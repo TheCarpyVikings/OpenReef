@@ -1,0 +1,35 @@
+{
+  "title": "OpenReef",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up OpenReef",
+        "description": "Create the OpenReef companion entry used by the add-on UI.",
+        "data": {
+          "tank_name": "Tank name",
+          "user_name": "User name"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "OpenReef is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "OpenReef profile",
+        "data": {
+          "tank_name": "Tank name",
+          "user_name": "User name"
+        }
+      }
+    }
+  },
+  "issues": {
+    "missing_entities": {
+      "title": "OpenReef has missing mapped entities",
+      "description": "OpenReef has {count} mapped Home Assistant entities that do not currently exist. Open the OpenReef settings and update the mappings."
+    }
+  }
+}

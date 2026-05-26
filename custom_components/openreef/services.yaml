@@ -1,0 +1,34 @@
+apply_mode:
+  name: Apply mode
+  description: Applies a named OpenReef equipment mode. Only explicitly armed equipment controls are changed.
+  fields:
+    mode_id:
+      name: Mode ID
+      description: The OpenReef mode identifier to apply.
+      required: true
+      selector:
+        text:
+
+record_manual_reading:
+  name: Record manual reading
+  description: Records a manual reef parameter reading in OpenReef.
+  fields:
+    parameter:
+      name: Parameter
+      description: The OpenReef parameter key, such as alkalinity or nitrate.
+      required: true
+      selector:
+        text:
+    value:
+      name: Value
+      description: Numeric reading value.
+      required: true
+      selector:
+        number:
+          mode: box
+    date:
+      name: Date
+      description: Optional ISO date. Defaults to today.
+      required: false
+      selector:
+        text:

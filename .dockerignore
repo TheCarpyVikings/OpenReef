@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+.env*
+.reef-settings.json
+.google-tokens.json
+*.tsbuildinfo
+coverage
+codebase_bundle*.md
+ragnars_reef_notebooklm_bundle.md
+ragnars_reef_context_for_gravityclaw.md
+.venv
+.agents

@@ -23,6 +23,9 @@
 # misc
 .DS_Store
 *.pem
+.reef-settings.json
+.google-tokens.json
+openreef-settings.json
 
 # debug
 npm-debug.log*

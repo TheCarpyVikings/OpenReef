@@ -1,36 +1,38 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OpenReef
 
-## Getting Started
+OpenReef is a private-beta reef aquarium controller dashboard for Home Assistant OS.
 
-First, run the development server:
+This repository contains the native pair:
+
+- `custom_components/openreef` — Home Assistant custom integration for setup, mappings, services, diagnostics, and WebSocket commands.
+- `ragnars_reef` — Home Assistant add-on that hosts the Next.js dashboard through Ingress.
+- `src` — OpenReef dashboard application.
+
+## Private Beta Install
+
+1. Install the OpenReef custom integration through HACS as a custom integration repository.
+2. Restart Home Assistant.
+3. Add OpenReef in Settings → Devices & services.
+4. Add this repository to the Home Assistant add-on store.
+5. Install and start the OpenReef add-on.
+6. Open OpenReef from the sidebar and map your entities.
+
+Controls are locked by default. Each equipment switch must be explicitly mapped and armed before OpenReef will send control service calls.
+
+## Development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm install
+pnpm lint
+pnpm exec tsc --noEmit
+pnpm build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+For local dashboard development outside the add-on, configure server-side Home Assistant access with environment variables:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+HA_URL=http://homeassistant.local:8123
+HA_TOKEN=...
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Do not expose Home Assistant tokens to browser-side `NEXT_PUBLIC_*` variables.
