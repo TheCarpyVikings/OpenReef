@@ -441,6 +441,29 @@ const DEFAULT_SETTINGS: AppSettings = {
     },
 };
 
+const isLegacyTankName = (value: string | undefined) => {
+    if (!value) return false;
+    return /^(ragnar'?s\s*reef|ragnarsreef|ragnars_reef)$/i.test(value.trim());
+};
+
+const isLegacyUserName = (value: string | undefined) => {
+    if (!value) return false;
+    return /^reefyreece$/i.test(value.trim());
+};
+
+const migrateLegacyBranding = (settings: AppSettings): AppSettings => ({
+    ...settings,
+    general: {
+        ...settings.general,
+        tankName: isLegacyTankName(settings.general?.tankName)
+            ? DEFAULT_SETTINGS.general.tankName
+            : settings.general.tankName,
+        userName: isLegacyUserName(settings.general?.userName)
+            ? DEFAULT_SETTINGS.general.userName
+            : settings.general.userName,
+    },
+});
+
 interface SettingsContextType {
     settings: AppSettings;
     updateSettings: (newSettings: Partial<AppSettings>) => void;
@@ -734,6 +757,9 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     initialSettings = { ...initialSettings, ...parsed } as AppSettings;
                 }
             }
+
+            initialSettings = migrateLegacyBranding(initialSettings);
+
             // Migration & Merging Logic
             // Merge modes: ensure ALL default modes exist, and migrate equipmentOff to equipmentConfig
             const savedModes: LegacyMode[] = Array.isArray(initialSettings.modes) ? initialSettings.modes : [];

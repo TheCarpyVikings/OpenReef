@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.8
+
+- Use the documented Home Assistant app REST and WebSocket proxy URLs.
+- Add a startup preflight log for Supervisor token/API proxy availability.
+- Keep the last HA connection error visible instead of flickering back to a generic connecting state.
+- Fix the dashboard logo URL under `/app/..._openreef` and migrate legacy default branding names.
+
 ## 0.1.7
 
 - Keep browser API calls inside OpenReef when Home Assistant serves the app at `/app/..._openreef`.

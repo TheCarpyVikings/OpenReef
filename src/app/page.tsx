@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import styles from './dashboard.module.css';
 import { useHomeAssistant } from '@/hooks/use-home-assistant';
-import { apiFetch } from '@/lib/api-fetch';
+import { apiFetch, withIngressPath } from '@/lib/api-fetch';
 import { EntitySwitch } from '@/components/dashboard/EntitySwitch';
 import { Zap, Shield, Coffee, Activity, Waves, Lightbulb, Power, ClipboardList, Settings, Clock, Layout, Droplets, FileText, Video, TrendingUp } from 'lucide-react';
 import { TasksScreen } from '@/components/dashboard/TasksScreen';
@@ -37,6 +37,7 @@ function DashboardContent() {
   const [dashboardHistory, setDashboardHistory] = useState<Record<string, DataPoint[]>>({});
   const [tasks, setTasks] = useState<ReefTask[]>([]);
   const [settingsDeepLink, setSettingsDeepLink] = useState<{ section?: string; alarmId?: string } | null>(null);
+  const logoSrc = withIngressPath('/openreef-logo.png');
 
   // Fetch midnight energies for delta calculation
   const fetchMidnightEnergies = useCallback(async () => {
@@ -192,14 +193,14 @@ function DashboardContent() {
     <div className={styles.dashboardContainer}>
       <header className={styles.header}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          {/* eslint-disable-next-line @next/next/no-img-element -- Relative asset path keeps the logo inside Home Assistant Ingress. */}
-          <img src="openreef-logo.png" alt="OpenReef Logo" width={64} height={64} style={{ height: '64px', width: 'auto' }} />
+          {/* eslint-disable-next-line @next/next/no-img-element -- Ingress path is only known in the browser. */}
+          <img suppressHydrationWarning src={logoSrc} alt="OpenReef Logo" width={64} height={64} style={{ height: '64px', width: 'auto' }} />
           <div>
             <h1 className={styles.title}>{settings.general.tankName}</h1>
             <p style={{ color: '#778da9', margin: '0.25rem 0 0 0' }}>{settings.general.userName}&apos;s OpenReef</p>
           </div>
         </div>
-        <div className={styles.statusIndicator}>
+        <div className={styles.statusIndicator} title={isConnected ? 'HA Connected' : error || 'Connecting to HA...'}>
           <div className={`${styles.statusDot} ${isConnected ? styles.connected : styles.disconnected}`} />
           {isConnected ? 'HA Connected' : error || 'Connecting to HA...'}
         </div>

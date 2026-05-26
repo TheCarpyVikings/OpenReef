@@ -31,7 +31,7 @@ const trimTrailingSlash = (value: string) => value.replace(/\/$/, '');
 
 export const getHABaseUrl = () => {
     if (process.env.HA_ADDON_MODE === 'true') {
-        return 'http://supervisor/core';
+        return 'http://supervisor/core/api';
     }
 
     const configuredUrl = process.env.HA_URL || process.env.NEXT_PUBLIC_HA_URL || '';
@@ -51,17 +51,44 @@ const requireHAConfig = () => {
     return { baseUrl, token };
 };
 
+const normalizeRestPath = (path: string) => {
+    if (process.env.HA_ADDON_MODE === 'true' && path.startsWith('/api/')) {
+        return path.slice('/api'.length);
+    }
+
+    return path;
+};
+
+const getHAWebSocketUrl = () => {
+    if (process.env.HA_ADDON_MODE === 'true') {
+        return 'ws://supervisor/core/websocket';
+    }
+
+    const baseUrl = getHABaseUrl();
+    return `${baseUrl.replace(/^http/, 'ws')}/api/websocket`;
+};
+
 export async function haRestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
     const { baseUrl, token } = requireHAConfig();
-    const response = await fetch(`${baseUrl}${path}`, {
-        ...init,
-        cache: 'no-store',
-        headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            ...(init.headers || {}),
-        },
-    });
+    let response: Response;
+
+    try {
+        response = await fetch(`${baseUrl}${normalizeRestPath(path)}`, {
+            ...init,
+            cache: 'no-store',
+            signal: init.signal ?? AbortSignal.timeout(10000),
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                ...(init.headers || {}),
+            },
+        });
+    } catch (error) {
+        if (error instanceof Error && error.name === 'TimeoutError') {
+            throw new HAApiError('Timed out contacting the Home Assistant API proxy', 504);
+        }
+        throw new HAApiError(error instanceof Error ? error.message : 'Could not contact Home Assistant', 502);
+    }
 
     if (!response.ok) {
         const body = await response.text().catch(() => '');
@@ -111,8 +138,8 @@ export async function haWebSocketCommand<T>(
     payload: Record<string, unknown>,
     timeoutMs = 15000,
 ): Promise<T> {
-    const { baseUrl, token } = requireHAConfig();
-    const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/api/websocket`;
+    const { token } = requireHAConfig();
+    const wsUrl = getHAWebSocketUrl();
     const messageId = 1;
 
     return new Promise<T>((resolve, reject) => {

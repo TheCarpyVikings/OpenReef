@@ -26,7 +26,6 @@ export function useHomeAssistant() {
 
         const fetchEntities = async () => {
             setIsConnected(false);
-            setError(null);
             try {
                 const nextEntities = await getHAEntities();
                 if (!isMounted) return;

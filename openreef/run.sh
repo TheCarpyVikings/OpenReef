@@ -21,6 +21,23 @@ bashio::log.info "Starting OpenReef..."
 bashio::log.info "HA Addon Mode: enabled"
 bashio::log.info "Ingress port: 8099 (nginx) -> 3000 (next.js)"
 
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    bashio::log.info "Supervisor token: available"
+else
+    bashio::log.warning "Supervisor token: missing"
+fi
+
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    if curl --fail --silent --show-error --max-time 8 \
+        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        -H "Content-Type: application/json" \
+        http://supervisor/core/api/config >/dev/null; then
+        bashio::log.info "Home Assistant API proxy: reachable"
+    else
+        bashio::log.warning "Home Assistant API proxy: not reachable yet"
+    fi
+fi
+
 # Start nginx for ingress proxy (port 8099)
 nginx
 
