@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- Fix Home Assistant Apps/Supervisor local build context.
+- Add required Home Assistant app Docker labels.
+
 ## 0.1.0
 
 - Private-beta OpenReef add-on package.
