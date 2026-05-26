@@ -2,7 +2,7 @@ name: "OpenReef"
 version: "0.1.0"
 slug: "openreef"
 description: "Private-beta reef aquarium controller dashboard for Home Assistant"
-url: "https://github.com/reecerixson/OpenReef"
+url: "https://github.com/TheCarpyVikings/OpenReef"
 arch:
   - aarch64
   - amd64
