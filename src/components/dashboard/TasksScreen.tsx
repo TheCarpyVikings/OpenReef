@@ -7,7 +7,7 @@ import {
     Clock, Edit2, X, Save
 } from 'lucide-react';
 import { useSettings } from '@/context/SettingsContext';
-import { apiFetch } from '@/lib/api-fetch';
+import { apiFetch, withIngressPath } from '@/lib/api-fetch';
 import styles from '@/app/dashboard.module.css';
 import type { ReefTask, TaskPriority } from '@/types/reef';
 
@@ -191,7 +191,7 @@ export const TasksScreen: React.FC = () => {
 
     const handleSync = () => {
         if (!isAuthenticated) {
-            window.location.href = '/api/auth/google';
+            window.location.href = withIngressPath('/api/auth/google');
         } else {
             fetchTasks();
         }

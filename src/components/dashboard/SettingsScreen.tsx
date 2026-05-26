@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- Legacy settings form has schema-dynamic update paths that need a dedicated typed split. */
 import React, { useState, useEffect } from 'react';
 import { useSettings } from '@/context/SettingsContext';
+import { withIngressPath } from '@/lib/api-fetch';
 import styles from '@/app/dashboard.module.css';
 import { Settings, Layout, Thermometer, PenTool, CheckSquare, Save, Activity, Plus, Trash2, Tag, Database, Zap, Power, Shield, Cpu, FlaskConical as Flask, RefreshCw, RotateCcw, Check, AlertTriangle, Waves, Lightbulb, Droplets, Sparkles, Video } from 'lucide-react';
 import { SetupWizard } from './SetupWizard';
@@ -222,7 +223,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                         </p>
                                         <div style={{ marginTop: '1rem' }}>
                                             <button
-                                                onClick={() => window.location.href = '/api/auth/google'}
+                                                onClick={() => window.location.href = withIngressPath('/api/auth/google')}
                                                 className={styles.tabItem}
                                                 style={{
                                                     padding: '8px 16px',

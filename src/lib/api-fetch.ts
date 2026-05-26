@@ -4,8 +4,28 @@
  * which is automatically included by the browser. No need to manually
  * attach auth headers — this eliminates the NEXT_PUBLIC_API_SECRET leak.
  */
+const INGRESS_SEGMENT_PATTERN = /^\/([^/?#]+_openreef)(?:[/?#]|$)/i;
+
+export function withIngressPath(path: string): string {
+    if (typeof window === 'undefined' || !path.startsWith('/')) {
+        return path;
+    }
+
+    const match = window.location.pathname.match(INGRESS_SEGMENT_PATTERN);
+    if (!match) {
+        return path;
+    }
+
+    const ingressBase = `/${match[1]}`;
+    if (path === ingressBase || path.startsWith(`${ingressBase}/`)) {
+        return path;
+    }
+
+    return `${ingressBase}${path}`;
+}
+
 export async function apiFetch(url: string, options: RequestInit = {}): Promise<Response> {
-    return fetch(url, { ...options, credentials: 'same-origin' });
+    return fetch(withIngressPath(url), { ...options, credentials: 'same-origin' });
 }
 
 /**
@@ -15,7 +35,7 @@ export async function apiFetch(url: string, options: RequestInit = {}): Promise<
  */
 export async function initApiSession(secret: string): Promise<boolean> {
     try {
-        const res = await fetch('/api/auth/session', {
+        const res = await fetch(withIngressPath('/api/auth/session'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ secret }),
@@ -26,4 +46,3 @@ export async function initApiSession(secret: string): Promise<boolean> {
         return false;
     }
 }
-

@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import Image from 'next/image';
 import styles from './dashboard.module.css';
 import { useHomeAssistant } from '@/hooks/use-home-assistant';
 import { apiFetch } from '@/lib/api-fetch';
@@ -193,7 +192,8 @@ function DashboardContent() {
     <div className={styles.dashboardContainer}>
       <header className={styles.header}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <Image src="/openreef-logo.png" alt="OpenReef Logo" width={64} height={64} style={{ height: '64px', width: 'auto' }} priority />
+          {/* eslint-disable-next-line @next/next/no-img-element -- Relative asset path keeps the logo inside Home Assistant Ingress. */}
+          <img src="openreef-logo.png" alt="OpenReef Logo" width={64} height={64} style={{ height: '64px', width: 'auto' }} />
           <div>
             <h1 className={styles.title}>{settings.general.tankName}</h1>
             <p style={{ color: '#778da9', margin: '0.25rem 0 0 0' }}>{settings.general.userName}&apos;s OpenReef</p>

@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import Hls from 'hls.js';
 import { Camera, RefreshCw } from 'lucide-react';
+import { apiFetch, withIngressPath } from '@/lib/api-fetch';
 import styles from './live.module.css';
 
 const DEFAULT_ENTITY_ID = 'camera.reef_tank';
@@ -37,7 +38,7 @@ export default function ReefTankLivePage() {
         const video = videoRef.current;
         if (!video) return;
 
-        const res = await fetch(`/api/camera/hls?entity=${encodeURIComponent(entityId)}`, {
+        const res = await apiFetch(`/api/camera/hls?entity=${encodeURIComponent(entityId)}`, {
           cache: 'no-store',
         });
         if (!res.ok) {
@@ -47,7 +48,7 @@ export default function ReefTankLivePage() {
         const { token } = await res.json();
         if (cancelled) return;
 
-        const hlsUrl = `/api/camera/hls/${token}/master_playlist.m3u8`;
+        const hlsUrl = withIngressPath(`/api/camera/hls/${token}/master_playlist.m3u8`);
 
         if (Hls.isSupported()) {
           const hls = new Hls({

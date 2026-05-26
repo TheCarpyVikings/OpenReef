@@ -4,6 +4,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import Hls from 'hls.js';
 import styles from '@/app/dashboard.module.css';
 import { useSettings } from '@/context/SettingsContext';
+import { apiFetch, withIngressPath } from '@/lib/api-fetch';
 import { Camera, Maximize2, Minimize2, Download, RefreshCw, VideoOff, Settings } from 'lucide-react';
 
 interface CameraScreenProps {
@@ -28,7 +29,7 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({ setActiveTab }) => {
     // Build a snapshot URL — proxied through Next.js server.
     const getSnapshotUrl = useCallback((entityId: string) => {
         if (!entityId) return '';
-        return `/api/camera/snapshot?entity=${encodeURIComponent(entityId)}`;
+        return withIngressPath(`/api/camera/snapshot?entity=${encodeURIComponent(entityId)}`);
     }, []);
 
     // Start HLS stream via HA's WebSocket camera/stream API.
@@ -54,14 +55,14 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({ setActiveTab }) => {
         async function startHLS(videoElement: HTMLVideoElement) {
             try {
                 // 1. Request HLS token from our server-side proxy.
-                const res = await fetch(
+                const res = await apiFetch(
                     `/api/camera/hls?entity=${encodeURIComponent(entityId)}`,
                 );
                 if (!res.ok) throw new Error(`HLS start failed: ${res.status}`);
                 const { token } = await res.json();
                 if (cancelled) return;
 
-                const hlsUrl = `/api/camera/hls/${token}/master_playlist.m3u8`;
+                const hlsUrl = withIngressPath(`/api/camera/hls/${token}/master_playlist.m3u8`);
 
                 // 2. Attach HLS.js (or use native HLS on Safari).
                 if (Hls.isSupported()) {
