@@ -5,7 +5,11 @@ WORKDIR /app
 FROM base AS source
 ARG OPENREEF_REPOSITORY="https://github.com/TheCarpyVikings/OpenReef.git"
 ARG OPENREEF_REF="main"
-RUN git clone --depth 1 --branch "${OPENREEF_REF}" "${OPENREEF_REPOSITORY}" /src
+COPY config.yaml /tmp/openreef-addon-config.yaml
+RUN echo "OpenReef source cache key:" \
+    && sha256sum /tmp/openreef-addon-config.yaml \
+    && git clone --depth 1 --branch "${OPENREEF_REF}" "${OPENREEF_REPOSITORY}" /src \
+    && git -C /src rev-parse HEAD > /src/.openreef-source-revision
 
 FROM base AS deps
 RUN corepack enable && corepack prepare pnpm@9.15.9 --activate

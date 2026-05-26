@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11
+
+- Bust Docker's cached Git clone layer whenever the add-on version changes, preventing Home Assistant from running stale frontend code after an update.
+- Default the beta add-on to manual start so Home Assistant will not relaunch it automatically while testers are proving stability.
+
 ## 0.1.10
 
 - Disable automatic Home Assistant entity polling on dashboard load.
