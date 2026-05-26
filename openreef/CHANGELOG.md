@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12
+
+- Use one shared Home Assistant connection state across the dashboard instead of one hook instance per panel.
+- Gate history and service calls until the user has manually connected OpenReef to Home Assistant.
+- Pass browser request aborts through to the server-side HA states request.
+
 ## 0.1.11
 
 - Bust Docker's cached Git clone layer whenever the add-on version changes, preventing Home Assistant from running stale frontend code after an update.

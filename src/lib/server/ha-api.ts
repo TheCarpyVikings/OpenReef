@@ -70,13 +70,17 @@ const getHAWebSocketUrl = () => {
 
 export async function haRestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
     const { baseUrl, token } = requireHAConfig();
+    const timeoutSignal = AbortSignal.timeout(10000);
+    const signal = init.signal
+        ? AbortSignal.any([init.signal, timeoutSignal])
+        : timeoutSignal;
     let response: Response;
 
     try {
         response = await fetch(`${baseUrl}${normalizeRestPath(path)}`, {
             ...init,
             cache: 'no-store',
-            signal: init.signal ?? AbortSignal.timeout(10000),
+            signal,
             headers: {
                 Authorization: `Bearer ${token}`,
                 'Content-Type': 'application/json',
@@ -121,8 +125,8 @@ export function statesToEntities(states: HAState[]): HassEntities {
     return entities as unknown as HassEntities;
 }
 
-export async function getHAEntities(): Promise<HassEntities> {
-    const states = await haRestJson<HAState[]>('/api/states');
+export async function getHAEntities(signal?: AbortSignal): Promise<HassEntities> {
+    const states = await haRestJson<HAState[]>('/api/states', { signal });
     return statesToEntities(states);
 }
 

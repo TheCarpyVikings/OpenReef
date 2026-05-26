@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { HassEntities } from 'home-assistant-js-websocket';
 import { getHAEntities, haCallService } from '@/lib/ha-connection';
 import type { HAHistoryResponse } from '@/types/reef';
@@ -11,51 +11,118 @@ const getErrorMessage = (err: unknown) => {
     return 'Failed to connect to Home Assistant';
 };
 
-export function useHomeAssistant() {
-    const [entities, setEntities] = useState<HassEntities | null>(null);
-    const [isConnected, setIsConnected] = useState(false);
-    const [error, setError] = useState<string | null>('HA paused - click to connect');
-    const [reconnectTrigger, setReconnectTrigger] = useState(0);
+type HAStoreState = {
+    entities: HassEntities | null;
+    isConnected: boolean;
+    error: string | null;
+};
 
-    const reconnect = useCallback(() => {
-        setError('Connecting to HA...');
-        setReconnectTrigger(prev => prev + 1);
-    }, []);
+const PAUSED_MESSAGE = 'HA paused - click to connect';
+
+let haStoreState: HAStoreState = {
+    entities: null,
+    isConnected: false,
+    error: PAUSED_MESSAGE,
+};
+
+const haStoreListeners = new Set<() => void>();
+let activeEntityRequest: Promise<void> | null = null;
+let activeEntityController: AbortController | null = null;
+let unloadHandlerRegistered = false;
+
+const emitHAStore = () => {
+    haStoreListeners.forEach(listener => listener());
+};
+
+const setHAStoreState = (nextState: Partial<HAStoreState>) => {
+    haStoreState = { ...haStoreState, ...nextState };
+    emitHAStore();
+};
+
+const subscribeToHAStore = (listener: () => void) => {
+    haStoreListeners.add(listener);
+    return () => {
+        haStoreListeners.delete(listener);
+    };
+};
+
+const getHAStoreSnapshot = () => haStoreState;
+
+const abortActiveEntityRequest = () => {
+    activeEntityController?.abort();
+    activeEntityController = null;
+    activeEntityRequest = null;
+    if (!haStoreState.isConnected) {
+        setHAStoreState({ error: PAUSED_MESSAGE });
+    }
+};
+
+const registerUnloadAbortHandler = () => {
+    if (unloadHandlerRegistered || typeof window === 'undefined') return;
+    unloadHandlerRegistered = true;
+    window.addEventListener('pagehide', abortActiveEntityRequest);
+};
+
+const requestEntitiesOnce = async () => {
+    if (activeEntityRequest) return activeEntityRequest;
+
+    const controller = new AbortController();
+    activeEntityController = controller;
+    setHAStoreState({ isConnected: false, error: 'Connecting to HA...' });
+
+    activeEntityRequest = (async () => {
+        try {
+            const nextEntities = await getHAEntities(controller.signal);
+            if (controller.signal.aborted) return;
+
+            setHAStoreState({
+                entities: nextEntities,
+                isConnected: true,
+                error: null,
+            });
+        } catch (err: unknown) {
+            if (controller.signal.aborted) return;
+            console.error('[HA] Hook Connection Error:', err);
+
+            setHAStoreState({
+                isConnected: false,
+                error: getErrorMessage(err),
+            });
+        } finally {
+            if (activeEntityController === controller) {
+                activeEntityController = null;
+            }
+            activeEntityRequest = null;
+        }
+    })();
+
+    return activeEntityRequest;
+};
+
+const requireConnected = () => {
+    if (!haStoreState.isConnected) {
+        throw new Error(`${PAUSED_MESSAGE}.`);
+    }
+};
+
+export function useHomeAssistant() {
+    const { entities, isConnected, error } = useSyncExternalStore(
+        subscribeToHAStore,
+        getHAStoreSnapshot,
+        getHAStoreSnapshot,
+    );
 
     useEffect(() => {
-        if (reconnectTrigger === 0) return;
+        registerUnloadAbortHandler();
+    }, []);
 
-        let isMounted = true;
-        const controller = new AbortController();
-
-        const fetchEntities = async () => {
-            setIsConnected(false);
-            try {
-                const nextEntities = await getHAEntities(controller.signal);
-                if (!isMounted) return;
-
-                setEntities(nextEntities);
-                setIsConnected(true);
-                setError(null);
-            } catch (err: unknown) {
-                if (!isMounted || controller.signal.aborted) return;
-                console.error('[HA] Hook Connection Error:', err);
-
-                setError(getErrorMessage(err));
-                setIsConnected(false);
-            }
-        };
-
-        void fetchEntities();
-
-        return () => {
-            isMounted = false;
-            controller.abort();
-        };
-    }, [reconnectTrigger]);
+    const reconnect = useCallback(() => {
+        void requestEntitiesOnce();
+    }, []);
 
     const callService = useCallback(async (domain: string, service: string, serviceData?: object) => {
         try {
+            requireConnected();
             await haCallService(domain, service, serviceData);
         } catch (err) {
             console.error('HA Service Call Error:', err);
@@ -100,6 +167,7 @@ export function useHomeAssistant() {
     }, [callService]);
 
     const fetchHistory = useCallback(async (entityId: string | string[], hours: number = 24): Promise<HAHistoryResponse> => {
+        requireConnected();
         const endTime = new Date();
         const startTime = new Date(endTime.getTime() - hours * 60 * 60 * 1000);
         const { getHAHistory } = await import('@/lib/ha-connection');

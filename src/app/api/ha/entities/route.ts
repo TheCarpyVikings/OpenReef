@@ -13,7 +13,7 @@ let entityCache: {
     entities: HassEntities;
 } | null = null;
 
-export async function GET() {
+export async function GET(request: Request) {
     const now = Date.now();
 
     if (entityCache && now - entityCache.timestamp < FRESH_CACHE_MS) {
@@ -21,7 +21,7 @@ export async function GET() {
     }
 
     try {
-        const entities = await getHAEntities();
+        const entities = await getHAEntities(request.signal);
         entityCache = { timestamp: now, entities };
         return NextResponse.json({ entities });
     } catch (error) {
