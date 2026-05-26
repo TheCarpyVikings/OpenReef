@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6
+
+- Handle unstripped `/api/hassio_ingress/...` and `/app/..._openreef` prefixes in the nginx ingress proxy.
+
 ## 0.1.5
 
 - Use Home Assistant's `X-Ingress-Path` header when rewriting Next.js asset and API URLs.
