@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Remove a noisy nginx MIME warning from the Ingress proxy log.
+
 ## 0.1.3
 
 - Fix blank Home Assistant Ingress screen by preserving the OpenReef ingress prefix for Next.js assets and app API calls.
