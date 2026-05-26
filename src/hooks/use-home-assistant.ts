@@ -26,7 +26,7 @@ let haStoreState: HAStoreState = {
 };
 
 const haStoreListeners = new Set<() => void>();
-let activeEntityRequest: Promise<void> | null = null;
+let activeEntityRequest: Promise<boolean> | null = null;
 let activeEntityController: AbortController | null = null;
 let unloadHandlerRegistered = false;
 
@@ -63,7 +63,7 @@ const registerUnloadAbortHandler = () => {
     window.addEventListener('pagehide', abortActiveEntityRequest);
 };
 
-const requestEntitiesOnce = async () => {
+const requestEntitiesOnce = async (): Promise<boolean> => {
     if (activeEntityRequest) return activeEntityRequest;
 
     const controller = new AbortController();
@@ -73,21 +73,23 @@ const requestEntitiesOnce = async () => {
     activeEntityRequest = (async () => {
         try {
             const nextEntities = await getHAEntities(controller.signal);
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted) return false;
 
             setHAStoreState({
                 entities: nextEntities,
                 isConnected: true,
                 error: null,
             });
+            return true;
         } catch (err: unknown) {
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted) return false;
             console.error('[HA] Hook Connection Error:', err);
 
             setHAStoreState({
                 isConnected: false,
                 error: getErrorMessage(err),
             });
+            return false;
         } finally {
             if (activeEntityController === controller) {
                 activeEntityController = null;
@@ -117,7 +119,7 @@ export function useHomeAssistant() {
     }, []);
 
     const reconnect = useCallback(() => {
-        void requestEntitiesOnce();
+        return requestEntitiesOnce();
     }, []);
 
     const callService = useCallback(async (domain: string, service: string, serviceData?: object) => {

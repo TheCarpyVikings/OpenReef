@@ -1039,6 +1039,62 @@
     border-color: var(--primary-color);
 }
 
+.entityPicker {
+    width: 100%;
+    max-width: 520px;
+}
+
+.entitySuggestionRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.entitySuggestionButton {
+    display: grid;
+    gap: 0.2rem;
+    min-width: min(100%, 180px);
+    max-width: 240px;
+    padding: 0.55rem 0.7rem;
+    border-radius: 8px;
+    border: 1px solid rgba(119, 141, 169, 0.18);
+    background: rgba(13, 27, 42, 0.7);
+    color: #dbe7f3;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.2s ease;
+}
+
+.entitySuggestionButton:hover {
+    border-color: rgba(var(--primary-rgb), 0.45);
+    background: rgba(var(--primary-rgb), 0.1);
+}
+
+.entitySuggestionButton span,
+.entitySuggestionButton code {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.entitySuggestionButton span {
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.entitySuggestionButton code {
+    color: #8aa2bd;
+    font-size: 0.68rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.activeEntitySuggestion {
+    border-color: rgba(var(--primary-rgb), 0.65);
+    background: rgba(var(--primary-rgb), 0.16);
+    color: var(--primary-color);
+}
+
 .colorGrid {
     display: flex;
     gap: 1rem;

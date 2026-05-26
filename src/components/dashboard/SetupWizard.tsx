@@ -3,6 +3,13 @@ import { useSettings } from '@/context/SettingsContext';
 import styles from '@/app/dashboard.module.css';
 import { ArrowRight, ArrowLeft, Check, Smartphone, Activity, Zap, Lightbulb, AlertTriangle, RefreshCw, Database, X } from 'lucide-react';
 import { useHomeAssistant } from '@/hooks/use-home-assistant';
+import { EntityPicker } from './EntityPicker';
+import {
+    getBestEntitySuggestion,
+    getEquipmentSuggestionTarget,
+    getSensorSuggestionTarget,
+    shouldReplaceEntitySuggestionValue,
+} from '@/lib/entity-suggestions';
 
 const WIZARD_STEPS = [
     { id: 'welcome', title: 'Welcome', icon: <Smartphone size={24} /> },
@@ -16,7 +23,7 @@ const WIZARD_STEPS = [
 
 export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }) => {
     const { settings, updateNestedSetting, updateSettings } = useSettings();
-    const { isConnected, reconnect } = useHomeAssistant();
+    const { entities, reconnect } = useHomeAssistant();
     const [currentStep, setCurrentStep] = useState(0);
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState<'success' | 'error' | null>(null);
@@ -62,24 +69,41 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
         setTestResult(null);
         updateNestedSetting('general', { haUrl: localGeneral.haUrl, haToken: '' });
 
-        // Give it a moment to update context/local storage if needed, then try reconnect
-        setTimeout(async () => {
-            try {
-                await reconnect();
-                // Wait for connection status
-                setTimeout(() => {
-                    if (isConnected) {
-                        setTestResult('success');
-                    } else {
-                        setTestResult('error');
-                    }
-                    setIsTesting(false);
-                }, 2000);
-            } catch {
-                setTestResult('error');
-                setIsTesting(false);
-            }
-        }, 500);
+        try {
+            const connected = await reconnect();
+            setTestResult(connected ? 'success' : 'error');
+        } catch {
+            setTestResult('error');
+        } finally {
+            setIsTesting(false);
+        }
+    };
+
+    const updateTankEntity = (key: keyof typeof localEntities.tank, entityId: string) => {
+        setLocalEntities({
+            ...localEntities,
+            tank: {
+                ...localEntities.tank,
+                [key]: entityId,
+            },
+        });
+    };
+
+    const updateEquipmentEntity = (
+        equipmentId: string,
+        field: 'switch' | 'power' | 'energy',
+        entityId: string,
+    ) => {
+        setLocalEntities({
+            ...localEntities,
+            equipment: {
+                ...localEntities.equipment,
+                [equipmentId]: {
+                    ...(localEntities.equipment[equipmentId] || { switch: '', power: '', energy: '' }),
+                    [field]: entityId,
+                },
+            },
+        });
     };
 
     const renderStepContent = () => {
@@ -205,29 +229,44 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                     { id: 'ph', label: 'pH', key: 'ph' },
                     { id: 'salinity', label: 'Salinity', key: 'salinity' },
                     { id: 'orp', label: 'ORP', key: 'orp' },
+                    { id: 'do', label: 'Dissolved Oxygen', key: 'do' },
                 ];
+                const applySensorSuggestions = () => {
+                    let nextTank = { ...localEntities.tank };
+                    coreSensors.forEach(sensor => {
+                        const current = nextTank[sensor.key];
+                        if (!shouldReplaceEntitySuggestionValue(current)) return;
+                        const suggestion = getBestEntitySuggestion(
+                            entities,
+                            getSensorSuggestionTarget(sensor.id, sensor.label, 'tank'),
+                        );
+                        if (suggestion) {
+                            nextTank = { ...nextTank, [sensor.key]: suggestion };
+                        }
+                    });
+                    setLocalEntities({ ...localEntities, tank: nextTank });
+                };
                 return (
                     <div className={styles.wizardStepContainer}>
                         <h3>Map Your Sensors</h3>
-                        <p className={styles.wizardDescription}>Enter the Entity ID from Home Assistant for each sensor.</p>
+                        <p className={styles.wizardDescription}>OpenReef can use your existing Home Assistant sensor entities.</p>
+                        {entities && (
+                            <div className={styles.wizardActionRow} style={{ marginTop: 0, marginBottom: '1.5rem' }}>
+                                <button type="button" className={styles.secondaryButton} onClick={applySensorSuggestions}>
+                                    <Check size={18} /> Use Matches
+                                </button>
+                            </div>
+                        )}
                         <div className={styles.wizardGrid}>
                             {coreSensors.map(sensor => (
                                 <div key={sensor.id} className={styles.settingGroup}>
                                     <label className={styles.label}>{sensor.label}</label>
-                                    <input
-                                        type="text"
-                                        className={styles.input}
+                                    <EntityPicker
+                                        entities={entities}
+                                        target={getSensorSuggestionTarget(sensor.id, sensor.label, 'tank')}
                                         placeholder={`sensor.tank_${sensor.id}`}
                                         value={localEntities.tank[sensor.key]}
-                                        onChange={(e) => {
-                                            setLocalEntities({
-                                                ...localEntities,
-                                                tank: {
-                                                    ...localEntities.tank,
-                                                    [sensor.key]: e.target.value,
-                                                },
-                                            });
-                                        }}
+                                        onChange={(entityId) => updateTankEntity(sensor.key, entityId)}
                                     />
                                 </div>
                             ))}
@@ -242,44 +281,71 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                     { id: 'SKIMMER', label: 'Skimmer' },
                     { id: 'ATO', label: 'ATO' },
                 ];
+                const applyEquipmentSuggestions = () => {
+                    let nextEquipment = { ...localEntities.equipment };
+                    coreEquipment.forEach(eq => {
+                        const current = nextEquipment[eq.id] || { switch: '', power: '', energy: '' };
+                        const nextConfig = { ...current };
+                        if (shouldReplaceEntitySuggestionValue(current.switch)) {
+                            const suggestion = getBestEntitySuggestion(
+                                entities,
+                                getEquipmentSuggestionTarget(eq.id, eq.label, 'switch'),
+                            );
+                            if (suggestion) nextConfig.switch = suggestion;
+                        }
+                        if (shouldReplaceEntitySuggestionValue(current.power)) {
+                            const suggestion = getBestEntitySuggestion(
+                                entities,
+                                getEquipmentSuggestionTarget(eq.id, eq.label, 'power'),
+                            );
+                            if (suggestion) nextConfig.power = suggestion;
+                        }
+                        if (shouldReplaceEntitySuggestionValue(current.energy)) {
+                            const suggestion = getBestEntitySuggestion(
+                                entities,
+                                getEquipmentSuggestionTarget(eq.id, eq.label, 'energy'),
+                            );
+                            if (suggestion) nextConfig.energy = suggestion;
+                        }
+                        nextEquipment = { ...nextEquipment, [eq.id]: nextConfig };
+                    });
+                    setLocalEntities({ ...localEntities, equipment: nextEquipment });
+                };
                 return (
                     <div className={styles.wizardStepContainer}>
                         <h3>Map Your Equipment</h3>
                         <p className={styles.wizardDescription}>
                             Control switches and monitor power usage.
                         </p>
+                        {entities && (
+                            <div className={styles.wizardActionRow} style={{ marginTop: 0, marginBottom: '1.5rem' }}>
+                                <button type="button" className={styles.secondaryButton} onClick={applyEquipmentSuggestions}>
+                                    <Check size={18} /> Use Matches
+                                </button>
+                            </div>
+                        )}
                         <div className={styles.wizardGrid}>
                             {coreEquipment.map(eq => (
                                 <div key={eq.id} className={styles.card} style={{ padding: '1rem' }}>
                                     <h4 style={{ marginBottom: '0.5rem', color: '#e0e1dd' }}>{eq.label}</h4>
                                     <div className={styles.settingGroup}>
                                         <label className={styles.subLabel}>Switch Entity</label>
-                                        <input
-                                            type="text"
-                                            className={styles.input}
+                                        <EntityPicker
+                                            entities={entities}
+                                            target={getEquipmentSuggestionTarget(eq.id, eq.label, 'switch')}
                                             placeholder="switch.device_name"
                                             value={localEntities.equipment[eq.id]?.switch || ''}
-                                            onChange={(e) => {
-                                                const newEntities = JSON.parse(JSON.stringify(localEntities));
-                                                if (!newEntities.equipment[eq.id]) newEntities.equipment[eq.id] = {};
-                                                newEntities.equipment[eq.id].switch = e.target.value;
-                                                setLocalEntities(newEntities);
-                                            }}
+                                            onChange={(entityId) => updateEquipmentEntity(eq.id, 'switch', entityId)}
                                         />
                                     </div>
                                     <div className={styles.settingGroup}>
                                         <label className={styles.subLabel}>Power Sensor (Optional)</label>
-                                        <input
-                                            type="text"
-                                            className={styles.input}
+                                        <EntityPicker
+                                            entities={entities}
+                                            target={getEquipmentSuggestionTarget(eq.id, eq.label, 'power')}
                                             placeholder="sensor.device_power"
                                             value={localEntities.equipment[eq.id]?.power || ''}
-                                            onChange={(e) => {
-                                                const newEntities = JSON.parse(JSON.stringify(localEntities));
-                                                if (!newEntities.equipment[eq.id]) newEntities.equipment[eq.id] = {};
-                                                newEntities.equipment[eq.id].power = e.target.value;
-                                                setLocalEntities(newEntities);
-                                            }}
+                                            onChange={(entityId) => updateEquipmentEntity(eq.id, 'power', entityId)}
                                         />
                                     </div>
                                 </div>

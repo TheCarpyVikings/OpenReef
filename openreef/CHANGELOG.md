@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13
+
+- Add Home Assistant entity suggestions for onboarding sensor and equipment mapping.
+- Add reusable entity pickers to sensor, custom sensor, and equipment settings.
+- Make connection tests wait for the shared Home Assistant connection result before reporting success or failure.
+
 ## 0.1.12
 
 - Use one shared Home Assistant connection state across the dashboard instead of one hook instance per panel.

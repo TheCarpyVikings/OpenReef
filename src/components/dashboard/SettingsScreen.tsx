@@ -6,6 +6,8 @@ import styles from '@/app/dashboard.module.css';
 import { Settings, Layout, Thermometer, PenTool, CheckSquare, Save, Activity, Plus, Trash2, Tag, Database, Zap, Power, Shield, Cpu, FlaskConical as Flask, RefreshCw, RotateCcw, Check, AlertTriangle, Waves, Lightbulb, Droplets, Sparkles, Video } from 'lucide-react';
 import { SetupWizard } from './SetupWizard';
 import { useHomeAssistant } from '@/hooks/use-home-assistant';
+import { EntityPicker } from './EntityPicker';
+import { getEquipmentSuggestionTarget, getSensorSuggestionTarget } from '@/lib/entity-suggestions';
 
 const sections = [
     { id: 'setup', label: 'Setup Wizard', icon: <Sparkles size={18} /> },
@@ -31,8 +33,8 @@ interface SettingsScreenProps {
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, initialEditingAlarmId }) => {
-    const { settings, updateNestedSetting, updateSpawningSetting, clearManualReadings, updateMode, getEquipmentName, addEquipment, removeEquipment, getLabel, addAlarm, updateAlarm, removeAlarm, addCalibrationSensor, removeCalibrationSensor, updateCalibrationSensor, resetHAConfig, haError, setHaError, addRecurringTask, removeRecurringTask, addCustomSensor, removeCustomSensor, addAwcPreset, removeAwcPreset } = useSettings();
-    const { pressButton, entities, isConnected, reconnect, error: currentHaError } = useHomeAssistant();
+    const { settings, updateSettings, updateNestedSetting, updateSpawningSetting, clearManualReadings, updateMode, getEquipmentName, addEquipment, removeEquipment, getLabel, addAlarm, updateAlarm, removeAlarm, addCalibrationSensor, removeCalibrationSensor, updateCalibrationSensor, resetHAConfig, haError, setHaError, addRecurringTask, removeRecurringTask, addCustomSensor, removeCustomSensor, addAwcPreset, removeAwcPreset } = useSettings();
+    const { pressButton, entities, reconnect, error: currentHaError } = useHomeAssistant();
     const [activeSection, setActiveSection] = useState(initialSection || 'general');
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [newEquipmentName, setNewEquipmentName] = useState('');
@@ -63,18 +65,11 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
         setHaError(null);
 
         try {
-            await reconnect();
-            // Wait a bit for the connection state to update
-            setTimeout(() => {
-                if (isConnected) {
-                    setTestResult('success');
-                } else {
-                    setTestResult('error');
-                }
-                setIsTesting(false);
-            }, 2000);
+            const connected = await reconnect();
+            setTestResult(connected ? 'success' : 'error');
         } catch {
             setTestResult('error');
+        } finally {
             setIsTesting(false);
         }
     };
@@ -830,19 +825,24 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                                         {(sensor as any).haKey && (
                                                             <div className={styles.settingGroup} style={{ marginBottom: 0 }}>
                                                                 <label className={styles.label}>HA Entity ID</label>
-                                                                <input
-                                                                    type="text"
-                                                                    className={styles.input}
+                                                                <EntityPicker
+                                                                    entities={entities}
+                                                                    target={getSensorSuggestionTarget(
+                                                                        sensor.id,
+                                                                        settings.labels[sensor.id] || sensor.label,
+                                                                        (section as any).parent === 'room' ? 'room' : (section as any).parent === 'tank' ? 'tank' : 'manual',
+                                                                    )}
                                                                     value={(sensor as any).isCustom ? (sensor as any).haKey : (settings.entities as any)[(section as any).parent][(sensor as any).haKey]}
-                                                                    onChange={(e) => {
+                                                                    placeholder={`sensor.${sensor.id}`}
+                                                                    onChange={(entityId) => {
                                                                         if ((sensor as any).isCustom) {
-                                                                            const updated = settings.customSensors.map(s => s.id === sensor.id ? { ...s, haKey: e.target.value } : s);
-                                                                            updateNestedSetting('customSensors', { customSensors: updated } as any);
+                                                                            const updated = settings.customSensors.map(s => s.id === sensor.id ? { ...s, haKey: entityId } : s);
+                                                                            updateSettings({ customSensors: updated });
                                                                         } else {
                                                                             const parentEntities = (settings.entities as any)[(section as any).parent];
                                                                             updateNestedSetting('entities', {
                                                                                 ...settings.entities,
-                                                                                [(section as any).parent]: { ...parentEntities, [(sensor as any).haKey!]: e.target.value }
+                                                                                [(section as any).parent]: { ...parentEntities, [(sensor as any).haKey!]: entityId }
                                                                             } as any);
                                                                         }
                                                                     }}
@@ -1000,12 +1000,16 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                     </div>
                                     <div className={styles.settingGroup} style={{ marginBottom: 0 }}>
                                         <label className={styles.label}>HA Entity (Optional)</label>
-                                        <input
-                                            type="text"
-                                            className={styles.input}
+                                        <EntityPicker
+                                            entities={entities}
+                                            target={getSensorSuggestionTarget(
+                                                newSensor.label || 'custom_sensor',
+                                                newSensor.label || 'Custom Sensor',
+                                                newSensor.group,
+                                            )}
                                             placeholder="sensor.magnesium"
                                             value={newSensor.haKey}
-                                            onChange={(e) => setNewSensor({ ...newSensor, haKey: e.target.value })}
+                                            onChange={(entityId) => setNewSensor({ ...newSensor, haKey: entityId })}
                                         />
                                     </div>
                                     <div className={styles.settingGroup} style={{ marginBottom: 0 }}>
@@ -1117,36 +1121,39 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.5rem' }}>
                                                 <div className={styles.settingGroup} style={{ marginBottom: 0 }}>
                                                     <label className={styles.label}>Switch Entity</label>
-                                                    <input
-                                                        type="text"
-                                                        className={styles.input}
+                                                    <EntityPicker
+                                                        entities={entities}
+                                                        target={getEquipmentSuggestionTarget(key, getEquipmentName(key, key), 'switch')}
+                                                        placeholder="switch.device_name"
                                                         value={config.switch}
-                                                        onChange={(e) => {
-                                                            const equip = { ...settings.entities.equipment, [key]: { ...config, switch: e.target.value } };
+                                                        onChange={(entityId) => {
+                                                            const equip = { ...settings.entities.equipment, [key]: { ...config, switch: entityId } };
                                                             updateNestedSetting('entities', { ...settings.entities, equipment: equip } as any);
                                                         }}
                                                     />
                                                 </div>
                                                 <div className={styles.settingGroup} style={{ marginBottom: 0 }}>
                                                     <label className={styles.label}>Power Entity (W)</label>
-                                                    <input
-                                                        type="text"
-                                                        className={styles.input}
+                                                    <EntityPicker
+                                                        entities={entities}
+                                                        target={getEquipmentSuggestionTarget(key, getEquipmentName(key, key), 'power')}
+                                                        placeholder="sensor.device_power"
                                                         value={config.power}
-                                                        onChange={(e) => {
-                                                            const equip = { ...settings.entities.equipment, [key]: { ...config, power: e.target.value } };
+                                                        onChange={(entityId) => {
+                                                            const equip = { ...settings.entities.equipment, [key]: { ...config, power: entityId } };
                                                             updateNestedSetting('entities', { ...settings.entities, equipment: equip } as any);
                                                         }}
                                                     />
                                                 </div>
                                                 <div className={styles.settingGroup} style={{ marginBottom: 0 }}>
                                                     <label className={styles.label}>Energy Entity (Wh)</label>
-                                                    <input
-                                                        type="text"
-                                                        className={styles.input}
+                                                    <EntityPicker
+                                                        entities={entities}
+                                                        target={getEquipmentSuggestionTarget(key, getEquipmentName(key, key), 'energy')}
+                                                        placeholder="sensor.device_energy"
                                                         value={config.energy}
-                                                        onChange={(e) => {
-                                                            const equip = { ...settings.entities.equipment, [key]: { ...config, energy: e.target.value } };
+                                                        onChange={(entityId) => {
+                                                            const equip = { ...settings.entities.equipment, [key]: { ...config, energy: entityId } };
                                                             updateNestedSetting('entities', { ...settings.entities, equipment: equip } as any);
                                                         }}
                                                     />
