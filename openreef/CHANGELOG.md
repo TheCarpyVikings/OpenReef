@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.10
+
+- Disable automatic Home Assistant entity polling on dashboard load.
+- Require a manual click on the HA status badge before OpenReef requests HA entities.
+- Keep page-close/request abort behavior so refreshing or leaving OpenReef cannot leave browser-triggered HA requests running.
+
+## 0.1.9
+
+- Reduce Home Assistant load from the dashboard by replacing 5-second entity polling with 60-second visible-only polling.
+- Abort in-flight entity requests when the OpenReef page is closed or refreshed.
+- Cache entity snapshots server-side so multiple tabs/devices do not repeatedly hit Home Assistant Core.
+- Make the HA status badge manually retryable and keep errors readable.
+
 ## 0.1.8
 
 - Use the documented Home Assistant app REST and WebSocket proxy URLs.

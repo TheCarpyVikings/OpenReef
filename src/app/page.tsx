@@ -29,7 +29,7 @@ import type { DashboardTab, DataPoint, EquipmentModeState, ReefTask } from '@/ty
 
 function DashboardContent() {
   const { settings, getEquipmentName, updateNestedSetting, setActiveModeExpiry, activeModeExpiry } = useSettings();
-  const { entities, isConnected, toggleSwitch, turnOffSwitch, turnOnSwitch, fetchHistory, error } = useHomeAssistant();
+  const { entities, isConnected, toggleSwitch, turnOffSwitch, turnOnSwitch, fetchHistory, error, reconnect } = useHomeAssistant();
   const [activeTab, setActiveTab] = useState<DashboardTab>('mission');
   const [selectedParam, setSelectedParam] = useState<{ id: string; label: string; color: string; isManual: boolean } | null>(null);
   const [selectedEquipment, setSelectedEquipment] = useState<{ label: string; entityId: string; icon: React.ReactNode } | null>(null);
@@ -200,10 +200,15 @@ function DashboardContent() {
             <p style={{ color: '#778da9', margin: '0.25rem 0 0 0' }}>{settings.general.userName}&apos;s OpenReef</p>
           </div>
         </div>
-        <div className={styles.statusIndicator} title={isConnected ? 'HA Connected' : error || 'Connecting to HA...'}>
+        <button
+          type="button"
+          className={styles.statusIndicator}
+          title={isConnected ? 'HA Connected' : error || 'Connecting to HA... Click to retry.'}
+          onClick={reconnect}
+        >
           <div className={`${styles.statusDot} ${isConnected ? styles.connected : styles.disconnected}`} />
-          {isConnected ? 'HA Connected' : error || 'Connecting to HA...'}
-        </div>
+          <span className={styles.statusText}>{isConnected ? 'HA Connected' : error || 'Connecting to HA...'}</span>
+        </button>
       </header>
 
       <nav className={styles.navBar}>

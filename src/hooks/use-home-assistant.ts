@@ -14,27 +14,31 @@ const getErrorMessage = (err: unknown) => {
 export function useHomeAssistant() {
     const [entities, setEntities] = useState<HassEntities | null>(null);
     const [isConnected, setIsConnected] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>('HA paused - click to connect');
     const [reconnectTrigger, setReconnectTrigger] = useState(0);
 
     const reconnect = useCallback(() => {
+        setError('Connecting to HA...');
         setReconnectTrigger(prev => prev + 1);
     }, []);
 
     useEffect(() => {
+        if (reconnectTrigger === 0) return;
+
         let isMounted = true;
+        const controller = new AbortController();
 
         const fetchEntities = async () => {
             setIsConnected(false);
             try {
-                const nextEntities = await getHAEntities();
+                const nextEntities = await getHAEntities(controller.signal);
                 if (!isMounted) return;
 
                 setEntities(nextEntities);
                 setIsConnected(true);
                 setError(null);
             } catch (err: unknown) {
-                if (!isMounted) return;
+                if (!isMounted || controller.signal.aborted) return;
                 console.error('[HA] Hook Connection Error:', err);
 
                 setError(getErrorMessage(err));
@@ -42,12 +46,11 @@ export function useHomeAssistant() {
             }
         };
 
-        fetchEntities();
-        const interval = setInterval(fetchEntities, 5000);
+        void fetchEntities();
 
         return () => {
             isMounted = false;
-            clearInterval(interval);
+            controller.abort();
         };
     }, [reconnectTrigger]);
 

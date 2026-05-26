@@ -20,8 +20,8 @@ export const getCurrentHAConfig = () => ({
 
 export const getHAConnection = async () => true;
 
-export const getHAEntities = async (): Promise<HassEntities> => {
-    const response = await apiFetch('/api/ha/entities');
+export const getHAEntities = async (signal?: AbortSignal): Promise<HassEntities> => {
+    const response = await apiFetch('/api/ha/entities', { signal });
     if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: string };
         throw new Error(body.error || 'Failed to fetch Home Assistant entities');
