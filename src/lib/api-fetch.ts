@@ -5,18 +5,27 @@
  * attach auth headers — this eliminates the NEXT_PUBLIC_API_SECRET leak.
  */
 const INGRESS_SEGMENT_PATTERN = /^\/([^/?#]+_openreef)(?:[/?#]|$)/i;
+const HASSIO_INGRESS_PATTERN = /^\/api\/hassio_ingress\/([^/?#]+)(?:[/?#]|$)/i;
 
 export function withIngressPath(path: string): string {
     if (typeof window === 'undefined' || !path.startsWith('/')) {
         return path;
     }
 
-    const match = window.location.pathname.match(INGRESS_SEGMENT_PATTERN);
-    if (!match) {
+    const pathname = window.location.pathname;
+    const hassioMatch = pathname.match(HASSIO_INGRESS_PATTERN);
+    const openreefMatch = pathname.match(INGRESS_SEGMENT_PATTERN);
+
+    const ingressBase = hassioMatch
+        ? `/api/hassio_ingress/${hassioMatch[1]}`
+        : openreefMatch
+            ? `/${openreefMatch[1]}`
+            : '';
+
+    if (!ingressBase) {
         return path;
     }
 
-    const ingressBase = `/${match[1]}`;
     if (path === ingressBase || path.startsWith(`${ingressBase}/`)) {
         return path;
     }

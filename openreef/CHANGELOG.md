@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+
+- Use Home Assistant's `X-Ingress-Path` header when rewriting Next.js asset and API URLs.
+- Remove the explicit root `ingress_entry` so the Apps UI uses the Supervisor-managed ingress session URL.
+- Teach browser API calls to stay under `/api/hassio_ingress/...` when Home Assistant serves the app there.
+
 ## 0.1.4
 
 - Remove a noisy nginx MIME warning from the Ingress proxy log.
