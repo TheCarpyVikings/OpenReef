@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.14
+
+- Always show a clickable entity discovery action in onboarding and entity pickers.
+- Let the wizard fetch Home Assistant entities on demand before applying suggested matches.
+- Show clear setup feedback when no close entity matches are found.
+
 ## 0.1.13
 
 - Add Home Assistant entity suggestions for onboarding sensor and equipment mapping.

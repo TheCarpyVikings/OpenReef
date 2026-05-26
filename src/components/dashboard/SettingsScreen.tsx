@@ -834,6 +834,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                                                     )}
                                                                     value={(sensor as any).isCustom ? (sensor as any).haKey : (settings.entities as any)[(section as any).parent][(sensor as any).haKey]}
                                                                     placeholder={`sensor.${sensor.id}`}
+                                                                    onRequestEntities={reconnect}
                                                                     onChange={(entityId) => {
                                                                         if ((sensor as any).isCustom) {
                                                                             const updated = settings.customSensors.map(s => s.id === sensor.id ? { ...s, haKey: entityId } : s);
@@ -1009,6 +1010,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                             )}
                                             placeholder="sensor.magnesium"
                                             value={newSensor.haKey}
+                                            onRequestEntities={reconnect}
                                             onChange={(entityId) => setNewSensor({ ...newSensor, haKey: entityId })}
                                         />
                                     </div>
@@ -1126,6 +1128,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                                         target={getEquipmentSuggestionTarget(key, getEquipmentName(key, key), 'switch')}
                                                         placeholder="switch.device_name"
                                                         value={config.switch}
+                                                        onRequestEntities={reconnect}
                                                         onChange={(entityId) => {
                                                             const equip = { ...settings.entities.equipment, [key]: { ...config, switch: entityId } };
                                                             updateNestedSetting('entities', { ...settings.entities, equipment: equip } as any);
@@ -1139,6 +1142,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                                         target={getEquipmentSuggestionTarget(key, getEquipmentName(key, key), 'power')}
                                                         placeholder="sensor.device_power"
                                                         value={config.power}
+                                                        onRequestEntities={reconnect}
                                                         onChange={(entityId) => {
                                                             const equip = { ...settings.entities.equipment, [key]: { ...config, power: entityId } };
                                                             updateNestedSetting('entities', { ...settings.entities, equipment: equip } as any);
@@ -1152,6 +1156,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                                         target={getEquipmentSuggestionTarget(key, getEquipmentName(key, key), 'energy')}
                                                         placeholder="sensor.device_energy"
                                                         value={config.energy}
+                                                        onRequestEntities={reconnect}
                                                         onChange={(entityId) => {
                                                             const equip = { ...settings.entities.equipment, [key]: { ...config, energy: entityId } };
                                                             updateNestedSetting('entities', { ...settings.entities, equipment: equip } as any);

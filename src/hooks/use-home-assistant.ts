@@ -26,7 +26,7 @@ let haStoreState: HAStoreState = {
 };
 
 const haStoreListeners = new Set<() => void>();
-let activeEntityRequest: Promise<boolean> | null = null;
+let activeEntityRequest: Promise<HassEntities | null> | null = null;
 let activeEntityController: AbortController | null = null;
 let unloadHandlerRegistered = false;
 
@@ -63,7 +63,7 @@ const registerUnloadAbortHandler = () => {
     window.addEventListener('pagehide', abortActiveEntityRequest);
 };
 
-const requestEntitiesOnce = async (): Promise<boolean> => {
+const requestEntitiesOnce = async (): Promise<HassEntities | null> => {
     if (activeEntityRequest) return activeEntityRequest;
 
     const controller = new AbortController();
@@ -73,23 +73,23 @@ const requestEntitiesOnce = async (): Promise<boolean> => {
     activeEntityRequest = (async () => {
         try {
             const nextEntities = await getHAEntities(controller.signal);
-            if (controller.signal.aborted) return false;
+            if (controller.signal.aborted) return null;
 
             setHAStoreState({
                 entities: nextEntities,
                 isConnected: true,
                 error: null,
             });
-            return true;
+            return nextEntities;
         } catch (err: unknown) {
-            if (controller.signal.aborted) return false;
+            if (controller.signal.aborted) return null;
             console.error('[HA] Hook Connection Error:', err);
 
             setHAStoreState({
                 isConnected: false,
                 error: getErrorMessage(err),
             });
-            return false;
+            return null;
         } finally {
             if (activeEntityController === controller) {
                 activeEntityController = null;

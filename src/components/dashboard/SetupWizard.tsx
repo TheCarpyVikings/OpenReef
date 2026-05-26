@@ -27,6 +27,8 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
     const [currentStep, setCurrentStep] = useState(0);
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState<'success' | 'error' | null>(null);
+    const [sensorMatchStatus, setSensorMatchStatus] = useState<'idle' | 'loading' | 'applied' | 'none' | 'error'>('idle');
+    const [equipmentMatchStatus, setEquipmentMatchStatus] = useState<'idle' | 'loading' | 'applied' | 'none' | 'error'>('idle');
 
     // Local state for form inputs to avoid constant context updates during typing
     // We'll initialize this with current settings when the step changes
@@ -231,32 +233,49 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                     { id: 'orp', label: 'ORP', key: 'orp' },
                     { id: 'do', label: 'Dissolved Oxygen', key: 'do' },
                 ];
-                const applySensorSuggestions = () => {
+                const applySensorSuggestions = async () => {
+                    setSensorMatchStatus('loading');
+                    const haEntities = entities || await reconnect();
+                    if (!haEntities) {
+                        setSensorMatchStatus('error');
+                        return;
+                    }
+
                     let nextTank = { ...localEntities.tank };
+                    let matchCount = 0;
                     coreSensors.forEach(sensor => {
                         const current = nextTank[sensor.key];
                         if (!shouldReplaceEntitySuggestionValue(current)) return;
                         const suggestion = getBestEntitySuggestion(
-                            entities,
+                            haEntities,
                             getSensorSuggestionTarget(sensor.id, sensor.label, 'tank'),
                         );
                         if (suggestion) {
                             nextTank = { ...nextTank, [sensor.key]: suggestion };
+                            matchCount += 1;
                         }
                     });
                     setLocalEntities({ ...localEntities, tank: nextTank });
+                    setSensorMatchStatus(matchCount > 0 ? 'applied' : 'none');
                 };
                 return (
                     <div className={styles.wizardStepContainer}>
                         <h3>Map Your Sensors</h3>
                         <p className={styles.wizardDescription}>OpenReef can use your existing Home Assistant sensor entities.</p>
-                        {entities && (
-                            <div className={styles.wizardActionRow} style={{ marginTop: 0, marginBottom: '1.5rem' }}>
-                                <button type="button" className={styles.secondaryButton} onClick={applySensorSuggestions}>
-                                    <Check size={18} /> Use Matches
-                                </button>
-                            </div>
-                        )}
+                        <div className={styles.wizardActionRow} style={{ marginTop: 0, marginBottom: '1.5rem' }}>
+                            <button
+                                type="button"
+                                className={styles.secondaryButton}
+                                onClick={() => { void applySensorSuggestions(); }}
+                                disabled={sensorMatchStatus === 'loading'}
+                            >
+                                {sensorMatchStatus === 'loading' ? <RefreshCw size={18} className={styles.spin} /> : <Check size={18} />}
+                                {sensorMatchStatus === 'loading' ? 'Finding Entities...' : 'Find Sensor Matches'}
+                            </button>
+                        </div>
+                        {sensorMatchStatus === 'applied' && <p className={styles.helperText}>Matches applied. Check each field before continuing.</p>}
+                        {sensorMatchStatus === 'none' && <p className={styles.helperText}>No close matches found yet. You can still type an entity ID.</p>}
+                        {sensorMatchStatus === 'error' && <div className={styles.errorMessage}><AlertTriangle size={16} /> Could not load Home Assistant entities.</div>}
                         <div className={styles.wizardGrid}>
                             {coreSensors.map(sensor => (
                                 <div key={sensor.id} className={styles.settingGroup}>
@@ -267,6 +286,7 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                                         placeholder={`sensor.tank_${sensor.id}`}
                                         value={localEntities.tank[sensor.key]}
                                         onChange={(entityId) => updateTankEntity(sensor.key, entityId)}
+                                        onRequestEntities={reconnect}
                                     />
                                 </div>
                             ))}
@@ -281,35 +301,53 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                     { id: 'SKIMMER', label: 'Skimmer' },
                     { id: 'ATO', label: 'ATO' },
                 ];
-                const applyEquipmentSuggestions = () => {
+                const applyEquipmentSuggestions = async () => {
+                    setEquipmentMatchStatus('loading');
+                    const haEntities = entities || await reconnect();
+                    if (!haEntities) {
+                        setEquipmentMatchStatus('error');
+                        return;
+                    }
+
                     let nextEquipment = { ...localEntities.equipment };
+                    let matchCount = 0;
                     coreEquipment.forEach(eq => {
                         const current = nextEquipment[eq.id] || { switch: '', power: '', energy: '' };
                         const nextConfig = { ...current };
                         if (shouldReplaceEntitySuggestionValue(current.switch)) {
                             const suggestion = getBestEntitySuggestion(
-                                entities,
+                                haEntities,
                                 getEquipmentSuggestionTarget(eq.id, eq.label, 'switch'),
                             );
-                            if (suggestion) nextConfig.switch = suggestion;
+                            if (suggestion) {
+                                nextConfig.switch = suggestion;
+                                matchCount += 1;
+                            }
                         }
                         if (shouldReplaceEntitySuggestionValue(current.power)) {
                             const suggestion = getBestEntitySuggestion(
-                                entities,
+                                haEntities,
                                 getEquipmentSuggestionTarget(eq.id, eq.label, 'power'),
                             );
-                            if (suggestion) nextConfig.power = suggestion;
+                            if (suggestion) {
+                                nextConfig.power = suggestion;
+                                matchCount += 1;
+                            }
                         }
                         if (shouldReplaceEntitySuggestionValue(current.energy)) {
                             const suggestion = getBestEntitySuggestion(
-                                entities,
+                                haEntities,
                                 getEquipmentSuggestionTarget(eq.id, eq.label, 'energy'),
                             );
-                            if (suggestion) nextConfig.energy = suggestion;
+                            if (suggestion) {
+                                nextConfig.energy = suggestion;
+                                matchCount += 1;
+                            }
                         }
                         nextEquipment = { ...nextEquipment, [eq.id]: nextConfig };
                     });
                     setLocalEntities({ ...localEntities, equipment: nextEquipment });
+                    setEquipmentMatchStatus(matchCount > 0 ? 'applied' : 'none');
                 };
                 return (
                     <div className={styles.wizardStepContainer}>
@@ -317,13 +355,20 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                         <p className={styles.wizardDescription}>
                             Control switches and monitor power usage.
                         </p>
-                        {entities && (
-                            <div className={styles.wizardActionRow} style={{ marginTop: 0, marginBottom: '1.5rem' }}>
-                                <button type="button" className={styles.secondaryButton} onClick={applyEquipmentSuggestions}>
-                                    <Check size={18} /> Use Matches
-                                </button>
-                            </div>
-                        )}
+                        <div className={styles.wizardActionRow} style={{ marginTop: 0, marginBottom: '1.5rem' }}>
+                            <button
+                                type="button"
+                                className={styles.secondaryButton}
+                                onClick={() => { void applyEquipmentSuggestions(); }}
+                                disabled={equipmentMatchStatus === 'loading'}
+                            >
+                                {equipmentMatchStatus === 'loading' ? <RefreshCw size={18} className={styles.spin} /> : <Check size={18} />}
+                                {equipmentMatchStatus === 'loading' ? 'Finding Entities...' : 'Find Equipment Matches'}
+                            </button>
+                        </div>
+                        {equipmentMatchStatus === 'applied' && <p className={styles.helperText}>Matches applied. Equipment controls stay locked until you explicitly arm them.</p>}
+                        {equipmentMatchStatus === 'none' && <p className={styles.helperText}>No close matches found yet. You can still type an entity ID.</p>}
+                        {equipmentMatchStatus === 'error' && <div className={styles.errorMessage}><AlertTriangle size={16} /> Could not load Home Assistant entities.</div>}
                         <div className={styles.wizardGrid}>
                             {coreEquipment.map(eq => (
                                 <div key={eq.id} className={styles.card} style={{ padding: '1rem' }}>
@@ -336,6 +381,7 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                                             placeholder="switch.device_name"
                                             value={localEntities.equipment[eq.id]?.switch || ''}
                                             onChange={(entityId) => updateEquipmentEntity(eq.id, 'switch', entityId)}
+                                            onRequestEntities={reconnect}
                                         />
                                     </div>
                                     <div className={styles.settingGroup}>
@@ -346,6 +392,7 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                                             placeholder="sensor.device_power"
                                             value={localEntities.equipment[eq.id]?.power || ''}
                                             onChange={(entityId) => updateEquipmentEntity(eq.id, 'power', entityId)}
+                                            onRequestEntities={reconnect}
                                         />
                                     </div>
                                 </div>
