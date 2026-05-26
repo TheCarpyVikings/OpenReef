@@ -107,7 +107,7 @@ export default function ReefTankLivePage() {
           <div>
             <div className={styles.eyebrow}>
               <Camera size={16} />
-              Ragnar&apos;s Reef Live
+              OpenReef Live
             </div>
             <h1 className={styles.title}>OpenReef Live View</h1>
             <p className={styles.subtitle}>

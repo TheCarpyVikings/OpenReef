@@ -37,8 +37,8 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
-COPY ragnars_reef/nginx.conf /etc/nginx/http.d/default.conf
-COPY ragnars_reef/run.sh /run.sh
+COPY openreef/nginx.conf /etc/nginx/http.d/default.conf
+COPY openreef/run.sh /run.sh
 RUN chmod a+x /run.sh
 
 EXPOSE 8099

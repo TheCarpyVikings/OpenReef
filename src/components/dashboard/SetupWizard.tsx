@@ -93,7 +93,7 @@ export const SetupWizard: React.FC<{ onComplete: () => void }> = ({ onComplete }
                         </div>
                         <h2>Welcome to OpenReef!</h2>
                         <p>
-                            This wizard will guide you through the initial setup of your Open Reef Controller.
+                            This wizard will guide you through the initial setup of your OpenReef.
                             We&apos;ll connect to Home Assistant, configure your sensors, set up your equipment,
                             and get your lighting schedule ready.
                         </p>

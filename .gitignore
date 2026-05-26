@@ -26,6 +26,9 @@
 .reef-settings.json
 .google-tokens.json
 openreef-settings.json
+codebase_bundle*.md
+openreef_context_for_gravityclaw.md
+openreef_notebooklm_bundle.md
 
 # debug
 npm-debug.log*

@@ -5,7 +5,7 @@ OpenReef is a private-beta reef aquarium controller dashboard for Home Assistant
 This repository contains the native pair:
 
 - `custom_components/openreef` — Home Assistant custom integration for setup, mappings, services, diagnostics, and WebSocket commands.
-- `ragnars_reef` — Home Assistant add-on that hosts the Next.js dashboard through Ingress.
+- `openreef` — Home Assistant add-on that hosts the Next.js dashboard through Ingress.
 - `src` — OpenReef dashboard application.
 
 ## Private Beta Install

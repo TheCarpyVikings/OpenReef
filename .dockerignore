@@ -7,7 +7,7 @@ node_modules
 *.tsbuildinfo
 coverage
 codebase_bundle*.md
-ragnars_reef_notebooklm_bundle.md
-ragnars_reef_context_for_gravityclaw.md
+openreef_notebooklm_bundle.md
+openreef_context_for_gravityclaw.md
 .venv
 .agents

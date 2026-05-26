@@ -196,7 +196,7 @@ function DashboardContent() {
           <Image src="/openreef-logo.png" alt="OpenReef Logo" width={64} height={64} style={{ height: '64px', width: 'auto' }} priority />
           <div>
             <h1 className={styles.title}>{settings.general.tankName}</h1>
-            <p style={{ color: '#778da9', margin: '0.25rem 0 0 0' }}>{settings.general.userName}&apos;s Open Reef Controller</p>
+            <p style={{ color: '#778da9', margin: '0.25rem 0 0 0' }}>{settings.general.userName}&apos;s OpenReef</p>
           </div>
         </div>
         <div className={styles.statusIndicator}>
