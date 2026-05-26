@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7
+
+- Keep browser API calls inside OpenReef when Home Assistant serves the app at `/app/..._openreef`.
+
 ## 0.1.6
 
 - Handle unstripped `/api/hassio_ingress/...` and `/app/..._openreef` prefixes in the nginx ingress proxy.
