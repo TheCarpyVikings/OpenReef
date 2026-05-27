@@ -146,14 +146,15 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
-  async _loadTrend(sensorId) {
+  async _loadTrend(sensorId, range = this._trend?.range || "24h") {
     const sensor = this._config?.sensors?.[sensorId];
     const entityId = sensor?.entity_id || "";
-    const requestId = `${sensorId}:${Date.now()}`;
+    const requestId = `${sensorId}:${range}:${Date.now()}`;
     this._trendRequest = requestId;
     this._trend = {
       sensorId,
       entityId,
+      range,
       loading: true,
       points: [],
       error: "",
@@ -165,6 +166,7 @@ class OpenReefPanel extends HTMLElement {
       this._trend = {
         sensorId,
         entityId,
+        range,
         loading: false,
         points: [],
         error: "Map this sensor before viewing a trend.",
@@ -174,11 +176,12 @@ class OpenReefPanel extends HTMLElement {
     }
 
     try {
-      const points = await this._fetchTrendPoints(entityId);
+      const points = await this._fetchTrendPoints(entityId, range);
       if (this._trendRequest !== requestId) return;
       this._trend = {
         sensorId,
         entityId,
+        range,
         loading: false,
         points,
         error: points.length ? "" : "No numeric history is available for this sensor yet.",
@@ -188,6 +191,7 @@ class OpenReefPanel extends HTMLElement {
       this._trend = {
         sensorId,
         entityId,
+        range,
         loading: false,
         points: [],
         error: err instanceof Error ? err.message : "Could not load trend history.",
@@ -196,14 +200,15 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
-  async _fetchTrendPoints(entityId) {
+  async _fetchTrendPoints(entityId, range) {
     const end = new Date();
-    const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+    const start = new Date(end.getTime() - this._trendRangeMs(range));
 
     if (typeof this._hass?.callApi === "function") {
       const params = new URLSearchParams({
         filter_entity_id: entityId,
         minimal_response: "1",
+        no_attributes: "1",
         significant_changes_only: "0",
       });
       const raw = await this._hass.callApi(
@@ -287,6 +292,32 @@ class OpenReefPanel extends HTMLElement {
     return sampled;
   }
 
+  _trendRanges() {
+    return [
+      ["1h", "1 hour", 60 * 60 * 1000],
+      ["6h", "6 hours", 6 * 60 * 60 * 1000],
+      ["24h", "24 hours", 24 * 60 * 60 * 1000],
+      ["7d", "7 days", 7 * 24 * 60 * 60 * 1000],
+      ["30d", "30 days", 30 * 24 * 60 * 60 * 1000],
+    ];
+  }
+
+  _trendRangeMs(range) {
+    return this._trendRanges().find(([id]) => id === range)?.[2] || 24 * 60 * 60 * 1000;
+  }
+
+  _trendRangeLabel(range) {
+    return this._trendRanges().find(([id]) => id === range)?.[1] || "24 hours";
+  }
+
+  _formatTrendTime(timestamp, range = "24h") {
+    const date = new Date(timestamp);
+    if (range === "1h" || range === "6h" || range === "24h") {
+      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
   _attachEvents() {
     if (this._eventsAttached) return;
     this._eventsAttached = true;
@@ -339,12 +370,19 @@ class OpenReefPanel extends HTMLElement {
         const equipment = this._config.equipment[id] || {};
         this._searchEntities(`equipment:${id}:${field}`, this._equipmentTarget(id, equipment, field));
       }
+      if (action === "search-energy") {
+        this._searchEntities(`energy:${field}`, this._energyTarget(field, target.dataset.label));
+      }
       if (action === "choose-sensor") {
         this._config.sensors[id].entity_id = target.dataset.entity;
         this._render();
       }
       if (action === "choose-equipment") {
         this._config.equipment[id][field] = target.dataset.entity;
+        this._render();
+      }
+      if (action === "choose-energy") {
+        this._config.energy[field] = target.dataset.entity;
         this._render();
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
@@ -363,12 +401,13 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "show-trend") this._loadTrend(id);
+      if (action === "trend-range") this._loadTrend(id, target.dataset.range);
       if (action === "close-trend") {
         this._trend = null;
         this._trendRequest = "";
         this._render();
       }
-      if (action === "refresh-trend") this._loadTrend(id);
+      if (action === "refresh-trend") this._loadTrend(id, this._trend?.range || "24h");
     });
 
     this.shadowRoot.addEventListener("input", (event) => {
@@ -377,13 +416,17 @@ class OpenReefPanel extends HTMLElement {
       const scope = target.dataset.scope;
       const id = target.dataset.id;
       const field = target.dataset.field;
-      const value = target.type === "number" ? Number(target.value) : target.value;
+      const value = target.type === "checkbox" ? target.checked : target.type === "number" ? Number(target.value) : target.value;
 
       if (scope === "tank") this._config.tank[field] = value;
       if (scope === "display") this._config.display[field] = value;
       if (scope === "sensor") this._config.sensors[id][field] = value;
       if (scope === "equipment") this._config.equipment[id][field] = value;
       if (scope === "energy") this._config.energy[field] = value;
+      if (scope === "mission-card") {
+        this._config.display.missionCards = this._missionCards();
+        this._config.display.missionCards[id] = value;
+      }
       if (scope === "display" && field === "themeColor") this._render();
     });
   }
@@ -446,6 +489,43 @@ class OpenReefPanel extends HTMLElement {
       keywords: [label, "cost", "money"],
       device_classes: ["monetary"],
       units: ["GBP", "£"],
+    };
+  }
+
+  _energyTarget(field, label = "") {
+    const words = String(label || field)
+      .replaceAll("_", " ")
+      .replaceAll("entity id", "")
+      .trim();
+    const lowerWords = words.toLowerCase();
+    let period = "";
+    if (lowerWords.includes("daily")) period = "daily";
+    if (lowerWords.includes("weekly")) period = "weekly";
+    if (lowerWords.includes("monthly")) period = "monthly";
+
+    if (field.includes("cost")) {
+      return {
+        id: field,
+        label: words,
+        domains: ["sensor"],
+        keywords: [words, period, "cost", "money", "price", "tariff"],
+        prefer: ["reef", "tank", "aquarium", period, "cost", "energy"],
+        avoid: [],
+        device_classes: ["monetary"],
+        units: ["GBP", "gbp", "£"],
+      };
+    }
+
+    return {
+      id: field,
+      label: words,
+      domains: ["sensor"],
+      keywords: [words, period, "energy", "kwh", "consumption"],
+      prefer: ["reef", "tank", "aquarium", period, "energy"],
+      avoid: [],
+      device_classes: ["energy"],
+      units: ["kWh", "Wh"],
+      state_classes: ["total", "total_increasing"],
     };
   }
 
@@ -516,6 +596,23 @@ class OpenReefPanel extends HTMLElement {
 
   _sensorGroupClass(sensor) {
     return sensor?.group === "room" ? "room-card" : "tank-card";
+  }
+
+  _missionCards() {
+    return {
+      live: true,
+      controls: true,
+      energy: true,
+      ...(this._config?.display?.missionCards || {}),
+    };
+  }
+
+  _missionCardChoices() {
+    return [
+      ["live", "Live Stats", "Show mapped sensor readings in Mission Control."],
+      ["controls", "Controls", "Show armed equipment status in Mission Control."],
+      ["energy", "Energy", "Show energy and cost summaries in Mission Control."],
+    ];
   }
 
   _renderLoading() {
@@ -621,6 +718,7 @@ class OpenReefPanel extends HTMLElement {
     const missing = this._validation?.missing_entities || [];
     const armedUnavailable = this._validation?.armed_unavailable || [];
     const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length ? "Watch closely" : "All systems nominal";
+    const cards = this._missionCards();
 
     return `
       <section class="stack">
@@ -633,14 +731,18 @@ class OpenReefPanel extends HTMLElement {
           <button class="secondary" data-action="validate">Refresh checks</button>
         </div>
         <div class="grid two">
-          <article class="panel">
+          ${cards.live ? `<article class="panel">
             <h3>Core Sensors</h3>
             ${sensors.map(([id, sensor]) => this._sensorRow(id, sensor)).join("")}
-          </article>
-          <article class="panel">
+          </article>` : ""}
+          ${cards.controls ? `<article class="panel">
             <h3>Armed Equipment</h3>
             ${this._armedEquipmentRows()}
-          </article>
+          </article>` : ""}
+          ${cards.energy ? `<article class="panel">
+            <h3>Energy</h3>
+            ${this._missionEnergyRows()}
+          </article>` : ""}
         </div>
       </section>
     `;
@@ -673,6 +775,29 @@ class OpenReefPanel extends HTMLElement {
         <div class="pill">${this._escape(this._stateValue(item.switch_entity_id))}</div>
       </div>
     `).join("");
+  }
+
+  _missionEnergyRows() {
+    const tariff = Number(this._config.energy.tariff || 0);
+    const rows = [
+      ["Today", "daily_energy_entity_id", "daily_cost_entity_id"],
+      ["This week", "weekly_energy_entity_id", "weekly_cost_entity_id"],
+      ["This month", "monthly_energy_entity_id", "monthly_cost_entity_id"],
+    ];
+    return rows.map(([label, energyKey, costKey]) => {
+      const energy = this._number(this._config.energy[energyKey]);
+      const mappedCost = this._number(this._config.energy[costKey]);
+      const cost = mappedCost ?? (energy === null ? null : energy * tariff);
+      return `
+        <div class="row">
+          <div>
+            <strong>${label}</strong>
+            <span>${this._escape(this._config.energy[energyKey] || "Energy entity not mapped")}</span>
+          </div>
+          <div class="pill">${this._format(energy, 2)} kWh / ${cost === null ? "--" : cost.toFixed(2)} ${this._escape(this._config.energy.currency || "GBP")}</div>
+        </div>
+      `;
+    }).join("");
   }
 
   _liveStats() {
@@ -715,6 +840,8 @@ class OpenReefPanel extends HTMLElement {
 
   _controlCard(id, item) {
     const state = this._stateValue(item.switch_entity_id);
+    const isOn = state === "on";
+    const enabled = Boolean(item.armed && item.switch_entity_id);
     return `
       <article class="panel">
         <div class="card-head">
@@ -724,12 +851,18 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <span class="pill">${this._escape(state)}</span>
         </div>
-        <div class="button-row">
-          <button class="${item.armed ? "warning" : "secondary"}" data-action="toggle-armed" data-id="${this._escape(id)}">
-            ${item.armed ? "Disarm" : "Arm control"}
-          </button>
-          <button class="primary" ${item.armed && item.switch_entity_id ? "" : "disabled"} data-action="toggle-equipment" data-id="${this._escape(id)}">
-            Toggle
+        <div class="control-row">
+          <span>${enabled ? "Manual control" : "Disarmed in Settings"}</span>
+          <button
+            class="control-switch ${isOn ? "on" : "off"} ${enabled ? "" : "locked"}"
+            data-action="toggle-equipment"
+            data-id="${this._escape(id)}"
+            role="switch"
+            aria-checked="${isOn ? "true" : "false"}"
+            ${enabled ? "" : "disabled"}
+          >
+            <span></span>
+            <strong>${isOn ? "On" : "Off"}</strong>
           </button>
         </div>
       </article>
@@ -789,6 +922,7 @@ class OpenReefPanel extends HTMLElement {
           <button class="primary" data-action="save">Save settings</button>
         </div>
         ${this._profileSettings()}
+        ${this._missionSettings()}
         <article class="panel">
           <h3>Sensors</h3>
           <div class="grid two compact">${Object.entries(this._config.sensors || {}).map(([id, sensor]) => this._sensorPicker(id, sensor)).join("")}</div>
@@ -796,6 +930,26 @@ class OpenReefPanel extends HTMLElement {
         ${this._equipmentSettings()}
         ${this._energySettings()}
       </section>
+    `;
+  }
+
+  _missionSettings() {
+    const cards = this._missionCards();
+    return `
+      <article class="panel">
+        <h3>Mission Control Cards</h3>
+        <div class="grid three compact">
+          ${this._missionCardChoices().map(([id, label, description]) => `
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="mission-card" data-id="${this._escape(id)}" ${cards[id] ? "checked" : ""}>
+              <span>
+                <strong>${this._escape(label)}</strong>
+                <small>${this._escape(description)}</small>
+              </span>
+            </label>
+          `).join("")}
+        </div>
+      </article>
     `;
   }
 
@@ -879,7 +1033,19 @@ class OpenReefPanel extends HTMLElement {
       <div class="equipment-editor">
         <div class="card-head">
           <label>Name<input data-scope="equipment" data-id="${this._escape(id)}" data-field="label" value="${this._escape(item.label || id)}"></label>
-          <button class="danger-text" data-action="remove-equipment" data-id="${this._escape(id)}">Remove</button>
+          <div class="settings-actions">
+            <button
+              class="arm-switch ${item.armed ? "on" : "off"}"
+              data-action="toggle-armed"
+              data-id="${this._escape(id)}"
+              role="switch"
+              aria-checked="${item.armed ? "true" : "false"}"
+            >
+              <span></span>
+              <strong>${item.armed ? "Armed" : "Disarmed"}</strong>
+            </button>
+            <button class="danger-text" data-action="remove-equipment" data-id="${this._escape(id)}">Remove</button>
+          </div>
         </div>
         <div class="grid two compact">
           ${fields.map(([field, label, placeholder]) => `
@@ -911,11 +1077,25 @@ class OpenReefPanel extends HTMLElement {
       <article class="panel">
         <h3>Energy Totals</h3>
         <div class="grid two compact">
-          ${fields.map(([field, label]) => `
-            <label>${label}<input data-scope="energy" data-field="${field}" value="${this._escape(this._config.energy[field])}" placeholder="sensor.optional"></label>
-          `).join("")}
+          ${fields.map(([field, label]) => this._energyPicker(field, label)).join("")}
         </div>
       </article>
+    `;
+  }
+
+  _energyPicker(field, label) {
+    const key = `energy:${field}`;
+    const result = this._searchResults[key];
+    return `
+      <section class="picker mapping-card entity-card">
+        <div class="mapping-head">
+          <h3>${this._escape(label)}</h3>
+          <span class="pill">optional</span>
+        </div>
+        <label>${this._escape(label)}<input data-scope="energy" data-field="${this._escape(field)}" value="${this._escape(this._config.energy[field])}" placeholder="sensor.optional"></label>
+        <button class="secondary" data-action="search-energy" data-field="${this._escape(field)}" data-label="${this._escape(label)}">${result?.loading ? "Finding..." : "Find matches"}</button>
+        ${this._candidateList(key, "choose-energy", "", field)}
+      </section>
     `;
   }
 
@@ -947,7 +1127,7 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
-  _trendSvg(points, unit) {
+  _trendSvg(points, unit, range) {
     if (points.length < 2) return `<div class="empty-chart">No trend points yet.</div>`;
     const width = 640;
     const height = 220;
@@ -979,9 +1159,9 @@ class OpenReefPanel extends HTMLElement {
           <polyline points="${coords.join(" ")}" />
         </svg>
         <div class="chart-labels">
-          <span>${new Date(minTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+          <span>${this._formatTrendTime(minTime, range)}</span>
           <strong>${this._format(max, 2)} ${this._escape(unit || "")}</strong>
-          <span>${new Date(maxTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+          <span>${this._formatTrendTime(maxTime, range)}</span>
         </div>
       </div>
     `;
@@ -991,21 +1171,35 @@ class OpenReefPanel extends HTMLElement {
     const sensor = this._config.sensors?.[this._trend.sensorId] || {};
     const points = this._trend.points || [];
     const summary = this._trendSummary(points);
+    const range = this._trend.range || "24h";
     return `
       <div class="modal">
         <section class="wizard trend-dialog">
           <button class="close" data-action="close-trend">x</button>
           <div class="section-head">
             <div>
-              <p class="eyebrow">24-hour trend</p>
+              <p class="eyebrow">${this._escape(this._trendRangeLabel(range))} trend</p>
               <h2>${this._escape(sensor.label || "Sensor")}</h2>
               <p class="muted">${this._escape(this._trend.entityId || "Not mapped")}</p>
             </div>
             <button class="secondary" data-action="refresh-trend" data-id="${this._escape(this._trend.sensorId)}" ${this._trend.loading ? "disabled" : ""}>Refresh</button>
           </div>
+          <div class="range-picker">
+            ${this._trendRanges().map(([id, label]) => `
+              <button
+                class="${range === id ? "active" : ""}"
+                data-action="trend-range"
+                data-id="${this._escape(this._trend.sensorId)}"
+                data-range="${this._escape(id)}"
+                ${this._trend.loading ? "disabled" : ""}
+              >
+                ${this._escape(label)}
+              </button>
+            `).join("")}
+          </div>
           ${this._trend.loading ? `<div class="center-card compact-center"><div class="spinner"></div><p>Loading trend...</p></div>` : ""}
           ${this._trend.error ? `<div class="notice error">${this._escape(this._trend.error)}</div>` : ""}
-          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, sensor.unit) : ""}
+          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, sensor.unit, range) : ""}
           ${summary ? `
             <div class="trend-summary">
               <article><span>Latest</span><strong>${this._format(summary.latest, 2)} ${this._escape(sensor.unit || "")}</strong></article>
@@ -1067,8 +1261,8 @@ class OpenReefPanel extends HTMLElement {
         .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
         .actions, .button-row, .quick-add, .wizard-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         .tabs { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
-        .tabs button, .primary, .secondary, .warning, .candidate, .danger-text { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
-        .tabs button.active, .primary { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
+        .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
+        .tabs button.active, .primary, .range-picker button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
         .secondary:hover, .tabs button:hover { border-color: var(--openreef-accent); }
         .warning { background: #47351a; color: #fde68a; border-color: #a16207; }
         .danger-text { color: #fecaca; background: transparent; border-color: #7f1d1d; }
@@ -1087,6 +1281,15 @@ class OpenReefPanel extends HTMLElement {
         .danger-border { border-color: #ef4444; background: #2b171c; }
         .panel, .stat { padding: 18px; }
         .section-head, .card-head, .row { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+        .control-row, .settings-actions { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .control-row { padding-top: 18px; color: #8da2ba; }
+        .control-switch, .arm-switch { display: inline-flex; align-items: center; gap: 10px; min-width: 112px; min-height: 44px; border: 1px solid #334155; border-radius: 999px; padding: 5px 14px 5px 5px; background: #1f2937; color: #dcecff; font-weight: 800; }
+        .control-switch span, .arm-switch span { display: block; width: 32px; height: 32px; border-radius: 50%; background: #94a3b8; transition: transform .16s ease, background .16s ease; }
+        .control-switch.on, .arm-switch.on { background: #0f3f2c; border-color: #22c55e; color: #bbf7d0; }
+        .control-switch.on span, .arm-switch.on span { background: #22c55e; transform: translateX(42px); }
+        .control-switch.on strong, .arm-switch.on strong { transform: translateX(-32px); }
+        .control-switch.locked { opacity: .5; filter: grayscale(.8); }
+        .arm-switch.off { background: #172536; color: #cbd5e1; }
         .row { padding: 12px 0; border-top: 1px solid #223447; align-items: center; }
         .row:first-of-type { border-top: 0; }
         .row div { display: grid; gap: 4px; }
@@ -1105,6 +1308,9 @@ class OpenReefPanel extends HTMLElement {
         input[type="color"] { min-height: 48px; padding: 4px; cursor: pointer; }
         .field-group { display: grid; gap: 9px; }
         .field-label { color: #a7b7ca; font-size: 13px; font-weight: 800; }
+        .toggle-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; grid-template-columns: auto 1fr; align-items: start; }
+        .toggle-card input { width: 20px; min-height: 20px; margin-top: 2px; accent-color: var(--openreef-accent); }
+        .toggle-card span { display: grid; gap: 4px; }
         .theme-picker { display: grid; grid-template-columns: repeat(8, minmax(34px, 1fr)); gap: 8px; }
         .theme-swatch { min-height: 42px; border: 1px solid #2b4056; border-radius: 8px; background: var(--swatch); padding: 0; }
         .theme-swatch.active { border-color: #f8fafc; box-shadow: 0 0 0 2px var(--openreef-accent-border); }
@@ -1124,6 +1330,7 @@ class OpenReefPanel extends HTMLElement {
         .mapping-head h3 { margin-bottom: 0; }
         .equipment-editor { background: #0e1a28; }
         .trend-dialog { max-width: 900px; }
+        .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
         .compact-center { min-height: 220px; }
         .chart-wrap { display: grid; gap: 8px; border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0b1724; }
         .trend-chart { width: 100%; min-height: 260px; overflow: visible; }
@@ -1153,6 +1360,8 @@ class OpenReefPanel extends HTMLElement {
           .topbar, .hero, .section-head, .card-head { flex-direction: column; align-items: stretch; }
           .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .grid.two, .grid.three { grid-template-columns: 1fr; }
+          .range-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .trend-summary { grid-template-columns: 1fr; }
         }
       </style>
     `;

@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 2
+CORE_SCHEMA_VERSION = 3
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -122,6 +122,11 @@ DEFAULT_CORE_CONFIG = {
     "display": {
         "themeColor": "#00b4d8",
         "setupComplete": False,
+        "missionCards": {
+            "live": True,
+            "controls": True,
+            "energy": True,
+        },
     },
     "sensors": {
         sensor_id: {
