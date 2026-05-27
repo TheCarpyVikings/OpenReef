@@ -1837,7 +1837,7 @@ class OpenReefPanel extends HTMLElement {
         }
         * { box-sizing: border-box; }
         button, input, select { font: inherit; }
-        button { cursor: pointer; }
+        button { cursor: pointer; color: inherit; }
         button:disabled { cursor: not-allowed; opacity: .45; }
         .page { min-height: 100vh; padding: 24px; background: radial-gradient(circle at 20% 0%, var(--openreef-accent-soft), transparent 28%), #07111a; }
         .topbar, .hero, .panel, .stat, .wizard { border: 1px solid #24364a; background: #121f2f; border-radius: 8px; }
@@ -1874,7 +1874,7 @@ class OpenReefPanel extends HTMLElement {
         .warning-border { border-color: #f59e0b; background: #2f2614; }
         .danger-border { border-color: #ef4444; background: #2b171c; }
         .panel, .stat { padding: 18px; }
-        .summary-card, .empty-state, .issue-item { border: 1px solid #24364a; background: #121f2f; border-radius: 8px; }
+        .summary-card, .empty-state, .issue-item { border: 1px solid #24364a; background: #121f2f; border-radius: 8px; color: #e5edf5; }
         .summary-card { display: grid; gap: 7px; text-align: left; padding: 16px; min-height: 118px; }
         .summary-card span { color: #8da2ba; font-weight: 800; }
         .summary-card strong { color: #67e8f9; font-size: 28px; }
@@ -1918,8 +1918,11 @@ class OpenReefPanel extends HTMLElement {
         .pill.critical { background: #7f1d1d; color: #fecaca; }
         .pill.unknown { background: #334155; color: #cbd5e1; }
         .pill.disabled { background: #1f2937; color: #94a3b8; }
-        .stat { display: grid; gap: 8px; min-height: 150px; }
+        .stat { display: grid; gap: 8px; min-height: 150px; color: #e5edf5; }
+        .stat p { color: #dcecff; font-weight: 800; }
         .stat strong { font-size: 34px; color: #67e8f9; }
+        .stat span { color: #dcecff; }
+        .stat small { color: #9fb2c7; }
         .stat-button { position: relative; width: 100%; text-align: left; }
         .stat-button:hover, .stat-button:focus-visible { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent-border); outline: none; }
         .trend-hint { position: absolute; top: 14px; right: 14px; border: 1px solid #294055; border-radius: 999px; padding: 4px 9px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; }
