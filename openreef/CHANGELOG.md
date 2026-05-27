@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15
+
+- Add a low-load OpenReef safe-start screen so opening the add-on no longer loads the full dashboard immediately.
+- Lazy-load setup and dashboard screens only after the user chooses them.
+- Keep Home Assistant entity discovery off until the user starts setup or manually opens the dashboard.
+
 ## 0.1.14
 
 - Always show a clickable entity discovery action in onboarding and entity pickers.

@@ -171,6 +171,109 @@
     color: #4ade80;
 }
 
+.safeLaunchPage {
+    --primary-color: #00b4d8;
+    --primary-rgb: 0, 180, 216;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    background: #071019;
+    color: #e0e1dd;
+    font-family: 'Inter', sans-serif;
+}
+
+.safeLaunchPanel {
+    width: min(100%, 680px);
+    padding: 2rem;
+    border-radius: 12px;
+    background: rgba(13, 27, 42, 0.92);
+    border: 1px solid rgba(119, 141, 169, 0.24);
+    box-shadow: 0 20px 70px rgba(0, 0, 0, 0.38);
+}
+
+.safeLaunchHeader {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.safeLaunchHeader img {
+    width: 72px;
+    height: 72px;
+    object-fit: contain;
+}
+
+.safeLaunchHeader h1 {
+    margin: 0;
+    color: var(--primary-color);
+    font-size: 2rem;
+}
+
+.safeLaunchHeader p,
+.safeLaunchPanel p {
+    margin: 0.25rem 0 0;
+    color: #8aa2bd;
+}
+
+.safeLaunchNotice {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 1rem;
+    border-radius: 10px;
+    color: #b9cbe0;
+    background: rgba(0, 180, 216, 0.08);
+    border: 1px solid rgba(0, 180, 216, 0.18);
+    margin-bottom: 1.5rem;
+}
+
+.safeLaunchNotice svg {
+    color: var(--primary-color);
+    flex-shrink: 0;
+}
+
+.safeLaunchActions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+}
+
+.safeLaunchPrimary,
+.safeLaunchSecondary {
+    min-height: 56px;
+    border-radius: 10px;
+    border: 1px solid rgba(119, 141, 169, 0.24);
+    padding: 0 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.65rem;
+}
+
+.safeLaunchPrimary {
+    background: var(--primary-color);
+    color: #00111a;
+}
+
+.safeLaunchSecondary {
+    background: rgba(255, 255, 255, 0.04);
+    color: #e0e1dd;
+}
+
+.safeLaunchSpinner {
+    width: 34px;
+    height: 34px;
+    border-radius: 999px;
+    border: 3px solid rgba(119, 141, 169, 0.22);
+    border-top-color: var(--primary-color);
+    animation: spin 1s linear infinite;
+    margin-bottom: 1rem;
+}
+
 .activeCard {
     border-color: rgba(var(--primary-rgb), 0.4);
     background: rgba(var(--primary-rgb), 0.1);
