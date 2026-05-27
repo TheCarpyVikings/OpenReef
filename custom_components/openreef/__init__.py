@@ -1,37 +1,53 @@
-"""OpenReef Home Assistant companion integration."""
+"""OpenReef Home Assistant native controller integration."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components import websocket_api
+from homeassistant.components import panel_custom, websocket_api
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_SETTINGS,
-    DEFAULT_SETTINGS,
+    DEFAULT_CORE_CONFIG,
     DOMAIN,
+    ISSUE_ARMED_UNAVAILABLE,
+    ISSUE_LEGACY_LABS_CONFIG,
     ISSUE_MISSING_ENTITIES,
+    MVP_SENSORS,
+    NAME,
+    PANEL_ICON,
+    PANEL_STATIC_URL,
+    PANEL_URL,
     SERVICE_APPLY_MODE,
+    SERVICE_ARM_EQUIPMENT,
+    SERVICE_DISARM_EQUIPMENT,
     SERVICE_RECORD_MANUAL_READING,
 )
 
 type OpenReefConfigEntry = ConfigEntry
 
 
+SEARCH_LIMIT = 10
+UNAVAILABLE_STATES = {"unknown", "unavailable"}
+
 APPLY_MODE_SCHEMA = vol.Schema({vol.Required("mode_id"): cv.string})
+
+EQUIPMENT_ARM_SCHEMA = vol.Schema({vol.Required("equipment_id"): cv.string})
 
 RECORD_MANUAL_READING_SCHEMA = vol.Schema(
     {
@@ -40,10 +56,6 @@ RECORD_MANUAL_READING_SCHEMA = vol.Schema(
         vol.Optional("date"): cv.string,
     }
 )
-
-SEARCH_LIMIT = 10
-RUNTIME_ENTITY_LIMIT = 100
-UNAVAILABLE_STATES = {"unknown", "unavailable"}
 
 
 def _entries(hass: HomeAssistant) -> list[OpenReefConfigEntry]:
@@ -55,19 +67,20 @@ def _first_entry(hass: HomeAssistant) -> OpenReefConfigEntry | None:
     return entries[0] if entries else None
 
 
-def _settings_from_entry(entry: OpenReefConfigEntry | None) -> dict[str, Any]:
-    if entry is None:
-        return deepcopy(DEFAULT_SETTINGS)
-    settings = entry.options.get(CONF_SETTINGS)
-    if isinstance(settings, dict):
-        return deepcopy(settings)
-    return deepcopy(DEFAULT_SETTINGS)
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
 
 
-def _normalise_entity_id(value: Any) -> str | None:
+def _normalise_entity_id(value: Any) -> str:
     if isinstance(value, str) and "." in value:
-        return value
-    return None
+        return value.strip()
+    return ""
 
 
 def _normalise_text(value: Any) -> str:
@@ -81,7 +94,7 @@ def _normalise_text(value: Any) -> str:
 def _normalise_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, str) and item.strip()]
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 def _domain(entity_id: str) -> str:
@@ -101,50 +114,214 @@ def _has_token(haystack: str, token: str) -> bool:
 def _score_terms(haystack: str, terms: list[str], points: int) -> int:
     score = 0
     for term in terms:
-        score += points if (
-            _has_token(haystack, term) if len(_normalise_text(term)) <= 3 else _has_phrase(haystack, term)
-        ) else 0
+        normalised = _normalise_text(term)
+        if not normalised:
+            continue
+        if len(normalised) <= 3:
+            score += points if _has_token(haystack, normalised) else 0
+        else:
+            score += points if _has_phrase(haystack, normalised) else 0
     return score
 
 
-def _collect_entity_ids(settings: dict[str, Any]) -> set[str]:
+def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
+    """Convert the old full-dashboard settings shape into the new core config."""
+    core = deepcopy(DEFAULT_CORE_CONFIG)
+    general = settings.get("general", {})
+    entities = settings.get("entities", {})
+    thresholds = settings.get("thresholds", {})
+    labels = settings.get("labels", {})
+    equipment_aliases = settings.get("equipment", {}).get("aliases", {})
+
+    if isinstance(general, dict):
+        core["tank"]["name"] = general.get("tankName") or NAME
+        core["tank"]["owner"] = general.get("userName") or ""
+        core["display"]["themeColor"] = general.get("themeColor") or "#00b4d8"
+        core["energy"]["tariff"] = general.get("energyTariff") or 0.28
+
+    tank = entities.get("tank", {}) if isinstance(entities, dict) else {}
+    room = entities.get("room", {}) if isinstance(entities, dict) else {}
+    sensor_sources = {
+        "temp": tank.get("temp") if isinstance(tank, dict) else "",
+        "ph": tank.get("ph") if isinstance(tank, dict) else "",
+        "salinity": tank.get("salinity") if isinstance(tank, dict) else "",
+        "room_temp": room.get("temp") if isinstance(room, dict) else "",
+        "co2": room.get("co2") if isinstance(room, dict) else "",
+        "humidity": room.get("humidity") if isinstance(room, dict) else "",
+    }
+
+    for sensor_id, entity_id in sensor_sources.items():
+        if sensor_id not in core["sensors"]:
+            continue
+        core["sensors"][sensor_id]["entity_id"] = _normalise_entity_id(entity_id)
+        if isinstance(labels, dict) and labels.get(sensor_id):
+            core["sensors"][sensor_id]["label"] = labels[sensor_id]
+        if isinstance(thresholds, dict) and isinstance(thresholds.get(sensor_id), dict):
+            threshold = thresholds[sensor_id]
+            core["sensors"][sensor_id]["min"] = threshold.get(
+                "min", core["sensors"][sensor_id]["min"]
+            )
+            core["sensors"][sensor_id]["max"] = threshold.get(
+                "max", core["sensors"][sensor_id]["max"]
+            )
+
+    equipment = entities.get("equipment", {}) if isinstance(entities, dict) else {}
+    if isinstance(equipment, dict):
+        for equipment_id, config in equipment.items():
+            if not isinstance(config, dict):
+                continue
+            core["equipment"][equipment_id] = {
+                "label": equipment_aliases.get(equipment_id, equipment_id)
+                if isinstance(equipment_aliases, dict)
+                else equipment_id,
+                "switch_entity_id": _normalise_entity_id(config.get("switch")),
+                "power_entity_id": _normalise_entity_id(config.get("power")),
+                "energy_entity_id": _normalise_entity_id(config.get("energy")),
+                "cost_entity_id": "",
+                "armed": bool(config.get("controlEnabled", False)),
+            }
+
+    energy = entities.get("energy", {}) if isinstance(entities, dict) else {}
+    if isinstance(energy, dict):
+        core["energy"].update(
+            {
+                "daily_energy_entity_id": _normalise_entity_id(energy.get("dailyEnergy")),
+                "weekly_energy_entity_id": _normalise_entity_id(energy.get("weeklyEnergy")),
+                "monthly_energy_entity_id": _normalise_entity_id(energy.get("monthlyEnergy")),
+                "daily_cost_entity_id": _normalise_entity_id(energy.get("dailyCost")),
+                "weekly_cost_entity_id": _normalise_entity_id(energy.get("weeklyCost")),
+                "monthly_cost_entity_id": _normalise_entity_id(energy.get("monthlyCost")),
+            }
+        )
+
+    core["modes"] = settings.get("modes") if isinstance(settings.get("modes"), list) else []
+    core["manualReadings"] = (
+        settings.get("manualReadings")
+        if isinstance(settings.get("manualReadings"), dict)
+        else {}
+    )
+    core["display"]["setupComplete"] = any(
+        sensor.get("entity_id") for sensor in core["sensors"].values()
+    )
+    return core
+
+
+def _normalise_core_config(settings: Any) -> dict[str, Any]:
+    if not isinstance(settings, dict):
+        return deepcopy(DEFAULT_CORE_CONFIG)
+    if "general" in settings or "entities" in settings:
+        return _legacy_to_core_config(settings)
+
+    config = _deep_merge(DEFAULT_CORE_CONFIG, settings)
+    config["schemaVersion"] = DEFAULT_CORE_CONFIG["schemaVersion"]
+
+    for sensor_id, meta in MVP_SENSORS.items():
+        sensor = config["sensors"].setdefault(sensor_id, {})
+        sensor["entity_id"] = _normalise_entity_id(sensor.get("entity_id"))
+        sensor.setdefault("label", meta["label"])
+        sensor.setdefault("group", meta["group"])
+        sensor.setdefault("unit", meta["unit"])
+        sensor.setdefault("min", meta["min"])
+        sensor.setdefault("max", meta["max"])
+
+    equipment = config.setdefault("equipment", {})
+    if not isinstance(equipment, dict):
+        config["equipment"] = {}
+    else:
+        for equipment_id, equipment_config in list(equipment.items()):
+            if not isinstance(equipment_config, dict):
+                equipment.pop(equipment_id)
+                continue
+            equipment_config["label"] = equipment_config.get("label") or equipment_id
+            equipment_config["switch_entity_id"] = _normalise_entity_id(
+                equipment_config.get("switch_entity_id")
+            )
+            equipment_config["power_entity_id"] = _normalise_entity_id(
+                equipment_config.get("power_entity_id")
+            )
+            equipment_config["energy_entity_id"] = _normalise_entity_id(
+                equipment_config.get("energy_entity_id")
+            )
+            equipment_config["cost_entity_id"] = _normalise_entity_id(
+                equipment_config.get("cost_entity_id")
+            )
+            equipment_config["armed"] = bool(equipment_config.get("armed", False))
+
+    return config
+
+
+def _config_from_entry(entry: OpenReefConfigEntry | None) -> dict[str, Any]:
+    if entry is None:
+        return deepcopy(DEFAULT_CORE_CONFIG)
+    return _normalise_core_config(entry.options.get(CONF_SETTINGS))
+
+
+def _collect_entity_ids(config: dict[str, Any]) -> set[str]:
     entity_ids: set[str] = set()
 
-    def walk(value: Any) -> None:
-        if isinstance(value, dict):
-            for child in value.values():
-                walk(child)
-        elif isinstance(value, list):
-            for child in value:
-                walk(child)
-        else:
-            entity_id = _normalise_entity_id(value)
+    for sensor in config.get("sensors", {}).values():
+        if isinstance(sensor, dict):
+            entity_id = _normalise_entity_id(sensor.get("entity_id"))
             if entity_id:
                 entity_ids.add(entity_id)
 
-    walk(settings.get("entities", {}))
-    walk(settings.get("lighting", {}).get("channels", {}))
+    for equipment in config.get("equipment", {}).values():
+        if not isinstance(equipment, dict):
+            continue
+        for key in (
+            "switch_entity_id",
+            "power_entity_id",
+            "energy_entity_id",
+            "cost_entity_id",
+        ):
+            entity_id = _normalise_entity_id(equipment.get(key))
+            if entity_id:
+                entity_ids.add(entity_id)
+
+    energy = config.get("energy", {})
+    if isinstance(energy, dict):
+        for key in (
+            "daily_energy_entity_id",
+            "weekly_energy_entity_id",
+            "monthly_energy_entity_id",
+            "daily_cost_entity_id",
+            "weekly_cost_entity_id",
+            "monthly_cost_entity_id",
+        ):
+            entity_id = _normalise_entity_id(energy.get(key))
+            if entity_id:
+                entity_ids.add(entity_id)
+
     return entity_ids
 
 
-def _validate_settings(hass: HomeAssistant, settings: dict[str, Any]) -> dict[str, Any]:
-    entity_ids = sorted(_collect_entity_ids(settings))
+def _validate_config(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
+    entity_ids = sorted(_collect_entity_ids(config))
     missing = [entity_id for entity_id in entity_ids if hass.states.get(entity_id) is None]
     locked_controls: list[str] = []
+    armed_unavailable: list[str] = []
 
-    equipment = settings.get("entities", {}).get("equipment", {})
+    equipment = config.get("equipment", {})
     if isinstance(equipment, dict):
-        for config in equipment.values():
-            if not isinstance(config, dict):
+        for equipment_config in equipment.values():
+            if not isinstance(equipment_config, dict):
                 continue
-            switch_entity = _normalise_entity_id(config.get("switch"))
-            if switch_entity and not config.get("controlEnabled", False):
+            switch_entity = _normalise_entity_id(equipment_config.get("switch_entity_id"))
+            if not switch_entity:
+                continue
+            if not equipment_config.get("armed", False):
                 locked_controls.append(switch_entity)
+                continue
+            state = hass.states.get(switch_entity)
+            if state is None or state.state in UNAVAILABLE_STATES:
+                armed_unavailable.append(switch_entity)
 
     return {
         "entity_count": len(entity_ids),
         "missing_entities": missing,
         "locked_controls": sorted(locked_controls),
+        "armed_unavailable": sorted(armed_unavailable),
+        "setup_complete": bool(config.get("display", {}).get("setupComplete")),
     }
 
 
@@ -190,16 +367,17 @@ def _entity_search_candidate(
     if domains and domain not in domains:
         return None
 
-    # Search must stay light enough for low-memory HA OS installs. Do not read
-    # or copy State objects here; runtime values are fetched separately by ID.
-    attributes: dict[str, Any] = {}
+    state = hass.states.get(entity_id)
+    attributes = state.attributes if state is not None else {}
     name = (
         getattr(registry_entry, "name", None)
         or getattr(registry_entry, "original_name", None)
         or attributes.get("friendly_name")
         or entity_id
     )
-    device_class = getattr(registry_entry, "device_class", None) or attributes.get("device_class")
+    device_class = getattr(registry_entry, "device_class", None) or attributes.get(
+        "device_class"
+    )
     unit = attributes.get("unit_of_measurement")
     state_class = attributes.get("state_class")
 
@@ -229,7 +407,9 @@ def _entity_search_candidate(
         score += 24
     if isinstance(state_class, str) and state_class in state_classes:
         score += 16
-    if _has_phrase(haystack, "reef") or _has_phrase(haystack, "tank") or _has_phrase(haystack, "aquarium"):
+    if _has_phrase(haystack, "reef") or _has_phrase(haystack, "tank") or _has_phrase(
+        haystack, "aquarium"
+    ):
         score += 5
     if entity_id == target.get("id"):
         score += 20
@@ -271,8 +451,8 @@ def _search_entities(
 async def _async_refresh_issues(
     hass: HomeAssistant, entry: OpenReefConfigEntry | None
 ) -> None:
-    settings = _settings_from_entry(entry)
-    validation = _validate_settings(hass, settings)
+    config = _config_from_entry(entry)
+    validation = _validate_config(hass, config)
 
     if validation["missing_entities"]:
         ir.async_create_issue(
@@ -289,21 +469,53 @@ async def _async_refresh_issues(
     else:
         ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)
 
+    if validation["armed_unavailable"]:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            ISSUE_ARMED_UNAVAILABLE,
+            breaks_in_ha_version=None,
+            data={"count": len(validation["armed_unavailable"])},
+            is_fixable=False,
+            issue_domain=DOMAIN,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_ARMED_UNAVAILABLE,
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, ISSUE_ARMED_UNAVAILABLE)
 
-async def _async_update_settings(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, settings: dict[str, Any]
-) -> None:
+    raw_settings = entry.options.get(CONF_SETTINGS) if entry is not None else None
+    if isinstance(raw_settings, dict) and ("general" in raw_settings or "entities" in raw_settings):
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            ISSUE_LEGACY_LABS_CONFIG,
+            breaks_in_ha_version=None,
+            is_fixable=True,
+            issue_domain=DOMAIN,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_LEGACY_LABS_CONFIG,
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, ISSUE_LEGACY_LABS_CONFIG)
+
+
+async def _async_save_config(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
+) -> dict[str, Any]:
+    normalised = _normalise_core_config(config)
     options = dict(entry.options)
-    options[CONF_SETTINGS] = settings
+    options[CONF_SETTINGS] = normalised
     hass.config_entries.async_update_entry(entry, options=options)
     await _async_refresh_issues(hass, entry)
+    return normalised
 
 
-def _equipment_for_mode(settings: dict[str, Any], mode_id: str) -> dict[str, str]:
-    for mode in settings.get("modes", []):
+def _equipment_for_mode(config: dict[str, Any], mode_id: str) -> dict[str, str]:
+    for mode in config.get("modes", []):
         if isinstance(mode, dict) and mode.get("id") == mode_id:
-            config = mode.get("equipmentConfig", {})
-            return config if isinstance(config, dict) else {}
+            equipment_config = mode.get("equipmentConfig", {})
+            return equipment_config if isinstance(equipment_config, dict) else {}
     raise ServiceValidationError(f"OpenReef mode '{mode_id}' does not exist")
 
 
@@ -312,10 +524,10 @@ async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
     if entry is None:
         raise HomeAssistantError("OpenReef is not configured")
 
-    settings = _settings_from_entry(entry)
+    config = _config_from_entry(entry)
     mode_id = call.data["mode_id"]
-    equipment_config = _equipment_for_mode(settings, mode_id)
-    equipment = settings.get("entities", {}).get("equipment", {})
+    equipment_config = _equipment_for_mode(config, mode_id)
+    equipment = config.get("equipment", {})
 
     if not isinstance(equipment, dict):
         raise ServiceValidationError("OpenReef equipment mapping is invalid")
@@ -327,15 +539,15 @@ async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
         if desired_state not in {"on", "off"}:
             continue
 
-        config = equipment.get(equipment_key)
-        if not isinstance(config, dict):
+        mapped = equipment.get(equipment_key)
+        if not isinstance(mapped, dict):
             continue
 
-        switch_entity = _normalise_entity_id(config.get("switch"))
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
         if not switch_entity:
             continue
 
-        if not config.get("controlEnabled", False):
+        if not mapped.get("armed", False):
             skipped_locked.append(switch_entity)
             continue
 
@@ -354,6 +566,36 @@ async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
         )
 
 
+async def _handle_arm_equipment(
+    hass: HomeAssistant, call: ServiceCall, armed: bool
+) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+
+    equipment_id = call.data["equipment_id"]
+    config = _config_from_entry(entry)
+    equipment = config.get("equipment", {})
+    equipment_config = equipment.get(equipment_id) if isinstance(equipment, dict) else None
+    if not isinstance(equipment_config, dict):
+        raise ServiceValidationError("Equipment is not mapped in OpenReef")
+
+    switch_entity = _normalise_entity_id(equipment_config.get("switch_entity_id"))
+    if armed and (_domain(switch_entity) != "switch" or hass.states.get(switch_entity) is None):
+        raise ServiceValidationError("Armed equipment must map to an available switch")
+
+    equipment_config["armed"] = armed
+    await _async_save_config(hass, entry, config)
+
+
+async def _handle_arm_equipment_service(hass: HomeAssistant, call: ServiceCall) -> None:
+    await _handle_arm_equipment(hass, call, True)
+
+
+async def _handle_disarm_equipment_service(hass: HomeAssistant, call: ServiceCall) -> None:
+    await _handle_arm_equipment(hass, call, False)
+
+
 async def _handle_record_manual_reading(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
@@ -361,17 +603,17 @@ async def _handle_record_manual_reading(
     if entry is None:
         raise HomeAssistantError("OpenReef is not configured")
 
-    settings = _settings_from_entry(entry)
-    readings = settings.setdefault("manualReadings", {})
+    config = _config_from_entry(entry)
+    readings = config.setdefault("manualReadings", {})
     if not isinstance(readings, dict):
         readings = {}
-        settings["manualReadings"] = readings
+        config["manualReadings"] = readings
 
     parameter = call.data["parameter"]
     date = call.data.get("date") or datetime.now(timezone.utc).date().isoformat()
     readings.setdefault(parameter, []).append({"date": date, "value": call.data["value"]})
 
-    await _async_update_settings(hass, entry, settings)
+    await _async_save_config(hass, entry, config)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/get_config"})
@@ -379,15 +621,64 @@ async def _handle_record_manual_reading(
 def websocket_get_config(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Return the current OpenReef configuration."""
+    """Return the current OpenReef core configuration."""
     entry = _first_entry(hass)
+    config = _config_from_entry(entry)
     connection.send_result(
         msg["id"],
         {
             "configured": entry is not None,
-            "settings": _settings_from_entry(entry),
+            "config": config,
+            "settings": config,
+            "sensor_meta": MVP_SENSORS,
+            "validation": _validate_config(hass, config),
         },
     )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/save_config",
+        vol.Required("config"): dict,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_save_config(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Persist OpenReef core configuration."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+
+    config = await _async_save_config(hass, entry, msg["config"])
+    connection.send_result(
+        msg["id"],
+        {"success": True, "config": config, "validation": _validate_config(hass, config)},
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/update_config",
+        vol.Required("settings"): dict,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_update_config_alias(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Backward-compatible alias for older Labs builds."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+
+    config = await _async_save_config(hass, entry, msg["settings"])
+    connection.send_result(msg["id"], {"success": True, "config": config})
 
 
 @websocket_api.websocket_command(
@@ -413,30 +704,26 @@ def websocket_search_entities(
     )
 
 
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "openreef/get_runtime_state",
-        vol.Optional("entity_ids"): vol.All(cv.ensure_list, [cv.entity_id]),
-    }
-)
-@callback
-def websocket_get_runtime_state(
+@websocket_api.websocket_command({vol.Required("type"): "openreef/validate_config"})
+@websocket_api.async_response
+async def websocket_validate_config(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Return minimal runtime state for configured or explicitly requested entities."""
-    if "entity_ids" in msg:
-        entity_ids = msg["entity_ids"]
-    else:
-        entity_ids = sorted(_collect_entity_ids(_settings_from_entry(_first_entry(hass))))
+    """Validate OpenReef mapped entities against the HA state registry."""
+    entry = _first_entry(hass)
+    validation = _validate_config(hass, _config_from_entry(entry))
+    connection.send_result(msg["id"], validation)
 
-    entity_ids = list(dict.fromkeys(entity_ids))[:RUNTIME_ENTITY_LIMIT]
-    connection.send_result(
-        msg["id"],
-        {
-            "states": [_runtime_state_for_entity(hass, entity_id) for entity_id in entity_ids],
-            "entity_count": len(entity_ids),
-        },
-    )
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/validate_mappings"})
+@websocket_api.async_response
+async def websocket_validate_mappings_alias(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Backward-compatible validation alias for older Labs builds."""
+    entry = _first_entry(hass)
+    validation = _validate_config(hass, _config_from_entry(entry))
+    connection.send_result(msg["id"], validation)
 
 
 @websocket_api.websocket_command(
@@ -456,24 +743,24 @@ async def websocket_toggle_equipment(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
 
-    settings = _settings_from_entry(entry)
-    equipment = settings.get("entities", {}).get("equipment", {})
+    config = _config_from_entry(entry)
+    equipment = config.get("equipment", {})
     if not isinstance(equipment, dict):
         connection.send_error(msg["id"], "invalid_config", "OpenReef equipment mapping is invalid")
         return
 
     equipment_id = msg["equipment_id"]
-    config = equipment.get(equipment_id)
-    if not isinstance(config, dict):
+    mapped = equipment.get(equipment_id)
+    if not isinstance(mapped, dict):
         connection.send_error(msg["id"], "not_mapped", "Equipment is not mapped in OpenReef")
         return
 
-    switch_entity = _normalise_entity_id(config.get("switch"))
+    switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
     if not switch_entity or _domain(switch_entity) != "switch":
         connection.send_error(msg["id"], "invalid_entity", "Equipment must map to a switch entity")
         return
 
-    if not config.get("controlEnabled", False):
+    if not mapped.get("armed", False):
         connection.send_error(msg["id"], "not_armed", "OpenReef control is not armed for this equipment")
         return
 
@@ -500,46 +787,45 @@ async def websocket_toggle_equipment(
     )
 
 
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "openreef/update_config",
-        vol.Required("settings"): dict,
-    }
-)
-@websocket_api.require_admin
-@websocket_api.async_response
-async def websocket_update_config(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Persist OpenReef configuration from the add-on UI."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+async def _async_register_panel(hass: HomeAssistant) -> None:
+    """Register the OpenReef native sidebar panel once."""
+    if hass.data.setdefault(DOMAIN, {}).get("panel_registered"):
         return
 
-    await _async_update_settings(hass, entry, msg["settings"])
-    connection.send_result(msg["id"], {"success": True})
+    frontend_path = Path(__file__).parent / "frontend"
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                PANEL_STATIC_URL,
+                str(frontend_path),
+                cache_headers=False,
+            )
+        ]
+    )
 
-
-@websocket_api.websocket_command({vol.Required("type"): "openreef/validate_mappings"})
-@websocket_api.async_response
-async def websocket_validate_mappings(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Validate OpenReef mapped entities against the HA state registry."""
-    entry = _first_entry(hass)
-    validation = _validate_settings(hass, _settings_from_entry(entry))
-    connection.send_result(msg["id"], validation)
+    await panel_custom.async_register_panel(
+        hass,
+        webcomponent_name="openreef-panel",
+        frontend_url_path=PANEL_URL,
+        sidebar_title=NAME,
+        sidebar_icon=PANEL_ICON,
+        module_url=f"{PANEL_STATIC_URL}/openreef-panel.js",
+        embed_iframe=False,
+        require_admin=False,
+        config={"domain": DOMAIN},
+    )
+    hass.data[DOMAIN]["panel_registered"] = True
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up OpenReef services and websocket commands."""
     websocket_api.async_register_command(hass, websocket_get_config)
+    websocket_api.async_register_command(hass, websocket_save_config)
+    websocket_api.async_register_command(hass, websocket_update_config_alias)
     websocket_api.async_register_command(hass, websocket_search_entities)
-    websocket_api.async_register_command(hass, websocket_get_runtime_state)
+    websocket_api.async_register_command(hass, websocket_validate_config)
+    websocket_api.async_register_command(hass, websocket_validate_mappings_alias)
     websocket_api.async_register_command(hass, websocket_toggle_equipment)
-    websocket_api.async_register_command(hass, websocket_update_config)
-    websocket_api.async_register_command(hass, websocket_validate_mappings)
 
     hass.services.async_register(
         DOMAIN,
@@ -553,6 +839,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         _handle_record_manual_reading,
         schema=RECORD_MANUAL_READING_SCHEMA,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ARM_EQUIPMENT,
+        _handle_arm_equipment_service,
+        schema=EQUIPMENT_ARM_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DISARM_EQUIPMENT,
+        _handle_disarm_equipment_service,
+        schema=EQUIPMENT_ARM_SCHEMA,
+    )
 
     return True
 
@@ -560,7 +858,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> bool:
     """Set up OpenReef from a config entry."""
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = entry
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    await _async_register_panel(hass)
+    raw_settings = entry.options.get(CONF_SETTINGS)
+    normalised = _config_from_entry(entry)
+    is_legacy = isinstance(raw_settings, dict) and (
+        "general" in raw_settings or "entities" in raw_settings
+    )
+    if normalised != raw_settings and not is_legacy:
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SETTINGS: normalised}
+        )
     await _async_refresh_issues(hass, entry)
     return True
 
@@ -569,6 +876,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     """Unload an OpenReef config entry."""
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_ARMED_UNAVAILABLE)
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_LEGACY_LABS_CONFIG)
     return True
 
 

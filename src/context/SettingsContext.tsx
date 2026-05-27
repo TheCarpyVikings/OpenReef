@@ -517,9 +517,11 @@ type LegacyCalibration = Partial<AppSettings['calibration'][string]> & {
     high?: string;
 };
 
+const LABS_SERVER_SYNC_ENABLED = process.env.NEXT_PUBLIC_OPENREEF_ENABLE_LABS_SYNC === 'true';
+
 /**
  * Strips sensitive fields (API keys, tokens) before persisting to localStorage.
- * The server-side settings store remains the source of truth for these values.
+ * OpenReef Labs keeps settings local unless explicit Labs server sync is enabled.
  */
 function sanitizeForStorage(s: AppSettings): AppSettings {
     return {
@@ -714,43 +716,50 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             let initialSettings: AppSettings = { ...DEFAULT_SETTINGS };
 
             // 0. Fetch non-sensitive HA metadata from the server.
-            try {
-                const haConfigRes = await apiFetch('/api/ha/config');
-                if (haConfigRes.ok) {
-                    const haConfig = await haConfigRes.json() as { token?: string; url?: string };
-                    if (haConfig.url) {
-                        initialSettings.general.haUrl = haConfig.url;
+            if (LABS_SERVER_SYNC_ENABLED) {
+                try {
+                    const haConfigRes = await apiFetch('/api/ha/config');
+                    if (haConfigRes.ok) {
+                        const haConfig = await haConfigRes.json() as { token?: string; url?: string };
+                        if (haConfig.url) {
+                            initialSettings.general.haUrl = haConfig.url;
+                        }
                     }
+                } catch (err) {
+                    console.warn('[Settings] Could not fetch HA config from server:', err);
                 }
-            } catch (err) {
-                console.warn('[Settings] Could not fetch HA config from server:', err);
             }
 
-            // 1. Try to load from server FIRST
-            try {
-                const response = await apiFetch('/api/settings');
-                const data = await response.json() as SettingsResponse;
-                if (data.settings) {
-                    console.log('[Settings] Loaded from server');
-                    initialSettings = { ...initialSettings, ...data.settings } as AppSettings;
-                } else {
-                    // 2. Fallback to local storage if server is empty
+            if (LABS_SERVER_SYNC_ENABLED) {
+                try {
+                    const response = await apiFetch('/api/settings');
+                    const data = await response.json() as SettingsResponse;
+                    if (data.settings) {
+                        console.log('[Settings] Loaded from server');
+                        initialSettings = { ...initialSettings, ...data.settings } as AppSettings;
+                    } else {
+                        const saved = localStorage.getItem('reefSettings');
+                        if (saved) {
+                            console.log('[Settings] Server empty, loaded from local storage');
+                            const parsed = JSON.parse(saved) as Partial<AppSettings>;
+                            initialSettings = { ...initialSettings, ...parsed } as AppSettings;
+
+                            apiFetch('/api/settings', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ settings: initialSettings })
+                            }).catch(err => console.error('[Settings] Initial upload failed:', err));
+                        }
+                    }
+                } catch (err) {
+                    console.error('[Settings] Server sync failed, using local storage fallback:', err);
                     const saved = localStorage.getItem('reefSettings');
                     if (saved) {
-                        console.log('[Settings] Server empty, loaded from local storage');
                         const parsed = JSON.parse(saved) as Partial<AppSettings>;
                         initialSettings = { ...initialSettings, ...parsed } as AppSettings;
-
-                        // Upload local settings to server for other devices
-                        apiFetch('/api/settings', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ settings: initialSettings })
-                        }).catch(err => console.error('[Settings] Initial upload failed:', err));
                     }
                 }
-            } catch (err) {
-                console.error('[Settings] Server sync failed, using local storage fallback:', err);
+            } else {
                 const saved = localStorage.getItem('reefSettings');
                 if (saved) {
                     const parsed = JSON.parse(saved) as Partial<AppSettings>;
@@ -864,12 +873,13 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             const sanitized = sanitizeForStorage(settings);
             localStorage.setItem('reefSettings', JSON.stringify(sanitized));
 
-            // Sync to server (full settings including secrets — server is the source of truth)
-            apiFetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ settings })
-            }).catch(err => console.error('[Settings] Failed to sync to server:', err));
+            if (LABS_SERVER_SYNC_ENABLED) {
+                apiFetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ settings })
+                }).catch(err => console.error('[Settings] Failed to sync to server:', err));
+            }
 
             // Apply theme color globally
             const hex = settings.general.themeColor;
@@ -898,6 +908,12 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
 
     const resetHAConfig = () => {
+        if (!LABS_SERVER_SYNC_ENABLED) {
+            updateNestedSetting('general', { haUrl: '', haToken: '' });
+            setHaError(null);
+            return;
+        }
+
         apiFetch('/api/ha/config').then(res => res.json()).then(config => {
             updateNestedSetting('general', { haUrl: config.url || '', haToken: '' });
         }).catch(() => {

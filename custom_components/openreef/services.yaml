@@ -32,3 +32,25 @@ record_manual_reading:
       required: false
       selector:
         text:
+
+arm_equipment:
+  name: Arm equipment
+  description: Allows OpenReef to control one mapped switch entity.
+  fields:
+    equipment_id:
+      name: Equipment ID
+      description: The OpenReef equipment identifier to arm.
+      required: true
+      selector:
+        text:
+
+disarm_equipment:
+  name: Disarm equipment
+  description: Locks OpenReef control for one mapped switch entity.
+  fields:
+    equipment_id:
+      name: Equipment ID
+      description: The OpenReef equipment identifier to disarm.
+      required: true
+      selector:
+        text:

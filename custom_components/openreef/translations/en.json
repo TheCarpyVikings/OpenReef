@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Set up OpenReef",
-        "description": "Create the OpenReef companion entry used by the add-on UI.",
+        "description": "Create the OpenReef native controller entry and sidebar panel.",
         "data": {
           "tank_name": "Tank name",
           "user_name": "User name"
@@ -30,6 +30,14 @@
     "missing_entities": {
       "title": "OpenReef has missing mapped entities",
       "description": "OpenReef has {count} mapped Home Assistant entities that do not currently exist. Open the OpenReef settings and update the mappings."
+    },
+    "armed_unavailable": {
+      "title": "OpenReef has armed equipment unavailable",
+      "description": "OpenReef has {count} armed equipment switch entities that are unavailable. Disarm or remap them before relying on controls."
+    },
+    "legacy_labs_config": {
+      "title": "OpenReef migrated old Labs settings",
+      "description": "OpenReef found older add-on dashboard settings and converted the core mappings. Review the OpenReef Settings panel and save to complete the migration."
     }
   }
 }

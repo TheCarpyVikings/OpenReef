@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Move the stable OpenReef controller to the Home Assistant custom integration and native sidebar panel.
+- Add HA-native setup, targeted entity suggestions, Mission Control, Live Stats, Controls, Energy, and Settings.
+- Rename the add-on to OpenReef Labs and remove it from the core controller path by default.
+
 ## 0.1.18
 
 - Make Test Connection a local add-on/Supervisor health check with no HA Core entity call.

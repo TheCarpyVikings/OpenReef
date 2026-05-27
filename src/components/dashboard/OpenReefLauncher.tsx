@@ -2,21 +2,16 @@
 
 import React, { useState } from 'react';
 import dynamic from 'next/dynamic';
-import { ArrowRight, Gauge, Settings, ShieldCheck } from 'lucide-react';
+import { FlaskConical, Gauge, ShieldCheck } from 'lucide-react';
 import styles from '@/app/dashboard.module.css';
 import { withIngressPath } from '@/lib/api-fetch';
-
-const ControllerLiteApp = dynamic(() => import('./ControllerLiteApp'), {
-  ssr: false,
-  loading: () => <SafeLoading label="Loading OpenReef..." />,
-});
 
 const LabsDashboardApp = dynamic(() => import('./DashboardApp'), {
   ssr: false,
   loading: () => <SafeLoading label="Loading Labs dashboard..." />,
 });
 
-type OpenReefMode = 'launcher' | 'setup' | 'dashboard' | 'labs';
+type OpenReefMode = 'launcher' | 'labs';
 
 function SafeLoading({ label }: { label: string }) {
   return (
@@ -34,14 +29,6 @@ export function OpenReefLauncher() {
   const logoSrc = withIngressPath('/openreef-logo.png');
   const labsEnabled = process.env.NEXT_PUBLIC_OPENREEF_ENABLE_LABS === 'true';
 
-  if (mode === 'setup') {
-    return <ControllerLiteApp initialView="setup" onExit={() => setMode('launcher')} />;
-  }
-
-  if (mode === 'dashboard') {
-    return <ControllerLiteApp initialView="dashboard" />;
-  }
-
   if (mode === 'labs' && labsEnabled) {
     return <LabsDashboardApp />;
   }
@@ -54,30 +41,31 @@ export function OpenReefLauncher() {
           <img src={logoSrc} alt="OpenReef Logo" width={72} height={72} />
           <div>
             <h1>OpenReef</h1>
-            <p>Safe start</p>
+            <p>Labs add-on</p>
           </div>
         </div>
 
         <div className={styles.safeLaunchNotice}>
           <ShieldCheck size={20} />
-          <span>OpenReef starts in controller-lite mode. Home Assistant requests are targeted and capped.</span>
+          <span>OpenReef Core now runs as a native Home Assistant sidebar panel from the integration. This add-on is optional Labs space for future advanced features.</span>
         </div>
 
         <div className={styles.safeLaunchActions}>
-          <button type="button" className={styles.safeLaunchPrimary} onClick={() => setMode('setup')}>
-            <Settings size={20} />
-            <span>Start Setup</span>
-            <ArrowRight size={18} />
-          </button>
-          <button type="button" className={styles.safeLaunchSecondary} onClick={() => setMode('dashboard')}>
+          <a className={styles.safeLaunchPrimary} href="/openreef">
             <Gauge size={20} />
-            <span>Open Dashboard</span>
-          </button>
+            <span>Open Native Panel</span>
+          </a>
           {labsEnabled && (
             <button type="button" className={styles.safeLaunchSecondary} onClick={() => setMode('labs')}>
-              <Gauge size={20} />
+              <FlaskConical size={20} />
               <span>Labs Dashboard</span>
             </button>
+          )}
+          {!labsEnabled && (
+            <div className={styles.safeLaunchSecondary} aria-disabled="true">
+              <FlaskConical size={20} />
+              <span>Labs disabled</span>
+            </div>
           )}
         </div>
       </section>

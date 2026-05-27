@@ -10,7 +10,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 
-from .const import CONF_SETTINGS, DEFAULT_SETTINGS, DOMAIN, NAME
+from .const import CONF_SETTINGS, DEFAULT_CORE_CONFIG, DOMAIN, NAME
 
 
 class OpenReefConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -28,9 +28,9 @@ class OpenReefConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             tank_name = user_input["tank_name"].strip() or NAME
             user_name = user_input.get("user_name", "").strip()
-            settings = deepcopy(DEFAULT_SETTINGS)
-            settings["general"]["tankName"] = tank_name
-            settings["general"]["userName"] = user_name
+            settings = deepcopy(DEFAULT_CORE_CONFIG)
+            settings["tank"]["name"] = tank_name
+            settings["tank"]["owner"] = user_name
 
             return self.async_create_entry(
                 title=tank_name,
@@ -69,13 +69,13 @@ class OpenReefOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         """Edit basic OpenReef profile options."""
         settings = deepcopy(
-            self._config_entry.options.get(CONF_SETTINGS, DEFAULT_SETTINGS)
+            self._config_entry.options.get(CONF_SETTINGS, DEFAULT_CORE_CONFIG)
         )
-        general = settings.setdefault("general", {})
+        tank = settings.setdefault("tank", {})
 
         if user_input is not None:
-            general["tankName"] = user_input["tank_name"].strip() or NAME
-            general["userName"] = user_input.get("user_name", "").strip()
+            tank["name"] = user_input["tank_name"].strip() or NAME
+            tank["owner"] = user_input.get("user_name", "").strip()
             return self.async_create_entry(
                 title="",
                 data={**self._config_entry.options, CONF_SETTINGS: settings},
@@ -86,10 +86,10 @@ class OpenReefOptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=vol.Schema(
                 {
                     vol.Required(
-                        "tank_name", default=general.get("tankName", NAME)
+                        "tank_name", default=tank.get("name", NAME)
                     ): str,
                     vol.Optional(
-                        "user_name", default=general.get("userName", "")
+                        "user_name", default=tank.get("owner", "")
                     ): str,
                 }
             ),

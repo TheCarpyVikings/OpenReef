@@ -1,7 +1,7 @@
 {
   "domain": "openreef",
   "name": "OpenReef",
-  "after_dependencies": ["frontend", "websocket_api"],
+  "dependencies": ["http", "frontend", "panel_custom", "websocket_api"],
   "codeowners": ["@TheCarpyVikings"],
   "config_flow": true,
   "documentation": "https://github.com/TheCarpyVikings/OpenReef",
@@ -10,5 +10,5 @@
   "issue_tracker": "https://github.com/TheCarpyVikings/OpenReef/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.18"
+  "version": "0.2.0"
 }
