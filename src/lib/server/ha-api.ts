@@ -1,7 +1,6 @@
 import 'server-only';
 
 import WebSocket from 'ws';
-import type { HassEntities } from 'home-assistant-js-websocket';
 import type { HAHistoryResponse } from '@/types/reef';
 
 export type HAState = {
@@ -111,23 +110,6 @@ export async function callHAService(
         method: 'POST',
         body: JSON.stringify(serviceData),
     });
-}
-
-export function statesToEntities(states: HAState[]): HassEntities {
-    const entities: Record<string, HAState> = {};
-    states.forEach((state) => {
-        entities[state.entity_id] = {
-            ...state,
-            attributes: state.attributes || {},
-            context: state.context || { id: '', parent_id: null, user_id: null },
-        };
-    });
-    return entities as unknown as HassEntities;
-}
-
-export async function getHAEntities(signal?: AbortSignal): Promise<HassEntities> {
-    const states = await haRestJson<HAState[]>('/api/states', { signal });
-    return statesToEntities(states);
 }
 
 type HAWebSocketResult<T> = {

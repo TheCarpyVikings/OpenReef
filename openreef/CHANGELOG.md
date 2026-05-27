@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.16
+
+- Make controller-lite the default OpenReef dashboard with Mission Control, Live Stats, Controls, Energy, and Settings.
+- Replace full Home Assistant state discovery with OpenReef integration-owned targeted search and runtime snapshots.
+- Keep the full legacy dashboard behind the Labs flag for future restoration work.
+
 ## 0.1.15
 
 - Add a low-load OpenReef safe-start screen so opening the add-on no longer loads the full dashboard immediately.

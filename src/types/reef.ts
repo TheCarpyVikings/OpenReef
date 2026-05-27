@@ -43,6 +43,41 @@ export type DashboardTab =
 
 export type EquipmentModeState = 'on' | 'off' | 'ignore';
 
+export type OpenReefRuntimeEntity = {
+    entity_id: string;
+    state: string | null;
+    unit?: string | null;
+    last_changed?: string | null;
+    available: boolean;
+};
+
+export type OpenReefRuntimeStateResponse = {
+    states: OpenReefRuntimeEntity[];
+    entity_count?: number;
+};
+
+export type OpenReefEntityCandidate = {
+    entity_id: string;
+    name: string;
+    domain: string;
+    device_class?: string | null;
+    unit?: string | null;
+    area?: string | null;
+    score: number;
+};
+
+export type OpenReefEntitySearchResponse = {
+    candidates: OpenReefEntityCandidate[];
+    limit?: number;
+};
+
+export type OpenReefToggleEquipmentResponse = {
+    success: boolean;
+    equipment_id: string;
+    entity_id: string;
+    state: OpenReefRuntimeEntity;
+};
+
 export type HAHistoryEntry = {
     state?: string;
     s?: string;

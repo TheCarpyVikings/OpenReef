@@ -204,7 +204,7 @@ function DashboardContent() {
           type="button"
           className={styles.statusIndicator}
           title={isConnected ? 'HA Connected' : error || 'Connecting to HA... Click to retry.'}
-          onClick={reconnect}
+          onClick={() => { void reconnect(); }}
         >
           <div className={`${styles.statusDot} ${isConnected ? styles.connected : styles.disconnected}`} />
           <span className={styles.statusText}>{isConnected ? 'HA Connected' : error || 'Connecting to HA...'}</span>

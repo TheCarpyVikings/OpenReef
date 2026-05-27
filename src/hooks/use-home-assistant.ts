@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { HassEntities } from 'home-assistant-js-websocket';
-import { getHAEntities, haCallService } from '@/lib/ha-connection';
+import { getHARuntimeState, haCallService, toggleOpenReefEquipment } from '@/lib/ha-connection';
 import type { HAHistoryResponse } from '@/types/reef';
 
 const getErrorMessage = (err: unknown) => {
@@ -63,20 +63,20 @@ const registerUnloadAbortHandler = () => {
     window.addEventListener('pagehide', abortActiveEntityRequest);
 };
 
-const requestEntitiesOnce = async (): Promise<HassEntities | null> => {
+const requestEntitiesOnce = async (entityIds?: string[]): Promise<HassEntities | null> => {
     if (activeEntityRequest) return activeEntityRequest;
 
     const controller = new AbortController();
     activeEntityController = controller;
-    setHAStoreState({ isConnected: false, error: 'Connecting to HA...' });
+    setHAStoreState({ isConnected: false, error: 'Checking HA...' });
 
     activeEntityRequest = (async () => {
         try {
-            const nextEntities = await getHAEntities(controller.signal);
+            const nextEntities = await getHARuntimeState(entityIds, controller.signal);
             if (controller.signal.aborted) return null;
 
             setHAStoreState({
-                entities: nextEntities,
+                entities: { ...(haStoreState.entities || {}), ...nextEntities },
                 isConnected: true,
                 error: null,
             });
@@ -118,8 +118,8 @@ export function useHomeAssistant() {
         registerUnloadAbortHandler();
     }, []);
 
-    const reconnect = useCallback(() => {
-        return requestEntitiesOnce();
+    const reconnect = useCallback((entityIds?: string[]) => {
+        return requestEntitiesOnce(entityIds);
     }, []);
 
     const callService = useCallback(async (domain: string, service: string, serviceData?: object) => {
@@ -135,6 +135,26 @@ export function useHomeAssistant() {
     const toggleSwitch = useCallback(async (entityId: string) => {
         return callService('switch', 'toggle', { entity_id: entityId });
     }, [callService]);
+
+    const toggleEquipment = useCallback(async (equipmentId: string) => {
+        const result = await toggleOpenReefEquipment(equipmentId);
+        setHAStoreState({
+            entities: {
+                ...(haStoreState.entities || {}),
+                [result.entity_id]: {
+                    entity_id: result.entity_id,
+                    state: result.state.state ?? 'unavailable',
+                    attributes: { unit_of_measurement: result.state.unit ?? undefined },
+                    last_changed: result.state.last_changed ?? '',
+                    last_updated: result.state.last_changed ?? '',
+                    context: { id: '', parent_id: null, user_id: null },
+                },
+            } as HassEntities,
+            isConnected: true,
+            error: null,
+        });
+        return result;
+    }, []);
 
     const turnOffSwitch = useCallback(async (entityId: string) => {
         return callService('switch', 'turn_off', { entity_id: entityId });
@@ -192,5 +212,7 @@ export function useHomeAssistant() {
         updateInputDateTime,
         fetchHistory,
         reconnect,
+        refreshRuntimeState: reconnect,
+        toggleEquipment,
     };
 }

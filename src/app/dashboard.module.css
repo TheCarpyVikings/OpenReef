@@ -279,6 +279,154 @@
     background: rgba(var(--primary-rgb), 0.1);
 }
 
+.mvpHeaderBrand {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    min-width: 0;
+}
+
+.mvpHeaderBrand img {
+    width: 56px;
+    height: 56px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+
+.mvpHeaderActions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.mvpMuted {
+    color: #8aa2bd;
+}
+
+.mvpStatusBanner {
+    grid-column: 1 / -1;
+    min-height: 74px;
+    border: 1px solid rgba(74, 222, 128, 0.5);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+}
+
+.mvpPulse {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    box-shadow: 0 0 18px currentColor;
+    flex-shrink: 0;
+}
+
+.mvpCardTitle {
+    margin: 0 0 0.75rem;
+    color: #e0e1dd;
+    font-size: 1rem;
+}
+
+.mvpList {
+    display: grid;
+    gap: 0.75rem;
+}
+
+.mvpListRow {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: center;
+    padding-bottom: 0.65rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mvpListRow:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+
+.mvpFullGrid {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.mvpControlHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.mvpControlActions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+}
+
+.mvpArmToggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #dbe7f3;
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.mvpArmToggle input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--primary-color);
+}
+
+.mvpThresholdRow {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(90px, 120px) minmax(90px, 120px);
+    gap: 0.75rem;
+    align-items: end;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mvpThresholdRow label {
+    color: #8aa2bd;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.mvpThresholdRow .input {
+    margin-top: 0.3rem;
+    padding: 0.55rem 0.65rem;
+}
+
+@media (max-width: 720px) {
+    .header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .mvpHeaderActions {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .mvpStatusBanner,
+    .mvpControlActions {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .mvpThresholdRow {
+        grid-template-columns: 1fr;
+    }
+}
+
 .iconWrapper {
     width: 40px;
     height: 40px;

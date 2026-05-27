@@ -6,17 +6,17 @@ import { ArrowRight, Gauge, Settings, ShieldCheck } from 'lucide-react';
 import styles from '@/app/dashboard.module.css';
 import { withIngressPath } from '@/lib/api-fetch';
 
-const SetupOnlyApp = dynamic(() => import('./SetupOnlyApp'), {
+const ControllerLiteApp = dynamic(() => import('./ControllerLiteApp'), {
   ssr: false,
-  loading: () => <SafeLoading label="Loading setup..." />,
+  loading: () => <SafeLoading label="Loading OpenReef..." />,
 });
 
-const DashboardApp = dynamic(() => import('./DashboardApp'), {
+const LabsDashboardApp = dynamic(() => import('./DashboardApp'), {
   ssr: false,
-  loading: () => <SafeLoading label="Loading dashboard..." />,
+  loading: () => <SafeLoading label="Loading Labs dashboard..." />,
 });
 
-type OpenReefMode = 'launcher' | 'setup' | 'dashboard';
+type OpenReefMode = 'launcher' | 'setup' | 'dashboard' | 'labs';
 
 function SafeLoading({ label }: { label: string }) {
   return (
@@ -32,13 +32,18 @@ function SafeLoading({ label }: { label: string }) {
 export function OpenReefLauncher() {
   const [mode, setMode] = useState<OpenReefMode>('launcher');
   const logoSrc = withIngressPath('/openreef-logo.png');
+  const labsEnabled = process.env.NEXT_PUBLIC_OPENREEF_ENABLE_LABS === 'true';
 
   if (mode === 'setup') {
-    return <SetupOnlyApp onExit={() => setMode('launcher')} />;
+    return <ControllerLiteApp initialView="setup" onExit={() => setMode('launcher')} />;
   }
 
   if (mode === 'dashboard') {
-    return <DashboardApp />;
+    return <ControllerLiteApp initialView="dashboard" />;
+  }
+
+  if (mode === 'labs' && labsEnabled) {
+    return <LabsDashboardApp />;
   }
 
   return (
@@ -55,7 +60,7 @@ export function OpenReefLauncher() {
 
         <div className={styles.safeLaunchNotice}>
           <ShieldCheck size={20} />
-          <span>OpenReef is starting in a low-load mode. Home Assistant is not queried until you ask for entity discovery.</span>
+          <span>OpenReef starts in controller-lite mode. Home Assistant requests are targeted and capped.</span>
         </div>
 
         <div className={styles.safeLaunchActions}>
@@ -68,6 +73,12 @@ export function OpenReefLauncher() {
             <Gauge size={20} />
             <span>Open Dashboard</span>
           </button>
+          {labsEnabled && (
+            <button type="button" className={styles.safeLaunchSecondary} onClick={() => setMode('labs')}>
+              <Gauge size={20} />
+              <span>Labs Dashboard</span>
+            </button>
+          )}
         </div>
       </section>
     </main>
