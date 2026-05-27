@@ -18,7 +18,7 @@ import {
 import type { HassEntities } from 'home-assistant-js-websocket';
 import styles from '@/app/dashboard.module.css';
 import { SettingsProvider, useSettings, type AppSettings } from '@/context/SettingsContext';
-import { withIngressPath } from '@/lib/api-fetch';
+import { apiFetch, withIngressPath } from '@/lib/api-fetch';
 import {
     formatNumber,
     getEntityState,
@@ -575,7 +575,6 @@ function MetricCard({ label, value, unit, prefix = false }: { label: string; val
 
 function MvpSetupWizard({ onClose }: { onClose: () => void }) {
     const { settings, updateSettings, updateNestedSetting, getEquipmentName } = useSettings();
-    const { reconnect } = useHomeAssistant();
     const [step, setStep] = useState(0);
     const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
     const steps = ['Basics', 'Sensors', 'Equipment', 'Energy'];
@@ -624,7 +623,13 @@ function MvpSetupWizard({ onClose }: { onClose: () => void }) {
     const testConnection = async () => {
         setTestStatus('testing');
         try {
-            await reconnect([]);
+            const [healthResponse, configResponse] = await Promise.all([
+                apiFetch('/api/health'),
+                apiFetch('/api/ha/config'),
+            ]);
+            if (!healthResponse.ok || !configResponse.ok) {
+                throw new Error('OpenReef add-on health check failed');
+            }
             setTestStatus('ok');
         } catch {
             setTestStatus('error');

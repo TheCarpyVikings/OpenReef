@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.18
+
+- Make Test Connection a local add-on/Supervisor health check with no HA Core entity call.
+- Replace runtime-state websocket calls with targeted per-entity REST reads.
+- Avoid polling default equipment placeholder entities before users map real equipment.
+
 ## 0.1.17
 
 - Make onboarding suggestions fully local so clicking "Show safe suggestions" cannot query Home Assistant.
