@@ -154,6 +154,7 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
         if sensor_id not in core["sensors"]:
             continue
         core["sensors"][sensor_id]["entity_id"] = _normalise_entity_id(entity_id)
+        core["sensors"][sensor_id]["enabled"] = bool(core["sensors"][sensor_id]["entity_id"])
         if isinstance(labels, dict) and labels.get(sensor_id):
             core["sensors"][sensor_id]["label"] = labels[sensor_id]
         if isinstance(thresholds, dict) and isinstance(thresholds.get(sensor_id), dict):
@@ -215,10 +216,17 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     config = _deep_merge(DEFAULT_CORE_CONFIG, settings)
     config["schemaVersion"] = DEFAULT_CORE_CONFIG["schemaVersion"]
 
+    raw_sensors = settings.get("sensors") if isinstance(settings.get("sensors"), dict) else {}
+
     for sensor_id, meta in MVP_SENSORS.items():
         sensor = config["sensors"].setdefault(sensor_id, {})
+        raw_sensor = raw_sensors.get(sensor_id) if isinstance(raw_sensors.get(sensor_id), dict) else {}
         sensor["entity_id"] = _normalise_entity_id(sensor.get("entity_id"))
         sensor.setdefault("label", meta["label"])
+        if "enabled" in raw_sensor:
+            sensor["enabled"] = bool(raw_sensor.get("enabled"))
+        else:
+            sensor["enabled"] = bool(sensor["entity_id"]) or bool(meta.get("enabled", False))
         sensor.setdefault("group", meta["group"])
         sensor.setdefault("unit", meta["unit"])
         sensor.setdefault("min", meta["min"])
@@ -261,6 +269,8 @@ def _collect_entity_ids(config: dict[str, Any]) -> set[str]:
 
     for sensor in config.get("sensors", {}).values():
         if isinstance(sensor, dict):
+            if not sensor.get("enabled", False):
+                continue
             entity_id = _normalise_entity_id(sensor.get("entity_id"))
             if entity_id:
                 entity_ids.add(entity_id)

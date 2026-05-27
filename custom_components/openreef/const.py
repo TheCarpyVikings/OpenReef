@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 3
+CORE_SCHEMA_VERSION = 4
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -23,6 +23,7 @@ ISSUE_LEGACY_LABS_CONFIG = "legacy_labs_config"
 MVP_SENSORS = {
     "temp": {
         "label": "Tank Temperature",
+        "enabled": True,
         "group": "tank",
         "unit": "°C",
         "min": 24.5,
@@ -38,6 +39,7 @@ MVP_SENSORS = {
     },
     "ph": {
         "label": "pH Level",
+        "enabled": False,
         "group": "tank",
         "unit": "",
         "min": 7.8,
@@ -53,6 +55,7 @@ MVP_SENSORS = {
     },
     "salinity": {
         "label": "Salinity",
+        "enabled": False,
         "group": "tank",
         "unit": "ppt",
         "min": 32,
@@ -68,6 +71,7 @@ MVP_SENSORS = {
     },
     "room_temp": {
         "label": "Room Temp",
+        "enabled": False,
         "group": "room",
         "unit": "°C",
         "min": 16,
@@ -83,6 +87,7 @@ MVP_SENSORS = {
     },
     "co2": {
         "label": "CO2 Level",
+        "enabled": False,
         "group": "room",
         "unit": "ppm",
         "min": 350,
@@ -98,6 +103,7 @@ MVP_SENSORS = {
     },
     "humidity": {
         "label": "Humidity",
+        "enabled": False,
         "group": "room",
         "unit": "%",
         "min": 30,
@@ -132,6 +138,7 @@ DEFAULT_CORE_CONFIG = {
         sensor_id: {
             "entity_id": "",
             "label": meta["label"],
+            "enabled": meta["enabled"],
             "group": meta["group"],
             "unit": meta["unit"],
             "min": meta["min"],
