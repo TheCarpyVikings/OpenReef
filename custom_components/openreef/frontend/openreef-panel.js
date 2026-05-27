@@ -14,16 +14,21 @@ class OpenReefPanel extends HTMLElement {
     this._error = "";
     this._busy = false;
     this._eventsAttached = false;
+    this._lastRenderedSetupOpen = false;
+    this._lastRenderedSetupStep = null;
   }
 
   set hass(hass) {
     this._hass = hass;
     if (this._config) {
-      this._render();
-    } else {
-      this._renderLoading();
-      this._loadConfig();
+      if (!this._setupOpen) {
+        this._render();
+      }
+      return;
     }
+
+    this._renderLoading();
+    this._loadConfig();
   }
 
   connectedCallback() {
@@ -322,7 +327,24 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _renderLoading() {
+    this._lastRenderedSetupOpen = false;
+    this._lastRenderedSetupStep = null;
     this.shadowRoot.innerHTML = `${this._styles()}<main class="page"><div class="center-card"><div class="spinner"></div><p>Loading OpenReef...</p></div></main>`;
+  }
+
+  _captureScrollState() {
+    const wizard = this.shadowRoot.querySelector(".wizard");
+    return {
+      wizard: wizard ? wizard.scrollTop : 0,
+    };
+  }
+
+  _restoreScrollState(scrollState) {
+    if (!scrollState) return;
+    requestAnimationFrame(() => {
+      const wizard = this.shadowRoot.querySelector(".wizard");
+      if (wizard) wizard.scrollTop = scrollState.wizard;
+    });
   }
 
   _render() {
@@ -330,6 +352,12 @@ class OpenReefPanel extends HTMLElement {
       this._renderLoading();
       return;
     }
+
+    const scrollState = this._captureScrollState();
+    const preserveSetupScroll =
+      this._setupOpen &&
+      this._lastRenderedSetupOpen &&
+      this._setupStep === this._lastRenderedSetupStep;
 
     this.shadowRoot.innerHTML = `
       ${this._styles()}
@@ -352,6 +380,10 @@ class OpenReefPanel extends HTMLElement {
         ${this._setupOpen ? this._setupWizard() : ""}
       </main>
     `;
+
+    this._lastRenderedSetupOpen = this._setupOpen;
+    this._lastRenderedSetupStep = this._setupOpen ? this._setupStep : null;
+    if (preserveSetupScroll) this._restoreScrollState(scrollState);
   }
 
   _messages() {
@@ -759,15 +791,16 @@ class OpenReefPanel extends HTMLElement {
         .stat { display: grid; gap: 8px; min-height: 150px; }
         .stat strong { font-size: 34px; color: #67e8f9; }
         label { display: grid; gap: 7px; color: #a7b7ca; font-size: 13px; font-weight: 700; }
-        input { width: 100%; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
+        input { width: 100%; min-width: 0; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
         .picker { display: grid; gap: 9px; align-content: start; }
         .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
         .candidates { display: grid; gap: 7px; }
-        .candidate { display: grid; gap: 3px; text-align: left; }
+        .candidate { display: grid; gap: 3px; min-width: 0; text-align: left; }
+        .candidate strong, .candidate span, small { min-width: 0; overflow-wrap: anywhere; }
         .candidate span { color: #93a4b8; font-size: 12px; }
         .equipment-editor { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; }
-        .modal { position: fixed; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(0,0,0,.72); z-index: 10; }
-        .wizard { position: relative; width: min(1100px, 100%); max-height: min(900px, 92vh); overflow: auto; padding: 28px; display: grid; gap: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+        .modal { position: fixed; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(0,0,0,.72); z-index: 10; overflow: hidden; }
+        .wizard { position: relative; width: min(1100px, 100%); max-height: min(900px, 92vh); overflow: auto; overscroll-behavior: contain; padding: 28px; display: grid; gap: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
         .close { position: absolute; top: 14px; right: 14px; width: 38px; height: 38px; border-radius: 50%; border: 1px solid #294055; background: #172536; color: #dcecff; }
         .stepper { display: flex; gap: 10px; justify-content: center; }
         .stepper span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: #203247; color: #94a3b8; font-weight: 800; }
