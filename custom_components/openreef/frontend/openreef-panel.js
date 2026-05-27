@@ -184,7 +184,7 @@ class OpenReefPanel extends HTMLElement {
         range,
         loading: false,
         points,
-        error: points.length ? "" : "No numeric history is available for this sensor yet.",
+        error: points.length ? "" : this._trendEmptyMessage(range),
       };
     } catch (err) {
       if (this._trendRequest !== requestId) return;
@@ -203,9 +203,23 @@ class OpenReefPanel extends HTMLElement {
   async _fetchTrendPoints(entityId, range) {
     const end = new Date();
     const start = new Date(end.getTime() - this._trendRangeMs(range));
+    let statisticPoints = [];
 
+    if (range === "7d" || range === "30d") {
+      statisticPoints = await this._fetchStatisticTrendPoints(entityId, start, end, range);
+      if (statisticPoints.length >= 2) return statisticPoints;
+    }
+
+    const historyPoints = await this._fetchHistoryTrendPoints(entityId, start, end);
+    if (historyPoints.length >= 2) return historyPoints;
+
+    return statisticPoints.length ? statisticPoints : historyPoints;
+  }
+
+  async _fetchHistoryTrendPoints(entityId, start, end) {
     if (typeof this._hass?.callApi === "function") {
       const params = new URLSearchParams({
+        end_time: end.toISOString(),
         filter_entity_id: entityId,
         minimal_response: "1",
         no_attributes: "1",
@@ -229,6 +243,22 @@ class OpenReefPanel extends HTMLElement {
     return this._historyPoints(raw, entityId);
   }
 
+  async _fetchStatisticTrendPoints(entityId, start, end, range) {
+    try {
+      const raw = await this._callWS({
+        type: "recorder/statistics_during_period",
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        statistic_ids: [entityId],
+        period: range === "30d" ? "day" : "hour",
+        types: ["mean", "state", "min", "max"],
+      });
+      return this._statisticsPoints(raw, entityId);
+    } catch {
+      return [];
+    }
+  }
+
   _historySeries(raw, entityId) {
     if (Array.isArray(raw)) {
       if (Array.isArray(raw[0])) return raw[0];
@@ -244,6 +274,8 @@ class OpenReefPanel extends HTMLElement {
 
   _historyTime(item, fallbackTime) {
     const raw =
+      item?.start ??
+      item?.end ??
       item?.last_updated ??
       item?.last_changed ??
       item?.last_reported ??
@@ -261,6 +293,37 @@ class OpenReefPanel extends HTMLElement {
       if (Number.isFinite(date)) return date;
     }
     return fallbackTime;
+  }
+
+  _statisticsSeries(raw, entityId) {
+    if (!raw || typeof raw !== "object") return [];
+    if (Array.isArray(raw[entityId])) return raw[entityId];
+    if (raw.statistics && Array.isArray(raw.statistics[entityId])) {
+      return raw.statistics[entityId];
+    }
+    const series = Object.entries(raw)
+      .filter(([key]) => key !== "metadata")
+      .map(([, value]) => value)
+      .find((value) => Array.isArray(value));
+    return Array.isArray(series) ? series : [];
+  }
+
+  _statisticsPoints(raw, entityId) {
+    const series = this._statisticsSeries(raw, entityId);
+    const points = series
+      .map((item, index) => {
+        const rawValue = item?.mean ?? item?.state ?? item?.max ?? item?.min;
+        const value = Number.parseFloat(rawValue);
+        if (!Number.isFinite(value)) return null;
+        return {
+          time: this._historyTime(item, Date.now() - (series.length - index - 1) * 60000),
+          value,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.time - b.time);
+
+    return this._downsample(points, 220);
   }
 
   _historyPoints(raw, entityId) {
@@ -308,6 +371,23 @@ class OpenReefPanel extends HTMLElement {
 
   _trendRangeLabel(range) {
     return this._trendRanges().find(([id]) => id === range)?.[1] || "24 hours";
+  }
+
+  _trendEmptyMessage(range) {
+    if (range === "7d" || range === "30d") {
+      return `No long-term statistics or recorder history is available for this ${this._trendRangeLabel(range)} range. Home Assistant may not have kept that much history for this entity yet.`;
+    }
+    return "No numeric history is available for this sensor yet.";
+  }
+
+  _trendCoverageMessage(points, range) {
+    if (points.length < 2) return "";
+    const requested = this._trendRangeMs(range);
+    const first = points[0].time;
+    const last = points[points.length - 1].time;
+    const actual = last - first;
+    if (actual >= requested * 0.65) return "";
+    return `Showing ${this._formatTrendTime(first, range)} to ${this._formatTrendTime(last, range)} because Home Assistant only returned part of the requested ${this._trendRangeLabel(range)} range.`;
   }
 
   _formatTrendTime(timestamp, range = "24h") {
@@ -1152,7 +1232,7 @@ class OpenReefPanel extends HTMLElement {
 
     return `
       <div class="chart-wrap">
-        <svg class="trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="24 hour trend">
+        <svg class="trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this._escape(this._trendRangeLabel(range))} trend">
           <line x1="${pad}" y1="${pad}" x2="${width - pad}" y2="${pad}" />
           <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" />
           <polygon points="${fillCoords}" />
@@ -1172,6 +1252,7 @@ class OpenReefPanel extends HTMLElement {
     const points = this._trend.points || [];
     const summary = this._trendSummary(points);
     const range = this._trend.range || "24h";
+    const coverageMessage = this._trendCoverageMessage(points, range);
     return `
       <div class="modal">
         <section class="wizard trend-dialog">
@@ -1199,6 +1280,7 @@ class OpenReefPanel extends HTMLElement {
           </div>
           ${this._trend.loading ? `<div class="center-card compact-center"><div class="spinner"></div><p>Loading trend...</p></div>` : ""}
           ${this._trend.error ? `<div class="notice error">${this._escape(this._trend.error)}</div>` : ""}
+          ${coverageMessage ? `<div class="notice warning-notice">${this._escape(coverageMessage)}</div>` : ""}
           ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, sensor.unit, range) : ""}
           ${summary ? `
             <div class="trend-summary">
@@ -1268,6 +1350,7 @@ class OpenReefPanel extends HTMLElement {
         .danger-text { color: #fecaca; background: transparent; border-color: #7f1d1d; }
         .notice { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; background: #0f2c3d; border: 1px solid #075985; }
         .notice.error, .error-text { color: #fecaca; border-color: #7f1d1d; }
+        .notice.warning-notice { color: #fde68a; border-color: #a16207; background: #2f2614; }
         .notice.success { color: #bbf7d0; border-color: #166534; }
         .stack { display: grid; gap: 16px; }
         .stack.tight { gap: 10px; }
