@@ -190,8 +190,9 @@ def _entity_search_candidate(
     if domains and domain not in domains:
         return None
 
-    state = hass.states.get(entity_id)
-    attributes = state.attributes if state else {}
+    # Search must stay light enough for low-memory HA OS installs. Do not read
+    # or copy State objects here; runtime values are fetched separately by ID.
+    attributes: dict[str, Any] = {}
     name = (
         getattr(registry_entry, "name", None)
         or getattr(registry_entry, "original_name", None)
@@ -260,15 +261,6 @@ def _search_entities(
         )
         if candidate is not None:
             candidates[registry_entry.entity_id] = candidate
-
-    # Some entities may not have a registry entry. This loop stays in-process and
-    # returns only bounded summaries; it never serializes the full state machine.
-    for state in hass.states.async_all():
-        if state.entity_id in candidates:
-            continue
-        candidate = _entity_search_candidate(hass, area_registry, state.entity_id, None, target)
-        if candidate is not None:
-            candidates[state.entity_id] = candidate
 
     return sorted(
         candidates.values(),

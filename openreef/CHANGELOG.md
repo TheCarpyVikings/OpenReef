@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.17
+
+- Make onboarding suggestions fully local so clicking "Show safe suggestions" cannot query Home Assistant.
+- Remove HA state access from the integration entity search path.
+
 ## 0.1.16
 
 - Make controller-lite the default OpenReef dashboard with Mission Control, Live Stats, Controls, Energy, and Settings.

@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import styles from '@/app/dashboard.module.css';
-import { searchHAEntities } from '@/lib/ha-connection';
+import { getLocalEntitySuggestions } from '@/lib/local-entity-suggestions';
 import type { EntitySuggestionTarget } from '@/lib/entity-suggestions';
 import type { OpenReefEntityCandidate } from '@/types/reef';
 
@@ -25,18 +25,11 @@ export const SafeEntityPicker: React.FC<SafeEntityPickerProps> = ({
     const [candidates, setCandidates] = useState<OpenReefEntityCandidate[]>([]);
     const [error, setError] = useState<string | null>(null);
 
-    const handleSearch = async () => {
+    const handleSearch = () => {
         setIsSearching(true);
         setError(null);
-        try {
-            const result = await searchHAEntities(target);
-            setCandidates(result.candidates || []);
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Could not search Home Assistant entities');
-            setCandidates([]);
-        } finally {
-            setIsSearching(false);
-        }
+        setCandidates(getLocalEntitySuggestions(target, value, placeholder));
+        setIsSearching(false);
     };
 
     return (
@@ -57,7 +50,7 @@ export const SafeEntityPicker: React.FC<SafeEntityPickerProps> = ({
                     onClick={handleSearch}
                     disabled={isSearching}
                 >
-                    {isSearching ? 'Finding matches...' : 'Find matches'}
+                    {isSearching ? 'Finding matches...' : 'Show safe suggestions'}
                 </button>
             </div>
             {error && <p className={styles.entityPickerHint}>{error}</p>}
