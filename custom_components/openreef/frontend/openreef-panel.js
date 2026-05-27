@@ -455,14 +455,21 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "choose-sensor") {
         this._config.sensors[id].entity_id = target.dataset.entity;
+        delete this._searchResults[`sensor:${id}`];
         this._render();
       }
       if (action === "choose-equipment") {
         this._config.equipment[id][field] = target.dataset.entity;
+        delete this._searchResults[`equipment:${id}:${field}`];
         this._render();
       }
       if (action === "choose-energy") {
         this._config.energy[field] = target.dataset.entity;
+        delete this._searchResults[`energy:${field}`];
+        this._render();
+      }
+      if (action === "hide-matches") {
+        delete this._searchResults[target.dataset.key];
         this._render();
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
@@ -634,6 +641,27 @@ class OpenReefPanel extends HTMLElement {
 
   _format(value, digits = 1) {
     return Number.isFinite(value) ? Number(value).toFixed(digits) : "--";
+  }
+
+  _energyWh(entityId) {
+    const value = this._number(entityId);
+    if (value === null) return null;
+    const unit = String(this._state(entityId)?.attributes?.unit_of_measurement || "").toLowerCase();
+    return unit === "kwh" ? value * 1000 : value;
+  }
+
+  _formatEnergyWh(entityId) {
+    const value = this._energyWh(entityId);
+    return value === null ? "-- Wh" : `${Number(value).toFixed(0)} Wh`;
+  }
+
+  _energyCost(energyEntityId, mappedCost) {
+    if (mappedCost !== null) return mappedCost;
+    const value = this._number(energyEntityId);
+    if (value === null) return null;
+    const unit = String(this._state(energyEntityId)?.attributes?.unit_of_measurement || "").toLowerCase();
+    const energyKwh = unit === "kwh" ? value : value / 1000;
+    return energyKwh * Number(this._config.energy.tariff || 0);
   }
 
   _escape(value) {
@@ -858,23 +886,21 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _missionEnergyRows() {
-    const tariff = Number(this._config.energy.tariff || 0);
     const rows = [
       ["Today", "daily_energy_entity_id", "daily_cost_entity_id"],
       ["This week", "weekly_energy_entity_id", "weekly_cost_entity_id"],
       ["This month", "monthly_energy_entity_id", "monthly_cost_entity_id"],
     ];
     return rows.map(([label, energyKey, costKey]) => {
-      const energy = this._number(this._config.energy[energyKey]);
       const mappedCost = this._number(this._config.energy[costKey]);
-      const cost = mappedCost ?? (energy === null ? null : energy * tariff);
+      const cost = this._energyCost(this._config.energy[energyKey], mappedCost);
       return `
         <div class="row">
           <div>
             <strong>${label}</strong>
             <span>${this._escape(this._config.energy[energyKey] || "Energy entity not mapped")}</span>
           </div>
-          <div class="pill">${this._format(energy, 2)} kWh / ${cost === null ? "--" : cost.toFixed(2)} ${this._escape(this._config.energy.currency || "GBP")}</div>
+          <div class="pill">${this._formatEnergyWh(this._config.energy[energyKey])} / ${cost === null ? "--" : cost.toFixed(2)} ${this._escape(this._config.energy.currency || "GBP")}</div>
         </div>
       `;
     }).join("");
@@ -964,13 +990,12 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="grid three">
           ${totals.map(([label, energyKey, costKey]) => {
-            const energy = this._number(this._config.energy[energyKey]);
             const mappedCost = this._number(this._config.energy[costKey]);
-            const cost = mappedCost ?? (energy === null ? null : energy * tariff);
+            const cost = this._energyCost(this._config.energy[energyKey], mappedCost);
             return `
               <article class="stat">
                 <p>${label}</p>
-                <strong>${this._format(energy, 2)} kWh</strong>
+                <strong>${this._formatEnergyWh(this._config.energy[energyKey])}</strong>
                 <span>${cost === null ? "--" : cost.toFixed(2)} ${this._escape(this._config.energy.currency || "GBP")}</span>
                 <small>${this._escape(this._config.energy[energyKey] || "Optional mapping missing")}</small>
               </article>
@@ -980,12 +1005,11 @@ class OpenReefPanel extends HTMLElement {
         <div class="grid two">
           ${Object.entries(this._config.equipment || {}).map(([id, item]) => {
             const power = this._number(item.power_entity_id);
-            const energy = this._number(item.energy_entity_id);
             return `
               <article class="panel">
                 <h3>${this._escape(item.label || id)}</h3>
                 <div class="row"><span>Power</span><strong>${this._format(power, 1)} W</strong></div>
-                <div class="row"><span>Energy</span><strong>${this._format(energy, 2)} kWh</strong></div>
+                <div class="row"><span>Energy</span><strong>${this._formatEnergyWh(item.energy_entity_id)}</strong></div>
               </article>
             `;
           }).join("")}
@@ -1186,6 +1210,10 @@ class OpenReefPanel extends HTMLElement {
     if (result.loading) return `<p class="hint">Searching Home Assistant...</p>`;
     if (!result.candidates?.length) return `<p class="hint">No matches found. Manual entry still works.</p>`;
     return `
+      <div class="candidate-tools">
+        <span>${result.candidates.length} match${result.candidates.length === 1 ? "" : "es"}</span>
+        <button class="secondary compact-button" data-action="hide-matches" data-key="${this._escape(key)}">Hide matches</button>
+      </div>
       <div class="candidates">
         ${result.candidates.map((candidate) => `
           <button class="candidate" data-action="${action}" data-id="${this._escape(id)}" data-field="${this._escape(field)}" data-entity="${this._escape(candidate.entity_id)}">
@@ -1346,6 +1374,7 @@ class OpenReefPanel extends HTMLElement {
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
         .tabs button.active, .primary, .range-picker button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
         .secondary:hover, .tabs button:hover { border-color: var(--openreef-accent); }
+        .compact-button { min-height: 30px; padding: 6px 10px; font-size: 12px; }
         .warning { background: #47351a; color: #fde68a; border-color: #a16207; }
         .danger-text { color: #fecaca; background: transparent; border-color: #7f1d1d; }
         .notice { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; background: #0f2c3d; border: 1px solid #075985; }
@@ -1400,6 +1429,7 @@ class OpenReefPanel extends HTMLElement {
         .color-field { gap: 6px; }
         .picker { display: grid; gap: 9px; align-content: start; }
         .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .candidate-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #8da2ba; font-size: 12px; font-weight: 800; }
         .candidates { display: grid; gap: 7px; }
         .candidate { display: grid; gap: 3px; min-width: 0; text-align: left; }
         .candidate strong, .candidate span, small { min-width: 0; overflow-wrap: anywhere; }
