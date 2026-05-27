@@ -247,6 +247,15 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         active = mode.get("active")
         mode["active"] = active if active in {"running", "feed", "maintenance"} else "running"
         mode["startedAt"] = mode.get("startedAt") if isinstance(mode.get("startedAt"), str) else ""
+        return_plan = mode.get("returnPlan")
+        if not isinstance(return_plan, dict):
+            mode["returnPlan"] = {}
+        else:
+            mode["returnPlan"] = {
+                equipment_id: desired_state
+                for equipment_id, desired_state in return_plan.items()
+                if isinstance(equipment_id, str) and desired_state in {"on", "off"}
+            }
 
     mode_previews = config.setdefault("modePreviews", {})
     if not isinstance(mode_previews, dict):
@@ -295,6 +304,11 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 for equipment_id in list(preview):
                     if equipment_id not in config["equipment"]:
                         preview.pop(equipment_id)
+    mode = config.get("mode", {})
+    if isinstance(mode, dict) and isinstance(mode.get("returnPlan"), dict):
+        for equipment_id in list(mode["returnPlan"]):
+            if equipment_id not in config["equipment"]:
+                mode["returnPlan"].pop(equipment_id)
 
     alerts = config.setdefault("alerts", {})
     if not isinstance(alerts, dict):
@@ -738,6 +752,17 @@ def _append_activity(config: dict[str, Any], message: str, activity_type: str = 
 
 
 def _equipment_for_mode(config: dict[str, Any], mode_id: str) -> dict[str, str]:
+    if mode_id == "running":
+        mode = config.get("mode", {})
+        return_plan = mode.get("returnPlan") if isinstance(mode, dict) else {}
+        if isinstance(return_plan, dict):
+            return {
+                equipment_id: desired_state
+                for equipment_id, desired_state in return_plan.items()
+                if desired_state in {"on", "off"}
+            }
+        return {}
+
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict) and isinstance(mode_previews.get(mode_id), dict):
         return {
@@ -762,6 +787,12 @@ async def _async_apply_mode(
     config = _config_from_entry(entry)
     equipment_config = _equipment_for_mode(config, mode_id)
     equipment = config.get("equipment", {})
+    current_mode = config.get("mode", {}) if isinstance(config.get("mode"), dict) else {}
+    existing_return_plan = (
+        current_mode.get("returnPlan") if isinstance(current_mode.get("returnPlan"), dict) else {}
+    )
+    return_plan: dict[str, str] = dict(existing_return_plan)
+    should_capture_return_plan = mode_id != "running"
 
     if not isinstance(equipment, dict):
         raise ServiceValidationError("OpenReef equipment mapping is invalid")
@@ -807,6 +838,13 @@ async def _async_apply_mode(
             )
             continue
 
+        if (
+            should_capture_return_plan
+            and equipment_key not in return_plan
+            and state.state in {"on", "off"}
+        ):
+            return_plan[equipment_key] = state.state
+
         await hass.services.async_call(
             "switch",
             f"turn_{desired_state}",
@@ -831,6 +869,7 @@ async def _async_apply_mode(
     config["mode"] = {
         "active": mode_id,
         "startedAt": datetime.now(timezone.utc).isoformat(),
+        "returnPlan": return_plan if should_capture_return_plan else {},
     }
     mode_label = mode_id.replace("_", " ").title()
     _append_activity(

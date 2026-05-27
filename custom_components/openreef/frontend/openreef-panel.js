@@ -571,18 +571,13 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "set-mode") {
         const modeId = target.dataset.mode || "running";
-        if (modeId !== "running") {
+        const hasRestorePlan = this._modeActionRows("running").length > 0;
+        if (modeId !== "running" || (this._activeMode() !== "running" && hasRestorePlan)) {
           this._modeConfirm = modeId;
           this._render();
           return;
         }
-        const modeLabel = this._modeChoices().find(([modeId]) => modeId === target.dataset.mode)?.[1] || "Running";
-        this._config.mode = {
-          active: modeId,
-          startedAt: new Date().toISOString(),
-        };
-        this._recordActivity(`Mode changed to ${modeLabel}`);
-        this._saveConfig();
+        if (this._activeMode() !== "running") this._applyMode("running");
       }
       if (action === "apply-mode") this._applyMode(target.dataset.mode);
       if (action === "close-mode-confirm") {
@@ -844,7 +839,7 @@ class OpenReefPanel extends HTMLElement {
 
   _modeChoices() {
     return [
-      ["running", "Running", "Normal monitoring. No equipment changes are applied."],
+      ["running", "Running", "Returns from Feed or Maintenance by restoring captured armed equipment states."],
       ["feed", "Feed", "Temporarily changes selected armed equipment after confirmation."],
       ["maintenance", "Maintenance", "Applies a hands-in-tank equipment plan after confirmation."],
     ];
@@ -1003,13 +998,15 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _modePreview(modeId) {
+    if (modeId === "running") return this._config.mode?.returnPlan || {};
     return this._config.modePreviews?.[modeId] || {};
   }
 
   _modePreviewSummary(modeId) {
     const preview = this._modePreview(modeId);
     const actions = Object.values(preview).filter((state) => state === "on" || state === "off");
-    if (!actions.length) return "Preview not configured.";
+    if (!actions.length) return modeId === "running" ? "No restore plan saved." : "Preview not configured.";
+    if (modeId === "running") return `${actions.length} captured state${actions.length === 1 ? "" : "s"} to restore.`;
     const off = actions.filter((state) => state === "off").length;
     const on = actions.filter((state) => state === "on").length;
     return `${off} off, ${on} on when confirmed.`;
@@ -1036,7 +1033,9 @@ class OpenReefPanel extends HTMLElement {
             status = "missing";
             detail = `${switchEntity} is ${current}`;
           } else {
-            detail = `${switchEntity} is currently ${current}`;
+            detail = modeId === "running"
+              ? `${switchEntity} is currently ${current}; restore to ${desiredState}`
+              : `${switchEntity} is currently ${current}`;
           }
         }
         return {
@@ -1280,7 +1279,7 @@ class OpenReefPanel extends HTMLElement {
           ${this._modeChoices().map(([id, label, description]) => `
             <button class="mode-button ${active === id ? "active" : ""}" data-action="set-mode" data-mode="${this._escape(id)}">
               <strong>${this._escape(label)}</strong>
-              <span>${this._escape(description)} ${id === "running" ? "" : this._escape(this._modePreviewSummary(id))}</span>
+              <span>${this._escape(description)} ${id === "running" && active === "running" ? "" : this._escape(this._modePreviewSummary(id))}</span>
             </button>
           `).join("")}
         </div>
@@ -1782,7 +1781,7 @@ class OpenReefPanel extends HTMLElement {
       ["cost_entity_id", "Cost", "sensor.example_cost"],
     ];
     return `
-      <div class="equipment-editor">
+      <div class="equipment-editor ${item.armed ? "armed-editor" : "disarmed-editor"}">
         <div class="card-head">
           <label>Name<input data-scope="equipment" data-id="${this._escape(id)}" data-field="label" value="${this._escape(item.label || id)}"></label>
           <div class="settings-actions">
@@ -2312,7 +2311,11 @@ class OpenReefPanel extends HTMLElement {
         .mapping-head h3 { margin-bottom: 0; }
         .mapping-section { display: grid; gap: 12px; border: 1px solid #223447; border-radius: 8px; padding: 14px; background: #0b1724; }
         .mapping-section + .mapping-section { margin-top: 12px; }
-        .equipment-editor { background: #0e1a28; }
+        .equipment-editor { position: relative; overflow: hidden; background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 32%, #0e1a28); border-color: var(--openreef-accent-border); box-shadow: inset 4px 0 0 var(--openreef-accent); }
+        .equipment-editor.disarmed-editor { border-color: #334155; background: #101824; box-shadow: inset 4px 0 0 #475569; }
+        .equipment-editor > .card-head { padding-bottom: 12px; margin-bottom: 4px; border-bottom: 1px solid rgba(148, 163, 184, .16); }
+        .equipment-editor .mapping-card.entity-card { background: rgba(16, 29, 44, .82); }
+        .equipment-editor.armed-editor .mapping-card.entity-card { border-color: color-mix(in srgb, var(--openreef-accent) 34%, #3b4257); }
         .equipment-group { display: grid; gap: 12px; border: 1px solid #223447; border-radius: 8px; padding: 14px; background: #0b1724; }
         .trend-dialog { max-width: 900px; }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
