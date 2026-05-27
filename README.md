@@ -5,8 +5,9 @@ OpenReef is a private-beta reef aquarium controller for Home Assistant OS.
 The stable controller now lives in the Home Assistant custom integration:
 
 - `custom_components/openreef` — Home Assistant custom integration, native sidebar panel, setup wizard, mappings, services, diagnostics, and repair notices.
-- `openreef` — optional OpenReef Labs add-on for future advanced/experimental features.
-- `src` — preserved Next.js dashboard application used by Labs and future migration work.
+- `src` — preserved Next.js dashboard application code for future migration work.
+
+The optional OpenReef Labs add-on has moved to a separate private repository so normal users cannot discover it from the main OpenReef install path.
 
 ## Private Beta Install
 
@@ -18,7 +19,7 @@ The stable controller now lives in the Home Assistant custom integration:
 
 Controls are locked by default. Each equipment switch must be explicitly mapped and armed before OpenReef will send control service calls.
 
-The add-on is no longer required for the MVP controller. Install OpenReef Labs only when testing experimental advanced screens.
+The add-on is no longer required for the MVP controller. OpenReef Labs is intentionally separate and private while experimental advanced screens are being rebuilt.
 
 ## Development
 
