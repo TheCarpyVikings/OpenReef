@@ -327,15 +327,20 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         interlocks["atoMaxRuntimeEnabled"] = bool(
             interlocks.get("atoMaxRuntimeEnabled", False)
         )
+        raw_runtime_seconds = interlocks.get("atoMaxRuntimeSeconds")
+        if raw_runtime_seconds is None and "atoMaxRuntimeMinutes" in interlocks:
+            try:
+                raw_runtime_seconds = int(interlocks.get("atoMaxRuntimeMinutes", 5)) * 60
+            except (TypeError, ValueError):
+                raw_runtime_seconds = 300
         try:
-            interlocks["atoMaxRuntimeMinutes"] = int(
-                interlocks.get("atoMaxRuntimeMinutes", 5)
-            )
+            interlocks["atoMaxRuntimeSeconds"] = int(raw_runtime_seconds)
         except (TypeError, ValueError):
-            interlocks["atoMaxRuntimeMinutes"] = 5
-        interlocks["atoMaxRuntimeMinutes"] = max(
-            1, min(interlocks["atoMaxRuntimeMinutes"], 120)
+            interlocks["atoMaxRuntimeSeconds"] = 300
+        interlocks["atoMaxRuntimeSeconds"] = max(
+            5, min(interlocks["atoMaxRuntimeSeconds"], 1800)
         )
+        interlocks.pop("atoMaxRuntimeMinutes", None)
         interlocks["returnPumpSkimmerWarning"] = bool(
             interlocks.get("returnPumpSkimmerWarning", True)
         )

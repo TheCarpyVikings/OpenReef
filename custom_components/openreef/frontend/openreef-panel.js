@@ -1577,7 +1577,7 @@ class OpenReefPanel extends HTMLElement {
   _settingsPanel(id, title, description, content) {
     const open = this._settingsSectionOpen(id);
     return `
-      <article class="panel settings-section">
+      <article class="panel settings-section themed-settings-card">
         <button class="settings-section-head" data-action="toggle-settings-section" data-id="${this._escape(id)}">
           <span>
             <strong>${this._escape(title)}</strong>
@@ -1933,8 +1933,8 @@ class OpenReefPanel extends HTMLElement {
               <small>Prepare a maximum top-off run time before unattended ATO automation is introduced.</small>
             </span>
           </label>
-          <label>ATO max runtime minutes
-            <input type="number" min="1" max="120" step="1" data-scope="interlocks" data-field="atoMaxRuntimeMinutes" value="${this._escape(interlocks.atoMaxRuntimeMinutes ?? 5)}">
+          <label>ATO max runtime seconds
+            <input type="number" min="5" max="1800" step="5" data-scope="interlocks" data-field="atoMaxRuntimeSeconds" value="${this._escape(interlocks.atoMaxRuntimeSeconds ?? 300)}">
           </label>
         </div>
         ${this._interlockWarnings().length ? `<div class="notice warning-notice">${this._interlockWarnings().length} interlock warning(s) currently visible in Mission Control.</div>` : `<p class="muted">No interlock warnings are active.</p>`}
@@ -2240,11 +2240,12 @@ class OpenReefPanel extends HTMLElement {
         .settings-save { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
         .save-state { border: 1px solid #166534; border-radius: 999px; padding: 7px 11px; color: #bbf7d0; background: #0b2b24; font-size: 12px; font-weight: 800; }
         .save-state.dirty { border-color: #a16207; color: #fde68a; background: #2f2614; }
-        .settings-section { display: grid; gap: 14px; }
+        .settings-section { display: grid; gap: 14px; position: relative; overflow: hidden; }
+        .themed-settings-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96) 34%, #121f2f); box-shadow: inset 4px 0 0 var(--openreef-accent); }
         .settings-section-head { width: 100%; border: 0; background: transparent; padding: 0; display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; text-align: left; color: #e5edf5; }
         .settings-section-head span:first-child { display: grid; gap: 4px; }
         .settings-section-head strong { font-size: 18px; }
-        .settings-section-head small { color: #8da2ba; }
+        .settings-section-head small { color: #a8bed4; }
         .settings-section-body { display: grid; gap: 14px; }
         .status-list { display: grid; gap: 6px; margin-top: 14px; }
         .mode-confirm-list { display: grid; gap: 8px; }
@@ -2287,7 +2288,7 @@ class OpenReefPanel extends HTMLElement {
         input[type="color"] { min-height: 48px; padding: 4px; cursor: pointer; }
         .field-group { display: grid; gap: 9px; }
         .field-label { color: #a7b7ca; font-size: 13px; font-weight: 800; }
-        .toggle-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; grid-template-columns: auto 1fr; align-items: start; }
+        .toggle-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: rgba(14, 26, 40, .88); grid-template-columns: auto 1fr; align-items: start; }
         .toggle-card input { width: 20px; min-height: 20px; margin-top: 2px; accent-color: var(--openreef-accent); }
         .toggle-card span { display: grid; gap: 4px; }
         .theme-picker { display: grid; grid-template-columns: repeat(8, minmax(34px, 1fr)); gap: 8px; }
@@ -2309,7 +2310,7 @@ class OpenReefPanel extends HTMLElement {
         .mapping-card.disabled-card { border-color: #334155; background: #101824; }
         .mapping-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
         .mapping-head h3 { margin-bottom: 0; }
-        .mapping-section { display: grid; gap: 12px; border: 1px solid #223447; border-radius: 8px; padding: 14px; background: #0b1724; }
+        .mapping-section { display: grid; gap: 12px; border: 1px solid color-mix(in srgb, var(--openreef-accent) 22%, #223447); border-radius: 8px; padding: 14px; background: rgba(11, 23, 36, .82); }
         .mapping-section + .mapping-section { margin-top: 12px; }
         .equipment-editor { position: relative; overflow: hidden; background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 32%, #0e1a28); border-color: var(--openreef-accent-border); box-shadow: inset 4px 0 0 var(--openreef-accent); }
         .equipment-editor.disarmed-editor { border-color: #334155; background: #101824; box-shadow: inset 4px 0 0 #475569; }
