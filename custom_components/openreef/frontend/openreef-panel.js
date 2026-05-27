@@ -23,7 +23,7 @@ class OpenReefPanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._config) {
-      if (!this._setupOpen && !this._trend) {
+      if (this._shouldRenderForHassUpdate()) {
         this._render();
       }
       return;
@@ -31,6 +31,17 @@ class OpenReefPanel extends HTMLElement {
 
     this._renderLoading();
     this._loadConfig();
+  }
+
+  _isEditingFormControl() {
+    const active = this.shadowRoot.activeElement;
+    return Boolean(active?.matches?.("input, textarea, select"));
+  }
+
+  _shouldRenderForHassUpdate() {
+    if (this._setupOpen || this._trend || this._activeTab === "settings") return false;
+    if (this._isEditingFormControl()) return false;
+    return true;
   }
 
   connectedCallback() {
