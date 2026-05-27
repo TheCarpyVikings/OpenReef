@@ -196,6 +196,8 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
         )
 
     core["modes"] = settings.get("modes") if isinstance(settings.get("modes"), list) else []
+    core["mode"]["active"] = "running"
+    core["mode"]["startedAt"] = ""
     core["manualReadings"] = (
         settings.get("manualReadings")
         if isinstance(settings.get("manualReadings"), dict)
@@ -231,6 +233,14 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         sensor.setdefault("unit", meta["unit"])
         sensor.setdefault("min", meta["min"])
         sensor.setdefault("max", meta["max"])
+
+    mode = config.setdefault("mode", {})
+    if not isinstance(mode, dict):
+        config["mode"] = deepcopy(DEFAULT_CORE_CONFIG["mode"])
+    else:
+        active = mode.get("active")
+        mode["active"] = active if active in {"running", "feed", "maintenance"} else "running"
+        mode["startedAt"] = mode.get("startedAt") if isinstance(mode.get("startedAt"), str) else ""
 
     equipment = config.setdefault("equipment", {})
     if not isinstance(equipment, dict):

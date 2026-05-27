@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 4
+CORE_SCHEMA_VERSION = 5
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -156,6 +156,10 @@ DEFAULT_CORE_CONFIG = {
         "daily_cost_entity_id": "",
         "weekly_cost_entity_id": "",
         "monthly_cost_entity_id": "",
+    },
+    "mode": {
+        "active": "running",
+        "startedAt": "",
     },
     "modes": [],
     "manualReadings": {},
