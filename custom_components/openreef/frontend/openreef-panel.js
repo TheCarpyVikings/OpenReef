@@ -16,12 +16,14 @@ class OpenReefPanel extends HTMLElement {
     this._eventsAttached = false;
     this._lastRenderedSetupOpen = false;
     this._lastRenderedSetupStep = null;
+    this._trend = null;
+    this._trendRequest = "";
   }
 
   set hass(hass) {
     this._hass = hass;
     if (this._config) {
-      if (!this._setupOpen) {
+      if (!this._setupOpen && !this._trend) {
         this._render();
       }
       return;
@@ -133,6 +135,147 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  async _loadTrend(sensorId) {
+    const sensor = this._config?.sensors?.[sensorId];
+    const entityId = sensor?.entity_id || "";
+    const requestId = `${sensorId}:${Date.now()}`;
+    this._trendRequest = requestId;
+    this._trend = {
+      sensorId,
+      entityId,
+      loading: true,
+      points: [],
+      error: "",
+    };
+    this._render();
+
+    if (!entityId) {
+      if (this._trendRequest !== requestId) return;
+      this._trend = {
+        sensorId,
+        entityId,
+        loading: false,
+        points: [],
+        error: "Map this sensor before viewing a trend.",
+      };
+      this._render();
+      return;
+    }
+
+    try {
+      const points = await this._fetchTrendPoints(entityId);
+      if (this._trendRequest !== requestId) return;
+      this._trend = {
+        sensorId,
+        entityId,
+        loading: false,
+        points,
+        error: points.length ? "" : "No numeric history is available for this sensor yet.",
+      };
+    } catch (err) {
+      if (this._trendRequest !== requestId) return;
+      this._trend = {
+        sensorId,
+        entityId,
+        loading: false,
+        points: [],
+        error: err instanceof Error ? err.message : "Could not load trend history.",
+      };
+    }
+    this._render();
+  }
+
+  async _fetchTrendPoints(entityId) {
+    const end = new Date();
+    const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+
+    if (typeof this._hass?.callApi === "function") {
+      const params = new URLSearchParams({
+        filter_entity_id: entityId,
+        minimal_response: "1",
+        significant_changes_only: "0",
+      });
+      const raw = await this._hass.callApi(
+        "GET",
+        `history/period/${encodeURIComponent(start.toISOString())}?${params.toString()}`,
+      );
+      return this._historyPoints(raw, entityId);
+    }
+
+    const raw = await this._callWS({
+      type: "history/history_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      entity_ids: [entityId],
+      minimal_response: true,
+      significant_changes_only: false,
+    });
+    return this._historyPoints(raw, entityId);
+  }
+
+  _historySeries(raw, entityId) {
+    if (Array.isArray(raw)) {
+      if (Array.isArray(raw[0])) return raw[0];
+      return raw;
+    }
+    if (raw && typeof raw === "object") {
+      if (Array.isArray(raw[entityId])) return raw[entityId];
+      const series = Object.values(raw).find((value) => Array.isArray(value));
+      return Array.isArray(series) ? series : [];
+    }
+    return [];
+  }
+
+  _historyTime(item, fallbackTime) {
+    const raw =
+      item?.last_updated ??
+      item?.last_changed ??
+      item?.last_reported ??
+      item?.lu ??
+      item?.lc ??
+      item?.lr;
+
+    if (typeof raw === "number") {
+      return raw < 100000000000 ? raw * 1000 : raw;
+    }
+    if (typeof raw === "string" && raw.trim()) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) return parsed < 100000000000 ? parsed * 1000 : parsed;
+      const date = Date.parse(raw);
+      if (Number.isFinite(date)) return date;
+    }
+    return fallbackTime;
+  }
+
+  _historyPoints(raw, entityId) {
+    const series = this._historySeries(raw, entityId);
+    const now = Date.now();
+    const points = series
+      .map((item, index) => {
+        const state = item?.state ?? item?.s ?? item?.value ?? item?.v;
+        const value = Number.parseFloat(state);
+        if (!Number.isFinite(value)) return null;
+        return {
+          time: this._historyTime(item, now - (series.length - index - 1) * 60000),
+          value,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.time - b.time);
+
+    return this._downsample(points, 180);
+  }
+
+  _downsample(points, maxPoints) {
+    if (points.length <= maxPoints) return points;
+    const sampled = [];
+    const step = (points.length - 1) / (maxPoints - 1);
+    for (let index = 0; index < maxPoints; index += 1) {
+      sampled.push(points[Math.round(index * step)]);
+    }
+    return sampled;
+  }
+
   _attachEvents() {
     if (this._eventsAttached) return;
     this._eventsAttached = true;
@@ -204,6 +347,17 @@ class OpenReefPanel extends HTMLElement {
         this._saveConfig();
       }
       if (action === "toggle-equipment") this._toggleEquipment(id);
+      if (action === "set-theme") {
+        this._config.display.themeColor = target.dataset.color;
+        this._render();
+      }
+      if (action === "show-trend") this._loadTrend(id);
+      if (action === "close-trend") {
+        this._trend = null;
+        this._trendRequest = "";
+        this._render();
+      }
+      if (action === "refresh-trend") this._loadTrend(id);
     });
 
     this.shadowRoot.addEventListener("input", (event) => {
@@ -219,6 +373,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "sensor") this._config.sensors[id][field] = value;
       if (scope === "equipment") this._config.equipment[id][field] = value;
       if (scope === "energy") this._config.energy[field] = value;
+      if (scope === "display" && field === "themeColor") this._render();
     });
   }
 
@@ -326,6 +481,32 @@ class OpenReefPanel extends HTMLElement {
       .replace(/^_+|_+$/g, "") || "equipment";
   }
 
+  _themeColor() {
+    const color = this._config?.display?.themeColor || "#00b4d8";
+    return /^#[0-9a-f]{6}$/i.test(color) ? color : "#00b4d8";
+  }
+
+  _themeChoices() {
+    return [
+      ["#00b4d8", "Reef Blue"],
+      ["#14b8a6", "Lagoon Teal"],
+      ["#22c55e", "Coral Green"],
+      ["#f59e0b", "Sunset Amber"],
+      ["#f97316", "Clownfish Orange"],
+      ["#e879f9", "Coral Pink"],
+      ["#8b5cf6", "Royal Violet"],
+      ["#38bdf8", "Clear Sky"],
+    ];
+  }
+
+  _sensorGroupLabel(sensor) {
+    return sensor?.group === "room" ? "Room" : "Tank";
+  }
+
+  _sensorGroupClass(sensor) {
+    return sensor?.group === "room" ? "room-card" : "tank-card";
+  }
+
   _renderLoading() {
     this._lastRenderedSetupOpen = false;
     this._lastRenderedSetupStep = null;
@@ -378,6 +559,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._tabs()}
         ${this._activeContent()}
         ${this._setupOpen ? this._setupWizard() : ""}
+        ${this._trend ? this._trendModal() : ""}
       </main>
     `;
 
@@ -491,12 +673,13 @@ class OpenReefPanel extends HTMLElement {
             const value = this._number(sensor.entity_id);
             const display = id === "ph" ? this._format(value, 2) : this._format(value, 1);
             return `
-              <article class="stat">
+              <button class="stat stat-button ${this._sensorGroupClass(sensor)}" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
                 <p>${this._escape(sensor.label)}</p>
                 <strong>${display}</strong>
                 <span>${this._escape(sensor.unit || "")}</span>
                 <small>${this._escape(sensor.entity_id || "Not mapped")}</small>
-              </article>
+                <span class="trend-hint">Trend</span>
+              </button>
             `;
           }).join("")}
         </div>
@@ -606,13 +789,29 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _profileSettings() {
+    const themeColor = this._themeColor();
     return `
       <article class="panel">
         <h3>Profile</h3>
         <div class="grid two compact">
           <label>Tank name<input data-scope="tank" data-field="name" value="${this._escape(this._config.tank.name)}"></label>
           <label>Owner<input data-scope="tank" data-field="owner" value="${this._escape(this._config.tank.owner)}"></label>
-          <label>Theme<input data-scope="display" data-field="themeColor" value="${this._escape(this._config.display.themeColor)}"></label>
+          <div class="field-group">
+            <span class="field-label">Theme colour</span>
+            <div class="theme-picker">
+              ${this._themeChoices().map(([color, label]) => `
+                <button
+                  class="theme-swatch ${themeColor.toLowerCase() === color.toLowerCase() ? "active" : ""}"
+                  style="--swatch: ${this._escape(color)}"
+                  data-action="set-theme"
+                  data-color="${this._escape(color)}"
+                  aria-label="${this._escape(label)}"
+                  title="${this._escape(label)}"
+                ></button>
+              `).join("")}
+            </div>
+            <label class="color-field">Custom colour<input type="color" data-scope="display" data-field="themeColor" value="${this._escape(themeColor)}"></label>
+          </div>
           <label>Tariff<input type="number" step="0.01" data-scope="energy" data-field="tariff" value="${this._escape(this._config.energy.tariff)}"></label>
         </div>
       </article>
@@ -622,16 +821,24 @@ class OpenReefPanel extends HTMLElement {
   _sensorPicker(id, sensor) {
     const key = `sensor:${id}`;
     const result = this._searchResults[key];
+    const status = this._sensorStatus(sensor);
     return `
-      <div class="picker">
-        <label>${this._escape(sensor.label)}<input data-scope="sensor" data-id="${this._escape(id)}" data-field="entity_id" value="${this._escape(sensor.entity_id)}" placeholder="sensor.example"></label>
+      <section class="picker mapping-card ${this._sensorGroupClass(sensor)}">
+        <div class="mapping-head">
+          <div>
+            <p class="eyebrow">${this._escape(this._sensorGroupLabel(sensor))}</p>
+            <h3>${this._escape(sensor.label)}</h3>
+          </div>
+          <span class="pill ${status}">${this._escape(status)}</span>
+        </div>
+        <label>Entity<input data-scope="sensor" data-id="${this._escape(id)}" data-field="entity_id" value="${this._escape(sensor.entity_id)}" placeholder="sensor.example"></label>
         <div class="mini-grid">
           <label>Min<input type="number" step="0.01" data-scope="sensor" data-id="${this._escape(id)}" data-field="min" value="${this._escape(sensor.min)}"></label>
           <label>Max<input type="number" step="0.01" data-scope="sensor" data-id="${this._escape(id)}" data-field="max" value="${this._escape(sensor.max)}"></label>
         </div>
         <button class="secondary" data-action="search-sensor" data-id="${this._escape(id)}">${result?.loading ? "Finding..." : "Find matches"}</button>
         ${this._candidateList(key, "choose-sensor", id)}
-      </div>
+      </section>
     `;
   }
 
@@ -665,11 +872,15 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="grid two compact">
           ${fields.map(([field, label, placeholder]) => `
-            <div class="picker">
+            <section class="picker mapping-card entity-card">
+              <div class="mapping-head">
+                <h3>${label}</h3>
+                <span class="pill">${field === "switch_entity_id" ? "required" : "optional"}</span>
+              </div>
               <label>${label}<input data-scope="equipment" data-id="${this._escape(id)}" data-field="${field}" value="${this._escape(item[field])}" placeholder="${placeholder}"></label>
               <button class="secondary" data-action="search-equipment" data-id="${this._escape(id)}" data-field="${field}">Find matches</button>
               ${this._candidateList(`equipment:${id}:${field}`, "choose-equipment", id, field)}
-            </div>
+            </section>
           `).join("")}
         </div>
       </div>
@@ -715,6 +926,87 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _trendSummary(points) {
+    if (!points.length) return null;
+    const values = points.map((point) => point.value);
+    return {
+      latest: values[values.length - 1],
+      min: Math.min(...values),
+      max: Math.max(...values),
+    };
+  }
+
+  _trendSvg(points, unit) {
+    if (points.length < 2) return `<div class="empty-chart">No trend points yet.</div>`;
+    const width = 640;
+    const height = 220;
+    const pad = 22;
+    const minTime = points[0].time;
+    const maxTime = points[points.length - 1].time;
+    const values = points.map((point) => point.value);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const valueRange = max - min || 1;
+    const timeRange = maxTime - minTime || 1;
+    const coords = points.map((point) => {
+      const x = pad + ((point.time - minTime) / timeRange) * (width - pad * 2);
+      const y = height - pad - ((point.value - min) / valueRange) * (height - pad * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    const fillCoords = [
+      `${pad},${height - pad}`,
+      ...coords,
+      `${width - pad},${height - pad}`,
+    ].join(" ");
+
+    return `
+      <div class="chart-wrap">
+        <svg class="trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="24 hour trend">
+          <line x1="${pad}" y1="${pad}" x2="${width - pad}" y2="${pad}" />
+          <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" />
+          <polygon points="${fillCoords}" />
+          <polyline points="${coords.join(" ")}" />
+        </svg>
+        <div class="chart-labels">
+          <span>${new Date(minTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+          <strong>${this._format(max, 2)} ${this._escape(unit || "")}</strong>
+          <span>${new Date(maxTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  _trendModal() {
+    const sensor = this._config.sensors?.[this._trend.sensorId] || {};
+    const points = this._trend.points || [];
+    const summary = this._trendSummary(points);
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog">
+          <button class="close" data-action="close-trend">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">24-hour trend</p>
+              <h2>${this._escape(sensor.label || "Sensor")}</h2>
+              <p class="muted">${this._escape(this._trend.entityId || "Not mapped")}</p>
+            </div>
+            <button class="secondary" data-action="refresh-trend" data-id="${this._escape(this._trend.sensorId)}" ${this._trend.loading ? "disabled" : ""}>Refresh</button>
+          </div>
+          ${this._trend.loading ? `<div class="center-card compact-center"><div class="spinner"></div><p>Loading trend...</p></div>` : ""}
+          ${this._trend.error ? `<div class="notice error">${this._escape(this._trend.error)}</div>` : ""}
+          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, sensor.unit) : ""}
+          ${summary ? `
+            <div class="trend-summary">
+              <article><span>Latest</span><strong>${this._format(summary.latest, 2)} ${this._escape(sensor.unit || "")}</strong></article>
+              <article><span>Low</span><strong>${this._format(summary.min, 2)} ${this._escape(sensor.unit || "")}</strong></article>
+              <article><span>High</span><strong>${this._format(summary.max, 2)} ${this._escape(sensor.unit || "")}</strong></article>
+            </div>
+          ` : ""}
+        </section>
+      </div>
+    `;
+  }
+
   _setupWizard() {
     const steps = ["Profile", "Sensors", "Equipment", "Finish"];
     return `
@@ -736,9 +1028,13 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _styles() {
+    const accent = this._themeColor();
     return `
       <style>
         :host {
+          --openreef-accent: ${accent};
+          --openreef-accent-soft: ${accent}24;
+          --openreef-accent-border: ${accent}88;
           display: block;
           min-height: 100vh;
           background: #07111a;
@@ -749,11 +1045,11 @@ class OpenReefPanel extends HTMLElement {
         button, input { font: inherit; }
         button { cursor: pointer; }
         button:disabled { cursor: not-allowed; opacity: .45; }
-        .page { min-height: 100vh; padding: 24px; background: radial-gradient(circle at 20% 0%, rgba(14, 165, 233, .12), transparent 28%), #07111a; }
+        .page { min-height: 100vh; padding: 24px; background: radial-gradient(circle at 20% 0%, var(--openreef-accent-soft), transparent 28%), #07111a; }
         .topbar, .hero, .panel, .stat, .wizard { border: 1px solid #24364a; background: #121f2f; border-radius: 8px; }
         .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 22px; margin-bottom: 18px; }
         h1, h2, h3, p { margin: 0; }
-        h1 { font-size: clamp(26px, 3vw, 42px); color: #15c8e8; }
+        h1 { font-size: clamp(26px, 3vw, 42px); color: var(--openreef-accent); }
         h2 { font-size: 24px; margin-bottom: 8px; }
         h3 { font-size: 17px; margin-bottom: 14px; }
         .eyebrow, .muted, .hint, small, .topbar p, .section-head p, .row span { color: #8da2ba; }
@@ -761,8 +1057,8 @@ class OpenReefPanel extends HTMLElement {
         .actions, .button-row, .quick-add, .wizard-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         .tabs { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
-        .tabs button.active, .primary { background: #10b8d7; border-color: #10b8d7; color: #041019; font-weight: 800; }
-        .secondary:hover, .tabs button:hover { border-color: #14b8d4; }
+        .tabs button.active, .primary { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
+        .secondary:hover, .tabs button:hover { border-color: var(--openreef-accent); }
         .warning { background: #47351a; color: #fde68a; border-color: #a16207; }
         .danger-text { color: #fecaca; background: transparent; border-color: #7f1d1d; }
         .notice { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; background: #0f2c3d; border: 1px solid #075985; }
@@ -790,24 +1086,56 @@ class OpenReefPanel extends HTMLElement {
         .pill.unknown { background: #334155; color: #cbd5e1; }
         .stat { display: grid; gap: 8px; min-height: 150px; }
         .stat strong { font-size: 34px; color: #67e8f9; }
+        .stat-button { position: relative; width: 100%; text-align: left; }
+        .stat-button:hover, .stat-button:focus-visible { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent-border); outline: none; }
+        .trend-hint { position: absolute; top: 14px; right: 14px; border: 1px solid #294055; border-radius: 999px; padding: 4px 9px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; }
         label { display: grid; gap: 7px; color: #a7b7ca; font-size: 13px; font-weight: 700; }
         input { width: 100%; min-width: 0; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
+        input[type="color"] { min-height: 48px; padding: 4px; cursor: pointer; }
+        .field-group { display: grid; gap: 9px; }
+        .field-label { color: #a7b7ca; font-size: 13px; font-weight: 800; }
+        .theme-picker { display: grid; grid-template-columns: repeat(8, minmax(34px, 1fr)); gap: 8px; }
+        .theme-swatch { min-height: 42px; border: 1px solid #2b4056; border-radius: 8px; background: var(--swatch); padding: 0; }
+        .theme-swatch.active { border-color: #f8fafc; box-shadow: 0 0 0 2px var(--openreef-accent-border); }
+        .color-field { gap: 6px; }
         .picker { display: grid; gap: 9px; align-content: start; }
         .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
         .candidates { display: grid; gap: 7px; }
         .candidate { display: grid; gap: 3px; min-width: 0; text-align: left; }
         .candidate strong, .candidate span, small { min-width: 0; overflow-wrap: anywhere; }
         .candidate span { color: #93a4b8; font-size: 12px; }
-        .equipment-editor { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; }
+        .mapping-card, .equipment-editor { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; }
+        .mapping-card { gap: 11px; }
+        .mapping-card.tank-card { border-color: #1d4f6b; background: linear-gradient(180deg, rgba(14, 165, 233, .08), rgba(14, 26, 40, .96)); }
+        .mapping-card.room-card { border-color: #315f50; background: linear-gradient(180deg, rgba(34, 197, 94, .07), rgba(14, 26, 40, .96)); }
+        .mapping-card.entity-card { border-color: #3b4257; background: #101d2c; }
+        .mapping-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+        .mapping-head h3 { margin-bottom: 0; }
+        .equipment-editor { background: #0e1a28; }
+        .trend-dialog { max-width: 900px; }
+        .compact-center { min-height: 220px; }
+        .chart-wrap { display: grid; gap: 8px; border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0b1724; }
+        .trend-chart { width: 100%; min-height: 260px; overflow: visible; }
+        .trend-chart line { stroke: #24364a; stroke-width: 1; }
+        .trend-chart polygon { fill: var(--openreef-accent-soft); }
+        .trend-chart polyline { fill: none; stroke: var(--openreef-accent); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+        .chart-labels, .trend-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; align-items: center; }
+        .chart-labels { color: #8da2ba; font-size: 12px; }
+        .chart-labels strong { text-align: center; color: #e5edf5; }
+        .chart-labels span:last-child { text-align: right; }
+        .trend-summary article { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0b1724; display: grid; gap: 6px; }
+        .trend-summary span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+        .trend-summary strong { color: #67e8f9; font-size: 22px; }
+        .empty-chart { min-height: 220px; display: grid; place-items: center; color: #8da2ba; border: 1px dashed #294055; border-radius: 8px; }
         .modal { position: fixed; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(0,0,0,.72); z-index: 10; overflow: hidden; }
         .wizard { position: relative; width: min(1100px, 100%); max-height: min(900px, 92vh); overflow: auto; overscroll-behavior: contain; padding: 28px; display: grid; gap: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
         .close { position: absolute; top: 14px; right: 14px; width: 38px; height: 38px; border-radius: 50%; border: 1px solid #294055; background: #172536; color: #dcecff; }
         .stepper { display: flex; gap: 10px; justify-content: center; }
         .stepper span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: #203247; color: #94a3b8; font-weight: 800; }
-        .stepper span.on { background: #10b8d7; color: #041019; }
+        .stepper span.on { background: var(--openreef-accent); color: #041019; }
         .wizard-actions { justify-content: space-between; padding-top: 8px; }
         .center-card { min-height: 60vh; display: grid; place-items: center; gap: 16px; color: #8da2ba; }
-        .spinner { width: 36px; height: 36px; border: 3px solid #203247; border-top-color: #10b8d7; border-radius: 50%; animation: spin 1s linear infinite; }
+        .spinner { width: 36px; height: 36px; border: 3px solid #203247; border-top-color: var(--openreef-accent); border-radius: 50%; animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 900px) {
           .page { padding: 12px; }
