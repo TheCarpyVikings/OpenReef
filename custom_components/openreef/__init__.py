@@ -296,6 +296,36 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                     if equipment_id not in config["equipment"]:
                         preview.pop(equipment_id)
 
+    alerts = config.setdefault("alerts", {})
+    if not isinstance(alerts, dict):
+        config["alerts"] = deepcopy(DEFAULT_CORE_CONFIG["alerts"])
+    else:
+        alerts["persistentNotifications"] = bool(alerts.get("persistentNotifications", False))
+        alerts["notifyCriticalOnly"] = bool(alerts.get("notifyCriticalOnly", True))
+
+    interlocks = config.setdefault("interlocks", {})
+    if not isinstance(interlocks, dict):
+        config["interlocks"] = deepcopy(DEFAULT_CORE_CONFIG["interlocks"])
+    else:
+        interlocks["heaterRequiresTankTemp"] = bool(
+            interlocks.get("heaterRequiresTankTemp", True)
+        )
+        interlocks["atoMaxRuntimeEnabled"] = bool(
+            interlocks.get("atoMaxRuntimeEnabled", False)
+        )
+        try:
+            interlocks["atoMaxRuntimeMinutes"] = int(
+                interlocks.get("atoMaxRuntimeMinutes", 5)
+            )
+        except (TypeError, ValueError):
+            interlocks["atoMaxRuntimeMinutes"] = 5
+        interlocks["atoMaxRuntimeMinutes"] = max(
+            1, min(interlocks["atoMaxRuntimeMinutes"], 120)
+        )
+        interlocks["returnPumpSkimmerWarning"] = bool(
+            interlocks.get("returnPumpSkimmerWarning", True)
+        )
+
     activity = config.setdefault("activity", [])
     if not isinstance(activity, list):
         config["activity"] = []
@@ -511,6 +541,122 @@ def _search_entities(
     )[:limit]
 
 
+def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
+    alerts: list[dict[str, str]] = []
+    sensors = config.get("sensors", {})
+    if not isinstance(sensors, dict):
+        return alerts
+
+    for sensor_id, sensor in sensors.items():
+        if not isinstance(sensor, dict):
+            continue
+        if not sensor.get("enabled", False) or not sensor.get("alertsEnabled", True):
+            continue
+        entity_id = _normalise_entity_id(sensor.get("entity_id"))
+        label = str(sensor.get("label") or sensor_id)
+        if not entity_id:
+            alerts.append(
+                {
+                    "id": sensor_id,
+                    "severity": "warning",
+                    "title": f"{label} is not mapped",
+                    "message": "Map this sensor or disable alerts for it in OpenReef.",
+                }
+            )
+            continue
+
+        state = hass.states.get(entity_id)
+        if state is None or state.state in UNAVAILABLE_STATES:
+            alerts.append(
+                {
+                    "id": sensor_id,
+                    "severity": "warning",
+                    "title": f"{label} is not reporting",
+                    "message": f"{entity_id} is unavailable.",
+                }
+            )
+            continue
+
+        try:
+            value = float(state.state)
+            minimum = float(sensor.get("min"))
+            maximum = float(sensor.get("max"))
+            warning_buffer = float(sensor.get("warningBuffer", 10))
+        except (TypeError, ValueError):
+            continue
+
+        unit = str(sensor.get("unit") or "").strip()
+        if value < minimum or value > maximum:
+            alerts.append(
+                {
+                    "id": sensor_id,
+                    "severity": "critical",
+                    "title": f"{label} outside range",
+                    "message": f"{value:g} {unit}".strip()
+                    + f" is outside {minimum:g} - {maximum:g} {unit}".rstrip(),
+                }
+            )
+            continue
+
+        buffer = (maximum - minimum) * max(0, min(warning_buffer, 50)) / 100
+        if value < minimum + buffer or value > maximum - buffer:
+            alerts.append(
+                {
+                    "id": sensor_id,
+                    "severity": "warning",
+                    "title": f"{label} near threshold",
+                    "message": f"{value:g} {unit}".strip()
+                    + f" is near {minimum:g} - {maximum:g} {unit}".rstrip(),
+                }
+            )
+
+    return alerts
+
+
+async def _async_sync_alert_notifications(
+    hass: HomeAssistant, config: dict[str, Any]
+) -> None:
+    sensors = config.get("sensors", {})
+    sensor_ids = list(sensors) if isinstance(sensors, dict) else list(MVP_SENSORS)
+    alert_config = config.get("alerts", {})
+    enabled = isinstance(alert_config, dict) and alert_config.get(
+        "persistentNotifications", False
+    )
+    critical_only = not isinstance(alert_config, dict) or alert_config.get(
+        "notifyCriticalOnly", True
+    )
+    alert_items = _sensor_alert_items(hass, config) if enabled else []
+    active_ids = {
+        item["id"]
+        for item in alert_items
+        if not critical_only or item["severity"] == "critical"
+    }
+
+    for sensor_id in sensor_ids:
+        notification_id = f"openreef_alert_{sensor_id}"
+        if sensor_id not in active_ids:
+            await hass.services.async_call(
+                "persistent_notification",
+                "dismiss",
+                {"notification_id": notification_id},
+                blocking=False,
+            )
+
+    for item in alert_items:
+        if critical_only and item["severity"] != "critical":
+            continue
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "notification_id": f"openreef_alert_{item['id']}",
+                "title": f"OpenReef: {item['title']}",
+                "message": item["message"],
+            },
+            blocking=False,
+        )
+
+
 async def _async_refresh_issues(
     hass: HomeAssistant, entry: OpenReefConfigEntry | None
 ) -> None:
@@ -571,10 +717,35 @@ async def _async_save_config(
     options[CONF_SETTINGS] = normalised
     hass.config_entries.async_update_entry(entry, options=options)
     await _async_refresh_issues(hass, entry)
+    await _async_sync_alert_notifications(hass, normalised)
     return normalised
 
 
+def _append_activity(config: dict[str, Any], message: str, activity_type: str = "info") -> None:
+    activity = config.setdefault("activity", [])
+    if not isinstance(activity, list):
+        activity = []
+        config["activity"] = activity
+    activity.insert(
+        0,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": message,
+            "type": activity_type,
+        },
+    )
+    config["activity"] = activity[:50]
+
+
 def _equipment_for_mode(config: dict[str, Any], mode_id: str) -> dict[str, str]:
+    mode_previews = config.get("modePreviews", {})
+    if isinstance(mode_previews, dict) and isinstance(mode_previews.get(mode_id), dict):
+        return {
+            equipment_id: desired_state
+            for equipment_id, desired_state in mode_previews[mode_id].items()
+            if desired_state in {"on", "off"}
+        }
+
     for mode in config.get("modes", []):
         if isinstance(mode, dict) and mode.get("id") == mode_id:
             equipment_config = mode.get("equipmentConfig", {})
@@ -582,21 +753,22 @@ def _equipment_for_mode(config: dict[str, Any], mode_id: str) -> dict[str, str]:
     raise ServiceValidationError(f"OpenReef mode '{mode_id}' does not exist")
 
 
-async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
-    entry = _first_entry(hass)
-    if entry is None:
-        raise HomeAssistantError("OpenReef is not configured")
-
+async def _async_apply_mode(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    mode_id: str,
+    context: Any,
+) -> dict[str, Any]:
     config = _config_from_entry(entry)
-    mode_id = call.data["mode_id"]
     equipment_config = _equipment_for_mode(config, mode_id)
     equipment = config.get("equipment", {})
 
     if not isinstance(equipment, dict):
         raise ServiceValidationError("OpenReef equipment mapping is invalid")
 
-    applied = 0
-    skipped_locked: list[str] = []
+    applied: list[dict[str, str]] = []
+    skipped_locked: list[dict[str, str]] = []
+    skipped_missing: list[dict[str, str]] = []
 
     for equipment_key, desired_state in equipment_config.items():
         if desired_state not in {"on", "off"}:
@@ -608,10 +780,31 @@ async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
 
         switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
         if not switch_entity:
+            skipped_missing.append(
+                {"equipment_id": equipment_key, "reason": "No switch entity mapped"}
+            )
             continue
 
         if not mapped.get("armed", False):
-            skipped_locked.append(switch_entity)
+            skipped_locked.append(
+                {
+                    "equipment_id": equipment_key,
+                    "entity_id": switch_entity,
+                    "label": str(mapped.get("label") or equipment_key),
+                }
+            )
+            continue
+
+        state = hass.states.get(switch_entity)
+        if state is None or state.state in UNAVAILABLE_STATES:
+            skipped_missing.append(
+                {
+                    "equipment_id": equipment_key,
+                    "entity_id": switch_entity,
+                    "label": str(mapped.get("label") or equipment_key),
+                    "reason": "Switch unavailable",
+                }
+            )
             continue
 
         await hass.services.async_call(
@@ -619,14 +812,49 @@ async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
             f"turn_{desired_state}",
             {ATTR_ENTITY_ID: switch_entity},
             blocking=True,
-            context=call.context,
+            context=context,
         )
-        applied += 1
+        applied.append(
+            {
+                "equipment_id": equipment_key,
+                "entity_id": switch_entity,
+                "label": str(mapped.get("label") or equipment_key),
+                "state": desired_state,
+            }
+        )
 
-    if applied == 0 and skipped_locked:
+    if not applied and skipped_locked and not skipped_missing:
         raise ServiceValidationError(
             "OpenReef mode matched equipment, but all mapped controls are locked"
         )
+
+    config["mode"] = {
+        "active": mode_id,
+        "startedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    mode_label = mode_id.replace("_", " ").title()
+    _append_activity(
+        config,
+        f"{mode_label} mode applied: {len(applied)} changed, {len(skipped_locked)} locked, {len(skipped_missing)} unavailable",
+        "control",
+    )
+    await _async_save_config(hass, entry, config)
+
+    return {
+        "success": True,
+        "mode_id": mode_id,
+        "applied": applied,
+        "skipped_locked": skipped_locked,
+        "skipped_missing": skipped_missing,
+    }
+
+
+async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+
+    await _async_apply_mode(hass, entry, call.data["mode_id"], call.context)
 
 
 async def _handle_arm_equipment(
@@ -774,7 +1002,9 @@ async def websocket_validate_config(
 ) -> None:
     """Validate OpenReef mapped entities against the HA state registry."""
     entry = _first_entry(hass)
-    validation = _validate_config(hass, _config_from_entry(entry))
+    config = _config_from_entry(entry)
+    validation = _validate_config(hass, config)
+    await _async_sync_alert_notifications(hass, config)
     connection.send_result(msg["id"], validation)
 
 
@@ -785,8 +1015,37 @@ async def websocket_validate_mappings_alias(
 ) -> None:
     """Backward-compatible validation alias for older Labs builds."""
     entry = _first_entry(hass)
-    validation = _validate_config(hass, _config_from_entry(entry))
+    config = _config_from_entry(entry)
+    validation = _validate_config(hass, config)
+    await _async_sync_alert_notifications(hass, config)
     connection.send_result(msg["id"], validation)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/apply_mode",
+        vol.Required("mode_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_apply_mode(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Apply one confirmed OpenReef mode to explicitly armed equipment."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+
+    try:
+        result = await _async_apply_mode(
+            hass, entry, msg["mode_id"], connection.context(msg)
+        )
+    except ServiceValidationError as err:
+        connection.send_error(msg["id"], "invalid_mode", str(err))
+        return
+    connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command(
@@ -888,6 +1147,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_search_entities)
     websocket_api.async_register_command(hass, websocket_validate_config)
     websocket_api.async_register_command(hass, websocket_validate_mappings_alias)
+    websocket_api.async_register_command(hass, websocket_apply_mode)
     websocket_api.async_register_command(hass, websocket_toggle_equipment)
 
     hass.services.async_register(
@@ -932,6 +1192,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
             entry, options={**entry.options, CONF_SETTINGS: normalised}
         )
     await _async_refresh_issues(hass, entry)
+    await _async_sync_alert_notifications(hass, normalised)
     return True
 
 
@@ -941,6 +1202,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_ARMED_UNAVAILABLE)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_LEGACY_LABS_CONFIG)
+    for sensor_id in MVP_SENSORS:
+        await hass.services.async_call(
+            "persistent_notification",
+            "dismiss",
+            {"notification_id": f"openreef_alert_{sensor_id}"},
+            blocking=False,
+        )
     return True
 
 

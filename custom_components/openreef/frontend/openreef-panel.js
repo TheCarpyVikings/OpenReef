@@ -18,6 +18,18 @@ class OpenReefPanel extends HTMLElement {
     this._lastRenderedSetupStep = null;
     this._trend = null;
     this._trendRequest = "";
+    this._modeConfirm = null;
+    this._configDirty = false;
+    this._settingsSections = {
+      profile: true,
+      mission: true,
+      sensors: true,
+      equipment: true,
+      modes: true,
+      alerts: true,
+      interlocks: true,
+      energy: true,
+    };
   }
 
   set hass(hass) {
@@ -68,6 +80,7 @@ class OpenReefPanel extends HTMLElement {
       this._sensorMeta = result.sensor_meta || {};
       this._validation = result.validation || null;
       this._setupOpen = !this._config?.display?.setupComplete;
+      this._configDirty = false;
       this._error = "";
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not load OpenReef";
@@ -89,6 +102,7 @@ class OpenReefPanel extends HTMLElement {
       });
       this._config = result.config || nextConfig;
       this._validation = result.validation || null;
+      this._configDirty = false;
       this._message = "Saved";
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not save OpenReef";
@@ -105,6 +119,18 @@ class OpenReefPanel extends HTMLElement {
     });
     this._config = result.config || nextConfig;
     this._validation = result.validation || null;
+    this._configDirty = false;
+  }
+
+  _setDirty(dirty = true) {
+    this._configDirty = dirty;
+    const saveButton = this.shadowRoot.querySelector("[data-action='save']");
+    if (saveButton) saveButton.textContent = dirty ? "Save changes" : "Saved";
+    const saveState = this.shadowRoot.querySelector(".save-state");
+    if (saveState) {
+      saveState.textContent = dirty ? "Unsaved changes" : "Saved";
+      saveState.classList.toggle("dirty", dirty);
+    }
   }
 
   async _validateConfig() {
@@ -152,6 +178,30 @@ class OpenReefPanel extends HTMLElement {
       this._message = "Command sent";
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not toggle equipment";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _applyMode(modeId) {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/apply_mode", mode_id: modeId });
+      const refreshed = await this._callWS({ type: "openreef/get_config" });
+      this._config = refreshed.config || this._config;
+      this._validation = refreshed.validation || this._validation;
+      this._configDirty = false;
+      const applied = result.applied?.length || 0;
+      const locked = result.skipped_locked?.length || 0;
+      const unavailable = result.skipped_missing?.length || 0;
+      this._message = `Mode applied: ${applied} changed, ${locked} locked, ${unavailable} unavailable`;
+      this._modeConfirm = null;
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not apply mode";
     } finally {
       this._busy = false;
       this._render();
@@ -472,16 +522,19 @@ class OpenReefPanel extends HTMLElement {
       if (action === "choose-sensor") {
         this._config.sensors[id].entity_id = target.dataset.entity;
         delete this._searchResults[`sensor:${id}`];
+        this._setDirty(true);
         this._render();
       }
       if (action === "choose-equipment") {
         this._config.equipment[id][field] = target.dataset.entity;
         delete this._searchResults[`equipment:${id}:${field}`];
+        this._setDirty(true);
         this._render();
       }
       if (action === "choose-energy") {
         this._config.energy[field] = target.dataset.entity;
         delete this._searchResults[`energy:${field}`];
+        this._setDirty(true);
         this._render();
       }
       if (action === "hide-matches") {
@@ -492,6 +545,7 @@ class OpenReefPanel extends HTMLElement {
         const sensor = this._config.sensors[id];
         sensor.enabled = !this._sensorEnabled(sensor);
         delete this._searchResults[`sensor:${id}`];
+        this._setDirty(true);
         this._render();
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
@@ -500,6 +554,7 @@ class OpenReefPanel extends HTMLElement {
         delete this._config.equipment[id];
         Object.values(this._config.modePreviews || {}).forEach((preview) => delete preview[id]);
         this._recordActivity(`Removed equipment: ${removed}`);
+        this._setDirty(true);
         this._render();
       }
       if (action === "toggle-armed") {
@@ -511,16 +566,32 @@ class OpenReefPanel extends HTMLElement {
       if (action === "toggle-equipment") this._toggleEquipment(id);
       if (action === "set-theme") {
         this._config.display.themeColor = target.dataset.color;
+        this._setDirty(true);
         this._render();
       }
       if (action === "set-mode") {
+        const modeId = target.dataset.mode || "running";
+        if (modeId !== "running") {
+          this._modeConfirm = modeId;
+          this._render();
+          return;
+        }
         const modeLabel = this._modeChoices().find(([modeId]) => modeId === target.dataset.mode)?.[1] || "Running";
         this._config.mode = {
-          active: target.dataset.mode || "running",
+          active: modeId,
           startedAt: new Date().toISOString(),
         };
         this._recordActivity(`Mode changed to ${modeLabel}`);
         this._saveConfig();
+      }
+      if (action === "apply-mode") this._applyMode(target.dataset.mode);
+      if (action === "close-mode-confirm") {
+        this._modeConfirm = null;
+        this._render();
+      }
+      if (action === "toggle-settings-section") {
+        this._settingsSections[id] = !this._settingsSectionOpen(id);
+        this._render();
       }
       if (action === "clear-activity") {
         this._config.activity = [];
@@ -549,6 +620,14 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "sensor") this._config.sensors[id][field] = value;
       if (scope === "equipment") this._config.equipment[id][field] = value;
       if (scope === "energy") this._config.energy[field] = value;
+      if (scope === "alerts") {
+        this._config.alerts = this._config.alerts || {};
+        this._config.alerts[field] = value;
+      }
+      if (scope === "interlocks") {
+        this._config.interlocks = this._config.interlocks || {};
+        this._config.interlocks[field] = value;
+      }
       if (scope === "mode-preview") {
         const modeId = target.dataset.mode;
         const equipmentId = target.dataset.equipment;
@@ -560,6 +639,7 @@ class OpenReefPanel extends HTMLElement {
         this._config.display.missionCards = this._missionCards();
         this._config.display.missionCards[id] = value;
       }
+      if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
     };
 
@@ -584,6 +664,7 @@ class OpenReefPanel extends HTMLElement {
       armed: false,
     };
     this._recordActivity(`Added equipment: ${label || "Equipment"}`);
+    this._setDirty(true);
     this._render();
   }
 
@@ -682,7 +763,7 @@ class OpenReefPanel extends HTMLElement {
 
   _sensorStatus(sensor) {
     if (!this._sensorEnabled(sensor)) return "disabled";
-    if (sensor.alertsEnabled === false) return "ok";
+    if (sensor.alertsEnabled === false) return "muted";
     const value = this._number(sensor.entity_id);
     if (value === null) return "unknown";
     if (value < Number(sensor.min) || value > Number(sensor.max)) return "critical";
@@ -690,6 +771,12 @@ class OpenReefPanel extends HTMLElement {
     const buffer = (Number(sensor.max) - Number(sensor.min)) * bufferPercent;
     if (value < Number(sensor.min) + buffer || value > Number(sensor.max) - buffer) return "warning";
     return "ok";
+  }
+
+  _sensorStatusLabel(status) {
+    if (status === "muted") return "muted";
+    if (status === "unknown") return "not reporting";
+    return status;
   }
 
   _format(value, digits = 1) {
@@ -758,8 +845,8 @@ class OpenReefPanel extends HTMLElement {
   _modeChoices() {
     return [
       ["running", "Running", "Normal monitoring. No equipment changes are applied."],
-      ["feed", "Feed", "Marks the tank as feeding. Automation will come later behind explicit arming."],
-      ["maintenance", "Maintenance", "Marks hands-in-tank work. Controls remain manual and safe."],
+      ["feed", "Feed", "Temporarily changes selected armed equipment after confirmation."],
+      ["maintenance", "Maintenance", "Applies a hands-in-tank equipment plan after confirmation."],
     ];
   }
 
@@ -839,9 +926,56 @@ class OpenReefPanel extends HTMLElement {
     return state;
   }
 
-  _heaterInterlocks() {
+  _interlockWarnings() {
+    const interlocks = this._config.interlocks || {};
+    const equipment = Object.entries(this._config.equipment || {});
+    const warnings = [];
+
+    if (interlocks.heaterRequiresTankTemp !== false) {
+      warnings.push(...this._heaterInterlocks(equipment));
+    }
+    if (interlocks.atoMaxRuntimeEnabled !== true) {
+      const armedAto = equipment.filter(
+        ([id, item]) => item.armed && this._equipmentType(id, item) === "Top off",
+      );
+      if (armedAto.length) {
+        warnings.push({
+          title: "ATO runtime interlock is not enabled",
+          detail: "An ATO/top-off device is armed. Configure the max-runtime guard before relying on unattended top-off control.",
+        });
+      }
+    }
+    if (interlocks.returnPumpSkimmerWarning !== false) {
+      const armedSkimmers = equipment.filter(
+        ([id, item]) => item.armed && `${id} ${item.label || ""}`.toLowerCase().includes("skimmer"),
+      );
+      const armedReturnPumps = equipment.filter(
+        ([id, item]) => item.armed && `${id} ${item.label || ""}`.toLowerCase().includes("return"),
+      );
+      if (armedSkimmers.length && !armedReturnPumps.length) {
+        warnings.push({
+          title: "Skimmer has no armed return pump relationship",
+          detail: "Arm or map the return pump so future skimmer safety rules can prevent dry or overflow scenarios.",
+        });
+      }
+      armedSkimmers.forEach(([skimmerId, skimmer]) => {
+        const skimmerState = this._stateValue(skimmer.switch_entity_id);
+        const returnOff = armedReturnPumps.some(([, pump]) => this._stateValue(pump.switch_entity_id) === "off");
+        if (skimmerState === "on" && returnOff) {
+          warnings.push({
+            title: "Skimmer is on while an armed return pump is off",
+            detail: `${skimmer.label || skimmerId} is running. Check return flow before leaving the system unattended.`,
+          });
+        }
+      });
+    }
+
+    return warnings;
+  }
+
+  _heaterInterlocks(equipment = Object.entries(this._config.equipment || {})) {
     const tempSensor = this._config.sensors?.temp;
-    const heaters = Object.entries(this._config.equipment || {}).filter(
+    const heaters = equipment.filter(
       ([id, item]) => item.armed && this._equipmentType(id, item) === "Temperature" && `${id} ${item.label || ""}`.toLowerCase().includes("heater"),
     );
 
@@ -878,7 +1012,52 @@ class OpenReefPanel extends HTMLElement {
     if (!actions.length) return "Preview not configured.";
     const off = actions.filter((state) => state === "off").length;
     const on = actions.filter((state) => state === "on").length;
-    return `${off} off, ${on} on when automation is added.`;
+    return `${off} off, ${on} on when confirmed.`;
+  }
+
+  _modeActionRows(modeId) {
+    const preview = this._modePreview(modeId);
+    return Object.entries(preview)
+      .filter(([, state]) => state === "on" || state === "off")
+      .map(([equipmentId, desiredState]) => {
+        const item = this._config.equipment?.[equipmentId] || {};
+        const switchEntity = item.switch_entity_id || "";
+        let status = "ready";
+        let detail = switchEntity || "No switch mapped";
+        if (!switchEntity) {
+          status = "missing";
+          detail = "No switch mapped";
+        } else if (!item.armed) {
+          status = "locked";
+          detail = "Skipped because this device is disarmed";
+        } else {
+          const current = this._stateValue(switchEntity);
+          if (current === "unknown" || current === "unavailable" || current === "--") {
+            status = "missing";
+            detail = `${switchEntity} is ${current}`;
+          } else {
+            detail = `${switchEntity} is currently ${current}`;
+          }
+        }
+        return {
+          equipmentId,
+          label: item.label || equipmentId,
+          desiredState,
+          detail,
+          status,
+          armed: Boolean(item.armed),
+        };
+      });
+  }
+
+  _modeActionCounts(modeId) {
+    const rows = this._modeActionRows(modeId);
+    return {
+      rows,
+      ready: rows.filter((row) => row.status === "ready").length,
+      locked: rows.filter((row) => row.status === "locked").length,
+      missing: rows.filter((row) => row.status === "missing").length,
+    };
   }
 
   _recordActivity(message, type = "info") {
@@ -967,6 +1146,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._activeContent()}
         ${this._setupOpen ? this._setupWizard() : ""}
         ${this._trend ? this._trendModal() : ""}
+        ${this._modeConfirm ? this._modeConfirmModal() : ""}
       </main>
     `;
 
@@ -1018,7 +1198,7 @@ class OpenReefPanel extends HTMLElement {
     const warnings = sensorAlerts.filter((alert) => alert.status === "warning");
     const missing = this._validation?.missing_entities || [];
     const armedUnavailable = this._validation?.armed_unavailable || [];
-    const interlocks = this._heaterInterlocks();
+    const interlocks = this._interlockWarnings();
     const mappedSensors = sensors.filter(([, sensor]) => sensor.entity_id).length;
     const armedEquipment = equipment.filter(([, item]) => item.armed).length;
     const mappedEnergy = this._energyTotalMappings().filter(([, energyKey]) => this._config.energy[energyKey]).length;
@@ -1092,7 +1272,7 @@ class OpenReefPanel extends HTMLElement {
           <div>
             <p class="eyebrow">Current Mode</p>
             <h3>${this._escape(this._activeModeLabel())}</h3>
-            <p class="muted">Mode is currently a safe label only. Preview equipment behavior in Settings before automation is enabled.</p>
+            <p class="muted">Feed and Maintenance modes require confirmation and only act on armed equipment.</p>
           </div>
           <span class="pill">${this._escape(startedLabel)}</span>
         </div>
@@ -1391,33 +1571,64 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _settingsSectionOpen(id) {
+    return this._settingsSections[id] !== false;
+  }
+
+  _settingsPanel(id, title, description, content) {
+    const open = this._settingsSectionOpen(id);
+    return `
+      <article class="panel settings-section">
+        <button class="settings-section-head" data-action="toggle-settings-section" data-id="${this._escape(id)}">
+          <span>
+            <strong>${this._escape(title)}</strong>
+            <small>${this._escape(description)}</small>
+          </span>
+          <span class="pill">${open ? "Hide" : "Show"}</span>
+        </button>
+        ${open ? `<div class="settings-section-body">${content}</div>` : ""}
+      </article>
+    `;
+  }
+
+  _saveControls() {
+    return `
+      <div class="settings-save">
+        <span class="save-state ${this._configDirty ? "dirty" : ""}">${this._configDirty ? "Unsaved changes" : "Saved"}</span>
+        <button class="primary" data-action="save">${this._configDirty ? "Save changes" : "Saved"}</button>
+      </div>
+    `;
+  }
+
   _settings() {
     return `
       <section class="stack">
         <div class="section-head">
-          <h2>Settings</h2>
-          <button class="primary" data-action="save">Save settings</button>
+          <div>
+            <h2>Settings</h2>
+            <p>Configure only the controller pieces you own. Entity searches stay targeted and capped.</p>
+          </div>
+          ${this._saveControls()}
         </div>
         ${this._profileSettings()}
         ${this._missionSettings()}
         ${this._sensorSettings()}
         ${this._equipmentSettings()}
         ${this._modePreviewSettings()}
+        ${this._alertsSettings()}
+        ${this._interlockSettings()}
         ${this._energySettings()}
       </section>
     `;
   }
 
   _sensorSettings() {
-    return `
-      <article class="panel">
-        <div class="section-head">
-          <h3>Sensors</h3>
-          <p>Tank and room readings are separated so similar entities are easier to scan.</p>
-        </div>
-        ${this._sensorMappingGroups()}
-      </article>
-    `;
+    return this._settingsPanel(
+      "sensors",
+      "Sensors",
+      "Enable only the probes and room sensors you actually own.",
+      this._sensorMappingGroups(),
+    );
   }
 
   _sensorMappingGroups() {
@@ -1445,9 +1656,11 @@ class OpenReefPanel extends HTMLElement {
 
   _missionSettings() {
     const cards = this._missionCards();
-    return `
-      <article class="panel">
-        <h3>Mission Control Cards</h3>
+    return this._settingsPanel(
+      "mission",
+      "Mission Control",
+      "Choose which summary cards appear on the first screen.",
+      `
         <div class="grid three compact">
           ${this._missionCardChoices().map(([id, label, description]) => `
             <label class="toggle-card">
@@ -1459,15 +1672,17 @@ class OpenReefPanel extends HTMLElement {
             </label>
           `).join("")}
         </div>
-      </article>
-    `;
+      `,
+    );
   }
 
   _profileSettings() {
     const themeColor = this._themeColor();
-    return `
-      <article class="panel">
-        <h3>Profile</h3>
+    return this._settingsPanel(
+      "profile",
+      "Profile",
+      "Name the controller, pick a theme, and set your energy tariff.",
+      `
         <div class="grid two compact">
           <label>Tank name<input data-scope="tank" data-field="name" value="${this._escape(this._config.tank.name)}"></label>
           <label>Owner<input data-scope="tank" data-field="owner" value="${this._escape(this._config.tank.owner)}"></label>
@@ -1489,8 +1704,8 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <label>Tariff<input type="number" step="0.01" data-scope="energy" data-field="tariff" value="${this._escape(this._config.energy.tariff)}"></label>
         </div>
-      </article>
-    `;
+      `,
+    );
   }
 
   _sensorPicker(id, sensor) {
@@ -1519,7 +1734,7 @@ class OpenReefPanel extends HTMLElement {
         ${enabled ? `
           <div class="card-head">
             <span class="muted">Used in Live Stats, trends, and Mission Control alerts.</span>
-            <span class="pill ${status}">${this._escape(status)}</span>
+            <span class="pill ${status}">${this._escape(this._sensorStatusLabel(status))}</span>
           </div>
           <label>Entity<input data-scope="sensor" data-id="${this._escape(id)}" data-field="entity_id" value="${this._escape(sensor.entity_id)}" placeholder="sensor.example"></label>
           <label class="toggle-card">
@@ -1543,17 +1758,20 @@ class OpenReefPanel extends HTMLElement {
 
   _equipmentSettings() {
     const quick = ["Return Pump", "Heater", "Skimmer", "ATO", "Wave Maker", "Lights"];
-    return `
-      <article class="panel">
+    return this._settingsPanel(
+      "equipment",
+      "Equipment",
+      "Map switch-controlled devices, then arm them deliberately.",
+      `
         <div class="section-head">
-          <h3>Equipment</h3>
+          <p class="muted">Add common reef equipment quickly, or rename it after adding.</p>
           <div class="quick-add">${quick.map((label) => `<button class="secondary" data-action="add-equipment" data-label="${this._escape(label)}">+ ${this._escape(label)}</button>`).join("")}</div>
         </div>
         <div class="stack tight">
           ${Object.entries(this._config.equipment || {}).map(([id, item]) => this._equipmentEditor(id, item)).join("") || `<p class="muted">Add equipment to enable safe controls and energy tracking.</p>`}
         </div>
-      </article>
-    `;
+      `,
+    );
   }
 
   _equipmentEditor(id, item) {
@@ -1600,21 +1818,18 @@ class OpenReefPanel extends HTMLElement {
 
   _modePreviewSettings() {
     const equipment = Object.entries(this._config.equipment || {});
-    return `
-      <article class="panel">
-        <div class="section-head">
-          <div>
-            <h3>Mode Behavior Preview</h3>
-            <p>Preview only for now. These settings do not automatically control equipment yet.</p>
-          </div>
-        </div>
+    return this._settingsPanel(
+      "modes",
+      "Mode Actions",
+      "Define what Feed and Maintenance mode will do after confirmation.",
+      `
         ${equipment.length ? `
           <div class="grid two">
             ${["feed", "maintenance"].map((modeId) => this._modePreviewEditor(modeId, equipment)).join("")}
           </div>
-        ` : `<p class="muted">Add equipment first, then preview what Feed or Maintenance mode should eventually do.</p>`}
-      </article>
-    `;
+        ` : `<p class="muted">Add equipment first, then choose what Feed or Maintenance mode should do.</p>`}
+      `,
+    );
   }
 
   _modePreviewEditor(modeId, equipment) {
@@ -1647,6 +1862,87 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _alertsSettings() {
+    const alerts = this._config.alerts || {};
+    const sensors = this._enabledSensors();
+    const alertRows = sensors.map(([id, sensor]) => {
+      const status = this._sensorStatus(sensor);
+      return `
+        <div class="row">
+          <div>
+            <strong>${this._escape(sensor.label || id)}</strong>
+            <span>${sensor.alertsEnabled === false ? "Alerts muted" : this._escape(sensor.entity_id || "No entity mapped")}</span>
+          </div>
+          <span class="pill ${status}">${this._escape(this._sensorStatusLabel(status))}</span>
+        </div>
+      `;
+    }).join("");
+    return this._settingsPanel(
+      "alerts",
+      "Alerts",
+      "Control Mission Control alert behaviour and optional Home Assistant notifications.",
+      `
+        <div class="grid two compact">
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="alerts" data-field="persistentNotifications" ${alerts.persistentNotifications ? "checked" : ""}>
+            <span>
+              <strong>Home Assistant notifications</strong>
+              <small>Create persistent notifications when OpenReef detects configured sensor alerts.</small>
+            </span>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="alerts" data-field="notifyCriticalOnly" ${alerts.notifyCriticalOnly !== false ? "checked" : ""}>
+            <span>
+              <strong>Critical notifications only</strong>
+              <small>Keep warnings inside Mission Control unless a reading moves outside range.</small>
+            </span>
+          </label>
+        </div>
+        <div class="status-list">
+          ${alertRows || `<p class="muted">Enable sensor types to see their alert state here.</p>`}
+        </div>
+      `,
+    );
+  }
+
+  _interlockSettings() {
+    const interlocks = this._config.interlocks || {};
+    return this._settingsPanel(
+      "interlocks",
+      "Interlocks",
+      "Configure safety rules before future automation is allowed to act.",
+      `
+        <div class="grid two compact">
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="interlocks" data-field="heaterRequiresTankTemp" ${interlocks.heaterRequiresTankTemp !== false ? "checked" : ""}>
+            <span>
+              <strong>Heater requires tank temperature</strong>
+              <small>Warn if a heater is armed without a live tank temperature reading.</small>
+            </span>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="interlocks" data-field="returnPumpSkimmerWarning" ${interlocks.returnPumpSkimmerWarning !== false ? "checked" : ""}>
+            <span>
+              <strong>Skimmer follows return flow</strong>
+              <small>Warn if skimmer control is armed without a return-pump relationship.</small>
+            </span>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="interlocks" data-field="atoMaxRuntimeEnabled" ${interlocks.atoMaxRuntimeEnabled ? "checked" : ""}>
+            <span>
+              <strong>ATO max-runtime guard</strong>
+              <small>Prepare a maximum top-off run time before unattended ATO automation is introduced.</small>
+            </span>
+          </label>
+          <label>ATO max runtime minutes
+            <input type="number" min="1" max="120" step="1" data-scope="interlocks" data-field="atoMaxRuntimeMinutes" value="${this._escape(interlocks.atoMaxRuntimeMinutes ?? 5)}">
+          </label>
+        </div>
+        ${this._interlockWarnings().length ? `<div class="notice warning-notice">${this._interlockWarnings().length} interlock warning(s) currently visible in Mission Control.</div>` : `<p class="muted">No interlock warnings are active.</p>`}
+      `,
+    );
+  }
+
   _energySettings() {
     const fields = [
       ["daily_energy_entity_id", "Daily energy"],
@@ -1656,14 +1952,16 @@ class OpenReefPanel extends HTMLElement {
       ["weekly_cost_entity_id", "Weekly cost"],
       ["monthly_cost_entity_id", "Monthly cost"],
     ];
-    return `
-      <article class="panel">
-        <h3>Energy Totals</h3>
+    return this._settingsPanel(
+      "energy",
+      "Energy Totals",
+      "Optional daily, weekly, monthly, and cost sensors.",
+      `
         <div class="grid two compact">
           ${fields.map(([field, label]) => this._energyPicker(field, label)).join("")}
         </div>
-      </article>
-    `;
+      `,
+    );
   }
 
   _energyPicker(field, label) {
@@ -1801,6 +2099,46 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _modeConfirmModal() {
+    const modeId = this._modeConfirm;
+    const mode = this._modeChoices().find(([id]) => id === modeId) || [modeId, modeId, ""];
+    const counts = this._modeActionCounts(modeId);
+    return `
+      <div class="modal">
+        <section class="wizard confirm-dialog">
+          <button class="close" data-action="close-mode-confirm">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Confirm Mode Action</p>
+              <h2>${this._escape(mode[1])}</h2>
+              <p class="muted">${this._escape(mode[2])}</p>
+            </div>
+            <span class="pill ${counts.ready ? "warning" : "unknown"}">${counts.ready} ready</span>
+          </div>
+          <div class="notice warning-notice">OpenReef will only control mapped switch entities that are explicitly armed in Settings. Locked or unavailable equipment will be skipped.</div>
+          ${this._configDirty ? `<div class="notice">Save your Settings changes before applying this mode, so Home Assistant uses the same plan shown here.</div>` : ""}
+          ${counts.rows.length ? `
+            <div class="mode-confirm-list">
+              ${counts.rows.map((row) => `
+                <div class="mode-confirm-row ${this._escape(row.status)}">
+                  <div>
+                    <strong>${this._escape(row.label)}</strong>
+                    <span>${this._escape(row.detail)}</span>
+                  </div>
+                  <span class="pill ${row.status === "ready" ? "ok" : row.status === "locked" ? "disabled" : "warning"}">${this._escape(row.status === "ready" ? `turn ${row.desiredState}` : row.status)}</span>
+                </div>
+              `).join("")}
+            </div>
+          ` : `<p class="muted">No equipment actions are configured for this mode yet. Add them in Settings.</p>`}
+          <footer class="wizard-actions">
+            <button class="secondary" data-action="close-mode-confirm">Cancel</button>
+            <button class="primary" data-action="apply-mode" data-mode="${this._escape(modeId)}" ${counts.ready && !this._configDirty ? "" : "disabled"}>Apply ${this._escape(mode[1])}</button>
+          </footer>
+        </section>
+      </div>
+    `;
+  }
+
   _setupWizard() {
     const steps = ["Profile", "Sensors", "Equipment", "Finish"];
     return `
@@ -1900,6 +2238,23 @@ class OpenReefPanel extends HTMLElement {
         .activity-item span { color: #8da2ba; font-size: 12px; font-weight: 800; }
         .activity-item strong { color: #dcecff; overflow-wrap: anywhere; }
         .activity-item.control strong { color: #bbf7d0; }
+        .settings-save { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+        .save-state { border: 1px solid #166534; border-radius: 999px; padding: 7px 11px; color: #bbf7d0; background: #0b2b24; font-size: 12px; font-weight: 800; }
+        .save-state.dirty { border-color: #a16207; color: #fde68a; background: #2f2614; }
+        .settings-section { display: grid; gap: 14px; }
+        .settings-section-head { width: 100%; border: 0; background: transparent; padding: 0; display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; text-align: left; color: #e5edf5; }
+        .settings-section-head span:first-child { display: grid; gap: 4px; }
+        .settings-section-head strong { font-size: 18px; }
+        .settings-section-head small { color: #8da2ba; }
+        .settings-section-body { display: grid; gap: 14px; }
+        .status-list { display: grid; gap: 6px; margin-top: 14px; }
+        .mode-confirm-list { display: grid; gap: 8px; }
+        .mode-confirm-row { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: #0b1724; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+        .mode-confirm-row div { display: grid; gap: 4px; }
+        .mode-confirm-row span { color: #8da2ba; }
+        .mode-confirm-row.ready { border-color: #166534; }
+        .mode-confirm-row.locked { opacity: .72; }
+        .confirm-dialog { max-width: 780px; }
         .control-row, .settings-actions { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
         .control-row { padding-top: 18px; color: #8da2ba; }
         .control-switch, .arm-switch { display: inline-flex; align-items: center; gap: 10px; min-width: 112px; min-height: 44px; border: 1px solid #334155; border-radius: 999px; padding: 5px 14px 5px 5px; background: #1f2937; color: #dcecff; font-weight: 800; }
@@ -1918,6 +2273,7 @@ class OpenReefPanel extends HTMLElement {
         .pill.critical { background: #7f1d1d; color: #fecaca; }
         .pill.unknown { background: #334155; color: #cbd5e1; }
         .pill.disabled { background: #1f2937; color: #94a3b8; }
+        .pill.muted { background: #312e81; color: #ddd6fe; }
         .stat { display: grid; gap: 8px; min-height: 150px; color: #e5edf5; }
         .stat p { color: #dcecff; font-weight: 800; }
         .stat strong { font-size: 34px; color: #67e8f9; }
@@ -1986,7 +2342,7 @@ class OpenReefPanel extends HTMLElement {
         @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 900px) {
           .page { padding: 12px; }
-          .topbar, .hero, .section-head, .card-head { flex-direction: column; align-items: stretch; }
+          .topbar, .hero, .section-head, .card-head, .settings-section-head, .mode-confirm-row { flex-direction: column; align-items: stretch; }
           .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }

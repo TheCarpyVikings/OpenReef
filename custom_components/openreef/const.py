@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 6
+CORE_SCHEMA_VERSION = 7
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -166,6 +166,16 @@ DEFAULT_CORE_CONFIG = {
     "modePreviews": {
         "feed": {},
         "maintenance": {},
+    },
+    "alerts": {
+        "persistentNotifications": False,
+        "notifyCriticalOnly": True,
+    },
+    "interlocks": {
+        "heaterRequiresTankTemp": True,
+        "atoMaxRuntimeEnabled": False,
+        "atoMaxRuntimeMinutes": 5,
+        "returnPumpSkimmerWarning": True,
     },
     "activity": [],
     "modes": [],

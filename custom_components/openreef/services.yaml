@@ -1,6 +1,6 @@
 apply_mode:
   name: Apply mode
-  description: Applies a named OpenReef equipment mode. Only explicitly armed equipment controls are changed.
+  description: Applies a confirmed OpenReef mode plan. Only explicitly armed equipment controls are changed.
   fields:
     mode_id:
       name: Mode ID
