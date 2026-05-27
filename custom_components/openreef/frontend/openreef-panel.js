@@ -208,6 +208,46 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  async _muteAlert(sensorId, durationMinutes) {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._callWS({
+        type: "openreef/mute_alert",
+        sensor_id: sensorId,
+        duration_minutes: durationMinutes,
+      });
+      this._config = result.config || this._config;
+      this._validation = result.validation || this._validation;
+      this._message = durationMinutes > 0 ? "Alert muted" : "Alert unmuted";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not update alert mute";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _clearAlertHistory() {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/clear_alert_history" });
+      this._config = result.config || this._config;
+      this._validation = result.validation || this._validation;
+      this._message = "Alert history cleared";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not clear alert history";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
   async _loadTrend(sensorId, range = this._trend?.range || "24h") {
     const sensor = this._config?.sensors?.[sensorId];
     const entityId = sensor?.entity_id || "";
@@ -504,6 +544,9 @@ class OpenReefPanel extends HTMLElement {
         this._saveConfig();
       }
       if (action === "validate") this._validateConfig();
+      if (action === "mute-alert") this._muteAlert(id, Number(target.dataset.minutes || 60));
+      if (action === "unmute-alert") this._muteAlert(id, 0);
+      if (action === "clear-alert-history") this._clearAlertHistory();
       if (action === "search-sensor") {
         const meta = this._sensorMeta[id] || {};
         this._searchEntities(`sensor:${id}`, {
@@ -756,8 +799,27 @@ class OpenReefPanel extends HTMLElement {
     return Number.isFinite(value) ? value : null;
   }
 
-  _sensorStatus(sensor) {
+  _alertMutedUntil(sensorId) {
+    const value = this._config?.alerts?.muteUntil?.[sensorId];
+    if (!value) return null;
+    const mutedUntil = new Date(value);
+    if (!Number.isFinite(mutedUntil.getTime()) || mutedUntil <= new Date()) return null;
+    return mutedUntil;
+  }
+
+  _isAlertMuted(sensorId) {
+    return Boolean(this._alertMutedUntil(sensorId));
+  }
+
+  _formatMutedUntil(sensorId) {
+    const mutedUntil = this._alertMutedUntil(sensorId);
+    if (!mutedUntil) return "";
+    return mutedUntil.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+  }
+
+  _sensorStatus(sensor, sensorId = "") {
     if (!this._sensorEnabled(sensor)) return "disabled";
+    if (sensorId && this._isAlertMuted(sensorId)) return "muted";
     if (sensor.alertsEnabled === false) return "muted";
     const value = this._number(sensor.entity_id);
     if (value === null) return "unknown";
@@ -771,6 +833,7 @@ class OpenReefPanel extends HTMLElement {
   _sensorStatusLabel(status) {
     if (status === "muted") return "muted";
     if (status === "unknown") return "not reporting";
+    if (status === "ok") return "resolved";
     return status;
   }
 
@@ -874,7 +937,7 @@ class OpenReefPanel extends HTMLElement {
     return sensors
       .filter(([, sensor]) => sensor.alertsEnabled !== false)
       .map(([id, sensor]) => {
-        const status = this._sensorStatus(sensor);
+        const status = this._sensorStatus(sensor, id);
         if (!["critical", "warning", "unknown"].includes(status)) return null;
         const value = this._number(sensor.entity_id);
         const display = id === "ph" ? this._format(value, 2) : this._format(value, 1);
@@ -1366,7 +1429,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _sensorRow(id, sensor) {
-    const status = this._sensorStatus(sensor);
+    const status = this._sensorStatus(sensor, id);
     const value = this._number(sensor.entity_id);
     const display = id === "ph" ? this._format(value, 2) : this._format(value, 1);
     return `
@@ -1710,7 +1773,7 @@ class OpenReefPanel extends HTMLElement {
   _sensorPicker(id, sensor) {
     const key = `sensor:${id}`;
     const result = this._searchResults[key];
-    const status = this._sensorStatus(sensor);
+    const status = this._sensorStatus(sensor, id);
     const enabled = this._sensorEnabled(sensor);
     return `
       <section class="picker mapping-card ${this._sensorGroupClass(sensor)} ${enabled ? "" : "disabled-card"}">
@@ -1865,17 +1928,32 @@ class OpenReefPanel extends HTMLElement {
     const alerts = this._config.alerts || {};
     const sensors = this._enabledSensors();
     const alertRows = sensors.map(([id, sensor]) => {
-      const status = this._sensorStatus(sensor);
+      const status = this._sensorStatus(sensor, id);
+      const mutedUntil = this._formatMutedUntil(id);
+      const statusDetail = mutedUntil
+        ? `Muted until ${mutedUntil}`
+        : sensor.alertsEnabled === false
+          ? "Alerts muted for this sensor"
+          : this._escape(sensor.entity_id || "No entity mapped");
       return `
-        <div class="row">
+        <div class="row alert-row">
           <div>
             <strong>${this._escape(sensor.label || id)}</strong>
-            <span>${sensor.alertsEnabled === false ? "Alerts muted" : this._escape(sensor.entity_id || "No entity mapped")}</span>
+            <span>${statusDetail}</span>
           </div>
-          <span class="pill ${status}">${this._escape(this._sensorStatusLabel(status))}</span>
+          <div class="alert-actions">
+            <span class="pill ${status}">${this._escape(this._sensorStatusLabel(status))}</span>
+            ${this._isAlertMuted(id)
+              ? `<button class="secondary compact-button" data-action="unmute-alert" data-id="${this._escape(id)}">Unmute</button>`
+              : `
+                <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="60">Mute 1h</button>
+                <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="1440">Mute 24h</button>
+              `}
+          </div>
         </div>
       `;
     }).join("");
+    const history = Array.isArray(alerts.history) ? alerts.history.slice(0, 10) : [];
     return this._settingsPanel(
       "alerts",
       "Alerts",
@@ -1899,6 +1977,22 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="status-list">
           ${alertRows || `<p class="muted">Enable sensor types to see their alert state here.</p>`}
+        </div>
+        <div class="section-head">
+          <div>
+            <h3>Alert history</h3>
+            <p>Recorded when OpenReef checks, saves, or mutes alert state.</p>
+          </div>
+          ${history.length ? `<button class="secondary compact-button" data-action="clear-alert-history">Clear history</button>` : ""}
+        </div>
+        <div class="alert-history">
+          ${history.length ? history.map((item) => `
+            <div class="activity-item ${this._escape(item.state || "info")}">
+              <span>${this._escape(this._formatActivityTime(item.timestamp))}</span>
+              <strong>${this._escape(item.title || item.label || item.sensor_id)}</strong>
+              <small>${this._escape(item.message || "")}</small>
+            </div>
+          `).join("") : `<p class="muted">No alert history yet. Use Check to refresh alert state.</p>`}
         </div>
       `,
     );
@@ -2237,6 +2331,10 @@ class OpenReefPanel extends HTMLElement {
         .activity-item span { color: #8da2ba; font-size: 12px; font-weight: 800; }
         .activity-item strong { color: #dcecff; overflow-wrap: anywhere; }
         .activity-item.control strong { color: #bbf7d0; }
+        .activity-item.critical strong { color: #fecaca; }
+        .activity-item.warning strong { color: #fde68a; }
+        .activity-item.muted strong { color: #ddd6fe; }
+        .activity-item.resolved strong { color: #bbf7d0; }
         .settings-save { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
         .save-state { border: 1px solid #166534; border-radius: 999px; padding: 7px 11px; color: #bbf7d0; background: #0b2b24; font-size: 12px; font-weight: 800; }
         .save-state.dirty { border-color: #a16207; color: #fde68a; background: #2f2614; }
@@ -2248,6 +2346,10 @@ class OpenReefPanel extends HTMLElement {
         .settings-section-head small { color: #a8bed4; }
         .settings-section-body { display: grid; gap: 14px; }
         .status-list { display: grid; gap: 6px; margin-top: 14px; }
+        .alert-row { align-items: center; }
+        .alert-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+        .alert-history { display: grid; gap: 8px; }
+        .alert-history .activity-item { grid-template-columns: minmax(130px, .18fr) minmax(180px, .28fr) 1fr; }
         .mode-confirm-list { display: grid; gap: 8px; }
         .mode-confirm-row { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: #0b1724; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
         .mode-confirm-row div { display: grid; gap: 4px; }
@@ -2304,10 +2406,9 @@ class OpenReefPanel extends HTMLElement {
         .candidate span { color: #93a4b8; font-size: 12px; }
         .mapping-card, .equipment-editor { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; }
         .mapping-card { gap: 11px; }
-        .mapping-card.tank-card { border-color: #1d4f6b; background: linear-gradient(180deg, rgba(14, 165, 233, .08), rgba(14, 26, 40, .96)); }
-        .mapping-card.room-card { border-color: #315f50; background: linear-gradient(180deg, rgba(34, 197, 94, .07), rgba(14, 26, 40, .96)); }
+        .mapping-card.tank-card, .mapping-card.room-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 34%, #0e1a28); box-shadow: inset 4px 0 0 var(--openreef-accent); }
         .mapping-card.entity-card { border-color: #3b4257; background: #101d2c; }
-        .mapping-card.disabled-card { border-color: #334155; background: #101824; }
+        .mapping-card.disabled-card { border-color: #334155; background: #101824; box-shadow: inset 4px 0 0 #475569; }
         .mapping-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
         .mapping-head h3 { margin-bottom: 0; }
         .mapping-section { display: grid; gap: 12px; border: 1px solid color-mix(in srgb, var(--openreef-accent) 22%, #223447); border-radius: 8px; padding: 14px; background: rgba(11, 23, 36, .82); }

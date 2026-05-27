@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +316,41 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     else:
         alerts["persistentNotifications"] = bool(alerts.get("persistentNotifications", False))
         alerts["notifyCriticalOnly"] = bool(alerts.get("notifyCriticalOnly", True))
+        mute_until = alerts.get("muteUntil")
+        alerts["muteUntil"] = (
+            {
+                sensor_id: muted_until
+                for sensor_id, muted_until in mute_until.items()
+                if sensor_id in MVP_SENSORS and isinstance(muted_until, str)
+            }
+            if isinstance(mute_until, dict)
+            else {}
+        )
+        last_states = alerts.get("lastStates")
+        alerts["lastStates"] = (
+            {
+                sensor_id: state
+                for sensor_id, state in last_states.items()
+                if sensor_id in MVP_SENSORS
+                and state in {"resolved", "warning", "critical", "muted"}
+            }
+            if isinstance(last_states, dict)
+            else {}
+        )
+        history = alerts.get("history")
+        alerts["history"] = (
+            [
+                item
+                for item in history[:50]
+                if isinstance(item, dict)
+                and isinstance(item.get("timestamp"), str)
+                and isinstance(item.get("sensor_id"), str)
+                and isinstance(item.get("state"), str)
+                and isinstance(item.get("title"), str)
+            ]
+            if isinstance(history, list)
+            else []
+        )
 
     interlocks = config.setdefault("interlocks", {})
     if not isinstance(interlocks, dict):
@@ -560,16 +595,72 @@ def _search_entities(
     )[:limit]
 
 
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _alert_mute_until(
+    config: dict[str, Any], sensor_id: str, now: datetime | None = None
+) -> datetime | None:
+    alerts = config.get("alerts", {})
+    mute_until = alerts.get("muteUntil", {}) if isinstance(alerts, dict) else {}
+    muted_until = _parse_datetime(mute_until.get(sensor_id)) if isinstance(mute_until, dict) else None
+    if muted_until is None:
+        return None
+    if muted_until <= (now or datetime.now(timezone.utc)):
+        if isinstance(mute_until, dict):
+            mute_until.pop(sensor_id, None)
+        return None
+    return muted_until
+
+
+def _append_alert_history(
+    alert_config: dict[str, Any],
+    sensor_id: str,
+    label: str,
+    state: str,
+    title: str,
+    message: str,
+) -> None:
+    history = alert_config.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        alert_config["history"] = history
+    history.insert(
+        0,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "sensor_id": sensor_id,
+            "label": label,
+            "state": state,
+            "title": title,
+            "message": message,
+        },
+    )
+    alert_config["history"] = history[:50]
+
+
 def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
     sensors = config.get("sensors", {})
     if not isinstance(sensors, dict):
         return alerts
+    now = datetime.now(timezone.utc)
 
     for sensor_id, sensor in sensors.items():
         if not isinstance(sensor, dict):
             continue
         if not sensor.get("enabled", False) or not sensor.get("alertsEnabled", True):
+            continue
+        if _alert_mute_until(config, sensor_id, now) is not None:
             continue
         entity_id = _normalise_entity_id(sensor.get("entity_id"))
         label = str(sensor.get("label") or sensor_id)
@@ -630,6 +721,50 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
             )
 
     return alerts
+
+
+def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> None:
+    alert_config = config.setdefault("alerts", {})
+    if not isinstance(alert_config, dict):
+        return
+    sensors = config.get("sensors", {})
+    if not isinstance(sensors, dict):
+        return
+
+    active_items = {item["id"]: item for item in _sensor_alert_items(hass, config)}
+    previous_states = alert_config.get("lastStates", {})
+    if not isinstance(previous_states, dict):
+        previous_states = {}
+    next_states: dict[str, str] = {}
+    now = datetime.now(timezone.utc)
+
+    for sensor_id, sensor in sensors.items():
+        if not isinstance(sensor, dict):
+            continue
+        if not sensor.get("enabled", False) or not sensor.get("alertsEnabled", True):
+            continue
+        label = str(sensor.get("label") or sensor_id)
+        item = active_items.get(sensor_id)
+        muted_until = _alert_mute_until(config, sensor_id, now)
+        if muted_until is not None:
+            state = "muted"
+            title = f"{label} alert muted"
+            message = f"Muted until {muted_until.isoformat()}"
+        elif item is not None:
+            state = item["severity"]
+            title = item["title"]
+            message = item["message"]
+        else:
+            state = "resolved"
+            title = f"{label} resolved"
+            message = "Reading is back inside the configured alert behaviour."
+
+        previous = previous_states.get(sensor_id)
+        if previous != state and (previous is not None or state != "resolved"):
+            _append_alert_history(alert_config, sensor_id, label, state, title, message)
+        next_states[sensor_id] = state
+
+    alert_config["lastStates"] = next_states
 
 
 async def _async_sync_alert_notifications(
@@ -732,6 +867,7 @@ async def _async_save_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
 ) -> dict[str, Any]:
     normalised = _normalise_core_config(config)
+    _sync_alert_state(hass, normalised)
     options = dict(entry.options)
     options[CONF_SETTINGS] = normalised
     hass.config_entries.async_update_entry(entry, options=options)
@@ -952,13 +1088,19 @@ async def _handle_record_manual_reading(
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/get_config"})
-@callback
-def websocket_get_config(
+@websocket_api.async_response
+async def websocket_get_config(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return the current OpenReef core configuration."""
     entry = _first_entry(hass)
     config = _config_from_entry(entry)
+    if entry is not None:
+        _sync_alert_state(hass, config)
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SETTINGS: config}
+        )
+        await _async_sync_alert_notifications(hass, config)
     connection.send_result(
         msg["id"],
         {
@@ -1047,6 +1189,11 @@ async def websocket_validate_config(
     """Validate OpenReef mapped entities against the HA state registry."""
     entry = _first_entry(hass)
     config = _config_from_entry(entry)
+    if entry is not None:
+        _sync_alert_state(hass, config)
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SETTINGS: config}
+        )
     validation = _validate_config(hass, config)
     await _async_sync_alert_notifications(hass, config)
     connection.send_result(msg["id"], validation)
@@ -1060,9 +1207,78 @@ async def websocket_validate_mappings_alias(
     """Backward-compatible validation alias for older Labs builds."""
     entry = _first_entry(hass)
     config = _config_from_entry(entry)
+    if entry is not None:
+        _sync_alert_state(hass, config)
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SETTINGS: config}
+        )
     validation = _validate_config(hass, config)
     await _async_sync_alert_notifications(hass, config)
     connection.send_result(msg["id"], validation)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/mute_alert",
+        vol.Required("sensor_id"): cv.string,
+        vol.Optional("duration_minutes", default=60): vol.All(
+            vol.Coerce(int), vol.Range(min=0, max=10080)
+        ),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mute_alert(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Mute or unmute one OpenReef sensor alert."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+
+    sensor_id = msg["sensor_id"]
+    config = _config_from_entry(entry)
+    sensors = config.get("sensors", {})
+    if not isinstance(sensors, dict) or sensor_id not in sensors:
+        connection.send_error(msg["id"], "invalid_sensor", "Unknown OpenReef sensor")
+        return
+
+    alert_config = config.setdefault("alerts", {})
+    mute_until = alert_config.setdefault("muteUntil", {})
+    duration = msg["duration_minutes"]
+    if duration <= 0:
+        mute_until.pop(sensor_id, None)
+    else:
+        muted_until = datetime.now(timezone.utc) + timedelta(minutes=duration)
+        mute_until[sensor_id] = muted_until.isoformat()
+
+    config = await _async_save_config(hass, entry, config)
+    connection.send_result(
+        msg["id"],
+        {"success": True, "config": config, "validation": _validate_config(hass, config)},
+    )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/clear_alert_history"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_clear_alert_history(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Clear stored OpenReef alert history."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+
+    config = _config_from_entry(entry)
+    config.setdefault("alerts", {})["history"] = []
+    config = await _async_save_config(hass, entry, config)
+    connection.send_result(
+        msg["id"],
+        {"success": True, "config": config, "validation": _validate_config(hass, config)},
+    )
 
 
 @websocket_api.websocket_command(
@@ -1191,6 +1407,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_search_entities)
     websocket_api.async_register_command(hass, websocket_validate_config)
     websocket_api.async_register_command(hass, websocket_validate_mappings_alias)
+    websocket_api.async_register_command(hass, websocket_mute_alert)
+    websocket_api.async_register_command(hass, websocket_clear_alert_history)
     websocket_api.async_register_command(hass, websocket_apply_mode)
     websocket_api.async_register_command(hass, websocket_toggle_equipment)
 
@@ -1231,6 +1449,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     is_legacy = isinstance(raw_settings, dict) and (
         "general" in raw_settings or "entities" in raw_settings
     )
+    _sync_alert_state(hass, normalised)
     if normalised != raw_settings and not is_legacy:
         hass.config_entries.async_update_entry(
             entry, options={**entry.options, CONF_SETTINGS: normalised}

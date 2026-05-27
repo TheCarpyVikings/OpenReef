@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 9
+CORE_SCHEMA_VERSION = 10
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -171,6 +171,9 @@ DEFAULT_CORE_CONFIG = {
     "alerts": {
         "persistentNotifications": False,
         "notifyCriticalOnly": True,
+        "muteUntil": {},
+        "history": [],
+        "lastStates": {},
     },
     "interlocks": {
         "heaterRequiresTankTemp": True,
