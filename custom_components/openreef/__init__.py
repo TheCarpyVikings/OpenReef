@@ -233,6 +233,12 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         sensor.setdefault("unit", meta["unit"])
         sensor.setdefault("min", meta["min"])
         sensor.setdefault("max", meta["max"])
+        sensor["alertsEnabled"] = bool(sensor.get("alertsEnabled", True))
+        try:
+            sensor["warningBuffer"] = float(sensor.get("warningBuffer", 10))
+        except (TypeError, ValueError):
+            sensor["warningBuffer"] = 10
+        sensor["warningBuffer"] = max(0, min(sensor["warningBuffer"], 50))
 
     mode = config.setdefault("mode", {})
     if not isinstance(mode, dict):
@@ -241,6 +247,23 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         active = mode.get("active")
         mode["active"] = active if active in {"running", "feed", "maintenance"} else "running"
         mode["startedAt"] = mode.get("startedAt") if isinstance(mode.get("startedAt"), str) else ""
+
+    mode_previews = config.setdefault("modePreviews", {})
+    if not isinstance(mode_previews, dict):
+        config["modePreviews"] = deepcopy(DEFAULT_CORE_CONFIG["modePreviews"])
+    else:
+        for mode_id in ("feed", "maintenance"):
+            preview = mode_previews.setdefault(mode_id, {})
+            if not isinstance(preview, dict):
+                mode_previews[mode_id] = {}
+                continue
+            for equipment_id, desired_state in list(preview.items()):
+                if not isinstance(equipment_id, str) or desired_state not in {
+                    "on",
+                    "off",
+                    "unchanged",
+                }:
+                    preview.pop(equipment_id)
 
     equipment = config.setdefault("equipment", {})
     if not isinstance(equipment, dict):
@@ -264,6 +287,26 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 equipment_config.get("cost_entity_id")
             )
             equipment_config["armed"] = bool(equipment_config.get("armed", False))
+
+    mode_previews = config.get("modePreviews", {})
+    if isinstance(mode_previews, dict):
+        for preview in mode_previews.values():
+            if isinstance(preview, dict):
+                for equipment_id in list(preview):
+                    if equipment_id not in config["equipment"]:
+                        preview.pop(equipment_id)
+
+    activity = config.setdefault("activity", [])
+    if not isinstance(activity, list):
+        config["activity"] = []
+    else:
+        config["activity"] = [
+            item
+            for item in activity[:50]
+            if isinstance(item, dict)
+            and isinstance(item.get("timestamp"), str)
+            and isinstance(item.get("message"), str)
+        ]
 
     return config
 

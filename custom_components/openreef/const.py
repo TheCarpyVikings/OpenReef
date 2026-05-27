@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 5
+CORE_SCHEMA_VERSION = 6
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -143,6 +143,8 @@ DEFAULT_CORE_CONFIG = {
             "unit": meta["unit"],
             "min": meta["min"],
             "max": meta["max"],
+            "alertsEnabled": True,
+            "warningBuffer": 10,
         }
         for sensor_id, meta in MVP_SENSORS.items()
     },
@@ -161,6 +163,11 @@ DEFAULT_CORE_CONFIG = {
         "active": "running",
         "startedAt": "",
     },
+    "modePreviews": {
+        "feed": {},
+        "maintenance": {},
+    },
+    "activity": [],
     "modes": [],
     "manualReadings": {},
 }

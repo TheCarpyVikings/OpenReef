@@ -98,6 +98,15 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  async _persistConfigSilently(nextConfig = this._config) {
+    const result = await this._callWS({
+      type: "openreef/save_config",
+      config: nextConfig,
+    });
+    this._config = result.config || nextConfig;
+    this._validation = result.validation || null;
+  }
+
   async _validateConfig() {
     try {
       this._validation = await this._callWS({ type: "openreef/validate_config" });
@@ -131,12 +140,15 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _toggleEquipment(equipmentId) {
+    const item = this._config.equipment?.[equipmentId] || {};
     this._busy = true;
     this._message = "";
     this._error = "";
     this._render();
     try {
       await this._callWS({ type: "openreef/toggle_equipment", equipment_id: equipmentId });
+      this._recordActivity(`Toggled ${item.label || equipmentId}`, "control");
+      await this._persistConfigSilently();
       this._message = "Command sent";
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not toggle equipment";
@@ -434,9 +446,13 @@ class OpenReefPanel extends HTMLElement {
       if (action === "finish-setup") {
         this._config.display.setupComplete = true;
         this._setupOpen = false;
+        this._recordActivity("Setup completed");
         this._saveConfig();
       }
-      if (action === "save") this._saveConfig();
+      if (action === "save") {
+        this._recordActivity("Settings saved");
+        this._saveConfig();
+      }
       if (action === "validate") this._validateConfig();
       if (action === "search-sensor") {
         const meta = this._sensorMeta[id] || {};
@@ -480,12 +496,16 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
       if (action === "remove-equipment") {
+        const removed = this._config.equipment[id]?.label || id;
         delete this._config.equipment[id];
+        Object.values(this._config.modePreviews || {}).forEach((preview) => delete preview[id]);
+        this._recordActivity(`Removed equipment: ${removed}`);
         this._render();
       }
       if (action === "toggle-armed") {
         const equipment = this._config.equipment[id];
         equipment.armed = !equipment.armed;
+        this._recordActivity(`${equipment.label || id} ${equipment.armed ? "armed" : "disarmed"}`, "control");
         this._saveConfig();
       }
       if (action === "toggle-equipment") this._toggleEquipment(id);
@@ -494,10 +514,16 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "set-mode") {
+        const modeLabel = this._modeChoices().find(([modeId]) => modeId === target.dataset.mode)?.[1] || "Running";
         this._config.mode = {
           active: target.dataset.mode || "running",
           startedAt: new Date().toISOString(),
         };
+        this._recordActivity(`Mode changed to ${modeLabel}`);
+        this._saveConfig();
+      }
+      if (action === "clear-activity") {
+        this._config.activity = [];
         this._saveConfig();
       }
       if (action === "show-trend") this._loadTrend(id);
@@ -510,7 +536,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "refresh-trend") this._loadTrend(id, this._trend?.range || "24h");
     });
 
-    this.shadowRoot.addEventListener("input", (event) => {
+    const handleFieldInput = (event) => {
       const target = event.target;
       if (!target.dataset) return;
       const scope = target.dataset.scope;
@@ -523,12 +549,22 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "sensor") this._config.sensors[id][field] = value;
       if (scope === "equipment") this._config.equipment[id][field] = value;
       if (scope === "energy") this._config.energy[field] = value;
+      if (scope === "mode-preview") {
+        const modeId = target.dataset.mode;
+        const equipmentId = target.dataset.equipment;
+        this._config.modePreviews = this._config.modePreviews || { feed: {}, maintenance: {} };
+        this._config.modePreviews[modeId] = this._config.modePreviews[modeId] || {};
+        this._config.modePreviews[modeId][equipmentId] = value;
+      }
       if (scope === "mission-card") {
         this._config.display.missionCards = this._missionCards();
         this._config.display.missionCards[id] = value;
       }
       if (scope === "display" && field === "themeColor") this._render();
-    });
+    };
+
+    this.shadowRoot.addEventListener("input", handleFieldInput);
+    this.shadowRoot.addEventListener("change", handleFieldInput);
   }
 
   _addEquipment(label) {
@@ -547,6 +583,7 @@ class OpenReefPanel extends HTMLElement {
       cost_entity_id: "",
       armed: false,
     };
+    this._recordActivity(`Added equipment: ${label || "Equipment"}`);
     this._render();
   }
 
@@ -645,10 +682,12 @@ class OpenReefPanel extends HTMLElement {
 
   _sensorStatus(sensor) {
     if (!this._sensorEnabled(sensor)) return "disabled";
+    if (sensor.alertsEnabled === false) return "ok";
     const value = this._number(sensor.entity_id);
     if (value === null) return "unknown";
     if (value < Number(sensor.min) || value > Number(sensor.max)) return "critical";
-    const buffer = (Number(sensor.max) - Number(sensor.min)) * 0.1;
+    const bufferPercent = Math.max(0, Math.min(Number(sensor.warningBuffer ?? 10), 50)) / 100;
+    const buffer = (Number(sensor.max) - Number(sensor.min)) * bufferPercent;
     if (value < Number(sensor.min) + buffer || value > Number(sensor.max) - buffer) return "warning";
     return "ok";
   }
@@ -751,6 +790,7 @@ class OpenReefPanel extends HTMLElement {
 
   _sensorAlerts(sensors = this._enabledSensors()) {
     return sensors
+      .filter(([, sensor]) => sensor.alertsEnabled !== false)
       .map(([id, sensor]) => {
         const status = this._sensorStatus(sensor);
         if (!["critical", "warning", "unknown"].includes(status)) return null;
@@ -797,6 +837,64 @@ class OpenReefPanel extends HTMLElement {
     if (state === "on") return "On";
     if (state === "off") return "Off";
     return state;
+  }
+
+  _heaterInterlocks() {
+    const tempSensor = this._config.sensors?.temp;
+    const heaters = Object.entries(this._config.equipment || {}).filter(
+      ([id, item]) => item.armed && this._equipmentType(id, item) === "Temperature" && `${id} ${item.label || ""}`.toLowerCase().includes("heater"),
+    );
+
+    if (!heaters.length) return [];
+    if (!this._sensorEnabled(tempSensor)) {
+      return [{
+        title: "Heater interlock cannot verify tank temperature",
+        detail: "A heater is armed, but Tank Temperature is disabled.",
+      }];
+    }
+    if (!tempSensor?.entity_id) {
+      return [{
+        title: "Heater interlock needs a tank temperature sensor",
+        detail: "Map Tank Temperature before relying on armed heater controls.",
+      }];
+    }
+    const state = this._state(tempSensor.entity_id);
+    if (!state || ["unknown", "unavailable"].includes(state.state)) {
+      return [{
+        title: "Heater interlock has no live temperature reading",
+        detail: `${tempSensor.entity_id} is ${state?.state || "not available"}.`,
+      }];
+    }
+    return [];
+  }
+
+  _modePreview(modeId) {
+    return this._config.modePreviews?.[modeId] || {};
+  }
+
+  _modePreviewSummary(modeId) {
+    const preview = this._modePreview(modeId);
+    const actions = Object.values(preview).filter((state) => state === "on" || state === "off");
+    if (!actions.length) return "Preview not configured.";
+    const off = actions.filter((state) => state === "off").length;
+    const on = actions.filter((state) => state === "on").length;
+    return `${off} off, ${on} on when automation is added.`;
+  }
+
+  _recordActivity(message, type = "info") {
+    this._config.activity = Array.isArray(this._config.activity) ? this._config.activity : [];
+    this._config.activity.unshift({
+      timestamp: new Date().toISOString(),
+      message,
+      type,
+    });
+    this._config.activity = this._config.activity.slice(0, 50);
+  }
+
+  _formatActivityTime(timestamp) {
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) return "Unknown time";
+    return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
   }
 
   _missionCards() {
@@ -920,11 +1018,12 @@ class OpenReefPanel extends HTMLElement {
     const warnings = sensorAlerts.filter((alert) => alert.status === "warning");
     const missing = this._validation?.missing_entities || [];
     const armedUnavailable = this._validation?.armed_unavailable || [];
+    const interlocks = this._heaterInterlocks();
     const mappedSensors = sensors.filter(([, sensor]) => sensor.entity_id).length;
     const armedEquipment = equipment.filter(([, item]) => item.armed).length;
     const mappedEnergy = this._energyTotalMappings().filter(([, energyKey]) => this._config.energy[energyKey]).length;
     const noEnabledSensors = !sensors.length;
-    const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length || noEnabledSensors ? "Watch closely" : "All systems nominal";
+    const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
     const summaryCards = [
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, `${critical.length} critical · ${warnings.length} warning`, critical.length ? "critical" : warnings.length || noEnabledSensors ? "warning" : "ok", "live") : "",
@@ -934,11 +1033,11 @@ class OpenReefPanel extends HTMLElement {
 
     return `
       <section class="stack">
-        <div class="hero ${critical.length || armedUnavailable.length ? "danger-border" : warnings.length || missing.length || noEnabledSensors ? "warning-border" : "ok-border"}">
+        <div class="hero ${critical.length || armedUnavailable.length ? "danger-border" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "warning-border" : "ok-border"}">
           <div>
             <p class="eyebrow">Mission Control</p>
             <h2>${status}</h2>
-            <p>${critical.length} critical alert(s), ${warnings.length} warning(s), ${missing.length} missing mapping(s), ${armedUnavailable.length} armed device issue(s).</p>
+            <p>${critical.length} critical alert(s), ${warnings.length} warning(s), ${interlocks.length} interlock warning(s), ${missing.length} missing mapping(s), ${armedUnavailable.length} armed device issue(s).</p>
           </div>
           <div class="actions">
             <button class="secondary" data-action="validate">Refresh checks</button>
@@ -952,8 +1051,9 @@ class OpenReefPanel extends HTMLElement {
             <h3>Attention</h3>
             <p>Only configured OpenReef entities are checked here.</p>
           </div>
-          ${this._missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable)}
+          ${this._missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks)}
         </article>
+        ${this._activityPanel()}
         <div class="grid two">
           ${cards.live ? `<article class="panel">
             <h3>Core Sensors</h3>
@@ -992,7 +1092,7 @@ class OpenReefPanel extends HTMLElement {
           <div>
             <p class="eyebrow">Current Mode</p>
             <h3>${this._escape(this._activeModeLabel())}</h3>
-            <p class="muted">Mode is currently a safe label only. It does not control equipment yet.</p>
+            <p class="muted">Mode is currently a safe label only. Preview equipment behavior in Settings before automation is enabled.</p>
           </div>
           <span class="pill">${this._escape(startedLabel)}</span>
         </div>
@@ -1000,7 +1100,7 @@ class OpenReefPanel extends HTMLElement {
           ${this._modeChoices().map(([id, label, description]) => `
             <button class="mode-button ${active === id ? "active" : ""}" data-action="set-mode" data-mode="${this._escape(id)}">
               <strong>${this._escape(label)}</strong>
-              <span>${this._escape(description)}</span>
+              <span>${this._escape(description)} ${id === "running" ? "" : this._escape(this._modePreviewSummary(id))}</span>
             </button>
           `).join("")}
         </div>
@@ -1008,7 +1108,32 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
-  _missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable) {
+  _activityPanel() {
+    const activity = Array.isArray(this._config.activity) ? this._config.activity.slice(0, 8) : [];
+    return `
+      <article class="panel">
+        <div class="section-head">
+          <div>
+            <h3>Activity</h3>
+            <p>Recent OpenReef changes and manual actions.</p>
+          </div>
+          ${activity.length ? `<button class="secondary compact-button" data-action="clear-activity">Clear</button>` : ""}
+        </div>
+        ${activity.length ? `
+          <div class="activity-list">
+            ${activity.map((item) => `
+              <div class="activity-item ${this._escape(item.type || "info")}">
+                <span>${this._escape(this._formatActivityTime(item.timestamp))}</span>
+                <strong>${this._escape(item.message)}</strong>
+              </div>
+            `).join("")}
+          </div>
+        ` : `<p class="muted">No OpenReef activity has been recorded yet.</p>`}
+      </article>
+    `;
+  }
+
+  _missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks = []) {
     const issues = [];
     const unmappedSensors = sensors.filter(([, sensor]) => !sensor.entity_id);
     const disarmedMapped = equipment.filter(([, item]) => item.switch_entity_id && !item.armed);
@@ -1034,6 +1159,9 @@ class OpenReefPanel extends HTMLElement {
     if (armedUnavailable.length) {
       issues.push(["critical", "Armed equipment unavailable", armedUnavailable.slice(0, 6).join(", "), "controls"]);
     }
+    interlocks.forEach((issue) => {
+      issues.push(["warning", issue.title, issue.detail, "controls"]);
+    });
     if (disarmedMapped.length) {
       issues.push(["info", "Mapped controls are still disarmed", `${disarmedMapped.length} device(s) need arming in Settings before they can be controlled.`, "settings"]);
     }
@@ -1274,6 +1402,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._missionSettings()}
         ${this._sensorSettings()}
         ${this._equipmentSettings()}
+        ${this._modePreviewSettings()}
         ${this._energySettings()}
       </section>
     `;
@@ -1389,13 +1518,21 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${enabled ? `
           <div class="card-head">
-            <span class="muted">Used in Live Stats, trends, alerts, and Mission Control.</span>
+            <span class="muted">Used in Live Stats, trends, and Mission Control alerts.</span>
             <span class="pill ${status}">${this._escape(status)}</span>
           </div>
           <label>Entity<input data-scope="sensor" data-id="${this._escape(id)}" data-field="entity_id" value="${this._escape(sensor.entity_id)}" placeholder="sensor.example"></label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="sensor" data-id="${this._escape(id)}" data-field="alertsEnabled" ${sensor.alertsEnabled === false ? "" : "checked"}>
+            <span>
+              <strong>Mission Control alerts</strong>
+              <small>Warn when this reading is missing, near a threshold, or outside range.</small>
+            </span>
+          </label>
           <div class="mini-grid">
             <label>Min<input type="number" step="0.01" data-scope="sensor" data-id="${this._escape(id)}" data-field="min" value="${this._escape(sensor.min)}"></label>
             <label>Max<input type="number" step="0.01" data-scope="sensor" data-id="${this._escape(id)}" data-field="max" value="${this._escape(sensor.max)}"></label>
+            <label>Warning buffer %<input type="number" step="1" min="0" max="50" data-scope="sensor" data-id="${this._escape(id)}" data-field="warningBuffer" value="${this._escape(sensor.warningBuffer ?? 10)}"></label>
           </div>
           <button class="secondary" data-action="search-sensor" data-id="${this._escape(id)}">${result?.loading ? "Finding..." : "Find matches"}</button>
           ${this._candidateList(key, "choose-sensor", id)}
@@ -1458,6 +1595,55 @@ class OpenReefPanel extends HTMLElement {
           `).join("")}
         </div>
       </div>
+    `;
+  }
+
+  _modePreviewSettings() {
+    const equipment = Object.entries(this._config.equipment || {});
+    return `
+      <article class="panel">
+        <div class="section-head">
+          <div>
+            <h3>Mode Behavior Preview</h3>
+            <p>Preview only for now. These settings do not automatically control equipment yet.</p>
+          </div>
+        </div>
+        ${equipment.length ? `
+          <div class="grid two">
+            ${["feed", "maintenance"].map((modeId) => this._modePreviewEditor(modeId, equipment)).join("")}
+          </div>
+        ` : `<p class="muted">Add equipment first, then preview what Feed or Maintenance mode should eventually do.</p>`}
+      </article>
+    `;
+  }
+
+  _modePreviewEditor(modeId, equipment) {
+    const mode = this._modeChoices().find(([id]) => id === modeId);
+    const preview = this._modePreview(modeId);
+    const options = [
+      ["unchanged", "Leave unchanged"],
+      ["off", "Turn off"],
+      ["on", "Turn on"],
+    ];
+    return `
+      <section class="mapping-section">
+        <div>
+          <p class="eyebrow">${this._escape(mode?.[1] || modeId)}</p>
+          <h4>${this._escape(mode?.[2] || "Preview equipment behavior.")}</h4>
+        </div>
+        <div class="stack tight">
+          ${equipment.map(([equipmentId, item]) => {
+            const selected = preview[equipmentId] || "unchanged";
+            return `
+              <label>${this._escape(item.label || equipmentId)}
+                <select data-scope="mode-preview" data-mode="${this._escape(modeId)}" data-equipment="${this._escape(equipmentId)}">
+                  ${options.map(([value, label]) => `<option value="${this._escape(value)}" ${selected === value ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
+                </select>
+              </label>
+            `;
+          }).join("")}
+        </div>
+      </section>
     `;
   }
 
@@ -1650,7 +1836,7 @@ class OpenReefPanel extends HTMLElement {
           font-family: var(--ha-font-family-body, Arial, sans-serif);
         }
         * { box-sizing: border-box; }
-        button, input { font: inherit; }
+        button, input, select { font: inherit; }
         button { cursor: pointer; }
         button:disabled { cursor: not-allowed; opacity: .45; }
         .page { min-height: 100vh; padding: 24px; background: radial-gradient(circle at 20% 0%, var(--openreef-accent-soft), transparent 28%), #07111a; }
@@ -1708,6 +1894,12 @@ class OpenReefPanel extends HTMLElement {
         .mode-button { display: grid; gap: 5px; text-align: left; }
         .mode-button span { color: #9fb2c7; font-size: 12px; font-weight: 500; }
         .mode-button.active span { color: #06202a; }
+        .activity-list { display: grid; gap: 8px; }
+        .activity-item { display: grid; grid-template-columns: minmax(130px, .22fr) 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding: 10px 0; }
+        .activity-item:first-child { border-top: 0; }
+        .activity-item span { color: #8da2ba; font-size: 12px; font-weight: 800; }
+        .activity-item strong { color: #dcecff; overflow-wrap: anywhere; }
+        .activity-item.control strong { color: #bbf7d0; }
         .control-row, .settings-actions { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
         .control-row { padding-top: 18px; color: #8da2ba; }
         .control-switch, .arm-switch { display: inline-flex; align-items: center; gap: 10px; min-width: 112px; min-height: 44px; border: 1px solid #334155; border-radius: 999px; padding: 5px 14px 5px 5px; background: #1f2937; color: #dcecff; font-weight: 800; }
@@ -1732,7 +1924,8 @@ class OpenReefPanel extends HTMLElement {
         .stat-button:hover, .stat-button:focus-visible { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent-border); outline: none; }
         .trend-hint { position: absolute; top: 14px; right: 14px; border: 1px solid #294055; border-radius: 999px; padding: 4px 9px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; }
         label { display: grid; gap: 7px; color: #a7b7ca; font-size: 13px; font-weight: 700; }
-        input { width: 100%; min-width: 0; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
+        input, select { width: 100%; min-width: 0; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
+        select { cursor: pointer; }
         input[type="color"] { min-height: 48px; padding: 4px; cursor: pointer; }
         .field-group { display: grid; gap: 9px; }
         .field-label { color: #a7b7ca; font-size: 13px; font-weight: 800; }
@@ -1795,6 +1988,7 @@ class OpenReefPanel extends HTMLElement {
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }
           .issue-item { grid-template-columns: 1fr; }
+          .activity-item { grid-template-columns: 1fr; }
           .range-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .trend-summary { grid-template-columns: 1fr; }
         }
