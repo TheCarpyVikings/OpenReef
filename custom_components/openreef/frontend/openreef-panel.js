@@ -763,7 +763,13 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "tank") this._config.tank[field] = value;
       if (scope === "display") this._config.display[field] = value;
       if (scope === "sensor") this._config.sensors[id][field] = value;
-      if (scope === "equipment") this._config.equipment[id][field] = value;
+      if (scope === "equipment") {
+        this._config.equipment[id][field] = value;
+        if (field === "displayWavemaker") {
+          this._config.equipment[id].allowAutoRestart = value ? false : true;
+          this._config.equipment[id].wavemakerNotifications = value;
+        }
+      }
       if (scope === "energy") this._config.energy[field] = value;
       if (scope === "alerts") {
         this._config.alerts = this._config.alerts || {};
@@ -808,7 +814,10 @@ class OpenReefPanel extends HTMLElement {
       }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
-      if ((scope === "mode-schedule" || scope === "mode-schedule-global") && event.type === "change") this._render();
+      if (
+        (scope === "mode-schedule" || scope === "mode-schedule-global" || (scope === "equipment" && field === "displayWavemaker"))
+        && event.type === "change"
+      ) this._render();
     };
 
     this.shadowRoot.addEventListener("input", handleFieldInput);
@@ -823,6 +832,7 @@ class OpenReefPanel extends HTMLElement {
       id = `${base}_${suffix}`;
       suffix += 1;
     }
+    const displayWavemaker = this._looksLikeDisplayWavemaker(label, id);
     this._config.equipment[id] = {
       label: label || "Equipment",
       switch_entity_id: "",
@@ -830,6 +840,9 @@ class OpenReefPanel extends HTMLElement {
       energy_entity_id: "",
       cost_entity_id: "",
       armed: false,
+      displayWavemaker,
+      allowAutoRestart: !displayWavemaker,
+      wavemakerNotifications: displayWavemaker,
     };
     this._equipmentEditors[id] = true;
     this._recordActivity(`Added equipment: ${label || "Equipment"}`);
@@ -840,6 +853,11 @@ class OpenReefPanel extends HTMLElement {
   _equipmentLabelExists(label) {
     const lower = String(label || "").toLowerCase();
     return Object.values(this._config.equipment || {}).some((item) => String(item.label || "").toLowerCase() === lower);
+  }
+
+  _looksLikeDisplayWavemaker(label, id = "") {
+    const text = `${id} ${label || ""}`.toLowerCase();
+    return text.includes("wave") || text.includes("wavemaker") || text.includes("powerhead") || text.includes("gyre");
   }
 
   _addStarterEquipment() {
@@ -854,6 +872,7 @@ class OpenReefPanel extends HTMLElement {
         id = `${base}_${suffix}`;
         suffix += 1;
       }
+      const displayWavemaker = this._looksLikeDisplayWavemaker(label, id);
       this._config.equipment[id] = {
         label,
         switch_entity_id: "",
@@ -861,6 +880,9 @@ class OpenReefPanel extends HTMLElement {
         energy_entity_id: "",
         cost_entity_id: "",
         armed: false,
+        displayWavemaker,
+        allowAutoRestart: !displayWavemaker,
+        wavemakerNotifications: displayWavemaker,
       };
       this._equipmentEditors[id] = true;
       added += 1;
@@ -1403,7 +1425,7 @@ class OpenReefPanel extends HTMLElement {
     const type = this._equipmentType(equipmentId, item);
     const text = `${equipmentId} ${item?.label || ""}`.toLowerCase();
     const isReturn = text.includes("return");
-    const isWave = text.includes("wave") || text.includes("powerhead");
+    const isWave = type === "Display wavemaker" || text.includes("wave") || text.includes("powerhead");
     const isSkimmer = text.includes("skimmer");
     const isPump = type === "Flow" || text.includes("pump");
     const isTopOff = type === "Top off" || text.includes("ato") || text.includes("top off");
@@ -1475,6 +1497,7 @@ class OpenReefPanel extends HTMLElement {
 
   _equipmentType(id, item) {
     const text = `${id} ${item?.label || ""}`.toLowerCase();
+    if (item?.displayWavemaker) return "Display wavemaker";
     if (text.includes("heater") || text.includes("chiller")) return "Temperature";
     if (text.includes("return") || text.includes("wave") || text.includes("pump") || text.includes("powerhead")) return "Flow";
     if (text.includes("skimmer") || text.includes("filter") || text.includes("reactor")) return "Filtration";
@@ -1484,12 +1507,20 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _equipmentGroups(rows = Object.entries(this._config.equipment || {})) {
-    const order = ["Flow", "Temperature", "Filtration", "Lighting", "Top off", "Other"];
+    const order = ["Display wavemaker", "Flow", "Temperature", "Filtration", "Lighting", "Top off", "Other"];
     const groups = new Map(order.map((label) => [label, []]));
     rows.forEach(([id, item]) => {
       groups.get(this._equipmentType(id, item)).push([id, item]);
     });
     return order.map((label) => [label, groups.get(label)]).filter(([, items]) => items.length);
+  }
+
+  _isDisplayWavemaker(id, item) {
+    return Boolean(item?.displayWavemaker) || this._looksLikeDisplayWavemaker(item?.label, id);
+  }
+
+  _blocksDisplayWavemakerAutoRestart(item, desiredState = "on") {
+    return desiredState === "on" && Boolean(item?.displayWavemaker) && item.allowAutoRestart !== true;
   }
 
   _equipmentStateClass(item) {
@@ -1511,6 +1542,9 @@ class OpenReefPanel extends HTMLElement {
   _equipmentRisk(id, item) {
     const type = this._equipmentType(id, item);
     const text = `${id} ${item?.label || ""}`.toLowerCase();
+    if (item?.displayWavemaker) {
+      return ["critical", "Display risk", "Display wavemakers can injure livestock if restarted while fish are inside. Inspect the tank before turning them on."];
+    }
     if (type === "Top off" || text.includes("ato")) {
       return ["critical", "Critical", "Top-off equipment can change salinity if left running."];
     }
@@ -1529,6 +1563,9 @@ class OpenReefPanel extends HTMLElement {
   _equipmentUseHint(id, item) {
     const type = this._equipmentType(id, item);
     const text = `${id} ${item?.label || ""}`.toLowerCase();
+    if (item?.displayWavemaker) {
+      return "Automatic restart is blocked by default. If a display wavemaker stays off, inspect the tank and restart manually because flow is critical for corals.";
+    }
     if (type === "Temperature" || text.includes("heater")) {
       return "Best kept armed only with a live tank temperature sensor and heater interlock warning enabled.";
     }
@@ -1682,6 +1719,7 @@ class OpenReefPanel extends HTMLElement {
       .map(([equipmentId, desiredState]) => {
         const item = this._config.equipment?.[equipmentId] || {};
         const switchEntity = item.switch_entity_id || "";
+        const autoRestartBlocked = this._blocksDisplayWavemakerAutoRestart(item, desiredState);
         let status = "ready";
         let detail = switchEntity || "No switch mapped";
         if (!switchEntity) {
@@ -1695,6 +1733,9 @@ class OpenReefPanel extends HTMLElement {
           if (current === "unknown" || current === "unavailable" || current === "--") {
             status = "missing";
             detail = `${switchEntity} is ${current}`;
+          } else if (autoRestartBlocked) {
+            status = "locked";
+            detail = "Automatic display wavemaker restart is blocked. Inspect livestock and restart manually.";
           } else {
             detail = modeId === "running"
               ? `${switchEntity} is currently ${current}; restore to ${desiredState}`
@@ -1708,6 +1749,8 @@ class OpenReefPanel extends HTMLElement {
           detail,
           status,
           armed: Boolean(item.armed),
+          displayWavemaker: Boolean(item.displayWavemaker),
+          autoRestartBlocked,
         };
       });
   }
@@ -2028,6 +2071,9 @@ class OpenReefPanel extends HTMLElement {
     const issues = [];
     const unmappedSensors = sensors.filter(([, sensor]) => !sensor.entity_id);
     const disarmedMapped = equipment.filter(([, item]) => item.switch_entity_id && !item.armed);
+    const displayWavemakersOff = this._activeMode() === "running"
+      ? equipment.filter(([, item]) => item.displayWavemaker && item.armed && item.switch_entity_id && this._stateValue(item.switch_entity_id) === "off")
+      : [];
 
     sensorAlerts.filter((alert) => alert.status === "critical").forEach((alert) => {
       issues.push(["critical", alert.title, alert.detail, "live"]);
@@ -2049,6 +2095,14 @@ class OpenReefPanel extends HTMLElement {
     }
     if (armedUnavailable.length) {
       issues.push(["critical", "Armed equipment unavailable", armedUnavailable.slice(0, 6).join(", "), "controls"]);
+    }
+    if (displayWavemakersOff.length) {
+      issues.push([
+        "critical",
+        "Display wavemaker still off",
+        `${displayWavemakersOff.map(([, item]) => item.label || item.switch_entity_id).join(", ")} need inspection before manual restart. Flow is critical for corals.`,
+        "controls",
+      ]);
     }
     interlocks.forEach((issue) => {
       issues.push(["warning", issue.title, issue.detail, "controls"]);
@@ -2183,6 +2237,7 @@ class OpenReefPanel extends HTMLElement {
     const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
     const reason = this._controlBlockReason(item);
     const action = this._controlActionLabel(item);
+    const displayWavemakerOff = item.displayWavemaker && state === "off";
     return `
       <article class="panel control-card ${enabled ? "" : "locked-card"}">
         <div class="card-head">
@@ -2200,6 +2255,7 @@ class OpenReefPanel extends HTMLElement {
           <small>${this._escape(riskDetail)}</small>
           <small>${this._escape(this._equipmentUseHint(id, item))}</small>
         </div>
+        ${displayWavemakerOff ? `<div class="notice danger-notice compact-notice"><strong>Display wavemaker is off.</strong> Inspect the tank before restarting. Flow is critical for corals.</div>` : ""}
         <div class="control-row">
           <span>${this._escape(reason)}</span>
           <div class="control-actions">
@@ -2230,6 +2286,7 @@ class OpenReefPanel extends HTMLElement {
     const current = this._stateValue(item.switch_entity_id);
     const action = this._controlActionLabel(item);
     const target = current === "on" ? "off" : "on";
+    const displayRestart = item.displayWavemaker && target === "on";
     return `
       <div class="modal">
         <section class="wizard confirm-dialog">
@@ -2243,6 +2300,7 @@ class OpenReefPanel extends HTMLElement {
             <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
           </div>
           <div class="notice warning-notice">${this._escape(riskDetail)} OpenReef will only continue if this device is still mapped, available, and armed.</div>
+          ${displayRestart ? `<div class="notice danger-notice"><strong>Check the display wavemaker before restarting.</strong> Fish can be inside stopped display wavemakers. Inspect the tank first, then restart manually when livestock are clear.</div>` : ""}
           <div class="mode-confirm-list">
             <div class="mode-confirm-row ready">
               <div>
@@ -2683,6 +2741,7 @@ class OpenReefPanel extends HTMLElement {
               <span class="pill ${stateClass}">${this._escape(stateLabel)}</span>
               <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
               <span class="pill ${optionalMapped ? "ok" : "unknown"}">${optionalMapped}/3 energy</span>
+              ${item.displayWavemaker ? `<span class="pill warning">display wavemaker</span>` : ""}
             </div>
           </div>
           <div class="settings-actions">
@@ -2734,6 +2793,39 @@ class OpenReefPanel extends HTMLElement {
                   `).join("")}
                 </div>
               ` : `<p class="hint">${optionalMapped ? `${optionalMapped} optional energy field${optionalMapped === 1 ? "" : "s"} mapped.` : "No optional energy fields mapped yet."}</p>`}
+            </section>
+            <section class="mapping-card entity-card wavemaker-safety-card">
+              <div class="mapping-head">
+                <div>
+                  <h3>Display wavemaker safety</h3>
+                  <p class="muted">Only enable this for wavemakers or powerheads inside the display tank.</p>
+                </div>
+                <span class="pill ${item.displayWavemaker ? "warning" : "unknown"}">${item.displayWavemaker ? "protected" : "off"}</span>
+              </div>
+              <label class="toggle-card">
+                <input type="checkbox" data-scope="equipment" data-id="${this._escape(id)}" data-field="displayWavemaker" ${item.displayWavemaker ? "checked" : ""}>
+                <span>
+                  <strong>Display-tank wavemaker</strong>
+                  <small>Marks this as a physical livestock risk when it restarts after being off.</small>
+                </span>
+              </label>
+              ${item.displayWavemaker ? `
+                <div class="notice danger-notice"><strong>OpenReef will block automatic restart by default.</strong> If this wavemaker is still off in Running, Mission Control will warn you to inspect livestock and restart manually.</div>
+                <label class="toggle-card">
+                  <input type="checkbox" data-scope="equipment" data-id="${this._escape(id)}" data-field="allowAutoRestart" ${item.allowAutoRestart ? "checked" : ""}>
+                  <span>
+                    <strong>Allow automatic restart</strong>
+                    <small>Use only if this wavemaker is physically guarded or you are comfortable with automatic restart risk.</small>
+                  </span>
+                </label>
+                <label class="toggle-card">
+                  <input type="checkbox" data-scope="equipment" data-id="${this._escape(id)}" data-field="wavemakerNotifications" ${item.wavemakerNotifications !== false ? "checked" : ""}>
+                  <span>
+                    <strong>Home Assistant warning</strong>
+                    <small>Create a persistent notification while this armed display wavemaker is off in Running.</small>
+                  </span>
+                </label>
+              ` : ""}
             </section>
           </div>
         ` : ""}
@@ -2866,6 +2958,9 @@ class OpenReefPanel extends HTMLElement {
     }
     if (!counts.rows.length) {
       return ["warning", "No actions configured", `${mode.label} needs at least one equipment action.`];
+    }
+    if (counts.rows.some((row) => row.autoRestartBlocked)) {
+      return ["warning", "Wavemaker restart blocked", "A display wavemaker will not be turned on automatically; inspect the tank and restart it manually."];
     }
     if (!counts.ready) {
       return ["warning", "No armed equipment ready", `${counts.locked} locked and ${counts.missing} unavailable item(s) will be skipped.`];
@@ -3220,6 +3315,8 @@ class OpenReefPanel extends HTMLElement {
     const mode = this._modeChoices().find(([id]) => id === modeId) || [modeId, modeId, ""];
     const counts = this._modeActionCounts(modeId);
     const timerSummary = this._modeTimerSummary(modeId);
+    const blockedDisplayWavemakers = counts.rows.filter((row) => row.autoRestartBlocked);
+    const canApply = counts.ready || (modeId === "running" && counts.rows.length);
     return `
       <div class="modal">
         <section class="wizard confirm-dialog">
@@ -3234,6 +3331,7 @@ class OpenReefPanel extends HTMLElement {
             <span class="pill ${counts.ready ? "warning" : "unknown"}">${counts.ready} ready</span>
           </div>
           <div class="notice warning-notice">OpenReef will only control mapped switch entities that are explicitly armed in Settings. Locked or unavailable equipment will be skipped.</div>
+          ${blockedDisplayWavemakers.length ? `<div class="notice danger-notice"><strong>Display wavemaker restart is blocked.</strong> Inspect the tank before manually restarting any display wavemaker. Fish can be inside stopped wavemakers, and flow is critical for corals.</div>` : ""}
           ${this._configDirty ? `<div class="notice">OpenReef will save your pending Settings changes before applying this mode.</div>` : ""}
           ${counts.rows.length ? `
             <div class="mode-confirm-list">
@@ -3243,14 +3341,14 @@ class OpenReefPanel extends HTMLElement {
                     <strong>${this._escape(row.label)}</strong>
                     <span>${this._escape(row.detail)}</span>
                   </div>
-                  <span class="pill ${row.status === "ready" ? "ok" : row.status === "locked" ? "disabled" : "warning"}">${this._escape(row.status === "ready" ? `turn ${row.desiredState}` : row.status)}</span>
+                  <span class="pill ${row.autoRestartBlocked ? "warning" : row.status === "ready" ? "ok" : row.status === "locked" ? "disabled" : "warning"}">${this._escape(row.status === "ready" ? `turn ${row.desiredState}` : row.autoRestartBlocked ? "blocked" : row.status)}</span>
                 </div>
               `).join("")}
             </div>
           ` : `<p class="muted">No equipment actions are configured for this mode yet. Add them in Settings.</p>`}
           <footer class="wizard-actions">
             <button class="secondary" data-action="close-mode-confirm">Cancel</button>
-            <button class="primary" data-action="apply-mode" data-mode="${this._escape(modeId)}" ${counts.ready ? "" : "disabled"}>${this._configDirty ? "Save and apply" : "Apply"} ${this._escape(mode[1])}</button>
+            <button class="primary" data-action="apply-mode" data-mode="${this._escape(modeId)}" ${canApply ? "" : "disabled"}>${this._configDirty ? "Save and apply" : "Apply"} ${this._escape(mode[1])}</button>
           </footer>
         </section>
       </div>
@@ -3469,6 +3567,8 @@ class OpenReefPanel extends HTMLElement {
         .notice { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; background: #0f2c3d; border: 1px solid #075985; }
         .notice.error, .error-text { color: #fecaca; border-color: #7f1d1d; }
         .notice.warning-notice { color: #fde68a; border-color: #a16207; background: #2f2614; }
+        .notice.danger-notice { color: #fecaca; border-color: #ef4444; background: #2b171c; }
+        .notice.compact-notice { margin-bottom: 0; }
         .notice.success { color: #bbf7d0; border-color: #166534; }
         .stack { display: grid; gap: 16px; }
         .stack.tight { gap: 10px; }

@@ -477,6 +477,19 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 equipment_config.get("cost_entity_id")
             )
             equipment_config["armed"] = bool(equipment_config.get("armed", False))
+            display_wavemaker = bool(
+                equipment_config.get("displayWavemaker", False)
+                or _looks_like_display_wavemaker(equipment_id, equipment_config)
+            )
+            equipment_config["displayWavemaker"] = display_wavemaker
+            equipment_config["allowAutoRestart"] = (
+                bool(equipment_config.get("allowAutoRestart", False))
+                if display_wavemaker
+                else bool(equipment_config.get("allowAutoRestart", True))
+            )
+            equipment_config["wavemakerNotifications"] = bool(
+                equipment_config.get("wavemakerNotifications", display_wavemaker)
+            )
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -904,6 +917,63 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
     return alerts
 
 
+def _equipment_label(equipment_id: str, mapped: dict[str, Any]) -> str:
+    return str(mapped.get("label") or equipment_id)
+
+
+def _looks_like_display_wavemaker(equipment_id: str, mapped: dict[str, Any]) -> bool:
+    text = f"{equipment_id} {mapped.get('label') or ''}".lower()
+    return any(term in text for term in ("wave", "wavemaker", "powerhead", "gyre"))
+
+
+def _is_protected_display_wavemaker(mapped: dict[str, Any]) -> bool:
+    return bool(mapped.get("displayWavemaker", False)) and not bool(
+        mapped.get("allowAutoRestart", False)
+    )
+
+
+def _display_wavemaker_warning_items(
+    hass: HomeAssistant, config: dict[str, Any]
+) -> list[dict[str, str]]:
+    equipment = config.get("equipment", {})
+    if not isinstance(equipment, dict):
+        return []
+
+    active_mode = "running"
+    mode = config.get("mode", {})
+    if isinstance(mode, dict):
+        active_mode = str(mode.get("active") or "running")
+
+    items: list[dict[str, str]] = []
+    for equipment_id, mapped in equipment.items():
+        if not isinstance(mapped, dict):
+            continue
+        if active_mode != "running" or not mapped.get("displayWavemaker", False):
+            continue
+        if not mapped.get("armed", False):
+            continue
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        if not switch_entity:
+            continue
+        state = hass.states.get(switch_entity)
+        if state is None or state.state != "off":
+            continue
+        label = _equipment_label(equipment_id, mapped)
+        items.append(
+            {
+                "id": equipment_id,
+                "entity_id": switch_entity,
+                "label": label,
+                "title": f"{label} is still off",
+                "message": (
+                    "**Display wavemaker is still off. Inspect the tank before "
+                    "manually restarting it. Flow is critical for corals.**"
+                ),
+            }
+        )
+    return items
+
+
 def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> None:
     alert_config = config.setdefault("alerts", {})
     if not isinstance(alert_config, dict):
@@ -985,6 +1055,41 @@ async def _async_sync_alert_notifications(
             "create",
             {
                 "notification_id": f"openreef_alert_{item['id']}",
+                "title": f"OpenReef: {item['title']}",
+                "message": item["message"],
+            },
+            blocking=False,
+        )
+
+    equipment = config.get("equipment", {})
+    equipment_ids = list(equipment) if isinstance(equipment, dict) else []
+    wavemaker_items = _display_wavemaker_warning_items(hass, config)
+    active_wavemaker_ids = {
+        item["id"]
+        for item in wavemaker_items
+        if isinstance(equipment, dict)
+        and isinstance(equipment.get(item["id"]), dict)
+        and equipment[item["id"]].get("wavemakerNotifications", True)
+    }
+
+    for equipment_id in equipment_ids:
+        notification_id = f"openreef_display_wavemaker_{equipment_id}"
+        if equipment_id not in active_wavemaker_ids:
+            await hass.services.async_call(
+                "persistent_notification",
+                "dismiss",
+                {"notification_id": notification_id},
+                blocking=False,
+            )
+
+    for item in wavemaker_items:
+        if item["id"] not in active_wavemaker_ids:
+            continue
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "notification_id": f"openreef_display_wavemaker_{item['id']}",
                 "title": f"OpenReef: {item['title']}",
                 "message": item["message"],
             },
@@ -1388,6 +1493,7 @@ async def _async_apply_mode(
                     "equipment_id": equipment_key,
                     "entity_id": switch_entity,
                     "label": str(mapped.get("label") or equipment_key),
+                    "reason": "Disarmed in Settings",
                 }
             )
             continue
@@ -1411,6 +1517,17 @@ async def _async_apply_mode(
         ):
             return_plan[equipment_key] = state.state
 
+        if desired_state == "on" and _is_protected_display_wavemaker(mapped):
+            skipped_locked.append(
+                {
+                    "equipment_id": equipment_key,
+                    "entity_id": switch_entity,
+                    "label": _equipment_label(equipment_key, mapped),
+                    "reason": "Display wavemaker automatic restart blocked",
+                }
+            )
+            continue
+
         await hass.services.async_call(
             "switch",
             f"turn_{desired_state}",
@@ -1427,7 +1544,12 @@ async def _async_apply_mode(
             }
         )
 
-    if not applied and skipped_locked and not skipped_missing:
+    if (
+        not applied
+        and skipped_locked
+        and not skipped_missing
+        and all(item.get("reason") == "Disarmed in Settings" for item in skipped_locked)
+    ):
         raise ServiceValidationError(
             "OpenReef mode matched equipment, but all mapped controls are locked"
         )
