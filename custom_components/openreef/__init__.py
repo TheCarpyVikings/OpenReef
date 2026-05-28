@@ -45,6 +45,7 @@ type OpenReefConfigEntry = ConfigEntry
 
 SEARCH_LIMIT = 10
 UNAVAILABLE_STATES = {"unknown", "unavailable"}
+BUILT_IN_MODES = {"running", "feed", "maintenance"}
 MODE_TIMER_UNSUB = "mode_timer_unsub"
 
 APPLY_MODE_SCHEMA = vol.Schema({vol.Required("mode_id"): cv.string})
@@ -91,6 +92,13 @@ def _normalise_text(value: Any) -> str:
     return " ".join(
         "".join(char.lower() if char.isalnum() else " " for char in value).split()
     )
+
+
+def _normalise_mode_id(value: Any) -> str:
+    text = _normalise_text(value).replace(" ", "_")
+    if not text or text in BUILT_IN_MODES:
+        return ""
+    return text[:48]
 
 
 def _normalise_list(value: Any) -> list[str]:
@@ -254,12 +262,26 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             sensor["warningBuffer"] = 10
         sensor["warningBuffer"] = max(0, min(sensor["warningBuffer"], 50))
 
+    custom_modes = config.setdefault("customModes", [])
+    normalised_custom_modes: list[dict[str, str]] = []
+    custom_mode_ids: set[str] = set()
+    if isinstance(custom_modes, list):
+        for item in custom_modes[:8]:
+            raw_id = item.get("id") if isinstance(item, dict) else item
+            mode_id = _normalise_mode_id(raw_id)
+            if not mode_id or mode_id in custom_mode_ids:
+                continue
+            normalised_custom_modes.append({"id": mode_id})
+            custom_mode_ids.add(mode_id)
+    config["customModes"] = normalised_custom_modes
+    allowed_mode_ids = BUILT_IN_MODES | custom_mode_ids
+
     mode = config.setdefault("mode", {})
     if not isinstance(mode, dict):
         config["mode"] = deepcopy(DEFAULT_CORE_CONFIG["mode"])
     else:
         active = mode.get("active")
-        mode["active"] = active if active in {"running", "feed", "maintenance"} else "running"
+        mode["active"] = active if active in allowed_mode_ids else "running"
         mode["startedAt"] = mode.get("startedAt") if isinstance(mode.get("startedAt"), str) else ""
         mode["expiresAt"] = mode.get("expiresAt") if isinstance(mode.get("expiresAt"), str) else ""
         mode["autoReturn"] = bool(mode.get("autoReturn", False))
@@ -280,7 +302,10 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     if not isinstance(mode_previews, dict):
         config["modePreviews"] = deepcopy(DEFAULT_CORE_CONFIG["modePreviews"])
     else:
-        for mode_id in ("feed", "maintenance"):
+        for mode_id in list(mode_previews):
+            if mode_id == "running" or mode_id not in allowed_mode_ids:
+                mode_previews.pop(mode_id)
+        for mode_id in sorted(allowed_mode_ids - {"running"}):
             preview = mode_previews.setdefault(mode_id, {})
             if not isinstance(preview, dict):
                 mode_previews[mode_id] = {}
@@ -297,7 +322,17 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     if not isinstance(mode_timers, dict):
         config["modeTimers"] = deepcopy(DEFAULT_CORE_CONFIG["modeTimers"])
     else:
-        for mode_id, defaults in DEFAULT_CORE_CONFIG["modeTimers"].items():
+        timer_defaults = {
+            **DEFAULT_CORE_CONFIG["modeTimers"],
+            **{
+                mode_id: {"durationMinutes": 0, "autoReturn": False}
+                for mode_id in custom_mode_ids
+            },
+        }
+        for mode_id in list(mode_timers):
+            if mode_id not in timer_defaults:
+                mode_timers.pop(mode_id)
+        for mode_id, defaults in timer_defaults.items():
             timer = mode_timers.setdefault(mode_id, {})
             if not isinstance(timer, dict):
                 timer = deepcopy(defaults)
@@ -315,7 +350,20 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     if not isinstance(mode_settings, dict):
         config["modeSettings"] = deepcopy(DEFAULT_CORE_CONFIG["modeSettings"])
     else:
-        for mode_id, defaults in DEFAULT_CORE_CONFIG["modeSettings"].items():
+        settings_defaults = {
+            **DEFAULT_CORE_CONFIG["modeSettings"],
+            **{
+                mode_id: {
+                    "label": mode_id.replace("_", " ").title(),
+                    "description": "Custom manual mode. Set the equipment plan before applying.",
+                }
+                for mode_id in custom_mode_ids
+            },
+        }
+        for mode_id in list(mode_settings):
+            if mode_id not in settings_defaults:
+                mode_settings.pop(mode_id)
+        for mode_id, defaults in settings_defaults.items():
             settings = mode_settings.setdefault(mode_id, {})
             if not isinstance(settings, dict):
                 settings = deepcopy(defaults)
@@ -347,7 +395,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 if not isinstance(item, dict):
                     continue
                 mode_id = item.get("mode")
-                if mode_id not in {"feed", "maintenance"}:
+                if mode_id not in allowed_mode_ids - {"running"}:
                     continue
                 safe_items.append(
                     {

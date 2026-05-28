@@ -27,14 +27,14 @@ class OpenReefPanel extends HTMLElement {
     this._equipmentEditors = {};
     this._equipmentEnergyEditors = {};
     this._settingsSections = {
-      profile: true,
-      mission: true,
-      sensors: true,
-      equipment: true,
-      modes: true,
-      alerts: true,
-      interlocks: true,
-      energy: true,
+      profile: false,
+      mission: false,
+      sensors: false,
+      equipment: false,
+      modes: false,
+      alerts: false,
+      interlocks: false,
+      energy: false,
     };
   }
 
@@ -657,6 +657,8 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "setup-add-starter-equipment") this._addStarterEquipment();
+      if (action === "add-custom-mode") this._addCustomMode();
+      if (action === "remove-custom-mode") this._removeCustomMode(target.dataset.mode);
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
       if (action === "remove-equipment") {
         const removed = this._config.equipment[id]?.label || id;
@@ -849,6 +851,66 @@ class OpenReefPanel extends HTMLElement {
       added += 1;
     });
     this._recordActivity(added ? `Added ${added} starter equipment item(s)` : "Starter equipment already exists");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _customModes() {
+    return Array.isArray(this._config?.customModes)
+      ? this._config.customModes.filter((mode) => mode && typeof mode.id === "string")
+      : [];
+  }
+
+  _editableModeIds() {
+    return ["feed", "maintenance", ...this._customModes().map((mode) => mode.id)];
+  }
+
+  _isCustomMode(modeId) {
+    return this._customModes().some((mode) => mode.id === modeId);
+  }
+
+  _modeSlug(label) {
+    const slug = this._slug(label || "Custom Mode");
+    return ["running", "feed", "maintenance"].includes(slug) ? `custom_${slug}` : slug;
+  }
+
+  _addCustomMode() {
+    this._config.customModes = this._customModes();
+    const existing = new Set(this._modeChoices().map(([modeId]) => modeId));
+    let suffix = this._config.customModes.length + 1;
+    let label = suffix > 1 ? `Custom Mode ${suffix}` : "Custom Mode";
+    let modeId = this._modeSlug(label);
+    while (existing.has(modeId)) {
+      suffix += 1;
+      label = `Custom Mode ${suffix}`;
+      modeId = this._modeSlug(label);
+    }
+    this._config.customModes.push({ id: modeId });
+    this._config.modeSettings = this._config.modeSettings || {};
+    this._config.modeSettings[modeId] = {
+      label,
+      description: "Custom manual mode. Set the equipment plan before applying.",
+    };
+    this._config.modePreviews = this._config.modePreviews || {};
+    this._config.modePreviews[modeId] = {};
+    this._config.modeTimers = this._config.modeTimers || {};
+    this._config.modeTimers[modeId] = { durationMinutes: 0, autoReturn: false };
+    this._recordActivity(`Added custom mode: ${label}`);
+    this._setDirty(true);
+    this._render();
+  }
+
+  _removeCustomMode(modeId) {
+    if (!this._isCustomMode(modeId) || this._activeMode() === modeId) return;
+    const mode = this._modeConfig(modeId);
+    this._config.customModes = this._customModes().filter((item) => item.id !== modeId);
+    delete this._config.modeSettings?.[modeId];
+    delete this._config.modePreviews?.[modeId];
+    delete this._config.modeTimers?.[modeId];
+    if (Array.isArray(this._config.modeSchedule?.items)) {
+      this._config.modeSchedule.items = this._config.modeSchedule.items.filter((item) => item?.mode !== modeId);
+    }
+    this._recordActivity(`Removed custom mode: ${mode.label}`);
     this._setDirty(true);
     this._render();
   }
@@ -1107,7 +1169,10 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _modeChoices() {
-    return this._modeBaseChoices().map(([id]) => {
+    return [
+      ...this._modeBaseChoices().map(([id]) => id),
+      ...this._customModes().map((mode) => mode.id),
+    ].map((id) => {
       const mode = this._modeConfig(id);
       return [mode.id, mode.label, mode.description];
     });
@@ -1157,7 +1222,9 @@ class OpenReefPanel extends HTMLElement {
   _modeTimerConfig(modeId) {
     const defaults = modeId === "maintenance"
       ? { durationMinutes: 60, autoReturn: false }
-      : { durationMinutes: 10, autoReturn: false };
+      : modeId === "feed"
+        ? { durationMinutes: 10, autoReturn: false }
+        : { durationMinutes: 0, autoReturn: false };
     const timer = this._config?.modeTimers?.[modeId] || {};
     const duration = Number(timer.durationMinutes ?? defaults.durationMinutes);
     return {
@@ -2596,16 +2663,22 @@ class OpenReefPanel extends HTMLElement {
 
   _modePreviewSettings() {
     const equipment = Object.entries(this._config.equipment || {});
+    const modeIds = this._editableModeIds();
     return this._settingsPanel(
       "modes",
       "Mode Actions",
-      "Define what Feed and Maintenance mode will do after confirmation.",
+      "Define what Feed, Maintenance, and custom modes will do after confirmation.",
       `
-        ${equipment.length ? `
-          <div class="grid two">
-            ${["feed", "maintenance"].map((modeId) => this._modePreviewEditor(modeId, equipment)).join("")}
+        <div class="section-head mode-settings-toolbar">
+          <div>
+            <p class="eyebrow">Manual modes</p>
+            <p class="muted">Custom modes use the same confirmation, arming, and restore safeguards as Feed and Maintenance.</p>
           </div>
-        ` : `<p class="muted">Add equipment first, then choose what Feed or Maintenance mode should do.</p>`}
+          <button class="primary compact-button" data-action="add-custom-mode">+ Custom mode</button>
+        </div>
+        <div class="grid two">
+          ${modeIds.map((modeId) => this._modePreviewEditor(modeId, equipment)).join("")}
+        </div>
         <section class="mapping-section scheduler-preview">
           <div>
             <p class="eyebrow">Scheduler prep</p>
@@ -2620,8 +2693,14 @@ class OpenReefPanel extends HTMLElement {
 
   _modePreviewEditor(modeId, equipment) {
     const mode = this._modeConfig(modeId);
+    const isCustom = this._isCustomMode(modeId);
+    const isActive = this._activeMode() === modeId;
     const preview = this._modePreview(modeId);
     const timer = this._modeTimerConfig(modeId);
+    const presets = this._modePresetChoices(modeId);
+    const planNote = presets.length
+      ? `${this._modePreviewSummary(modeId)} Presets only edit this plan; applying the mode still needs confirmation.`
+      : `${this._modePreviewSummary(modeId)} Applying the mode still needs confirmation.`;
     const options = [
       ["unchanged", "Leave unchanged"],
       ["off", "Turn off"],
@@ -2629,9 +2708,16 @@ class OpenReefPanel extends HTMLElement {
     ];
     return `
       <section class="mapping-section">
-        <div>
-          <p class="eyebrow">${this._escape(mode.label)}</p>
-          <h4>${this._escape(mode.description || "Preview equipment behavior.")}</h4>
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">${this._escape(isCustom ? "Custom mode" : mode.label)}</p>
+            <h4>${this._escape(mode.description || "Preview equipment behavior.")}</h4>
+          </div>
+          ${isCustom ? `
+            <button class="danger-text compact-button" data-action="remove-custom-mode" data-mode="${this._escape(modeId)}" ${isActive ? "disabled" : ""}>
+              ${isActive ? "Active" : "Remove"}
+            </button>
+          ` : `<span class="pill disabled">Built-in</span>`}
         </div>
         <div class="mode-name-grid">
           <label>Mode name
@@ -2641,15 +2727,17 @@ class OpenReefPanel extends HTMLElement {
             <input value="${this._escape(mode.description)}" data-scope="mode-settings" data-mode="${this._escape(modeId)}" data-field="description">
           </label>
         </div>
-        <div class="preset-row">
-          ${this._modePresetChoices(modeId).map(([presetId, label, detail]) => `
+        ${presets.length ? `
+          <div class="preset-row">
+            ${presets.map(([presetId, label, detail]) => `
             <button class="setup-choice mode-preset-choice" data-action="apply-mode-preset" data-mode="${this._escape(modeId)}" data-preset="${this._escape(presetId)}">
               <strong>${this._escape(label)}</strong>
               <span>${this._escape(detail)}</span>
             </button>
-          `).join("")}
-        </div>
-        <div class="setup-status-line">${this._escape(this._modePreviewSummary(modeId))} Presets only edit this plan; applying the mode still needs confirmation.</div>
+            `).join("")}
+          </div>
+        ` : ""}
+        <div class="setup-status-line">${this._escape(planNote)}</div>
         <div class="mode-timer-card">
           <label>Timer minutes
             <input type="number" min="0" max="720" step="1" value="${this._escape(String(timer.durationMinutes))}" data-scope="mode-timer" data-mode="${this._escape(modeId)}" data-field="durationMinutes">
@@ -2663,7 +2751,7 @@ class OpenReefPanel extends HTMLElement {
             </span>
           </label>
         </div>
-        <div class="stack tight">
+        ${equipment.length ? `<div class="stack tight">
           ${equipment.map(([equipmentId, item]) => {
             const selected = preview[equipmentId] || "unchanged";
             return `
@@ -2675,7 +2763,7 @@ class OpenReefPanel extends HTMLElement {
               </label>
             `;
           }).join("")}
-        </div>
+        </div>` : `<p class="muted">Add equipment first, then choose what this mode should do.</p>`}
       </section>
     `;
   }

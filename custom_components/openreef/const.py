@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 12
+CORE_SCHEMA_VERSION = 13
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -180,6 +180,7 @@ DEFAULT_CORE_CONFIG = {
             "autoReturn": False,
         },
     },
+    "customModes": [],
     "modeSettings": {
         "feed": {
             "label": "Feed",
