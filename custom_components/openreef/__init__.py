@@ -49,6 +49,18 @@ BUILT_IN_MODES = {"running", "feed", "maintenance"}
 WEEK_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 MODE_TIMER_UNSUB = "mode_timer_unsub"
 MODE_SCHEDULE_UNSUB = "mode_schedule_unsub"
+EQUIPMENT_PROFILE_TYPES = {
+    "return_pump",
+    "display_wavemaker",
+    "flow_pump",
+    "heater",
+    "skimmer",
+    "ato",
+    "lighting",
+    "doser",
+    "filtration",
+    "other",
+}
 
 APPLY_MODE_SCHEMA = vol.Schema({vol.Required("mode_id"): cv.string})
 
@@ -94,6 +106,71 @@ def _normalise_text(value: Any) -> str:
     return " ".join(
         "".join(char.lower() if char.isalnum() else " " for char in value).split()
     )
+
+
+def _normalise_equipment_profile(value: Any) -> str:
+    text = _normalise_text(value).replace(" ", "_")
+    aliases = {
+        "return": "return_pump",
+        "returnpump": "return_pump",
+        "return_pump": "return_pump",
+        "wavemaker": "display_wavemaker",
+        "wave_maker": "display_wavemaker",
+        "display_wavemaker": "display_wavemaker",
+        "powerhead": "display_wavemaker",
+        "flow": "flow_pump",
+        "flow_pump": "flow_pump",
+        "pump": "flow_pump",
+        "temperature": "heater",
+        "heater": "heater",
+        "chiller": "heater",
+        "skimmer": "skimmer",
+        "ato": "ato",
+        "top_off": "ato",
+        "rodi": "ato",
+        "light": "lighting",
+        "lights": "lighting",
+        "lighting": "lighting",
+        "doser": "doser",
+        "dosers": "doser",
+        "dosing": "doser",
+        "filter": "filtration",
+        "filtration": "filtration",
+        "reactor": "filtration",
+        "other": "other",
+    }
+    return aliases.get(text, text if text in EQUIPMENT_PROFILE_TYPES else "")
+
+
+def _infer_equipment_profile(equipment_id: str, equipment_config: dict[str, Any]) -> str:
+    explicit = _normalise_equipment_profile(
+        equipment_config.get("type") or equipment_config.get("profile")
+    )
+    if explicit:
+        return explicit
+    if equipment_config.get("displayWavemaker", False):
+        return "display_wavemaker"
+
+    text = _normalise_text(f"{equipment_id} {equipment_config.get('label') or ''}")
+    if any(term in text for term in ("wave", "wavemaker", "powerhead", "gyre")):
+        return "display_wavemaker"
+    if "return" in text:
+        return "return_pump"
+    if any(term in text for term in ("heater", "chiller")):
+        return "heater"
+    if "skimmer" in text:
+        return "skimmer"
+    if any(term in text for term in ("ato", "top off", "rodi")):
+        return "ato"
+    if any(term in text for term in ("light", "kessil", "hydra")):
+        return "lighting"
+    if any(term in text for term in ("doser", "dosing")):
+        return "doser"
+    if any(term in text for term in ("filter", "reactor")):
+        return "filtration"
+    if "pump" in text:
+        return "flow_pump"
+    return "other"
 
 
 def _normalise_mode_id(value: Any) -> str:
@@ -477,9 +554,22 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 equipment_config.get("cost_entity_id")
             )
             equipment_config["armed"] = bool(equipment_config.get("armed", False))
+            explicit_type = _normalise_equipment_profile(
+                equipment_config.get("type") or equipment_config.get("profile")
+            )
+            equipment_type = explicit_type or _infer_equipment_profile(
+                equipment_id, equipment_config
+            )
+            equipment_config["type"] = equipment_type
             display_wavemaker = bool(
-                equipment_config.get("displayWavemaker", False)
-                or _looks_like_display_wavemaker(equipment_id, equipment_config)
+                equipment_type == "display_wavemaker"
+                or (
+                    not explicit_type
+                    and (
+                        equipment_config.get("displayWavemaker", False)
+                        or _looks_like_display_wavemaker(equipment_id, equipment_config)
+                    )
+                )
             )
             equipment_config["displayWavemaker"] = display_wavemaker
             equipment_config["allowAutoRestart"] = (

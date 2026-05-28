@@ -765,9 +765,11 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "sensor") this._config.sensors[id][field] = value;
       if (scope === "equipment") {
         this._config.equipment[id][field] = value;
-        if (field === "displayWavemaker") {
-          this._config.equipment[id].allowAutoRestart = value ? false : true;
-          this._config.equipment[id].wavemakerNotifications = value;
+        if (field === "type") {
+          const displayWavemaker = value === "display_wavemaker";
+          this._config.equipment[id].displayWavemaker = displayWavemaker;
+          this._config.equipment[id].allowAutoRestart = displayWavemaker ? false : true;
+          this._config.equipment[id].wavemakerNotifications = displayWavemaker;
         }
       }
       if (scope === "energy") this._config.energy[field] = value;
@@ -815,7 +817,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-global" || (scope === "equipment" && field === "displayWavemaker"))
+        (scope === "mode-schedule" || scope === "mode-schedule-global" || (scope === "equipment" && field === "type"))
         && event.type === "change"
       ) this._render();
     };
@@ -832,9 +834,11 @@ class OpenReefPanel extends HTMLElement {
       id = `${base}_${suffix}`;
       suffix += 1;
     }
-    const displayWavemaker = this._looksLikeDisplayWavemaker(label, id);
+    const type = this._inferEquipmentProfile(label, id);
+    const displayWavemaker = type === "display_wavemaker";
     this._config.equipment[id] = {
       label: label || "Equipment",
+      type,
       switch_entity_id: "",
       power_entity_id: "",
       energy_entity_id: "",
@@ -860,6 +864,39 @@ class OpenReefPanel extends HTMLElement {
     return text.includes("wave") || text.includes("wavemaker") || text.includes("powerhead") || text.includes("gyre");
   }
 
+  _equipmentProfileChoices() {
+    return [
+      ["return_pump", "Return pump"],
+      ["display_wavemaker", "Display wavemaker"],
+      ["flow_pump", "Flow pump"],
+      ["heater", "Heater / chiller"],
+      ["skimmer", "Skimmer"],
+      ["ato", "ATO / top-off"],
+      ["lighting", "Lighting"],
+      ["doser", "Doser"],
+      ["filtration", "Filter / reactor"],
+      ["other", "Other"],
+    ];
+  }
+
+  _equipmentProfileLabel(profile) {
+    return this._equipmentProfileChoices().find(([id]) => id === profile)?.[1] || "Other";
+  }
+
+  _inferEquipmentProfile(label, id = "") {
+    const text = `${id} ${label || ""}`.toLowerCase();
+    if (this._looksLikeDisplayWavemaker(label, id)) return "display_wavemaker";
+    if (text.includes("return")) return "return_pump";
+    if (text.includes("heater") || text.includes("chiller")) return "heater";
+    if (text.includes("skimmer")) return "skimmer";
+    if (text.includes("ato") || text.includes("top off") || text.includes("rodi")) return "ato";
+    if (text.includes("light") || text.includes("kessil") || text.includes("hydra")) return "lighting";
+    if (text.includes("doser") || text.includes("dosing")) return "doser";
+    if (text.includes("filter") || text.includes("reactor")) return "filtration";
+    if (text.includes("pump")) return "flow_pump";
+    return "other";
+  }
+
   _addStarterEquipment() {
     const starter = ["Return Pump", "Heater", "Lights", "Skimmer", "ATO"];
     let added = 0;
@@ -872,9 +909,11 @@ class OpenReefPanel extends HTMLElement {
         id = `${base}_${suffix}`;
         suffix += 1;
       }
-      const displayWavemaker = this._looksLikeDisplayWavemaker(label, id);
+      const type = this._inferEquipmentProfile(label, id);
+      const displayWavemaker = type === "display_wavemaker";
       this._config.equipment[id] = {
         label,
+        type,
         switch_entity_id: "",
         power_entity_id: "",
         energy_entity_id: "",
@@ -1406,15 +1445,15 @@ class OpenReefPanel extends HTMLElement {
   _modePresetChoices(modeId) {
     if (modeId === "feed") {
       return [
-        ["reef-feed", "Reef feed", "Turn off return pump, wavemakers, and skimmer candidates."],
+        ["reef-feed", "Reef feed", "Turn off return pump, flow profiles, and skimmer."],
         ["flow-only", "Flow only", "Turn off flow devices, leave filtration unchanged."],
         ["clear", "Clear plan", "Leave all equipment unchanged."],
       ];
     }
     if (modeId === "maintenance") {
       return [
-        ["hands-in-tank", "Hands in tank", "Turn off heater, ATO, skimmer, and wavemaker candidates."],
-        ["waterline", "Waterline work", "Turn off top-off and skimmer candidates."],
+        ["hands-in-tank", "Hands in tank", "Turn off heater, ATO, skimmer, and display flow profiles."],
+        ["waterline", "Waterline work", "Turn off top-off and skimmer profiles."],
         ["clear", "Clear plan", "Leave all equipment unchanged."],
       ];
     }
@@ -1422,14 +1461,13 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _modePresetState(modeId, preset, equipmentId, item) {
-    const type = this._equipmentType(equipmentId, item);
-    const text = `${equipmentId} ${item?.label || ""}`.toLowerCase();
-    const isReturn = text.includes("return");
-    const isWave = type === "Display wavemaker" || text.includes("wave") || text.includes("powerhead");
-    const isSkimmer = text.includes("skimmer");
-    const isPump = type === "Flow" || text.includes("pump");
-    const isTopOff = type === "Top off" || text.includes("ato") || text.includes("top off");
-    const isTemperature = type === "Temperature" || text.includes("heater") || text.includes("chiller");
+    const profile = this._equipmentProfile(equipmentId, item);
+    const isReturn = profile === "return_pump";
+    const isWave = profile === "display_wavemaker" || profile === "flow_pump";
+    const isSkimmer = profile === "skimmer";
+    const isPump = isReturn || isWave;
+    const isTopOff = profile === "ato";
+    const isTemperature = profile === "heater";
 
     if (preset === "clear") return "unchanged";
     if (modeId === "feed" && preset === "reef-feed") {
@@ -1496,18 +1534,20 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _equipmentType(id, item) {
-    const text = `${id} ${item?.label || ""}`.toLowerCase();
-    if (item?.displayWavemaker) return "Display wavemaker";
-    if (text.includes("heater") || text.includes("chiller")) return "Temperature";
-    if (text.includes("return") || text.includes("wave") || text.includes("pump") || text.includes("powerhead")) return "Flow";
-    if (text.includes("skimmer") || text.includes("filter") || text.includes("reactor")) return "Filtration";
-    if (text.includes("light") || text.includes("kessil")) return "Lighting";
-    if (text.includes("ato") || text.includes("top off") || text.includes("rodi")) return "Top off";
-    return "Other";
+    return this._equipmentProfileLabel(this._equipmentProfile(id, item));
+  }
+
+  _equipmentProfile(id, item) {
+    const explicit = this._equipmentProfileChoices().some(([profile]) => profile === item?.type)
+      ? item.type
+      : "";
+    if (explicit) return explicit;
+    if (item?.displayWavemaker) return "display_wavemaker";
+    return this._inferEquipmentProfile(item?.label, id);
   }
 
   _equipmentGroups(rows = Object.entries(this._config.equipment || {})) {
-    const order = ["Display wavemaker", "Flow", "Temperature", "Filtration", "Lighting", "Top off", "Other"];
+    const order = this._equipmentProfileChoices().map(([, label]) => label);
     const groups = new Map(order.map((label) => [label, []]));
     rows.forEach(([id, item]) => {
       groups.get(this._equipmentType(id, item)).push([id, item]);
@@ -1516,11 +1556,11 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _isDisplayWavemaker(id, item) {
-    return Boolean(item?.displayWavemaker) || this._looksLikeDisplayWavemaker(item?.label, id);
+    return this._equipmentProfile(id, item) === "display_wavemaker";
   }
 
-  _blocksDisplayWavemakerAutoRestart(item, desiredState = "on") {
-    return desiredState === "on" && Boolean(item?.displayWavemaker) && item.allowAutoRestart !== true;
+  _blocksDisplayWavemakerAutoRestart(item, desiredState = "on", id = "") {
+    return desiredState === "on" && this._isDisplayWavemaker(id, item) && item.allowAutoRestart !== true;
   }
 
   _equipmentStateClass(item) {
@@ -1540,49 +1580,56 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _equipmentRisk(id, item) {
-    const type = this._equipmentType(id, item);
-    const text = `${id} ${item?.label || ""}`.toLowerCase();
-    if (item?.displayWavemaker) {
+    const profile = this._equipmentProfile(id, item);
+    if (profile === "display_wavemaker") {
       return ["critical", "Display risk", "Display wavemakers can injure livestock if restarted while fish are inside. Inspect the tank before turning them on."];
     }
-    if (type === "Top off" || text.includes("ato")) {
+    if (profile === "ato") {
       return ["critical", "Critical", "Top-off equipment can change salinity if left running."];
     }
-    if (text.includes("return")) {
+    if (profile === "return_pump") {
       return ["critical", "Critical", "Return pumps affect flow through the whole system."];
     }
-    if (type === "Temperature" || text.includes("heater") || text.includes("chiller")) {
+    if (profile === "heater") {
       return ["critical", "Critical", "Temperature equipment can move the tank quickly."];
     }
-    if (text.includes("skimmer")) {
+    if (profile === "skimmer") {
       return ["warning", "Caution", "Skimmers can overflow if flow conditions change."];
+    }
+    if (profile === "doser") {
+      return ["critical", "Critical", "Dosing equipment can change chemistry quickly."];
     }
     return ["ok", "Normal", "Standard manual control."];
   }
 
   _equipmentUseHint(id, item) {
-    const type = this._equipmentType(id, item);
-    const text = `${id} ${item?.label || ""}`.toLowerCase();
-    if (item?.displayWavemaker) {
+    const profile = this._equipmentProfile(id, item);
+    if (profile === "display_wavemaker") {
       return "Automatic restart is blocked by default. If a display wavemaker stays off, inspect the tank and restart manually because flow is critical for corals.";
     }
-    if (type === "Temperature" || text.includes("heater")) {
+    if (profile === "heater") {
       return "Best kept armed only with a live tank temperature sensor and heater interlock warning enabled.";
     }
-    if (type === "Top off" || text.includes("ato")) {
+    if (profile === "ato") {
       return "Top-off control should stay deliberate. Use the ATO runtime interlock before unattended use.";
     }
-    if (text.includes("return")) {
+    if (profile === "return_pump") {
       return "Main circulation device. Feed or maintenance plans should be reviewed before turning this off.";
     }
-    if (text.includes("skimmer")) {
+    if (profile === "skimmer") {
       return "Often paused during feeding or maintenance to avoid overflow after water level changes.";
     }
-    if (type === "Flow") {
+    if (profile === "flow_pump") {
       return "Flow equipment is a good candidate for Feed mode presets.";
     }
-    if (type === "Lighting") {
+    if (profile === "lighting") {
       return "Lighting is usually left unchanged by Feed and Maintenance presets.";
+    }
+    if (profile === "doser") {
+      return "Keep dosing controls deliberate and review chemistry before arming manual control.";
+    }
+    if (profile === "filtration") {
+      return "Filtration and reactor controls can affect nutrient export and water clarity.";
     }
     return "Use manual control only when the mapped switch and reef impact are clear.";
   }
@@ -1631,7 +1678,7 @@ class OpenReefPanel extends HTMLElement {
     }
     if (interlocks.atoMaxRuntimeEnabled !== true) {
       const armedAto = equipment.filter(
-        ([id, item]) => item.armed && this._equipmentType(id, item) === "Top off",
+        ([id, item]) => item.armed && this._equipmentProfile(id, item) === "ato",
       );
       if (armedAto.length) {
         warnings.push({
@@ -1642,10 +1689,10 @@ class OpenReefPanel extends HTMLElement {
     }
     if (interlocks.returnPumpSkimmerWarning !== false) {
       const armedSkimmers = equipment.filter(
-        ([id, item]) => item.armed && `${id} ${item.label || ""}`.toLowerCase().includes("skimmer"),
+        ([id, item]) => item.armed && this._equipmentProfile(id, item) === "skimmer",
       );
       const armedReturnPumps = equipment.filter(
-        ([id, item]) => item.armed && `${id} ${item.label || ""}`.toLowerCase().includes("return"),
+        ([id, item]) => item.armed && this._equipmentProfile(id, item) === "return_pump",
       );
       if (armedSkimmers.length && !armedReturnPumps.length) {
         warnings.push({
@@ -1671,7 +1718,7 @@ class OpenReefPanel extends HTMLElement {
   _heaterInterlocks(equipment = Object.entries(this._config.equipment || {})) {
     const tempSensor = this._config.sensors?.temp;
     const heaters = equipment.filter(
-      ([id, item]) => item.armed && this._equipmentType(id, item) === "Temperature" && `${id} ${item.label || ""}`.toLowerCase().includes("heater"),
+      ([id, item]) => item.armed && this._equipmentProfile(id, item) === "heater",
     );
 
     if (!heaters.length) return [];
@@ -1719,7 +1766,7 @@ class OpenReefPanel extends HTMLElement {
       .map(([equipmentId, desiredState]) => {
         const item = this._config.equipment?.[equipmentId] || {};
         const switchEntity = item.switch_entity_id || "";
-        const autoRestartBlocked = this._blocksDisplayWavemakerAutoRestart(item, desiredState);
+        const autoRestartBlocked = this._blocksDisplayWavemakerAutoRestart(item, desiredState, equipmentId);
         let status = "ready";
         let detail = switchEntity || "No switch mapped";
         if (!switchEntity) {
@@ -2072,7 +2119,7 @@ class OpenReefPanel extends HTMLElement {
     const unmappedSensors = sensors.filter(([, sensor]) => !sensor.entity_id);
     const disarmedMapped = equipment.filter(([, item]) => item.switch_entity_id && !item.armed);
     const displayWavemakersOff = this._activeMode() === "running"
-      ? equipment.filter(([, item]) => item.displayWavemaker && item.armed && item.switch_entity_id && this._stateValue(item.switch_entity_id) === "off")
+      ? equipment.filter(([id, item]) => this._isDisplayWavemaker(id, item) && item.armed && item.switch_entity_id && this._stateValue(item.switch_entity_id) === "off")
       : [];
 
     sensorAlerts.filter((alert) => alert.status === "critical").forEach((alert) => {
@@ -2237,7 +2284,7 @@ class OpenReefPanel extends HTMLElement {
     const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
     const reason = this._controlBlockReason(item);
     const action = this._controlActionLabel(item);
-    const displayWavemakerOff = item.displayWavemaker && state === "off";
+    const displayWavemakerOff = this._isDisplayWavemaker(id, item) && state === "off";
     return `
       <article class="panel control-card ${enabled ? "" : "locked-card"}">
         <div class="card-head">
@@ -2286,7 +2333,7 @@ class OpenReefPanel extends HTMLElement {
     const current = this._stateValue(item.switch_entity_id);
     const action = this._controlActionLabel(item);
     const target = current === "on" ? "off" : "on";
-    const displayRestart = item.displayWavemaker && target === "on";
+    const displayRestart = this._isDisplayWavemaker(id, item) && target === "on";
     return `
       <div class="modal">
         <section class="wizard confirm-dialog">
@@ -2731,6 +2778,8 @@ class OpenReefPanel extends HTMLElement {
     const stateClass = this._equipmentStateClass(item);
     const stateLabel = this._equipmentStateLabel(item);
     const [risk, riskLabel] = this._equipmentRisk(id, item);
+    const profile = this._equipmentProfile(id, item);
+    const isDisplayWavemaker = profile === "display_wavemaker";
     return `
       <div class="equipment-editor ${item.armed ? "armed-editor" : "disarmed-editor"} ${open ? "open-editor" : "collapsed-editor"}">
         <div class="equipment-editor-head">
@@ -2740,8 +2789,8 @@ class OpenReefPanel extends HTMLElement {
             <div class="pill-stack inline">
               <span class="pill ${stateClass}">${this._escape(stateLabel)}</span>
               <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
+              <span class="pill">${this._escape(this._equipmentProfileLabel(profile))}</span>
               <span class="pill ${optionalMapped ? "ok" : "unknown"}">${optionalMapped}/3 energy</span>
-              ${item.displayWavemaker ? `<span class="pill warning">display wavemaker</span>` : ""}
             </div>
           </div>
           <div class="settings-actions">
@@ -2761,6 +2810,21 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${open ? `
           <div class="equipment-editor-body">
+            <section class="mapping-card entity-card profile-card">
+              <div class="mapping-head">
+                <div>
+                  <h3>Equipment profile</h3>
+                  <p class="muted">Profiles drive presets, safety warnings, grouping, and future automation rules.</p>
+                </div>
+                <span class="pill ${risk === "critical" ? "critical" : risk === "warning" ? "warning" : "ok"}">${this._escape(this._equipmentProfileLabel(profile))}</span>
+              </div>
+              <label>Profile
+                <select data-scope="equipment" data-id="${this._escape(id)}" data-field="type">
+                  ${this._equipmentProfileChoices().map(([value, label]) => `<option value="${this._escape(value)}" ${profile === value ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
+                </select>
+              </label>
+              <p class="hint">${this._escape(this._equipmentUseHint(id, item))}</p>
+            </section>
             <section class="picker mapping-card entity-card">
               <div class="mapping-head">
                 <h3>Switch</h3>
@@ -2798,18 +2862,11 @@ class OpenReefPanel extends HTMLElement {
               <div class="mapping-head">
                 <div>
                   <h3>Display wavemaker safety</h3>
-                  <p class="muted">Only enable this for wavemakers or powerheads inside the display tank.</p>
+                  <p class="muted">Choose the Display wavemaker profile for powerheads inside the display tank.</p>
                 </div>
-                <span class="pill ${item.displayWavemaker ? "warning" : "unknown"}">${item.displayWavemaker ? "protected" : "off"}</span>
+                <span class="pill ${isDisplayWavemaker ? "warning" : "unknown"}">${isDisplayWavemaker ? "protected" : "off"}</span>
               </div>
-              <label class="toggle-card">
-                <input type="checkbox" data-scope="equipment" data-id="${this._escape(id)}" data-field="displayWavemaker" ${item.displayWavemaker ? "checked" : ""}>
-                <span>
-                  <strong>Display-tank wavemaker</strong>
-                  <small>Marks this as a physical livestock risk when it restarts after being off.</small>
-                </span>
-              </label>
-              ${item.displayWavemaker ? `
+              ${isDisplayWavemaker ? `
                 <div class="notice danger-notice"><strong>OpenReef will block automatic restart by default.</strong> If this wavemaker is still off in Running, Mission Control will warn you to inspect livestock and restart manually.</div>
                 <label class="toggle-card">
                   <input type="checkbox" data-scope="equipment" data-id="${this._escape(id)}" data-field="allowAutoRestart" ${item.allowAutoRestart ? "checked" : ""}>
@@ -2825,7 +2882,7 @@ class OpenReefPanel extends HTMLElement {
                     <small>Create a persistent notification while this armed display wavemaker is off in Running.</small>
                   </span>
                 </label>
-              ` : ""}
+              ` : `<p class="hint">This device is not treated as a display-tank wavemaker. It will use the normal safety behaviour for its selected profile.</p>`}
             </section>
           </div>
         ` : ""}
