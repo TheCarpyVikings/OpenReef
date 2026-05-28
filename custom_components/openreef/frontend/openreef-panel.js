@@ -218,6 +218,9 @@ class OpenReefPanel extends HTMLElement {
     this._error = "";
     this._render();
     try {
+      if (this._configDirty) {
+        await this._persistConfigSilently();
+      }
       const result = await this._callWS({ type: "openreef/apply_mode", mode_id: modeId });
       const refreshed = await this._callWS({ type: "openreef/get_config" });
       this._config = refreshed.config || this._config;
@@ -2861,7 +2864,7 @@ class OpenReefPanel extends HTMLElement {
             <span class="pill ${counts.ready ? "warning" : "unknown"}">${counts.ready} ready</span>
           </div>
           <div class="notice warning-notice">OpenReef will only control mapped switch entities that are explicitly armed in Settings. Locked or unavailable equipment will be skipped.</div>
-          ${this._configDirty ? `<div class="notice">Save your Settings changes before applying this mode, so Home Assistant uses the same plan shown here.</div>` : ""}
+          ${this._configDirty ? `<div class="notice">OpenReef will save your pending Settings changes before applying this mode.</div>` : ""}
           ${counts.rows.length ? `
             <div class="mode-confirm-list">
               ${counts.rows.map((row) => `
@@ -2877,7 +2880,7 @@ class OpenReefPanel extends HTMLElement {
           ` : `<p class="muted">No equipment actions are configured for this mode yet. Add them in Settings.</p>`}
           <footer class="wizard-actions">
             <button class="secondary" data-action="close-mode-confirm">Cancel</button>
-            <button class="primary" data-action="apply-mode" data-mode="${this._escape(modeId)}" ${counts.ready && !this._configDirty ? "" : "disabled"}>Apply ${this._escape(mode[1])}</button>
+            <button class="primary" data-action="apply-mode" data-mode="${this._escape(modeId)}" ${counts.ready ? "" : "disabled"}>${this._configDirty ? "Save and apply" : "Apply"} ${this._escape(mode[1])}</button>
           </footer>
         </section>
       </div>
