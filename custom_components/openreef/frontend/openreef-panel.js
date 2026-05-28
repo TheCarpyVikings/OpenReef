@@ -20,6 +20,7 @@ class OpenReefPanel extends HTMLElement {
     this._trendRequest = "";
     this._modeConfirm = null;
     this._controlConfirm = null;
+    this._equipmentDetail = null;
     this._configDirty = false;
     this._equipmentEditors = {};
     this._equipmentEnergyEditors = {};
@@ -528,6 +529,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "tab") {
         this._activeTab = id;
         this._setupOpen = false;
+        this._equipmentDetail = null;
+        this._controlConfirm = null;
         this._render();
       }
       if (action === "setup") {
@@ -641,6 +644,14 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "toggle-equipment-energy") {
         this._equipmentEnergyEditors[id] = !this._equipmentEnergyOpen(id);
+        this._render();
+      }
+      if (action === "show-equipment-detail") {
+        this._equipmentDetail = id;
+        this._render();
+      }
+      if (action === "close-equipment-detail") {
+        this._equipmentDetail = null;
         this._render();
       }
       if (action === "set-theme") {
@@ -834,6 +845,36 @@ class OpenReefPanel extends HTMLElement {
   _number(entityId) {
     const value = Number.parseFloat(this._stateValue(entityId));
     return Number.isFinite(value) ? value : null;
+  }
+
+  _entityStatus(entityId) {
+    if (!entityId) return ["unknown", "Not mapped"];
+    const state = this._state(entityId);
+    if (!state) return ["critical", "Missing"];
+    if (state.state === "unavailable") return ["critical", "Unavailable"];
+    if (state.state === "unknown") return ["warning", "Unknown"];
+    return ["ok", "Live"];
+  }
+
+  _bestEntityStatus(entityIds) {
+    const mapped = entityIds.filter(Boolean);
+    if (!mapped.length) return ["unknown", "Not mapped"];
+    const statuses = mapped.map((entityId) => this._entityStatus(entityId));
+    return statuses.find(([status]) => status === "ok") || statuses[0];
+  }
+
+  _lastChangedLabel(entityId) {
+    const state = this._state(entityId);
+    const raw = state?.last_changed || state?.last_updated || state?.last_reported;
+    if (!raw) return "No timestamp";
+    const date = new Date(raw);
+    if (!Number.isFinite(date.getTime())) return "No timestamp";
+    return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+  }
+
+  _friendlyEntityName(entityId) {
+    const state = this._state(entityId);
+    return state?.attributes?.friendly_name || entityId || "Not mapped";
   }
 
   _alertMutedUntil(sensorId) {
@@ -1298,6 +1339,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._setupOpen ? this._setupWizard() : ""}
         ${this._trend ? this._trendModal() : ""}
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
+        ${this._equipmentDetail ? this._equipmentDetailModal() : ""}
         ${this._controlConfirm ? this._controlConfirmModal() : ""}
       </main>
     `;
@@ -1641,18 +1683,21 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="control-row">
           <span>${this._escape(reason)}</span>
-          <button
-            class="control-switch ${isOn ? "on" : "off"} ${enabled ? "" : "locked"}"
-            data-action="toggle-equipment"
-            data-id="${this._escape(id)}"
-            role="switch"
-            aria-checked="${isOn ? "true" : "false"}"
-            title="${this._escape(enabled ? `Click to ${action}` : reason)}"
-            ${enabled ? "" : "disabled"}
-          >
-            <span></span>
-            <strong>${isOn ? "On" : "Off"}</strong>
-          </button>
+          <div class="control-actions">
+            <button class="secondary compact-button" data-action="show-equipment-detail" data-id="${this._escape(id)}">Details</button>
+            <button
+              class="control-switch ${isOn ? "on" : "off"} ${enabled ? "" : "locked"}"
+              data-action="toggle-equipment"
+              data-id="${this._escape(id)}"
+              role="switch"
+              aria-checked="${isOn ? "true" : "false"}"
+              title="${this._escape(enabled ? `Click to ${action}` : reason)}"
+              ${enabled ? "" : "disabled"}
+            >
+              <span></span>
+              <strong>${isOn ? "On" : "Off"}</strong>
+            </button>
+          </div>
         </div>
       </article>
     `;
@@ -1704,6 +1749,99 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _equipmentDetailModal() {
+    const id = this._equipmentDetail;
+    const item = this._config.equipment?.[id];
+    if (!id || !item) return "";
+    const enabled = this._controlAvailable(item);
+    const isOn = this._stateValue(item.switch_entity_id) === "on";
+    const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
+    const switchStatus = this._equipmentStateClass(item);
+    const switchLabel = this._equipmentStateLabel(item);
+    const mappedCost = this._number(item.cost_entity_id);
+    const cost = this._energyCost(item.energy_entity_id, mappedCost);
+    const fields = [
+      ["Switch", item.switch_entity_id, this._equipmentStateLabel(item)],
+      ["Power", item.power_entity_id, `${this._format(this._number(item.power_entity_id), 1)} W`],
+      ["Energy", item.energy_entity_id, this._formatEnergyWh(item.energy_entity_id)],
+      ["Cost", item.cost_entity_id, this._formatMoney(mappedCost)],
+    ];
+    return `
+      <div class="modal">
+        <section class="wizard detail-dialog">
+          <button class="close" data-action="close-equipment-detail">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Equipment Detail</p>
+              <h2>${this._escape(item.label || id)}</h2>
+              <p class="muted">${this._escape(this._equipmentType(id, item))}</p>
+            </div>
+            <div class="pill-stack">
+              <span class="pill ${item.armed ? "ok" : "disabled"}">${item.armed ? "Armed" : "Disarmed"}</span>
+              <span class="pill ${switchStatus}">${this._escape(switchLabel)}</span>
+              <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
+            </div>
+          </div>
+          <div class="detail-grid">
+            <article class="detail-card">
+              <span>Manual Control</span>
+              <strong>${this._escape(this._controlBlockReason(item))}</strong>
+              <p>${this._escape(riskDetail)}</p>
+              <div class="control-actions">
+                <button
+                  class="control-switch ${isOn ? "on" : "off"} ${enabled ? "" : "locked"}"
+                  data-action="toggle-equipment"
+                  data-id="${this._escape(id)}"
+                  role="switch"
+                  aria-checked="${isOn ? "true" : "false"}"
+                  ${enabled ? "" : "disabled"}
+                >
+                  <span></span>
+                  <strong>${isOn ? "On" : "Off"}</strong>
+                </button>
+              </div>
+            </article>
+            <article class="detail-card">
+              <span>Energy</span>
+              <strong>${this._formatEnergyWh(item.energy_entity_id)}</strong>
+              <p>Power ${this._format(this._number(item.power_entity_id), 1)} W · Cost ${this._escape(this._formatMoney(cost))}</p>
+            </article>
+          </div>
+          <section class="mapping-card entity-card">
+            <div class="mapping-head">
+              <div>
+                <h3>Mapped entities</h3>
+                <p class="muted">Only these configured entities are read by OpenReef.</p>
+              </div>
+              <button class="secondary compact-button" data-action="tab" data-id="settings">Edit mappings</button>
+            </div>
+            <div class="entity-table">
+              ${fields.map(([label, entityId, value]) => this._entityDetailRow(label, entityId, value)).join("")}
+            </div>
+          </section>
+        </section>
+      </div>
+    `;
+  }
+
+  _entityDetailRow(label, entityId, value) {
+    const [status, statusLabel] = this._entityStatus(entityId);
+    return `
+      <div class="entity-detail-row">
+        <div>
+          <strong>${this._escape(label)}</strong>
+          <span>${this._escape(this._friendlyEntityName(entityId))}</span>
+          <small>${this._escape(entityId || "Not mapped")}</small>
+        </div>
+        <div>
+          <strong>${this._escape(value || "--")}</strong>
+          <span>${this._escape(this._lastChangedLabel(entityId))}</span>
+        </div>
+        <span class="pill ${status}">${this._escape(statusLabel)}</span>
+      </div>
+    `;
+  }
+
   _energy() {
     const tariff = Number(this._config.energy.tariff || 0);
     const totals = this._energyTotalMappings();
@@ -1716,18 +1854,7 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${hasEnergyMappings ? "" : this._emptyState("Energy is not mapped yet", "Map daily, weekly, monthly, or per-device energy entities in Settings. OpenReef will show blanks until then.", "settings", "Map energy")}
         <div class="grid three">
-          ${totals.map(([label, energyKey, costKey]) => {
-            const mappedCost = this._number(this._config.energy[costKey]);
-            const cost = this._energyCost(this._config.energy[energyKey], mappedCost);
-            return `
-              <article class="stat">
-                <p>${label}</p>
-                <strong>${this._formatEnergyWh(this._config.energy[energyKey])}</strong>
-                <span>${this._escape(this._formatMoney(cost))}</span>
-                <small>${this._escape(this._config.energy[energyKey] || "Optional mapping missing")}</small>
-              </article>
-            `;
-          }).join("")}
+          ${totals.map(([label, energyKey, costKey]) => this._energyTotalCard(label, energyKey, costKey)).join("")}
         </div>
         <div class="section-head">
           <h3>Per-device energy</h3>
@@ -1740,23 +1867,54 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _energyTotalCard(label, energyKey, costKey) {
+    const energyEntity = this._config.energy[energyKey];
+    const costEntity = this._config.energy[costKey];
+    const mappedCost = this._number(costEntity);
+    const cost = this._energyCost(energyEntity, mappedCost);
+    const [status, statusLabel] = this._entityStatus(energyEntity);
+    return `
+      <article class="stat energy-total-card">
+        <div class="card-head">
+          <p>${this._escape(label)}</p>
+          <span class="pill ${status}">${this._escape(statusLabel)}</span>
+        </div>
+        <strong>${this._formatEnergyWh(energyEntity)}</strong>
+        <span>${this._escape(this._formatMoney(cost))}</span>
+        <small>${this._escape(energyEntity || "Optional energy mapping missing")}</small>
+        <small>${costEntity ? `Cost source: ${this._escape(costEntity)}` : "Cost is estimated from tariff when energy is mapped."}</small>
+      </article>
+    `;
+  }
+
   _deviceEnergyCard(id, item) {
     const power = this._number(item.power_entity_id);
     const mappedCost = this._number(item.cost_entity_id);
     const cost = this._energyCost(item.energy_entity_id, mappedCost);
     const hasAnyEnergy = item.power_entity_id || item.energy_entity_id || item.cost_entity_id;
+    const [switchStatus, switchStatusLabel] = this._entityStatus(item.switch_entity_id);
+    const [energyStatus, energyStatusLabel] = this._bestEntityStatus([item.energy_entity_id, item.power_entity_id, item.cost_entity_id]);
     return `
-      <article class="panel">
+      <article class="panel device-energy-card ${hasAnyEnergy ? "" : "locked-card"}">
         <div class="card-head">
           <div>
             <h3>${this._escape(item.label || id)}</h3>
-            <p>${this._escape(this._equipmentType(id, item))}</p>
+            <p>${this._escape(this._equipmentType(id, item))} · ${this._escape(item.switch_entity_id || "No switch mapped")}</p>
           </div>
-          <span class="pill ${hasAnyEnergy ? "ok" : "unknown"}">${hasAnyEnergy ? "mapped" : "optional"}</span>
+          <div class="pill-stack">
+            <span class="pill ${switchStatus}">${this._escape(switchStatusLabel)}</span>
+            <span class="pill ${energyStatus}">${hasAnyEnergy ? this._escape(energyStatusLabel) : "optional"}</span>
+          </div>
         </div>
-        <div class="row"><span>Current power</span><strong>${this._format(power, 1)} W</strong></div>
-        <div class="row"><span>Total energy</span><strong>${this._formatEnergyWh(item.energy_entity_id)}</strong></div>
-        <div class="row"><span>Estimated cost</span><strong>${this._escape(this._formatMoney(cost))}</strong></div>
+        <div class="energy-metrics">
+          <div><span>Power</span><strong>${this._format(power, 1)} W</strong></div>
+          <div><span>Energy</span><strong>${this._formatEnergyWh(item.energy_entity_id)}</strong></div>
+          <div><span>Cost</span><strong>${this._escape(this._formatMoney(cost))}</strong></div>
+        </div>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="show-equipment-detail" data-id="${this._escape(id)}">Details</button>
+          <button class="secondary compact-button" data-action="tab" data-id="settings">Edit mapping</button>
+        </div>
         ${hasAnyEnergy ? "" : `<p class="hint">Map power or energy entities in Settings to track this device.</p>`}
       </article>
     `;
@@ -2542,10 +2700,21 @@ class OpenReefPanel extends HTMLElement {
         .mode-confirm-row.ready { border-color: #166534; }
         .mode-confirm-row.locked { opacity: .72; }
         .confirm-dialog { max-width: 780px; }
+        .detail-dialog { max-width: 960px; }
+        .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .detail-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0b1724; display: grid; gap: 8px; }
+        .detail-card span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+        .detail-card strong { color: #67e8f9; font-size: 24px; }
+        .detail-card p { color: #9fb2c7; }
+        .entity-table { display: grid; gap: 8px; }
+        .entity-detail-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(130px, .45fr) auto; gap: 12px; align-items: center; border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); }
+        .entity-detail-row div { display: grid; gap: 3px; min-width: 0; }
+        .entity-detail-row span, .entity-detail-row small { color: #8da2ba; overflow-wrap: anywhere; }
         .control-card { display: grid; gap: 14px; }
         .control-card.locked-card { opacity: .82; }
         .control-detail { display: grid; gap: 4px; color: #9fb2c7; overflow-wrap: anywhere; }
         .control-detail small { color: #8da2ba; }
+        .control-actions { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
         .control-row, .settings-actions { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
         .control-row { padding-top: 18px; color: #8da2ba; }
         .control-switch, .arm-switch { display: inline-flex; align-items: center; gap: 10px; min-width: 112px; min-height: 44px; border: 1px solid #334155; border-radius: 999px; padding: 5px 14px 5px 5px; background: #1f2937; color: #dcecff; font-weight: 800; }
@@ -2578,6 +2747,12 @@ class OpenReefPanel extends HTMLElement {
         .stat-button { position: relative; width: 100%; text-align: left; }
         .stat-button:hover, .stat-button:focus-visible { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent-border); outline: none; }
         .trend-hint { position: absolute; top: 14px; right: 14px; border: 1px solid #294055; border-radius: 999px; padding: 4px 9px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; }
+        .energy-total-card { align-content: start; }
+        .device-energy-card { display: grid; gap: 14px; }
+        .energy-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+        .energy-metrics div { border: 1px solid #24364a; border-radius: 8px; background: rgba(11, 23, 36, .72); padding: 12px; display: grid; gap: 5px; }
+        .energy-metrics span { color: #8da2ba; font-size: 12px; font-weight: 800; }
+        .energy-metrics strong { color: #67e8f9; overflow-wrap: anywhere; }
         label { display: grid; gap: 7px; color: #a7b7ca; font-size: 13px; font-weight: 700; }
         input, select { width: 100%; min-width: 0; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
         select { cursor: pointer; }
@@ -2653,6 +2828,7 @@ class OpenReefPanel extends HTMLElement {
           .mode-actions { grid-template-columns: 1fr; }
           .issue-item { grid-template-columns: 1fr; }
           .activity-item { grid-template-columns: 1fr; }
+          .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
           .range-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .trend-summary { grid-template-columns: 1fr; }
         }
