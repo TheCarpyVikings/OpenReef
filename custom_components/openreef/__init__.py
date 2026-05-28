@@ -18,6 +18,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
@@ -44,6 +45,7 @@ type OpenReefConfigEntry = ConfigEntry
 
 SEARCH_LIMIT = 10
 UNAVAILABLE_STATES = {"unknown", "unavailable"}
+MODE_TIMER_UNSUB = "mode_timer_unsub"
 
 APPLY_MODE_SCHEMA = vol.Schema({vol.Required("mode_id"): cv.string})
 
@@ -196,6 +198,18 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
         )
 
     core["modes"] = settings.get("modes") if isinstance(settings.get("modes"), list) else []
+    if isinstance(core["modes"], list):
+        for mode in core["modes"]:
+            if not isinstance(mode, dict):
+                continue
+            mode_id = mode.get("id")
+            if mode_id not in core["modeTimers"]:
+                continue
+            try:
+                duration = int(mode.get("duration", core["modeTimers"][mode_id]["durationMinutes"]))
+            except (TypeError, ValueError):
+                continue
+            core["modeTimers"][mode_id]["durationMinutes"] = max(0, min(duration, 720))
     core["mode"]["active"] = "running"
     core["mode"]["startedAt"] = ""
     core["manualReadings"] = (
@@ -247,6 +261,11 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         active = mode.get("active")
         mode["active"] = active if active in {"running", "feed", "maintenance"} else "running"
         mode["startedAt"] = mode.get("startedAt") if isinstance(mode.get("startedAt"), str) else ""
+        mode["expiresAt"] = mode.get("expiresAt") if isinstance(mode.get("expiresAt"), str) else ""
+        mode["autoReturn"] = bool(mode.get("autoReturn", False))
+        if mode["active"] == "running":
+            mode["expiresAt"] = ""
+            mode["autoReturn"] = False
         return_plan = mode.get("returnPlan")
         if not isinstance(return_plan, dict):
             mode["returnPlan"] = {}
@@ -273,6 +292,24 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                     "unchanged",
                 }:
                     preview.pop(equipment_id)
+
+    mode_timers = config.setdefault("modeTimers", {})
+    if not isinstance(mode_timers, dict):
+        config["modeTimers"] = deepcopy(DEFAULT_CORE_CONFIG["modeTimers"])
+    else:
+        for mode_id, defaults in DEFAULT_CORE_CONFIG["modeTimers"].items():
+            timer = mode_timers.setdefault(mode_id, {})
+            if not isinstance(timer, dict):
+                timer = deepcopy(defaults)
+                mode_timers[mode_id] = timer
+            try:
+                timer["durationMinutes"] = int(
+                    timer.get("durationMinutes", defaults["durationMinutes"])
+                )
+            except (TypeError, ValueError):
+                timer["durationMinutes"] = defaults["durationMinutes"]
+            timer["durationMinutes"] = max(0, min(timer["durationMinutes"], 720))
+            timer["autoReturn"] = bool(timer.get("autoReturn", defaults["autoReturn"]))
 
     equipment = config.setdefault("equipment", {})
     if not isinstance(equipment, dict):
@@ -811,6 +848,75 @@ async def _async_sync_alert_notifications(
         )
 
 
+def _clear_mode_timer(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MODE_TIMER_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_schedule_mode_timer(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    _clear_mode_timer(hass)
+    if entry is None:
+        return
+
+    config = config or _config_from_entry(entry)
+    mode = config.get("mode", {})
+    if not isinstance(mode, dict):
+        return
+    active = mode.get("active")
+    if active == "running" or not mode.get("autoReturn", False):
+        return
+
+    expires_at = _parse_datetime(mode.get("expiresAt"))
+    if expires_at is None:
+        return
+
+    scheduled_expires_at = mode.get("expiresAt")
+    scheduled_mode = str(active)
+    run_at = expires_at
+    now = datetime.now(timezone.utc)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+
+    async def _handle_mode_timer(_now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+
+        latest_config = _config_from_entry(latest_entry)
+        latest_mode = latest_config.get("mode", {})
+        if not isinstance(latest_mode, dict):
+            return
+        if (
+            latest_mode.get("active") != scheduled_mode
+            or latest_mode.get("expiresAt") != scheduled_expires_at
+            or not latest_mode.get("autoReturn", False)
+        ):
+            return
+
+        try:
+            await _async_apply_mode(hass, latest_entry, "running", None)
+        except ServiceValidationError as err:
+            latest_config = _config_from_entry(latest_entry)
+            latest_mode = latest_config.setdefault("mode", {})
+            if isinstance(latest_mode, dict):
+                latest_mode["autoReturn"] = False
+            _append_activity(
+                latest_config,
+                f"Auto-return to Running blocked: {err}",
+                "warning",
+            )
+            await _async_save_config(hass, latest_entry, latest_config)
+
+    hass.data.setdefault(DOMAIN, {})[MODE_TIMER_UNSUB] = async_track_point_in_time(
+        hass, _handle_mode_timer, run_at
+    )
+
+
 async def _async_refresh_issues(
     hass: HomeAssistant, entry: OpenReefConfigEntry | None
 ) -> None:
@@ -873,6 +979,7 @@ async def _async_save_config(
     hass.config_entries.async_update_entry(entry, options=options)
     await _async_refresh_issues(hass, entry)
     await _async_sync_alert_notifications(hass, normalised)
+    await _async_schedule_mode_timer(hass, entry, normalised)
     return normalised
 
 
@@ -1007,15 +1114,41 @@ async def _async_apply_mode(
             "OpenReef mode matched equipment, but all mapped controls are locked"
         )
 
+    now = datetime.now(timezone.utc)
+    mode_timer = (
+        config.get("modeTimers", {}).get(mode_id, {})
+        if isinstance(config.get("modeTimers"), dict)
+        else {}
+    )
+    duration_minutes = 0
+    auto_return = False
+    expires_at = ""
+    if should_capture_return_plan and isinstance(mode_timer, dict):
+        try:
+            duration_minutes = int(mode_timer.get("durationMinutes", 0))
+        except (TypeError, ValueError):
+            duration_minutes = 0
+        duration_minutes = max(0, min(duration_minutes, 720))
+        if duration_minutes:
+            expires_at = (now + timedelta(minutes=duration_minutes)).isoformat()
+            auto_return = bool(mode_timer.get("autoReturn", False))
+
     config["mode"] = {
         "active": mode_id,
-        "startedAt": datetime.now(timezone.utc).isoformat(),
+        "startedAt": now.isoformat(),
+        "expiresAt": expires_at,
+        "autoReturn": auto_return,
         "returnPlan": return_plan if should_capture_return_plan else {},
     }
     mode_label = mode_id.replace("_", " ").title()
+    timer_detail = ""
+    if should_capture_return_plan and duration_minutes:
+        timer_detail = (
+            f", timer {duration_minutes}m, auto-return {'on' if auto_return else 'off'}"
+        )
     _append_activity(
         config,
-        f"{mode_label} mode applied: {len(applied)} changed, {len(skipped_locked)} locked, {len(skipped_missing)} unavailable",
+        f"{mode_label} mode applied: {len(applied)} changed, {len(skipped_locked)} locked, {len(skipped_missing)} unavailable{timer_detail}",
         "control",
     )
     await _async_save_config(hass, entry, config)
@@ -1456,6 +1589,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
         )
     await _async_refresh_issues(hass, entry)
     await _async_sync_alert_notifications(hass, normalised)
+    await _async_schedule_mode_timer(hass, entry, normalised)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> bool:
+    """Unload OpenReef entry resources."""
+    _clear_mode_timer(hass)
+    hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
     return True
 
 

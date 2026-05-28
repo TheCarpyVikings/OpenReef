@@ -22,6 +22,7 @@ class OpenReefPanel extends HTMLElement {
     this._controlConfirm = null;
     this._equipmentDetail = null;
     this._configDirty = false;
+    this._modeCountdownTimer = null;
     this._equipmentEditors = {};
     this._equipmentEnergyEditors = {};
     this._settingsSections = {
@@ -64,6 +65,18 @@ class OpenReefPanel extends HTMLElement {
     this._attachEvents();
     this._renderLoading();
     this._loadConfig();
+    if (!this._modeCountdownTimer) {
+      this._modeCountdownTimer = window.setInterval(() => {
+        this._updateModeCountdownElements();
+      }, 10000);
+    }
+  }
+
+  disconnectedCallback() {
+    if (this._modeCountdownTimer) {
+      window.clearInterval(this._modeCountdownTimer);
+      this._modeCountdownTimer = null;
+    }
   }
 
   async _callWS(payload) {
@@ -733,6 +746,14 @@ class OpenReefPanel extends HTMLElement {
         this._config.modePreviews[modeId] = this._config.modePreviews[modeId] || {};
         this._config.modePreviews[modeId][equipmentId] = value;
       }
+      if (scope === "mode-timer") {
+        const modeId = target.dataset.mode;
+        this._config.modeTimers = this._config.modeTimers || {};
+        this._config.modeTimers[modeId] = this._config.modeTimers[modeId] || {};
+        this._config.modeTimers[modeId][field] = field === "durationMinutes"
+          ? Math.max(0, Math.min(Number(value), 720))
+          : value;
+      }
       if (scope === "mission-card") {
         this._config.display.missionCards = this._missionCards();
         this._config.display.missionCards[id] = value;
@@ -1072,15 +1093,75 @@ class OpenReefPanel extends HTMLElement {
     return `${days} day${days === 1 ? "" : "s"}`;
   }
 
+  _formatDurationMs(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return "Expired";
+    const totalSeconds = Math.ceil(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes < 1) return `${seconds}s`;
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    if (hours < 1) return `${minutes}m`;
+    return `${hours}h ${remainingMinutes}m`;
+  }
+
+  _modeTimerConfig(modeId) {
+    const defaults = modeId === "maintenance"
+      ? { durationMinutes: 60, autoReturn: false }
+      : { durationMinutes: 10, autoReturn: false };
+    const timer = this._config?.modeTimers?.[modeId] || {};
+    const duration = Number(timer.durationMinutes ?? defaults.durationMinutes);
+    return {
+      durationMinutes: Number.isFinite(duration) ? Math.max(0, Math.min(duration, 720)) : defaults.durationMinutes,
+      autoReturn: Boolean(timer.autoReturn ?? defaults.autoReturn),
+    };
+  }
+
+  _activeModeExpiresAt() {
+    const raw = this._config?.mode?.expiresAt;
+    if (!raw) return null;
+    const expiresAt = new Date(raw);
+    return Number.isFinite(expiresAt.getTime()) ? expiresAt : null;
+  }
+
+  _activeModeCountdownText() {
+    const active = this._activeMode();
+    if (active === "running") return "No timer active";
+    const expiresAt = this._activeModeExpiresAt();
+    if (!expiresAt) return "No timer set";
+    const remaining = expiresAt.getTime() - Date.now();
+    const autoReturn = Boolean(this._config?.mode?.autoReturn);
+    return remaining > 0
+      ? `${this._formatDurationMs(remaining)} left${autoReturn ? " - auto-return on" : ""}`
+      : autoReturn
+        ? "Auto-return due"
+        : "Timer expired";
+  }
+
+  _modeTimerSummary(modeId) {
+    if (modeId === "running") return "No timer is used for Running.";
+    const timer = this._modeTimerConfig(modeId);
+    if (!timer.durationMinutes) return "No timer set.";
+    return `${timer.durationMinutes} minute timer; auto-return ${timer.autoReturn ? "on" : "off"}.`;
+  }
+
+  _updateModeCountdownElements() {
+    const text = this._activeModeCountdownText();
+    this.shadowRoot.querySelectorAll("[data-mode-countdown]").forEach((element) => {
+      element.textContent = text;
+    });
+  }
+
   _modeStatusDetail() {
     const active = this._activeMode();
     if (active === "running") {
       return "Normal monitoring. No mode equipment plan is active.";
     }
     const restoreRows = this._modeActionRows("running");
-    if (!restoreRows.length) return "No restore states were captured for Running yet.";
+    const timerText = this._activeModeCountdownText();
+    if (!restoreRows.length) return `No restore states were captured for Running yet. ${timerText}.`;
     const ready = restoreRows.filter((row) => row.status === "ready").length;
-    return `${restoreRows.length} captured state${restoreRows.length === 1 ? "" : "s"} for Running. ${ready} ready to restore.`;
+    return `${restoreRows.length} captured state${restoreRows.length === 1 ? "" : "s"} for Running. ${ready} ready to restore. ${timerText}.`;
   }
 
   _modePresetChoices(modeId) {
@@ -1634,6 +1715,7 @@ class OpenReefPanel extends HTMLElement {
     const startedLabel = started && Number.isFinite(started.getTime()) ? started.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not started yet";
     const durationLabel = this._modeDurationLabel();
     const durationText = durationLabel === "Not started yet" ? durationLabel : `for ${durationLabel}`;
+    const countdownText = this._activeModeCountdownText();
     const restoreRows = active === "running" ? [] : this._modeActionRows("running");
     return `
       <article class="panel mode-panel">
@@ -1646,6 +1728,7 @@ class OpenReefPanel extends HTMLElement {
           <div class="pill-stack">
             <span class="pill">${this._escape(startedLabel)}</span>
             <span class="pill ${active === "running" ? "ok" : "warning"}">${this._escape(durationText)}</span>
+            ${active !== "running" ? `<span class="pill warning" data-mode-countdown>${this._escape(countdownText)}</span>` : ""}
           </div>
         </div>
         <div class="mode-actions">
@@ -1681,7 +1764,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _activityPanel() {
-    const activity = Array.isArray(this._config.activity) ? this._config.activity.slice(0, 8) : [];
+    const activity = Array.isArray(this._config.activity) ? this._config.activity.slice(0, 12) : [];
     return `
       <article class="panel">
         <div class="section-head">
@@ -2440,6 +2523,7 @@ class OpenReefPanel extends HTMLElement {
   _modePreviewEditor(modeId, equipment) {
     const mode = this._modeChoices().find(([id]) => id === modeId);
     const preview = this._modePreview(modeId);
+    const timer = this._modeTimerConfig(modeId);
     const options = [
       ["unchanged", "Leave unchanged"],
       ["off", "Turn off"],
@@ -2460,6 +2544,19 @@ class OpenReefPanel extends HTMLElement {
           `).join("")}
         </div>
         <div class="setup-status-line">${this._escape(this._modePreviewSummary(modeId))} Presets only edit this plan; applying the mode still needs confirmation.</div>
+        <div class="mode-timer-card">
+          <label>Timer minutes
+            <input type="number" min="0" max="720" step="1" value="${this._escape(String(timer.durationMinutes))}" data-scope="mode-timer" data-mode="${this._escape(modeId)}" data-field="durationMinutes">
+            <small>Use 0 for no timer. The timer starts when this mode is applied.</small>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="mode-timer" data-mode="${this._escape(modeId)}" data-field="autoReturn" ${timer.autoReturn ? "checked" : ""}>
+            <span>
+              <strong>Auto-return to Running</strong>
+              <small>Off by default. If enabled, Home Assistant restores the captured Running state when the timer ends.</small>
+            </span>
+          </label>
+        </div>
         <div class="stack tight">
           ${equipment.map(([equipmentId, item]) => {
             const selected = preview[equipmentId] || "unchanged";
@@ -2749,6 +2846,7 @@ class OpenReefPanel extends HTMLElement {
     const modeId = this._modeConfirm;
     const mode = this._modeChoices().find(([id]) => id === modeId) || [modeId, modeId, ""];
     const counts = this._modeActionCounts(modeId);
+    const timerSummary = this._modeTimerSummary(modeId);
     return `
       <div class="modal">
         <section class="wizard confirm-dialog">
@@ -2758,6 +2856,7 @@ class OpenReefPanel extends HTMLElement {
               <p class="eyebrow">Confirm Mode Action</p>
               <h2>${this._escape(mode[1])}</h2>
               <p class="muted">${this._escape(mode[2])}</p>
+              <p class="muted">${this._escape(timerSummary)}</p>
             </div>
             <span class="pill ${counts.ready ? "warning" : "unknown"}">${counts.ready} ready</span>
           </div>
@@ -3039,6 +3138,7 @@ class OpenReefPanel extends HTMLElement {
         .mode-mini-row.missing { border-color: #a16207; }
         .mode-mini-row span { color: #67e8f9; font-weight: 800; text-transform: uppercase; }
         .mode-mini-row small { color: #8da2ba; }
+        .mode-timer-card { display: grid; grid-template-columns: minmax(160px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: stretch; border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); }
         .activity-list { display: grid; gap: 8px; }
         .activity-item { display: grid; grid-template-columns: minmax(130px, .22fr) 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding: 10px 0; }
         .activity-item:first-child { border-top: 0; }
@@ -3214,7 +3314,7 @@ class OpenReefPanel extends HTMLElement {
           .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }
-          .mode-mini-row, .preset-row { grid-template-columns: 1fr; }
+          .mode-mini-row, .preset-row, .mode-timer-card { grid-template-columns: 1fr; }
           .issue-item { grid-template-columns: 1fr; }
           .activity-item { grid-template-columns: 1fr; }
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }

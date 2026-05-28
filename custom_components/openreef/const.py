@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 10
+CORE_SCHEMA_VERSION = 11
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -162,11 +162,23 @@ DEFAULT_CORE_CONFIG = {
     "mode": {
         "active": "running",
         "startedAt": "",
+        "expiresAt": "",
+        "autoReturn": False,
         "returnPlan": {},
     },
     "modePreviews": {
         "feed": {},
         "maintenance": {},
+    },
+    "modeTimers": {
+        "feed": {
+            "durationMinutes": 10,
+            "autoReturn": False,
+        },
+        "maintenance": {
+            "durationMinutes": 60,
+            "autoReturn": False,
+        },
     },
     "alerts": {
         "persistentNotifications": False,
