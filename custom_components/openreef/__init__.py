@@ -311,6 +311,54 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             timer["durationMinutes"] = max(0, min(timer["durationMinutes"], 720))
             timer["autoReturn"] = bool(timer.get("autoReturn", defaults["autoReturn"]))
 
+    mode_settings = config.setdefault("modeSettings", {})
+    if not isinstance(mode_settings, dict):
+        config["modeSettings"] = deepcopy(DEFAULT_CORE_CONFIG["modeSettings"])
+    else:
+        for mode_id, defaults in DEFAULT_CORE_CONFIG["modeSettings"].items():
+            settings = mode_settings.setdefault(mode_id, {})
+            if not isinstance(settings, dict):
+                settings = deepcopy(defaults)
+                mode_settings[mode_id] = settings
+            label = settings.get("label")
+            description = settings.get("description")
+            settings["label"] = (
+                label.strip()[:48]
+                if isinstance(label, str) and label.strip()
+                else defaults["label"]
+            )
+            settings["description"] = (
+                description.strip()[:160]
+                if isinstance(description, str) and description.strip()
+                else defaults["description"]
+            )
+
+    mode_schedule = config.setdefault("modeSchedule", {})
+    if not isinstance(mode_schedule, dict):
+        config["modeSchedule"] = deepcopy(DEFAULT_CORE_CONFIG["modeSchedule"])
+    else:
+        mode_schedule["enabled"] = False
+        items = mode_schedule.get("items")
+        if not isinstance(items, list):
+            mode_schedule["items"] = []
+        else:
+            safe_items: list[dict[str, Any]] = []
+            for item in items[:12]:
+                if not isinstance(item, dict):
+                    continue
+                mode_id = item.get("mode")
+                if mode_id not in {"feed", "maintenance"}:
+                    continue
+                safe_items.append(
+                    {
+                        "enabled": False,
+                        "mode": mode_id,
+                        "time": item.get("time") if isinstance(item.get("time"), str) else "",
+                        "days": item.get("days") if isinstance(item.get("days"), list) else [],
+                    }
+                )
+            mode_schedule["items"] = safe_items
+
     equipment = config.setdefault("equipment", {})
     if not isinstance(equipment, dict):
         config["equipment"] = {}
@@ -999,6 +1047,16 @@ def _append_activity(config: dict[str, Any], message: str, activity_type: str = 
     config["activity"] = activity[:50]
 
 
+def _mode_label(config: dict[str, Any], mode_id: str) -> str:
+    settings = config.get("modeSettings", {})
+    mode_settings = settings.get(mode_id) if isinstance(settings, dict) else None
+    if isinstance(mode_settings, dict):
+        label = mode_settings.get("label")
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    return mode_id.replace("_", " ").title()
+
+
 def _equipment_for_mode(config: dict[str, Any], mode_id: str) -> dict[str, str]:
     if mode_id == "running":
         mode = config.get("mode", {})
@@ -1140,7 +1198,7 @@ async def _async_apply_mode(
         "autoReturn": auto_return,
         "returnPlan": return_plan if should_capture_return_plan else {},
     }
-    mode_label = mode_id.replace("_", " ").title()
+    mode_label = _mode_label(config, mode_id)
     timer_detail = ""
     if should_capture_return_plan and duration_minutes:
         timer_detail = (

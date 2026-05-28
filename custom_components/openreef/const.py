@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 11
+CORE_SCHEMA_VERSION = 12
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -179,6 +179,20 @@ DEFAULT_CORE_CONFIG = {
             "durationMinutes": 60,
             "autoReturn": False,
         },
+    },
+    "modeSettings": {
+        "feed": {
+            "label": "Feed",
+            "description": "Temporarily changes selected armed equipment after confirmation.",
+        },
+        "maintenance": {
+            "label": "Maintenance",
+            "description": "Applies a hands-in-tank equipment plan after confirmation.",
+        },
+    },
+    "modeSchedule": {
+        "enabled": False,
+        "items": [],
     },
     "alerts": {
         "persistentNotifications": False,

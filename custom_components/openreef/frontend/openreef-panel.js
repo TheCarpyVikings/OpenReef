@@ -780,6 +780,12 @@ class OpenReefPanel extends HTMLElement {
           ? Math.max(0, Math.min(Number(value), 720))
           : value;
       }
+      if (scope === "mode-settings") {
+        const modeId = target.dataset.mode;
+        this._config.modeSettings = this._config.modeSettings || {};
+        this._config.modeSettings[modeId] = this._config.modeSettings[modeId] || {};
+        this._config.modeSettings[modeId][field] = value;
+      }
       if (scope === "mission-card") {
         this._config.display.missionCards = this._missionCards();
         this._config.display.missionCards[id] = value;
@@ -1082,12 +1088,29 @@ class OpenReefPanel extends HTMLElement {
     ];
   }
 
-  _modeChoices() {
+  _modeBaseChoices() {
     return [
       ["running", "Running", "Returns from Feed or Maintenance by restoring captured armed equipment states."],
       ["feed", "Feed", "Temporarily changes selected armed equipment after confirmation."],
       ["maintenance", "Maintenance", "Applies a hands-in-tank equipment plan after confirmation."],
     ];
+  }
+
+  _modeConfig(modeId) {
+    const base = this._modeBaseChoices().find(([id]) => id === modeId) || [modeId, modeId, ""];
+    const settings = this._config?.modeSettings?.[modeId] || {};
+    const label = typeof settings.label === "string" && settings.label.trim() ? settings.label.trim() : base[1];
+    const description = typeof settings.description === "string" && settings.description.trim()
+      ? settings.description.trim()
+      : base[2];
+    return { id: modeId, label, description };
+  }
+
+  _modeChoices() {
+    return this._modeBaseChoices().map(([id]) => {
+      const mode = this._modeConfig(id);
+      return [mode.id, mode.label, mode.description];
+    });
   }
 
   _activeMode() {
@@ -1164,6 +1187,11 @@ class OpenReefPanel extends HTMLElement {
         : "Timer expired";
   }
 
+  _modeTimerExpired() {
+    const expiresAt = this._activeModeExpiresAt();
+    return this._activeMode() !== "running" && Boolean(expiresAt) && expiresAt.getTime() <= Date.now();
+  }
+
   _modeTimerSummary(modeId) {
     if (modeId === "running") return "No timer is used for Running.";
     const timer = this._modeTimerConfig(modeId);
@@ -1198,9 +1226,12 @@ class OpenReefPanel extends HTMLElement {
     }
     const restoreRows = this._modeActionRows("running");
     const timerText = this._activeModeCountdownText();
-    if (!restoreRows.length) return `No restore states were captured for Running yet. ${timerText}.`;
+    const timerSuffix = this._modeTimerExpired() && !this._config?.mode?.autoReturn
+      ? "Timer expired. Return to Running when ready."
+      : `${timerText}.`;
+    if (!restoreRows.length) return `No restore states were captured for Running yet. ${timerSuffix}`;
     const ready = restoreRows.filter((row) => row.status === "ready").length;
-    return `${restoreRows.length} captured state${restoreRows.length === 1 ? "" : "s"} for Running. ${ready} ready to restore. ${timerText}.`;
+    return `${restoreRows.length} captured state${restoreRows.length === 1 ? "" : "s"} for Running. ${ready} ready to restore. ${timerSuffix}`;
   }
 
   _modePresetChoices(modeId) {
@@ -1768,6 +1799,7 @@ class OpenReefPanel extends HTMLElement {
             <span class="pill">${this._escape(startedLabel)}</span>
             <span class="pill ${active === "running" ? "ok" : "warning"}">${this._escape(durationText)}</span>
             ${active !== "running" ? `<span class="pill warning" data-mode-countdown>${this._escape(countdownText)}</span>` : ""}
+            ${active !== "running" ? `<button class="primary compact-button" data-action="set-mode" data-mode="running">${this._modeTimerExpired() ? "Return now" : "Return to Running"}</button>` : ""}
           </div>
         </div>
         <div class="mode-actions">
@@ -1798,6 +1830,24 @@ class OpenReefPanel extends HTMLElement {
             </div>
           </div>
         ` : ""}
+      </article>
+    `;
+  }
+
+  _modeBanner() {
+    const active = this._activeMode();
+    const isRunning = active === "running";
+    return `
+      <article class="panel mode-strip ${isRunning ? "running" : this._modeTimerExpired() ? "expired" : "active"}">
+        <div>
+          <p class="eyebrow">Active Mode</p>
+          <h3>${this._escape(this._activeModeLabel())}</h3>
+          <p>${this._escape(this._modeStatusDetail())}</p>
+        </div>
+        <div class="pill-stack">
+          <span class="pill ${isRunning ? "ok" : "warning"}" ${isRunning ? "" : "data-mode-countdown"}>${this._escape(isRunning ? "Monitoring" : this._activeModeCountdownText())}</span>
+          ${!isRunning ? `<button class="primary compact-button" data-action="set-mode" data-mode="running">${this._modeTimerExpired() ? "Return now" : "Return to Running"}</button>` : ""}
+        </div>
       </article>
     `;
   }
@@ -1963,6 +2013,7 @@ class OpenReefPanel extends HTMLElement {
           <h2>Controls</h2>
           <p>Controls stay locked until each device is explicitly armed.</p>
         </div>
+        ${this._modeBanner()}
         ${rows.length ? groups.map(([label, items]) => `
           <section class="equipment-group">
             <div class="section-head">
@@ -2555,12 +2606,20 @@ class OpenReefPanel extends HTMLElement {
             ${["feed", "maintenance"].map((modeId) => this._modePreviewEditor(modeId, equipment)).join("")}
           </div>
         ` : `<p class="muted">Add equipment first, then choose what Feed or Maintenance mode should do.</p>`}
+        <section class="mapping-section scheduler-preview">
+          <div>
+            <p class="eyebrow">Scheduler prep</p>
+            <h4>Scheduled mode automation is reserved for a later smoke-tested pass.</h4>
+            <p class="muted">The config shape is ready, but OpenReef will not run timed schedules or background loops from this screen yet.</p>
+          </div>
+          <span class="pill disabled">Disabled</span>
+        </section>
       `,
     );
   }
 
   _modePreviewEditor(modeId, equipment) {
-    const mode = this._modeChoices().find(([id]) => id === modeId);
+    const mode = this._modeConfig(modeId);
     const preview = this._modePreview(modeId);
     const timer = this._modeTimerConfig(modeId);
     const options = [
@@ -2571,8 +2630,16 @@ class OpenReefPanel extends HTMLElement {
     return `
       <section class="mapping-section">
         <div>
-          <p class="eyebrow">${this._escape(mode?.[1] || modeId)}</p>
-          <h4>${this._escape(mode?.[2] || "Preview equipment behavior.")}</h4>
+          <p class="eyebrow">${this._escape(mode.label)}</p>
+          <h4>${this._escape(mode.description || "Preview equipment behavior.")}</h4>
+        </div>
+        <div class="mode-name-grid">
+          <label>Mode name
+            <input value="${this._escape(mode.label)}" data-scope="mode-settings" data-mode="${this._escape(modeId)}" data-field="label">
+          </label>
+          <label>Description
+            <input value="${this._escape(mode.description)}" data-scope="mode-settings" data-mode="${this._escape(modeId)}" data-field="description">
+          </label>
         </div>
         <div class="preset-row">
           ${this._modePresetChoices(modeId).map(([presetId, label, detail]) => `
@@ -3165,6 +3232,11 @@ class OpenReefPanel extends HTMLElement {
         .empty-state p { color: #8da2ba; }
         .section-head, .card-head, .row { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
         .mode-panel { display: grid; gap: 14px; }
+        .mode-strip { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
+        .mode-strip h3 { margin-bottom: 6px; }
+        .mode-strip p:not(.eyebrow) { color: #a8bed4; }
+        .mode-strip.running { border-color: #166534; background: #0b2b24; }
+        .mode-strip.expired { border-color: #a16207; background: #2f2614; }
         .mode-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
         .mode-button { display: grid; gap: 5px; text-align: left; }
         .mode-button span { color: #9fb2c7; font-size: 12px; font-weight: 500; }
@@ -3177,6 +3249,7 @@ class OpenReefPanel extends HTMLElement {
         .mode-mini-row.missing { border-color: #a16207; }
         .mode-mini-row span { color: #67e8f9; font-weight: 800; text-transform: uppercase; }
         .mode-mini-row small { color: #8da2ba; }
+        .mode-name-grid { display: grid; grid-template-columns: minmax(160px, .35fr) minmax(240px, 1fr); gap: 12px; }
         .mode-timer-card { display: grid; grid-template-columns: minmax(160px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: stretch; border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); }
         .activity-list { display: grid; gap: 8px; }
         .activity-item { display: grid; grid-template-columns: minmax(130px, .22fr) 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding: 10px 0; }
@@ -3339,6 +3412,7 @@ class OpenReefPanel extends HTMLElement {
         .setup-status-line { border: 1px solid #24364a; border-radius: 8px; background: #0b1724; color: #cbd5e1; padding: 12px 14px; font-weight: 800; }
         .preset-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
         .mode-preset-choice { min-height: 90px; }
+        .scheduler-preview { grid-template-columns: 1fr auto; align-items: center; margin-top: 14px; border-style: dashed; }
         .setup-next-list { display: grid; gap: 10px; }
         .setup-next-list div { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding-top: 10px; }
         .setup-next-list div:first-child { border-top: 0; padding-top: 0; }
@@ -3348,12 +3422,12 @@ class OpenReefPanel extends HTMLElement {
         @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 900px) {
           .page { padding: 12px; }
-          .topbar, .hero, .section-head, .card-head, .settings-section-head, .mode-confirm-row { flex-direction: column; align-items: stretch; }
+          .topbar, .hero, .section-head, .card-head, .settings-section-head, .mode-confirm-row, .mode-strip { flex-direction: column; align-items: stretch; }
           .equipment-editor-head { grid-template-columns: 1fr; align-items: stretch; }
           .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }
-          .mode-mini-row, .preset-row, .mode-timer-card { grid-template-columns: 1fr; }
+          .mode-mini-row, .preset-row, .mode-timer-card, .mode-name-grid, .scheduler-preview { grid-template-columns: 1fr; }
           .issue-item { grid-template-columns: 1fr; }
           .activity-item { grid-template-columns: 1fr; }
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
