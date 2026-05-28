@@ -23,6 +23,7 @@ class OpenReefPanel extends HTMLElement {
     this._equipmentDetail = null;
     this._configDirty = false;
     this._modeCountdownTimer = null;
+    this._lastModeAutoReturnRefresh = 0;
     this._equipmentEditors = {};
     this._equipmentEnergyEditors = {};
     this._settingsSections = {
@@ -67,6 +68,7 @@ class OpenReefPanel extends HTMLElement {
     this._loadConfig();
     if (!this._modeCountdownTimer) {
       this._modeCountdownTimer = window.setInterval(() => {
+        this._refreshAfterAutoReturnIfDue();
         this._updateModeCountdownElements();
       }, 10000);
     }
@@ -101,6 +103,27 @@ class OpenReefPanel extends HTMLElement {
       this._error = "";
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not load OpenReef";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _refreshConfigSilently(message = "") {
+    if (!this._hass || this._busy) return false;
+    this._busy = true;
+    try {
+      const result = await this._callWS({ type: "openreef/get_config" });
+      this._config = result.config || result.settings || this._config;
+      this._sensorMeta = result.sensor_meta || this._sensorMeta;
+      this._validation = result.validation || this._validation;
+      this._configDirty = false;
+      if (message) this._message = message;
+      this._error = "";
+      return true;
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not refresh OpenReef";
+      return false;
     } finally {
       this._busy = false;
       this._render();
@@ -1153,6 +1176,19 @@ class OpenReefPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-mode-countdown]").forEach((element) => {
       element.textContent = text;
     });
+  }
+
+  _refreshAfterAutoReturnIfDue() {
+    if (!this._config || this._configDirty || this._setupOpen || this._trend) return;
+    if (this._isEditingFormControl()) return;
+    const mode = this._config.mode || {};
+    if (this._activeMode() === "running" || !mode.autoReturn) return;
+    const expiresAt = this._activeModeExpiresAt();
+    if (!expiresAt || expiresAt.getTime() > Date.now()) return;
+    const now = Date.now();
+    if (now - this._lastModeAutoReturnRefresh < 15000) return;
+    this._lastModeAutoReturnRefresh = now;
+    this._refreshConfigSilently("Auto-return status refreshed");
   }
 
   _modeStatusDetail() {
