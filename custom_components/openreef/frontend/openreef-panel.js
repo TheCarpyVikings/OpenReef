@@ -550,6 +550,10 @@ class OpenReefPanel extends HTMLElement {
         this._setupStep = Math.max(this._setupStep - 1, 0);
         this._render();
       }
+      if (action === "setup-step") {
+        this._setupStep = Math.max(0, Math.min(Number(target.dataset.step || 0), 3));
+        this._render();
+      }
       if (action === "finish-setup") {
         this._config.display.setupComplete = true;
         this._setupOpen = false;
@@ -609,6 +613,11 @@ class OpenReefPanel extends HTMLElement {
         this._setDirty(true);
         this._render();
       }
+      if (action === "setup-sensor-preset") {
+        this._applySensorPreset(id);
+        this._render();
+      }
+      if (action === "setup-add-starter-equipment") this._addStarterEquipment();
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
       if (action === "remove-equipment") {
         const removed = this._config.equipment[id]?.label || id;
@@ -752,6 +761,50 @@ class OpenReefPanel extends HTMLElement {
     this._recordActivity(`Added equipment: ${label || "Equipment"}`);
     this._setDirty(true);
     this._render();
+  }
+
+  _equipmentLabelExists(label) {
+    const lower = String(label || "").toLowerCase();
+    return Object.values(this._config.equipment || {}).some((item) => String(item.label || "").toLowerCase() === lower);
+  }
+
+  _addStarterEquipment() {
+    const starter = ["Return Pump", "Heater", "Lights", "Skimmer", "ATO"];
+    let added = 0;
+    starter.forEach((label) => {
+      if (this._equipmentLabelExists(label)) return;
+      const base = this._slug(label);
+      let id = base;
+      let suffix = 2;
+      while (this._config.equipment[id]) {
+        id = `${base}_${suffix}`;
+        suffix += 1;
+      }
+      this._config.equipment[id] = {
+        label,
+        switch_entity_id: "",
+        power_entity_id: "",
+        energy_entity_id: "",
+        cost_entity_id: "",
+        armed: false,
+      };
+      this._equipmentEditors[id] = true;
+      added += 1;
+    });
+    this._recordActivity(added ? `Added ${added} starter equipment item(s)` : "Starter equipment already exists");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _applySensorPreset(preset) {
+    const sensors = this._config.sensors || {};
+    Object.entries(sensors).forEach(([id, sensor]) => {
+      if (preset === "tank") sensor.enabled = sensor.group !== "room";
+      if (preset === "all") sensor.enabled = true;
+      if (preset === "minimal") sensor.enabled = id === "temp";
+    });
+    this._recordActivity(`Setup sensor preset selected: ${preset}`);
+    this._setDirty(true);
   }
 
   _equipmentTarget(id, equipment, field) {
@@ -2575,24 +2628,177 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
-  _setupWizard() {
-    const steps = ["Profile", "Sensors", "Equipment", "Finish"];
+  _setupStats() {
+    const sensors = Object.entries(this._config.sensors || {});
+    const enabledSensors = sensors.filter(([, sensor]) => this._sensorEnabled(sensor));
+    const mappedSensors = enabledSensors.filter(([, sensor]) => sensor.entity_id);
+    const equipment = Object.entries(this._config.equipment || {});
+    const mappedEquipment = equipment.filter(([, item]) => item.switch_entity_id);
+    const armedEquipment = equipment.filter(([, item]) => item.armed);
+    const energyMapped = this._energyTotalMappings().filter(([, energyKey]) => this._config.energy[energyKey]).length;
+    return {
+      sensors,
+      enabledSensors,
+      mappedSensors,
+      equipment,
+      mappedEquipment,
+      armedEquipment,
+      energyMapped,
+    };
+  }
+
+  _setupShell(title, description, content) {
+    const steps = ["Profile", "Sensors", "Equipment", "Review"];
     return `
       <div class="modal">
-        <section class="wizard">
+        <section class="wizard setup-wizard">
           <button class="close" data-action="close-setup">x</button>
-          <div class="stepper">${steps.map((step, index) => `<span class="${index <= this._setupStep ? "on" : ""}">${index + 1}</span>`).join("")}</div>
-          ${this._setupStep === 0 ? `<h2>Welcome to OpenReef</h2><p class="muted">Start with your tank name, then map the reef sensors Home Assistant already knows about.</p>${this._profileSettings()}` : ""}
-          ${this._setupStep === 1 ? `<h2>Map Sensors</h2><p class="muted">Use the Find matches buttons for clickable suggestions, or paste an entity ID.</p>${this._sensorMappingGroups()}` : ""}
-          ${this._setupStep === 2 ? `<h2>Map Equipment</h2><p class="muted">Equipment controls remain locked until you arm each device.</p>${this._equipmentSettings()}` : ""}
-          ${this._setupStep === 3 ? `<h2>You are ready</h2><p class="muted">Save the setup, then use Mission Control to check mappings before arming controls.</p>${this._mission()}` : ""}
+          <div class="setup-progress">
+            <div class="stepper">${steps.map((step, index) => `
+              <button class="${index <= this._setupStep ? "on" : ""}" data-action="setup-step" data-step="${index}" title="${this._escape(step)}">${index + 1}</button>
+            `).join("")}</div>
+            <span>Step ${this._setupStep + 1} of ${steps.length}: ${this._escape(steps[this._setupStep])}</span>
+          </div>
+          <div class="setup-title">
+            <h2>${this._escape(title)}</h2>
+            <p class="muted">${this._escape(description)}</p>
+          </div>
+          ${content}
           <footer class="wizard-actions">
             <button class="secondary" data-action="prev-step" ${this._setupStep === 0 ? "disabled" : ""}>Back</button>
-            ${this._setupStep < 3 ? `<button class="primary" data-action="next-step">Next</button>` : `<button class="primary" data-action="finish-setup">Finish</button>`}
+            ${this._setupStep < 3 ? `<button class="primary" data-action="next-step">Next</button>` : `<button class="primary" data-action="finish-setup">Finish setup</button>`}
           </footer>
         </section>
       </div>
     `;
+  }
+
+  _setupProfileStep() {
+    const themeColor = this._themeColor();
+    return this._setupShell(
+      "Welcome to OpenReef",
+      "Name the controller and choose a theme. You can change everything later in Settings.",
+      `
+        <div class="setup-guide">
+          <article><strong>1. Pick your sensors</strong><span>Enable only probes and room sensors you actually own.</span></article>
+          <article><strong>2. Map equipment</strong><span>Switch controls stay locked until you arm each device.</span></article>
+          <article><strong>3. Review safety</strong><span>Mission Control checks only OpenReef entities.</span></article>
+        </div>
+        <article class="panel setup-panel">
+          <div class="grid two compact">
+            <label>Tank name<input data-scope="tank" data-field="name" value="${this._escape(this._config.tank.name)}"></label>
+            <label>Owner<input data-scope="tank" data-field="owner" value="${this._escape(this._config.tank.owner)}"></label>
+            <div class="field-group">
+              <span class="field-label">Theme colour</span>
+              <div class="theme-picker">
+                ${this._themeChoices().map(([color, label]) => `
+                  <button
+                    class="theme-swatch ${themeColor.toLowerCase() === color.toLowerCase() ? "active" : ""}"
+                    style="--swatch: ${this._escape(color)}"
+                    data-action="set-theme"
+                    data-color="${this._escape(color)}"
+                    aria-label="${this._escape(label)}"
+                    title="${this._escape(label)}"
+                  ></button>
+                `).join("")}
+              </div>
+              <label class="color-field">Custom colour<input type="color" data-scope="display" data-field="themeColor" value="${this._escape(themeColor)}"></label>
+            </div>
+            <label>Energy tariff<input type="number" step="0.01" data-scope="energy" data-field="tariff" value="${this._escape(this._config.energy.tariff)}"></label>
+          </div>
+        </article>
+      `,
+    );
+  }
+
+  _setupSensorStep() {
+    const stats = this._setupStats();
+    return this._setupShell(
+      "Choose and map sensors",
+      "Start with the probes you own. Missing optional sensors will not count against setup if they are disabled.",
+      `
+        <div class="setup-choice-grid">
+          <button class="setup-choice" data-action="setup-sensor-preset" data-id="tank">
+            <strong>Tank sensors</strong>
+            <span>Temperature, pH, and salinity.</span>
+          </button>
+          <button class="setup-choice" data-action="setup-sensor-preset" data-id="all">
+            <strong>Tank + room</strong>
+            <span>Add room temperature, CO2, and humidity.</span>
+          </button>
+          <button class="setup-choice" data-action="setup-sensor-preset" data-id="minimal">
+            <strong>Temperature only</strong>
+            <span>Safest starting point for a basic install.</span>
+          </button>
+        </div>
+        <div class="setup-status-line">${stats.mappedSensors.length}/${stats.enabledSensors.length} enabled sensors mapped.</div>
+        ${this._sensorMappingGroups()}
+      `,
+    );
+  }
+
+  _setupEquipmentStep() {
+    const stats = this._setupStats();
+    return this._setupShell(
+      "Add equipment",
+      "Add common reef devices now or skip this for a read-only monitor. Nothing can be controlled until you arm it.",
+      `
+        <div class="setup-choice-grid two-choice">
+          <button class="setup-choice" data-action="setup-add-starter-equipment">
+            <strong>Add starter equipment</strong>
+            <span>Return pump, heater, lights, skimmer, and ATO. All start disarmed.</span>
+          </button>
+          <article class="setup-choice passive">
+            <strong>Monitor-only is fine</strong>
+            <span>You can finish setup with no equipment and add controls later.</span>
+          </article>
+        </div>
+        <div class="setup-status-line">${stats.mappedEquipment.length}/${stats.equipment.length} equipment switches mapped. ${stats.armedEquipment.length} armed.</div>
+        ${this._equipmentSettings()}
+      `,
+    );
+  }
+
+  _setupReviewStep() {
+    const stats = this._setupStats();
+    const sensorsReady = stats.enabledSensors.length && stats.mappedSensors.length === stats.enabledSensors.length;
+    const controlsReady = stats.equipment.length ? stats.mappedEquipment.length === stats.equipment.length : true;
+    return this._setupShell(
+      "Review setup",
+      "Finish when the basics look right. OpenReef will stay safe even if you finish with missing optional mappings.",
+      `
+        <div class="summary-grid">
+          ${this._setupReviewCard("Sensors", `${stats.mappedSensors.length}/${stats.enabledSensors.length}`, sensorsReady ? "Mapped" : "Needs attention", sensorsReady ? "ok" : "warning", 1)}
+          ${this._setupReviewCard("Equipment", `${stats.mappedEquipment.length}/${stats.equipment.length}`, stats.equipment.length ? `${stats.armedEquipment.length} armed` : "Monitor only", controlsReady ? "ok" : "warning", 2)}
+          ${this._setupReviewCard("Energy", `${stats.energyMapped}/3`, stats.energyMapped ? "Totals mapped" : "Optional", stats.energyMapped ? "ok" : "unknown", 3)}
+        </div>
+        <article class="panel setup-panel">
+          <h3>What happens next</h3>
+          <div class="setup-next-list">
+            <div><span class="pill ok">Safe</span><p>OpenReef reads only the entities you mapped or enabled.</p></div>
+            <div><span class="pill disabled">Locked</span><p>Equipment stays locked until each device is armed in Settings.</p></div>
+            <div><span class="pill unknown">Flexible</span><p>Optional sensors, energy totals, and equipment can be added later.</p></div>
+          </div>
+        </article>
+      `,
+    );
+  }
+
+  _setupReviewCard(label, value, detail, status, step) {
+    return `
+      <button class="summary-card ${status}" data-action="setup-step" data-step="${step}">
+        <span>${this._escape(label)}</span>
+        <strong>${this._escape(value)}</strong>
+        <small>${this._escape(detail)}</small>
+      </button>
+    `;
+  }
+
+  _setupWizard() {
+    if (this._setupStep === 0) return this._setupProfileStep();
+    if (this._setupStep === 1) return this._setupSensorStep();
+    if (this._setupStep === 2) return this._setupEquipmentStep();
+    return this._setupReviewStep();
   }
 
   _styles() {
@@ -2811,10 +3017,25 @@ class OpenReefPanel extends HTMLElement {
         .empty-chart { min-height: 220px; display: grid; place-items: center; color: #8da2ba; border: 1px dashed #294055; border-radius: 8px; }
         .modal { position: fixed; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(0,0,0,.72); z-index: 10; overflow: hidden; }
         .wizard { position: relative; width: min(1100px, 100%); max-height: min(900px, 92vh); overflow: auto; overscroll-behavior: contain; padding: 28px; display: grid; gap: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+        .setup-wizard { width: min(1180px, 100%); }
         .close { position: absolute; top: 14px; right: 14px; width: 38px; height: 38px; border-radius: 50%; border: 1px solid #294055; background: #172536; color: #dcecff; }
+        .setup-progress { display: grid; gap: 8px; justify-items: center; color: #8da2ba; font-size: 12px; font-weight: 800; }
         .stepper { display: flex; gap: 10px; justify-content: center; }
-        .stepper span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: #203247; color: #94a3b8; font-weight: 800; }
-        .stepper span.on { background: var(--openreef-accent); color: #041019; }
+        .stepper span, .stepper button { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; border: 0; background: #203247; color: #94a3b8; font-weight: 800; padding: 0; }
+        .stepper span.on, .stepper button.on { background: var(--openreef-accent); color: #041019; }
+        .setup-title { display: grid; gap: 4px; }
+        .setup-guide, .setup-choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+        .setup-choice-grid.two-choice { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .setup-guide article, .setup-choice, .setup-panel { border: 1px solid color-mix(in srgb, var(--openreef-accent) 24%, #24364a); border-radius: 8px; background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(11, 23, 36, .9)); }
+        .setup-guide article, .setup-choice { display: grid; gap: 6px; min-height: 96px; padding: 14px; text-align: left; }
+        .setup-choice { color: #e5edf5; }
+        .setup-choice:hover, .setup-choice:focus-visible { border-color: var(--openreef-accent); outline: none; box-shadow: 0 0 0 1px var(--openreef-accent-border); }
+        .setup-choice.passive { cursor: default; }
+        .setup-guide span, .setup-choice span { color: #9fb2c7; }
+        .setup-status-line { border: 1px solid #24364a; border-radius: 8px; background: #0b1724; color: #cbd5e1; padding: 12px 14px; font-weight: 800; }
+        .setup-next-list { display: grid; gap: 10px; }
+        .setup-next-list div { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding-top: 10px; }
+        .setup-next-list div:first-child { border-top: 0; padding-top: 0; }
         .wizard-actions { justify-content: space-between; padding-top: 8px; }
         .center-card { min-height: 60vh; display: grid; place-items: center; gap: 16px; color: #8da2ba; }
         .spinner { width: 36px; height: 36px; border: 3px solid #203247; border-top-color: var(--openreef-accent); border-radius: 50%; animation: spin 1s linear infinite; }
@@ -2831,6 +3052,8 @@ class OpenReefPanel extends HTMLElement {
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
           .range-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .trend-summary { grid-template-columns: 1fr; }
+          .setup-guide, .setup-choice-grid, .setup-choice-grid.two-choice { grid-template-columns: 1fr; }
+          .setup-next-list div { grid-template-columns: 1fr; }
         }
       </style>
     `;
