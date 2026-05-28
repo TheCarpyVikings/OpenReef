@@ -19,7 +19,10 @@ class OpenReefPanel extends HTMLElement {
     this._trend = null;
     this._trendRequest = "";
     this._modeConfirm = null;
+    this._controlConfirm = null;
     this._configDirty = false;
+    this._equipmentEditors = {};
+    this._equipmentEnergyEditors = {};
     this._settingsSections = {
       profile: true,
       mission: true,
@@ -167,17 +170,28 @@ class OpenReefPanel extends HTMLElement {
 
   async _toggleEquipment(equipmentId) {
     const item = this._config.equipment?.[equipmentId] || {};
+    const label = item.label || equipmentId;
+    const current = this._stateValue(item.switch_entity_id);
+    const desired = current === "on" ? "off" : "on";
     this._busy = true;
     this._message = "";
     this._error = "";
     this._render();
     try {
       await this._callWS({ type: "openreef/toggle_equipment", equipment_id: equipmentId });
-      this._recordActivity(`Toggled ${item.label || equipmentId}`, "control");
+      this._recordActivity(`${label} turned ${desired}`, "control");
       await this._persistConfigSilently();
-      this._message = "Command sent";
+      this._message = `${label} turned ${desired}`;
+      this._controlConfirm = null;
     } catch (err) {
-      this._error = err instanceof Error ? err.message : "Could not toggle equipment";
+      const reason = err instanceof Error ? err.message : "Could not toggle equipment";
+      this._recordActivity(`${label} toggle blocked: ${reason}`, "warning");
+      try {
+        await this._persistConfigSilently();
+      } catch {
+        // Keep the visible control error if activity persistence fails.
+      }
+      this._error = reason;
     } finally {
       this._busy = false;
       this._render();
@@ -570,6 +584,7 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "choose-equipment") {
         this._config.equipment[id][field] = target.dataset.entity;
+        this._equipmentEditors[id] = true;
         delete this._searchResults[`equipment:${id}:${field}`];
         this._setDirty(true);
         this._render();
@@ -606,7 +621,28 @@ class OpenReefPanel extends HTMLElement {
         this._recordActivity(`${equipment.label || id} ${equipment.armed ? "armed" : "disarmed"}`, "control");
         this._saveConfig();
       }
-      if (action === "toggle-equipment") this._toggleEquipment(id);
+      if (action === "toggle-equipment") {
+        const equipment = this._config.equipment[id] || {};
+        if (this._requiresControlConfirm(id, equipment)) {
+          this._controlConfirm = id;
+          this._render();
+        } else {
+          this._toggleEquipment(id);
+        }
+      }
+      if (action === "confirm-toggle-equipment") this._toggleEquipment(id);
+      if (action === "close-control-confirm") {
+        this._controlConfirm = null;
+        this._render();
+      }
+      if (action === "toggle-equipment-editor") {
+        this._equipmentEditors[id] = !this._equipmentEditorOpen(id);
+        this._render();
+      }
+      if (action === "toggle-equipment-energy") {
+        this._equipmentEnergyEditors[id] = !this._equipmentEnergyOpen(id);
+        this._render();
+      }
       if (action === "set-theme") {
         this._config.display.themeColor = target.dataset.color;
         this._setDirty(true);
@@ -701,6 +737,7 @@ class OpenReefPanel extends HTMLElement {
       cost_entity_id: "",
       armed: false,
     };
+    this._equipmentEditors[id] = true;
     this._recordActivity(`Added equipment: ${label || "Equipment"}`);
     this._setDirty(true);
     this._render();
@@ -984,6 +1021,58 @@ class OpenReefPanel extends HTMLElement {
     return state;
   }
 
+  _equipmentRisk(id, item) {
+    const type = this._equipmentType(id, item);
+    const text = `${id} ${item?.label || ""}`.toLowerCase();
+    if (type === "Top off" || text.includes("ato")) {
+      return ["critical", "Critical", "Top-off equipment can change salinity if left running."];
+    }
+    if (text.includes("return")) {
+      return ["critical", "Critical", "Return pumps affect flow through the whole system."];
+    }
+    if (type === "Temperature" || text.includes("heater") || text.includes("chiller")) {
+      return ["critical", "Critical", "Temperature equipment can move the tank quickly."];
+    }
+    if (text.includes("skimmer")) {
+      return ["warning", "Caution", "Skimmers can overflow if flow conditions change."];
+    }
+    return ["ok", "Normal", "Standard manual control."];
+  }
+
+  _controlAvailable(item) {
+    if (!item?.switch_entity_id) return false;
+    if (!item.armed) return false;
+    const state = this._stateValue(item.switch_entity_id);
+    return state === "on" || state === "off";
+  }
+
+  _controlBlockReason(item) {
+    if (!item?.switch_entity_id) return "Map a switch in Settings";
+    if (!item.armed) return "Disarmed in Settings";
+    const state = this._stateValue(item.switch_entity_id);
+    if (state !== "on" && state !== "off") return `Switch is ${state}`;
+    return "Manual control armed";
+  }
+
+  _controlActionLabel(item) {
+    return this._stateValue(item?.switch_entity_id) === "on" ? "turn off" : "turn on";
+  }
+
+  _requiresControlConfirm(id, item) {
+    const [risk] = this._equipmentRisk(id, item);
+    return risk === "critical" || risk === "warning";
+  }
+
+  _equipmentEditorOpen(id) {
+    const item = this._config.equipment?.[id];
+    if (!item?.switch_entity_id) return true;
+    return this._equipmentEditors[id] === true;
+  }
+
+  _equipmentEnergyOpen(id) {
+    return this._equipmentEnergyEditors[id] === true;
+  }
+
   _interlockWarnings() {
     const interlocks = this._config.interlocks || {};
     const equipment = Object.entries(this._config.equipment || {});
@@ -1209,6 +1298,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._setupOpen ? this._setupWizard() : ""}
         ${this._trend ? this._trendModal() : ""}
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
+        ${this._controlConfirm ? this._controlConfirmModal() : ""}
       </main>
     `;
 
@@ -1527,26 +1617,37 @@ class OpenReefPanel extends HTMLElement {
   _controlCard(id, item) {
     const state = this._stateValue(item.switch_entity_id);
     const isOn = state === "on";
-    const enabled = Boolean(item.armed && item.switch_entity_id);
+    const enabled = this._controlAvailable(item);
     const stateClass = this._equipmentStateClass(item);
     const stateLabel = this._equipmentStateLabel(item);
+    const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
+    const reason = this._controlBlockReason(item);
+    const action = this._controlActionLabel(item);
     return `
-      <article class="panel">
+      <article class="panel control-card ${enabled ? "" : "locked-card"}">
         <div class="card-head">
           <div>
             <h3>${this._escape(item.label || id)}</h3>
-            <p>${this._escape(item.switch_entity_id || "No switch mapped")}</p>
+            <p>${this._escape(this._equipmentType(id, item))}</p>
           </div>
-          <span class="pill ${stateClass}">${this._escape(stateLabel)}</span>
+          <div class="pill-stack">
+            <span class="pill ${stateClass}">${this._escape(stateLabel)}</span>
+            <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
+          </div>
+        </div>
+        <div class="control-detail">
+          <span>${this._escape(item.switch_entity_id || "No switch mapped")}</span>
+          <small>${this._escape(riskDetail)}</small>
         </div>
         <div class="control-row">
-          <span>${enabled ? "Manual control armed" : item.switch_entity_id ? "Disarmed in Settings" : "Map a switch in Settings"}</span>
+          <span>${this._escape(reason)}</span>
           <button
             class="control-switch ${isOn ? "on" : "off"} ${enabled ? "" : "locked"}"
             data-action="toggle-equipment"
             data-id="${this._escape(id)}"
             role="switch"
             aria-checked="${isOn ? "true" : "false"}"
+            title="${this._escape(enabled ? `Click to ${action}` : reason)}"
             ${enabled ? "" : "disabled"}
           >
             <span></span>
@@ -1554,6 +1655,52 @@ class OpenReefPanel extends HTMLElement {
           </button>
         </div>
       </article>
+    `;
+  }
+
+  _controlConfirmModal() {
+    const id = this._controlConfirm;
+    const item = this._config.equipment?.[id];
+    if (!id || !item) return "";
+    const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
+    const current = this._stateValue(item.switch_entity_id);
+    const action = this._controlActionLabel(item);
+    const target = current === "on" ? "off" : "on";
+    return `
+      <div class="modal">
+        <section class="wizard confirm-dialog">
+          <button class="close" data-action="close-control-confirm">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Confirm Manual Control</p>
+              <h2>${this._escape(item.label || id)}</h2>
+              <p class="muted">${this._escape(item.switch_entity_id || "No switch mapped")}</p>
+            </div>
+            <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
+          </div>
+          <div class="notice warning-notice">${this._escape(riskDetail)} OpenReef will only continue if this device is still mapped, available, and armed.</div>
+          <div class="mode-confirm-list">
+            <div class="mode-confirm-row ready">
+              <div>
+                <strong>Current state</strong>
+                <span>${this._escape(current)}</span>
+              </div>
+              <span class="pill ${current === "on" ? "ok" : current === "off" ? "unknown" : "warning"}">${this._escape(current)}</span>
+            </div>
+            <div class="mode-confirm-row ready">
+              <div>
+                <strong>Requested action</strong>
+                <span>OpenReef will ${this._escape(action)} this switch.</span>
+              </div>
+              <span class="pill warning">turn ${this._escape(target)}</span>
+            </div>
+          </div>
+          <footer class="wizard-actions">
+            <button class="secondary" data-action="close-control-confirm">Cancel</button>
+            <button class="primary" data-action="confirm-toggle-equipment" data-id="${this._escape(id)}">Confirm ${this._escape(action)}</button>
+          </footer>
+        </section>
+      </div>
     `;
   }
 
@@ -1837,16 +1984,29 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _equipmentEditor(id, item) {
-    const fields = [
-      ["switch_entity_id", "Switch", "switch.example"],
+    const open = this._equipmentEditorOpen(id);
+    const energyOpen = this._equipmentEnergyOpen(id);
+    const optionalFields = [
       ["power_entity_id", "Power", "sensor.example_power"],
       ["energy_entity_id", "Energy", "sensor.example_energy"],
       ["cost_entity_id", "Cost", "sensor.example_cost"],
     ];
+    const optionalMapped = optionalFields.filter(([field]) => item[field]).length;
+    const stateClass = this._equipmentStateClass(item);
+    const stateLabel = this._equipmentStateLabel(item);
+    const [risk, riskLabel] = this._equipmentRisk(id, item);
     return `
-      <div class="equipment-editor ${item.armed ? "armed-editor" : "disarmed-editor"}">
-        <div class="card-head">
-          <label>Name<input data-scope="equipment" data-id="${this._escape(id)}" data-field="label" value="${this._escape(item.label || id)}"></label>
+      <div class="equipment-editor ${item.armed ? "armed-editor" : "disarmed-editor"} ${open ? "open-editor" : "collapsed-editor"}">
+        <div class="equipment-editor-head">
+          <label class="equipment-name">Name<input data-scope="equipment" data-id="${this._escape(id)}" data-field="label" value="${this._escape(item.label || id)}"></label>
+          <div class="equipment-summary">
+            <span>${this._escape(item.switch_entity_id || "No switch mapped")}</span>
+            <div class="pill-stack inline">
+              <span class="pill ${stateClass}">${this._escape(stateLabel)}</span>
+              <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
+              <span class="pill ${optionalMapped ? "ok" : "unknown"}">${optionalMapped}/3 energy</span>
+            </div>
+          </div>
           <div class="settings-actions">
             <button
               class="arm-switch ${item.armed ? "on" : "off"}"
@@ -1858,22 +2018,47 @@ class OpenReefPanel extends HTMLElement {
               <span></span>
               <strong>${item.armed ? "Armed" : "Disarmed"}</strong>
             </button>
+            <button class="secondary" data-action="toggle-equipment-editor" data-id="${this._escape(id)}">${open ? "Hide" : "Configure"}</button>
             <button class="danger-text" data-action="remove-equipment" data-id="${this._escape(id)}">Remove</button>
           </div>
         </div>
-        <div class="grid two compact">
-          ${fields.map(([field, label, placeholder]) => `
+        ${open ? `
+          <div class="equipment-editor-body">
             <section class="picker mapping-card entity-card">
               <div class="mapping-head">
-                <h3>${label}</h3>
-                <span class="pill">${field === "switch_entity_id" ? "required" : "optional"}</span>
+                <h3>Switch</h3>
+                <span class="pill">required</span>
               </div>
-              <label>${label}<input data-scope="equipment" data-id="${this._escape(id)}" data-field="${field}" value="${this._escape(item[field])}" placeholder="${placeholder}"></label>
-              <button class="secondary" data-action="search-equipment" data-id="${this._escape(id)}" data-field="${field}">Find matches</button>
-              ${this._candidateList(`equipment:${id}:${field}`, "choose-equipment", id, field)}
+              <label>Switch<input data-scope="equipment" data-id="${this._escape(id)}" data-field="switch_entity_id" value="${this._escape(item.switch_entity_id)}" placeholder="switch.example"></label>
+              <button class="secondary" data-action="search-equipment" data-id="${this._escape(id)}" data-field="switch_entity_id">${this._searchResults[`equipment:${id}:switch_entity_id`]?.loading ? "Finding..." : "Find matches"}</button>
+              ${this._candidateList(`equipment:${id}:switch_entity_id`, "choose-equipment", id, "switch_entity_id")}
             </section>
-          `).join("")}
-        </div>
+            <section class="mapping-card entity-card energy-mapping-summary">
+              <div class="mapping-head">
+                <div>
+                  <h3>Energy mapping</h3>
+                  <p class="muted">Optional power, energy, and cost entities for per-device tracking.</p>
+                </div>
+                <button class="secondary compact-button" data-action="toggle-equipment-energy" data-id="${this._escape(id)}">${energyOpen ? "Hide fields" : "Show fields"}</button>
+              </div>
+              ${energyOpen ? `
+                <div class="grid three compact">
+                  ${optionalFields.map(([field, label, placeholder]) => `
+                    <section class="picker mapping-card entity-card nested-card">
+                      <div class="mapping-head">
+                        <h3>${label}</h3>
+                        <span class="pill">optional</span>
+                      </div>
+                      <label>${label}<input data-scope="equipment" data-id="${this._escape(id)}" data-field="${field}" value="${this._escape(item[field])}" placeholder="${placeholder}"></label>
+                      <button class="secondary" data-action="search-equipment" data-id="${this._escape(id)}" data-field="${field}">${this._searchResults[`equipment:${id}:${field}`]?.loading ? "Finding..." : "Find matches"}</button>
+                      ${this._candidateList(`equipment:${id}:${field}`, "choose-equipment", id, field)}
+                    </section>
+                  `).join("")}
+                </div>
+              ` : `<p class="hint">${optionalMapped ? `${optionalMapped} optional energy field${optionalMapped === 1 ? "" : "s"} mapped.` : "No optional energy fields mapped yet."}</p>`}
+            </section>
+          </div>
+        ` : ""}
       </div>
     `;
   }
@@ -2357,6 +2542,10 @@ class OpenReefPanel extends HTMLElement {
         .mode-confirm-row.ready { border-color: #166534; }
         .mode-confirm-row.locked { opacity: .72; }
         .confirm-dialog { max-width: 780px; }
+        .control-card { display: grid; gap: 14px; }
+        .control-card.locked-card { opacity: .82; }
+        .control-detail { display: grid; gap: 4px; color: #9fb2c7; overflow-wrap: anywhere; }
+        .control-detail small { color: #8da2ba; }
         .control-row, .settings-actions { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
         .control-row { padding-top: 18px; color: #8da2ba; }
         .control-switch, .arm-switch { display: inline-flex; align-items: center; gap: 10px; min-width: 112px; min-height: 44px; border: 1px solid #334155; border-radius: 999px; padding: 5px 14px 5px 5px; background: #1f2937; color: #dcecff; font-weight: 800; }
@@ -2376,6 +2565,11 @@ class OpenReefPanel extends HTMLElement {
         .pill.unknown { background: #334155; color: #cbd5e1; }
         .pill.disabled { background: #1f2937; color: #94a3b8; }
         .pill.muted { background: #312e81; color: #ddd6fe; }
+        .pill.risk-ok { background: #14532d; color: #bbf7d0; }
+        .pill.risk-warning { background: #713f12; color: #fde68a; }
+        .pill.risk-critical { background: #7f1d1d; color: #fecaca; }
+        .pill-stack { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+        .pill-stack.inline { justify-content: flex-start; }
         .stat { display: grid; gap: 8px; min-height: 150px; color: #e5edf5; }
         .stat p { color: #dcecff; font-weight: 800; }
         .stat strong { font-size: 34px; color: #67e8f9; }
@@ -2415,7 +2609,12 @@ class OpenReefPanel extends HTMLElement {
         .mapping-section + .mapping-section { margin-top: 12px; }
         .equipment-editor { position: relative; overflow: hidden; background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 32%, #0e1a28); border-color: var(--openreef-accent-border); box-shadow: inset 4px 0 0 var(--openreef-accent); }
         .equipment-editor.disarmed-editor { border-color: #334155; background: #101824; box-shadow: inset 4px 0 0 #475569; }
-        .equipment-editor > .card-head { padding-bottom: 12px; margin-bottom: 4px; border-bottom: 1px solid rgba(148, 163, 184, .16); }
+        .equipment-editor-head { display: grid; grid-template-columns: minmax(180px, 260px) 1fr auto; gap: 12px; align-items: end; padding-bottom: 12px; margin-bottom: 4px; border-bottom: 1px solid rgba(148, 163, 184, .16); }
+        .equipment-name input { font-weight: 800; }
+        .equipment-summary { display: grid; gap: 7px; min-width: 0; color: #9fb2c7; overflow-wrap: anywhere; }
+        .equipment-editor-body { display: grid; gap: 12px; padding-top: 12px; }
+        .energy-mapping-summary { display: grid; gap: 12px; }
+        .nested-card { background: rgba(11, 23, 36, .72); }
         .equipment-editor .mapping-card.entity-card { background: rgba(16, 29, 44, .82); }
         .equipment-editor.armed-editor .mapping-card.entity-card { border-color: color-mix(in srgb, var(--openreef-accent) 34%, #3b4257); }
         .equipment-group { display: grid; gap: 12px; border: 1px solid #223447; border-radius: 8px; padding: 14px; background: #0b1724; }
@@ -2448,6 +2647,7 @@ class OpenReefPanel extends HTMLElement {
         @media (max-width: 900px) {
           .page { padding: 12px; }
           .topbar, .hero, .section-head, .card-head, .settings-section-head, .mode-confirm-row { flex-direction: column; align-items: stretch; }
+          .equipment-editor-head { grid-template-columns: 1fr; align-items: stretch; }
           .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }
