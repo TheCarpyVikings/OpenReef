@@ -18,7 +18,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.event import async_track_point_in_time, async_track_time_change
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
@@ -46,7 +46,9 @@ type OpenReefConfigEntry = ConfigEntry
 SEARCH_LIMIT = 10
 UNAVAILABLE_STATES = {"unknown", "unavailable"}
 BUILT_IN_MODES = {"running", "feed", "maintenance"}
+WEEK_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 MODE_TIMER_UNSUB = "mode_timer_unsub"
+MODE_SCHEDULE_UNSUB = "mode_schedule_unsub"
 
 APPLY_MODE_SCHEMA = vol.Schema({vol.Required("mode_id"): cv.string})
 
@@ -99,6 +101,29 @@ def _normalise_mode_id(value: Any) -> str:
     if not text or text in BUILT_IN_MODES:
         return ""
     return text[:48]
+
+
+def _normalise_schedule_id(value: Any, fallback: str) -> str:
+    text = _normalise_text(value).replace(" ", "_")
+    if not text:
+        text = fallback
+    return text[:64]
+
+
+def _normalise_schedule_time(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        return ""
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return ""
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return ""
+    return f"{hour:02d}:{minute:02d}"
 
 
 def _normalise_list(value: Any) -> list[str]:
@@ -385,24 +410,47 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     if not isinstance(mode_schedule, dict):
         config["modeSchedule"] = deepcopy(DEFAULT_CORE_CONFIG["modeSchedule"])
     else:
-        mode_schedule["enabled"] = False
+        mode_schedule["enabled"] = bool(mode_schedule.get("enabled", False))
+        last_runs = mode_schedule.get("lastRuns")
+        if not isinstance(last_runs, dict):
+            last_runs = {}
+        mode_schedule["lastRuns"] = {
+            str(schedule_id): str(last_run)
+            for schedule_id, last_run in last_runs.items()
+            if isinstance(schedule_id, str) and isinstance(last_run, str)
+        }
         items = mode_schedule.get("items")
         if not isinstance(items, list):
             mode_schedule["items"] = []
         else:
             safe_items: list[dict[str, Any]] = []
-            for item in items[:12]:
+            used_schedule_ids: set[str] = set()
+            for index, item in enumerate(items[:12]):
                 if not isinstance(item, dict):
                     continue
                 mode_id = item.get("mode")
                 if mode_id not in allowed_mode_ids - {"running"}:
                     continue
+                schedule_id = _normalise_schedule_id(
+                    item.get("id"), f"{mode_id}_{index + 1}"
+                )
+                if schedule_id in used_schedule_ids:
+                    schedule_id = f"{schedule_id}_{index + 1}"
+                used_schedule_ids.add(schedule_id)
+                schedule_time = _normalise_schedule_time(item.get("time"))
+                days = [
+                    day
+                    for day in _normalise_list(item.get("days"))
+                    if day in WEEK_DAYS
+                ]
                 safe_items.append(
                     {
-                        "enabled": False,
+                        "id": schedule_id,
+                        "enabled": bool(item.get("enabled", False)),
                         "mode": mode_id,
-                        "time": item.get("time") if isinstance(item.get("time"), str) else "",
-                        "days": item.get("days") if isinstance(item.get("days"), list) else [],
+                        "time": schedule_time,
+                        "days": days,
+                        "requireAutoReturn": bool(item.get("requireAutoReturn", True)),
                     }
                 )
             mode_schedule["items"] = safe_items
@@ -950,6 +998,12 @@ def _clear_mode_timer(hass: HomeAssistant) -> None:
         unsub()
 
 
+def _clear_mode_schedule(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MODE_SCHEDULE_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
 async def _async_schedule_mode_timer(
     hass: HomeAssistant,
     entry: OpenReefConfigEntry | None,
@@ -1010,6 +1064,163 @@ async def _async_schedule_mode_timer(
 
     hass.data.setdefault(DOMAIN, {})[MODE_TIMER_UNSUB] = async_track_point_in_time(
         hass, _handle_mode_timer, run_at
+    )
+
+
+def _mode_has_actions(config: dict[str, Any], mode_id: str) -> bool:
+    try:
+        equipment_config = _equipment_for_mode(config, mode_id)
+    except ServiceValidationError:
+        return False
+    return any(state in {"on", "off"} for state in equipment_config.values())
+
+
+async def _async_mark_schedule_run(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    config: dict[str, Any],
+    schedule_id: str,
+    run_key: str,
+    message: str,
+    activity_type: str,
+) -> None:
+    schedule = config.setdefault("modeSchedule", {})
+    if isinstance(schedule, dict):
+        last_runs = schedule.setdefault("lastRuns", {})
+        if isinstance(last_runs, dict):
+            last_runs[schedule_id] = run_key
+    _append_activity(config, message, activity_type)
+    await _async_save_config(hass, entry, config)
+
+
+async def _async_schedule_mode_schedule(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    _clear_mode_schedule(hass)
+    if entry is None:
+        return
+
+    config = config or _config_from_entry(entry)
+    schedule = config.get("modeSchedule", {})
+    if not isinstance(schedule, dict) or not schedule.get("enabled", False):
+        return
+    items = schedule.get("items")
+    if not isinstance(items, list) or not any(
+        isinstance(item, dict)
+        and item.get("enabled", False)
+        and _normalise_schedule_time(item.get("time"))
+        for item in items
+    ):
+        return
+
+    async def _handle_mode_schedule(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+
+        latest_config = _config_from_entry(latest_entry)
+        latest_schedule = latest_config.get("modeSchedule", {})
+        if not isinstance(latest_schedule, dict) or not latest_schedule.get("enabled", False):
+            return
+        latest_items = latest_schedule.get("items")
+        if not isinstance(latest_items, list):
+            return
+
+        day = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[now.weekday()]
+        schedule_time = now.strftime("%H:%M")
+        run_key = f"{now.date().isoformat()}:{schedule_time}"
+        last_runs = latest_schedule.get("lastRuns")
+        if not isinstance(last_runs, dict):
+            last_runs = {}
+            latest_schedule["lastRuns"] = last_runs
+
+        for item in latest_items:
+            if not isinstance(item, dict) or not item.get("enabled", False):
+                continue
+            if item.get("time") != schedule_time:
+                continue
+            days = item.get("days")
+            if isinstance(days, list) and days and day not in days:
+                continue
+            schedule_id = str(item.get("id") or f"{item.get('mode')}_{schedule_time}")
+            if last_runs.get(schedule_id) == run_key:
+                continue
+
+            mode_id = str(item.get("mode") or "")
+            mode_label = _mode_label(latest_config, mode_id)
+            timer = latest_config.get("modeTimers", {}).get(mode_id, {})
+            requires_auto_return = bool(item.get("requireAutoReturn", True))
+            mode = latest_config.get("mode", {})
+            active_mode = mode.get("active") if isinstance(mode, dict) else "running"
+
+            if active_mode != "running":
+                await _async_mark_schedule_run(
+                    hass,
+                    latest_entry,
+                    latest_config,
+                    schedule_id,
+                    run_key,
+                    f"Scheduled {mode_label} skipped: OpenReef is already in {_mode_label(latest_config, str(active_mode))} mode",
+                    "warning",
+                )
+                return
+
+            if requires_auto_return and not (
+                isinstance(timer, dict) and timer.get("autoReturn", False)
+            ):
+                await _async_mark_schedule_run(
+                    hass,
+                    latest_entry,
+                    latest_config,
+                    schedule_id,
+                    run_key,
+                    f"Scheduled {mode_label} skipped: auto-return is required but disabled",
+                    "warning",
+                )
+                return
+
+            if not _mode_has_actions(latest_config, mode_id):
+                await _async_mark_schedule_run(
+                    hass,
+                    latest_entry,
+                    latest_config,
+                    schedule_id,
+                    run_key,
+                    f"Scheduled {mode_label} skipped: no equipment actions are configured",
+                    "warning",
+                )
+                return
+
+            try:
+                await _async_apply_mode(hass, latest_entry, mode_id, None)
+            except ServiceValidationError as err:
+                await _async_mark_schedule_run(
+                    hass,
+                    latest_entry,
+                    _config_from_entry(latest_entry),
+                    schedule_id,
+                    run_key,
+                    f"Scheduled {mode_label} blocked: {err}",
+                    "warning",
+                )
+                return
+
+            applied_config = _config_from_entry(latest_entry)
+            await _async_mark_schedule_run(
+                hass,
+                latest_entry,
+                applied_config,
+                schedule_id,
+                run_key,
+                f"Scheduled {mode_label} ran",
+                "control",
+            )
+            return
+
+    hass.data.setdefault(DOMAIN, {})[MODE_SCHEDULE_UNSUB] = async_track_time_change(
+        hass, _handle_mode_schedule, second=0
     )
 
 
@@ -1076,6 +1287,7 @@ async def _async_save_config(
     await _async_refresh_issues(hass, entry)
     await _async_sync_alert_notifications(hass, normalised)
     await _async_schedule_mode_timer(hass, entry, normalised)
+    await _async_schedule_mode_schedule(hass, entry, normalised)
     return normalised
 
 
@@ -1696,18 +1908,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_refresh_issues(hass, entry)
     await _async_sync_alert_notifications(hass, normalised)
     await _async_schedule_mode_timer(hass, entry, normalised)
-    return True
-
-
-async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> bool:
-    """Unload OpenReef entry resources."""
-    _clear_mode_timer(hass)
-    hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
+    await _async_schedule_mode_schedule(hass, entry, normalised)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> bool:
     """Unload an OpenReef config entry."""
+    _clear_mode_timer(hass)
+    _clear_mode_schedule(hass)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_ARMED_UNAVAILABLE)

@@ -659,6 +659,12 @@ class OpenReefPanel extends HTMLElement {
       if (action === "setup-add-starter-equipment") this._addStarterEquipment();
       if (action === "add-custom-mode") this._addCustomMode();
       if (action === "remove-custom-mode") this._removeCustomMode(target.dataset.mode);
+      if (action === "add-mode-schedule") this._addModeSchedule();
+      if (action === "remove-mode-schedule") this._removeModeSchedule(target.dataset.schedule);
+      if (action === "toggle-schedule-day") {
+        this._toggleScheduleDay(target.dataset.schedule, target.dataset.day);
+        this._render();
+      }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
       if (action === "remove-equipment") {
         const removed = this._config.equipment[id]?.label || id;
@@ -788,12 +794,21 @@ class OpenReefPanel extends HTMLElement {
         this._config.modeSettings[modeId] = this._config.modeSettings[modeId] || {};
         this._config.modeSettings[modeId][field] = value;
       }
+      if (scope === "mode-schedule-global") {
+        this._config.modeSchedule = this._modeSchedule();
+        this._config.modeSchedule[field] = value;
+      }
+      if (scope === "mode-schedule") {
+        const schedule = this._scheduleItem(id);
+        if (schedule) schedule[field] = value;
+      }
       if (scope === "mission-card") {
         this._config.display.missionCards = this._missionCards();
         this._config.display.missionCards[id] = value;
       }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
+      if ((scope === "mode-schedule" || scope === "mode-schedule-global") && event.type === "change") this._render();
     };
 
     this.shadowRoot.addEventListener("input", handleFieldInput);
@@ -913,6 +928,71 @@ class OpenReefPanel extends HTMLElement {
     this._recordActivity(`Removed custom mode: ${mode.label}`);
     this._setDirty(true);
     this._render();
+  }
+
+  _modeSchedule() {
+    this._config.modeSchedule = this._config.modeSchedule || { enabled: false, items: [], lastRuns: {} };
+    this._config.modeSchedule.items = Array.isArray(this._config.modeSchedule.items)
+      ? this._config.modeSchedule.items
+      : [];
+    this._config.modeSchedule.lastRuns = this._config.modeSchedule.lastRuns || {};
+    return this._config.modeSchedule;
+  }
+
+  _scheduleItem(scheduleId) {
+    return this._modeSchedule().items.find((item) => item?.id === scheduleId);
+  }
+
+  _scheduleDays() {
+    return [
+      ["mon", "Mon"],
+      ["tue", "Tue"],
+      ["wed", "Wed"],
+      ["thu", "Thu"],
+      ["fri", "Fri"],
+      ["sat", "Sat"],
+      ["sun", "Sun"],
+    ];
+  }
+
+  _addModeSchedule() {
+    const schedule = this._modeSchedule();
+    const modeId = this._editableModeIds()[0] || "feed";
+    const id = `schedule_${Date.now().toString(36)}`;
+    schedule.items.push({
+      id,
+      enabled: false,
+      mode: modeId,
+      time: "12:00",
+      days: [],
+      requireAutoReturn: true,
+    });
+    this._recordActivity("Added mode schedule");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _removeModeSchedule(scheduleId) {
+    const schedule = this._modeSchedule();
+    schedule.items = schedule.items.filter((item) => item?.id !== scheduleId);
+    delete schedule.lastRuns?.[scheduleId];
+    this._recordActivity("Removed mode schedule");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _toggleScheduleDay(scheduleId, day) {
+    const item = this._scheduleItem(scheduleId);
+    if (!item) return;
+    if (day === "all") {
+      item.days = [];
+    } else {
+      const days = Array.isArray(item.days) ? item.days : [];
+      item.days = days.includes(day)
+        ? days.filter((value) => value !== day)
+        : [...days, day];
+    }
+    this._setDirty(true);
   }
 
   _applySensorPreset(preset) {
@@ -2679,14 +2759,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="grid two">
           ${modeIds.map((modeId) => this._modePreviewEditor(modeId, equipment)).join("")}
         </div>
-        <section class="mapping-section scheduler-preview">
-          <div>
-            <p class="eyebrow">Scheduler prep</p>
-            <h4>Scheduled mode automation is reserved for a later smoke-tested pass.</h4>
-            <p class="muted">The config shape is ready, but OpenReef will not run timed schedules or background loops from this screen yet.</p>
-          </div>
-          <span class="pill disabled">Disabled</span>
-        </section>
+        ${this._modeScheduleSettings()}
       `,
     );
   }
@@ -2764,6 +2837,112 @@ class OpenReefPanel extends HTMLElement {
             `;
           }).join("")}
         </div>` : `<p class="muted">Add equipment first, then choose what this mode should do.</p>`}
+      </section>
+    `;
+  }
+
+  _scheduleDayLabel(days) {
+    if (!Array.isArray(days) || !days.length) return "Every day";
+    const names = new Map(this._scheduleDays());
+    return days.map((day) => names.get(day) || day).join(", ");
+  }
+
+  _schedulePreview(item) {
+    const schedule = this._modeSchedule();
+    const mode = this._modeConfig(item.mode);
+    const timer = this._modeTimerConfig(item.mode);
+    const counts = this._modeActionCounts(item.mode);
+    if (!schedule.enabled) {
+      return ["disabled", "Scheduler off", "Turn on scheduled modes to allow this item to run."];
+    }
+    if (!item.enabled) {
+      return ["disabled", "Paused", "This schedule is saved but will not run."];
+    }
+    if (!item.time) {
+      return ["warning", "Needs a time", "Choose a time before this schedule can run."];
+    }
+    if (item.requireAutoReturn && !timer.autoReturn) {
+      return ["warning", "Auto-return required", `${mode.label} will not run on schedule until auto-return is enabled for the mode.`];
+    }
+    if (!counts.rows.length) {
+      return ["warning", "No actions configured", `${mode.label} needs at least one equipment action.`];
+    }
+    if (!counts.ready) {
+      return ["warning", "No armed equipment ready", `${counts.locked} locked and ${counts.missing} unavailable item(s) will be skipped.`];
+    }
+    return ["ok", `${counts.ready} ready`, `${mode.label} will run ${this._scheduleDayLabel(item.days)} at ${item.time}.`];
+  }
+
+  _modeScheduleSettings() {
+    const schedule = this._modeSchedule();
+    const items = schedule.items;
+    const modeIds = this._editableModeIds();
+    return `
+      <section class="mapping-section scheduler-preview">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Mode Schedules</p>
+            <h4>Run a saved mode at a chosen time and day.</h4>
+            <p class="muted">Schedules are off by default and still only control armed equipment. OpenReef skips schedules that are unsafe or incomplete.</p>
+          </div>
+          <div class="schedule-toolbar">
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="mode-schedule-global" data-field="enabled" ${schedule.enabled ? "checked" : ""}>
+              <span><strong>Scheduled modes</strong><small>${schedule.enabled ? "Enabled" : "Off"}</small></span>
+            </label>
+            <button class="primary compact-button" data-action="add-mode-schedule">+ Schedule</button>
+          </div>
+        </div>
+        ${items.length ? `
+          <div class="schedule-list">
+            ${items.map((item) => {
+              const [status, title, detail] = this._schedulePreview(item);
+              const days = Array.isArray(item.days) ? item.days : [];
+              return `
+                <article class="schedule-card ${this._escape(status)}">
+                  <div class="section-head">
+                    <div>
+                      <p class="eyebrow">Schedule</p>
+                      <h4>${this._escape(this._modeConfig(item.mode).label)}</h4>
+                      <p class="muted">${this._escape(detail)}</p>
+                    </div>
+                    <div class="pill-stack">
+                      <span class="pill ${this._escape(status)}">${this._escape(title)}</span>
+                      <button class="danger-text compact-button" data-action="remove-mode-schedule" data-schedule="${this._escape(item.id)}">Remove</button>
+                    </div>
+                  </div>
+                  <div class="schedule-fields">
+                    <label>Mode
+                      <select data-scope="mode-schedule" data-id="${this._escape(item.id)}" data-field="mode">
+                        ${modeIds.map((modeId) => {
+                          const mode = this._modeConfig(modeId);
+                          return `<option value="${this._escape(modeId)}" ${item.mode === modeId ? "selected" : ""}>${this._escape(mode.label)}</option>`;
+                        }).join("")}
+                      </select>
+                    </label>
+                    <label>Time
+                      <input type="time" value="${this._escape(item.time || "12:00")}" data-scope="mode-schedule" data-id="${this._escape(item.id)}" data-field="time">
+                    </label>
+                    <label class="toggle-card compact-toggle">
+                      <input type="checkbox" data-scope="mode-schedule" data-id="${this._escape(item.id)}" data-field="enabled" ${item.enabled ? "checked" : ""}>
+                      <span><strong>Enable item</strong><small>Runs only while global scheduling is on.</small></span>
+                    </label>
+                    <label class="toggle-card compact-toggle">
+                      <input type="checkbox" data-scope="mode-schedule" data-id="${this._escape(item.id)}" data-field="requireAutoReturn" ${item.requireAutoReturn !== false ? "checked" : ""}>
+                      <span><strong>Require auto-return</strong><small>Recommended for unattended schedules.</small></span>
+                    </label>
+                  </div>
+                  <div class="schedule-days">
+                    <button class="${days.length ? "" : "active"}" data-action="toggle-schedule-day" data-schedule="${this._escape(item.id)}" data-day="all">Every day</button>
+                    ${this._scheduleDays().map(([day, label]) => `
+                      <button class="${days.includes(day) ? "active" : ""}" data-action="toggle-schedule-day" data-schedule="${this._escape(item.id)}" data-day="${this._escape(day)}">${this._escape(label)}</button>
+                    `).join("")}
+                  </div>
+                </article>
+              `;
+            }).join("")}
+          </div>
+        ` : `<p class="muted">No schedules yet. Add one when you want a mode to run automatically.</p>`}
       </section>
     `;
   }
@@ -3500,7 +3679,18 @@ class OpenReefPanel extends HTMLElement {
         .setup-status-line { border: 1px solid #24364a; border-radius: 8px; background: #0b1724; color: #cbd5e1; padding: 12px 14px; font-weight: 800; }
         .preset-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
         .mode-preset-choice { min-height: 90px; }
-        .scheduler-preview { grid-template-columns: 1fr auto; align-items: center; margin-top: 14px; border-style: dashed; }
+        .scheduler-preview { margin-top: 14px; border-style: dashed; }
+        .schedule-toolbar { display: flex; gap: 10px; align-items: stretch; justify-content: flex-end; flex-wrap: wrap; }
+        .schedule-list { display: grid; gap: 12px; }
+        .schedule-card { display: grid; gap: 12px; border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: rgba(11, 23, 36, .72); }
+        .schedule-card.ok { border-color: #166534; }
+        .schedule-card.warning { border-color: #a16207; background: rgba(47, 38, 20, .48); }
+        .schedule-card.disabled { opacity: .82; border-color: #334155; }
+        .schedule-fields { display: grid; grid-template-columns: minmax(170px, .7fr) minmax(130px, .35fr) minmax(220px, 1fr) minmax(220px, 1fr); gap: 10px; align-items: stretch; }
+        .schedule-days { display: flex; gap: 7px; flex-wrap: wrap; }
+        .schedule-days button { border: 1px solid #294055; border-radius: 999px; padding: 7px 10px; background: #172536; color: #dcecff; font-weight: 800; }
+        .schedule-days button.active { border-color: var(--openreef-accent); background: var(--openreef-accent); color: #041019; }
+        .compact-toggle { min-width: 220px; padding: 10px; }
         .setup-next-list { display: grid; gap: 10px; }
         .setup-next-list div { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding-top: 10px; }
         .setup-next-list div:first-child { border-top: 0; padding-top: 0; }
@@ -3515,7 +3705,7 @@ class OpenReefPanel extends HTMLElement {
           .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }
-          .mode-mini-row, .preset-row, .mode-timer-card, .mode-name-grid, .scheduler-preview { grid-template-columns: 1fr; }
+          .mode-mini-row, .preset-row, .mode-timer-card, .mode-name-grid, .scheduler-preview, .schedule-fields { grid-template-columns: 1fr; }
           .issue-item { grid-template-columns: 1fr; }
           .activity-item { grid-template-columns: 1fr; }
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
