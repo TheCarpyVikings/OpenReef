@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 21
-INTEGRATION_VERSION = "0.4.20"
+CORE_SCHEMA_VERSION = 22
+INTEGRATION_VERSION = "0.4.21"
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -31,8 +31,8 @@ MVP_SENSORS = {
         "max": 27.5,
         "target": {
             "domains": ["sensor"],
-            "keywords": ["temperature", "temp"],
-            "prefer": ["reef", "tank", "aquarium", "water", "saltwater"],
+            "keywords": ["temperature", "temp", "display", "tank"],
+            "prefer": ["reef", "tank", "display", "aquarium", "water", "saltwater", "apex", "neptune"],
             "avoid": ["room", "ambient", "air"],
             "device_classes": ["temperature"],
             "units": ["°C", "°F", "C", "F"],
@@ -48,7 +48,7 @@ MVP_SENSORS = {
         "target": {
             "domains": ["sensor"],
             "keywords": ["ph"],
-            "prefer": ["reef", "tank", "aquarium", "water", "saltwater"],
+            "prefer": ["reef", "tank", "aquarium", "water", "saltwater", "apex", "neptune"],
             "avoid": ["phone", "phase", "room"],
             "device_classes": [],
             "units": [],
@@ -64,7 +64,7 @@ MVP_SENSORS = {
         "target": {
             "domains": ["sensor"],
             "keywords": ["salinity", "specific gravity", "sg", "conductivity"],
-            "prefer": ["reef", "tank", "aquarium", "salt", "ppt"],
+            "prefer": ["reef", "tank", "aquarium", "salt", "ppt", "apex", "neptune"],
             "avoid": ["room", "ambient", "air"],
             "device_classes": [],
             "units": ["ppt", "SG", "sg", "mS/cm"],
@@ -80,7 +80,7 @@ MVP_SENSORS = {
         "target": {
             "domains": ["sensor"],
             "keywords": ["temperature", "temp", "sump", "rear chamber", "chamber"],
-            "prefer": ["sump", "rear", "chamber", "filter", "refugium"],
+            "prefer": ["sump", "rear", "chamber", "filter", "refugium", "apex", "neptune"],
             "avoid": ["room", "ambient", "air", "display"],
             "device_classes": ["temperature"],
             "units": ["°C", "°F", "C", "F"],
@@ -95,8 +95,8 @@ MVP_SENSORS = {
         "max": 11.0,
         "target": {
             "domains": ["sensor"],
-            "keywords": ["alkalinity", "alk", "kh", "dkh"],
-            "prefer": ["trident", "apex", "reef", "tank", "aquarium"],
+            "keywords": ["alkalinity", "alk", "kh", "dkh", "trident", "neptune"],
+            "prefer": ["trident", "apex", "neptune", "reef", "tank", "aquarium"],
             "avoid": ["room", "ambient", "air"],
             "device_classes": [],
             "units": ["dKH", "dkh", "KH"],
@@ -111,8 +111,8 @@ MVP_SENSORS = {
         "max": 450,
         "target": {
             "domains": ["sensor"],
-            "keywords": ["orp", "oxidation", "redox"],
-            "prefer": ["apex", "reef", "tank", "aquarium"],
+            "keywords": ["orp", "oxidation", "redox", "apex", "neptune"],
+            "prefer": ["apex", "neptune", "reef", "tank", "aquarium"],
             "avoid": ["room", "ambient", "air"],
             "device_classes": [],
             "units": ["mV", "mv"],
@@ -127,8 +127,8 @@ MVP_SENSORS = {
         "max": 460,
         "target": {
             "domains": ["sensor"],
-            "keywords": ["calcium", "ca"],
-            "prefer": ["trident", "apex", "reef", "tank", "aquarium"],
+            "keywords": ["calcium", "ca", "trident", "neptune"],
+            "prefer": ["trident", "apex", "neptune", "reef", "tank", "aquarium"],
             "avoid": ["room", "ambient", "air"],
             "device_classes": [],
             "units": ["ppm", "mg/L", "mg/l"],
@@ -143,8 +143,8 @@ MVP_SENSORS = {
         "max": 1450,
         "target": {
             "domains": ["sensor"],
-            "keywords": ["magnesium", "mg"],
-            "prefer": ["trident", "apex", "reef", "tank", "aquarium"],
+            "keywords": ["magnesium", "mg", "trident", "neptune"],
+            "prefer": ["trident", "apex", "neptune", "reef", "tank", "aquarium"],
             "avoid": ["room", "ambient", "air"],
             "device_classes": [],
             "units": ["ppm", "mg/L", "mg/l"],

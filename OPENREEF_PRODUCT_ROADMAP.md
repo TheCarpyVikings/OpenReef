@@ -37,6 +37,10 @@ Status: **Core MVP in active beta**
 - Safe controls: switch mapping required, explicit arming required
 - Energy: totals and per-equipment mappings, optional cost fields
 - Trends: targeted one-entity history views with selectable ranges
+- Alerts: sensor threshold states, muting, history, and optional HA persistent notifications
+- Modes: Running, Feed, Maintenance, custom modes, schedules, confirmations, timers, and restore plans
+- Safety: heater temperature checks, skimmer/return-pump helpers, ATO duty cycle, ATO return-pump checks, display-wavemaker restart warnings/reminders
+- Beta setup: onboarding includes Apex/Trident sensor preset, starter equipment, and safety defaults
 - Labs/old Next.js work: preserved for later migration
 
 ## Roadmap Phases
@@ -213,15 +217,15 @@ Exit criteria:
 
 | Feature | Current Source | Core Status | Target Phase | Notes |
 | --- | --- | --- | --- | --- |
-| Mission Control | Core panel + old `MissionControlScreen.tsx` | In Core MVP | 0-1 | Continue expanding with configurable cards, alerts, events. |
-| Live Stats | Core panel + old `LiveStatsScreen.tsx` | In Core MVP | 0 | Add richer HA-native trend controls and history UX. |
-| Controls | Core panel + old controls/entities code | In Core MVP | 0-1 | Keep arming in Settings, switches in Controls. Add interlocks next. |
-| Energy | Core panel + old `EnergyScreen.tsx` | In Core MVP | 0-1 | Improve per-device totals and cost modeling. |
-| Settings | Core panel + old `SettingsScreen.tsx` | In Core MVP | 0 | Needs to become the central configuration surface. |
+| Mission Control | Core panel + old `MissionControlScreen.tsx` | In Core beta | 0-1 | Configurable cards, alerts, modes, attention items, and event context are active. |
+| Live Stats | Core panel + old `LiveStatsScreen.tsx` | In Core beta | 0 | Targeted HA-native trends are active; continue improving visual history UX. |
+| Controls | Core panel + old controls/entities code | In Core beta | 0-1 | Arming lives in Settings, switches live in Controls, interlocks block unsafe actions. |
+| Energy | Core panel + old `EnergyScreen.tsx` | In Core beta | 0-1 | Totals, Wh display, and per-device optional mappings are active. |
+| Settings | Core panel + old `SettingsScreen.tsx` | In Core beta | 0 | Central configuration surface with collapsed sections by default. |
 | Entity Suggestions | `entity-suggestions.ts`, Core WS search | In Core MVP | 0 | Keep targeted and capped. No full-state fetches. |
 | Reef Health Score | `ReefHealthScore.tsx` | Labs/reference | 1/5 | Core summary first, analytics later. |
-| Alerts/Alarms | `SettingsContext` alarm helpers | Labs/reference | 1 | Build HA-native alert config and repair issues. |
-| Feed/Maintenance Modes | `SettingsContext` modes | Partial service support | 1 | Needs timer, preview, and return-to-running behavior. |
+| Alerts/Alarms | `SettingsContext` alarm helpers | In Core beta | 1 | Thresholds, muting, alert history, and HA persistent notifications are active. |
+| Feed/Maintenance Modes | `SettingsContext` modes | In Core beta | 1 | Manual confirmation, timers, auto-return, schedules, custom modes, and restore plans are active. |
 | Tasks/Maintenance | `TasksScreen.tsx`, Google Tasks API | Labs/reference | 2 | Prefer HA-native/local storage first; cloud sync optional later. |
 | Manual Tests | `ManualStatsScreen.tsx`, history components | Labs/reference | 2 | Add chemistry entry and trends. |
 | Dosing/Reminders | settings/task categories | Planned | 2 | Advisory first, automation later. |
@@ -241,12 +245,12 @@ Exit criteria:
 
 ### Next Core Slice
 
-- Alerts/alarms configuration in Settings.
-- Mission Control alarm card.
-- HA notification target selection.
-- Feed and maintenance mode editor.
-- Timed mode countdown and automatic return to running.
-- Activity log for mode changes and manual control actions.
+- Mobile polish pass across setup, settings, mode dialogs, and controls.
+- Apex beta handoff: guide, known limitations, and support-summary workflow.
+- Reef Health Score V1 for Core, based only on configured OpenReef entities.
+- Manual chemistry entry for alkalinity, calcium, magnesium, nitrate, phosphate, pH, salinity, and temperature.
+- A first maintenance/tasks slice that does not depend on Google Tasks.
+- Read-only Apex/Trident import helper docs before automating any import flow.
 
 ### Stability Hardening
 
@@ -255,11 +259,13 @@ Exit criteria:
 - Add frontend smoke checklist with desktop/mobile screenshots.
 - Add diagnostics summary for Core config without secrets.
 - Add "support bundle" issue template for beta testers.
+- Add low-memory HA OS smoke-test notes for ready-made unit planning.
 
 ### Documentation
 
 - Update README install path for Core-only OpenReef.
 - Add beta tester guide.
+- Add Apex beta tester guide.
 - Add known limitations.
 - Add "Labs features are preserved but experimental" note.
 - Add ready-made unit planning doc later.

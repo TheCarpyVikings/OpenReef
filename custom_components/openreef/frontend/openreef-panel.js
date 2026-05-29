@@ -87,6 +87,14 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
+  _setupSteps() {
+    return ["Profile", "Sensors", "Equipment", "Safety", "Review"];
+  }
+
+  _lastSetupStep() {
+    return this._setupSteps().length - 1;
+  }
+
   _loadSettingsSections() {
     const defaults = this._defaultSettingsSections();
     try {
@@ -622,7 +630,7 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "next-step") {
-        this._setupStep = Math.min(this._setupStep + 1, 3);
+        this._setupStep = Math.min(this._setupStep + 1, this._lastSetupStep());
         this._render();
       }
       if (action === "prev-step") {
@@ -630,7 +638,7 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "setup-step") {
-        this._setupStep = Math.max(0, Math.min(Number(target.dataset.step || 0), 3));
+        this._setupStep = Math.max(0, Math.min(Number(target.dataset.step || 0), this._lastSetupStep()));
         this._render();
       }
       if (action === "finish-setup") {
@@ -1358,6 +1366,12 @@ class OpenReefPanel extends HTMLElement {
     return Number.isFinite(value) ? Number(value).toFixed(digits) : "--";
   }
 
+  _sensorDigits(sensorId) {
+    if (sensorId === "ph" || sensorId === "alkalinity") return 2;
+    if (["orp", "calcium", "magnesium", "co2"].includes(sensorId)) return 0;
+    return 1;
+  }
+
   _energyWh(entityId) {
     const value = this._number(entityId);
     if (value === null) return null;
@@ -1656,7 +1670,7 @@ class OpenReefPanel extends HTMLElement {
         const status = this._sensorStatus(sensor, id);
         if (!["critical", "warning", "unknown"].includes(status)) return null;
         const value = this._number(sensor.entity_id);
-        const display = id === "ph" ? this._format(value, 2) : this._format(value, 1);
+        const display = this._format(value, this._sensorDigits(id));
         const range = `${sensor.min} - ${sensor.max} ${sensor.unit || ""}`.trim();
         const title = status === "unknown" ? `${sensor.label} is not reporting` : `${sensor.label} ${status === "critical" ? "outside range" : "near threshold"}`;
         const detail = status === "unknown" ? (sensor.entity_id || "No entity mapped") : `${display} ${sensor.unit || ""} · target ${range}`;
@@ -2103,10 +2117,30 @@ class OpenReefPanel extends HTMLElement {
 
   _supportSummaryText() {
     const check = this._systemCheck();
+    const sensors = Object.entries(this._config.sensors || {})
+      .filter(([, sensor]) => this._sensorEnabled(sensor))
+      .map(([id, sensor]) => {
+        const status = this._sensorStatus(sensor, id);
+        return `- ${sensor.label || id}: ${sensor.entity_id || "not mapped"} (${status})`;
+      });
+    const equipment = Object.entries(this._config.equipment || {})
+      .map(([id, item]) => {
+        const profile = this._equipmentProfileLabel(this._equipmentProfile(id, item));
+        const state = this._equipmentStateLabel(item);
+        return `- ${item.label || id}: ${profile}, switch ${item.switch_entity_id || "not mapped"}, ${item.armed ? "armed" : "disarmed"}, ${state}`;
+      });
+    const energy = this._energyTotalMappings()
+      .map(([label, energyKey, costKey]) => `- ${label}: energy ${this._config.energy?.[energyKey] || "not mapped"}, cost ${this._config.energy?.[costKey] || "not mapped"}`);
+    const interlocks = this._config.interlocks || {};
+    const alerts = this._config.alerts || {};
+    const activity = Array.isArray(this._config.activity)
+      ? this._config.activity.slice(0, 5).map((item) => `- ${this._formatActivityTime(item.timestamp)}: ${item.message || item.type || "activity"}`)
+      : [];
     const lines = [
       "OpenReef support summary",
       `Version: ${check.version}`,
       `Schema: ${check.schema}`,
+      `Setup complete: ${this._config.display?.setupComplete ? "yes" : "no"}`,
       `Active mode: ${check.activeMode}`,
       `Mode timer: ${check.modeTimer}`,
       `Sensors mapped/enabled: ${check.sensors}`,
@@ -2122,6 +2156,27 @@ class OpenReefPanel extends HTMLElement {
       `Schedules: ${check.schedules}`,
       `Last activity: ${check.lastActivity}`,
       `Unsaved changes: ${check.dirty ? "yes" : "no"}`,
+      "",
+      "Enabled sensors",
+      ...(sensors.length ? sensors : ["- none"]),
+      "",
+      "Equipment",
+      ...(equipment.length ? equipment : ["- none"]),
+      "",
+      "Energy mappings",
+      ...energy,
+      "",
+      "Safety settings",
+      `- heater requires tank temp: ${interlocks.heaterRequiresTankTemp !== false ? "on" : "off"}`,
+      `- ATO return-pump warning: ${interlocks.atoReturnPumpWarning !== false ? "on" : "off"}`,
+      `- ATO block if return pump off: ${interlocks.atoBlockWhenReturnPumpOff ? "on" : "off"}`,
+      `- ATO duty cycle: ${check.atoDutyCycle}`,
+      `- skimmer auto-off with return pump: ${interlocks.skimmerAutoOffWhenReturnPumpOff ? "on" : "off"}`,
+      `- wavemaker reminders: ${alerts.wavemakerReminders !== false ? "on" : "off"} (${alerts.wavemakerReminderMinutes || 10}m)`,
+      `- HA persistent notifications: ${alerts.persistentNotifications ? "on" : "off"}`,
+      "",
+      "Recent activity",
+      ...(activity.length ? activity : ["- none"]),
     ];
     return lines.join("\n");
   }
@@ -2462,7 +2517,7 @@ class OpenReefPanel extends HTMLElement {
   _sensorRow(id, sensor) {
     const status = this._sensorStatus(sensor, id);
     const value = this._number(sensor.entity_id);
-    const display = id === "ph" ? this._format(value, 2) : this._format(value, 1);
+    const display = this._format(value, this._sensorDigits(id));
     return `
       <div class="row">
         <div>
@@ -2517,7 +2572,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="grid three">
           ${sensors.length ? sensors.map(([id, sensor]) => {
             const value = this._number(sensor.entity_id);
-            const display = id === "ph" ? this._format(value, 2) : this._format(value, 1);
+            const display = this._format(value, this._sensorDigits(id));
             return `
               <button class="stat stat-button ${this._sensorGroupClass(sensor)}" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
                 <p>${this._escape(sensor.label)}</p>
@@ -2850,16 +2905,16 @@ class OpenReefPanel extends HTMLElement {
     return this._settingsSections[id] !== false;
   }
 
-  _settingsPanel(id, title, description, content) {
-    const open = this._settingsSectionOpen(id);
+  _settingsPanel(id, title, description, content, forceOpen = false) {
+    const open = forceOpen || this._settingsSectionOpen(id);
     return `
       <article class="panel settings-section themed-settings-card">
-        <button class="settings-section-head" data-action="toggle-settings-section" data-id="${this._escape(id)}">
+        <button class="settings-section-head ${forceOpen ? "static-section-head" : ""}" ${forceOpen ? "disabled" : `data-action="toggle-settings-section" data-id="${this._escape(id)}"`}>
           <span>
             <strong>${this._escape(title)}</strong>
             <small>${this._escape(description)}</small>
           </span>
-          <span class="pill">${open ? "Hide" : "Show"}</span>
+          <span class="pill">${forceOpen ? "Setup" : open ? "Hide" : "Show"}</span>
         </button>
         ${open ? `<div class="settings-section-body">${content}</div>` : ""}
       </article>
@@ -3045,7 +3100,7 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
-  _equipmentSettings() {
+  _equipmentSettings(forceOpen = false) {
     const quick = ["Return Pump", "Heater", "Skimmer", "ATO", "Wave Maker", "Lights"];
     return this._settingsPanel(
       "equipment",
@@ -3060,6 +3115,7 @@ class OpenReefPanel extends HTMLElement {
           ${Object.entries(this._config.equipment || {}).map(([id, item]) => this._equipmentEditor(id, item)).join("") || `<p class="muted">Add equipment to enable safe controls and energy tracking.</p>`}
         </div>
       `,
+      forceOpen,
     );
   }
 
@@ -3725,7 +3781,7 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
-  _trendSvg(points, unit, range) {
+  _trendSvg(points, unit, range, digits = 2) {
     if (points.length < 2) return `<div class="empty-chart">No trend points yet.</div>`;
     const width = 640;
     const height = 220;
@@ -3758,7 +3814,7 @@ class OpenReefPanel extends HTMLElement {
         </svg>
         <div class="chart-labels">
           <span>${this._formatTrendTime(minTime, range)}</span>
-          <strong>${this._format(max, 2)} ${this._escape(unit || "")}</strong>
+          <strong>${this._format(max, digits)} ${this._escape(unit || "")}</strong>
           <span>${this._formatTrendTime(maxTime, range)}</span>
         </div>
       </div>
@@ -3770,6 +3826,7 @@ class OpenReefPanel extends HTMLElement {
     const points = this._trend.points || [];
     const summary = this._trendSummary(points);
     const range = this._trend.range || "24h";
+    const digits = this._sensorDigits(this._trend.sensorId);
     const coverageMessage = this._trendCoverageMessage(points, range);
     return `
       <div class="modal">
@@ -3799,12 +3856,12 @@ class OpenReefPanel extends HTMLElement {
           ${this._trend.loading ? `<div class="center-card compact-center"><div class="spinner"></div><p>Loading trend...</p></div>` : ""}
           ${this._trend.error ? `<div class="notice error">${this._escape(this._trend.error)}</div>` : ""}
           ${coverageMessage ? `<div class="notice warning-notice">${this._escape(coverageMessage)}</div>` : ""}
-          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, sensor.unit, range) : ""}
+          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, sensor.unit, range, digits) : ""}
           ${summary ? `
             <div class="trend-summary">
-              <article><span>Latest</span><strong>${this._format(summary.latest, 2)} ${this._escape(sensor.unit || "")}</strong></article>
-              <article><span>Low</span><strong>${this._format(summary.min, 2)} ${this._escape(sensor.unit || "")}</strong></article>
-              <article><span>High</span><strong>${this._format(summary.max, 2)} ${this._escape(sensor.unit || "")}</strong></article>
+              <article><span>Latest</span><strong>${this._format(summary.latest, digits)} ${this._escape(sensor.unit || "")}</strong></article>
+              <article><span>Low</span><strong>${this._format(summary.min, digits)} ${this._escape(sensor.unit || "")}</strong></article>
+              <article><span>High</span><strong>${this._format(summary.max, digits)} ${this._escape(sensor.unit || "")}</strong></article>
             </div>
           ` : ""}
         </section>
@@ -3877,7 +3934,8 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _setupShell(title, description, content) {
-    const steps = ["Profile", "Sensors", "Equipment", "Review"];
+    const steps = this._setupSteps();
+    const lastStep = this._lastSetupStep();
     return `
       <div class="modal">
         <section class="wizard setup-wizard">
@@ -3895,7 +3953,7 @@ class OpenReefPanel extends HTMLElement {
           ${content}
           <footer class="wizard-actions">
             <button class="secondary" data-action="prev-step" ${this._setupStep === 0 ? "disabled" : ""}>Back</button>
-            ${this._setupStep < 3 ? `<button class="primary" data-action="next-step">Next</button>` : `<button class="primary" data-action="finish-setup">Finish setup</button>`}
+            ${this._setupStep < lastStep ? `<button class="primary" data-action="next-step">Next</button>` : `<button class="primary" data-action="finish-setup">Finish setup</button>`}
           </footer>
         </section>
       </div>
@@ -3952,8 +4010,8 @@ class OpenReefPanel extends HTMLElement {
             <span>Display tank temperature, pH, and salinity.</span>
           </button>
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="apex">
-            <strong>Apex / Trident sensors</strong>
-            <span>Display tank temp, sump temp, pH, salinity, alkalinity, ORP, calcium, and magnesium.</span>
+            <strong>Apex / Trident beta</strong>
+            <span>Display temp, sump temp, salinity, alkalinity, ORP, calcium, pH, and magnesium.</span>
           </button>
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="all">
             <strong>Everything</strong>
@@ -3987,7 +4045,106 @@ class OpenReefPanel extends HTMLElement {
           </article>
         </div>
         <div class="setup-status-line">${stats.mappedEquipment.length}/${stats.equipment.length} equipment switches mapped. ${stats.armedEquipment.length} armed.</div>
-        ${this._equipmentSettings()}
+        ${this._equipmentSettings(true)}
+      `,
+    );
+  }
+
+  _setupSafetyStep() {
+    const interlocks = this._config.interlocks || {};
+    const alerts = this._config.alerts || {};
+    const hasAto = Object.values(this._config.equipment || {}).some((item) => this._equipmentProfile("", item) === "ato");
+    const hasDisplayWavemaker = Object.values(this._config.equipment || {}).some((item) => this._equipmentProfile("", item) === "display_wavemaker");
+    return this._setupShell(
+      "Review safety defaults",
+      "These settings make the first beta safer without forcing advanced automation on.",
+      `
+        <div class="setup-guide">
+          <article><strong>Control stays deliberate</strong><span>Switches only work after a device is mapped and armed.</span></article>
+          <article><strong>ATO can be limited</strong><span>Use duty cycling only if you want OpenReef to power your ATO for short windows.</span></article>
+          <article><strong>Display wavemakers are special</strong><span>OpenReef warns before automatic restart because livestock can enter stopped pumps.</span></article>
+        </div>
+        <article class="panel setup-panel">
+          <div class="section-head">
+            <div>
+              <h3>Recommended beta safety settings</h3>
+              <p>Leave these enabled unless your tester understands the trade-off.</p>
+            </div>
+          </div>
+          <div class="grid two compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="interlocks" data-field="heaterRequiresTankTemp" ${interlocks.heaterRequiresTankTemp !== false ? "checked" : ""}>
+              <span>
+                <strong>Heater requires tank temperature</strong>
+                <small>Mission Control warns if heater control is armed without a live display temperature.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="interlocks" data-field="atoReturnPumpWarning" ${interlocks.atoReturnPumpWarning !== false ? "checked" : ""}>
+              <span>
+                <strong>Warn ATO when return flow is not confirmed</strong>
+                <small>Useful for rear chambers and sumps where water level can lie during flow problems.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="interlocks" data-field="atoBlockWhenReturnPumpOff" ${interlocks.atoBlockWhenReturnPumpOff ? "checked" : ""}>
+              <span>
+                <strong>Block ATO if return pump is off</strong>
+                <small>Optional stricter rule: OpenReef will not turn an armed ATO on while return flow is off or unavailable.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="interlocks" data-field="skimmerAutoOffWhenReturnPumpOff" ${interlocks.skimmerAutoOffWhenReturnPumpOff ? "checked" : ""}>
+              <span>
+                <strong>Turn skimmer off with return pump</strong>
+                <small>Optional helper for water-level changes. It only affects mapped, armed skimmers.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="alerts" data-field="persistentNotifications" ${alerts.persistentNotifications ? "checked" : ""}>
+              <span>
+                <strong>Home Assistant notifications</strong>
+                <small>Create persistent HA notifications for OpenReef alerts.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="alerts" data-field="wavemakerReminders" ${alerts.wavemakerReminders !== false ? "checked" : ""}>
+              <span>
+                <strong>Display wavemaker reminders</strong>
+                <small>Repeat reminders while an armed display wavemaker remains off in Running.</small>
+              </span>
+            </label>
+          </div>
+        </article>
+        <article class="panel setup-panel">
+          <div class="section-head">
+            <div>
+              <h3>ATO duty cycle</h3>
+              <p>Off means the ATO can stay powered normally. On means OpenReef enforces short on-windows.</p>
+            </div>
+            <span class="pill ${interlocks.atoDutyCycleEnabled ? "warning" : "unknown"}">${interlocks.atoDutyCycleEnabled ? "enabled" : "off"}</span>
+          </div>
+          ${hasAto ? "" : `<div class="notice compact-notice">No ATO equipment is mapped yet. These settings can still be saved now and will apply later.</div>`}
+          <div class="grid four compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="interlocks" data-field="atoDutyCycleEnabled" ${interlocks.atoDutyCycleEnabled ? "checked" : ""}>
+              <span>
+                <strong>Enable ATO duty cycle</strong>
+                <small>Use for short, repeated ATO power windows.</small>
+              </span>
+            </label>
+            <label>On duration seconds
+              <input type="number" min="5" max="1800" step="5" data-scope="interlocks" data-field="atoDutyCycleOnSeconds" value="${this._escape(interlocks.atoDutyCycleOnSeconds ?? 120)}">
+            </label>
+            <label>Every minutes
+              <input type="number" min="5" max="1440" step="5" data-scope="interlocks" data-field="atoDutyCycleIntervalMinutes" value="${this._escape(interlocks.atoDutyCycleIntervalMinutes ?? 60)}">
+            </label>
+            <label>Anchor time
+              <input type="time" data-scope="interlocks" data-field="atoDutyCycleAnchorTime" value="${this._escape(interlocks.atoDutyCycleAnchorTime || "00:00")}">
+            </label>
+          </div>
+        </article>
+        ${hasDisplayWavemaker ? `<div class="notice danger-notice"><strong>Display wavemaker warning:</strong> if a display wavemaker has been off, inspect it before restarting. Fish can enter stopped wavemakers, and flow is critical for corals.</div>` : ""}
       `,
     );
   }
@@ -3996,6 +4153,7 @@ class OpenReefPanel extends HTMLElement {
     const stats = this._setupStats();
     const sensorsReady = stats.enabledSensors.length && stats.mappedSensors.length === stats.enabledSensors.length;
     const controlsReady = stats.equipment.length ? stats.mappedEquipment.length === stats.equipment.length : true;
+    const safetyReady = (this._config.interlocks?.heaterRequiresTankTemp !== false) && (this._config.alerts?.wavemakerReminders !== false);
     return this._setupShell(
       "Review setup",
       "Finish when the basics look right. OpenReef will stay safe even if you finish with missing optional mappings.",
@@ -4003,7 +4161,8 @@ class OpenReefPanel extends HTMLElement {
         <div class="summary-grid">
           ${this._setupReviewCard("Sensors", `${stats.mappedSensors.length}/${stats.enabledSensors.length}`, sensorsReady ? "Mapped" : "Needs attention", sensorsReady ? "ok" : "warning", 1)}
           ${this._setupReviewCard("Equipment", `${stats.mappedEquipment.length}/${stats.equipment.length}`, stats.equipment.length ? `${stats.armedEquipment.length} armed` : "Monitor only", controlsReady ? "ok" : "warning", 2)}
-          ${this._setupReviewCard("Energy", `${stats.energyMapped}/3`, stats.energyMapped ? "Totals mapped" : "Optional", stats.energyMapped ? "ok" : "unknown", 3)}
+          ${this._setupReviewCard("Safety", safetyReady ? "On" : "Review", "Core warnings and reminders", safetyReady ? "ok" : "warning", 3)}
+          ${this._setupReviewCard("Energy", `${stats.energyMapped}/3`, stats.energyMapped ? "Totals mapped" : "Optional", stats.energyMapped ? "ok" : "unknown", 4)}
         </div>
         <article class="panel setup-panel">
           <h3>What happens next</h3>
@@ -4031,6 +4190,7 @@ class OpenReefPanel extends HTMLElement {
     if (this._setupStep === 0) return this._setupProfileStep();
     if (this._setupStep === 1) return this._setupSensorStep();
     if (this._setupStep === 2) return this._setupEquipmentStep();
+    if (this._setupStep === 3) return this._setupSafetyStep();
     return this._setupReviewStep();
   }
 
@@ -4142,6 +4302,7 @@ class OpenReefPanel extends HTMLElement {
         .settings-section { display: grid; gap: 14px; position: relative; overflow: hidden; }
         .themed-settings-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96) 34%, #121f2f); box-shadow: inset 4px 0 0 var(--openreef-accent); }
         .settings-section-head { width: 100%; border: 0; background: transparent; padding: 0; display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; text-align: left; color: #e5edf5; }
+        .settings-section-head.static-section-head:disabled { opacity: 1; cursor: default; }
         .settings-section-head span:first-child { display: grid; gap: 4px; }
         .settings-section-head strong { font-size: 18px; }
         .settings-section-head small { color: #a8bed4; }
@@ -4332,6 +4493,24 @@ class OpenReefPanel extends HTMLElement {
           .trend-summary { grid-template-columns: 1fr; }
           .setup-guide, .setup-choice-grid, .setup-choice-grid.two-choice { grid-template-columns: 1fr; }
           .setup-next-list div { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 640px) {
+          .page { padding: 8px; }
+          .modal { padding: 8px; align-items: stretch; overflow: auto; }
+          .wizard { width: 100%; max-height: calc(100vh - 16px); padding: 18px; }
+          .close { top: 10px; right: 10px; width: 34px; height: 34px; }
+          .setup-progress { padding-right: 40px; }
+          .stepper { gap: 6px; flex-wrap: wrap; }
+          .stepper span, .stepper button { width: 30px; height: 30px; }
+          .tabs { grid-template-columns: 1fr; }
+          .actions, .button-row, .quick-add, .wizard-actions, .settings-toolbar, .settings-save, .control-actions, .alert-actions, .schedule-toolbar { align-items: stretch; flex-direction: column; }
+          .actions button, .button-row button, .quick-add button, .wizard-actions button, .settings-toolbar button, .settings-save button, .control-actions button, .alert-actions button, .schedule-toolbar button { width: 100%; }
+          .theme-picker { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+          .candidate-tools, .selected-entity, .time-input-row { align-items: stretch; flex-direction: column; }
+          .mapping-head, .equipment-editor-head, .control-row { align-items: stretch; }
+          .control-switch, .arm-switch { justify-content: space-between; width: 100%; max-width: 220px; }
+          .chart-wrap { padding: 10px; }
+          .trend-chart { min-height: 200px; }
         }
       </style>
     `;
