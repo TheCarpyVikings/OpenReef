@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.redact import async_redact_data
 
-from .const import CONF_SETTINGS
+from .const import CONF_SETTINGS, INTEGRATION_VERSION
 
 TO_REDACT = {
     "haToken",
@@ -56,6 +56,7 @@ async def async_get_config_entry_diagnostics(
         "entry": async_redact_data(dict(entry.data), TO_REDACT),
         "options": async_redact_data(dict(entry.options), TO_REDACT),
         "has_settings": CONF_SETTINGS in entry.options,
+        "integration_version": INTEGRATION_VERSION,
         "schema_version": settings.get("schemaVersion") if isinstance(settings, dict) else None,
         "mapped_entities": mapped_entities,
         "armed_equipment": armed_equipment,

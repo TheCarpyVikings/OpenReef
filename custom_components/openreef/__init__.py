@@ -29,6 +29,7 @@ from .const import (
     ISSUE_ARMED_UNAVAILABLE,
     ISSUE_LEGACY_LABS_CONFIG,
     ISSUE_MISSING_ENTITIES,
+    INTEGRATION_VERSION,
     MVP_SENSORS,
     NAME,
     PANEL_ICON,
@@ -602,6 +603,11 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     else:
         alerts["persistentNotifications"] = bool(alerts.get("persistentNotifications", False))
         alerts["notifyCriticalOnly"] = bool(alerts.get("notifyCriticalOnly", True))
+        try:
+            hysteresis_percent = float(alerts.get("hysteresisPercent", 2))
+        except (TypeError, ValueError):
+            hysteresis_percent = 2
+        alerts["hysteresisPercent"] = max(0, min(hysteresis_percent, 20))
         alerts["wavemakerReminders"] = bool(alerts.get("wavemakerReminders", True))
         try:
             reminder_minutes = int(alerts.get("wavemakerReminderMinutes", 10))
@@ -945,6 +951,22 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
     sensors = config.get("sensors", {})
     if not isinstance(sensors, dict):
         return alerts
+    alert_config = config.get("alerts", {})
+    last_states = (
+        alert_config.get("lastStates", {})
+        if isinstance(alert_config, dict)
+        and isinstance(alert_config.get("lastStates"), dict)
+        else {}
+    )
+    try:
+        hysteresis_percent = float(
+            alert_config.get("hysteresisPercent", 2)
+            if isinstance(alert_config, dict)
+            else 2
+        )
+    except (TypeError, ValueError):
+        hysteresis_percent = 2
+    hysteresis_percent = max(0, min(hysteresis_percent, 20))
     now = datetime.now(timezone.utc)
 
     for sensor_id, sensor in sensors.items():
@@ -1001,7 +1023,14 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
             continue
 
         buffer = (maximum - minimum) * max(0, min(warning_buffer, 50)) / 100
-        if value < minimum + buffer or value > maximum - buffer:
+        hysteresis = (maximum - minimum) * hysteresis_percent / 100
+        lower_warning = minimum + buffer
+        upper_warning = maximum - buffer
+        previous_state = last_states.get(sensor_id)
+        sticky_warning = previous_state in {"warning", "critical"} and (
+            value < lower_warning + hysteresis or value > upper_warning - hysteresis
+        )
+        if value < lower_warning or value > upper_warning or sticky_warning:
             alerts.append(
                 {
                     "id": sensor_id,
@@ -1915,6 +1944,7 @@ async def websocket_get_config(
         msg["id"],
         {
             "configured": entry is not None,
+            "version": INTEGRATION_VERSION,
             "config": config,
             "settings": config,
             "sensor_meta": MVP_SENSORS,
@@ -1943,7 +1973,12 @@ async def websocket_save_config(
     config = await _async_save_config(hass, entry, msg["config"])
     connection.send_result(
         msg["id"],
-        {"success": True, "config": config, "validation": _validate_config(hass, config)},
+        {
+            "success": True,
+            "version": INTEGRATION_VERSION,
+            "config": config,
+            "validation": _validate_config(hass, config),
+        },
     )
 
 
@@ -1965,7 +2000,10 @@ async def websocket_update_config_alias(
         return
 
     config = await _async_save_config(hass, entry, msg["settings"])
-    connection.send_result(msg["id"], {"success": True, "config": config})
+    connection.send_result(
+        msg["id"],
+        {"success": True, "version": INTEGRATION_VERSION, "config": config},
+    )
 
 
 @websocket_api.websocket_command(
@@ -2066,7 +2104,12 @@ async def websocket_mute_alert(
     config = await _async_save_config(hass, entry, config)
     connection.send_result(
         msg["id"],
-        {"success": True, "config": config, "validation": _validate_config(hass, config)},
+        {
+            "success": True,
+            "version": INTEGRATION_VERSION,
+            "config": config,
+            "validation": _validate_config(hass, config),
+        },
     )
 
 
@@ -2087,7 +2130,12 @@ async def websocket_clear_alert_history(
     config = await _async_save_config(hass, entry, config)
     connection.send_result(
         msg["id"],
-        {"success": True, "config": config, "validation": _validate_config(hass, config)},
+        {
+            "success": True,
+            "version": INTEGRATION_VERSION,
+            "config": config,
+            "validation": _validate_config(hass, config),
+        },
     )
 
 
