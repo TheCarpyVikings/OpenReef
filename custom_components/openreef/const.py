@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 18
-INTEGRATION_VERSION = "0.4.17"
+CORE_SCHEMA_VERSION = 19
+INTEGRATION_VERSION = "0.4.18"
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -211,6 +211,10 @@ DEFAULT_CORE_CONFIG = {
         "heaterRequiresTankTemp": True,
         "atoMaxRuntimeEnabled": False,
         "atoMaxRuntimeSeconds": 300,
+        "atoDutyCycleEnabled": False,
+        "atoDutyCycleOnSeconds": 120,
+        "atoDutyCycleIntervalMinutes": 60,
+        "atoDutyCycleAnchorTime": "00:00",
         "returnPumpSkimmerWarning": True,
     },
     "activity": [],

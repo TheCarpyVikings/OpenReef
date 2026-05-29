@@ -21,6 +21,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_point_in_time, async_track_time_change
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_SETTINGS,
@@ -50,6 +51,10 @@ BUILT_IN_MODES = {"running", "feed", "maintenance"}
 WEEK_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 MODE_TIMER_UNSUB = "mode_timer_unsub"
 MODE_SCHEDULE_UNSUB = "mode_schedule_unsub"
+ATO_DUTY_CYCLE_UNSUB = "ato_duty_cycle_unsub"
+ATO_DUTY_CYCLE_OFF_UNSUB = "ato_duty_cycle_off_unsub"
+ATO_DUTY_CYCLE_LAST = "ato_duty_cycle_last"
+DELAYED_EQUIPMENT_UNSUBS = "delayed_equipment_unsubs"
 WAVEMAKER_REMINDER_UNSUB = "wavemaker_reminder_unsub"
 WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
 EQUIPMENT_PROFILE_TYPES = {
@@ -204,6 +209,19 @@ def _normalise_schedule_time(value: Any) -> str:
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         return ""
     return f"{hour:02d}:{minute:02d}"
+
+
+def _normalise_schedule_times(value: Any, fallback: Any = None) -> list[str]:
+    raw_times = value if isinstance(value, list) else []
+    if not raw_times and fallback is not None:
+        raw_times = [fallback]
+
+    times: list[str] = []
+    for raw_time in raw_times:
+        schedule_time = _normalise_schedule_time(raw_time)
+        if schedule_time and schedule_time not in times:
+            times.append(schedule_time)
+    return times[:24]
 
 
 def _normalise_list(value: Any) -> list[str]:
@@ -517,7 +535,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 if schedule_id in used_schedule_ids:
                     schedule_id = f"{schedule_id}_{index + 1}"
                 used_schedule_ids.add(schedule_id)
-                schedule_time = _normalise_schedule_time(item.get("time"))
+                schedule_times = _normalise_schedule_times(
+                    item.get("times"), item.get("time")
+                )
                 days = [
                     day
                     for day in _normalise_list(item.get("days"))
@@ -528,7 +548,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                         "id": schedule_id,
                         "enabled": bool(item.get("enabled", False)),
                         "mode": mode_id,
-                        "time": schedule_time,
+                        "time": schedule_times[0] if schedule_times else "",
+                        "times": schedule_times,
                         "days": days,
                         "requireAutoReturn": bool(item.get("requireAutoReturn", True)),
                     }
@@ -583,6 +604,11 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             equipment_config["wavemakerNotifications"] = bool(
                 equipment_config.get("wavemakerNotifications", display_wavemaker)
             )
+            try:
+                power_on_delay = int(equipment_config.get("powerOnDelaySeconds", 0))
+            except (TypeError, ValueError):
+                power_on_delay = 0
+            equipment_config["powerOnDelaySeconds"] = max(0, min(power_on_delay, 1800))
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -674,6 +700,35 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             5, min(interlocks["atoMaxRuntimeSeconds"], 1800)
         )
         interlocks.pop("atoMaxRuntimeMinutes", None)
+        interlocks["atoDutyCycleEnabled"] = bool(
+            interlocks.get("atoDutyCycleEnabled", False)
+        )
+        try:
+            interlocks["atoDutyCycleOnSeconds"] = int(
+                interlocks.get("atoDutyCycleOnSeconds", 120)
+            )
+        except (TypeError, ValueError):
+            interlocks["atoDutyCycleOnSeconds"] = 120
+        interlocks["atoDutyCycleOnSeconds"] = max(
+            5, min(interlocks["atoDutyCycleOnSeconds"], 1800)
+        )
+        try:
+            interlocks["atoDutyCycleIntervalMinutes"] = int(
+                interlocks.get("atoDutyCycleIntervalMinutes", 60)
+            )
+        except (TypeError, ValueError):
+            interlocks["atoDutyCycleIntervalMinutes"] = 60
+        interlocks["atoDutyCycleIntervalMinutes"] = max(
+            5, min(interlocks["atoDutyCycleIntervalMinutes"], 1440)
+        )
+        interlocks["atoDutyCycleOnSeconds"] = min(
+            interlocks["atoDutyCycleOnSeconds"],
+            interlocks["atoDutyCycleIntervalMinutes"] * 60,
+        )
+        interlocks["atoDutyCycleAnchorTime"] = (
+            _normalise_schedule_time(interlocks.get("atoDutyCycleAnchorTime"))
+            or "00:00"
+        )
         interlocks["returnPumpSkimmerWarning"] = bool(
             interlocks.get("returnPumpSkimmerWarning", True)
         )
@@ -1243,6 +1298,23 @@ def _clear_mode_schedule(hass: HomeAssistant) -> None:
         unsub()
 
 
+def _clear_ato_duty_cycle(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(ATO_DUTY_CYCLE_UNSUB, None)
+    if unsub is not None:
+        unsub()
+    off_unsub = hass.data.setdefault(DOMAIN, {}).pop(ATO_DUTY_CYCLE_OFF_UNSUB, None)
+    if off_unsub is not None:
+        off_unsub()
+
+
+def _clear_delayed_equipment_calls(hass: HomeAssistant) -> None:
+    delayed = hass.data.setdefault(DOMAIN, {}).pop(DELAYED_EQUIPMENT_UNSUBS, {})
+    if isinstance(delayed, dict):
+        for unsub in delayed.values():
+            if unsub is not None:
+                unsub()
+
+
 def _clear_wavemaker_reminders(hass: HomeAssistant) -> None:
     unsub = hass.data.setdefault(DOMAIN, {}).pop(WAVEMAKER_REMINDER_UNSUB, None)
     if unsub is not None:
@@ -1470,7 +1542,7 @@ async def _async_schedule_mode_schedule(
     if not isinstance(items, list) or not any(
         isinstance(item, dict)
         and item.get("enabled", False)
-        and _normalise_schedule_time(item.get("time"))
+        and _normalise_schedule_times(item.get("times"), item.get("time"))
         for item in items
     ):
         return
@@ -1499,7 +1571,8 @@ async def _async_schedule_mode_schedule(
         for item in latest_items:
             if not isinstance(item, dict) or not item.get("enabled", False):
                 continue
-            if item.get("time") != schedule_time:
+            item_times = _normalise_schedule_times(item.get("times"), item.get("time"))
+            if schedule_time not in item_times:
                 continue
             days = item.get("days")
             if isinstance(days, list) and days and day not in days:
@@ -1584,6 +1657,193 @@ async def _async_schedule_mode_schedule(
     )
 
 
+def _ato_duty_cycle_window(
+    config: dict[str, Any], now: datetime
+) -> tuple[bool, str, datetime]:
+    interlocks = config.get("interlocks", {})
+    if not isinstance(interlocks, dict):
+        return False, "", now
+
+    anchor_time = _normalise_schedule_time(
+        interlocks.get("atoDutyCycleAnchorTime")
+    ) or "00:00"
+    anchor_hour, anchor_minute = (int(part) for part in anchor_time.split(":"))
+    interval_seconds = max(
+        5 * 60,
+        min(int(interlocks.get("atoDutyCycleIntervalMinutes", 60) or 60), 1440)
+        * 60,
+    )
+    on_seconds = max(
+        5,
+        min(int(interlocks.get("atoDutyCycleOnSeconds", 120) or 120), 1800),
+    )
+    on_seconds = min(on_seconds, interval_seconds)
+
+    seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+    anchor_seconds = anchor_hour * 3600 + anchor_minute * 60
+    offset = (seconds_since_midnight - anchor_seconds) % (24 * 3600)
+    window_start_offset = offset - (offset % interval_seconds)
+    window_start_seconds = (anchor_seconds + window_start_offset) % (24 * 3600)
+    window_start = now.replace(
+        hour=window_start_seconds // 3600,
+        minute=(window_start_seconds % 3600) // 60,
+        second=0,
+        microsecond=0,
+    )
+    if window_start > now:
+        window_start -= timedelta(days=1)
+
+    active = offset % interval_seconds < on_seconds
+    window_key = f"{window_start.date().isoformat()}:{window_start.strftime('%H:%M')}"
+    return active, window_key, window_start + timedelta(seconds=on_seconds)
+
+
+def _armed_ato_equipment(config: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    equipment = config.get("equipment", {})
+    if not isinstance(equipment, dict):
+        return []
+    return [
+        (equipment_id, mapped)
+        for equipment_id, mapped in equipment.items()
+        if isinstance(mapped, dict)
+        and mapped.get("armed", False)
+        and mapped.get("type") == "ato"
+        and _normalise_entity_id(mapped.get("switch_entity_id"))
+    ]
+
+
+async def _async_set_ato_duty_cycle_state(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    target_state: str,
+    window_key: str,
+    reason: str,
+) -> None:
+    latest_config = _config_from_entry(entry)
+    mode = latest_config.get("mode", {})
+    if not isinstance(mode, dict) or mode.get("active") != "running":
+        return
+
+    changed: list[str] = []
+    unavailable: list[str] = []
+    for equipment_id, mapped in _armed_ato_equipment(latest_config):
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        state = hass.states.get(switch_entity)
+        if state is None or state.state in UNAVAILABLE_STATES:
+            unavailable.append(_equipment_label(equipment_id, mapped))
+            continue
+        if state.state == target_state:
+            continue
+        await hass.services.async_call(
+            "switch",
+            f"turn_{target_state}",
+            {ATTR_ENTITY_ID: switch_entity},
+            blocking=True,
+        )
+        changed.append(_equipment_label(equipment_id, mapped))
+
+    if not changed and not unavailable:
+        return
+
+    if changed:
+        _append_activity(
+            latest_config,
+            f"ATO safety window {reason}: {', '.join(changed)} turned {target_state}",
+            "control",
+        )
+    if unavailable:
+        _append_activity(
+            latest_config,
+            f"ATO safety window skipped unavailable ATO: {', '.join(unavailable)}",
+            "warning",
+        )
+
+    interlocks = latest_config.setdefault("interlocks", {})
+    if isinstance(interlocks, dict):
+        interlocks["atoDutyCycleLastWindow"] = window_key
+    await _async_save_config(hass, entry, latest_config)
+
+
+async def _async_schedule_ato_duty_cycle(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    _clear_ato_duty_cycle(hass)
+    if entry is None:
+        return
+
+    config = config or _config_from_entry(entry)
+    interlocks = config.get("interlocks", {})
+    if (
+        not isinstance(interlocks, dict)
+        or not interlocks.get("atoDutyCycleEnabled", False)
+        or not interlocks.get("atoMaxRuntimeEnabled", False)
+        or int(interlocks.get("atoDutyCycleOnSeconds", 120))
+        > int(interlocks.get("atoMaxRuntimeSeconds", 300))
+    ):
+        return
+
+    async def _handle_ato_duty_cycle(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+
+        latest_config = _config_from_entry(latest_entry)
+        latest_interlocks = latest_config.get("interlocks", {})
+        if (
+            not isinstance(latest_interlocks, dict)
+            or not latest_interlocks.get("atoDutyCycleEnabled", False)
+            or not latest_interlocks.get("atoMaxRuntimeEnabled", False)
+            or int(latest_interlocks.get("atoDutyCycleOnSeconds", 120))
+            > int(latest_interlocks.get("atoMaxRuntimeSeconds", 300))
+        ):
+            return
+
+        if not _armed_ato_equipment(latest_config):
+            return
+
+        active, window_key, off_at = _ato_duty_cycle_window(latest_config, now)
+        if active:
+            last_store = hass.data.setdefault(DOMAIN, {}).setdefault(
+                ATO_DUTY_CYCLE_LAST, {}
+            )
+            entry_store = last_store.setdefault(entry.entry_id, {})
+            if entry_store.get("active_window") != window_key:
+                entry_store["active_window"] = window_key
+                await _async_set_ato_duty_cycle_state(
+                    hass, latest_entry, "on", window_key, "started"
+                )
+
+            async def _turn_off_at_end(_now: datetime) -> None:
+                newest_entry = _first_entry(hass)
+                if newest_entry is None or newest_entry.entry_id != entry.entry_id:
+                    return
+                await _async_set_ato_duty_cycle_state(
+                    hass, newest_entry, "off", window_key, "ended"
+                )
+
+            run_at = off_at if off_at > now else now + timedelta(seconds=1)
+            off_unsub = hass.data.setdefault(DOMAIN, {}).pop(
+                ATO_DUTY_CYCLE_OFF_UNSUB, None
+            )
+            if off_unsub is not None:
+                off_unsub()
+            hass.data.setdefault(DOMAIN, {})[ATO_DUTY_CYCLE_OFF_UNSUB] = (
+                async_track_point_in_time(hass, _turn_off_at_end, run_at)
+            )
+            return
+
+        await _async_set_ato_duty_cycle_state(
+            hass, latest_entry, "off", window_key, "outside schedule"
+        )
+
+    hass.data.setdefault(DOMAIN, {})[ATO_DUTY_CYCLE_UNSUB] = async_track_time_change(
+        hass, _handle_ato_duty_cycle, second=0
+    )
+    await _handle_ato_duty_cycle(dt_util.now())
+
+
 async def _async_refresh_issues(
     hass: HomeAssistant, entry: OpenReefConfigEntry | None
 ) -> None:
@@ -1648,6 +1908,7 @@ async def _async_save_config(
     await _async_sync_alert_notifications(hass, normalised)
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
+    await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     return normalised
 
@@ -1703,6 +1964,86 @@ def _equipment_for_mode(config: dict[str, Any], mode_id: str) -> dict[str, str]:
             equipment_config = mode.get("equipmentConfig", {})
             return equipment_config if isinstance(equipment_config, dict) else {}
     raise ServiceValidationError(f"OpenReef mode '{mode_id}' does not exist")
+
+
+def _equipment_power_on_delay(mapped: dict[str, Any]) -> int:
+    try:
+        delay = int(mapped.get("powerOnDelaySeconds", 0))
+    except (TypeError, ValueError):
+        delay = 0
+    return max(0, min(delay, 1800))
+
+
+def _delayed_equipment_key(entry: OpenReefConfigEntry, equipment_id: str) -> str:
+    return f"{entry.entry_id}:{equipment_id}"
+
+
+async def _async_schedule_delayed_equipment_on(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    equipment_id: str,
+    mapped: dict[str, Any],
+    delay_seconds: int,
+    context: Any,
+) -> None:
+    key = _delayed_equipment_key(entry, equipment_id)
+    delayed = hass.data.setdefault(DOMAIN, {}).setdefault(DELAYED_EQUIPMENT_UNSUBS, {})
+    old_unsub = delayed.pop(key, None)
+    if old_unsub is not None:
+        old_unsub()
+
+    switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+    label = _equipment_label(equipment_id, mapped)
+    run_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+
+    async def _turn_on_after_delay(_now: datetime) -> None:
+        delayed_store = hass.data.setdefault(DOMAIN, {}).setdefault(
+            DELAYED_EQUIPMENT_UNSUBS, {}
+        )
+        delayed_store.pop(key, None)
+
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+
+        latest_config = _config_from_entry(latest_entry)
+        latest_mode = latest_config.get("mode", {})
+        if not isinstance(latest_mode, dict) or latest_mode.get("active") != "running":
+            return
+
+        latest_equipment = latest_config.get("equipment", {})
+        latest_mapped = (
+            latest_equipment.get(equipment_id)
+            if isinstance(latest_equipment, dict)
+            else None
+        )
+        if (
+            not isinstance(latest_mapped, dict)
+            or not latest_mapped.get("armed", False)
+            or _normalise_entity_id(latest_mapped.get("switch_entity_id"))
+            != switch_entity
+        ):
+            return
+
+        state = hass.states.get(switch_entity)
+        if state is None or state.state in UNAVAILABLE_STATES or state.state == "on":
+            return
+
+        await hass.services.async_call(
+            "switch",
+            "turn_on",
+            {ATTR_ENTITY_ID: switch_entity},
+            blocking=True,
+            context=context,
+        )
+        _append_activity(
+            latest_config,
+            f"Delayed restart completed: {label} turned on after {delay_seconds}s",
+            "control",
+        )
+        await _async_save_config(hass, latest_entry, latest_config)
+
+    delayed[key] = async_track_point_in_time(hass, _turn_on_after_delay, run_at)
 
 
 async def _async_apply_mode(
@@ -1780,6 +2121,45 @@ async def _async_apply_mode(
                     "entity_id": switch_entity,
                     "label": _equipment_label(equipment_key, mapped),
                     "reason": "Display wavemaker automatic restart blocked",
+                }
+            )
+            continue
+
+        interlocks = config.get("interlocks", {})
+        if (
+            mode_id == "running"
+            and desired_state == "on"
+            and mapped.get("type") == "ato"
+            and isinstance(interlocks, dict)
+            and interlocks.get("atoDutyCycleEnabled", False)
+        ):
+            skipped_locked.append(
+                {
+                    "equipment_id": equipment_key,
+                    "entity_id": switch_entity,
+                    "label": _equipment_label(equipment_key, mapped),
+                    "reason": "ATO duty cycle controls power windows",
+                }
+            )
+            continue
+
+        if (
+            mode_id == "running"
+            and desired_state == "on"
+            and state.state != "on"
+            and _equipment_power_on_delay(mapped) > 0
+        ):
+            delay_seconds = _equipment_power_on_delay(mapped)
+            await _async_schedule_delayed_equipment_on(
+                hass, entry, equipment_key, mapped, delay_seconds, context
+            )
+            applied.append(
+                {
+                    "equipment_id": equipment_key,
+                    "entity_id": switch_entity,
+                    "label": str(mapped.get("label") or equipment_key),
+                    "state": "delayed_on",
+                    "delay_seconds": str(delay_seconds),
                 }
             )
             continue
@@ -2316,6 +2696,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_sync_alert_notifications(hass, normalised)
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
+    await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     return True
 
@@ -2324,7 +2705,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     """Unload an OpenReef config entry."""
     _clear_mode_timer(hass)
     _clear_mode_schedule(hass)
+    _clear_ato_duty_cycle(hass)
+    _clear_delayed_equipment_calls(hass)
     _clear_wavemaker_reminders(hass)
+    hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).pop(
+        entry.entry_id, None
+    )
     hass.data.setdefault(DOMAIN, {}).setdefault(WAVEMAKER_REMINDER_LAST, {}).pop(
         entry.entry_id, None
     )

@@ -281,12 +281,13 @@ class OpenReefPanel extends HTMLElement {
       this._validation = refreshed.validation || this._validation;
       this._configDirty = false;
       const applied = result.applied?.length || 0;
+      const delayed = (result.applied || []).filter((item) => item?.state === "delayed_on").length;
       const locked = result.skipped_locked?.length || 0;
       const unavailable = result.skipped_missing?.length || 0;
       const wavemakerBlocked = (result.skipped_locked || []).filter(
         (item) => item?.reason === "Display wavemaker automatic restart blocked",
       ).length;
-      this._message = `Mode applied: ${applied} changed, ${locked} locked, ${unavailable} unavailable${wavemakerBlocked ? `, ${wavemakerBlocked} display wavemaker restart blocked` : ""}`;
+      this._message = `Mode applied: ${applied} changed${delayed ? `, ${delayed} delayed restart` : ""}, ${locked} locked, ${unavailable} unavailable${wavemakerBlocked ? `, ${wavemakerBlocked} display wavemaker restart blocked` : ""}`;
       this._modeConfirm = null;
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not apply mode";
@@ -715,6 +716,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "remove-custom-mode") this._removeCustomMode(target.dataset.mode);
       if (action === "add-mode-schedule") this._addModeSchedule();
       if (action === "remove-mode-schedule") this._removeModeSchedule(target.dataset.schedule);
+      if (action === "add-schedule-time") this._addScheduleTime(target.dataset.schedule);
+      if (action === "remove-schedule-time") this._removeScheduleTime(target.dataset.schedule, Number(target.dataset.index));
       if (action === "toggle-schedule-day") {
         this._toggleScheduleDay(target.dataset.schedule, target.dataset.day);
         this._render();
@@ -880,6 +883,15 @@ class OpenReefPanel extends HTMLElement {
         const schedule = this._scheduleItem(id);
         if (schedule) schedule[field] = value;
       }
+      if (scope === "mode-schedule-time") {
+        const schedule = this._scheduleItem(id);
+        const index = Number(target.dataset.index);
+        if (schedule && Number.isInteger(index)) {
+          schedule.times = this._scheduleTimes(schedule);
+          schedule.times[index] = value;
+          schedule.time = schedule.times[0] || "";
+        }
+      }
       if (scope === "mission-card") {
         this._config.display.missionCards = this._missionCards();
         this._config.display.missionCards[id] = value;
@@ -887,7 +899,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-global" || (scope === "equipment" && field === "type"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || (scope === "equipment" && field === "type"))
         && event.type === "change"
       ) this._render();
     };
@@ -917,6 +929,7 @@ class OpenReefPanel extends HTMLElement {
       displayWavemaker,
       allowAutoRestart: !displayWavemaker,
       wavemakerNotifications: displayWavemaker,
+      powerOnDelaySeconds: type === "skimmer" ? 300 : type === "ato" ? 120 : 0,
     };
     this._equipmentEditors[id] = true;
     this._recordActivity(`Added equipment: ${label || "Equipment"}`);
@@ -992,6 +1005,7 @@ class OpenReefPanel extends HTMLElement {
         displayWavemaker,
         allowAutoRestart: !displayWavemaker,
         wavemakerNotifications: displayWavemaker,
+        powerOnDelaySeconds: type === "skimmer" ? 300 : type === "ato" ? 120 : 0,
       };
       this._equipmentEditors[id] = true;
       added += 1;
@@ -1074,6 +1088,13 @@ class OpenReefPanel extends HTMLElement {
     return this._modeSchedule().items.find((item) => item?.id === scheduleId);
   }
 
+  _scheduleTimes(item) {
+    const rawTimes = Array.isArray(item?.times) ? item.times : [];
+    const times = rawTimes.filter((time) => typeof time === "string" && time);
+    if (!times.length && item?.time) times.push(item.time);
+    return [...new Set(times)].slice(0, 24);
+  }
+
   _scheduleDays() {
     return [
       ["mon", "Mon"],
@@ -1095,6 +1116,7 @@ class OpenReefPanel extends HTMLElement {
       enabled: false,
       mode: modeId,
       time: "12:00",
+      times: ["12:00"],
       days: [],
       requireAutoReturn: true,
     });
@@ -1108,6 +1130,27 @@ class OpenReefPanel extends HTMLElement {
     schedule.items = schedule.items.filter((item) => item?.id !== scheduleId);
     delete schedule.lastRuns?.[scheduleId];
     this._recordActivity("Removed mode schedule");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _addScheduleTime(scheduleId) {
+    const item = this._scheduleItem(scheduleId);
+    if (!item) return;
+    item.times = this._scheduleTimes(item);
+    if (item.times.length >= 24) return;
+    item.times.push("12:00");
+    item.time = item.times[0] || "";
+    this._setDirty(true);
+    this._render();
+  }
+
+  _removeScheduleTime(scheduleId, index) {
+    const item = this._scheduleItem(scheduleId);
+    if (!item) return;
+    item.times = this._scheduleTimes(item).filter((_, itemIndex) => itemIndex !== index);
+    if (!item.times.length) item.times = ["12:00"];
+    item.time = item.times[0] || "";
     this._setDirty(true);
     this._render();
   }
@@ -1764,6 +1807,29 @@ class OpenReefPanel extends HTMLElement {
         });
       }
     }
+    if (interlocks.atoDutyCycleEnabled === true) {
+      const armedAto = equipment.filter(
+        ([id, item]) => item.armed && this._equipmentProfile(id, item) === "ato" && item.switch_entity_id,
+      );
+      if (!armedAto.length) {
+        warnings.push({
+          title: "ATO safety schedule has no armed ATO",
+          detail: "Enable an ATO equipment item, map its switch, and arm it before the duty-cycle safety schedule can run.",
+        });
+      }
+      if (interlocks.atoMaxRuntimeEnabled !== true) {
+        warnings.push({
+          title: "ATO safety schedule needs max-runtime guard",
+          detail: "Enable the ATO max-runtime guard before allowing scheduled ATO power windows.",
+        });
+      }
+      if (Number(interlocks.atoDutyCycleOnSeconds || 0) > Number(interlocks.atoMaxRuntimeSeconds || 0)) {
+        warnings.push({
+          title: "ATO safety window exceeds max runtime",
+          detail: "The ATO power window should be shorter than, or equal to, the max-runtime guard.",
+        });
+      }
+    }
     if (interlocks.returnPumpSkimmerWarning !== false) {
       const armedSkimmers = equipment.filter(
         ([id, item]) => item.armed && this._equipmentProfile(id, item) === "skimmer",
@@ -1861,8 +1927,9 @@ class OpenReefPanel extends HTMLElement {
             status = "locked";
             detail = "Automatic display wavemaker restart is blocked. Inspect livestock and restart manually.";
           } else {
+            const delay = Number(item.powerOnDelaySeconds || 0);
             detail = modeId === "running"
-              ? `${switchEntity} is currently ${current}; restore to ${desiredState}`
+              ? `${switchEntity} is currently ${current}; restore to ${desiredState}${desiredState === "on" && delay ? ` after ${delay}s delay` : ""}`
               : `${switchEntity} is currently ${current}`;
           }
         }
@@ -1963,6 +2030,7 @@ class OpenReefPanel extends HTMLElement {
       ? schedule.items.filter((item) => item?.enabled).length
       : 0;
     const customModes = this._customModes().length;
+    const interlockConfig = this._config.interlocks || {};
     const lastActivity = Array.isArray(this._config.activity) && this._config.activity[0]
       ? this._config.activity[0].message || "Recorded"
       : "None yet";
@@ -1977,6 +2045,9 @@ class OpenReefPanel extends HTMLElement {
       energy: `${this._energyTotalMappings().filter(([, key]) => this._config.energy[key]).length}/3`,
       alerts: `${sensorAlerts.filter((item) => item.status === "critical").length} critical, ${sensorAlerts.filter((item) => item.status === "warning").length} warning`,
       interlocks: interlocks.length,
+      atoDutyCycle: interlockConfig.atoDutyCycleEnabled
+        ? `${interlockConfig.atoDutyCycleOnSeconds || 120}s every ${interlockConfig.atoDutyCycleIntervalMinutes || 60}m`
+        : "off",
       missing: missing.length,
       armedUnavailable: armedUnavailable.length,
       customModes,
@@ -2000,6 +2071,7 @@ class OpenReefPanel extends HTMLElement {
       `Energy totals mapped: ${check.energy}`,
       `Alerts: ${check.alerts}`,
       `Interlock warnings: ${check.interlocks}`,
+      `ATO duty cycle: ${check.atoDutyCycle}`,
       `Missing entities: ${check.missing}`,
       `Armed unavailable: ${check.armedUnavailable}`,
       `Custom modes: ${check.customModes}`,
@@ -3002,6 +3074,19 @@ class OpenReefPanel extends HTMLElement {
               </label>
               <p class="hint">${this._escape(this._equipmentUseHint(id, item))}</p>
             </section>
+            <section class="mapping-card entity-card safety-card">
+              <div class="mapping-head">
+                <div>
+                  <h3>Restart delay</h3>
+                  <p class="muted">Delay automatic turn-on when OpenReef returns to Running.</p>
+                </div>
+                <span class="pill ${Number(item.powerOnDelaySeconds || 0) ? "warning" : "unknown"}">${Number(item.powerOnDelaySeconds || 0) ? `${this._escape(String(item.powerOnDelaySeconds))}s` : "off"}</span>
+              </div>
+              <label>Power-on delay seconds
+                <input type="number" min="0" max="1800" step="5" data-scope="equipment" data-id="${this._escape(id)}" data-field="powerOnDelaySeconds" value="${this._escape(item.powerOnDelaySeconds ?? 0)}">
+                <small>Useful for skimmers and ATO after return-pump pauses while water levels stabilise.</small>
+              </label>
+            </section>
             <section class="picker mapping-card entity-card">
               <div class="mapping-head">
                 <h3>Switch</h3>
@@ -3190,13 +3275,14 @@ class OpenReefPanel extends HTMLElement {
     const mode = this._modeConfig(item.mode);
     const timer = this._modeTimerConfig(item.mode);
     const counts = this._modeActionCounts(item.mode);
+    const times = this._scheduleTimes(item);
     if (!schedule.enabled) {
       return ["disabled", "Scheduler off", "Turn on scheduled modes to allow this item to run."];
     }
     if (!item.enabled) {
       return ["disabled", "Paused", "This schedule is saved but will not run."];
     }
-    if (!item.time) {
+    if (!times.length) {
       return ["warning", "Needs a time", "Choose a time before this schedule can run."];
     }
     if (item.requireAutoReturn && !timer.autoReturn) {
@@ -3211,7 +3297,8 @@ class OpenReefPanel extends HTMLElement {
     if (!counts.ready) {
       return ["warning", "No armed equipment ready", `${counts.locked} locked and ${counts.missing} unavailable item(s) will be skipped.`];
     }
-    return ["ok", `${counts.ready} ready`, `${mode.label} will run ${this._scheduleDayLabel(item.days)} at ${item.time}.`];
+    const timeLabel = times.length === 1 ? times[0] : `${times.length} times (${times.join(", ")})`;
+    return ["ok", `${counts.ready} ready`, `${mode.label} will run ${this._scheduleDayLabel(item.days)} at ${timeLabel}.`];
   }
 
   _modeScheduleSettings() {
@@ -3223,7 +3310,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="section-head">
           <div>
             <p class="eyebrow">Mode Schedules</p>
-            <h4>Run a saved mode at a chosen time and day.</h4>
+            <h4>Run a saved mode at chosen times and days.</h4>
             <p class="muted">Schedules are off by default and still only control armed equipment. OpenReef skips schedules that are unsafe or incomplete.</p>
           </div>
           <div class="schedule-toolbar">
@@ -3239,6 +3326,7 @@ class OpenReefPanel extends HTMLElement {
             ${items.map((item) => {
               const [status, title, detail] = this._schedulePreview(item);
               const days = Array.isArray(item.days) ? item.days : [];
+              const times = this._scheduleTimes(item);
               return `
                 <article class="schedule-card ${this._escape(status)}">
                   <div class="section-head">
@@ -3261,9 +3349,6 @@ class OpenReefPanel extends HTMLElement {
                         }).join("")}
                       </select>
                     </label>
-                    <label>Time
-                      <input type="time" value="${this._escape(item.time || "12:00")}" data-scope="mode-schedule" data-id="${this._escape(item.id)}" data-field="time">
-                    </label>
                     <label class="toggle-card compact-toggle">
                       <input type="checkbox" data-scope="mode-schedule" data-id="${this._escape(item.id)}" data-field="enabled" ${item.enabled ? "checked" : ""}>
                       <span><strong>Enable item</strong><small>Runs only while global scheduling is on.</small></span>
@@ -3272,6 +3357,25 @@ class OpenReefPanel extends HTMLElement {
                       <input type="checkbox" data-scope="mode-schedule" data-id="${this._escape(item.id)}" data-field="requireAutoReturn" ${item.requireAutoReturn !== false ? "checked" : ""}>
                       <span><strong>Require auto-return</strong><small>Recommended for unattended schedules.</small></span>
                     </label>
+                  </div>
+                  <div class="schedule-times">
+                    <div class="section-head compact-head">
+                      <div>
+                        <strong>Run times</strong>
+                        <p class="muted">Add multiple times when the same safe mode should run more than once per day.</p>
+                      </div>
+                      <button class="secondary compact-button" data-action="add-schedule-time" data-schedule="${this._escape(item.id)}">+ Time</button>
+                    </div>
+                    <div class="time-list">
+                      ${times.map((time, index) => `
+                        <label>Time ${index + 1}
+                          <span class="time-input-row">
+                            <input type="time" value="${this._escape(time)}" data-scope="mode-schedule-time" data-id="${this._escape(item.id)}" data-index="${index}" data-field="times">
+                            <button class="danger-text compact-button" data-action="remove-schedule-time" data-schedule="${this._escape(item.id)}" data-index="${index}" ${times.length <= 1 ? "disabled" : ""}>Remove</button>
+                          </span>
+                        </label>
+                      `).join("")}
+                    </div>
                   </div>
                   <div class="schedule-days">
                     <button class="${days.length ? "" : "active"}" data-action="toggle-schedule-day" data-schedule="${this._escape(item.id)}" data-day="all">Every day</button>
@@ -3410,6 +3514,36 @@ class OpenReefPanel extends HTMLElement {
             <input type="number" min="5" max="1800" step="5" data-scope="interlocks" data-field="atoMaxRuntimeSeconds" value="${this._escape(interlocks.atoMaxRuntimeSeconds ?? 300)}">
           </label>
         </div>
+        <section class="mapping-section ato-duty-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">ATO Safety Schedule</p>
+              <h4>Power the ATO only for short windows.</h4>
+              <p class="muted">Designed for reefers who want top-off power available for a few minutes every hour instead of permanently on.</p>
+            </div>
+            <span class="pill ${interlocks.atoDutyCycleEnabled ? "warning" : "unknown"}">${interlocks.atoDutyCycleEnabled ? "enabled" : "off"}</span>
+          </div>
+          <div class="notice warning-notice"><strong>ATO automation only runs in Running mode and only controls armed ATO equipment.</strong> Keep the max-runtime guard enabled before using unattended ATO power windows.</div>
+          <div class="grid four compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="interlocks" data-field="atoDutyCycleEnabled" ${interlocks.atoDutyCycleEnabled ? "checked" : ""}>
+              <span>
+                <strong>ATO duty cycle</strong>
+                <small>Turn armed ATO switches on briefly, then force them off outside the window.</small>
+              </span>
+            </label>
+            <label>On duration seconds
+              <input type="number" min="5" max="1800" step="5" data-scope="interlocks" data-field="atoDutyCycleOnSeconds" value="${this._escape(interlocks.atoDutyCycleOnSeconds ?? 120)}">
+            </label>
+            <label>Every minutes
+              <input type="number" min="5" max="1440" step="5" data-scope="interlocks" data-field="atoDutyCycleIntervalMinutes" value="${this._escape(interlocks.atoDutyCycleIntervalMinutes ?? 60)}">
+            </label>
+            <label>Anchor time
+              <input type="time" data-scope="interlocks" data-field="atoDutyCycleAnchorTime" value="${this._escape(interlocks.atoDutyCycleAnchorTime || "00:00")}">
+              <small>Example: 00:00 runs hourly on the hour when interval is 60.</small>
+            </label>
+          </div>
+        </section>
         ${this._interlockWarnings().length ? `<div class="notice warning-notice">${this._interlockWarnings().length} interlock warning(s) currently visible in Mission Control.</div>` : `<p class="muted">No interlock warnings are active.</p>`}
       `,
     );
@@ -3448,6 +3582,7 @@ class OpenReefPanel extends HTMLElement {
       ["Entity mappings", `${check.mappedEquipment} equipment, ${check.energy} energy totals`],
       ["Alerts", check.alerts],
       ["Interlocks", `${check.interlocks} warning(s)`],
+      ["ATO duty cycle", check.atoDutyCycle],
       ["Missing entities", check.missing],
       ["Armed unavailable", check.armedUnavailable],
       ["Custom modes", check.customModes],
@@ -4098,7 +4233,12 @@ class OpenReefPanel extends HTMLElement {
         .schedule-card.ok { border-color: #166534; }
         .schedule-card.warning { border-color: #a16207; background: rgba(47, 38, 20, .48); }
         .schedule-card.disabled { opacity: .82; border-color: #334155; }
-        .schedule-fields { display: grid; grid-template-columns: minmax(170px, .7fr) minmax(130px, .35fr) minmax(220px, 1fr) minmax(220px, 1fr); gap: 10px; align-items: stretch; }
+        .schedule-fields { display: grid; grid-template-columns: minmax(170px, .7fr) minmax(220px, 1fr) minmax(220px, 1fr); gap: 10px; align-items: stretch; }
+        .schedule-times { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(9, 18, 30, .56); display: grid; gap: 10px; }
+        .compact-head { align-items: center; }
+        .time-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+        .time-input-row { display: flex; gap: 8px; align-items: center; }
+        .time-input-row input { flex: 1; }
         .schedule-days { display: flex; gap: 7px; flex-wrap: wrap; }
         .schedule-days button { border: 1px solid #294055; border-radius: 999px; padding: 7px 10px; background: #172536; color: #dcecff; font-weight: 800; }
         .schedule-days button.active { border-color: var(--openreef-accent); background: var(--openreef-accent); color: #041019; }
