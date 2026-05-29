@@ -1902,9 +1902,6 @@ async def _async_schedule_ato_duty_cycle(
     if (
         not isinstance(interlocks, dict)
         or not interlocks.get("atoDutyCycleEnabled", False)
-        or not interlocks.get("atoMaxRuntimeEnabled", False)
-        or int(interlocks.get("atoDutyCycleOnSeconds", 120))
-        > int(interlocks.get("atoMaxRuntimeSeconds", 300))
     ):
         return
 
@@ -1918,9 +1915,6 @@ async def _async_schedule_ato_duty_cycle(
         if (
             not isinstance(latest_interlocks, dict)
             or not latest_interlocks.get("atoDutyCycleEnabled", False)
-            or not latest_interlocks.get("atoMaxRuntimeEnabled", False)
-            or int(latest_interlocks.get("atoDutyCycleOnSeconds", 120))
-            > int(latest_interlocks.get("atoMaxRuntimeSeconds", 300))
         ):
             return
 

@@ -1743,7 +1743,7 @@ class OpenReefPanel extends HTMLElement {
       return "Best kept armed only with a live tank temperature sensor and heater interlock warning enabled.";
     }
     if (profile === "ato") {
-      return "Top-off control should stay deliberate. Use the ATO runtime interlock before unattended use.";
+      return "Top-off control should stay deliberate. If you want scheduled ATO power windows, use the duty-cycle safety schedule.";
     }
     if (profile === "return_pump") {
       return "Main circulation device. Feed or maintenance plans should be reviewed before turning this off.";
@@ -1851,17 +1851,6 @@ class OpenReefPanel extends HTMLElement {
     if (interlocks.heaterRequiresTankTemp !== false) {
       warnings.push(...this._heaterInterlocks(equipment));
     }
-    if (interlocks.atoMaxRuntimeEnabled !== true) {
-      const armedAto = equipment.filter(
-        ([id, item]) => item.armed && this._equipmentProfile(id, item) === "ato",
-      );
-      if (armedAto.length) {
-        warnings.push({
-          title: "ATO runtime interlock is not enabled",
-          detail: "An ATO/top-off device is armed. Configure the max-runtime guard before relying on unattended top-off control.",
-        });
-      }
-    }
     if (interlocks.atoDutyCycleEnabled === true) {
       const armedAto = equipment.filter(
         ([id, item]) => item.armed && this._equipmentProfile(id, item) === "ato" && item.switch_entity_id,
@@ -1870,18 +1859,6 @@ class OpenReefPanel extends HTMLElement {
         warnings.push({
           title: "ATO safety schedule has no armed ATO",
           detail: "Enable an ATO equipment item, map its switch, and arm it before the duty-cycle safety schedule can run.",
-        });
-      }
-      if (interlocks.atoMaxRuntimeEnabled !== true) {
-        warnings.push({
-          title: "ATO safety schedule needs max-runtime guard",
-          detail: "Enable the ATO max-runtime guard before allowing scheduled ATO power windows.",
-        });
-      }
-      if (Number(interlocks.atoDutyCycleOnSeconds || 0) > Number(interlocks.atoMaxRuntimeSeconds || 0)) {
-        warnings.push({
-          title: "ATO safety window exceeds max runtime",
-          detail: "The ATO power window should be shorter than, or equal to, the max-runtime guard.",
         });
       }
     }
@@ -3595,27 +3572,17 @@ class OpenReefPanel extends HTMLElement {
               <small>Prevents manual and scheduled ATO power-on while an armed return pump is off or unavailable.</small>
             </span>
           </label>
-          <label class="toggle-card">
-            <input type="checkbox" data-scope="interlocks" data-field="atoMaxRuntimeEnabled" ${interlocks.atoMaxRuntimeEnabled ? "checked" : ""}>
-            <span>
-              <strong>ATO max-runtime guard</strong>
-              <small>Prepare a maximum top-off run time before unattended ATO automation is introduced.</small>
-            </span>
-          </label>
-          <label>ATO max runtime seconds
-            <input type="number" min="5" max="1800" step="5" data-scope="interlocks" data-field="atoMaxRuntimeSeconds" value="${this._escape(interlocks.atoMaxRuntimeSeconds ?? 300)}">
-          </label>
         </div>
         <section class="mapping-section ato-duty-section">
           <div class="section-head">
             <div>
               <p class="eyebrow">ATO Safety Schedule</p>
               <h4>Power the ATO only for short windows.</h4>
-              <p class="muted">Designed for reefers who want top-off power available for a few minutes every hour instead of permanently on.</p>
+              <p class="muted">Leave this off if your ATO should have continuous power. Turn it on only when you want OpenReef to enforce short power windows.</p>
             </div>
             <span class="pill ${interlocks.atoDutyCycleEnabled ? "warning" : "unknown"}">${interlocks.atoDutyCycleEnabled ? "enabled" : "off"}</span>
           </div>
-          <div class="notice warning-notice"><strong>ATO automation only runs in Running mode and only controls armed ATO equipment.</strong> Keep the max-runtime guard enabled before using unattended ATO power windows.</div>
+          <div class="notice warning-notice"><strong>ATO duty cycle only runs in Running mode and only controls armed ATO equipment.</strong> When enabled, OpenReef turns the ATO on for the configured duration, then forces it off outside that window.</div>
           <div class="grid four compact">
             <label class="toggle-card">
               <input type="checkbox" data-scope="interlocks" data-field="atoDutyCycleEnabled" ${interlocks.atoDutyCycleEnabled ? "checked" : ""}>
