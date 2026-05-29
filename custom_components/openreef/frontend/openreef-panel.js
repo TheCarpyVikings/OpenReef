@@ -1376,7 +1376,7 @@ class OpenReefPanel extends HTMLElement {
 
   _sensorSupportStatus(sensor, sensorId = "") {
     const status = this._sensorStatus(sensor, sensorId);
-    if (status === "muted") return `${status}; ${this._sensorStatusDetail(sensor, sensorId)}`;
+    if (status === "muted") return `alerts off; ${this._sensorStatusDetail(sensor, sensorId)}`;
     return status;
   }
 
@@ -2158,7 +2158,9 @@ class OpenReefPanel extends HTMLElement {
         state: this._config.display?.setupComplete ? "ok" : "warning",
         label: "Setup wizard",
         status: this._config.display?.setupComplete ? "ready" : "not finished",
-        detail: "Finish setup before handing this build to a tester.",
+        detail: this._config.display?.setupComplete
+          ? "Setup is complete. The tester can still reopen Setup or Settings later."
+          : "Finish setup before handing this build to a tester.",
       },
       {
         state: enabledSensors.length && mappedSensors.length === enabledSensors.length ? "ok" : "warning",
