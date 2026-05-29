@@ -40,7 +40,7 @@ Status: **Core MVP in active beta**
 - Alerts: sensor threshold states, muting, history, and optional HA persistent notifications
 - Modes: Running, Feed, Maintenance, custom modes, schedules, confirmations, timers, and restore plans
 - Safety: heater temperature checks, skimmer/return-pump helpers, ATO duty cycle, ATO return-pump checks, display-wavemaker restart warnings/reminders
-- Beta setup: onboarding includes Apex/Trident sensor preset, starter equipment, and safety defaults
+- Beta setup: onboarding includes Apex/Trident sensor preset, starter equipment, safety defaults, and a support-summary handoff checklist
 - Labs/old Next.js work: preserved for later migration
 
 ## Roadmap Phases
@@ -246,7 +246,7 @@ Exit criteria:
 ### Next Core Slice
 
 - Mobile polish pass across setup, settings, mode dialogs, and controls.
-- Apex beta handoff: guide, known limitations, and support-summary workflow.
+- Apex beta feedback loop: collect suggestion quality, mobile setup notes, and support-summary examples.
 - Reef Health Score V1 for Core, based only on configured OpenReef entities.
 - Manual chemistry entry for alkalinity, calcium, magnesium, nitrate, phosphate, pH, salinity, and temperature.
 - A first maintenance/tasks slice that does not depend on Google Tasks.

@@ -1356,9 +1356,27 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _sensorStatusLabel(status) {
-    if (status === "muted") return "muted";
+    if (status === "muted") return "alerts off";
     if (status === "unknown") return "not reporting";
-    if (status === "ok") return "resolved";
+    if (status === "ok") return "ok";
+    return status;
+  }
+
+  _sensorStatusDetail(sensor, sensorId = "") {
+    if (!this._sensorEnabled(sensor)) return "Disabled and hidden from dashboards.";
+    const mutedUntil = this._formatMutedUntil(sensorId);
+    if (mutedUntil) return `Alerts muted until ${mutedUntil}. The live reading can still be used.`;
+    if (sensor.alertsEnabled === false) return "Mission Control alerts are off. The live reading can still be used.";
+    const status = this._sensorStatus(sensor, sensorId);
+    if (status === "unknown") return sensor.entity_id ? "Mapped, but Home Assistant is not reporting a numeric value." : "No entity is mapped yet.";
+    if (status === "critical") return "Outside the configured safe range.";
+    if (status === "warning") return "Near the configured warning threshold.";
+    return "Live and inside the configured range.";
+  }
+
+  _sensorSupportStatus(sensor, sensorId = "") {
+    const status = this._sensorStatus(sensor, sensorId);
+    if (status === "muted") return `${status}; ${this._sensorStatusDetail(sensor, sensorId)}`;
     return status;
   }
 
@@ -2115,12 +2133,82 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
+  _atoDutyCycleSummary() {
+    const interlocks = this._config.interlocks || {};
+    if (!interlocks.atoDutyCycleEnabled) {
+      return "Off. OpenReef will not duty-cycle the ATO; continuous/manual ATO power is allowed.";
+    }
+    return `On. OpenReef powers armed ATO switches for ${interlocks.atoDutyCycleOnSeconds || 120} seconds every ${interlocks.atoDutyCycleIntervalMinutes || 60} minutes, then forces them off outside that window.`;
+  }
+
+  _betaChecklist(check = this._systemCheck()) {
+    const sensors = Object.entries(this._config.sensors || {});
+    const enabledSensors = sensors.filter(([, sensor]) => this._sensorEnabled(sensor));
+    const mappedSensors = enabledSensors.filter(([, sensor]) => sensor.entity_id);
+    const equipment = Object.entries(this._config.equipment || {});
+    const mappedEquipment = equipment.filter(([, item]) => item.switch_entity_id);
+    const armedEquipment = equipment.filter(([, item]) => item.armed);
+    const displayWavemakers = equipment.filter(([id, item]) => this._equipmentProfile(id, item) === "display_wavemaker");
+    const remindersOn = this._config.alerts?.wavemakerReminders !== false;
+    const reminderMinutes = Number(this._config.alerts?.wavemakerReminderMinutes || 10);
+    const missing = Number(check.missing || 0);
+    const armedUnavailable = Number(check.armedUnavailable || 0);
+    return [
+      {
+        state: this._config.display?.setupComplete ? "ok" : "warning",
+        label: "Setup wizard",
+        status: this._config.display?.setupComplete ? "ready" : "not finished",
+        detail: "Finish setup before handing this build to a tester.",
+      },
+      {
+        state: enabledSensors.length && mappedSensors.length === enabledSensors.length ? "ok" : "warning",
+        label: "Owned sensors",
+        status: `${mappedSensors.length}/${enabledSensors.length} mapped`,
+        detail: "Disabled sensors are intentionally ignored.",
+      },
+      {
+        state: missing || armedUnavailable ? "critical" : "ok",
+        label: "Entity health",
+        status: missing || armedUnavailable ? "needs attention" : "clean",
+        detail: `${missing} missing, ${armedUnavailable} armed unavailable.`,
+      },
+      {
+        state: equipment.length && mappedEquipment.length === equipment.length ? "ok" : equipment.length ? "warning" : "unknown",
+        label: "Control safety",
+        status: equipment.length ? `${armedEquipment.length}/${equipment.length} armed` : "monitor only",
+        detail: "Only mapped and armed switch entities can be controlled.",
+      },
+      {
+        state: this._config.interlocks?.atoDutyCycleEnabled ? "warning" : "unknown",
+        label: "ATO duty cycle",
+        status: this._config.interlocks?.atoDutyCycleEnabled ? "enabled" : "off",
+        detail: this._atoDutyCycleSummary(),
+      },
+      {
+        state: !displayWavemakers.length ? "unknown" : remindersOn && reminderMinutes >= 5 ? "ok" : remindersOn ? "warning" : "critical",
+        label: "Display wavemaker reminders",
+        status: !displayWavemakers.length ? "not mapped" : remindersOn ? `${reminderMinutes}m` : "off",
+        detail: !displayWavemakers.length
+          ? "Map display wavemakers only for pumps inside the display tank."
+          : remindersOn
+            ? "Warns while a display wavemaker remains off in Running."
+            : "Turn this on before giving control access to a tester.",
+      },
+      {
+        state: "unknown",
+        label: "Manual smoke test",
+        status: "tester to confirm",
+        detail: "Open on desktop and phone, run Find matches, open trends, and copy this summary.",
+      },
+    ];
+  }
+
   _supportSummaryText() {
     const check = this._systemCheck();
     const sensors = Object.entries(this._config.sensors || {})
       .filter(([, sensor]) => this._sensorEnabled(sensor))
       .map(([id, sensor]) => {
-        const status = this._sensorStatus(sensor, id);
+        const status = this._sensorSupportStatus(sensor, id);
         return `- ${sensor.label || id}: ${sensor.entity_id || "not mapped"} (${status})`;
       });
     const equipment = Object.entries(this._config.equipment || {})
@@ -2136,6 +2224,7 @@ class OpenReefPanel extends HTMLElement {
     const activity = Array.isArray(this._config.activity)
       ? this._config.activity.slice(0, 5).map((item) => `- ${this._formatActivityTime(item.timestamp)}: ${item.message || item.type || "activity"}`)
       : [];
+    const checklist = this._betaChecklist(check).map((item) => `- ${item.label}: ${item.status}${item.detail ? ` - ${item.detail}` : ""}`);
     const lines = [
       "OpenReef support summary",
       `Version: ${check.version}`,
@@ -2174,6 +2263,9 @@ class OpenReefPanel extends HTMLElement {
       `- skimmer auto-off with return pump: ${interlocks.skimmerAutoOffWhenReturnPumpOff ? "on" : "off"}`,
       `- wavemaker reminders: ${alerts.wavemakerReminders !== false ? "on" : "off"} (${alerts.wavemakerReminderMinutes || 10}m)`,
       `- HA persistent notifications: ${alerts.persistentNotifications ? "on" : "off"}`,
+      "",
+      "Beta handoff checklist",
+      ...checklist,
       "",
       "Recent activity",
       ...(activity.length ? activity : ["- none"]),
@@ -3050,6 +3142,7 @@ class OpenReefPanel extends HTMLElement {
     const key = `sensor:${id}`;
     const result = this._searchResults[key];
     const status = this._sensorStatus(sensor, id);
+    const statusDetail = this._sensorStatusDetail(sensor, id);
     const enabled = this._sensorEnabled(sensor);
     return `
       <section class="picker mapping-card ${this._sensorGroupClass(sensor)} ${enabled ? "" : "disabled-card"}">
@@ -3074,6 +3167,7 @@ class OpenReefPanel extends HTMLElement {
             <span class="muted">Used in Live Stats, trends, and Mission Control alerts.</span>
             <span class="pill ${status}">${this._escape(this._sensorStatusLabel(status))}</span>
           </div>
+          <p class="status-detail">${this._escape(statusDetail)}</p>
           <label>Entity<input data-scope="sensor" data-id="${this._escape(id)}" data-field="entity_id" value="${this._escape(sensor.entity_id)}" placeholder="sensor.example"></label>
           ${sensor.entity_id ? `
             <div class="selected-entity">
@@ -3587,6 +3681,7 @@ class OpenReefPanel extends HTMLElement {
 
   _interlockSettings() {
     const interlocks = this._config.interlocks || {};
+    const atoDutySummary = this._atoDutyCycleSummary();
     return this._settingsPanel(
       "interlocks",
       "Interlocks",
@@ -3634,11 +3729,11 @@ class OpenReefPanel extends HTMLElement {
             <div>
               <p class="eyebrow">ATO Safety Schedule</p>
               <h4>Power the ATO only for short windows.</h4>
-              <p class="muted">Leave this off if your ATO should have continuous power. Turn it on only when you want OpenReef to enforce short power windows.</p>
+              <p class="muted">${this._escape(atoDutySummary)}</p>
             </div>
             <span class="pill ${interlocks.atoDutyCycleEnabled ? "warning" : "unknown"}">${interlocks.atoDutyCycleEnabled ? "enabled" : "off"}</span>
           </div>
-          <div class="notice warning-notice"><strong>ATO duty cycle only runs in Running mode and only controls armed ATO equipment.</strong> When enabled, OpenReef turns the ATO on for the configured duration, then forces it off outside that window.</div>
+          <div class="notice warning-notice"><strong>ATO duty cycle only runs in Running mode and only controls armed ATO equipment.</strong> Leave it off when the ATO should stay powered continuously.</div>
           <div class="grid four compact">
             <label class="toggle-card">
               <input type="checkbox" data-scope="interlocks" data-field="atoDutyCycleEnabled" ${interlocks.atoDutyCycleEnabled ? "checked" : ""}>
@@ -3687,6 +3782,7 @@ class OpenReefPanel extends HTMLElement {
 
   _systemCheckSettings() {
     const check = this._systemCheck();
+    const checklist = this._betaChecklist(check);
     const rows = [
       ["OpenReef version", check.version],
       ["Config schema", check.schema],
@@ -3718,6 +3814,24 @@ class OpenReefPanel extends HTMLElement {
             </article>
           `).join("")}
         </div>
+        <section class="mapping-section beta-checklist">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Beta handoff</p>
+              <h4>Quick readiness checklist for your tester.</h4>
+              <p class="muted">This does not expose tokens or secrets. It turns the support summary into a simple go/no-go scan.</p>
+            </div>
+          </div>
+          <div class="system-grid">
+            ${checklist.map((item) => `
+              <article class="system-card ${this._escape(item.state)}">
+                <span>${this._escape(item.label)}</span>
+                <strong>${this._escape(item.status)}</strong>
+                <small>${this._escape(item.detail)}</small>
+              </article>
+            `).join("")}
+          </div>
+        </section>
         <div class="button-row">
           <button class="secondary" data-action="validate">Refresh checks</button>
           <button class="primary" data-action="copy-support-summary">Copy support summary</button>
@@ -4053,6 +4167,7 @@ class OpenReefPanel extends HTMLElement {
   _setupSafetyStep() {
     const interlocks = this._config.interlocks || {};
     const alerts = this._config.alerts || {};
+    const atoDutySummary = this._atoDutyCycleSummary();
     const hasAto = Object.values(this._config.equipment || {}).some((item) => this._equipmentProfile("", item) === "ato");
     const hasDisplayWavemaker = Object.values(this._config.equipment || {}).some((item) => this._equipmentProfile("", item) === "display_wavemaker");
     return this._setupShell(
@@ -4120,7 +4235,7 @@ class OpenReefPanel extends HTMLElement {
           <div class="section-head">
             <div>
               <h3>ATO duty cycle</h3>
-              <p>Off means the ATO can stay powered normally. On means OpenReef enforces short on-windows.</p>
+              <p>${this._escape(atoDutySummary)}</p>
             </div>
             <span class="pill ${interlocks.atoDutyCycleEnabled ? "warning" : "unknown"}">${interlocks.atoDutyCycleEnabled ? "enabled" : "off"}</span>
           </div>
@@ -4469,8 +4584,15 @@ class OpenReefPanel extends HTMLElement {
         .compact-toggle { min-width: 220px; padding: 10px; }
         .system-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
         .system-card { border: 1px solid color-mix(in srgb, var(--openreef-accent) 28%, #24364a); border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 5px; }
+        .system-card.ok { border-color: #166534; background: rgba(11, 43, 36, .82); }
+        .system-card.warning { border-color: #a16207; background: rgba(47, 38, 20, .68); }
+        .system-card.critical { border-color: #7f1d1d; background: rgba(43, 23, 28, .82); }
+        .system-card.unknown { border-color: #334155; background: rgba(16, 29, 44, .82); }
         .system-card span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
         .system-card strong { color: #dcecff; overflow-wrap: anywhere; }
+        .system-card small, .status-detail { color: #a8bed4; line-height: 1.35; }
+        .status-detail { margin-top: -2px; }
+        .beta-checklist { border-color: var(--openreef-accent-border); background: rgba(11, 23, 36, .74); }
         .setup-next-list { display: grid; gap: 10px; }
         .setup-next-list div { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding-top: 10px; }
         .setup-next-list div:first-child { border-top: 0; padding-top: 0; }

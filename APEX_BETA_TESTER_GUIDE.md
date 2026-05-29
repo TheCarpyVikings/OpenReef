@@ -44,7 +44,7 @@ The optional OpenReef Labs add-on is not required for this beta.
 - Add equipment, map switch entities, then arm only the devices you are comfortable testing.
 - Try Feed or Maintenance mode and check the confirmation screen before applying.
 - Confirm ATO duty cycle stays off unless deliberately enabled.
-- Use **Settings -> System Check -> Copy support summary** if something looks wrong.
+- Use **Settings -> System Check** to review the beta handoff checklist, then **Copy support summary** if something looks wrong.
 
 ## Please Report
 
@@ -53,6 +53,6 @@ The optional OpenReef Labs add-on is not required for this beta.
 - Which Apex/Trident entities mapped correctly.
 - Which suggestions were wrong or missing.
 - Whether mobile setup is usable.
-- The copied support summary.
+- The copied support summary, including the beta handoff checklist.
 
 Do not send API keys, passwords, or Home Assistant long-lived access tokens.
