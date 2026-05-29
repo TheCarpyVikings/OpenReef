@@ -49,6 +49,8 @@ BUILT_IN_MODES = {"running", "feed", "maintenance"}
 WEEK_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 MODE_TIMER_UNSUB = "mode_timer_unsub"
 MODE_SCHEDULE_UNSUB = "mode_schedule_unsub"
+WAVEMAKER_REMINDER_UNSUB = "wavemaker_reminder_unsub"
+WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
 EQUIPMENT_PROFILE_TYPES = {
     "return_pump",
     "display_wavemaker",
@@ -600,6 +602,12 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     else:
         alerts["persistentNotifications"] = bool(alerts.get("persistentNotifications", False))
         alerts["notifyCriticalOnly"] = bool(alerts.get("notifyCriticalOnly", True))
+        alerts["wavemakerReminders"] = bool(alerts.get("wavemakerReminders", True))
+        try:
+            reminder_minutes = int(alerts.get("wavemakerReminderMinutes", 10))
+        except (TypeError, ValueError):
+            reminder_minutes = 10
+        alerts["wavemakerReminderMinutes"] = max(1, min(reminder_minutes, 240))
         mute_until = alerts.get("muteUntil")
         alerts["muteUntil"] = (
             {
@@ -1153,7 +1161,14 @@ async def _async_sync_alert_notifications(
 
     equipment = config.get("equipment", {})
     equipment_ids = list(equipment) if isinstance(equipment, dict) else []
-    wavemaker_items = _display_wavemaker_warning_items(hass, config)
+    wavemaker_reminders_enabled = not isinstance(alert_config, dict) or alert_config.get(
+        "wavemakerReminders", True
+    )
+    wavemaker_items = (
+        _display_wavemaker_warning_items(hass, config)
+        if wavemaker_reminders_enabled
+        else []
+    )
     active_wavemaker_ids = {
         item["id"]
         for item in wavemaker_items
@@ -1197,6 +1212,127 @@ def _clear_mode_schedule(hass: HomeAssistant) -> None:
     unsub = hass.data.setdefault(DOMAIN, {}).pop(MODE_SCHEDULE_UNSUB, None)
     if unsub is not None:
         unsub()
+
+
+def _clear_wavemaker_reminders(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(WAVEMAKER_REMINDER_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+def _wavemaker_reminder_interval(config: dict[str, Any]) -> int:
+    alerts = config.get("alerts", {})
+    if not isinstance(alerts, dict):
+        return 10 * 60
+    try:
+        minutes = int(alerts.get("wavemakerReminderMinutes", 10))
+    except (TypeError, ValueError):
+        minutes = 10
+    return max(1, min(minutes, 240)) * 60
+
+
+async def _async_schedule_wavemaker_reminders(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    _clear_wavemaker_reminders(hass)
+    if entry is None:
+        return
+
+    config = config or _config_from_entry(entry)
+    alerts = config.get("alerts", {})
+    if not isinstance(alerts, dict) or not alerts.get("wavemakerReminders", True):
+        return
+
+    last_store = hass.data.setdefault(DOMAIN, {}).setdefault(
+        WAVEMAKER_REMINDER_LAST, {}
+    )
+    entry_store = last_store.setdefault(entry.entry_id, {})
+    start_ts = datetime.now(timezone.utc).timestamp()
+    for item in _display_wavemaker_warning_items(hass, config):
+        entry_store.setdefault(item["id"], start_ts)
+
+    async def _handle_wavemaker_reminder(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+
+        latest_config = _config_from_entry(latest_entry)
+        latest_alerts = latest_config.get("alerts", {})
+        if not isinstance(latest_alerts, dict) or not latest_alerts.get(
+            "wavemakerReminders", True
+        ):
+            return
+
+        equipment = latest_config.get("equipment", {})
+        warning_items = _display_wavemaker_warning_items(hass, latest_config)
+        active_ids = {item["id"] for item in warning_items}
+        last_store = hass.data.setdefault(DOMAIN, {}).setdefault(
+            WAVEMAKER_REMINDER_LAST, {}
+        )
+        entry_store = last_store.setdefault(entry.entry_id, {})
+        for equipment_id in list(entry_store):
+            if equipment_id not in active_ids:
+                entry_store.pop(equipment_id, None)
+        if isinstance(equipment, dict):
+            for equipment_id in equipment:
+                if equipment_id in active_ids:
+                    continue
+                await hass.services.async_call(
+                    "persistent_notification",
+                    "dismiss",
+                    {
+                        "notification_id": (
+                            f"openreef_display_wavemaker_{equipment_id}"
+                        )
+                    },
+                    blocking=False,
+                )
+
+        interval_seconds = _wavemaker_reminder_interval(latest_config)
+        due_items: list[dict[str, str]] = []
+        now_ts = now.timestamp()
+        for item in warning_items:
+            mapped = equipment.get(item["id"]) if isinstance(equipment, dict) else None
+            if not isinstance(mapped, dict) or not mapped.get(
+                "wavemakerNotifications", True
+            ):
+                continue
+            last_sent = float(entry_store.get(item["id"], 0) or 0)
+            if now_ts - last_sent < interval_seconds:
+                continue
+            due_items.append(item)
+            entry_store[item["id"]] = now_ts
+
+        if not due_items:
+            return
+
+        for item in due_items:
+            await hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "notification_id": f"openreef_display_wavemaker_{item['id']}",
+                    "title": f"OpenReef: {item['title']}",
+                    "message": item["message"],
+                },
+                blocking=False,
+            )
+
+        labels = ", ".join(item["label"] for item in due_items)
+        _append_activity(
+            latest_config,
+            f"Display wavemaker reminder: {labels} still off in Running",
+            "critical",
+        )
+        options = dict(latest_entry.options)
+        options[CONF_SETTINGS] = _normalise_core_config(latest_config)
+        hass.config_entries.async_update_entry(latest_entry, options=options)
+
+    hass.data.setdefault(DOMAIN, {})[
+        WAVEMAKER_REMINDER_UNSUB
+    ] = async_track_time_change(hass, _handle_wavemaker_reminder, second=15)
 
 
 async def _async_schedule_mode_timer(
@@ -1483,6 +1619,7 @@ async def _async_save_config(
     await _async_sync_alert_notifications(hass, normalised)
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
+    await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     return normalised
 
 
@@ -1676,9 +1813,19 @@ async def _async_apply_mode(
         timer_detail = (
             f", timer {duration_minutes}m, auto-return {'on' if auto_return else 'off'}"
         )
+    display_restart_blocked = sum(
+        1
+        for item in skipped_locked
+        if item.get("reason") == "Display wavemaker automatic restart blocked"
+    )
+    safety_detail = (
+        f", {display_restart_blocked} display wavemaker restart blocked"
+        if display_restart_blocked
+        else ""
+    )
     _append_activity(
         config,
-        f"{mode_label} mode applied: {len(applied)} changed, {len(skipped_locked)} locked, {len(skipped_missing)} unavailable{timer_detail}",
+        f"{mode_label} mode applied: {len(applied)} changed, {len(skipped_locked)} locked, {len(skipped_missing)} unavailable{safety_detail}{timer_detail}",
         "control",
     )
     await _async_save_config(hass, entry, config)
@@ -2121,6 +2268,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_sync_alert_notifications(hass, normalised)
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
+    await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     return True
 
 
@@ -2128,6 +2276,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     """Unload an OpenReef config entry."""
     _clear_mode_timer(hass)
     _clear_mode_schedule(hass)
+    _clear_wavemaker_reminders(hass)
+    hass.data.setdefault(DOMAIN, {}).setdefault(WAVEMAKER_REMINDER_LAST, {}).pop(
+        entry.entry_id, None
+    )
+    config = _config_from_entry(entry)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_ARMED_UNAVAILABLE)
@@ -2139,6 +2292,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
             {"notification_id": f"openreef_alert_{sensor_id}"},
             blocking=False,
         )
+    equipment = config.get("equipment", {})
+    if isinstance(equipment, dict):
+        for equipment_id in equipment:
+            await hass.services.async_call(
+                "persistent_notification",
+                "dismiss",
+                {"notification_id": f"openreef_display_wavemaker_{equipment_id}"},
+                blocking=False,
+            )
     return True
 
 

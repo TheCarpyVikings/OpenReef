@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 16
+CORE_SCHEMA_VERSION = 17
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -199,6 +199,8 @@ DEFAULT_CORE_CONFIG = {
     "alerts": {
         "persistentNotifications": False,
         "notifyCriticalOnly": True,
+        "wavemakerReminders": True,
+        "wavemakerReminderMinutes": 10,
         "muteUntil": {},
         "history": [],
         "lastStates": {},

@@ -252,7 +252,10 @@ class OpenReefPanel extends HTMLElement {
       const applied = result.applied?.length || 0;
       const locked = result.skipped_locked?.length || 0;
       const unavailable = result.skipped_missing?.length || 0;
-      this._message = `Mode applied: ${applied} changed, ${locked} locked, ${unavailable} unavailable`;
+      const wavemakerBlocked = (result.skipped_locked || []).filter(
+        (item) => item?.reason === "Display wavemaker automatic restart blocked",
+      ).length;
+      this._message = `Mode applied: ${applied} changed, ${locked} locked, ${unavailable} unavailable${wavemakerBlocked ? `, ${wavemakerBlocked} display wavemaker restart blocked` : ""}`;
       this._modeConfirm = null;
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not apply mode";
@@ -2878,8 +2881,8 @@ class OpenReefPanel extends HTMLElement {
                 <label class="toggle-card">
                   <input type="checkbox" data-scope="equipment" data-id="${this._escape(id)}" data-field="wavemakerNotifications" ${item.wavemakerNotifications !== false ? "checked" : ""}>
                   <span>
-                    <strong>Home Assistant warning</strong>
-                    <small>Create a persistent notification while this armed display wavemaker is off in Running.</small>
+                    <strong>Home Assistant reminders</strong>
+                    <small>Create and repeat notifications while this armed display wavemaker is off in Running.</small>
                   </span>
                 </label>
               ` : `<p class="hint">This device is not treated as a display-tank wavemaker. It will use the normal safety behaviour for its selected profile.</p>`}
@@ -3148,6 +3151,17 @@ class OpenReefPanel extends HTMLElement {
               <strong>Critical notifications only</strong>
               <small>Keep warnings inside Mission Control unless a reading moves outside range.</small>
             </span>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="alerts" data-field="wavemakerReminders" ${alerts.wavemakerReminders !== false ? "checked" : ""}>
+            <span>
+              <strong>Display wavemaker reminders</strong>
+              <small>Repeat Home Assistant reminders while an armed display wavemaker is off in Running.</small>
+            </span>
+          </label>
+          <label>Wavemaker reminder interval
+            <input type="number" min="1" max="240" step="1" data-scope="alerts" data-field="wavemakerReminderMinutes" value="${this._escape(String(alerts.wavemakerReminderMinutes || 10))}">
+            <small>Minutes between reminders. OpenReef only checks mapped display-wavemaker switches.</small>
           </label>
         </div>
         <div class="status-list">
