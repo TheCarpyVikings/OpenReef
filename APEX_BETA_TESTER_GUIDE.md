@@ -45,6 +45,7 @@ The optional OpenReef Labs add-on is not required for this beta.
 - Try Feed or Maintenance mode and check the confirmation screen before applying.
 - Confirm ATO duty cycle stays off unless deliberately enabled.
 - Use **Settings -> System Check** to review the beta handoff checklist, then **Copy support summary** if something looks wrong.
+- Use **Copy beta smoke test** in System Check for the full step-by-step test script.
 
 ## Please Report
 

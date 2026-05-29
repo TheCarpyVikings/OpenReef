@@ -822,6 +822,7 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "copy-support-summary") this._copySupportSummary();
+      if (action === "copy-beta-smoke-test") this._copyBetaSmokeTest();
       if (action === "clear-activity") {
         this._config.activity = [];
         this._saveConfig();
@@ -2043,13 +2044,20 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _copySupportSummary() {
-    const summary = this._supportSummaryText();
+    await this._copyText(this._supportSummaryText(), "Support summary copied", "Could not copy support summary");
+  }
+
+  async _copyBetaSmokeTest() {
+    await this._copyText(this._betaSmokeTestText(), "Beta smoke-test checklist copied", "Could not copy beta smoke-test checklist");
+  }
+
+  async _copyText(text, successMessage, failureMessage) {
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(summary);
+        await navigator.clipboard.writeText(text);
       } else {
         const textarea = document.createElement("textarea");
-        textarea.value = summary;
+        textarea.value = text;
         textarea.setAttribute("readonly", "readonly");
         textarea.style.position = "fixed";
         textarea.style.opacity = "0";
@@ -2058,10 +2066,10 @@ class OpenReefPanel extends HTMLElement {
         document.execCommand("copy");
         textarea.remove();
       }
-      this._message = "Support summary copied";
+      this._message = successMessage;
       this._error = "";
     } catch {
-      this._error = "Could not copy support summary";
+      this._error = failureMessage;
       this._message = "";
     }
     this._render();
@@ -2271,6 +2279,66 @@ class OpenReefPanel extends HTMLElement {
       "",
       "Recent activity",
       ...(activity.length ? activity : ["- none"]),
+    ];
+    return lines.join("\n");
+  }
+
+  _betaSmokeTestText() {
+    const check = this._systemCheck();
+    const enabledSensors = Object.entries(this._config.sensors || {})
+      .filter(([, sensor]) => this._sensorEnabled(sensor))
+      .map(([, sensor]) => sensor.label || "Sensor");
+    const equipment = Object.values(this._config.equipment || {})
+      .map((item) => item.label || "Equipment");
+    const lines = [
+      "OpenReef beta smoke-test checklist",
+      `OpenReef version: ${check.version}`,
+      "",
+      "Before testing",
+      "- Update OpenReef in HACS and restart Home Assistant.",
+      "- Open OpenReef from the Home Assistant sidebar.",
+      "- Keep Home Assistant open on another tab or device so disconnections are obvious.",
+      "",
+      "Desktop stability",
+      "- Open OpenReef, hard refresh the browser, and reopen it from the sidebar.",
+      "- Confirm Home Assistant does not show Connection lost / Reconnecting.",
+      "- Open Settings -> System Check and press Refresh checks.",
+      "",
+      "Setup and mapping",
+      "- Open Setup and confirm the wizard can move through every step.",
+      "- If testing Apex/Trident, choose the Apex / Trident beta sensor preset.",
+      `- Confirm enabled sensors match the tester's system: ${enabledSensors.join(", ") || "none enabled"}.`,
+      "- Use Find matches for at least two sensors and confirm suggestions are sensible.",
+      "- Do not paste HA tokens or secrets anywhere in OpenReef.",
+      "",
+      "Live Stats and trends",
+      "- Open Live Stats and confirm mapped readings show current values.",
+      "- Open a trend for temperature and pH if available.",
+      "- Test 1 hour, 24 hours, 7 days, and 30 days. Long ranges may be limited by HA recorder history.",
+      "- Repeat one trend test on a phone or narrow browser window.",
+      "",
+      "Controls and safety",
+      `- Review mapped equipment: ${equipment.join(", ") || "none mapped"}.`,
+      "- Only arm equipment the tester is comfortable controlling.",
+      "- Confirm disarmed equipment switches are greyed/locked.",
+      "- Toggle one safe mapped switch, then return it to the expected state.",
+      "- If display wavemakers are mapped, confirm the warning/reminder wording is visible and understood.",
+      "",
+      "Modes",
+      "- Open Feed and Maintenance confirmation dialogs.",
+      "- Confirm the plan shows exactly what will change before applying.",
+      "- Apply a mode only when safe to do so, then confirm Running restores the expected state.",
+      "- If ATO duty cycle is enabled, confirm the tester expects short ATO on-windows.",
+      "",
+      "Mobile",
+      "- Open OpenReef on a phone.",
+      "- Check Mission Control, Live Stats, Controls, Energy, Settings, and System Check.",
+      "- Confirm setup/settings sections scroll normally and buttons are tappable.",
+      "",
+      "Report back",
+      "- Copy Settings -> System Check -> Copy support summary.",
+      "- Note any wrong entity suggestions, confusing wording, mobile layout issues, or HA reconnects.",
+      "- Do not send API keys, passwords, or Home Assistant long-lived access tokens.",
     ];
     return lines.join("\n");
   }
@@ -3836,6 +3904,7 @@ class OpenReefPanel extends HTMLElement {
         </section>
         <div class="button-row">
           <button class="secondary" data-action="validate">Refresh checks</button>
+          <button class="secondary" data-action="copy-beta-smoke-test">Copy beta smoke test</button>
           <button class="primary" data-action="copy-support-summary">Copy support summary</button>
         </div>
       `,

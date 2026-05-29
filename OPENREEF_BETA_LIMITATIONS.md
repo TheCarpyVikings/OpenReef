@@ -47,4 +47,5 @@ OpenReef Core currently focuses on:
 - Confirm Find matches does not crash Home Assistant.
 - Confirm controls only work for mapped and armed equipment.
 - Confirm the Settings -> System Check beta handoff checklist is clean enough for the tester's setup.
+- Confirm the Settings -> System Check beta smoke-test checklist has been copied or shared.
 - Confirm copied support summaries do not contain tokens or secrets.
