@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 19
-INTEGRATION_VERSION = "0.4.18"
+CORE_SCHEMA_VERSION = 20
+INTEGRATION_VERSION = "0.4.19"
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -23,7 +23,7 @@ ISSUE_LEGACY_LABS_CONFIG = "legacy_labs_config"
 
 MVP_SENSORS = {
     "temp": {
-        "label": "Tank Temperature",
+        "label": "Display Tank Temperature",
         "enabled": True,
         "group": "tank",
         "unit": "°C",
@@ -41,7 +41,7 @@ MVP_SENSORS = {
     "ph": {
         "label": "pH Level",
         "enabled": False,
-        "group": "tank",
+        "group": "chemistry",
         "unit": "",
         "min": 7.8,
         "max": 8.4,
@@ -57,7 +57,7 @@ MVP_SENSORS = {
     "salinity": {
         "label": "Salinity",
         "enabled": False,
-        "group": "tank",
+        "group": "chemistry",
         "unit": "ppt",
         "min": 32,
         "max": 36,
@@ -68,6 +68,86 @@ MVP_SENSORS = {
             "avoid": ["room", "ambient", "air"],
             "device_classes": [],
             "units": ["ppt", "SG", "sg", "mS/cm"],
+        },
+    },
+    "sump_temp": {
+        "label": "Sump Temperature",
+        "enabled": False,
+        "group": "sump",
+        "unit": "°C",
+        "min": 24.5,
+        "max": 27.5,
+        "target": {
+            "domains": ["sensor"],
+            "keywords": ["temperature", "temp", "sump", "rear chamber", "chamber"],
+            "prefer": ["sump", "rear", "chamber", "filter", "refugium"],
+            "avoid": ["room", "ambient", "air", "display"],
+            "device_classes": ["temperature"],
+            "units": ["°C", "°F", "C", "F"],
+        },
+    },
+    "alkalinity": {
+        "label": "Alkalinity",
+        "enabled": False,
+        "group": "chemistry",
+        "unit": "dKH",
+        "min": 7.0,
+        "max": 11.0,
+        "target": {
+            "domains": ["sensor"],
+            "keywords": ["alkalinity", "alk", "kh", "dkh"],
+            "prefer": ["trident", "apex", "reef", "tank", "aquarium"],
+            "avoid": ["room", "ambient", "air"],
+            "device_classes": [],
+            "units": ["dKH", "dkh", "KH"],
+        },
+    },
+    "orp": {
+        "label": "ORP",
+        "enabled": False,
+        "group": "chemistry",
+        "unit": "mV",
+        "min": 250,
+        "max": 450,
+        "target": {
+            "domains": ["sensor"],
+            "keywords": ["orp", "oxidation", "redox"],
+            "prefer": ["apex", "reef", "tank", "aquarium"],
+            "avoid": ["room", "ambient", "air"],
+            "device_classes": [],
+            "units": ["mV", "mv"],
+        },
+    },
+    "calcium": {
+        "label": "Calcium",
+        "enabled": False,
+        "group": "chemistry",
+        "unit": "ppm",
+        "min": 380,
+        "max": 460,
+        "target": {
+            "domains": ["sensor"],
+            "keywords": ["calcium", "ca"],
+            "prefer": ["trident", "apex", "reef", "tank", "aquarium"],
+            "avoid": ["room", "ambient", "air"],
+            "device_classes": [],
+            "units": ["ppm", "mg/L", "mg/l"],
+        },
+    },
+    "magnesium": {
+        "label": "Magnesium",
+        "enabled": False,
+        "group": "chemistry",
+        "unit": "ppm",
+        "min": 1250,
+        "max": 1450,
+        "target": {
+            "domains": ["sensor"],
+            "keywords": ["magnesium", "mg"],
+            "prefer": ["trident", "apex", "reef", "tank", "aquarium"],
+            "avoid": ["room", "ambient", "air"],
+            "device_classes": [],
+            "units": ["ppm", "mg/L", "mg/l"],
         },
     },
     "room_temp": {
@@ -216,6 +296,9 @@ DEFAULT_CORE_CONFIG = {
         "atoDutyCycleIntervalMinutes": 60,
         "atoDutyCycleAnchorTime": "00:00",
         "returnPumpSkimmerWarning": True,
+        "skimmerAutoOffWhenReturnPumpOff": False,
+        "atoReturnPumpWarning": True,
+        "atoBlockWhenReturnPumpOff": False,
     },
     "activity": [],
     "modes": [],

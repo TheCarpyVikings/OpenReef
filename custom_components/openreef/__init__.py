@@ -732,6 +732,15 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         interlocks["returnPumpSkimmerWarning"] = bool(
             interlocks.get("returnPumpSkimmerWarning", True)
         )
+        interlocks["skimmerAutoOffWhenReturnPumpOff"] = bool(
+            interlocks.get("skimmerAutoOffWhenReturnPumpOff", False)
+        )
+        interlocks["atoReturnPumpWarning"] = bool(
+            interlocks.get("atoReturnPumpWarning", True)
+        )
+        interlocks["atoBlockWhenReturnPumpOff"] = bool(
+            interlocks.get("atoBlockWhenReturnPumpOff", False)
+        )
 
     activity = config.setdefault("activity", [])
     if not isinstance(activity, list):
@@ -1699,6 +1708,18 @@ def _ato_duty_cycle_window(
 
 
 def _armed_ato_equipment(config: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return _armed_equipment_by_profile(config, "ato")
+
+
+def _equipment_profile_for_config(equipment_id: str, mapped: dict[str, Any]) -> str:
+    return _normalise_equipment_profile(
+        mapped.get("type") or mapped.get("profile")
+    ) or _infer_equipment_profile(equipment_id, mapped)
+
+
+def _armed_equipment_by_profile(
+    config: dict[str, Any], profile: str
+) -> list[tuple[str, dict[str, Any]]]:
     equipment = config.get("equipment", {})
     if not isinstance(equipment, dict):
         return []
@@ -1707,9 +1728,92 @@ def _armed_ato_equipment(config: dict[str, Any]) -> list[tuple[str, dict[str, An
         for equipment_id, mapped in equipment.items()
         if isinstance(mapped, dict)
         and mapped.get("armed", False)
-        and mapped.get("type") == "ato"
+        and _equipment_profile_for_config(equipment_id, mapped) == profile
         and _normalise_entity_id(mapped.get("switch_entity_id"))
     ]
+
+
+def _return_pump_dependency_issues(
+    hass: HomeAssistant, config: dict[str, Any]
+) -> list[str]:
+    issues: list[str] = []
+    for equipment_id, mapped in _armed_equipment_by_profile(config, "return_pump"):
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        state = hass.states.get(switch_entity)
+        if state is None or state.state in UNAVAILABLE_STATES or state.state == "off":
+            issues.append(_equipment_label(equipment_id, mapped))
+    return issues
+
+
+def _ato_return_pump_block_reason(hass: HomeAssistant, config: dict[str, Any]) -> str:
+    interlocks = config.get("interlocks", {})
+    if not isinstance(interlocks, dict) or not interlocks.get(
+        "atoBlockWhenReturnPumpOff", False
+    ):
+        return ""
+    issues = _return_pump_dependency_issues(hass, config)
+    if not issues:
+        return ""
+    return "ATO is held because return flow is not confirmed: " + ", ".join(issues)
+
+
+def _equipment_safety_block_reason(
+    hass: HomeAssistant,
+    config: dict[str, Any],
+    equipment_id: str,
+    mapped: dict[str, Any],
+    desired_state: str,
+) -> str:
+    if (
+        desired_state == "on"
+        and _equipment_profile_for_config(equipment_id, mapped) == "ato"
+    ):
+        return _ato_return_pump_block_reason(hass, config)
+    return ""
+
+
+async def _async_auto_off_skimmers_for_return_pump(
+    hass: HomeAssistant,
+    config: dict[str, Any],
+    context: Any,
+) -> list[dict[str, str]]:
+    interlocks = config.get("interlocks", {})
+    if not isinstance(interlocks, dict) or not interlocks.get(
+        "skimmerAutoOffWhenReturnPumpOff", False
+    ):
+        return []
+
+    changed: list[dict[str, str]] = []
+    for equipment_id, mapped in _armed_equipment_by_profile(config, "skimmer"):
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        state = hass.states.get(switch_entity)
+        if state is None or state.state in UNAVAILABLE_STATES or state.state != "on":
+            continue
+        await hass.services.async_call(
+            "switch",
+            "turn_off",
+            {ATTR_ENTITY_ID: switch_entity},
+            blocking=True,
+            context=context,
+        )
+        changed.append(
+            {
+                "equipment_id": equipment_id,
+                "entity_id": switch_entity,
+                "label": _equipment_label(equipment_id, mapped),
+                "state": "off",
+                "reason": "Return pump safety auto-off",
+            }
+        )
+
+    if changed:
+        labels = ", ".join(item["label"] for item in changed)
+        _append_activity(
+            config,
+            f"Return pump safety turned off skimmer(s): {labels}",
+            "control",
+        )
+    return changed
 
 
 async def _async_set_ato_duty_cycle_state(
@@ -1723,6 +1827,26 @@ async def _async_set_ato_duty_cycle_state(
     mode = latest_config.get("mode", {})
     if not isinstance(mode, dict) or mode.get("active") != "running":
         return
+
+    if target_state == "on":
+        block_reason = _ato_return_pump_block_reason(hass, latest_config)
+        if block_reason:
+            interlocks = latest_config.setdefault("interlocks", {})
+            last_block = (
+                interlocks.get("atoDutyCycleLastReturnPumpBlock")
+                if isinstance(interlocks, dict)
+                else None
+            )
+            if last_block != window_key:
+                if isinstance(interlocks, dict):
+                    interlocks["atoDutyCycleLastReturnPumpBlock"] = window_key
+                _append_activity(
+                    latest_config,
+                    f"ATO safety window held: {block_reason}",
+                    "warning",
+                )
+                await _async_save_config(hass, entry, latest_config)
+            return
 
     changed: list[str] = []
     unavailable: list[str] = []
@@ -2068,6 +2192,7 @@ async def _async_apply_mode(
     applied: list[dict[str, str]] = []
     skipped_locked: list[dict[str, str]] = []
     skipped_missing: list[dict[str, str]] = []
+    return_pump_turned_off = False
 
     for equipment_key, desired_state in equipment_config.items():
         if desired_state not in {"on", "off"}:
@@ -2143,6 +2268,20 @@ async def _async_apply_mode(
             )
             continue
 
+        safety_block_reason = _equipment_safety_block_reason(
+            hass, config, equipment_key, mapped, desired_state
+        )
+        if safety_block_reason:
+            skipped_locked.append(
+                {
+                    "equipment_id": equipment_key,
+                    "entity_id": switch_entity,
+                    "label": _equipment_label(equipment_key, mapped),
+                    "reason": safety_block_reason,
+                }
+            )
+            continue
+
         if (
             mode_id == "running"
             and desired_state == "on"
@@ -2178,6 +2317,16 @@ async def _async_apply_mode(
                 "label": str(mapped.get("label") or equipment_key),
                 "state": desired_state,
             }
+        )
+        if (
+            desired_state == "off"
+            and _equipment_profile_for_config(equipment_key, mapped) == "return_pump"
+        ):
+            return_pump_turned_off = True
+
+    if return_pump_turned_off:
+        applied.extend(
+            await _async_auto_off_skimmers_for_return_pump(hass, config, context)
         )
 
     if (
@@ -2584,17 +2733,38 @@ async def websocket_toggle_equipment(
         connection.send_error(msg["id"], "not_armed", "OpenReef control is not armed for this equipment")
         return
 
-    if hass.states.get(switch_entity) is None:
+    state = hass.states.get(switch_entity)
+    if state is None or state.state in UNAVAILABLE_STATES:
         connection.send_error(msg["id"], "missing_entity", "Mapped switch entity is not available")
+        return
+
+    if state.state not in {"on", "off"}:
+        connection.send_error(msg["id"], "invalid_state", "Mapped switch is not on or off")
+        return
+
+    target_state = "off" if state.state == "on" else "on"
+    safety_block_reason = _equipment_safety_block_reason(
+        hass, config, equipment_id, mapped, target_state
+    )
+    if safety_block_reason:
+        connection.send_error(msg["id"], "safety_blocked", safety_block_reason)
         return
 
     await hass.services.async_call(
         "switch",
-        "toggle",
+        f"turn_{target_state}",
         {ATTR_ENTITY_ID: switch_entity},
         blocking=True,
         context=connection.context(msg),
     )
+
+    safety_actions: list[dict[str, str]] = []
+    if target_state == "off" and _equipment_profile_for_config(equipment_id, mapped) == "return_pump":
+        safety_actions = await _async_auto_off_skimmers_for_return_pump(
+            hass, config, connection.context(msg)
+        )
+        if safety_actions:
+            config = await _async_save_config(hass, entry, config)
 
     connection.send_result(
         msg["id"],
@@ -2603,6 +2773,10 @@ async def websocket_toggle_equipment(
             "equipment_id": equipment_id,
             "entity_id": switch_entity,
             "state": _runtime_state_for_entity(hass, switch_entity),
+            "target_state": target_state,
+            "safety_actions": safety_actions,
+            "config": config,
+            "validation": _validate_config(hass, config),
         },
     )
 

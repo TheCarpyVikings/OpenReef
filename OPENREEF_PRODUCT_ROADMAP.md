@@ -33,7 +33,7 @@ Status: **Core MVP in active beta**
 - HA custom integration: `custom_components/openreef`
 - HA-native sidebar panel: `custom_components/openreef/frontend/openreef-panel.js`
 - Core screens: Mission Control, Live Stats, Controls, Energy, Settings
-- MVP sensors: tank temperature, pH, salinity, room temperature, CO2, humidity
+- Core sensors: display temperature, sump temperature, pH, salinity, alkalinity, ORP, calcium, magnesium, room temperature, CO2, humidity
 - Safe controls: switch mapping required, explicit arming required
 - Energy: totals and per-equipment mappings, optional cost fields
 - Trends: targeted one-entity history views with selectable ranges
@@ -80,6 +80,7 @@ Exit criteria:
 Goal: turn OpenReef into a reef husbandry assistant, not just a switch panel.
 
 - Manual water test entry for alkalinity, calcium, magnesium, nitrate, phosphate, pH, salinity, temperature.
+- Apex/Trident import helper: guide users through syncing Neptune Apex/Trident entities into Home Assistant, then map those entities into OpenReef without copy/paste.
 - Test history trends and parameter target ranges.
 - Maintenance task system: recurring tasks, overdue status, categories, priority.
 - Optional Google Tasks migration strategy replaced or wrapped by HA-native storage first.

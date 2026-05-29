@@ -245,10 +245,13 @@ class OpenReefPanel extends HTMLElement {
     this._error = "";
     this._render();
     try {
-      await this._callWS({ type: "openreef/toggle_equipment", equipment_id: equipmentId });
+      const result = await this._callWS({ type: "openreef/toggle_equipment", equipment_id: equipmentId });
+      this._config = result.config || this._config;
+      this._validation = result.validation || this._validation;
+      const safetyActions = result.safety_actions || [];
       this._recordActivity(`${label} turned ${desired}`, "control");
       await this._persistConfigSilently();
-      this._message = `${label} turned ${desired}`;
+      this._message = `${label} turned ${desired}${safetyActions.length ? `; ${safetyActions.length} safety action${safetyActions.length === 1 ? "" : "s"} applied` : ""}`;
       this._controlConfirm = null;
     } catch (err) {
       const reason = err instanceof Error ? err.message : "Could not toggle equipment";
@@ -1171,8 +1174,11 @@ class OpenReefPanel extends HTMLElement {
 
   _applySensorPreset(preset) {
     const sensors = this._config.sensors || {};
+    const tankBasic = new Set(["temp", "ph", "salinity"]);
+    const apex = new Set(["temp", "sump_temp", "salinity", "alkalinity", "orp", "calcium", "ph", "magnesium"]);
     Object.entries(sensors).forEach(([id, sensor]) => {
-      if (preset === "tank") sensor.enabled = sensor.group !== "room";
+      if (preset === "tank") sensor.enabled = tankBasic.has(id);
+      if (preset === "apex") sensor.enabled = apex.has(id);
       if (preset === "all") sensor.enabled = true;
       if (preset === "minimal") sensor.enabled = id === "temp";
     });
@@ -1622,11 +1628,17 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _sensorGroupLabel(sensor) {
-    return sensor?.group === "room" ? "Room" : "Tank";
+    if (sensor?.group === "room") return "Room";
+    if (sensor?.group === "sump") return "Sump";
+    if (sensor?.group === "chemistry") return "Chemistry";
+    return "Display";
   }
 
   _sensorGroupClass(sensor) {
-    return sensor?.group === "room" ? "room-card" : "tank-card";
+    if (sensor?.group === "room") return "room-card";
+    if (sensor?.group === "sump") return "sump-card";
+    if (sensor?.group === "chemistry") return "chemistry-card";
+    return "tank-card";
   }
 
   _sensorEnabled(sensor) {
@@ -1754,18 +1766,61 @@ class OpenReefPanel extends HTMLElement {
     return "Use manual control only when the mapped switch and reef impact are clear.";
   }
 
-  _controlAvailable(item) {
+  _returnPumpDependencyIssues() {
+    return Object.entries(this._config.equipment || {})
+      .filter(([id, item]) => item.armed && this._equipmentProfile(id, item) === "return_pump" && item.switch_entity_id)
+      .filter(([, item]) => this._stateValue(item.switch_entity_id) !== "on")
+      .map(([id, item]) => item.label || id);
+  }
+
+  _atoHeldByReturnPump() {
+    const interlocks = this._config.interlocks || {};
+    return interlocks.atoBlockWhenReturnPumpOff === true && this._returnPumpDependencyIssues().length > 0;
+  }
+
+  _equipmentSafetyStatus(id, item) {
+    const profile = this._equipmentProfile(id, item);
+    if (profile === "ato" && this._atoHeldByReturnPump()) {
+      return ["critical", "Held by return pump safety", `Return flow is not confirmed: ${this._returnPumpDependencyIssues().join(", ")}`];
+    }
+    if (profile === "ato" && this._config.interlocks?.atoDutyCycleEnabled === true) {
+      const state = this._stateValue(item.switch_entity_id);
+      return [
+        state === "on" ? "warning" : "unknown",
+        state === "on" ? "ATO schedule window active" : "Held by ATO schedule",
+        `ATO power is limited to ${this._config.interlocks.atoDutyCycleOnSeconds || 120}s every ${this._config.interlocks.atoDutyCycleIntervalMinutes || 60}m.`,
+      ];
+    }
+    if (profile === "skimmer" && this._returnPumpDependencyIssues().length > 0) {
+      const autoOff = this._config.interlocks?.skimmerAutoOffWhenReturnPumpOff === true;
+      return [
+        autoOff ? "warning" : "unknown",
+        autoOff ? "Skimmer protected by return pump safety" : "Return pump is not running",
+        autoOff
+          ? "If the return pump is turned off through OpenReef, armed skimmers are turned off automatically."
+          : "Consider enabling skimmer auto-off before leaving this unattended.",
+      ];
+    }
+    if (Number.isFinite(Number(item?.powerOnDelaySeconds)) && Number(item.powerOnDelaySeconds) > 0) {
+      return ["unknown", "Delayed restart configured", `When restored by a mode, restart waits ${item.powerOnDelaySeconds}s.`];
+    }
+    return null;
+  }
+
+  _controlAvailable(id, item) {
     if (!item?.switch_entity_id) return false;
     if (!item.armed) return false;
     const state = this._stateValue(item.switch_entity_id);
+    if (this._equipmentProfile(id, item) === "ato" && state === "off" && this._atoHeldByReturnPump()) return false;
     return state === "on" || state === "off";
   }
 
-  _controlBlockReason(item) {
+  _controlBlockReason(item, id = "") {
     if (!item?.switch_entity_id) return "Map a switch in Settings";
     if (!item.armed) return "Disarmed in Settings";
     const state = this._stateValue(item.switch_entity_id);
     if (state !== "on" && state !== "off") return `Switch is ${state}`;
+    if (this._equipmentProfile(id, item) === "ato" && state === "off" && this._atoHeldByReturnPump()) return "Held by return pump safety";
     return "Manual control armed";
   }
 
@@ -1829,6 +1884,18 @@ class OpenReefPanel extends HTMLElement {
           detail: "The ATO power window should be shorter than, or equal to, the max-runtime guard.",
         });
       }
+    }
+    const returnPumpIssues = this._returnPumpDependencyIssues();
+    const armedAtoWithSwitch = equipment.filter(
+      ([id, item]) => item.armed && this._equipmentProfile(id, item) === "ato" && item.switch_entity_id,
+    );
+    if (armedAtoWithSwitch.length && returnPumpIssues.length && (interlocks.atoReturnPumpWarning !== false || interlocks.atoBlockWhenReturnPumpOff === true)) {
+      warnings.push({
+        title: interlocks.atoBlockWhenReturnPumpOff === true ? "ATO held by return pump safety" : "ATO can run while return pump is off",
+        detail: interlocks.atoBlockWhenReturnPumpOff === true
+          ? `OpenReef will block ATO power-on while return flow is not confirmed: ${returnPumpIssues.join(", ")}.`
+          : `Return flow is not confirmed: ${returnPumpIssues.join(", ")}. Consider enabling the ATO return-pump block before unattended use.`,
+      });
     }
     if (interlocks.returnPumpSkimmerWarning !== false) {
       const armedSkimmers = equipment.filter(
@@ -2515,11 +2582,12 @@ class OpenReefPanel extends HTMLElement {
   _controlCard(id, item) {
     const state = this._stateValue(item.switch_entity_id);
     const isOn = state === "on";
-    const enabled = this._controlAvailable(item);
+    const enabled = this._controlAvailable(id, item);
     const stateClass = this._equipmentStateClass(item);
     const stateLabel = this._equipmentStateLabel(item);
     const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
-    const reason = this._controlBlockReason(item);
+    const reason = this._controlBlockReason(item, id);
+    const safetyStatus = this._equipmentSafetyStatus(id, item);
     const action = this._controlActionLabel(item);
     const displayWavemakerOff = this._isDisplayWavemaker(id, item) && state === "off";
     return `
@@ -2540,6 +2608,7 @@ class OpenReefPanel extends HTMLElement {
           <small>${this._escape(this._equipmentUseHint(id, item))}</small>
         </div>
         ${displayWavemakerOff ? `<div class="notice danger-notice compact-notice"><strong>Display wavemaker is off.</strong> Inspect the tank before restarting. Flow is critical for corals.</div>` : ""}
+        ${safetyStatus ? `<div class="notice compact-notice ${safetyStatus[0] === "critical" ? "danger-notice" : safetyStatus[0] === "warning" ? "warning-notice" : ""}"><strong>${this._escape(safetyStatus[1])}.</strong> ${this._escape(safetyStatus[2])}</div>` : ""}
         <div class="control-row">
           <span>${this._escape(reason)}</span>
           <div class="control-actions">
@@ -2614,7 +2683,7 @@ class OpenReefPanel extends HTMLElement {
     const id = this._equipmentDetail;
     const item = this._config.equipment?.[id];
     if (!id || !item) return "";
-    const enabled = this._controlAvailable(item);
+    const enabled = this._controlAvailable(id, item);
     const isOn = this._stateValue(item.switch_entity_id) === "on";
     const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
     const switchStatus = this._equipmentStateClass(item);
@@ -2646,7 +2715,7 @@ class OpenReefPanel extends HTMLElement {
           <div class="detail-grid">
             <article class="detail-card">
               <span>Manual Control</span>
-              <strong>${this._escape(this._controlBlockReason(item))}</strong>
+              <strong>${this._escape(this._controlBlockReason(item, id))}</strong>
               <p>${this._escape(riskDetail)}</p>
               <p>${this._escape(this._equipmentUseHint(id, item))}</p>
               <div class="control-actions">
@@ -2869,7 +2938,9 @@ class OpenReefPanel extends HTMLElement {
   _sensorMappingGroups() {
     const sensors = Object.entries(this._config.sensors || {});
     const groups = [
-      ["tank", "Tank sensors", "Water readings used for reef health and alerts."],
+      ["tank", "Display tank", "Core readings from the main display."],
+      ["sump", "Sump / rear chamber", "Readings from the filtration chamber or sump."],
+      ["chemistry", "Chemistry", "Apex and Trident style chemistry probes and test values."],
       ["room", "Room environment", "Air readings around the aquarium."],
     ];
     return groups.map(([group, title, description]) => {
@@ -3504,6 +3575,27 @@ class OpenReefPanel extends HTMLElement {
             </span>
           </label>
           <label class="toggle-card">
+            <input type="checkbox" data-scope="interlocks" data-field="skimmerAutoOffWhenReturnPumpOff" ${interlocks.skimmerAutoOffWhenReturnPumpOff ? "checked" : ""}>
+            <span>
+              <strong>Auto-off skimmer with return pump</strong>
+              <small>If OpenReef turns an armed return pump off, it also turns armed skimmers off.</small>
+            </span>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="interlocks" data-field="atoReturnPumpWarning" ${interlocks.atoReturnPumpWarning !== false ? "checked" : ""}>
+            <span>
+              <strong>Warn ATO when return pump is off</strong>
+              <small>Surface Mission Control warnings if top-off could run while return flow is not confirmed.</small>
+            </span>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="interlocks" data-field="atoBlockWhenReturnPumpOff" ${interlocks.atoBlockWhenReturnPumpOff ? "checked" : ""}>
+            <span>
+              <strong>Block ATO if return pump is off</strong>
+              <small>Prevents manual and scheduled ATO power-on while an armed return pump is off or unavailable.</small>
+            </span>
+          </label>
+          <label class="toggle-card">
             <input type="checkbox" data-scope="interlocks" data-field="atoMaxRuntimeEnabled" ${interlocks.atoMaxRuntimeEnabled ? "checked" : ""}>
             <span>
               <strong>ATO max-runtime guard</strong>
@@ -3889,12 +3981,16 @@ class OpenReefPanel extends HTMLElement {
       `
         <div class="setup-choice-grid">
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="tank">
-            <strong>Tank sensors</strong>
-            <span>Temperature, pH, and salinity.</span>
+            <strong>Reef basics</strong>
+            <span>Display tank temperature, pH, and salinity.</span>
+          </button>
+          <button class="setup-choice" data-action="setup-sensor-preset" data-id="apex">
+            <strong>Apex / Trident sensors</strong>
+            <span>Display tank temp, sump temp, pH, salinity, alkalinity, ORP, calcium, and magnesium.</span>
           </button>
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="all">
-            <strong>Tank + room</strong>
-            <span>Add room temperature, CO2, and humidity.</span>
+            <strong>Everything</strong>
+            <span>Add all reef, chemistry, sump, and room sensors.</span>
           </button>
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="minimal">
             <strong>Temperature only</strong>
@@ -4172,7 +4268,7 @@ class OpenReefPanel extends HTMLElement {
         .selected-entity span { min-width: 0; color: #dcecff; font-weight: 800; }
         .mapping-card, .equipment-editor { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; }
         .mapping-card { gap: 11px; }
-        .mapping-card.tank-card, .mapping-card.room-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 34%, #0e1a28); box-shadow: inset 4px 0 0 var(--openreef-accent); }
+        .mapping-card.tank-card, .mapping-card.sump-card, .mapping-card.chemistry-card, .mapping-card.room-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 34%, #0e1a28); box-shadow: inset 4px 0 0 var(--openreef-accent); }
         .mapping-card.entity-card { border-color: #3b4257; background: #101d2c; }
         .mapping-card.disabled-card { border-color: #334155; background: #101824; box-shadow: inset 4px 0 0 #475569; }
         .mapping-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
