@@ -7,7 +7,8 @@
         "description": "Create the OpenReef native controller entry and sidebar panel.",
         "data": {
           "tank_name": "Tank name",
-          "user_name": "User name"
+          "user_name": "User name",
+          "tank_profile": "Tank profile"
         }
       }
     },
@@ -21,7 +22,8 @@
         "title": "OpenReef profile",
         "data": {
           "tank_name": "Tank name",
-          "user_name": "User name"
+          "user_name": "User name",
+          "tank_profile": "Tank profile"
         }
       }
     }

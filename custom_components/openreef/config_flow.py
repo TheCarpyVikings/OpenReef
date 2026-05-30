@@ -10,7 +10,14 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 
-from .const import CONF_SETTINGS, DEFAULT_CORE_CONFIG, DOMAIN, NAME
+from .const import (
+    CONF_SETTINGS,
+    DEFAULT_CORE_CONFIG,
+    DEFAULT_TANK_PROFILE,
+    DOMAIN,
+    NAME,
+    TANK_PROFILE_CHOICES,
+)
 
 
 class OpenReefConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -28,9 +35,15 @@ class OpenReefConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             tank_name = user_input["tank_name"].strip() or NAME
             user_name = user_input.get("user_name", "").strip()
+            tank_profile = user_input.get("tank_profile", DEFAULT_TANK_PROFILE)
             settings = deepcopy(DEFAULT_CORE_CONFIG)
             settings["tank"]["name"] = tank_name
             settings["tank"]["owner"] = user_name
+            settings["tank"]["profile"] = (
+                tank_profile
+                if tank_profile in TANK_PROFILE_CHOICES
+                else DEFAULT_TANK_PROFILE
+            )
 
             return self.async_create_entry(
                 title=tank_name,
@@ -44,6 +57,9 @@ class OpenReefConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required("tank_name", default=NAME): str,
                     vol.Optional("user_name", default=""): str,
+                    vol.Optional(
+                        "tank_profile", default=DEFAULT_TANK_PROFILE
+                    ): vol.In(TANK_PROFILE_CHOICES),
                 }
             ),
         )
@@ -76,6 +92,12 @@ class OpenReefOptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             tank["name"] = user_input["tank_name"].strip() or NAME
             tank["owner"] = user_input.get("user_name", "").strip()
+            tank_profile = user_input.get("tank_profile", DEFAULT_TANK_PROFILE)
+            tank["profile"] = (
+                tank_profile
+                if tank_profile in TANK_PROFILE_CHOICES
+                else DEFAULT_TANK_PROFILE
+            )
             return self.async_create_entry(
                 title="",
                 data={**self._config_entry.options, CONF_SETTINGS: settings},
@@ -91,6 +113,10 @@ class OpenReefOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Optional(
                         "user_name", default=tank.get("owner", "")
                     ): str,
+                    vol.Optional(
+                        "tank_profile",
+                        default=tank.get("profile", DEFAULT_TANK_PROFILE),
+                    ): vol.In(TANK_PROFILE_CHOICES),
                 }
             ),
         )

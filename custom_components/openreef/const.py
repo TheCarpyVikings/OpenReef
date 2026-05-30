@@ -9,8 +9,18 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 23
-INTEGRATION_VERSION = "0.4.26"
+CORE_SCHEMA_VERSION = 24
+INTEGRATION_VERSION = "0.4.27"
+
+DEFAULT_TANK_PROFILE = "mixed_reef"
+TANK_PROFILE_CHOICES = {
+    "fish_only_fowlr": "Fish-only / FOWLR",
+    "soft_coral": "Soft coral",
+    "lps": "LPS reef",
+    "sps": "SPS reef",
+    "mixed_reef": "Mixed reef",
+    "anemone_dominant": "Anemone-dominant",
+}
 
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
@@ -336,6 +346,7 @@ DEFAULT_CORE_CONFIG = {
     "tank": {
         "name": NAME,
         "owner": "",
+        "profile": DEFAULT_TANK_PROFILE,
     },
     "display": {
         "themeColor": "#00b4d8",

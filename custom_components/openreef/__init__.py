@@ -26,6 +26,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_SETTINGS,
     DEFAULT_CORE_CONFIG,
+    DEFAULT_TANK_PROFILE,
     DOMAIN,
     ISSUE_ARMED_UNAVAILABLE,
     ISSUE_LEGACY_LABS_CONFIG,
@@ -40,6 +41,7 @@ from .const import (
     SERVICE_ARM_EQUIPMENT,
     SERVICE_DISARM_EQUIPMENT,
     SERVICE_RECORD_MANUAL_READING,
+    TANK_PROFILE_CHOICES,
 )
 
 type OpenReefConfigEntry = ConfigEntry
@@ -148,6 +150,13 @@ def _normalise_equipment_profile(value: Any) -> str:
         "other": "other",
     }
     return aliases.get(text, text if text in EQUIPMENT_PROFILE_TYPES else "")
+
+
+def _normalise_tank_profile(value: Any) -> str:
+    if not isinstance(value, str):
+        return DEFAULT_TANK_PROFILE
+    key = value.strip().lower()
+    return key if key in TANK_PROFILE_CHOICES else DEFAULT_TANK_PROFILE
 
 
 def _infer_equipment_profile(equipment_id: str, equipment_config: dict[str, Any]) -> str:
@@ -269,6 +278,7 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
     if isinstance(general, dict):
         core["tank"]["name"] = general.get("tankName") or NAME
         core["tank"]["owner"] = general.get("userName") or ""
+        core["tank"]["profile"] = _normalise_tank_profile(general.get("tankProfile"))
         core["display"]["themeColor"] = general.get("themeColor") or "#00b4d8"
         core["energy"]["tariff"] = general.get("energyTariff") or 0.28
 
@@ -362,6 +372,22 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
 
     config = _deep_merge(DEFAULT_CORE_CONFIG, settings)
     config["schemaVersion"] = DEFAULT_CORE_CONFIG["schemaVersion"]
+
+    tank = config.setdefault("tank", {})
+    if not isinstance(tank, dict):
+        config["tank"] = deepcopy(DEFAULT_CORE_CONFIG["tank"])
+    else:
+        tank["name"] = (
+            tank.get("name").strip()[:80]
+            if isinstance(tank.get("name"), str) and tank.get("name").strip()
+            else NAME
+        )
+        tank["owner"] = (
+            tank.get("owner").strip()[:80]
+            if isinstance(tank.get("owner"), str)
+            else ""
+        )
+        tank["profile"] = _normalise_tank_profile(tank.get("profile"))
 
     raw_sensors = settings.get("sensors") if isinstance(settings.get("sensors"), dict) else {}
 

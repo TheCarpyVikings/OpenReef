@@ -19,6 +19,7 @@ class OpenReefPanel extends HTMLElement {
     this._lastRenderedSetupStep = null;
     this._trend = null;
     this._trendRequest = "";
+    this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
     this._controlConfirm = null;
     this._equipmentDetail = null;
@@ -212,12 +213,46 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _validateConfig() {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
     try {
       this._validation = await this._callWS({ type: "openreef/validate_config" });
+      await this._refreshHealthTrends();
+      this._message = "Checks refreshed";
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not validate OpenReef";
+    } finally {
+      this._busy = false;
     }
     this._render();
+  }
+
+  async _refreshHealthTrends() {
+    const sensors = this._enabledSensors()
+      .filter(([id, sensor]) => this._sensorKind(sensor, id) !== "binary")
+      .filter(([, sensor]) => Boolean(sensor.entity_id));
+    const items = {};
+
+    await Promise.all(sensors.map(async ([id, sensor]) => {
+      try {
+        const points = await this._fetchTrendPoints(sensor.entity_id, "24h");
+        items[id] = this._analyseHealthTrend(id, sensor, points);
+      } catch (err) {
+        items[id] = {
+          status: "unknown",
+          penalty: 0,
+          detail: err instanceof Error ? err.message : "Trend history unavailable.",
+        };
+      }
+    }));
+
+    this._healthTrends = {
+      checkedAt: new Date().toISOString(),
+      items,
+      error: "",
+    };
   }
 
   async _searchEntities(key, target) {
@@ -912,7 +947,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || (scope === "equipment" && field === "type"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
         && event.type === "change"
       ) this._render();
     };
@@ -1493,6 +1528,30 @@ class OpenReefPanel extends HTMLElement {
       ["#8b5cf6", "Royal Violet"],
       ["#38bdf8", "Clear Sky"],
     ];
+  }
+
+  _tankProfileChoices() {
+    return [
+      ["fish_only_fowlr", "Fish-only / FOWLR", "Life support and equipment reliability matter most."],
+      ["soft_coral", "Soft coral", "Forgiving weighting for easier coral systems."],
+      ["lps", "LPS reef", "Balanced stability and chemistry weighting."],
+      ["sps", "SPS reef", "Tighter stability and chemistry weighting."],
+      ["mixed_reef", "Mixed reef", "Balanced default for most reef tanks."],
+      ["anemone_dominant", "Anemone-dominant", "Emphasises stable life support and display flow."],
+    ];
+  }
+
+  _tankProfile() {
+    const profile = this._config?.tank?.profile || "mixed_reef";
+    return this._tankProfileChoices().some(([id]) => id === profile) ? profile : "mixed_reef";
+  }
+
+  _tankProfileLabel(profile = this._tankProfile()) {
+    return this._tankProfileChoices().find(([id]) => id === profile)?.[1] || "Mixed reef";
+  }
+
+  _tankProfileDetail(profile = this._tankProfile()) {
+    return this._tankProfileChoices().find(([id]) => id === profile)?.[2] || "Balanced default for most reef tanks.";
   }
 
   _modeBaseChoices() {
@@ -2166,36 +2225,239 @@ class OpenReefPanel extends HTMLElement {
     ];
   }
 
+  _healthCategoryChoices() {
+    return [
+      ["life", "Life Support"],
+      ["stability", "Stability"],
+      ["chemistry", "Chemistry / Parameters"],
+      ["equipment", "Equipment"],
+      ["maintenance", "Maintenance / Modes"],
+      ["confidence", "Confidence"],
+    ];
+  }
+
+  _healthWeights(profile = this._tankProfile()) {
+    const weights = {
+      fish_only_fowlr: { life: 0.35, stability: 0.15, chemistry: 0.10, equipment: 0.25, maintenance: 0.08, confidence: 0.07 },
+      soft_coral: { life: 0.32, stability: 0.18, chemistry: 0.14, equipment: 0.20, maintenance: 0.08, confidence: 0.08 },
+      lps: { life: 0.30, stability: 0.20, chemistry: 0.18, equipment: 0.18, maintenance: 0.07, confidence: 0.07 },
+      sps: { life: 0.25, stability: 0.28, chemistry: 0.25, equipment: 0.12, maintenance: 0.05, confidence: 0.05 },
+      mixed_reef: { life: 0.28, stability: 0.22, chemistry: 0.20, equipment: 0.18, maintenance: 0.07, confidence: 0.05 },
+      anemone_dominant: { life: 0.32, stability: 0.24, chemistry: 0.12, equipment: 0.20, maintenance: 0.06, confidence: 0.06 },
+    };
+    return weights[profile] || weights.mixed_reef;
+  }
+
+  _healthStatus(score, caps = []) {
+    if (caps.some((cap) => cap.status === "critical") || score < 70) return "critical";
+    if (caps.length || score < 90) return "warning";
+    return "ok";
+  }
+
+  _healthGrade(score) {
+    if (score >= 90) return "A";
+    if (score >= 80) return "B";
+    if (score >= 70) return "C";
+    if (score >= 60) return "D";
+    return "E";
+  }
+
+  _healthTrendFreshness() {
+    const checkedAt = this._healthTrends?.checkedAt;
+    if (!checkedAt) return "Not checked this session";
+    const date = new Date(checkedAt);
+    if (!Number.isFinite(date.getTime())) return "Not checked this session";
+    return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+  }
+
+  _analyseHealthTrend(sensorId, sensor, points) {
+    if (!Array.isArray(points) || points.length < 4) {
+      return { status: "unknown", penalty: 0, detail: "Not enough 24h history yet." };
+    }
+    const values = points.map((point) => Number(point.value)).filter(Number.isFinite);
+    if (values.length < 4) return { status: "unknown", penalty: 0, detail: "No numeric 24h history." };
+    const first = values[0];
+    const latest = values[values.length - 1];
+    const low = Math.min(...values);
+    const high = Math.max(...values);
+    const range = Math.max(0.0001, Math.abs(Number(sensor.max) - Number(sensor.min)));
+    const delta = Math.abs(latest - first);
+    const swing = high - low;
+    const profileMultiplier = {
+      fish_only_fowlr: 1.25,
+      soft_coral: 1.15,
+      lps: 1,
+      mixed_reef: 1,
+      anemone_dominant: 0.9,
+      sps: 0.75,
+    }[this._tankProfile()] || 1;
+    const movement = Math.max(delta / range, (swing / range) * 0.75);
+    const warningLevel = 0.28 * profileMultiplier;
+    const criticalLevel = 0.50 * profileMultiplier;
+    const status = movement >= criticalLevel ? "critical" : movement >= warningLevel ? "warning" : "ok";
+    const penalty = status === "critical" ? 14 : status === "warning" ? 7 : 0;
+    const unit = sensor.unit ? ` ${sensor.unit}` : "";
+    const direction = latest >= first ? "up" : "down";
+    const digits = this._sensorDigits(sensorId);
+    return {
+      status,
+      penalty,
+      detail: `24h ${direction} ${this._format(delta, digits)}${unit}; swing ${this._format(swing, digits)}${unit}.`,
+    };
+  }
+
+  _sensorHealthCategory(sensorId, sensor) {
+    if (["temp", "dissolved_oxygen", "leak", "high_water", "low_water"].includes(sensorId)) return "life";
+    if (sensor?.group === "chemistry") return "chemistry";
+    if (["flow", "lighting", "room", "sump", "water"].includes(sensor?.group)) return "stability";
+    return "confidence";
+  }
+
   _reefHealthScore(sensors = this._enabledSensors(), equipment = Object.entries(this._config.equipment || {}), sensorAlerts = this._sensorAlerts(sensors), interlocks = this._interlockWarnings()) {
-    const critical = sensorAlerts.filter((alert) => alert.status === "critical").length;
-    const warnings = sensorAlerts.filter((alert) => alert.status === "warning").length;
+    const profile = this._tankProfile();
+    const weights = this._healthWeights(profile);
+    const losses = [];
+    const caps = [];
+    const categoryLoss = Object.fromEntries(this._healthCategoryChoices().map(([id]) => [id, 0]));
+    const addLoss = (category, points, label, detail = "", status = "warning") => {
+      const safeCategory = categoryLoss[category] === undefined ? "confidence" : category;
+      const safePoints = Math.max(0, Number(points) || 0);
+      if (!safePoints) return;
+      categoryLoss[safeCategory] += safePoints;
+      losses.push({ category: safeCategory, points: safePoints, label, detail, status });
+    };
+    const addCap = (limit, label, detail, status = "critical") => {
+      caps.push({ limit: Math.max(0, Math.min(Number(limit) || 100, 100)), label, detail, status });
+    };
+
+    const activeMode = this._activeMode();
+    const running = activeMode === "running";
+    const mappedSensors = sensors.filter(([, sensor]) => sensor.entity_id).length;
+    const unmappedSensors = sensors.filter(([, sensor]) => !sensor.entity_id);
+    const noSensors = sensors.length === 0;
     const missing = Number(this._validation?.missing_entities?.length || 0);
     const armedUnavailable = Number(this._validation?.armed_unavailable?.length || 0);
-    const mappedSensors = sensors.filter(([, sensor]) => sensor.entity_id).length;
     const armedEquipment = equipment.filter(([, item]) => item.armed).length;
-    const noSensors = sensors.length === 0;
-    const score = Math.max(
-      0,
-      Math.min(
-        100,
-        100
-          - critical * 18
-          - warnings * 8
-          - interlocks.length * 6
-          - missing * 6
-          - armedUnavailable * 10
-          - (noSensors ? 20 : 0),
-      ),
-    );
-    const grade = score >= 90 ? "A" : score >= 80 ? "B" : score >= 70 ? "C" : score >= 60 ? "D" : "E";
-    const status = score >= 90 ? "ok" : score >= 75 ? "warning" : "critical";
+    const critical = sensorAlerts.filter((alert) => alert.status === "critical");
+    const warnings = sensorAlerts.filter((alert) => alert.status === "warning");
+    const unknowns = sensorAlerts.filter((alert) => alert.status === "unknown");
+
+    if (noSensors) addLoss("confidence", 30, "No enabled sensors", "Enable the sensors you actually own.");
+    unmappedSensors.forEach(([, sensor]) => {
+      addLoss("confidence", 12, `${sensor.label || "Sensor"} is enabled but unmapped`, "Disabled sensors are ignored; enabled sensors should be mapped.");
+    });
+    if (missing) addLoss("confidence", missing * 8, `${missing} mapped entity missing`, "Update mappings or remove stale entities.", "critical");
+    if (armedUnavailable) addLoss("equipment", armedUnavailable * 18, `${armedUnavailable} armed device unavailable`, "Disarm or remap unavailable equipment before relying on controls.", "critical");
+
+    sensorAlerts.forEach((alert) => {
+      const category = this._sensorHealthCategory(alert.id, alert.sensor);
+      const points = alert.status === "critical" ? 22 : alert.status === "warning" ? 9 : 8;
+      addLoss(category, points, alert.title, alert.detail, alert.status === "unknown" ? "warning" : alert.status);
+    });
+
+    const tempSensor = this._config.sensors?.temp || {};
+    const tempStatus = this._sensorStatus(tempSensor, "temp");
+    const heaters = equipment.filter(([id, item]) => item.armed && this._equipmentProfile(id, item) === "heater");
+    if (tempStatus === "critical") addCap(65, "Tank temperature outside range", "Temperature is a life-support reading.");
+    if (heaters.length && (!this._sensorEnabled(tempSensor) || !tempSensor.entity_id || ["unknown", "muted"].includes(tempStatus))) {
+      addCap(60, "Heater armed without verified tank temperature", "OpenReef cannot confidently supervise temperature equipment.");
+      addLoss("life", 24, "Heater interlock cannot verify temperature", "Map a live display temperature sensor before relying on armed heaters.", "critical");
+    }
+
+    sensors.forEach(([id, sensor]) => {
+      if (this._sensorKind(sensor, id) !== "binary") return;
+      if (this._sensorStatus(sensor, id) !== "critical") return;
+      if (id === "leak") addCap(35, "Leak detector active", "Treat this as a physical water safety issue.");
+      if (id === "high_water") addCap(45, "High water level active", "Overflow or sump/rear chamber level may be unsafe.");
+    });
+
+    const armedUnavailableSet = new Set(this._validation?.armed_unavailable || []);
+    equipment.forEach(([id, item]) => {
+      if (!item.armed || !item.switch_entity_id || !armedUnavailableSet.has(item.switch_entity_id)) return;
+      const profileType = this._equipmentProfile(id, item);
+      if (running && ["heater", "return_pump", "ato"].includes(profileType)) {
+        addCap(70, `${item.label || id} unavailable`, "An armed life-support control entity is unavailable.");
+      }
+    });
+
+    if (running && this._atoHeldByReturnPump()) {
+      addCap(60, "ATO held by return pump safety", "Top-off is blocked until return flow is confirmed.");
+      addLoss("life", 16, "ATO return-pump safety active", this._returnPumpDependencyIssues().join(", "), "critical");
+    }
+
+    const displayWavemakers = equipment.filter(([id, item]) => item.armed && this._equipmentProfile(id, item) === "display_wavemaker" && item.switch_entity_id);
+    const displayWavemakersOff = running
+      ? displayWavemakers.filter(([, item]) => this._stateValue(item.switch_entity_id) !== "on")
+      : [];
+    if (displayWavemakersOff.length) {
+      addLoss("equipment", 15, "Display wavemaker off in Running", "Inspect before restarting; fish can enter stopped wavemakers and flow is critical for corals.", "critical");
+      addLoss("stability", 10, "Display flow reduced", "Corals can suffer when display flow is left off.", "warning");
+      if (displayWavemakersOff.length === displayWavemakers.length) {
+        addCap(75, "All mapped display wavemakers are off", "Restore display flow manually after inspecting the tank.", "warning");
+      }
+    }
+
+    interlocks.forEach((issue) => {
+      addLoss("maintenance", 8, issue.title, issue.detail, "warning");
+    });
+    if (activeMode !== "running" && this._modeTimerExpired() && !this._config?.mode?.autoReturn) {
+      addLoss("maintenance", 12, `${this._activeModeLabel()} timer expired`, "Return to Running when the work is complete.", "warning");
+    }
+
+    Object.entries(this._healthTrends?.items || {}).forEach(([sensorId, trend]) => {
+      const sensor = this._config.sensors?.[sensorId];
+      if (!sensor || !this._sensorEnabled(sensor) || !sensor.entity_id) return;
+      if (!["warning", "critical"].includes(trend.status)) return;
+      const category = this._sensorHealthCategory(sensorId, sensor) === "chemistry" ? "chemistry" : "stability";
+      addLoss(category, trend.penalty, `${sensor.label || sensorId} trend moving quickly`, trend.detail, trend.status);
+    });
+
+    const categories = Object.fromEntries(this._healthCategoryChoices().map(([id, label]) => {
+      const score = Math.max(0, Math.round(100 - Math.min(categoryLoss[id] || 0, 100)));
+      return [id, { label, score, weight: weights[id] || 0, lost: Math.round(categoryLoss[id] || 0) }];
+    }));
+    let weightedScore = 0;
+    Object.entries(categories).forEach(([id, item]) => {
+      weightedScore += item.score * (weights[id] || 0);
+    });
+    let score = Math.max(0, Math.min(100, Math.round(weightedScore)));
+    const appliedCap = caps.length ? caps.reduce((lowest, cap) => cap.limit < lowest.limit ? cap : lowest, caps[0]) : null;
+    if (appliedCap) score = Math.min(score, appliedCap.limit);
+    const sortedLosses = [...losses].sort((a, b) => {
+      const statusRank = { critical: 2, warning: 1 };
+      return (statusRank[b.status] || 0) - (statusRank[a.status] || 0) || b.points - a.points;
+    });
+    const topReason = appliedCap?.label || sortedLosses[0]?.label || "All configured checks look steady";
+    const nextAction = appliedCap
+      ? appliedCap.detail
+      : sortedLosses[0]?.detail || "Keep monitoring and review trends after the next Check.";
+    const grade = this._healthGrade(score);
+    const status = this._healthStatus(score, caps);
     const detail = [
+      this._tankProfileLabel(profile),
       `${mappedSensors}/${sensors.length} sensors mapped`,
       `${armedEquipment}/${equipment.length} armed`,
-      `${critical} critical`,
-      `${warnings} warning`,
+      `${critical.length} critical`,
+      `${warnings.length} warning`,
     ].join(" · ");
-    return { score, grade, status, detail };
+    return {
+      score,
+      grade,
+      status,
+      detail,
+      profile,
+      profileLabel: this._tankProfileLabel(profile),
+      categories,
+      losses: sortedLosses,
+      caps,
+      appliedCap,
+      topReason,
+      nextAction,
+      trendFreshness: this._healthTrendFreshness(),
+      criticalCount: critical.length,
+      warningCount: warnings.length,
+      unknownCount: unknowns.length,
+    };
   }
 
   _systemCheck() {
@@ -2218,9 +2480,12 @@ class OpenReefPanel extends HTMLElement {
     const lastActivity = Array.isArray(this._config.activity) && this._config.activity[0]
       ? this._config.activity[0].message || "Recorded"
       : "None yet";
+    const health = this._reefHealthScore(enabledSensors, equipment, sensorAlerts, interlocks);
     return {
       version: this._integrationVersion || "unknown",
       schema: this._config.schemaVersion || "unknown",
+      tankProfile: health.profileLabel,
+      health,
       activeMode: this._activeModeLabel(),
       modeTimer: this._activeModeCountdownText(),
       sensors: `${mappedSensors.length}/${enabledSensors.length}`,
@@ -2335,11 +2600,27 @@ class OpenReefPanel extends HTMLElement {
       ? this._config.activity.slice(0, 5).map((item) => `- ${this._formatActivityTime(item.timestamp)}: ${item.message || item.type || "activity"}`)
       : [];
     const checklist = this._betaChecklist(check).map((item) => `- ${item.label}: ${item.status}${item.detail ? ` - ${item.detail}` : ""}`);
+    const health = check.health || this._reefHealthScore();
+    const healthCategories = this._healthCategoryChoices()
+      .map(([id]) => health.categories?.[id])
+      .filter(Boolean)
+      .map((category) => `- ${category.label}: ${category.score}/100 (${category.lost} lost, ${Math.round(category.weight * 100)}% weight)`);
+    const healthCaps = health.caps?.length
+      ? health.caps.map((cap) => `- ${cap.label}: cap ${cap.limit} - ${cap.detail}`)
+      : ["- none"];
+    const healthLosses = health.losses?.length
+      ? health.losses.slice(0, 5).map((loss) => `- ${loss.label}: -${loss.points} (${loss.category})${loss.detail ? ` - ${loss.detail}` : ""}`)
+      : ["- none"];
     const lines = [
       "OpenReef support summary",
       `Version: ${check.version}`,
       `Schema: ${check.schema}`,
       `Setup complete: ${this._config.display?.setupComplete ? "yes" : "no"}`,
+      `Tank profile: ${check.tankProfile}`,
+      `Reef Health Score: ${health.score}/100 (${health.grade}, ${health.status})`,
+      `Reef Health top reason: ${health.topReason}`,
+      `Reef Health next action: ${health.nextAction}`,
+      `Reef Health trend data: ${health.trendFreshness}`,
       `Active mode: ${check.activeMode}`,
       `Mode timer: ${check.modeTimer}`,
       `Sensors mapped/enabled: ${check.sensors}`,
@@ -2355,6 +2636,15 @@ class OpenReefPanel extends HTMLElement {
       `Schedules: ${check.schedules}`,
       `Last activity: ${check.lastActivity}`,
       `Unsaved changes: ${check.dirty ? "yes" : "no"}`,
+      "",
+      "Reef Health categories",
+      ...healthCategories,
+      "",
+      "Reef Health hard caps",
+      ...healthCaps,
+      "",
+      "Reef Health point losses",
+      ...healthLosses,
       "",
       "Enabled sensors",
       ...(sensors.length ? sensors : ["- none"]),
@@ -2403,9 +2693,11 @@ class OpenReefPanel extends HTMLElement {
       "- Open OpenReef, hard refresh the browser, and reopen it from the sidebar.",
       "- Confirm Home Assistant does not show Connection lost / Reconnecting.",
       "- Open Settings -> System Check and press Refresh checks.",
+      "- Open Mission Control and press Refresh health. Confirm the category breakdown, top reason, and trend freshness update without HA reconnecting.",
       "",
       "Setup and mapping",
       "- Open Setup and confirm the wizard can move through every step.",
+      "- Pick the closest tank type/profile and confirm the wording matches the reef being tested.",
       "- If testing Apex/Trident, choose the Apex / Trident beta preset. Use Apex + Trident NP only if nitrate/phosphate entities exist.",
       `- Confirm enabled sensors match the tester's system: ${enabledSensors.join(", ") || "none enabled"}.`,
       "- Use Find matches for at least two sensors and confirm suggestions are sensible.",
@@ -2617,7 +2909,7 @@ class OpenReefPanel extends HTMLElement {
     const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
     const summaryCards = [
-      cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.grade} grade · ${health.detail}`, health.status, "mission") : "",
+      cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.grade} grade · ${health.topReason}`, health.status, "mission") : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, `${critical.length} critical · ${warnings.length} warning`, critical.length ? "critical" : warnings.length || noEnabledSensors ? "warning" : "ok", "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -2638,6 +2930,7 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${this._modePanel()}
         ${summaryCards ? `<div class="summary-grid">${summaryCards}</div>` : ""}
+        ${cards.health ? this._reefHealthBreakdown(health) : ""}
         <article class="panel">
           <div class="section-head">
             <h3>Attention</h3>
@@ -2671,6 +2964,58 @@ class OpenReefPanel extends HTMLElement {
         <strong>${this._escape(value)}</strong>
         <small>${this._escape(detail)}</small>
       </button>
+    `;
+  }
+
+  _reefHealthBreakdown(health) {
+    const categories = this._healthCategoryChoices().map(([id]) => health.categories[id]).filter(Boolean);
+    const losses = health.losses.slice(0, 5);
+    return `
+      <article class="panel health-breakdown ${this._escape(health.status)}">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Why this score?</p>
+            <h3>${this._escape(health.profileLabel)} · ${this._escape(health.score)}/100</h3>
+            <p class="muted">Operational safety score. Disabled sensors are ignored; enabled sensors and armed equipment are checked.</p>
+          </div>
+          <div class="pill-stack">
+            <span class="pill ${this._escape(health.status)}">${this._escape(health.grade)} grade</span>
+            <span class="pill ${health.appliedCap ? "warning" : "unknown"}">${health.appliedCap ? `cap ${this._escape(health.appliedCap.limit)}` : "no cap"}</span>
+            <button class="secondary compact-button" data-action="validate">Refresh health</button>
+          </div>
+        </div>
+        <div class="health-category-grid">
+          ${categories.map((category) => `
+            <article class="health-category ${category.score >= 90 ? "ok" : category.score >= 70 ? "warning" : "critical"}">
+              <span>${this._escape(category.label)}</span>
+              <strong>${this._escape(category.score)}/100</strong>
+              <small>${this._escape(Math.round(category.weight * 100))}% weight · ${this._escape(category.lost)} lost</small>
+            </article>
+          `).join("")}
+        </div>
+        <div class="health-reason-grid">
+          <section class="health-reason-card">
+            <span>Top reason</span>
+            <strong>${this._escape(health.topReason)}</strong>
+            <p>${this._escape(health.nextAction)}</p>
+          </section>
+          <section class="health-reason-card">
+            <span>Trend data</span>
+            <strong>${this._escape(health.trendFreshness)}</strong>
+            <p>Trends are checked only when you press Check/Refresh health, using configured numeric sensors only.</p>
+          </section>
+        </div>
+        ${health.appliedCap ? `<div class="notice ${health.appliedCap.status === "critical" ? "danger-notice" : "warning-notice"}"><strong>Hard cap applied:</strong> ${this._escape(health.appliedCap.label)}. ${this._escape(health.appliedCap.detail)}</div>` : ""}
+        <div class="health-loss-list">
+          ${losses.length ? losses.map((loss) => `
+            <div class="health-loss-row ${this._escape(loss.status)}">
+              <span>${this._escape(this._healthCategoryChoices().find(([id]) => id === loss.category)?.[1] || loss.category)}</span>
+              <strong>-${this._escape(loss.points)}</strong>
+              <small>${this._escape(loss.label)}${loss.detail ? ` · ${this._escape(loss.detail)}` : ""}</small>
+            </div>
+          `).join("") : `<p class="muted">No point losses from configured OpenReef checks.</p>`}
+        </div>
+      </article>
     `;
   }
 
@@ -3358,6 +3703,12 @@ class OpenReefPanel extends HTMLElement {
         <div class="grid two compact">
           <label>Tank name<input data-scope="tank" data-field="name" value="${this._escape(this._config.tank.name)}"></label>
           <label>Owner<input data-scope="tank" data-field="owner" value="${this._escape(this._config.tank.owner)}"></label>
+          <label>Tank type
+            <select data-scope="tank" data-field="profile">
+              ${this._tankProfileChoices().map(([id, label]) => `<option value="${this._escape(id)}" ${this._tankProfile() === id ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
+            </select>
+            <small>${this._escape(this._tankProfileDetail())}</small>
+          </label>
           <div class="field-group">
             <span class="field-label">Theme colour</span>
             <div class="theme-picker">
@@ -4028,6 +4379,9 @@ class OpenReefPanel extends HTMLElement {
     const rows = [
       ["OpenReef version", check.version],
       ["Config schema", check.schema],
+      ["Tank profile", check.tankProfile],
+      ["Reef Health", `${check.health.score}/100 (${check.health.grade})`],
+      ["Health trend data", check.health.trendFreshness],
       ["Active mode", check.activeMode],
       ["Mode timer", check.modeTimer],
       ["Sensors", `${check.sensors} mapped/enabled`],
@@ -4333,6 +4687,12 @@ class OpenReefPanel extends HTMLElement {
           <div class="grid two compact">
             <label>Tank name<input data-scope="tank" data-field="name" value="${this._escape(this._config.tank.name)}"></label>
             <label>Owner<input data-scope="tank" data-field="owner" value="${this._escape(this._config.tank.owner)}"></label>
+            <label>Tank type
+              <select data-scope="tank" data-field="profile">
+                ${this._tankProfileChoices().map(([id, label]) => `<option value="${this._escape(id)}" ${this._tankProfile() === id ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
+              </select>
+              <small>${this._escape(this._tankProfileDetail())}</small>
+            </label>
             <div class="field-group">
               <span class="field-label">Theme colour</span>
               <div class="theme-picker">
@@ -4621,6 +4981,24 @@ class OpenReefPanel extends HTMLElement {
         .summary-card.warning { border-color: #a16207; background: #2f2614; }
         .summary-card.critical { border-color: #7f1d1d; background: #2b171c; }
         .summary-card.unknown { border-color: #334155; background: #101d2c; }
+        .health-breakdown { display: grid; gap: 14px; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
+        .health-breakdown.warning { border-color: #a16207; }
+        .health-breakdown.critical { border-color: #7f1d1d; }
+        .health-category-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+        .health-category, .health-reason-card, .health-loss-row { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 5px; }
+        .health-category span, .health-reason-card span, .health-loss-row span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+        .health-category strong { color: #67e8f9; font-size: 22px; }
+        .health-category.ok { border-color: #166534; }
+        .health-category.warning { border-color: #a16207; }
+        .health-category.critical { border-color: #7f1d1d; }
+        .health-reason-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .health-reason-card strong { color: #e5edf5; font-size: 16px; overflow-wrap: anywhere; }
+        .health-reason-card p { color: #9fb2c7; }
+        .health-loss-list { display: grid; gap: 8px; }
+        .health-loss-row { grid-template-columns: minmax(150px, .28fr) auto 1fr; align-items: center; }
+        .health-loss-row strong { color: #67e8f9; }
+        .health-loss-row.critical { border-color: #7f1d1d; }
+        .health-loss-row.warning { border-color: #a16207; }
         .issue-list { display: grid; gap: 8px; }
         .issue-item { width: 100%; display: grid; grid-template-columns: auto minmax(160px, .45fr) 1fr; gap: 12px; align-items: center; padding: 12px; text-align: left; }
         .issue-item small { color: #9fb2c7; }
@@ -4863,6 +5241,7 @@ class OpenReefPanel extends HTMLElement {
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
           .range-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .trend-summary { grid-template-columns: 1fr; }
+          .health-category-grid, .health-reason-grid, .health-loss-row { grid-template-columns: 1fr; }
           .setup-guide, .setup-choice-grid, .setup-choice-grid.two-choice { grid-template-columns: 1fr; }
           .setup-next-list div { grid-template-columns: 1fr; }
         }
