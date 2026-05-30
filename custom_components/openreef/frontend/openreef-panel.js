@@ -119,8 +119,9 @@ class OpenReefPanel extends HTMLElement {
 
   _defaultHealthSections() {
     return {
-      action: true,
-      watch: true,
+      details: false,
+      action: false,
+      watch: false,
       context: false,
       learning: false,
     };
@@ -129,7 +130,7 @@ class OpenReefPanel extends HTMLElement {
   _loadHealthSections() {
     const defaults = this._defaultHealthSections();
     try {
-      const stored = window.localStorage?.getItem("openreef:healthSections:v1");
+      const stored = window.localStorage?.getItem("openreef:healthSections:v2");
       if (!stored) return defaults;
       const parsed = JSON.parse(stored);
       return { ...defaults, ...(parsed && typeof parsed === "object" ? parsed : {}) };
@@ -140,7 +141,7 @@ class OpenReefPanel extends HTMLElement {
 
   _saveHealthSections() {
     try {
-      window.localStorage?.setItem("openreef:healthSections:v1", JSON.stringify(this._healthSections));
+      window.localStorage?.setItem("openreef:healthSections:v2", JSON.stringify(this._healthSections));
     } catch {
       // Insight section memory is a convenience only.
     }
@@ -3316,7 +3317,8 @@ class OpenReefPanel extends HTMLElement {
 
   _reefHealthInsightGroup(key, title, group, emptyText, summary) {
     const items = group || [];
-    const open = this._healthSectionOpen(key);
+    const hasUrgentScoreItem = ["action", "watch"].includes(key) && items.some((item) => item.affectsScore);
+    const open = this._healthSectionOpen(key) || hasUrgentScoreItem;
     const scoreItems = items.filter((item) => item.affectsScore).length;
     const countLabel = items.length ? `${items.length} item${items.length === 1 ? "" : "s"}` : "Clear";
     return `
@@ -3348,54 +3350,58 @@ class OpenReefPanel extends HTMLElement {
   _reefHealthBreakdown(health) {
     const categories = this._healthCategoryChoices().map(([id]) => health.categories[id]).filter(Boolean);
     const groups = health.groups || {};
+    const detailsOpen = this._healthSectionOpen("details");
     return `
       <article class="panel health-breakdown ${this._escape(health.status)}">
         <div class="section-head">
           <div>
             <p class="eyebrow">Why this score?</p>
             <h3>${this._escape(health.profileLabel)} · ${this._escape(health.score)}/100</h3>
-            <p class="muted">${this._escape(health.gradeDetail || `${health.grade} grade`)}. Operational safety score; context and learning notes do not reduce the score by themselves.</p>
+            <p class="muted">${this._escape(health.gradeDetail || `${health.grade} grade`)} · ${this._escape(health.topReason)}. ${this._escape(health.nextAction)}</p>
           </div>
           <div class="pill-stack">
             <span class="pill ${this._escape(health.status)}">${this._escape(health.grade)} grade</span>
             ${health.learningCount ? `<span class="pill unknown">${this._escape(health.learningCount)} learning</span>` : ""}
             <span class="pill ${health.appliedCap ? "warning" : "unknown"}">${health.appliedCap ? `cap ${this._escape(health.appliedCap.limit)}` : "no cap"}</span>
             <button class="secondary compact-button" data-action="validate">Refresh health</button>
+            <button class="secondary compact-button" data-action="toggle-health-section" data-section="details">${detailsOpen ? "Hide details" : "Show details"}</button>
           </div>
         </div>
-        <div class="health-category-grid">
-          ${categories.map((category) => `
-            <article class="health-category ${category.score >= 90 ? "ok" : category.score >= 70 ? "warning" : "critical"}">
-              <span>${this._escape(category.label)}</span>
-              <strong>${this._escape(category.score)}/100</strong>
-              <small>${this._escape(Math.round(category.weight * 100))}% weight · ${this._escape(category.lost)} lost</small>
-            </article>
-          `).join("")}
-        </div>
-        <div class="health-reason-grid">
-          <section class="health-reason-card">
-            <span>Top reason</span>
-            <strong>${this._escape(health.topReason)}</strong>
-            <p>${this._escape(health.nextAction)}</p>
-          </section>
-          <section class="health-reason-card">
-            <span>Trend data</span>
-            <strong>${this._escape(health.trendFreshness)}</strong>
-            <p>Trends are checked only when you press Check/Refresh health, using configured numeric sensors only.</p>
-          </section>
-          <section class="health-reason-card">
-            <span>${this._escape(health.profileLabel)} scoring</span>
-            <strong>Profile preset</strong>
-            <p>${this._escape(health.profileNote || this._tankProfileHealthNote(health.profile))}</p>
-          </section>
-        </div>
-        ${health.appliedCap ? `<div class="notice ${health.appliedCap.status === "critical" ? "danger-notice" : "warning-notice"}"><strong>Hard cap applied:</strong> ${this._escape(health.appliedCap.label)}. ${this._escape(health.appliedCap.detail)}</div>` : ""}
-        <div class="health-insight-grid">
-          ${this._reefHealthInsightGroup("action", "Needs action", groups.action, "No urgent Reef Health actions.", "Score-affecting safety issues appear here.")}
-          ${this._reefHealthInsightGroup("watch", "Worth watching", groups.watch, "No scoring warnings right now.", "Gentle warnings that may affect the score.")}
-          ${this._reefHealthInsightGroup("context", "Context", groups.context, "No extra context from optional readings.", "Informational notes; not scored unless linked to a real tank issue.")}
-          ${this._reefHealthInsightGroup("learning", "Learning", groups.learning, "Trend learning is up to date.", "OpenReef is building a normal baseline for this tank.")}
-        </div>
+        ${detailsOpen ? `
+          <div class="health-category-grid">
+            ${categories.map((category) => `
+              <article class="health-category ${category.score >= 90 ? "ok" : category.score >= 70 ? "warning" : "critical"}">
+                <span>${this._escape(category.label)}</span>
+                <strong>${this._escape(category.score)}/100</strong>
+                <small>${this._escape(Math.round(category.weight * 100))}% weight · ${this._escape(category.lost)} lost</small>
+              </article>
+            `).join("")}
+          </div>
+          <div class="health-reason-grid">
+            <section class="health-reason-card">
+              <span>Top reason</span>
+              <strong>${this._escape(health.topReason)}</strong>
+              <p>${this._escape(health.nextAction)}</p>
+            </section>
+            <section class="health-reason-card">
+              <span>Trend data</span>
+              <strong>${this._escape(health.trendFreshness)}</strong>
+              <p>Trends are checked only when you press Check/Refresh health, using configured numeric sensors only.</p>
+            </section>
+            <section class="health-reason-card">
+              <span>${this._escape(health.profileLabel)} scoring</span>
+              <strong>Profile preset</strong>
+              <p>${this._escape(health.profileNote || this._tankProfileHealthNote(health.profile))}</p>
+            </section>
+          </div>
+          ${health.appliedCap ? `<div class="notice ${health.appliedCap.status === "critical" ? "danger-notice" : "warning-notice"}"><strong>Hard cap applied:</strong> ${this._escape(health.appliedCap.label)}. ${this._escape(health.appliedCap.detail)}</div>` : ""}
+          <div class="health-insight-grid">
+            ${this._reefHealthInsightGroup("action", "Needs action", groups.action, "No urgent Reef Health actions.", "Score-affecting safety issues appear here.")}
+            ${this._reefHealthInsightGroup("watch", "Worth watching", groups.watch, "No scoring warnings right now.", "Gentle warnings that may affect the score.")}
+            ${this._reefHealthInsightGroup("context", "Context", groups.context, "No extra context from optional readings.", "Informational notes; not scored unless linked to a real tank issue.")}
+            ${this._reefHealthInsightGroup("learning", "Learning", groups.learning, "Trend learning is up to date.", "OpenReef is building a normal baseline for this tank.")}
+          </div>
+        ` : ""}
       </article>
     `;
   }
