@@ -21,6 +21,8 @@ Controls are locked by default. Each equipment switch must be explicitly mapped 
 
 For tester handoff, use [BETA_TESTER_INSTALL_GUIDE.md](BETA_TESTER_INSTALL_GUIDE.md), [OPENREEF_BETA_SMOKE_TEST.md](OPENREEF_BETA_SMOKE_TEST.md), and [OPENREEF_BETA_FEEDBACK_TEMPLATE.md](OPENREEF_BETA_FEEDBACK_TEMPLATE.md).
 
+Product direction is tracked in [OPENREEF_PRODUCT_ROADMAP.md](OPENREEF_PRODUCT_ROADMAP.md), with Apex comparison and Labs migration detail in [OPENREEF_COMPETITIVE_AUDIT.md](OPENREEF_COMPETITIVE_AUDIT.md).
+
 The add-on is no longer required for the MVP controller. OpenReef Labs is intentionally separate and private while experimental advanced screens are being rebuilt.
 
 ## Development

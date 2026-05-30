@@ -1,294 +1,254 @@
 # OpenReef Product Roadmap
 
-OpenReef is not a basic aquarium dashboard. The target is an open-source, Home Assistant-native reef controller that can compete with Neptune Apex on capability while being easier to install, understand, and trust.
-
-This roadmap keeps the full product ambition visible while forcing every feature through small, smoke-tested releases. The old Next.js/Labs work remains valuable source material, but OpenReef Core is the production path.
-
-## Product Principles
-
-- **Home Assistant-native first:** core setup, monitoring, control, safety, and settings must work without the optional Labs add-on.
-- **No crash paths:** no feature may request all HA state, poll broad APIs, leak tokens, or keep runaway browser work alive after leaving the page.
-- **Safe control by default:** mapped equipment is read-only until explicitly armed in Settings.
-- **Frictionless setup:** users choose from suggested HA entities, with manual entity ID entry only as fallback.
-- **Apex-level power, OpenReef-level usability:** advanced control should feel approachable to reef keepers who are not software people.
-- **Labs is preservation, not abandonment:** old features stay available as migration references until they are rebuilt safely in Core.
-
-## Release Gates
-
-Every feature stage must pass these before it becomes part of OpenReef Core:
-
-- Open/refresh OpenReef repeatedly on a low-memory HA OS VM without HA disconnects or OOM.
-- No full `/api/states` fetches or broad unbounded entity scans.
-- Browser receives no HA tokens, Supervisor tokens, API keys, or private secrets.
-- All writes go through OpenReef validation, services, or targeted WebSocket commands.
-- Missing entities and optional mappings produce empty states, not crashes.
-- Works on desktop and mobile.
-- Settings are editable without redraw/focus loss.
-- Feature can be disabled or hidden if it is not configured.
-
-## Current Foundation
-
-Status: **Core MVP in active beta**
-
-- HA custom integration: `custom_components/openreef`
-- HA-native sidebar panel: `custom_components/openreef/frontend/openreef-panel.js`
-- Core screens: Mission Control, Live Stats, Controls, Energy, Settings
-- Core sensors: display temperature, sump temperature, pH, salinity, alkalinity, ORP, calcium, magnesium, room temperature, CO2, humidity
-- Safe controls: switch mapping required, explicit arming required
-- Energy: totals and per-equipment mappings, optional cost fields
-- Trends: targeted one-entity history views with selectable ranges
-- Alerts: sensor threshold states, muting, history, and optional HA persistent notifications
-- Modes: Running, Feed, Maintenance, custom modes, schedules, confirmations, timers, and restore plans
-- Safety: heater temperature checks, skimmer/return-pump helpers, ATO duty cycle, ATO return-pump checks, display-wavemaker restart warnings/reminders
-- Beta setup: onboarding includes Apex/Trident sensor preset, starter equipment, safety defaults, a support-summary handoff checklist, a copyable smoke-test script, and a copyable feedback template
-- Labs/old Next.js work: preserved for later migration
-
-## Roadmap Phases
-
-### Phase 0 - Stability Baseline
-
-Goal: make the HA-native controller boringly stable before adding complexity.
-
-- Keep Core installable through HACS.
-- Keep the optional add-on/Labs separate from Core.
-- Harden setup wizard, settings editing, entity search, trends, and control toggles.
-- Add smoke-test notes for low-memory HA OS.
-- Document rollback and beta reset steps.
-
-Exit criteria:
-
-- OpenReef can be used daily without disconnecting HA.
-- Entity search and trend viewing are repeatable without HA restart.
-- First-time setup can be completed by a non-technical user.
-
-### Phase 1 - Controller Essentials
-
-Goal: match the everyday controller jobs a reef keeper expects.
-
-- Alerts and alarms for sensor thresholds.
-- Notification routing through HA notifications.
-- Feed modes: fish feed, coral feed, timed pause, automatic return to running.
-- Maintenance mode with timed equipment behavior.
-- Mode scheduler and manual mode override.
-- Equipment interlocks, for example heater blocked if temperature probe is unavailable.
-- Better Mission Control summary and configurable cards.
-- Persistent activity/event log.
-
-Exit criteria:
-
-- A user can safely run daily reef operations from Core without Labs.
-- Every automated action is visible, reversible, and auditable.
-
-### Phase 2 - Testing, Dosing, And Maintenance
-
-Goal: turn OpenReef into a reef husbandry assistant, not just a switch panel.
-
-- Manual water test entry for alkalinity, calcium, magnesium, nitrate, phosphate, pH, salinity, temperature.
-- Apex/Trident import helper: guide users through syncing Neptune Apex/Trident entities into Home Assistant, then map those entities into OpenReef without copy/paste.
-- Test history trends and parameter target ranges.
-- Maintenance task system: recurring tasks, overdue status, categories, priority.
-- Optional Google Tasks migration strategy replaced or wrapped by HA-native storage first.
-- Dosing log and dosing reminders.
-- Simple dose calculators, gated as advisory only.
-- Reagent/filter/media replacement tracking.
-
-Exit criteria:
-
-- A user can track reef chemistry and maintenance inside OpenReef without external spreadsheets.
-- No cloud dependency is required for the core workflow.
-
-### Phase 3 - Lighting And Environment
-
-Goal: bring back lighting and environmental control safely.
-
-- Light entity mapping and grouped lighting profiles.
-- Manual light controls with arming/permission model.
-- Sunrise/sunset schedule.
-- Moonlight profile and lunar phase support.
-- Acclimation mode.
-- Room environment cards for CO2, humidity, room temperature, and ventilation helpers.
-- Day/night analytics for pH, temperature, and lighting periods.
-
-Exit criteria:
-
-- Lighting works through HA entities only.
-- Schedules are previewable before activation.
-- No direct hardware assumptions are baked into Core.
-
-### Phase 4 - Water Change And AWC
-
-Goal: support manual and automated water-change workflows without unsafe automation.
-
-- Manual water-change logging.
-- Water-change schedule and reminders.
-- Pre-change checklist.
-- Drain/fill equipment mappings.
-- AWC simulation/preview before any automation is armed.
-- AWC armed mode with explicit confirmations and interlocks.
-- Saltwater mixing station support later, as a separate feature gate.
-
-Exit criteria:
-
-- Manual water changes are useful first.
-- Automated water changes cannot run until mappings, safeguards, and confirmations are complete.
-
-### Phase 5 - Analytics And Reports
-
-Goal: make OpenReef feel smarter than Apex while staying explainable.
-
-- Reef Health Score migrated into Core.
-- Rate-of-change charts.
-- Anomaly timeline.
-- Correlation heatmap.
-- Day/night analysis.
-- Weekly/monthly reports.
-- Exportable PDF/CSV reports.
-- Explainable warnings: "what changed", "why it matters", "what to check".
-
-Exit criteria:
-
-- Analytics are read-only and cannot affect equipment.
-- Every warning links back to visible source data.
-
-### Phase 6 - Camera And Visual Monitoring
-
-Goal: restore camera features without tying Core stability to media pipelines.
-
-- HA camera entity picker.
-- Snapshot view.
-- Low-load still-image refresh mode.
-- Optional live stream view.
-- Time-lapse capture planning.
-- Visual comparison later, behind explicit experimental flags.
-
-Exit criteria:
-
-- Opening the camera screen cannot crash HA or the browser.
-- Live streaming is optional and isolated.
-
-### Phase 7 - AI Guardian
-
-Goal: add intelligence after the controller is stable and explainable.
-
-- AI advisor starts as read-only.
-- Uses redacted, minimal reef status summaries.
-- No API keys in browser or diagnostics.
-- Clear "advice, not automation" labeling.
-- Optional cloud provider configuration.
-- Later: incident summaries, report drafting, and setup assistant.
-
-Exit criteria:
-
-- AI cannot control equipment.
-- AI works even when disabled by showing normal non-AI Core UI.
-
-### Phase 8 - Coral Spawning And Advanced Modes
-
-Goal: restore specialist features once lights, pumps, schedules, and safety are mature.
-
-- Spawning profile configuration.
-- Lunar/sunset schedule helpers.
-- Light and pump choreography.
-- Preview timeline.
-- Manual start only at first.
-- Automation only after interlocks and clear warnings exist.
-
-Exit criteria:
-
-- Advanced modes are opt-in and never appear in beginner setup by default.
-
-### Phase 9 - Ready-Made OpenReef Units
-
-Goal: make OpenReef accessible to reef keepers who do not want to build HA themselves.
-
-- HA OS image or documented appliance build.
-- Preinstalled OpenReef integration.
-- First-run guided setup.
-- Suggested supported hardware list.
-- Backup/restore path.
-- Support diagnostics bundle.
-- Clear tester/customer update path.
-
-Exit criteria:
-
-- A non-technical reef keeper can power on, join network, open HA, and complete OpenReef setup.
-
-## Feature Migration Tracker
-
-| Feature | Current Source | Core Status | Target Phase | Notes |
-| --- | --- | --- | --- | --- |
-| Mission Control | Core panel + old `MissionControlScreen.tsx` | In Core beta | 0-1 | Configurable cards, alerts, modes, attention items, and event context are active. |
-| Live Stats | Core panel + old `LiveStatsScreen.tsx` | In Core beta | 0 | Targeted HA-native trends are active; continue improving visual history UX. |
-| Controls | Core panel + old controls/entities code | In Core beta | 0-1 | Arming lives in Settings, switches live in Controls, interlocks block unsafe actions. |
-| Energy | Core panel + old `EnergyScreen.tsx` | In Core beta | 0-1 | Totals, Wh display, and per-device optional mappings are active. |
-| Settings | Core panel + old `SettingsScreen.tsx` | In Core beta | 0 | Central configuration surface with collapsed sections by default. |
-| Entity Suggestions | `entity-suggestions.ts`, Core WS search | In Core MVP | 0 | Keep targeted and capped. No full-state fetches. |
-| Reef Health Score | `ReefHealthScore.tsx` | Labs/reference | 1/5 | Core summary first, analytics later. |
-| Alerts/Alarms | `SettingsContext` alarm helpers | In Core beta | 1 | Thresholds, muting, alert history, and HA persistent notifications are active. |
-| Feed/Maintenance Modes | `SettingsContext` modes | In Core beta | 1 | Manual confirmation, timers, auto-return, schedules, custom modes, and restore plans are active. |
-| Tasks/Maintenance | `TasksScreen.tsx`, Google Tasks API | Labs/reference | 2 | Prefer HA-native/local storage first; cloud sync optional later. |
-| Manual Tests | `ManualStatsScreen.tsx`, history components | Labs/reference | 2 | Add chemistry entry and trends. |
-| Dosing/Reminders | settings/task categories | Planned | 2 | Advisory first, automation later. |
-| Lights | `LightsScreen.tsx`, lighting settings | Labs/reference | 3 | Rebuild around HA light entities and schedules. |
-| Day/Night Analysis | `DayNightAnalysis.tsx` | Labs/reference | 3/5 | Depends on stable lights and sensor history. |
-| Water Change | `WaterChangeScreen.tsx` | Labs/reference | 4 | Manual logging before automation. |
-| Reports | `ReportsScreen.tsx` | Labs/reference | 5 | Depends on stable history and events. |
-| Analytics | `AnalyticsScreen.tsx`, analytics components | Labs/reference | 5 | Read-only, explainable, downsampled data. |
-| Camera | `CameraScreen.tsx`, camera API routes | Labs/reference | 6 | Start with HA camera snapshots, live stream later. |
-| AI Chemistry Advisor | `AIChemistryAdvisor.tsx`, `ai-service.ts` | Labs/reference | 7 | Redacted server-side summaries only. |
-| Guardian/Avatar | `GuardianScreen.tsx`, `SimliAvatar.tsx`, TTS route | Labs/reference | 7 | Optional, cloud-dependent, never required for Core. |
-| Reef Diagram | `ReefDiagramScreen.tsx` | Labs/reference | 5/8 | Useful once equipment mapping is mature. |
-| Spawning | `SpawningScreen.tsx`, spawning API/settings | Labs/reference | 8 | Advanced opt-in feature. |
-| Public/Ready-Made Units | Docs/process | Planned | 9 | Needs install, backup, support, and hardware plan. |
-
-## Near-Term Backlog
-
-### Next Core Slice
-
-- Mobile polish pass across setup, settings, mode dialogs, and controls.
-- Apex beta feedback loop: collect suggestion quality, mobile setup notes, and support-summary examples.
-- Reef Health Score V1 for Core, based only on configured OpenReef entities.
-- Manual chemistry entry for alkalinity, calcium, magnesium, nitrate, phosphate, pH, salinity, and temperature.
-- A first maintenance/tasks slice that does not depend on Google Tasks.
-- Read-only Apex/Trident import helper docs before automating any import flow.
-
-### Stability Hardening
-
-- Add Python tests for mission card config migration.
-- Add tests for targeted history request shape.
-- Add frontend smoke checklist with desktop/mobile screenshots.
-- Add diagnostics summary for Core config without secrets.
-- Add "support bundle" issue template for beta testers.
-- Add low-memory HA OS smoke-test notes for ready-made unit planning.
-
-### Documentation
-
-- Update README install path for Core-only OpenReef.
-- Add beta tester guide.
-- Add Apex beta tester guide.
-- Add beta smoke-test script.
-- Add beta feedback template.
-- Add known limitations.
-- Add "Labs features are preserved but experimental" note.
-- Add ready-made unit planning doc later.
-
-## Smoke-Test Checklist Template
-
-Use this for every feature slice.
-
-- Fresh install opens OpenReef without setup crash.
-- Existing install migrates config.
-- Setup/settings forms can be edited for 60 seconds without losing focus.
-- Entity pickers return capped suggestions only.
-- Feature works with missing optional entities.
-- Feature works after HA restart.
-- Browser hard refresh works.
-- Mobile layout is usable.
-- No secrets in browser responses, logs, localStorage, diagnostics, or page source.
-- HA Core memory remains stable during repeated use.
+OpenReef is an open-source, Home Assistant-native reef controller intended to compete with Neptune Apex on capability while being easier to install, understand, and trust.
+
+Use this roadmap as the working checklist. Detailed Apex comparison and Labs inventory live in [OPENREEF_COMPETITIVE_AUDIT.md](OPENREEF_COMPETITIVE_AUDIT.md).
+
+## What Is Next
+
+These are the next useful passes before widening beta beyond trusted testers.
+
+- [ ] Make copied smoke-test text setup-neutral so it does not list only the current user's sensors/equipment.
+- [ ] Add low-memory HA OS smoke-test notes.
+- [ ] Add rollback and beta reset instructions.
+- [ ] Add first Python tests for config migration, targeted entity search, and safe toggle validation.
+- [ ] Add first frontend smoke-test notes/screenshots for desktop and mobile.
+- [ ] Add nitrate, phosphate, dissolved oxygen, leak, water-level, and flow sensors as optional Core mappings.
+- [ ] Add Manual Chemistry V1: manual entry, history, and trends for common reef tests.
+- [ ] Add Maintenance Tasks V1 without Google dependency.
+- [ ] Add Reef Health Score V1 in Core using configured OpenReef entities only.
+
+## Product Rules
+
+- [x] Home Assistant-native Core is the production path.
+- [x] Labs/old Next.js code is preserved as migration reference.
+- [x] Control stays locked until mapped and explicitly armed.
+- [x] Entity search must be targeted and capped.
+- [x] No feature may fetch all HA states by default.
+- [x] Browser responses must not expose HA tokens, Supervisor tokens, API keys, or secrets.
+- [x] Every automated action needs preview, confirmation, logging, and a disable path.
+- [ ] Every feature slice must pass desktop, mobile, restart, refresh, and low-memory smoke tests.
+
+## Done / Core Beta
+
+### Foundation
+
+- [x] HACS custom integration install path.
+- [x] HA-native OpenReef sidebar panel.
+- [x] Single OpenReef config entry.
+- [x] Core settings stored in the integration config.
+- [x] Optional Labs/add-on separated from the stable controller path.
+- [x] Support summary, beta smoke test, and feedback template copy tools.
+- [x] Diagnostics with secret redaction.
+- [x] Repair issues for missing mappings and unavailable armed equipment.
+
+### Monitoring
+
+- [x] Display tank temperature.
+- [x] Sump temperature.
+- [x] pH.
+- [x] Salinity.
+- [x] ORP.
+- [x] Alkalinity.
+- [x] Calcium.
+- [x] Magnesium.
+- [x] Room temperature.
+- [x] CO2.
+- [x] Humidity.
+- [x] Optional sensor enable/disable.
+- [x] Targeted entity suggestions.
+- [x] Live Stats.
+- [x] Per-sensor trend modal with 1h, 6h, 24h, 7d, and 30d ranges.
+
+### Control And Safety
+
+- [x] Safe mapped switch control.
+- [x] Explicit arming per equipment item.
+- [x] Disarmed controls locked in UI.
+- [x] Equipment profiles for ATO, heater/chiller, return pump, skimmer, display wavemaker, lighting, doser, feeder, RODI, and other.
+- [x] Feed, Maintenance, Running, and custom modes.
+- [x] Mode previews before control.
+- [x] Mode timers and auto-return.
+- [x] Mode schedules with multiple times per day.
+- [x] ATO duty cycle: on duration and interval.
+- [x] ATO block/warning when return flow is not confirmed.
+- [x] Skimmer auto-off helper when return pump is off.
+- [x] Heater requires display tank temperature warning.
+- [x] Display wavemaker restart warnings and reminders.
+- [x] Activity log for mode and ATO actions.
+
+### Dashboard
+
+- [x] Mission Control.
+- [x] Configurable Mission Control cards.
+- [x] Attention section for alerts, missing mappings, interlocks, and armed unavailable equipment.
+- [x] Controls screen.
+- [x] Energy totals and per-equipment energy mappings.
+- [x] Energy display in Wh.
+- [x] Settings sections collapsed by default.
+- [x] Theme color picker.
+- [x] System Check.
+
+## In Progress / Needs Smoke Testing
+
+- [ ] Beta tester install and feedback flow with a real external tester.
+- [ ] Apex/Trident preset with a tester who has Apex entities already in Home Assistant.
+- [ ] Long-range trends on a Home Assistant instance with more than 30 days of recorder history.
+- [ ] Mobile setup and settings on multiple phone sizes.
+- [ ] Low-memory HA OS VM repeat-use testing.
+- [ ] Persistent notification behaviour over several days.
+- [ ] ATO duty cycle over several days.
+- [ ] Scheduled modes over several days.
+
+## Apex Parity
+
+### Monitoring Parity
+
+- [x] Temperature, pH, salinity, ORP, alkalinity, calcium, magnesium.
+- [ ] Nitrate first-class Core sensor.
+- [ ] Phosphate first-class Core sensor.
+- [ ] Dissolved oxygen optional sensor.
+- [ ] Leak sensor mapping.
+- [ ] Optical/high/low water level sensor mapping.
+- [ ] Liquid level/depth sensor mapping.
+- [ ] Flow sensor mapping.
+- [ ] PAR sensor mapping.
+- [ ] Additional probe/module grouping.
+- [ ] Probe calibration helpers.
+- [ ] Probe health/last-seen checks.
+- [ ] Apex/Trident import helper for HA-synced entities.
+
+### Control Parity
+
+- [x] Outlet/switch control through HA entities.
+- [x] Feed and maintenance modes.
+- [x] Mode schedules.
+- [x] Energy/power visibility for mapped devices.
+- [ ] Auto feeder scheduling.
+- [ ] Dosing pump scheduling.
+- [ ] Dosing pump manual control guardrails.
+- [ ] Pump profiles through HA entities.
+- [ ] Lighting profiles through HA entities.
+- [ ] Return pump/feed/maintenance interlock templates.
+- [ ] Leak-triggered emergency actions.
+- [ ] Flow-triggered warnings and actions.
+- [ ] Water-level-triggered warnings and actions.
+- [ ] Power-monitor anomaly warnings.
+
+### Chemistry And Dosing Parity
+
+- [ ] Manual water test entry.
+- [ ] Chemistry history dashboard.
+- [ ] Target ranges by parameter.
+- [ ] Dosing log.
+- [ ] Dosing reminders.
+- [ ] Advisory dose calculator.
+- [ ] Trident/Apex synced chemistry display.
+- [ ] Trident-style alkalinity/calcium/magnesium trend cards.
+- [ ] Trident NP-style nitrate/phosphate trend cards.
+- [ ] Controlled dosing guardrails, advisory first.
+- [ ] Automated dosing only after safety review and smoke tests.
+
+### Water And Maintenance Parity
+
+- [ ] Maintenance task list.
+- [ ] Recurring task generation.
+- [ ] Reagent tracking.
+- [ ] Filter/media replacement tracking.
+- [ ] Manual water-change logging.
+- [ ] Water-change schedule and reminders.
+- [ ] AWC preview/simulation.
+- [ ] AWC armed workflow.
+- [ ] AWC interlocks for high/low level, return pump, fresh reservoir, and waste reservoir.
+- [ ] RODI support.
+- [ ] Saltwater mixing station support.
+
+### Lighting And Environment Parity
+
+- [ ] Light entity mapping.
+- [ ] Channel mapping for multi-channel lights.
+- [ ] Lighting presets.
+- [ ] Sunrise/sunset ramp schedule.
+- [ ] Moonlight and lunar phase support.
+- [ ] Acclimation mode.
+- [ ] Refugium light schedule.
+- [ ] Ventilation/fan helpers from CO2, humidity, and room temperature.
+
+## Better Than Apex
+
+- [ ] Beginner setup with no programming language.
+- [ ] Visual safety builder instead of Apex-style text programming.
+- [ ] Explainable alerts: what changed, why it matters, and what to check.
+- [ ] Better long-range trends and range selection.
+- [ ] Reef Health Score in Core.
+- [ ] Rate-of-change warnings.
+- [ ] Anomaly timeline.
+- [ ] Correlation heatmap.
+- [ ] Day/night analysis.
+- [ ] Weekly/monthly reef reports.
+- [ ] CSV/PDF export.
+- [ ] Shareable support bundle with redaction.
+- [ ] Read-only AI Guardian summaries.
+- [ ] AI report drafting.
+- [ ] Open hardware recommendations.
+- [ ] Ready-made OpenReef units for non-technical reef keepers.
+
+## Ready-Made Unit Track
+
+- [ ] Supported hardware list.
+- [ ] Recommended HA OS device profile.
+- [ ] Preinstalled OpenReef image or appliance setup guide.
+- [ ] First-run setup checklist for customers.
+- [ ] Backup and restore instructions.
+- [ ] Remote support-safe diagnostics workflow.
+- [ ] Update strategy.
+- [ ] Recovery/reset instructions.
+- [ ] Optional starter kit hardware map: temp probe, pH path, smart plugs, leak sensor, ATO relay, dosing path.
+
+## Labs Migration Tracker
+
+| Feature | Source | Status | Target |
+| --- | --- | --- | --- |
+| Mission Control | `MissionControlScreen.tsx` | Migrated to Core | Keep improving |
+| Live Stats | `LiveStatsScreen.tsx` | Migrated to Core | Keep improving |
+| Controls | `EntitySwitch.tsx`, old HA helpers | Migrated to Core | Keep improving |
+| Energy | `EnergyScreen.tsx` | Partly migrated to Core | Add power anomaly work |
+| Settings | `SettingsScreen.tsx` | Partly migrated to Core | Continue simplifying |
+| Entity picker | `EntityPicker.tsx`, `SafeEntityPicker.tsx` | Migrated to Core | Keep targeted/capped |
+| Manual tests | `ManualStatsScreen.tsx`, `ParamHistoryModal.tsx` | Labs/reference | Chemistry V1 |
+| Reef Health Score | `ReefHealthScore.tsx` | Labs/reference | Core V1 soon |
+| Tasks | `TasksScreen.tsx`, Google Tasks API | Labs/reference | HA-native Tasks V1 |
+| Lights | `LightsScreen.tsx` | Labs/reference | Lighting phase |
+| Water change/AWC | `WaterChangeScreen.tsx` | Labs/reference | Water phase |
+| Analytics | `AnalyticsScreen.tsx`, analytics components | Labs/reference | Read-only analytics phase |
+| Reports | `ReportsScreen.tsx` | Labs/reference | Reports phase |
+| Camera | `CameraScreen.tsx`, camera API routes | Labs/reference | Camera phase |
+| Reef diagram | `ReefDiagramScreen.tsx` | Labs/reference | Equipment visualization phase |
+| Calibration | `SettingsScreen.tsx` calibration section | Labs/reference | Monitoring parity |
+| AI advisor | `AIChemistryAdvisor.tsx`, `ai-service.ts` | Labs/reference | Read-only AI phase |
+| Guardian/avatar/TTS | `GuardianScreen.tsx`, `SimliAvatar.tsx`, TTS route | Labs/reference | Optional AI phase |
+| Coral spawning | `SpawningScreen.tsx`, spawning API | Labs/reference | Advanced opt-in phase |
+| Google Sheets sync | Sheets API routes | Labs/reference | Optional export/sync later |
+| Google Tasks sync | Tasks API routes | Labs/reference | Optional sync after local Tasks V1 |
+
+## Release Gate For Every New Feature
+
+- [ ] Fresh install opens without setup crash.
+- [ ] Existing install migrates config.
+- [ ] Settings can be edited for 60 seconds without losing focus.
+- [ ] Entity pickers return capped suggestions only.
+- [ ] Missing optional entities show empty states.
+- [ ] Feature works after HA restart.
+- [ ] Browser hard refresh works.
+- [ ] Mobile layout is usable.
+- [ ] No secrets in browser responses, logs, localStorage, diagnostics, or page source.
+- [ ] HA Core memory remains stable during repeated use.
+- [ ] User can disable or hide the feature if not configured.
 
 ## Decision Log
 
-- **2026-05-27:** OpenReef Core is the product foundation. Labs/Next.js remains a feature archive and optional experimental surface.
-- **2026-05-27:** Features migrate into Core in small smoke-tested slices rather than as one large dashboard port.
-- **2026-05-27:** Stability beats speed. A feature that risks HA stability stays in Labs until redesigned.
+- [x] 2026-05-27: OpenReef Core is the product foundation.
+- [x] 2026-05-27: Labs/Next.js remains a feature archive and optional experimental surface.
+- [x] 2026-05-27: Features migrate into Core in small smoke-tested slices.
+- [x] 2026-05-27: Stability beats speed.
+- [x] 2026-05-30: Roadmap reset around Apex parity, Better Than Apex differentiation, and checkbox-driven owner tracking.
