@@ -1310,19 +1310,68 @@ class OpenReefPanel extends HTMLElement {
     this._setDirty(true);
   }
 
+  _sensorPresetDefinitions() {
+    const apexBase = ["temp", "sump_temp", "ph", "orp", "salinity"];
+    const trident = ["alkalinity", "calcium", "magnesium"];
+    const tridentNp = ["nitrate", "phosphate"];
+    const fmm = ["flow", "leak", "high_water", "low_water"];
+    return {
+      tank: {
+        label: "OpenReef basics",
+        sensors: ["temp", "ph", "salinity"],
+      },
+      apex: {
+        label: "Apex controller",
+        sensors: apexBase,
+      },
+      trident: {
+        label: "Apex + Trident",
+        sensors: [...apexBase, ...trident],
+      },
+      trident_np: {
+        label: "Apex + Trident NP",
+        sensors: [...apexBase, ...tridentNp],
+      },
+      apex_trident_np: {
+        label: "Apex + Trident + Trident NP",
+        sensors: [...apexBase, ...trident, ...tridentNp],
+      },
+      apex_np: {
+        label: "Apex + Trident + Trident NP",
+        sensors: [...apexBase, ...trident, ...tridentNp],
+      },
+      apex_fmm: {
+        label: "Apex + FMM",
+        sensors: [...apexBase, ...fmm],
+      },
+      apex_full: {
+        label: "Apex full ecosystem",
+        sensors: [...apexBase, ...trident, ...tridentNp, ...fmm],
+      },
+      all: {
+        label: "Everything available",
+        sensors: null,
+      },
+      minimal: {
+        label: "Temperature only",
+        sensors: ["temp"],
+      },
+    };
+  }
+
+  _sensorPresetDefinition(preset) {
+    const definitions = this._sensorPresetDefinitions();
+    return definitions[preset] || definitions.tank;
+  }
+
   _applySensorPreset(preset) {
     const sensors = this._config.sensors || {};
-    const tankBasic = new Set(["temp", "ph", "salinity"]);
-    const apex = new Set(["temp", "sump_temp", "salinity", "alkalinity", "orp", "calcium", "ph", "magnesium"]);
-    const apexNp = new Set([...apex, "nitrate", "phosphate"]);
+    const definition = this._sensorPresetDefinition(preset);
+    const enabled = definition.sensors ? new Set(definition.sensors) : null;
     Object.entries(sensors).forEach(([id, sensor]) => {
-      if (preset === "tank") sensor.enabled = tankBasic.has(id);
-      if (preset === "apex") sensor.enabled = apex.has(id);
-      if (preset === "apex_np") sensor.enabled = apexNp.has(id);
-      if (preset === "all") sensor.enabled = true;
-      if (preset === "minimal") sensor.enabled = id === "temp";
+      sensor.enabled = enabled ? enabled.has(id) : true;
     });
-    this._recordActivity(`Setup sensor preset selected: ${preset}`);
+    this._recordActivity(`Setup sensor preset selected: ${definition.label}`);
     this._setDirty(true);
   }
 
@@ -3170,6 +3219,7 @@ class OpenReefPanel extends HTMLElement {
       ? this._config.activity[0].message || "Recorded"
       : "None yet";
     const health = this._reefHealthScore(enabledSensors, equipment, sensorAlerts, interlocks);
+    const sensorSummary = this._sensorSummaryState(sensorAlerts, !enabledSensors.length);
     return {
       version: this._integrationVersion || "unknown",
       schema: this._config.schemaVersion || "unknown",
@@ -3182,7 +3232,11 @@ class OpenReefPanel extends HTMLElement {
       equipment: `${armedEquipment.length}/${equipment.length}`,
       mappedEquipment: `${mappedEquipment.length}/${equipment.length}`,
       energy: `${this._energyTotalMappings().filter(([, key]) => this._config.energy[key]).length}/3`,
-      alerts: `${sensorAlerts.filter((item) => item.status === "critical").length} critical, ${sensorAlerts.filter((item) => item.status === "warning").length} warning`,
+      alerts: [
+        `${sensorSummary.criticalCount} critical`,
+        `${sensorSummary.warningCount} warning`,
+        sensorSummary.contextCount ? `${sensorSummary.contextCount} context warning${sensorSummary.contextCount === 1 ? "" : "s"}` : "",
+      ].filter(Boolean).join(", "),
       interlocks: interlocks.length,
       atoDutyCycle: interlockConfig.atoDutyCycleEnabled
         ? `${interlockConfig.atoDutyCycleOnSeconds || 120}s every ${interlockConfig.atoDutyCycleIntervalMinutes || 60}m`
@@ -3403,7 +3457,8 @@ class OpenReefPanel extends HTMLElement {
       "Setup and mapping",
       "- Open Setup and confirm the wizard can move through every step.",
       "- Pick the closest tank type/profile and confirm the wording matches the reef being tested.",
-      "- If testing Apex/Trident, choose the Apex / Trident beta preset. Use Apex + Trident NP only if nitrate/phosphate entities exist.",
+      "- If testing Neptune data, choose the closest guide: Apex controller, Apex + Trident, Apex + Trident NP, Apex + Trident + Trident NP, Apex + FMM, or Apex full ecosystem.",
+      "- Confirm Apex/Trident entities already exist in Home Assistant; OpenReef maps HA entities and does not connect directly to Apex hardware yet.",
       `- Confirm enabled sensors match the tester's system: ${enabledSensors.join(", ") || "none enabled"}.`,
       "- Use Find matches for at least two sensors and confirm suggestions are sensible.",
       "- Do not paste HA tokens or secrets anywhere in OpenReef.",
@@ -3453,13 +3508,13 @@ class OpenReefPanel extends HTMLElement {
       "- Device type: HA Green / HA Yellow / Raspberry Pi / VM / other:",
       "- Browser and device used:",
       "- Reef equipment being tested:",
-      "- Apex/Trident entities in Home Assistant: yes / no",
+      "- Neptune entities in Home Assistant: Apex / Trident / Trident NP / FMM / none:",
       "",
       "Install and setup",
       "- Did OpenReef install/update cleanly?",
       "- Did OpenReef appear in the sidebar after restart?",
       "- Did the setup wizard make sense?",
-      "- Which sensor preset did you choose?",
+      "- Which Apex/OpenReef sensor guide did you choose?",
       "- Which entity suggestions were correct?",
       "- Which entity suggestions were missing or wrong?",
       "",
@@ -3597,12 +3652,53 @@ class OpenReefPanel extends HTMLElement {
     return this._mission();
   }
 
+  _sensorAlertBuckets(sensorAlerts = []) {
+    const buckets = {
+      scoringCritical: [],
+      scoringWarning: [],
+      context: [],
+      unknown: [],
+    };
+    sensorAlerts.forEach((alert) => {
+      const impact = this._sensorAlertImpact(alert.id, alert.sensor, alert.status);
+      if (!impact.affectsScore) {
+        buckets.context.push(alert);
+      } else if (alert.status === "critical") {
+        buckets.scoringCritical.push(alert);
+      } else if (alert.status === "unknown") {
+        buckets.unknown.push(alert);
+      } else {
+        buckets.scoringWarning.push(alert);
+      }
+    });
+    return buckets;
+  }
+
+  _sensorSummaryState(sensorAlerts = [], noEnabledSensors = false) {
+    const buckets = this._sensorAlertBuckets(sensorAlerts);
+    const criticalCount = buckets.scoringCritical.length;
+    const warningCount = buckets.scoringWarning.length + buckets.unknown.length;
+    const contextCount = buckets.context.length;
+    const detail = [
+      `${criticalCount} critical`,
+      `${warningCount} warning`,
+      contextCount ? `${contextCount} context warning${contextCount === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(" · ");
+    return {
+      ...buckets,
+      criticalCount,
+      warningCount,
+      contextCount,
+      detail,
+      status: criticalCount ? "critical" : warningCount || contextCount || noEnabledSensors ? "warning" : "ok",
+    };
+  }
+
   _mission() {
     const sensors = this._enabledSensors();
     const equipment = Object.entries(this._config.equipment || {});
     const sensorAlerts = this._sensorAlerts(sensors);
-    const critical = sensorAlerts.filter((alert) => alert.status === "critical");
-    const warnings = sensorAlerts.filter((alert) => alert.status === "warning");
+    const sensorSummary = this._sensorSummaryState(sensorAlerts, !sensors.length);
     const missing = this._validation?.missing_entities || [];
     const armedUnavailable = this._validation?.armed_unavailable || [];
     const interlocks = this._interlockWarnings();
@@ -3611,24 +3707,24 @@ class OpenReefPanel extends HTMLElement {
     const mappedEnergy = this._energyTotalMappings().filter(([, energyKey]) => this._config.energy[energyKey]).length;
     const noEnabledSensors = !sensors.length;
     const health = this._reefHealthScore(sensors, equipment, sensorAlerts, interlocks);
-    const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
+    const status = sensorSummary.criticalCount || armedUnavailable.length ? "Action needed" : sensorSummary.warningCount || sensorSummary.contextCount || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
     const dosing = this._dosingEnabled() ? this._dosingMissionState() : null;
     const summaryCards = [
       cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission") : "",
       cards.dosing && dosing ? this._missionSummaryCard("Dosing Advisor", dosing.value, dosing.detail, dosing.status, "mission") : "",
-      cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, `${critical.length} critical · ${warnings.length} warning`, critical.length ? "critical" : warnings.length || noEnabledSensors ? "warning" : "ok", "live") : "",
+      cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
     ].join("");
 
     return `
       <section class="stack">
-        <div class="hero ${critical.length || armedUnavailable.length ? "danger-border" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "warning-border" : "ok-border"}">
+        <div class="hero ${sensorSummary.criticalCount || armedUnavailable.length ? "danger-border" : sensorSummary.warningCount || sensorSummary.contextCount || missing.length || noEnabledSensors || interlocks.length ? "warning-border" : "ok-border"}">
           <div>
             <p class="eyebrow">Mission Control</p>
             <h2>${status}</h2>
-            <p>${critical.length} critical alert(s), ${warnings.length} warning(s), ${interlocks.length} interlock warning(s), ${missing.length} missing mapping(s), ${armedUnavailable.length} armed device issue(s).</p>
+            <p>${sensorSummary.criticalCount} critical alert(s), ${sensorSummary.warningCount} warning(s), ${sensorSummary.contextCount} context warning(s), ${interlocks.length} interlock warning(s), ${missing.length} missing mapping(s), ${armedUnavailable.length} armed device issue(s).</p>
           </div>
           <div class="actions">
             <button class="secondary" data-action="validate">Refresh checks</button>
@@ -3872,14 +3968,17 @@ class OpenReefPanel extends HTMLElement {
       ? equipment.filter(([id, item]) => this._isDisplayWavemaker(id, item) && item.armed && item.switch_entity_id && this._stateValue(item.switch_entity_id) === "off")
       : [];
 
-    sensorAlerts.filter((alert) => alert.status === "critical").forEach((alert) => {
-      issues.push(["critical", alert.title, alert.detail, "live"]);
-    });
-    sensorAlerts.filter((alert) => alert.status === "warning").forEach((alert) => {
-      issues.push(["warning", alert.title, alert.detail, "live"]);
-    });
-    sensorAlerts.filter((alert) => alert.status === "unknown").forEach((alert) => {
-      issues.push(["warning", alert.title, alert.detail, "settings"]);
+    sensorAlerts.forEach((alert) => {
+      const impact = this._sensorAlertImpact(alert.id, alert.sensor, alert.status);
+      if (alert.status === "unknown") {
+        issues.push(["warning", alert.title, alert.detail, "settings"]);
+        return;
+      }
+      if (!impact.affectsScore) {
+        issues.push(["warning", `${alert.title} (context)`, `${alert.detail} · context only`, "live"]);
+        return;
+      }
+      issues.push([alert.status === "critical" ? "critical" : "warning", alert.title, alert.detail, "live"]);
     });
     if (unmappedSensors.length) {
       issues.push(["warning", "Sensors still need mapping", unmappedSensors.map(([, sensor]) => sensor.label).join(", "), "settings"]);
@@ -4386,8 +4485,41 @@ class OpenReefPanel extends HTMLElement {
       "sensors",
       "Sensors",
       "Enable only the probes, safety sensors, and room sensors you actually own.",
-      this._sensorMappingGroups(),
+      `${this._apexImportGuide("settings")}${this._sensorMappingGroups()}`,
     );
+  }
+
+  _apexImportGuide(context = "setup") {
+    const compact = context === "settings";
+    const choices = [
+      ["tank", "No Apex / OpenReef sensors", "Use normal Home Assistant reef sensors: display temp, pH, and salinity."],
+      ["apex", "Apex controller", "Enable Apex-style temp, sump temp, pH, ORP, and salinity readings."],
+      ["trident", "Apex + Trident", "Add alkalinity, calcium, and magnesium for Trident-style chemistry insight."],
+      ["trident_np", "Apex + Trident NP", "Add nitrate and phosphate readings from Trident NP."],
+      ["apex_trident_np", "Apex + Trident + Trident NP", "Enable the full Trident chemistry set: alkalinity, calcium, magnesium, nitrate, and phosphate."],
+      ["apex_fmm", "Apex + FMM", "Add flow, leak, high-water, and low-water safety sensors."],
+      ["apex_full", "Apex full ecosystem", "Enable Apex controller, Trident, Trident NP, and FMM-style sensors."],
+    ];
+    return `
+      <article class="apex-guide ${compact ? "compact-guide" : ""}">
+        <div>
+          <p class="eyebrow">Apex / Trident beta helper</p>
+          <h3>Which Neptune data is already in Home Assistant?</h3>
+          <p>OpenReef reads Home Assistant entities that already exist. It does not connect directly to Apex hardware yet, so set up the Apex/Trident entities in Home Assistant first, then use one of these guided presets.</p>
+        </div>
+        <div class="setup-choice-grid">
+          ${choices.map(([id, title, description]) => `
+            <button class="setup-choice" data-action="setup-sensor-preset" data-id="${this._escape(id)}">
+              <strong>${this._escape(title)}</strong>
+              <span>${this._escape(description)}</span>
+            </button>
+          `).join("")}
+        </div>
+        <div class="notice info-notice">
+          <strong>Monitor-only is valid.</strong> Apex users can use OpenReef for Reef Health, trends, chemistry insight, and alerts without arming any OpenReef-controlled switches.
+        </div>
+      </article>
+    `;
   }
 
   _sensorMappingGroups() {
@@ -5509,21 +5641,10 @@ class OpenReefPanel extends HTMLElement {
       "Choose and map sensors",
       "Start with the probes you own. Missing optional sensors will not count against setup if they are disabled.",
       `
-        <div class="setup-choice-grid">
-          <button class="setup-choice" data-action="setup-sensor-preset" data-id="tank">
-            <strong>Reef basics</strong>
-            <span>Display tank temperature, pH, and salinity.</span>
-          </button>
-          <button class="setup-choice" data-action="setup-sensor-preset" data-id="apex">
-            <strong>Apex / Trident beta</strong>
-            <span>Display temp, sump temp, salinity, alkalinity, ORP, calcium, pH, and magnesium.</span>
-          </button>
-          <button class="setup-choice" data-action="setup-sensor-preset" data-id="apex_np">
-            <strong>Apex + Trident NP</strong>
-            <span>Add nitrate and phosphate for testers with Trident NP entities.</span>
-          </button>
+        ${this._apexImportGuide("setup")}
+        <div class="setup-choice-grid two-choice">
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="all">
-            <strong>Everything</strong>
+            <strong>Everything available</strong>
             <span>Add all reef, chemistry, water, safety, flow, lighting, sump, and room sensors.</span>
           </button>
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="minimal">
@@ -5995,6 +6116,10 @@ class OpenReefPanel extends HTMLElement {
         .stepper span, .stepper button { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; border: 0; background: #203247; color: #94a3b8; font-weight: 800; padding: 0; }
         .stepper span.on, .stepper button.on { background: var(--openreef-accent); color: #041019; }
         .setup-title { display: grid; gap: 4px; }
+        .apex-guide { display: grid; gap: 14px; border: 1px solid color-mix(in srgb, var(--openreef-accent) 28%, #24364a); border-radius: 8px; padding: 16px; background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(11, 23, 36, .88)); }
+        .apex-guide.compact-guide { margin-bottom: 12px; }
+        .apex-guide h3 { margin-bottom: 4px; }
+        .apex-guide p { color: #a8bed4; }
         .setup-guide, .setup-choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
         .setup-choice-grid.two-choice { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .setup-guide article, .setup-choice, .setup-panel { border: 1px solid color-mix(in srgb, var(--openreef-accent) 24%, #24364a); border-radius: 8px; background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(11, 23, 36, .9)); }

@@ -14,6 +14,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Add first Python tests for config migration, targeted entity search, and safe toggle validation.
 - [ ] Add first frontend smoke-test notes/screenshots for desktop and mobile.
 - [x] Add nitrate, phosphate, dissolved oxygen, leak, water-level, flow, and PAR sensors as optional Core mappings.
+- [x] Add Apex/Trident beta setup guide with Apex controller, Trident, Trident NP, FMM, and full-ecosystem presets.
 - [x] Add Reef Health Score V2.3 in Core: Apex/read-only friendly, parameter-specific trends, learning mode, compact default with expandable insight UI.
 - [x] Add Dosing & Consumption Advisor V1 (advisory): Trident-style Alk/Ca/Mg consumption rates, projection-to-limit, and advisory dose tips. Reuses Reef Health Score stability as the single source of truth.
 - [ ] Add Manual Chemistry V1: manual entry, history, and trends for common reef tests.
@@ -102,7 +103,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 ## In Progress / Needs Smoke Testing
 
 - [ ] Beta tester install and feedback flow with a real external tester.
-- [ ] Apex/Trident preset with a tester who has Apex entities already in Home Assistant.
+- [ ] Apex/Trident guided setup with a tester who has Apex entities already in Home Assistant.
 - [ ] Long-range trends on a Home Assistant instance with more than 30 days of recorder history.
 - [ ] Mobile setup and settings on multiple phone sizes.
 - [ ] Low-memory HA OS VM repeat-use testing.
@@ -126,7 +127,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Additional probe/module grouping.
 - [ ] Probe calibration helpers.
 - [ ] Probe health/last-seen checks.
-- [ ] Apex/Trident import helper for HA-synced entities.
+- [x] Apex/Trident import helper for HA-synced entities.
 
 ### Control Parity
 
