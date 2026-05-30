@@ -14,7 +14,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Add first Python tests for config migration, targeted entity search, and safe toggle validation.
 - [ ] Add first frontend smoke-test notes/screenshots for desktop and mobile.
 - [x] Add nitrate, phosphate, dissolved oxygen, leak, water-level, flow, and PAR sensors as optional Core mappings.
-- [x] Add Reef Health Score V2 in Core: tank profiles, category scores, hard caps, top reason, next action, and targeted trend refresh.
+- [x] Add Reef Health Score V2.1 in Core: Apex/read-only friendly, parameter-specific trends, learning mode, grouped insights.
 - [ ] Add Manual Chemistry V1: manual entry, history, and trends for common reef tests.
 - [ ] Add Maintenance Tasks V1 without Google dependency.
 
@@ -87,7 +87,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 ### Dashboard
 
 - [x] Mission Control.
-- [x] Reef Health Score V2 with profile-aware weighting, six visible categories, hard safety caps, and explainable next action.
+- [x] Reef Health Score V2.1 with profile-aware weighting, parameter-specific trend interpretation, learning mode, hard safety caps, and explainable next action.
 - [x] Configurable Mission Control cards.
 - [x] Attention section for alerts, missing mappings, interlocks, and armed unavailable equipment.
 - [x] Controls screen.
@@ -188,7 +188,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Visual safety builder instead of Apex-style text programming.
 - [ ] Explainable alerts: what changed, why it matters, and what to check.
 - [ ] Better long-range trends and range selection.
-- [x] Reef Health Score V2 in Core.
+- [x] Reef Health Score V2.1 in Core.
 - [ ] Rate-of-change warnings.
 - [ ] Anomaly timeline.
 - [ ] Correlation heatmap.
@@ -224,7 +224,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 | Settings | `SettingsScreen.tsx` | Partly migrated to Core | Continue simplifying |
 | Entity picker | `EntityPicker.tsx`, `SafeEntityPicker.tsx` | Migrated to Core | Keep targeted/capped |
 | Manual tests | `ManualStatsScreen.tsx`, `ParamHistoryModal.tsx` | Labs/reference | Chemistry V1 |
-| Reef Health Score | `ReefHealthScore.tsx` | Migrated to Core V2 | Add history after stability soak |
+| Reef Health Score | `ReefHealthScore.tsx` | Migrated to Core V2.1 | Add history after stability soak |
 | Tasks | `TasksScreen.tsx`, Google Tasks API | Labs/reference | HA-native Tasks V1 |
 | Lights | `LightsScreen.tsx` | Labs/reference | Lighting phase |
 | Water change/AWC | `WaterChangeScreen.tsx` | Labs/reference | Water phase |

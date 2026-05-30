@@ -235,18 +235,25 @@ class OpenReefPanel extends HTMLElement {
       .filter(([, sensor]) => Boolean(sensor.entity_id));
     const items = {};
 
-    await Promise.all(sensors.map(async ([id, sensor]) => {
-      try {
-        const points = await this._fetchTrendPoints(sensor.entity_id, "24h");
-        items[id] = this._analyseHealthTrend(id, sensor, points);
-      } catch (err) {
-        items[id] = {
-          status: "unknown",
-          penalty: 0,
-          detail: err instanceof Error ? err.message : "Trend history unavailable.",
-        };
-      }
-    }));
+    for (let index = 0; index < sensors.length; index += 2) {
+      const chunk = sensors.slice(index, index + 2);
+      await Promise.all(chunk.map(async ([id, sensor]) => {
+        try {
+          const trendData = await this._fetchHealthTrendData(sensor.entity_id);
+          items[id] = this._analyseHealthTrend(id, sensor, trendData);
+        } catch (err) {
+          items[id] = {
+            status: "learning",
+            group: "learning",
+            category: this._sensorHealthCategory(id, sensor),
+            penalty: 0,
+            affectsScore: false,
+            label: `${sensor.label || id} trend learning`,
+            detail: err instanceof Error ? err.message : "Trend history unavailable.",
+          };
+        }
+      }));
+    }
 
     this._healthTrends = {
       checkedAt: new Date().toISOString(),
@@ -453,6 +460,24 @@ class OpenReefPanel extends HTMLElement {
     if (historyPoints.length >= 2) return historyPoints;
 
     return statisticPoints.length ? statisticPoints : historyPoints;
+  }
+
+  async _fetchHealthTrendData(entityId) {
+    const end = new Date();
+    const sevenDayStart = new Date(end.getTime() - this._trendRangeMs("7d"));
+    const dayStart = new Date(end.getTime() - this._trendRangeMs("24h"));
+    const statisticPoints = await this._fetchStatisticTrendPoints(entityId, sevenDayStart, end, "7d");
+
+    if (statisticPoints.length >= 8) {
+      return { points: statisticPoints, range: "7d", source: "statistics" };
+    }
+
+    const historyPoints = await this._fetchHistoryTrendPoints(entityId, dayStart, end);
+    return {
+      points: historyPoints.length ? historyPoints : statisticPoints,
+      range: historyPoints.length ? "24h" : "7d",
+      source: historyPoints.length ? "history" : "statistics",
+    };
   }
 
   async _fetchHistoryTrendPoints(entityId, start, end) {
@@ -2270,20 +2295,8 @@ class OpenReefPanel extends HTMLElement {
     return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
   }
 
-  _analyseHealthTrend(sensorId, sensor, points) {
-    if (!Array.isArray(points) || points.length < 4) {
-      return { status: "unknown", penalty: 0, detail: "Not enough 24h history yet." };
-    }
-    const values = points.map((point) => Number(point.value)).filter(Number.isFinite);
-    if (values.length < 4) return { status: "unknown", penalty: 0, detail: "No numeric 24h history." };
-    const first = values[0];
-    const latest = values[values.length - 1];
-    const low = Math.min(...values);
-    const high = Math.max(...values);
-    const range = Math.max(0.0001, Math.abs(Number(sensor.max) - Number(sensor.min)));
-    const delta = Math.abs(latest - first);
-    const swing = high - low;
-    const profileMultiplier = {
+  _healthTrendMultiplier() {
+    return {
       fish_only_fowlr: 1.25,
       soft_coral: 1.15,
       lps: 1,
@@ -2291,19 +2304,186 @@ class OpenReefPanel extends HTMLElement {
       anemone_dominant: 0.9,
       sps: 0.75,
     }[this._tankProfile()] || 1;
-    const movement = Math.max(delta / range, (swing / range) * 0.75);
-    const warningLevel = 0.28 * profileMultiplier;
-    const criticalLevel = 0.50 * profileMultiplier;
-    const status = movement >= criticalLevel ? "critical" : movement >= warningLevel ? "warning" : "ok";
-    const penalty = status === "critical" ? 14 : status === "warning" ? 7 : 0;
-    const unit = sensor.unit ? ` ${sensor.unit}` : "";
-    const direction = latest >= first ? "up" : "down";
-    const digits = this._sensorDigits(sensorId);
+  }
+
+  _healthTrendRule(sensorId) {
+    const multiplier = this._healthTrendMultiplier();
+    const context = { kind: "context", category: "stability", affectsScore: false };
+    const rules = {
+      temp: { kind: "temperature", category: "stability", warningSwing: 1.5 * multiplier, criticalSwing: 2.5 * multiplier, warningDelta: 0.8 * multiplier, criticalDelta: 1.5 * multiplier, penaltyWarning: 5, penaltyCritical: 12 },
+      sump_temp: { kind: "context", category: "stability", affectsScore: false },
+      ph: { kind: "daily-envelope", category: "chemistry", warningAvg: 0.12 * multiplier, criticalAvg: 0.25 * multiplier, warningEnvelope: 0.18 * multiplier, criticalEnvelope: 0.35 * multiplier, penaltyWarning: 5, penaltyCritical: 10 },
+      salinity: { kind: "daily-baseline", category: "chemistry", warningAvg: 0.7 * multiplier, criticalAvg: 1.5 * multiplier, penaltyWarning: 8, penaltyCritical: 18 },
+      alkalinity: { kind: "daily-baseline", category: "chemistry", warningAvg: 0.35 * multiplier, criticalAvg: 0.7 * multiplier, penaltyWarning: 10, penaltyCritical: 20 },
+      calcium: { kind: "daily-baseline", category: "chemistry", warningAvg: 30 * multiplier, criticalAvg: 60 * multiplier, penaltyWarning: 5, penaltyCritical: 10 },
+      magnesium: { kind: "daily-baseline", category: "chemistry", warningAvg: 60 * multiplier, criticalAvg: 120 * multiplier, penaltyWarning: 5, penaltyCritical: 10 },
+      nitrate: { kind: "slow-baseline", category: "chemistry", warningAvg: 5 * multiplier, criticalAvg: 10 * multiplier, warningRelative: 0.5 * multiplier, criticalRelative: 1 * multiplier, penaltyWarning: 4, penaltyCritical: 8 },
+      phosphate: { kind: "slow-baseline", category: "chemistry", warningAvg: 0.05 * multiplier, criticalAvg: 0.1 * multiplier, warningRelative: 0.75 * multiplier, criticalRelative: 1.5 * multiplier, penaltyWarning: 4, penaltyCritical: 8 },
+      dissolved_oxygen: { kind: "daily-baseline", category: "life", warningAvg: 1 * multiplier, criticalAvg: 2 * multiplier, penaltyWarning: 8, penaltyCritical: 16 },
+      flow: { kind: "context", category: "stability", affectsScore: false },
+      orp: { kind: "context", category: "chemistry", affectsScore: false },
+      par: { kind: "context", category: "stability", affectsScore: false },
+      room_temp: { kind: "context", category: "stability", affectsScore: false },
+      co2: { kind: "context", category: "stability", affectsScore: false },
+      humidity: { kind: "context", category: "stability", affectsScore: false },
+    };
+    return rules[sensorId] || context;
+  }
+
+  _trendDays(points) {
+    const buckets = new Map();
+    points.forEach((point) => {
+      if (!Number.isFinite(point?.time) || !Number.isFinite(Number(point?.value))) return;
+      const key = new Date(point.time).toISOString().slice(0, 10);
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(Number(point.value));
+    });
+    return [...buckets.entries()]
+      .map(([day, values]) => {
+        const count = values.length;
+        const sum = values.reduce((total, value) => total + value, 0);
+        return {
+          day,
+          count,
+          avg: sum / count,
+          low: Math.min(...values),
+          high: Math.max(...values),
+        };
+      })
+      .filter((item) => item.count >= 3)
+      .sort((a, b) => a.day.localeCompare(b.day));
+  }
+
+  _average(values) {
+    const safe = values.filter(Number.isFinite);
+    if (!safe.length) return 0;
+    return safe.reduce((total, value) => total + value, 0) / safe.length;
+  }
+
+  _healthTrendLearning(sensorId, sensor, detail = "OpenReef needs more history before judging this trend.") {
+    return {
+      status: "learning",
+      group: "learning",
+      category: this._sensorHealthCategory(sensorId, sensor),
+      penalty: 0,
+      affectsScore: false,
+      label: `${sensor.label || sensorId} trend learning`,
+      detail,
+    };
+  }
+
+  _healthTrendContext(sensorId, sensor, detail) {
+    return {
+      status: "context",
+      group: "context",
+      category: this._sensorHealthCategory(sensorId, sensor),
+      penalty: 0,
+      affectsScore: false,
+      label: `${sensor.label || sensorId} context`,
+      detail,
+    };
+  }
+
+  _healthTrendResult(sensorId, sensor, rule, status, detail) {
+    const penalty = status === "critical" ? rule.penaltyCritical : status === "warning" ? rule.penaltyWarning : 0;
+    if (!penalty) return this._healthTrendContext(sensorId, sensor, detail);
     return {
       status,
+      group: status === "critical" ? "action" : "watch",
+      category: rule.category || this._sensorHealthCategory(sensorId, sensor),
       penalty,
-      detail: `24h ${direction} ${this._format(delta, digits)}${unit}; swing ${this._format(swing, digits)}${unit}.`,
+      affectsScore: true,
+      label: `${sensor.label || sensorId} trend needs attention`,
+      detail,
     };
+  }
+
+  _analyseHealthTrend(sensorId, sensor, trendData) {
+    const points = Array.isArray(trendData) ? trendData : trendData?.points || [];
+    const range = Array.isArray(trendData) ? "24h" : trendData?.range || "24h";
+    const rule = this._healthTrendRule(sensorId);
+    if (!Array.isArray(points) || points.length < 4) {
+      return this._healthTrendLearning(sensorId, sensor);
+    }
+    const values = points.map((point) => Number(point.value)).filter(Number.isFinite);
+    if (values.length < 4) return this._healthTrendLearning(sensorId, sensor, "No numeric history is available yet.");
+
+    const first = values[0];
+    const latest = values[values.length - 1];
+    const low = Math.min(...values);
+    const high = Math.max(...values);
+    const delta = Math.abs(latest - first);
+    const swing = high - low;
+    const unit = sensor.unit ? ` ${sensor.unit}` : "";
+    const digits = this._sensorDigits(sensorId);
+    const direction = latest >= first ? "up" : "down";
+
+    if (rule.kind === "context") {
+      return this._healthTrendContext(sensorId, sensor, `${this._trendRangeLabel(range)} ${direction} ${this._format(delta, digits)}${unit}; swing ${this._format(swing, digits)}${unit}. Shown as context, not a Reef Health penalty.`);
+    }
+
+    if (rule.kind === "temperature") {
+      let trendDelta = delta;
+      let trendSwing = swing;
+      let trendDirection = direction;
+      let detailPrefix = this._trendRangeLabel(range);
+      if (range === "7d") {
+        const days = this._trendDays(points);
+        if (days.length) {
+          const latestDay = days[days.length - 1];
+          const baselineAvg = days.length > 1 ? this._average(days.slice(0, -1).map((day) => day.avg)) : latestDay.avg;
+          trendDelta = Math.abs(latestDay.avg - baselineAvg);
+          trendSwing = latestDay.high - latestDay.low;
+          trendDirection = latestDay.avg >= baselineAvg ? "up" : "down";
+          detailPrefix = "Latest day";
+        }
+      }
+      const status = trendSwing >= rule.criticalSwing || trendDelta >= rule.criticalDelta
+        ? "critical"
+        : trendSwing >= rule.warningSwing || trendDelta >= rule.warningDelta
+          ? "warning"
+          : "ok";
+      return this._healthTrendResult(sensorId, sensor, rule, status, `${detailPrefix} ${trendDirection} ${this._format(trendDelta, digits)}${unit}; swing ${this._format(trendSwing, digits)}${unit}.`);
+    }
+
+    const days = this._trendDays(points);
+    if ((rule.kind === "daily-envelope" || rule.kind === "daily-baseline" || rule.kind === "slow-baseline") && (range !== "7d" || days.length < 4)) {
+      return this._healthTrendLearning(sensorId, sensor, "OpenReef needs several days of history before comparing this tank against its own normal pattern.");
+    }
+
+    const latestDay = days[days.length - 1];
+    const baselineDays = days.slice(0, -1);
+    const baselineAvg = this._average(baselineDays.map((day) => day.avg));
+    const avgDrift = Math.abs(latestDay.avg - baselineAvg);
+
+    if (rule.kind === "daily-envelope") {
+      const lowDrift = Math.abs(latestDay.low - this._average(baselineDays.map((day) => day.low)));
+      const highDrift = Math.abs(latestDay.high - this._average(baselineDays.map((day) => day.high)));
+      const envelopeDrift = Math.max(lowDrift, highDrift);
+      const status = avgDrift >= rule.criticalAvg || envelopeDrift >= rule.criticalEnvelope
+        ? "critical"
+        : avgDrift >= rule.warningAvg || envelopeDrift >= rule.warningEnvelope
+          ? "warning"
+          : "ok";
+      return this._healthTrendResult(sensorId, sensor, rule, status, `Today avg ${this._format(latestDay.avg, digits)}${unit}; baseline ${this._format(baselineAvg, digits)}${unit}; envelope shift ${this._format(envelopeDrift, digits)}${unit}. Normal day/night swing is expected.`);
+    }
+
+    if (rule.kind === "slow-baseline") {
+      const relativeDrift = avgDrift / Math.max(Math.abs(baselineAvg), 0.01);
+      const status = avgDrift >= rule.criticalAvg || relativeDrift >= rule.criticalRelative
+        ? "critical"
+        : avgDrift >= rule.warningAvg || relativeDrift >= rule.warningRelative
+          ? "warning"
+          : "ok";
+      return this._healthTrendResult(sensorId, sensor, rule, status, `Latest daily avg ${this._format(latestDay.avg, digits)}${unit}; baseline ${this._format(baselineAvg, digits)}${unit}; slow drift ${this._format(avgDrift, digits)}${unit}.`);
+    }
+
+    const status = avgDrift >= rule.criticalAvg
+      ? "critical"
+      : avgDrift >= rule.warningAvg
+        ? "warning"
+        : "ok";
+    return this._healthTrendResult(sensorId, sensor, rule, status, `Latest daily avg ${this._format(latestDay.avg, digits)}${unit}; baseline ${this._format(baselineAvg, digits)}${unit}; drift ${this._format(avgDrift, digits)}${unit}.`);
   }
 
   _sensorHealthCategory(sensorId, sensor) {
@@ -2313,21 +2493,70 @@ class OpenReefPanel extends HTMLElement {
     return "confidence";
   }
 
+  _sensorAlertImpact(sensorId, sensor, status) {
+    if (status === "unknown") {
+      return { category: "confidence", points: 8, group: "watch", affectsScore: true };
+    }
+    if (["room_temp", "co2", "humidity", "orp", "par", "sump_temp"].includes(sensorId)) {
+      return { category: this._sensorHealthCategory(sensorId, sensor), points: 0, group: "context", affectsScore: false };
+    }
+    if (sensorId === "flow") {
+      return { category: "stability", points: status === "critical" ? 10 : 4, group: status === "critical" ? "action" : "watch", affectsScore: true };
+    }
+    if (["leak", "high_water", "low_water", "temp", "dissolved_oxygen"].includes(sensorId)) {
+      return { category: "life", points: status === "critical" ? 22 : 9, group: status === "critical" ? "action" : "watch", affectsScore: true };
+    }
+    if (sensor?.group === "chemistry") {
+      return { category: "chemistry", points: status === "critical" ? 18 : 6, group: status === "critical" ? "action" : "watch", affectsScore: true };
+    }
+    return { category: this._sensorHealthCategory(sensorId, sensor), points: status === "critical" ? 12 : 4, group: status === "critical" ? "action" : "watch", affectsScore: true };
+  }
+
   _reefHealthScore(sensors = this._enabledSensors(), equipment = Object.entries(this._config.equipment || {}), sensorAlerts = this._sensorAlerts(sensors), interlocks = this._interlockWarnings()) {
     const profile = this._tankProfile();
     const weights = this._healthWeights(profile);
     const losses = [];
     const caps = [];
+    const groups = { action: [], watch: [], context: [], learning: [] };
     const categoryLoss = Object.fromEntries(this._healthCategoryChoices().map(([id]) => [id, 0]));
+    const addInsight = (group, item) => {
+      const safeGroup = groups[group] ? group : "context";
+      groups[safeGroup].push({
+        status: item.status || (safeGroup === "action" ? "critical" : safeGroup === "watch" ? "warning" : "context"),
+        category: item.category || "confidence",
+        points: Math.max(0, Number(item.points) || 0),
+        affectsScore: item.affectsScore === true,
+        label: item.label || "OpenReef insight",
+        detail: item.detail || "",
+        cap: item.cap || null,
+      });
+    };
     const addLoss = (category, points, label, detail = "", status = "warning") => {
       const safeCategory = categoryLoss[category] === undefined ? "confidence" : category;
       const safePoints = Math.max(0, Number(points) || 0);
       if (!safePoints) return;
       categoryLoss[safeCategory] += safePoints;
       losses.push({ category: safeCategory, points: safePoints, label, detail, status });
+      addInsight(status === "critical" ? "action" : "watch", {
+        category: safeCategory,
+        points: safePoints,
+        affectsScore: true,
+        label,
+        detail,
+        status,
+      });
     };
     const addCap = (limit, label, detail, status = "critical") => {
-      caps.push({ limit: Math.max(0, Math.min(Number(limit) || 100, 100)), label, detail, status });
+      const cap = { limit: Math.max(0, Math.min(Number(limit) || 100, 100)), label, detail, status };
+      caps.push(cap);
+      addInsight(status === "critical" ? "action" : "watch", {
+        category: "life",
+        affectsScore: true,
+        label,
+        detail,
+        status,
+        cap: cap.limit,
+      });
     };
 
     const activeMode = this._activeMode();
@@ -2350,10 +2579,32 @@ class OpenReefPanel extends HTMLElement {
     if (armedUnavailable) addLoss("equipment", armedUnavailable * 18, `${armedUnavailable} armed device unavailable`, "Disarm or remap unavailable equipment before relying on controls.", "critical");
 
     sensorAlerts.forEach((alert) => {
-      const category = this._sensorHealthCategory(alert.id, alert.sensor);
-      const points = alert.status === "critical" ? 22 : alert.status === "warning" ? 9 : 8;
-      addLoss(category, points, alert.title, alert.detail, alert.status === "unknown" ? "warning" : alert.status);
+      const impact = this._sensorAlertImpact(alert.id, alert.sensor, alert.status);
+      const status = alert.status === "unknown" ? "warning" : alert.status;
+      if (impact.affectsScore && impact.points > 0) {
+        addLoss(impact.category, impact.points, alert.title, alert.detail, status);
+      } else {
+        addInsight(impact.group, {
+          category: impact.category,
+          affectsScore: false,
+          label: alert.title,
+          detail: `${alert.detail}. Shown as context; it does not reduce Reef Health unless it explains a tank-water issue.`,
+          status,
+        });
+      }
     });
+    const phAlert = sensorAlerts.find((alert) => alert.id === "ph" && ["warning", "critical"].includes(alert.status));
+    const co2Sensor = this._config.sensors?.co2;
+    const co2Value = co2Sensor?.entity_id ? Number.parseFloat(this._stateValue(co2Sensor.entity_id)) : Number.NaN;
+    if (phAlert && this._sensorEnabled(co2Sensor) && Number.isFinite(co2Value) && co2Value >= Number(co2Sensor.max)) {
+      addInsight("context", {
+        category: "chemistry",
+        affectsScore: false,
+        label: "CO2 may explain pH pressure",
+        detail: `${co2Sensor.label || "CO2"} is ${this._format(co2Value, 0)} ${co2Sensor.unit || "ppm"}. Fresh air or gas exchange may help if pH is low.`,
+        status: "warning",
+      });
+    }
 
     const tempSensor = this._config.sensors?.temp || {};
     const tempStatus = this._sensorStatus(tempSensor, "temp");
@@ -2407,9 +2658,17 @@ class OpenReefPanel extends HTMLElement {
     Object.entries(this._healthTrends?.items || {}).forEach(([sensorId, trend]) => {
       const sensor = this._config.sensors?.[sensorId];
       if (!sensor || !this._sensorEnabled(sensor) || !sensor.entity_id) return;
-      if (!["warning", "critical"].includes(trend.status)) return;
-      const category = this._sensorHealthCategory(sensorId, sensor) === "chemistry" ? "chemistry" : "stability";
-      addLoss(category, trend.penalty, `${sensor.label || sensorId} trend moving quickly`, trend.detail, trend.status);
+      if (trend.affectsScore && trend.penalty > 0) {
+        addLoss(trend.category || this._sensorHealthCategory(sensorId, sensor), trend.penalty, trend.label || `${sensor.label || sensorId} trend needs attention`, trend.detail, trend.status);
+        return;
+      }
+      addInsight(trend.group || "context", {
+        category: trend.category || this._sensorHealthCategory(sensorId, sensor),
+        affectsScore: false,
+        label: trend.label || `${sensor.label || sensorId} trend`,
+        detail: trend.detail,
+        status: trend.status || "context",
+      });
     });
 
     const categories = Object.fromEntries(this._healthCategoryChoices().map(([id, label]) => {
@@ -2427,10 +2686,11 @@ class OpenReefPanel extends HTMLElement {
       const statusRank = { critical: 2, warning: 1 };
       return (statusRank[b.status] || 0) - (statusRank[a.status] || 0) || b.points - a.points;
     });
-    const topReason = appliedCap?.label || sortedLosses[0]?.label || "All configured checks look steady";
+    const topInsight = groups.action[0] || groups.watch[0] || null;
+    const topReason = appliedCap?.label || topInsight?.label || "All scoring checks look steady";
     const nextAction = appliedCap
       ? appliedCap.detail
-      : sortedLosses[0]?.detail || "Keep monitoring and review trends after the next Check.";
+      : topInsight?.detail || (groups.context.length ? "Review the context notes if you are investigating a wider tank pattern." : "Keep monitoring and review trends after the next Check.");
     const grade = this._healthGrade(score);
     const status = this._healthStatus(score, caps);
     const detail = [
@@ -2449,6 +2709,7 @@ class OpenReefPanel extends HTMLElement {
       profileLabel: this._tankProfileLabel(profile),
       categories,
       losses: sortedLosses,
+      groups,
       caps,
       appliedCap,
       topReason,
@@ -2486,6 +2747,7 @@ class OpenReefPanel extends HTMLElement {
       schema: this._config.schemaVersion || "unknown",
       tankProfile: health.profileLabel,
       health,
+      controlMode: armedEquipment.length ? "OpenReef control armed" : "Monitor-only valid",
       activeMode: this._activeModeLabel(),
       modeTimer: this._activeModeCountdownText(),
       sensors: `${mappedSensors.length}/${enabledSensors.length}`,
@@ -2611,12 +2873,19 @@ class OpenReefPanel extends HTMLElement {
     const healthLosses = health.losses?.length
       ? health.losses.slice(0, 5).map((loss) => `- ${loss.label}: -${loss.points} (${loss.category})${loss.detail ? ` - ${loss.detail}` : ""}`)
       : ["- none"];
+    const healthGroupLines = (label, group) => [
+      label,
+      ...((health.groups?.[group] || []).length
+        ? health.groups[group].slice(0, 6).map((item) => `- ${item.label}: ${item.affectsScore ? `${item.points ? `-${item.points}` : "cap"} score impact` : "info only"}${item.detail ? ` - ${item.detail}` : ""}`)
+        : ["- none"]),
+    ];
     const lines = [
       "OpenReef support summary",
       `Version: ${check.version}`,
       `Schema: ${check.schema}`,
       `Setup complete: ${this._config.display?.setupComplete ? "yes" : "no"}`,
       `Tank profile: ${check.tankProfile}`,
+      `OpenReef control mode: ${check.controlMode}`,
       `Reef Health Score: ${health.score}/100 (${health.grade}, ${health.status})`,
       `Reef Health top reason: ${health.topReason}`,
       `Reef Health next action: ${health.nextAction}`,
@@ -2645,6 +2914,12 @@ class OpenReefPanel extends HTMLElement {
       "",
       "Reef Health point losses",
       ...healthLosses,
+      "",
+      "Reef Health insights",
+      ...healthGroupLines("Needs action", "action"),
+      ...healthGroupLines("Worth watching", "watch"),
+      ...healthGroupLines("Context", "context"),
+      ...healthGroupLines("Learning", "learning"),
       "",
       "Enabled sensors",
       ...(sensors.length ? sensors : ["- none"]),
@@ -2967,9 +3242,30 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _reefHealthInsightGroup(title, group, emptyText) {
+    const items = group || [];
+    return `
+      <section class="health-insight-group">
+        <div class="health-insight-head">
+          <span>${this._escape(title)}</span>
+          <small>${items.length ? `${items.length} item${items.length === 1 ? "" : "s"}` : "Clear"}</small>
+        </div>
+        ${items.length ? items.slice(0, 6).map((item) => `
+          <div class="health-insight-row ${this._escape(item.status)}">
+            <div>
+              <strong>${this._escape(item.label)}</strong>
+              <small>${this._escape(item.detail || "")}</small>
+            </div>
+            <span class="pill ${item.affectsScore ? item.status : "unknown"}">${item.affectsScore ? (item.points ? `-${this._escape(item.points)}` : `cap ${this._escape(item.cap || "")}`) : "info"}</span>
+          </div>
+        `).join("") : `<p class="muted">${this._escape(emptyText)}</p>`}
+      </section>
+    `;
+  }
+
   _reefHealthBreakdown(health) {
     const categories = this._healthCategoryChoices().map(([id]) => health.categories[id]).filter(Boolean);
-    const losses = health.losses.slice(0, 5);
+    const groups = health.groups || {};
     return `
       <article class="panel health-breakdown ${this._escape(health.status)}">
         <div class="section-head">
@@ -3006,14 +3302,11 @@ class OpenReefPanel extends HTMLElement {
           </section>
         </div>
         ${health.appliedCap ? `<div class="notice ${health.appliedCap.status === "critical" ? "danger-notice" : "warning-notice"}"><strong>Hard cap applied:</strong> ${this._escape(health.appliedCap.label)}. ${this._escape(health.appliedCap.detail)}</div>` : ""}
-        <div class="health-loss-list">
-          ${losses.length ? losses.map((loss) => `
-            <div class="health-loss-row ${this._escape(loss.status)}">
-              <span>${this._escape(this._healthCategoryChoices().find(([id]) => id === loss.category)?.[1] || loss.category)}</span>
-              <strong>-${this._escape(loss.points)}</strong>
-              <small>${this._escape(loss.label)}${loss.detail ? ` · ${this._escape(loss.detail)}` : ""}</small>
-            </div>
-          `).join("") : `<p class="muted">No point losses from configured OpenReef checks.</p>`}
+        <div class="health-insight-grid">
+          ${this._reefHealthInsightGroup("Needs action", groups.action, "No urgent Reef Health actions.")}
+          ${this._reefHealthInsightGroup("Worth watching", groups.watch, "No scoring warnings right now.")}
+          ${this._reefHealthInsightGroup("Context", groups.context, "No extra context from optional readings.")}
+          ${this._reefHealthInsightGroup("Learning", groups.learning, "Trend learning is up to date.")}
         </div>
       </article>
     `;
@@ -4985,8 +5278,8 @@ class OpenReefPanel extends HTMLElement {
         .health-breakdown.warning { border-color: #a16207; }
         .health-breakdown.critical { border-color: #7f1d1d; }
         .health-category-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
-        .health-category, .health-reason-card, .health-loss-row { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 5px; }
-        .health-category span, .health-reason-card span, .health-loss-row span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+        .health-category, .health-reason-card, .health-insight-group, .health-insight-row { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 5px; }
+        .health-category span, .health-reason-card span, .health-insight-head span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
         .health-category strong { color: #67e8f9; font-size: 22px; }
         .health-category.ok { border-color: #166534; }
         .health-category.warning { border-color: #a16207; }
@@ -4994,11 +5287,17 @@ class OpenReefPanel extends HTMLElement {
         .health-reason-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
         .health-reason-card strong { color: #e5edf5; font-size: 16px; overflow-wrap: anywhere; }
         .health-reason-card p { color: #9fb2c7; }
-        .health-loss-list { display: grid; gap: 8px; }
-        .health-loss-row { grid-template-columns: minmax(150px, .28fr) auto 1fr; align-items: center; }
-        .health-loss-row strong { color: #67e8f9; }
-        .health-loss-row.critical { border-color: #7f1d1d; }
-        .health-loss-row.warning { border-color: #a16207; }
+        .health-insight-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .health-insight-group { align-content: start; }
+        .health-insight-head, .health-insight-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .health-insight-row { background: rgba(18, 31, 47, .76); }
+        .health-insight-row div { display: grid; gap: 4px; min-width: 0; }
+        .health-insight-row strong { color: #e5edf5; overflow-wrap: anywhere; }
+        .health-insight-row small { color: #9fb2c7; overflow-wrap: anywhere; }
+        .health-insight-row.critical { border-color: #7f1d1d; }
+        .health-insight-row.warning { border-color: #a16207; }
+        .health-insight-row.learning { border-color: #334155; }
+        .health-insight-row.context { border-color: #294055; }
         .issue-list { display: grid; gap: 8px; }
         .issue-item { width: 100%; display: grid; grid-template-columns: auto minmax(160px, .45fr) 1fr; gap: 12px; align-items: center; padding: 12px; text-align: left; }
         .issue-item small { color: #9fb2c7; }
@@ -5241,7 +5540,8 @@ class OpenReefPanel extends HTMLElement {
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
           .range-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .trend-summary { grid-template-columns: 1fr; }
-          .health-category-grid, .health-reason-grid, .health-loss-row { grid-template-columns: 1fr; }
+          .health-category-grid, .health-reason-grid, .health-insight-grid { grid-template-columns: 1fr; }
+          .health-insight-head, .health-insight-row { flex-direction: column; align-items: stretch; }
           .setup-guide, .setup-choice-grid, .setup-choice-grid.two-choice { grid-template-columns: 1fr; }
           .setup-next-list div { grid-template-columns: 1fr; }
         }
