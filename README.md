@@ -19,6 +19,8 @@ The optional OpenReef Labs add-on has moved to a separate private repository so 
 
 Controls are locked by default. Each equipment switch must be explicitly mapped and armed before OpenReef will send control service calls.
 
+For tester handoff, use [BETA_TESTER_INSTALL_GUIDE.md](BETA_TESTER_INSTALL_GUIDE.md), [OPENREEF_BETA_SMOKE_TEST.md](OPENREEF_BETA_SMOKE_TEST.md), and [OPENREEF_BETA_FEEDBACK_TEMPLATE.md](OPENREEF_BETA_FEEDBACK_TEMPLATE.md).
+
 The add-on is no longer required for the MVP controller. OpenReef Labs is intentionally separate and private while experimental advanced screens are being rebuilt.
 
 ## Development

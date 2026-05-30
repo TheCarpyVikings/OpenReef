@@ -823,6 +823,7 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "copy-support-summary") this._copySupportSummary();
       if (action === "copy-beta-smoke-test") this._copyBetaSmokeTest();
+      if (action === "copy-beta-feedback-template") this._copyBetaFeedbackTemplate();
       if (action === "clear-activity") {
         this._config.activity = [];
         this._saveConfig();
@@ -2051,6 +2052,10 @@ class OpenReefPanel extends HTMLElement {
     await this._copyText(this._betaSmokeTestText(), "Beta smoke-test checklist copied", "Could not copy beta smoke-test checklist");
   }
 
+  async _copyBetaFeedbackTemplate() {
+    await this._copyText(this._betaFeedbackTemplateText(), "Beta feedback template copied", "Could not copy beta feedback template");
+  }
+
   async _copyText(text, successMessage, failureMessage) {
     try {
       if (navigator.clipboard?.writeText) {
@@ -2336,9 +2341,67 @@ class OpenReefPanel extends HTMLElement {
       "- Confirm setup/settings sections scroll normally and buttons are tappable.",
       "",
       "Report back",
+      "- Copy Settings -> System Check -> Copy feedback template.",
       "- Copy Settings -> System Check -> Copy support summary.",
       "- Note any wrong entity suggestions, confusing wording, mobile layout issues, or HA reconnects.",
       "- Do not send API keys, passwords, or Home Assistant long-lived access tokens.",
+    ];
+    return lines.join("\n");
+  }
+
+  _betaFeedbackTemplateText() {
+    const check = this._systemCheck();
+    const lines = [
+      "OpenReef beta feedback",
+      `OpenReef version: ${check.version}`,
+      `Config schema: ${check.schema}`,
+      "",
+      "Tester setup",
+      "- Home Assistant version:",
+      "- Device type: HA Green / HA Yellow / Raspberry Pi / VM / other:",
+      "- Browser and device used:",
+      "- Reef equipment being tested:",
+      "- Apex/Trident entities in Home Assistant: yes / no",
+      "",
+      "Install and setup",
+      "- Did OpenReef install/update cleanly?",
+      "- Did OpenReef appear in the sidebar after restart?",
+      "- Did the setup wizard make sense?",
+      "- Which sensor preset did you choose?",
+      "- Which entity suggestions were correct?",
+      "- Which entity suggestions were missing or wrong?",
+      "",
+      "Live Stats and trends",
+      "- Which readings showed correctly?",
+      "- Which trend ranges worked? 1 hour / 6 hours / 24 hours / 7 days / 30 days",
+      "- Any values, units, labels, or graph ranges look wrong?",
+      "",
+      "Controls, modes, and safety",
+      "- Which equipment did you map?",
+      "- Which equipment did you arm?",
+      "- Did disarmed equipment stay locked?",
+      "- Did Feed, Maintenance, Running, or custom modes do what the preview said?",
+      "- Did ATO duty cycle behaviour match your expectation?",
+      "- If display wavemakers were used, were the warnings clear?",
+      "",
+      "Mobile",
+      "- Phone/tablet tested:",
+      "- Were buttons tappable?",
+      "- Did setup/settings scroll properly?",
+      "- Any text too small, hidden, or hard to read?",
+      "",
+      "Stability",
+      "- Any Home Assistant Connection lost / Reconnecting messages?",
+      "- Any browser freezes, restarts, or slow screens?",
+      "- Any action that felt unsafe or confusing?",
+      "",
+      "Screenshots or notes",
+      "-",
+      "",
+      "Support summary",
+      "Paste Settings -> System Check -> Copy support summary below this line.",
+      "",
+      "Do not include API keys, passwords, Home Assistant long-lived access tokens, or private network credentials.",
     ];
     return lines.join("\n");
   }
@@ -3905,6 +3968,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="button-row">
           <button class="secondary" data-action="validate">Refresh checks</button>
           <button class="secondary" data-action="copy-beta-smoke-test">Copy beta smoke test</button>
+          <button class="secondary" data-action="copy-beta-feedback-template">Copy feedback template</button>
           <button class="primary" data-action="copy-support-summary">Copy support summary</button>
         </div>
       `,

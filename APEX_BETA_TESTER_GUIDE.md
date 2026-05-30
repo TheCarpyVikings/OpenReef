@@ -4,10 +4,11 @@ This guide is for testers who already have Neptune Apex or Trident data visible 
 
 ## Install
 
-1. Install OpenReef through HACS as a custom integration.
-2. Restart Home Assistant.
-3. Go to **Settings -> Devices & services -> Add integration -> OpenReef**.
-4. Open **OpenReef** from the Home Assistant sidebar.
+1. Follow the main beta install guide in `BETA_TESTER_INSTALL_GUIDE.md`.
+2. Install OpenReef through HACS as a custom integration.
+3. Restart Home Assistant.
+4. Go to **Settings -> Devices & services -> Add integration -> OpenReef**.
+5. Open **OpenReef** from the Home Assistant sidebar.
 
 The optional OpenReef Labs add-on is not required for this beta.
 
@@ -46,6 +47,7 @@ The optional OpenReef Labs add-on is not required for this beta.
 - Confirm ATO duty cycle stays off unless deliberately enabled.
 - Use **Settings -> System Check** to review the beta handoff checklist, then **Copy support summary** if something looks wrong.
 - Use **Copy beta smoke test** in System Check for the full step-by-step test script.
+- Use **Copy feedback template** in System Check when reporting results.
 
 ## Please Report
 
@@ -55,5 +57,6 @@ The optional OpenReef Labs add-on is not required for this beta.
 - Which suggestions were wrong or missing.
 - Whether mobile setup is usable.
 - The copied support summary, including the beta handoff checklist.
+- The completed feedback template.
 
 Do not send API keys, passwords, or Home Assistant long-lived access tokens.

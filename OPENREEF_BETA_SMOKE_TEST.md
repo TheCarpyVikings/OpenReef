@@ -68,6 +68,7 @@ Ask the tester to send:
 - Which suggestions were wrong or missing.
 - Any mobile layout issues.
 - Any Home Assistant disconnects/restarts.
+- **Settings -> System Check -> Copy feedback template** output.
 - **Settings -> System Check -> Copy support summary** output.
 
 Do not ask testers to send API keys, passwords, or Home Assistant long-lived access tokens.

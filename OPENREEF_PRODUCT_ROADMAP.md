@@ -40,7 +40,7 @@ Status: **Core MVP in active beta**
 - Alerts: sensor threshold states, muting, history, and optional HA persistent notifications
 - Modes: Running, Feed, Maintenance, custom modes, schedules, confirmations, timers, and restore plans
 - Safety: heater temperature checks, skimmer/return-pump helpers, ATO duty cycle, ATO return-pump checks, display-wavemaker restart warnings/reminders
-- Beta setup: onboarding includes Apex/Trident sensor preset, starter equipment, safety defaults, a support-summary handoff checklist, and a copyable smoke-test script
+- Beta setup: onboarding includes Apex/Trident sensor preset, starter equipment, safety defaults, a support-summary handoff checklist, a copyable smoke-test script, and a copyable feedback template
 - Labs/old Next.js work: preserved for later migration
 
 ## Roadmap Phases
@@ -267,6 +267,7 @@ Exit criteria:
 - Add beta tester guide.
 - Add Apex beta tester guide.
 - Add beta smoke-test script.
+- Add beta feedback template.
 - Add known limitations.
 - Add "Labs features are preserved but experimental" note.
 - Add ready-made unit planning doc later.
