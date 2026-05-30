@@ -13,10 +13,10 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Add rollback and beta reset instructions.
 - [ ] Add first Python tests for config migration, targeted entity search, and safe toggle validation.
 - [ ] Add first frontend smoke-test notes/screenshots for desktop and mobile.
-- [ ] Add nitrate, phosphate, dissolved oxygen, leak, water-level, and flow sensors as optional Core mappings.
+- [x] Add nitrate, phosphate, dissolved oxygen, leak, water-level, flow, and PAR sensors as optional Core mappings.
 - [ ] Add Manual Chemistry V1: manual entry, history, and trends for common reef tests.
 - [ ] Add Maintenance Tasks V1 without Google dependency.
-- [ ] Add Reef Health Score V1 in Core using configured OpenReef entities only.
+- [x] Add Reef Health Score V1 in Core using configured OpenReef entities only.
 
 ## Product Rules
 
@@ -52,6 +52,13 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] Alkalinity.
 - [x] Calcium.
 - [x] Magnesium.
+- [x] Nitrate.
+- [x] Phosphate.
+- [x] Dissolved oxygen.
+- [x] Leak detector.
+- [x] High and low water-level sensors.
+- [x] Flow rate.
+- [x] PAR.
 - [x] Room temperature.
 - [x] CO2.
 - [x] Humidity.
@@ -80,6 +87,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 ### Dashboard
 
 - [x] Mission Control.
+- [x] Reef Health Score V1.
 - [x] Configurable Mission Control cards.
 - [x] Attention section for alerts, missing mappings, interlocks, and armed unavailable equipment.
 - [x] Controls screen.
@@ -105,14 +113,14 @@ These are the next useful passes before widening beta beyond trusted testers.
 ### Monitoring Parity
 
 - [x] Temperature, pH, salinity, ORP, alkalinity, calcium, magnesium.
-- [ ] Nitrate first-class Core sensor.
-- [ ] Phosphate first-class Core sensor.
-- [ ] Dissolved oxygen optional sensor.
-- [ ] Leak sensor mapping.
-- [ ] Optical/high/low water level sensor mapping.
+- [x] Nitrate first-class Core sensor.
+- [x] Phosphate first-class Core sensor.
+- [x] Dissolved oxygen optional sensor.
+- [x] Leak sensor mapping.
+- [x] Optical/high/low water level sensor mapping.
 - [ ] Liquid level/depth sensor mapping.
-- [ ] Flow sensor mapping.
-- [ ] PAR sensor mapping.
+- [x] Flow sensor mapping.
+- [x] PAR sensor mapping.
 - [ ] Additional probe/module grouping.
 - [ ] Probe calibration helpers.
 - [ ] Probe health/last-seen checks.
@@ -180,7 +188,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Visual safety builder instead of Apex-style text programming.
 - [ ] Explainable alerts: what changed, why it matters, and what to check.
 - [ ] Better long-range trends and range selection.
-- [ ] Reef Health Score in Core.
+- [x] Reef Health Score in Core.
 - [ ] Rate-of-change warnings.
 - [ ] Anomaly timeline.
 - [ ] Correlation heatmap.
@@ -216,7 +224,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 | Settings | `SettingsScreen.tsx` | Partly migrated to Core | Continue simplifying |
 | Entity picker | `EntityPicker.tsx`, `SafeEntityPicker.tsx` | Migrated to Core | Keep targeted/capped |
 | Manual tests | `ManualStatsScreen.tsx`, `ParamHistoryModal.tsx` | Labs/reference | Chemistry V1 |
-| Reef Health Score | `ReefHealthScore.tsx` | Labs/reference | Core V1 soon |
+| Reef Health Score | `ReefHealthScore.tsx` | Migrated to Core V1 | Keep improving |
 | Tasks | `TasksScreen.tsx`, Google Tasks API | Labs/reference | HA-native Tasks V1 |
 | Lights | `LightsScreen.tsx` | Labs/reference | Lighting phase |
 | Water change/AWC | `WaterChangeScreen.tsx` | Labs/reference | Water phase |

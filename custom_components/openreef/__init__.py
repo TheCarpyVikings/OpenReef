@@ -375,6 +375,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         else:
             sensor["enabled"] = bool(sensor["entity_id"]) or bool(meta.get("enabled", False))
         sensor.setdefault("group", meta["group"])
+        sensor["kind"] = meta.get("kind", "numeric")
         sensor.setdefault("unit", meta["unit"])
         sensor.setdefault("min", meta["min"])
         sensor.setdefault("max", meta["max"])
@@ -1010,6 +1011,45 @@ def _append_alert_history(
     alert_config["history"] = history[:50]
 
 
+def _sensor_kind(sensor_id: str, sensor: dict[str, Any]) -> str:
+    kind = sensor.get("kind") or MVP_SENSORS.get(sensor_id, {}).get("kind") or "numeric"
+    return str(kind)
+
+
+def _sensor_binary_state(state: str) -> str:
+    value = state.strip().lower()
+    if value in {
+        "on",
+        "wet",
+        "detected",
+        "leaking",
+        "leak",
+        "flood",
+        "problem",
+        "unsafe",
+        "active",
+        "high",
+        "low",
+        "1",
+        "true",
+    }:
+        return "critical"
+    if value in {
+        "off",
+        "dry",
+        "clear",
+        "safe",
+        "ok",
+        "normal",
+        "inactive",
+        "closed",
+        "0",
+        "false",
+    }:
+        return "ok"
+    return "warning"
+
+
 def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
     sensors = config.get("sensors", {})
@@ -1063,6 +1103,28 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
                     "message": f"{entity_id} is unavailable.",
                 }
             )
+            continue
+
+        if _sensor_kind(sensor_id, sensor) == "binary":
+            binary_status = _sensor_binary_state(str(state.state))
+            if binary_status == "critical":
+                alerts.append(
+                    {
+                        "id": sensor_id,
+                        "severity": "critical",
+                        "title": f"{label} active",
+                        "message": f"{entity_id} reports {state.state}.",
+                    }
+                )
+            elif binary_status == "warning":
+                alerts.append(
+                    {
+                        "id": sensor_id,
+                        "severity": "warning",
+                        "title": f"{label} state needs review",
+                        "message": f"{entity_id} reports {state.state}.",
+                    }
+                )
             continue
 
         try:

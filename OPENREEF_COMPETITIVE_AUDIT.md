@@ -47,10 +47,10 @@ OpenReef can win by avoiding Apex's biggest pain point: powerful control that of
 | Temperature/pH | Core Apex monitoring | Core OpenReef monitoring | Competitive |
 | ORP/salinity | Apex/Pro and module support | Core OpenReef optional sensors | Competitive if entities exist |
 | Alk/Ca/Mg | Trident | Core OpenReef can display HA entities | Need import helper and chemistry-specific dashboard |
-| Nitrate/phosphate | Trident NP | Not first-class Core yet | Add optional sensors and trends |
-| Leak detection | Apex/FMM sensors | Not first-class Core yet | Add leak mappings and emergency actions |
-| Water level/depth | Optical sensors and LLS | Not first-class Core yet | Add level/depth mappings and interlocks |
-| Flow monitoring | FMK/FMM | Not first-class Core yet | Add flow mappings and warnings |
+| Nitrate/phosphate | Trident NP | Core optional sensors | Add import helper and chemistry-specific dashboard |
+| Leak detection | Apex/FMM sensors | Core optional binary safety sensor | Add emergency actions later |
+| Water level/depth | Optical sensors and LLS | Core high/low binary water-level sensors | Add liquid-level/depth mapping and interlocks |
+| Flow monitoring | FMK/FMM | Core optional flow-rate sensor | Add flow-triggered warnings and actions |
 | Dosing | DOS and Trident-controlled dosing | Labs/reference only | Build advisory dosing before automation |
 | Automatic water changes | DOS workflows | Labs/reference only | Build manual log, preview, then armed AWC |
 | Feeding | AFS | Not Core yet | Add feeder entity mapping/schedules |
@@ -69,9 +69,9 @@ OpenReef can win by avoiding Apex's biggest pain point: powerful control that of
 | Panel | HA-native sidebar custom panel | Browser receives HA `hass` object, not tokens |
 | Setup | Wizard with presets and entity suggestions | Apex/Trident beta preset exists |
 | Entity access | Targeted search/runtime/history | Avoids full `/api/states` crash path |
-| Monitoring | Temp, sump temp, pH, salinity, ORP, alk, calcium, magnesium, room temp, CO2, humidity | Add nitrate/phosphate/DO/leak/level/flow next |
+| Monitoring | Temp, sump temp, pH, salinity, ORP, alk, calcium, magnesium, nitrate, phosphate, dissolved oxygen, leak, high/low water level, flow, PAR, room temp, CO2, humidity | Add liquid-level/depth and import helpers next |
 | Trends | Single-entity targeted history with selectable ranges | Long ranges depend on HA recorder |
-| Mission Control | Health cards, attention items, mode card, configurable cards | Add Reef Health Score later |
+| Mission Control | Health cards, Reef Health Score, attention items, mode card, configurable cards | Keep the score explainable and simple |
 | Controls | Mapped/armed switch control only | Good safety foundation |
 | Energy | Totals and per-equipment mappings | Add anomaly and standby detection later |
 | Alerts | Thresholds, mute, history, persistent notifications | Add explainable guidance and routing |
@@ -90,7 +90,7 @@ OpenReef can win by avoiding Apex's biggest pain point: powerful control that of
 | Mission Control | `MissionControlScreen.tsx` | Health/alerts/tasks/equipment ideas | Continue migration |
 | Live Stats | `LiveStatsScreen.tsx` | Sensor card ideas | Mostly migrated |
 | Manual stats | `ManualStatsScreen.tsx`, `ParamHistoryModal.tsx` | Chemistry logging | Build Core Chemistry V1 |
-| Reef Health Score | `ReefHealthScore.tsx` | Better-than-Apex summary | Build Core V1 soon |
+| Reef Health Score | `ReefHealthScore.tsx` | Better-than-Apex summary | Core V1 migrated; improve scoring over time |
 | Energy | `EnergyScreen.tsx`, `EquipmentDetailModal.tsx` | Cost/power detail | Partly migrated |
 | Tasks | `TasksScreen.tsx`, task API | Maintenance workflow | Build local/HA-native first |
 | Lights | `LightsScreen.tsx` | Lighting profiles | Rebuild through HA lights |
@@ -137,10 +137,10 @@ OpenReef can win by avoiding Apex's biggest pain point: powerful control that of
 ## Recommended Build Order
 
 1. Stabilize beta handoff and low-memory testing.
-2. Add missing first-class monitoring sensors: nitrate, phosphate, dissolved oxygen, leak, water level, flow, PAR.
-3. Add Manual Chemistry V1 and Reef Health Score V1.
-4. Add Maintenance Tasks V1 and reagent/media tracking.
-5. Add Apex/Trident import helper.
+2. Add Manual Chemistry V1 and chemistry-specific trend cards.
+3. Add Maintenance Tasks V1 and reagent/media tracking.
+4. Add Apex/Trident import helper.
+5. Add liquid-level/depth and richer flow interlocks.
 6. Add Lighting V1 through HA light entities.
 7. Add Dosing V1 as advisory/logging/reminders before automation.
 8. Add Water Change V1, then AWC preview, then armed AWC.

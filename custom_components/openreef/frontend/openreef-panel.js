@@ -1186,9 +1186,11 @@ class OpenReefPanel extends HTMLElement {
     const sensors = this._config.sensors || {};
     const tankBasic = new Set(["temp", "ph", "salinity"]);
     const apex = new Set(["temp", "sump_temp", "salinity", "alkalinity", "orp", "calcium", "ph", "magnesium"]);
+    const apexNp = new Set([...apex, "nitrate", "phosphate"]);
     Object.entries(sensors).forEach(([id, sensor]) => {
       if (preset === "tank") sensor.enabled = tankBasic.has(id);
       if (preset === "apex") sensor.enabled = apex.has(id);
+      if (preset === "apex_np") sensor.enabled = apexNp.has(id);
       if (preset === "all") sensor.enabled = true;
       if (preset === "minimal") sensor.enabled = id === "temp";
     });
@@ -1331,6 +1333,21 @@ class OpenReefPanel extends HTMLElement {
     return Boolean(this._alertMutedUntil(sensorId));
   }
 
+  _sensorKind(sensor, sensorId = "") {
+    return sensor?.kind || this._sensorMeta?.[sensorId]?.kind || "numeric";
+  }
+
+  _binarySensorStatus(rawState) {
+    const value = String(rawState || "").trim().toLowerCase();
+    if (["on", "wet", "detected", "leaking", "leak", "flood", "problem", "unsafe", "active", "high", "low", "1", "true"].includes(value)) {
+      return "critical";
+    }
+    if (["off", "dry", "clear", "safe", "ok", "normal", "inactive", "closed", "0", "false"].includes(value)) {
+      return "ok";
+    }
+    return "warning";
+  }
+
   _formatMutedUntil(sensorId) {
     const mutedUntil = this._alertMutedUntil(sensorId);
     if (!mutedUntil) return "";
@@ -1341,6 +1358,11 @@ class OpenReefPanel extends HTMLElement {
     if (!this._sensorEnabled(sensor)) return "disabled";
     if (sensorId && this._isAlertMuted(sensorId)) return "muted";
     if (sensor.alertsEnabled === false) return "muted";
+    if (this._sensorKind(sensor, sensorId) === "binary") {
+      const state = this._state(sensor.entity_id);
+      if (!sensor.entity_id || !state || ["unknown", "unavailable"].includes(state.state)) return "unknown";
+      return this._binarySensorStatus(state.state);
+    }
     const value = this._number(sensor.entity_id);
     if (value === null) return "unknown";
     if (value < Number(sensor.min) || value > Number(sensor.max)) return "critical";
@@ -1370,6 +1392,12 @@ class OpenReefPanel extends HTMLElement {
     if (mutedUntil) return `Alerts muted until ${mutedUntil}. The live reading can still be used.`;
     if (sensor.alertsEnabled === false) return "Mission Control alerts are off. The live reading can still be used.";
     const status = this._sensorStatus(sensor, sensorId);
+    if (this._sensorKind(sensor, sensorId) === "binary") {
+      if (status === "unknown") return sensor.entity_id ? "Mapped, but Home Assistant is not reporting a clear state." : "No entity is mapped yet.";
+      if (status === "critical") return "This safety sensor is active.";
+      if (status === "warning") return "Home Assistant returned an unexpected state for this safety sensor.";
+      return "Live and reporting its normal state.";
+    }
     if (status === "unknown") return sensor.entity_id ? "Mapped, but Home Assistant is not reporting a numeric value." : "No entity is mapped yet.";
     if (status === "critical") return "Outside the configured safe range.";
     if (status === "warning") return "Near the configured warning threshold.";
@@ -1382,13 +1410,29 @@ class OpenReefPanel extends HTMLElement {
     return status;
   }
 
+  _sensorDisplayValue(sensorId, sensor) {
+    if (this._sensorKind(sensor, sensorId) === "binary") {
+      const state = this._state(sensor.entity_id);
+      if (!sensor.entity_id) return "Not mapped";
+      if (!state || state.state === "unknown" || state.state === "unavailable") return "Unknown";
+      return String(state.state).replaceAll("_", " ");
+    }
+    return this._format(this._number(sensor.entity_id), this._sensorDigits(sensorId));
+  }
+
+  _sensorDisplayUnit(sensorId, sensor) {
+    return this._sensorKind(sensor, sensorId) === "binary" ? "" : (sensor.unit || "");
+  }
+
   _format(value, digits = 1) {
     return Number.isFinite(value) ? Number(value).toFixed(digits) : "--";
   }
 
   _sensorDigits(sensorId) {
     if (sensorId === "ph" || sensorId === "alkalinity") return 2;
-    if (["orp", "calcium", "magnesium", "co2"].includes(sensorId)) return 0;
+    if (sensorId === "phosphate") return 3;
+    if (["nitrate", "dissolved_oxygen"].includes(sensorId)) return 2;
+    if (["orp", "calcium", "magnesium", "co2", "flow", "par"].includes(sensorId)) return 0;
     return 1;
   }
 
@@ -1665,6 +1709,10 @@ class OpenReefPanel extends HTMLElement {
     if (sensor?.group === "room") return "Room";
     if (sensor?.group === "sump") return "Sump";
     if (sensor?.group === "chemistry") return "Chemistry";
+    if (sensor?.group === "water") return "Water";
+    if (sensor?.group === "safety") return "Safety";
+    if (sensor?.group === "flow") return "Flow";
+    if (sensor?.group === "lighting") return "Lighting";
     return "Display";
   }
 
@@ -1672,6 +1720,10 @@ class OpenReefPanel extends HTMLElement {
     if (sensor?.group === "room") return "room-card";
     if (sensor?.group === "sump") return "sump-card";
     if (sensor?.group === "chemistry") return "chemistry-card";
+    if (sensor?.group === "water") return "water-card";
+    if (sensor?.group === "safety") return "safety-sensor-card";
+    if (sensor?.group === "flow") return "flow-card";
+    if (sensor?.group === "lighting") return "lighting-card";
     return "tank-card";
   }
 
@@ -1689,11 +1741,20 @@ class OpenReefPanel extends HTMLElement {
       .map(([id, sensor]) => {
         const status = this._sensorStatus(sensor, id);
         if (!["critical", "warning", "unknown"].includes(status)) return null;
-        const value = this._number(sensor.entity_id);
-        const display = this._format(value, this._sensorDigits(id));
-        const range = `${sensor.min} - ${sensor.max} ${sensor.unit || ""}`.trim();
-        const title = status === "unknown" ? `${sensor.label} is not reporting` : `${sensor.label} ${status === "critical" ? "outside range" : "near threshold"}`;
-        const detail = status === "unknown" ? (sensor.entity_id || "No entity mapped") : `${display} ${sensor.unit || ""} · target ${range}`;
+        const display = this._sensorDisplayValue(id, sensor);
+        const unit = this._sensorDisplayUnit(id, sensor);
+        const isBinary = this._sensorKind(sensor, id) === "binary";
+        const range = isBinary ? "normal state" : `${sensor.min} - ${sensor.max} ${unit}`.trim();
+        const title = status === "unknown"
+          ? `${sensor.label} is not reporting`
+          : isBinary
+            ? `${sensor.label} active`
+            : `${sensor.label} ${status === "critical" ? "outside range" : "near threshold"}`;
+        const detail = status === "unknown"
+          ? (sensor.entity_id || "No entity mapped")
+          : isBinary
+            ? `${sensor.entity_id || "Sensor"} reports ${display}`
+            : `${display} ${unit} · target ${range}`;
         return { id, sensor, status, title, detail };
       })
       .filter(Boolean);
@@ -2088,6 +2149,7 @@ class OpenReefPanel extends HTMLElement {
 
   _missionCards() {
     return {
+      health: true,
       live: true,
       controls: true,
       energy: true,
@@ -2097,10 +2159,43 @@ class OpenReefPanel extends HTMLElement {
 
   _missionCardChoices() {
     return [
+      ["health", "Reef Health", "Show an explainable 0-100 health score."],
       ["live", "Live Stats", "Show mapped sensor readings in Mission Control."],
       ["controls", "Controls", "Show armed equipment status in Mission Control."],
       ["energy", "Energy", "Show energy and cost summaries in Mission Control."],
     ];
+  }
+
+  _reefHealthScore(sensors = this._enabledSensors(), equipment = Object.entries(this._config.equipment || {}), sensorAlerts = this._sensorAlerts(sensors), interlocks = this._interlockWarnings()) {
+    const critical = sensorAlerts.filter((alert) => alert.status === "critical").length;
+    const warnings = sensorAlerts.filter((alert) => alert.status === "warning").length;
+    const missing = Number(this._validation?.missing_entities?.length || 0);
+    const armedUnavailable = Number(this._validation?.armed_unavailable?.length || 0);
+    const mappedSensors = sensors.filter(([, sensor]) => sensor.entity_id).length;
+    const armedEquipment = equipment.filter(([, item]) => item.armed).length;
+    const noSensors = sensors.length === 0;
+    const score = Math.max(
+      0,
+      Math.min(
+        100,
+        100
+          - critical * 18
+          - warnings * 8
+          - interlocks.length * 6
+          - missing * 6
+          - armedUnavailable * 10
+          - (noSensors ? 20 : 0),
+      ),
+    );
+    const grade = score >= 90 ? "A" : score >= 80 ? "B" : score >= 70 ? "C" : score >= 60 ? "D" : "E";
+    const status = score >= 90 ? "ok" : score >= 75 ? "warning" : "critical";
+    const detail = [
+      `${mappedSensors}/${sensors.length} sensors mapped`,
+      `${armedEquipment}/${equipment.length} armed`,
+      `${critical} critical`,
+      `${warnings} warning`,
+    ].join(" · ");
+    return { score, grade, status, detail };
   }
 
   _systemCheck() {
@@ -2311,7 +2406,7 @@ class OpenReefPanel extends HTMLElement {
       "",
       "Setup and mapping",
       "- Open Setup and confirm the wizard can move through every step.",
-      "- If testing Apex/Trident, choose the Apex / Trident beta sensor preset.",
+      "- If testing Apex/Trident, choose the Apex / Trident beta preset. Use Apex + Trident NP only if nitrate/phosphate entities exist.",
       `- Confirm enabled sensors match the tester's system: ${enabledSensors.join(", ") || "none enabled"}.`,
       "- Use Find matches for at least two sensors and confirm suggestions are sensible.",
       "- Do not paste HA tokens or secrets anywhere in OpenReef.",
@@ -2518,9 +2613,11 @@ class OpenReefPanel extends HTMLElement {
     const armedEquipment = equipment.filter(([, item]) => item.armed).length;
     const mappedEnergy = this._energyTotalMappings().filter(([, energyKey]) => this._config.energy[energyKey]).length;
     const noEnabledSensors = !sensors.length;
+    const health = this._reefHealthScore(sensors, equipment, sensorAlerts, interlocks);
     const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
     const summaryCards = [
+      cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.grade} grade · ${health.detail}`, health.status, "mission") : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, `${critical.length} critical · ${warnings.length} warning`, critical.length ? "critical" : warnings.length || noEnabledSensors ? "warning" : "ok", "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -2741,15 +2838,15 @@ class OpenReefPanel extends HTMLElement {
 
   _sensorRow(id, sensor) {
     const status = this._sensorStatus(sensor, id);
-    const value = this._number(sensor.entity_id);
-    const display = this._format(value, this._sensorDigits(id));
+    const display = this._sensorDisplayValue(id, sensor);
+    const unit = this._sensorDisplayUnit(id, sensor);
     return `
       <div class="row">
         <div>
           <strong>${this._escape(sensor.label)}</strong>
           <span>${this._escape(sensor.entity_id || "Not mapped")}</span>
         </div>
-        <div class="pill ${status}">${display} ${this._escape(sensor.unit || "")}</div>
+        <div class="pill ${status}">${this._escape(display)} ${this._escape(unit)}</div>
       </div>
     `;
   }
@@ -2796,16 +2893,24 @@ class OpenReefPanel extends HTMLElement {
         <h2>Live Stats</h2>
         <div class="grid three">
           ${sensors.length ? sensors.map(([id, sensor]) => {
-            const value = this._number(sensor.entity_id);
-            const display = this._format(value, this._sensorDigits(id));
-            return `
-              <button class="stat stat-button ${this._sensorGroupClass(sensor)}" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
+            const display = this._sensorDisplayValue(id, sensor);
+            const unit = this._sensorDisplayUnit(id, sensor);
+            const trendEnabled = this._sensorKind(sensor, id) !== "binary" && Boolean(sensor.entity_id);
+            const content = `
                 <p>${this._escape(sensor.label)}</p>
-                <strong>${display}</strong>
-                <span>${this._escape(sensor.unit || "")}</span>
+                <strong>${this._escape(display)}</strong>
+                <span>${this._escape(unit)}</span>
                 <small>${this._escape(sensor.entity_id || "Not mapped")}</small>
-                <span class="trend-hint">Trend</span>
+                <span class="trend-hint">${trendEnabled ? "Trend" : "State"}</span>
+            `;
+            return trendEnabled ? `
+              <button class="stat stat-button ${this._sensorGroupClass(sensor)}" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
+                ${content}
               </button>
+            ` : `
+              <article class="stat ${this._sensorGroupClass(sensor)} no-trend">
+                ${content}
+              </article>
             `;
           }).join("") : this._emptyState("No live sensors enabled", "Enable the sensor types you own in Settings, then map them to Home Assistant entities.", "settings", "Choose sensors")}
         </div>
@@ -3187,7 +3292,7 @@ class OpenReefPanel extends HTMLElement {
     return this._settingsPanel(
       "sensors",
       "Sensors",
-      "Enable only the probes and room sensors you actually own.",
+      "Enable only the probes, safety sensors, and room sensors you actually own.",
       this._sensorMappingGroups(),
     );
   }
@@ -3198,6 +3303,10 @@ class OpenReefPanel extends HTMLElement {
       ["tank", "Display tank", "Core readings from the main display."],
       ["sump", "Sump / rear chamber", "Readings from the filtration chamber or sump."],
       ["chemistry", "Chemistry", "Apex and Trident style chemistry probes and test values."],
+      ["water", "Water safety", "Dissolved oxygen, water level, and other water-condition sensors."],
+      ["safety", "Leak and safety", "Binary safety sensors that should normally stay clear or off."],
+      ["flow", "Flow", "Return or circulation flow readings from HA sensors."],
+      ["lighting", "Lighting", "PAR and other light-measurement sensors."],
       ["room", "Room environment", "Air readings around the aquarium."],
     ];
     return groups.map(([group, title, description]) => {
@@ -4262,9 +4371,13 @@ class OpenReefPanel extends HTMLElement {
             <strong>Apex / Trident beta</strong>
             <span>Display temp, sump temp, salinity, alkalinity, ORP, calcium, pH, and magnesium.</span>
           </button>
+          <button class="setup-choice" data-action="setup-sensor-preset" data-id="apex_np">
+            <strong>Apex + Trident NP</strong>
+            <span>Add nitrate and phosphate for testers with Trident NP entities.</span>
+          </button>
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="all">
             <strong>Everything</strong>
-            <span>Add all reef, chemistry, sump, and room sensors.</span>
+            <span>Add all reef, chemistry, water, safety, flow, lighting, sump, and room sensors.</span>
           </button>
           <button class="setup-choice" data-action="setup-sensor-preset" data-id="minimal">
             <strong>Temperature only</strong>
@@ -4646,7 +4759,9 @@ class OpenReefPanel extends HTMLElement {
         .selected-entity span { min-width: 0; color: #dcecff; font-weight: 800; }
         .mapping-card, .equipment-editor { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; }
         .mapping-card { gap: 11px; }
-        .mapping-card.tank-card, .mapping-card.sump-card, .mapping-card.chemistry-card, .mapping-card.room-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 34%, #0e1a28); box-shadow: inset 4px 0 0 var(--openreef-accent); }
+        .mapping-card.tank-card, .mapping-card.sump-card, .mapping-card.chemistry-card, .mapping-card.room-card, .mapping-card.water-card, .mapping-card.safety-sensor-card, .mapping-card.flow-card, .mapping-card.lighting-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(14, 26, 40, .96) 34%, #0e1a28); box-shadow: inset 4px 0 0 var(--openreef-accent); }
+        .stat.water-card, .stat.safety-sensor-card, .stat.flow-card, .stat.lighting-card { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
+        .stat.no-trend { text-align: left; cursor: default; }
         .mapping-card.entity-card { border-color: #3b4257; background: #101d2c; }
         .mapping-card.disabled-card { border-color: #334155; background: #101824; box-shadow: inset 4px 0 0 #475569; }
         .mapping-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
