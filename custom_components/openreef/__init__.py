@@ -28,6 +28,7 @@ from .const import (
     DEFAULT_CORE_CONFIG,
     DEFAULT_TANK_PROFILE,
     DOMAIN,
+    DOSING_PARAMETERS,
     ISSUE_ARMED_UNAVAILABLE,
     ISSUE_LEGACY_LABS_CONFIG,
     ISSUE_MISSING_ENTITIES,
@@ -780,6 +781,27 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             and isinstance(item.get("timestamp"), str)
             and isinstance(item.get("message"), str)
         ]
+
+    dosing = config.setdefault("dosing", {})
+    if not isinstance(dosing, dict):
+        config["dosing"] = deepcopy(DEFAULT_CORE_CONFIG["dosing"])
+    else:
+        dosing["enabled"] = bool(dosing.get("enabled", True))
+        raw_parameters = dosing.get("parameters")
+        raw_parameters = raw_parameters if isinstance(raw_parameters, dict) else {}
+        parameters: dict[str, dict[str, float]] = {}
+        for parameter in DOSING_PARAMETERS:
+            raw = raw_parameters.get(parameter)
+            raw = raw if isinstance(raw, dict) else {}
+            entry: dict[str, float] = {}
+            for field in ("doserMlPerDay", "potencyPerMl", "target"):
+                try:
+                    value = float(raw.get(field, 0))
+                except (TypeError, ValueError):
+                    value = 0.0
+                entry[field] = max(0.0, value)
+            parameters[parameter] = entry
+        dosing["parameters"] = parameters
 
     return config
 

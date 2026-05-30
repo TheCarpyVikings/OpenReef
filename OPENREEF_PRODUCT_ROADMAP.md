@@ -15,6 +15,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Add first frontend smoke-test notes/screenshots for desktop and mobile.
 - [x] Add nitrate, phosphate, dissolved oxygen, leak, water-level, flow, and PAR sensors as optional Core mappings.
 - [x] Add Reef Health Score V2.3 in Core: Apex/read-only friendly, parameter-specific trends, learning mode, compact default with expandable insight UI.
+- [x] Add Dosing & Consumption Advisor V1 (advisory): Trident-style Alk/Ca/Mg consumption rates, projection-to-limit, and advisory dose tips. Reuses Reef Health Score stability as the single source of truth.
 - [ ] Add Manual Chemistry V1: manual entry, history, and trends for common reef tests.
 - [ ] Add Maintenance Tasks V1 without Google dependency.
 
@@ -88,6 +89,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 
 - [x] Mission Control.
 - [x] Reef Health Score V2.3 with profile-aware weighting, parameter-specific trend interpretation, learning mode, hard safety caps, and compact explainable/expandable insight UI.
+- [x] Dosing & Consumption Advisor (advisory): Alk/Ca/Mg consumption rate, projection-to-limit, advisory dose tips, and borrowed stability. Mission card + settings, hideable.
 - [x] Configurable Mission Control cards.
 - [x] Attention section for alerts, missing mappings, interlocks, and armed unavailable equipment.
 - [x] Controls screen.
@@ -150,9 +152,9 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Target ranges by parameter.
 - [ ] Dosing log.
 - [ ] Dosing reminders.
-- [ ] Advisory dose calculator.
+- [x] Advisory dose calculator.
 - [ ] Trident/Apex synced chemistry display.
-- [ ] Trident-style alkalinity/calcium/magnesium trend cards.
+- [x] Trident-style alkalinity/calcium/magnesium trend cards.
 - [ ] Trident NP-style nitrate/phosphate trend cards.
 - [ ] Controlled dosing guardrails, advisory first.
 - [ ] Automated dosing only after safety review and smoke tests.
@@ -189,7 +191,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Explainable alerts: what changed, why it matters, and what to check.
 - [ ] Better long-range trends and range selection.
 - [x] Reef Health Score V2.3 in Core.
-- [ ] Rate-of-change warnings.
+- [x] Rate-of-change warnings.
 - [ ] Anomaly timeline.
 - [ ] Correlation heatmap.
 - [ ] Day/night analysis.
@@ -260,3 +262,4 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] 2026-05-27: Features migrate into Core in small smoke-tested slices.
 - [x] 2026-05-27: Stability beats speed.
 - [x] 2026-05-30: Roadmap reset around Apex parity, Better Than Apex differentiation, and checkbox-driven owner tracking.
+- [x] 2026-05-30: Dosing & Consumption Advisor ships advisory-only (no automated dosing) and reuses the Reef Health Score stability analysis as the single source of truth, so the two surfaces never disagree.

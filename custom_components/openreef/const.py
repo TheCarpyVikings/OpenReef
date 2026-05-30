@@ -9,8 +9,12 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 24
-INTEGRATION_VERSION = "0.4.30"
+CORE_SCHEMA_VERSION = 25
+INTEGRATION_VERSION = "0.4.31"
+
+# Parameters the advisory Dosing & Consumption Advisor tracks. These are the
+# consumable chemistry parameters a doser/Trident owner replenishes daily.
+DOSING_PARAMETERS = ("alkalinity", "calcium", "magnesium")
 
 DEFAULT_TANK_PROFILE = "mixed_reef"
 TANK_PROFILE_CHOICES = {
@@ -446,6 +450,13 @@ DEFAULT_CORE_CONFIG = {
     "activity": [],
     "modes": [],
     "manualReadings": {},
+    "dosing": {
+        "enabled": True,
+        "parameters": {
+            parameter: {"doserMlPerDay": 0, "potencyPerMl": 0, "target": 0}
+            for parameter in DOSING_PARAMETERS
+        },
+    },
 }
 
 DEFAULT_SETTINGS = {

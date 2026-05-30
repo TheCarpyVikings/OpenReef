@@ -20,6 +20,7 @@ class OpenReefPanel extends HTMLElement {
     this._trend = null;
     this._trendRequest = "";
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
+    this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
     this._controlConfirm = null;
     this._equipmentDetail = null;
@@ -124,6 +125,7 @@ class OpenReefPanel extends HTMLElement {
       watch: false,
       context: false,
       learning: false,
+      "dosing-advice": false,
     };
   }
 
@@ -265,14 +267,24 @@ class OpenReefPanel extends HTMLElement {
       .filter(([id, sensor]) => this._sensorKind(sensor, id) !== "binary")
       .filter(([, sensor]) => Boolean(sensor.entity_id));
     const items = {};
+    const consumptionItems = {};
+    const dosingIds = new Set(this._dosingParameterIds());
 
     for (let index = 0; index < sensors.length; index += 2) {
       const chunk = sensors.slice(index, index + 2);
       await Promise.all(chunk.map(async ([id, sensor]) => {
         try {
+          // Fetch once, analyse twice: the same 7d trend feeds both the
+          // Reef Health Score and the advisory Dosing & Consumption Advisor.
           const trendData = await this._fetchHealthTrendData(sensor.entity_id);
-          items[id] = this._analyseHealthTrend(id, sensor, trendData);
+          const healthItem = this._analyseHealthTrend(id, sensor, trendData);
+          items[id] = healthItem;
+          if (dosingIds.has(id)) {
+            // Stability is borrowed from the health trend (single source of truth).
+            consumptionItems[id] = this._analyseConsumption(id, sensor, trendData, healthItem);
+          }
         } catch (err) {
+          const detail = err instanceof Error ? err.message : "Trend history unavailable.";
           items[id] = {
             status: "learning",
             group: "learning",
@@ -280,15 +292,24 @@ class OpenReefPanel extends HTMLElement {
             penalty: 0,
             affectsScore: false,
             label: `${sensor.label || id} trend learning`,
-            detail: err instanceof Error ? err.message : "Trend history unavailable.",
+            detail,
           };
+          if (dosingIds.has(id)) {
+            consumptionItems[id] = this._consumptionLearning(id, sensor, detail);
+          }
         }
       }));
     }
 
+    const checkedAt = new Date().toISOString();
     this._healthTrends = {
-      checkedAt: new Date().toISOString(),
+      checkedAt,
       items,
+      error: "",
+    };
+    this._consumption = {
+      checkedAt,
+      items: consumptionItems,
       error: "",
     };
   }
@@ -1005,6 +1026,16 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "mission-card") {
         this._config.display.missionCards = this._missionCards();
         this._config.display.missionCards[id] = value;
+      }
+      if (scope === "dosing") {
+        this._config.dosing = this._config.dosing || { enabled: true, parameters: {} };
+        if (field === "enabled") {
+          this._config.dosing.enabled = value;
+        } else {
+          this._config.dosing.parameters = this._config.dosing.parameters || {};
+          this._config.dosing.parameters[id] = this._config.dosing.parameters[id] || {};
+          this._config.dosing.parameters[id][field] = Math.max(0, Number(value) || 0);
+        }
       }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
@@ -2283,6 +2314,7 @@ class OpenReefPanel extends HTMLElement {
   _missionCards() {
     return {
       health: true,
+      dosing: true,
       live: true,
       controls: true,
       energy: true,
@@ -2293,6 +2325,7 @@ class OpenReefPanel extends HTMLElement {
   _missionCardChoices() {
     return [
       ["health", "Reef Health", "Show an explainable 0-100 health score."],
+      ["dosing", "Dosing Advisor", "Show consumption, projections, and advisory dose tips."],
       ["live", "Live Stats", "Show mapped sensor readings in Mission Control."],
       ["controls", "Controls", "Show armed equipment status in Mission Control."],
       ["energy", "Energy", "Show energy and cost summaries in Mission Control."],
@@ -2538,6 +2571,330 @@ class OpenReefPanel extends HTMLElement {
         ? "warning"
         : "ok";
     return this._healthTrendResult(sensorId, sensor, rule, status, `Latest daily avg ${this._format(latestDay.avg, digits)}${unit}; baseline ${this._format(baselineAvg, digits)}${unit}; drift ${this._format(avgDrift, digits)}${unit}.`);
+  }
+
+  // --- Dosing & Consumption Advisor (advisory only) -----------------------
+
+  _dosingEnabled() {
+    return this._config?.dosing?.enabled !== false;
+  }
+
+  _dosingParameterIds() {
+    const params = this._config?.dosing?.parameters;
+    if (params && typeof params === "object") {
+      const keys = Object.keys(params);
+      if (keys.length) return keys;
+    }
+    return ["alkalinity", "calcium", "magnesium"];
+  }
+
+  _dosingParamConfig(sensorId) {
+    return this._config?.dosing?.parameters?.[sensorId] || {};
+  }
+
+  _dosingActiveParameters() {
+    return this._dosingParameterIds()
+      .map((id) => [id, this._config?.sensors?.[id]])
+      .filter(([, sensor]) => sensor && this._sensorEnabled(sensor) && sensor.entity_id);
+  }
+
+  _consumptionFreshness() {
+    const checkedAt = this._consumption?.checkedAt;
+    if (!checkedAt) return "Not checked this session";
+    const date = new Date(checkedAt);
+    if (!Number.isFinite(date.getTime())) return "Not checked this session";
+    return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+  }
+
+  // Least-squares fit of ys against xs. xs are real day offsets so the slope
+  // is per calendar day even when some days were dropped for sparse readings.
+  _linearFit(xs, ys) {
+    const n = ys.length;
+    if (n < 2) return { slope: 0, intercept: ys[0] || 0, residualStdev: 0 };
+    let sumX = 0;
+    let sumY = 0;
+    let sumXY = 0;
+    let sumXX = 0;
+    for (let i = 0; i < n; i += 1) {
+      sumX += xs[i];
+      sumY += ys[i];
+      sumXY += xs[i] * ys[i];
+      sumXX += xs[i] * xs[i];
+    }
+    const denom = n * sumXX - sumX * sumX;
+    const slope = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom;
+    const intercept = (sumY - slope * sumX) / n;
+    let residSq = 0;
+    for (let i = 0; i < n; i += 1) {
+      const predicted = intercept + slope * xs[i];
+      residSq += (ys[i] - predicted) ** 2;
+    }
+    return { slope, intercept, residualStdev: Math.sqrt(residSq / n) };
+  }
+
+  _formatDays(days) {
+    if (!Number.isFinite(days)) return "--";
+    if (days < 1) {
+      const hours = Math.max(1, Math.round(days * 24));
+      return `${hours} hour${hours === 1 ? "" : "s"}`;
+    }
+    const rounded = days >= 10 ? Math.round(days) : Math.round(days * 10) / 10;
+    return `${this._format(rounded, days >= 10 ? 0 : 1)} day${rounded === 1 ? "" : "s"}`;
+  }
+
+  // Stability is borrowed from the Reef Health Score trend analysis so the two
+  // surfaces can never disagree for the same parameter.
+  _consumptionStability(healthItem) {
+    const status = healthItem?.status;
+    if (!healthItem || status === "learning") return { stars: "", label: "Learning baseline", status: "learning" };
+    if (status === "critical") return { stars: "★★☆☆☆", label: "Drifting", status: "critical" };
+    if (status === "warning") return { stars: "★★★☆☆", label: "Some drift", status: "warning" };
+    return { stars: "★★★★★", label: "Steady", status: "ok" };
+  }
+
+  _consumptionLearning(sensorId, sensor, detail = "Collecting history before estimating consumption.") {
+    return {
+      id: sensorId,
+      label: sensor.label || sensorId,
+      group: "learning",
+      status: "learning",
+      unit: sensor.unit || "",
+      digits: this._sensorDigits(sensorId),
+      current: this._number(sensor.entity_id),
+      slopePerDay: null,
+      confident: false,
+      projectionDays: null,
+      projectionEdge: null,
+      projectionValue: null,
+      extraMlPerDay: null,
+      correctionMl: null,
+      doseText: detail,
+      trendText: detail,
+      projectionText: "",
+      stability: { stars: "", label: "Learning baseline", status: "learning" },
+    };
+  }
+
+  _analyseConsumption(sensorId, sensor, trendData, healthItem) {
+    const label = sensor.label || sensorId;
+    const unit = sensor.unit || "";
+    const unitSuffix = unit ? ` ${unit}` : "";
+    const digits = this._sensorDigits(sensorId);
+    const points = Array.isArray(trendData) ? trendData : trendData?.points || [];
+    const range = Array.isArray(trendData) ? "24h" : trendData?.range || "24h";
+    const days = this._trendDays(points);
+
+    if (range !== "7d" || days.length < 4) {
+      return this._consumptionLearning(
+        sensorId,
+        sensor,
+        "Collecting Trident history — OpenReef needs about 4 days of readings before it can estimate consumption.",
+      );
+    }
+
+    // Net trend: least-squares slope of daily averages (units/day). Daily
+    // averaging collapses the dose-event sawtooth into a stable baseline.
+    const firstDay = Date.parse(`${days[0].day}T00:00:00Z`);
+    const xs = days.map((day) => (Date.parse(`${day.day}T00:00:00Z`) - firstDay) / 86400000);
+    const ys = days.map((day) => day.avg);
+    const fit = this._linearFit(xs, ys);
+    const slope = fit.slope;
+    const span = xs[xs.length - 1] - xs[0] || 1;
+    const totalChange = Math.abs(slope) * span;
+    const confident = Math.abs(slope) > 0 && totalChange >= fit.residualStdev;
+
+    const latestAvg = days[days.length - 1].avg;
+    const liveValue = this._number(sensor.entity_id);
+    const value = Number.isFinite(liveValue) ? liveValue : latestAvg;
+    const stability = this._consumptionStability(healthItem);
+
+    const min = Number(sensor.min);
+    const max = Number(sensor.max);
+    let projectionDays = null;
+    let projectionEdge = null;
+    let projectionValue = null;
+    if (confident && slope < 0 && Number.isFinite(min) && value > min) {
+      projectionDays = (value - min) / Math.abs(slope);
+      projectionEdge = "low";
+      projectionValue = min;
+    } else if (confident && slope > 0 && Number.isFinite(max) && value < max) {
+      projectionDays = (max - value) / slope;
+      projectionEdge = "high";
+      projectionValue = max;
+    }
+    if (projectionDays !== null && (!Number.isFinite(projectionDays) || projectionDays > 60)) {
+      projectionDays = null;
+      projectionEdge = null;
+      projectionValue = null;
+    }
+
+    const paramConfig = this._dosingParamConfig(sensorId);
+    const potency = Number(paramConfig.potencyPerMl) || 0;
+    const target = Number(paramConfig.target) || 0;
+    const holdOffsetUnits = -slope; // +ve => add this many units/day to hold steady
+    let extraMlPerDay = null;
+    let correctionMl = null;
+    if (potency > 0) {
+      extraMlPerDay = holdOffsetUnits / potency;
+      const goal = target > 0 ? target : value;
+      correctionMl = (goal - value) / potency;
+    }
+
+    const rateDigits = Math.max(digits, 2);
+    const rateText = `${this._format(Math.abs(slope), rateDigits)}${unitSuffix}/day`;
+    let doseText;
+    if (!confident) {
+      doseText = "Holding steady within measurement noise — no dose change suggested.";
+    } else if (slope < 0) {
+      if (potency > 0) {
+        doseText = `Net loss ~${rateText}. To hold steady, increase your daily dose by about ${this._format(Math.abs(extraMlPerDay), 1)} mL/day.`;
+        if (target > 0 && correctionMl > 0.5) {
+          doseText += ` To climb to ${this._format(target, digits)}${unitSuffix}, add a one-off correction of about ${this._format(correctionMl, 1)} mL.`;
+        }
+      } else {
+        doseText = `Net loss ~${rateText}. Increase your daily dose to offset it. Add your solution potency in Settings for an exact mL figure.`;
+      }
+    } else if (potency > 0) {
+      doseText = `Net rise ~${rateText}. You can reduce your daily dose by about ${this._format(Math.abs(extraMlPerDay), 1)} mL/day to hold steady.`;
+    } else {
+      doseText = `Net rise ~${rateText}. Consider reducing your dose. Add your solution potency in Settings for an exact mL figure.`;
+    }
+
+    let status = "ok";
+    if (projectionDays !== null) {
+      if (projectionDays <= 3) status = "critical";
+      else if (projectionDays <= 10) status = "warning";
+    }
+
+    const trendText = confident
+      ? `${slope < 0 ? "Falling" : "Rising"} ~${rateText}, net of your current dosing.`
+      : "Net change is within measurement noise (holding steady).";
+    const projectionText = projectionDays !== null
+      ? `At this rate ${label} reaches your ${projectionEdge === "low" ? "low" : "high"} limit of ${this._format(projectionValue, digits)}${unitSuffix} in about ${this._formatDays(projectionDays)}.`
+      : confident ? "No threshold crossing projected within 60 days." : "";
+
+    return {
+      id: sensorId,
+      label,
+      group: "advice",
+      status,
+      unit,
+      digits,
+      current: value,
+      slopePerDay: slope,
+      confident,
+      projectionDays,
+      projectionEdge,
+      projectionValue,
+      extraMlPerDay,
+      correctionMl,
+      doseText,
+      trendText,
+      projectionText,
+      stability,
+    };
+  }
+
+  _consumptionItem(id, sensor) {
+    return this._consumption?.items?.[id] || this._consumptionLearning(id, sensor);
+  }
+
+  _dosingMissionState() {
+    const active = this._dosingActiveParameters();
+    if (!active.length) {
+      return { value: "Not set", detail: "Map alkalinity, calcium, or magnesium to enable", status: "unknown" };
+    }
+    const items = active.map(([id, sensor]) => this._consumptionItem(id, sensor));
+    if (!this._consumption?.checkedAt) {
+      return { value: `${active.length} ready`, detail: "Press Refresh checks to estimate consumption", status: "unknown" };
+    }
+    const critical = items.filter((item) => item.status === "critical");
+    const warning = items.filter((item) => item.status === "warning");
+    const learning = items.filter((item) => item.status === "learning");
+    const projected = items
+      .filter((item) => Number.isFinite(item.projectionDays))
+      .sort((a, b) => a.projectionDays - b.projectionDays)[0];
+    if (critical.length || warning.length) {
+      const lead = projected || critical[0] || warning[0];
+      return {
+        value: projected ? this._formatDays(projected.projectionDays) : `${critical.length + warning.length} to watch`,
+        detail: projected ? `${lead.label} nears its limit` : `${lead.label} drifting`,
+        status: critical.length ? "critical" : "warning",
+      };
+    }
+    if (learning.length === items.length) {
+      return { value: "Learning", detail: "Building consumption baseline from Trident history", status: "unknown" };
+    }
+    return { value: "Steady", detail: `${items.length} parameter${items.length === 1 ? "" : "s"} holding`, status: "ok" };
+  }
+
+  _dosingParameterCard(item) {
+    const unitSuffix = item.unit ? ` ${item.unit}` : "";
+    const statusClass = item.status === "critical"
+      ? "critical"
+      : item.status === "warning"
+        ? "warning"
+        : item.status === "learning"
+          ? "unknown"
+          : "ok";
+    const currentText = Number.isFinite(item.current) ? `${this._format(item.current, item.digits)}${unitSuffix}` : "--";
+    const stabilityText = `${item.stability.stars ? `${item.stability.stars} ` : ""}${item.stability.label}`;
+    return `
+      <article class="dosing-card ${statusClass}">
+        <div class="dosing-card-head">
+          <span>${this._escape(item.label)}</span>
+          <strong>${this._escape(currentText)}</strong>
+        </div>
+        <ul class="dosing-card-lines">
+          <li><span>Trend</span><small>${this._escape(item.trendText)}</small></li>
+          ${item.projectionText ? `<li><span>Projection</span><small>${this._escape(item.projectionText)}</small></li>` : ""}
+          <li><span>Advice</span><small>${this._escape(item.doseText)}</small></li>
+          <li><span>Stability</span><small>${this._escape(stabilityText)}</small></li>
+        </ul>
+      </article>
+    `;
+  }
+
+  _dosingBreakdown() {
+    if (!this._dosingEnabled()) return "";
+    const active = this._dosingActiveParameters();
+    if (!active.length) {
+      return `
+        <article class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Dosing &amp; Consumption Advisor</p>
+              <h3>Advisory dosing insight</h3>
+            </div>
+          </div>
+          ${this._emptyState("No dosing parameters mapped", "Map alkalinity, calcium, or magnesium (for example your Trident) in Settings. OpenReef can then estimate consumption and advise dose changes — something Apex Fusion does not do.", "settings", "Map chemistry")}
+        </article>
+      `;
+    }
+    const cards = active.map(([id, sensor]) => this._dosingParameterCard(this._consumptionItem(id, sensor))).join("");
+    const methodOpen = this._healthSectionOpen("dosing-advice");
+    return `
+      <article class="panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Dosing &amp; Consumption Advisor</p>
+            <h3>Consumption, projections &amp; advisory dosing</h3>
+            <p class="muted">Estimated from your Trident/chemistry history. Trend data: ${this._escape(this._consumptionFreshness())}.</p>
+          </div>
+          <div class="pill-stack">
+            <button class="secondary compact-button" data-action="validate">Refresh advisor</button>
+            <button class="secondary compact-button" data-action="toggle-health-section" data-section="dosing-advice">${methodOpen ? "Hide how this works" : "How this works"}</button>
+          </div>
+        </div>
+        <div class="notice warning-notice"><strong>Advisory only.</strong> OpenReef never doses for you. Verify every figure against your own test kit before changing your doser.</div>
+        <div class="dosing-grid">${cards}</div>
+        ${methodOpen ? `
+          <div class="notice">
+            <strong>How this works.</strong> OpenReef averages each day of your Trident readings (so individual dose spikes cancel out), fits the day-to-day trend, and reports the net change after your current dosing. The projection extends that trend to your configured limit. Dose advice offsets the net change; enter your solution potency (units raised per mL in your tank) and target in Settings for exact millilitre figures. Stability is shared with your Reef Health Score.
+          </div>
+        ` : ""}
+      </article>
+    `;
   }
 
   _sensorHealthCategory(sensorId, sensor) {
@@ -3256,8 +3613,10 @@ class OpenReefPanel extends HTMLElement {
     const health = this._reefHealthScore(sensors, equipment, sensorAlerts, interlocks);
     const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
+    const dosing = this._dosingEnabled() ? this._dosingMissionState() : null;
     const summaryCards = [
       cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission") : "",
+      cards.dosing && dosing ? this._missionSummaryCard("Dosing Advisor", dosing.value, dosing.detail, dosing.status, "mission") : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, `${critical.length} critical · ${warnings.length} warning`, critical.length ? "critical" : warnings.length || noEnabledSensors ? "warning" : "ok", "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -3279,6 +3638,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._modePanel()}
         ${summaryCards ? `<div class="summary-grid">${summaryCards}</div>` : ""}
         ${cards.health ? this._reefHealthBreakdown(health) : ""}
+        ${cards.dosing ? this._dosingBreakdown() : ""}
         <article class="panel">
           <div class="section-head">
             <h3>Attention</h3>
@@ -4010,6 +4370,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._profileSettings()}
         ${this._missionSettings()}
         ${this._sensorSettings()}
+        ${this._dosingSettings()}
         ${this._equipmentSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
@@ -4077,6 +4438,45 @@ class OpenReefPanel extends HTMLElement {
           `).join("")}
         </div>
       `,
+    );
+  }
+
+  _dosingSettings() {
+    const dosing = this._config.dosing || {};
+    const enabled = dosing.enabled !== false;
+    const active = this._dosingActiveParameters();
+    const body = `
+      <label class="toggle-card">
+        <input type="checkbox" data-scope="dosing" data-field="enabled" ${enabled ? "checked" : ""}>
+        <span>
+          <strong>Show the Dosing Advisor</strong>
+          <small>Advisory only — OpenReef never doses for you. It estimates consumption and dose changes from your Trident/chemistry history.</small>
+        </span>
+      </label>
+      ${active.length ? active.map(([id, sensor]) => {
+        const cfg = this._dosingParamConfig(id);
+        const unitLabel = sensor.unit ? ` (${sensor.unit})` : "";
+        const name = sensor.label || id;
+        return `
+          <section class="mapping-section">
+            <div>
+              <p class="eyebrow">${this._escape(name)}</p>
+              <h4>Optional: enter your ${this._escape(name.toLowerCase())} dosing so OpenReef can give exact millilitre advice. Leave blank for rate-only advice.</h4>
+            </div>
+            <div class="mini-grid">
+              <label>Current dose (mL/day)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="doserMlPerDay" value="${this._escape(cfg.doserMlPerDay ?? 0)}"></label>
+              <label>Potency (${this._escape(sensor.unit || "units")} per mL)<input type="number" step="0.0001" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="potencyPerMl" value="${this._escape(cfg.potencyPerMl ?? 0)}"></label>
+              <label>Target${this._escape(unitLabel)}<input type="number" step="0.01" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="target" value="${this._escape(cfg.target ?? 0)}"></label>
+            </div>
+          </section>
+        `;
+      }).join("") : `<p class="muted">Enable and map alkalinity, calcium, or magnesium in the Sensors section (for example your Trident) to use the Dosing Advisor.</p>`}
+    `;
+    return this._settingsPanel(
+      "dosing",
+      "Dosing Advisor",
+      "Advisory consumption tracking and dose suggestions for alkalinity, calcium, and magnesium.",
+      body,
     );
   }
 
@@ -5399,6 +5799,19 @@ class OpenReefPanel extends HTMLElement {
         .health-insight-row.warning { border-color: #a16207; }
         .health-insight-row.learning { border-color: #334155; }
         .health-insight-row.context { border-color: #294055; }
+        .dosing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+        .dosing-card { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 8px; align-content: start; }
+        .dosing-card.ok { border-color: #166534; }
+        .dosing-card.warning { border-color: #a16207; }
+        .dosing-card.critical { border-color: #7f1d1d; }
+        .dosing-card.unknown { border-color: #334155; }
+        .dosing-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+        .dosing-card-head span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+        .dosing-card-head strong { color: #67e8f9; font-size: 20px; }
+        .dosing-card-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+        .dosing-card-lines li { display: grid; gap: 2px; min-width: 0; }
+        .dosing-card-lines span { color: #8da2ba; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+        .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
         .issue-list { display: grid; gap: 8px; }
         .issue-item { width: 100%; display: grid; grid-template-columns: auto minmax(160px, .45fr) 1fr; gap: 12px; align-items: center; padding: 12px; text-align: left; }
         .issue-item small { color: #9fb2c7; }
@@ -5641,7 +6054,7 @@ class OpenReefPanel extends HTMLElement {
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
           .range-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .trend-summary { grid-template-columns: 1fr; }
-          .health-category-grid, .health-reason-grid, .health-insight-grid { grid-template-columns: 1fr; }
+          .health-category-grid, .health-reason-grid, .health-insight-grid, .dosing-grid { grid-template-columns: 1fr; }
           .health-insight-head, .health-insight-row { flex-direction: column; align-items: stretch; }
           .setup-guide, .setup-choice-grid, .setup-choice-grid.two-choice { grid-template-columns: 1fr; }
           .setup-next-list div { grid-template-columns: 1fr; }
