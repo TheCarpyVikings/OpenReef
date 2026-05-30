@@ -29,6 +29,7 @@ class OpenReefPanel extends HTMLElement {
     this._equipmentEditors = {};
     this._equipmentEnergyEditors = {};
     this._settingsSections = this._loadSettingsSections();
+    this._healthSections = this._loadHealthSections();
   }
 
   set hass(hass) {
@@ -113,6 +114,35 @@ class OpenReefPanel extends HTMLElement {
       window.localStorage?.setItem("openreef:settingsSections:v1", JSON.stringify(this._settingsSections));
     } catch {
       // Section memory is a convenience only; OpenReef still works without localStorage.
+    }
+  }
+
+  _defaultHealthSections() {
+    return {
+      action: true,
+      watch: true,
+      context: false,
+      learning: false,
+    };
+  }
+
+  _loadHealthSections() {
+    const defaults = this._defaultHealthSections();
+    try {
+      const stored = window.localStorage?.getItem("openreef:healthSections:v1");
+      if (!stored) return defaults;
+      const parsed = JSON.parse(stored);
+      return { ...defaults, ...(parsed && typeof parsed === "object" ? parsed : {}) };
+    } catch {
+      return defaults;
+    }
+  }
+
+  _saveHealthSections() {
+    try {
+      window.localStorage?.setItem("openreef:healthSections:v1", JSON.stringify(this._healthSections));
+    } catch {
+      // Insight section memory is a convenience only.
     }
   }
 
@@ -881,6 +911,12 @@ class OpenReefPanel extends HTMLElement {
         this._saveSettingsSections();
         this._render();
       }
+      if (action === "toggle-health-section") {
+        const section = target.dataset.section;
+        this._healthSections[section] = !this._healthSectionOpen(section);
+        this._saveHealthSections();
+        this._render();
+      }
       if (action === "copy-support-summary") this._copySupportSummary();
       if (action === "copy-beta-smoke-test") this._copyBetaSmokeTest();
       if (action === "copy-beta-feedback-template") this._copyBetaFeedbackTemplate();
@@ -1577,6 +1613,18 @@ class OpenReefPanel extends HTMLElement {
 
   _tankProfileDetail(profile = this._tankProfile()) {
     return this._tankProfileChoices().find(([id]) => id === profile)?.[2] || "Balanced default for most reef tanks.";
+  }
+
+  _tankProfileHealthNote(profile = this._tankProfile()) {
+    const notes = {
+      fish_only_fowlr: "FOWLR scoring cares most about temperature, oxygen, flow, water safety, and reliable equipment. Coral chemistry trends are kept lighter.",
+      soft_coral: "Soft coral scoring is forgiving: OpenReef still checks stability, but it avoids overreacting to small chemistry movement.",
+      lps: "LPS scoring balances water stability, chemistry, and life-support. Small daily movement is expected; persistent drift matters more.",
+      sps: "SPS scoring is stricter on alkalinity, salinity, temperature stability, and chemistry drift because these tanks usually have less margin.",
+      mixed_reef: "Mixed reef scoring is balanced: life-support comes first, then stability and chemistry trends. Normal pH day/night movement is expected.",
+      anemone_dominant: "Anemone scoring emphasises life-support, stable conditions, and display flow because wandering or stressed anemones can affect the whole tank.",
+    };
+    return notes[profile] || notes.mixed_reef;
   }
 
   _modeBaseChoices() {
@@ -2295,6 +2343,11 @@ class OpenReefPanel extends HTMLElement {
     return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
   }
 
+  _healthSectionOpen(section) {
+    const defaults = this._defaultHealthSections();
+    return Boolean(this._healthSections?.[section] ?? defaults[section]);
+  }
+
   _healthTrendMultiplier() {
     return {
       fish_only_fowlr: 1.25,
@@ -2419,7 +2472,7 @@ class OpenReefPanel extends HTMLElement {
     const direction = latest >= first ? "up" : "down";
 
     if (rule.kind === "context") {
-      return this._healthTrendContext(sensorId, sensor, `${this._trendRangeLabel(range)} ${direction} ${this._format(delta, digits)}${unit}; swing ${this._format(swing, digits)}${unit}. Shown as context, not a Reef Health penalty.`);
+      return this._healthTrendContext(sensorId, sensor, `${this._trendRangeLabel(range)} ${direction} ${this._format(delta, digits)}${unit}; swing ${this._format(swing, digits)}${unit}. Context only: useful for troubleshooting wider patterns, not scored by itself.`);
     }
 
     if (rule.kind === "temperature") {
@@ -2688,11 +2741,24 @@ class OpenReefPanel extends HTMLElement {
     });
     const topInsight = groups.action[0] || groups.watch[0] || null;
     const topReason = appliedCap?.label || topInsight?.label || "All scoring checks look steady";
+    const learningCount = groups.learning.length;
+    const contextCount = groups.context.length;
     const nextAction = appliedCap
       ? appliedCap.detail
-      : topInsight?.detail || (groups.context.length ? "Review the context notes if you are investigating a wider tank pattern." : "Keep monitoring and review trends after the next Check.");
+      : topInsight?.detail
+        || (learningCount
+          ? "No action needed. OpenReef is still learning one or more normal trend patterns; current safety checks are still active."
+          : contextCount
+            ? "No action needed. Context notes are there for troubleshooting and do not affect the score by themselves."
+            : "Keep monitoring and refresh health after the next meaningful tank change.");
     const grade = this._healthGrade(score);
     const status = this._healthStatus(score, caps);
+    const gradeDetail = [
+      `${grade} grade`,
+      appliedCap ? `cap ${appliedCap.limit}` : "no hard cap",
+      learningCount ? `${learningCount} trend${learningCount === 1 ? "" : "s"} learning` : "",
+      contextCount ? `${contextCount} context note${contextCount === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(" · ");
     const detail = [
       this._tankProfileLabel(profile),
       `${mappedSensors}/${sensors.length} sensors mapped`,
@@ -2703,10 +2769,12 @@ class OpenReefPanel extends HTMLElement {
     return {
       score,
       grade,
+      gradeDetail,
       status,
       detail,
       profile,
       profileLabel: this._tankProfileLabel(profile),
+      profileNote: this._tankProfileHealthNote(profile),
       categories,
       losses: sortedLosses,
       groups,
@@ -2715,6 +2783,8 @@ class OpenReefPanel extends HTMLElement {
       topReason,
       nextAction,
       trendFreshness: this._healthTrendFreshness(),
+      learningCount,
+      contextCount,
       criticalCount: critical.length,
       warningCount: warnings.length,
       unknownCount: unknowns.length,
@@ -2887,9 +2957,11 @@ class OpenReefPanel extends HTMLElement {
       `Tank profile: ${check.tankProfile}`,
       `OpenReef control mode: ${check.controlMode}`,
       `Reef Health Score: ${health.score}/100 (${health.grade}, ${health.status})`,
+      `Reef Health detail: ${health.gradeDetail || `${health.grade} grade`}`,
       `Reef Health top reason: ${health.topReason}`,
       `Reef Health next action: ${health.nextAction}`,
       `Reef Health trend data: ${health.trendFreshness}`,
+      `Reef Health learning items: ${health.learningCount || 0}`,
       `Active mode: ${check.activeMode}`,
       `Mode timer: ${check.modeTimer}`,
       `Sensors mapped/enabled: ${check.sensors}`,
@@ -3184,7 +3256,7 @@ class OpenReefPanel extends HTMLElement {
     const status = critical.length || armedUnavailable.length ? "Action needed" : warnings.length || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
     const summaryCards = [
-      cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.grade} grade · ${health.topReason}`, health.status, "mission") : "",
+      cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission") : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, `${critical.length} critical · ${warnings.length} warning`, critical.length ? "critical" : warnings.length || noEnabledSensors ? "warning" : "ok", "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -3242,23 +3314,33 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
-  _reefHealthInsightGroup(title, group, emptyText) {
+  _reefHealthInsightGroup(key, title, group, emptyText, summary) {
     const items = group || [];
+    const open = this._healthSectionOpen(key);
+    const scoreItems = items.filter((item) => item.affectsScore).length;
+    const countLabel = items.length ? `${items.length} item${items.length === 1 ? "" : "s"}` : "Clear";
     return `
-      <section class="health-insight-group">
-        <div class="health-insight-head">
-          <span>${this._escape(title)}</span>
-          <small>${items.length ? `${items.length} item${items.length === 1 ? "" : "s"}` : "Clear"}</small>
-        </div>
-        ${items.length ? items.slice(0, 6).map((item) => `
-          <div class="health-insight-row ${this._escape(item.status)}">
-            <div>
-              <strong>${this._escape(item.label)}</strong>
-              <small>${this._escape(item.detail || "")}</small>
-            </div>
-            <span class="pill ${item.affectsScore ? item.status : "unknown"}">${item.affectsScore ? (item.points ? `-${this._escape(item.points)}` : `cap ${this._escape(item.cap || "")}`) : "info"}</span>
+      <section class="health-insight-group ${open ? "open" : "collapsed"}">
+        <button class="health-insight-head" data-action="toggle-health-section" data-section="${this._escape(key)}" aria-expanded="${open ? "true" : "false"}">
+          <span>
+            <strong>${this._escape(title)}</strong>
+            <small>${this._escape(summary || emptyText)}</small>
+          </span>
+          <span class="pill ${scoreItems ? "warning" : items.length ? "unknown" : "ok"}">${this._escape(open ? "Hide" : countLabel)}</span>
+        </button>
+        ${open ? `
+          <div class="health-insight-body">
+            ${items.length ? items.slice(0, 6).map((item) => `
+              <div class="health-insight-row ${this._escape(item.status)}">
+                <div>
+                  <strong>${this._escape(item.label)}</strong>
+                  <small>${this._escape(item.detail || "")}</small>
+                </div>
+                <span class="pill ${item.affectsScore ? item.status : "unknown"}">${item.affectsScore ? (item.points ? `-${this._escape(item.points)}` : `cap ${this._escape(item.cap || "")}`) : "info"}</span>
+              </div>
+            `).join("") : `<p class="muted">${this._escape(emptyText)}</p>`}
           </div>
-        `).join("") : `<p class="muted">${this._escape(emptyText)}</p>`}
+        ` : ""}
       </section>
     `;
   }
@@ -3272,10 +3354,11 @@ class OpenReefPanel extends HTMLElement {
           <div>
             <p class="eyebrow">Why this score?</p>
             <h3>${this._escape(health.profileLabel)} · ${this._escape(health.score)}/100</h3>
-            <p class="muted">Operational safety score. Disabled sensors are ignored; enabled sensors and armed equipment are checked.</p>
+            <p class="muted">${this._escape(health.gradeDetail || `${health.grade} grade`)}. Operational safety score; context and learning notes do not reduce the score by themselves.</p>
           </div>
           <div class="pill-stack">
             <span class="pill ${this._escape(health.status)}">${this._escape(health.grade)} grade</span>
+            ${health.learningCount ? `<span class="pill unknown">${this._escape(health.learningCount)} learning</span>` : ""}
             <span class="pill ${health.appliedCap ? "warning" : "unknown"}">${health.appliedCap ? `cap ${this._escape(health.appliedCap.limit)}` : "no cap"}</span>
             <button class="secondary compact-button" data-action="validate">Refresh health</button>
           </div>
@@ -3300,13 +3383,18 @@ class OpenReefPanel extends HTMLElement {
             <strong>${this._escape(health.trendFreshness)}</strong>
             <p>Trends are checked only when you press Check/Refresh health, using configured numeric sensors only.</p>
           </section>
+          <section class="health-reason-card">
+            <span>${this._escape(health.profileLabel)} scoring</span>
+            <strong>Profile preset</strong>
+            <p>${this._escape(health.profileNote || this._tankProfileHealthNote(health.profile))}</p>
+          </section>
         </div>
         ${health.appliedCap ? `<div class="notice ${health.appliedCap.status === "critical" ? "danger-notice" : "warning-notice"}"><strong>Hard cap applied:</strong> ${this._escape(health.appliedCap.label)}. ${this._escape(health.appliedCap.detail)}</div>` : ""}
         <div class="health-insight-grid">
-          ${this._reefHealthInsightGroup("Needs action", groups.action, "No urgent Reef Health actions.")}
-          ${this._reefHealthInsightGroup("Worth watching", groups.watch, "No scoring warnings right now.")}
-          ${this._reefHealthInsightGroup("Context", groups.context, "No extra context from optional readings.")}
-          ${this._reefHealthInsightGroup("Learning", groups.learning, "Trend learning is up to date.")}
+          ${this._reefHealthInsightGroup("action", "Needs action", groups.action, "No urgent Reef Health actions.", "Score-affecting safety issues appear here.")}
+          ${this._reefHealthInsightGroup("watch", "Worth watching", groups.watch, "No scoring warnings right now.", "Gentle warnings that may affect the score.")}
+          ${this._reefHealthInsightGroup("context", "Context", groups.context, "No extra context from optional readings.", "Informational notes; not scored unless linked to a real tank issue.")}
+          ${this._reefHealthInsightGroup("learning", "Learning", groups.learning, "Trend learning is up to date.", "OpenReef is building a normal baseline for this tank.")}
         </div>
       </article>
     `;
@@ -5279,17 +5367,24 @@ class OpenReefPanel extends HTMLElement {
         .health-breakdown.critical { border-color: #7f1d1d; }
         .health-category-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
         .health-category, .health-reason-card, .health-insight-group, .health-insight-row { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 5px; }
-        .health-category span, .health-reason-card span, .health-insight-head span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+        .health-category span, .health-reason-card span, .health-insight-head strong { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
         .health-category strong { color: #67e8f9; font-size: 22px; }
         .health-category.ok { border-color: #166534; }
         .health-category.warning { border-color: #a16207; }
         .health-category.critical { border-color: #7f1d1d; }
-        .health-reason-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .health-reason-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
         .health-reason-card strong { color: #e5edf5; font-size: 16px; overflow-wrap: anywhere; }
         .health-reason-card p { color: #9fb2c7; }
         .health-insight-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-        .health-insight-group { align-content: start; }
+        .health-insight-group { align-content: start; padding: 0; overflow: hidden; }
+        .health-insight-group.open { padding-bottom: 12px; }
+        .health-insight-group.collapsed { background: rgba(11, 23, 36, .55); }
         .health-insight-head, .health-insight-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .health-insight-head { width: 100%; border: 0; border-radius: 0; background: transparent; padding: 12px; text-align: left; }
+        .health-insight-head span:first-child { display: grid; gap: 4px; min-width: 0; }
+        .health-insight-head small { color: #8da2ba; overflow-wrap: anywhere; }
+        .health-insight-head:hover, .health-insight-head:focus-visible { background: rgba(103, 232, 249, .05); outline: none; }
+        .health-insight-body { display: grid; gap: 7px; padding: 0 12px; }
         .health-insight-row { background: rgba(18, 31, 47, .76); }
         .health-insight-row div { display: grid; gap: 4px; min-width: 0; }
         .health-insight-row strong { color: #e5edf5; overflow-wrap: anywhere; }
