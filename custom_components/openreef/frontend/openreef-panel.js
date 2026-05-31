@@ -524,7 +524,16 @@ class OpenReefPanel extends HTMLElement {
       return { points: statisticPoints, range: "7d", source: "statistics" };
     }
 
-    const historyPoints = await this._fetchHistoryTrendPoints(entityId, dayStart, end);
+    const sevenDayHistoryPoints = await this._fetchHistoryTrendPoints(entityId, sevenDayStart, end, {
+      maxPoints: 420,
+    });
+    if (sevenDayHistoryPoints.length >= 8 && this._trendDays(sevenDayHistoryPoints).length >= 2) {
+      return { points: sevenDayHistoryPoints, range: "7d", source: "history" };
+    }
+
+    const historyPoints = await this._fetchHistoryTrendPoints(entityId, dayStart, end, {
+      maxPoints: 240,
+    });
     return {
       points: historyPoints.length ? historyPoints : statisticPoints,
       range: historyPoints.length ? "24h" : "7d",
@@ -532,20 +541,21 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
-  async _fetchHistoryTrendPoints(entityId, start, end) {
+  async _fetchHistoryTrendPoints(entityId, start, end, options = {}) {
+    const significantChangesOnly = Boolean(options.significantChangesOnly);
     if (typeof this._hass?.callApi === "function") {
       const params = new URLSearchParams({
         end_time: end.toISOString(),
         filter_entity_id: entityId,
         minimal_response: "1",
         no_attributes: "1",
-        significant_changes_only: "0",
+        significant_changes_only: significantChangesOnly ? "1" : "0",
       });
       const raw = await this._hass.callApi(
         "GET",
         `history/period/${encodeURIComponent(start.toISOString())}?${params.toString()}`,
       );
-      return this._historyPoints(raw, entityId);
+      return this._thinTrendPoints(this._historyPoints(raw, entityId), options.maxPoints);
     }
 
     const raw = await this._callWS({
@@ -554,9 +564,20 @@ class OpenReefPanel extends HTMLElement {
       end_time: end.toISOString(),
       entity_ids: [entityId],
       minimal_response: true,
-      significant_changes_only: false,
+      significant_changes_only: significantChangesOnly,
     });
-    return this._historyPoints(raw, entityId);
+    return this._thinTrendPoints(this._historyPoints(raw, entityId), options.maxPoints);
+  }
+
+  _thinTrendPoints(points, maxPoints) {
+    if (!Number.isFinite(maxPoints) || !Array.isArray(points) || points.length <= maxPoints) return points;
+    if (maxPoints <= 2) return [points[0], points[points.length - 1]].filter(Boolean);
+    const indexes = new Set([0, points.length - 1]);
+    const step = (points.length - 1) / (maxPoints - 1);
+    for (let index = 1; index < maxPoints - 1; index += 1) {
+      indexes.add(Math.round(index * step));
+    }
+    return [...indexes].sort((a, b) => a - b).map((index) => points[index]).filter(Boolean);
   }
 
   async _fetchStatisticTrendPoints(entityId, start, end, range) {
@@ -5437,11 +5458,11 @@ class OpenReefPanel extends HTMLElement {
 
     return `
       <div class="chart-wrap">
-        <svg class="trend-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this._escape(this._trendRangeLabel(range))} trend">
-          <line x1="${pad}" y1="${pad}" x2="${width - pad}" y2="${pad}" />
-          <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" />
+        <svg class="trend-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${this._escape(this._trendRangeLabel(range))} trend">
+          <line x1="${pad}" y1="${pad}" x2="${width - pad}" y2="${pad}" vector-effect="non-scaling-stroke" />
+          <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" vector-effect="non-scaling-stroke" />
           <polygon points="${fillCoords}" />
-          <polyline points="${coords.join(" ")}" />
+          <polyline points="${coords.join(" ")}" vector-effect="non-scaling-stroke" />
         </svg>
         <div class="chart-labels">
           <span>${this._formatTrendTime(minTime, range)}</span>
@@ -5838,6 +5859,8 @@ class OpenReefPanel extends HTMLElement {
           background: #07111a;
           color: #e5edf5;
           font-family: var(--ha-font-family-body, Arial, sans-serif);
+          -webkit-text-size-adjust: 100%;
+          text-size-adjust: 100%;
         }
         * { box-sizing: border-box; }
         button, input, select { font: inherit; }
@@ -6095,7 +6118,7 @@ class OpenReefPanel extends HTMLElement {
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
         .compact-center { min-height: 220px; }
         .chart-wrap { display: grid; gap: 8px; border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0b1724; }
-        .trend-chart { width: 100%; min-height: 260px; overflow: visible; }
+        .trend-chart { display: block; width: 100%; height: 240px; overflow: hidden; }
         .trend-chart line { stroke: #24364a; stroke-width: 1; }
         .trend-chart polygon { fill: var(--openreef-accent-soft); }
         .trend-chart polyline { fill: none; stroke: var(--openreef-accent); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
@@ -6200,7 +6223,7 @@ class OpenReefPanel extends HTMLElement {
           .mapping-head, .equipment-editor-head, .control-row { align-items: stretch; }
           .control-switch, .arm-switch { justify-content: space-between; width: 100%; max-width: 220px; }
           .chart-wrap { padding: 10px; }
-          .trend-chart { min-height: 200px; }
+          .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
         }
         /* Tablet tier: re-expand content grids that the phone collapse would
