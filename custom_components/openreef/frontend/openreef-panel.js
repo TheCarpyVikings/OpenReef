@@ -31,6 +31,7 @@ class OpenReefPanel extends HTMLElement {
     this._equipmentEnergyEditors = {};
     this._settingsSections = this._loadSettingsSections();
     this._healthSections = this._loadHealthSections();
+    this._manualHistoryOpen = {};
   }
 
   set hass(hass) {
@@ -81,6 +82,7 @@ class OpenReefPanel extends HTMLElement {
       profile: false,
       mission: false,
       sensors: false,
+      manualTests: false,
       equipment: false,
       modes: false,
       alerts: false,
@@ -91,7 +93,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _setupSteps() {
-    return ["Profile", "Sensors", "Equipment", "Safety", "Review"];
+    return ["Profile", "Sensors", "Manual Tests", "Equipment", "Safety", "Review"];
   }
 
   _lastSetupStep() {
@@ -300,6 +302,13 @@ class OpenReefPanel extends HTMLElement {
         }
       }));
     }
+
+    this._dosingActiveParameters().forEach(([id, sensor]) => {
+      if (consumptionItems[id] || this._manualReadings(id).length < 2) return;
+      const trendData = this._manualTrendData(id);
+      const healthItem = this._analyseHealthTrend(id, sensor, trendData);
+      consumptionItems[id] = this._analyseConsumption(id, sensor, trendData, healthItem);
+    });
 
     const checkedAt = new Date().toISOString();
     this._healthTrends = {
@@ -855,6 +864,17 @@ class OpenReefPanel extends HTMLElement {
         this._applySensorPreset(id);
         this._render();
       }
+      if (action === "apply-manual-schedule-preset") {
+        this._applyManualSchedulePreset();
+        this._setDirty(true);
+        this._render();
+      }
+      if (action === "save-manual-reading") this._saveManualReadingFromForm();
+      if (action === "delete-manual-reading") this._deleteManualReading(id, target.dataset.reading);
+      if (action === "toggle-manual-history") {
+        this._manualHistoryOpen[id] = !this._manualHistoryOpen[id];
+        this._render();
+      }
       if (action === "setup-add-starter-equipment") this._addStarterEquipment();
       if (action === "add-custom-mode") this._addCustomMode();
       if (action === "remove-custom-mode") this._removeCustomMode(target.dataset.mode);
@@ -985,6 +1005,13 @@ class OpenReefPanel extends HTMLElement {
       const field = target.dataset.field;
       const value = target.type === "checkbox" ? target.checked : target.type === "number" ? Number(target.value) : target.value;
 
+      if (target.dataset.manualField === "parameter") {
+        const unitInput = this.shadowRoot.querySelector('[data-manual-field="unit"]');
+        if (unitInput) unitInput.value = this._manualTestMeta(value).unit || "";
+        const sourceInput = this.shadowRoot.querySelector('[data-manual-field="source"]');
+        if (sourceInput) sourceInput.value = this._manualTestConfig(value).preferredSource || "";
+        return;
+      }
       if (scope === "tank") this._config.tank[field] = value;
       if (scope === "display") this._config.display[field] = value;
       if (scope === "sensor") this._config.sensors[id][field] = value;
@@ -1058,10 +1085,20 @@ class OpenReefPanel extends HTMLElement {
           this._config.dosing.parameters[id][field] = Math.max(0, Number(value) || 0);
         }
       }
+      if (scope === "manual-tests") {
+        this._config.manualTests = this._config.manualTests || { enabled: true, schedules: {} };
+        this._config.manualTests[field] = value;
+      }
+      if (scope === "manual-test") {
+        this._config.manualTests = this._config.manualTests || { enabled: true, schedules: {} };
+        this._config.manualTests.schedules = this._config.manualTests.schedules || {};
+        this._config.manualTests.schedules[id] = this._config.manualTests.schedules[id] || {};
+        this._config.manualTests.schedules[id][field] = field === "cadenceDays" ? Math.max(1, Math.min(365, Number(value) || 1)) : value;
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && field === "enabled") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
         && event.type === "change"
       ) this._render();
     };
@@ -2666,8 +2703,12 @@ class OpenReefPanel extends HTMLElement {
 
   _dosingActiveParameters() {
     return this._dosingParameterIds()
-      .map((id) => [id, this._config?.sensors?.[id]])
-      .filter(([, sensor]) => sensor && this._sensorEnabled(sensor) && sensor.entity_id);
+      .map((id) => {
+        const sensor = this._config?.sensors?.[id] || {};
+        const meta = this._manualTestMeta(id);
+        return [id, { ...meta, ...sensor, label: sensor.label || meta.label, unit: sensor.unit ?? meta.unit }];
+      })
+      .filter(([id, sensor]) => (sensor && this._sensorEnabled(sensor) && sensor.entity_id) || this._manualReadings(id).length >= 2);
   }
 
   _consumptionFreshness() {
@@ -2771,13 +2812,16 @@ class OpenReefPanel extends HTMLElement {
     const digits = this._sensorDigits(sensorId);
     const points = Array.isArray(trendData) ? trendData : trendData?.points || [];
     const range = Array.isArray(trendData) ? "24h" : trendData?.range || "24h";
+    const source = Array.isArray(trendData) ? "history" : trendData?.source || "history";
     const days = this._trendDays(points);
 
     if (range !== "7d" || days.length < 4) {
       return this._consumptionLearning(
         sensorId,
         sensor,
-        "Collecting Trident history — OpenReef needs about 4 days of readings before it can estimate consumption.",
+        source === "manual"
+          ? "Collecting manual test history — OpenReef needs about 4 dated results before it can estimate consumption."
+          : "Collecting Trident history — OpenReef needs about 4 days of readings before it can estimate consumption.",
       );
     }
 
@@ -2879,8 +2923,9 @@ class OpenReefPanel extends HTMLElement {
       else if (projectionDays <= 10) status = "warning";
     }
 
+    const sourceText = source === "manual" ? "from manual test history" : "net of your current dosing";
     const trendText = confident
-      ? `${slope < 0 ? "Falling" : "Rising"} ~${rateText}, net of your current dosing.`
+      ? `${slope < 0 ? "Falling" : "Rising"} ~${rateText}, ${sourceText}.`
       : "Net change is within measurement noise (holding steady).";
     const projectionText = projectionDays !== null
       ? `At this rate ${label} reaches your ${projectionEdge === "low" ? "low" : "high"} limit of ${this._format(projectionValue, digits)}${unitSuffix} in about ${this._formatDays(projectionDays)}.`
@@ -3198,6 +3243,20 @@ class OpenReefPanel extends HTMLElement {
       });
     });
 
+    this._manualTestFreshnessItems().forEach((item) => {
+      if (item.affectsScore && item.points > 0) {
+        addLoss(item.category, item.points, item.label, item.detail, item.status);
+        return;
+      }
+      addInsight("context", {
+        category: item.category,
+        affectsScore: false,
+        label: item.label,
+        detail: item.detail,
+        status: item.status,
+      });
+    });
+
     const categories = Object.fromEntries(this._healthCategoryChoices().map(([id, label]) => {
       const score = Math.max(0, Math.round(100 - Math.min(categoryLoss[id] || 0, 100)));
       return [id, { label, score, weight: weights[id] || 0, lost: Math.round(categoryLoss[id] || 0) }];
@@ -3287,6 +3346,9 @@ class OpenReefPanel extends HTMLElement {
       : "None yet";
     const health = this._reefHealthScore(enabledSensors, equipment, sensorAlerts, interlocks);
     const sensorSummary = this._sensorSummaryState(sensorAlerts, !enabledSensors.length);
+    const manualTracked = this._manualTestParameterIds().filter((id) => this._manualTestConfig(id).enabled);
+    const manualDue = this._manualTestFreshnessItems().filter((item) => item.status === "warning" || item.status === "critical");
+    const manualLogged = this._manualTestParameterIds().filter((id) => this._manualReadings(id).length > 0);
     return {
       version: this._integrationVersion || "unknown",
       schema: this._config.schemaVersion || "unknown",
@@ -3299,6 +3361,9 @@ class OpenReefPanel extends HTMLElement {
       equipment: `${armedEquipment.length}/${equipment.length}`,
       mappedEquipment: `${mappedEquipment.length}/${equipment.length}`,
       energy: `${this._energyTotalMappings().filter(([, key]) => this._config.energy[key]).length}/3`,
+      manualTests: `${manualTracked.length}/${this._manualTestParameterIds().length}`,
+      manualDue: manualDue.length,
+      manualLogged: manualLogged.length,
       alerts: [
         `${sensorSummary.criticalCount} critical`,
         `${sensorSummary.warningCount} warning`,
@@ -3405,6 +3470,18 @@ class OpenReefPanel extends HTMLElement {
       });
     const energy = this._energyTotalMappings()
       .map(([label, energyKey, costKey]) => `- ${label}: energy ${this._config.energy?.[energyKey] || "not mapped"}, cost ${this._config.energy?.[costKey] || "not mapped"}`);
+    const manualTests = this._manualTestParameterIds()
+      .filter((id) => this._manualTestConfig(id).enabled || this._manualReadings(id).length)
+      .map((id) => {
+        const meta = this._manualTestMeta(id);
+        const schedule = this._manualTestConfig(id);
+        const state = this._manualDueState(id);
+        const latest = state.latest;
+        const latestText = latest
+          ? `${this._format(Number(latest.value), this._sensorDigits(id))}${latest.unit ? ` ${latest.unit}` : meta.unit ? ` ${meta.unit}` : ""} on ${this._formatActivityTime(latest.timestamp)}`
+          : "no result logged";
+        return `- ${meta.label}: ${schedule.enabled ? `every ${schedule.cadenceDays}d` : "not scheduled"}, ${state.label}, ${latestText}`;
+      });
     const interlocks = this._config.interlocks || {};
     const alerts = this._config.alerts || {};
     const activity = Array.isArray(this._config.activity)
@@ -3447,6 +3524,9 @@ class OpenReefPanel extends HTMLElement {
       `Equipment armed/total: ${check.equipment}`,
       `Equipment mapped/total: ${check.mappedEquipment}`,
       `Energy totals mapped: ${check.energy}`,
+      `Manual tests tracked: ${check.manualTests}`,
+      `Manual tests due: ${check.manualDue}`,
+      `Manual parameters logged: ${check.manualLogged}`,
       `Alerts: ${check.alerts}`,
       `Interlock warnings: ${check.interlocks}`,
       `ATO duty cycle: ${check.atoDutyCycle}`,
@@ -3480,6 +3560,9 @@ class OpenReefPanel extends HTMLElement {
       "",
       "Energy mappings",
       ...energy,
+      "",
+      "Manual testing",
+      ...(manualTests.length ? manualTests : ["- no manual test schedules or readings yet"]),
       "",
       "Safety settings",
       `- heater requires tank temp: ${interlocks.heaterRequiresTankTemp !== false ? "on" : "off"}`,
@@ -3529,6 +3612,12 @@ class OpenReefPanel extends HTMLElement {
       `- Confirm enabled sensors match the tester's system: ${enabledSensors.join(", ") || "none enabled"}.`,
       "- Use Find matches for at least two sensors and confirm suggestions are sensible.",
       "- Do not paste HA tokens or secrets anywhere in OpenReef.",
+      "",
+      "Manual tests",
+      "- Open Manual Tests and apply the suggested routine for the selected tank profile.",
+      "- Change one cadence to confirm the routine is configurable, then save Settings.",
+      "- Record one safe manual result, confirm it appears as fresh, then delete it if it was only a test entry.",
+      "- Confirm the support summary shows tracked, due, and logged manual parameters.",
       "",
       "Live Stats and trends",
       "- Open Live Stats and confirm mapped readings show current values.",
@@ -3584,6 +3673,12 @@ class OpenReefPanel extends HTMLElement {
       "- Which Apex/OpenReef sensor guide did you choose?",
       "- Which entity suggestions were correct?",
       "- Which entity suggestions were missing or wrong?",
+      "",
+      "Manual tests",
+      "- Which manual test routine did OpenReef suggest?",
+      "- Did the cadence controls make sense for your reef?",
+      "- Were you able to record and delete a manual result?",
+      "- Should any test be checked more or less often by default?",
       "",
       "Live Stats and trends",
       "- Which readings showed correctly?",
@@ -3696,6 +3791,7 @@ class OpenReefPanel extends HTMLElement {
     const tabs = [
       ["mission", "Mission Control"],
       ["live", "Live Stats"],
+      ["manual", "Manual Tests"],
       ["controls", "Controls"],
       ["energy", "Energy"],
       ["settings", "Settings"],
@@ -3713,6 +3809,7 @@ class OpenReefPanel extends HTMLElement {
 
   _activeContent() {
     if (this._activeTab === "live") return this._liveStats();
+    if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "controls") return this._controls();
     if (this._activeTab === "energy") return this._energy();
     if (this._activeTab === "settings") return this._settings();
@@ -4479,6 +4576,312 @@ class OpenReefPanel extends HTMLElement {
     ];
   }
 
+  // --- Manual Tests -------------------------------------------------------
+
+  _manualTestParameterIds() {
+    return ["alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity", "ph", "temp"];
+  }
+
+  _manualTestSourceChoices() {
+    return ["", "Hanna", "Salifert", "Red Sea", "Nyos", "API", "ICP", "Apex", "Trident", "Trident NP", "Other"];
+  }
+
+  _manualTestMeta(id) {
+    const sensor = this._config?.sensors?.[id] || {};
+    const fallback = {
+      alkalinity: ["Alkalinity", "dKH", 7, 11],
+      calcium: ["Calcium", "ppm", 380, 460],
+      magnesium: ["Magnesium", "ppm", 1250, 1450],
+      nitrate: ["Nitrate", "ppm", 0.5, 20],
+      phosphate: ["Phosphate", "ppm", 0.02, 0.12],
+      salinity: ["Salinity", "ppt", 32, 36],
+      ph: ["pH Level", "", 7.8, 8.4],
+      temp: ["Display Tank Temperature", "°C", 24.5, 27.5],
+    }[id] || [id, "", 0, 0];
+    return {
+      id,
+      label: sensor.label || fallback[0],
+      unit: sensor.unit ?? fallback[1],
+      min: Number.isFinite(Number(sensor.min)) ? Number(sensor.min) : fallback[2],
+      max: Number.isFinite(Number(sensor.max)) ? Number(sensor.max) : fallback[3],
+    };
+  }
+
+  _manualTestsConfig() {
+    this._config.manualTests = this._config.manualTests || { enabled: true, schedules: {} };
+    this._config.manualTests.schedules = this._config.manualTests.schedules || {};
+    return this._config.manualTests;
+  }
+
+  _manualTestConfig(id) {
+    const config = this._manualTestsConfig();
+    const schedules = config.schedules;
+    const suggested = this._manualSuggestedCadenceDays(id);
+    schedules[id] = schedules[id] || { enabled: false, cadenceDays: suggested, preferredSource: "" };
+    return {
+      enabled: schedules[id].enabled === true,
+      cadenceDays: Math.max(1, Math.min(365, Number(schedules[id].cadenceDays) || suggested)),
+      preferredSource: schedules[id].preferredSource || "",
+    };
+  }
+
+  _manualSuggestedCadenceDays(id, profile = this._tankProfile()) {
+    const presets = {
+      fish_only_fowlr: { alkalinity: 30, calcium: 30, magnesium: 60, nitrate: 14, phosphate: 30, salinity: 14, ph: 30, temp: 7 },
+      soft_coral: { alkalinity: 7, calcium: 21, magnesium: 30, nitrate: 14, phosphate: 14, salinity: 7, ph: 30, temp: 7 },
+      lps: { alkalinity: 7, calcium: 14, magnesium: 30, nitrate: 7, phosphate: 7, salinity: 7, ph: 21, temp: 7 },
+      sps: { alkalinity: 3, calcium: 7, magnesium: 14, nitrate: 7, phosphate: 7, salinity: 7, ph: 14, temp: 7 },
+      mixed_reef: { alkalinity: 4, calcium: 14, magnesium: 21, nitrate: 7, phosphate: 7, salinity: 7, ph: 21, temp: 7 },
+      anemone_dominant: { alkalinity: 14, calcium: 21, magnesium: 30, nitrate: 7, phosphate: 7, salinity: 7, ph: 14, temp: 7 },
+    };
+    return presets[profile]?.[id] || presets.mixed_reef[id] || 14;
+  }
+
+  _manualSuggestedEnabled(id) {
+    if (["alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity"].includes(id)) return true;
+    return ["sps", "mixed_reef", "anemone_dominant"].includes(this._tankProfile()) && ["ph", "temp"].includes(id);
+  }
+
+  _applyManualSchedulePreset() {
+    const config = this._manualTestsConfig();
+    config.enabled = true;
+    this._manualTestParameterIds().forEach((id) => {
+      config.schedules[id] = {
+        ...(config.schedules[id] || {}),
+        enabled: this._manualSuggestedEnabled(id),
+        cadenceDays: this._manualSuggestedCadenceDays(id),
+      };
+    });
+    this._recordActivity(`Manual testing routine suggested for ${this._tankProfileLabel(this._tankProfile())}`);
+  }
+
+  _manualReadings(id) {
+    const readings = this._config?.manualReadings?.[id];
+    if (!Array.isArray(readings)) return [];
+    return [...readings]
+      .filter((entry) => Number.isFinite(Number(entry?.value)))
+      .sort((a, b) => this._manualReadingTime(b) - this._manualReadingTime(a));
+  }
+
+  _manualReadingTime(entry) {
+    const time = Date.parse(entry?.timestamp || entry?.date || "");
+    return Number.isFinite(time) ? time : 0;
+  }
+
+  _manualLatestReading(id) {
+    return this._manualReadings(id)[0] || null;
+  }
+
+  _manualAgeDays(entry) {
+    const time = this._manualReadingTime(entry);
+    if (!time) return Number.POSITIVE_INFINITY;
+    return Math.max(0, (Date.now() - time) / 86400000);
+  }
+
+  _manualDueState(id) {
+    const meta = this._manualTestMeta(id);
+    const schedule = this._manualTestConfig(id);
+    const latest = this._manualLatestReading(id);
+    if (!this._manualTestsConfig().enabled || !schedule.enabled) {
+      return { status: "unknown", label: "not tracked", detail: "Freshness reminders are off for this test.", latest };
+    }
+    if (!latest) {
+      return { status: "warning", label: "not logged", detail: `${meta.label} is on a ${schedule.cadenceDays}-day schedule but has no manual entry yet.`, latest };
+    }
+    const age = this._manualAgeDays(latest);
+    if (age > schedule.cadenceDays * 2) {
+      return { status: "critical", label: "overdue", detail: `${meta.label} was last logged ${this._format(age, 0)} days ago; target cadence is every ${schedule.cadenceDays} days.`, latest };
+    }
+    if (age > schedule.cadenceDays) {
+      return { status: "warning", label: "due", detail: `${meta.label} is due. Last logged ${this._format(age, 0)} days ago; target cadence is every ${schedule.cadenceDays} days.`, latest };
+    }
+    return { status: "ok", label: "fresh", detail: `${meta.label} logged ${this._format(age, age < 2 ? 1 : 0)} days ago; target cadence is every ${schedule.cadenceDays} days.`, latest };
+  }
+
+  _manualTestFreshnessItems() {
+    if (!this._manualTestsConfig().enabled) return [];
+    return this._manualTestParameterIds()
+      .filter((id) => this._manualTestConfig(id).enabled)
+      .map((id) => {
+        const meta = this._manualTestMeta(id);
+        const state = this._manualDueState(id);
+        const category = ["alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity", "ph"].includes(id) ? "chemistry" : "confidence";
+        const points = state.status === "critical" ? 10 : state.status === "warning" ? 4 : 0;
+        return {
+          id,
+          label: `${meta.label} manual test ${state.label}`,
+          detail: state.detail,
+          status: state.status,
+          category,
+          points,
+          affectsScore: points > 0,
+        };
+      });
+  }
+
+  _manualTrendData(id) {
+    const points = this._manualReadings(id)
+      .map((entry) => ({ time: this._manualReadingTime(entry), value: Number(entry.value) }))
+      .filter((point) => Number.isFinite(point.time) && Number.isFinite(point.value))
+      .sort((a, b) => a.time - b.time);
+    return { points, range: points.length >= 4 ? "7d" : "manual", source: "manual" };
+  }
+
+  _manualTrendSummary(id) {
+    const readings = this._manualReadings(id);
+    if (readings.length < 2) return "Add two or more results to show a manual trend.";
+    const latest = readings[0];
+    const previous = readings[1];
+    const meta = this._manualTestMeta(id);
+    const delta = Number(latest.value) - Number(previous.value);
+    const direction = delta > 0 ? "up" : delta < 0 ? "down" : "steady";
+    return `${direction} ${this._format(Math.abs(delta), this._sensorDigits(id))}${meta.unit ? ` ${meta.unit}` : ""} since last test.`;
+  }
+
+  _nowLocalInputValue() {
+    const date = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+    return date.toISOString().slice(0, 16);
+  }
+
+  _saveManualReadingFromForm() {
+    const field = (name) => this.shadowRoot.querySelector(`[data-manual-field="${name}"]`);
+    const parameter = field("parameter")?.value || "alkalinity";
+    const meta = this._manualTestMeta(parameter);
+    const value = Number(field("value")?.value);
+    if (!Number.isFinite(value)) {
+      this._error = "Enter a numeric manual test value.";
+      this._message = "";
+      this._render();
+      return;
+    }
+    const localTime = field("timestamp")?.value;
+    const timestamp = localTime ? new Date(localTime).toISOString() : new Date().toISOString();
+    const unit = field("unit")?.value || meta.unit || "";
+    const source = field("source")?.value || "";
+    const notes = field("notes")?.value || "";
+    this._config.manualReadings = this._config.manualReadings || {};
+    this._config.manualReadings[parameter] = this._manualReadings(parameter);
+    this._config.manualReadings[parameter].push({
+      id: `${parameter}:${Date.now()}`,
+      timestamp,
+      value,
+      unit,
+      source,
+      notes,
+    });
+    this._recordActivity(`Manual ${meta.label} test recorded: ${this._format(value, this._sensorDigits(parameter))}${unit ? ` ${unit}` : ""}`, "control");
+    this._saveConfig();
+  }
+
+  _deleteManualReading(parameter, readingId) {
+    const readings = this._config.manualReadings?.[parameter];
+    if (!Array.isArray(readings)) return;
+    this._config.manualReadings[parameter] = readings.filter((entry) => entry.id !== readingId);
+    this._recordActivity(`Manual ${this._manualTestMeta(parameter).label} test deleted`, "warning");
+    this._saveConfig();
+  }
+
+  _manualTests() {
+    const tracked = this._manualTestParameterIds().filter((id) => this._manualTestConfig(id).enabled);
+    const due = this._manualTestFreshnessItems().filter((item) => item.status === "warning" || item.status === "critical");
+    return `
+      <section class="stack">
+        <div class="section-head">
+          <div>
+            <h2>Manual Tests</h2>
+            <p>Log test-kit results and let OpenReef keep you consistent with your own routine.</p>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="apply-manual-schedule-preset">Use ${this._escape(this._tankProfileLabel(this._tankProfile()))} routine</button>
+            <button class="primary" data-action="tab" data-id="settings">Edit schedule</button>
+          </div>
+        </div>
+        <div class="summary-grid">
+          ${this._missionSummaryCard("Tracked tests", `${tracked.length}/${this._manualTestParameterIds().length}`, "user-selected cadence", tracked.length ? "ok" : "unknown", "settings")}
+          ${this._missionSummaryCard("Due now", `${due.length}`, due.length ? "review manual testing" : "routine is current", due.some((item) => item.status === "critical") ? "critical" : due.length ? "warning" : "ok", "manual")}
+          ${this._missionSummaryCard("Dosing insight", `${this._dosingActiveParameters().length}`, "mapped sensors or manual history", this._dosingActiveParameters().length ? "ok" : "unknown", "mission")}
+        </div>
+        ${this._manualEntryPanel()}
+        <div class="grid four">
+          ${this._manualTestParameterIds().map((id) => this._manualTestCard(id)).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  _manualEntryPanel() {
+    const defaultId = this._manualTestParameterIds().find((id) => this._manualTestConfig(id).enabled) || "alkalinity";
+    const meta = this._manualTestMeta(defaultId);
+    const preferredSource = this._manualTestConfig(defaultId).preferredSource || "";
+    return `
+      <article class="panel manual-entry-panel">
+        <div class="section-head">
+          <div>
+            <h3>Record a manual result</h3>
+            <p>Use this for Hanna, Salifert, Red Sea, ICP, Apex cross-checks, or any manual chemistry result.</p>
+          </div>
+        </div>
+        <div class="manual-entry-grid">
+          <label>Parameter
+            <select data-manual-field="parameter">
+              ${this._manualTestParameterIds().map((id) => `<option value="${this._escape(id)}" ${id === defaultId ? "selected" : ""}>${this._escape(this._manualTestMeta(id).label)}</option>`).join("")}
+            </select>
+          </label>
+          <label>Value<input type="number" step="0.001" data-manual-field="value" placeholder="0.00"></label>
+          <label>Unit<input data-manual-field="unit" value="${this._escape(meta.unit)}" placeholder="ppm, dKH, ppt"></label>
+          <label>Date/time<input type="datetime-local" data-manual-field="timestamp" value="${this._escape(this._nowLocalInputValue())}"></label>
+          <label>Source
+            <select data-manual-field="source">
+              ${this._manualTestSourceChoices().map((source) => `<option value="${this._escape(source)}" ${source === preferredSource ? "selected" : ""}>${this._escape(source || "Choose source")}</option>`).join("")}
+            </select>
+          </label>
+          <label class="manual-notes">Notes<textarea data-manual-field="notes" rows="2" placeholder="Optional note, e.g. before water change"></textarea></label>
+          <button class="primary" data-action="save-manual-reading">Save result</button>
+        </div>
+      </article>
+    `;
+  }
+
+  _manualTestCard(id) {
+    const meta = this._manualTestMeta(id);
+    const schedule = this._manualTestConfig(id);
+    const state = this._manualDueState(id);
+    const latest = state.latest;
+    const readings = this._manualReadings(id);
+    const open = this._manualHistoryOpen[id] === true;
+    const value = latest ? `${this._format(Number(latest.value), this._sensorDigits(id))}${latest.unit ? ` ${latest.unit}` : meta.unit ? ` ${meta.unit}` : ""}` : "--";
+    return `
+      <article class="manual-test-card ${state.status}">
+        <div class="card-head">
+          <div>
+            <h3>${this._escape(meta.label)}</h3>
+            <p>${schedule.enabled ? `Every ${this._escape(schedule.cadenceDays)} day${schedule.cadenceDays === 1 ? "" : "s"}` : "Schedule off"}</p>
+          </div>
+          <span class="pill ${state.status}">${this._escape(state.label)}</span>
+        </div>
+        <strong>${this._escape(value)}</strong>
+        <small>${this._escape(latest ? this._formatActivityTime(latest.timestamp) : "No manual result yet")}</small>
+        <p>${this._escape(state.detail)}</p>
+        <p class="hint">${this._escape(this._manualTrendSummary(id))}</p>
+        <button class="secondary compact-button" data-action="toggle-manual-history" data-id="${this._escape(id)}">${open ? "Hide history" : `Show history (${readings.length})`}</button>
+        ${open ? `
+          <div class="manual-history">
+            ${readings.length ? readings.slice(0, 12).map((entry) => `
+              <div class="manual-history-row">
+                <div>
+                  <strong>${this._escape(this._format(Number(entry.value), this._sensorDigits(id)))}${entry.unit ? ` ${this._escape(entry.unit)}` : ""}</strong>
+                  <small>${this._escape(this._formatActivityTime(entry.timestamp))}${entry.source ? ` · ${this._escape(entry.source)}` : ""}</small>
+                  ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
+                </div>
+                <button class="danger-text compact-button" data-action="delete-manual-reading" data-id="${this._escape(id)}" data-reading="${this._escape(entry.id)}">Delete</button>
+              </div>
+            `).join("") : `<p class="muted">No history yet.</p>`}
+          </div>
+        ` : ""}
+      </article>
+    `;
+  }
+
   _emptyState(title, detail, tab = "settings", actionLabel = "Open settings") {
     return `
       <article class="empty-state">
@@ -4536,6 +4939,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._profileSettings()}
         ${this._missionSettings()}
         ${this._sensorSettings()}
+        ${this._manualTestSettings()}
         ${this._dosingSettings()}
         ${this._equipmentSettings()}
         ${this._modePreviewSettings()}
@@ -4640,6 +5044,69 @@ class OpenReefPanel extends HTMLElement {
     );
   }
 
+  _manualTestSettings(forceOpen = false) {
+    const manualTests = this._manualTestsConfig();
+    return this._settingsPanel(
+      "manualTests",
+      "Manual Tests",
+      "Choose the chemistry routine OpenReef should keep you consistent with.",
+      `
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">${this._escape(this._tankProfileLabel(this._tankProfile()))} suggestion</p>
+            <h4>Use the preset as a starting point, then change any test cadence to match how you reef.</h4>
+          </div>
+          <button class="secondary" data-action="apply-manual-schedule-preset">Apply suggested routine</button>
+        </div>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="manual-tests" data-field="enabled" ${manualTests.enabled === false ? "" : "checked"}>
+          <span>
+            <strong>Use manual tests in Reef Health</strong>
+            <small>Only enabled test schedules affect Chemistry and Confidence. Disabled tests are ignored.</small>
+          </span>
+        </label>
+        <div class="grid four compact">
+          ${this._manualTestParameterIds().map((id) => {
+            const meta = this._manualTestMeta(id);
+            const schedule = this._manualTestConfig(id);
+            const due = this._manualDueState(id);
+            const suggested = this._manualSuggestedCadenceDays(id);
+            return `
+              <section class="mapping-card manual-schedule-card ${schedule.enabled ? "manual-enabled" : "disabled-card"}">
+                <div class="mapping-head">
+                  <div>
+                    <p class="eyebrow">${this._escape(meta.unit || "manual")}</p>
+                    <h3>${this._escape(meta.label)}</h3>
+                  </div>
+                  <span class="pill ${due.status}">${this._escape(due.label)}</span>
+                </div>
+                <label class="toggle-card">
+                  <input type="checkbox" data-scope="manual-test" data-id="${this._escape(id)}" data-field="enabled" ${schedule.enabled ? "checked" : ""}>
+                  <span>
+                    <strong>Track this test</strong>
+                    <small>Suggested for ${this._escape(this._tankProfileLabel(this._tankProfile()))}: every ${this._escape(suggested)} day${suggested === 1 ? "" : "s"}.</small>
+                  </span>
+                </label>
+                ${schedule.enabled ? `
+                  <div class="mini-grid">
+                    <label>Every days<input type="number" min="1" max="365" step="1" data-scope="manual-test" data-id="${this._escape(id)}" data-field="cadenceDays" value="${this._escape(schedule.cadenceDays)}"></label>
+                    <label>Preferred source
+                      <select data-scope="manual-test" data-id="${this._escape(id)}" data-field="preferredSource">
+                        ${this._manualTestSourceChoices().map((source) => `<option value="${this._escape(source)}" ${schedule.preferredSource === source ? "selected" : ""}>${this._escape(source || "No preference")}</option>`).join("")}
+                      </select>
+                    </label>
+                  </div>
+                  <p class="hint">${this._escape(due.detail)}</p>
+                ` : `<p class="muted">Ignored by Reef Health until you enable it.</p>`}
+              </section>
+            `;
+          }).join("")}
+        </div>
+      `,
+      forceOpen,
+    );
+  }
+
   _dosingSettings() {
     const dosing = this._config.dosing || {};
     const enabled = dosing.enabled !== false;
@@ -4649,7 +5116,7 @@ class OpenReefPanel extends HTMLElement {
         <input type="checkbox" data-scope="dosing" data-field="enabled" ${enabled ? "checked" : ""}>
         <span>
           <strong>Show the Dosing Advisor</strong>
-          <small>Advisory only — OpenReef never doses for you. It estimates consumption and dose changes from your Trident/chemistry history.</small>
+          <small>Advisory only — OpenReef never doses for you. It estimates consumption from mapped chemistry entities or manual test history.</small>
         </span>
       </label>
       ${active.length ? active.map(([id, sensor]) => {
@@ -4669,7 +5136,7 @@ class OpenReefPanel extends HTMLElement {
             </div>
           </section>
         `;
-      }).join("") : `<p class="muted">Enable and map alkalinity, calcium, or magnesium in the Sensors section (for example your Trident) to use the Dosing Advisor.</p>`}
+      }).join("") : `<p class="muted">Map alkalinity, calcium, or magnesium sensors, or add at least two manual results for a parameter, to use the Dosing Advisor.</p>`}
     `;
     return this._settingsPanel(
       "dosing",
@@ -5371,6 +5838,7 @@ class OpenReefPanel extends HTMLElement {
       ["Active mode", check.activeMode],
       ["Mode timer", check.modeTimer],
       ["Sensors", `${check.sensors} mapped/enabled`],
+      ["Manual tests", `${check.manualTests} tracked, ${check.manualDue} due`],
       ["Equipment", `${check.equipment} armed/total`],
       ["Entity mappings", `${check.mappedEquipment} equipment, ${check.energy} energy totals`],
       ["Alerts", check.alerts],
@@ -5620,6 +6088,8 @@ class OpenReefPanel extends HTMLElement {
     const mappedEquipment = equipment.filter(([, item]) => item.switch_entity_id);
     const armedEquipment = equipment.filter(([, item]) => item.armed);
     const energyMapped = this._energyTotalMappings().filter(([, energyKey]) => this._config.energy[energyKey]).length;
+    const manualTracked = this._manualTestParameterIds().filter((id) => this._manualTestConfig(id).enabled);
+    const manualDue = this._manualTestFreshnessItems().filter((item) => item.status === "warning" || item.status === "critical");
     return {
       sensors,
       enabledSensors,
@@ -5628,6 +6098,8 @@ class OpenReefPanel extends HTMLElement {
       mappedEquipment,
       armedEquipment,
       energyMapped,
+      manualTracked,
+      manualDue,
     };
   }
 
@@ -5721,6 +6193,28 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="setup-status-line">${stats.mappedSensors.length}/${stats.enabledSensors.length} enabled sensors mapped.</div>
         ${this._sensorMappingGroups()}
+      `,
+    );
+  }
+
+  _setupManualTestsStep() {
+    const stats = this._setupStats();
+    return this._setupShell(
+      "Manual testing routine",
+      "OpenReef can suggest a routine for your tank profile, but you decide what to track and how often.",
+      `
+        <div class="setup-choice-grid two-choice">
+          <button class="setup-choice" data-action="apply-manual-schedule-preset">
+            <strong>Use ${this._escape(this._tankProfileLabel(this._tankProfile()))} suggestion</strong>
+            <span>Enable a sensible starting routine for chemistry and salinity, then adjust it any time.</span>
+          </button>
+          <article class="setup-choice passive">
+            <strong>Skip for now</strong>
+            <span>Manual testing is optional. You can still log results later without a schedule.</span>
+          </article>
+        </div>
+        <div class="setup-status-line">${stats.manualTracked.length} manual tests tracked. ${stats.manualDue.length} currently due.</div>
+        ${this._manualTestSettings(true)}
       `,
     );
   }
@@ -5858,9 +6352,10 @@ class OpenReefPanel extends HTMLElement {
       `
         <div class="summary-grid">
           ${this._setupReviewCard("Sensors", `${stats.mappedSensors.length}/${stats.enabledSensors.length}`, sensorsReady ? "Mapped" : "Needs attention", sensorsReady ? "ok" : "warning", 1)}
-          ${this._setupReviewCard("Equipment", `${stats.mappedEquipment.length}/${stats.equipment.length}`, stats.equipment.length ? `${stats.armedEquipment.length} armed` : "Monitor only", controlsReady ? "ok" : "warning", 2)}
-          ${this._setupReviewCard("Safety", safetyReady ? "On" : "Review", "Core warnings and reminders", safetyReady ? "ok" : "warning", 3)}
-          ${this._setupReviewCard("Energy", `${stats.energyMapped}/3`, stats.energyMapped ? "Totals mapped" : "Optional", stats.energyMapped ? "ok" : "unknown", 4)}
+          ${this._setupReviewCard("Manual Tests", `${stats.manualTracked.length}`, stats.manualTracked.length ? "Routine selected" : "Optional", stats.manualDue.length ? "warning" : stats.manualTracked.length ? "ok" : "unknown", 2)}
+          ${this._setupReviewCard("Equipment", `${stats.mappedEquipment.length}/${stats.equipment.length}`, stats.equipment.length ? `${stats.armedEquipment.length} armed` : "Monitor only", controlsReady ? "ok" : "warning", 3)}
+          ${this._setupReviewCard("Safety", safetyReady ? "On" : "Review", "Core warnings and reminders", safetyReady ? "ok" : "warning", 4)}
+          ${this._setupReviewCard("Energy", `${stats.energyMapped}/3`, stats.energyMapped ? "Totals mapped" : "Optional", stats.energyMapped ? "ok" : "unknown", 5)}
         </div>
         <article class="panel setup-panel">
           <h3>What happens next</h3>
@@ -5887,8 +6382,9 @@ class OpenReefPanel extends HTMLElement {
   _setupWizard() {
     if (this._setupStep === 0) return this._setupProfileStep();
     if (this._setupStep === 1) return this._setupSensorStep();
-    if (this._setupStep === 2) return this._setupEquipmentStep();
-    if (this._setupStep === 3) return this._setupSafetyStep();
+    if (this._setupStep === 2) return this._setupManualTestsStep();
+    if (this._setupStep === 3) return this._setupEquipmentStep();
+    if (this._setupStep === 4) return this._setupSafetyStep();
     return this._setupReviewStep();
   }
 
@@ -5923,7 +6419,7 @@ class OpenReefPanel extends HTMLElement {
         .eyebrow, .muted, .hint, small, .topbar p, .section-head p, .row span { color: #8da2ba; }
         .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
         .actions, .button-row, .quick-add, .wizard-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-        .tabs { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
+        .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button, .mode-button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
         .tabs button.active, .primary, .range-picker button.active, .mode-button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
         .secondary:hover, .tabs button:hover { border-color: var(--openreef-accent); }
@@ -6002,6 +6498,22 @@ class OpenReefPanel extends HTMLElement {
         .dosing-card-lines li { display: grid; gap: 2px; min-width: 0; }
         .dosing-card-lines span { color: #8da2ba; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
         .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
+        .manual-entry-panel { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
+        .manual-entry-grid { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(130px, .5fr) minmax(110px, .45fr) minmax(180px, .8fr) minmax(140px, .6fr) minmax(220px, 1fr) auto; gap: 12px; align-items: end; }
+        .manual-notes { min-width: 0; }
+        textarea { width: 100%; min-height: 44px; resize: vertical; border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 10px; }
+        .manual-test-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #121f2f; display: grid; gap: 9px; align-content: start; min-height: 220px; }
+        .manual-test-card.ok { border-color: #166534; background: #0b2b24; }
+        .manual-test-card.warning { border-color: #a16207; background: #2f2614; }
+        .manual-test-card.critical { border-color: #7f1d1d; background: #2b171c; }
+        .manual-test-card.unknown { border-color: #334155; }
+        .manual-test-card > strong { color: #67e8f9; font-size: 24px; overflow-wrap: anywhere; }
+        .manual-test-card p { color: #9fb2c7; }
+        .manual-history { display: grid; gap: 8px; border-top: 1px solid #24364a; padding-top: 10px; }
+        .manual-history-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; border: 1px solid #24364a; border-radius: 8px; padding: 10px; background: rgba(11, 23, 36, .72); }
+        .manual-history-row div { display: grid; gap: 4px; min-width: 0; }
+        .manual-history-row strong, .manual-history-row small { overflow-wrap: anywhere; }
+        .manual-schedule-card.manual-enabled { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .88)); }
         .issue-list { display: grid; gap: 8px; }
         .issue-item { width: 100%; display: grid; grid-template-columns: auto minmax(160px, .45fr) 1fr; gap: 12px; align-items: center; padding: 12px; text-align: left; }
         .issue-item small { color: #9fb2c7; }
@@ -6246,6 +6758,7 @@ class OpenReefPanel extends HTMLElement {
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }
           .mode-mini-row, .preset-row, .mode-timer-card, .mode-name-grid, .scheduler-preview, .schedule-fields { grid-template-columns: 1fr; }
+          .manual-entry-grid { grid-template-columns: 1fr; }
           .issue-item { grid-template-columns: 1fr; }
           .activity-item { grid-template-columns: 1fr; }
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
@@ -6274,6 +6787,7 @@ class OpenReefPanel extends HTMLElement {
           .chart-wrap { padding: 10px; }
           .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
+          .manual-history-row { flex-direction: column; }
         }
         /* Tablet tier: re-expand content grids that the phone collapse would
            otherwise force into a single wasteful column. Bounded at 641px so
@@ -6281,6 +6795,8 @@ class OpenReefPanel extends HTMLElement {
         @media (min-width: 641px) and (max-width: 1024px) {
           .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
           .grid.two, .grid.three, .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .manual-entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .manual-notes { grid-column: 1 / -1; }
           .dosing-grid, .health-insight-grid, .health-reason-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .health-category-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         }

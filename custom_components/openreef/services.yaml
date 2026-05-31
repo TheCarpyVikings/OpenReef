@@ -32,6 +32,30 @@ record_manual_reading:
       required: false
       selector:
         text:
+    timestamp:
+      name: Timestamp
+      description: Optional ISO timestamp. Defaults to now.
+      required: false
+      selector:
+        text:
+    unit:
+      name: Unit
+      description: Optional reading unit.
+      required: false
+      selector:
+        text:
+    source:
+      name: Test kit or source
+      description: Optional source, such as Hanna, Salifert, Red Sea, ICP, Apex, or Trident.
+      required: false
+      selector:
+        text:
+    notes:
+      name: Notes
+      description: Optional reading notes.
+      required: false
+      selector:
+        text:
 
 arm_equipment:
   name: Arm equipment

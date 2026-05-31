@@ -33,6 +33,8 @@ from .const import (
     ISSUE_LEGACY_LABS_CONFIG,
     ISSUE_MISSING_ENTITIES,
     INTEGRATION_VERSION,
+    MANUAL_TEST_CADENCE_PRESETS,
+    MANUAL_TEST_PARAMETERS,
     MVP_SENSORS,
     NAME,
     PANEL_ICON,
@@ -781,6 +783,70 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             and isinstance(item.get("timestamp"), str)
             and isinstance(item.get("message"), str)
         ]
+
+    manual_readings = config.setdefault("manualReadings", {})
+    if not isinstance(manual_readings, dict):
+        config["manualReadings"] = {}
+    else:
+        normalised_readings: dict[str, list[dict[str, Any]]] = {}
+        for parameter in MANUAL_TEST_PARAMETERS:
+            entries = manual_readings.get(parameter)
+            if not isinstance(entries, list):
+                continue
+            safe_entries: list[dict[str, Any]] = []
+            for index, item in enumerate(entries[:250]):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    value = float(item.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                timestamp = item.get("timestamp") or item.get("date")
+                if not isinstance(timestamp, str) or not timestamp:
+                    continue
+                sensor = config.get("sensors", {}).get(parameter, {})
+                unit = item.get("unit") or sensor.get("unit") or MVP_SENSORS.get(parameter, {}).get("unit", "")
+                source = item.get("source") or item.get("kit") or ""
+                notes = item.get("notes") or ""
+                entry_id = item.get("id") or f"{timestamp}:{index}"
+                safe_entries.append(
+                    {
+                        "id": str(entry_id)[:120],
+                        "timestamp": timestamp,
+                        "value": value,
+                        "unit": str(unit)[:20],
+                        "source": str(source)[:80],
+                        "notes": str(notes)[:500],
+                    }
+                )
+            normalised_readings[parameter] = safe_entries
+        config["manualReadings"] = normalised_readings
+
+    manual_tests = config.setdefault("manualTests", {})
+    if not isinstance(manual_tests, dict):
+        config["manualTests"] = deepcopy(DEFAULT_CORE_CONFIG["manualTests"])
+        manual_tests = config["manualTests"]
+    manual_tests["enabled"] = bool(manual_tests.get("enabled", True))
+    raw_schedules = manual_tests.get("schedules")
+    raw_schedules = raw_schedules if isinstance(raw_schedules, dict) else {}
+    profile = config.get("tank", {}).get("profile", DEFAULT_TANK_PROFILE)
+    profile_defaults = MANUAL_TEST_CADENCE_PRESETS.get(
+        profile, MANUAL_TEST_CADENCE_PRESETS[DEFAULT_TANK_PROFILE]
+    )
+    schedules: dict[str, dict[str, Any]] = {}
+    for parameter in MANUAL_TEST_PARAMETERS:
+        raw = raw_schedules.get(parameter)
+        raw = raw if isinstance(raw, dict) else {}
+        try:
+            cadence_days = int(raw.get("cadenceDays", profile_defaults.get(parameter, 14)))
+        except (TypeError, ValueError):
+            cadence_days = profile_defaults.get(parameter, 14)
+        schedules[parameter] = {
+            "enabled": bool(raw.get("enabled", False)),
+            "cadenceDays": max(1, min(cadence_days, 365)),
+            "preferredSource": str(raw.get("preferredSource", ""))[:80],
+        }
+    manual_tests["schedules"] = schedules
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):
@@ -2557,8 +2623,23 @@ async def _handle_record_manual_reading(
         config["manualReadings"] = readings
 
     parameter = call.data["parameter"]
-    date = call.data.get("date") or datetime.now(timezone.utc).date().isoformat()
-    readings.setdefault(parameter, []).append({"date": date, "value": call.data["value"]})
+    if parameter not in MANUAL_TEST_PARAMETERS:
+        raise ServiceValidationError(f"Unsupported OpenReef manual test parameter: {parameter}")
+    timestamp = call.data.get("timestamp") or call.data.get("date") or datetime.now(timezone.utc).isoformat()
+    sensor = config.get("sensors", {}).get(parameter, {})
+    unit = call.data.get("unit") or sensor.get("unit") or MVP_SENSORS.get(parameter, {}).get("unit", "")
+    source = call.data.get("source") or ""
+    notes = call.data.get("notes") or ""
+    readings.setdefault(parameter, []).append(
+        {
+            "id": f"{parameter}:{timestamp}:{len(readings.get(parameter, []))}",
+            "timestamp": timestamp,
+            "value": call.data["value"],
+            "unit": unit,
+            "source": source,
+            "notes": notes,
+        }
+    )
 
     await _async_save_config(hass, entry, config)
 

@@ -10,7 +10,7 @@ PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
 CORE_SCHEMA_VERSION = 26
-INTEGRATION_VERSION = "0.4.36"
+INTEGRATION_VERSION = "0.4.37"
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -527,8 +527,7 @@ DEFAULT_CORE_CONFIG = {
         "enabled": True,
         "schedules": {
             parameter: {
-                "enabled": parameter
-                in ("alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity"),
+                "enabled": False,
                 "cadenceDays": MANUAL_TEST_CADENCE_PRESETS[DEFAULT_TANK_PROFILE][parameter],
                 "preferredSource": "",
             }
