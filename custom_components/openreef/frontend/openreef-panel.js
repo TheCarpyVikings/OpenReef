@@ -36,6 +36,7 @@ class OpenReefPanel extends HTMLElement {
     this._onboarding = null;
     this._onboardingChecked = false;
     this._avatarReady = false;
+    this._stickerReady = false;
   }
 
   set hass(hass) {
@@ -3888,6 +3889,15 @@ class OpenReefPanel extends HTMLElement {
     img.src = `${this._avatarBase()}idle.png`;
   }
 
+  _probeSticker() {
+    if (this._stickerReady || this._stickerProbing) return;
+    this._stickerProbing = true;
+    const img = new Image();
+    img.onload = () => { this._stickerReady = true; this._stickerProbing = false; if (this._onboarding && this._onboarding.active) this._render(); };
+    img.onerror = () => { this._stickerProbing = false; };
+    img.src = `${this._avatarBase()}apex-throne.png`;
+  }
+
   _avatarMarkup(pose) {
     if (this._avatarReady) {
       return `<img class="or-avatar-img" src="${this._avatarBase()}${this._escape(pose)}.png" alt="">`;
@@ -3930,6 +3940,7 @@ class OpenReefPanel extends HTMLElement {
     const steps = this._onboardingVisibleSteps();
     if (!steps.length) return;
     this._probeAvatar();
+    this._probeSticker();
     this._onboarding = { active: true, step: 0, steps, scrolledStep: -1 };
     this._render();
   }
@@ -4012,6 +4023,7 @@ class OpenReefPanel extends HTMLElement {
               <span class="eyebrow">Your guide · ${idx + 1}/${steps.length}</span>
               <button class="or-tone" data-action="onboarding-tone" title="Switch tone">${tone === "cheeky" ? "😏 Cheeky" : "👔 Pro"}</button>
             </div>
+            ${isLast && tone === "cheeky" && this._stickerReady ? `<img class="or-sticker" src="${this._avatarBase()}apex-throne.png" alt="OpenReef's professional assessment of the competition">` : ""}
             <p class="or-line">${this._escape(line)}</p>
             <div class="or-dots">${dots}</div>
             <div class="or-actions">
@@ -6846,6 +6858,7 @@ class OpenReefPanel extends HTMLElement {
         .or-bubble-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
         .or-tone { border: 1px solid #294055; border-radius: 999px; background: #172536; color: #dcecff; font-size: 11px; font-weight: 800; padding: 3px 10px; }
         .or-tone:hover { border-color: var(--openreef-accent); }
+        .or-sticker { display: block; width: 100%; max-height: 230px; object-fit: contain; border-radius: 10px; margin-bottom: 10px; }
         .or-line { color: #e9f1f8; line-height: 1.42; overflow-wrap: anywhere; }
         .or-dots { display: flex; gap: 6px; margin: 10px 0; }
         .or-dot { width: 7px; height: 7px; border-radius: 50%; background: #2b4056; }
@@ -7151,6 +7164,7 @@ class OpenReefPanel extends HTMLElement {
           .or-avatar { width: 60px; }
           .or-avatar-ph { width: 56px; height: 56px; font-size: 27px; }
           .or-bubble { padding: 12px 13px; }
+          .or-sticker { max-height: 150px; }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
         }
