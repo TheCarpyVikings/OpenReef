@@ -32,6 +32,7 @@ class OpenReefPanel extends HTMLElement {
     this._settingsSections = this._loadSettingsSections();
     this._healthSections = this._loadHealthSections();
     this._manualHistoryOpen = {};
+    this._manualEntryDefaults = {};
   }
 
   set hass(hass) {
@@ -507,6 +508,23 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
+  _loadManualTrend(parameterId, range = this._trend?.source === "manual" ? this._trend.range : "all") {
+    const meta = this._manualTestMeta(parameterId);
+    const points = this._manualTrendPoints(parameterId, range);
+    this._trendRequest = `manual:${parameterId}:${range}:${Date.now()}`;
+    this._trend = {
+      sensorId: parameterId,
+      entityId: "Manual test results",
+      range,
+      source: "manual",
+      loading: false,
+      points,
+      error: points.length >= 2 ? "" : "Add at least two dated manual results to chart this parameter.",
+      manualMeta: meta,
+    };
+    this._render();
+  }
+
   async _fetchTrendPoints(entityId, range) {
     const end = new Date();
     const start = new Date(end.getTime() - this._trendRangeMs(range));
@@ -711,12 +729,26 @@ class OpenReefPanel extends HTMLElement {
     ];
   }
 
+  _manualTrendRanges() {
+    return [
+      ["30d", "30 days", 30 * 24 * 60 * 60 * 1000],
+      ["90d", "90 days", 90 * 24 * 60 * 60 * 1000],
+      ["180d", "180 days", 180 * 24 * 60 * 60 * 1000],
+      ["365d", "1 year", 365 * 24 * 60 * 60 * 1000],
+      ["all", "All history", Number.POSITIVE_INFINITY],
+    ];
+  }
+
   _trendRangeMs(range) {
-    return this._trendRanges().find(([id]) => id === range)?.[2] || 24 * 60 * 60 * 1000;
+    return this._trendRanges().find(([id]) => id === range)?.[2]
+      || this._manualTrendRanges().find(([id]) => id === range)?.[2]
+      || 24 * 60 * 60 * 1000;
   }
 
   _trendRangeLabel(range) {
-    return this._trendRanges().find(([id]) => id === range)?.[1] || "24 hours";
+    return this._trendRanges().find(([id]) => id === range)?.[1]
+      || this._manualTrendRanges().find(([id]) => id === range)?.[1]
+      || "24 hours";
   }
 
   _trendEmptyMessage(range) {
@@ -870,9 +902,15 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "save-manual-reading") this._saveManualReadingFromForm();
+      if (action === "save-manual-batch") this._saveManualBatchFromForm();
       if (action === "delete-manual-reading") this._deleteManualReading(id, target.dataset.reading);
       if (action === "toggle-manual-history") {
         this._manualHistoryOpen[id] = !this._manualHistoryOpen[id];
+        this._render();
+      }
+      if (action === "show-manual-trend") this._loadManualTrend(id);
+      if (action === "manual-entry-now") {
+        this._manualEntryDefaults.timestamp = this._nowLocalInputValue();
         this._render();
       }
       if (action === "setup-add-starter-equipment") this._addStarterEquipment();
@@ -988,13 +1026,19 @@ class OpenReefPanel extends HTMLElement {
         this._saveConfig();
       }
       if (action === "show-trend") this._loadTrend(id);
-      if (action === "trend-range") this._loadTrend(id, target.dataset.range);
+      if (action === "trend-range") {
+        if (this._trend?.source === "manual") this._loadManualTrend(id, target.dataset.range);
+        else this._loadTrend(id, target.dataset.range);
+      }
       if (action === "close-trend") {
         this._trend = null;
         this._trendRequest = "";
         this._render();
       }
-      if (action === "refresh-trend") this._loadTrend(id, this._trend?.range || "24h");
+      if (action === "refresh-trend") {
+        if (this._trend?.source === "manual") this._loadManualTrend(id, this._trend?.range || "all");
+        else this._loadTrend(id, this._trend?.range || "24h");
+      }
     });
 
     const handleFieldInput = (event) => {
@@ -1010,6 +1054,10 @@ class OpenReefPanel extends HTMLElement {
         if (unitInput) unitInput.value = this._manualTestMeta(value).unit || "";
         const sourceInput = this.shadowRoot.querySelector('[data-manual-field="source"]');
         if (sourceInput) sourceInput.value = this._manualTestConfig(value).preferredSource || "";
+        return;
+      }
+      if (target.dataset.manualBatchField) {
+        this._manualEntryDefaults[target.dataset.manualBatchField] = value;
         return;
       }
       if (scope === "tank") this._config.tank[field] = value;
@@ -3616,7 +3664,10 @@ class OpenReefPanel extends HTMLElement {
       "Manual tests",
       "- Open Manual Tests and apply the suggested routine for the selected tank profile.",
       "- Change one cadence to confirm the routine is configurable, then save Settings.",
-      "- Record one safe manual result, confirm it appears as fresh, then delete it if it was only a test entry.",
+      "- Record a batch test session with two or more values using one shared date/time.",
+      "- Backdate the session, save it, then confirm the next entry keeps that date/time instead of resetting to now.",
+      "- Open a Manual Tests trend for one parameter with at least two results.",
+      "- Delete any test-only manual entries afterwards.",
       "- Confirm the support summary shows tracked, due, and logged manual parameters.",
       "",
       "Live Stats and trends",
@@ -3677,7 +3728,9 @@ class OpenReefPanel extends HTMLElement {
       "Manual tests",
       "- Which manual test routine did OpenReef suggest?",
       "- Did the cadence controls make sense for your reef?",
-      "- Were you able to record and delete a manual result?",
+      "- Were you able to record and delete a batch of manual results?",
+      "- Did historical date entry feel easy enough?",
+      "- Did manual charts make sense for your test history?",
       "- Should any test be checked more or less often by default?",
       "",
       "Live Stats and trends",
@@ -4727,6 +4780,13 @@ class OpenReefPanel extends HTMLElement {
     return { points, range: points.length >= 4 ? "7d" : "manual", source: "manual" };
   }
 
+  _manualTrendPoints(id, range = "all") {
+    const points = this._manualTrendData(id).points;
+    if (range === "all" || !Number.isFinite(this._trendRangeMs(range))) return points;
+    const cutoff = Date.now() - this._trendRangeMs(range);
+    return points.filter((point) => point.time >= cutoff);
+  }
+
   _manualTrendSummary(id) {
     const readings = this._manualReadings(id);
     if (readings.length < 2) return "Add two or more results to show a manual trend.";
@@ -4741,6 +4801,10 @@ class OpenReefPanel extends HTMLElement {
   _nowLocalInputValue() {
     const date = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
     return date.toISOString().slice(0, 16);
+  }
+
+  _manualEntryTimestampValue() {
+    return this._manualEntryDefaults.timestamp || this._nowLocalInputValue();
   }
 
   _saveManualReadingFromForm() {
@@ -4770,6 +4834,63 @@ class OpenReefPanel extends HTMLElement {
       notes,
     });
     this._recordActivity(`Manual ${meta.label} test recorded: ${this._format(value, this._sensorDigits(parameter))}${unit ? ` ${unit}` : ""}`, "control");
+    this._saveConfig();
+  }
+
+  _saveManualBatchFromForm() {
+    const field = (name) => this.shadowRoot.querySelector(`[data-manual-batch-field="${name}"]`);
+    const localTime = field("timestamp")?.value || this._nowLocalInputValue();
+    const parsedTime = Date.parse(localTime);
+    if (!Number.isFinite(parsedTime)) {
+      this._error = "Choose a valid date/time for this manual test session.";
+      this._message = "";
+      this._render();
+      return;
+    }
+    const timestamp = new Date(localTime).toISOString();
+    const source = field("source")?.value || "";
+    const notes = field("notes")?.value || "";
+    const rows = [...this.shadowRoot.querySelectorAll("[data-manual-batch-value]")]
+      .map((input) => {
+        const parameter = input.dataset.manualBatchValue;
+        const raw = String(input.value || "").trim();
+        if (!raw) return null;
+        const value = Number(raw);
+        if (!Number.isFinite(value)) {
+          return { parameter, error: true };
+        }
+        return { parameter, value };
+      })
+      .filter(Boolean);
+
+    if (rows.some((row) => row.error)) {
+      this._error = "Every manual test value must be numeric.";
+      this._message = "";
+      this._render();
+      return;
+    }
+    if (!rows.length) {
+      this._error = "Enter at least one manual test result.";
+      this._message = "";
+      this._render();
+      return;
+    }
+
+    this._manualEntryDefaults = { timestamp: localTime, source, notes };
+    this._config.manualReadings = this._config.manualReadings || {};
+    rows.forEach((row, index) => {
+      const meta = this._manualTestMeta(row.parameter);
+      this._config.manualReadings[row.parameter] = this._manualReadings(row.parameter);
+      this._config.manualReadings[row.parameter].push({
+        id: `${row.parameter}:${Date.now()}:${index}`,
+        timestamp,
+        value: row.value,
+        unit: meta.unit || "",
+        source,
+        notes,
+      });
+    });
+    this._recordActivity(`Manual test session recorded: ${rows.length} result${rows.length === 1 ? "" : "s"}`, "control");
     this._saveConfig();
   }
 
@@ -4810,33 +4931,49 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _manualEntryPanel() {
-    const defaultId = this._manualTestParameterIds().find((id) => this._manualTestConfig(id).enabled) || "alkalinity";
-    const meta = this._manualTestMeta(defaultId);
-    const preferredSource = this._manualTestConfig(defaultId).preferredSource || "";
+    const tracked = this._manualTestParameterIds().filter((id) => this._manualTestConfig(id).enabled);
+    const orderedIds = [
+      ...tracked,
+      ...this._manualTestParameterIds().filter((id) => !tracked.includes(id)),
+    ];
+    const preferredSource = this._manualEntryDefaults.source
+      || tracked.map((id) => this._manualTestConfig(id).preferredSource).find(Boolean)
+      || "";
     return `
       <article class="panel manual-entry-panel">
         <div class="section-head">
           <div>
-            <h3>Record a manual result</h3>
-            <p>Use this for Hanna, Salifert, Red Sea, ICP, Apex cross-checks, or any manual chemistry result.</p>
+            <h3>Record a manual test session</h3>
+            <p>Use one date for a full round of results. Leave any parameter blank if you did not test it.</p>
           </div>
+          <button class="secondary compact-button" data-action="manual-entry-now">Use now</button>
         </div>
-        <div class="manual-entry-grid">
-          <label>Parameter
-            <select data-manual-field="parameter">
-              ${this._manualTestParameterIds().map((id) => `<option value="${this._escape(id)}" ${id === defaultId ? "selected" : ""}>${this._escape(this._manualTestMeta(id).label)}</option>`).join("")}
-            </select>
-          </label>
-          <label>Value<input type="number" step="0.001" data-manual-field="value" placeholder="0.00"></label>
-          <label>Unit<input data-manual-field="unit" value="${this._escape(meta.unit)}" placeholder="ppm, dKH, ppt"></label>
-          <label>Date/time<input type="datetime-local" data-manual-field="timestamp" value="${this._escape(this._nowLocalInputValue())}"></label>
+        <div class="manual-session-grid">
+          <label>Date/time<input type="datetime-local" data-manual-batch-field="timestamp" value="${this._escape(this._manualEntryTimestampValue())}"></label>
           <label>Source
-            <select data-manual-field="source">
+            <select data-manual-batch-field="source">
               ${this._manualTestSourceChoices().map((source) => `<option value="${this._escape(source)}" ${source === preferredSource ? "selected" : ""}>${this._escape(source || "Choose source")}</option>`).join("")}
             </select>
           </label>
-          <label class="manual-notes">Notes<textarea data-manual-field="notes" rows="2" placeholder="Optional note, e.g. before water change"></textarea></label>
-          <button class="primary" data-action="save-manual-reading">Save result</button>
+          <label class="manual-notes">Session notes<textarea data-manual-batch-field="notes" rows="2" placeholder="Optional note, e.g. before water change">${this._escape(this._manualEntryDefaults.notes || "")}</textarea></label>
+        </div>
+        <div class="manual-batch-grid">
+          ${orderedIds.map((id) => {
+            const meta = this._manualTestMeta(id);
+            const schedule = this._manualTestConfig(id);
+            return `
+              <label class="manual-batch-row ${schedule.enabled ? "tracked" : ""}">
+                <span>
+                  <strong>${this._escape(meta.label)}</strong>
+                  <small>${this._escape(meta.unit || "unitless")}${schedule.enabled ? " · tracked" : " · optional"}</small>
+                </span>
+                <input type="number" step="0.001" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(meta.min && meta.max ? `${meta.min} - ${meta.max}` : "0.00")}">
+              </label>
+            `;
+          }).join("")}
+        </div>
+        <div class="button-row end">
+          <button class="primary" data-action="save-manual-batch">Save test session</button>
         </div>
       </article>
     `;
@@ -4863,7 +5000,10 @@ class OpenReefPanel extends HTMLElement {
         <small>${this._escape(latest ? this._formatActivityTime(latest.timestamp) : "No manual result yet")}</small>
         <p>${this._escape(state.detail)}</p>
         <p class="hint">${this._escape(this._manualTrendSummary(id))}</p>
-        <button class="secondary compact-button" data-action="toggle-manual-history" data-id="${this._escape(id)}">${open ? "Hide history" : `Show history (${readings.length})`}</button>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="show-manual-trend" data-id="${this._escape(id)}" ${readings.length < 2 ? "disabled" : ""}>Trend</button>
+          <button class="secondary compact-button" data-action="toggle-manual-history" data-id="${this._escape(id)}">${open ? "Hide history" : `Show history (${readings.length})`}</button>
+        </div>
         ${open ? `
           <div class="manual-history">
             ${readings.length ? readings.slice(0, 12).map((entry) => `
@@ -5988,12 +6128,14 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _trendModal() {
-    const sensor = this._config.sensors?.[this._trend.sensorId] || {};
+    const manual = this._trend.source === "manual";
+    const sensor = manual ? this._trend.manualMeta || this._manualTestMeta(this._trend.sensorId) : this._config.sensors?.[this._trend.sensorId] || {};
     const points = this._trend.points || [];
     const summary = this._trendSummary(points);
     const range = this._trend.range || "24h";
     const digits = this._sensorDigits(this._trend.sensorId);
-    const coverageMessage = this._trendCoverageMessage(points, range);
+    const coverageMessage = manual ? "" : this._trendCoverageMessage(points, range);
+    const ranges = manual ? this._manualTrendRanges() : this._trendRanges();
     return `
       <div class="modal">
         <section class="wizard trend-dialog">
@@ -6007,7 +6149,7 @@ class OpenReefPanel extends HTMLElement {
             <button class="secondary" data-action="refresh-trend" data-id="${this._escape(this._trend.sensorId)}" ${this._trend.loading ? "disabled" : ""}>Refresh</button>
           </div>
           <div class="range-picker">
-            ${this._trendRanges().map(([id, label]) => `
+            ${ranges.map(([id, label]) => `
               <button
                 class="${range === id ? "active" : ""}"
                 data-action="trend-range"
@@ -6419,6 +6561,7 @@ class OpenReefPanel extends HTMLElement {
         .eyebrow, .muted, .hint, small, .topbar p, .section-head p, .row span { color: #8da2ba; }
         .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
         .actions, .button-row, .quick-add, .wizard-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .button-row.end { justify-content: flex-end; }
         .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button, .mode-button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
         .tabs button.active, .primary, .range-picker button.active, .mode-button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
@@ -6500,6 +6643,12 @@ class OpenReefPanel extends HTMLElement {
         .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
         .manual-entry-panel { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .manual-entry-grid { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(130px, .5fr) minmax(110px, .45fr) minmax(180px, .8fr) minmax(140px, .6fr) minmax(220px, 1fr) auto; gap: 12px; align-items: end; }
+        .manual-session-grid { display: grid; grid-template-columns: minmax(180px, .45fr) minmax(150px, .35fr) minmax(260px, 1fr); gap: 12px; align-items: end; }
+        .manual-batch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+        .manual-batch-row { border: 1px solid #24364a; border-radius: 8px; background: rgba(11, 23, 36, .72); padding: 10px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, .55fr); gap: 10px; align-items: center; }
+        .manual-batch-row.tracked { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
+        .manual-batch-row span { display: grid; gap: 3px; min-width: 0; }
+        .manual-batch-row input { min-height: 38px; }
         .manual-notes { min-width: 0; }
         textarea { width: 100%; min-height: 44px; resize: vertical; border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 10px; }
         .manual-test-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #121f2f; display: grid; gap: 9px; align-content: start; min-height: 220px; }
@@ -6758,7 +6907,7 @@ class OpenReefPanel extends HTMLElement {
           .grid.two, .grid.three, .grid.four { grid-template-columns: 1fr; }
           .mode-actions { grid-template-columns: 1fr; }
           .mode-mini-row, .preset-row, .mode-timer-card, .mode-name-grid, .scheduler-preview, .schedule-fields { grid-template-columns: 1fr; }
-          .manual-entry-grid { grid-template-columns: 1fr; }
+          .manual-entry-grid, .manual-session-grid { grid-template-columns: 1fr; }
           .issue-item { grid-template-columns: 1fr; }
           .activity-item { grid-template-columns: 1fr; }
           .detail-grid, .entity-detail-row, .energy-metrics { grid-template-columns: 1fr; }
@@ -6788,6 +6937,7 @@ class OpenReefPanel extends HTMLElement {
           .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
           .manual-history-row { flex-direction: column; }
+          .manual-batch-row { grid-template-columns: 1fr; }
         }
         /* Tablet tier: re-expand content grids that the phone collapse would
            otherwise force into a single wasteful column. Bounded at 641px so
@@ -6795,7 +6945,7 @@ class OpenReefPanel extends HTMLElement {
         @media (min-width: 641px) and (max-width: 1024px) {
           .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
           .grid.two, .grid.three, .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-          .manual-entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .manual-entry-grid, .manual-session-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .manual-notes { grid-column: 1 / -1; }
           .dosing-grid, .health-insight-grid, .health-reason-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .health-category-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

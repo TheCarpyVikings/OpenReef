@@ -18,7 +18,8 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] Add Reef Health Score V2.3 in Core: Apex/read-only friendly, parameter-specific trends, learning mode, compact default with expandable insight UI.
 - [x] Add Dosing & Consumption Advisor V1 (advisory): Trident-style Alk/Ca/Mg consumption rates, projection-to-limit, and advisory dose tips. Reuses Reef Health Score stability as the single source of truth.
 - [x] Add Manual Chemistry V1: manual entry, configurable profile-based schedules, freshness scoring, history, and Dosing Advisor fallback from manual results.
-- [ ] Add Manual Chemistry V1.1: charted manual-test trends, per-parameter tuning, and export/import helpers.
+- [x] Add Manual Chemistry V1.1: charted manual-test trends and batch historical test entry.
+- [ ] Add Manual Chemistry V1.2: per-parameter tuning plus export/import helpers.
 - [ ] Add Maintenance Tasks V1 without Google dependency.
 
 ## Product Rules
