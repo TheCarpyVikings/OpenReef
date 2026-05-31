@@ -203,6 +203,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] Shareable support bundle with redaction.
 - [ ] Read-only AI Guardian summaries.
 - [ ] AI report drafting.
+- [x] Guided onboarding tour V1 (Phase 1): in-panel cartoon guide with spotlight coach-marks over Mission Control, Cheeky/Professional tone toggle, emoji placeholder avatar that auto-swaps to real art. Phases 2 (walking avatar), 3 (live-state reactions), 4 (optional TTS) to follow.
 - [ ] Open hardware recommendations.
 - [ ] Ready-made OpenReef units for non-technical reef keepers.
 
