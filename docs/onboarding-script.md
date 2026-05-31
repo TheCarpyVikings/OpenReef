@@ -16,8 +16,91 @@ ships, and can be replayed any time. A cartoon Viking guide (the maker) narrates
 
 ## Avatar poses used
 
-`idle`, `point`, `smug`, `facepalm`, `celebrate` (1024² transparent PNGs, see image-prompt kit).
-Until art is added, a built-in SVG placeholder mascot is shown.
+`idle`, `point`, `smug`, `facepalm`, `celebrate` (1024² transparent PNGs — prompts below).
+Until art is added, a built-in emoji placeholder is shown.
+
+## Image-generation prompt kit (copy-paste)
+
+### Step 0 — describe your character ONCE, then reuse it in every prompt
+
+Replace `[CHARACTER]` below with a short description of your guy, e.g.:
+
+```
+[CHARACTER] = a cartoon Viking reef-keeper version of me — <hair, beard, build,
+outfit colours, any signature item, e.g. teal hoodie + horned beanie>.
+```
+
+**Consistency is everything.** Best results: upload your existing character image as a
+**reference** (Midjourney `--cref <url>`, or "character reference" / img2img in Flux, Firefly,
+Ideogram), lock the **same seed** across all five, and change only the pose clause. If your tool
+can't output transparency, add `on a plain solid #00b140 green background` and remove it after with
+remove.bg / Photoroom (free).
+
+### The five prompts (one per file — paste, swap `[CHARACTER]`, generate)
+
+**idle.png**
+```
+Full-body mascot illustration of [CHARACTER], relaxed friendly idle giving a small
+welcoming wave with one hand, warm smile. Flat vector cartoon style, bold clean
+outlines, soft cel shading, vibrant friendly colours. Character centred, facing the
+viewer with a slight 3/4 turn, standing on nothing. Transparent background, no scenery,
+no ground shadow, no text. Identical character design, outfit, colours, scale, camera
+distance and centring to the other poses. 1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, inconsistent outfit.
+```
+
+**point.png**
+```
+Full-body mascot illustration of [CHARACTER], enthusiastically presenting with one open
+hand extended out to his left side as if showing something on a screen, bright
+encouraging expression. Flat vector cartoon style, bold clean outlines, soft cel
+shading, vibrant friendly colours. Character centred, facing the viewer with a slight
+3/4 turn, standing on nothing. Transparent background, no scenery, no ground shadow, no
+text. Identical character design, outfit, colours, scale, camera distance and centring
+to the other poses. 1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, inconsistent outfit.
+```
+
+**smug.png**
+```
+Full-body mascot illustration of [CHARACTER], arms crossed, confident smug grin, one
+eyebrow raised, chest out — "told you so". Flat vector cartoon style, bold clean
+outlines, soft cel shading, vibrant friendly colours. Character centred, facing the
+viewer with a slight 3/4 turn, standing on nothing. Transparent background, no scenery,
+no ground shadow, no text. Identical character design, outfit, colours, scale, camera
+distance and centring to the other poses. 1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, inconsistent outfit.
+```
+
+**facepalm.png**
+```
+Full-body mascot illustration of [CHARACTER], comic exasperation with one palm to his
+forehead, eyes shut, mild light-hearted despair. Flat vector cartoon style, bold clean
+outlines, soft cel shading, vibrant friendly colours. Character centred, facing the
+viewer with a slight 3/4 turn, standing on nothing. Transparent background, no scenery,
+no ground shadow, no text. Identical character design, outfit, colours, scale, camera
+distance and centring to the other poses. 1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, inconsistent outfit.
+```
+
+**celebrate.png**
+```
+Full-body mascot illustration of [CHARACTER], both arms thrown up in triumph, huge
+joyful grin, mid-cheer. Flat vector cartoon style, bold clean outlines, soft cel
+shading, vibrant friendly colours. Character centred, facing the viewer with a slight
+3/4 turn, standing on nothing. Transparent background, no scenery, no ground shadow, no
+text. Identical character design, outfit, colours, scale, camera distance and centring
+to the other poses. 1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, inconsistent outfit.
+```
+
+Save each at its exact filename into `custom_components/openreef/frontend/avatar/`. The panel
+auto-swaps from the emoji placeholder to your art on the next update + restart — no code change.
 
 ## Steps
 
