@@ -2382,13 +2382,15 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _missionCards() {
+    const saved = this._config?.display?.missionCards || {};
+    const hasDosingParameters = this._dosingActiveParameters().length > 0;
     return {
       health: true,
-      dosing: true,
       live: true,
       controls: true,
       energy: true,
-      ...(this._config?.display?.missionCards || {}),
+      ...saved,
+      dosing: hasDosingParameters && saved.dosing !== false,
     };
   }
 
@@ -2507,7 +2509,7 @@ class OpenReefPanel extends HTMLElement {
           high: Math.max(...values),
         };
       })
-      .filter((item) => item.count >= 3)
+      .filter((item) => item.count >= 1)
       .sort((a, b) => a.day.localeCompare(b.day));
   }
 
@@ -2738,11 +2740,28 @@ class OpenReefPanel extends HTMLElement {
       projectionValue: null,
       extraMlPerDay: null,
       correctionMl: null,
+      suggestedDoseMlPerDay: null,
+      reviewDoseMlPerDay: null,
+      maxDailyAdjustmentUnits: null,
       doseText: detail,
       trendText: detail,
       projectionText: "",
       stability: { stars: "", label: "Learning baseline", status: "learning" },
     };
+  }
+
+  _dosingDailyAdjustmentLimit(sensorId, sensor) {
+    if (sensorId === "alkalinity") return 0.3;
+    if (sensorId === "calcium") return 20;
+    if (sensorId === "magnesium") return 50;
+    const min = Number(sensor?.min);
+    const max = Number(sensor?.max);
+    const range = Number.isFinite(min) && Number.isFinite(max) ? Math.abs(max - min) : 0;
+    return range > 0 ? range * 0.1 : 1;
+  }
+
+  _formatDoseMl(value) {
+    return `${this._format(Math.max(0, Number(value) || 0), 1)} mL/day`;
   }
 
   _analyseConsumption(sensorId, sensor, trendData, healthItem) {
@@ -2799,15 +2818,33 @@ class OpenReefPanel extends HTMLElement {
     }
 
     const paramConfig = this._dosingParamConfig(sensorId);
+    const currentDoseMlPerDay = Math.max(0, Number(paramConfig.doserMlPerDay) || 0);
     const potency = Number(paramConfig.potencyPerMl) || 0;
     const target = Number(paramConfig.target) || 0;
     const holdOffsetUnits = -slope; // +ve => add this many units/day to hold steady
+    const maxDailyAdjustmentUnits = this._dosingDailyAdjustmentLimit(sensorId, sensor);
     let extraMlPerDay = null;
     let correctionMl = null;
+    let suggestedDoseMlPerDay = null;
+    let reviewDoseMlPerDay = null;
+    let correctionText = "";
     if (potency > 0) {
-      extraMlPerDay = holdOffsetUnits / potency;
-      const goal = target > 0 ? target : value;
-      correctionMl = (goal - value) / potency;
+      const cappedHoldOffsetUnits = Math.max(-maxDailyAdjustmentUnits, Math.min(holdOffsetUnits, maxDailyAdjustmentUnits));
+      extraMlPerDay = cappedHoldOffsetUnits / potency;
+      suggestedDoseMlPerDay = Math.max(0, currentDoseMlPerDay + holdOffsetUnits / potency);
+      reviewDoseMlPerDay = Math.max(0, currentDoseMlPerDay + extraMlPerDay);
+      if (target > 0) {
+        const correctionUnits = target - value;
+        correctionMl = correctionUnits / potency;
+        if (correctionUnits > 0) {
+          const correctionDays = Math.max(1, Math.ceil(correctionUnits / maxDailyAdjustmentUnits));
+          const dailyCorrectionUnits = correctionUnits / correctionDays;
+          const dailyCorrectionMl = Math.max(0, dailyCorrectionUnits / potency);
+          correctionText = ` If correcting toward ${this._format(target, digits)}${unitSuffix}, split it across about ${correctionDays} day${correctionDays === 1 ? "" : "s"} (roughly ${this._format(dailyCorrectionMl, 1)} mL/day), then retest.`;
+        } else if (correctionUnits < 0) {
+          correctionText = " Target is below the current reading; do not use a one-off chemical correction downward. Let normal consumption or water changes bring it down gradually.";
+        }
+      }
     }
 
     const rateDigits = Math.max(digits, 2);
@@ -2817,17 +2854,23 @@ class OpenReefPanel extends HTMLElement {
       doseText = "Holding steady within measurement noise — no dose change suggested.";
     } else if (slope < 0) {
       if (potency > 0) {
-        doseText = `Net loss ~${rateText}. To hold steady, increase your daily dose by about ${this._format(Math.abs(extraMlPerDay), 1)} mL/day.`;
-        if (target > 0 && correctionMl > 0.5) {
-          doseText += ` To climb to ${this._format(target, digits)}${unitSuffix}, add a one-off correction of about ${this._format(correctionMl, 1)} mL.`;
-        }
+        const capped = Math.abs(holdOffsetUnits) > maxDailyAdjustmentUnits;
+        doseText = `Net loss ~${rateText}. Current dose ${this._formatDoseMl(currentDoseMlPerDay)}; estimated holding dose ${this._formatDoseMl(suggestedDoseMlPerDay)}. `;
+        doseText += capped
+          ? `Use ${this._formatDoseMl(reviewDoseMlPerDay)} as the first review step because OpenReef limits advice to ${this._format(maxDailyAdjustmentUnits, rateDigits)}${unitSuffix}/day.`
+          : `Suggested next dose ${this._formatDoseMl(reviewDoseMlPerDay)}.`;
+        doseText += correctionText;
       } else {
-        doseText = `Net loss ~${rateText}. Increase your daily dose to offset it. Add your solution potency in Settings for an exact mL figure.`;
+        doseText = `Net loss ~${rateText}. Increase daily dosing only after confirming with a manual test. Add your solution potency in Settings for an exact mL figure.`;
       }
     } else if (potency > 0) {
-      doseText = `Net rise ~${rateText}. You can reduce your daily dose by about ${this._format(Math.abs(extraMlPerDay), 1)} mL/day to hold steady.`;
+      doseText = `Net rise ~${rateText}. Current dose ${this._formatDoseMl(currentDoseMlPerDay)}; estimated holding dose ${this._formatDoseMl(suggestedDoseMlPerDay)}. `;
+      doseText += reviewDoseMlPerDay <= 0
+        ? "Suggested next dose is 0 mL/day; avoid further dosing and investigate the source before making more changes."
+        : `Suggested next dose ${this._formatDoseMl(reviewDoseMlPerDay)}. Retest before further reductions.`;
+      doseText += correctionText;
     } else {
-      doseText = `Net rise ~${rateText}. Consider reducing your dose. Add your solution potency in Settings for an exact mL figure.`;
+      doseText = `Net rise ~${rateText}. Consider reducing daily dosing after confirming with a manual test. Add your solution potency in Settings for an exact mL figure.`;
     }
 
     let status = "ok";
@@ -2858,6 +2901,9 @@ class OpenReefPanel extends HTMLElement {
       projectionValue,
       extraMlPerDay,
       correctionMl,
+      suggestedDoseMlPerDay,
+      reviewDoseMlPerDay,
+      maxDailyAdjustmentUnits,
       doseText,
       trendText,
       projectionText,
