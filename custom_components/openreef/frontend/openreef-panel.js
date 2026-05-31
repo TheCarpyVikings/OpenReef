@@ -33,6 +33,9 @@ class OpenReefPanel extends HTMLElement {
     this._healthSections = this._loadHealthSections();
     this._manualHistoryOpen = {};
     this._manualEntryDefaults = {};
+    this._onboarding = null;
+    this._onboardingChecked = false;
+    this._avatarReady = false;
   }
 
   set hass(hass) {
@@ -55,6 +58,7 @@ class OpenReefPanel extends HTMLElement {
 
   _shouldRenderForHassUpdate() {
     if (this._setupOpen || this._trend || this._activeTab === "settings") return false;
+    if (this._onboarding && this._onboarding.active) return false;
     if (this._isEditingFormControl()) return false;
     return true;
   }
@@ -794,6 +798,11 @@ class OpenReefPanel extends HTMLElement {
         this._controlConfirm = null;
         this._render();
       }
+      if (action === "onboarding-start") this._startOnboarding();
+      if (action === "onboarding-next") this._onboardingNext();
+      if (action === "onboarding-back") this._onboardingBack();
+      if (action === "onboarding-skip") this._endOnboarding(true);
+      if (action === "onboarding-tone") this._toggleTone();
       if (action === "setup") {
         this._setupOpen = true;
         this._setupStep = 0;
@@ -1058,6 +1067,11 @@ class OpenReefPanel extends HTMLElement {
       }
       if (target.dataset.manualBatchField) {
         this._manualEntryDefaults[target.dataset.manualBatchField] = value;
+        return;
+      }
+      if (target.dataset.manualBatchSource) {
+        this._manualEntryDefaults.sources = this._manualEntryDefaults.sources || {};
+        this._manualEntryDefaults.sources[target.dataset.manualBatchSource] = value;
         return;
       }
       if (scope === "tank") this._config.tank[field] = value;
@@ -3083,7 +3097,7 @@ class OpenReefPanel extends HTMLElement {
     const cards = active.map(([id, sensor]) => this._dosingParameterCard(this._consumptionItem(id, sensor))).join("");
     const methodOpen = this._healthSectionOpen("dosing-advice");
     return `
-      <article class="panel">
+      <article class="panel" data-tour="dosing">
         <div class="section-head">
           <div>
             <p class="eyebrow">Dosing &amp; Consumption Advisor</p>
@@ -3824,12 +3838,192 @@ class OpenReefPanel extends HTMLElement {
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
         ${this._equipmentDetail ? this._equipmentDetailModal() : ""}
         ${this._controlConfirm ? this._controlConfirmModal() : ""}
+        ${this._onboarding && this._onboarding.active ? this._onboardingOverlay() : ""}
       </main>
     `;
 
     this._lastRenderedSetupOpen = this._setupOpen;
     this._lastRenderedSetupStep = this._setupOpen ? this._setupStep : null;
     if (preserveSetupScroll) this._restoreScrollState(scrollState);
+    if (this._onboarding && this._onboarding.active) {
+      requestAnimationFrame(() => this._positionOnboarding());
+    }
+    this._maybeAutoStartOnboarding();
+  }
+
+  // --- Avatar onboarding tour (Phase 1) -----------------------------------
+
+  _onboardingDone() {
+    try { return window.localStorage?.getItem("openreef:onboarding:v1:done") === "1"; }
+    catch { return false; }
+  }
+
+  _setOnboardingDone() {
+    try { window.localStorage?.setItem("openreef:onboarding:v1:done", "1"); } catch { /* ignore */ }
+  }
+
+  _tone() {
+    try { return window.localStorage?.getItem("openreef:tone") === "professional" ? "professional" : "cheeky"; }
+    catch { return "cheeky"; }
+  }
+
+  _toggleTone() {
+    const next = this._tone() === "cheeky" ? "professional" : "cheeky";
+    try { window.localStorage?.setItem("openreef:tone", next); } catch { /* ignore */ }
+    this._render();
+  }
+
+  _avatarBase() { return "/openreef_static/avatar/"; }
+
+  _avatarEmoji(pose) {
+    return { idle: "👋", point: "👉", smug: "😏", facepalm: "🤦", celebrate: "🎉" }[pose] || "🙂";
+  }
+
+  _probeAvatar() {
+    if (this._avatarReady || this._avatarProbing) return;
+    this._avatarProbing = true;
+    const img = new Image();
+    img.onload = () => { this._avatarReady = true; this._avatarProbing = false; if (this._onboarding && this._onboarding.active) this._render(); };
+    img.onerror = () => { this._avatarProbing = false; };
+    img.src = `${this._avatarBase()}idle.png`;
+  }
+
+  _avatarMarkup(pose) {
+    if (this._avatarReady) {
+      return `<img class="or-avatar-img" src="${this._avatarBase()}${this._escape(pose)}.png" alt="">`;
+    }
+    return `<div class="or-avatar-ph" data-pose="${this._escape(pose)}">${this._avatarEmoji(pose)}</div>`;
+  }
+
+  _onboardingScript() {
+    return [
+      { id: "welcome", anchor: null, pose: "idle",
+        cheeky: "Welcome to OpenReef. Grab your mead — this'll be quicker than programming an Apex. Give me 30 seconds and I'll show you the good bits.",
+        professional: "Welcome to OpenReef. Here's a 30-second tour of the main features." },
+      { id: "reef-health", anchor: "reef-health", pose: "point",
+        cheeky: "This is your Reef Health Score. Fusion shows you graphs; I tell you what they mean — and why — with no subscription and no runes to decode.",
+        professional: "This is your Reef Health Score: a single, explainable 0-100 read on the tank, weighted for your reef type." },
+      { id: "dosing", anchor: "dosing", pose: "smug",
+        cheeky: "Here's the part Neptune charges a kingdom for: your tank's actual alk/cal/mag consumption from your Trident, when you'll hit a limit, and how much to dose. You're welcome.",
+        professional: "The Dosing Advisor estimates alkalinity, calcium and magnesium consumption from history, projects when you'll reach a limit, and suggests dose adjustments. Advisory only." },
+      { id: "attention", anchor: "attention", pose: "idle",
+        cheeky: "If something's off, it lands here - in plain English, not a cryptic error code three menus deep.",
+        professional: "Anything that needs attention - alerts, missing mappings, safety interlocks - is summarised here." },
+      { id: "sensors", anchor: "sensors", pose: "point",
+        cheeky: "Tap any reading to see its trend. Pinch-zoom the ocean, basically.",
+        professional: "Tap any reading to open its trend, with ranges from 1 hour to 30 days." },
+      { id: "safety", anchor: "settings", pose: "idle",
+        cheeky: "One serious note: OpenReef never controls equipment until you map it and explicitly arm it. Nothing touches your livestock without permission. Set that up in Settings.",
+        professional: "One serious note: OpenReef never controls equipment until you map it and explicitly arm it. Nothing touches your livestock without permission. Set that up in Settings." },
+      { id: "done", anchor: null, pose: "celebrate",
+        cheeky: "That's the tour. Now go show your Apex who's boss. Skål! 🍻",
+        professional: "That's the tour. You can replay it any time from the Tour button." },
+    ];
+  }
+
+  _onboardingVisibleSteps() {
+    return this._onboardingScript().filter((step) =>
+      !step.anchor || this.shadowRoot.querySelector(`[data-tour="${step.anchor}"]`));
+  }
+
+  _startOnboarding() {
+    const steps = this._onboardingVisibleSteps();
+    if (!steps.length) return;
+    this._probeAvatar();
+    this._onboarding = { active: true, step: 0, steps, scrolledStep: -1 };
+    this._render();
+  }
+
+  _endOnboarding(markDone = true) {
+    if (markDone) this._setOnboardingDone();
+    this._onboarding = null;
+    this._render();
+  }
+
+  _onboardingNext() {
+    if (!this._onboarding) return;
+    if (this._onboarding.step >= this._onboarding.steps.length - 1) { this._endOnboarding(true); return; }
+    this._onboarding.step += 1;
+    this._render();
+  }
+
+  _onboardingBack() {
+    if (!this._onboarding) return;
+    this._onboarding.step = Math.max(0, this._onboarding.step - 1);
+    this._render();
+  }
+
+  _maybeAutoStartOnboarding() {
+    if (this._onboardingChecked) return;
+    this._onboardingChecked = true;
+    if (this._onboardingDone()) return;
+    if (this._setupOpen || this._trend || this._activeTab !== "mission") return;
+    if (this._onboarding && this._onboarding.active) return;
+    requestAnimationFrame(() => {
+      if (!this._setupOpen && !this._trend && this._activeTab === "mission" && !this._onboardingDone()) {
+        this._startOnboarding();
+      }
+    });
+  }
+
+  _positionOnboarding() {
+    if (!this._onboarding || !this._onboarding.active) return;
+    const spotlight = this.shadowRoot.querySelector(".or-spotlight");
+    if (!spotlight) return;
+    const step = this._onboarding.steps[this._onboarding.step];
+    const anchorEl = step && step.anchor ? this.shadowRoot.querySelector(`[data-tour="${step.anchor}"]`) : null;
+    if (anchorEl) {
+      if (this._onboarding.scrolledStep !== this._onboarding.step) {
+        this._onboarding.scrolledStep = this._onboarding.step;
+        anchorEl.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+      const r = anchorEl.getBoundingClientRect();
+      const pad = 8;
+      spotlight.style.opacity = "1";
+      spotlight.style.top = `${r.top - pad}px`;
+      spotlight.style.left = `${r.left - pad}px`;
+      spotlight.style.width = `${r.width + pad * 2}px`;
+      spotlight.style.height = `${r.height + pad * 2}px`;
+    } else {
+      spotlight.style.opacity = "0";
+      spotlight.style.top = "50%";
+      spotlight.style.left = "50%";
+      spotlight.style.width = "0px";
+      spotlight.style.height = "0px";
+    }
+  }
+
+  _onboardingOverlay() {
+    const ob = this._onboarding;
+    const steps = ob.steps;
+    const idx = Math.min(ob.step, steps.length - 1);
+    const step = steps[idx];
+    const tone = this._tone();
+    const line = step[tone] || step.cheeky;
+    const isLast = idx === steps.length - 1;
+    const dots = steps.map((_, i) => `<span class="or-dot ${i === idx ? "active" : ""}"></span>`).join("");
+    return `
+      <div class="or-onboard" role="dialog" aria-label="OpenReef guided tour">
+        <div class="or-spotlight"></div>
+        <div class="or-narrator">
+          <div class="or-avatar pose-${this._escape(step.pose)}">${this._avatarMarkup(step.pose)}</div>
+          <div class="or-bubble">
+            <div class="or-bubble-top">
+              <span class="eyebrow">Your guide · ${idx + 1}/${steps.length}</span>
+              <button class="or-tone" data-action="onboarding-tone" title="Switch tone">${tone === "cheeky" ? "😏 Cheeky" : "👔 Pro"}</button>
+            </div>
+            <p class="or-line">${this._escape(line)}</p>
+            <div class="or-dots">${dots}</div>
+            <div class="or-actions">
+              <button class="secondary compact-button" data-action="onboarding-skip">Skip</button>
+              <span class="or-spacer"></span>
+              ${idx > 0 ? `<button class="secondary compact-button" data-action="onboarding-back">Back</button>` : ""}
+              <button class="primary compact-button" data-action="onboarding-next">${isLast ? "Finish 🍻" : "Next"}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   _messages() {
@@ -3944,15 +4138,16 @@ class OpenReefPanel extends HTMLElement {
             <p>${sensorSummary.criticalCount} critical alert(s), ${sensorSummary.warningCount} warning(s), ${sensorSummary.contextCount} context warning(s), ${interlocks.length} interlock warning(s), ${missing.length} missing mapping(s), ${armedUnavailable.length} armed device issue(s).</p>
           </div>
           <div class="actions">
+            <button class="secondary" data-action="onboarding-start" title="Take the guided tour">👋 Tour</button>
             <button class="secondary" data-action="validate">Refresh checks</button>
-            <button class="primary" data-action="tab" data-id="settings">Open settings</button>
+            <button class="primary" data-action="tab" data-id="settings" data-tour="settings">Open settings</button>
           </div>
         </div>
         ${this._modePanel()}
         ${summaryCards ? `<div class="summary-grid">${summaryCards}</div>` : ""}
         ${cards.health ? this._reefHealthBreakdown(health) : ""}
         ${cards.dosing ? this._dosingBreakdown() : ""}
-        <article class="panel">
+        <article class="panel" data-tour="attention">
           <div class="section-head">
             <h3>Attention</h3>
             <p>Only configured OpenReef entities are checked here.</p>
@@ -3961,7 +4156,7 @@ class OpenReefPanel extends HTMLElement {
         </article>
         ${this._activityPanel()}
         <div class="grid two">
-          ${cards.live ? `<article class="panel">
+          ${cards.live ? `<article class="panel" data-tour="sensors">
             <h3>Core Sensors</h3>
             ${sensors.length ? sensors.map(([id, sensor]) => this._sensorRow(id, sensor)).join("") : this._emptyState("No sensors enabled", "Enable the sensor types you own in Settings. Disabled sensors stay out of Mission Control.", "settings", "Choose sensors")}
           </article>` : ""}
@@ -4025,7 +4220,7 @@ class OpenReefPanel extends HTMLElement {
     const groups = health.groups || {};
     const detailsOpen = this._healthSectionOpen("details");
     return `
-      <article class="panel health-breakdown ${this._escape(health.status)}">
+      <article class="panel health-breakdown ${this._escape(health.status)}" data-tour="reef-health">
         <div class="section-head">
           <div>
             <p class="eyebrow">Why this score?</p>
@@ -4848,7 +5043,6 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
     const timestamp = new Date(localTime).toISOString();
-    const source = field("source")?.value || "";
     const notes = field("notes")?.value || "";
     const rows = [...this.shadowRoot.querySelectorAll("[data-manual-batch-value]")]
       .map((input) => {
@@ -4859,7 +5053,8 @@ class OpenReefPanel extends HTMLElement {
         if (!Number.isFinite(value)) {
           return { parameter, error: true };
         }
-        return { parameter, value };
+        const source = this.shadowRoot.querySelector(`[data-manual-batch-source="${parameter}"]`)?.value || "";
+        return { parameter, value, source };
       })
       .filter(Boolean);
 
@@ -4876,7 +5071,11 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
 
-    this._manualEntryDefaults = { timestamp: localTime, source, notes };
+    const sources = {};
+    [...this.shadowRoot.querySelectorAll("[data-manual-batch-source]")].forEach((select) => {
+      sources[select.dataset.manualBatchSource] = select.value || "";
+    });
+    this._manualEntryDefaults = { timestamp: localTime, sources, notes };
     this._config.manualReadings = this._config.manualReadings || {};
     rows.forEach((row, index) => {
       const meta = this._manualTestMeta(row.parameter);
@@ -4886,7 +5085,7 @@ class OpenReefPanel extends HTMLElement {
         timestamp,
         value: row.value,
         unit: meta.unit || "",
-        source,
+        source: row.source,
         notes,
       });
     });
@@ -4936,39 +5135,35 @@ class OpenReefPanel extends HTMLElement {
       ...tracked,
       ...this._manualTestParameterIds().filter((id) => !tracked.includes(id)),
     ];
-    const preferredSource = this._manualEntryDefaults.source
-      || tracked.map((id) => this._manualTestConfig(id).preferredSource).find(Boolean)
-      || "";
     return `
       <article class="panel manual-entry-panel">
         <div class="section-head">
           <div>
             <h3>Record a manual test session</h3>
-            <p>Use one date for a full round of results. Leave any parameter blank if you did not test it.</p>
+            <p>Use one date for a full round of results. Pick the kit/source per result, because most reefers mix Hanna, Salifert, ICP, and other tests.</p>
           </div>
           <button class="secondary compact-button" data-action="manual-entry-now">Use now</button>
         </div>
         <div class="manual-session-grid">
           <label>Date/time<input type="datetime-local" data-manual-batch-field="timestamp" value="${this._escape(this._manualEntryTimestampValue())}"></label>
-          <label>Source
-            <select data-manual-batch-field="source">
-              ${this._manualTestSourceChoices().map((source) => `<option value="${this._escape(source)}" ${source === preferredSource ? "selected" : ""}>${this._escape(source || "Choose source")}</option>`).join("")}
-            </select>
-          </label>
           <label class="manual-notes">Session notes<textarea data-manual-batch-field="notes" rows="2" placeholder="Optional note, e.g. before water change">${this._escape(this._manualEntryDefaults.notes || "")}</textarea></label>
         </div>
         <div class="manual-batch-grid">
           ${orderedIds.map((id) => {
             const meta = this._manualTestMeta(id);
             const schedule = this._manualTestConfig(id);
+            const rowSource = this._manualEntryDefaults.sources?.[id] ?? schedule.preferredSource ?? this._manualEntryDefaults.source ?? "";
             return `
-              <label class="manual-batch-row ${schedule.enabled ? "tracked" : ""}">
+              <div class="manual-batch-row ${schedule.enabled ? "tracked" : ""}">
                 <span>
                   <strong>${this._escape(meta.label)}</strong>
                   <small>${this._escape(meta.unit || "unitless")}${schedule.enabled ? " · tracked" : " · optional"}</small>
                 </span>
-                <input type="number" step="0.001" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(meta.min && meta.max ? `${meta.min} - ${meta.max}` : "0.00")}">
-              </label>
+                <input type="number" step="0.001" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(meta.min && meta.max ? `${meta.min} - ${meta.max}` : "0.00")}" aria-label="${this._escape(meta.label)} value">
+                <select data-manual-batch-source="${this._escape(id)}" aria-label="${this._escape(meta.label)} source">
+                  ${this._manualTestSourceChoices().map((source) => `<option value="${this._escape(source)}" ${source === rowSource ? "selected" : ""}>${this._escape(source || "Source")}</option>`).join("")}
+                </select>
+              </div>
             `;
           }).join("")}
         </div>
@@ -6641,14 +6836,30 @@ class OpenReefPanel extends HTMLElement {
         .dosing-card-lines li { display: grid; gap: 2px; min-width: 0; }
         .dosing-card-lines span { color: #8da2ba; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
         .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
+        .or-onboard { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
+        .or-spotlight { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(4, 12, 20, .62); outline: 2px solid var(--openreef-accent); outline-offset: 2px; opacity: 0; transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, opacity .2s ease; pointer-events: none; }
+        .or-narrator { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(560px, calc(100vw - 24px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; }
+        .or-avatar { flex: 0 0 auto; width: 84px; display: grid; place-items: end center; }
+        .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); }
+        .or-avatar-ph { width: 74px; height: 74px; border-radius: 50%; display: grid; place-items: center; font-size: 34px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
+        .or-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 14px; padding: 13px 15px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
+        .or-bubble-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
+        .or-tone { border: 1px solid #294055; border-radius: 999px; background: #172536; color: #dcecff; font-size: 11px; font-weight: 800; padding: 3px 10px; }
+        .or-tone:hover { border-color: var(--openreef-accent); }
+        .or-line { color: #e9f1f8; line-height: 1.42; overflow-wrap: anywhere; }
+        .or-dots { display: flex; gap: 6px; margin: 10px 0; }
+        .or-dot { width: 7px; height: 7px; border-radius: 50%; background: #2b4056; }
+        .or-dot.active { background: var(--openreef-accent); }
+        .or-actions { display: flex; gap: 8px; align-items: center; }
+        .or-actions .or-spacer { flex: 1 1 auto; }
         .manual-entry-panel { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .manual-entry-grid { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(130px, .5fr) minmax(110px, .45fr) minmax(180px, .8fr) minmax(140px, .6fr) minmax(220px, 1fr) auto; gap: 12px; align-items: end; }
-        .manual-session-grid { display: grid; grid-template-columns: minmax(180px, .45fr) minmax(150px, .35fr) minmax(260px, 1fr); gap: 12px; align-items: end; }
-        .manual-batch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
-        .manual-batch-row { border: 1px solid #24364a; border-radius: 8px; background: rgba(11, 23, 36, .72); padding: 10px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, .55fr); gap: 10px; align-items: center; }
+        .manual-session-grid { display: grid; grid-template-columns: minmax(180px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: end; }
+        .manual-batch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
+        .manual-batch-row { border: 1px solid #24364a; border-radius: 8px; background: rgba(11, 23, 36, .72); padding: 10px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, .45fr) minmax(116px, .55fr); gap: 10px; align-items: center; }
         .manual-batch-row.tracked { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
         .manual-batch-row span { display: grid; gap: 3px; min-width: 0; }
-        .manual-batch-row input { min-height: 38px; }
+        .manual-batch-row input, .manual-batch-row select { min-height: 38px; }
         .manual-notes { min-width: 0; }
         textarea { width: 100%; min-height: 44px; resize: vertical; border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 10px; }
         .manual-test-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #121f2f; display: grid; gap: 9px; align-content: start; min-height: 220px; }
@@ -6936,6 +7147,10 @@ class OpenReefPanel extends HTMLElement {
           .chart-wrap { padding: 10px; }
           .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
+          .or-narrator { bottom: 10px; width: calc(100vw - 16px); gap: 10px; }
+          .or-avatar { width: 60px; }
+          .or-avatar-ph { width: 56px; height: 56px; font-size: 27px; }
+          .or-bubble { padding: 12px 13px; }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
         }
