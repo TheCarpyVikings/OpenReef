@@ -2911,7 +2911,7 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
         frontend_url_path=PANEL_URL,
         sidebar_title=NAME,
         sidebar_icon=PANEL_ICON,
-        module_url=f"{PANEL_STATIC_URL}/openreef-panel.js",
+        module_url=f"{PANEL_STATIC_URL}/openreef-panel.js?v={INTEGRATION_VERSION}",
         embed_iframe=False,
         require_admin=False,
         config={"domain": DOMAIN},

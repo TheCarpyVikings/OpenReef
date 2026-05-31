@@ -9,12 +9,22 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 25
-INTEGRATION_VERSION = "0.4.35"
+CORE_SCHEMA_VERSION = 26
+INTEGRATION_VERSION = "0.4.36"
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
 DOSING_PARAMETERS = ("alkalinity", "calcium", "magnesium")
+MANUAL_TEST_PARAMETERS = (
+    "alkalinity",
+    "calcium",
+    "magnesium",
+    "nitrate",
+    "phosphate",
+    "salinity",
+    "ph",
+    "temp",
+)
 
 DEFAULT_TANK_PROFILE = "mixed_reef"
 TANK_PROFILE_CHOICES = {
@@ -24,6 +34,69 @@ TANK_PROFILE_CHOICES = {
     "sps": "SPS reef",
     "mixed_reef": "Mixed reef",
     "anemone_dominant": "Anemone-dominant",
+}
+
+MANUAL_TEST_CADENCE_PRESETS = {
+    "fish_only_fowlr": {
+        "alkalinity": 30,
+        "calcium": 30,
+        "magnesium": 60,
+        "nitrate": 14,
+        "phosphate": 30,
+        "salinity": 14,
+        "ph": 30,
+        "temp": 7,
+    },
+    "soft_coral": {
+        "alkalinity": 7,
+        "calcium": 21,
+        "magnesium": 30,
+        "nitrate": 14,
+        "phosphate": 14,
+        "salinity": 7,
+        "ph": 30,
+        "temp": 7,
+    },
+    "lps": {
+        "alkalinity": 7,
+        "calcium": 14,
+        "magnesium": 30,
+        "nitrate": 7,
+        "phosphate": 7,
+        "salinity": 7,
+        "ph": 21,
+        "temp": 7,
+    },
+    "sps": {
+        "alkalinity": 3,
+        "calcium": 7,
+        "magnesium": 14,
+        "nitrate": 7,
+        "phosphate": 7,
+        "salinity": 7,
+        "ph": 14,
+        "temp": 7,
+    },
+    "mixed_reef": {
+        "alkalinity": 4,
+        "calcium": 14,
+        "magnesium": 21,
+        "nitrate": 7,
+        "phosphate": 7,
+        "salinity": 7,
+        "ph": 21,
+        "temp": 7,
+    },
+    "anemone_dominant": {
+        "alkalinity": 14,
+        "calcium": 21,
+        "magnesium": 30,
+        "nitrate": 7,
+        "phosphate": 7,
+        "salinity": 7,
+        "ph": 14,
+        "temp": 7,
+    },
 }
 
 SERVICE_APPLY_MODE = "apply_mode"
@@ -450,6 +523,18 @@ DEFAULT_CORE_CONFIG = {
     "activity": [],
     "modes": [],
     "manualReadings": {},
+    "manualTests": {
+        "enabled": True,
+        "schedules": {
+            parameter: {
+                "enabled": parameter
+                in ("alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity"),
+                "cadenceDays": MANUAL_TEST_CADENCE_PRESETS[DEFAULT_TANK_PROFILE][parameter],
+                "preferredSource": "",
+            }
+            for parameter in MANUAL_TEST_PARAMETERS
+        },
+    },
     "dosing": {
         "enabled": True,
         "parameters": {

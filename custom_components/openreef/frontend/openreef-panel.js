@@ -6008,6 +6008,8 @@ class OpenReefPanel extends HTMLElement {
         .empty-state { display: grid; grid-column: 1 / -1; gap: 10px; place-items: start; padding: 18px; border-style: dashed; color: #cbd5e1; }
         .empty-state p { color: #8da2ba; }
         .section-head, .card-head, .row { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+        .section-head > div { min-width: 0; }
+        .section-head p { overflow-wrap: anywhere; }
         .mode-panel { display: grid; gap: 14px; }
         .mode-strip { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .mode-strip h3 { margin-bottom: 6px; }
@@ -6089,7 +6091,8 @@ class OpenReefPanel extends HTMLElement {
         .arm-switch.off { background: #172536; color: #cbd5e1; }
         .row { padding: 12px 0; border-top: 1px solid #223447; align-items: center; }
         .row:first-of-type { border-top: 0; }
-        .row div { display: grid; gap: 4px; }
+        .row div { display: grid; gap: 4px; min-width: 0; }
+        .row strong, .row span { overflow-wrap: anywhere; }
         .pill { display: inline-flex; align-items: center; justify-content: center; min-width: 74px; min-height: 30px; padding: 5px 10px; border-radius: 999px; background: #203247; color: #dbeafe; font-weight: 800; }
         .pill.ok { background: #14532d; color: #bbf7d0; }
         .pill.warning { background: #713f12; color: #fde68a; }
