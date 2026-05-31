@@ -6201,6 +6201,16 @@ class OpenReefPanel extends HTMLElement {
           .control-switch, .arm-switch { justify-content: space-between; width: 100%; max-width: 220px; }
           .chart-wrap { padding: 10px; }
           .trend-chart { min-height: 200px; }
+          .summary-card { min-height: auto; }
+        }
+        /* Tablet tier: re-expand content grids that the phone collapse would
+           otherwise force into a single wasteful column. Bounded at 641px so
+           true phones keep the single-column layout above. */
+        @media (min-width: 641px) and (max-width: 1024px) {
+          .tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+          .grid.two, .grid.three, .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .dosing-grid, .health-insight-grid, .health-reason-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .health-category-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         }
       </style>
     `;
