@@ -37,6 +37,7 @@ class OpenReefPanel extends HTMLElement {
     this._onboardingChecked = false;
     this._avatarPoses = {};
     this._stickerReady = false;
+    this._buddy = { dismissed: false, expanded: false, lastKey: "", timer: null };
   }
 
   set hass(hass) {
@@ -804,6 +805,17 @@ class OpenReefPanel extends HTMLElement {
       if (action === "onboarding-back") this._onboardingBack();
       if (action === "onboarding-skip") this._endOnboarding(true);
       if (action === "onboarding-tone") this._toggleTone();
+      if (action === "buddy-toggle") {
+        if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
+        this._buddy.expanded = !this._buddy.expanded;
+        this._render();
+      }
+      if (action === "buddy-dismiss") {
+        // Session hide only (he's on by default and returns next load — no dead-end).
+        if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
+        this._buddy.dismissed = true;
+        this._render();
+      }
       if (action === "setup") {
         this._setupOpen = true;
         this._setupStep = 0;
@@ -3839,6 +3851,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._equipmentDetail ? this._equipmentDetailModal() : ""}
         ${this._controlConfirm ? this._controlConfirmModal() : ""}
         ${this._onboarding && this._onboarding.active ? this._onboardingOverlay() : ""}
+        ${this._buddyOverlay()}
       </main>
     `;
 
@@ -3876,13 +3889,13 @@ class OpenReefPanel extends HTMLElement {
   _avatarBase() { return "/openreef_static/avatar/"; }
 
   _avatarEmoji(pose) {
-    return { idle: "👋", point: "👉", smug: "😏", facepalm: "🤦", celebrate: "🎉" }[pose] || "🙂";
+    return { idle: "👋", point: "👉", smug: "😏", facepalm: "🤦", celebrate: "🎉", concerned: "😟", thinking: "🤔", chilled: "😎" }[pose] || "🙂";
   }
 
   _probeAvatar() {
     if (this._avatarProbing) return;
     this._avatarProbing = true;
-    ["idle", "point", "smug", "facepalm", "celebrate"].forEach((pose) => {
+    ["idle", "point", "smug", "facepalm", "celebrate", "concerned", "thinking", "chilled"].forEach((pose) => {
       const img = new Image();
       img.onload = () => { this._avatarPoses[pose] = true; if (this._onboarding && this._onboarding.active) this._render(); };
       img.src = `${this._avatarBase()}${pose}.png`;
@@ -4080,6 +4093,89 @@ class OpenReefPanel extends HTMLElement {
             </div>
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  // --- Phase 3: reactive corner buddy ------------------------------------
+
+  _buddyEnabled() {
+    try { return window.localStorage?.getItem("openreef:buddy") !== "off"; }
+    catch { return true; }
+  }
+
+  _setBuddyEnabled(on) {
+    try { window.localStorage?.setItem("openreef:buddy", on ? "on" : "off"); } catch { /* ignore */ }
+  }
+
+  _buddyReaction(health, tone) {
+    const critical = health.status === "critical"
+      || health.criticalCount > 0
+      || (health.appliedCap && health.appliedCap.status === "critical");
+    const warning = !critical && (health.status === "warning" || health.warningCount > 0 || Boolean(health.appliedCap));
+    if (critical) {
+      // Serious — identical in both tones, no jokes. Uses the engine's own text.
+      return { mood: "critical", pose: "concerned", title: health.topReason || "Needs attention now", line: health.nextAction || "Check this as soon as you can.", key: `crit|${health.topReason || ""}` };
+    }
+    if (warning) {
+      return { mood: "warning", pose: "point", title: health.topReason || "Worth a look", line: health.nextAction || "", key: `warn|${health.topReason || ""}` };
+    }
+    if (health.learningCount > 0) {
+      return {
+        mood: "learning", pose: "thinking",
+        title: tone === "cheeky" ? "Still learning your tank" : "Learning baselines",
+        line: tone === "cheeky" ? "Give me a few more days of data and I'll spot the patterns Fusion never would." : "Some trends are still establishing a baseline.",
+        key: "learn",
+      };
+    }
+    const great = health.grade === "A";
+    return {
+      mood: "ok", pose: great ? "celebrate" : "chilled",
+      title: tone === "cheeky" ? (great ? "Boringly stable" : "All cruising") : "All in range",
+      line: tone === "cheeky"
+        ? (great ? "Exactly how a reef should be. Nothing for you to do." : "Nothing needs you right now.")
+        : "All monitored parameters are within range.",
+      key: great ? "ok-a" : "ok",
+    };
+  }
+
+  _buddyOverlay() {
+    if (!this._config || this._activeTab !== "mission") return "";
+    if (this._onboarding && this._onboarding.active) return "";
+    if (this._setupOpen || this._trend || this._modeConfirm || this._equipmentDetail || this._controlConfirm) return "";
+    if (this._buddy.dismissed || !this._buddyEnabled()) return "";
+
+    const tone = this._tone();
+    const reaction = this._buddyReaction(this._reefHealthScore(), tone);
+    // Auto-open the bubble when the situation changes; collapse non-critical after a while.
+    if (reaction.key !== this._buddy.lastKey) {
+      this._buddy.lastKey = reaction.key;
+      this._buddy.expanded = true;
+      if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
+      if (reaction.mood !== "critical") {
+        this._buddy.timer = setTimeout(() => {
+          if (this._buddy) { this._buddy.expanded = false; this._buddy.timer = null; this._render(); }
+        }, 9000);
+      }
+    }
+    const expanded = this._buddy.expanded;
+    const bubble = expanded ? `
+      <div class="or-buddy-bubble mood-${reaction.mood}">
+        <button class="or-buddy-close" data-action="buddy-dismiss" title="Hide your reef buddy">×</button>
+        <div class="or-bubble-top">
+          <span class="eyebrow">Reef buddy</span>
+          <button class="or-tone" data-action="onboarding-tone" title="Switch tone">${tone === "cheeky" ? "😏 Cheeky" : "👔 Pro"}</button>
+        </div>
+        <strong class="or-buddy-title">${this._escape(reaction.title)}</strong>
+        ${reaction.line ? `<p class="or-buddy-line">${this._escape(reaction.line)}</p>` : ""}
+      </div>` : "";
+    return `
+      <div class="or-buddy">
+        ${bubble}
+        <button class="or-buddy-avatar mood-${reaction.mood}" data-action="buddy-toggle" title="Your reef buddy">
+          <span class="or-buddy-dot mood-${reaction.mood}"></span>
+          ${this._avatarMarkup(reaction.pose)}
+        </button>
       </div>
     `;
   }
@@ -6914,6 +7010,22 @@ class OpenReefPanel extends HTMLElement {
         .or-dot.active { background: var(--openreef-accent); }
         .or-actions { display: flex; gap: 8px; align-items: center; }
         .or-actions .or-spacer { flex: 1 1 auto; }
+        .or-buddy { position: fixed; right: 16px; bottom: 16px; z-index: 11; display: flex; align-items: flex-end; gap: 10px; pointer-events: none; }
+        .or-buddy-avatar { position: relative; flex: 0 0 auto; width: 122px; padding: 0; border: 0; background: transparent; cursor: pointer; pointer-events: auto; display: block; }
+        .or-buddy-avatar .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 12px rgba(0,0,0,.5)); }
+        .or-buddy-avatar .or-avatar-ph { width: 92px; height: 92px; margin: 0 auto; }
+        .or-buddy-dot { position: absolute; top: 8px; right: 12px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #07111a; background: #22c55e; }
+        .or-buddy-dot.mood-warning { background: #f59e0b; }
+        .or-buddy-dot.mood-critical { background: #ef4444; animation: or-pulse 1.2s ease-in-out infinite; }
+        .or-buddy-dot.mood-learning { background: #38bdf8; }
+        @keyframes or-pulse { 50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, .25); } }
+        .or-buddy-bubble { position: relative; pointer-events: auto; max-width: 300px; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 14px; padding: 12px 30px 12px 14px; box-shadow: 0 16px 44px rgba(0,0,0,.5); }
+        .or-buddy-bubble.mood-warning { border-color: #a16207; }
+        .or-buddy-bubble.mood-critical { border-color: #ef4444; background: #2b171c; }
+        .or-buddy-title { display: block; color: #f1f6fb; margin-top: 2px; }
+        .or-buddy-line { color: #cbd9e8; margin-top: 4px; line-height: 1.4; overflow-wrap: anywhere; }
+        .or-buddy-close { position: absolute; top: 6px; right: 8px; width: 22px; height: 22px; border: 0; border-radius: 50%; background: transparent; color: #8da2ba; font-size: 16px; line-height: 1; cursor: pointer; }
+        .or-buddy-close:hover { color: #e5edf5; }
         .manual-entry-panel { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .manual-entry-grid { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(130px, .5fr) minmax(110px, .45fr) minmax(180px, .8fr) minmax(140px, .6fr) minmax(220px, 1fr) auto; gap: 12px; align-items: end; }
         .manual-session-grid { display: grid; grid-template-columns: minmax(180px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: end; }
@@ -7215,6 +7327,9 @@ class OpenReefPanel extends HTMLElement {
           .or-bubble { width: 100%; padding: 14px 16px; }
           .or-line { font-size: 16px; }
           .or-sticker { max-height: 260px; }
+          .or-buddy { right: 10px; bottom: 10px; flex-direction: column; align-items: flex-end; gap: 8px; }
+          .or-buddy-avatar { width: 92px; }
+          .or-buddy-bubble { max-width: calc(100vw - 24px); }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
         }

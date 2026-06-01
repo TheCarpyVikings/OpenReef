@@ -187,6 +187,12 @@ Before adding or editing a joke, confirm the claim against a source like the abo
   render). Mobile (≤640) keeps the docked stacked bar. No new art (glide, not a sprite walk).
   - Future polish: a real sprite-sheet walk cycle; smarter bubble side-placement; facing flip;
     smooth (non-instant) scroll while walking.
-- **Phase 3:** ambient reactions to live state (celebrate at grade A, point at a new alert, plain
-  heads-up when a parameter drifts — serious on safety).
+- **Phase 3 v1 (done):** a **reactive corner buddy** on Mission Control (on by default, session
+  hide via ×). His pose + line are driven by the existing **Reef Health verdict** (`_reefHealthScore`
+  → `_buddyReaction`), so reactions are always accurate: celebrate/chilled at grade A, point at a
+  warning (engine's own topReason/nextAction), concerned ⚠️ at a critical/safety state (serious,
+  identical in both tones — no jokes), thinking while learning baselines. Auto-opens the bubble on a
+  state change, auto-collapses non-critical after 9s; status dot green/amber/red. New poses
+  `concerned`/`thinking`/`chilled` (emoji placeholders until art added). Mood ring/dot + pulse on
+  critical.
 - **Phase 4:** optional voice via HA TTS, off by default.
