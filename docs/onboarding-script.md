@@ -12,8 +12,9 @@ reef-related or pokes fun at Neptune Apex — nothing else.
 - **Two tones.** `cheeky` (default) and `professional`. Every step has both lines; the toggle picks
   which to show. Professional = the same facts, no jokes/emoji.
 - **Always escapable.** Skip and "Don't show again" on every step. Re-runnable from a button.
-- **Degrade gracefully.** If a step's anchor element isn't on screen (feature hidden/unmapped),
-  that step is skipped automatically — never blocks.
+- **Every step always shows** (so all poses + the supplier tip appear). If a step's anchor element
+  isn't on screen (feature hidden/unmapped), the step renders centred with **no spotlight** rather
+  than being skipped.
 
 ## Avatar poses used
 
@@ -132,14 +133,14 @@ claims (Apex Fusion is free, so no "subscription/licence" jokes).
 - **Professional:** "Anything that needs attention — alerts, missing mappings, safety interlocks — is summarised here in plain English."
 
 ### 5. Trends — `anchor: sensors` · pose: `point`
-- **Cheeky:** "Tap any reading for its full trend. Every probe you own in one place — no extra module to buy just to read one more thing."
+- **Cheeky:** "Tap any reading for its full trend. Apex probes, Trident, and the cheap non-Apex sensors your controller flatly refuses to talk to — all in one place."
 - **Professional:** "Tap any reading to open its trend, with ranges from 1 hour to 30 days."
 
 ### 6. Safety (straight, no jokes) — `anchor: settings` · pose: `idle`
 - **Cheeky / Professional (same):** "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings."
 
 ### 7. Done — `anchor: null` · pose: `celebrate` (+ apex-throne sticker in Cheeky mode)
-- **Cheeky:** "That's the tour — your reef's in good hands. Your Apex can sit there and think about what it's done. 🪸"
+- **Cheeky:** "That's the tour — your reef's in good hands. Now go show your Apex who's boss. 🪸"
 - **Professional:** "That's the tour. You can replay it any time from the Tour button."
 
 ## Triggers
@@ -170,7 +171,10 @@ Apex jabs must map to a real, documented pain point. Verified ones used above:
 - **Fusion is FREE** — do **not** joke about Fusion subscriptions/licence fees. It does show raw
   graphs without interpreting them (no health score / dose math), which is the fair contrast.
   [Apex Fusion](https://help.neptunesystems.com/apex-fusion/)
-- **Module-per-capability** — extra inputs/probes generally mean buying another module.
+- **Closed ecosystem** — Apex reads Apex/Aquabus gear; it won't accept arbitrary cheap third-party
+  probes. OpenReef (via Home Assistant) reads the Apex/Trident data **and** any other sensor.
+  NOTE: OpenReef does NOT replace the Apex modules — it needs them (or whatever produces the HA
+  entity) to get the readings. Never joke that OpenReef removes the need for the modules.
 
 Before adding or editing a joke, confirm the claim against a source like the above.
 

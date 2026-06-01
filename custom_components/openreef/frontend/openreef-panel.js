@@ -3922,20 +3922,22 @@ class OpenReefPanel extends HTMLElement {
         cheeky: "Anything wrong shows up here in plain English. No fault codes to Google, no scattered docs, no three-day forum thread just to get your auto top-off behaving.",
         professional: "Anything that needs attention - alerts, missing mappings, safety interlocks - is summarised here in plain English." },
       { id: "sensors", anchor: "sensors", pose: "point",
-        cheeky: "Tap any reading for its full trend. Every probe you own in one place — no extra module to buy just to read one more thing.",
+        cheeky: "Tap any reading for its full trend. Apex probes, Trident, and the cheap non-Apex sensors your controller flatly refuses to talk to — all in one place.",
         professional: "Tap any reading to open its trend, with ranges from 1 hour to 30 days." },
       { id: "safety", anchor: "settings", pose: "idle",
         cheeky: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings.",
         professional: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings." },
       { id: "done", anchor: null, pose: "celebrate",
-        cheeky: "That's the tour — your reef's in good hands. Your Apex can sit there and think about what it's done. 🪸",
+        cheeky: "That's the tour — your reef's in good hands. Now go show your Apex who's boss. 🪸",
         professional: "That's the tour. You can replay it any time from the Tour button." },
     ];
   }
 
   _onboardingVisibleSteps() {
-    return this._onboardingScript().filter((step) =>
-      !step.anchor || this.shadowRoot.querySelector(`[data-tour="${step.anchor}"]`));
+    // Always show every step (so every pose and the supplier tip appear). A step
+    // whose anchor element isn't on screen just renders centred with no spotlight
+    // (see _positionOnboarding).
+    return this._onboardingScript();
   }
 
   _startOnboarding() {
@@ -6853,16 +6855,16 @@ class OpenReefPanel extends HTMLElement {
         .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
         .or-onboard { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
         .or-spotlight { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(4, 12, 20, .62); outline: 2px solid var(--openreef-accent); outline-offset: 2px; opacity: 0; transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, opacity .2s ease; pointer-events: none; }
-        .or-narrator { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(560px, calc(100vw - 24px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; }
-        .or-avatar { flex: 0 0 auto; width: 132px; display: grid; place-items: end center; }
+        .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(740px, calc(100vw - 28px)); display: flex; gap: 14px; align-items: flex-end; pointer-events: auto; z-index: 13; }
+        .or-avatar { flex: 0 0 auto; width: 210px; display: grid; place-items: end center; }
         .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); }
-        .or-avatar-ph { width: 110px; height: 110px; border-radius: 50%; display: grid; place-items: center; font-size: 48px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
-        .or-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 14px; padding: 13px 15px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
+        .or-avatar-ph { width: 168px; height: 168px; border-radius: 50%; display: grid; place-items: center; font-size: 74px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
+        .or-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 16px; padding: 18px 20px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
         .or-bubble-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
         .or-tone { border: 1px solid #294055; border-radius: 999px; background: #172536; color: #dcecff; font-size: 11px; font-weight: 800; padding: 3px 10px; }
         .or-tone:hover { border-color: var(--openreef-accent); }
-        .or-sticker { display: block; width: 100%; max-height: 280px; object-fit: contain; border-radius: 10px; margin-bottom: 10px; }
-        .or-line { color: #e9f1f8; line-height: 1.42; overflow-wrap: anywhere; }
+        .or-sticker { display: block; width: 100%; max-height: 360px; object-fit: contain; border-radius: 10px; margin-bottom: 12px; }
+        .or-line { color: #e9f1f8; font-size: 17px; line-height: 1.5; overflow-wrap: anywhere; }
         .or-link { display: inline-block; margin-top: 8px; color: var(--openreef-accent); font-weight: 800; text-decoration: none; border-bottom: 1px solid var(--openreef-accent-border); overflow-wrap: anywhere; }
         .or-link:hover { border-bottom-color: var(--openreef-accent); }
         .or-dots { display: flex; gap: 6px; margin: 10px 0; }
@@ -7165,11 +7167,12 @@ class OpenReefPanel extends HTMLElement {
           .chart-wrap { padding: 10px; }
           .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
-          .or-narrator { bottom: 10px; width: calc(100vw - 16px); gap: 8px; }
-          .or-avatar { width: 92px; }
-          .or-avatar-ph { width: 78px; height: 78px; font-size: 36px; }
-          .or-bubble { padding: 12px 13px; }
-          .or-sticker { max-height: 200px; }
+          .or-narrator { bottom: 10px; width: calc(100vw - 14px); gap: 8px; }
+          .or-avatar { width: 124px; }
+          .or-avatar-ph { width: 104px; height: 104px; font-size: 46px; }
+          .or-bubble { padding: 14px 15px; }
+          .or-line { font-size: 16px; }
+          .or-sticker { max-height: 250px; }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
         }
