@@ -925,6 +925,10 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "save-manual-reading") this._saveManualReadingFromForm();
       if (action === "save-manual-batch") this._saveManualBatchFromForm();
+      if (action === "copy-manual-csv") this._copyManualCsv();
+      if (action === "download-manual-csv") this._downloadManualCsv();
+      if (action === "copy-manual-template") this._copyManualTemplate();
+      if (action === "import-manual-csv") this._importManualCsvFromForm();
       if (action === "delete-manual-reading") this._deleteManualReading(id, target.dataset.reading);
       if (action === "toggle-manual-history") {
         this._manualHistoryOpen[id] = !this._manualHistoryOpen[id];
@@ -1087,9 +1091,17 @@ class OpenReefPanel extends HTMLElement {
         this._manualEntryDefaults.sources[target.dataset.manualBatchSource] = value;
         return;
       }
+      if (target.dataset.manualImportField) {
+        this._manualEntryDefaults.importText = value;
+        return;
+      }
       if (scope === "tank") this._config.tank[field] = value;
       if (scope === "display") this._config.display[field] = value;
-      if (scope === "sensor") this._config.sensors[id][field] = value;
+      if (scope === "sensor") {
+        this._config.sensors = this._config.sensors || {};
+        this._config.sensors[id] = this._config.sensors[id] || {};
+        this._config.sensors[id][field] = value;
+      }
       if (scope === "equipment") {
         this._config.equipment[id][field] = value;
         if (field === "type") {
@@ -1168,12 +1180,25 @@ class OpenReefPanel extends HTMLElement {
         this._config.manualTests = this._config.manualTests || { enabled: true, schedules: {} };
         this._config.manualTests.schedules = this._config.manualTests.schedules || {};
         this._config.manualTests.schedules[id] = this._config.manualTests.schedules[id] || {};
-        this._config.manualTests.schedules[id][field] = field === "cadenceDays" ? Math.max(1, Math.min(365, Number(value) || 1)) : value;
+        const schedule = this._config.manualTests.schedules[id];
+        if (field === "cadenceDays") {
+          const cadenceDays = Math.max(1, Math.min(365, Number(value) || 1));
+          schedule.cadenceDays = cadenceDays;
+          const criticalAfterDays = Number(schedule.criticalAfterDays);
+          if (!Number.isFinite(criticalAfterDays) || criticalAfterDays < cadenceDays) {
+            schedule.criticalAfterDays = Math.min(730, cadenceDays * 2);
+          }
+        } else if (field === "criticalAfterDays") {
+          const cadenceDays = Math.max(1, Math.min(365, Number(schedule.cadenceDays) || this._manualSuggestedCadenceDays(id)));
+          schedule.criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(value) || cadenceDays * 2));
+        } else {
+          schedule[field] = value;
+        }
       }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && field === "enabled") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
         && event.type === "change"
       ) this._render();
     };
@@ -3554,7 +3579,9 @@ class OpenReefPanel extends HTMLElement {
         const latestText = latest
           ? `${this._format(Number(latest.value), this._sensorDigits(id))}${latest.unit ? ` ${latest.unit}` : meta.unit ? ` ${meta.unit}` : ""} on ${this._formatActivityTime(latest.timestamp)}`
           : "no result logged";
-        return `- ${meta.label}: ${schedule.enabled ? `every ${schedule.cadenceDays}d` : "not scheduled"}, ${state.label}, ${latestText}`;
+        const range = `${meta.min} - ${meta.max}${meta.unit ? ` ${meta.unit}` : ""}`;
+        const source = schedule.preferredSource ? `, preferred source ${schedule.preferredSource}` : "";
+        return `- ${meta.label}: ${schedule.enabled ? `due after ${schedule.cadenceDays}d, critical after ${schedule.criticalAfterDays}d` : "not scheduled"}, target ${range}${source}, ${state.label}, ${latestText}`;
       });
     const interlocks = this._config.interlocks || {};
     const alerts = this._config.alerts || {};
@@ -3897,7 +3924,7 @@ class OpenReefPanel extends HTMLElement {
     this._avatarProbing = true;
     ["idle", "point", "smug", "facepalm", "celebrate", "concerned", "thinking", "chilled"].forEach((pose) => {
       const img = new Image();
-      img.onload = () => { this._avatarPoses[pose] = true; if (this._onboarding && this._onboarding.active) this._render(); };
+      img.onload = () => { this._avatarPoses[pose] = true; this._render(); };
       img.src = `${this._avatarBase()}${pose}.png`;
     });
   }
@@ -4144,6 +4171,7 @@ class OpenReefPanel extends HTMLElement {
     if (this._onboarding && this._onboarding.active) return "";
     if (this._setupOpen || this._trend || this._modeConfirm || this._equipmentDetail || this._controlConfirm) return "";
     if (this._buddy.dismissed || !this._buddyEnabled()) return "";
+    this._probeAvatar();
 
     const tone = this._tone();
     const reaction = this._buddyReaction(this._reefHealthScore(), tone);
@@ -5019,10 +5047,13 @@ class OpenReefPanel extends HTMLElement {
     const config = this._manualTestsConfig();
     const schedules = config.schedules;
     const suggested = this._manualSuggestedCadenceDays(id);
-    schedules[id] = schedules[id] || { enabled: false, cadenceDays: suggested, preferredSource: "" };
+    schedules[id] = schedules[id] || { enabled: false, cadenceDays: suggested, criticalAfterDays: suggested * 2, preferredSource: "" };
+    const cadenceDays = Math.max(1, Math.min(365, Number(schedules[id].cadenceDays) || suggested));
+    const criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(schedules[id].criticalAfterDays) || cadenceDays * 2));
     return {
       enabled: schedules[id].enabled === true,
-      cadenceDays: Math.max(1, Math.min(365, Number(schedules[id].cadenceDays) || suggested)),
+      cadenceDays,
+      criticalAfterDays,
       preferredSource: schedules[id].preferredSource || "",
     };
   }
@@ -5052,6 +5083,7 @@ class OpenReefPanel extends HTMLElement {
         ...(config.schedules[id] || {}),
         enabled: this._manualSuggestedEnabled(id),
         cadenceDays: this._manualSuggestedCadenceDays(id),
+        criticalAfterDays: this._manualSuggestedCadenceDays(id) * 2,
       };
     });
     this._recordActivity(`Manual testing routine suggested for ${this._tankProfileLabel(this._tankProfile())}`);
@@ -5088,16 +5120,16 @@ class OpenReefPanel extends HTMLElement {
       return { status: "unknown", label: "not tracked", detail: "Freshness reminders are off for this test.", latest };
     }
     if (!latest) {
-      return { status: "warning", label: "not logged", detail: `${meta.label} is on a ${schedule.cadenceDays}-day schedule but has no manual entry yet.`, latest };
+      return { status: "warning", label: "not logged", detail: `${meta.label} is on a ${schedule.cadenceDays}-day schedule but has no manual entry yet. Critical after ${schedule.criticalAfterDays} days.`, latest };
     }
     const age = this._manualAgeDays(latest);
-    if (age > schedule.cadenceDays * 2) {
-      return { status: "critical", label: "overdue", detail: `${meta.label} was last logged ${this._format(age, 0)} days ago; target cadence is every ${schedule.cadenceDays} days.`, latest };
+    if (age > schedule.criticalAfterDays) {
+      return { status: "critical", label: "overdue", detail: `${meta.label} was last logged ${this._format(age, 0)} days ago; critical threshold is ${schedule.criticalAfterDays} days.`, latest };
     }
     if (age > schedule.cadenceDays) {
-      return { status: "warning", label: "due", detail: `${meta.label} is due. Last logged ${this._format(age, 0)} days ago; target cadence is every ${schedule.cadenceDays} days.`, latest };
+      return { status: "warning", label: "due", detail: `${meta.label} is due. Last logged ${this._format(age, 0)} days ago; target cadence is every ${schedule.cadenceDays} days. Critical after ${schedule.criticalAfterDays} days.`, latest };
     }
-    return { status: "ok", label: "fresh", detail: `${meta.label} logged ${this._format(age, age < 2 ? 1 : 0)} days ago; target cadence is every ${schedule.cadenceDays} days.`, latest };
+    return { status: "ok", label: "fresh", detail: `${meta.label} logged ${this._format(age, age < 2 ? 1 : 0)} days ago; target cadence is every ${schedule.cadenceDays} days. Critical after ${schedule.criticalAfterDays} days.`, latest };
   }
 
   _manualTestFreshnessItems() {
@@ -5154,6 +5186,214 @@ class OpenReefPanel extends HTMLElement {
 
   _manualEntryTimestampValue() {
     return this._manualEntryDefaults.timestamp || this._nowLocalInputValue();
+  }
+
+  _manualParameterAlias(value) {
+    const key = this._slug(String(value || "").replaceAll("/", " "));
+    const aliases = {
+      alk: "alkalinity",
+      alkalinity: "alkalinity",
+      dkh: "alkalinity",
+      kh: "alkalinity",
+      ca: "calcium",
+      calcium: "calcium",
+      mg: "magnesium",
+      magnesium: "magnesium",
+      no3: "nitrate",
+      nitrate: "nitrate",
+      po4: "phosphate",
+      phosphate: "phosphate",
+      salinity: "salinity",
+      sal: "salinity",
+      ppt: "salinity",
+      sg: "salinity",
+      ph: "ph",
+      ph_level: "ph",
+      temp: "temp",
+      temperature: "temp",
+      display_tank_temperature: "temp",
+    };
+    return aliases[key] || (this._manualTestParameterIds().includes(key) ? key : "");
+  }
+
+  _csvCell(value) {
+    const text = String(value ?? "");
+    if (/[",\n\r]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
+    return text;
+  }
+
+  _parseCsvLine(line) {
+    const cells = [];
+    let current = "";
+    let quoted = false;
+    for (let index = 0; index < line.length; index += 1) {
+      const char = line[index];
+      if (char === '"') {
+        if (quoted && line[index + 1] === '"') {
+          current += '"';
+          index += 1;
+        } else {
+          quoted = !quoted;
+        }
+      } else if (char === "," && !quoted) {
+        cells.push(current);
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    cells.push(current);
+    return cells.map((cell) => cell.trim());
+  }
+
+  _manualCsvRows() {
+    return this._manualTestParameterIds()
+      .flatMap((parameter) => this._manualReadings(parameter).map((entry) => {
+        const meta = this._manualTestMeta(parameter);
+        return {
+          parameter,
+          label: meta.label,
+          timestamp: entry.timestamp || "",
+          value: Number(entry.value),
+          unit: entry.unit || meta.unit || "",
+          source: entry.source || "",
+          notes: entry.notes || "",
+        };
+      }))
+      .sort((a, b) => Date.parse(a.timestamp || "") - Date.parse(b.timestamp || ""));
+  }
+
+  _manualCsvText() {
+    const header = ["parameter", "label", "timestamp", "value", "unit", "source", "notes"];
+    const rows = this._manualCsvRows().map((row) => [
+      row.parameter,
+      row.label,
+      row.timestamp,
+      Number.isFinite(row.value) ? row.value : "",
+      row.unit,
+      row.source,
+      row.notes,
+    ]);
+    return [header, ...rows].map((row) => row.map((cell) => this._csvCell(cell)).join(",")).join("\n");
+  }
+
+  _manualCsvTemplateText() {
+    return [
+      "parameter,timestamp,value,unit,source,notes",
+      "alkalinity,2026-05-30T19:30,8.1,dKH,Hanna,evening test",
+      "calcium,2026-05-30T19:30,430,ppm,Salifert,evening test",
+      "magnesium,2026-05-30T19:30,1350,ppm,Salifert,evening test",
+      "nitrate,2026-05-30T19:30,8,ppm,Hanna,evening test",
+      "phosphate,2026-05-30T19:30,0.06,ppm,Hanna,evening test",
+    ].join("\n");
+  }
+
+  async _copyManualCsv() {
+    await this._copyText(this._manualCsvText(), "Manual test CSV copied", "Could not copy manual test CSV");
+  }
+
+  _downloadManualCsv() {
+    try {
+      const blob = new Blob([this._manualCsvText()], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `openreef-manual-tests-${new Date().toISOString().slice(0, 10)}.csv`;
+      this.shadowRoot.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this._message = "Manual test CSV downloaded";
+      this._error = "";
+    } catch {
+      this._error = "Could not download manual test CSV";
+      this._message = "";
+    }
+    this._render();
+  }
+
+  async _copyManualTemplate() {
+    await this._copyText(this._manualCsvTemplateText(), "Manual import template copied", "Could not copy manual import template");
+  }
+
+  _parseManualCsv(text) {
+    const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) return { rows: [], errors: ["Paste CSV rows before importing."] };
+    if (lines.length > 501) return { rows: [], errors: ["Import up to 500 manual test rows at a time."] };
+    let header = ["parameter", "timestamp", "value", "unit", "source", "notes"];
+    let start = 0;
+    const first = this._parseCsvLine(lines[0]).map((cell) => this._slug(cell));
+    if (first.includes("parameter") && first.includes("value")) {
+      header = first.map((cell) => cell === "date" ? "timestamp" : cell);
+      start = 1;
+    }
+    const rows = [];
+    const errors = [];
+    lines.slice(start).forEach((line, rowIndex) => {
+      const cells = this._parseCsvLine(line);
+      const raw = {};
+      header.forEach((column, index) => {
+        raw[column] = cells[index] ?? "";
+      });
+      const parameter = this._manualParameterAlias(raw.parameter || raw.test || raw.label);
+      if (!parameter) {
+        errors.push(`Row ${rowIndex + start + 1}: unknown parameter.`);
+        return;
+      }
+      const value = Number(String(raw.value || "").replace(",", "."));
+      if (!Number.isFinite(value)) {
+        errors.push(`Row ${rowIndex + start + 1}: value must be numeric.`);
+        return;
+      }
+      const timestampText = raw.timestamp || raw.time || raw.date || "";
+      const timestampMs = Date.parse(timestampText.includes("T") || timestampText.includes(":") ? timestampText : `${timestampText}T12:00:00`);
+      if (!Number.isFinite(timestampMs)) {
+        errors.push(`Row ${rowIndex + start + 1}: timestamp/date is invalid.`);
+        return;
+      }
+      const meta = this._manualTestMeta(parameter);
+      rows.push({
+        parameter,
+        timestamp: new Date(timestampMs).toISOString(),
+        value,
+        unit: raw.unit || meta.unit || "",
+        source: raw.source || raw.kit || "",
+        notes: raw.notes || raw.note || "",
+      });
+    });
+    return { rows, errors };
+  }
+
+  _importManualCsvFromForm() {
+    const text = this.shadowRoot.querySelector("[data-manual-import-field='text']")?.value || this._manualEntryDefaults.importText || "";
+    const parsed = this._parseManualCsv(text);
+    if (parsed.errors.length) {
+      this._error = parsed.errors.slice(0, 4).join(" ");
+      this._message = "";
+      this._render();
+      return;
+    }
+    if (!parsed.rows.length) {
+      this._error = "No manual test rows found to import.";
+      this._message = "";
+      this._render();
+      return;
+    }
+    this._config.manualReadings = this._config.manualReadings || {};
+    parsed.rows.forEach((row, index) => {
+      this._config.manualReadings[row.parameter] = this._manualReadings(row.parameter);
+      this._config.manualReadings[row.parameter].push({
+        id: `${row.parameter}:import:${Date.now()}:${index}`,
+        timestamp: row.timestamp,
+        value: row.value,
+        unit: row.unit,
+        source: row.source,
+        notes: row.notes,
+      });
+    });
+    this._manualEntryDefaults.importText = "";
+    this._recordActivity(`Manual CSV imported: ${parsed.rows.length} result${parsed.rows.length === 1 ? "" : "s"}`, "control");
+    this._saveConfig();
   }
 
   _saveManualReadingFromForm() {
@@ -5276,6 +5516,7 @@ class OpenReefPanel extends HTMLElement {
           ${this._missionSummaryCard("Dosing insight", `${this._dosingActiveParameters().length}`, "mapped sensors or manual history", this._dosingActiveParameters().length ? "ok" : "unknown", "mission")}
         </div>
         ${this._manualEntryPanel()}
+        ${this._manualDataToolsPanel()}
         <div class="grid four">
           ${this._manualTestParameterIds().map((id) => this._manualTestCard(id)).join("")}
         </div>
@@ -5323,6 +5564,32 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="button-row end">
           <button class="primary" data-action="save-manual-batch">Save test session</button>
+        </div>
+      </article>
+    `;
+  }
+
+  _manualDataToolsPanel() {
+    const count = this._manualCsvRows().length;
+    return `
+      <article class="panel manual-data-tools">
+        <div class="section-head">
+          <div>
+            <h3>Import and export history</h3>
+            <p>Bring in old test-kit results or export the OpenReef chemistry log as CSV.</p>
+          </div>
+          <div class="button-row">
+            <button class="secondary compact-button" data-action="copy-manual-template">Copy template</button>
+            <button class="secondary compact-button" data-action="copy-manual-csv" ${count ? "" : "disabled"}>Copy CSV</button>
+            <button class="secondary compact-button" data-action="download-manual-csv" ${count ? "" : "disabled"}>Download CSV</button>
+          </div>
+        </div>
+        <label>Paste CSV history
+          <textarea data-manual-import-field="text" rows="5" placeholder="parameter,timestamp,value,unit,source,notes&#10;alkalinity,2026-05-30T19:30,8.1,dKH,Hanna,evening test">${this._escape(this._manualEntryDefaults.importText || "")}</textarea>
+        </label>
+        <div class="button-row end">
+          <small>${this._escape(count)} saved result${count === 1 ? "" : "s"}. Supported names include alkalinity/alk/dKH, calcium/Ca, magnesium/Mg, nitrate/NO3, phosphate/PO4, salinity, pH, and temp.</small>
+          <button class="primary" data-action="import-manual-csv">Import CSV</button>
         </div>
       </article>
     `;
@@ -5578,7 +5845,10 @@ class OpenReefPanel extends HTMLElement {
                 </label>
                 ${schedule.enabled ? `
                   <div class="mini-grid">
-                    <label>Every days<input type="number" min="1" max="365" step="1" data-scope="manual-test" data-id="${this._escape(id)}" data-field="cadenceDays" value="${this._escape(schedule.cadenceDays)}"></label>
+                    <label>Due after days<input type="number" min="1" max="365" step="1" data-scope="manual-test" data-id="${this._escape(id)}" data-field="cadenceDays" value="${this._escape(schedule.cadenceDays)}"></label>
+                    <label>Critical after days<input type="number" min="${this._escape(schedule.cadenceDays)}" max="730" step="1" data-scope="manual-test" data-id="${this._escape(id)}" data-field="criticalAfterDays" value="${this._escape(schedule.criticalAfterDays)}"></label>
+                    <label>Target low<input type="number" step="0.001" data-scope="sensor" data-id="${this._escape(id)}" data-field="min" value="${this._escape(meta.min)}"></label>
+                    <label>Target high<input type="number" step="0.001" data-scope="sensor" data-id="${this._escape(id)}" data-field="max" value="${this._escape(meta.max)}"></label>
                     <label>Preferred source
                       <select data-scope="manual-test" data-id="${this._escape(id)}" data-field="preferredSource">
                         ${this._manualTestSourceChoices().map((source) => `<option value="${this._escape(source)}" ${schedule.preferredSource === source ? "selected" : ""}>${this._escape(source || "No preference")}</option>`).join("")}
