@@ -35,7 +35,7 @@ class OpenReefPanel extends HTMLElement {
     this._manualEntryDefaults = {};
     this._onboarding = null;
     this._onboardingChecked = false;
-    this._avatarReady = false;
+    this._avatarPoses = {};
     this._stickerReady = false;
   }
 
@@ -3881,12 +3881,13 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _probeAvatar() {
-    if (this._avatarReady || this._avatarProbing) return;
+    if (this._avatarProbing) return;
     this._avatarProbing = true;
-    const img = new Image();
-    img.onload = () => { this._avatarReady = true; this._avatarProbing = false; if (this._onboarding && this._onboarding.active) this._render(); };
-    img.onerror = () => { this._avatarProbing = false; };
-    img.src = `${this._avatarBase()}idle.png`;
+    ["idle", "point", "smug", "facepalm", "celebrate"].forEach((pose) => {
+      const img = new Image();
+      img.onload = () => { this._avatarPoses[pose] = true; if (this._onboarding && this._onboarding.active) this._render(); };
+      img.src = `${this._avatarBase()}${pose}.png`;
+    });
   }
 
   _probeSticker() {
@@ -3899,7 +3900,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _avatarMarkup(pose) {
-    if (this._avatarReady) {
+    if (this._avatarPoses[pose]) {
       return `<img class="or-avatar-img" src="${this._avatarBase()}${this._escape(pose)}.png" alt="">`;
     }
     return `<div class="or-avatar-ph" data-pose="${this._escape(pose)}">${this._avatarEmoji(pose)}</div>`;
