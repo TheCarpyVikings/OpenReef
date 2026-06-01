@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 26
+CORE_SCHEMA_VERSION = 27
 INTEGRATION_VERSION = "0.4.51"
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
@@ -529,6 +529,7 @@ DEFAULT_CORE_CONFIG = {
             parameter: {
                 "enabled": False,
                 "cadenceDays": MANUAL_TEST_CADENCE_PRESETS[DEFAULT_TANK_PROFILE][parameter],
+                "criticalAfterDays": MANUAL_TEST_CADENCE_PRESETS[DEFAULT_TANK_PROFILE][parameter] * 2,
                 "preferredSource": "",
             }
             for parameter in MANUAL_TEST_PARAMETERS

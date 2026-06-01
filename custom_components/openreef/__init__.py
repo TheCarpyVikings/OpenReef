@@ -841,9 +841,15 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             cadence_days = int(raw.get("cadenceDays", profile_defaults.get(parameter, 14)))
         except (TypeError, ValueError):
             cadence_days = profile_defaults.get(parameter, 14)
+        cadence_days = max(1, min(cadence_days, 365))
+        try:
+            critical_after_days = int(raw.get("criticalAfterDays", cadence_days * 2))
+        except (TypeError, ValueError):
+            critical_after_days = cadence_days * 2
         schedules[parameter] = {
             "enabled": bool(raw.get("enabled", False)),
-            "cadenceDays": max(1, min(cadence_days, 365)),
+            "cadenceDays": cadence_days,
+            "criticalAfterDays": max(cadence_days, min(critical_after_days, 730)),
             "preferredSource": str(raw.get("preferredSource", ""))[:80],
         }
     manual_tests["schedules"] = schedules

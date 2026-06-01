@@ -19,7 +19,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] Add Dosing & Consumption Advisor V1 (advisory): Trident-style Alk/Ca/Mg consumption rates, projection-to-limit, and advisory dose tips. Reuses Reef Health Score stability as the single source of truth.
 - [x] Add Manual Chemistry V1: manual entry, configurable profile-based schedules, freshness scoring, history, and Dosing Advisor fallback from manual results.
 - [x] Add Manual Chemistry V1.1: charted manual-test trends and batch historical test entry.
-- [ ] Add Manual Chemistry V1.2: per-parameter tuning plus export/import helpers.
+- [x] Add Manual Chemistry V1.2: per-parameter target/freshness tuning plus CSV export/import helpers.
 - [ ] Add Maintenance Tasks V1 without Google dependency.
 
 ## Product Rules
