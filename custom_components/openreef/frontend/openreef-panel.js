@@ -4026,8 +4026,10 @@ class OpenReefPanel extends HTMLElement {
       else if (r.top >= nh + 20) top = r.top - nh - 14;
       else top = Math.max(m, vh - nh - m);
     } else {
+      // Centre-stage steps (welcome / finale) sit centred on screen, not at the
+      // bottom — the finale's tall sticker bubble would otherwise run off-screen.
       centreX = vw / 2;
-      top = vh - nh - 24;
+      top = Math.max(m, (vh - nh) / 2);
     }
     const left = Math.round(Math.max(m, Math.min(centreX - nw / 2, vw - nw - m)));
     top = Math.round(top);
