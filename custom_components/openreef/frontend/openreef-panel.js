@@ -3915,7 +3915,8 @@ class OpenReefPanel extends HTMLElement {
         cheeky: "Your whole reef's health in one honest number. Apex Fusion shows you the graphs and leaves you to play detective — I actually tell you what they mean.",
         professional: "Your Reef Health Score: one explainable 0-100 read on the tank, weighted for your reef type." },
       { id: "dosing", anchor: "dosing", pose: "smug",
-        cheeky: "Your alk, cal and mag consumption — worked out, with how much to dose. Your Trident burns reagents and clogs its lines to take those readings; turning them into actual advice costs you nothing.",
+        cheeky: "Your alk, cal and mag consumption — worked out, with exactly how much to dose. The maths is free; the Trident's reagents sadly aren't. Good news: my mate Harry does ABC reagents cheaper.",
+        link: { label: "Harry's ABC reagents → marine-spec.co.uk", url: "https://www.marine-spec.co.uk" },
         professional: "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only." },
       { id: "attention", anchor: "attention", pose: "facepalm",
         cheeky: "Anything wrong shows up here in plain English. No fault codes to Google, no scattered docs, no three-day forum thread just to get your auto top-off behaving.",
@@ -4026,6 +4027,7 @@ class OpenReefPanel extends HTMLElement {
             </div>
             ${isLast && tone === "cheeky" && this._stickerReady ? `<img class="or-sticker" src="${this._avatarBase()}apex-throne.png" alt="OpenReef's professional assessment of the competition">` : ""}
             <p class="or-line">${this._escape(line)}</p>
+            ${step.link && tone === "cheeky" ? `<a class="or-link" href="${this._escape(step.link.url)}" target="_blank" rel="noopener noreferrer">${this._escape(step.link.label)}</a>` : ""}
             <div class="or-dots">${dots}</div>
             <div class="or-actions">
               <button class="secondary compact-button" data-action="onboarding-skip">Skip</button>
@@ -6861,6 +6863,8 @@ class OpenReefPanel extends HTMLElement {
         .or-tone:hover { border-color: var(--openreef-accent); }
         .or-sticker { display: block; width: 100%; max-height: 280px; object-fit: contain; border-radius: 10px; margin-bottom: 10px; }
         .or-line { color: #e9f1f8; line-height: 1.42; overflow-wrap: anywhere; }
+        .or-link { display: inline-block; margin-top: 8px; color: var(--openreef-accent); font-weight: 800; text-decoration: none; border-bottom: 1px solid var(--openreef-accent-border); overflow-wrap: anywhere; }
+        .or-link:hover { border-bottom-color: var(--openreef-accent); }
         .or-dots { display: flex; gap: 6px; margin: 10px 0; }
         .or-dot { width: 7px; height: 7px; border-radius: 50%; background: #2b4056; }
         .or-dot.active { background: var(--openreef-accent); }

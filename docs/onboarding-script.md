@@ -123,7 +123,8 @@ claims (Apex Fusion is free, so no "subscription/licence" jokes).
 - **Professional:** "Your Reef Health Score: one explainable 0–100 read on the tank, weighted for your reef type."
 
 ### 3. Dosing Advisor — `anchor: dosing` · pose: `smug`
-- **Cheeky:** "Your alk, cal and mag consumption — worked out, with how much to dose. Your Trident burns reagents and clogs its lines to take those readings; turning them into actual advice costs you nothing."
+- **Cheeky:** "Your alk, cal and mag consumption — worked out, with exactly how much to dose. The maths is free; the Trident's reagents sadly aren't. Good news: my mate Harry does ABC reagents cheaper."
+- **Cheeky link** (clickable, Cheeky mode only): "Harry's ABC reagents → marine-spec.co.uk" → <https://www.marine-spec.co.uk> (a step may carry an optional `link: { label, url }`, rendered as an `<a target="_blank">` under the line in Cheeky mode only).
 - **Professional:** "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only."
 
 ### 4. Attention — `anchor: attention` · pose: `facepalm`
