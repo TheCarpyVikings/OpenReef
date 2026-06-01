@@ -178,9 +178,15 @@ Apex jabs must map to a real, documented pain point. Verified ones used above:
 
 Before adding or editing a joke, confirm the claim against a source like the above.
 
-## Future (not in Phase 1)
+## Phases
 
-- Phase 2: free-floating avatar that walks between anchors (sprite-sheet walk cycle).
-- Phase 3: ambient reactions to live state (celebrate at grade A, facepalm when alk is about to
-  breach).
-- Phase 4: optional voice via HA TTS, off by default.
+- **Phase 1 (done):** docked narrator bar + spotlight, all 7 steps/poses, Cheeky/Pro, finale gag.
+- **Phase 2 v1 (done):** the guide **walks up to each spotlighted card** on desktop — the narrator
+  glides (CSS `left`/`top` transition) to float beside/below the anchored card, with a subtle
+  `or-bob` idle bob; it walks continuously between cards (last position seeded into the next
+  render). Mobile (≤640) keeps the docked stacked bar. No new art (glide, not a sprite walk).
+  - Future polish: a real sprite-sheet walk cycle; smarter bubble side-placement; facing flip;
+    smooth (non-instant) scroll while walking.
+- **Phase 3:** ambient reactions to live state (celebrate at grade A, point at a new alert, plain
+  heads-up when a parameter drifts — serious on safety).
+- **Phase 4:** optional voice via HA TTS, off by default.

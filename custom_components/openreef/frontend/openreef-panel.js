@@ -3982,15 +3982,18 @@ class OpenReefPanel extends HTMLElement {
 
   _positionOnboarding() {
     if (!this._onboarding || !this._onboarding.active) return;
+    const narrator = this.shadowRoot.querySelector(".or-narrator");
     const spotlight = this.shadowRoot.querySelector(".or-spotlight");
-    if (!spotlight) return;
+    if (!spotlight || !narrator) return;
     const step = this._onboarding.steps[this._onboarding.step];
     const anchorEl = step && step.anchor ? this.shadowRoot.querySelector(`[data-tour="${step.anchor}"]`) : null;
+    // Bring the target into view first (instant, so rects are correct for placement).
+    if (anchorEl && this._onboarding.scrolledStep !== this._onboarding.step) {
+      this._onboarding.scrolledStep = this._onboarding.step;
+      anchorEl.scrollIntoView({ block: "center", behavior: "auto" });
+    }
+    // Spotlight ring on the anchored card (or hidden for centre-stage steps).
     if (anchorEl) {
-      if (this._onboarding.scrolledStep !== this._onboarding.step) {
-        this._onboarding.scrolledStep = this._onboarding.step;
-        anchorEl.scrollIntoView({ block: "center", behavior: "smooth" });
-      }
       const r = anchorEl.getBoundingClientRect();
       const pad = 8;
       spotlight.style.opacity = "1";
@@ -4000,11 +4003,44 @@ class OpenReefPanel extends HTMLElement {
       spotlight.style.height = `${r.height + pad * 2}px`;
     } else {
       spotlight.style.opacity = "0";
-      spotlight.style.top = "50%";
-      spotlight.style.left = "50%";
       spotlight.style.width = "0px";
       spotlight.style.height = "0px";
     }
+    // Mobile keeps the docked stacked bar (CSS); desktop walks the guide to the card.
+    if (window.innerWidth <= 640) {
+      ["left", "top", "right", "bottom", "transform"].forEach((p) => { narrator.style[p] = ""; });
+      this._onboarding.pos = null;
+      return;
+    }
+    const m = 14;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const nw = narrator.offsetWidth;
+    const nh = narrator.offsetHeight;
+    let centreX;
+    let top;
+    if (anchorEl) {
+      const r = anchorEl.getBoundingClientRect();
+      centreX = r.left + r.width / 2;
+      if (vh - r.bottom >= nh + 20) top = r.bottom + 14;
+      else if (r.top >= nh + 20) top = r.top - nh - 14;
+      else top = Math.max(m, vh - nh - m);
+    } else {
+      centreX = vw / 2;
+      top = vh - nh - 24;
+    }
+    const left = Math.round(Math.max(m, Math.min(centreX - nw / 2, vw - nw - m)));
+    top = Math.round(top);
+    // First placement snaps; later steps animate the walk between cards.
+    const firstPlace = !this._onboarding.pos;
+    if (firstPlace) narrator.style.transition = "none";
+    narrator.style.left = `${left}px`;
+    narrator.style.top = `${top}px`;
+    narrator.style.right = "auto";
+    narrator.style.bottom = "auto";
+    narrator.style.transform = "none";
+    if (firstPlace) { void narrator.offsetWidth; narrator.style.transition = ""; }
+    this._onboarding.pos = { left, top };
   }
 
   _onboardingOverlay() {
@@ -4016,10 +4052,14 @@ class OpenReefPanel extends HTMLElement {
     const line = step[tone] || step.cheeky;
     const isLast = idx === steps.length - 1;
     const dots = steps.map((_, i) => `<span class="or-dot ${i === idx ? "active" : ""}"></span>`).join("");
+    // On desktop, render the guide where it last stood so it walks to the next card.
+    const seed = window.innerWidth > 640 && ob.pos
+      ? ` style="left:${ob.pos.left}px;top:${ob.pos.top}px;right:auto;bottom:auto;transform:none;"`
+      : "";
     return `
       <div class="or-onboard" role="dialog" aria-label="OpenReef guided tour">
         <div class="or-spotlight"></div>
-        <div class="or-narrator">
+        <div class="or-narrator"${seed}>
           <div class="or-avatar pose-${this._escape(step.pose)}">${this._avatarMarkup(step.pose)}</div>
           <div class="or-bubble">
             <div class="or-bubble-top">
@@ -6854,9 +6894,10 @@ class OpenReefPanel extends HTMLElement {
         .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
         .or-onboard { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
         .or-spotlight { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(4, 12, 20, .62); outline: 2px solid var(--openreef-accent); outline-offset: 2px; opacity: 0; transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, opacity .2s ease; pointer-events: none; }
-        .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(740px, calc(100vw - 28px)); display: flex; gap: 14px; align-items: flex-end; pointer-events: auto; z-index: 13; }
-        .or-avatar { flex: 0 0 auto; width: 210px; display: grid; place-items: end center; }
-        .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); }
+        .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(520px, calc(100vw - 28px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; transition: left .6s cubic-bezier(.34,.6,.26,1), top .6s cubic-bezier(.34,.6,.26,1); }
+        .or-avatar { flex: 0 0 auto; width: 176px; display: grid; place-items: end center; }
+        .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); animation: or-bob 2.6s ease-in-out infinite; }
+        @keyframes or-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
         .or-avatar-ph { width: 168px; height: 168px; border-radius: 50%; display: grid; place-items: center; font-size: 74px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
         .or-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 16px; padding: 18px 20px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
         .or-bubble-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
