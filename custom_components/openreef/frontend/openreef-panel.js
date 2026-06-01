@@ -2485,12 +2485,11 @@ class OpenReefPanel extends HTMLElement {
     const saved = this._config?.display?.missionCards || {};
     const hasDosingParameters = this._dosingActiveParameters().length > 0;
     return {
-      health: true,
-      live: true,
-      controls: true,
-      energy: true,
-      ...saved,
-      dosing: hasDosingParameters && saved.dosing !== false,
+      health: saved.health !== false,
+      live: saved.live !== false,
+      controls: saved.controls !== false,
+      energy: saved.energy !== false,
+      dosing: saved.dosing === true || (hasDosingParameters && saved.dosing !== false),
     };
   }
 
@@ -7167,12 +7166,12 @@ class OpenReefPanel extends HTMLElement {
           .chart-wrap { padding: 10px; }
           .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
-          .or-narrator { bottom: 10px; width: calc(100vw - 14px); gap: 8px; }
-          .or-avatar { width: 124px; }
-          .or-avatar-ph { width: 104px; height: 104px; font-size: 46px; }
-          .or-bubble { padding: 14px 15px; }
+          .or-narrator { bottom: 10px; width: calc(100vw - 12px); flex-direction: column; align-items: flex-start; gap: 0; }
+          .or-avatar { width: 168px; margin-left: 8px; margin-bottom: -8px; }
+          .or-avatar-ph { width: 120px; height: 120px; font-size: 52px; }
+          .or-bubble { width: 100%; padding: 14px 16px; }
           .or-line { font-size: 16px; }
-          .or-sticker { max-height: 250px; }
+          .or-sticker { max-height: 260px; }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
         }
