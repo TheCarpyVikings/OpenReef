@@ -111,24 +111,27 @@ no highlight.
 Poses are matched to the joke and all five are used: idle → point → smug → facepalm → point →
 idle → celebrate.
 
+Every cheeky line ties to a **documented** Apex pain point (see "Fact-check" below) — no invented
+claims (Apex Fusion is free, so no "subscription/licence" jokes).
+
 ### 1. Welcome — `anchor: null` · pose: `idle`
-- **Cheeky:** "Welcome aboard! Quick 30-second tour of your reef — no manual, no virtual outlets, no programming degree. Promise."
+- **Cheeky:** "Welcome aboard! A 30-second tour — and not a single line of Apex code. No virtual outlets, no Defer commands, no hunting through scattered docs for the one setting you need."
 - **Professional:** "Welcome to OpenReef. Here's a quick 30-second tour of the main features."
 
 ### 2. Reef Health — `anchor: reef-health` · pose: `point`
-- **Cheeky:** "Your whole reef's health in one honest number. Apex Fusion hands you a wall of graphs and wishes you luck — I actually tell you what they mean."
+- **Cheeky:** "Your whole reef's health in one honest number. Apex Fusion shows you the graphs and leaves you to play detective — I actually tell you what they mean."
 - **Professional:** "Your Reef Health Score: one explainable 0–100 read on the tank, weighted for your reef type."
 
 ### 3. Dosing Advisor — `anchor: dosing` · pose: `smug`
-- **Cheeky:** "Your alk, cal and mag consumption — worked out, with how much to dose. Neptune sells that as a separate module AND a subscription. Adorable."
+- **Cheeky:** "Your alk, cal and mag consumption — worked out, with how much to dose. Your Trident burns reagents and clogs its lines to take those readings; turning them into actual advice costs you nothing."
 - **Professional:** "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only."
 
 ### 4. Attention — `anchor: attention` · pose: `facepalm`
-- **Cheeky:** "Anything wrong shows up here in plain English. No cryptic codes, no five-menu treasure hunt, no forum thread just to decode what your controller meant."
+- **Cheeky:** "Anything wrong shows up here in plain English. No fault codes to Google, no scattered docs, no three-day forum thread just to get your auto top-off behaving."
 - **Professional:** "Anything that needs attention — alerts, missing mappings, safety interlocks — is summarised here in plain English."
 
 ### 5. Trends — `anchor: sensors` · pose: `point`
-- **Cheeky:** "Tap any reading for its full trend. Every probe you own in one place — no extra modules, no licence fees, no lock-in."
+- **Cheeky:** "Tap any reading for its full trend. Every probe you own in one place — no extra module to buy just to read one more thing."
 - **Professional:** "Tap any reading to open its trend, with ranges from 1 hour to 30 days."
 
 ### 6. Safety (straight, no jokes) — `anchor: settings` · pose: `idle`
@@ -148,6 +151,27 @@ idle → celebrate.
 ## Controls
 
 `Back` · `Next` (→ `Finish` on last step) · `Skip` · `Don't show again`. Step dots show progress.
+
+## Fact-check (keep jokes grounded)
+
+Apex jabs must map to a real, documented pain point. Verified ones used above:
+
+- **Programming complexity** — non-standard language (virtual outlets, `Defer`), and Neptune's
+  official docs are widely described as scattered; the de-facto manual is community-written.
+  [ATK tutorial thread](https://www.reef2reef.com/threads/neptune-apex-programming-tutorials-part-3-automatic-top-off-kit-atk.618106/),
+  [programming help](https://www.reef2reef.com/threads/neptune-apex-programming-help.1003634/)
+- **Auto Top-Off Kit (ATK)** — one of Neptune's most-complained-about products; setup/operation
+  confusion is common. (same ATK thread above)
+- **Trident reagents = the real recurring cost** — ~$45/2-month, ~$100/6-month; availability
+  issues; sample/waste lines clog; readings can drift vs manual test kits.
+  [reagent cost thread](https://www.reef2reef.com/threads/trident-2-months-reagent-44-95-6-month-is-99-95-what.697014/),
+  [Trident service/clogging](https://help.neptunesystems.com/tridentservice/)
+- **Fusion is FREE** — do **not** joke about Fusion subscriptions/licence fees. It does show raw
+  graphs without interpreting them (no health score / dose math), which is the fair contrast.
+  [Apex Fusion](https://help.neptunesystems.com/apex-fusion/)
+- **Module-per-capability** — extra inputs/probes generally mean buying another module.
+
+Before adding or editing a joke, confirm the claim against a source like the above.
 
 ## Future (not in Phase 1)
 
