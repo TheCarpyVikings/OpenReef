@@ -311,7 +311,7 @@ class OpenReefPanel extends HTMLElement {
     }
 
     this._dosingActiveParameters().forEach(([id, sensor]) => {
-      if (consumptionItems[id] || this._manualReadings(id).length < 2) return;
+      if ((consumptionItems[id] && consumptionItems[id].status !== "learning") || this._manualReadings(id).length < 2) return;
       const trendData = this._manualTrendData(id);
       const healthItem = this._analyseHealthTrend(id, sensor, trendData);
       consumptionItems[id] = this._analyseConsumption(id, sensor, trendData, healthItem);
@@ -553,7 +553,7 @@ class OpenReefPanel extends HTMLElement {
     const dayStart = new Date(end.getTime() - this._trendRangeMs("24h"));
     const statisticPoints = await this._fetchStatisticTrendPoints(entityId, sevenDayStart, end, "7d");
 
-    if (statisticPoints.length >= 8) {
+    if (statisticPoints.length >= 8 && this._trendDays(statisticPoints).length >= 4) {
       return { points: statisticPoints, range: "7d", source: "statistics" };
     }
 
@@ -2864,12 +2864,12 @@ class OpenReefPanel extends HTMLElement {
     return { stars: "★★★★★", label: "Steady", status: "ok" };
   }
 
-  _consumptionLearning(sensorId, sensor, detail = "Collecting history before estimating consumption.") {
+  _consumptionLearning(sensorId, sensor, detail = "Collecting history before estimating consumption.", options = {}) {
     return {
       id: sensorId,
       label: sensor.label || sensorId,
       group: "learning",
-      status: "learning",
+      status: options.status || "learning",
       unit: sensor.unit || "",
       digits: this._sensorDigits(sensorId),
       current: this._number(sensor.entity_id),
@@ -2886,7 +2886,46 @@ class OpenReefPanel extends HTMLElement {
       doseText: detail,
       trendText: detail,
       projectionText: "",
+      confidenceText: detail,
+      source: options.source || "unknown",
+      potencyInfo: null,
       stability: { stars: "", label: "Learning baseline", status: "learning" },
+    };
+  }
+
+  _manualDosingFreshness(sensorId) {
+    const latest = this._manualLatestReading(sensorId);
+    const meta = this._manualTestMeta(sensorId);
+    const schedule = this._manualTestConfig(sensorId);
+    const scheduleActive = this._manualTestsConfig().enabled && schedule.enabled;
+    const cadenceDays = scheduleActive ? schedule.cadenceDays : this._manualSuggestedCadenceDays(sensorId);
+    const criticalAfterDays = scheduleActive ? schedule.criticalAfterDays : Math.max(cadenceDays * 2, cadenceDays + 1);
+    if (!latest) {
+      return {
+        fresh: false,
+        status: "learning",
+        detail: `Add a fresh ${meta.label} result before OpenReef gives manual-test dosing advice.`,
+      };
+    }
+    const age = this._manualAgeDays(latest);
+    if (age > criticalAfterDays) {
+      return {
+        fresh: false,
+        status: "critical",
+        detail: `${meta.label} was last logged ${this._format(age, 0)} days ago. Retest before using manual history for dose advice.`,
+      };
+    }
+    if (age > cadenceDays) {
+      return {
+        fresh: false,
+        status: "warning",
+        detail: `${meta.label} is due for a fresh test. Retest before using manual history for dose advice.`,
+      };
+    }
+    return {
+      fresh: true,
+      status: "ok",
+      detail: `${meta.label} manual history is fresh enough for advisory trend checks.`,
     };
   }
 
@@ -2904,23 +2943,111 @@ class OpenReefPanel extends HTMLElement {
     return `${this._format(Math.max(0, Number(value) || 0), 1)} mL/day`;
   }
 
+  _dosingMinimumSignal(sensorId, sensor) {
+    if (sensorId === "alkalinity") return 0.1;
+    if (sensorId === "calcium") return 8;
+    if (sensorId === "magnesium") return 20;
+    const min = Number(sensor?.min);
+    const max = Number(sensor?.max);
+    const range = Number.isFinite(min) && Number.isFinite(max) ? Math.abs(max - min) : 0;
+    return range > 0 ? Math.max(range * 0.02, 0.01) : 0.05;
+  }
+
+  _consumptionConfidence(sensorId, sensor, source, days, fit, span, totalChange) {
+    const minDays = source === "manual" ? 4 : 4;
+    if (days.length < minDays) {
+      return {
+        confident: false,
+        detail: `OpenReef needs at least ${minDays} dated day${minDays === 1 ? "" : "s"} before estimating ${sensor.label || sensorId} consumption.`,
+      };
+    }
+    const minSpan = source === "manual"
+      ? Math.max(6, Math.min(21, this._manualSuggestedCadenceDays(sensorId) * 2))
+      : 3;
+    if (span < minSpan) {
+      return {
+        confident: false,
+        detail: `OpenReef needs about ${this._format(minSpan, 0)} days of ${source === "manual" ? "manual results" : "chemistry history"} before advising dose changes.`,
+      };
+    }
+    const minSignal = this._dosingMinimumSignal(sensorId, sensor);
+    const unitSuffix = sensor.unit ? ` ${sensor.unit}` : "";
+    const digits = this._sensorDigits(sensorId);
+    if (totalChange < minSignal) {
+      return {
+        confident: false,
+        detail: `Net movement is smaller than the useful signal for this test (${this._format(minSignal, digits)}${unitSuffix}). No dosing change suggested yet.`,
+      };
+    }
+    const residualLimit = source === "manual" ? 1.5 : 1.2;
+    if (fit.residualStdev > 0 && totalChange < fit.residualStdev * residualLimit) {
+      return {
+        confident: false,
+        detail: "The readings are too noisy to separate real consumption from testing/measurement noise yet.",
+      };
+    }
+    return { confident: true, detail: "Consumption trend is strong enough for advisory dosing." };
+  }
+
+  _dosingCalculatedPotency(config) {
+    const tankVolume = Number(config?.tankVolumeLitres) || 0;
+    const productDose = Number(config?.productDoseMl) || 0;
+    const productVolume = Number(config?.productVolumeLitres) || 0;
+    const productRaise = Number(config?.productRaise) || 0;
+    if (tankVolume <= 0 || productDose <= 0 || productVolume <= 0 || productRaise <= 0) {
+      return { value: 0, complete: false };
+    }
+    return {
+      value: (productRaise * productVolume) / (productDose * tankVolume),
+      complete: true,
+    };
+  }
+
+  _dosingEffectivePotency(sensorId, sensor, config = this._dosingParamConfig(sensorId)) {
+    const manual = Number(config?.potencyPerMl) || 0;
+    const calculated = this._dosingCalculatedPotency(config);
+    if (manual > 0) {
+      return { value: manual, source: "manual", label: `Manual override: ${this._format(manual, 4)} ${sensor.unit || "units"}/mL` };
+    }
+    if (calculated.value > 0) {
+      return { value: calculated.value, source: "calculator", label: `Calculated: ${this._format(calculated.value, 4)} ${sensor.unit || "units"}/mL in this tank` };
+    }
+    return { value: 0, source: "missing", label: "No solution strength set" };
+  }
+
   _analyseConsumption(sensorId, sensor, trendData, healthItem) {
     const label = sensor.label || sensorId;
     const unit = sensor.unit || "";
     const unitSuffix = unit ? ` ${unit}` : "";
     const digits = this._sensorDigits(sensorId);
-    const points = Array.isArray(trendData) ? trendData : trendData?.points || [];
+    let points = Array.isArray(trendData) ? trendData : Array.isArray(trendData?.points) ? trendData.points : [];
     const range = Array.isArray(trendData) ? "24h" : trendData?.range || "24h";
     const source = Array.isArray(trendData) ? "history" : trendData?.source || "history";
+
+    if (source === "manual") {
+      const manualFreshness = this._manualDosingFreshness(sensorId);
+      if (!manualFreshness.fresh) {
+        return this._consumptionLearning(sensorId, sensor, manualFreshness.detail, {
+          status: manualFreshness.status,
+          source: "manual",
+        });
+      }
+      const schedule = this._manualTestConfig(sensorId);
+      const lookbackDays = Math.max(45, Math.min(180, schedule.criticalAfterDays * 3));
+      const cutoff = Date.now() - lookbackDays * 86400000;
+      points = points.filter((point) => point.time >= cutoff);
+    }
+
     const days = this._trendDays(points);
 
-    if (range !== "7d" || days.length < 4) {
+    if ((source !== "manual" && range !== "7d") || days.length < 4) {
       return this._consumptionLearning(
         sensorId,
         sensor,
         source === "manual"
           ? "Collecting manual test history — OpenReef needs about 4 dated results before it can estimate consumption."
-          : "Collecting Trident history — OpenReef needs about 4 days of readings before it can estimate consumption.",
+          : "Collecting mapped chemistry history — OpenReef needs about 4 days of readings before it can estimate consumption.",
+        { source },
       );
     }
 
@@ -2933,7 +3060,8 @@ class OpenReefPanel extends HTMLElement {
     const slope = fit.slope;
     const span = xs[xs.length - 1] - xs[0] || 1;
     const totalChange = Math.abs(slope) * span;
-    const confident = Math.abs(slope) > 0 && totalChange >= fit.residualStdev;
+    const confidence = this._consumptionConfidence(sensorId, sensor, source, days, fit, span, totalChange);
+    const confident = confidence.confident;
 
     const latestAvg = days[days.length - 1].avg;
     const liveValue = this._number(sensor.entity_id);
@@ -2962,7 +3090,8 @@ class OpenReefPanel extends HTMLElement {
 
     const paramConfig = this._dosingParamConfig(sensorId);
     const currentDoseMlPerDay = Math.max(0, Number(paramConfig.doserMlPerDay) || 0);
-    const potency = Number(paramConfig.potencyPerMl) || 0;
+    const potencyInfo = this._dosingEffectivePotency(sensorId, sensor, paramConfig);
+    const potency = potencyInfo.value;
     const target = Number(paramConfig.target) || 0;
     const holdOffsetUnits = -slope; // +ve => add this many units/day to hold steady
     const maxDailyAdjustmentUnits = this._dosingDailyAdjustmentLimit(sensorId, sensor);
@@ -2994,7 +3123,7 @@ class OpenReefPanel extends HTMLElement {
     const rateText = `${this._format(Math.abs(slope), rateDigits)}${unitSuffix}/day`;
     let doseText;
     if (!confident) {
-      doseText = "Holding steady within measurement noise — no dose change suggested.";
+      doseText = `${confidence.detail} No dosing change suggested yet.`;
     } else if (slope < 0) {
       if (potency > 0) {
         const capped = Math.abs(holdOffsetUnits) > maxDailyAdjustmentUnits;
@@ -3004,7 +3133,7 @@ class OpenReefPanel extends HTMLElement {
           : `Suggested next dose ${this._formatDoseMl(reviewDoseMlPerDay)}.`;
         doseText += correctionText;
       } else {
-        doseText = `Net loss ~${rateText}. Increase daily dosing only after confirming with a manual test. Add your solution potency in Settings for an exact mL figure.`;
+        doseText = `Net loss ~${rateText}. Increase daily dosing only after confirming with a manual test. Add your solution strength in Settings for an exact mL figure.`;
       }
     } else if (potency > 0) {
       doseText = `Net rise ~${rateText}. Current dose ${this._formatDoseMl(currentDoseMlPerDay)}; estimated holding dose ${this._formatDoseMl(suggestedDoseMlPerDay)}. `;
@@ -3013,7 +3142,7 @@ class OpenReefPanel extends HTMLElement {
         : `Suggested next dose ${this._formatDoseMl(reviewDoseMlPerDay)}. Retest before further reductions.`;
       doseText += correctionText;
     } else {
-      doseText = `Net rise ~${rateText}. Consider reducing daily dosing after confirming with a manual test. Add your solution potency in Settings for an exact mL figure.`;
+      doseText = `Net rise ~${rateText}. Consider reducing daily dosing after confirming with a manual test. Add your solution strength in Settings for an exact mL figure.`;
     }
 
     let status = "ok";
@@ -3025,7 +3154,7 @@ class OpenReefPanel extends HTMLElement {
     const sourceText = source === "manual" ? "from manual test history" : "net of your current dosing";
     const trendText = confident
       ? `${slope < 0 ? "Falling" : "Rising"} ~${rateText}, ${sourceText}.`
-      : "Net change is within measurement noise (holding steady).";
+      : confidence.detail;
     const projectionText = projectionDays !== null
       ? `At this rate ${label} reaches your ${projectionEdge === "low" ? "low" : "high"} limit of ${this._format(projectionValue, digits)}${unitSuffix} in about ${this._formatDays(projectionDays)}.`
       : confident ? "No threshold crossing projected within 60 days." : "";
@@ -3051,6 +3180,9 @@ class OpenReefPanel extends HTMLElement {
       doseText,
       trendText,
       projectionText,
+      confidenceText: confidence.detail,
+      source,
+      potencyInfo,
       stability,
     };
   }
@@ -3078,12 +3210,12 @@ class OpenReefPanel extends HTMLElement {
       const lead = projected || critical[0] || warning[0];
       return {
         value: projected ? this._formatDays(projected.projectionDays) : `${critical.length + warning.length} to watch`,
-        detail: projected ? `${lead.label} nears its limit` : `${lead.label} drifting`,
+        detail: projected ? `${lead.label} nears its limit` : (lead.trendText || `${lead.label} needs attention`),
         status: critical.length ? "critical" : "warning",
       };
     }
     if (learning.length === items.length) {
-      return { value: "Learning", detail: "Building consumption baseline from Trident history", status: "unknown" };
+      return { value: "Learning", detail: "Building consumption baseline from chemistry history", status: "unknown" };
     }
     return { value: "Steady", detail: `${items.length} parameter${items.length === 1 ? "" : "s"} holding`, status: "ok" };
   }
@@ -3109,6 +3241,7 @@ class OpenReefPanel extends HTMLElement {
           <li><span>Trend</span><small>${this._escape(item.trendText)}</small></li>
           ${item.projectionText ? `<li><span>Projection</span><small>${this._escape(item.projectionText)}</small></li>` : ""}
           <li><span>Advice</span><small>${this._escape(item.doseText)}</small></li>
+          <li><span>Solution strength</span><small>${this._escape(item.potencyInfo?.label || "No solution strength set")}</small></li>
           <li><span>Stability</span><small>${this._escape(stabilityText)}</small></li>
         </ul>
       </article>
@@ -3139,7 +3272,7 @@ class OpenReefPanel extends HTMLElement {
           <div>
             <p class="eyebrow">Dosing &amp; Consumption Advisor</p>
             <h3>Consumption, projections &amp; advisory dosing</h3>
-            <p class="muted">Estimated from your Trident/chemistry history. Trend data: ${this._escape(this._consumptionFreshness())}.</p>
+            <p class="muted">Estimated from mapped chemistry history or manual tests. Trend data: ${this._escape(this._consumptionFreshness())}.</p>
           </div>
           <div class="pill-stack">
             <button class="secondary compact-button" data-action="validate">Refresh advisor</button>
@@ -3150,7 +3283,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="dosing-grid">${cards}</div>
         ${methodOpen ? `
           <div class="notice">
-            <strong>How this works.</strong> OpenReef averages each day of your Trident readings (so individual dose spikes cancel out), fits the day-to-day trend, and reports the net change after your current dosing. The projection extends that trend to your configured limit. Dose advice offsets the net change; enter your solution potency (units raised per mL in your tank) and target in Settings for exact millilitre figures. Stability is shared with your Reef Health Score.
+            <strong>How this works.</strong> OpenReef averages each day of mapped chemistry readings or dated manual tests, fits the day-to-day trend, and reports the net change after your current dosing. Manual-test advice is held back when the latest result is due or overdue. The projection extends a confident trend to your configured limit. Dose advice offsets the net change; enter your solution strength and target in Settings for exact millilitre figures. Stability is shared with your Reef Health Score.
           </div>
         ` : ""}
       </article>
@@ -3583,6 +3716,15 @@ class OpenReefPanel extends HTMLElement {
         const source = schedule.preferredSource ? `, preferred source ${schedule.preferredSource}` : "";
         return `- ${meta.label}: ${schedule.enabled ? `due after ${schedule.cadenceDays}d, critical after ${schedule.criticalAfterDays}d` : "not scheduled"}, target ${range}${source}, ${state.label}, ${latestText}`;
       });
+    const dosingAdvisor = this._dosingEnabled()
+      ? this._dosingActiveParameters().map(([id, sensor]) => {
+        const item = this._consumptionItem(id, sensor);
+        const potency = this._dosingEffectivePotency(id, sensor);
+        const status = item.status === "learning" ? "learning" : item.status;
+        const advice = item.projectionText ? `${item.trendText} ${item.projectionText}` : item.trendText;
+        return `- ${item.label}: ${status}, ${advice} Advice: ${item.doseText} Solution strength: ${potency.label}.`;
+      })
+      : ["- disabled"];
     const interlocks = this._config.interlocks || {};
     const alerts = this._config.alerts || {};
     const activity = Array.isArray(this._config.activity)
@@ -3664,6 +3806,9 @@ class OpenReefPanel extends HTMLElement {
       "",
       "Manual testing",
       ...(manualTests.length ? manualTests : ["- no manual test schedules or readings yet"]),
+      "",
+      "Dosing Advisor",
+      ...(dosingAdvisor.length ? dosingAdvisor : ["- no active dosing parameters"]),
       "",
       "Safety settings",
       `- heater requires tank temp: ${interlocks.heaterRequiresTankTemp !== false ? "on" : "off"}`,
@@ -5882,17 +6027,29 @@ class OpenReefPanel extends HTMLElement {
         const cfg = this._dosingParamConfig(id);
         const unitLabel = sensor.unit ? ` (${sensor.unit})` : "";
         const name = sensor.label || id;
+        const potencyInfo = this._dosingEffectivePotency(id, sensor, cfg);
+        const productUnit = sensor.unit || "units";
         return `
           <section class="mapping-section">
             <div>
               <p class="eyebrow">${this._escape(name)}</p>
-              <h4>Optional: enter your ${this._escape(name.toLowerCase())} dosing so OpenReef can give exact millilitre advice. Leave blank for rate-only advice.</h4>
+              <h4>Optional: enter your ${this._escape(name.toLowerCase())} dosing so OpenReef can give exact millilitre advice. Leave strength blank for rate-only advice.</h4>
             </div>
             <div class="mini-grid">
               <label>Current dose (mL/day)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="doserMlPerDay" value="${this._escape(cfg.doserMlPerDay ?? 0)}"></label>
-              <label>Potency (${this._escape(sensor.unit || "units")} per mL)<input type="number" step="0.0001" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="potencyPerMl" value="${this._escape(cfg.potencyPerMl ?? 0)}"></label>
               <label>Target${this._escape(unitLabel)}<input type="number" step="0.01" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="target" value="${this._escape(cfg.target ?? 0)}"></label>
             </div>
+            <div class="notice compact-notice">
+              <strong>Solution strength calculator.</strong> If the bottle says “dose 10 mL to raise 100 L by 1 ${this._escape(productUnit)}”, enter 10, 100, and 1. Manual override wins if you know the exact ${this._escape(productUnit)}/mL for your tank.
+            </div>
+            <div class="mini-grid">
+              <label>Tank volume (L)<input type="number" step="1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="tankVolumeLitres" value="${this._escape(cfg.tankVolumeLitres ?? 0)}"></label>
+              <label>Bottle dose (mL)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productDoseMl" value="${this._escape(cfg.productDoseMl ?? 0)}"></label>
+              <label>Bottle volume (L)<input type="number" step="1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productVolumeLitres" value="${this._escape(cfg.productVolumeLitres ?? 0)}"></label>
+              <label>Bottle raises by${this._escape(unitLabel)}<input type="number" step="0.0001" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productRaise" value="${this._escape(cfg.productRaise ?? 0)}"></label>
+              <label>Manual strength override (${this._escape(productUnit)}/mL)<input type="number" step="0.0001" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="potencyPerMl" value="${this._escape(cfg.potencyPerMl ?? 0)}"></label>
+            </div>
+            <p class="hint">${this._escape(potencyInfo.label)}.</p>
           </section>
         `;
       }).join("") : `<p class="muted">Map alkalinity, calcium, or magnesium sensors, or add at least two manual results for a parameter, to use the Dosing Advisor.</p>`}

@@ -870,7 +870,15 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             raw = raw_parameters.get(parameter)
             raw = raw if isinstance(raw, dict) else {}
             entry: dict[str, float] = {}
-            for field in ("doserMlPerDay", "potencyPerMl", "target"):
+            for field in (
+                "doserMlPerDay",
+                "potencyPerMl",
+                "target",
+                "tankVolumeLitres",
+                "productDoseMl",
+                "productVolumeLitres",
+                "productRaise",
+            ):
                 try:
                     value = float(raw.get(field, 0))
                 except (TypeError, ValueError):
