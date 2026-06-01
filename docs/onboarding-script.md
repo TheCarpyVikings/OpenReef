@@ -18,7 +18,8 @@ reef-related or pokes fun at Neptune Apex — nothing else.
 
 ## Avatar poses used
 
-`idle`, `point`, `smug`, `facepalm`, `celebrate` (1024² transparent PNGs — prompts below).
+Tour: `idle`, `point`, `smug`, `facepalm`, `celebrate`. Phase 3 buddy adds `concerned`,
+`thinking`, `chilled`. (1024² PNGs — prompts below.)
 Until art is added, a built-in emoji placeholder is shown.
 
 ## Image-generation prompt kit (copy-paste)
@@ -38,7 +39,7 @@ Ideogram), lock the **same seed** across all five, and change only the pose clau
 can't output transparency, add `on a plain solid #00b140 green background` and remove it after with
 remove.bg / Photoroom (free).
 
-### The five prompts (one per file — paste, swap `[CHARACTER]`, generate)
+### Tour poses (5) — one per file; paste, swap `[CHARACTER]`, generate
 
 **idle.png**
 ```
@@ -101,8 +102,53 @@ Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
 multiple characters, blurry, inconsistent outfit.
 ```
 
+### Reaction poses (Phase 3 buddy)
+
+For the reactive corner buddy. **`concerned` is essential** (the serious safety face — never paired
+with a joke); `thinking` and `chilled` are optional but recommended. Same style/framing as above.
+
+**concerned.png (ESSENTIAL — safety reactions)**
+```
+Full-body mascot illustration of [CHARACTER], a serious, concerned expression — no
+smile, brow slightly furrowed, one hand raised in a calm "hold on, pay attention"
+gesture. Composed but genuinely warning you, not panicking. Flat vector cartoon style,
+bold clean outlines, soft cel shading, vibrant friendly colours. Character centred,
+facing the viewer with a slight 3/4 turn, standing on nothing. Transparent background,
+no scenery, no ground shadow, no text. Identical character design, outfit, colours,
+scale, camera distance and centring to the other poses. 1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, smiling, inconsistent outfit.
+```
+
+**thinking.png (optional — learning / drifting)**
+```
+Full-body mascot illustration of [CHARACTER], a thoughtful analytical expression, one
+hand on his chin, looking slightly upward as if working something out. Flat vector
+cartoon style, bold clean outlines, soft cel shading, vibrant friendly colours.
+Character centred, facing the viewer with a slight 3/4 turn, standing on nothing.
+Transparent background, no scenery, no ground shadow, no text. Identical character
+design, outfit, colours, scale, camera distance and centring to the other poses.
+1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, inconsistent outfit.
+```
+
+**chilled.png (optional — calm "all good" alt to celebrate)**
+```
+Full-body mascot illustration of [CHARACTER], relaxed and content, hands behind his
+head in a casual everything's-fine lean, eyes half-closed and chilled. Flat vector
+cartoon style, bold clean outlines, soft cel shading, vibrant friendly colours.
+Character centred, facing the viewer with a slight 3/4 turn, standing on nothing.
+Transparent background, no scenery, no ground shadow, no text. Identical character
+design, outfit, colours, scale, camera distance and centring to the other poses.
+1024x1024.
+Negative: extra background, drop shadow, cropped hands or feet, watermark, text,
+multiple characters, blurry, inconsistent outfit.
+```
+
 Save each at its exact filename into `custom_components/openreef/frontend/avatar/`. The panel
-auto-swaps from the emoji placeholder to your art on the next update + restart — no code change.
+auto-swaps each pose from its emoji placeholder to your art on the next update + restart — no code
+change. White background is fine — it gets cut to transparent and downscaled to 512px in prep.
 
 ## Steps
 
