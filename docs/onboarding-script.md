@@ -1,8 +1,9 @@
 # OpenReef Onboarding Tour — Script (Phase 1)
 
 A guided, skippable tour that runs **over Mission Control** on first launch after the feature
-ships, and can be replayed any time. A cartoon Viking guide (the maker) narrates from a docked
-"narrator bar"; each step scrolls to and highlights a real element on screen.
+ships, and can be replayed any time. A cartoon reef-keeper guide narrates from a docked
+"narrator bar"; each step scrolls to and highlights a real element on screen. Humour is
+reef-related or pokes fun at Neptune Apex — nothing else.
 
 ## Design rules
 
@@ -26,8 +27,8 @@ Until art is added, a built-in emoji placeholder is shown.
 Replace `[CHARACTER]` below with a short description of your guy, e.g.:
 
 ```
-[CHARACTER] = a cartoon Viking reef-keeper version of me — <hair, beard, build,
-outfit colours, any signature item, e.g. teal hoodie + horned beanie>.
+[CHARACTER] = a cartoon reef-keeper mascot — <hair, beard, build, outfit colours,
+any signature item, e.g. olive hoodie + cap + sunglasses>.
 ```
 
 **Consistency is everything.** Best results: upload your existing character image as a
@@ -107,32 +108,35 @@ auto-swaps from the emoji placeholder to your art on the next update + restart �
 Each step = `{ id, anchor (data-tour), pose, cheeky, professional }`. `anchor: null` ⇒ centred,
 no highlight.
 
+Poses are matched to the joke and all five are used: idle → point → smug → facepalm → point →
+idle → celebrate.
+
 ### 1. Welcome — `anchor: null` · pose: `idle`
-- **Cheeky:** "Welcome to OpenReef. Grab your mead — this'll be quicker than programming an Apex. Give me 30 seconds and I'll show you the good bits."
-- **Professional:** "Welcome to OpenReef. Here's a 30-second tour of the main features."
+- **Cheeky:** "Welcome aboard! Quick 30-second tour of your reef — no manual, no virtual outlets, no programming degree. Promise."
+- **Professional:** "Welcome to OpenReef. Here's a quick 30-second tour of the main features."
 
 ### 2. Reef Health — `anchor: reef-health` · pose: `point`
-- **Cheeky:** "This is your Reef Health Score. Fusion shows you graphs; *I* tell you what they mean — and *why* — with no subscription and no runes to decode."
-- **Professional:** "This is your Reef Health Score: a single, explainable 0–100 read on the tank, weighted for your reef type."
+- **Cheeky:** "Your whole reef's health in one honest number. Apex Fusion hands you a wall of graphs and wishes you luck — I actually tell you what they mean."
+- **Professional:** "Your Reef Health Score: one explainable 0–100 read on the tank, weighted for your reef type."
 
 ### 3. Dosing Advisor — `anchor: dosing` · pose: `smug`
-- **Cheeky:** "Here's the part Neptune charges a kingdom for: your tank's *actual* alk/cal/mag consumption, worked out from your Trident — plus how long until you hit a limit, and how much to dose. You're welcome."
-- **Professional:** "The Dosing Advisor estimates your alkalinity, calcium and magnesium consumption from history, projects when you'll reach a limit, and suggests dose adjustments. Advisory only."
+- **Cheeky:** "Your alk, cal and mag consumption — worked out, with how much to dose. Neptune sells that as a separate module AND a subscription. Adorable."
+- **Professional:** "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only."
 
-### 4. Attention — `anchor: attention` · pose: `idle`
-- **Cheeky:** "If something's off, it lands here — in plain English, not a cryptic error code three menus deep."
-- **Professional:** "Anything that needs attention — alerts, missing mappings, safety interlocks — is summarised here."
+### 4. Attention — `anchor: attention` · pose: `facepalm`
+- **Cheeky:** "Anything wrong shows up here in plain English. No cryptic codes, no five-menu treasure hunt, no forum thread just to decode what your controller meant."
+- **Professional:** "Anything that needs attention — alerts, missing mappings, safety interlocks — is summarised here in plain English."
 
 ### 5. Trends — `anchor: sensors` · pose: `point`
-- **Cheeky:** "Tap any reading to see its trend. Pinch-zoom the ocean, basically."
+- **Cheeky:** "Tap any reading for its full trend. Every probe you own in one place — no extra modules, no licence fees, no lock-in."
 - **Professional:** "Tap any reading to open its trend, with ranges from 1 hour to 30 days."
 
 ### 6. Safety (straight, no jokes) — `anchor: settings` · pose: `idle`
-- **Cheeky / Professional (same):** "One serious note: OpenReef never controls equipment until *you* map it and explicitly arm it. Nothing touches your livestock without permission. Set that up in Settings."
+- **Cheeky / Professional (same):** "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings."
 
-### 7. Done — `anchor: null` · pose: `celebrate`
-- **Cheeky:** "That's the tour. Now go show your Apex who's boss. Skål! 🍻"
-- **Professional:** "That's the tour. You can replay it any time from Settings."
+### 7. Done — `anchor: null` · pose: `celebrate` (+ apex-throne sticker in Cheeky mode)
+- **Cheeky:** "That's the tour — your reef's in good hands. Your Apex can sit there and think about what it's done. 🪸"
+- **Professional:** "That's the tour. You can replay it any time from the Tour button."
 
 ## Triggers
 

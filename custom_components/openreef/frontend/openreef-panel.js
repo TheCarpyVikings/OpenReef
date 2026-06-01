@@ -3909,25 +3909,25 @@ class OpenReefPanel extends HTMLElement {
   _onboardingScript() {
     return [
       { id: "welcome", anchor: null, pose: "idle",
-        cheeky: "Welcome to OpenReef. Grab your mead — this'll be quicker than programming an Apex. Give me 30 seconds and I'll show you the good bits.",
-        professional: "Welcome to OpenReef. Here's a 30-second tour of the main features." },
+        cheeky: "Welcome aboard! Quick 30-second tour of your reef — no manual, no virtual outlets, no programming degree. Promise.",
+        professional: "Welcome to OpenReef. Here's a quick 30-second tour of the main features." },
       { id: "reef-health", anchor: "reef-health", pose: "point",
-        cheeky: "This is your Reef Health Score. Fusion shows you graphs; I tell you what they mean — and why — with no subscription and no runes to decode.",
-        professional: "This is your Reef Health Score: a single, explainable 0-100 read on the tank, weighted for your reef type." },
+        cheeky: "Your whole reef's health in one honest number. Apex Fusion hands you a wall of graphs and wishes you luck — I actually tell you what they mean.",
+        professional: "Your Reef Health Score: one explainable 0-100 read on the tank, weighted for your reef type." },
       { id: "dosing", anchor: "dosing", pose: "smug",
-        cheeky: "Here's the part Neptune charges a kingdom for: your tank's actual alk/cal/mag consumption from your Trident, when you'll hit a limit, and how much to dose. You're welcome.",
-        professional: "The Dosing Advisor estimates alkalinity, calcium and magnesium consumption from history, projects when you'll reach a limit, and suggests dose adjustments. Advisory only." },
-      { id: "attention", anchor: "attention", pose: "idle",
-        cheeky: "If something's off, it lands here - in plain English, not a cryptic error code three menus deep.",
-        professional: "Anything that needs attention - alerts, missing mappings, safety interlocks - is summarised here." },
+        cheeky: "Your alk, cal and mag consumption — worked out, with how much to dose. Neptune sells that as a separate module AND a subscription. Adorable.",
+        professional: "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only." },
+      { id: "attention", anchor: "attention", pose: "facepalm",
+        cheeky: "Anything wrong shows up here in plain English. No cryptic codes, no five-menu treasure hunt, no forum thread just to decode what your controller meant.",
+        professional: "Anything that needs attention - alerts, missing mappings, safety interlocks - is summarised here in plain English." },
       { id: "sensors", anchor: "sensors", pose: "point",
-        cheeky: "Tap any reading to see its trend. Pinch-zoom the ocean, basically.",
+        cheeky: "Tap any reading for its full trend. Every probe you own in one place — no extra modules, no licence fees, no lock-in.",
         professional: "Tap any reading to open its trend, with ranges from 1 hour to 30 days." },
       { id: "safety", anchor: "settings", pose: "idle",
-        cheeky: "One serious note: OpenReef never controls equipment until you map it and explicitly arm it. Nothing touches your livestock without permission. Set that up in Settings.",
-        professional: "One serious note: OpenReef never controls equipment until you map it and explicitly arm it. Nothing touches your livestock without permission. Set that up in Settings." },
+        cheeky: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings.",
+        professional: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings." },
       { id: "done", anchor: null, pose: "celebrate",
-        cheeky: "That's the tour. Now go show your Apex who's boss. Skål! 🍻",
+        cheeky: "That's the tour — your reef's in good hands. Your Apex can sit there and think about what it's done. 🪸",
         professional: "That's the tour. You can replay it any time from the Tour button." },
     ];
   }
@@ -6852,14 +6852,14 @@ class OpenReefPanel extends HTMLElement {
         .or-onboard { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
         .or-spotlight { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(4, 12, 20, .62); outline: 2px solid var(--openreef-accent); outline-offset: 2px; opacity: 0; transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, opacity .2s ease; pointer-events: none; }
         .or-narrator { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); width: min(560px, calc(100vw - 24px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; }
-        .or-avatar { flex: 0 0 auto; width: 84px; display: grid; place-items: end center; }
+        .or-avatar { flex: 0 0 auto; width: 132px; display: grid; place-items: end center; }
         .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); }
-        .or-avatar-ph { width: 74px; height: 74px; border-radius: 50%; display: grid; place-items: center; font-size: 34px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
+        .or-avatar-ph { width: 110px; height: 110px; border-radius: 50%; display: grid; place-items: center; font-size: 48px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
         .or-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 14px; padding: 13px 15px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
         .or-bubble-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
         .or-tone { border: 1px solid #294055; border-radius: 999px; background: #172536; color: #dcecff; font-size: 11px; font-weight: 800; padding: 3px 10px; }
         .or-tone:hover { border-color: var(--openreef-accent); }
-        .or-sticker { display: block; width: 100%; max-height: 230px; object-fit: contain; border-radius: 10px; margin-bottom: 10px; }
+        .or-sticker { display: block; width: 100%; max-height: 280px; object-fit: contain; border-radius: 10px; margin-bottom: 10px; }
         .or-line { color: #e9f1f8; line-height: 1.42; overflow-wrap: anywhere; }
         .or-dots { display: flex; gap: 6px; margin: 10px 0; }
         .or-dot { width: 7px; height: 7px; border-radius: 50%; background: #2b4056; }
@@ -7161,11 +7161,11 @@ class OpenReefPanel extends HTMLElement {
           .chart-wrap { padding: 10px; }
           .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
-          .or-narrator { bottom: 10px; width: calc(100vw - 16px); gap: 10px; }
-          .or-avatar { width: 60px; }
-          .or-avatar-ph { width: 56px; height: 56px; font-size: 27px; }
+          .or-narrator { bottom: 10px; width: calc(100vw - 16px); gap: 8px; }
+          .or-avatar { width: 92px; }
+          .or-avatar-ph { width: 78px; height: 78px; font-size: 36px; }
           .or-bubble { padding: 12px 13px; }
-          .or-sticker { max-height: 150px; }
+          .or-sticker { max-height: 200px; }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
         }
