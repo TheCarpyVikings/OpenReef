@@ -150,6 +150,63 @@ Save each at its exact filename into `custom_components/openreef/frontend/avatar
 auto-swaps each pose from its emoji placeholder to your art on the next update + restart — no code
 change. White background is fine — it gets cut to transparent and downscaled to 512px in prep.
 
+### Walk-cycle frames (Phase 2 polish — desktop)
+
+A real 4-frame side-profile walk for when the guide moves between cards (he turns frontal to talk
+on arrival). All face **LEFT**; the panel mirrors them for walking right. **Critical:** keep the
+**feet on the same baseline and the same character height** as the standing poses so he doesn't jump
+when he stops to talk. These get cut + composited into one `walk-strip.png` sprite (the standing
+poses stay separate). Cycle order 1 → 2 → 3 → 4. If 4 come out inconsistent, frames 1 + 3 (the two
+contact poses) alone make a usable 2-frame walk.
+
+**walk-1.png — contact, left leg leading**
+```
+Full-body mascot illustration of [CHARACTER], SIDE PROFILE facing LEFT, mid-walk contact pose: left
+leg reaching forward about to heel-strike, right leg extended back pushing off (toe down), right arm
+swung forward, left arm swung back, torso upright with a slight forward lean. Same character design,
+outfit, colours, proportions, height and foot baseline as the other poses. Flat vector cartoon
+style, bold clean outlines, soft cel shading, vibrant friendly colours. Centred, standing on
+nothing, transparent background, no scenery, no ground shadow, no text. 1024x1024.
+Negative: front view, facing viewer, three-quarter view, extra background, drop shadow, cropped
+hands or feet, watermark, text, multiple characters, blurry.
+```
+
+**walk-2.png — passing, right leg planted**
+```
+Full-body mascot illustration of [CHARACTER], SIDE PROFILE facing LEFT, mid-walk passing pose:
+weight on the right leg (planted, vertical), left leg lifted with bent knee passing forward beneath
+the body, body at its highest point, arms roughly vertical mid-swing. Same character design, outfit,
+colours, proportions, height and foot baseline as the other poses. Flat vector cartoon style, bold
+clean outlines, soft cel shading, vibrant friendly colours. Centred, standing on nothing,
+transparent background, no scenery, no ground shadow, no text. 1024x1024.
+Negative: front view, facing viewer, three-quarter view, extra background, drop shadow, cropped
+hands or feet, watermark, text, multiple characters, blurry.
+```
+
+**walk-3.png — contact, right leg leading**
+```
+Full-body mascot illustration of [CHARACTER], SIDE PROFILE facing LEFT, mid-walk contact pose: right
+leg reaching forward about to heel-strike, left leg extended back pushing off (toe down), left arm
+swung forward, right arm swung back, torso upright with a slight forward lean. Same character
+design, outfit, colours, proportions, height and foot baseline as the other poses. Flat vector
+cartoon style, bold clean outlines, soft cel shading, vibrant friendly colours. Centred, standing on
+nothing, transparent background, no scenery, no ground shadow, no text. 1024x1024.
+Negative: front view, facing viewer, three-quarter view, extra background, drop shadow, cropped
+hands or feet, watermark, text, multiple characters, blurry.
+```
+
+**walk-4.png — passing, left leg planted**
+```
+Full-body mascot illustration of [CHARACTER], SIDE PROFILE facing LEFT, mid-walk passing pose:
+weight on the left leg (planted, vertical), right leg lifted with bent knee passing forward beneath
+the body, body at its highest point, arms roughly vertical mid-swing. Same character design, outfit,
+colours, proportions, height and foot baseline as the other poses. Flat vector cartoon style, bold
+clean outlines, soft cel shading, vibrant friendly colours. Centred, standing on nothing,
+transparent background, no scenery, no ground shadow, no text. 1024x1024.
+Negative: front view, facing viewer, three-quarter view, extra background, drop shadow, cropped
+hands or feet, watermark, text, multiple characters, blurry.
+```
+
 ## Steps
 
 Each step = `{ id, anchor (data-tour), pose, cheeky, professional }`. `anchor: null` ⇒ centred,
