@@ -11,6 +11,11 @@ reef-related or pokes fun at Neptune Apex — nothing else.
   The safety step is delivered straight — no comedy on anything that protects livestock.
 - **Two tones.** `cheeky` (default) and `professional`. Every step has both lines; the toggle picks
   which to show. Professional = the same facts, no jokes/emoji.
+- **Controller-aware (cheeky only).** Each step has `cheeky` (anti-Apex) and `cheekyNoApex`
+  (reef-focused, no controller jabs). `_hasApex()` picks: an explicit "Your controller" override
+  (Apex / Other / None, in setup + Settings), else auto-detected from mapped entity IDs
+  (apex/trident/neptune/fusion). Professional lines don't vary; the apex-throne finale sticker only
+  shows for Apex users.
 - **Always escapable.** Skip and "Don't show again" on every step. Re-runnable from a button.
 - **Every step always shows** (so all poses + the supplier tip appear). If a step's anchor element
   isn't on screen (feature hidden/unmapped), the step renders centred with **no spotlight** rather

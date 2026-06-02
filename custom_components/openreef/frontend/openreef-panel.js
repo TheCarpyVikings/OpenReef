@@ -806,6 +806,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "onboarding-back") this._onboardingBack();
       if (action === "onboarding-skip") this._endOnboarding(true);
       if (action === "onboarding-tone") this._toggleTone();
+      if (action === "set-controller") { this._setController(target.dataset.id); this._render(); }
       if (action === "buddy-toggle") {
         if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
         this._buddy.expanded = !this._buddy.expanded;
@@ -4768,6 +4769,34 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
+  // Controller override: "auto" (detect from entities), "apex", "other", or "none".
+  _controllerSetting() {
+    try { return window.localStorage?.getItem("openreef:controller") || "auto"; }
+    catch { return "auto"; }
+  }
+
+  _setController(value) {
+    try { window.localStorage?.setItem("openreef:controller", value); } catch { /* ignore */ }
+  }
+
+  _detectApex() {
+    const ids = [];
+    Object.values(this._config?.sensors || {}).forEach((s) => { if (s.entity_id) ids.push(s.entity_id); });
+    Object.values(this._config?.equipment || {}).forEach((e) => {
+      if (e.switch_entity_id) ids.push(e.switch_entity_id);
+      if (e.power_entity_id) ids.push(e.power_entity_id);
+    });
+    return ids.some((id) => /apex|trident|neptune|fusion/i.test(id));
+  }
+
+  // Whether to use the anti-Apex jokes (vs the reef-focused set).
+  _hasApex() {
+    const c = this._controllerSetting();
+    if (c === "apex") return true;
+    if (c === "other" || c === "none") return false;
+    return this._detectApex();
+  }
+
   _avatarBase() { return "/openreef_static/avatar/"; }
 
   _avatarEmoji(pose) {
@@ -4896,25 +4925,31 @@ class OpenReefPanel extends HTMLElement {
     return [
       { id: "welcome", anchor: null, pose: "idle",
         cheeky: "Welcome aboard! A 30-second tour — and not a single line of Apex code. No virtual outlets, no Defer commands, no hunting through scattered docs for the one setting you need.",
+        cheekyNoApex: "Welcome aboard! A 30-second tour of your reef — no spreadsheets, no guesswork, no 'is that trend bad?' panic. Give me 30 seconds.",
         professional: "Welcome to OpenReef. Here's a quick 30-second tour of the main features." },
       { id: "reef-health", anchor: "reef-health", pose: "point",
         cheeky: "Your whole reef's health in one honest number. Apex Fusion shows you the graphs and leaves you to play detective — I actually tell you what they mean.",
+        cheekyNoApex: "Your whole reef's health in one honest number. No more squinting at separate graphs wondering if it all adds up — I tell you what they mean.",
         professional: "Your Reef Health Score: one explainable 0-100 read on the tank, weighted for your reef type." },
       { id: "dosing", anchor: "dosing", pose: "smug",
         cheeky: "Your alk, cal and mag consumption — worked out, with exactly how much to dose. The maths is free; the Trident's reagents sadly aren't. Good news: my mate Harry does ABC reagents cheaper.",
+        cheekyNoApex: "Your alk, cal and mag consumption — worked out from your tests, with exactly how much to dose. The maths most reefers do by hand (or skip). And my mate Harry does ABC dosing cheap.",
         link: { label: "Harry's ABC reagents → marine-spec.co.uk", url: "https://www.marine-spec.co.uk" },
         professional: "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only." },
       { id: "attention", anchor: "attention", pose: "facepalm",
         cheeky: "Anything wrong shows up here in plain English. No fault codes to Google, no scattered docs, no three-day forum thread just to get your auto top-off behaving.",
+        cheekyNoApex: "Anything wrong shows up here in plain English — before your corals tell you the hard way. No cryptic codes, no guesswork.",
         professional: "Anything that needs attention - alerts, missing mappings, safety interlocks - is summarised here in plain English." },
       { id: "sensors", anchor: "sensors", pose: "point",
         cheeky: "Tap any reading for its full trend. Apex probes, Trident, and the cheap non-Apex sensors your controller flatly refuses to talk to — all in one place.",
+        cheekyNoApex: "Tap any reading for its full trend. Every probe and smart plug you own — even the cheap ones — in one place, with proper history.",
         professional: "Tap any reading to open its trend, with ranges from 1 hour to 30 days." },
       { id: "safety", anchor: "settings", pose: "idle",
         cheeky: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings.",
         professional: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings." },
       { id: "done", anchor: null, pose: "celebrate",
         cheeky: "That's the tour — your reef's in good hands. Now go show your Apex who's boss. 🪸",
+        cheekyNoApex: "That's the tour — your reef's in good hands. Now go enjoy the tank instead of babysitting it. 🪸",
         professional: "That's the tour. You can replay it any time from the Tour button." },
     ];
   }
@@ -5005,7 +5040,10 @@ class OpenReefPanel extends HTMLElement {
     const idx = Math.min(ob.step, steps.length - 1);
     const step = steps[idx];
     const tone = this._tone();
-    const line = step[tone] || step.cheeky;
+    const hasApex = this._hasApex();
+    const line = tone === "cheeky"
+      ? (hasApex ? step.cheeky : (step.cheekyNoApex || step.cheeky))
+      : (step.professional || step.cheeky);
     const isLast = idx === steps.length - 1;
     const dots = steps.map((_, i) => `<span class="or-dot ${i === idx ? "active" : ""}"></span>`).join("");
     // On desktop, render the guide where it last stood so it walks to the next card.
@@ -5027,7 +5065,7 @@ class OpenReefPanel extends HTMLElement {
               <span class="eyebrow">Your guide · ${idx + 1}/${steps.length}</span>
               <button class="or-tone" data-action="onboarding-tone" title="Switch tone">${tone === "cheeky" ? "😏 Cheeky" : "👔 Pro"}</button>
             </div>
-            ${isLast && tone === "cheeky" && this._stickerReady ? `<img class="or-sticker" src="${this._avatarBase()}apex-throne.png" alt="OpenReef's professional assessment of the competition">` : ""}
+            ${isLast && tone === "cheeky" && hasApex && this._stickerReady ? `<img class="or-sticker" src="${this._avatarBase()}apex-throne.png" alt="OpenReef's professional assessment of the competition">` : ""}
             <p class="or-line">${this._escape(line)}</p>
             ${step.link && tone === "cheeky" ? `<a class="or-link" href="${this._escape(step.link.url)}" target="_blank" rel="noopener noreferrer">${this._escape(step.link.label)}</a>` : ""}
             <div class="or-dots">${dots}</div>
@@ -5070,7 +5108,9 @@ class OpenReefPanel extends HTMLElement {
       return {
         mood: "learning", pose: "thinking",
         title: tone === "cheeky" ? "Still learning your tank" : "Learning baselines",
-        line: tone === "cheeky" ? "Give me a few more days of data and I'll spot the patterns Fusion never would." : "Some trends are still establishing a baseline.",
+        line: tone === "cheeky"
+          ? (this._hasApex() ? "Give me a few more days of data and I'll spot the patterns Fusion never would." : "Give me a few more days of data and I'll spot the patterns you'd never catch by eye.")
+          : "Some trends are still establishing a baseline.",
         key: "learn",
       };
     }
@@ -6938,6 +6978,13 @@ class OpenReefPanel extends HTMLElement {
     );
   }
 
+  _controllerControl() {
+    const c = this._controllerSetting();
+    const detected = this._detectApex() ? "Apex detected" : "no Apex detected";
+    const opts = [["auto", `Auto (${detected})`], ["apex", "Neptune Apex"], ["other", "Other controller"], ["none", "No controller"]];
+    return `<div class="range-picker controller-picker">${opts.map(([id, label]) => `<button class="${c === id ? "active" : ""}" data-action="set-controller" data-id="${this._escape(id)}">${this._escape(label)}</button>`).join("")}</div>`;
+  }
+
   _guideSettings() {
     const buddyOn = this._buddyEnabled();
     const cheeky = this._tone() === "cheeky";
@@ -6947,12 +6994,16 @@ class OpenReefPanel extends HTMLElement {
       "Your reef guide's personality, the live reactive buddy, and the guided tour.",
       `
         <div class="stack tight">
+          <div>
+            <div class="control-row"><div><strong>Your controller</strong><div class="muted">Tailors the guide's jokes. Apex owners get the anti-Apex digs; everyone else gets reef-only humour. Auto reads your mapped entities.</div></div></div>
+            ${this._controllerControl()}
+          </div>
           <div class="control-row">
             <div><strong>Reef buddy</strong><div class="muted">A live mascot in the Mission Control corner that reacts to your tank state.</div></div>
             <button class="${buddyOn ? "primary" : "secondary"} compact-button" data-action="toggle-buddy">${buddyOn ? "On" : "Off"}</button>
           </div>
           <div class="control-row">
-            <div><strong>Tone</strong><div class="muted">Cheeky adds the anti-Apex humour; Professional keeps it plain. Safety messages stay serious either way.</div></div>
+            <div><strong>Tone</strong><div class="muted">Cheeky adds the humour; Professional keeps it plain. Safety messages stay serious either way.</div></div>
             <button class="secondary compact-button" data-action="onboarding-tone">${cheeky ? "😏 Cheeky" : "👔 Professional"}</button>
           </div>
           <div class="control-row">
@@ -7974,6 +8025,11 @@ class OpenReefPanel extends HTMLElement {
               <small>${this._escape(this._tankProfileDetail())}</small>
             </label>
             <div class="field-group">
+              <span class="field-label">Your controller</span>
+              ${this._controllerControl()}
+              <small>Tailors the guide's tips and jokes to your gear. You can change this later in Settings.</small>
+            </div>
+            <div class="field-group">
               <span class="field-label">Theme colour</span>
               <div class="theme-picker">
                 ${this._themeChoices().map(([color, label]) => `
@@ -8543,6 +8599,7 @@ class OpenReefPanel extends HTMLElement {
         .equipment-group { display: grid; gap: 12px; border: 1px solid #223447; border-radius: 8px; padding: 14px; background: #0b1724; }
         .trend-dialog { max-width: 900px; }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+        .controller-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 6px; }
         .compact-center { min-height: 220px; }
         .chart-wrap { display: grid; gap: 8px; border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0b1724; }
         .trend-chart { display: block; width: 100%; height: 240px; overflow: hidden; }
