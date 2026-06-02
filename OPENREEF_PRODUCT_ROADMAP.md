@@ -10,8 +10,8 @@ These are the next useful passes before widening beta beyond trusted testers.
 
 - [ ] Make copied smoke-test text setup-neutral so it does not list only the current user's sensors/equipment.
 - [ ] Add low-memory HA OS smoke-test notes.
-- [ ] Add rollback and beta reset instructions.
-- [ ] Add first Python tests for config migration, targeted entity search, and safe toggle validation.
+- [x] Add rollback and beta reset instructions (docs/BETA_ROLLBACK_AND_RESET.md).
+- [x] Add first Python tests for config migration (dependency-free, `tests/test_config_migration.py`; caught and fixed a corrupted-block migration crash). Entity-search/safe-toggle tests still need a HA test harness.
 - [ ] Add first frontend smoke-test notes/screenshots for desktop and mobile.
 - [x] Add nitrate, phosphate, dissolved oxygen, leak, water-level, flow, and PAR sensors as optional Core mappings.
 - [x] Add Apex/Trident beta setup guide with Apex controller, Trident, Trident NP, FMM, and full-ecosystem presets.
