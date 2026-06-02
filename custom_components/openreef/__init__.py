@@ -933,6 +933,18 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 default=0.0,
             )
         system["tankVolumeLitres"] = max(0.0, tank_volume)
+        for field in (
+            "kalkDailyDoseMl",
+            "kalkConcentrationTspPerGallon",
+            "kalkEvaporationLimitMlPerDay",
+            "kalkMaxPh",
+            "kalkMaxPhRise",
+        ):
+            try:
+                value = float(raw_system.get(field, default_system[field]))
+            except (TypeError, ValueError):
+                value = float(default_system[field])
+            system[field] = max(0.0, value)
         dosing["system"] = system
         parameters: dict[str, dict[str, Any]] = {}
         known_parameters = set(DOSING_PARAMETERS)

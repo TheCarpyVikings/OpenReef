@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 30
-INTEGRATION_VERSION = "0.4.55"
+CORE_SCHEMA_VERSION = 31
+INTEGRATION_VERSION = "0.4.56"
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -542,6 +542,11 @@ DEFAULT_CORE_CONFIG = {
             "secondaryProduct": "",
             "secondaryDelivery": "",
             "tankVolumeLitres": 0,
+            "kalkDailyDoseMl": 0,
+            "kalkConcentrationTspPerGallon": 0,
+            "kalkEvaporationLimitMlPerDay": 0,
+            "kalkMaxPh": 8.45,
+            "kalkMaxPhRise": 0.2,
             "freshTestRequired": True,
             "safetyAcknowledged": False,
             "customProductName": "",

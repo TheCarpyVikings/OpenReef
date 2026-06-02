@@ -2813,6 +2813,11 @@ class OpenReefPanel extends HTMLElement {
       secondaryProduct: "",
       secondaryDelivery: "",
       tankVolumeLitres: 0,
+      kalkDailyDoseMl: 0,
+      kalkConcentrationTspPerGallon: 0,
+      kalkEvaporationLimitMlPerDay: 0,
+      kalkMaxPh: 8.45,
+      kalkMaxPhRise: 0.2,
       freshTestRequired: true,
       safetyAcknowledged: false,
       customProductName: "",
@@ -2830,6 +2835,11 @@ class OpenReefPanel extends HTMLElement {
       ...this._dosingSystemDefaults(),
       ...raw,
       tankVolumeLitres: Number(raw.tankVolumeLitres) || Math.max(0, ...parameterVolumes),
+      kalkDailyDoseMl: Math.max(0, Number(raw.kalkDailyDoseMl) || 0),
+      kalkConcentrationTspPerGallon: Math.max(0, Number(raw.kalkConcentrationTspPerGallon) || 0),
+      kalkEvaporationLimitMlPerDay: Math.max(0, Number(raw.kalkEvaporationLimitMlPerDay) || 0),
+      kalkMaxPh: Math.max(0, Number(raw.kalkMaxPh) || 8.45),
+      kalkMaxPhRise: Math.max(0, Number(raw.kalkMaxPhRise) || 0.2),
       freshTestRequired: raw.freshTestRequired !== false,
       safetyAcknowledged: raw.safetyAcknowledged === true,
     };
@@ -3000,6 +3010,42 @@ class OpenReefPanel extends HTMLElement {
     if (primary.id && this._dosingProductSupportsParameter(primary, sensorId)) return primary;
     if (secondary.id && this._dosingProductSupportsParameter(secondary, sensorId)) return secondary;
     return primary.id ? primary : secondary.id ? secondary : this._dosingProduct("");
+  }
+
+  _kalkSafetyContext(system = this._dosingSystem()) {
+    const ph = this._config?.sensors?.ph || {};
+    const hasPhGuard = this._sensorEnabled(ph) && !!ph.entity_id;
+    const phValue = hasPhGuard ? this._number(ph.entity_id) : null;
+    const maxPh = Math.max(0, Number(system.kalkMaxPh) || 8.45);
+    const maxPhRise = Math.max(0, Number(system.kalkMaxPhRise) || 0.2);
+    const dailyDoseMl = Math.max(0, Number(system.kalkDailyDoseMl) || 0);
+    const concentrationTspPerGallon = Math.max(0, Number(system.kalkConcentrationTspPerGallon) || 0);
+    const evaporationLimitMlPerDay = Math.max(0, Number(system.kalkEvaporationLimitMlPerDay) || 0);
+    const evaporationHeadroomMl = evaporationLimitMlPerDay > 0 ? Math.max(0, evaporationLimitMlPerDay - dailyDoseMl) : null;
+    const capacityConfigured = dailyDoseMl > 0 && concentrationTspPerGallon > 0 && evaporationLimitMlPerDay > 0;
+    const phStatus = !hasPhGuard
+      ? "missing"
+      : Number.isFinite(phValue)
+        ? phValue >= maxPh
+          ? "high"
+          : phValue >= maxPh - 0.05
+            ? "near"
+            : "ok"
+        : "unknown";
+    return {
+      hasPhGuard,
+      phValue,
+      phStatus,
+      maxPh,
+      maxPhRise,
+      dailyDoseMl,
+      concentrationTspPerGallon,
+      evaporationLimitMlPerDay,
+      evaporationHeadroomMl,
+      capacityConfigured,
+      canIncreaseByEvaporation: evaporationLimitMlPerDay <= 0 || dailyDoseMl < evaporationLimitMlPerDay,
+      safeToConsiderIncrease: hasPhGuard && phStatus === "ok" && capacityConfigured && (evaporationLimitMlPerDay <= 0 || dailyDoseMl < evaporationLimitMlPerDay),
+    };
   }
 
   _dosingProductPreset(sensorId) {
@@ -3314,6 +3360,7 @@ class OpenReefPanel extends HTMLElement {
     const tankVolume = Number(system.tankVolumeLitres) || 0;
     const locks = [];
     const warnings = [];
+    let kalkContext = null;
     if (!product?.id) locks.push("Choose a primary dosing system or secondary supplement.");
     if (product?.id && !this._dosingProductSupportsParameter(product, sensorId)) {
       locks.push(`${product.label} is not a ${sensor.label || sensorId} dosing product.`);
@@ -3325,10 +3372,29 @@ class OpenReefPanel extends HTMLElement {
     const manual = this._dosingFreshManualGate(sensorId);
     if (potencyInfo.exactCorrection && !manual.fresh) warnings.push(`Correction advice locked: ${manual.detail}`);
     if (product?.classId === "kalkwasser") {
+      kalkContext = this._kalkSafetyContext(system);
       warnings.push("Kalkwasser is high-pH and evaporation-limited. Do not use it as a one-off correction bolus.");
-      const ph = this._config?.sensors?.ph || {};
-      if (!this._sensorEnabled(ph) || !ph.entity_id) warnings.push("No mapped pH guard is available for kalkwasser context.");
+      if (!this._dosingProductSupportsParameter(product, sensorId)) {
+        warnings.push(`Kalkwasser does not maintain ${sensor.label || sensorId}; use a magnesium-specific product or water-change plan for magnesium drift.`);
+      }
+      if (!kalkContext.hasPhGuard) {
+        warnings.push("No mapped pH guard is available for kalkwasser context.");
+      } else if (!Number.isFinite(kalkContext.phValue)) {
+        warnings.push("Mapped pH guard is unavailable or non-numeric right now.");
+      } else if (kalkContext.phStatus === "high") {
+        locks.push(`Current pH ${this._format(kalkContext.phValue, 2)} is at or above the kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser.`);
+      } else if (kalkContext.phStatus === "near") {
+        warnings.push(`Current pH ${this._format(kalkContext.phValue, 2)} is close to the kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser without reviewing the pH pattern.`);
+      }
       if (!system.secondaryDelivery) warnings.push("Choose how kalkwasser is delivered: ATO, dosing pump, or manual top-off.");
+      if (!kalkContext.capacityConfigured) {
+        warnings.push("Kalk capacity is not fully configured. Add daily kalk volume, concentration, and evaporation ceiling before judging whether kalk can keep up.");
+      }
+      if (kalkContext.evaporationLimitMlPerDay > 0 && kalkContext.dailyDoseMl > kalkContext.evaporationLimitMlPerDay) {
+        locks.push(`Daily kalk volume ${this._format(kalkContext.dailyDoseMl, 0)} mL/day exceeds the evaporation ceiling ${this._format(kalkContext.evaporationLimitMlPerDay, 0)} mL/day.`);
+      } else if (kalkContext.evaporationLimitMlPerDay > 0 && kalkContext.dailyDoseMl >= kalkContext.evaporationLimitMlPerDay * 0.9) {
+        warnings.push(`Daily kalk volume is close to the evaporation limit; remaining headroom is about ${this._format(kalkContext.evaporationHeadroomMl, 0)} mL/day.`);
+      }
     }
     if (source === "manual" && !manual.fresh) locks.push(manual.detail);
     const status = locks.length ? "locked" : warnings.length ? "warning" : "ready";
@@ -3339,9 +3405,44 @@ class OpenReefPanel extends HTMLElement {
       manual,
       currentDose,
       tankVolume,
+      kalkContext,
       canExactMaintenance: !locks.length && potencyInfo.exactMaintenance && potencyInfo.value > 0 && currentDose > 0,
       canExactCorrection: !locks.length && !warnings.some((warning) => warning.startsWith("Correction advice locked")) && potencyInfo.exactCorrection && potencyInfo.value > 0 && manual.fresh,
     };
+  }
+
+  _kalkMaintenanceText(label, sensorId, slope, rateText, safety) {
+    const context = safety.kalkContext || this._kalkSafetyContext();
+    if (!this._dosingProductSupportsParameter(this._dosingProduct("kalkwasser_calcium_hydroxide"), sensorId)) {
+      return `Kalkwasser does not maintain ${label}. Track magnesium separately and use a magnesium-specific product or water-change plan if it keeps drifting.`;
+    }
+    const maxPhText = this._format(context.maxPh, 2);
+    if (!safety.manual.fresh) {
+      return `${label} manual tests are not fresh enough for kalkwasser advice. Retest before changing any kalk routine.`;
+    }
+    if (safety.locks.length) {
+      return `Kalkwasser action is locked: ${safety.locks.join(" ")}`;
+    }
+    if (!context.capacityConfigured) {
+      return `Net ${slope < 0 ? "loss" : "rise"} ~${rateText}. Kalk capacity is not configured yet. Add daily kalk volume, concentration, and evaporation ceiling before OpenReef judges whether kalk can keep up.`;
+    }
+    if (!context.hasPhGuard) {
+      return `Net ${slope < 0 ? "loss" : "rise"} ~${rateText}. No mapped pH guard is available, so OpenReef will not suggest increasing kalkwasser.`;
+    }
+    if (context.phStatus === "high" || context.phStatus === "near") {
+      return `Net ${slope < 0 ? "loss" : "rise"} ~${rateText}. Do not increase kalkwasser while pH is ${context.phStatus === "high" ? "high" : "near the safety ceiling"} (${Number.isFinite(context.phValue) ? this._format(context.phValue, 2) : "--"} / max ${maxPhText}).`;
+    }
+    if (slope < 0) {
+      const headroom = Number.isFinite(context.evaporationHeadroomMl) ? `${this._format(context.evaporationHeadroomMl, 0)} mL/day evaporation headroom` : "unknown evaporation headroom";
+      if (!context.canIncreaseByEvaporation) {
+        return `Net loss ~${rateText}. Kalk may not keep up because the configured daily kalk volume is already at the evaporation limit. Add a primary dosing system or reduce demand rather than pushing kalk harder.`;
+      }
+      return `Net loss ~${rateText}. Kalk may not keep up if this trend continues. Review a small maintenance increase only within ${headroom}, max pH ${maxPhText}, and max pH rise ${this._format(context.maxPhRise, 2)}; otherwise add a primary dosing system.`;
+    }
+    if (slope > 0) {
+      return `Net rise ~${rateText}. Do not increase kalkwasser. Review whether the current kalk dose is too strong before making further changes.`;
+    }
+    return `Kalkwasser appears steady. Keep monitoring pH and evaporation before changing the routine.`;
   }
 
   _analyseConsumption(sensorId, sensor, trendData, healthItem) {
@@ -3458,7 +3559,7 @@ class OpenReefPanel extends HTMLElement {
     } else if (!productInfo.id) {
       maintenanceText = "Choose your dosing system in Settings before OpenReef gives product-specific advice.";
     } else if (productInfo.classId === "kalkwasser") {
-      maintenanceText = `Net ${slope < 0 ? "loss" : "rise"} ~${rateText}. Kalkwasser can support daily demand, but it is pH and evaporation constrained. Adjust only after confirming pH behaviour and top-off capacity.`;
+      maintenanceText = this._kalkMaintenanceText(label, sensorId, slope, rateText, safety);
     } else if (slope < 0) {
       if (potency > 0 && safety.canExactMaintenance) {
         const capped = Math.abs(holdOffsetUnits) > maxDailyAdjustmentUnits;
@@ -4126,6 +4227,13 @@ class OpenReefPanel extends HTMLElement {
       `Primary system: ${primary.id ? `${primary.label} (${this._dosingProductClassLabel(primary.classId)})` : "not selected"}`,
       `Secondary supplement: ${secondary.id ? `${secondary.label} (${this._dosingProductClassLabel(secondary.classId)})` : "none"}`,
       secondary.id ? `Secondary delivery: ${delivery}` : "",
+      ...(secondary.classId === "kalkwasser" ? [
+        `Kalk daily volume: ${system.kalkDailyDoseMl ? `${this._format(system.kalkDailyDoseMl, 0)} mL/day` : "not set"}`,
+        `Kalk concentration: ${system.kalkConcentrationTspPerGallon ? `${this._format(system.kalkConcentrationTspPerGallon, 2)} tsp/US gal` : "not set"}`,
+        `Kalk evaporation ceiling: ${system.kalkEvaporationLimitMlPerDay ? `${this._format(system.kalkEvaporationLimitMlPerDay, 0)} mL/day` : "not set"}`,
+        `Kalk max pH: ${this._format(system.kalkMaxPh || 8.45, 2)}`,
+        `Kalk max pH rise: ${this._format(system.kalkMaxPhRise || 0.2, 2)}`,
+      ] : []),
       `Trend data: ${this._consumptionFreshness()}`,
       "",
       "Safety model",
@@ -4278,6 +4386,13 @@ class OpenReefPanel extends HTMLElement {
       `- net tank volume: ${dosingSystem.tankVolumeLitres ? `${this._format(dosingSystem.tankVolumeLitres, 0)} L` : "not set"}`,
       `- primary: ${primaryProduct.id ? `${primaryProduct.label} (${this._dosingProductClassLabel(primaryProduct.classId)})` : "not selected"}`,
       `- secondary: ${secondaryProduct.id ? `${secondaryProduct.label} (${this._dosingProductClassLabel(secondaryProduct.classId)})` : "none"}`,
+      ...(secondaryProduct.classId === "kalkwasser" ? [
+        `- kalk daily volume: ${dosingSystem.kalkDailyDoseMl ? `${this._format(dosingSystem.kalkDailyDoseMl, 0)} mL/day` : "not set"}`,
+        `- kalk concentration: ${dosingSystem.kalkConcentrationTspPerGallon ? `${this._format(dosingSystem.kalkConcentrationTspPerGallon, 2)} tsp/US gal` : "not set"}`,
+        `- kalk evaporation ceiling: ${dosingSystem.kalkEvaporationLimitMlPerDay ? `${this._format(dosingSystem.kalkEvaporationLimitMlPerDay, 0)} mL/day` : "not set"}`,
+        `- kalk max pH: ${this._format(dosingSystem.kalkMaxPh || 8.45, 2)}`,
+        `- kalk max pH rise: ${this._format(dosingSystem.kalkMaxPhRise || 0.2, 2)}`,
+      ] : []),
       "",
       "Dosing Advisor",
       ...(dosingAdvisor.length ? dosingAdvisor : ["- no active dosing parameters"]),
@@ -6548,6 +6663,39 @@ class OpenReefPanel extends HTMLElement {
         <div class="notice ${secondary.classId === "kalkwasser" ? "warning-notice" : "compact-notice"}">
           <strong>${this._escape(selected ? "Product safety model" : "Setup required")}.</strong> ${this._escape(productNote)}
         </div>
+        ${secondaryDeliveryVisible ? `
+          <div class="setting-card subtle-card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Kalkwasser safety limits</p>
+                <h4>Capacity, evaporation, and pH guardrails</h4>
+                <p class="muted">These are advisory-only limits. OpenReef uses them to avoid telling you to push kalk harder when pH or evaporation makes that unsafe.</p>
+              </div>
+            </div>
+            <div class="grid three compact">
+              <label>Daily kalk volume (mL/day)
+                <input type="number" min="0" step="10" data-scope="dosing-system" data-field="kalkDailyDoseMl" value="${this._escape(system.kalkDailyDoseMl || 0)}">
+                <small>How much kalkwasser solution you currently add per day.</small>
+              </label>
+              <label>Kalk concentration (tsp/US gal)
+                <input type="number" min="0" step="0.25" data-scope="dosing-system" data-field="kalkConcentrationTspPerGallon" value="${this._escape(system.kalkConcentrationTspPerGallon || 0)}">
+                <small>Use your actual mixed strength, not the powder amount left in the container.</small>
+              </label>
+              <label>Evaporation ceiling (mL/day)
+                <input type="number" min="0" step="10" data-scope="dosing-system" data-field="kalkEvaporationLimitMlPerDay" value="${this._escape(system.kalkEvaporationLimitMlPerDay || 0)}">
+                <small>Approximate daily top-off capacity before salinity risk becomes likely.</small>
+              </label>
+              <label>Max pH
+                <input type="number" min="0" step="0.01" data-scope="dosing-system" data-field="kalkMaxPh" value="${this._escape(system.kalkMaxPh || 8.45)}">
+                <small>OpenReef blocks kalk increase advice at or above this pH.</small>
+              </label>
+              <label>Max pH rise
+                <input type="number" min="0" step="0.01" data-scope="dosing-system" data-field="kalkMaxPhRise" value="${this._escape(system.kalkMaxPhRise || 0.2)}">
+                <small>Maximum rise you are comfortable seeing from a dosing window.</small>
+              </label>
+            </div>
+          </div>
+        ` : ""}
         <label class="toggle-card">
           <input type="checkbox" data-scope="dosing-system" data-field="safetyAcknowledged" ${system.safetyAcknowledged ? "checked" : ""}>
           <span>
