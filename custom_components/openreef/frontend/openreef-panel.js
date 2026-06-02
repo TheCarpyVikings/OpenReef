@@ -3532,6 +3532,7 @@ class OpenReefPanel extends HTMLElement {
     let suggestedDoseMlPerDay = null;
     let reviewDoseMlPerDay = null;
     let correctionText = "";
+    const productSupportsParameter = !productInfo.id || this._dosingProductSupportsParameter(productInfo, sensorId);
     if (potency > 0 && safety.canExactMaintenance) {
       const cappedHoldOffsetUnits = Math.max(-maxDailyAdjustmentUnits, Math.min(holdOffsetUnits, maxDailyAdjustmentUnits));
       extraMlPerDay = cappedHoldOffsetUnits / potency;
@@ -3554,7 +3555,9 @@ class OpenReefPanel extends HTMLElement {
     const rateDigits = Math.max(digits, 2);
     const rateText = `${this._format(Math.abs(slope), rateDigits)}${unitSuffix}/day`;
     let maintenanceText;
-    if (!confident) {
+    if (!productSupportsParameter) {
+      maintenanceText = `${productInfo.label} does not maintain ${label}. Track ${label} separately and choose a ${label.toLowerCase()} supplement, water-change plan, or primary dosing system if this keeps drifting.`;
+    } else if (!confident) {
       maintenanceText = `${confidence.detail} No dosing change suggested yet.`;
     } else if (!productInfo.id) {
       maintenanceText = "Choose your dosing system in Settings before OpenReef gives product-specific advice.";
@@ -3582,7 +3585,9 @@ class OpenReefPanel extends HTMLElement {
     }
 
     if (!correctionText) {
-      if (!confident) {
+      if (!productSupportsParameter) {
+        correctionText = `No ${label} correction advice: ${productInfo.label} is not a ${label} dosing product.`;
+      } else if (!confident) {
         correctionText = "Correction dosing is locked until the trend is trustworthy.";
       } else if (!target) {
         correctionText = "Set a target in Settings before OpenReef discusses correction dosing.";
@@ -3602,7 +3607,9 @@ class OpenReefPanel extends HTMLElement {
       : safety.warnings.length
         ? safety.warnings.join(" ")
         : "Ready for advisory guidance only. OpenReef will not control a doser.";
-    const doNotDoseText = target > 0 && value > target
+    const doNotDoseText = !productSupportsParameter
+      ? `Do not use ${productInfo.label} to adjust ${label}.`
+      : target > 0 && value > target
       ? "Do not add a chemical correction while the current reading is above target."
       : productInfo.classId === "kalkwasser"
         ? "Do not use kalkwasser for one-off correction doses."
@@ -3770,6 +3777,16 @@ class OpenReefPanel extends HTMLElement {
       dosing_pump: "dosing pump",
       manual_top_off: "manual top-off",
     }[system.secondaryDelivery] || "not set";
+    const primaryTitle = primary.id
+      ? primary.label
+      : secondary.classId === "kalkwasser"
+        ? "Kalkwasser support only"
+        : "Not selected";
+    const primaryDetail = primary.id
+      ? this._dosingProductClassLabel(primary.classId)
+      : secondary.classId === "kalkwasser"
+        ? "No primary two-part/AFR selected"
+        : "Choose in Settings";
     return `
       <article class="panel" data-tour="dosing">
         <div class="section-head">
@@ -3787,8 +3804,8 @@ class OpenReefPanel extends HTMLElement {
         <div class="health-reason-grid">
           <div class="health-reason-card">
             <span>Primary system</span>
-            <strong>${this._escape(primary.id ? primary.label : "Not selected")}</strong>
-            <p>${this._escape(primary.id ? this._dosingProductClassLabel(primary.classId) : "Choose in Settings")}</p>
+            <strong>${this._escape(primaryTitle)}</strong>
+            <p>${this._escape(primaryDetail)}</p>
           </div>
           <div class="health-reason-card">
             <span>Secondary supplement</span>
