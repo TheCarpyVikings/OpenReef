@@ -15,7 +15,7 @@ review the recommendation text, safety gates, and failure modes one at a time.
 
 ## Product/System Evals
 
-- [ ] Tropic Marin All-For-Reef eval.
+- [x] Tropic Marin All-For-Reef eval.
 - [ ] Seachem Reef Fusion 1/2 eval.
 - [ ] Aquaforest Component 1+2+3+ eval.
 - [ ] ATI Essentials / Essentials Pro eval.
@@ -118,3 +118,71 @@ Remaining tuning questions:
   trusted.
 - Whether the real UI needs an eval-data import helper for live-context sensor states, not just manual
   chemistry rows.
+
+## Tropic Marin All-For-Reef Eval
+
+Status: complete for the first beta pass. Harness output and manual CSV import files are ready for
+UI review.
+
+Source links checked:
+
+- Tropic Marin All-For-Reef: https://www.tropic-marin-smartinfo.com/all-for-reef
+- Local dosing research doc on balanced all-in-one systems and maintenance-only products.
+
+Product class:
+
+- `single_solution_balanced`
+- Primary dosing system.
+- Maintenance guidance only; no one-off correction bolus.
+
+Assumptions:
+
+- 200 L mixed reef.
+- Targets: alkalinity 8.3 dKH, calcium 430 ppm, magnesium 1350 ppm.
+- Manual alkalinity/calcium/magnesium tests drive advice.
+- Current daily All-For-Reef dose is scenario-specific.
+- Official dose model used by OpenReef for guidance:
+  - start near 5 mL per 100 L per day,
+  - review upward by no more than 2.5 mL per 100 L per week,
+  - do not exceed 25 mL per 100 L per day.
+
+Scenarios:
+
+- [x] Stable maintenance.
+- [x] Demand increasing within headroom.
+- [x] Near max dose / demand outgrowing All-For-Reef.
+- [x] Calcium-led adjustment.
+- [x] Imbalanced parameters.
+- [x] Stale manual tests.
+- [x] Above-target chemistry.
+
+Expected safety rules:
+
+- All-For-Reef must never produce an exact one-off correction bolus.
+- OpenReef must never imply automated dosing-pump control.
+- Falling Alk/Ca should produce a slow weekly maintenance review step, then retest.
+- Near-max dosing should warn before suggesting any increase.
+- Calcium-led wording should be visible because Tropic Marin recommends calcium as the regular
+  regulator once All-For-Reef is established.
+- If Alk/Ca/Mg are moving in different directions, OpenReef should tell the user to correct the
+  imbalance separately before relying on All-For-Reef maintenance.
+- Stale manual tests should lock actionable advice until fresh tests are logged.
+- Above-target chemistry should never suggest chemical correction downward.
+
+Manual import notes:
+
+- CSV files are in `docs/eval-data/all-for-reef/`.
+- Start UI review with `demand-increasing.csv`, then `near-max-dose.csv`.
+- `stale-manual-tests.csv` only behaves as stale relative to the current Home Assistant clock; adjust
+  dates if needed when retesting later.
+- The live pH/temp/salinity context exists in the pure eval harness, but the CSV files only contain
+  manual chemistry rows.
+
+Completed UI tweaks:
+
+- The Dosing Advisor now shows one shared daily All-For-Reef dose control instead of one dose field
+  per parameter.
+
+Tweaks to consider after UI review:
+
+- Whether OpenReef should highlight calcium as the primary regulator more prominently in the UI.

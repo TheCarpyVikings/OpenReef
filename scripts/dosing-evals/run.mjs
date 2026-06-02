@@ -3,12 +3,14 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadOpenReefPanel } from "./panel-loader.mjs";
+import { runAllForReefMaintenanceEval } from "./scenarios/all-for-reef-maintenance.mjs";
 import { runKalkwasserDosingPumpEval } from "./scenarios/kalkwasser-dosing-pump.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
 
 const scenarios = {
+  "all-for-reef-maintenance": runAllForReefMaintenanceEval,
   "kalkwasser-dosing-pump": runKalkwasserDosingPumpEval,
 };
 
