@@ -4748,12 +4748,12 @@ class OpenReefPanel extends HTMLElement {
       if (!el) return;
       this._onboarding.walkFrame = (this._onboarding.walkFrame + 1) % 4;
       el.src = `${this._avatarBase()}walk-${this._onboarding.walkFrame + 1}.png`;
-    }, 140);
+    }, 210);
     this._onboarding.walkEndTimer = setTimeout(() => {
       clearInterval(this._onboarding.walkInterval);
       this._onboarding.walkInterval = null;
       if (this._onboarding) { this._onboarding.walking = false; this._render(); }
-    }, 640);
+    }, 1450);
   }
 
   _avatarMarkup(pose) {
@@ -8210,7 +8210,7 @@ class OpenReefPanel extends HTMLElement {
         .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
         .or-onboard { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
         .or-spotlight { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(4, 12, 20, .62); outline: 2px solid var(--openreef-accent); outline-offset: 2px; opacity: 0; transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, opacity .2s ease; pointer-events: none; }
-        .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(520px, calc(100vw - 28px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; transition: left .6s cubic-bezier(.34,.6,.26,1), top .6s cubic-bezier(.34,.6,.26,1); }
+        .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(520px, calc(100vw - 28px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; transition: left 1.4s cubic-bezier(.4,.15,.35,1), top 1.4s cubic-bezier(.4,.15,.35,1); }
         .or-avatar { flex: 0 0 auto; width: 176px; display: grid; place-items: end center; }
         .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); animation: or-bob 2.6s ease-in-out infinite; }
         .or-walk-img { animation: none; transform-origin: center bottom; }
