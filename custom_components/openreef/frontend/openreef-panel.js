@@ -801,7 +801,7 @@ class OpenReefPanel extends HTMLElement {
         this._controlConfirm = null;
         this._render();
       }
-      if (action === "onboarding-start") this._startOnboarding();
+      if (action === "onboarding-start") { this._activeTab = "mission"; this._startOnboarding(); }
       if (action === "onboarding-next") this._onboardingNext();
       if (action === "onboarding-back") this._onboardingBack();
       if (action === "onboarding-skip") this._endOnboarding(true);
@@ -815,6 +815,12 @@ class OpenReefPanel extends HTMLElement {
         // Session hide only (he's on by default and returns next load — no dead-end).
         if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
         this._buddy.dismissed = true;
+        this._render();
+      }
+      if (action === "toggle-buddy") {
+        // Persistent on/off from Settings.
+        this._setBuddyEnabled(!this._buddyEnabled());
+        this._buddy.dismissed = false;
         this._render();
       }
       if (action === "setup") {
@@ -2888,7 +2894,7 @@ class OpenReefPanel extends HTMLElement {
         classId: "single_solution_balanced",
         roles: ["primary"],
         parameters: ["alkalinity", "calcium", "magnesium"],
-        note: "Balanced all-in-one maintenance. OpenReef tracks consumption and direction, but does not use it as a one-off correction calculator.",
+        note: "Balanced all-in-one maintenance. Start and adjust slowly from test trends; use separate corrections if parameters are unbalanced before relying on All-For-Reef.",
       },
       {
         id: "seachem_reef_fusion",
@@ -3457,6 +3463,62 @@ class OpenReefPanel extends HTMLElement {
     return `Kalkwasser appears steady. Keep monitoring pH and evaporation before changing the routine.`;
   }
 
+  _allForReefDoseContext(currentDoseMlPerDay = 0, system = this._dosingSystem()) {
+    const tankVolume = Number(system?.tankVolumeLitres) || 0;
+    const startDoseMl = tankVolume > 0 ? tankVolume * 0.05 : 0; // 5 mL / 100 L daily.
+    const weeklyStepMl = tankVolume > 0 ? tankVolume * 0.025 : 0; // 2.5 mL / 100 L weekly review step.
+    const maxDoseMl = tankVolume > 0 ? tankVolume * 0.25 : 0; // 25 mL / 100 L daily.
+    const currentDose = Math.max(0, Number(currentDoseMlPerDay) || 0);
+    return {
+      tankVolume,
+      currentDose,
+      startDoseMl,
+      weeklyStepMl,
+      maxDoseMl,
+      nearMax: maxDoseMl > 0 && currentDose >= maxDoseMl * 0.9,
+      atOrAboveMax: maxDoseMl > 0 && currentDose >= maxDoseMl,
+    };
+  }
+
+  _allForReefDoseContextText(context) {
+    if (!context.tankVolume) {
+      return "Enter net tank volume before OpenReef can compare your All-For-Reef dose with Tropic Marin's start, weekly review, and maximum guidance.";
+    }
+    return `For ${this._format(context.tankVolume, 0)} L, Tropic Marin's guidance works out to roughly ${this._formatDoseMl(context.startDoseMl)} to start, ${this._formatDoseMl(context.weeklyStepMl)} maximum weekly review step, and ${this._formatDoseMl(context.maxDoseMl)} maximum daily dose.`;
+  }
+
+  _allForReefMaintenanceText(label, sensorId, slope, rateText, safety, currentDoseMlPerDay) {
+    const context = this._allForReefDoseContext(currentDoseMlPerDay);
+    const doseContext = this._allForReefDoseContextText(context);
+    if (!safety.manual.fresh) {
+      return `${label} manual tests are not fresh enough for All-For-Reef advice. Retest before changing the daily dose.`;
+    }
+    if (!context.tankVolume) {
+      return `${doseContext} Do not change the daily dose from OpenReef guidance yet.`;
+    }
+    const calciumRegulator = sensorId === "calcium"
+      ? " Tropic Marin recommends using calcium as the regular dose regulator once All-For-Reef is established, while still checking alkalinity and magnesium."
+      : "";
+    const imbalanceGuard = " If calcium, alkalinity, and magnesium are not moving together, correct the imbalance separately first; do not use All-For-Reef as a one-off correction product.";
+    if (context.atOrAboveMax && slope < 0) {
+      return `Net loss ~${rateText}. Current All-For-Reef dose ${this._formatDoseMl(context.currentDose)} is at or above the ${this._formatDoseMl(context.maxDoseMl)} max for this tank. Do not increase All-For-Reef beyond the max; retest, correct separately if needed, or add a different primary system.${calciumRegulator}${imbalanceGuard}`;
+    }
+    if (context.nearMax && slope < 0) {
+      return `Net loss ~${rateText}. Current All-For-Reef dose ${this._formatDoseMl(context.currentDose)} is close to the ${this._formatDoseMl(context.maxDoseMl)} max for this tank. Review only a small weekly increase up to ${this._formatDoseMl(context.weeklyStepMl)} if fresh tests agree, then retest. If demand keeps rising, add a different primary system.${calciumRegulator}${imbalanceGuard}`;
+    }
+    if (slope < 0) {
+      return `Net loss ~${rateText}. All-For-Reef is a maintenance system: review increasing the total daily dose by no more than ${this._formatDoseMl(context.weeklyStepMl)} this week (current ${this._formatDoseMl(context.currentDose)}, max ${this._formatDoseMl(context.maxDoseMl)}), then retest calcium and alkalinity.${calciumRegulator}${imbalanceGuard}`;
+    }
+    if (slope > 0) {
+      return `Net rise ~${rateText}. Review holding or reducing the total daily All-For-Reef dose by up to ${this._formatDoseMl(context.weeklyStepMl)} this week (current ${this._formatDoseMl(context.currentDose)}), then retest. Do not add a chemical correction downward.${calciumRegulator}${imbalanceGuard}`;
+    }
+    return `All-For-Reef appears steady. ${doseContext} Keep the dose consistent and retest on your chosen schedule.${calciumRegulator}`;
+  }
+
+  _allForReefCorrectionText(label) {
+    return `Do not use Tropic Marin All-For-Reef as a one-off ${label} correction. Bring calcium, alkalinity, and magnesium into balance with separate correction products or water changes first, then use All-For-Reef for maintenance.`;
+  }
+
   _analyseConsumption(sensorId, sensor, trendData, healthItem) {
     const label = sensor.label || sensorId;
     const unit = sensor.unit || "";
@@ -3579,6 +3641,8 @@ class OpenReefPanel extends HTMLElement {
       maintenanceText = "Choose your dosing system in Settings before OpenReef gives product-specific advice.";
     } else if (productInfo.classId === "kalkwasser") {
       maintenanceText = this._kalkMaintenanceText(label, sensorId, slope, rateText, safety);
+    } else if (productInfo.id === "tropic_marin_all_for_reef") {
+      maintenanceText = this._allForReefMaintenanceText(label, sensorId, slope, rateText, safety, currentDoseMlPerDay);
     } else if (slope < 0) {
       if (potency > 0 && safety.canExactMaintenance) {
         const capped = Math.abs(holdOffsetUnits) > maxDailyAdjustmentUnits;
@@ -3611,6 +3675,8 @@ class OpenReefPanel extends HTMLElement {
         correctionText = "Set a target in Settings before OpenReef discusses correction dosing.";
       } else if (productInfo.classId === "kalkwasser") {
         correctionText = "Do not use kalkwasser as a one-off correction bolus.";
+      } else if (productInfo.id === "tropic_marin_all_for_reef") {
+        correctionText = this._allForReefCorrectionText(label);
       } else if (target < value) {
         correctionText = "Do not chemically correct downward. Let normal consumption or water changes bring the value down gradually.";
       } else if (!safety.canExactCorrection) {
@@ -3631,6 +3697,8 @@ class OpenReefPanel extends HTMLElement {
       ? "Do not add a chemical correction while the current reading is above target."
       : productInfo.classId === "kalkwasser"
         ? "Do not use kalkwasser for one-off correction doses."
+        : productInfo.id === "tropic_marin_all_for_reef"
+          ? "Do not use All-For-Reef for one-off correction doses."
         : "";
     const doseText = [maintenanceText, correctionText, doNotDoseText].filter(Boolean).join(" ");
 
@@ -6544,6 +6612,7 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${this._configDirty ? `<div class="notice warning-notice sticky-save-warning"><strong>Unsaved changes.</strong> Save before applying modes or leaving Settings.</div>` : ""}
         ${this._profileSettings()}
+        ${this._guideSettings()}
         ${this._missionSettings()}
         ${this._sensorSettings()}
         ${this._manualTestSettings()}
@@ -6866,6 +6935,32 @@ class OpenReefPanel extends HTMLElement {
       "Dosing Advisor",
       "Advisory consumption tracking and dose suggestions for alkalinity, calcium, and magnesium.",
       body,
+    );
+  }
+
+  _guideSettings() {
+    const buddyOn = this._buddyEnabled();
+    const cheeky = this._tone() === "cheeky";
+    return this._settingsPanel(
+      "guide",
+      "Guide & buddy",
+      "Your reef guide's personality, the live reactive buddy, and the guided tour.",
+      `
+        <div class="stack tight">
+          <div class="control-row">
+            <div><strong>Reef buddy</strong><div class="muted">A live mascot in the Mission Control corner that reacts to your tank state.</div></div>
+            <button class="${buddyOn ? "primary" : "secondary"} compact-button" data-action="toggle-buddy">${buddyOn ? "On" : "Off"}</button>
+          </div>
+          <div class="control-row">
+            <div><strong>Tone</strong><div class="muted">Cheeky adds the anti-Apex humour; Professional keeps it plain. Safety messages stay serious either way.</div></div>
+            <button class="secondary compact-button" data-action="onboarding-tone">${cheeky ? "😏 Cheeky" : "👔 Professional"}</button>
+          </div>
+          <div class="control-row">
+            <div><strong>Guided tour</strong><div class="muted">Replay the walkthrough on Mission Control any time.</div></div>
+            <button class="secondary compact-button" data-action="onboarding-start">👋 Replay</button>
+          </div>
+        </div>
+      `,
     );
   }
 
