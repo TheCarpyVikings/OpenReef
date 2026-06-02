@@ -20,7 +20,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] Add Manual Chemistry V1: manual entry, configurable profile-based schedules, freshness scoring, history, and Dosing Advisor fallback from manual results.
 - [x] Add Manual Chemistry V1.1: charted manual-test trends and batch historical test entry.
 - [x] Add Manual Chemistry V1.2: per-parameter target/freshness tuning plus CSV export/import helpers.
-- [x] Add Dosing Advisor product presets: popular exact-strength and maintenance-style dosing products plus custom fallback.
+- [x] Add Dosing Advisor V1.3 safety overhaul: product-system setup, verified-strength gates, kalkwasser safety handling, and copied dosing summaries.
 - [ ] Add Maintenance Tasks V1 without Google dependency.
 
 ## Product Rules
@@ -270,3 +270,4 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] 2026-05-30: Dosing & Consumption Advisor ships advisory-only (no automated dosing) and reuses the Reef Health Score stability analysis as the single source of truth, so the two surfaces never disagree.
 - [x] 2026-06-01: Dosing Advisor V1.1 adds manual-test freshness gates, stricter confidence checks, solution-strength calculator fields, and support-summary diagnostics before beta handoff.
 - [x] 2026-06-02: Dosing Advisor V1.2 adds product presets for common dosing systems, separates exact-strength products from maintenance-style methods, and keeps Custom as the safe fallback.
+- [x] 2026-06-02: Dosing Advisor V1.3 moves from per-parameter product picks to an advisory-only product-system safety model with primary/secondary products, kalkwasser guardrails, exact-advice locks, and standalone dosing summaries.

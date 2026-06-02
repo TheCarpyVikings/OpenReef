@@ -236,6 +236,34 @@ def _normalise_schedule_times(value: Any, fallback: Any = None) -> list[str]:
     return times[:24]
 
 
+def _normalise_dosing_product_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower().replace(" ", "_")[:120]
+
+
+def _normalise_dosing_delivery(value: Any) -> str:
+    key = _normalise_dosing_product_id(value)
+    return key if key in {"ato", "dosing_pump", "manual_top_off"} else ""
+
+
+def _infer_dosing_primary_from_parameters(parameters: dict[str, Any]) -> str:
+    presets: list[str] = []
+    for raw in parameters.values():
+        if not isinstance(raw, dict):
+            continue
+        preset = _normalise_dosing_product_id(raw.get("productPreset"))
+        if preset and preset not in {"custom", "kalkwasser_calcium_hydroxide"}:
+            presets.append(preset)
+    if any(preset.startswith("seachem_reef_fusion") for preset in presets):
+        return "seachem_reef_fusion"
+    if any(preset.startswith("red_sea_foundation") for preset in presets):
+        return "custom_verified_strength"
+    for preset in presets:
+        return preset
+    return ""
+
+
 def _normalise_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -861,6 +889,51 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         dosing["enabled"] = bool(dosing.get("enabled", True))
         raw_parameters = dosing.get("parameters")
         raw_parameters = raw_parameters if isinstance(raw_parameters, dict) else {}
+        raw_system = dosing.get("system")
+        raw_system = raw_system if isinstance(raw_system, dict) else {}
+        default_system = deepcopy(DEFAULT_CORE_CONFIG["dosing"]["system"])
+        system: dict[str, Any] = {}
+        inferred_primary = _infer_dosing_primary_from_parameters(raw_parameters)
+        inferred_secondary = (
+            "kalkwasser_calcium_hydroxide"
+            if any(
+                isinstance(raw, dict)
+                and _normalise_dosing_product_id(raw.get("productPreset"))
+                == "kalkwasser_calcium_hydroxide"
+                for raw in raw_parameters.values()
+            )
+            else ""
+        )
+        for field in ("primaryProduct", "secondaryProduct", "customProductClass"):
+            fallback = default_system[field]
+            if field == "primaryProduct":
+                fallback = inferred_primary
+            if field == "secondaryProduct":
+                fallback = inferred_secondary
+            system[field] = _normalise_dosing_product_id(raw_system.get(field)) or fallback
+        system["secondaryDelivery"] = _normalise_dosing_delivery(
+            raw_system.get("secondaryDelivery")
+        )
+        for field in ("freshTestRequired", "safetyAcknowledged"):
+            system[field] = bool(raw_system.get(field, default_system[field]))
+        for field in ("customProductName", "customNotes"):
+            value = raw_system.get(field, default_system[field])
+            system[field] = str(value)[:240] if value is not None else ""
+        try:
+            tank_volume = float(raw_system.get("tankVolumeLitres", 0))
+        except (TypeError, ValueError):
+            tank_volume = 0.0
+        if tank_volume <= 0:
+            tank_volume = max(
+                (
+                    float(raw.get("tankVolumeLitres", 0) or 0)
+                    for raw in raw_parameters.values()
+                    if isinstance(raw, dict)
+                ),
+                default=0.0,
+            )
+        system["tankVolumeLitres"] = max(0.0, tank_volume)
+        dosing["system"] = system
         parameters: dict[str, dict[str, Any]] = {}
         known_parameters = set(DOSING_PARAMETERS)
         for optional_parameter in ("nitrate", "phosphate"):
