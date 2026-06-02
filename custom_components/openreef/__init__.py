@@ -672,6 +672,22 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 power_on_delay = 0
             equipment_config["powerOnDelaySeconds"] = max(0, min(power_on_delay, 1800))
 
+    cameras = config.setdefault("cameras", {})
+    if not isinstance(cameras, dict):
+        config["cameras"] = {}
+    else:
+        for camera_id, camera_config in list(cameras.items()):
+            if not isinstance(camera_config, dict):
+                cameras.pop(camera_id)
+                continue
+            label = camera_config.get("label")
+            camera_config["label"] = (
+                label.strip()[:80]
+                if isinstance(label, str) and label.strip()
+                else camera_id
+            )
+            camera_config["entity_id"] = _normalise_entity_id(camera_config.get("entity_id"))
+
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
         for preview in mode_previews.values():

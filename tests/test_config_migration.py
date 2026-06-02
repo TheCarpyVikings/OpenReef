@@ -128,6 +128,26 @@ def test_disarmed_by_default_after_migration():
     assert heater.get("armed", False) is False
 
 
+def test_camera_mapping_survives_migration():
+    cfg = {"cameras": {"display": {"label": "Display Tank", "entity_id": "camera.reef_display"}}}
+    result = normalise(cfg)
+    assert isinstance(result.get("cameras"), dict)
+    cam = result["cameras"]["display"]
+    assert cam["entity_id"] == "camera.reef_display"
+    assert cam["label"] == "Display Tank"
+
+
+def test_garbage_cameras_block_coerced():
+    for junk in ("not a dict", 7, ["x"]):
+        result = normalise({"cameras": junk})
+        assert isinstance(result.get("cameras"), dict)  # never crashes / never a scalar
+    # A non-dict camera entry is dropped, a label-less one is labelled by id.
+    result = normalise({"cameras": {"a": "broken", "b": {"entity_id": "camera.x"}}})
+    assert "a" not in result["cameras"]
+    assert result["cameras"]["b"]["label"] == "b"
+    assert result["cameras"]["b"]["entity_id"] == "camera.x"
+
+
 def test_idempotent():
     sample = {
         "schemaVersion": 24,

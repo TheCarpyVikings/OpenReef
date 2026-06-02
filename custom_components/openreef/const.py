@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 31
-INTEGRATION_VERSION = "0.4.66"
+CORE_SCHEMA_VERSION = 32
+INTEGRATION_VERSION = "0.4.67"
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -450,6 +450,7 @@ DEFAULT_CORE_CONFIG = {
         for sensor_id, meta in MVP_SENSORS.items()
     },
     "equipment": {},
+    "cameras": {},
     "energy": {
         "tariff": 0.28,
         "currency": "GBP",

@@ -19,6 +19,7 @@ class OpenReefPanel extends HTMLElement {
     this._lastRenderedSetupStep = null;
     this._trend = null;
     this._trendRequest = "";
+    this._cameraFocus = null;
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -62,6 +63,9 @@ class OpenReefPanel extends HTMLElement {
   _shouldRenderForHassUpdate() {
     if (this._setupOpen || this._trend || this._activeTab === "settings") return false;
     if (this._onboarding && this._onboarding.active) return false;
+    // Don't recreate camera <img> elements on hass updates — it would restart the
+    // live MJPEG streams. A manual Refresh button re-renders on demand.
+    if (this._activeTab === "cameras" || this._cameraFocus) return false;
     if (this._isEditingFormControl()) return false;
     return true;
   }
@@ -886,6 +890,34 @@ class OpenReefPanel extends HTMLElement {
         this._setDirty(true);
         this._render();
       }
+      if (action === "focus-camera") { this._cameraFocus = id; this._render(); }
+      if (action === "close-camera") { this._cameraFocus = null; this._render(); }
+      if (action === "refresh-cameras") this._render();
+      if (action === "fullscreen-camera") {
+        const stage = this.shadowRoot.querySelector("[data-camera-stage]");
+        if (stage && stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
+      }
+      if (action === "add-camera") {
+        const input = this.shadowRoot.getElementById("or-add-camera-name");
+        const label = (input?.value || "").trim();
+        this._addCamera(label || "Camera");
+      }
+      if (action === "remove-camera") this._removeCamera(id);
+      if (action === "search-camera") {
+        this._searchEntities(`camera:${id}`, this._cameraTarget(id, this._config.cameras[id] || {}));
+      }
+      if (action === "choose-camera") {
+        this._config.cameras[id].entity_id = target.dataset.entity;
+        delete this._searchResults[`camera:${id}`];
+        this._setDirty(true);
+        this._render();
+      }
+      if (action === "clear-camera") {
+        this._config.cameras[id].entity_id = "";
+        delete this._searchResults[`camera:${id}`];
+        this._setDirty(true);
+        this._render();
+      }
       if (action === "choose-equipment") {
         this._config.equipment[id][field] = target.dataset.entity;
         this._equipmentEditors[id] = true;
@@ -1119,6 +1151,11 @@ class OpenReefPanel extends HTMLElement {
           this._config.equipment[id].allowAutoRestart = displayWavemaker ? false : true;
           this._config.equipment[id].wavemakerNotifications = displayWavemaker;
         }
+      }
+      if (scope === "camera") {
+        this._config.cameras = this._config.cameras || {};
+        this._config.cameras[id] = this._config.cameras[id] || {};
+        this._config.cameras[id][field] = value;
       }
       if (scope === "energy") this._config.energy[field] = value;
       if (scope === "alerts") {
@@ -2557,6 +2594,7 @@ class OpenReefPanel extends HTMLElement {
       controls: saved.controls !== false,
       energy: saved.energy !== false,
       dosing: saved.dosing === true || (hasDosingParameters && saved.dosing !== false),
+      cameras: saved.cameras === true || (this._cameraList().some(([, c]) => c.entity_id) && saved.cameras !== false),
     };
   }
 
@@ -2564,6 +2602,7 @@ class OpenReefPanel extends HTMLElement {
     return [
       ["health", "Reef Health", "Show an explainable 0-100 health score."],
       ["dosing", "Dosing Advisor", "Show consumption, projections, and advisory dose tips."],
+      ["cameras", "Live Camera", "Show a live tank snapshot that opens the Cameras tab."],
       ["live", "Live Stats", "Show mapped sensor readings in Mission Control."],
       ["controls", "Controls", "Show armed equipment status in Mission Control."],
       ["energy", "Energy", "Show energy and cost summaries in Mission Control."],
@@ -2920,11 +2959,12 @@ class OpenReefPanel extends HTMLElement {
         parameters: ["alkalinity", "calcium"],
         exactMaintenance: true,
         exactCorrection: true,
+        maxDosePer25LitresMl: 4,
         exactParameters: {
           calcium: { productDoseMl: 1, productVolumeLitres: 25, productRaise: 4 },
           alkalinity: { productDoseMl: 1, productVolumeLitres: 25, productRaise: 0.493 },
         },
-        note: "Exact-strength two-part preset. Dose parts separately and verify against the bottle before acting.",
+        note: "Exact-strength two-part preset. Dose parts separately, never mix the two bottles directly, and verify against the bottle before acting.",
       },
       {
         id: "aquaforest_component_123",
@@ -3032,6 +3072,12 @@ class OpenReefPanel extends HTMLElement {
     if (primary.id && this._dosingProductSupportsParameter(primary, sensorId)) return primary;
     if (secondary.id && this._dosingProductSupportsParameter(secondary, sensorId)) return secondary;
     return primary.id ? primary : secondary.id ? secondary : this._dosingProduct("");
+  }
+
+  _dosingProductDailyMaxMl(product, system = this._dosingSystem()) {
+    const maxPer25Litres = Number(product?.maxDosePer25LitresMl) || 0;
+    const tankVolume = Number(system?.tankVolumeLitres) || 0;
+    return maxPer25Litres > 0 && tankVolume > 0 ? maxPer25Litres * (tankVolume / 25) : 0;
   }
 
   _dosingUsesSharedDose(product) {
@@ -3362,11 +3408,12 @@ class OpenReefPanel extends HTMLElement {
     }
     if (calculated.value > 0) {
       const source = product?.exactParameters?.[sensorId] ? "preset" : "calculator";
+      const verifiedRecipe = product.requiresCustomStrength === true || product.classId === "custom_verified_strength";
       return {
         value: calculated.value,
         source,
-        exactMaintenance: product.exactMaintenance === true || product.classId === "custom_verified_strength",
-        exactCorrection: product.exactCorrection === true || product.classId === "custom_verified_strength",
+        exactMaintenance: product.exactMaintenance === true || verifiedRecipe,
+        exactCorrection: product.exactCorrection === true || verifiedRecipe,
         label: `${product.label}: calculated ${this._format(calculated.value, 4)} ${sensor.unit || "units"}/mL in this tank`,
       };
     }
@@ -3417,6 +3464,20 @@ class OpenReefPanel extends HTMLElement {
     if (potencyInfo.exactMaintenance && currentDose <= 0) locks.push("Enter the current daily dose before exact maintenance changes appear.");
     const manual = this._dosingFreshManualGate(sensorId);
     if (potencyInfo.exactCorrection && !manual.fresh) warnings.push(`Correction advice locked: ${manual.detail}`);
+    const productDailyMaxMl = this._dosingProductDailyMaxMl(product, system);
+    if (product?.id === "seachem_reef_fusion") {
+      warnings.push("Dose Reef Fusion 1 and 2 separately in a high-flow area; never mix the two bottles directly.");
+    }
+    if (product?.id === "brs_pharma_two_part") {
+      warnings.push("Dose DIY calcium, alkalinity, and magnesium parts separately in high flow; monitor salinity and pH while using concentrated two/three-part additives.");
+    }
+    if (productDailyMaxMl > 0 && currentDose > 0) {
+      if (currentDose > productDailyMaxMl) {
+        locks.push(`Current ${product?.label || "product"} dose ${this._formatDoseMl(currentDose)} is above the product daily maximum of ${this._formatDoseMl(productDailyMaxMl)} for this tank.`);
+      } else if (currentDose >= productDailyMaxMl * 0.9) {
+        warnings.push(`Current ${product?.label || "product"} dose ${this._formatDoseMl(currentDose)} is close to the product daily maximum of ${this._formatDoseMl(productDailyMaxMl)} for this tank.`);
+      }
+    }
     if (product?.classId === "kalkwasser") {
       kalkContext = this._kalkSafetyContext(system);
       warnings.push("Kalkwasser is high-pH and evaporation-limited. Do not use it as a one-off correction bolus.");
@@ -3446,6 +3507,8 @@ class OpenReefPanel extends HTMLElement {
       if (warning.startsWith("Kalkwasser is high-pH and evaporation-limited")) return false;
       if (warning.startsWith("Kalkwasser does not maintain")) return false;
       if (warning.startsWith("pH guard OK:")) return false;
+      if (warning.startsWith("Dose Reef Fusion 1 and 2 separately")) return false;
+      if (warning.startsWith("Dose DIY calcium, alkalinity, and magnesium parts separately")) return false;
       if (warning.includes(" is not a ") && warning.includes(" dosing product")) return false;
       return true;
     });
@@ -3634,9 +3697,12 @@ class OpenReefPanel extends HTMLElement {
     const potencyInfo = this._dosingEffectivePotency(sensorId, sensor, paramConfig, productInfo);
     const safety = this._dosingSafetyState(sensorId, sensor, productInfo, potencyInfo, paramConfig, source);
     const potency = potencyInfo.value;
+    const productDailyMaxMl = this._dosingProductDailyMaxMl(productInfo);
     const target = Number(paramConfig.target) || 0;
     const holdOffsetUnits = -slope; // +ve => add this many units/day to hold steady
     const maxDailyAdjustmentUnits = this._dosingDailyAdjustmentLimit(sensorId, sensor);
+    const correctionUnitsToTarget = target > 0 ? target - value : 0;
+    const correctionSignalStrong = target > 0 && Math.abs(correctionUnitsToTarget) >= this._dosingMinimumSignal(sensorId, sensor);
     let extraMlPerDay = null;
     let correctionMl = null;
     let suggestedDoseMlPerDay = null;
@@ -3649,14 +3715,32 @@ class OpenReefPanel extends HTMLElement {
       extraMlPerDay = cappedHoldOffsetUnits / potency;
       suggestedDoseMlPerDay = Math.max(0, currentDoseMlPerDay + holdOffsetUnits / potency);
       reviewDoseMlPerDay = Math.max(0, currentDoseMlPerDay + extraMlPerDay);
-      if (target > 0 && safety.canExactCorrection) {
-        const correctionUnits = target - value;
+      if (productDailyMaxMl > 0) {
+        reviewDoseMlPerDay = Math.min(reviewDoseMlPerDay, productDailyMaxMl);
+      }
+      if (target > 0 && safety.canExactCorrection && correctionSignalStrong) {
+        const correctionUnits = correctionUnitsToTarget;
         correctionMl = correctionUnits / potency;
         if (correctionUnits > 0) {
-          const correctionDays = Math.max(1, Math.ceil(correctionUnits / maxDailyAdjustmentUnits));
-          const dailyCorrectionUnits = correctionUnits / correctionDays;
-          const dailyCorrectionMl = Math.max(0, dailyCorrectionUnits / potency);
-          correctionText = ` If correcting toward ${this._format(target, digits)}${unitSuffix}, split it across about ${correctionDays} day${correctionDays === 1 ? "" : "s"} (roughly ${this._format(dailyCorrectionMl, 1)} mL/day), then retest.`;
+          const productCorrectionLimitUnits = productDailyMaxMl > 0
+            ? Math.max(0, productDailyMaxMl - currentDoseMlPerDay) * potency
+            : Infinity;
+          const dailyCorrectionLimitUnits = Math.min(maxDailyAdjustmentUnits, productCorrectionLimitUnits);
+          const correctionDays = dailyCorrectionLimitUnits > 0
+            ? Math.max(1, Math.ceil(correctionUnits / dailyCorrectionLimitUnits))
+            : null;
+          if (correctionDays === null) {
+            correctionText = productDailyMaxMl > 0
+              ? ` Correction dosing is locked because the current daily dose is already at the product maximum of ${this._formatDoseMl(productDailyMaxMl)} for this tank.`
+              : " Correction dosing is locked until a safe daily correction limit is available.";
+          } else {
+            const dailyCorrectionUnits = correctionUnits / correctionDays;
+            const dailyCorrectionMl = Math.max(0, dailyCorrectionUnits / potency);
+            correctionText = ` If correcting toward ${this._format(target, digits)}${unitSuffix}, split it across about ${correctionDays} day${correctionDays === 1 ? "" : "s"} (roughly ${this._format(dailyCorrectionMl, 1)} mL/day), then retest.`;
+            if (productDailyMaxMl > 0) {
+              correctionText += ` Do not exceed ${this._formatDoseMl(productDailyMaxMl)} total ${productInfo.label} per day for this tank.`;
+            }
+          }
         } else if (correctionUnits < 0) {
           correctionText = " Target is below the current reading; do not use a one-off chemical correction downward. Let normal consumption or water changes bring it down gradually.";
         }
@@ -3682,7 +3766,10 @@ class OpenReefPanel extends HTMLElement {
       if (potency > 0 && safety.canExactMaintenance) {
         const capped = Math.abs(holdOffsetUnits) > maxDailyAdjustmentUnits;
         maintenanceText = `Net loss ~${rateText}. Current dose ${this._formatDoseMl(currentDoseMlPerDay)}; estimated holding dose ${this._formatDoseMl(suggestedDoseMlPerDay)}. `;
-        maintenanceText += capped
+        const maxCapped = productDailyMaxMl > 0 && suggestedDoseMlPerDay > productDailyMaxMl;
+        maintenanceText += maxCapped
+          ? `Suggested holding dose is above the product maximum of ${this._formatDoseMl(productDailyMaxMl)} for this tank. Do not increase past that limit; retest and consider another dosing approach if demand keeps rising.`
+          : capped
           ? `Use ${this._formatDoseMl(reviewDoseMlPerDay)} as the first review step because OpenReef limits advice to ${this._format(maxDailyAdjustmentUnits, rateDigits)}${unitSuffix}/day.`
           : `Suggested next dose ${this._formatDoseMl(reviewDoseMlPerDay)}.`;
       } else if (potency > 0 && !safety.canExactMaintenance) {
@@ -3706,6 +3793,8 @@ class OpenReefPanel extends HTMLElement {
         correctionText = "No correction advice because recent movement is below the useful signal.";
       } else if (!confident) {
         correctionText = "Correction dosing is locked until the trend is trustworthy.";
+      } else if (target > 0 && !correctionSignalStrong) {
+        correctionText = "No correction advice because the current reading is close enough to target for this test.";
       } else if (!target) {
         correctionText = "Set a target in Settings before OpenReef discusses correction dosing.";
       } else if (productInfo.classId === "kalkwasser") {
@@ -3744,7 +3833,7 @@ class OpenReefPanel extends HTMLElement {
     }
     if (safety.status === "locked" && status === "ok") status = "learning";
     if (safety.status === "warning" && status === "ok") status = "warning";
-    if (unsupportedProduct && status === "learning") status = "ok";
+    if (unsupportedProduct && (status === "learning" || noUsefulMovement)) status = "ok";
 
     const sourceText = source === "manual" ? "from manual test history" : "net of your current dosing";
     const trendText = confident
@@ -5216,6 +5305,7 @@ class OpenReefPanel extends HTMLElement {
       ["live", "Live Stats"],
       ["manual", "Manual Tests"],
       ["controls", "Controls"],
+      ["cameras", "Cameras"],
       ["energy", "Energy"],
       ["settings", "Settings"],
     ];
@@ -5234,9 +5324,201 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "live") return this._liveStats();
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "controls") return this._controls();
+    if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
     if (this._activeTab === "settings") return this._settings();
     return this._mission();
+  }
+
+  // --- Live cameras ------------------------------------------------------
+
+  _cameraList() {
+    return Object.entries(this._config.cameras || {});
+  }
+
+  _cameraSnapshotUrl(entityId) {
+    const st = this._state(entityId);
+    const pic = st?.attributes?.entity_picture;
+    if (pic) return pic;
+    const token = st?.attributes?.access_token;
+    return token ? `/api/camera_proxy/${entityId}?token=${token}` : "";
+  }
+
+  _cameraStreamUrl(entityId) {
+    const snap = this._cameraSnapshotUrl(entityId);
+    return snap ? snap.replace("/camera_proxy/", "/camera_proxy_stream/") : "";
+  }
+
+  _cameraOnline(entityId) {
+    const st = this._state(entityId);
+    if (!st || ["unavailable", "unknown"].includes(st.state)) return false;
+    return Boolean(this._cameraSnapshotUrl(entityId));
+  }
+
+  _cameraTarget(id, cam) {
+    return {
+      id,
+      label: cam?.label || id,
+      domains: ["camera"],
+      keywords: [cam?.label || id, "camera", "cam", "tank", "reef"],
+      prefer: ["reef", "tank", "aquarium", "display", "sump"],
+      avoid: [],
+      device_classes: [],
+      units: [],
+    };
+  }
+
+  _addCamera(label) {
+    const base = this._slug(label || "Camera");
+    let id = base;
+    let suffix = 2;
+    this._config.cameras = this._config.cameras || {};
+    while (this._config.cameras[id]) { id = `${base}_${suffix}`; suffix += 1; }
+    this._config.cameras[id] = { label: label || "Camera", entity_id: "" };
+    this._setDirty(true);
+    this._render();
+  }
+
+  _removeCamera(id) {
+    if (this._config.cameras) delete this._config.cameras[id];
+    this._setDirty(true);
+    this._render();
+  }
+
+  _cameras() {
+    const cams = this._cameraList();
+    return `
+      <section class="stack">
+        <div class="section-head">
+          <div>
+            <h2>Cameras</h2>
+            <p>Watch your tank live. Camera entities are mapped in Settings.</p>
+          </div>
+          <div class="actions">
+            <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings">Manage cameras</button>
+          </div>
+        </div>
+        ${cams.length
+          ? `<div class="cam-grid">${cams.map(([id, cam]) => this._cameraTile(id, cam)).join("")}</div>`
+          : this._emptyState(
+              "No cameras yet",
+              "Add a camera in Settings. Set it up in Home Assistant first (Generic Camera, ONVIF, RTSP or go2rtc), then map its camera.* entity here.",
+              "settings",
+              "Add a camera",
+            )}
+      </section>
+      ${this._cameraFocus ? this._cameraModal() : ""}
+    `;
+  }
+
+  _cameraTile(id, cam) {
+    const online = cam.entity_id && this._cameraOnline(cam.entity_id);
+    const stream = online ? this._cameraStreamUrl(cam.entity_id) : "";
+    return `
+      <button class="cam-tile ${online ? "" : "offline"}" data-action="focus-camera" data-id="${this._escape(id)}" title="${this._escape(cam.label || id)}">
+        ${online
+          ? `<img class="cam-feed" src="${this._escape(stream)}" alt="${this._escape(cam.label || id)}">`
+          : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Offline" : "Not mapped"}</small></div>`}
+        ${online ? `<span class="cam-live"><span class="cam-dot"></span>LIVE</span>` : ""}
+        <span class="cam-label">${this._escape(cam.label || id)}</span>
+      </button>
+    `;
+  }
+
+  _cameraModal() {
+    const cam = (this._config.cameras || {})[this._cameraFocus];
+    if (!cam) return "";
+    const online = cam.entity_id && this._cameraOnline(cam.entity_id);
+    const stream = online ? this._cameraStreamUrl(cam.entity_id) : "";
+    const snap = online ? this._cameraSnapshotUrl(cam.entity_id) : "";
+    return `
+      <div class="modal">
+        <section class="wizard cam-dialog">
+          <button class="close" data-action="close-camera">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Live camera</p>
+              <h2>${this._escape(cam.label || this._cameraFocus)}</h2>
+              <p class="muted">${this._escape(cam.entity_id || "Not mapped")}</p>
+            </div>
+          </div>
+          <div class="cam-stage" data-camera-stage>
+            ${online
+              ? `<img class="cam-feed-large" src="${this._escape(stream)}" alt="${this._escape(cam.label || "")}"><span class="cam-live"><span class="cam-dot"></span>LIVE</span>`
+              : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Camera offline or unavailable" : "Not mapped"}</small></div>`}
+          </div>
+          <div class="actions">
+            ${online ? `<a class="secondary compact-button" href="${this._escape(snap)}" target="_blank" rel="noopener noreferrer">Snapshot</a>` : ""}
+            ${online ? `<button class="secondary compact-button" data-action="fullscreen-camera">Fullscreen</button>` : ""}
+            <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  _missionCameraCard() {
+    const mapped = this._cameraList().filter(([, c]) => c.entity_id);
+    if (!mapped.length) {
+      return this._missionSummaryCard("Cameras", "0", "no cameras mapped yet", "unknown", "cameras");
+    }
+    const [id, cam] = mapped[0];
+    const online = this._cameraOnline(cam.entity_id);
+    const snap = online ? this._cameraSnapshotUrl(cam.entity_id) : "";
+    const extra = mapped.length > 1 ? ` · +${mapped.length - 1} more` : "";
+    return `
+      <button class="summary-card cam-card" data-action="tab" data-id="cameras">
+        <span>Live Camera</span>
+        ${online
+          ? `<img class="cam-card-img" src="${this._escape(snap)}" alt="${this._escape(cam.label || id)}">`
+          : `<div class="cam-card-img cam-placeholder"><span class="cam-glyph">📷</span></div>`}
+        <small>${this._escape(cam.label || id)}${extra}</small>
+      </button>
+    `;
+  }
+
+  _cameraSettings() {
+    const cams = this._cameraList();
+    const body = `
+      <div class="quick-add">
+        <input id="or-add-camera-name" placeholder="Camera name (e.g. Display Tank)">
+        <button class="secondary compact-button" data-action="add-camera">Add camera</button>
+      </div>
+      ${cams.length
+        ? cams.map(([id, cam]) => this._cameraPicker(id, cam)).join("")
+        : `<p class="muted">No cameras yet. Add one above, then map its Home Assistant <code>camera.*</code> entity. You'll need the camera set up in Home Assistant first.</p>`}
+    `;
+    return this._settingsPanel(
+      "cameras",
+      "Cameras",
+      "Map Home Assistant camera entities to watch your tank live on the Cameras tab.",
+      body,
+    );
+  }
+
+  _cameraPicker(id, cam) {
+    const key = `camera:${id}`;
+    const result = this._searchResults[key];
+    const online = cam.entity_id && this._cameraOnline(cam.entity_id);
+    return `
+      <section class="picker mapping-card">
+        <div class="mapping-head">
+          <div><p class="eyebrow">Camera</p><h3>${this._escape(cam.label || id)}</h3></div>
+          <button class="secondary compact-button" data-action="remove-camera" data-id="${this._escape(id)}">Remove</button>
+        </div>
+        <label>Name<input data-scope="camera" data-id="${this._escape(id)}" data-field="label" value="${this._escape(cam.label || "")}" placeholder="Display Tank"></label>
+        <label>Entity<input data-scope="camera" data-id="${this._escape(id)}" data-field="entity_id" value="${this._escape(cam.entity_id || "")}" placeholder="camera.reef_display"></label>
+        ${cam.entity_id ? `
+          <div class="selected-entity">
+            <span>${this._escape(this._friendlyEntityName(cam.entity_id))} · ${online ? "Live" : "Offline or missing"}</span>
+            <button class="secondary compact-button" data-action="clear-camera" data-id="${this._escape(id)}">Clear</button>
+          </div>
+        ` : ""}
+        <button class="secondary" data-action="search-camera" data-id="${this._escape(id)}">${result?.loading ? "Finding..." : "Find matches"}</button>
+        ${this._candidateList(key, "choose-camera", id)}
+      </section>
+    `;
   }
 
   _sensorAlertBuckets(sensorAlerts = []) {
@@ -5303,6 +5585,7 @@ class OpenReefPanel extends HTMLElement {
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
+      cards.cameras ? this._missionCameraCard() : "",
     ].join("");
 
     return `
@@ -6693,6 +6976,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._manualTestSettings()}
         ${this._dosingSettings()}
         ${this._equipmentSettings()}
+        ${this._cameraSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._interlockSettings()}
@@ -8686,6 +8970,23 @@ class OpenReefPanel extends HTMLElement {
         .equipment-editor.armed-editor .mapping-card.entity-card { border-color: color-mix(in srgb, var(--openreef-accent) 34%, #3b4257); }
         .equipment-group { display: grid; gap: 12px; border: 1px solid #223447; border-radius: 8px; padding: 14px; background: #0b1724; }
         .trend-dialog { max-width: 900px; }
+        .cam-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+        .cam-tile { position: relative; aspect-ratio: 16 / 9; border: 1px solid #24364a; border-radius: 10px; overflow: hidden; background: #0b1724; padding: 0; cursor: pointer; display: block; }
+        .cam-tile:hover { border-color: var(--openreef-accent); }
+        .cam-tile.offline { cursor: default; }
+        .cam-feed { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .cam-placeholder { width: 100%; height: 100%; display: grid; place-items: center; gap: 6px; color: #8da2ba; text-align: center; }
+        .cam-glyph { font-size: 34px; opacity: .55; }
+        .cam-label { position: absolute; left: 8px; bottom: 8px; padding: 3px 9px; border-radius: 6px; background: rgba(4, 12, 20, .66); color: #e5edf5; font-weight: 800; font-size: 12px; }
+        .cam-live { position: absolute; right: 8px; top: 8px; display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; background: rgba(4, 12, 20, .66); color: #fecaca; font-weight: 800; font-size: 11px; letter-spacing: .06em; }
+        .cam-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; animation: or-pulse 1.4s ease-in-out infinite; }
+        .cam-dialog { max-width: 1100px; }
+        .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #04080d; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
+        .cam-feed-large { width: 100%; height: 100%; object-fit: contain; display: block; background: #04080d; }
+        .cam-card { position: relative; padding: 0; overflow: hidden; min-height: 0; border: 1px solid #24364a; }
+        .cam-card > span { position: absolute; left: 10px; top: 9px; z-index: 1; padding: 2px 8px; border-radius: 6px; background: rgba(4, 12, 20, .66); color: #8da2ba; font-weight: 800; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+        .cam-card-img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; }
+        .cam-card small { position: absolute; left: 10px; bottom: 9px; padding: 2px 8px; border-radius: 6px; background: rgba(4, 12, 20, .66); color: #e5edf5; }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
         .controller-picker { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 6px; }
         .compact-center { min-height: 220px; }

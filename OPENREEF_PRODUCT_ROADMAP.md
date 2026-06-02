@@ -237,7 +237,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 | Water change/AWC | `WaterChangeScreen.tsx` | Labs/reference | Water phase |
 | Analytics | `AnalyticsScreen.tsx`, analytics components | Labs/reference | Read-only analytics phase |
 | Reports | `ReportsScreen.tsx` | Labs/reference | Reports phase |
-| Camera | `CameraScreen.tsx`, camera API routes | Labs/reference | Camera phase |
+| Camera | `CameraScreen.tsx`, camera API routes | Live Cameras V1 in Core (MJPEG, grid + focus, Mission Control card) | Add HLS/recording/PTZ |
 | Reef diagram | `ReefDiagramScreen.tsx` | Labs/reference | Equipment visualization phase |
 | Calibration | `SettingsScreen.tsx` calibration section | Labs/reference | Monitoring parity |
 | AI advisor | `AIChemistryAdvisor.tsx`, `ai-service.ts` | Labs/reference | Read-only AI phase |
