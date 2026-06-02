@@ -4736,27 +4736,85 @@ class OpenReefPanel extends HTMLElement {
     img.src = `${this._avatarBase()}walk-1.png`;
   }
 
-  _runWalk(dx) {
-    if (!this._onboarding) return;
-    clearInterval(this._onboarding.walkInterval);
-    clearTimeout(this._onboarding.walkEndTimer);
-    const walkingNow = this._onboarding.walking && this._walkReady && window.innerWidth > 640;
-    if (!walkingNow) { this._onboarding.walking = false; return; }
-    const img = this.shadowRoot.querySelector(".or-walk-img");
-    // Frames face LEFT; flip when heading right.
-    if (img) img.style.transform = dx > 4 ? "scaleX(-1)" : "none";
-    this._onboarding.walkFrame = 0;
-    this._onboarding.walkInterval = setInterval(() => {
-      const el = this.shadowRoot.querySelector(".or-walk-img");
-      if (!el) return;
-      this._onboarding.walkFrame = (this._onboarding.walkFrame + 1) % 4;
-      el.src = `${this._avatarBase()}walk-${this._onboarding.walkFrame + 1}.png`;
-    }, 210);
-    this._onboarding.walkEndTimer = setTimeout(() => {
-      clearInterval(this._onboarding.walkInterval);
-      this._onboarding.walkInterval = null;
-      if (this._onboarding) { this._onboarding.walking = false; this._render(); }
-    }, 1450);
+  // Aim the spotlight + (desktop) narrator at the card's CURRENT position. Safe to
+  // call every frame, so it tracks a card while the page smooth-scrolls.
+  _aimOnboarding(anchorEl, snap = false) {
+    const narrator = this.shadowRoot.querySelector(".or-narrator");
+    const spotlight = this.shadowRoot.querySelector(".or-spotlight");
+    if (!narrator || !spotlight) return;
+    if (anchorEl) {
+      const r = anchorEl.getBoundingClientRect();
+      const pad = 8;
+      spotlight.style.opacity = "1";
+      spotlight.style.top = `${r.top - pad}px`;
+      spotlight.style.left = `${r.left - pad}px`;
+      spotlight.style.width = `${r.width + pad * 2}px`;
+      spotlight.style.height = `${r.height + pad * 2}px`;
+    } else {
+      spotlight.style.opacity = "0";
+      spotlight.style.width = "0px";
+      spotlight.style.height = "0px";
+    }
+    if (window.innerWidth <= 640) {
+      ["left", "top", "right", "bottom", "transform"].forEach((p) => { narrator.style[p] = ""; });
+      this._onboarding.pos = null;
+      return;
+    }
+    const m = 14;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const nw = narrator.offsetWidth;
+    const nh = narrator.offsetHeight;
+    let centreX;
+    let top;
+    if (anchorEl) {
+      const r = anchorEl.getBoundingClientRect();
+      centreX = r.left + r.width / 2;
+      if (vh - r.bottom >= nh + 20) top = r.bottom + 14;
+      else if (r.top >= nh + 20) top = r.top - nh - 14;
+      else top = Math.max(m, vh - nh - m);
+    } else {
+      centreX = vw / 2;
+      top = Math.max(m, (vh - nh) / 2);
+    }
+    const left = Math.round(Math.max(m, Math.min(centreX - nw / 2, vw - nw - m)));
+    top = Math.round(top);
+    if (snap) narrator.style.transition = "none";
+    narrator.style.left = `${left}px`;
+    narrator.style.top = `${top}px`;
+    narrator.style.right = "auto";
+    narrator.style.bottom = "auto";
+    narrator.style.transform = "none";
+    if (snap) { void narrator.offsetWidth; narrator.style.transition = ""; }
+    this._onboarding.pos = { left, top };
+  }
+
+  // rAF loop: tracks the card each frame (so the spotlight + guide follow the page
+  // as it smooth-scrolls) and plays the walk frames; ends back on the frontal pose.
+  _trackOnboarding(anchorEl, dir) {
+    cancelAnimationFrame(this._onboarding.walkRaf);
+    const walkAnim = this._onboarding.walking && this._walkReady && window.innerWidth > 640;
+    const DUR = walkAnim ? 1500 : 700;
+    const FRAME_MS = 210;
+    const start = performance.now();
+    const wi = this.shadowRoot.querySelector(".or-walk-img");
+    if (wi) wi.style.transform = dir > 4 ? "scaleX(-1)" : "none"; // frames face left; flip heading right
+    const tick = () => {
+      if (!this._onboarding || !this._onboarding.active) return;
+      this._aimOnboarding(anchorEl);
+      const t = performance.now() - start;
+      if (walkAnim) {
+        const f = (Math.floor(t / FRAME_MS) % 4) + 1;
+        const el = this.shadowRoot.querySelector(".or-walk-img");
+        if (el) el.src = `${this._avatarBase()}walk-${f}.png`;
+      }
+      if (t >= DUR) {
+        if (this._onboarding.walking) { this._onboarding.walking = false; this._render(); }
+        return;
+      }
+      this._onboarding.walkRaf = requestAnimationFrame(tick);
+    };
+    this._onboarding.walkRaf = requestAnimationFrame(tick);
   }
 
   _avatarMarkup(pose) {
@@ -4806,16 +4864,13 @@ class OpenReefPanel extends HTMLElement {
     this._probeAvatar();
     this._probeSticker();
     this._probeWalk();
-    this._onboarding = { active: true, step: 0, steps, scrolledStep: -1, walking: false, walkFrame: 0, walkInterval: null, walkEndTimer: null };
+    this._onboarding = { active: true, step: 0, steps, scrolledStep: -1, walking: false, walkRaf: null };
     this._render();
   }
 
   _endOnboarding(markDone = true) {
     if (markDone) this._setOnboardingDone();
-    if (this._onboarding) {
-      clearInterval(this._onboarding.walkInterval);
-      clearTimeout(this._onboarding.walkEndTimer);
-    }
+    if (this._onboarding) cancelAnimationFrame(this._onboarding.walkRaf);
     this._onboarding = null;
     this._render();
   }
@@ -4856,64 +4911,24 @@ class OpenReefPanel extends HTMLElement {
     if (!spotlight || !narrator) return;
     const step = this._onboarding.steps[this._onboarding.step];
     const anchorEl = step && step.anchor ? this.shadowRoot.querySelector(`[data-tour="${step.anchor}"]`) : null;
-    // Bring the target into view first (instant, so rects are correct for placement).
-    if (anchorEl && this._onboarding.scrolledStep !== this._onboarding.step) {
-      this._onboarding.scrolledStep = this._onboarding.step;
-      anchorEl.scrollIntoView({ block: "center", behavior: "auto" });
-    }
-    // Spotlight ring on the anchored card (or hidden for centre-stage steps).
-    if (anchorEl) {
-      const r = anchorEl.getBoundingClientRect();
-      const pad = 8;
-      spotlight.style.opacity = "1";
-      spotlight.style.top = `${r.top - pad}px`;
-      spotlight.style.left = `${r.left - pad}px`;
-      spotlight.style.width = `${r.width + pad * 2}px`;
-      spotlight.style.height = `${r.height + pad * 2}px`;
-    } else {
-      spotlight.style.opacity = "0";
-      spotlight.style.width = "0px";
-      spotlight.style.height = "0px";
-    }
-    // Mobile keeps the docked stacked bar (CSS); desktop walks the guide to the card.
-    if (window.innerWidth <= 640) {
-      ["left", "top", "right", "bottom", "transform"].forEach((p) => { narrator.style[p] = ""; });
-      this._onboarding.pos = null;
+    const stepChanged = this._onboarding.scrolledStep !== this._onboarding.step;
+    if (!stepChanged) {
+      // Re-render mid/after walk or on a tone toggle: just keep things aligned.
+      this._aimOnboarding(anchorEl);
       return;
     }
-    const m = 14;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const nw = narrator.offsetWidth;
-    const nh = narrator.offsetHeight;
-    let centreX;
-    let top;
-    if (anchorEl) {
-      const r = anchorEl.getBoundingClientRect();
-      centreX = r.left + r.width / 2;
-      if (vh - r.bottom >= nh + 20) top = r.bottom + 14;
-      else if (r.top >= nh + 20) top = r.top - nh - 14;
-      else top = Math.max(m, vh - nh - m);
-    } else {
-      // Centre-stage steps (welcome / finale) sit centred on screen, not at the
-      // bottom — the finale's tall sticker bubble would otherwise run off-screen.
-      centreX = vw / 2;
-      top = Math.max(m, (vh - nh) / 2);
-    }
-    const left = Math.round(Math.max(m, Math.min(centreX - nw / 2, vw - nw - m)));
-    top = Math.round(top);
-    // First placement snaps; later steps animate the walk between cards.
+    this._onboarding.scrolledStep = this._onboarding.step;
     const firstPlace = !this._onboarding.pos;
-    const prevLeft = this._onboarding.pos ? this._onboarding.pos.left : left;
-    if (firstPlace) narrator.style.transition = "none";
-    narrator.style.left = `${left}px`;
-    narrator.style.top = `${top}px`;
-    narrator.style.right = "auto";
-    narrator.style.bottom = "auto";
-    narrator.style.transform = "none";
-    if (firstPlace) { void narrator.offsetWidth; narrator.style.transition = ""; }
-    this._onboarding.pos = { left, top };
-    this._runWalk(left - prevLeft);
+    const prevLeft = this._onboarding.pos ? this._onboarding.pos.left : null;
+    // First placement snaps with no scroll/walk; later steps smooth-scroll the card
+    // into view and the guide tracks + walks to it.
+    if (anchorEl) {
+      anchorEl.scrollIntoView({ block: "center", behavior: firstPlace ? "auto" : "smooth" });
+    }
+    this._aimOnboarding(anchorEl, firstPlace);
+    if (firstPlace) return;
+    const dir = prevLeft == null ? 0 : (this._onboarding.pos.left - prevLeft);
+    this._trackOnboarding(anchorEl, dir);
   }
 
   _onboardingOverlay() {
