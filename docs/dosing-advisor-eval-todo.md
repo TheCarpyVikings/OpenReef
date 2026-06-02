@@ -60,7 +60,8 @@ Each product eval should record:
 
 ## Kalkwasser / Calcium Hydroxide Dosing-Pump Eval
 
-Status: harness created; first advisor tuning pass complete.
+Status: complete for the first beta pass. Harness output and manual CSV import checks have been
+reviewed against the OpenReef UI.
 
 Assumptions:
 
@@ -90,6 +91,17 @@ Expected safety rules:
 - Magnesium drift must not be attributed to kalkwasser.
 - If demand outgrows kalk, OpenReef should suggest review/escalation rather than fake precision.
 
+Manual import notes:
+
+- The seven manual-test CSVs are usable for testing advisor wording in a real OpenReef instance.
+- Stable support should read calm: alkalinity/calcium steady, magnesium not covered by kalkwasser.
+- Demand outgrowing kalk should warn that kalk may not keep up without offering a correction bolus.
+- High pH risk requires a real mapped pH value above the configured kalk max pH, or a temporary lower
+  max-pH setting, because manual Alk/Ca/Mg CSV rows cannot simulate live pH state on their own.
+- No pH guard requires the pH sensor to be unmapped/disabled in OpenReef settings.
+- Stale manual tests require old result dates relative to the current Home Assistant clock.
+- Above-target chemistry should avoid any downward chemical correction advice.
+
 Model inputs now tracked:
 
 - Daily kalk volume.
@@ -104,3 +116,5 @@ Remaining tuning questions:
   safety-context-only guidance.
 - Whether hybrid kalk + two-part/AFR should get a separate eval before exact two-part calculators are
   trusted.
+- Whether the real UI needs an eval-data import helper for live-context sensor states, not just manual
+  chemistry rows.
