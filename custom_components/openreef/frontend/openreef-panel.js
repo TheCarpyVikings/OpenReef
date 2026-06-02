@@ -2869,10 +2869,22 @@ class OpenReefPanel extends HTMLElement {
     ];
     const specific = {
       calcium: [
+        maintenance(
+          "kalkwasser_calcium_hydroxide",
+          "Kalkwasser / calcium hydroxide",
+          "Generic",
+          "Balanced calcium and alkalinity maintenance method. High-pH and often evaporation-limited, so OpenReef treats it as trend-guided maintenance, not a one-off correction calculator.",
+        ),
         exact("red_sea_foundation_a", "Red Sea Foundation A / Calcium+", "Red Sea", 1, 100, 2, "Bottle-style preset: 1 mL per 100 L raises calcium by 2 ppm. Confirm your bottle before acting."),
         exact("seachem_reef_fusion_1", "Seachem Reef Fusion 1", "Seachem", 1, 94.6, 4, "Manufacturer-style preset: 1 mL per 25 US gal raises calcium by about 4 mg/L."),
       ],
       alkalinity: [
+        maintenance(
+          "kalkwasser_calcium_hydroxide",
+          "Kalkwasser / calcium hydroxide",
+          "Generic",
+          "Balanced calcium and alkalinity maintenance method. High-pH and often evaporation-limited, so OpenReef treats it as trend-guided maintenance, not a one-off correction calculator.",
+        ),
         exact("red_sea_foundation_b", "Red Sea Foundation B / KH-Alkalinity", "Red Sea", 1, 100, 0.1, "Bottle-style preset: 1 mL per 100 L raises alkalinity by 0.1 dKH. Confirm your bottle before acting."),
         exact("seachem_reef_fusion_2", "Seachem Reef Fusion 2", "Seachem", 1, 94.6, 0.49, "Converted preset: 1 mL per 25 US gal raises alkalinity by about 0.176 meq/L, roughly 0.49 dKH."),
       ],
