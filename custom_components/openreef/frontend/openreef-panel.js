@@ -1191,7 +1191,9 @@ class OpenReefPanel extends HTMLElement {
         if (target.type === "checkbox") {
           this._config.dosing.system[field] = value;
         } else if (target.type === "number") {
-          this._config.dosing.system[field] = Math.max(0, Number(value) || 0);
+          const numericValue = Math.max(0, Number(value) || 0);
+          this._config.dosing.system[field] = numericValue;
+          if (field === "sharedDailyDoseMl") this._syncSharedDosingDose(numericValue);
         } else {
           this._config.dosing.system[field] = value;
         }
@@ -2821,6 +2823,7 @@ class OpenReefPanel extends HTMLElement {
       secondaryProduct: "",
       secondaryDelivery: "",
       tankVolumeLitres: 0,
+      sharedDailyDoseMl: 0,
       kalkDailyDoseMl: 0,
       kalkConcentrationTspPerGallon: 0,
       kalkEvaporationLimitMlPerDay: 0,
@@ -2843,6 +2846,7 @@ class OpenReefPanel extends HTMLElement {
       ...this._dosingSystemDefaults(),
       ...raw,
       tankVolumeLitres: Number(raw.tankVolumeLitres) || Math.max(0, ...parameterVolumes),
+      sharedDailyDoseMl: Math.max(0, Number(raw.sharedDailyDoseMl) || 0),
       kalkDailyDoseMl: Math.max(0, Number(raw.kalkDailyDoseMl) || 0),
       kalkConcentrationTspPerGallon: Math.max(0, Number(raw.kalkConcentrationTspPerGallon) || 0),
       kalkEvaporationLimitMlPerDay: Math.max(0, Number(raw.kalkEvaporationLimitMlPerDay) || 0),
@@ -2864,6 +2868,16 @@ class OpenReefPanel extends HTMLElement {
 
   _dosingParamConfig(sensorId) {
     return this._config?.dosing?.parameters?.[sensorId] || {};
+  }
+
+  _syncSharedDosingDose(value) {
+    const dose = Math.max(0, Number(value) || 0);
+    this._config.dosing = this._config.dosing || { enabled: true, parameters: {}, system: {} };
+    this._config.dosing.parameters = this._config.dosing.parameters || {};
+    this._dosingParameterIds().forEach((id) => {
+      this._config.dosing.parameters[id] = this._config.dosing.parameters[id] || {};
+      this._config.dosing.parameters[id].doserMlPerDay = dose;
+    });
   }
 
   _dosingProductLibrary() {
@@ -3018,6 +3032,26 @@ class OpenReefPanel extends HTMLElement {
     if (primary.id && this._dosingProductSupportsParameter(primary, sensorId)) return primary;
     if (secondary.id && this._dosingProductSupportsParameter(secondary, sensorId)) return secondary;
     return primary.id ? primary : secondary.id ? secondary : this._dosingProduct("");
+  }
+
+  _dosingUsesSharedDose(product) {
+    return product?.classId === "single_solution_balanced";
+  }
+
+  _dosingSharedDailyDoseMl(product = this._dosingProduct(this._dosingSystem().primaryProduct), system = this._dosingSystem()) {
+    if (!this._dosingUsesSharedDose(product)) return 0;
+    const direct = Number(system?.sharedDailyDoseMl);
+    if (Number.isFinite(direct) && direct > 0) return Math.max(0, direct);
+    const legacyDoses = this._dosingParameterIds()
+      .filter((id) => this._dosingProductSupportsParameter(product, id))
+      .map((id) => Number(this._dosingParamConfig(id).doserMlPerDay) || 0)
+      .filter((value) => value > 0);
+    return legacyDoses.length ? legacyDoses[0] : 0;
+  }
+
+  _dosingCurrentDoseMlForParameter(sensorId, config = this._dosingParamConfig(sensorId), product = this._dosingProductForParameter(sensorId)) {
+    if (this._dosingUsesSharedDose(product)) return this._dosingSharedDailyDoseMl(product);
+    return Math.max(0, Number(config?.doserMlPerDay) || 0);
   }
 
   _kalkSafetyContext(system = this._dosingSystem()) {
@@ -3365,7 +3399,7 @@ class OpenReefPanel extends HTMLElement {
 
   _dosingSafetyState(sensorId, sensor, product, potencyInfo, config, source) {
     const system = this._dosingSystem();
-    const currentDose = Number(config?.doserMlPerDay) || 0;
+    const currentDose = this._dosingCurrentDoseMlForParameter(sensorId, config, product);
     const tankVolume = Number(system.tankVolumeLitres) || 0;
     const locks = [];
     const warnings = [];
@@ -3595,8 +3629,8 @@ class OpenReefPanel extends HTMLElement {
     }
 
     const paramConfig = this._dosingParamConfig(sensorId);
-    const currentDoseMlPerDay = Math.max(0, Number(paramConfig.doserMlPerDay) || 0);
     const productInfo = this._dosingProductForParameter(sensorId);
+    const currentDoseMlPerDay = this._dosingCurrentDoseMlForParameter(sensorId, paramConfig, productInfo);
     const potencyInfo = this._dosingEffectivePotency(sensorId, sensor, paramConfig, productInfo);
     const safety = this._dosingSafetyState(sensorId, sensor, productInfo, potencyInfo, paramConfig, source);
     const potency = potencyInfo.value;
@@ -4349,6 +4383,7 @@ class OpenReefPanel extends HTMLElement {
       `Safety acknowledged: ${system.safetyAcknowledged ? "yes" : "no"}`,
       `Net tank volume: ${system.tankVolumeLitres ? `${this._format(system.tankVolumeLitres, 0)} L` : "not set"}`,
       `Primary system: ${primary.id ? `${primary.label} (${this._dosingProductClassLabel(primary.classId)})` : "not selected"}`,
+      this._dosingUsesSharedDose(primary) ? `Shared daily dose: ${this._dosingSharedDailyDoseMl(primary, system) ? this._formatDoseMl(this._dosingSharedDailyDoseMl(primary, system)) : "not set"}` : "",
       `Secondary supplement: ${secondary.id ? `${secondary.label} (${this._dosingProductClassLabel(secondary.classId)})` : "none"}`,
       secondary.id ? `Secondary delivery: ${delivery}` : "",
       ...(secondary.classId === "kalkwasser" ? [
@@ -4793,7 +4828,7 @@ class OpenReefPanel extends HTMLElement {
   _hasApex() {
     const c = this._controllerSetting();
     if (c === "apex") return true;
-    if (c === "other" || c === "none") return false;
+    if (c === "no" || c === "none" || c === "other") return false;
     return this._detectApex();
   }
 
@@ -4808,7 +4843,7 @@ class OpenReefPanel extends HTMLElement {
     this._avatarProbing = true;
     ["idle", "point", "smug", "facepalm", "celebrate", "concerned", "thinking", "chilled"].forEach((pose) => {
       const img = new Image();
-      img.onload = () => { this._avatarPoses[pose] = true; this._render(); };
+      img.onload = () => { this._avatarPoses[pose] = true; if (!this._isEditingFormControl()) this._render(); };
       img.src = `${this._avatarBase()}${pose}.png`;
     });
   }
@@ -4924,16 +4959,16 @@ class OpenReefPanel extends HTMLElement {
   _onboardingScript() {
     return [
       { id: "welcome", anchor: null, pose: "idle",
-        cheeky: "Welcome aboard! A 30-second tour — and not a single line of Apex code. No virtual outlets, no Defer commands, no hunting through scattered docs for the one setting you need.",
-        cheekyNoApex: "Welcome aboard! A 30-second tour of your reef — no spreadsheets, no guesswork, no 'is that trend bad?' panic. Give me 30 seconds.",
-        professional: "Welcome to OpenReef. Here's a quick 30-second tour of the main features." },
+        cheeky: "Hey — I'm your reef guide, the little reefer who lives in your dashboard. 30-second tour, and not a line of Apex code: no virtual outlets, no Defer commands, no scattered docs.",
+        cheekyNoApex: "Hey — I'm your reef guide, the little reefer who lives in your dashboard. Give me 30 seconds and I'll show you round — no spreadsheets, no guesswork.",
+        professional: "Welcome to OpenReef. I'm your reef guide — here's a quick 30-second tour of the main features." },
       { id: "reef-health", anchor: "reef-health", pose: "point",
         cheeky: "Your whole reef's health in one honest number. Apex Fusion shows you the graphs and leaves you to play detective — I actually tell you what they mean.",
         cheekyNoApex: "Your whole reef's health in one honest number. No more squinting at separate graphs wondering if it all adds up — I tell you what they mean.",
         professional: "Your Reef Health Score: one explainable 0-100 read on the tank, weighted for your reef type." },
       { id: "dosing", anchor: "dosing", pose: "smug",
         cheeky: "Your alk, cal and mag consumption — worked out, with exactly how much to dose. The maths is free; the Trident's reagents sadly aren't. Good news: my mate Harry does ABC reagents cheaper.",
-        cheekyNoApex: "Your alk, cal and mag consumption — worked out from your tests, with exactly how much to dose. The maths most reefers do by hand (or skip). And my mate Harry does ABC dosing cheap.",
+        cheekyNoApex: "Your alk, cal and mag consumption — worked out from your tests, with exactly how much to dose. The maths most reefers do by hand, or skip entirely and wonder why the corals sulk.",
         link: { label: "Harry's ABC reagents → marine-spec.co.uk", url: "https://www.marine-spec.co.uk" },
         professional: "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only." },
       { id: "attention", anchor: "attention", pose: "facepalm",
@@ -5067,7 +5102,7 @@ class OpenReefPanel extends HTMLElement {
             </div>
             ${isLast && tone === "cheeky" && hasApex && this._stickerReady ? `<img class="or-sticker" src="${this._avatarBase()}apex-throne.png" alt="OpenReef's professional assessment of the competition">` : ""}
             <p class="or-line">${this._escape(line)}</p>
-            ${step.link && tone === "cheeky" ? `<a class="or-link" href="${this._escape(step.link.url)}" target="_blank" rel="noopener noreferrer">${this._escape(step.link.label)}</a>` : ""}
+            ${step.link && tone === "cheeky" && hasApex ? `<a class="or-link" href="${this._escape(step.link.url)}" target="_blank" rel="noopener noreferrer">${this._escape(step.link.label)}</a>` : ""}
             <div class="or-dots">${dots}</div>
             <div class="or-actions">
               <button class="secondary compact-button" data-action="onboarding-skip">Skip</button>
@@ -6838,6 +6873,14 @@ class OpenReefPanel extends HTMLElement {
       ? [primary.id ? primary.note : "", secondary.id ? secondary.note : ""].filter(Boolean).join(" ")
       : "Choose the system you use before OpenReef shows product-specific advice.";
     const secondaryDeliveryVisible = secondary.classId === "kalkwasser";
+    const primaryUsesSharedDose = this._dosingUsesSharedDose(primary);
+    const sharedDailyDoseMl = this._dosingSharedDailyDoseMl(primary, system);
+    const sharedDoseContext = primary.id === "tropic_marin_all_for_reef"
+      ? this._allForReefDoseContext(sharedDailyDoseMl, system)
+      : null;
+    const sharedDoseText = sharedDoseContext
+      ? this._allForReefDoseContextText(sharedDoseContext)
+      : "Single-solution systems use one total daily dose across every parameter they maintain.";
     const body = `
       <label class="toggle-card">
         <input type="checkbox" data-scope="dosing" data-field="enabled" ${enabled ? "checked" : ""}>
@@ -6891,6 +6934,27 @@ class OpenReefPanel extends HTMLElement {
         <div class="notice ${secondary.classId === "kalkwasser" ? "warning-notice" : "compact-notice"}">
           <strong>${this._escape(selected ? "Product safety model" : "Setup required")}.</strong> ${this._escape(productNote)}
         </div>
+        ${primaryUsesSharedDose ? `
+          <div class="setting-card subtle-card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Single-solution daily dose</p>
+                <h4>Enter the total ${this._escape(primary.label)} dose once.</h4>
+                <p class="muted">OpenReef uses this same shared dose for alkalinity, calcium, and magnesium guidance. Do not enter separate per-parameter doses for a one-bottle system.</p>
+              </div>
+              <span class="pill ${sharedDailyDoseMl > 0 ? "ok" : "unknown"}">${sharedDailyDoseMl > 0 ? this._escape(this._formatDoseMl(sharedDailyDoseMl)) : "not set"}</span>
+            </div>
+            <div class="grid two compact">
+              <label>Total daily dose (mL/day)
+                <input type="number" min="0" step="0.1" data-scope="dosing-system" data-field="sharedDailyDoseMl" value="${this._escape(sharedDailyDoseMl)}">
+                <small>Use the actual daily amount your doser adds from this bottle.</small>
+              </label>
+              <div class="notice compact-notice">
+                <strong>Shared dose.</strong> ${this._escape(sharedDoseText)}
+              </div>
+            </div>
+          </div>
+        ` : ""}
         ${secondaryDeliveryVisible ? `
           <div class="setting-card subtle-card">
             <div class="section-head">
@@ -6938,6 +7002,8 @@ class OpenReefPanel extends HTMLElement {
         const name = sensor.label || id;
         const product = this._dosingProductForParameter(id);
         const potencyInfo = this._dosingEffectivePotency(id, sensor, cfg, product);
+        const sharedDoseProduct = this._dosingUsesSharedDose(product);
+        const sharedDoseForCard = this._dosingSharedDailyDoseMl(product, system);
         const productUnit = sensor.unit || "units";
         const exact = product.exactParameters?.[id] || {};
         const productDose = this._dosingPresetNumber(cfg, exact, "productDoseMl");
@@ -6948,15 +7014,25 @@ class OpenReefPanel extends HTMLElement {
           <section class="mapping-section">
             <div>
               <p class="eyebrow">${this._escape(name)}</p>
-              <h4>Current dose, target, and optional verified strength for ${this._escape(product.label)}.</h4>
+              <h4>${sharedDoseProduct
+                ? `Target for ${this._escape(product.label)}. The daily dose is set once in Dosing Setup.`
+                : `Current dose, target, and optional verified strength for ${this._escape(product.label)}.`}</h4>
             </div>
             <div class="mini-grid">
-              <label>Current dose (mL/day)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="doserMlPerDay" value="${this._escape(cfg.doserMlPerDay ?? 0)}"></label>
+              ${sharedDoseProduct ? "" : `<label>Current dose (mL/day)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="doserMlPerDay" value="${this._escape(cfg.doserMlPerDay ?? 0)}"></label>`}
               <label>Target${this._escape(unitLabel)}<input type="number" step="0.01" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="target" value="${this._escape(cfg.target ?? 0)}"></label>
             </div>
-            <div class="notice compact-notice">
-              <strong>${this._escape(this._dosingProductClassLabel(product.classId))}.</strong> ${this._escape(product.note || "OpenReef will use rate-only guidance until a safe exact strength is available.")}
-            </div>
+            ${sharedDoseProduct ? `
+              <div class="notice compact-notice">
+                <strong>Uses shared dose.</strong> ${this._escape(sharedDoseForCard > 0
+                  ? `${this._formatDoseMl(sharedDoseForCard)} total ${product.label} per day.`
+                  : `Set the total daily ${product.label} dose above.`)} OpenReef uses this target to judge whether the shared dose should be reviewed.
+              </div>
+            ` : `
+              <div class="notice compact-notice">
+                <strong>${this._escape(this._dosingProductClassLabel(product.classId))}.</strong> ${this._escape(product.note || "OpenReef will use rate-only guidance until a safe exact strength is available.")}
+              </div>
+            `}
             ${showStrengthFields ? `
               <div class="mini-grid">
                 <label>Instruction dose (mL)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productDoseMl" value="${this._escape(productDose)}"></label>
@@ -6978,11 +7054,14 @@ class OpenReefPanel extends HTMLElement {
     );
   }
 
-  _controllerControl() {
+  // OpenReef is the controller. This only asks whether the user ALSO runs a Neptune
+  // Apex (a minority), which unlocks the Apex-specific tips + jokes.
+  _apexControl() {
     const c = this._controllerSetting();
-    const detected = this._detectApex() ? "Apex detected" : "no Apex detected";
-    const opts = [["auto", `Auto (${detected})`], ["apex", "Neptune Apex"], ["other", "Other controller"], ["none", "No controller"]];
-    return `<div class="range-picker controller-picker">${opts.map(([id, label]) => `<button class="${c === id ? "active" : ""}" data-action="set-controller" data-id="${this._escape(id)}">${this._escape(label)}</button>`).join("")}</div>`;
+    const active = (c === "other" || c === "none") ? "no" : c; // normalise older values
+    const detected = this._detectApex() ? "Apex found" : "none found";
+    const opts = [["auto", `Auto (${detected})`], ["apex", "Yes — I have an Apex"], ["no", "No — OpenReef only"]];
+    return `<div class="range-picker controller-picker">${opts.map(([id, label]) => `<button class="${active === id ? "active" : ""}" data-action="set-controller" data-id="${this._escape(id)}">${this._escape(label)}</button>`).join("")}</div>`;
   }
 
   _guideSettings() {
@@ -6994,10 +7073,6 @@ class OpenReefPanel extends HTMLElement {
       "Your reef guide's personality, the live reactive buddy, and the guided tour.",
       `
         <div class="stack tight">
-          <div>
-            <div class="control-row"><div><strong>Your controller</strong><div class="muted">Tailors the guide's jokes. Apex owners get the anti-Apex digs; everyone else gets reef-only humour. Auto reads your mapped entities.</div></div></div>
-            ${this._controllerControl()}
-          </div>
           <div class="control-row">
             <div><strong>Reef buddy</strong><div class="muted">A live mascot in the Mission Control corner that reacts to your tank state.</div></div>
             <button class="${buddyOn ? "primary" : "secondary"} compact-button" data-action="toggle-buddy">${buddyOn ? "On" : "Off"}</button>
@@ -7031,6 +7106,11 @@ class OpenReefPanel extends HTMLElement {
             </select>
             <small>${this._escape(this._tankProfileDetail())}</small>
           </label>
+          <div class="field-group">
+            <span class="field-label">Also running a Neptune Apex?</span>
+            ${this._apexControl()}
+            <small>OpenReef is your reef controller. Tell it if you also run an Apex (data in Home Assistant) to unlock Apex-specific tips and jokes.</small>
+          </div>
           <div class="field-group">
             <span class="field-label">Theme colour</span>
             <div class="theme-picker">
@@ -8005,10 +8085,18 @@ class OpenReefPanel extends HTMLElement {
 
   _setupProfileStep() {
     const themeColor = this._themeColor();
+    this._probeAvatar();
     return this._setupShell(
       "Welcome to OpenReef",
-      "Name the controller and choose a theme. You can change everything later in Settings.",
+      "OpenReef is your Home Assistant-native reef controller. Let's get the basics set up — you can change everything later in Settings.",
       `
+        <div class="setup-intro">
+          <div class="setup-intro-avatar">${this._avatarMarkup("idle")}</div>
+          <div class="setup-intro-bubble">
+            <strong>Hi, I'm your reef guide 👋</strong>
+            <p class="muted">A little reefer who lives in your dashboard. I'll keep an eye on the tank with you — and once you're set up, I'll show you round in a quick tour.</p>
+          </div>
+        </div>
         <div class="setup-guide">
           <article><strong>1. Pick your sensors</strong><span>Enable only probes and room sensors you actually own.</span></article>
           <article><strong>2. Map equipment</strong><span>Switch controls stay locked until you arm each device.</span></article>
@@ -8025,9 +8113,9 @@ class OpenReefPanel extends HTMLElement {
               <small>${this._escape(this._tankProfileDetail())}</small>
             </label>
             <div class="field-group">
-              <span class="field-label">Your controller</span>
-              ${this._controllerControl()}
-              <small>Tailors the guide's tips and jokes to your gear. You can change this later in Settings.</small>
+              <span class="field-label">Also running a Neptune Apex?</span>
+              ${this._apexControl()}
+              <small>OpenReef is your reef controller. If you also run an Apex (data already in Home Assistant), I'll tailor a few tips — and the jokes — to it. Optional; change it any time in Settings.</small>
             </div>
             <div class="field-group">
               <span class="field-label">Theme colour</span>
@@ -8599,7 +8687,7 @@ class OpenReefPanel extends HTMLElement {
         .equipment-group { display: grid; gap: 12px; border: 1px solid #223447; border-radius: 8px; padding: 14px; background: #0b1724; }
         .trend-dialog { max-width: 900px; }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
-        .controller-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 6px; }
+        .controller-picker { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 6px; }
         .compact-center { min-height: 220px; }
         .chart-wrap { display: grid; gap: 8px; border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0b1724; }
         .trend-chart { display: block; width: 100%; height: 240px; overflow: hidden; }
@@ -8627,6 +8715,14 @@ class OpenReefPanel extends HTMLElement {
         .apex-guide.compact-guide { margin-bottom: 12px; }
         .apex-guide h3 { margin-bottom: 4px; }
         .apex-guide p { color: #a8bed4; }
+        .setup-intro { display: flex; align-items: center; gap: 16px; padding: 6px 4px 14px; }
+        .setup-intro-avatar { flex: 0 0 auto; width: 110px; }
+        .setup-intro-avatar .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 12px rgba(0,0,0,.45)); }
+        .setup-intro-avatar .or-avatar-ph { width: 88px; height: 88px; border-radius: 50%; display: grid; place-items: center; font-size: 40px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); }
+        .setup-intro-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 14px; padding: 14px 16px; }
+        .setup-intro-bubble strong { color: #f1f6fb; }
+        .setup-intro-bubble p { margin-top: 4px; line-height: 1.4; }
+        @media (max-width: 640px) { .setup-intro { flex-direction: column; align-items: flex-start; gap: 8px; } .setup-intro-avatar { width: 96px; } }
         .setup-guide, .setup-choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
         .setup-choice-grid.two-choice { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .setup-guide article, .setup-choice, .setup-panel { border: 1px solid color-mix(in srgb, var(--openreef-accent) 24%, #24364a); border-radius: 8px; background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(11, 23, 36, .9)); }

@@ -11,11 +11,16 @@ reef-related or pokes fun at Neptune Apex — nothing else.
   The safety step is delivered straight — no comedy on anything that protects livestock.
 - **Two tones.** `cheeky` (default) and `professional`. Every step has both lines; the toggle picks
   which to show. Professional = the same facts, no jokes/emoji.
-- **Controller-aware (cheeky only).** Each step has `cheeky` (anti-Apex) and `cheekyNoApex`
-  (reef-focused, no controller jabs). `_hasApex()` picks: an explicit "Your controller" override
-  (Apex / Other / None, in setup + Settings), else auto-detected from mapped entity IDs
-  (apex/trident/neptune/fusion). Professional lines don't vary; the apex-throne finale sticker only
-  shows for Apex users.
+- **OpenReef IS the controller.** Most users have no separate controller — OpenReef is it. An Apex
+  is an optional extra a minority also run (and OpenReef makes their Apex data more useful). Setup
+  asks "Also running a Neptune Apex?" (Auto / Yes / No), mirrored in Profile settings — NOT framed as
+  "which controller".
+- **Apex-aware jokes (cheeky only).** Each step has `cheeky` (anti-Apex) and `cheekyNoApex`
+  (reef-focused, no controller jabs). `_hasApex()` picks: the explicit Apex answer (apex/no) else
+  auto-detect from mapped entity IDs (apex/trident/neptune/fusion). Professional lines don't vary;
+  the apex-throne finale sticker AND the marine-spec reagent link show **only for Apex users**.
+- **Mini-me is introduced** on setup step 1 (avatar + "Hi, I'm your reef guide" bubble) and in the
+  tour's welcome step.
 - **Always escapable.** Skip and "Don't show again" on every step. Re-runnable from a button.
 - **Every step always shows** (so all poses + the supplier tip appear). If a step's anchor element
   isn't on screen (feature hidden/unmapped), the step renders centred with **no spotlight** rather
