@@ -3756,14 +3756,21 @@ class OpenReefPanel extends HTMLElement {
       warning: "Review",
       locked: "Locked",
       learning: "Learning",
+      steady: "Steady",
+      "not-covered": "Not covered",
     }[item.recommendationState] || "Advisor";
+    const statePillClass = item.recommendationState === "ready" || item.recommendationState === "steady"
+      ? "ok"
+      : item.recommendationState === "locked" || item.recommendationState === "warning"
+        ? "warning"
+        : "unknown";
     return `
       <article class="dosing-card ${statusClass}">
         <div class="dosing-card-head">
           <span>${this._escape(item.label)}</span>
           <strong>${this._escape(currentText)}</strong>
         </div>
-        <div class="pill ${item.recommendationState === "ready" ? "ok" : item.recommendationState === "locked" ? "warning" : "unknown"}">${this._escape(stateLabel)}</div>
+        <div class="pill ${statePillClass}">${this._escape(stateLabel)}</div>
         <ul class="dosing-card-lines">
           <li><span>Product assumption</span><small>${this._escape(item.productAssumption || product.label)}</small></li>
           <li><span>Trend</span><small>${this._escape(item.trendText)}</small></li>
