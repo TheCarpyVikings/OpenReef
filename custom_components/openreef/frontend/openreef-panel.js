@@ -3387,6 +3387,8 @@ class OpenReefPanel extends HTMLElement {
         locks.push(`Current pH ${this._format(kalkContext.phValue, 2)} is at or above the kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser.`);
       } else if (kalkContext.phStatus === "near") {
         warnings.push(`Current pH ${this._format(kalkContext.phValue, 2)} is close to the kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser without reviewing the pH pattern.`);
+      } else {
+        warnings.push(`pH guard OK: current pH ${this._format(kalkContext.phValue, 2)} is below the kalk max pH ${this._format(kalkContext.maxPh, 2)}.`);
       }
       if (!system.secondaryDelivery) warnings.push("Choose how kalkwasser is delivered: ATO, dosing pump, or manual top-off.");
       if (!kalkContext.capacityConfigured) {
@@ -3402,6 +3404,7 @@ class OpenReefPanel extends HTMLElement {
     const actionWarnings = warnings.filter((warning) => {
       if (warning.startsWith("Kalkwasser is high-pH and evaporation-limited")) return false;
       if (warning.startsWith("Kalkwasser does not maintain")) return false;
+      if (warning.startsWith("pH guard OK:")) return false;
       if (warning.includes(" is not a ") && warning.includes(" dosing product")) return false;
       return true;
     });
