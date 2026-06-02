@@ -861,7 +861,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         dosing["enabled"] = bool(dosing.get("enabled", True))
         raw_parameters = dosing.get("parameters")
         raw_parameters = raw_parameters if isinstance(raw_parameters, dict) else {}
-        parameters: dict[str, dict[str, float]] = {}
+        parameters: dict[str, dict[str, Any]] = {}
         known_parameters = set(DOSING_PARAMETERS)
         for optional_parameter in ("nitrate", "phosphate"):
             if optional_parameter in raw_parameters:
@@ -869,7 +869,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         for parameter in sorted(known_parameters):
             raw = raw_parameters.get(parameter)
             raw = raw if isinstance(raw, dict) else {}
-            entry: dict[str, float] = {}
+            entry: dict[str, Any] = {
+                "productPreset": str(raw.get("productPreset", "custom"))[:120],
+            }
             for field in (
                 "doserMlPerDay",
                 "potencyPerMl",

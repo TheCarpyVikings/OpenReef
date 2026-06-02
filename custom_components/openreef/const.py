@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 28
-INTEGRATION_VERSION = "0.4.52"
+CORE_SCHEMA_VERSION = 29
+INTEGRATION_VERSION = "0.4.53"
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -539,6 +539,7 @@ DEFAULT_CORE_CONFIG = {
         "enabled": True,
         "parameters": {
             parameter: {
+                "productPreset": "custom",
                 "doserMlPerDay": 0,
                 "potencyPerMl": 0,
                 "target": 0,

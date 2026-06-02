@@ -1169,7 +1169,11 @@ class OpenReefPanel extends HTMLElement {
         } else {
           this._config.dosing.parameters = this._config.dosing.parameters || {};
           this._config.dosing.parameters[id] = this._config.dosing.parameters[id] || {};
-          this._config.dosing.parameters[id][field] = Math.max(0, Number(value) || 0);
+          if (field === "productPreset") {
+            this._applyDosingProductPreset(id, value);
+          } else {
+            this._config.dosing.parameters[id][field] = Math.max(0, Number(value) || 0);
+          }
         }
       }
       if (scope === "manual-tests") {
@@ -1198,7 +1202,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
         && event.type === "change"
       ) this._render();
     };
@@ -2800,6 +2804,123 @@ class OpenReefPanel extends HTMLElement {
     return this._config?.dosing?.parameters?.[sensorId] || {};
   }
 
+  _dosingProductPresets(sensorId) {
+    const exact = (id, label, brand, productDoseMl, productVolumeLitres, productRaise, note) => ({
+      id,
+      label,
+      brand,
+      method: "exact",
+      productDoseMl,
+      productVolumeLitres,
+      productRaise,
+      note,
+    });
+    const maintenance = (id, label, brand, note) => ({
+      id,
+      label,
+      brand,
+      method: "maintenance",
+      note,
+    });
+    const common = [
+      {
+        id: "custom",
+        label: "Custom / enter bottle instructions",
+        brand: "Custom",
+        method: "custom",
+        note: "Use this for any product not listed, a mixed solution, or your own known strength.",
+      },
+      maintenance(
+        "tropic_marin_all_for_reef",
+        "Tropic Marin All-For-Reef",
+        "Tropic Marin",
+        "Balanced all-in-one system. OpenReef tracks consumption and suggests review direction, but does not use it as a one-off correction calculator.",
+      ),
+      maintenance(
+        "ati_essentials_pro",
+        "ATI Essentials Pro",
+        "ATI",
+        "Balanced two-part system adjusted from alkalinity consumption and regular testing. Use current dose and trends for advice.",
+      ),
+      maintenance(
+        "aquaforest_component_123",
+        "Aquaforest Component 1+2+3+",
+        "Aquaforest",
+        "Balanced three-part method normally dosed in equal parts and tuned from test results.",
+      ),
+      maintenance(
+        "fauna_marin_balling_light",
+        "Fauna Marin Balling Light",
+        "Fauna Marin",
+        "Balling method with recipe-dependent solution strength. Use custom strength if you know the exact concentration.",
+      ),
+      maintenance(
+        "brs_pharma_two_part",
+        "BRS Pharma 2-Part / DIY Recipe",
+        "Bulk Reef Supply",
+        "Recipe strength depends on how the solution was mixed. Select Custom and enter your bottle/recipe strength for exact mL advice.",
+      ),
+      maintenance(
+        "brightwell_reef_code",
+        "Brightwell Reef Code A/B",
+        "Brightwell",
+        "Two-part system. Confirm the bottle concentration for your exact product and use Custom if you want correction-dose math.",
+      ),
+    ];
+    const specific = {
+      calcium: [
+        exact("red_sea_foundation_a", "Red Sea Foundation A / Calcium+", "Red Sea", 1, 100, 2, "Bottle-style preset: 1 mL per 100 L raises calcium by 2 ppm. Confirm your bottle before acting."),
+        exact("seachem_reef_fusion_1", "Seachem Reef Fusion 1", "Seachem", 1, 94.6, 4, "Manufacturer-style preset: 1 mL per 25 US gal raises calcium by about 4 mg/L."),
+      ],
+      alkalinity: [
+        exact("red_sea_foundation_b", "Red Sea Foundation B / KH-Alkalinity", "Red Sea", 1, 100, 0.1, "Bottle-style preset: 1 mL per 100 L raises alkalinity by 0.1 dKH. Confirm your bottle before acting."),
+        exact("seachem_reef_fusion_2", "Seachem Reef Fusion 2", "Seachem", 1, 94.6, 0.49, "Converted preset: 1 mL per 25 US gal raises alkalinity by about 0.176 meq/L, roughly 0.49 dKH."),
+      ],
+      magnesium: [
+        exact("red_sea_foundation_c", "Red Sea Foundation C / Magnesium", "Red Sea", 1, 100, 1, "Bottle-style preset: 1 mL per 100 L raises magnesium by 1 ppm. Confirm your bottle before acting."),
+      ],
+    };
+    return [...common, ...(specific[sensorId] || [])];
+  }
+
+  _dosingProductPreset(sensorId, config = this._dosingParamConfig(sensorId)) {
+    const presetId = typeof config === "string" ? config : config?.productPreset || "custom";
+    return this._dosingProductPresets(sensorId).find((preset) => preset.id === presetId) || this._dosingProductPresets(sensorId)[0];
+  }
+
+  _applyDosingProductPreset(sensorId, presetId) {
+    this._config.dosing = this._config.dosing || { enabled: true, parameters: {} };
+    this._config.dosing.parameters = this._config.dosing.parameters || {};
+    const cfg = this._config.dosing.parameters[sensorId] || {};
+    const preset = this._dosingProductPreset(sensorId, presetId);
+    cfg.productPreset = preset.id;
+    if (preset.method === "exact") {
+      cfg.productDoseMl = preset.productDoseMl;
+      cfg.productVolumeLitres = preset.productVolumeLitres;
+      cfg.productRaise = preset.productRaise;
+      cfg.potencyPerMl = 0;
+    }
+    if (preset.method === "maintenance") {
+      cfg.productDoseMl = 0;
+      cfg.productVolumeLitres = 0;
+      cfg.productRaise = 0;
+      cfg.potencyPerMl = 0;
+    }
+    this._config.dosing.parameters[sensorId] = cfg;
+  }
+
+  _dosingProductOptions(sensorId, selectedId) {
+    return this._dosingProductPresets(sensorId)
+      .map((preset) => `<option value="${this._escape(preset.id)}" ${preset.id === selectedId ? "selected" : ""}>${this._escape(preset.label)}</option>`)
+      .join("");
+  }
+
+  _dosingPresetNumber(config, preset, field) {
+    const value = Number(config?.[field]) || 0;
+    if (value > 0) return value;
+    return preset?.method === "exact" ? Number(preset[field]) || 0 : 0;
+  }
+
   _dosingActiveParameters() {
     return this._dosingParameterIds()
       .map((id) => {
@@ -2889,6 +3010,7 @@ class OpenReefPanel extends HTMLElement {
       confidenceText: detail,
       source: options.source || "unknown",
       potencyInfo: null,
+      productInfo: this._dosingProductPreset(sensorId),
       stability: { stars: "", label: "Learning baseline", status: "learning" },
     };
   }
@@ -2989,11 +3111,11 @@ class OpenReefPanel extends HTMLElement {
     return { confident: true, detail: "Consumption trend is strong enough for advisory dosing." };
   }
 
-  _dosingCalculatedPotency(config) {
+  _dosingCalculatedPotency(config, preset = null) {
     const tankVolume = Number(config?.tankVolumeLitres) || 0;
-    const productDose = Number(config?.productDoseMl) || 0;
-    const productVolume = Number(config?.productVolumeLitres) || 0;
-    const productRaise = Number(config?.productRaise) || 0;
+    const productDose = this._dosingPresetNumber(config, preset, "productDoseMl");
+    const productVolume = this._dosingPresetNumber(config, preset, "productVolumeLitres");
+    const productRaise = this._dosingPresetNumber(config, preset, "productRaise");
     if (tankVolume <= 0 || productDose <= 0 || productVolume <= 0 || productRaise <= 0) {
       return { value: 0, complete: false };
     }
@@ -3004,13 +3126,21 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _dosingEffectivePotency(sensorId, sensor, config = this._dosingParamConfig(sensorId)) {
+    const preset = this._dosingProductPreset(sensorId, config);
     const manual = Number(config?.potencyPerMl) || 0;
-    const calculated = this._dosingCalculatedPotency(config);
+    const calculated = this._dosingCalculatedPotency(config, preset);
     if (manual > 0) {
       return { value: manual, source: "manual", label: `Manual override: ${this._format(manual, 4)} ${sensor.unit || "units"}/mL` };
     }
+    if (preset.method === "maintenance") {
+      return { value: 0, source: "maintenance", label: `${preset.label}: maintenance-style product; tune the daily dose from tests and consumption trend` };
+    }
     if (calculated.value > 0) {
-      return { value: calculated.value, source: "calculator", label: `Calculated: ${this._format(calculated.value, 4)} ${sensor.unit || "units"}/mL in this tank` };
+      const source = preset.method === "exact" ? "preset" : "calculator";
+      return { value: calculated.value, source, label: `${preset.method === "exact" ? `${preset.label}: ` : ""}Calculated ${this._format(calculated.value, 4)} ${sensor.unit || "units"}/mL in this tank` };
+    }
+    if (preset.method === "exact") {
+      return { value: 0, source: "preset-incomplete", label: `${preset.label}: add tank volume to calculate exact mL advice` };
     }
     return { value: 0, source: "missing", label: "No solution strength set" };
   }
@@ -3183,6 +3313,7 @@ class OpenReefPanel extends HTMLElement {
       confidenceText: confidence.detail,
       source,
       potencyInfo,
+      productInfo: this._dosingProductPreset(sensorId, paramConfig),
       stability,
     };
   }
@@ -3231,6 +3362,7 @@ class OpenReefPanel extends HTMLElement {
           : "ok";
     const currentText = Number.isFinite(item.current) ? `${this._format(item.current, item.digits)}${unitSuffix}` : "--";
     const stabilityText = `${item.stability.stars ? `${item.stability.stars} ` : ""}${item.stability.label}`;
+    const product = item.productInfo || this._dosingProductPreset(item.id);
     return `
       <article class="dosing-card ${statusClass}">
         <div class="dosing-card-head">
@@ -3241,6 +3373,7 @@ class OpenReefPanel extends HTMLElement {
           <li><span>Trend</span><small>${this._escape(item.trendText)}</small></li>
           ${item.projectionText ? `<li><span>Projection</span><small>${this._escape(item.projectionText)}</small></li>` : ""}
           <li><span>Advice</span><small>${this._escape(item.doseText)}</small></li>
+          <li><span>Dosing product</span><small>${this._escape(product.label)}</small></li>
           <li><span>Solution strength</span><small>${this._escape(item.potencyInfo?.label || "No solution strength set")}</small></li>
           <li><span>Stability</span><small>${this._escape(stabilityText)}</small></li>
         </ul>
@@ -3720,9 +3853,10 @@ class OpenReefPanel extends HTMLElement {
       ? this._dosingActiveParameters().map(([id, sensor]) => {
         const item = this._consumptionItem(id, sensor);
         const potency = this._dosingEffectivePotency(id, sensor);
+        const product = this._dosingProductPreset(id);
         const status = item.status === "learning" ? "learning" : item.status;
         const advice = item.projectionText ? `${item.trendText} ${item.projectionText}` : item.trendText;
-        return `- ${item.label}: ${status}, ${advice} Advice: ${item.doseText} Solution strength: ${potency.label}.`;
+        return `- ${item.label}: ${status}, product ${product.label}, ${advice} Advice: ${item.doseText} Solution strength: ${potency.label}.`;
       })
       : ["- disabled"];
     const interlocks = this._config.interlocks || {};
@@ -6029,6 +6163,11 @@ class OpenReefPanel extends HTMLElement {
         const name = sensor.label || id;
         const potencyInfo = this._dosingEffectivePotency(id, sensor, cfg);
         const productUnit = sensor.unit || "units";
+        const preset = this._dosingProductPreset(id, cfg);
+        const presetTone = preset.method === "exact" ? "Exact-strength preset" : preset.method === "maintenance" ? "Maintenance-style product" : "Custom product";
+        const productDose = this._dosingPresetNumber(cfg, preset, "productDoseMl");
+        const productVolume = this._dosingPresetNumber(cfg, preset, "productVolumeLitres");
+        const productRaise = this._dosingPresetNumber(cfg, preset, "productRaise");
         return `
           <section class="mapping-section">
             <div>
@@ -6036,20 +6175,25 @@ class OpenReefPanel extends HTMLElement {
               <h4>Optional: enter your ${this._escape(name.toLowerCase())} dosing so OpenReef can give exact millilitre advice. Leave strength blank for rate-only advice.</h4>
             </div>
             <div class="mini-grid">
+              <label>Dosing product
+                <select data-scope="dosing" data-id="${this._escape(id)}" data-field="productPreset">
+                  ${this._dosingProductOptions(id, preset.id)}
+                </select>
+              </label>
               <label>Current dose (mL/day)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="doserMlPerDay" value="${this._escape(cfg.doserMlPerDay ?? 0)}"></label>
               <label>Target${this._escape(unitLabel)}<input type="number" step="0.01" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="target" value="${this._escape(cfg.target ?? 0)}"></label>
             </div>
             <div class="notice compact-notice">
-              <strong>Solution strength calculator.</strong> If the bottle says “dose 10 mL to raise 100 L by 1 ${this._escape(productUnit)}”, enter 10, 100, and 1. Manual override wins if you know the exact ${this._escape(productUnit)}/mL for your tank.
+              <strong>${this._escape(presetTone)}.</strong> ${this._escape(preset.note)} ${preset.method === "exact" ? "Enter your real water volume to calculate mL advice." : "OpenReef will still use your test history to show consumption and direction."}
             </div>
             <div class="mini-grid">
               <label>Tank volume (L)<input type="number" step="1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="tankVolumeLitres" value="${this._escape(cfg.tankVolumeLitres ?? 0)}"></label>
-              <label>Bottle dose (mL)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productDoseMl" value="${this._escape(cfg.productDoseMl ?? 0)}"></label>
-              <label>Bottle volume (L)<input type="number" step="1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productVolumeLitres" value="${this._escape(cfg.productVolumeLitres ?? 0)}"></label>
-              <label>Bottle raises by${this._escape(unitLabel)}<input type="number" step="0.0001" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productRaise" value="${this._escape(cfg.productRaise ?? 0)}"></label>
+              <label>Bottle dose (mL)<input type="number" step="0.1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productDoseMl" value="${this._escape(productDose)}"></label>
+              <label>Bottle volume (L)<input type="number" step="1" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productVolumeLitres" value="${this._escape(productVolume)}"></label>
+              <label>Bottle raises by${this._escape(unitLabel)}<input type="number" step="0.0001" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="productRaise" value="${this._escape(productRaise)}"></label>
               <label>Manual strength override (${this._escape(productUnit)}/mL)<input type="number" step="0.0001" min="0" data-scope="dosing" data-id="${this._escape(id)}" data-field="potencyPerMl" value="${this._escape(cfg.potencyPerMl ?? 0)}"></label>
             </div>
-            <p class="hint">${this._escape(potencyInfo.label)}.</p>
+            <p class="hint">${this._escape(potencyInfo.label)}. Always verify against your bottle and confirm with a fresh test before changing a doser.</p>
           </section>
         `;
       }).join("") : `<p class="muted">Map alkalinity, calcium, or magnesium sensors, or add at least two manual results for a parameter, to use the Dosing Advisor.</p>`}
