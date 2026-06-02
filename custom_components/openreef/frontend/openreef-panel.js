@@ -37,6 +37,7 @@ class OpenReefPanel extends HTMLElement {
     this._onboardingChecked = false;
     this._avatarPoses = {};
     this._stickerReady = false;
+    this._walkReady = false;
     this._buddy = { dismissed: false, expanded: false, lastKey: "", timer: null };
   }
 
@@ -3265,6 +3266,7 @@ class OpenReefPanel extends HTMLElement {
     if (totalChange < minSignal) {
       return {
         confident: false,
+        reason: "low_signal",
         detail: `Net movement is smaller than the useful signal for this test (${this._format(minSignal, digits)}${unitSuffix}). No dosing change suggested yet.`,
       };
     }
@@ -3362,8 +3364,11 @@ class OpenReefPanel extends HTMLElement {
     const warnings = [];
     let kalkContext = null;
     if (!product?.id) locks.push("Choose a primary dosing system or secondary supplement.");
-    if (product?.id && !this._dosingProductSupportsParameter(product, sensorId)) {
-      locks.push(`${product.label} is not a ${sensor.label || sensorId} dosing product.`);
+    const productCoversParameter = !product?.id || this._dosingProductSupportsParameter(product, sensorId);
+    if (product?.id && !productCoversParameter) {
+      warnings.push(product.classId === "kalkwasser"
+        ? `Kalkwasser does not maintain ${sensor.label || sensorId}; use a magnesium-specific product or water-change plan for magnesium drift.`
+        : `${product.label} is not a ${sensor.label || sensorId} dosing product.`);
     }
     if (!system.safetyAcknowledged) locks.push("Acknowledge that OpenReef is advisory only and never doses for you.");
     if (potencyInfo.value <= 0 && ["preset", "calculator", "manual"].includes(potencyInfo.source)) locks.push("Complete product strength details.");
@@ -3374,9 +3379,6 @@ class OpenReefPanel extends HTMLElement {
     if (product?.classId === "kalkwasser") {
       kalkContext = this._kalkSafetyContext(system);
       warnings.push("Kalkwasser is high-pH and evaporation-limited. Do not use it as a one-off correction bolus.");
-      if (!this._dosingProductSupportsParameter(product, sensorId)) {
-        warnings.push(`Kalkwasser does not maintain ${sensor.label || sensorId}; use a magnesium-specific product or water-change plan for magnesium drift.`);
-      }
       if (!kalkContext.hasPhGuard) {
         warnings.push("No mapped pH guard is available for kalkwasser context.");
       } else if (!Number.isFinite(kalkContext.phValue)) {
@@ -3397,11 +3399,18 @@ class OpenReefPanel extends HTMLElement {
       }
     }
     if (source === "manual" && !manual.fresh) locks.push(manual.detail);
-    const status = locks.length ? "locked" : warnings.length ? "warning" : "ready";
+    const actionWarnings = warnings.filter((warning) => {
+      if (warning.startsWith("Kalkwasser is high-pH and evaporation-limited")) return false;
+      if (warning.startsWith("Kalkwasser does not maintain")) return false;
+      if (warning.includes(" is not a ") && warning.includes(" dosing product")) return false;
+      return true;
+    });
+    const status = locks.length ? "locked" : actionWarnings.length ? "warning" : "ready";
     return {
       status,
       locks,
       warnings,
+      actionWarnings,
       manual,
       currentDose,
       tankVolume,
@@ -3492,6 +3501,7 @@ class OpenReefPanel extends HTMLElement {
     const totalChange = Math.abs(slope) * span;
     const confidence = this._consumptionConfidence(sensorId, sensor, source, days, fit, span, totalChange);
     const confident = confidence.confident;
+    const noUsefulMovement = confidence.reason === "low_signal";
 
     const latestAvg = days[days.length - 1].avg;
     const liveValue = this._number(sensor.entity_id);
@@ -3533,6 +3543,7 @@ class OpenReefPanel extends HTMLElement {
     let reviewDoseMlPerDay = null;
     let correctionText = "";
     const productSupportsParameter = !productInfo.id || this._dosingProductSupportsParameter(productInfo, sensorId);
+    const unsupportedProduct = productInfo.id && !productSupportsParameter;
     if (potency > 0 && safety.canExactMaintenance) {
       const cappedHoldOffsetUnits = Math.max(-maxDailyAdjustmentUnits, Math.min(holdOffsetUnits, maxDailyAdjustmentUnits));
       extraMlPerDay = cappedHoldOffsetUnits / potency;
@@ -3555,8 +3566,10 @@ class OpenReefPanel extends HTMLElement {
     const rateDigits = Math.max(digits, 2);
     const rateText = `${this._format(Math.abs(slope), rateDigits)}${unitSuffix}/day`;
     let maintenanceText;
-    if (!productSupportsParameter) {
+    if (unsupportedProduct) {
       maintenanceText = `${productInfo.label} does not maintain ${label}. Track ${label} separately and choose a ${label.toLowerCase()} supplement, water-change plan, or primary dosing system if this keeps drifting.`;
+    } else if (noUsefulMovement) {
+      maintenanceText = "Movement is below OpenReef's useful signal for this test. No dosing change suggested.";
     } else if (!confident) {
       maintenanceText = `${confidence.detail} No dosing change suggested yet.`;
     } else if (!productInfo.id) {
@@ -3585,8 +3598,10 @@ class OpenReefPanel extends HTMLElement {
     }
 
     if (!correctionText) {
-      if (!productSupportsParameter) {
+      if (unsupportedProduct) {
         correctionText = `No ${label} correction advice: ${productInfo.label} is not a ${label} dosing product.`;
+      } else if (noUsefulMovement) {
+        correctionText = "No correction advice because recent movement is below the useful signal.";
       } else if (!confident) {
         correctionText = "Correction dosing is locked until the trend is trustworthy.";
       } else if (!target) {
@@ -3607,7 +3622,7 @@ class OpenReefPanel extends HTMLElement {
       : safety.warnings.length
         ? safety.warnings.join(" ")
         : "Ready for advisory guidance only. OpenReef will not control a doser.";
-    const doNotDoseText = !productSupportsParameter
+    const doNotDoseText = unsupportedProduct
       ? `Do not use ${productInfo.label} to adjust ${label}.`
       : target > 0 && value > target
       ? "Do not add a chemical correction while the current reading is above target."
@@ -3623,6 +3638,7 @@ class OpenReefPanel extends HTMLElement {
     }
     if (safety.status === "locked" && status === "ok") status = "learning";
     if (safety.status === "warning" && status === "ok") status = "warning";
+    if (unsupportedProduct && status === "learning") status = "ok";
 
     const sourceText = source === "manual" ? "from manual test history" : "net of your current dosing";
     const trendText = confident
@@ -3661,7 +3677,19 @@ class OpenReefPanel extends HTMLElement {
       source,
       potencyInfo,
       productInfo,
-      recommendationState: safety.status === "locked" ? "locked" : !confident ? "learning" : safety.status === "warning" ? "warning" : potency > 0 ? "ready" : "guidance",
+      recommendationState: unsupportedProduct
+        ? "not-covered"
+        : safety.status === "locked"
+          ? "locked"
+          : safety.status === "warning"
+            ? "warning"
+            : noUsefulMovement
+              ? "steady"
+              : !confident
+                ? "learning"
+                : potency > 0
+                  ? "ready"
+                  : "guidance",
       productAssumption: `${productInfo.label} (${this._dosingProductClassLabel(productInfo.classId)})`,
       safety,
       stability,
@@ -4687,6 +4715,40 @@ class OpenReefPanel extends HTMLElement {
     img.src = `${this._avatarBase()}apex-throne.png`;
   }
 
+  _probeWalk() {
+    if (this._walkReady || this._walkProbing) return;
+    this._walkProbing = true;
+    // Preload all four so frame swaps are instant once the cycle runs.
+    ["walk-1", "walk-2", "walk-3", "walk-4"].forEach((f) => { const i = new Image(); i.src = `${this._avatarBase()}${f}.png`; });
+    const img = new Image();
+    img.onload = () => { this._walkReady = true; this._walkProbing = false; };
+    img.onerror = () => { this._walkProbing = false; };
+    img.src = `${this._avatarBase()}walk-1.png`;
+  }
+
+  _runWalk(dx) {
+    if (!this._onboarding) return;
+    clearInterval(this._onboarding.walkInterval);
+    clearTimeout(this._onboarding.walkEndTimer);
+    const walkingNow = this._onboarding.walking && this._walkReady && window.innerWidth > 640;
+    if (!walkingNow) { this._onboarding.walking = false; return; }
+    const img = this.shadowRoot.querySelector(".or-walk-img");
+    // Frames face LEFT; flip when heading right.
+    if (img) img.style.transform = dx > 4 ? "scaleX(-1)" : "none";
+    this._onboarding.walkFrame = 0;
+    this._onboarding.walkInterval = setInterval(() => {
+      const el = this.shadowRoot.querySelector(".or-walk-img");
+      if (!el) return;
+      this._onboarding.walkFrame = (this._onboarding.walkFrame + 1) % 4;
+      el.src = `${this._avatarBase()}walk-${this._onboarding.walkFrame + 1}.png`;
+    }, 140);
+    this._onboarding.walkEndTimer = setTimeout(() => {
+      clearInterval(this._onboarding.walkInterval);
+      this._onboarding.walkInterval = null;
+      if (this._onboarding) { this._onboarding.walking = false; this._render(); }
+    }, 640);
+  }
+
   _avatarMarkup(pose) {
     if (this._avatarPoses[pose]) {
       return `<img class="or-avatar-img" src="${this._avatarBase()}${this._escape(pose)}.png" alt="">`;
@@ -4733,12 +4795,17 @@ class OpenReefPanel extends HTMLElement {
     if (!steps.length) return;
     this._probeAvatar();
     this._probeSticker();
-    this._onboarding = { active: true, step: 0, steps, scrolledStep: -1 };
+    this._probeWalk();
+    this._onboarding = { active: true, step: 0, steps, scrolledStep: -1, walking: false, walkFrame: 0, walkInterval: null, walkEndTimer: null };
     this._render();
   }
 
   _endOnboarding(markDone = true) {
     if (markDone) this._setOnboardingDone();
+    if (this._onboarding) {
+      clearInterval(this._onboarding.walkInterval);
+      clearTimeout(this._onboarding.walkEndTimer);
+    }
     this._onboarding = null;
     this._render();
   }
@@ -4747,12 +4814,15 @@ class OpenReefPanel extends HTMLElement {
     if (!this._onboarding) return;
     if (this._onboarding.step >= this._onboarding.steps.length - 1) { this._endOnboarding(true); return; }
     this._onboarding.step += 1;
+    this._onboarding.walking = true;
     this._render();
   }
 
   _onboardingBack() {
     if (!this._onboarding) return;
-    this._onboarding.step = Math.max(0, this._onboarding.step - 1);
+    if (this._onboarding.step === 0) return;
+    this._onboarding.step -= 1;
+    this._onboarding.walking = true;
     this._render();
   }
 
@@ -4824,6 +4894,7 @@ class OpenReefPanel extends HTMLElement {
     top = Math.round(top);
     // First placement snaps; later steps animate the walk between cards.
     const firstPlace = !this._onboarding.pos;
+    const prevLeft = this._onboarding.pos ? this._onboarding.pos.left : left;
     if (firstPlace) narrator.style.transition = "none";
     narrator.style.left = `${left}px`;
     narrator.style.top = `${top}px`;
@@ -4832,6 +4903,7 @@ class OpenReefPanel extends HTMLElement {
     narrator.style.transform = "none";
     if (firstPlace) { void narrator.offsetWidth; narrator.style.transition = ""; }
     this._onboarding.pos = { left, top };
+    this._runWalk(left - prevLeft);
   }
 
   _onboardingOverlay() {
@@ -4847,11 +4919,16 @@ class OpenReefPanel extends HTMLElement {
     const seed = window.innerWidth > 640 && ob.pos
       ? ` style="left:${ob.pos.left}px;top:${ob.pos.top}px;right:auto;bottom:auto;transform:none;"`
       : "";
+    // While moving between cards (desktop, frames loaded) show the walk cycle; otherwise the pose.
+    const walkingNow = ob.walking && this._walkReady && window.innerWidth > 640;
+    const avatarInner = walkingNow
+      ? `<img class="or-avatar-img or-walk-img" src="${this._avatarBase()}walk-${(ob.walkFrame % 4) + 1}.png" alt="">`
+      : this._avatarMarkup(step.pose);
     return `
       <div class="or-onboard" role="dialog" aria-label="OpenReef guided tour">
         <div class="or-spotlight"></div>
         <div class="or-narrator"${seed}>
-          <div class="or-avatar pose-${this._escape(step.pose)}">${this._avatarMarkup(step.pose)}</div>
+          <div class="or-avatar pose-${this._escape(step.pose)}">${avatarInner}</div>
           <div class="or-bubble">
             <div class="or-bubble-top">
               <span class="eyebrow">Your guide · ${idx + 1}/${steps.length}</span>
@@ -8129,6 +8206,7 @@ class OpenReefPanel extends HTMLElement {
         .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(520px, calc(100vw - 28px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; transition: left .6s cubic-bezier(.34,.6,.26,1), top .6s cubic-bezier(.34,.6,.26,1); }
         .or-avatar { flex: 0 0 auto; width: 176px; display: grid; place-items: end center; }
         .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); animation: or-bob 2.6s ease-in-out infinite; }
+        .or-walk-img { animation: none; transform-origin: center bottom; }
         @keyframes or-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
         .or-avatar-ph { width: 168px; height: 168px; border-radius: 50%; display: grid; place-items: center; font-size: 74px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
         .or-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 16px; padding: 18px 20px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }

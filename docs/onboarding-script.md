@@ -287,9 +287,14 @@ Before adding or editing a joke, confirm the claim against a source like the abo
 - **Phase 2 v1 (done):** the guide **walks up to each spotlighted card** on desktop — the narrator
   glides (CSS `left`/`top` transition) to float beside/below the anchored card, with a subtle
   `or-bob` idle bob; it walks continuously between cards (last position seeded into the next
-  render). Mobile (≤640) keeps the docked stacked bar. No new art (glide, not a sprite walk).
-  - Future polish: a real sprite-sheet walk cycle; smarter bubble side-placement; facing flip;
-    smooth (non-instant) scroll while walking.
+  render). Mobile (≤640) keeps the docked stacked bar.
+- **Phase 2 v2 (done):** a **real 4-frame walk cycle** during transit. The narrator slides while a
+  JS interval cycles `walk-1..4.png` (~140ms/frame) on the `.or-walk-img`, **mirrored** (scaleX)
+  when heading right; on arrival it switches back to the frontal talking pose. Gated on the walk
+  frames existing (`_walkReady`) — falls back to the plain glide otherwise; desktop only. (Note: in
+  side profile the two strides read identically, so no contralateral "right-leg-forward" frame is
+  needed — spread→passing→spread→passing is the whole cycle.)
+  - Future polish: smarter bubble side-placement; smooth (non-instant) scroll while walking.
 - **Phase 3 v1 (done):** a **reactive corner buddy** on Mission Control (on by default, session
   hide via ×). His pose + line are driven by the existing **Reef Health verdict** (`_reefHealthScore`
   → `_buddyReaction`), so reactions are always accurate: celebrate/chilled at grade A, point at a
