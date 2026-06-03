@@ -21,7 +21,11 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_point_in_time, async_track_time_change
+from homeassistant.helpers.event import (
+    async_track_point_in_time,
+    async_track_time_change,
+    async_track_time_interval,
+)
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
@@ -57,6 +61,13 @@ from .const import (
     SERVICE_APPLY_MODE,
     SERVICE_ARM_EQUIPMENT,
     SERVICE_DISARM_EQUIPMENT,
+    FEEDS_SUBDIR,
+    FEEDWATCH_DEFAULT_CADENCE,
+    FEEDWATCH_DEFAULT_RETENTION,
+    FEEDWATCH_MAX_CADENCE,
+    FEEDWATCH_MAX_MINUTES,
+    FEEDWATCH_MAX_RETENTION,
+    FEEDWATCH_MIN_CADENCE,
     SERVICE_RECORD_MANUAL_READING,
     TANK_PROFILE_CHOICES,
     TIMELAPSE_DEFAULT_CADENCE,
@@ -94,6 +105,8 @@ CAPTURE_LAST = "capture_last"
 CAPTURE_INFLIGHT = "capture_inflight"
 TIMELAPSE_UNSUB = "timelapse_unsub"
 TIMELAPSE_LAST = "timelapse_last"
+FEEDWATCH_UNSUB = "feedwatch_unsub"
+FEEDWATCH_SESSION = "feedwatch_session"
 # Maps an OpenReef event type -> the user-configurable trigger toggle that gates it.
 CAPTURE_TRIGGER_FIELD = {
     "critical_alert": "criticalAlerts",
@@ -832,6 +845,34 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         if overlay.get("position") in ("top-left", "top-right", "bottom-left", "bottom-right")
         else "bottom-left"
     )
+
+    feedwatch = config.setdefault("feedWatch", {})
+    if not isinstance(feedwatch, dict):
+        feedwatch = {}
+        config["feedWatch"] = feedwatch
+    feedwatch["enabled"] = bool(feedwatch.get("enabled", False))
+    fw_camera = feedwatch.get("cameraId")
+    feedwatch["cameraId"] = (
+        fw_camera if isinstance(fw_camera, str) and fw_camera in known_cameras else ""
+    )
+    feedwatch["cadenceSeconds"] = _clamp_int(
+        feedwatch.get("cadenceSeconds"),
+        FEEDWATCH_DEFAULT_CADENCE,
+        FEEDWATCH_MIN_CADENCE,
+        FEEDWATCH_MAX_CADENCE,
+    )
+    feedwatch["retentionSessions"] = _clamp_int(
+        feedwatch.get("retentionSessions"),
+        FEEDWATCH_DEFAULT_RETENTION,
+        1,
+        FEEDWATCH_MAX_RETENTION,
+    )
+    feed_sessions = config.get("feedSessions")
+    if not isinstance(feed_sessions, list):
+        feed_sessions = []
+    config["feedSessions"] = [s for s in feed_sessions if isinstance(s, dict)][
+        : feedwatch["retentionSessions"]
+    ]
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -1788,6 +1829,12 @@ def _clear_wavemaker_reminders(hass: HomeAssistant) -> None:
 
 def _clear_timelapse(hass: HomeAssistant) -> None:
     unsub = hass.data.setdefault(DOMAIN, {}).pop(TIMELAPSE_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+def _clear_feedwatch(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(FEEDWATCH_UNSUB, None)
     if unsub is not None:
         unsub()
 
@@ -2908,12 +2955,23 @@ async def _async_apply_mode(
     )
     await _async_save_config(hass, entry, config)
 
+    # Feed-watch (Phase D) supersedes the single Phase A feed clip: start a snapshot burst
+    # when entering feed (if enabled), and finalize any active session when leaving feed.
+    feedwatch_cfg = config.get("feedWatch", {})
+    feedwatch_on = isinstance(feedwatch_cfg, dict) and feedwatch_cfg.get("enabled", False)
+    if mode_id != "feed" and hass.data.setdefault(DOMAIN, {}).setdefault(
+        FEEDWATCH_SESSION, {}
+    ).get(entry.entry_id):
+        await _async_stop_feed_watch(hass, entry)
+    elif mode_id == "feed" and feedwatch_on:
+        await _async_start_feed_watch(hass, entry)
+
     # One capture per mode action, most-specific enabled trigger wins (feed > safety > mode).
     capture_triggers = config.get("capture", {}).get("triggers", {})
     if not isinstance(capture_triggers, dict):
         capture_triggers = {}
     capture_candidates: list[tuple[str, str, str]] = []
-    if mode_id == "feed":
+    if mode_id == "feed" and not feedwatch_on:
         capture_candidates.append(("feed_mode", "feedMode", f"{mode_label} mode"))
     if return_pump_turned_off:
         capture_candidates.append(
@@ -3752,6 +3810,173 @@ async def _async_capture_timelapse_frame(
         return None
 
 
+# --- Feed-watch (Phase D): a snapshot burst across the Feed-mode window ---
+
+def _feeds_dir(hass: HomeAssistant, session_id: str) -> Path:
+    """Per-session subdir of the captures dir holding (and serving) feed-watch frames."""
+    return _captures_dir(hass) / FEEDS_SUBDIR / session_id
+
+
+async def _async_delete_feed_dir(hass: HomeAssistant, session_id: str) -> None:
+    """Best-effort remove of a feed session's frame directory."""
+    directory = _feeds_dir(hass, session_id)
+
+    def _remove() -> None:
+        if not directory.is_dir():
+            return
+        for child in directory.iterdir():
+            try:
+                child.unlink()
+            except OSError:
+                pass
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+    await hass.async_add_executor_job(_remove)
+
+
+async def _async_stop_feed_watch(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
+    """Finalize the active feed-watch session (if any) and stop the burst timer."""
+    _clear_feedwatch(hass)
+    state = (
+        hass.data.setdefault(DOMAIN, {})
+        .setdefault(FEEDWATCH_SESSION, {})
+        .pop(entry.entry_id, None)
+    )
+    if not state:
+        return
+    session_id = state.get("id")
+    frame_dir = _feeds_dir(hass, session_id)
+
+    def _count() -> int:
+        if not frame_dir.is_dir():
+            return 0
+        return sum(1 for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg")
+
+    frame_count = await hass.async_add_executor_job(_count)
+    config = _config_from_entry(entry)
+    sessions = config.get("feedSessions")
+    if isinstance(sessions, list):
+        for session in sessions:
+            if isinstance(session, dict) and session.get("id") == session_id:
+                session["status"] = "done"
+                session["endedAt"] = dt_util.utcnow().isoformat()
+                session["frameCount"] = frame_count
+                break
+    await _async_save_config(hass, entry, config)
+
+
+async def _async_start_feed_watch(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
+    """Start a feed-watch session: snapshot the camera every cadenceSeconds for the feed
+    window. Never raises into the mode path."""
+    try:
+        if (
+            hass.data.setdefault(DOMAIN, {})
+            .setdefault(FEEDWATCH_SESSION, {})
+            .get(entry.entry_id)
+        ):
+            await _async_stop_feed_watch(hass, entry)
+
+        config = _config_from_entry(entry)
+        feedwatch_cfg = config.get("feedWatch", {})
+        if not isinstance(feedwatch_cfg, dict) or not feedwatch_cfg.get("enabled", False):
+            return
+        resolved = _resolve_capture_camera(
+            hass, config, {}, override=feedwatch_cfg.get("cameraId") or None
+        )
+        if resolved is None:
+            return
+        camera_id, entity_id, camera_label = resolved
+
+        now = dt_util.utcnow()
+        cadence = max(
+            FEEDWATCH_MIN_CADENCE,
+            min(int(feedwatch_cfg.get("cadenceSeconds", FEEDWATCH_DEFAULT_CADENCE)), FEEDWATCH_MAX_CADENCE),
+        )
+        mode = config.get("mode", {})
+        expires = _parse_datetime(mode.get("expiresAt")) if isinstance(mode, dict) else None
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        end_at = expires if expires and expires > now else now + timedelta(minutes=FEEDWATCH_MAX_MINUTES)
+        max_frames = min(2000, int((end_at - now).total_seconds() / cadence) + 5)
+
+        session_id = uuid.uuid4().hex
+        frame_dir = _feeds_dir(hass, session_id)
+        await hass.async_add_executor_job(lambda: frame_dir.mkdir(parents=True, exist_ok=True))
+        if not await _async_write_snapshot(
+            hass, entity_id, frame_dir / f"000_{now.strftime('%H%M%S')}.jpg"
+        ):
+            # Camera isn't delivering — don't open an empty session.
+            await _async_delete_feed_dir(hass, session_id)
+            return
+
+        sessions = config.get("feedSessions")
+        if not isinstance(sessions, list):
+            sessions = []
+        sessions.insert(
+            0,
+            {
+                "id": session_id,
+                "startedAt": now.isoformat(),
+                "cameraId": camera_id,
+                "cameraLabel": camera_label,
+                "frameCount": 1,
+                "status": "recording",
+            },
+        )
+        retention = max(
+            1,
+            min(
+                int(feedwatch_cfg.get("retentionSessions", FEEDWATCH_DEFAULT_RETENTION)),
+                FEEDWATCH_MAX_RETENTION,
+            ),
+        )
+        pruned = sessions[retention:]
+        config["feedSessions"] = sessions[:retention]
+        for old in pruned:
+            if isinstance(old, dict) and old.get("id"):
+                await _async_delete_feed_dir(hass, old["id"])
+        await _async_save_config(hass, entry, config)
+
+        hass.data.setdefault(DOMAIN, {}).setdefault(FEEDWATCH_SESSION, {})[entry.entry_id] = {
+            "id": session_id,
+            "endAt": end_at,
+            "frames": 1,
+            "maxFrames": max_frames,
+        }
+
+        async def _handle_feed_tick(_tick: datetime) -> None:
+            current = (
+                hass.data.setdefault(DOMAIN, {})
+                .setdefault(FEEDWATCH_SESSION, {})
+                .get(entry.entry_id)
+            )
+            if not current or current.get("id") != session_id:
+                _clear_feedwatch(hass)
+                return
+            latest_mode = _config_from_entry(entry).get("mode", {})
+            active = latest_mode.get("active") if isinstance(latest_mode, dict) else None
+            if (
+                active != "feed"
+                or dt_util.utcnow() >= current["endAt"]
+                or current["frames"] >= current["maxFrames"]
+            ):
+                await _async_stop_feed_watch(hass, entry)
+                return
+            index = current["frames"]
+            name = f"{index:03d}_{dt_util.utcnow().strftime('%H%M%S')}.jpg"
+            if await _async_write_snapshot(hass, entity_id, frame_dir / name):
+                current["frames"] = index + 1
+
+        hass.data.setdefault(DOMAIN, {})[FEEDWATCH_UNSUB] = async_track_time_interval(
+            hass, _handle_feed_tick, timedelta(seconds=cadence)
+        )
+    except Exception:  # noqa: BLE001 - feed-watch must never break the mode path
+        _LOGGER.exception("OpenReef feed-watch failed to start")
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/list_recordings"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -3969,6 +4194,102 @@ async def websocket_clear_timelapse(
     connection.send_result(msg["id"], {"success": True, "cameraId": camera_id})
 
 
+def _feed_first_frame(directory: Path) -> str:
+    """First (earliest) frame filename in a feed session dir, or '' — runs in executor."""
+    if not directory.is_dir():
+        return ""
+    names = sorted(p.name for p in directory.iterdir() if p.is_file() and p.suffix == ".jpg")
+    return names[0] if names else ""
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/list_feed_sessions"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_list_feed_sessions(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """List feed-watch sessions (newest first), each with a thumbnail frame."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    sessions = config.get("feedSessions")
+    if not isinstance(sessions, list):
+        sessions = []
+    enriched = []
+    for session in sessions:
+        if not isinstance(session, dict) or not session.get("id"):
+            continue
+        session_id = session["id"]
+        first = await hass.async_add_executor_job(_feed_first_frame, _feeds_dir(hass, session_id))
+        item = dict(session)
+        item["thumbnail"] = f"{FEEDS_SUBDIR}/{session_id}/{first}" if first else ""
+        enriched.append(item)
+    connection.send_result(msg["id"], {"sessions": enriched, "baseUrl": CAPTURES_STATIC_URL})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/list_feed_frames",
+        vol.Required("session_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_list_feed_frames(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """List one feed session's frames (in order) for the scrubber player."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    session_id = msg["session_id"]
+    frame_dir = _feeds_dir(hass, session_id)
+
+    def _list() -> list[str]:
+        if not frame_dir.is_dir():
+            return []
+        return sorted(p.name for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg")
+
+    frames = [
+        {"file": f"{FEEDS_SUBDIR}/{session_id}/{name}"}
+        for name in await hass.async_add_executor_job(_list)
+    ]
+    connection.send_result(
+        msg["id"], {"frames": frames, "baseUrl": CAPTURES_STATIC_URL, "sessionId": session_id}
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/delete_feed_session",
+        vol.Required("session_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_delete_feed_session(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Delete one feed session (frames on disk + its record)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    session_id = msg["session_id"]
+    await _async_delete_feed_dir(hass, session_id)
+    config = _config_from_entry(entry)
+    sessions = config.get("feedSessions")
+    if isinstance(sessions, list):
+        config["feedSessions"] = [
+            s for s in sessions if not (isinstance(s, dict) and s.get("id") == session_id)
+        ]
+    saved = await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"success": True, "sessionId": session_id, "config": saved})
+
+
 async def _async_register_panel(hass: HomeAssistant) -> None:
     """Register the OpenReef native sidebar panel once."""
     if hass.data.setdefault(DOMAIN, {}).get("panel_registered"):
@@ -4017,6 +4338,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_list_timelapse_frames)
     websocket_api.async_register_command(hass, websocket_capture_timelapse_frame)
     websocket_api.async_register_command(hass, websocket_clear_timelapse)
+    websocket_api.async_register_command(hass, websocket_list_feed_sessions)
+    websocket_api.async_register_command(hass, websocket_list_feed_frames)
+    websocket_api.async_register_command(hass, websocket_delete_feed_session)
 
     hass.services.async_register(
         DOMAIN,
@@ -4079,6 +4403,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_delayed_equipment_calls(hass)
     _clear_wavemaker_reminders(hass)
     _clear_timelapse(hass)
+    _clear_feedwatch(hass)
     hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).pop(
         entry.entry_id, None
     )
@@ -4087,6 +4412,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     )
     hass.data.setdefault(DOMAIN, {}).setdefault(CAPTURE_LAST, {}).pop(entry.entry_id, None)
     hass.data.setdefault(DOMAIN, {}).setdefault(TIMELAPSE_LAST, {}).pop(entry.entry_id, None)
+    hass.data.setdefault(DOMAIN, {}).setdefault(FEEDWATCH_SESSION, {}).pop(entry.entry_id, None)
     config = _config_from_entry(entry)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)

@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 35
-INTEGRATION_VERSION = "0.4.74"
+CORE_SCHEMA_VERSION = 36
+INTEGRATION_VERSION = "0.4.75"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -41,6 +41,17 @@ TIMELAPSE_DEFAULT_DAILY_DAYS = 90     # then 1/day until this age
 TIMELAPSE_DEFAULT_WEEKLY_DAYS = 365   # then 1/week until this age
 TIMELAPSE_DEFAULT_MONTHLY_DAYS = 0    # then 1/month until this age (0 = keep forever)
 TIMELAPSE_MAX_DAYS = 3650             # clamp for any tier boundary (~10 years)
+
+# Camera V2 — feed-watch (Phase D). A snapshot burst across the whole Feed-mode
+# window, grouped as a scrubbable "feed session" to confirm every fish ate.
+# Supersedes the Phase A feed-mode clip trigger while enabled.
+FEEDS_SUBDIR = "feeds"
+FEEDWATCH_DEFAULT_CADENCE = 10        # seconds between frames during a feeding
+FEEDWATCH_MIN_CADENCE = 3
+FEEDWATCH_MAX_CADENCE = 60
+FEEDWATCH_DEFAULT_RETENTION = 25      # feed sessions kept
+FEEDWATCH_MAX_RETENTION = 200
+FEEDWATCH_MAX_MINUTES = 20            # hard cap when the feed timer has no fixed duration
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -524,6 +535,13 @@ DEFAULT_CORE_CONFIG = {
         "showQuip": True,
         "position": "bottom-left",
     },
+    "feedWatch": {
+        "enabled": False,
+        "cameraId": "",
+        "cadenceSeconds": FEEDWATCH_DEFAULT_CADENCE,
+        "retentionSessions": FEEDWATCH_DEFAULT_RETENTION,
+    },
+    "feedSessions": [],
     "energy": {
         "tariff": 0.28,
         "currency": "GBP",

@@ -28,6 +28,9 @@ class OpenReefPanel extends HTMLElement {
     };
     this._timelapseTimer = null;
     this._overlayQuip = "";
+    this._feedWatch = { sessions: [], loaded: false, loading: false, error: "" };
+    this._feedPlayer = { sessionId: "", frames: [], index: 0, playing: false, loading: false };
+    this._feedPlayerTimer = null;
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -99,6 +102,7 @@ class OpenReefPanel extends HTMLElement {
   disconnectedCallback() {
     this._stopCameraWebRTC();
     this._stopTimelapse();
+    this._stopFeedPlayer();
     if (this._modeCountdownTimer) {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
@@ -817,6 +821,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "tab") {
         this._stopCameraWebRTC();
         this._stopTimelapse();
+        this._stopFeedPlayer();
+        this._feedPlayer.sessionId = "";
         this._activeTab = id;
         this._setupOpen = false;
         this._equipmentDetail = null;
@@ -915,6 +921,11 @@ class OpenReefPanel extends HTMLElement {
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
+      if (action === "open-feed") this._openFeedSession(id);
+      if (action === "close-feed") this._closeFeedSession();
+      if (action === "delete-feed") this._deleteFeedSession(id);
+      if (action === "feed-play") this._feedTogglePlay();
+      if (action === "feed-reload") this._loadFeedSessions();
       if (action === "fullscreen-camera") {
         const stage = this.shadowRoot.querySelector("[data-camera-stage]");
         if (stage && stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
@@ -1148,6 +1159,7 @@ class OpenReefPanel extends HTMLElement {
       const value = target.type === "checkbox" ? target.checked : target.type === "number" ? Number(target.value) : target.value;
 
       if (target.dataset.action === "timelapse-seek") { this._timelapseSeek(Number(target.value)); return; }
+      if (target.dataset.action === "feed-seek") { this._feedSeek(Number(target.value)); return; }
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
       if (target.dataset.manualField === "parameter") {
@@ -1235,6 +1247,10 @@ class OpenReefPanel extends HTMLElement {
         const set = new Set(ids);
         if (value) set.add(id); else set.delete(id);
         this._config.overlay.stats = [...set];
+      }
+      if (scope === "feedwatch") {
+        this._config.feedWatch = this._config.feedWatch || {};
+        this._config.feedWatch[field] = value;
       }
       if (scope === "mode-preview") {
         const modeId = target.dataset.mode;
@@ -3100,7 +3116,7 @@ class OpenReefPanel extends HTMLElement {
         roles: ["primary"],
         parameters: ["alkalinity", "calcium"],
         requiresCustomStrength: true,
-        note: "Two-part system with variant-specific strength. Use custom verified strength for exact mL advice.",
+        note: "Two-part system with variant-specific strength. Enter the strength from your actual bottle/recipe before exact mL advice appears.",
       },
       {
         id: "kalkwasser_calcium_hydroxide",
@@ -3519,7 +3535,14 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
-  _dosingFreshManualGate(sensorId) {
+  _dosingFreshManualGate(sensorId, source = "manual") {
+    if (source !== "manual") {
+      return {
+        fresh: true,
+        detail: "Mapped chemistry history is current enough for advisory trend checks.",
+        status: "ok",
+      };
+    }
     const freshness = this._manualDosingFreshness(sensorId);
     return {
       fresh: freshness.fresh,
@@ -3546,7 +3569,7 @@ class OpenReefPanel extends HTMLElement {
     if (potencyInfo.value <= 0 && ["preset", "calculator", "manual"].includes(potencyInfo.source)) locks.push("Complete product strength details.");
     if ((potencyInfo.exactMaintenance || potencyInfo.exactCorrection) && tankVolume <= 0) locks.push("Enter real net tank water volume.");
     if (potencyInfo.exactMaintenance && currentDose <= 0) locks.push("Enter the current daily dose before exact maintenance changes appear.");
-    const manual = this._dosingFreshManualGate(sensorId);
+    const manual = this._dosingFreshManualGate(sensorId, source);
     if (potencyInfo.exactCorrection && !manual.fresh) warnings.push(`Correction advice locked: ${manual.detail}`);
     const productDailyMaxMl = this._dosingProductDailyMaxMl(product, system);
     if (product?.id === "seachem_reef_fusion") {
@@ -3554,6 +3577,30 @@ class OpenReefPanel extends HTMLElement {
     }
     if (product?.id === "brs_pharma_two_part") {
       warnings.push("Dose DIY calcium, alkalinity, and magnesium parts separately in high flow; monitor salinity and pH while using concentrated two/three-part additives.");
+    }
+    if (product?.id === "esv_b_ionic") {
+      warnings.push("Dose ESV B-Ionic parts separately in high flow, verify the exact bottle strength, and never allow pH to rise above the product safety ceiling.");
+    }
+    const secondary = this._dosingProduct(system.secondaryProduct);
+    const secondaryIsKalk = secondary?.classId === "kalkwasser" && product?.classId !== "kalkwasser" && ["alkalinity", "calcium"].includes(sensorId);
+    if (secondaryIsKalk) {
+      kalkContext = this._kalkSafetyContext(system);
+      warnings.push("Secondary kalkwasser support is configured; keep exact corrections on the primary dosing system and do not use kalkwasser as a one-off correction.");
+      if (!kalkContext.hasPhGuard) {
+        warnings.push("No mapped pH guard is available for secondary kalkwasser context.");
+      } else if (!Number.isFinite(kalkContext.phValue)) {
+        warnings.push("Mapped pH guard for secondary kalkwasser is unavailable or non-numeric right now.");
+      } else if (kalkContext.phStatus === "high") {
+        warnings.push(`Current pH ${this._format(kalkContext.phValue, 2)} is at or above the secondary kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser.`);
+      } else if (kalkContext.phStatus === "near") {
+        warnings.push(`Current pH ${this._format(kalkContext.phValue, 2)} is close to the secondary kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser without reviewing the pH pattern.`);
+      } else {
+        warnings.push(`Secondary kalk pH guard OK: current pH ${this._format(kalkContext.phValue, 2)} is below the max pH ${this._format(kalkContext.maxPh, 2)}.`);
+      }
+      if (!system.secondaryDelivery) warnings.push("Choose how secondary kalkwasser is delivered: ATO, dosing pump, or manual top-off.");
+      if (!kalkContext.capacityConfigured) {
+        warnings.push("Secondary kalk capacity is not fully configured. Add daily kalk volume, concentration, and evaporation ceiling before judging whether kalk can help.");
+      }
     }
     if (productDailyMaxMl > 0 && currentDose > 0) {
       if (currentDose > productDailyMaxMl) {
@@ -3593,6 +3640,9 @@ class OpenReefPanel extends HTMLElement {
       if (warning.startsWith("pH guard OK:")) return false;
       if (warning.startsWith("Dose Reef Fusion 1 and 2 separately")) return false;
       if (warning.startsWith("Dose DIY calcium, alkalinity, and magnesium parts separately")) return false;
+      if (warning.startsWith("Dose ESV B-Ionic parts separately")) return false;
+      if (warning.startsWith("Secondary kalkwasser support is configured")) return false;
+      if (warning.startsWith("Secondary kalk pH guard OK:")) return false;
       if (warning.includes(" is not a ") && warning.includes(" dosing product")) return false;
       return true;
     });
@@ -3699,6 +3749,25 @@ class OpenReefPanel extends HTMLElement {
 
   _allForReefCorrectionText(label) {
     return `Do not use Tropic Marin All-For-Reef as a one-off ${label} correction. Bring calcium, alkalinity, and magnesium into balance with separate correction products or water changes first, then use All-For-Reef for maintenance.`;
+  }
+
+  _aquaforestMaintenanceText(label, sensorId, slope, rateText, safety, currentDoseMlPerDay) {
+    if (!safety.manual.fresh) {
+      return `${label} tests are not fresh enough for Aquaforest Component 1+2+3+ advice. Retest before changing the equal daily dose.`;
+    }
+    const currentDose = this._formatDoseMl(currentDoseMlPerDay);
+    const balanceGuard = " Aquaforest guidance keeps Components 1, 2, and 3 dosed equally; if one or two parameters are out of balance, correct them separately first, then return to equal maintenance dosing.";
+    if (slope < 0) {
+      return `Net loss ~${rateText}. Review whether the equal daily Component 1+2+3+ dose (${currentDose}) is no longer keeping up, then increase the equal dose only after fresh calcium, KH, and magnesium tests agree.${balanceGuard}`;
+    }
+    if (slope > 0) {
+      return `Net rise ~${rateText}. Review holding or reducing the equal daily Component 1+2+3+ dose (${currentDose}) and retest. Do not use chemical correction downward.${balanceGuard}`;
+    }
+    return `Aquaforest Component 1+2+3+ appears steady at ${currentDose}. Keep the three parts equal and retest on your chosen schedule.`;
+  }
+
+  _aquaforestCorrectionText(label) {
+    return `Do not use Aquaforest Component 1+2+3+ as a one-off ${label} correction. Keep the three components equal for maintenance and use a separate calcium, KH, magnesium, or water-change correction plan if the parameters are unbalanced.`;
   }
 
   _analyseConsumption(sensorId, sensor, trendData, healthItem) {
@@ -3846,6 +3915,8 @@ class OpenReefPanel extends HTMLElement {
       maintenanceText = this._kalkMaintenanceText(label, sensorId, slope, rateText, safety);
     } else if (productInfo.id === "tropic_marin_all_for_reef") {
       maintenanceText = this._allForReefMaintenanceText(label, sensorId, slope, rateText, safety, currentDoseMlPerDay);
+    } else if (productInfo.id === "aquaforest_component_123") {
+      maintenanceText = this._aquaforestMaintenanceText(label, sensorId, slope, rateText, safety, currentDoseMlPerDay);
     } else if (slope < 0) {
       if (potency > 0 && safety.canExactMaintenance) {
         const capped = Math.abs(holdOffsetUnits) > maxDailyAdjustmentUnits;
@@ -3885,6 +3956,8 @@ class OpenReefPanel extends HTMLElement {
         correctionText = "Do not use kalkwasser as a one-off correction bolus.";
       } else if (productInfo.id === "tropic_marin_all_for_reef") {
         correctionText = this._allForReefCorrectionText(label);
+      } else if (productInfo.id === "aquaforest_component_123") {
+        correctionText = this._aquaforestCorrectionText(label);
       } else if (target < value) {
         correctionText = "Do not chemically correct downward. Let normal consumption or water changes bring the value down gradually.";
       } else if (!safety.canExactCorrection) {
@@ -6020,6 +6093,271 @@ class OpenReefPanel extends HTMLElement {
     );
   }
 
+  // --- Feed-watch (Phase D): a scrubbable snapshot burst per feeding ------
+
+  _feedWatchSection() {
+    const fw = this._config.feedWatch || {};
+    const state = this._feedWatch;
+    if (!state.loaded && !state.loading) this._loadFeedSessions();
+    const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+    const header = `
+      <div class="section-head">
+        <div>
+          <h2>Feeds</h2>
+          <p>OpenReef snaps a burst through each feeding — scrub a session to check every fish showed up and ate.</p>
+        </div>
+        <div class="actions">
+          <button class="secondary compact-button" data-action="feed-reload">Refresh</button>
+          <button class="secondary compact-button" data-action="tab" data-id="settings">Settings</button>
+        </div>
+      </div>`;
+    let body;
+    if (state.loading && !sessions.length) {
+      body = `<div class="muted">Loading feeds…</div>`;
+    } else if (state.error && !sessions.length) {
+      body = `<div class="notice warning-notice">${this._escape(state.error)}</div>`;
+    } else if (!sessions.length) {
+      body = this._emptyState(
+        fw.enabled ? "No feeds yet" : "Feed-watch is off",
+        fw.enabled
+          ? "Apply Feed mode and OpenReef will record the whole feeding here to scrub through."
+          : "Turn on Feed-watch in Settings — then every Feed mode is captured as a scrubbable session.",
+        "settings",
+        fw.enabled ? "Open settings" : "Turn on feed-watch",
+      );
+    } else {
+      body = `<div class="cam-grid recordings-grid">${sessions.map((s) => this._feedSessionCard(s)).join("")}</div>`;
+    }
+    return `
+      <section class="stack feeds-section">${header}${body}</section>
+      ${this._feedPlayer.sessionId ? this._feedModal() : ""}`;
+  }
+
+  _feedSessionCard(session) {
+    const thumb = this._captureUrl(session.thumbnail);
+    const recording = session.status === "recording";
+    const count = session.frameCount || 0;
+    return `
+      <div class="cam-tile recording-tile">
+        <button class="recording-open" data-action="open-feed" data-id="${this._escape(session.id)}" title="Feed at ${this._escape(this._formatActivityTime(session.startedAt))}">
+          ${thumb
+            ? `<img class="cam-feed" src="${this._escape(thumb)}" alt="Feed session">`
+            : `<div class="cam-placeholder"><span class="cam-glyph">🐟</span><small>${recording ? "Recording…" : "No preview"}</small></div>`}
+          ${recording ? `<span class="cam-live feed-rec"><span class="cam-dot"></span>REC</span>` : ""}
+          <span class="cam-label">${this._escape(this._formatActivityTime(session.startedAt))}</span>
+        </button>
+        <div class="recording-meta">
+          <span class="pill ${recording ? "warning" : "ok"}">${recording ? "recording" : `${count} frame${count === 1 ? "" : "s"}`}</span>
+          <button class="secondary compact-button danger-button" data-action="delete-feed" data-id="${this._escape(session.id)}">Delete</button>
+        </div>
+      </div>`;
+  }
+
+  async _loadFeedSessions() {
+    const state = this._feedWatch;
+    state.loading = true;
+    state.error = "";
+    try {
+      const result = await this._callWS({ type: "openreef/list_feed_sessions" });
+      state.sessions = Array.isArray(result.sessions) ? result.sessions : [];
+    } catch (err) {
+      state.error = err instanceof Error ? err.message : "Could not load feeds";
+      state.sessions = [];
+    } finally {
+      state.loaded = true;
+      state.loading = false;
+      if (this._activeTab === "cameras") this._render();
+    }
+  }
+
+  async _openFeedSession(id) {
+    const player = this._feedPlayer;
+    player.sessionId = id;
+    player.frames = [];
+    player.index = 0;
+    player.playing = false;
+    player.loading = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/list_feed_frames", session_id: id });
+      if (this._feedPlayer.sessionId !== id) return;
+      player.frames = Array.isArray(result.frames) ? result.frames : [];
+      player.index = 0;
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not load this feed";
+    } finally {
+      player.loading = false;
+      if (this._feedPlayer.sessionId === id) this._render();
+    }
+  }
+
+  _closeFeedSession() {
+    this._stopFeedPlayer();
+    this._feedPlayer.sessionId = "";
+    this._feedPlayer.frames = [];
+    this._render();
+  }
+
+  _feedModal() {
+    const player = this._feedPlayer;
+    const session = (this._feedWatch.sessions || []).find((s) => s.id === player.sessionId);
+    const frames = player.frames;
+    const title = session ? this._formatActivityTime(session.startedAt) : "Feed session";
+    let stage;
+    if (player.loading) {
+      stage = `<div class="cam-placeholder"><span class="cam-glyph">🐟</span><small>Loading frames…</small></div>`;
+    } else if (!frames.length) {
+      stage = `<div class="cam-placeholder"><span class="cam-glyph">🐟</span><small>No frames in this feed yet</small></div>`;
+    } else {
+      const idx = Math.max(0, Math.min(player.index, frames.length - 1));
+      stage = `<img class="cam-feed-large feed-frame" src="${this._escape(this._captureUrl(frames[idx].file))}" alt="Feed frame"><span class="timelapse-stamp feed-counter">${idx + 1} / ${frames.length}</span>`;
+    }
+    const controls = frames.length
+      ? `<div class="timelapse-controls">
+          <button class="secondary compact-button" data-action="feed-play">${player.playing ? "⏸ Pause" : "▶ Play"}</button>
+          <input type="range" class="timelapse-scrubber feed-scrubber" min="0" max="${Math.max(0, frames.length - 1)}" value="${Math.max(0, Math.min(player.index, frames.length - 1))}" data-action="feed-seek">
+        </div>`
+      : "";
+    return `
+      <div class="modal">
+        <section class="wizard cam-dialog">
+          <button class="close" data-action="close-feed">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Feed-watch · ${this._escape(session?.cameraLabel || "Camera")}</p>
+              <h2>${this._escape(title)}</h2>
+              <p class="muted">Scrub through to confirm every fish came out and ate.</p>
+            </div>
+          </div>
+          <div class="cam-stage">${stage}</div>
+          ${controls}
+          <div class="actions">
+            <button class="secondary compact-button danger-button" data-action="delete-feed" data-id="${this._escape(player.sessionId)}">Delete feed</button>
+          </div>
+        </section>
+      </div>`;
+  }
+
+  _stopFeedPlayer() {
+    if (this._feedPlayerTimer) {
+      window.clearInterval(this._feedPlayerTimer);
+      this._feedPlayerTimer = null;
+    }
+    if (this._feedPlayer) this._feedPlayer.playing = false;
+  }
+
+  _feedTogglePlay() {
+    const player = this._feedPlayer;
+    if (player.playing) {
+      this._stopFeedPlayer();
+      this._render();
+      return;
+    }
+    if (player.frames.length < 2) return;
+    if (player.index >= player.frames.length - 1) player.index = 0;
+    player.playing = true;
+    this._render();
+    this._updateFeedDom();
+    this._feedPlayerTimer = window.setInterval(() => this._feedAdvance(), 400);
+  }
+
+  _feedAdvance() {
+    const player = this._feedPlayer;
+    if (!player.frames.length) {
+      this._stopFeedPlayer();
+      return;
+    }
+    if (player.index >= player.frames.length - 1) {
+      this._stopFeedPlayer();
+      this._render();
+      return;
+    }
+    player.index += 1;
+    this._updateFeedDom();
+  }
+
+  _feedSeek(value) {
+    const player = this._feedPlayer;
+    this._stopFeedPlayer();
+    player.index = Math.max(0, Math.min(Math.round(value || 0), player.frames.length - 1));
+    this._updateFeedDom();
+    const btn = this.shadowRoot?.querySelector('[data-action="feed-play"]');
+    if (btn) btn.textContent = "▶ Play";
+  }
+
+  _updateFeedDom() {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const player = this._feedPlayer;
+    const frames = player.frames;
+    if (!frames.length) return;
+    const idx = Math.max(0, Math.min(player.index, frames.length - 1));
+    const img = root.querySelector(".feed-frame");
+    if (img) img.src = this._captureUrl(frames[idx].file);
+    const counter = root.querySelector(".feed-counter");
+    if (counter) counter.textContent = `${idx + 1} / ${frames.length}`;
+    const scrubber = root.querySelector(".feed-scrubber");
+    if (scrubber && document.activeElement !== scrubber) scrubber.value = String(idx);
+    for (let i = idx + 1; i <= idx + 8 && i < frames.length; i += 1) {
+      const preload = new Image();
+      preload.src = this._captureUrl(frames[i].file);
+    }
+  }
+
+  async _deleteFeedSession(id) {
+    if (typeof window.confirm === "function" && !window.confirm("Delete this feed session? This can't be undone.")) {
+      return;
+    }
+    this._error = "";
+    try {
+      await this._callWS({ type: "openreef/delete_feed_session", session_id: id });
+      this._message = "Feed deleted";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not delete feed";
+    }
+    this._stopFeedPlayer();
+    if (this._feedPlayer.sessionId === id) {
+      this._feedPlayer.sessionId = "";
+      this._feedPlayer.frames = [];
+    }
+    await this._loadFeedSessions();
+  }
+
+  _feedWatchSettings() {
+    const fw = this._config.feedWatch || {};
+    const cams = this._cameraList();
+    const body = `
+      <label class="toggle-card">
+        <input type="checkbox" data-scope="feedwatch" data-field="enabled" ${fw.enabled ? "checked" : ""}>
+        <span><strong>Watch every feeding</strong><small>When Feed mode runs, capture a snapshot burst across the whole feeding so you can scrub through and confirm every fish ate.</small></span>
+      </label>
+      ${cams.length ? "" : `<div class="notice warning-notice">Map a camera under <strong>Cameras</strong> first.</div>`}
+      <p class="eyebrow">Camera</p>
+      <label>Feed-watch camera
+        <select data-scope="feedwatch" data-field="cameraId">
+          <option value="" ${!fw.cameraId ? "selected" : ""}>First mapped camera</option>
+          ${cams.map(([id, cam]) => `<option value="${this._escape(id)}" ${fw.cameraId === id ? "selected" : ""}>${this._escape(cam.label || id)}</option>`).join("")}
+        </select>
+      </label>
+      <p class="eyebrow">Capture</p>
+      <div class="grid two compact">
+        <label>Frame every (s)
+          <input type="number" min="3" max="60" step="1" data-scope="feedwatch" data-field="cadenceSeconds" value="${this._escape(fw.cadenceSeconds ?? 10)}">
+        </label>
+        <label>Keep last (feeds)
+          <input type="number" min="1" max="200" step="1" data-scope="feedwatch" data-field="retentionSessions" value="${this._escape(fw.retentionSessions ?? 25)}">
+        </label>
+      </div>
+      <p class="muted">Runs for the whole Feed-mode window (your feed timer), then stops. While on, it replaces the single Feed-mode clip in Auto-capture.</p>
+    `;
+    return this._settingsPanel(
+      "feedwatch",
+      "Feed-watch",
+      "Record each feeding as a scrubbable session — confirm every fish came out and ate.",
+      body,
+    );
+  }
+
   _cameraTarget(id, cam) {
     return {
       id,
@@ -6074,6 +6412,7 @@ class OpenReefPanel extends HTMLElement {
             )}
       </section>
       ${this._timelapseSection()}
+      ${this._feedWatchSection()}
       ${this._recordingsGallery()}
       ${this._cameraFocus ? this._cameraModal() : ""}
       ${this._recordingFocus ? this._recordingModal() : ""}
@@ -8154,6 +8493,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._captureSettings()}
         ${this._timelapseSettings()}
         ${this._overlaySettings()}
+        ${this._feedWatchSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._interlockSettings()}
@@ -10183,6 +10523,8 @@ class OpenReefPanel extends HTMLElement {
         .timelapse-speed { display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: #9fb3c8; }
         .timelapse-section .seg { display: inline-flex; gap: 4px; }
         .timelapse-section .seg .active { background: var(--primary-color, #00b4d8); color: #04222b; border-color: var(--primary-color, #00b4d8); }
+        .feeds-section { margin-top: 18px; }
+        .feed-rec { color: #fecaca; }
         .cam-overlay { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; gap: 8px; padding: 14px; }
         .cam-overlay.pos-top-left { align-items: flex-start; justify-content: flex-start; }
         .cam-overlay.pos-top-right { align-items: flex-end; justify-content: flex-start; }

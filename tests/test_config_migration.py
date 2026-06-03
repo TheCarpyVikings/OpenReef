@@ -301,6 +301,43 @@ def test_overlay_non_dict_block_coerced():
         assert isinstance(result.get("overlay"), dict)
 
 
+def test_feedwatch_defaults_injected():
+    result = normalise({})
+    fw = result.get("feedWatch")
+    assert isinstance(fw, dict)
+    assert fw["enabled"] is False
+    assert fw["cadenceSeconds"] == 10
+    assert fw["retentionSessions"] == 25
+    assert isinstance(result.get("feedSessions"), list)
+
+
+def test_feedwatch_garbage_coerced_and_clamped():
+    bad = {
+        "feedWatch": {
+            "enabled": "y",
+            "cameraId": 1,
+            "cadenceSeconds": 999,
+            "retentionSessions": -5,
+        }
+    }
+    result = normalise(bad)  # must not raise
+    fw = result["feedWatch"]
+    assert fw["enabled"] is True
+    assert fw["cameraId"] == ""           # non-str / unknown camera dropped
+    assert fw["cadenceSeconds"] == 60     # clamped to max
+    assert fw["retentionSessions"] == 1   # clamped to min
+
+
+def test_feedwatch_non_dict_and_sessions_truncated():
+    for junk in ("a string", 7, ["x"], None):
+        result = normalise({"feedWatch": junk})
+        assert isinstance(result.get("feedWatch"), dict)
+    sessions = [{"id": str(i)} for i in range(10)] + ["junk", 5]
+    result = normalise({"feedWatch": {"retentionSessions": 3}, "feedSessions": sessions})
+    assert len(result["feedSessions"]) == 3
+    assert all(isinstance(s, dict) for s in result["feedSessions"])
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:

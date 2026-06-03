@@ -131,7 +131,11 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
   onto the live feed with the health-reactive mini-me and a rotating anti-Apex quip (cheeky + calm only,
   shown to everyone — the dig is the point). One-tap **Share card** bakes it all into an image via canvas
   → native share sheet / download. *(shipped, v0.4.74)*
-- [ ] **D. Feed-watch** — capture during Feed mode to confirm every fish ate (specialisation of A).
+- [x] **D. Feed-watch** — applying Feed mode records a **snapshot burst** across the whole feeding window
+  (bounded by the feed timer) as a scrubbable **feed session** in a Feeds view, to confirm every fish came
+  out and ate. Supersedes the single Phase A feed clip while on. *(shipped, v0.4.75)*
+
+**Camera V2 arc complete (A→D).**
 
 ## Apex Parity
 
