@@ -20,6 +20,7 @@ class OpenReefPanel extends HTMLElement {
     this._trend = null;
     this._trendRequest = "";
     this._cameraFocus = null;
+    this._recordingFocus = null;
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -66,6 +67,8 @@ class OpenReefPanel extends HTMLElement {
     // Don't recreate camera <img> elements on hass updates — it would restart the
     // live MJPEG streams. A manual Refresh button re-renders on demand.
     if (this._activeTab === "cameras" || this._cameraFocus) return false;
+    // While a clip is open, don't re-render — it would interrupt <video> playback.
+    if (this._recordingFocus) return false;
     if (this._isEditingFormControl()) return false;
     return true;
   }
@@ -803,6 +806,8 @@ class OpenReefPanel extends HTMLElement {
         this._setupOpen = false;
         this._equipmentDetail = null;
         this._controlConfirm = null;
+        this._cameraFocus = null;
+        this._recordingFocus = null;
         this._render();
       }
       if (action === "onboarding-start") { this._activeTab = "mission"; this._startOnboarding(); }
@@ -918,6 +923,10 @@ class OpenReefPanel extends HTMLElement {
         this._setDirty(true);
         this._render();
       }
+      if (action === "capture-now") this._captureNow();
+      if (action === "open-recording") { this._recordingFocus = id; this._render(); }
+      if (action === "close-recording") { this._recordingFocus = null; this._render(); }
+      if (action === "delete-recording") this._deleteRecording(id);
       if (action === "choose-equipment") {
         this._config.equipment[id][field] = target.dataset.entity;
         this._equipmentEditors[id] = true;
@@ -1165,6 +1174,22 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "interlocks") {
         this._config.interlocks = this._config.interlocks || {};
         this._config.interlocks[field] = value;
+      }
+      if (scope === "capture") {
+        this._config.capture = this._config.capture || {};
+        this._config.capture[field] = value;
+      }
+      if (scope === "capture-trigger") {
+        this._config.capture = this._config.capture || {};
+        this._config.capture.triggers = this._config.capture.triggers || {};
+        this._config.capture.triggers[field] = value;
+      }
+      if (scope === "capture-cameras") {
+        this._config.capture = this._config.capture || {};
+        const ids = Array.isArray(this._config.capture.cameraIds) ? this._config.capture.cameraIds : [];
+        const set = new Set(ids);
+        if (value) set.add(id); else set.delete(id);
+        this._config.capture.cameraIds = [...set];
       }
       if (scope === "mode-preview") {
         const modeId = target.dataset.mode;
@@ -3385,6 +3410,11 @@ class OpenReefPanel extends HTMLElement {
   _dosingEffectivePotency(sensorId, sensor, config = this._dosingParamConfig(sensorId), product = this._dosingProductForParameter(sensorId), system = this._dosingSystem()) {
     const manual = Number(config?.potencyPerMl) || 0;
     const calculated = this._dosingCalculatedPotency(config, product, sensorId, system);
+    const exact = product?.exactParameters?.[sensorId] || null;
+    const tankVolume = Number(system?.tankVolumeLitres) || Number(config?.tankVolumeLitres) || 0;
+    const productDose = this._dosingPresetNumber(config, exact, "productDoseMl");
+    const productVolume = this._dosingPresetNumber(config, exact, "productVolumeLitres");
+    const productRaise = this._dosingPresetNumber(config, exact, "productRaise");
     if (manual > 0) {
       return {
         value: manual,
@@ -3404,6 +3434,15 @@ class OpenReefPanel extends HTMLElement {
         exactMaintenance: false,
         exactCorrection: false,
         label: "Kalkwasser is pH and evaporation constrained; OpenReef gives maintenance guidance only",
+      };
+    }
+    if ((product.requiresCustomStrength || product.classId === "custom_verified_strength") && productDose > 0 && productVolume > 0 && productRaise > 0 && tankVolume <= 0) {
+      return {
+        value: 0,
+        source: "calculator",
+        exactMaintenance: true,
+        exactCorrection: product?.classId !== "kalkwasser",
+        label: `${product.label}: enter net tank water volume before exact mL advice appears`,
       };
     }
     if (calculated.value > 0) {
@@ -5408,7 +5447,9 @@ class OpenReefPanel extends HTMLElement {
               "Add a camera",
             )}
       </section>
+      ${this._recordingsGallery()}
       ${this._cameraFocus ? this._cameraModal() : ""}
+      ${this._recordingFocus ? this._recordingModal() : ""}
     `;
   }
 
@@ -5497,6 +5538,75 @@ class OpenReefPanel extends HTMLElement {
     );
   }
 
+  _captureSettings() {
+    const capture = this._config.capture || {};
+    const triggers = capture.triggers || {};
+    const cams = this._cameraList();
+    const selected = Array.isArray(capture.cameraIds) ? capture.cameraIds : [];
+    const triggerDefs = [
+      ["criticalAlerts", "Critical alerts", "A sensor crosses into critical — temp, leak, water level, chemistry."],
+      ["warningAlerts", "Warning alerts", "Also capture warning-level transitions, not just critical (more footage)."],
+      ["modeChanges", "Mode changes", "When any mode is applied — feed, maintenance, water change, custom."],
+      ["feedMode", "Feed mode", "Specifically when Feed mode starts — check everyone's eating."],
+      ["skimmerAutoOff", "Skimmer safety auto-off", "When OpenReef turns a skimmer off because the return pump went off."],
+      ["atoWindows", "ATO safety windows", "When the ATO duty-cycle safety window opens or closes."],
+    ];
+    const body = `
+      <label class="toggle-card">
+        <input type="checkbox" data-scope="capture" data-field="enabled" ${capture.enabled ? "checked" : ""}>
+        <span>
+          <strong>Auto-capture clips</strong>
+          <small>Record a short clip (with a snapshot fallback) from a camera when the events you pick below happen.</small>
+        </span>
+      </label>
+      ${cams.length ? "" : `<div class="notice warning-notice">Map a camera under <strong>Cameras</strong> first — auto-capture needs one to record.</div>`}
+      <p class="eyebrow">Capture when…</p>
+      <div class="grid two compact">
+        ${triggerDefs.map(([field, title, desc]) => `
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="capture-trigger" data-field="${field}" ${triggers[field] ? "checked" : ""}>
+            <span><strong>${this._escape(title)}</strong><small>${this._escape(desc)}</small></span>
+          </label>
+        `).join("")}
+      </div>
+      <p class="eyebrow">Cameras to capture</p>
+      ${cams.length
+        ? `<div class="grid two compact">${cams.map(([id, cam]) => `
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="capture-cameras" data-id="${this._escape(id)}" ${selected.includes(id) ? "checked" : ""}>
+              <span><strong>${this._escape(cam.label || id)}</strong><small>${this._escape(cam.entity_id || "Not mapped")}</small></span>
+            </label>
+          `).join("")}</div>
+          <p class="muted">Leave all unticked to use the first mapped camera.</p>`
+        : `<p class="muted">No cameras mapped yet.</p>`}
+      <p class="eyebrow">Clip &amp; retention</p>
+      <div class="grid four compact">
+        <label>Clip length (s)
+          <input type="number" min="3" max="60" step="1" data-scope="capture" data-field="durationSeconds" value="${this._escape(capture.durationSeconds ?? 12)}">
+        </label>
+        <label>Pre-roll (s)
+          <input type="number" min="0" max="30" step="1" data-scope="capture" data-field="lookbackSeconds" value="${this._escape(capture.lookbackSeconds ?? 0)}">
+        </label>
+        <label>Keep last
+          <input type="number" min="1" max="50" step="1" data-scope="capture" data-field="retention" value="${this._escape(capture.retention ?? 10)}">
+        </label>
+        <label>Cooldown (s)
+          <input type="number" min="0" max="600" step="5" data-scope="capture" data-field="cooldownSeconds" value="${this._escape(capture.cooldownSeconds ?? 20)}">
+        </label>
+      </div>
+      <p class="muted">Pre-roll needs the camera's stream kept warm; leave it at 0 if clips come out empty. Cooldown stops a flapping sensor spamming clips.</p>
+      <div class="actions">
+        <button class="secondary compact-button" data-action="capture-now" ${cams.length ? "" : "disabled"}>Capture now</button>
+      </div>
+    `;
+    return this._settingsPanel(
+      "capture",
+      "Auto-capture",
+      "Record a clip from a camera when key OpenReef events fire. Keeps the last N, prunes the rest.",
+      body,
+    );
+  }
+
   _cameraPicker(id, cam) {
     const key = `camera:${id}`;
     const result = this._searchResults[key];
@@ -5518,6 +5628,139 @@ class OpenReefPanel extends HTMLElement {
         <button class="secondary" data-action="search-camera" data-id="${this._escape(id)}">${result?.loading ? "Finding..." : "Find matches"}</button>
         ${this._candidateList(key, "choose-camera", id)}
       </section>
+    `;
+  }
+
+  // --- Recordings (event-triggered capture) ------------------------------
+
+  _captureUrl(name) {
+    return name ? `/openreef_captures/${name}` : "";
+  }
+
+  _recordingsList() {
+    const list = this._config?.captures;
+    return Array.isArray(list) ? list.filter((rec) => rec && typeof rec === "object") : [];
+  }
+
+  async _captureNow() {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
+    try {
+      if (this._configDirty) await this._persistConfigSilently();
+      const result = await this._callWS({ type: "openreef/capture_now" });
+      this._config = result.config || this._config;
+      const status = result.record?.status || "capture";
+      this._recordActivity(`Manual ${status} captured`, "control");
+      this._message = `Captured ${status} from ${result.record?.cameraLabel || "camera"}`;
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not capture — check a camera is mapped and online";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _deleteRecording(id) {
+    this._busy = true;
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/delete_recording", id });
+      this._config = result.config || this._config;
+      if (this._recordingFocus === id) this._recordingFocus = null;
+      this._message = "Recording deleted";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not delete recording";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  _recordingsGallery() {
+    const recs = this._recordingsList();
+    const hasCamera = this._cameraList().some(([, c]) => c.entity_id);
+    return `
+      <section class="stack recordings-section">
+        <div class="section-head">
+          <div>
+            <h2>Recordings</h2>
+            <p>Clips OpenReef grabbed automatically when something happened — plus anything you capture by hand.</p>
+          </div>
+          <div class="actions">
+            <button class="secondary compact-button" data-action="capture-now" ${hasCamera ? "" : "disabled"}>Capture now</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings">Auto-capture</button>
+          </div>
+        </div>
+        ${recs.length
+          ? `<div class="cam-grid recordings-grid">${recs.map((rec) => this._recordingCard(rec)).join("")}</div>`
+          : this._emptyState(
+              "No recordings yet",
+              hasCamera
+                ? "Turn on Auto-capture in Settings and OpenReef records a clip when an alert fires — or hit Capture now."
+                : "Map a camera in Settings first, then switch on Auto-capture so OpenReef can record when something happens.",
+              "settings",
+              "Set up auto-capture",
+            )}
+      </section>
+    `;
+  }
+
+  _recordingCard(rec) {
+    const thumb = this._captureUrl(rec.thumbnail);
+    const status = rec.status || "snapshot";
+    const pill = status === "clip" ? "ok" : status === "failed" ? "critical" : "unknown";
+    const playable = Boolean(rec.video || rec.thumbnail);
+    return `
+      <div class="cam-tile recording-tile">
+        <button class="recording-open" data-action="open-recording" data-id="${this._escape(rec.id)}" title="${this._escape(rec.label || "Recording")}" ${playable ? "" : "disabled"}>
+          ${thumb
+            ? `<img class="cam-feed" src="${this._escape(thumb)}" alt="${this._escape(rec.label || "Recording")}">`
+            : `<div class="cam-placeholder"><span class="cam-glyph">🎞️</span><small>${status === "failed" ? "Capture failed" : "No preview"}</small></div>`}
+          ${rec.video ? `<span class="cam-live play-badge">▶ CLIP</span>` : ""}
+          <span class="cam-label">${this._escape(rec.label || "Event")}</span>
+        </button>
+        <div class="recording-meta">
+          <span class="pill ${pill}">${this._escape(status)}</span>
+          <span class="recording-time">${this._escape(this._formatActivityTime(rec.timestamp))}</span>
+          <button class="secondary compact-button danger-button" data-action="delete-recording" data-id="${this._escape(rec.id)}">Delete</button>
+        </div>
+      </div>
+    `;
+  }
+
+  _recordingModal() {
+    const rec = this._recordingsList().find((item) => item.id === this._recordingFocus);
+    if (!rec) return "";
+    const video = this._captureUrl(rec.video);
+    const thumb = this._captureUrl(rec.thumbnail);
+    return `
+      <div class="modal">
+        <section class="wizard cam-dialog">
+          <button class="close" data-action="close-recording">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Recording · ${this._escape(rec.cameraLabel || rec.cameraId || "Camera")}</p>
+              <h2>${this._escape(rec.label || "Event")}</h2>
+              <p class="muted">${this._escape(this._formatActivityTime(rec.timestamp))}</p>
+            </div>
+          </div>
+          <div class="cam-stage">
+            ${video
+              ? `<video class="cam-feed-large" src="${this._escape(video)}" poster="${this._escape(thumb)}" controls autoplay playsinline></video>`
+              : thumb
+                ? `<img class="cam-feed-large" src="${this._escape(thumb)}" alt="${this._escape(rec.label || "")}">`
+                : `<div class="cam-placeholder"><span class="cam-glyph">🎞️</span><small>No media for this capture</small></div>`}
+          </div>
+          <div class="actions">
+            ${video ? `<a class="secondary compact-button" href="${this._escape(video)}" target="_blank" rel="noopener noreferrer">Open clip</a>` : ""}
+            ${thumb ? `<a class="secondary compact-button" href="${this._escape(thumb)}" target="_blank" rel="noopener noreferrer">Snapshot</a>` : ""}
+            <button class="secondary compact-button danger-button" data-action="delete-recording" data-id="${this._escape(rec.id)}">Delete</button>
+          </div>
+        </section>
+      </div>
     `;
   }
 
@@ -6977,6 +7220,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._dosingSettings()}
         ${this._equipmentSettings()}
         ${this._cameraSettings()}
+        ${this._captureSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._interlockSettings()}
@@ -8987,6 +9231,17 @@ class OpenReefPanel extends HTMLElement {
         .cam-card > span { position: absolute; left: 10px; top: 9px; z-index: 1; padding: 2px 8px; border-radius: 6px; background: rgba(4, 12, 20, .66); color: #8da2ba; font-weight: 800; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
         .cam-card-img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; }
         .cam-card small { position: absolute; left: 10px; bottom: 9px; padding: 2px 8px; border-radius: 6px; background: rgba(4, 12, 20, .66); color: #e5edf5; }
+        .recordings-section { margin-top: 18px; }
+        .recording-tile { aspect-ratio: auto; cursor: default; display: flex; flex-direction: column; }
+        .recording-open { position: relative; width: 100%; aspect-ratio: 16 / 9; border: 0; padding: 0; background: #0b1724; cursor: pointer; display: block; }
+        .recording-open:disabled { cursor: default; opacity: .85; }
+        .recording-open:not(:disabled):hover { filter: brightness(1.08); }
+        .recording-meta { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid #24364a; background: #0b1724; }
+        .recording-time { color: #8da2ba; font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .play-badge { color: #d1fae5; letter-spacing: .05em; }
+        .danger-button { color: #fecaca; }
+        .danger-button:hover { border-color: #ef4444; }
+        video.cam-feed-large { background: #04080d; }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
         .controller-picker { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 6px; }
         .compact-center { min-height: 220px; }

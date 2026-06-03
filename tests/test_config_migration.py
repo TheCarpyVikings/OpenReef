@@ -148,6 +148,66 @@ def test_garbage_cameras_block_coerced():
     assert result["cameras"]["b"]["entity_id"] == "camera.x"
 
 
+def test_capture_block_defaults_injected():
+    # A pre-camera-V2 config gains the capture block + empty captures list on migration.
+    result = normalise({"schemaVersion": 32, "tank": {"name": "Reef"}})
+    assert result["schemaVersion"] == CURRENT_SCHEMA
+    capture = result.get("capture")
+    assert isinstance(capture, dict)
+    assert capture["enabled"] is False
+    assert isinstance(capture["triggers"], dict)
+    # Critical alerts default on; the noisier triggers default off.
+    assert capture["triggers"]["criticalAlerts"] is True
+    assert capture["triggers"]["modeChanges"] is False
+    assert isinstance(result.get("captures"), list)
+
+
+def test_capture_garbage_coerced_and_clamped():
+    bad = {
+        "capture": {
+            "enabled": "yes",
+            "durationSeconds": 99999,
+            "lookbackSeconds": -5,
+            "retention": 0,
+            "cooldownSeconds": "nope",
+            "cameraIds": "not a list",
+            "triggers": "broken",
+        },
+        "captures": "totally not a list",
+    }
+    result = normalise(bad)  # must not raise
+    capture = result["capture"]
+    assert isinstance(capture, dict)
+    assert capture["enabled"] is True
+    # Numerics clamped into their valid ranges.
+    assert 3 <= capture["durationSeconds"] <= 60
+    assert capture["lookbackSeconds"] >= 0
+    assert capture["retention"] >= 1
+    assert isinstance(capture["cooldownSeconds"], int)
+    assert capture["cameraIds"] == []
+    assert isinstance(capture["triggers"], dict)
+    assert isinstance(result["captures"], list)
+
+
+def test_capture_camera_ids_filtered_to_real_cameras():
+    cfg = {
+        "cameras": {"display": {"entity_id": "camera.reef_display"}},
+        "capture": {"cameraIds": ["display", "ghost_camera", 42]},
+    }
+    result = normalise(cfg)
+    assert result["capture"]["cameraIds"] == ["display"]
+
+
+def test_captures_list_truncated_to_max():
+    MAX = integration.const.CAPTURE_MAX_RECORDS
+    cfg = {"captures": [{"id": str(i)} for i in range(MAX + 25)]}
+    result = normalise(cfg)
+    assert len(result["captures"]) == MAX
+    # Non-dict capture records are dropped without crashing.
+    result2 = normalise({"captures": [{"id": "a"}, "junk", 7, {"id": "b"}]})
+    assert [rec["id"] for rec in result2["captures"]] == ["a", "b"]
+
+
 def test_idempotent():
     sample = {
         "schemaVersion": 24,

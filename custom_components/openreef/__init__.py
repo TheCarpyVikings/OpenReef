@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +26,17 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CAPTURE_DEFAULT_COOLDOWN,
+    CAPTURE_DEFAULT_DURATION,
+    CAPTURE_DEFAULT_LOOKBACK,
+    CAPTURE_DEFAULT_RETENTION,
+    CAPTURE_MAX_COOLDOWN,
+    CAPTURE_MAX_DURATION,
+    CAPTURE_MAX_LOOKBACK,
+    CAPTURE_MAX_RECORDS,
+    CAPTURE_MIN_DURATION,
+    CAPTURES_DIR_NAME,
+    CAPTURES_STATIC_URL,
     CONF_SETTINGS,
     DEFAULT_CORE_CONFIG,
     DEFAULT_TANK_PROFILE,
@@ -49,6 +62,8 @@ from .const import (
 
 type OpenReefConfigEntry = ConfigEntry
 
+_LOGGER = logging.getLogger(__name__)
+
 
 SEARCH_LIMIT = 10
 UNAVAILABLE_STATES = {"unknown", "unavailable"}
@@ -62,6 +77,18 @@ ATO_DUTY_CYCLE_LAST = "ato_duty_cycle_last"
 DELAYED_EQUIPMENT_UNSUBS = "delayed_equipment_unsubs"
 WAVEMAKER_REMINDER_UNSUB = "wavemaker_reminder_unsub"
 WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
+CAPTURES_PATH_REGISTERED = "captures_path_registered"
+CAPTURE_LAST = "capture_last"
+CAPTURE_INFLIGHT = "capture_inflight"
+# Maps an OpenReef event type -> the user-configurable trigger toggle that gates it.
+CAPTURE_TRIGGER_FIELD = {
+    "critical_alert": "criticalAlerts",
+    "warning_alert": "warningAlerts",
+    "mode_change": "modeChanges",
+    "skimmer_auto_off": "skimmerAutoOff",
+    "ato_window": "atoWindows",
+    "feed_mode": "feedMode",
+}
 EQUIPMENT_PROFILE_TYPES = {
     "return_pump",
     "display_wavemaker",
@@ -687,6 +714,52 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 else camera_id
             )
             camera_config["entity_id"] = _normalise_entity_id(camera_config.get("entity_id"))
+
+    def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = default
+        return max(low, min(value, high))
+
+    capture = config.setdefault("capture", {})
+    if not isinstance(capture, dict):
+        capture = {}
+        config["capture"] = capture
+    capture["enabled"] = bool(capture.get("enabled", False))
+    capture["durationSeconds"] = _clamp_int(
+        capture.get("durationSeconds"), CAPTURE_DEFAULT_DURATION, CAPTURE_MIN_DURATION, CAPTURE_MAX_DURATION
+    )
+    capture["lookbackSeconds"] = _clamp_int(
+        capture.get("lookbackSeconds"), CAPTURE_DEFAULT_LOOKBACK, 0, CAPTURE_MAX_LOOKBACK
+    )
+    capture["retention"] = _clamp_int(
+        capture.get("retention"), CAPTURE_DEFAULT_RETENTION, 1, CAPTURE_MAX_RECORDS
+    )
+    capture["cooldownSeconds"] = _clamp_int(
+        capture.get("cooldownSeconds"), CAPTURE_DEFAULT_COOLDOWN, 0, CAPTURE_MAX_COOLDOWN
+    )
+    known_cameras = config.get("cameras", {})
+    camera_ids = capture.get("cameraIds")
+    if not isinstance(camera_ids, list):
+        camera_ids = []
+    capture["cameraIds"] = [
+        cid for cid in camera_ids if isinstance(cid, str) and cid in known_cameras
+    ]
+    default_triggers = DEFAULT_CORE_CONFIG["capture"]["triggers"]
+    triggers = capture.get("triggers")
+    if not isinstance(triggers, dict):
+        triggers = {}
+    capture["triggers"] = {
+        key: bool(triggers.get(key, default_triggers[key])) for key in default_triggers
+    }
+
+    captures = config.get("captures")
+    if not isinstance(captures, list):
+        captures = []
+    config["captures"] = [record for record in captures if isinstance(record, dict)][
+        :CAPTURE_MAX_RECORDS
+    ]
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -1466,13 +1539,19 @@ def _display_wavemaker_warning_items(
     return items
 
 
-def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> None:
+def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
+    """Reconcile alert states, append history on transitions, and return new transitions.
+
+    The returned list (one entry per ok->warning/critical/etc transition this call detected)
+    lets callers fire event-triggered camera captures without re-deriving the alert logic.
+    """
+    transitions: list[dict[str, str]] = []
     alert_config = config.setdefault("alerts", {})
     if not isinstance(alert_config, dict):
-        return
+        return transitions
     sensors = config.get("sensors", {})
     if not isinstance(sensors, dict):
-        return
+        return transitions
 
     active_items = {item["id"]: item for item in _sensor_alert_items(hass, config)}
     previous_states = alert_config.get("lastStates", {})
@@ -1505,9 +1584,13 @@ def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> None:
         previous = previous_states.get(sensor_id)
         if previous != state and (previous is not None or state != "resolved"):
             _append_alert_history(alert_config, sensor_id, label, state, title, message)
+            transitions.append(
+                {"sensor_id": sensor_id, "label": label, "state": state, "title": title}
+            )
         next_states[sensor_id] = state
 
     alert_config["lastStates"] = next_states
+    return transitions
 
 
 async def _async_sync_alert_notifications(
@@ -2187,6 +2270,8 @@ async def _async_set_ato_duty_cycle_state(
     if isinstance(interlocks, dict):
         interlocks["atoDutyCycleLastWindow"] = window_key
     await _async_save_config(hass, entry, latest_config)
+    if changed:
+        _dispatch_capture(hass, entry, "ato_window", f"ATO safety window {reason}")
 
 
 async def _async_schedule_ato_duty_cycle(
@@ -2319,7 +2404,7 @@ async def _async_save_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
 ) -> dict[str, Any]:
     normalised = _normalise_core_config(config)
-    _sync_alert_state(hass, normalised)
+    transitions = _sync_alert_state(hass, normalised)
     options = dict(entry.options)
     options[CONF_SETTINGS] = normalised
     hass.config_entries.async_update_entry(entry, options=options)
@@ -2329,6 +2414,12 @@ async def _async_save_config(
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
+    # Event-triggered camera capture on a fresh ok->warning/critical transition.
+    for transition in transitions:
+        if transition.get("state") == "critical":
+            _dispatch_capture(hass, entry, "critical_alert", transition.get("title", "Critical alert"))
+        elif transition.get("state") == "warning":
+            _dispatch_capture(hass, entry, "warning_alert", transition.get("title", "Warning"))
     return normalised
 
 
@@ -2682,6 +2773,23 @@ async def _async_apply_mode(
         "control",
     )
     await _async_save_config(hass, entry, config)
+
+    # One capture per mode action, most-specific enabled trigger wins (feed > safety > mode).
+    capture_triggers = config.get("capture", {}).get("triggers", {})
+    if not isinstance(capture_triggers, dict):
+        capture_triggers = {}
+    capture_candidates: list[tuple[str, str, str]] = []
+    if mode_id == "feed":
+        capture_candidates.append(("feed_mode", "feedMode", f"{mode_label} mode"))
+    if return_pump_turned_off:
+        capture_candidates.append(
+            ("skimmer_auto_off", "skimmerAutoOff", f"{mode_label} mode — return pump safety")
+        )
+    capture_candidates.append(("mode_change", "modeChanges", f"{mode_label} mode applied"))
+    for event_type, field, capture_label in capture_candidates:
+        if capture_triggers.get(field):
+            _dispatch_capture(hass, entry, event_type, capture_label)
+            break
 
     return {
         "success": True,
@@ -3075,6 +3183,7 @@ async def websocket_toggle_equipment(
         )
         if safety_actions:
             config = await _async_save_config(hass, entry, config)
+            _dispatch_capture(hass, entry, "skimmer_auto_off", "Return pump safety auto-off")
 
     connection.send_result(
         msg["id"],
@@ -3088,6 +3197,358 @@ async def websocket_toggle_equipment(
             "config": config,
             "validation": _validate_config(hass, config),
         },
+    )
+
+
+# --- Camera V2 / Phase A: event-triggered capture -----------------------------------------
+
+def _captures_dir(hass: HomeAssistant) -> Path:
+    """Managed directory (under the HA config dir) for captured clips and thumbnails."""
+    return Path(hass.config.path(CAPTURES_DIR_NAME))
+
+
+async def _async_register_captures_path(hass: HomeAssistant) -> None:
+    """Create + serve the captures directory once, same-origin to the panel.
+
+    We add our own subdirectory to ``allowlist_external_dirs`` in memory so the stable
+    ``camera.record`` service can write clips here without the tester editing
+    ``configuration.yaml`` — it only ever widens the allowlist to a dir we fully control.
+    """
+    data = hass.data.setdefault(DOMAIN, {})
+    if data.get(CAPTURES_PATH_REGISTERED):
+        return
+    captures_dir = _captures_dir(hass)
+    await hass.async_add_executor_job(
+        lambda: captures_dir.mkdir(parents=True, exist_ok=True)
+    )
+    try:
+        hass.config.allowlist_external_dirs.add(str(captures_dir))
+    except Exception:  # noqa: BLE001 - non-fatal; snapshot fallback still works
+        _LOGGER.debug("Could not extend allowlist_external_dirs for captures", exc_info=True)
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                CAPTURES_STATIC_URL,
+                str(captures_dir),
+                cache_headers=False,
+            )
+        ]
+    )
+    data[CAPTURES_PATH_REGISTERED] = True
+
+
+def _resolve_capture_camera(
+    hass: HomeAssistant,
+    config: dict[str, Any],
+    capture_cfg: dict[str, Any],
+    override: str | None = None,
+) -> tuple[str, str, str] | None:
+    """Pick the first online, mapped camera to capture. Returns (id, entity_id, label)."""
+    cameras = config.get("cameras", {})
+    if not isinstance(cameras, dict) or not cameras:
+        return None
+    if override and override in cameras:
+        candidate_ids = [override]
+    else:
+        selected = capture_cfg.get("cameraIds")
+        selected = [cid for cid in selected if cid in cameras] if isinstance(selected, list) else []
+        candidate_ids = selected or list(cameras.keys())
+    for cid in candidate_ids:
+        cam = cameras.get(cid)
+        if not isinstance(cam, dict):
+            continue
+        entity_id = _normalise_entity_id(cam.get("entity_id"))
+        if not entity_id:
+            continue
+        state = hass.states.get(entity_id)
+        if state is None or state.state in UNAVAILABLE_STATES:
+            continue
+        return cid, entity_id, str(cam.get("label") or cid)
+    return None
+
+
+async def _async_delete_capture_files(
+    hass: HomeAssistant, records: list[dict[str, Any]]
+) -> None:
+    """Best-effort delete of the clip + thumbnail files for pruned/removed records."""
+    captures_dir = _captures_dir(hass)
+    paths: list[Path] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for key in ("video", "thumbnail"):
+            name = record.get(key)
+            if isinstance(name, str) and name:
+                paths.append(captures_dir / name)
+    if not paths:
+        return
+
+    def _remove() -> None:
+        for path in paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                _LOGGER.debug("Could not delete capture file %s", path, exc_info=True)
+
+    await hass.async_add_executor_job(_remove)
+
+
+async def _async_record_clip(
+    hass: HomeAssistant,
+    camera_entity_id: str,
+    video_path: Path,
+    duration: int,
+    lookback: int,
+) -> bool:
+    """Record an MP4 clip via the stable ``camera.record`` service. Returns True on success."""
+    data: dict[str, Any] = {
+        ATTR_ENTITY_ID: camera_entity_id,
+        "filename": str(video_path),
+        "duration": duration,
+    }
+    if lookback > 0:
+        data["lookback"] = lookback
+    await hass.services.async_call("camera", "record", data, blocking=True)
+    return await hass.async_add_executor_job(video_path.exists)
+
+
+async def _async_perform_capture(
+    hass: HomeAssistant,
+    capture_cfg: dict[str, Any],
+    camera_id: str,
+    camera_entity_id: str,
+    camera_label: str,
+    event_meta: dict[str, str],
+    now: datetime,
+) -> dict[str, Any]:
+    """Take a snapshot (always) + a clip (best-effort) and return a capture record."""
+    captures_dir = _captures_dir(hass)
+    await hass.async_add_executor_job(
+        lambda: captures_dir.mkdir(parents=True, exist_ok=True)
+    )
+    event_type = event_meta.get("eventType", "event")
+    base = f"{event_type}_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    duration = max(
+        CAPTURE_MIN_DURATION,
+        min(int(capture_cfg.get("durationSeconds", CAPTURE_DEFAULT_DURATION)), CAPTURE_MAX_DURATION),
+    )
+    lookback = max(0, min(int(capture_cfg.get("lookbackSeconds", 0)), CAPTURE_MAX_LOOKBACK))
+
+    thumbnail = ""
+    video = ""
+    status = "failed"
+
+    # Snapshot first — works on any camera, no allowlist, and doubles as the gallery poster.
+    try:
+        from homeassistant.components import camera as camera_component
+
+        image = await camera_component.async_get_image(hass, camera_entity_id, timeout=10)
+        thumb_path = captures_dir / f"{base}.jpg"
+        await hass.async_add_executor_job(thumb_path.write_bytes, image.content)
+        thumbnail = thumb_path.name
+        status = "snapshot"
+    except Exception:  # noqa: BLE001 - snapshot is best-effort
+        _LOGGER.warning("OpenReef snapshot failed for %s", camera_entity_id, exc_info=True)
+
+    # Clip is the headline; degrades to the snapshot if the camera has no stream.
+    video_path = captures_dir / f"{base}.mp4"
+    try:
+        if await _async_record_clip(hass, camera_entity_id, video_path, duration, lookback):
+            video = video_path.name
+            status = "clip"
+    except Exception:  # noqa: BLE001 - keep the snapshot on any clip failure
+        _LOGGER.warning(
+            "OpenReef clip recording failed for %s; keeping snapshot", camera_entity_id, exc_info=True
+        )
+
+    return {
+        "id": uuid.uuid4().hex,
+        "timestamp": now.isoformat(),
+        "eventType": event_type,
+        "label": event_meta.get("label", "Event"),
+        "cameraId": camera_id,
+        "cameraEntityId": camera_entity_id,
+        "cameraLabel": camera_label,
+        "video": video,
+        "thumbnail": thumbnail,
+        "durationSeconds": duration,
+        "status": status,
+    }
+
+
+async def _async_capture_event(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    event_meta: dict[str, str],
+    camera_override: str | None = None,
+) -> dict[str, Any] | None:
+    """Capture a clip/snapshot for an OpenReef event. Never raises into the caller's path."""
+    try:
+        config = _config_from_entry(entry)
+        capture_cfg = config.get("capture", {})
+        if not isinstance(capture_cfg, dict):
+            return None
+        manual = event_meta.get("eventType") == "manual"
+        if not manual and not capture_cfg.get("enabled", False):
+            return None
+
+        now = datetime.now(timezone.utc)
+        trigger_key = event_meta.get("eventType", "manual")
+        last_map = (
+            hass.data.setdefault(DOMAIN, {})
+            .setdefault(CAPTURE_LAST, {})
+            .setdefault(entry.entry_id, {})
+        )
+        cooldown = int(capture_cfg.get("cooldownSeconds", CAPTURE_DEFAULT_COOLDOWN))
+        if not manual and cooldown > 0:
+            last = last_map.get(trigger_key)
+            if last is not None and (now - last).total_seconds() < cooldown:
+                return None
+
+        camera = _resolve_capture_camera(hass, config, capture_cfg, camera_override)
+        if camera is None:
+            _LOGGER.debug("OpenReef capture skipped: no available camera (%s)", trigger_key)
+            return None
+        camera_id, camera_entity_id, camera_label = camera
+
+        # Synchronous check-and-add before any await => the event loop serialises concurrent
+        # dispatches, so the same camera never records two overlapping clips.
+        inflight: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault(CAPTURE_INFLIGHT, set())
+        if camera_entity_id in inflight:
+            return None
+        inflight.add(camera_entity_id)
+        try:
+            record = await _async_perform_capture(
+                hass, capture_cfg, camera_id, camera_entity_id, camera_label, event_meta, now
+            )
+        finally:
+            inflight.discard(camera_entity_id)
+
+        fresh = _config_from_entry(entry)
+        captures = fresh.get("captures")
+        if not isinstance(captures, list):
+            captures = []
+        captures.insert(0, record)
+        retention = max(1, min(int(capture_cfg.get("retention", CAPTURE_DEFAULT_RETENTION)), CAPTURE_MAX_RECORDS))
+        removed = captures[retention:]
+        fresh["captures"] = captures[:retention]
+        await _async_delete_capture_files(hass, removed)
+        _append_activity(
+            fresh,
+            f"Captured {record['status']} from {camera_label}: {event_meta.get('label', 'event')}",
+            "info",
+        )
+        last_map[trigger_key] = now
+        await _async_save_config(hass, entry, fresh)
+        return record
+    except Exception:  # noqa: BLE001 - capture must never break the alert/safety path
+        _LOGGER.exception("OpenReef camera capture failed")
+        return None
+
+
+def _dispatch_capture(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, event_type: str, label: str
+) -> None:
+    """Fire-and-forget a capture if enabled and this trigger's toggle is on."""
+    config = _config_from_entry(entry)
+    capture_cfg = config.get("capture", {})
+    if not isinstance(capture_cfg, dict) or not capture_cfg.get("enabled", False):
+        return
+    triggers = capture_cfg.get("triggers", {})
+    field = CAPTURE_TRIGGER_FIELD.get(event_type)
+    if field and not (isinstance(triggers, dict) and triggers.get(field, False)):
+        return
+    hass.async_create_task(
+        _async_capture_event(hass, entry, {"eventType": event_type, "label": label}),
+        "openreef_capture",
+    )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/list_recordings"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_list_recordings(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return the stored capture records + the base URL the panel serves them from."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    captures = config.get("captures", [])
+    if not isinstance(captures, list):
+        captures = []
+    connection.send_result(msg["id"], {"captures": captures, "baseUrl": CAPTURES_STATIC_URL})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/delete_recording",
+        vol.Required("id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_delete_recording(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Delete one capture's files + record."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    captures = config.get("captures", [])
+    if not isinstance(captures, list):
+        captures = []
+    target = next(
+        (rec for rec in captures if isinstance(rec, dict) and rec.get("id") == msg["id"]), None
+    )
+    if target is None:
+        connection.send_error(msg["id"], "not_found", "Recording not found")
+        return
+    await _async_delete_capture_files(hass, [target])
+    config["captures"] = [
+        rec for rec in captures if not (isinstance(rec, dict) and rec.get("id") == msg["id"])
+    ]
+    saved = await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"success": True, "config": saved})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/capture_now",
+        vol.Optional("camera_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_capture_now(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Manually capture a clip/snapshot now (bypasses the enabled/trigger gate)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    record = await _async_capture_event(
+        hass,
+        entry,
+        {"eventType": "manual", "label": "Manual capture"},
+        camera_override=msg.get("camera_id"),
+    )
+    if not record:
+        connection.send_error(
+            msg["id"],
+            "capture_failed",
+            "Could not capture — check a camera is mapped and online",
+        )
+        return
+    connection.send_result(
+        msg["id"], {"success": True, "record": record, "config": _config_from_entry(entry)}
     )
 
 
@@ -3133,6 +3594,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_clear_alert_history)
     websocket_api.async_register_command(hass, websocket_apply_mode)
     websocket_api.async_register_command(hass, websocket_toggle_equipment)
+    websocket_api.async_register_command(hass, websocket_list_recordings)
+    websocket_api.async_register_command(hass, websocket_delete_recording)
+    websocket_api.async_register_command(hass, websocket_capture_now)
 
     hass.services.async_register(
         DOMAIN,
@@ -3166,6 +3630,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     """Set up OpenReef from a config entry."""
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = entry
     await _async_register_panel(hass)
+    await _async_register_captures_path(hass)
     raw_settings = entry.options.get(CONF_SETTINGS)
     normalised = _config_from_entry(entry)
     is_legacy = isinstance(raw_settings, dict) and (
@@ -3198,6 +3663,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     hass.data.setdefault(DOMAIN, {}).setdefault(WAVEMAKER_REMINDER_LAST, {}).pop(
         entry.entry_id, None
     )
+    hass.data.setdefault(DOMAIN, {}).setdefault(CAPTURE_LAST, {}).pop(entry.entry_id, None)
     config = _config_from_entry(entry)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)

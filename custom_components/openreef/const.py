@@ -9,8 +9,22 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 32
-INTEGRATION_VERSION = "0.4.67"
+CORE_SCHEMA_VERSION = 33
+INTEGRATION_VERSION = "0.4.69"
+
+# Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
+# managed dir under the HA config directory and served back to the panel same-origin.
+CAPTURES_DIR_NAME = "openreef_captures"
+CAPTURES_STATIC_URL = "/openreef_captures"
+CAPTURE_MAX_RECORDS = 50           # hard cap on stored capture records (own cap, not the activity-50)
+CAPTURE_DEFAULT_RETENTION = 10     # default "keep last N"
+CAPTURE_DEFAULT_DURATION = 12      # seconds of clip
+CAPTURE_MIN_DURATION = 3
+CAPTURE_MAX_DURATION = 60
+CAPTURE_DEFAULT_LOOKBACK = 0       # pre-roll seconds (needs a warm HLS buffer; default off)
+CAPTURE_MAX_LOOKBACK = 30
+CAPTURE_DEFAULT_COOLDOWN = 20      # per-trigger debounce seconds
+CAPTURE_MAX_COOLDOWN = 600
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -451,6 +465,23 @@ DEFAULT_CORE_CONFIG = {
     },
     "equipment": {},
     "cameras": {},
+    "capture": {
+        "enabled": False,
+        "cameraIds": [],
+        "durationSeconds": CAPTURE_DEFAULT_DURATION,
+        "lookbackSeconds": CAPTURE_DEFAULT_LOOKBACK,
+        "retention": CAPTURE_DEFAULT_RETENTION,
+        "cooldownSeconds": CAPTURE_DEFAULT_COOLDOWN,
+        "triggers": {
+            "criticalAlerts": True,
+            "warningAlerts": False,
+            "modeChanges": False,
+            "skimmerAutoOff": True,
+            "atoWindows": False,
+            "feedMode": False,
+        },
+    },
+    "captures": [],
     "energy": {
         "tariff": 0.28,
         "currency": "GBP",

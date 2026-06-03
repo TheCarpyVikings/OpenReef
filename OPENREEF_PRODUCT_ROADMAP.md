@@ -114,6 +114,21 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [ ] ATO duty cycle over several days.
 - [ ] Scheduled modes over several days.
 
+## Camera V2 Track
+
+Cameras that fuse live video with OpenReef's data — the angle neither a Neptune Apex (no camera)
+nor a generic cam app (no tank data) can match. Built one phase at a time; tick as each ships.
+
+- [ ] **A. Event-triggered clip capture** — auto-record a short clip (snapshot fallback) when an
+  alert goes critical/warning, a mode fires, or safety trips. User-configurable triggers,
+  keep-last-N auto-prune, Recordings gallery linked to the activity log. *(in progress — foundation
+  for B/C/D)*
+- [ ] **B. Reef timelapse** — scheduled snapshots played back in-panel (watch coral grow / replay a
+  day's light cycle). Zero-ffmpeg JS slideshow; reuses A's storage + gallery.
+- [ ] **C. Live overlay + shareable tank card** — burn temp/pH/alk/Reef Health onto the live feed +
+  one-tap shareable photo with stats baked in.
+- [ ] **D. Feed-watch** — capture during Feed mode to confirm every fish ate (specialisation of A).
+
 ## Apex Parity
 
 ### Monitoring Parity
