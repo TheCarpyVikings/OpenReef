@@ -22,6 +22,11 @@ class OpenReefPanel extends HTMLElement {
     this._cameraFocus = null;
     this._recordingFocus = null;
     this._webrtcSession = null;
+    this._timelapse = {
+      frames: [], index: 0, playing: false, speed: 1, mode: "all",
+      loaded: false, loading: false, windowMid: 0, cameraId: "", cameraLabel: "", error: "",
+    };
+    this._timelapseTimer = null;
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -88,6 +93,7 @@ class OpenReefPanel extends HTMLElement {
 
   disconnectedCallback() {
     this._stopCameraWebRTC();
+    this._stopTimelapse();
     if (this._modeCountdownTimer) {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
@@ -805,6 +811,7 @@ class OpenReefPanel extends HTMLElement {
 
       if (action === "tab") {
         this._stopCameraWebRTC();
+        this._stopTimelapse();
         this._activeTab = id;
         this._setupOpen = false;
         this._equipmentDetail = null;
@@ -931,6 +938,11 @@ class OpenReefPanel extends HTMLElement {
       if (action === "open-recording") { this._recordingFocus = id; this._render(); }
       if (action === "close-recording") { this._recordingFocus = null; this._render(); }
       if (action === "delete-recording") this._deleteRecording(id);
+      if (action === "timelapse-play") this._timelapseTogglePlay();
+      if (action === "timelapse-mode") this._timelapseSetMode(id);
+      if (action === "timelapse-grab") this._timelapseGrab();
+      if (action === "timelapse-reload") this._loadTimelapseFrames();
+      if (action === "timelapse-clear") this._timelapseClear();
       if (action === "choose-equipment") {
         this._config.equipment[id][field] = target.dataset.entity;
         this._equipmentEditors[id] = true;
@@ -1129,6 +1141,9 @@ class OpenReefPanel extends HTMLElement {
       const field = target.dataset.field;
       const value = target.type === "checkbox" ? target.checked : target.type === "number" ? Number(target.value) : target.value;
 
+      if (target.dataset.action === "timelapse-seek") { this._timelapseSeek(Number(target.value)); return; }
+      if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
+
       if (target.dataset.manualField === "parameter") {
         const unitInput = this.shadowRoot.querySelector('[data-manual-field="unit"]');
         if (unitInput) unitInput.value = this._manualTestMeta(value).unit || "";
@@ -1194,6 +1209,15 @@ class OpenReefPanel extends HTMLElement {
         const set = new Set(ids);
         if (value) set.add(id); else set.delete(id);
         this._config.capture.cameraIds = [...set];
+      }
+      if (scope === "timelapse") {
+        this._config.timelapse = this._config.timelapse || {};
+        this._config.timelapse[field] = value;
+      }
+      if (scope === "timelapse-retention") {
+        this._config.timelapse = this._config.timelapse || {};
+        this._config.timelapse.retention = this._config.timelapse.retention || {};
+        this._config.timelapse.retention[field] = value;
       }
       if (scope === "mode-preview") {
         const modeId = target.dataset.mode;
@@ -5655,6 +5679,7 @@ class OpenReefPanel extends HTMLElement {
               "Add a camera",
             )}
       </section>
+      ${this._timelapseSection()}
       ${this._recordingsGallery()}
       ${this._cameraFocus ? this._cameraModal() : ""}
       ${this._recordingFocus ? this._recordingModal() : ""}
@@ -5836,6 +5861,310 @@ class OpenReefPanel extends HTMLElement {
         ${this._candidateList(key, "choose-camera", id)}
       </section>
     `;
+  }
+
+  // --- Timelapse (Phase B): scheduled frames + in-panel slideshow ---------
+
+  _stopTimelapse() {
+    if (this._timelapseTimer) {
+      window.clearInterval(this._timelapseTimer);
+      this._timelapseTimer = null;
+    }
+    if (this._timelapse) this._timelapse.playing = false;
+  }
+
+  async _loadTimelapseFrames() {
+    const state = this._timelapse;
+    state.loading = true;
+    state.error = "";
+    try {
+      const tl = this._config.timelapse || {};
+      const payload = { type: "openreef/list_timelapse_frames" };
+      if (tl.cameraId) payload.camera_id = tl.cameraId;
+      const result = await this._callWS(payload);
+      state.frames = Array.isArray(result.frames) ? result.frames : [];
+      state.windowMid = Number(result.windowMidMinutes) || 0;
+      state.cameraId = result.cameraId || "";
+      state.cameraLabel = result.cameraLabel || "";
+      state.index = Math.max(0, this._timelapseViewFrames().length - 1);
+    } catch (err) {
+      state.error = err instanceof Error ? err.message : "Could not load timelapse";
+      state.frames = [];
+    } finally {
+      state.loaded = true;
+      state.loading = false;
+      if (this._activeTab === "cameras") this._render();
+    }
+  }
+
+  _timelapseViewFrames() {
+    const state = this._timelapse;
+    const frames = Array.isArray(state.frames) ? state.frames : [];
+    if (state.mode !== "daily") return frames;
+    return this._timelapseDailyFrames(frames, state.windowMid || 0);
+  }
+
+  // One frame per calendar day — the one closest to the daylight-window midpoint.
+  _timelapseDailyFrames(frames, windowMid) {
+    const byDay = new Map();
+    for (const frame of frames) {
+      const date = new Date(frame.ts);
+      if (Number.isNaN(date.getTime())) continue;
+      const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+      const dist = Math.abs(date.getHours() * 60 + date.getMinutes() - windowMid);
+      const current = byDay.get(key);
+      if (!current || dist < current.dist) byDay.set(key, { frame, dist });
+    }
+    return [...byDay.values()]
+      .map((entry) => entry.frame)
+      .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  }
+
+  _formatTimelapseStamp(ts) {
+    const date = new Date(ts);
+    if (Number.isNaN(date.getTime())) return ts || "";
+    return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  _timelapseSection() {
+    const tl = this._config.timelapse || {};
+    const hasCamera = this._cameraList().some(([, cam]) => cam.entity_id);
+    const state = this._timelapse;
+    if (!state.loaded && !state.loading) this._loadTimelapseFrames();
+    const frames = state.frames;
+    const header = `
+      <div class="section-head">
+        <div>
+          <h2>Timelapse</h2>
+          <p>Replay a day's light cycle, or watch coral grow over months. Frames are captured automatically during your daylight window.</p>
+        </div>
+        <div class="actions">
+          <button class="secondary compact-button" data-action="timelapse-grab" ${hasCamera ? "" : "disabled"}>Grab frame now</button>
+          <button class="secondary compact-button" data-action="timelapse-reload">Reload</button>
+          <button class="secondary compact-button" data-action="tab" data-id="settings">Settings</button>
+        </div>
+      </div>`;
+    let body;
+    if (state.loading && !frames.length) {
+      body = `<div class="muted">Loading timelapse…</div>`;
+    } else if (state.error && !frames.length) {
+      body = `<div class="notice warning-notice">${this._escape(state.error)}</div>`;
+    } else if (!frames.length) {
+      body = this._emptyState(
+        tl.enabled ? "No frames yet" : "Timelapse is off",
+        tl.enabled
+          ? "Frames are captured on a schedule during your daylight window. Hit Grab frame now to seed one."
+          : "Turn on Timelapse in Settings and OpenReef will quietly build a reef timelapse you can scrub through.",
+        "settings",
+        tl.enabled ? "Open settings" : "Turn on timelapse",
+      );
+    } else {
+      body = this._timelapsePlayer();
+    }
+    return `<section class="stack timelapse-section">${header}${body}</section>`;
+  }
+
+  _timelapsePlayer() {
+    const state = this._timelapse;
+    const view = this._timelapseViewFrames();
+    if (!view.length) return `<div class="muted">No frames in this view.</div>`;
+    const idx = Math.max(0, Math.min(state.index, view.length - 1));
+    const frame = view[idx];
+    const speeds = [0.5, 1, 2, 4];
+    return `
+      <div class="cam-stage timelapse-stage">
+        <img class="cam-feed-large timelapse-frame" src="${this._escape(this._captureUrl(frame.file))}" alt="Timelapse frame">
+        <span class="timelapse-stamp">${this._escape(this._formatTimelapseStamp(frame.ts))}</span>
+      </div>
+      <div class="timelapse-controls">
+        <button class="secondary compact-button" data-action="timelapse-play">${state.playing ? "⏸ Pause" : "▶ Play"}</button>
+        <input type="range" class="timelapse-scrubber" min="0" max="${view.length - 1}" value="${idx}" data-action="timelapse-seek">
+        <span class="timelapse-counter">${idx + 1} / ${view.length}</span>
+        <label class="timelapse-speed">Speed
+          <select data-action="timelapse-speed">
+            ${speeds.map((s) => `<option value="${s}" ${state.speed === s ? "selected" : ""}>${s}×</option>`).join("")}
+          </select>
+        </label>
+        <span class="seg">
+          <button class="secondary compact-button ${state.mode === "all" ? "active" : ""}" data-action="timelapse-mode" data-id="all">Full day</button>
+          <button class="secondary compact-button ${state.mode === "daily" ? "active" : ""}" data-action="timelapse-mode" data-id="daily">Growth</button>
+        </span>
+      </div>
+      <p class="muted">Full day replays every frame (a day's light cycle); Growth shows one frame per day (watch it grow).</p>
+    `;
+  }
+
+  _updateTimelapseDom() {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const state = this._timelapse;
+    const view = this._timelapseViewFrames();
+    const idx = Math.max(0, Math.min(state.index, view.length - 1));
+    const frame = view[idx];
+    if (!frame) return;
+    const img = root.querySelector(".timelapse-frame");
+    if (img) img.src = this._captureUrl(frame.file);
+    const stamp = root.querySelector(".timelapse-stamp");
+    if (stamp) stamp.textContent = this._formatTimelapseStamp(frame.ts);
+    const scrubber = root.querySelector(".timelapse-scrubber");
+    if (scrubber && document.activeElement !== scrubber) scrubber.value = String(idx);
+    const counter = root.querySelector(".timelapse-counter");
+    if (counter) counter.textContent = `${idx + 1} / ${view.length}`;
+    // Rolling preload so the next frames are warm in cache (no flicker).
+    for (let i = idx + 1; i <= idx + 12 && i < view.length; i += 1) {
+      const preload = new Image();
+      preload.src = this._captureUrl(view[i].file);
+    }
+  }
+
+  _timelapseInterval() {
+    return Math.max(80, Math.round(500 / (this._timelapse.speed || 1)));
+  }
+
+  _timelapseTogglePlay() {
+    const state = this._timelapse;
+    if (state.playing) {
+      this._stopTimelapse();
+      this._render();
+      return;
+    }
+    const view = this._timelapseViewFrames();
+    if (view.length < 2) return;
+    if (state.index >= view.length - 1) state.index = 0;
+    state.playing = true;
+    this._render();
+    this._updateTimelapseDom();
+    this._timelapseTimer = window.setInterval(() => this._timelapseAdvance(), this._timelapseInterval());
+  }
+
+  _timelapseAdvance() {
+    const state = this._timelapse;
+    const view = this._timelapseViewFrames();
+    if (!view.length) {
+      this._stopTimelapse();
+      return;
+    }
+    if (state.index >= view.length - 1) {
+      this._stopTimelapse();
+      this._render();
+      return;
+    }
+    state.index += 1;
+    this._updateTimelapseDom();
+  }
+
+  _timelapseSeek(value) {
+    const state = this._timelapse;
+    this._stopTimelapse();
+    state.index = Math.max(0, Math.min(Math.round(value || 0), this._timelapseViewFrames().length - 1));
+    this._updateTimelapseDom();
+    const btn = this.shadowRoot?.querySelector('[data-action="timelapse-play"]');
+    if (btn) btn.textContent = "▶ Play";
+  }
+
+  _timelapseSetSpeed(value) {
+    const state = this._timelapse;
+    state.speed = value || 1;
+    if (state.playing && this._timelapseTimer) {
+      window.clearInterval(this._timelapseTimer);
+      this._timelapseTimer = window.setInterval(() => this._timelapseAdvance(), this._timelapseInterval());
+    }
+  }
+
+  _timelapseSetMode(mode) {
+    if (mode !== "all" && mode !== "daily") return;
+    const state = this._timelapse;
+    this._stopTimelapse();
+    state.mode = mode;
+    state.index = Math.max(0, this._timelapseViewFrames().length - 1);
+    this._render();
+  }
+
+  async _timelapseGrab() {
+    this._error = "";
+    try {
+      if (this._configDirty) await this._persistConfigSilently();
+      await this._callWS({ type: "openreef/capture_timelapse_frame" });
+      this._message = "Timelapse frame captured";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not capture a frame — check a camera is mapped and online";
+    }
+    await this._loadTimelapseFrames();
+  }
+
+  async _timelapseClear() {
+    if (typeof window.confirm === "function" && !window.confirm("Delete ALL timelapse frames for this camera? This can't be undone.")) {
+      return;
+    }
+    this._error = "";
+    try {
+      await this._callWS({ type: "openreef/clear_timelapse" });
+      this._message = "Timelapse cleared";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not clear timelapse";
+    }
+    this._stopTimelapse();
+    this._timelapse.index = 0;
+    await this._loadTimelapseFrames();
+  }
+
+  _timelapseSettings() {
+    const tl = this._config.timelapse || {};
+    const retention = tl.retention || {};
+    const cams = this._cameraList();
+    const body = `
+      <label class="toggle-card">
+        <input type="checkbox" data-scope="timelapse" data-field="enabled" ${tl.enabled ? "checked" : ""}>
+        <span><strong>Build a reef timelapse</strong><small>Snap a frame on a schedule during your daylight window, then play it back in the Cameras tab.</small></span>
+      </label>
+      ${cams.length ? "" : `<div class="notice warning-notice">Map a camera under <strong>Cameras</strong> first — timelapse needs one to capture.</div>`}
+      <p class="eyebrow">Camera</p>
+      <label>Timelapse camera
+        <select data-scope="timelapse" data-field="cameraId">
+          <option value="" ${!tl.cameraId ? "selected" : ""}>First mapped camera</option>
+          ${cams.map(([id, cam]) => `<option value="${this._escape(id)}" ${tl.cameraId === id ? "selected" : ""}>${this._escape(cam.label || id)}</option>`).join("")}
+        </select>
+      </label>
+      <p class="eyebrow">Cadence &amp; daylight window</p>
+      <div class="grid three compact">
+        <label>Every (min)
+          <input type="number" min="5" max="1440" step="5" data-scope="timelapse" data-field="cadenceMinutes" value="${this._escape(tl.cadenceMinutes ?? 30)}">
+        </label>
+        <label>From
+          <input type="time" data-scope="timelapse" data-field="windowStart" value="${this._escape(tl.windowStart || "08:00")}">
+        </label>
+        <label>To
+          <input type="time" data-scope="timelapse" data-field="windowEnd" value="${this._escape(tl.windowEnd || "22:00")}">
+        </label>
+      </div>
+      <p class="muted">Frames are only captured inside this window, so the timelapse skips the dark lights-off hours.</p>
+      <p class="eyebrow">Retention — tiered downsampling</p>
+      <div class="grid four compact">
+        <label>Every frame for (days)
+          <input type="number" min="0" max="3650" step="1" data-scope="timelapse-retention" data-field="detailDays" value="${this._escape(retention.detailDays ?? 14)}">
+        </label>
+        <label>Then 1/day until (days)
+          <input type="number" min="0" max="3650" step="1" data-scope="timelapse-retention" data-field="dailyUntilDays" value="${this._escape(retention.dailyUntilDays ?? 90)}">
+        </label>
+        <label>Then 1/week until (days)
+          <input type="number" min="0" max="3650" step="1" data-scope="timelapse-retention" data-field="weeklyUntilDays" value="${this._escape(retention.weeklyUntilDays ?? 365)}">
+        </label>
+        <label>Then 1/month until (days, 0=∞)
+          <input type="number" min="0" max="3650" step="1" data-scope="timelapse-retention" data-field="monthlyUntilDays" value="${this._escape(retention.monthlyUntilDays ?? 0)}">
+        </label>
+      </div>
+      <p class="muted">Recent frames stay detailed for day-cycle replay; older days thin to 1/day, then 1/week, then 1/month — so years of growth fit in a few hundred frames.</p>
+      <div class="actions">
+        <button class="secondary compact-button" data-action="timelapse-grab" ${cams.length ? "" : "disabled"}>Grab a frame now</button>
+        <button class="secondary compact-button danger-button" data-action="timelapse-clear">Clear timelapse</button>
+      </div>
+    `;
+    return this._settingsPanel(
+      "timelapse",
+      "Reef timelapse",
+      "Scheduled snapshots played back as a slideshow. Tiered retention keeps months of growth in a few hundred frames.",
+      body,
+    );
   }
 
   // --- Recordings (event-triggered capture) ------------------------------
@@ -7428,6 +7757,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._equipmentSettings()}
         ${this._cameraSettings()}
         ${this._captureSettings()}
+        ${this._timelapseSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._interlockSettings()}
@@ -9449,6 +9779,14 @@ class OpenReefPanel extends HTMLElement {
         .danger-button { color: #fecaca; }
         .danger-button:hover { border-color: #ef4444; }
         video.cam-feed-large { background: #04080d; }
+        .timelapse-section { margin-top: 18px; }
+        .timelapse-stamp { position: absolute; top: 10px; left: 12px; background: rgba(4, 8, 13, 0.72); color: #e6f1f7; padding: 4px 9px; border-radius: 6px; font-size: 0.8em; letter-spacing: 0.02em; }
+        .timelapse-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+        .timelapse-scrubber { flex: 1 1 180px; min-width: 120px; accent-color: var(--primary-color, #00b4d8); }
+        .timelapse-counter { font-variant-numeric: tabular-nums; color: #9fb3c8; font-size: 0.85em; }
+        .timelapse-speed { display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: #9fb3c8; }
+        .timelapse-section .seg { display: inline-flex; gap: 4px; }
+        .timelapse-section .seg .active { background: var(--primary-color, #00b4d8); color: #04222b; border-color: var(--primary-color, #00b4d8); }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
         .controller-picker { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 6px; }
         .compact-center { min-height: 220px; }

@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 33
-INTEGRATION_VERSION = "0.4.72"
+CORE_SCHEMA_VERSION = 34
+INTEGRATION_VERSION = "0.4.73"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -25,6 +25,22 @@ CAPTURE_DEFAULT_LOOKBACK = 0       # pre-roll seconds (needs a warm HLS buffer; 
 CAPTURE_MAX_LOOKBACK = 30
 CAPTURE_DEFAULT_COOLDOWN = 20      # per-trigger debounce seconds
 CAPTURE_MAX_COOLDOWN = 600
+
+# Camera V2 — reef timelapse (Phase B). Frames are JPEGs written into a per-camera
+# subdir of the captures dir and played back in-panel as a zero-ffmpeg slideshow.
+# Retention is a 4-tier downsampling ladder: every frame recently, then 1/day,
+# 1/week, 1/month as frames age — so years of growth fit in a few hundred frames.
+TIMELAPSE_SUBDIR = "timelapse"
+TIMELAPSE_DEFAULT_CADENCE = 30     # minutes between frames
+TIMELAPSE_MIN_CADENCE = 5
+TIMELAPSE_MAX_CADENCE = 1440
+TIMELAPSE_DEFAULT_WINDOW_START = "08:00"
+TIMELAPSE_DEFAULT_WINDOW_END = "22:00"
+TIMELAPSE_DEFAULT_DETAIL_DAYS = 14    # keep every frame for this long
+TIMELAPSE_DEFAULT_DAILY_DAYS = 90     # then 1/day until this age
+TIMELAPSE_DEFAULT_WEEKLY_DAYS = 365   # then 1/week until this age
+TIMELAPSE_DEFAULT_MONTHLY_DAYS = 0    # then 1/month until this age (0 = keep forever)
+TIMELAPSE_MAX_DAYS = 3650             # clamp for any tier boundary (~10 years)
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -482,6 +498,19 @@ DEFAULT_CORE_CONFIG = {
         },
     },
     "captures": [],
+    "timelapse": {
+        "enabled": False,
+        "cameraId": "",
+        "cadenceMinutes": TIMELAPSE_DEFAULT_CADENCE,
+        "windowStart": TIMELAPSE_DEFAULT_WINDOW_START,
+        "windowEnd": TIMELAPSE_DEFAULT_WINDOW_END,
+        "retention": {
+            "detailDays": TIMELAPSE_DEFAULT_DETAIL_DAYS,
+            "dailyUntilDays": TIMELAPSE_DEFAULT_DAILY_DAYS,
+            "weeklyUntilDays": TIMELAPSE_DEFAULT_WEEKLY_DAYS,
+            "monthlyUntilDays": TIMELAPSE_DEFAULT_MONTHLY_DAYS,
+        },
+    },
     "energy": {
         "tariff": 0.28,
         "currency": "GBP",

@@ -119,12 +119,14 @@ These are the next useful passes before widening beta beyond trusted testers.
 Cameras that fuse live video with OpenReef's data — the angle neither a Neptune Apex (no camera)
 nor a generic cam app (no tank data) can match. Built one phase at a time; tick as each ships.
 
-- [ ] **A. Event-triggered clip capture** — auto-record a short clip (snapshot fallback) when an
+- [x] **A. Event-triggered clip capture** — auto-record a short clip (snapshot fallback) when an
   alert goes critical/warning, a mode fires, or safety trips. User-configurable triggers,
-  keep-last-N auto-prune, Recordings gallery linked to the activity log. *(in progress — foundation
-  for B/C/D)*
-- [ ] **B. Reef timelapse** — scheduled snapshots played back in-panel (watch coral grow / replay a
-  day's light cycle). Zero-ffmpeg JS slideshow; reuses A's storage + gallery.
+  keep-last-N auto-prune, Recordings gallery linked to the activity log. Live view also upgraded to
+  smooth WebRTC. *(shipped + hardware-verified, v0.4.72)*
+- [x] **B. Reef timelapse** — scheduled snapshots (configurable cadence, daylight-window only) played
+  back in-panel as a zero-ffmpeg slideshow with Full-day/Growth modes. 4-tier downsampling retention
+  (every frame → 1/day → 1/week → 1/month) keeps months of growth in a few hundred frames. Reuses A's
+  storage + serving. *(shipped, v0.4.73)*
 - [ ] **C. Live overlay + shareable tank card** — burn temp/pH/alk/Reef Health onto the live feed +
   one-tap shareable photo with stats baked in.
 - [ ] **D. Feed-watch** — capture during Feed mode to confirm every fish ate (specialisation of A).

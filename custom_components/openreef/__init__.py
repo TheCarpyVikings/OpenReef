@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -58,6 +59,17 @@ from .const import (
     SERVICE_DISARM_EQUIPMENT,
     SERVICE_RECORD_MANUAL_READING,
     TANK_PROFILE_CHOICES,
+    TIMELAPSE_DEFAULT_CADENCE,
+    TIMELAPSE_DEFAULT_DAILY_DAYS,
+    TIMELAPSE_DEFAULT_DETAIL_DAYS,
+    TIMELAPSE_DEFAULT_MONTHLY_DAYS,
+    TIMELAPSE_DEFAULT_WEEKLY_DAYS,
+    TIMELAPSE_DEFAULT_WINDOW_END,
+    TIMELAPSE_DEFAULT_WINDOW_START,
+    TIMELAPSE_MAX_CADENCE,
+    TIMELAPSE_MAX_DAYS,
+    TIMELAPSE_MIN_CADENCE,
+    TIMELAPSE_SUBDIR,
 )
 
 type OpenReefConfigEntry = ConfigEntry
@@ -80,6 +92,8 @@ WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
 CAPTURES_PATH_REGISTERED = "captures_path_registered"
 CAPTURE_LAST = "capture_last"
 CAPTURE_INFLIGHT = "capture_inflight"
+TIMELAPSE_UNSUB = "timelapse_unsub"
+TIMELAPSE_LAST = "timelapse_last"
 # Maps an OpenReef event type -> the user-configurable trigger toggle that gates it.
 CAPTURE_TRIGGER_FIELD = {
     "critical_alert": "criticalAlerts",
@@ -252,6 +266,15 @@ def _normalise_schedule_time(value: Any) -> str:
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         return ""
     return f"{hour:02d}:{minute:02d}"
+
+
+def _hhmm_to_minutes(value: Any) -> int | None:
+    """'HH:MM' -> minutes since midnight, or None if invalid."""
+    normalised = _normalise_schedule_time(value)
+    if not normalised:
+        return None
+    hour, minute = normalised.split(":")
+    return int(hour) * 60 + int(minute)
 
 
 def _normalise_schedule_times(value: Any, fallback: Any = None) -> list[str]:
@@ -760,6 +783,36 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     config["captures"] = [record for record in captures if isinstance(record, dict)][
         :CAPTURE_MAX_RECORDS
     ]
+
+    timelapse = config.setdefault("timelapse", {})
+    if not isinstance(timelapse, dict):
+        timelapse = {}
+        config["timelapse"] = timelapse
+    timelapse["enabled"] = bool(timelapse.get("enabled", False))
+    tl_camera = timelapse.get("cameraId")
+    timelapse["cameraId"] = (
+        tl_camera if isinstance(tl_camera, str) and tl_camera in known_cameras else ""
+    )
+    timelapse["cadenceMinutes"] = _clamp_int(
+        timelapse.get("cadenceMinutes"),
+        TIMELAPSE_DEFAULT_CADENCE,
+        TIMELAPSE_MIN_CADENCE,
+        TIMELAPSE_MAX_CADENCE,
+    )
+    timelapse["windowStart"] = (
+        _normalise_schedule_time(timelapse.get("windowStart")) or TIMELAPSE_DEFAULT_WINDOW_START
+    )
+    timelapse["windowEnd"] = (
+        _normalise_schedule_time(timelapse.get("windowEnd")) or TIMELAPSE_DEFAULT_WINDOW_END
+    )
+    default_retention = DEFAULT_CORE_CONFIG["timelapse"]["retention"]
+    tl_retention = timelapse.get("retention")
+    if not isinstance(tl_retention, dict):
+        tl_retention = {}
+    timelapse["retention"] = {
+        key: _clamp_int(tl_retention.get(key), default_retention[key], 0, TIMELAPSE_MAX_DAYS)
+        for key in default_retention
+    }
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -1714,6 +1767,12 @@ def _clear_wavemaker_reminders(hass: HomeAssistant) -> None:
         unsub()
 
 
+def _clear_timelapse(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(TIMELAPSE_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
 def _wavemaker_reminder_interval(config: dict[str, Any]) -> int:
     alerts = config.get("alerts", {})
     if not isinstance(alerts, dict):
@@ -2348,6 +2407,61 @@ async def _async_schedule_ato_duty_cycle(
     await _handle_ato_duty_cycle(dt_util.now())
 
 
+async def _async_schedule_timelapse(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Arm the per-minute timelapse tick (mirrors the ATO duty-cycle scheduler).
+
+    Fires every minute; captures a frame only inside the daylight window and once the
+    cadence has elapsed since the last frame. Does NOT capture immediately on (re)arm —
+    so saving settings or restarting won't spam frames.
+    """
+    _clear_timelapse(hass)
+    if entry is None:
+        return
+
+    config = config or _config_from_entry(entry)
+    timelapse_cfg = config.get("timelapse", {})
+    if not isinstance(timelapse_cfg, dict) or not timelapse_cfg.get("enabled", False):
+        return
+
+    async def _handle_timelapse(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        latest_cfg = _config_from_entry(latest_entry).get("timelapse", {})
+        if not isinstance(latest_cfg, dict) or not latest_cfg.get("enabled", False):
+            return
+
+        # Inside the daylight window only (local time) — skip dark lights-off frames.
+        start = _hhmm_to_minutes(latest_cfg.get("windowStart"))
+        end = _hhmm_to_minutes(latest_cfg.get("windowEnd"))
+        if start is None or end is None:
+            return
+        now_min = now.hour * 60 + now.minute
+        in_window = start <= now_min <= end if start <= end else (now_min >= start or now_min <= end)
+        if not in_window:
+            return
+
+        cadence = max(
+            TIMELAPSE_MIN_CADENCE,
+            min(int(latest_cfg.get("cadenceMinutes", TIMELAPSE_DEFAULT_CADENCE)), TIMELAPSE_MAX_CADENCE),
+        )
+        last_store = hass.data.setdefault(DOMAIN, {}).setdefault(TIMELAPSE_LAST, {})
+        last = last_store.get(entry.entry_id)
+        if last is not None and (now - last).total_seconds() < cadence * 60 - 1:
+            return
+
+        if await _async_capture_timelapse_frame(hass, latest_entry) is not None:
+            last_store[entry.entry_id] = now
+
+    hass.data.setdefault(DOMAIN, {})[TIMELAPSE_UNSUB] = async_track_time_change(
+        hass, _handle_timelapse, second=0
+    )
+
+
 async def _async_refresh_issues(
     hass: HomeAssistant, entry: OpenReefConfigEntry | None
 ) -> None:
@@ -2414,6 +2528,7 @@ async def _async_save_config(
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
+    await _async_schedule_timelapse(hass, entry, normalised)
     # Event-triggered camera capture on a fresh ok->warning/critical transition.
     for transition in transitions:
         if transition.get("state") == "critical":
@@ -3314,6 +3429,23 @@ async def _async_record_clip(
     return await hass.async_add_executor_job(video_path.exists)
 
 
+async def _async_write_snapshot(hass: HomeAssistant, entity_id: str, path: Path) -> bool:
+    """Grab a still from a camera entity and write it to ``path`` (parent must exist).
+
+    Works on any camera, no allowlist. Best-effort — logs and returns False on failure,
+    never raises. Shared by event-capture thumbnails and timelapse frames.
+    """
+    try:
+        from homeassistant.components import camera as camera_component
+
+        image = await camera_component.async_get_image(hass, entity_id, timeout=10)
+        await hass.async_add_executor_job(path.write_bytes, image.content)
+        return True
+    except Exception:  # noqa: BLE001 - snapshot is best-effort
+        _LOGGER.warning("OpenReef snapshot failed for %s", entity_id, exc_info=True)
+        return False
+
+
 async def _async_perform_capture(
     hass: HomeAssistant,
     capture_cfg: dict[str, Any],
@@ -3341,16 +3473,9 @@ async def _async_perform_capture(
     status = "failed"
 
     # Snapshot first — works on any camera, no allowlist, and doubles as the gallery poster.
-    try:
-        from homeassistant.components import camera as camera_component
-
-        image = await camera_component.async_get_image(hass, camera_entity_id, timeout=10)
-        thumb_path = captures_dir / f"{base}.jpg"
-        await hass.async_add_executor_job(thumb_path.write_bytes, image.content)
-        thumbnail = thumb_path.name
+    if await _async_write_snapshot(hass, camera_entity_id, captures_dir / f"{base}.jpg"):
+        thumbnail = f"{base}.jpg"
         status = "snapshot"
-    except Exception:  # noqa: BLE001 - snapshot is best-effort
-        _LOGGER.warning("OpenReef snapshot failed for %s", camera_entity_id, exc_info=True)
 
     # Clip is the headline; degrades to the snapshot if the camera has no stream.
     video_path = captures_dir / f"{base}.mp4"
@@ -3466,6 +3591,148 @@ def _dispatch_capture(
     )
 
 
+# --- Timelapse (Phase B): scheduled frames + tiered downsampling retention ---
+
+def _timelapse_dir(hass: HomeAssistant, camera_id: str) -> Path:
+    """Per-camera subdir of the captures dir holding (and serving) timelapse frames."""
+    return _captures_dir(hass) / TIMELAPSE_SUBDIR / camera_id
+
+
+_TIMELAPSE_FRAME_RE = re.compile(r"^(\d{8}_\d{6})\.jpg$")
+
+
+def _timelapse_frame_timestamp(filename: str) -> datetime | None:
+    """Parse 'YYYYMMDD_HHMMSS.jpg' to a naive (local wall-clock) datetime, or None."""
+    match = _TIMELAPSE_FRAME_RE.match(filename)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def _timelapse_window_mid(timelapse_cfg: dict[str, Any]) -> int:
+    """Minutes-since-midnight of the capture window's midpoint (for keeper selection)."""
+    start = _hhmm_to_minutes(timelapse_cfg.get("windowStart"))
+    end = _hhmm_to_minutes(timelapse_cfg.get("windowEnd"))
+    if start is None:
+        start = _hhmm_to_minutes(TIMELAPSE_DEFAULT_WINDOW_START) or 0
+    if end is None:
+        end = _hhmm_to_minutes(TIMELAPSE_DEFAULT_WINDOW_END) or (24 * 60 - 1)
+    if end < start:
+        end += 24 * 60  # window crosses midnight
+    return ((start + end) // 2) % (24 * 60)
+
+
+def _timelapse_keepers(
+    timestamps: list[datetime], now: datetime, retention: dict[str, int], window_mid: int
+) -> set[datetime]:
+    """The 4-tier downsampling ladder (pure, unit-testable). Returns timestamps to KEEP.
+
+    By age: ``<= detailDays`` keep every frame; ``<= dailyUntilDays`` keep 1/day;
+    ``<= weeklyUntilDays`` keep 1/week (ISO year+week); ``<= monthlyUntilDays``
+    (or forever when 0) keep 1/month; older -> drop. Each daily/weekly/monthly bucket
+    keeps the frame whose time-of-day is closest to ``window_mid`` (consistent lighting).
+    Re-evaluates all frames by age, so it converges/cascades on repeated runs.
+    """
+    detail = retention.get("detailDays", 0)
+    daily = retention.get("dailyUntilDays", 0)
+    weekly = retention.get("weeklyUntilDays", 0)
+    monthly = retention.get("monthlyUntilDays", 0)
+
+    keep: set[datetime] = set()
+    buckets: dict[tuple, tuple[int, datetime]] = {}
+
+    def _consider(key: tuple, ts: datetime) -> None:
+        distance = abs((ts.hour * 60 + ts.minute) - window_mid)
+        current = buckets.get(key)
+        if current is None or distance < current[0]:
+            buckets[key] = (distance, ts)
+
+    for ts in timestamps:
+        age_days = (now - ts).total_seconds() / 86400.0
+        if age_days <= detail:
+            keep.add(ts)
+        elif age_days <= daily:
+            _consider(("d", ts.year, ts.month, ts.day), ts)
+        elif age_days <= weekly:
+            iso = ts.isocalendar()
+            _consider(("w", iso[0], iso[1]), ts)
+        elif monthly == 0 or age_days <= monthly:
+            _consider(("m", ts.year, ts.month), ts)
+        # else: older than the final tier -> dropped
+
+    for _distance, ts in buckets.values():
+        keep.add(ts)
+    return keep
+
+
+async def _async_prune_timelapse(
+    hass: HomeAssistant, camera_id: str, retention: dict[str, int], window_mid: int
+) -> None:
+    """Apply the tiered retention ladder to a camera's timelapse frames on disk."""
+    frame_dir = _timelapse_dir(hass, camera_id)
+
+    def _list() -> list[str]:
+        if not frame_dir.is_dir():
+            return []
+        return [p.name for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg"]
+
+    names = await hass.async_add_executor_job(_list)
+    ts_by_name = {name: _timelapse_frame_timestamp(name) for name in names}
+    timestamps = [ts for ts in ts_by_name.values() if ts is not None]
+    if not timestamps:
+        return
+    now = dt_util.now().replace(tzinfo=None)
+    keep = _timelapse_keepers(timestamps, now, retention, window_mid)
+    to_delete = [name for name, ts in ts_by_name.items() if ts is None or ts not in keep]
+    if not to_delete:
+        return
+
+    def _remove() -> None:
+        for name in to_delete:
+            try:
+                (frame_dir / name).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                _LOGGER.debug("Could not delete timelapse frame %s", name, exc_info=True)
+
+    await hass.async_add_executor_job(_remove)
+
+
+async def _async_capture_timelapse_frame(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, override: str | None = None
+) -> dict[str, Any] | None:
+    """Write one timelapse frame for the configured camera, then prune. Never raises."""
+    try:
+        config = _config_from_entry(entry)
+        timelapse_cfg = config.get("timelapse", {})
+        if not isinstance(timelapse_cfg, dict):
+            return None
+        target = override or timelapse_cfg.get("cameraId") or None
+        resolved = _resolve_capture_camera(hass, config, {}, override=target)
+        if resolved is None:
+            return None
+        camera_id, entity_id, camera_label = resolved
+        frame_dir = _timelapse_dir(hass, camera_id)
+        await hass.async_add_executor_job(lambda: frame_dir.mkdir(parents=True, exist_ok=True))
+        name = f"{dt_util.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        if not await _async_write_snapshot(hass, entity_id, frame_dir / name):
+            return None
+        retention = timelapse_cfg.get("retention", {})
+        if not isinstance(retention, dict):
+            retention = {}
+        await _async_prune_timelapse(
+            hass, camera_id, retention, _timelapse_window_mid(timelapse_cfg)
+        )
+        return {"cameraId": camera_id, "cameraLabel": camera_label, "file": name}
+    except Exception:  # noqa: BLE001 - timelapse must never break anything
+        _LOGGER.exception("OpenReef timelapse frame capture failed")
+        return None
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/list_recordings"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -3555,6 +3822,134 @@ async def websocket_capture_now(
     )
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/list_timelapse_frames",
+        vol.Optional("camera_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_list_timelapse_frames(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """List a camera's timelapse frames (oldest-first) for the in-panel player."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    timelapse_cfg = config.get("timelapse", {})
+    if not isinstance(timelapse_cfg, dict):
+        timelapse_cfg = {}
+    camera_id = msg.get("camera_id") or timelapse_cfg.get("cameraId") or ""
+    if not camera_id:
+        resolved = _resolve_capture_camera(hass, config, {})
+        camera_id = resolved[0] if resolved else ""
+    cameras = config.get("cameras", {})
+    camera_label = ""
+    if isinstance(cameras, dict) and isinstance(cameras.get(camera_id), dict):
+        camera_label = str(cameras[camera_id].get("label") or camera_id)
+
+    frames: list[dict[str, str]] = []
+    if camera_id:
+        frame_dir = _timelapse_dir(hass, camera_id)
+
+        def _list() -> list[str]:
+            if not frame_dir.is_dir():
+                return []
+            return sorted(
+                p.name for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg"
+            )
+
+        for name in await hass.async_add_executor_job(_list):
+            ts = _timelapse_frame_timestamp(name)
+            if ts is None:
+                continue
+            frames.append(
+                {"file": f"{TIMELAPSE_SUBDIR}/{camera_id}/{name}", "ts": ts.isoformat()}
+            )
+
+    connection.send_result(
+        msg["id"],
+        {
+            "frames": frames,
+            "baseUrl": CAPTURES_STATIC_URL,
+            "cameraId": camera_id,
+            "cameraLabel": camera_label,
+            "windowMidMinutes": _timelapse_window_mid(timelapse_cfg),
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/capture_timelapse_frame",
+        vol.Optional("camera_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_capture_timelapse_frame(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Grab one timelapse frame now (seed/test), ignoring window + cadence."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    result = await _async_capture_timelapse_frame(hass, entry, override=msg.get("camera_id"))
+    if result is None:
+        connection.send_error(
+            msg["id"],
+            "capture_failed",
+            "Could not capture — check a camera is mapped and online",
+        )
+        return
+    connection.send_result(msg["id"], {"success": True, "frame": result})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/clear_timelapse",
+        vol.Optional("camera_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_clear_timelapse(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Delete all timelapse frames for a camera (reset)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    timelapse_cfg = config.get("timelapse", {})
+    camera_id = msg.get("camera_id") or (
+        timelapse_cfg.get("cameraId") if isinstance(timelapse_cfg, dict) else ""
+    ) or ""
+    if not camera_id:
+        resolved = _resolve_capture_camera(hass, config, {})
+        camera_id = resolved[0] if resolved else ""
+    if camera_id:
+        frame_dir = _timelapse_dir(hass, camera_id)
+
+        def _wipe() -> None:
+            if not frame_dir.is_dir():
+                return
+            for p in frame_dir.iterdir():
+                if p.is_file() and p.suffix == ".jpg":
+                    try:
+                        p.unlink()
+                    except OSError:
+                        _LOGGER.debug("Could not delete timelapse frame %s", p, exc_info=True)
+
+        await hass.async_add_executor_job(_wipe)
+    connection.send_result(msg["id"], {"success": True, "cameraId": camera_id})
+
+
 async def _async_register_panel(hass: HomeAssistant) -> None:
     """Register the OpenReef native sidebar panel once."""
     if hass.data.setdefault(DOMAIN, {}).get("panel_registered"):
@@ -3600,6 +3995,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_list_recordings)
     websocket_api.async_register_command(hass, websocket_delete_recording)
     websocket_api.async_register_command(hass, websocket_capture_now)
+    websocket_api.async_register_command(hass, websocket_list_timelapse_frames)
+    websocket_api.async_register_command(hass, websocket_capture_timelapse_frame)
+    websocket_api.async_register_command(hass, websocket_clear_timelapse)
 
     hass.services.async_register(
         DOMAIN,
@@ -3650,6 +4048,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
+    await _async_schedule_timelapse(hass, entry, normalised)
     return True
 
 
@@ -3660,6 +4059,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_ato_duty_cycle(hass)
     _clear_delayed_equipment_calls(hass)
     _clear_wavemaker_reminders(hass)
+    _clear_timelapse(hass)
     hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).pop(
         entry.entry_id, None
     )
@@ -3667,6 +4067,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
         entry.entry_id, None
     )
     hass.data.setdefault(DOMAIN, {}).setdefault(CAPTURE_LAST, {}).pop(entry.entry_id, None)
+    hass.data.setdefault(DOMAIN, {}).setdefault(TIMELAPSE_LAST, {}).pop(entry.entry_id, None)
     config = _config_from_entry(entry)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)

@@ -227,6 +227,43 @@ def test_legacy_labs_config_routes_without_crash():
         assert "schemaVersion" in result
 
 
+def test_timelapse_defaults_injected():
+    result = normalise({})
+    tl = result.get("timelapse")
+    assert isinstance(tl, dict)
+    assert tl["enabled"] is False
+    assert tl["cadenceMinutes"] == 30
+    assert isinstance(tl.get("retention"), dict)
+    for key in ("detailDays", "dailyUntilDays", "weeklyUntilDays", "monthlyUntilDays"):
+        assert key in tl["retention"]
+
+
+def test_timelapse_garbage_coerced_and_clamped():
+    bad = {
+        "timelapse": {
+            "enabled": "yes",
+            "cadenceMinutes": 999999,
+            "windowStart": "nope",
+            "cameraId": 123,
+            "retention": "broken",
+        }
+    }
+    result = normalise(bad)  # must not raise
+    tl = result["timelapse"]
+    assert isinstance(tl, dict)
+    assert tl["cadenceMinutes"] <= 1440          # clamped to the max cadence
+    assert tl["windowStart"] == "08:00"          # invalid time falls back to default
+    assert tl["cameraId"] == ""                  # non-str / unknown camera dropped
+    assert isinstance(tl["retention"], dict)
+    assert all(isinstance(v, int) for v in tl["retention"].values())
+
+
+def test_timelapse_non_dict_block_coerced():
+    for junk in ("a string", 7, ["x"], None):
+        result = normalise({"timelapse": junk})
+        assert isinstance(result.get("timelapse"), dict)
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:
