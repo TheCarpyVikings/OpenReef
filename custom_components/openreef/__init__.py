@@ -3837,6 +3837,13 @@ async def _async_delete_feed_dir(hass: HomeAssistant, session_id: str) -> None:
     await hass.async_add_executor_job(_remove)
 
 
+def _feed_session_frame_count(directory: Path) -> int:
+    """Count a feed session's frames on disk — runs in the executor."""
+    if not directory.is_dir():
+        return 0
+    return sum(1 for p in directory.iterdir() if p.is_file() and p.suffix == ".jpg")
+
+
 async def _async_stop_feed_watch(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
     """Finalize the active feed-watch session (if any) and stop the burst timer."""
     _clear_feedwatch(hass)
@@ -3848,14 +3855,9 @@ async def _async_stop_feed_watch(hass: HomeAssistant, entry: OpenReefConfigEntry
     if not state:
         return
     session_id = state.get("id")
-    frame_dir = _feeds_dir(hass, session_id)
-
-    def _count() -> int:
-        if not frame_dir.is_dir():
-            return 0
-        return sum(1 for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg")
-
-    frame_count = await hass.async_add_executor_job(_count)
+    frame_count = await hass.async_add_executor_job(
+        _feed_session_frame_count, _feeds_dir(hass, session_id)
+    )
     config = _config_from_entry(entry)
     sessions = config.get("feedSessions")
     if isinstance(sessions, list):
@@ -3866,6 +3868,32 @@ async def _async_stop_feed_watch(hass: HomeAssistant, entry: OpenReefConfigEntry
                 session["frameCount"] = frame_count
                 break
     await _async_save_config(hass, entry, config)
+
+
+async def _async_finalize_orphaned_feed_sessions(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """A feed session left ``recording`` after an HA restart can never be finalized by
+    the burst timer (it lived only in hass.data), so it would show a perpetual REC badge.
+    Mark any lingering recording sessions as done on setup, recounting frames from disk."""
+    config = _config_from_entry(entry)
+    sessions = config.get("feedSessions")
+    if not isinstance(sessions, list):
+        return
+    changed = False
+    for session in sessions:
+        if not (isinstance(session, dict) and session.get("status") == "recording"):
+            continue
+        session_id = session.get("id")
+        if session_id:
+            session["frameCount"] = await hass.async_add_executor_job(
+                _feed_session_frame_count, _feeds_dir(hass, session_id)
+            )
+        session["status"] = "done"
+        session.setdefault("endedAt", session.get("startedAt", ""))
+        changed = True
+    if changed:
+        await _async_save_config(hass, entry, config)
 
 
 async def _async_start_feed_watch(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
@@ -4392,6 +4420,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
+    await _async_finalize_orphaned_feed_sessions(hass, entry)
     return True
 
 

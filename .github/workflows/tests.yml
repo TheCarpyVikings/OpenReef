@@ -1,0 +1,40 @@
+name: tests
+
+# Fast, dependency-free checks for the OpenReef custom integration. The Python
+# tests stub Home Assistant + voluptuous (see tests/_ha_stubs.py), so they run
+# without installing HA. The panel is a no-build vanilla web component, so a
+# syntax check is the cheapest guard against shipping a broken 10k-line file.
+
+on:
+  push:
+    paths:
+      - "custom_components/openreef/**"
+      - "tests/**"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    paths:
+      - "custom_components/openreef/**"
+      - "tests/**"
+      - ".github/workflows/tests.yml"
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Backend compiles
+        run: python3 -m py_compile custom_components/openreef/__init__.py custom_components/openreef/const.py
+
+      - name: Config migration tests
+        run: python3 tests/test_config_migration.py
+
+      - name: Timelapse retention ladder tests
+        run: python3 tests/test_timelapse_retention.py
+
+      - name: Panel JS syntax
+        run: node --check custom_components/openreef/frontend/openreef-panel.js
