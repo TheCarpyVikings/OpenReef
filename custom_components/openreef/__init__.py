@@ -3487,7 +3487,9 @@ async def websocket_list_recordings(
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "openreef/delete_recording",
-        vol.Required("id"): cv.string,
+        # NB: the param must NOT be named "id" — that collides with the websocket
+        # protocol's own message id, which the frontend overwrites before sending.
+        vol.Required("recording_id"): cv.string,
     }
 )
 @websocket_api.require_admin
@@ -3504,15 +3506,16 @@ async def websocket_delete_recording(
     captures = config.get("captures", [])
     if not isinstance(captures, list):
         captures = []
+    recording_id = msg["recording_id"]
     target = next(
-        (rec for rec in captures if isinstance(rec, dict) and rec.get("id") == msg["id"]), None
+        (rec for rec in captures if isinstance(rec, dict) and rec.get("id") == recording_id), None
     )
     if target is None:
         connection.send_error(msg["id"], "not_found", "Recording not found")
         return
     await _async_delete_capture_files(hass, [target])
     config["captures"] = [
-        rec for rec in captures if not (isinstance(rec, dict) and rec.get("id") == msg["id"])
+        rec for rec in captures if not (isinstance(rec, dict) and rec.get("id") == recording_id)
     ]
     saved = await _async_save_config(hass, entry, config)
     connection.send_result(msg["id"], {"success": True, "config": saved})

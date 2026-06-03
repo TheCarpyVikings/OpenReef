@@ -5820,7 +5820,7 @@ class OpenReefPanel extends HTMLElement {
     this._error = "";
     this._render();
     try {
-      const result = await this._callWS({ type: "openreef/delete_recording", id });
+      const result = await this._callWS({ type: "openreef/delete_recording", recording_id: id });
       this._config = result.config || this._config;
       if (this._recordingFocus === id) this._recordingFocus = null;
       this._message = "Recording deleted";
