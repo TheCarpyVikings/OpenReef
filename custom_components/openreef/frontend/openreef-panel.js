@@ -21,6 +21,7 @@ class OpenReefPanel extends HTMLElement {
     this._trendRequest = "";
     this._cameraFocus = null;
     this._recordingFocus = null;
+    this._webrtcSession = null;
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -86,6 +87,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._stopCameraWebRTC();
     if (this._modeCountdownTimer) {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
@@ -802,6 +804,7 @@ class OpenReefPanel extends HTMLElement {
       const field = target.dataset.field;
 
       if (action === "tab") {
+        this._stopCameraWebRTC();
         this._activeTab = id;
         this._setupOpen = false;
         this._equipmentDetail = null;
@@ -895,9 +898,9 @@ class OpenReefPanel extends HTMLElement {
         this._setDirty(true);
         this._render();
       }
-      if (action === "focus-camera") { this._cameraFocus = id; this._render(); }
-      if (action === "close-camera") { this._cameraFocus = null; this._render(); }
-      if (action === "refresh-cameras") this._render();
+      if (action === "focus-camera") { this._cameraFocus = id; this._render(); this._startCameraWebRTCForFocus(); }
+      if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._render(); }
+      if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "fullscreen-camera") {
         const stage = this.shadowRoot.querySelector("[data-camera-stage]");
         if (stage && stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
@@ -5394,6 +5397,157 @@ class OpenReefPanel extends HTMLElement {
     return Boolean(this._cameraSnapshotUrl(entityId));
   }
 
+  _startCameraWebRTCForFocus() {
+    const id = this._cameraFocus;
+    const cam = id && (this._config.cameras || {})[id];
+    if (cam && cam.entity_id && this._cameraOnline(cam.entity_id)) {
+      this._startCameraWebRTC(cam.entity_id);
+    }
+  }
+
+  // Smooth live view: negotiate WebRTC through Home Assistant's own same-origin
+  // websocket API (the flow ha-web-rtc-player uses). No external library, no
+  // backend. Falls back to the MJPEG <img> if anything fails, so the worst case
+  // is the previous (jumpy-but-working) behaviour, never worse.
+  async _startCameraWebRTC(entityId) {
+    this._stopCameraWebRTC();
+    const conn = this._hass && this._hass.connection;
+    const video = this.shadowRoot && this.shadowRoot.querySelector("video[data-camera-video]");
+    if (!entityId || !conn || !video || typeof RTCPeerConnection === "undefined") {
+      this._cameraWebRtcFallback(entityId);
+      return;
+    }
+    const session = {
+      entityId, pc: null, unsub: null, sessionId: null,
+      pending: [], closed: false, fellBack: false, gotTrack: false, timer: null,
+    };
+    this._webrtcSession = session;
+    try {
+      let configuration = {};
+      try {
+        const cfg = await conn.sendMessagePromise({
+          type: "camera/webrtc/get_client_config", entity_id: entityId,
+        });
+        configuration = (cfg && cfg.configuration) || {};
+      } catch {
+        // Some setups don't expose client config; host candidates suffice for local go2rtc.
+      }
+      if (session.closed) return;
+      const pc = new RTCPeerConnection(configuration);
+      session.pc = pc;
+      const remote = new MediaStream();
+      video.srcObject = remote;
+      pc.addTransceiver("audio", { direction: "recvonly" });
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addEventListener("track", (ev) => {
+        session.gotTrack = true;
+        remote.addTrack(ev.track);
+        const p = video.play();
+        if (p && p.catch) p.catch(() => {});
+      });
+      pc.addEventListener("icecandidate", (ev) => {
+        if (!ev.candidate) return;
+        const candidate = ev.candidate.toJSON();
+        if (session.sessionId) {
+          conn.sendMessagePromise({
+            type: "camera/webrtc/candidate", entity_id: entityId,
+            session_id: session.sessionId, candidate,
+          }).catch(() => {});
+        } else {
+          session.pending.push(candidate);
+        }
+      });
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+      if (session.closed) return;
+      await pc.setLocalDescription(offer);
+      if (session.closed) return;
+      const unsub = await conn.subscribeMessage(
+        (msg) => this._handleWebRtcEvent(session, msg),
+        { type: "camera/webrtc/offer", entity_id: entityId, offer: offer.sdp },
+      );
+      if (session.closed) { try { unsub(); } catch {} return; }
+      session.unsub = unsub;
+      // If no media arrives within a few seconds, drop to the MJPEG fallback.
+      session.timer = window.setTimeout(() => {
+        if (!session.closed && !session.gotTrack) this._cameraWebRtcFallback(entityId);
+      }, 7000);
+    } catch {
+      this._cameraWebRtcFallback(entityId);
+    }
+  }
+
+  _handleWebRtcEvent(session, msg) {
+    if (!session || session.closed || !session.pc || !msg) return;
+    const conn = this._hass && this._hass.connection;
+    try {
+      if (msg.type === "session") {
+        session.sessionId = msg.session_id;
+        for (const candidate of session.pending) {
+          if (conn) {
+            conn.sendMessagePromise({
+              type: "camera/webrtc/candidate", entity_id: session.entityId,
+              session_id: session.sessionId, candidate,
+            }).catch(() => {});
+          }
+        }
+        session.pending = [];
+      } else if (msg.type === "answer") {
+        session.pc.setRemoteDescription({ type: "answer", sdp: msg.answer })
+          .catch(() => this._cameraWebRtcFallback(session.entityId));
+      } else if (msg.type === "candidate") {
+        if (msg.candidate) session.pc.addIceCandidate(msg.candidate).catch(() => {});
+      } else if (msg.type === "error") {
+        this._cameraWebRtcFallback(session.entityId);
+      }
+    } catch {
+      this._cameraWebRtcFallback(session.entityId);
+    }
+  }
+
+  _cameraWebRtcFallback(entityId) {
+    const session = this._webrtcSession;
+    if (session) {
+      if (session.fellBack) return;
+      session.fellBack = true;
+    }
+    this._teardownWebRtcPeer();
+    const root = this.shadowRoot;
+    if (!root) return;
+    const video = root.querySelector("video[data-camera-video]");
+    const img = root.querySelector("img[data-camera-fallback]");
+    if (video) {
+      try { video.srcObject = null; } catch {}
+      video.style.display = "none";
+    }
+    if (img) {
+      const url = this._cameraStreamUrl(entityId);
+      if (url && img.getAttribute("src") !== url) img.src = url;
+      img.style.display = "";
+    }
+  }
+
+  _teardownWebRtcPeer() {
+    const session = this._webrtcSession;
+    if (!session) return;
+    if (session.timer) { window.clearTimeout(session.timer); session.timer = null; }
+    if (session.unsub) { try { session.unsub(); } catch {} session.unsub = null; }
+    if (session.pc) {
+      try { if (session.pc.getReceivers) session.pc.getReceivers().forEach((r) => { if (r.track) r.track.stop(); }); } catch {}
+      try { session.pc.close(); } catch {}
+      session.pc = null;
+    }
+  }
+
+  _stopCameraWebRTC() {
+    const session = this._webrtcSession;
+    if (!session) return;
+    session.closed = true;
+    this._teardownWebRtcPeer();
+    const video = this.shadowRoot && this.shadowRoot.querySelector("video[data-camera-video]");
+    if (video) { try { video.srcObject = null; } catch {} }
+    this._webrtcSession = null;
+  }
+
   _cameraTarget(id, cam) {
     return {
       id,
@@ -5471,7 +5625,6 @@ class OpenReefPanel extends HTMLElement {
     const cam = (this._config.cameras || {})[this._cameraFocus];
     if (!cam) return "";
     const online = cam.entity_id && this._cameraOnline(cam.entity_id);
-    const stream = online ? this._cameraStreamUrl(cam.entity_id) : "";
     const snap = online ? this._cameraSnapshotUrl(cam.entity_id) : "";
     return `
       <div class="modal">
@@ -5486,7 +5639,7 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <div class="cam-stage" data-camera-stage>
             ${online
-              ? `<img class="cam-feed-large" src="${this._escape(stream)}" alt="${this._escape(cam.label || "")}"><span class="cam-live"><span class="cam-dot"></span>LIVE</span>`
+              ? `<video class="cam-feed-large" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video><img class="cam-feed-large" data-camera-fallback alt="${this._escape(cam.label || "")}" style="display:none"><span class="cam-live"><span class="cam-dot"></span>LIVE</span>`
               : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Camera offline or unavailable" : "Not mapped"}</small></div>`}
           </div>
           <div class="actions">
