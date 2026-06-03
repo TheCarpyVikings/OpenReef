@@ -901,6 +901,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "focus-camera") { this._cameraFocus = id; this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._render(); }
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
+      if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "fullscreen-camera") {
         const stage = this.shadowRoot.querySelector("[data-camera-stage]");
         if (stage && stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
@@ -5548,6 +5549,59 @@ class OpenReefPanel extends HTMLElement {
     this._webrtcSession = null;
   }
 
+  // Snapshot the CURRENT live frame straight from the <video> (or the MJPEG
+  // fallback <img>) via canvas → download. No server round-trip, so no
+  // camera_proxy 500s and no new tab. Falls back to opening HA's still image
+  // only if there's no live frame ready to grab.
+  async _snapshotCamera() {
+    const cam = (this._config.cameras || {})[this._cameraFocus];
+    const root = this.shadowRoot;
+    const video = root && root.querySelector("video[data-camera-video]");
+    const img = root && root.querySelector("img[data-camera-fallback]");
+    const openStill = () => {
+      const url = cam && this._cameraSnapshotUrl(cam.entity_id);
+      if (url) window.open(url, "_blank", "noopener");
+    };
+    let source = null;
+    let w = 0;
+    let h = 0;
+    if (video && video.videoWidth && video.readyState >= 2) {
+      source = video;
+      w = video.videoWidth;
+      h = video.videoHeight;
+    } else if (img && img.naturalWidth && img.style.display !== "none") {
+      source = img;
+      w = img.naturalWidth;
+      h = img.naturalHeight;
+    }
+    if (!source || !w || !h) {
+      openStill();
+      return;
+    }
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(source, 0, 0, w, h);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+      if (!blob) throw new Error("encode failed");
+      const label = (cam && cam.label) || this._cameraFocus || "camera";
+      const safe = label.replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "") || "camera";
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `${safe}_${stamp}.jpg`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
+    } catch {
+      // Canvas blocked (rare) — fall back to HA's still image in a tab.
+      openStill();
+    }
+  }
+
   _cameraTarget(id, cam) {
     return {
       id,
@@ -5643,7 +5697,7 @@ class OpenReefPanel extends HTMLElement {
               : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Camera offline or unavailable" : "Not mapped"}</small></div>`}
           </div>
           <div class="actions">
-            ${online ? `<a class="secondary compact-button" href="${this._escape(snap)}" target="_blank" rel="noopener noreferrer">Snapshot</a>` : ""}
+            ${online ? `<button class="secondary compact-button" data-action="snapshot-camera">Snapshot</button>` : ""}
             ${online ? `<button class="secondary compact-button" data-action="fullscreen-camera">Fullscreen</button>` : ""}
             <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
           </div>
