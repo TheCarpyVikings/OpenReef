@@ -127,8 +127,10 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
   back in-panel as a zero-ffmpeg slideshow with Full-day/Growth modes. 4-tier downsampling retention
   (every frame → 1/day → 1/week → 1/month) keeps months of growth in a few hundred frames. Reuses A's
   storage + serving. *(shipped, v0.4.73)*
-- [ ] **C. Live overlay + shareable tank card** — burn temp/pH/alk/Reef Health onto the live feed +
-  one-tap shareable photo with stats baked in.
+- [x] **C. Live overlay + shareable tank card** — user-selected stats (+ Reef Health, tank name) burned
+  onto the live feed with the health-reactive mini-me and a rotating anti-Apex quip (cheeky + calm only,
+  shown to everyone — the dig is the point). One-tap **Share card** bakes it all into an image via canvas
+  → native share sheet / download. *(shipped, v0.4.74)*
 - [ ] **D. Feed-watch** — capture during Feed mode to confirm every fish ate (specialisation of A).
 
 ## Apex Parity

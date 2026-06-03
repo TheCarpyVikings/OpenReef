@@ -27,6 +27,7 @@ class OpenReefPanel extends HTMLElement {
       loaded: false, loading: false, windowMid: 0, cameraId: "", cameraLabel: "", error: "",
     };
     this._timelapseTimer = null;
+    this._overlayQuip = "";
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -54,6 +55,10 @@ class OpenReefPanel extends HTMLElement {
     if (this._config) {
       if (this._shouldRenderForHassUpdate()) {
         this._render();
+      } else if (this._cameraFocus) {
+        // Modal open: patch the live overlay stat values without re-rendering
+        // (a full render would restart the WebRTC video).
+        this._updateCameraOverlay();
       }
       return;
     }
@@ -905,10 +910,11 @@ class OpenReefPanel extends HTMLElement {
         this._setDirty(true);
         this._render();
       }
-      if (action === "focus-camera") { this._cameraFocus = id; this._render(); this._startCameraWebRTCForFocus(); }
+      if (action === "focus-camera") { this._cameraFocus = id; this._overlayQuip = this._pickOverlayQuip(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._render(); }
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
+      if (action === "share-card") this._shareTankCard();
       if (action === "fullscreen-camera") {
         const stage = this.shadowRoot.querySelector("[data-camera-stage]");
         if (stage && stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
@@ -1218,6 +1224,17 @@ class OpenReefPanel extends HTMLElement {
         this._config.timelapse = this._config.timelapse || {};
         this._config.timelapse.retention = this._config.timelapse.retention || {};
         this._config.timelapse.retention[field] = value;
+      }
+      if (scope === "overlay") {
+        this._config.overlay = this._config.overlay || {};
+        this._config.overlay[field] = value;
+      }
+      if (scope === "overlay-stats") {
+        this._config.overlay = this._config.overlay || {};
+        const ids = Array.isArray(this._config.overlay.stats) ? this._config.overlay.stats : [];
+        const set = new Set(ids);
+        if (value) set.add(id); else set.delete(id);
+        this._config.overlay.stats = [...set];
       }
       if (scope === "mode-preview") {
         const modeId = target.dataset.mode;
@@ -5626,6 +5643,383 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  // --- Live overlay + shareable tank card (Phase C) ----------------------
+
+  _overlayCfg() {
+    const cfg = this._config && this._config.overlay;
+    return cfg && typeof cfg === "object" ? cfg : {};
+  }
+
+  // Rotating anti-Apex one-liners. Shown to ANY cheeky user on a calm tank — the
+  // whole point is letting non-Apex owners have a dig too (deliberate exception to
+  // the usual Apex-owner gating). Kept fact-fair: no subscription jokes.
+  _overlayQuips() {
+    return [
+      "But can your Apex do this? 😏",
+      "No virtual outlets here.",
+      "Try that in Fusion.",
+      "Clicks, not code.",
+      "No Defer commands required.",
+      "All this, zero lines of Apex code.",
+      "Apex who? 🪸",
+      "One dashboard. No spreadsheets.",
+    ];
+  }
+
+  _pickOverlayQuip() {
+    const quips = this._overlayQuips();
+    return quips[Math.floor(Math.random() * quips.length)] || "";
+  }
+
+  _overlayReaction() {
+    return this._buddyReaction(this._reefHealthScore(), this._tone());
+  }
+
+  _overlayIsCalm() {
+    return this._overlayReaction().mood === "ok";
+  }
+
+  // The quip only shows in cheeky tone, on a calm tank, when enabled. Not Apex-gated.
+  _overlayQuipText() {
+    const cfg = this._overlayCfg();
+    if (!cfg.enabled || !cfg.showQuip) return "";
+    if (this._tone() !== "cheeky") return "";
+    if (!this._overlayIsCalm()) return "";
+    if (!this._overlayQuip) this._overlayQuip = this._pickOverlayQuip();
+    return this._overlayQuip;
+  }
+
+  _overlayPose() {
+    if (this._overlayQuipText()) return "smug";  // cocky pose when it's throwing the jab
+    return this._overlayReaction().pose;
+  }
+
+  _overlayShortLabel(id, sensor) {
+    const short = {
+      temp: "Temp", temperature: "Temp", ph: "pH", alkalinity: "Alk", calcium: "Ca",
+      magnesium: "Mg", salinity: "Salinity", orp: "ORP", nitrate: "NO₃", phosphate: "PO₄",
+      dissolved_oxygen: "DO", co2: "CO₂", par: "PAR", flow: "Flow",
+    }[id];
+    return short || (sensor && sensor.label) || id;
+  }
+
+  // The chips to show: selected sensors (mapped + enabled) + optional Reef Health.
+  _overlayStatList() {
+    const cfg = this._overlayCfg();
+    const sensors = this._config.sensors || {};
+    const chips = [];
+    for (const id of Array.isArray(cfg.stats) ? cfg.stats : []) {
+      const sensor = sensors[id];
+      if (!sensor || !sensor.entity_id || !this._sensorEnabled(sensor)) continue;
+      chips.push({
+        key: id,
+        label: this._overlayShortLabel(id, sensor),
+        value: this._sensorDisplayValue(id, sensor),
+        unit: this._sensorDisplayUnit(id, sensor),
+      });
+    }
+    if (cfg.showReefHealth) {
+      const health = this._reefHealthScore();
+      chips.push({
+        key: "reefHealth",
+        label: "Reef Health",
+        value: String(health.score ?? "--"),
+        unit: health.grade || "",
+      });
+    }
+    return chips;
+  }
+
+  _cameraOverlayMarkup() {
+    const cfg = this._overlayCfg();
+    if (!cfg.enabled) return "";
+    const chips = this._overlayStatList();
+    const tank = this._config.tank || {};
+    const showName = cfg.showTankName && tank.name;
+    const quip = this._overlayQuipText();
+    const pos = ["top-left", "top-right", "bottom-left", "bottom-right"].includes(cfg.position)
+      ? cfg.position
+      : "bottom-left";
+    if (!chips.length && !showName && !(cfg.showAvatar)) return "";
+    const chipsHtml = chips.map((chip) => `
+      <span class="cam-overlay-chip ${chip.key === "reefHealth" ? "is-health" : ""}">
+        <small>${this._escape(chip.label)}</small>
+        <strong data-overlay-stat="${this._escape(chip.key)}">${this._escape(chip.value)}${chip.unit ? ` ${this._escape(chip.unit)}` : ""}</strong>
+      </span>`).join("");
+    const avatar = cfg.showAvatar
+      ? `<div class="cam-overlay-avatar">
+          ${quip ? `<span class="cam-overlay-bubble">${this._escape(quip)}</span>` : ""}
+          ${this._avatarMarkup(this._overlayPose())}
+        </div>`
+      : "";
+    return `
+      <div class="cam-overlay pos-${pos}" data-camera-overlay>
+        ${showName ? `<span class="cam-overlay-title">${this._escape(tank.name)}</span>` : ""}
+        ${chips.length ? `<div class="cam-overlay-chips">${chipsHtml}</div>` : ""}
+        ${avatar}
+      </div>`;
+  }
+
+  // Patch the live overlay's stat values in place (no re-render -> video keeps playing).
+  _updateCameraOverlay() {
+    const cfg = this._overlayCfg();
+    if (!cfg.enabled) return;
+    const root = this.shadowRoot;
+    if (!root || !root.querySelector("[data-camera-overlay]")) return;
+    const sensors = this._config.sensors || {};
+    root.querySelectorAll("[data-overlay-stat]").forEach((el) => {
+      const key = el.getAttribute("data-overlay-stat");
+      if (key === "reefHealth") {
+        const health = this._reefHealthScore();
+        el.textContent = `${health.score ?? "--"}${health.grade ? ` ${health.grade}` : ""}`;
+        return;
+      }
+      const sensor = sensors[key];
+      if (!sensor) return;
+      const value = this._sensorDisplayValue(key, sensor);
+      const unit = this._sensorDisplayUnit(key, sensor);
+      el.textContent = `${value}${unit ? ` ${unit}` : ""}`;
+    });
+  }
+
+  _loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = src;
+    });
+  }
+
+  _roundRect(ctx, x, y, w, h, r) {
+    const radius = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + w, y, x + w, y + h, radius);
+    ctx.arcTo(x + w, y + h, x, y + h, radius);
+    ctx.arcTo(x, y + h, x, y, radius);
+    ctx.arcTo(x, y, x + w, y, radius);
+    ctx.closePath();
+  }
+
+  _downloadBlob(blob, filename) {
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
+  }
+
+  // One-tap shareable tank card: bakes the stats + avatar + quip + wordmark into the
+  // current frame via canvas, then native-shares (phones) or downloads (desktop).
+  async _shareTankCard() {
+    const cam = (this._config.cameras || {})[this._cameraFocus];
+    const root = this.shadowRoot;
+    const video = root && root.querySelector("video[data-camera-video]");
+    const img = root && root.querySelector("img[data-camera-fallback]");
+    const openStill = () => {
+      const url = cam && this._cameraSnapshotUrl(cam.entity_id);
+      if (url) window.open(url, "_blank", "noopener");
+    };
+    let source = null;
+    let w = 0;
+    let h = 0;
+    if (video && video.videoWidth && video.readyState >= 2) {
+      source = video;
+      w = video.videoWidth;
+      h = video.videoHeight;
+    } else if (img && img.naturalWidth && img.style.display !== "none") {
+      source = img;
+      w = img.naturalWidth;
+      h = img.naturalHeight;
+    }
+    if (!source || !w || !h) {
+      openStill();
+      return;
+    }
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(source, 0, 0, w, h);
+      await this._drawTankCard(ctx, w, h);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+      if (!blob) throw new Error("encode failed");
+      const tankName = (this._config.tank && this._config.tank.name) || "My Reef";
+      const safe = String(tankName).replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "") || "reef";
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const filename = `${safe}_tankcard_${stamp}.jpg`;
+      const quip = this._overlayQuipText();
+      const shareText = quip ? `${tankName} — ${quip}` : `${tankName} · built with OpenReef`;
+      const file = new File([blob], filename, { type: "image/jpeg" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: tankName, text: shareText });
+        } catch (err) {
+          // AbortError = user cancelled the share sheet; anything else -> save instead.
+          if (err && err.name !== "AbortError") this._downloadBlob(blob, filename);
+        }
+        return;
+      }
+      this._downloadBlob(blob, filename);
+    } catch {
+      openStill();
+    }
+  }
+
+  async _drawTankCard(ctx, w, h) {
+    const cfg = this._overlayCfg();
+    const scale = w / 1280;
+    const pad = Math.round(28 * scale);
+    const font = (px, weight = "600") =>
+      `${weight} ${Math.round(px * scale)}px -apple-system, "Segoe UI", Roboto, sans-serif`;
+    const pos = ["top-left", "top-right", "bottom-left", "bottom-right"].includes(cfg.position)
+      ? cfg.position
+      : "bottom-left";
+
+    // --- stats panel ---
+    const chips = this._overlayStatList().map((chip) => ({
+      label: chip.label,
+      value: `${chip.value}${chip.unit ? ` ${chip.unit}` : ""}`,
+      health: chip.key === "reefHealth",
+    }));
+    const tank = this._config.tank || {};
+    const title = cfg.showTankName && tank.name ? String(tank.name) : "";
+    if (title || chips.length) {
+      const titleH = title ? Math.round(48 * scale) : 0;
+      const rowH = Math.round(50 * scale);
+      ctx.save();
+      ctx.font = font(34, "700");
+      let maxW = title ? ctx.measureText(title).width : 0;
+      for (const chip of chips) {
+        ctx.font = font(26, "600");
+        const labelW = ctx.measureText(chip.label).width;
+        ctx.font = font(34, "700");
+        const valueW = ctx.measureText(chip.value).width;
+        maxW = Math.max(maxW, labelW + valueW + Math.round(40 * scale));
+      }
+      const panelW = Math.min(w - pad * 2, Math.round(maxW + pad * 2));
+      const panelH = Math.round(titleH + chips.length * rowH + pad);
+      const x = pos.includes("right") ? w - pad - panelW : pad;
+      const y = pos.includes("top") ? pad : h - pad - panelH;
+      this._roundRect(ctx, x, y, panelW, panelH, Math.round(18 * scale));
+      ctx.fillStyle = "rgba(4, 10, 16, 0.55)";
+      ctx.fill();
+      let cy = y + Math.round(pad * 0.6);
+      ctx.textBaseline = "top";
+      if (title) {
+        ctx.font = font(34, "700");
+        ctx.fillStyle = "#e9f4fb";
+        ctx.fillText(title, x + pad, cy);
+        cy += titleH;
+      }
+      for (const chip of chips) {
+        ctx.font = font(26, "600");
+        ctx.fillStyle = chip.health ? "#7fe0c4" : "#9fc7e0";
+        ctx.fillText(chip.label, x + pad, cy + Math.round(12 * scale));
+        ctx.font = font(34, "700");
+        ctx.fillStyle = "#ffffff";
+        const valueW = ctx.measureText(chip.value).width;
+        ctx.fillText(chip.value, x + panelW - pad - valueW, cy + Math.round(8 * scale));
+        cy += rowH;
+      }
+      ctx.restore();
+    }
+
+    // --- avatar + speech bubble (opposite side from the stats panel) ---
+    if (cfg.showAvatar) {
+      const avSize = Math.round(240 * scale);
+      const ax = pos.includes("right") ? pad : w - pad - avSize;
+      const ay = h - pad - avSize;
+      const quip = this._overlayQuipText();
+      if (quip) {
+        ctx.save();
+        ctx.font = font(28, "700");
+        const tw = ctx.measureText(quip).width;
+        const bw = Math.round(tw + 40 * scale);
+        const bh = Math.round(56 * scale);
+        const bx = Math.max(pad, Math.min(Math.round(ax + avSize / 2 - bw / 2), w - pad - bw));
+        const by = ay - bh - Math.round(14 * scale);
+        this._roundRect(ctx, bx, by, bw, bh, Math.round(14 * scale));
+        ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+        ctx.fill();
+        ctx.fillStyle = "#0a2230";
+        ctx.textBaseline = "middle";
+        ctx.fillText(quip, bx + Math.round(20 * scale), by + bh / 2);
+        ctx.restore();
+      }
+      const pose = this._overlayPose();
+      const avatar = await this._loadImage(`${this._avatarBase()}${pose}.png`).catch(() => null);
+      if (avatar) ctx.drawImage(avatar, ax, ay, avSize, avSize);
+    }
+
+    // --- OpenReef wordmark (top-right, out of the stats panel's way) ---
+    ctx.save();
+    ctx.font = font(26, "800");
+    ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.textBaseline = "top";
+    const mark = "OpenReef";
+    const markW = ctx.measureText(mark).width;
+    const markX = pos === "top-right" ? pad : w - pad - markW;
+    ctx.fillText(mark, markX, pad);
+    ctx.restore();
+  }
+
+  _overlaySettings() {
+    const cfg = this._overlayCfg();
+    const sensors = this._enabledSensors();
+    const selected = Array.isArray(cfg.stats) ? cfg.stats : [];
+    const positions = [
+      ["top-left", "Top left"],
+      ["top-right", "Top right"],
+      ["bottom-left", "Bottom left"],
+      ["bottom-right", "Bottom right"],
+    ];
+    const extra = (field, title, desc) => `
+      <label class="toggle-card">
+        <input type="checkbox" data-scope="overlay" data-field="${field}" ${cfg[field] ? "checked" : ""}>
+        <span><strong>${this._escape(title)}</strong><small>${this._escape(desc)}</small></span>
+      </label>`;
+    const body = `
+      <label class="toggle-card">
+        <input type="checkbox" data-scope="overlay" data-field="enabled" ${cfg.enabled ? "checked" : ""}>
+        <span><strong>Show stats on the live feed</strong><small>Burn selected readings (and the mini-me) onto the camera view, and into a shareable tank card.</small></span>
+      </label>
+      <p class="eyebrow">Stats to show</p>
+      ${sensors.length
+        ? `<div class="grid two compact">${sensors.map(([id, sensor]) => `
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="overlay-stats" data-id="${this._escape(id)}" ${selected.includes(id) ? "checked" : ""}>
+              <span><strong>${this._escape(this._overlayShortLabel(id, sensor))}</strong><small>${this._escape(sensor.label || id)}</small></span>
+            </label>`).join("")}</div>`
+        : `<p class="muted">No sensors mapped yet.</p>`}
+      <p class="eyebrow">Extras</p>
+      <div class="grid two compact">
+        ${extra("showReefHealth", "Reef Health score", "Show the overall health grade.")}
+        ${extra("showTankName", "Tank name", "Title the overlay with your tank's name.")}
+        ${extra("showAvatar", "Mini-me avatar", "Your reef guide, reacting to the tank's health.")}
+        ${extra("showQuip", "Cheeky one-liner", "A rotating Apex jab — cheeky mode + calm tank only. Your dig to share.")}
+      </div>
+      <p class="eyebrow">Position</p>
+      <label>Overlay corner
+        <select data-scope="overlay" data-field="position">
+          ${positions.map(([value, lbl]) => `<option value="${value}" ${cfg.position === value ? "selected" : ""}>${lbl}</option>`).join("")}
+        </select>
+      </label>
+      <p class="muted">Open a camera and tap <strong>Share card</strong> to save or share a photo with all this baked in.</p>
+    `;
+    return this._settingsPanel(
+      "overlay",
+      "Live overlay & tank card",
+      "Burn your stats (and a cheeky one-liner) onto the live feed and into a shareable photo.",
+      body,
+    );
+  }
+
   _cameraTarget(id, cam) {
     return {
       id,
@@ -5718,11 +6112,12 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <div class="cam-stage" data-camera-stage>
             ${online
-              ? `<video class="cam-feed-large" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video><img class="cam-feed-large" data-camera-fallback alt="${this._escape(cam.label || "")}" style="display:none"><span class="cam-live"><span class="cam-dot"></span>LIVE</span>`
+              ? `<video class="cam-feed-large" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video><img class="cam-feed-large" data-camera-fallback alt="${this._escape(cam.label || "")}" style="display:none"><span class="cam-live"><span class="cam-dot"></span>LIVE</span>${online ? this._cameraOverlayMarkup() : ""}`
               : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Camera offline or unavailable" : "Not mapped"}</small></div>`}
           </div>
           <div class="actions">
             ${online ? `<button class="secondary compact-button" data-action="snapshot-camera">Snapshot</button>` : ""}
+            ${online ? `<button class="secondary compact-button" data-action="share-card">Share card</button>` : ""}
             ${online ? `<button class="secondary compact-button" data-action="fullscreen-camera">Fullscreen</button>` : ""}
             <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
           </div>
@@ -7758,6 +8153,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._cameraSettings()}
         ${this._captureSettings()}
         ${this._timelapseSettings()}
+        ${this._overlaySettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._interlockSettings()}
@@ -9787,6 +10183,22 @@ class OpenReefPanel extends HTMLElement {
         .timelapse-speed { display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: #9fb3c8; }
         .timelapse-section .seg { display: inline-flex; gap: 4px; }
         .timelapse-section .seg .active { background: var(--primary-color, #00b4d8); color: #04222b; border-color: var(--primary-color, #00b4d8); }
+        .cam-overlay { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; gap: 8px; padding: 14px; }
+        .cam-overlay.pos-top-left { align-items: flex-start; justify-content: flex-start; }
+        .cam-overlay.pos-top-right { align-items: flex-end; justify-content: flex-start; }
+        .cam-overlay.pos-bottom-left { align-items: flex-start; justify-content: flex-end; }
+        .cam-overlay.pos-bottom-right { align-items: flex-end; justify-content: flex-end; }
+        .cam-overlay-title { background: rgba(4, 10, 16, .55); color: #e9f4fb; font-weight: 800; font-size: 14px; letter-spacing: .02em; padding: 4px 10px; border-radius: 8px; }
+        .cam-overlay-chips { display: flex; flex-direction: column; gap: 6px; max-width: 60%; }
+        .cam-overlay-chip { display: inline-flex; align-items: baseline; gap: 8px; background: rgba(4, 10, 16, .55); border-radius: 8px; padding: 4px 10px; }
+        .cam-overlay-chip small { color: #9fc7e0; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+        .cam-overlay-chip strong { color: #fff; font-size: 14px; font-weight: 800; }
+        .cam-overlay-chip.is-health small { color: #7fe0c4; }
+        .cam-overlay-avatar { position: absolute; bottom: 10px; right: 12px; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 96px; }
+        .cam-overlay.pos-bottom-right .cam-overlay-avatar, .cam-overlay.pos-top-right .cam-overlay-avatar { right: auto; left: 12px; }
+        .cam-overlay-avatar .or-avatar-img, .cam-overlay-avatar .or-avatar-ph { width: 96px; height: 96px; object-fit: contain; }
+        .cam-overlay-avatar .or-avatar-ph { display: grid; place-items: center; font-size: 48px; }
+        .cam-overlay-bubble { background: rgba(255, 255, 255, .94); color: #0a2230; font-weight: 800; font-size: 12px; padding: 5px 10px; border-radius: 12px; max-width: 180px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
         .controller-picker { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 6px; }
         .compact-center { min-height: 220px; }

@@ -814,6 +814,25 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         for key in default_retention
     }
 
+    overlay = config.setdefault("overlay", {})
+    if not isinstance(overlay, dict):
+        overlay = {}
+        config["overlay"] = overlay
+    overlay["enabled"] = bool(overlay.get("enabled", False))
+    overlay_stats = overlay.get("stats")
+    if not isinstance(overlay_stats, list):
+        overlay_stats = []
+    overlay["stats"] = [s for s in overlay_stats if isinstance(s, str) and s in MVP_SENSORS]
+    overlay["showReefHealth"] = bool(overlay.get("showReefHealth", True))
+    overlay["showTankName"] = bool(overlay.get("showTankName", True))
+    overlay["showAvatar"] = bool(overlay.get("showAvatar", True))
+    overlay["showQuip"] = bool(overlay.get("showQuip", True))
+    overlay["position"] = (
+        overlay.get("position")
+        if overlay.get("position") in ("top-left", "top-right", "bottom-left", "bottom-right")
+        else "bottom-left"
+    )
+
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
         for preview in mode_previews.values():

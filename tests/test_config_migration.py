@@ -264,6 +264,43 @@ def test_timelapse_non_dict_block_coerced():
         assert isinstance(result.get("timelapse"), dict)
 
 
+def test_overlay_defaults_injected():
+    result = normalise({})
+    overlay = result.get("overlay")
+    assert isinstance(overlay, dict)
+    assert overlay["enabled"] is False
+    assert isinstance(overlay["stats"], list)
+    assert "temp" in overlay["stats"]  # default survives the MVP-sensor filter
+    assert overlay["position"] in ("top-left", "top-right", "bottom-left", "bottom-right")
+    for key in ("showReefHealth", "showTankName", "showAvatar", "showQuip"):
+        assert isinstance(overlay[key], bool)
+
+
+def test_overlay_garbage_coerced_and_filtered():
+    bad = {
+        "overlay": {
+            "enabled": "yes",
+            "stats": ["temp", "not_a_sensor", 5, "ph"],
+            "position": "middle",
+            "showAvatar": "nah",
+        }
+    }
+    result = normalise(bad)  # must not raise
+    overlay = result["overlay"]
+    assert overlay["enabled"] is True            # "yes" coerced to bool
+    assert "not_a_sensor" not in overlay["stats"]  # unknown sensor dropped
+    assert 5 not in overlay["stats"]               # non-str dropped
+    assert overlay["stats"] == ["temp", "ph"]      # only real sensor ids, order kept
+    assert overlay["position"] == "bottom-left"    # invalid corner -> default
+    assert isinstance(overlay["showAvatar"], bool)
+
+
+def test_overlay_non_dict_block_coerced():
+    for junk in ("a string", 7, ["x"], None):
+        result = normalise({"overlay": junk})
+        assert isinstance(result.get("overlay"), dict)
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:

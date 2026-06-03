@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 34
-INTEGRATION_VERSION = "0.4.73"
+CORE_SCHEMA_VERSION = 35
+INTEGRATION_VERSION = "0.4.74"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -510,6 +510,19 @@ DEFAULT_CORE_CONFIG = {
             "weeklyUntilDays": TIMELAPSE_DEFAULT_WEEKLY_DAYS,
             "monthlyUntilDays": TIMELAPSE_DEFAULT_MONTHLY_DAYS,
         },
+    },
+    # Camera V2 — live overlay + shareable tank card (Phase C). Selected stats (+ optional
+    # mini-me avatar and a cheeky anti-Apex quip) burned onto the live feed and into a
+    # one-tap shareable image. Purely a frontend read of live state; config just persists
+    # the user's selections.
+    "overlay": {
+        "enabled": False,
+        "stats": ["temp", "ph", "alkalinity"],
+        "showReefHealth": True,
+        "showTankName": True,
+        "showAvatar": True,
+        "showQuip": True,
+        "position": "bottom-left",
     },
     "energy": {
         "tariff": 0.28,
