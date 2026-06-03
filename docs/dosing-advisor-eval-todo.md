@@ -16,15 +16,15 @@ review the recommendation text, safety gates, and failure modes one at a time.
 ## Product/System Evals
 
 - [x] Tropic Marin All-For-Reef eval.
-- [ ] Seachem Reef Fusion 1/2 eval.
+- [x] Seachem Reef Fusion 1/2 eval.
 - [ ] Aquaforest Component 1+2+3+ eval.
 - [ ] ATI Essentials / Essentials Pro eval.
 - [ ] Red Sea Complete Reef Care 4-part eval.
 - [ ] TRITON Core7 Flex eval.
 - [ ] Fauna Marin Balling Light eval.
-- [ ] BRS Pharma 2-Part / DIY recipe eval.
+- [x] BRS Pharma 2-Part / DIY recipe eval.
 - [ ] ESV B-Ionic eval.
-- [ ] Custom verified-strength product eval.
+- [x] Custom verified-strength product eval.
 - [ ] Hybrid dosing eval: kalkwasser plus two-part/AFR.
 - [ ] Apex/Trident read-only chemistry eval.
 
@@ -186,3 +186,151 @@ Completed UI tweaks:
 Tweaks to consider after UI review:
 
 - Whether OpenReef should highlight calcium as the primary regulator more prominently in the UI.
+
+## Seachem Reef Fusion 1/2 Eval
+
+Status: complete for the first beta pass. Harness output passes, product max-dose handling is in the
+advisor, and manual CSV import files are ready for UI review.
+
+Source links checked:
+
+- Seachem Reef Fusion: https://www.seachem.com/reef-fusion.php
+
+Product class:
+
+- `equal_part_two_part`
+- Primary dosing system.
+- Exact-strength advisory maintenance and correction, with separate Part 1 calcium and Part 2
+  alkalinity assumptions.
+
+Assumptions:
+
+- 200 L mixed reef.
+- Targets: alkalinity 8.3 dKH, calcium 430 ppm, magnesium 1350 ppm.
+- Manual alkalinity/calcium/magnesium tests drive advice.
+- Seachem preset strength used by OpenReef:
+  - Reef Fusion 1: 1 mL per 25 L raises calcium by 4 ppm.
+  - Reef Fusion 2: 1 mL per 25 L raises alkalinity by 0.176 meq/L, about 0.493 dKH.
+  - Manufacturer daily maximum: 4 mL per 25 L per product.
+
+Scenarios:
+
+- [x] Stable two-part dosing.
+- [x] Alkalinity demand rising.
+- [x] Calcium demand rising.
+- [x] Both parts falling.
+- [x] Near max dose / demand outgrowing two-part.
+- [x] Stale manual tests.
+- [x] Above-target chemistry.
+- [x] Magnesium drift.
+
+Expected safety rules:
+
+- Reef Fusion must never imply OpenReef controls dosing pumps.
+- The advisor must show/retain the warning to dose parts separately and never mix the two bottles
+  directly.
+- Exact mL advice must use the Seachem preset strengths only when tank volume, current daily dose,
+  fresh manual tests, and safety acknowledgement are present.
+- Stable readings should stay calm and avoid tiny correction nudges.
+- Falling alkalinity and falling calcium should be advised independently, not as a shared-dose
+  system.
+- Near-max dosing should warn before pushing beyond 4 mL per 25 L per product per day.
+- Above-target chemistry should never suggest chemical correction downward.
+- Magnesium must not be assigned to Reef Fusion 1/2 in this preset.
+
+Manual import notes:
+
+- CSV files are in `docs/eval-data/reef-fusion/`.
+- Start UI review with `alkalinity-demand.csv`, then `calcium-demand.csv`, then `near-max-dose.csv`.
+- `stale-manual-tests.csv` only behaves as stale relative to the current Home Assistant clock; adjust
+  dates if needed when retesting later.
+- The live pH/temp/salinity context exists in the pure eval harness, but the CSV files only contain
+  manual chemistry rows.
+
+Completed advisor tweaks:
+
+- Stable exact-strength products no longer show correction advice for tiny differences inside the
+  useful test signal.
+- Reef Fusion safety reminders are visible but no longer make a stable advisor look alarming.
+- Reef Fusion recommendations respect the product daily maximum for the configured tank volume.
+
+Next eval after Reef Fusion:
+
+- Custom verified-strength / DIY 3-part, because the first Apex beta tester uses DIY 3-part.
+
+## Custom Verified-Strength / DIY Three-Part Eval
+
+Status: complete for the first beta pass. Harness output passes and manual CSV import files are
+ready for UI review.
+
+Source links checked:
+
+- BRS Pharma 2-Part / DIY recipe guidance: recipe strength depends on the actual mix and should be
+  verified before exact mL advice.
+- Randy Holmes-Farley two/three-part recipe context: calcium, alkalinity, and magnesium solutions are
+  recipe-specific and must be treated as separate parts.
+
+Product class:
+
+- `equal_part_two_part` product entry with custom verified strengths.
+- Primary dosing system.
+- Exact advisory maintenance/correction only after the user enters tank volume and per-parameter
+  strength instructions.
+
+Assumptions:
+
+- 200 L mixed reef.
+- Targets: alkalinity 8.3 dKH, calcium 430 ppm, magnesium 1350 ppm.
+- Manual alkalinity/calcium/magnesium tests drive advice.
+- Example verified recipe used for eval data only:
+  - alkalinity: 1 mL per 100 L raises 0.053 dKH,
+  - calcium: 1 mL per 100 L raises 0.37 ppm,
+  - magnesium: 1 mL per 100 L raises 0.47 ppm.
+
+Scenarios:
+
+- [x] Stable verified DIY three-part.
+- [x] Alkalinity demand rising.
+- [x] Calcium demand rising.
+- [x] Magnesium demand rising.
+- [x] All three verified parts falling.
+- [x] Missing calcium verified strength.
+- [x] Missing net tank volume.
+- [x] Stale manual tests.
+- [x] Above-target chemistry.
+
+Expected safety rules:
+
+- OpenReef must never imply it controls dosing pumps.
+- Exact mL advice must stay locked until net tank volume and the matching parameter strength are
+  complete.
+- Missing strength for one part must not block the other verified parts.
+- Alkalinity, calcium, and magnesium advice must be independent, not a shared-dose system.
+- Stale manual tests should lock actionable changes until fresh results are logged.
+- Above-target chemistry should never suggest chemical correction downward.
+- The advisor should remind users to dose DIY parts separately and monitor salinity/pH with
+  concentrated two/three-part solutions.
+
+Manual import notes:
+
+- CSV files are in `docs/eval-data/custom-diy-three-part/`.
+- Start UI review with `alkalinity-demand.csv`, `calcium-demand.csv`, and
+  `balanced-three-part-demand.csv`.
+- `missing-calcium-strength.csv` requires the calcium strength fields to be cleared in Settings to
+  reproduce the lock in the real UI.
+- `missing-tank-volume.csv` requires net tank volume to be cleared/zeroed in Settings.
+- `stale-manual-tests.csv` only behaves as stale relative to the current Home Assistant clock; adjust
+  dates if needed when retesting later.
+- The live pH/temp/salinity context exists in the pure eval harness, but the CSV files only contain
+  manual chemistry rows.
+
+Completed advisor tweaks:
+
+- Recipe-dependent products with complete verified strength fields now unlock exact advisory mL
+  guidance.
+- DIY/BRS recipe advice includes a separate-parts salinity/pH safety reminder without making stable
+  tanks look alarming.
+
+Next eval after DIY three-part:
+
+- ESV B-Ionic, then Aquaforest Component 1+2+3+.
