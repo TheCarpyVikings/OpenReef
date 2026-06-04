@@ -8,8 +8,9 @@ eval todo once they become larger feature work.
 ## Smoke-Test Order
 
 - [x] Kalkwasser safety: `docs/eval-data/kalkwasser/demand-outgrowing-kalk.csv`
-- [ ] Reef Fusion exact advice: `docs/eval-data/reef-fusion/alkalinity-demand.csv`
+- [x] Reef Fusion exact advice: `docs/eval-data/reef-fusion/alkalinity-demand.csv`
 - [ ] DIY / custom verified strength: `docs/eval-data/custom-diy-three-part/alkalinity-demand.csv`
+      Safety guardrail fixed in `0.4.79`; repeat the HA smoke test with the same CSV.
 - [ ] All-For-Reef guided behaviour: `docs/eval-data/all-for-reef/demand-increasing.csv`
 - [ ] Above-target safety: `docs/eval-data/reef-fusion/above-target.csv`
 - [ ] Mission Control Dosing Advisor display persistence
@@ -26,6 +27,24 @@ eval todo once they become larger feature work.
 - [ ] Kalkwasser: remove duplicated "Do not use kalkwasser as a one-off correction bolus" wording.
 - [ ] Kalkwasser: explain evaporation headroom in plainer language, e.g. "based on your configured
       evaporation ceiling".
+- [ ] Reef Fusion magnesium card: remove irrelevant two-part dose/max-dose safety text from
+      magnesium, because Reef Fusion does not cover magnesium.
+- [ ] Reef Fusion magnesium card: change product assumption wording from "Seachem Reef Fusion 1/2"
+      to clearer "No magnesium product configured" or "Reef Fusion does not cover magnesium".
+- [ ] Reef Fusion calcium card: make correction wording clearly optional when calcium movement is
+      below useful signal, so it does not look like OpenReef is pushing calcium changes during an
+      alkalinity-only demand scenario.
+- [x] **Safety guardrail - high priority:** Custom verified-strength products can show absurd exact
+      mL/day advice when the entered/calculated strength is implausibly weak. In the DIY alkalinity
+      smoke test, OpenReef showed a `544.5 mL/day` holding dose and roughly `5300.0 mL/day`
+      correction dose from a calculated `0.0001 dKH/mL` potency. This should switch to
+      `Review`/`Locked`, suppress exact mL advice, and tell the user to verify the "1 mL raises X in
+      Y litres" strength fields before changing a doser.
+- [x] Custom verified-strength products need a conservative sanity limit for daily dose changes and
+      correction splits, or a user-configured maximum safe daily dose before exact advice can be
+      shown.
+      Fixed in `0.4.79`: implausibly weak custom strengths and very large custom-product advice now
+      switch to review/warning language and suppress exact mL lines until the strength is verified.
 
 ## Watch List
 
@@ -59,12 +78,61 @@ Polish found:
 
 ### Reef Fusion Exact Advice - Alkalinity Demand
 
-Status: blocked before advisor review.
+Status: passed with polish/follow-up tweaks.
 
-Observed:
+What looked right:
 
 - Primary system can be set to `Seachem Reef Fusion 1/2`.
-- Secondary supplement can be changed to `No secondary supplement` in the UI.
-- After saving, the settings reload with `Kalkwasser / calcium hydroxide` selected again.
-- Kalkwasser delivery and safety fields reappear, so the Reef Fusion-only smoke test is contaminated
-  by secondary kalk context.
+- Secondary supplement now persists as `None`.
+- Safety state is acknowledged with `200 L` net volume.
+- Alkalinity shows exact advisory maintenance and correction guidance.
+- Calcium is recognised as covered by Reef Fusion and stays steady.
+- Magnesium is marked `Not covered`.
+- No automatic dosing language appears.
+
+Polish found:
+
+- Magnesium card still includes irrelevant Reef Fusion daily dose/max-dose safety wording even though
+  magnesium is not covered.
+- Magnesium card product assumption is technically showing the selected primary system, but this reads
+  confusingly when the card itself is `Not covered`.
+- Calcium correction text appears even though calcium trend is below useful signal. This is safe
+  because it is phrased as "if correcting", but it should be visually/verbally less prominent than
+  the alkalinity demand.
+
+### DIY / Custom Verified Strength - Alkalinity Demand
+
+Status: blocked issue fixed in `0.4.79`; needs repeat HA smoke test.
+
+What looked right:
+
+- Primary system can be set to `Custom verified-strength product`.
+- Secondary supplement persists as `None`.
+- Safety state is acknowledged with `200 L` net volume.
+- Alkalinity demand is detected.
+- Calcium and magnesium remain steady and are not forced into dosing changes.
+- No automatic dosing language appears.
+
+Safety issue found:
+
+- Alkalinity advice showed very large exact mL values as normal `Ready` advice:
+  `544.5 mL/day` estimated holding dose and roughly `5300.0 mL/day` correction dose.
+- The root cause is an extremely weak calculated custom potency: `0.0001 dKH/mL` in this tank.
+- This is likely a strength-entry or recipe-unit problem, so OpenReef should not present it as an
+  actionable dose.
+
+Fix added:
+
+- If custom product strength creates unusually large advice, the card now switches to
+  review/warning language.
+- Exact maintenance and correction mL lines are suppressed for implausibly weak custom strengths.
+- Large custom correction advice is locked separately from sensible maintenance advice, so normal
+  DIY maintenance estimates can still appear.
+- The eval now includes an `implausibly-weak-alkalinity-strength` scenario to stop this regressing.
+
+Retest expectation:
+
+- The DIY alkalinity smoke test should no longer show `544.5 mL/day` holding advice or
+  `5300.0 mL/day` correction advice.
+- The alkalinity card should tell the user to verify the custom recipe or "1 mL raises X in Y L"
+  fields before changing a doser.

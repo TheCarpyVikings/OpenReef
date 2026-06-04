@@ -139,7 +139,9 @@ function dosingParameterConfig(parameter, scenario) {
     calcium: "caTarget",
     magnesium: "mgTarget",
   }[parameter];
-  const strength = scenario.missingStrengthFor === parameter ? {} : DIY_STRENGTHS[parameter];
+  const strength = scenario.missingStrengthFor === parameter
+    ? {}
+    : scenario.strengthOverrides?.[parameter] || DIY_STRENGTHS[parameter];
   return {
     doserMlPerDay: scenario[doseKey] ?? 20,
     target: scenario[targetKey] ?? TARGETS[parameter],
@@ -274,6 +276,17 @@ function scenarioExpectations(scenario, result) {
       "If this fails, the advisor is ignoring user-entered DIY alkalinity strength.",
     ));
   }
+  if (scenario.id === "implausibly-weak-alkalinity-strength") {
+    expectations.push(expectation(
+      "Implausibly weak custom strength locks exact advice",
+      alk?.recommendationState === "warning"
+        && textIncludes(alk.maintenanceText, "implausibly weak")
+        && !textIncludes(alk.maintenanceText, "Suggested next dose")
+        && !textIncludes(alk.correctionText, "5300"),
+      "OpenReef should catch likely recipe/unit mistakes before showing huge custom-product mL advice.",
+      "If this fails, custom verified-strength products can still display unsafe-looking exact dose changes.",
+    ));
+  }
   if (scenario.id === "calcium-demand") {
     expectations.push(expectation(
       "Calcium exact maintenance advice appears",
@@ -356,6 +369,23 @@ export const CUSTOM_DIY_SCENARIOS = [
     caDrift: -0.02,
     mgStart: 1350,
     mgDrift: -0.03,
+  },
+  {
+    id: "implausibly-weak-alkalinity-strength",
+    title: "Implausibly weak alkalinity strength",
+    expected: "Lock exact mL advice and ask the user to verify the custom recipe/strength fields.",
+    alkDoseMlPerDay: 300,
+    caDoseMlPerDay: 36,
+    mgDoseMlPerDay: 4,
+    alkStart: 8.52,
+    alkDrift: -0.012,
+    caStart: 431,
+    caDrift: -0.02,
+    mgStart: 1350,
+    mgDrift: -0.03,
+    strengthOverrides: {
+      alkalinity: { productDoseMl: 1, productVolumeLitres: 1, productRaise: 0.02 },
+    },
   },
   {
     id: "calcium-demand",

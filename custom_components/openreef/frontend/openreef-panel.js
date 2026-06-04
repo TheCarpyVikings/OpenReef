@@ -3475,6 +3475,51 @@ class OpenReefPanel extends HTMLElement {
     return range > 0 ? Math.max(range * 0.02, 0.01) : 0.05;
   }
 
+  _dosingMinimumCustomPotency(sensorId) {
+    if (sensorId === "alkalinity") return 0.001;
+    if (sensorId === "calcium") return 0.02;
+    if (sensorId === "magnesium") return 0.02;
+    return 0.0001;
+  }
+
+  _dosingCustomExactAdviceLimitMl(system, currentDoseMlPerDay = 0) {
+    const tankVolume = Number(system?.tankVolumeLitres) || 0;
+    const volumeLimit = tankVolume > 0 ? tankVolume * 1.5 : 250;
+    const doseLimit = currentDoseMlPerDay > 0
+      ? Math.max(currentDoseMlPerDay * 1.5, currentDoseMlPerDay + 100)
+      : 250;
+    return Math.max(100, Math.min(volumeLimit, doseLimit));
+  }
+
+  _dosingCustomExactAdviceRisk(sensorId, sensor, product, potencyInfo, safety, advice = {}) {
+    const customStrengthProduct = product?.requiresCustomStrength || product?.classId === "custom_verified_strength";
+    if (!customStrengthProduct || potencyInfo.value <= 0 || !["calculator", "manual"].includes(potencyInfo.source)) {
+      return null;
+    }
+    const unit = sensor?.unit || "units";
+    const minPotency = this._dosingMinimumCustomPotency(sensorId);
+    const limit = this._dosingCustomExactAdviceLimitMl(this._dosingSystem(), safety.currentDose);
+    const checkValues = [
+      advice.suggestedDoseMlPerDay,
+      advice.reviewDoseMlPerDay,
+      advice.dailyCorrectionMl,
+    ].filter((value) => Number.isFinite(value) && value > 0);
+    const highestAdvice = checkValues.length ? Math.max(...checkValues) : 0;
+    if (potencyInfo.value < minPotency) {
+      return {
+        limit,
+        detail: `${product.label} strength looks implausibly weak (${this._format(potencyInfo.value, 4)} ${unit}/mL). Check the recipe or "1 mL raises X in Y L" fields before changing a doser.`,
+      };
+    }
+    if (highestAdvice > limit) {
+      return {
+        limit,
+        detail: `${product.label} advice would require about ${this._formatDoseMl(highestAdvice)}, above OpenReef's conservative custom-product review limit of ${this._formatDoseMl(limit)}. Verify the product strength or set a safer dosing approach before changing a doser.`,
+      };
+    }
+    return null;
+  }
+
   _consumptionConfidence(sensorId, sensor, source, days, fit, span, totalChange) {
     const minDays = source === "manual" ? 4 : 4;
     if (days.length < minDays) {
@@ -3956,9 +4001,12 @@ class OpenReefPanel extends HTMLElement {
     const correctionSignalStrong = target > 0 && Math.abs(correctionUnitsToTarget) >= this._dosingMinimumSignal(sensorId, sensor);
     let extraMlPerDay = null;
     let correctionMl = null;
+    let dailyCorrectionMl = null;
     let suggestedDoseMlPerDay = null;
     let reviewDoseMlPerDay = null;
     let correctionText = "";
+    let customMaintenanceAdviceRisk = null;
+    let customCorrectionAdviceRisk = null;
     const productSupportsParameter = !productInfo.id || this._dosingProductSupportsParameter(productInfo, sensorId);
     const unsupportedProduct = productInfo.id && !productSupportsParameter;
     if (potency > 0 && safety.canExactMaintenance) {
@@ -3986,7 +4034,7 @@ class OpenReefPanel extends HTMLElement {
               : " Correction dosing is locked until a safe daily correction limit is available.";
           } else {
             const dailyCorrectionUnits = correctionUnits / correctionDays;
-            const dailyCorrectionMl = Math.max(0, dailyCorrectionUnits / potency);
+            dailyCorrectionMl = Math.max(0, dailyCorrectionUnits / potency);
             correctionText = ` If correcting toward ${this._format(target, digits)}${unitSuffix}, split it across about ${correctionDays} day${correctionDays === 1 ? "" : "s"} (roughly ${this._format(dailyCorrectionMl, 1)} mL/day), then retest.`;
             if (productDailyMaxMl > 0) {
               correctionText += ` Do not exceed ${this._formatDoseMl(productDailyMaxMl)} total ${productInfo.label} per day for this tank.`;
@@ -3996,6 +4044,23 @@ class OpenReefPanel extends HTMLElement {
           correctionText = " Target is below the current reading; do not use a one-off chemical correction downward. Let normal consumption or water changes bring it down gradually.";
         }
       }
+    }
+    customMaintenanceAdviceRisk = this._dosingCustomExactAdviceRisk(sensorId, sensor, productInfo, potencyInfo, safety, {
+      suggestedDoseMlPerDay,
+      reviewDoseMlPerDay,
+    });
+    customCorrectionAdviceRisk = this._dosingCustomExactAdviceRisk(sensorId, sensor, productInfo, potencyInfo, safety, {
+      dailyCorrectionMl,
+    });
+    if (customMaintenanceAdviceRisk) {
+      extraMlPerDay = null;
+      suggestedDoseMlPerDay = null;
+      reviewDoseMlPerDay = null;
+    }
+    if (customCorrectionAdviceRisk) {
+      correctionMl = null;
+      dailyCorrectionMl = null;
+      correctionText = "";
     }
 
     const rateDigits = Math.max(digits, 2);
@@ -4016,7 +4081,9 @@ class OpenReefPanel extends HTMLElement {
     } else if (productInfo.id === "aquaforest_component_123") {
       maintenanceText = this._aquaforestMaintenanceText(label, sensorId, slope, rateText, safety, currentDoseMlPerDay);
     } else if (slope < 0) {
-      if (potency > 0 && safety.canExactMaintenance) {
+      if (customMaintenanceAdviceRisk) {
+        maintenanceText = `Net loss ~${rateText}. Exact custom mL advice is locked: ${customMaintenanceAdviceRisk.detail}`;
+      } else if (potency > 0 && safety.canExactMaintenance) {
         const capped = Math.abs(holdOffsetUnits) > maxDailyAdjustmentUnits;
         maintenanceText = `Net loss ~${rateText}. Current dose ${this._formatDoseMl(currentDoseMlPerDay)}; estimated holding dose ${this._formatDoseMl(suggestedDoseMlPerDay)}. `;
         const maxCapped = productDailyMaxMl > 0 && suggestedDoseMlPerDay > productDailyMaxMl;
@@ -4030,6 +4097,8 @@ class OpenReefPanel extends HTMLElement {
       } else {
         maintenanceText = `Net loss ~${rateText}. ${productInfo.note || "Increase daily dosing only after confirming with a manual test."}`;
       }
+    } else if (customMaintenanceAdviceRisk) {
+      maintenanceText = `Net rise ~${rateText}. Exact custom mL advice is locked: ${customMaintenanceAdviceRisk.detail}`;
     } else if (potency > 0 && safety.canExactMaintenance) {
       maintenanceText = `Net rise ~${rateText}. Current dose ${this._formatDoseMl(currentDoseMlPerDay)}; estimated holding dose ${this._formatDoseMl(suggestedDoseMlPerDay)}. `;
       maintenanceText += reviewDoseMlPerDay <= 0
@@ -4058,6 +4127,8 @@ class OpenReefPanel extends HTMLElement {
         correctionText = this._aquaforestCorrectionText(label);
       } else if (target < value) {
         correctionText = "Do not chemically correct downward. Let normal consumption or water changes bring the value down gradually.";
+      } else if (customCorrectionAdviceRisk) {
+        correctionText = `Correction dosing is locked: ${customCorrectionAdviceRisk.detail}`;
       } else if (!safety.canExactCorrection) {
         correctionText = `Correction dosing is locked: ${safety.locks.concat(safety.warnings).join(" ") || "fresh manual test required."}`;
       } else if (correctionMl !== null) {
@@ -4065,7 +4136,10 @@ class OpenReefPanel extends HTMLElement {
       }
     }
 
-    const safetyText = safety.locks.length
+    const customAdviceRisk = customMaintenanceAdviceRisk || customCorrectionAdviceRisk;
+    const safetyText = customAdviceRisk
+      ? `Review product strength: ${customAdviceRisk.detail}`
+      : safety.locks.length
       ? `Locked: ${safety.locks.join(" ")}`
       : safety.warnings.length
         ? safety.warnings.join(" ")
@@ -4088,6 +4162,7 @@ class OpenReefPanel extends HTMLElement {
     }
     if (safety.status === "locked" && status === "ok") status = "learning";
     if (safety.status === "warning" && status === "ok") status = "warning";
+    if (customAdviceRisk && status === "ok") status = "warning";
     if (unsupportedProduct && (status === "learning" || noUsefulMovement)) status = "ok";
 
     const sourceText = source === "manual" ? "from manual test history" : "net of your current dosing";
@@ -4129,6 +4204,8 @@ class OpenReefPanel extends HTMLElement {
       productInfo,
       recommendationState: unsupportedProduct
         ? "not-covered"
+        : customAdviceRisk
+          ? "warning"
         : safety.status === "locked"
           ? "locked"
           : safety.status === "warning"
@@ -4142,6 +4219,9 @@ class OpenReefPanel extends HTMLElement {
                   : "guidance",
       productAssumption: `${productInfo.label} (${this._dosingProductClassLabel(productInfo.classId)})`,
       safety,
+      customExactAdviceRisk: customAdviceRisk,
+      customMaintenanceAdviceRisk,
+      customCorrectionAdviceRisk,
       stability,
     };
   }
