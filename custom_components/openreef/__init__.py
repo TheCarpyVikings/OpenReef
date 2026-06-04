@@ -1110,13 +1110,18 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             )
             else ""
         )
-        for field in ("primaryProduct", "secondaryProduct", "customProductClass"):
-            fallback = default_system[field]
-            if field == "primaryProduct":
-                fallback = inferred_primary
-            if field == "secondaryProduct":
-                fallback = inferred_secondary
-            system[field] = _normalise_dosing_product_id(raw_system.get(field)) or fallback
+        for field in ("primaryProduct", "secondaryProduct"):
+            fallback = inferred_primary if field == "primaryProduct" else inferred_secondary
+            if field in raw_system:
+                # Empty string is a deliberate user choice ("no primary"/"no secondary").
+                # Only infer from old per-parameter presets when the new system field is absent.
+                system[field] = _normalise_dosing_product_id(raw_system.get(field))
+            else:
+                system[field] = fallback
+        custom_class = _normalise_dosing_product_id(
+            raw_system.get("customProductClass", default_system["customProductClass"])
+        )
+        system["customProductClass"] = custom_class or default_system["customProductClass"]
         system["secondaryDelivery"] = _normalise_dosing_delivery(
             raw_system.get("secondaryDelivery")
         )
