@@ -24,6 +24,7 @@ export default function ReefTankLivePage() {
 
   useEffect(() => {
     let cancelled = false;
+    let activeVideo: HTMLVideoElement | null = null;
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
@@ -37,6 +38,7 @@ export default function ReefTankLivePage() {
       try {
         const video = videoRef.current;
         if (!video) return;
+        activeVideo = video;
 
         const res = await apiFetch(`/api/camera/hls?entity=${encodeURIComponent(entityId)}`, {
           cache: 'no-store',
@@ -97,6 +99,11 @@ export default function ReefTankLivePage() {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
+      }
+      if (activeVideo) {
+        activeVideo.pause();
+        activeVideo.removeAttribute('src');
+        activeVideo.load();
       }
     };
   }, [entityId, streamKey]);

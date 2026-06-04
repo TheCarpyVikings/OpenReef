@@ -113,6 +113,9 @@ export const CameraScreen: React.FC<CameraScreenProps> = ({ setActiveTab }) => {
                 hlsRef.current.destroy();
                 hlsRef.current = null;
             }
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeCam?.entityId, streamKey]);

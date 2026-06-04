@@ -109,6 +109,7 @@ WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
 CAPTURES_PATH_REGISTERED = "captures_path_registered"
 CAPTURE_LAST = "capture_last"
 CAPTURE_INFLIGHT = "capture_inflight"
+CAMERA_IO_INFLIGHT = "camera_io_inflight"
 TIMELAPSE_UNSUB = "timelapse_unsub"
 TIMELAPSE_LAST = "timelapse_last"
 FEEDWATCH_UNSUB = "feedwatch_unsub"
@@ -3636,15 +3637,35 @@ async def _async_record_clip(
     lookback: int,
 ) -> bool:
     """Record an MP4 clip via the stable ``camera.record`` service. Returns True on success."""
-    data: dict[str, Any] = {
-        ATTR_ENTITY_ID: camera_entity_id,
-        "filename": str(video_path),
-        "duration": duration,
-    }
-    if lookback > 0:
-        data["lookback"] = lookback
-    await hass.services.async_call("camera", "record", data, blocking=True)
-    return await hass.async_add_executor_job(video_path.exists)
+    if not _mark_camera_io_started(hass, camera_entity_id):
+        _LOGGER.debug("OpenReef clip skipped for %s: camera is already busy", camera_entity_id)
+        return False
+    try:
+        data: dict[str, Any] = {
+            ATTR_ENTITY_ID: camera_entity_id,
+            "filename": str(video_path),
+            "duration": duration,
+        }
+        if lookback > 0:
+            data["lookback"] = lookback
+        await hass.services.async_call("camera", "record", data, blocking=True)
+        return await hass.async_add_executor_job(video_path.exists)
+    finally:
+        _mark_camera_io_finished(hass, camera_entity_id)
+
+
+def _mark_camera_io_started(hass: HomeAssistant, entity_id: str) -> bool:
+    """Best-effort guard against overlapping camera reads for fragile USB cameras."""
+    inflight: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault(CAMERA_IO_INFLIGHT, set())
+    if entity_id in inflight:
+        return False
+    inflight.add(entity_id)
+    return True
+
+
+def _mark_camera_io_finished(hass: HomeAssistant, entity_id: str) -> None:
+    inflight: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault(CAMERA_IO_INFLIGHT, set())
+    inflight.discard(entity_id)
 
 
 async def _async_write_snapshot(hass: HomeAssistant, entity_id: str, path: Path) -> bool:
@@ -3653,6 +3674,9 @@ async def _async_write_snapshot(hass: HomeAssistant, entity_id: str, path: Path)
     Works on any camera, no allowlist. Best-effort — logs and returns False on failure,
     never raises. Shared by event-capture thumbnails and timelapse frames.
     """
+    if not _mark_camera_io_started(hass, entity_id):
+        _LOGGER.debug("OpenReef snapshot skipped for %s: camera is already busy", entity_id)
+        return False
     try:
         from homeassistant.components import camera as camera_component
 
@@ -3662,6 +3686,8 @@ async def _async_write_snapshot(hass: HomeAssistant, entity_id: str, path: Path)
     except Exception:  # noqa: BLE001 - snapshot is best-effort
         _LOGGER.warning("OpenReef snapshot failed for %s", entity_id, exc_info=True)
         return False
+    finally:
+        _mark_camera_io_finished(hass, entity_id)
 
 
 async def _async_perform_capture(

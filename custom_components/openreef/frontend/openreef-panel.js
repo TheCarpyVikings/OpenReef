@@ -5759,7 +5759,8 @@ class OpenReefPanel extends HTMLElement {
     }
     const session = {
       entityId, pc: null, unsub: null, sessionId: null,
-      pending: [], closed: false, fellBack: false, gotTrack: false, timer: null,
+      pending: [], closed: false, fellBack: false, gotTrack: false,
+      timer: null, connectionTimer: null,
     };
     this._webrtcSession = session;
     try {
@@ -5777,8 +5778,32 @@ class OpenReefPanel extends HTMLElement {
       session.pc = pc;
       const remote = new MediaStream();
       video.srcObject = remote;
-      pc.addTransceiver("audio", { direction: "recvonly" });
       pc.addTransceiver("video", { direction: "recvonly" });
+      const clearConnectionTimer = () => {
+        if (session.connectionTimer) {
+          window.clearTimeout(session.connectionTimer);
+          session.connectionTimer = null;
+        }
+      };
+      const scheduleConnectionFallback = (delay) => {
+        clearConnectionTimer();
+        session.connectionTimer = window.setTimeout(() => {
+          if (session.closed || !session.pc) return;
+          const states = [session.pc.connectionState, session.pc.iceConnectionState];
+          if (states.includes("failed") || states.includes("closed") || states.includes("disconnected")) {
+            this._cameraWebRtcFallback(entityId);
+          }
+        }, delay);
+      };
+      const watchConnection = () => {
+        if (session.closed || !session.pc) return;
+        const states = [session.pc.connectionState, session.pc.iceConnectionState];
+        if (states.includes("failed") || states.includes("closed")) scheduleConnectionFallback(0);
+        else if (states.includes("disconnected")) scheduleConnectionFallback(3000);
+        else if (states.includes("connected") || states.includes("completed")) clearConnectionTimer();
+      };
+      pc.addEventListener("connectionstatechange", watchConnection);
+      pc.addEventListener("iceconnectionstatechange", watchConnection);
       pc.addEventListener("track", (ev) => {
         session.gotTrack = true;
         remote.addTrack(ev.track);
@@ -5797,7 +5822,7 @@ class OpenReefPanel extends HTMLElement {
           session.pending.push(candidate);
         }
       });
-      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+      const offer = await pc.createOffer({ offerToReceiveVideo: true });
       if (session.closed) return;
       await pc.setLocalDescription(offer);
       if (session.closed) return;
@@ -5870,6 +5895,7 @@ class OpenReefPanel extends HTMLElement {
     const session = this._webrtcSession;
     if (!session) return;
     if (session.timer) { window.clearTimeout(session.timer); session.timer = null; }
+    if (session.connectionTimer) { window.clearTimeout(session.connectionTimer); session.connectionTimer = null; }
     if (session.unsub) { try { session.unsub(); } catch {} session.unsub = null; }
     if (session.pc) {
       try { if (session.pc.getReceivers) session.pc.getReceivers().forEach((r) => { if (r.track) r.track.stop(); }); } catch {}
@@ -5885,6 +5911,11 @@ class OpenReefPanel extends HTMLElement {
     this._teardownWebRtcPeer();
     const video = this.shadowRoot && this.shadowRoot.querySelector("video[data-camera-video]");
     if (video) { try { video.srcObject = null; } catch {} }
+    const img = this.shadowRoot && this.shadowRoot.querySelector("img[data-camera-fallback]");
+    if (img) {
+      try { img.removeAttribute("src"); } catch {}
+      img.style.display = "none";
+    }
     this._webrtcSession = null;
   }
 
@@ -6646,13 +6677,13 @@ class OpenReefPanel extends HTMLElement {
 
   _cameraTile(id, cam) {
     const online = cam.entity_id && this._cameraOnline(cam.entity_id);
-    const stream = online ? this._cameraStreamUrl(cam.entity_id) : "";
+    const snap = online ? this._cameraSnapshotUrl(cam.entity_id) : "";
     return `
       <button class="cam-tile ${online ? "" : "offline"}" data-action="focus-camera" data-id="${this._escape(id)}" title="${this._escape(cam.label || id)}">
         ${online
-          ? `<img class="cam-feed" src="${this._escape(stream)}" alt="${this._escape(cam.label || id)}">`
+          ? `<img class="cam-feed" src="${this._escape(snap)}" alt="${this._escape(cam.label || id)}" loading="lazy" decoding="async">`
           : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Offline" : "Not mapped"}</small></div>`}
-        ${online ? `<span class="cam-live"><span class="cam-dot"></span>LIVE</span>` : ""}
+        ${online ? `<span class="cam-live"><span class="cam-dot"></span>ONLINE</span>` : ""}
         <span class="cam-label">${this._escape(cam.label || id)}</span>
       </button>
     `;

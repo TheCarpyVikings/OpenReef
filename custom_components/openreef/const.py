@@ -10,7 +10,7 @@ PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
 CORE_SCHEMA_VERSION = 37
-INTEGRATION_VERSION = "0.4.80"
+INTEGRATION_VERSION = "0.4.81"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.

@@ -30,6 +30,8 @@ from _fake_ha import FakeEntry, FakeHass  # noqa: E402
 CONF_SETTINGS = integration.CONF_SETTINGS
 resolve = integration._resolve_capture_camera
 dispatch = integration._dispatch_capture
+mark_camera_io_started = integration._mark_camera_io_started
+mark_camera_io_finished = integration._mark_camera_io_finished
 
 
 # --- _resolve_capture_camera: pick the first ONLINE mapped camera -----------
@@ -101,6 +103,17 @@ def test_dispatch_fires_when_enabled_and_trigger_on():
     hass = FakeHass(entries=[entry])
     dispatch(hass, entry, "critical_alert", "Temp critical")
     assert len(hass.tasks) == 1
+
+
+# --- shared camera I/O guard -----------------------------------------------
+
+def test_camera_io_guard_blocks_overlap_and_releases():
+    hass = FakeHass()
+    assert mark_camera_io_started(hass, "camera.x") is True
+    assert mark_camera_io_started(hass, "camera.x") is False
+    mark_camera_io_finished(hass, "camera.x")
+    assert mark_camera_io_started(hass, "camera.x") is True
+    mark_camera_io_finished(hass, "camera.x")
 
 
 # --- tiny standalone runner -------------------------------------------------
