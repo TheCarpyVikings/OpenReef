@@ -1036,6 +1036,9 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
       if (action === "complete-task") this._completeTask(id);
+      if (action === "skip-task") this._skipTask(id);
+      if (action === "snooze-task") this._snoozeTask(id, Number(target.dataset.days) || 3);
+      if (action === "resume-task") this._resumeTask(id);
       if (action === "toggle-task-history") { this._maintenanceHistoryOpen[id] = !this._maintenanceHistoryOpen[id]; this._render(); }
       if (action === "delete-completion") this._deleteCompletion(id, target.dataset.entry);
       if (action === "add-maintenance-task") { const input = this.shadowRoot.getElementById("or-add-task-name"); this._addMaintenanceTask((input?.value || "").trim()); }
@@ -1356,6 +1359,11 @@ class OpenReefPanel extends HTMLElement {
         this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
         this._config.maintenance[field] = value;
       }
+      if (scope === "maintenance-reminders") {
+        this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
+        this._config.maintenance.reminders = this._config.maintenance.reminders || {};
+        this._config.maintenance.reminders[field] = value;
+      }
       if (scope === "maintenance-task") {
         this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
         this._config.maintenance.tasks = this._config.maintenance.tasks || {};
@@ -1369,6 +1377,13 @@ class OpenReefPanel extends HTMLElement {
         } else if (field === "criticalAfterDays") {
           const cadenceDays = Math.max(1, Number(task.cadenceDays) || 7);
           task.criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(value) || cadenceDays * 2));
+        } else if (field === "scheduleDay") {
+          const day = parseInt(target.dataset.day, 10);
+          const set = new Set(Array.isArray(task.scheduleDays) ? task.scheduleDays : []);
+          if (value) set.add(day); else set.delete(day);
+          task.scheduleDays = [...set].filter((n) => Number.isInteger(n) && n >= 0 && n <= 6).sort((a, b) => a - b);
+        } else if (field === "scheduleMonthDays") {
+          task.scheduleMonthDays = [...new Set(String(value).split(/[^0-9]+/).map((s) => parseInt(s, 10)).filter((n) => Number.isInteger(n) && n >= 1 && n <= 31))].sort((a, b) => a - b);
         } else {
           task[field] = value;
         }
@@ -1376,7 +1391,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
         && event.type === "change"
       ) this._render();
     };
@@ -8947,6 +8962,9 @@ class OpenReefPanel extends HTMLElement {
     const raw = this._maintenanceConfig().tasks[id] || {};
     const cadenceDays = Math.max(1, Math.min(365, Number(raw.cadenceDays) || 7));
     const criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(raw.criticalAfterDays) || cadenceDays * 2));
+    const toIntList = (v, lo, hi) => (Array.isArray(v)
+      ? [...new Set(v.map((n) => parseInt(n, 10)).filter((n) => Number.isInteger(n) && n >= lo && n <= hi))].sort((a, b) => a - b)
+      : []);
     return {
       label: raw.label || id,
       cadenceDays,
@@ -8954,6 +8972,12 @@ class OpenReefPanel extends HTMLElement {
       enabled: raw.enabled === true,
       notes: raw.notes || "",
       builtin: raw.builtin === true,
+      scheduleMode: raw.scheduleMode === "fixed" ? "fixed" : "interval",
+      scheduleDays: toIntList(raw.scheduleDays, 0, 6),
+      scheduleMonthDays: toIntList(raw.scheduleMonthDays, 1, 31),
+      notify: raw.notify !== false,
+      snoozedUntil: typeof raw.snoozedUntil === "string" ? raw.snoozedUntil : null,
+      logsVolume: raw.logsVolume === true,
     };
   }
 
@@ -8972,6 +8996,93 @@ class OpenReefPanel extends HTMLElement {
     return this._maintenanceCompletions(id)[0] || null;
   }
 
+  // Latest NON-skipped completion — skips are logged history but don't count as
+  // "done", so they never reset the cadence (lockstep with backend _maintenance_last_done).
+  _maintenanceLatestDone(id) {
+    return this._maintenanceCompletions(id).find((entry) => !entry?.skipped) || null;
+  }
+
+  _maintenanceOrdinal(n) {
+    const s = ["th", "st", "nd", "rd"];
+    const v = n % 100;
+    return s[(v - 20) % 10] || s[v] || s[0];
+  }
+
+  _maintenanceFormatDate(date) {
+    try {
+      return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    } catch (e) {
+      return date.toISOString().slice(0, 10);
+    }
+  }
+
+  _maintenanceScheduleLabel(task) {
+    const dow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const parts = [];
+    if (task.scheduleDays?.length) parts.push(task.scheduleDays.map((d) => dow[d] || "?").join("/"));
+    if (task.scheduleMonthDays?.length) parts.push(task.scheduleMonthDays.map((d) => `${d}${this._maintenanceOrdinal(d)}`).join("/"));
+    return parts.join(" + ") || "no days set";
+  }
+
+  // Most recent (and previous) scheduled local date <= today, for fixed-schedule tasks.
+  // Weekdays stored Mon=0..Sun=6 (matches backend date.weekday()); JS getDay() is Sun=0.
+  _maintenanceScheduledDates(task, today) {
+    const days = new Set(task.scheduleDays || []);
+    const monthDays = new Set(task.scheduleMonthDays || []);
+    if (!days.size && !monthDays.size) return [null, null];
+    const found = [];
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    for (let i = 0; i < 366; i += 1) {
+      const isoDow = (d.getDay() + 6) % 7;
+      if (days.has(isoDow) || monthDays.has(d.getDate())) {
+        found.push(new Date(d));
+        if (found.length === 2) break;
+      }
+      d.setDate(d.getDate() - 1);
+    }
+    return [found[0] || null, found[1] || null];
+  }
+
+  _maintenanceNextScheduledAfter(task, fromDate) {
+    const days = new Set(task.scheduleDays || []);
+    const monthDays = new Set(task.scheduleMonthDays || []);
+    if (!days.size && !monthDays.size) return null;
+    const d = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate() + 1);
+    for (let i = 0; i < 366; i += 1) {
+      const isoDow = (d.getDay() + 6) % 7;
+      if (days.has(isoDow) || monthDays.has(d.getDate())) return new Date(d);
+      d.setDate(d.getDate() + 1);
+    }
+    return null;
+  }
+
+  // When this task next becomes due (ms). Already-due tasks return now so they sort first.
+  _maintenanceNextDueMs(id) {
+    const state = this._maintenanceDueState(id);
+    if (state.status === "warning" || state.status === "critical") return Date.now();
+    const task = this._maintenanceTask(id);
+    const snoozeMs = Date.parse(task.snoozedUntil || "");
+    let baseMs;
+    if (task.scheduleMode === "fixed") {
+      const next = this._maintenanceNextScheduledAfter(task, new Date());
+      baseMs = next ? next.getTime() : Number.POSITIVE_INFINITY;
+    } else {
+      const latest = this._maintenanceLatestDone(id);
+      const lastMs = latest ? this._maintenanceCompletionTime(latest) : Date.now();
+      baseMs = lastMs + task.cadenceDays * 86400000;
+    }
+    return Number.isFinite(snoozeMs) && snoozeMs > baseMs ? snoozeMs : baseMs;
+  }
+
+  _maintenanceUpcoming(days = 7) {
+    const horizon = Date.now() + days * 86400000;
+    return this._maintenanceTaskList()
+      .filter(([id]) => this._maintenanceTask(id).enabled)
+      .map(([id]) => ({ id, task: this._maintenanceTask(id), state: this._maintenanceDueState(id), nextMs: this._maintenanceNextDueMs(id) }))
+      .filter((x) => x.state.status !== "unknown" && Number.isFinite(x.nextMs) && x.nextMs <= horizon)
+      .sort((a, b) => a.nextMs - b.nextMs);
+  }
+
   _maintenanceAgeDays(entry) {
     const time = this._maintenanceCompletionTime(entry);
     if (!time) return Number.POSITIVE_INFINITY;
@@ -8980,9 +9091,28 @@ class OpenReefPanel extends HTMLElement {
 
   _maintenanceDueState(id) {
     const task = this._maintenanceTask(id);
-    const latest = this._maintenanceLatestCompletion(id);
+    const latest = this._maintenanceLatestDone(id);
     if (!this._maintenanceConfig().enabled || !task.enabled) {
       return { status: "unknown", label: "not tracked", detail: "This task isn't being tracked.", latest };
+    }
+    const snoozeMs = Date.parse(task.snoozedUntil || "");
+    if (Number.isFinite(snoozeMs) && snoozeMs > Date.now()) {
+      return { status: "ok", label: "snoozed", detail: `Snoozed until ${this._formatActivityTime(task.snoozedUntil)}.`, latest, snoozed: true };
+    }
+    if (task.scheduleMode === "fixed") {
+      const [lastSched, prevSched] = this._maintenanceScheduledDates(task, new Date());
+      const dayLabel = this._maintenanceScheduleLabel(task);
+      if (!lastSched) {
+        return { status: "unknown", label: "no schedule", detail: "Pick the day(s) this task runs in Settings → Maintenance.", latest };
+      }
+      const doneMs = latest ? this._maintenanceCompletionTime(latest) : 0;
+      if (doneMs >= lastSched.getTime()) {
+        return { status: "ok", label: "done", detail: `${task.label} done for ${this._maintenanceFormatDate(lastSched)} (${dayLabel}).`, latest };
+      }
+      if (prevSched && doneMs < prevSched.getTime()) {
+        return { status: "critical", label: "overdue", detail: `${task.label} missed ${this._maintenanceFormatDate(prevSched)}; due again ${this._maintenanceFormatDate(lastSched)} (${dayLabel}).`, latest };
+      }
+      return { status: "warning", label: "due", detail: `${task.label} is due for ${this._maintenanceFormatDate(lastSched)} (${dayLabel}).`, latest };
     }
     if (!latest) {
       return { status: "warning", label: "never done", detail: `${task.label} is on a ${task.cadenceDays}-day cadence but hasn't been logged yet.`, latest };
@@ -9065,11 +9195,34 @@ class OpenReefPanel extends HTMLElement {
           ${this._missionSummaryCard("Due now", String(due), due ? "need doing soon" : "all caught up", due ? (overdue ? "critical" : "warning") : "ok", "maintenance")}
           ${this._missionSummaryCard("Overdue", String(overdue), overdue ? "past their window" : "none overdue", overdue ? "critical" : "ok", "maintenance")}
         </div>
+        ${this._maintenanceUpcomingSection()}
         ${enabledTasks.length
           ? `<div class="grid four">${enabledTasks.map(([id]) => this._maintenanceTaskCard(id)).join("")}</div>`
           : this._emptyState("No tasks tracked yet", "Turn on the chores you do in Settings → Maintenance — or add your own.", "settings", "Set up tasks")}
       </section>
     `;
+  }
+
+  _maintenanceUpcomingSection() {
+    const upcoming = this._maintenanceUpcoming(7);
+    if (!upcoming.length) return "";
+    const rows = upcoming.map(({ task, state, nextMs }) => {
+      const dueNow = state.status === "warning" || state.status === "critical";
+      const days = Math.max(0, Math.round((nextMs - Date.now()) / 86400000));
+      const when = dueNow
+        ? (state.status === "critical" ? "overdue" : "due now")
+        : (days <= 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`);
+      return `
+        <div class="manual-history-row">
+          <div><strong>${this._escape(task.label)}</strong></div>
+          <span class="pill ${state.status}">${this._escape(when)}</span>
+        </div>`;
+    }).join("");
+    return `
+      <section class="setting-card subtle-card">
+        <div class="section-head"><div><p class="eyebrow">Coming up</p><h3>Due this week</h3></div></div>
+        <div class="manual-history">${rows}</div>
+      </section>`;
   }
 
   _maintenanceTaskCard(id) {
@@ -9078,32 +9231,52 @@ class OpenReefPanel extends HTMLElement {
     const latest = state.latest;
     const completions = this._maintenanceCompletions(id);
     const open = this._maintenanceHistoryOpen[id] === true;
+    const due = state.status === "warning" || state.status === "critical";
+    const snoozed = state.snoozed === true;
+    const scheduleLine = task.scheduleMode === "fixed"
+      ? `Every ${this._escape(this._maintenanceScheduleLabel(task))}`
+      : `Every ${this._escape(task.cadenceDays)} day${task.cadenceDays === 1 ? "" : "s"}`;
     return `
       <article class="manual-test-card ${state.status}">
         <div class="card-head">
           <div>
             <h3>${this._escape(task.label)}</h3>
-            <p>Every ${this._escape(task.cadenceDays)} day${task.cadenceDays === 1 ? "" : "s"}</p>
+            <p>${scheduleLine}</p>
           </div>
           <span class="pill ${state.status}">${this._escape(state.label)}</span>
         </div>
         <small>${this._escape(latest ? `Last done ${this._formatActivityTime(latest.timestamp)}` : "Never logged")}</small>
         <p>${this._escape(state.detail)}</p>
+        ${task.logsVolume ? `
+          <div class="mini-grid">
+            <label>Volume logged<input id="or-vol-${this._escape(id)}" type="number" min="0" step="1" placeholder="optional"></label>
+            <label>Unit<select id="or-volunit-${this._escape(id)}"><option value="pct">%</option><option value="L">litres</option></select></label>
+          </div>
+        ` : ""}
         <div class="button-row">
           <button class="primary compact-button" data-action="complete-task" data-id="${this._escape(id)}">Mark done</button>
+          ${due ? `
+            <button class="secondary compact-button" data-action="skip-task" data-id="${this._escape(id)}">Skip</button>
+            <button class="secondary compact-button" data-action="snooze-task" data-id="${this._escape(id)}" data-days="3">Snooze 3d</button>
+            <button class="secondary compact-button" data-action="snooze-task" data-id="${this._escape(id)}" data-days="7">7d</button>
+          ` : ""}
+          ${snoozed ? `<button class="secondary compact-button" data-action="resume-task" data-id="${this._escape(id)}">Resume now</button>` : ""}
           <button class="secondary compact-button" data-action="toggle-task-history" data-id="${this._escape(id)}">${open ? "Hide history" : `History (${completions.length})`}</button>
         </div>
         ${open ? `
           <div class="manual-history">
-            ${completions.length ? completions.slice(0, 12).map((entry) => `
+            ${completions.length ? completions.slice(0, 12).map((entry) => {
+              const vol = (typeof entry.volume === "number") ? ` · ${entry.volume}${entry.volumeUnit === "L" ? " L" : "%"}` : "";
+              return `
               <div class="manual-history-row">
                 <div>
-                  <strong>${this._escape(this._formatActivityTime(entry.timestamp))}</strong>
+                  <strong>${this._escape(this._formatActivityTime(entry.timestamp))}${this._escape(vol)}</strong>${entry.skipped ? ` <span class="pill warning">skipped</span>` : ""}
                   ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
                 </div>
                 <button class="danger-text compact-button" data-action="delete-completion" data-id="${this._escape(id)}" data-entry="${this._escape(entry.id)}">Delete</button>
               </div>
-            `).join("") : `<p class="muted">No history yet.</p>`}
+            `;
+            }).join("") : `<p class="muted">No history yet.</p>`}
           </div>
         ` : ""}
       </article>
@@ -9113,6 +9286,7 @@ class OpenReefPanel extends HTMLElement {
   _maintenanceSettings(forceOpen = false) {
     const config = this._maintenanceConfig();
     const tasks = this._maintenanceTaskList();
+    const reminders = config.reminders || {};
     return this._settingsPanel(
       "maintenance",
       "Maintenance",
@@ -9125,6 +9299,24 @@ class OpenReefPanel extends HTMLElement {
             <small>Enabled tasks show on the Maintenance tab; overdue ones surface in Attention and gently nudge Reef Health.</small>
           </span>
         </label>
+        <div class="setting-card subtle-card">
+          <div class="section-head"><div><p class="eyebrow">Reminders</p><h3>HA-native nudges — free, unlimited, no app paywall</h3></div></div>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="maintenance-reminders" data-field="enabled" ${reminders.enabled === false ? "" : "checked"}>
+            <span><strong>Remind me when tasks are due</strong><small>One daily check fires an in-Home-Assistant notification (plus an optional phone push) for anything due or overdue — never a second-by-second nag.</small></span>
+          </label>
+          ${reminders.enabled === false ? "" : `
+            <div class="mini-grid">
+              <label>Daily check time<input type="time" data-scope="maintenance-reminders" data-field="time" value="${this._escape(reminders.time || "09:00")}"></label>
+              <label>Phone push target<input data-scope="maintenance-reminders" data-field="notifyTarget" value="${this._escape(reminders.notifyTarget || "")}" placeholder="e.g. mobile_app_pixel"></label>
+            </div>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="maintenance-reminders" data-field="persistent" ${reminders.persistent === false ? "" : "checked"}>
+              <span><strong>Show in-HA persistent notifications</strong><small>A dashboard notification per due task that clears the moment you mark it done. Turn off for phone-push only.</small></span>
+            </label>
+            <p class="muted">Phone push calls a Home Assistant <code>notify.&lt;target&gt;</code> service — the companion app creates one like <code>notify.mobile_app_yourphone</code>, so enter <code>mobile_app_yourphone</code>. Leave it empty for in-HA notifications only.</p>
+          `}
+        </div>
         <div class="section-head">
           <div><p class="eyebrow">Add a task</p></div>
           <div class="button-row">
@@ -9151,10 +9343,41 @@ class OpenReefPanel extends HTMLElement {
                   ${task.enabled ? `
                     <div class="mini-grid">
                       <label>Name<input data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="label" value="${this._escape(task.label)}" maxlength="80"></label>
-                      <label>Due after days<input type="number" min="1" max="365" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="cadenceDays" value="${this._escape(task.cadenceDays)}"></label>
-                      <label>Overdue after days<input type="number" min="${this._escape(task.cadenceDays)}" max="730" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="criticalAfterDays" value="${this._escape(task.criticalAfterDays)}"></label>
+                      <label>Schedule
+                        <select data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="scheduleMode">
+                          <option value="interval" ${task.scheduleMode !== "fixed" ? "selected" : ""}>Every N days</option>
+                          <option value="fixed" ${task.scheduleMode === "fixed" ? "selected" : ""}>Fixed days</option>
+                        </select>
+                      </label>
+                    </div>
+                    ${task.scheduleMode === "fixed" ? `
+                      <label>Days of week
+                        <div class="button-row">
+                          ${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d, i) => `
+                            <label class="day-toggle"><input type="checkbox" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="scheduleDay" data-day="${i}" ${task.scheduleDays.includes(i) ? "checked" : ""}> ${d}</label>
+                          `).join("")}
+                        </div>
+                      </label>
+                      <div class="mini-grid">
+                        <label>Days of month<input data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="scheduleMonthDays" value="${this._escape(task.scheduleMonthDays.join(", "))}" placeholder="e.g. 1, 15"></label>
+                      </div>
+                    ` : `
+                      <div class="mini-grid">
+                        <label>Due after days<input type="number" min="1" max="365" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="cadenceDays" value="${this._escape(task.cadenceDays)}"></label>
+                        <label>Overdue after days<input type="number" min="${this._escape(task.cadenceDays)}" max="730" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="criticalAfterDays" value="${this._escape(task.criticalAfterDays)}"></label>
+                      </div>
+                    `}
+                    <div class="mini-grid">
                       <label>Notes<input data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="notes" value="${this._escape(task.notes)}" maxlength="300"></label>
                     </div>
+                    <label class="toggle-card">
+                      <input type="checkbox" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="notify" ${task.notify ? "checked" : ""}>
+                      <span><strong>Remind me about this task</strong><small>Include it in due/overdue notifications.</small></span>
+                    </label>
+                    <label class="toggle-card">
+                      <input type="checkbox" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="logsVolume" ${task.logsVolume ? "checked" : ""}>
+                      <span><strong>Log a volume when done</strong><small>Adds an optional litres/% field on the task card — handy for water changes.</small></span>
+                    </label>
                   ` : ""}
                   <button class="danger-text compact-button" data-action="remove-maintenance-task" data-id="${this._escape(id)}">Remove task</button>
                 </section>
@@ -9172,13 +9395,75 @@ class OpenReefPanel extends HTMLElement {
     const config = this._maintenanceConfig();
     if (!Array.isArray(config.completions[id])) config.completions[id] = [];
     const timestamp = new Date().toISOString();
-    config.completions[id].unshift({
+    const entry = {
       id: `${id}:${timestamp}:${config.completions[id].length}`,
       timestamp,
       notes: "",
-    });
+    };
+    let volumeNote = "";
+    if (task.logsVolume) {
+      const volInput = this.shadowRoot.getElementById(`or-vol-${id}`);
+      const unitSel = this.shadowRoot.getElementById(`or-volunit-${id}`);
+      const vol = parseFloat(volInput?.value);
+      if (Number.isFinite(vol) && vol > 0) {
+        entry.volume = Math.round(vol * 100) / 100;
+        entry.volumeUnit = unitSel?.value === "L" ? "L" : "pct";
+        volumeNote = ` (${entry.volume}${entry.volumeUnit === "L" ? " L" : "%"})`;
+      }
+    }
+    config.completions[id].unshift(entry);
+    // Marking it done clears any active snooze.
+    if (config.tasks[id]?.snoozedUntil) config.tasks[id] = { ...config.tasks[id], snoozedUntil: null };
     this._setDirty(true);
-    this._recordActivity(`Maintenance done: ${task.label}`, "control");
+    this._recordActivity(`Maintenance done: ${task.label}${volumeNote}`, "control");
+    this._render();
+    await this._persistConfigSilently();
+  }
+
+  // Skip this occurrence: log a (non-counting) skip entry + snooze past the next
+  // occurrence, so it stops nagging this cycle without resetting the cadence.
+  async _skipTask(id) {
+    const task = this._maintenanceTask(id);
+    const config = this._maintenanceConfig();
+    if (!Array.isArray(config.completions[id])) config.completions[id] = [];
+    const timestamp = new Date().toISOString();
+    config.completions[id].unshift({
+      id: `${id}:${timestamp}:${config.completions[id].length}`,
+      timestamp,
+      notes: "Skipped",
+      skipped: true,
+    });
+    let untilMs;
+    if (task.scheduleMode === "fixed") {
+      const next = this._maintenanceNextScheduledAfter(task, new Date());
+      untilMs = next ? next.getTime() : Date.now() + task.cadenceDays * 86400000;
+    } else {
+      untilMs = Date.now() + task.cadenceDays * 86400000;
+    }
+    config.tasks[id] = { ...(config.tasks[id] || {}), snoozedUntil: new Date(untilMs).toISOString() };
+    this._setDirty(true);
+    this._recordActivity(`Maintenance skipped: ${task.label}`, "warning");
+    this._render();
+    await this._persistConfigSilently();
+  }
+
+  async _snoozeTask(id, days) {
+    const task = this._maintenanceTask(id);
+    const config = this._maintenanceConfig();
+    const span = Math.max(1, Number(days) || 1);
+    config.tasks[id] = { ...(config.tasks[id] || {}), snoozedUntil: new Date(Date.now() + span * 86400000).toISOString() };
+    this._setDirty(true);
+    this._recordActivity(`Maintenance snoozed ${span}d: ${task.label}`);
+    this._render();
+    await this._persistConfigSilently();
+  }
+
+  async _resumeTask(id) {
+    const task = this._maintenanceTask(id);
+    const config = this._maintenanceConfig();
+    config.tasks[id] = { ...(config.tasks[id] || {}), snoozedUntil: null };
+    this._setDirty(true);
+    this._recordActivity(`Maintenance resumed: ${task.label}`);
     this._render();
     await this._persistConfigSilently();
   }

@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 37
-INTEGRATION_VERSION = "0.4.81"
+CORE_SCHEMA_VERSION = 38
+INTEGRATION_VERSION = "0.4.82"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -164,6 +164,12 @@ MAINTENANCE_TASK_CADENCE_MIN = 1
 MAINTENANCE_TASK_CADENCE_MAX = 365
 MAINTENANCE_TASK_CRITICAL_MAX = 730
 MAINTENANCE_COMPLETIONS_MAX = 50   # kept per task
+
+# Maintenance Tasks V2 — HA-native reminders. A single daily tick (at this local
+# time) re-evaluates due/overdue tasks and fires an in-HA persistent notification
+# plus an optional one-shot phone push (HA companion app) — free, unlimited, and
+# never paywalled, unlike the apps. The single daily time IS the anti-spam control.
+MAINTENANCE_REMINDER_DEFAULT_TIME = "09:00"
 
 SERVICE_RECORD_TASK_COMPLETION = "record_task_completion"
 SERVICE_APPLY_MODE = "apply_mode"
@@ -658,6 +664,12 @@ DEFAULT_CORE_CONFIG = {
         "seeded": False,
         "tasks": {},
         "completions": {},
+        "reminders": {
+            "enabled": True,
+            "time": MAINTENANCE_REMINDER_DEFAULT_TIME,
+            "notifyTarget": "",
+            "persistent": True,
+        },
     },
     "dosing": {
         "enabled": True,

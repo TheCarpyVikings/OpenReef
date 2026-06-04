@@ -385,6 +385,72 @@ def test_maintenance_garbage_block_coerced():
         assert isinstance(normalise({"maintenance": junk}).get("maintenance"), dict)
 
 
+# --- V2: reminders block + per-task schedule/notify/volume fields ------------
+
+def test_maintenance_reminders_defaults_injected():
+    reminders = normalise({})["maintenance"]["reminders"]
+    assert reminders["enabled"] is True
+    assert reminders["time"] == "09:00"
+    assert reminders["notifyTarget"] == ""
+    assert reminders["persistent"] is True
+
+
+def test_maintenance_reminders_bad_time_defaults_and_trims():
+    cfg = {"maintenance": {"seeded": True, "tasks": {}, "reminders": {
+        "time": "9am", "notifyTarget": "  mobile_app_x  ", "persistent": False}}}
+    reminders = normalise(cfg)["maintenance"]["reminders"]
+    assert reminders["time"] == "09:00"                  # invalid HH:MM -> default
+    assert reminders["notifyTarget"] == "mobile_app_x"   # trimmed
+    assert reminders["persistent"] is False
+
+
+def test_maintenance_task_schedule_fields_coerced():
+    cfg = {"maintenance": {"seeded": True, "tasks": {"wc": {
+        "label": "WC", "enabled": True,
+        "scheduleMode": "weird",                # -> interval
+        "scheduleDays": [5, 5, 9, "1", -2],     # dedup + clamp 0..6 -> [1, 5]
+        "scheduleMonthDays": [1, 40, 15, 15],   # clamp 1..31 -> [1, 15]
+        "notify": 0, "logsVolume": 1,
+        "snoozedUntil": "not-a-date",           # -> None
+    }}}}
+    task = normalise(cfg)["maintenance"]["tasks"]["wc"]
+    assert task["scheduleMode"] == "interval"
+    assert task["scheduleDays"] == [1, 5]
+    assert task["scheduleMonthDays"] == [1, 15]
+    assert task["notify"] is False and task["logsVolume"] is True
+    assert task["snoozedUntil"] is None
+
+
+def test_maintenance_fixed_schedule_and_snooze_round_trip():
+    when = "2026-06-10T09:00:00+00:00"
+    cfg = {"maintenance": {"seeded": True, "tasks": {"wc": {
+        "label": "WC", "enabled": True, "scheduleMode": "fixed", "scheduleDays": [5], "snoozedUntil": when}}}}
+    task = normalise(cfg)["maintenance"]["tasks"]["wc"]
+    assert task["scheduleMode"] == "fixed"
+    assert task["scheduleDays"] == [5]
+    assert task["snoozedUntil"] == when          # valid ISO kept
+
+
+def test_maintenance_completion_volume_and_skip():
+    cfg = {"maintenance": {"seeded": True,
+        "tasks": {"wc": {"label": "WC", "enabled": True}},
+        "completions": {"wc": [
+            {"timestamp": "2026-01-01T00:00:00Z", "volume": 20.5, "volumeUnit": "L"},
+            {"timestamp": "2026-01-02T00:00:00Z", "skipped": True},
+            {"timestamp": "2026-01-03T00:00:00Z", "volume": "bad"},   # non-number -> dropped
+        ]}}}
+    entries = normalise(cfg)["maintenance"]["completions"]["wc"]
+    assert entries[0]["volume"] == 20.5 and entries[0]["volumeUnit"] == "L"
+    assert entries[1]["skipped"] is True
+    assert "volume" not in entries[2]
+
+
+def test_maintenance_water_change_logs_volume_default():
+    seeded = normalise({})["maintenance"]["tasks"]
+    assert seeded["water_change"]["logsVolume"] is True
+    assert seeded["clean_glass"]["logsVolume"] is False
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:

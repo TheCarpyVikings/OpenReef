@@ -52,6 +52,7 @@ from .const import (
     ISSUE_MISSING_ENTITIES,
     INTEGRATION_VERSION,
     MAINTENANCE_COMPLETIONS_MAX,
+    MAINTENANCE_REMINDER_DEFAULT_TIME,
     MAINTENANCE_TASK_CADENCE_MAX,
     MAINTENANCE_TASK_CADENCE_MIN,
     MAINTENANCE_TASK_CRITICAL_MAX,
@@ -106,6 +107,8 @@ ATO_DUTY_CYCLE_LAST = "ato_duty_cycle_last"
 DELAYED_EQUIPMENT_UNSUBS = "delayed_equipment_unsubs"
 WAVEMAKER_REMINDER_UNSUB = "wavemaker_reminder_unsub"
 WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
+MAINTENANCE_REMINDER_UNSUB = "maintenance_reminder_unsub"
+MAINTENANCE_REMINDER_LAST = "maintenance_reminder_last"
 CAPTURES_PATH_REGISTERED = "captures_path_registered"
 CAPTURE_LAST = "capture_last"
 CAPTURE_INFLIGHT = "capture_inflight"
@@ -153,6 +156,8 @@ RECORD_TASK_COMPLETION_SCHEMA = vol.Schema(
         vol.Required("task_id"): cv.string,
         vol.Optional("notes"): cv.string,
         vol.Optional("date"): cv.string,
+        vol.Optional("volume"): vol.Coerce(float),
+        vol.Optional("volume_unit"): cv.string,
     }
 )
 
@@ -1143,6 +1148,12 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             critical_after_days = int(raw.get("criticalAfterDays", cadence_days * 2))
         except (TypeError, ValueError):
             critical_after_days = cadence_days * 2
+        schedule_mode = raw.get("scheduleMode")
+        if schedule_mode not in ("interval", "fixed"):
+            schedule_mode = "interval"
+        snoozed_until = raw.get("snoozedUntil")
+        if not (isinstance(snoozed_until, str) and _parse_datetime(snoozed_until) is not None):
+            snoozed_until = None
         tasks[task_id] = {
             "label": str(label).strip()[:80],
             "cadenceDays": cadence_days,
@@ -1152,6 +1163,12 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             "enabled": bool(raw.get("enabled", False)),
             "notes": str(raw.get("notes", ""))[:300],
             "builtin": bool(raw.get("builtin", task_id in MAINTENANCE_TASK_DEFAULTS)),
+            "scheduleMode": schedule_mode,
+            "scheduleDays": _ints_in_range(raw.get("scheduleDays"), 0, 6),
+            "scheduleMonthDays": _ints_in_range(raw.get("scheduleMonthDays"), 1, 31),
+            "notify": bool(raw.get("notify", True)),
+            "snoozedUntil": snoozed_until,
+            "logsVolume": bool(raw.get("logsVolume", task_id == "water_change")),
         }
     maintenance["tasks"] = tasks
 
@@ -1170,16 +1187,36 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             if not isinstance(timestamp, str) or not timestamp:
                 continue
             entry_id = item.get("id") or f"{task_id}:{timestamp}:{index}"
-            safe.append(
-                {
-                    "id": str(entry_id)[:120],
-                    "timestamp": timestamp,
-                    "notes": str(item.get("notes", ""))[:500],
-                }
-            )
+            safe_entry: dict[str, Any] = {
+                "id": str(entry_id)[:120],
+                "timestamp": timestamp,
+                "notes": str(item.get("notes", ""))[:500],
+            }
+            if item.get("skipped"):
+                safe_entry["skipped"] = True
+            volume = item.get("volume")
+            if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+                safe_entry["volume"] = round(float(volume), 2)
+                safe_entry["volumeUnit"] = "L" if item.get("volumeUnit") == "L" else "pct"
+            safe.append(safe_entry)
         if safe:
             completions[task_id] = safe
     maintenance["completions"] = completions
+
+    raw_reminders = maintenance.get("reminders")
+    raw_reminders = raw_reminders if isinstance(raw_reminders, dict) else {}
+    reminder_time = raw_reminders.get("time", MAINTENANCE_REMINDER_DEFAULT_TIME)
+    if not (
+        isinstance(reminder_time, str)
+        and re.match(r"^([01]\d|2[0-3]):[0-5]\d$", reminder_time)
+    ):
+        reminder_time = MAINTENANCE_REMINDER_DEFAULT_TIME
+    maintenance["reminders"] = {
+        "enabled": bool(raw_reminders.get("enabled", True)),
+        "time": reminder_time,
+        "notifyTarget": str(raw_reminders.get("notifyTarget", "")).strip()[:120],
+        "persistent": bool(raw_reminders.get("persistent", True)),
+    }
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):
@@ -1804,6 +1841,131 @@ def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[
     return transitions
 
 
+def _ints_in_range(value: Any, low: int, high: int) -> list[int]:
+    """Coerce a value into a sorted, de-duplicated list of ints within [low, high]."""
+    out: list[int] = []
+    if isinstance(value, list):
+        for item in value:
+            try:
+                number = int(item)
+            except (TypeError, ValueError):
+                continue
+            if low <= number <= high and number not in out:
+                out.append(number)
+    return sorted(out)
+
+
+def _maintenance_last_done(entries: Any) -> datetime | None:
+    """Latest non-skipped completion datetime (UTC) for a task, or None.
+
+    Skipped entries are logged history but never count as 'done', so they don't reset
+    a task's cadence — matching the panel's _maintenanceLatestDone.
+    """
+    if not isinstance(entries, list):
+        return None
+    best: datetime | None = None
+    for item in entries:
+        if not isinstance(item, dict) or item.get("skipped"):
+            continue
+        parsed = _parse_datetime(item.get("timestamp") or item.get("date"))
+        if parsed is not None and (best is None or parsed > best):
+            best = parsed
+    return best
+
+
+def _maintenance_scheduled_dates(task: dict[str, Any], today):
+    """Return (last, prev) scheduled dates <= today for a fixed-schedule task, or
+    (None, None) if it has no schedule. Weekdays are Mon=0..Sun=6 (date.weekday())."""
+    days = set(task.get("scheduleDays") or [])
+    month_days = set(task.get("scheduleMonthDays") or [])
+    if not days and not month_days:
+        return None, None
+    found = []
+    cursor = today
+    for _ in range(366):
+        if cursor.weekday() in days or cursor.day in month_days:
+            found.append(cursor)
+            if len(found) == 2:
+                break
+        cursor = cursor - timedelta(days=1)
+    return (found[0] if found else None), (found[1] if len(found) > 1 else None)
+
+
+def _maintenance_task_state(
+    task: dict[str, Any], last_done: datetime | None, now: datetime
+) -> str:
+    """'ok' | 'warning' (due) | 'critical' (overdue) | 'unknown'. Lockstep with the
+    panel's _maintenanceDueState — keep both implementations in sync."""
+    if task.get("scheduleMode") == "fixed":
+        tz = now.tzinfo or timezone.utc
+        today = now.astimezone(tz).date()
+        last_sched, prev_sched = _maintenance_scheduled_dates(task, today)
+        if last_sched is None:
+            return "unknown"
+        done_date = last_done.astimezone(tz).date() if last_done is not None else None
+        if done_date is not None and done_date >= last_sched:
+            return "ok"
+        if prev_sched is not None and (done_date is None or done_date < prev_sched):
+            return "critical"
+        return "warning"
+    # interval mode (default): age since last done vs cadence / critical thresholds
+    cadence = task.get("cadenceDays", 7)
+    if last_done is None:
+        return "warning"
+    age_days = (now - last_done).total_seconds() / 86400.0
+    if age_days > task.get("criticalAfterDays", cadence * 2):
+        return "critical"
+    if age_days > cadence:
+        return "warning"
+    return "ok"
+
+
+def _maintenance_due_items(
+    config: dict[str, Any], now: datetime | None = None
+) -> list[dict[str, str]]:
+    """Backend mirror of the panel's due logic: enabled, non-snoozed tasks that are
+    due (warning) or overdue (critical). Drives HA-native reminders so they fire even
+    when the panel is closed. Returns [{id, label, severity, title, message}]."""
+    maintenance = config.get("maintenance", {})
+    if not isinstance(maintenance, dict) or not maintenance.get("enabled", True):
+        return []
+    tasks = maintenance.get("tasks", {})
+    if not isinstance(tasks, dict):
+        return []
+    completions = maintenance.get("completions", {})
+    if not isinstance(completions, dict):
+        completions = {}
+    now = now or datetime.now(timezone.utc)
+    items: list[dict[str, str]] = []
+    for task_id, task in tasks.items():
+        if not isinstance(task, dict) or not task.get("enabled", False):
+            continue
+        snoozed = _parse_datetime(task.get("snoozedUntil"))
+        if snoozed is not None and snoozed > now:
+            continue
+        last_done = _maintenance_last_done(completions.get(task_id))
+        state = _maintenance_task_state(task, last_done, now)
+        if state not in ("warning", "critical"):
+            continue
+        label = str(task.get("label") or task_id)
+        if state == "critical":
+            title = f"{label} overdue"
+            message = f"{label} is overdue — give it some attention."
+        else:
+            title = f"{label} due"
+            message = f"{label} is due for maintenance."
+        items.append(
+            {
+                "id": task_id,
+                "label": label,
+                "severity": state,
+                "title": title,
+                "message": message,
+            }
+        )
+    return items
+
+
 async def _async_sync_alert_notifications(
     hass: HomeAssistant, config: dict[str, Any]
 ) -> None:
@@ -1883,6 +2045,46 @@ async def _async_sync_alert_notifications(
             "create",
             {
                 "notification_id": f"openreef_display_wavemaker_{item['id']}",
+                "title": f"OpenReef: {item['title']}",
+                "message": item["message"],
+            },
+            blocking=False,
+        )
+
+    # Maintenance reminders — in-HA persistent notifications for due/overdue tasks.
+    # Idempotent + re-synced on every save, so marking a task done clears it instantly.
+    # The once-daily phone push is fired separately by _handle_maintenance_reminder.
+    maintenance = config.get("maintenance", {})
+    reminders = maintenance.get("reminders", {}) if isinstance(maintenance, dict) else {}
+    maint_tasks = maintenance.get("tasks", {}) if isinstance(maintenance, dict) else {}
+    maintenance_enabled = (
+        isinstance(reminders, dict)
+        and reminders.get("enabled", True)
+        and reminders.get("persistent", True)
+    )
+    maintenance_due = _maintenance_due_items(config) if maintenance_enabled else []
+    maintenance_notify_ids = {
+        item["id"]
+        for item in maintenance_due
+        if isinstance(maint_tasks.get(item["id"]), dict)
+        and maint_tasks[item["id"]].get("notify", True)
+    }
+    for task_id in list(maint_tasks) if isinstance(maint_tasks, dict) else []:
+        if task_id not in maintenance_notify_ids:
+            await hass.services.async_call(
+                "persistent_notification",
+                "dismiss",
+                {"notification_id": f"openreef_maintenance_{task_id}"},
+                blocking=False,
+            )
+    for item in maintenance_due:
+        if item["id"] not in maintenance_notify_ids:
+            continue
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "notification_id": f"openreef_maintenance_{item['id']}",
                 "title": f"OpenReef: {item['title']}",
                 "message": item["message"],
             },
@@ -2050,6 +2252,114 @@ async def _async_schedule_wavemaker_reminders(
     hass.data.setdefault(DOMAIN, {})[
         WAVEMAKER_REMINDER_UNSUB
     ] = async_track_time_change(hass, _handle_wavemaker_reminder, second=15)
+
+
+def _clear_maintenance_reminders(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MAINTENANCE_REMINDER_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+def _maintenance_reminder_time(config: dict[str, Any]) -> tuple[int, int]:
+    maintenance = config.get("maintenance", {})
+    reminders = maintenance.get("reminders", {}) if isinstance(maintenance, dict) else {}
+    value = (
+        reminders.get("time", MAINTENANCE_REMINDER_DEFAULT_TIME)
+        if isinstance(reminders, dict)
+        else MAINTENANCE_REMINDER_DEFAULT_TIME
+    )
+    if not (isinstance(value, str) and re.match(r"^([01]\d|2[0-3]):[0-5]\d$", value)):
+        value = MAINTENANCE_REMINDER_DEFAULT_TIME
+    hour, _, minute = value.partition(":")
+    return int(hour), int(minute)
+
+
+async def _async_fire_maintenance_reminder(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, now: datetime
+) -> None:
+    """Re-sync maintenance persistent notifications, then fire one digest phone push
+    for due/overdue tasks. Called once per daily tick (naturally rate-limited) and
+    extracted from the scheduler so it's unit-testable."""
+    latest_config = _config_from_entry(entry)
+    # Keep the in-HA persistent notifications matching current due state.
+    await _async_sync_alert_notifications(hass, latest_config)
+    maintenance = latest_config.get("maintenance", {})
+    reminders = maintenance.get("reminders", {}) if isinstance(maintenance, dict) else {}
+    if not isinstance(reminders, dict) or not reminders.get("enabled", True):
+        return
+    tasks = maintenance.get("tasks", {}) if isinstance(maintenance, dict) else {}
+    push_items = [
+        item
+        for item in _maintenance_due_items(latest_config, now)
+        if isinstance(tasks.get(item["id"]), dict)
+        and tasks[item["id"]].get("notify", True)
+    ]
+    last_store = hass.data.setdefault(DOMAIN, {}).setdefault(
+        MAINTENANCE_REMINDER_LAST, {}
+    )
+    previous_ids = last_store.get(entry.entry_id, set())
+    current_ids = {item["id"] for item in push_items}
+    last_store[entry.entry_id] = current_ids
+    if not push_items:
+        return
+    labels = ", ".join(item["label"] for item in push_items)
+    # One digest phone push per daily tick while tasks are due (the intended nag).
+    target = str(reminders.get("notifyTarget", "")).strip()
+    if target:
+        overdue = sum(1 for item in push_items if item["severity"] == "critical")
+        summary = f"{len(push_items)} reef task{'s' if len(push_items) != 1 else ''} due"
+        if overdue:
+            summary += f" ({overdue} overdue)"
+        await hass.services.async_call(
+            "notify",
+            target,
+            {"title": f"OpenReef: {summary}", "message": labels},
+            blocking=False,
+        )
+    # Only log to the activity feed when the due set grows, so a long-overdue task
+    # can't flood the (capped) history with a line every single day.
+    new_ids = current_ids - previous_ids
+    if new_ids:
+        new_labels = ", ".join(
+            item["label"] for item in push_items if item["id"] in new_ids
+        )
+        _append_activity(latest_config, f"Maintenance due: {new_labels}", "info")
+        options = dict(entry.options)
+        options[CONF_SETTINGS] = _normalise_core_config(latest_config)
+        hass.config_entries.async_update_entry(entry, options=options)
+
+
+async def _async_schedule_maintenance_reminders(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Register a single daily tick that re-evaluates due/overdue maintenance tasks
+    and fires one digest phone push. Re-registered on every save (so the configured
+    reminder time takes effect), mirroring the wavemaker reminder scheduler. The single
+    daily fire is the anti-spam control — directly answers the apps' 'pops up every
+    second' complaint."""
+    _clear_maintenance_reminders(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    maintenance = config.get("maintenance", {})
+    reminders = maintenance.get("reminders", {}) if isinstance(maintenance, dict) else {}
+    if not isinstance(reminders, dict) or not reminders.get("enabled", True):
+        return
+
+    async def _handle_maintenance_reminder(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        await _async_fire_maintenance_reminder(hass, latest_entry, now)
+
+    hour, minute = _maintenance_reminder_time(config)
+    hass.data.setdefault(DOMAIN, {})[
+        MAINTENANCE_REMINDER_UNSUB
+    ] = async_track_time_change(
+        hass, _handle_maintenance_reminder, hour=hour, minute=minute, second=0
+    )
 
 
 async def _async_schedule_mode_timer(
@@ -2692,6 +3002,7 @@ async def _async_save_config(
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
+    await _async_schedule_maintenance_reminders(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
     # Event-triggered camera capture on a fresh ok->warning/critical transition.
     for transition in transitions:
@@ -3193,14 +3504,16 @@ async def _handle_record_task_completion(
     if not isinstance(entries, list):
         entries = []
         completions[task_id] = entries
-    entries.insert(
-        0,
-        {
-            "id": f"{task_id}:{timestamp}:{len(entries)}",
-            "timestamp": timestamp,
-            "notes": str(call.data.get("notes") or ""),
-        },
-    )
+    completion = {
+        "id": f"{task_id}:{timestamp}:{len(entries)}",
+        "timestamp": timestamp,
+        "notes": str(call.data.get("notes") or ""),
+    }
+    volume = call.data.get("volume")
+    if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+        completion["volume"] = round(float(volume), 2)
+        completion["volumeUnit"] = "L" if call.data.get("volume_unit") == "L" else "pct"
+    entries.insert(0, completion)
     _append_activity(
         config, f"Maintenance done: {tasks[task_id].get('label', task_id)}", "control"
     )
@@ -4592,6 +4905,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
+    await _async_schedule_maintenance_reminders(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
     await _async_finalize_orphaned_feed_sessions(hass, entry)
     return True
@@ -4604,12 +4918,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_ato_duty_cycle(hass)
     _clear_delayed_equipment_calls(hass)
     _clear_wavemaker_reminders(hass)
+    _clear_maintenance_reminders(hass)
     _clear_timelapse(hass)
     _clear_feedwatch(hass)
     hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).pop(
         entry.entry_id, None
     )
     hass.data.setdefault(DOMAIN, {}).setdefault(WAVEMAKER_REMINDER_LAST, {}).pop(
+        entry.entry_id, None
+    )
+    hass.data.setdefault(DOMAIN, {}).setdefault(MAINTENANCE_REMINDER_LAST, {}).pop(
         entry.entry_id, None
     )
     hass.data.setdefault(DOMAIN, {}).setdefault(CAPTURE_LAST, {}).pop(entry.entry_id, None)
