@@ -3068,7 +3068,7 @@ class OpenReefPanel extends HTMLElement {
         classId: "equal_part_two_part",
         roles: ["primary"],
         parameters: ["alkalinity", "calcium", "magnesium"],
-        note: "Balanced maintenance system. OpenReef shows consumption direction and conservative review guidance.",
+        note: "Alkalinity-led balanced maintenance system. Dose the two parts separately and tune from alkalinity trend before leaning on calcium/magnesium.",
       },
       {
         id: "red_sea_complete_reef_care_4",
@@ -3092,10 +3092,12 @@ class OpenReefPanel extends HTMLElement {
         id: "fauna_marin_balling_light",
         label: "Fauna Marin Balling Light",
         brand: "Fauna Marin",
-        classId: "equal_part_three_part",
+        classId: "balling_three_part",
         roles: ["primary"],
         parameters: ["alkalinity", "calcium", "magnesium"],
         requiresCustomStrength: true,
+        exactMaintenance: true,
+        exactCorrection: false,
         note: "Recipe-dependent Balling method. Enter your verified recipe strength for exact mL advice.",
       },
       {
@@ -3127,6 +3129,60 @@ class OpenReefPanel extends HTMLElement {
         parameters: ["alkalinity", "calcium"],
         note: "High-pH balanced support method, usually limited by evaporation. OpenReef never treats kalkwasser as a correction bolus.",
       },
+      {
+        id: "brightwell_reef_code_ab",
+        label: "Brightwell Reef Code A/B",
+        brand: "Brightwell",
+        classId: "equal_part_two_part",
+        roles: ["primary"],
+        parameters: ["alkalinity", "calcium"],
+        exactMaintenance: true,
+        exactCorrection: true,
+        exactParameters: {
+          calcium: { productDoseMl: 1, productVolumeLitres: 3.785, productRaise: 16 },
+          alkalinity: { productDoseMl: 1, productVolumeLitres: 3.785, productRaise: 2.22 },
+        },
+        note: "Exact-strength two-part preset. Dose A and B separately, and allow unequal daily amounts if calcium and alkalinity consumption differ.",
+      },
+      {
+        id: "brightwell_kalk_plus_2",
+        label: "Brightwell Kalk+2",
+        brand: "Brightwell",
+        classId: "kalkwasser",
+        roles: ["secondary"],
+        parameters: ["alkalinity", "calcium"],
+        note: "Kalkwasser-style support with calcium/strontium/magnesium claims. Still high-pH and evaporation-limited, so OpenReef treats it as support only.",
+      },
+      {
+        id: "red_sea_complete_reef_care_7",
+        label: "Red Sea Foundation + Trace Colors 7-part",
+        brand: "Red Sea",
+        classId: "measured_uptake_multi_part",
+        roles: ["primary"],
+        parameters: ["alkalinity", "calcium", "magnesium"],
+        note: "Precision multi-bottle method. Track Foundation and Trace Colors separately; OpenReef gives measured-uptake guidance, not a collapsed one-bottle correction.",
+      },
+      {
+        id: "tropic_marin_original_balling",
+        label: "Tropic Marin Original Balling",
+        brand: "Tropic Marin",
+        classId: "balling_three_part",
+        roles: ["primary"],
+        parameters: ["alkalinity", "calcium", "magnesium"],
+        requiresCustomStrength: true,
+        exactMaintenance: true,
+        exactCorrection: false,
+        note: "Three-part Balling method. Part C maintains ionic balance; enter your verified recipe strength before exact mL maintenance advice appears.",
+      },
+      {
+        id: "calcium_reactor",
+        label: "Calcium reactor",
+        brand: "Generic",
+        classId: "calcium_reactor",
+        roles: ["primary"],
+        parameters: ["alkalinity", "calcium", "magnesium"],
+        note: "Reactor tuning workflow. OpenReef advises from Alk/Ca/Mg trends, pH context, and slow effluent/CO2 review rather than bottle mL corrections.",
+      },
     ];
   }
 
@@ -3141,6 +3197,9 @@ class OpenReefPanel extends HTMLElement {
       equal_part_three_part: "Equal-part three-part",
       calcium_led_multi_part: "Calcium-led multi-part",
       icp_guided_multi_part: "ICP-guided multi-part",
+      measured_uptake_multi_part: "Measured-uptake multi-part",
+      balling_three_part: "Balling three-part",
+      calcium_reactor: "Calcium reactor",
       kalkwasser: "Kalkwasser",
       custom_verified_strength: "Custom verified strength",
       unconfigured: "Not configured",
@@ -3476,12 +3535,15 @@ class OpenReefPanel extends HTMLElement {
     const productDose = this._dosingPresetNumber(config, exact, "productDoseMl");
     const productVolume = this._dosingPresetNumber(config, exact, "productVolumeLitres");
     const productRaise = this._dosingPresetNumber(config, exact, "productRaise");
+    const exactCorrectionAllowed = product?.exactCorrection === false
+      ? false
+      : product?.classId !== "kalkwasser";
     if (manual > 0) {
       return {
         value: manual,
         source: "manual",
         exactMaintenance: true,
-        exactCorrection: product?.classId !== "kalkwasser",
+        exactCorrection: exactCorrectionAllowed,
         label: `Manual override: ${this._format(manual, 4)} ${sensor.unit || "units"}/mL`,
       };
     }
@@ -3502,7 +3564,7 @@ class OpenReefPanel extends HTMLElement {
         value: 0,
         source: "calculator",
         exactMaintenance: true,
-        exactCorrection: product?.classId !== "kalkwasser",
+        exactCorrection: exactCorrectionAllowed,
         label: `${product.label}: enter net tank water volume before exact mL advice appears`,
       };
     }
@@ -3513,7 +3575,7 @@ class OpenReefPanel extends HTMLElement {
         value: calculated.value,
         source,
         exactMaintenance: product.exactMaintenance === true || verifiedRecipe,
-        exactCorrection: product.exactCorrection === true || verifiedRecipe,
+        exactCorrection: product.exactCorrection === false ? false : product.exactCorrection === true || verifiedRecipe,
         label: `${product.label}: calculated ${this._format(calculated.value, 4)} ${sensor.unit || "units"}/mL in this tank`,
       };
     }
@@ -3581,6 +3643,33 @@ class OpenReefPanel extends HTMLElement {
     if (product?.id === "esv_b_ionic") {
       warnings.push("Dose ESV B-Ionic parts separately in high flow, verify the exact bottle strength, and never allow pH to rise above the product safety ceiling.");
     }
+    if (product?.id === "ati_essentials") {
+      warnings.push("ATI Essentials advice is alkalinity-led maintenance guidance. Dose the parts separately, confirm your exact Essentials version, and retest before changing a doser.");
+    }
+    if (product?.id === "red_sea_complete_reef_care_4") {
+      warnings.push("Red Sea Complete Reef Care is calcium-led maintenance guidance. Use the Red Sea method/calculator for separate correction steps; OpenReef does not collapse the four bottles into one correction.");
+    }
+    if (product?.id === "triton_core7_flex") {
+      warnings.push("TRITON Core7 Flex is ICP-guided maintenance. Review trends and ICP/test results before changing the equal-base dose; OpenReef does not give one-off correction maths for Core7.");
+    }
+    if (product?.id === "fauna_marin_balling_light") {
+      warnings.push("Fauna Marin Balling Light is recipe-dependent. Dose the Balling Light solutions separately and only use exact mL advice after entering your verified recipe strength.");
+    }
+    if (product?.id === "brightwell_reef_code_ab") {
+      warnings.push("Dose Brightwell Reef Code A and B separately in high flow; do not mix concentrates, and remember this preset does not cover magnesium.");
+    }
+    if (product?.id === "brightwell_kalk_plus_2") {
+      warnings.push("Brightwell Kalk+2 is still high-pH kalkwasser-style support. Do not use it as a magnesium correction product.");
+    }
+    if (product?.id === "red_sea_complete_reef_care_7") {
+      warnings.push("Red Sea Foundation and Trace Colors are measured separately. OpenReef gives uptake guidance, not a combined seven-bottle correction.");
+    }
+    if (product?.id === "tropic_marin_original_balling") {
+      warnings.push("Tropic Marin Original Balling uses separate A/B/C parts; Part C supports ionic balance and should not be treated as a normal calcium or alkalinity correction bottle.");
+    }
+    if (product?.id === "calcium_reactor") {
+      warnings.push("Calcium reactor advice is tuning guidance. Adjust effluent/CO2 slowly and watch tank pH and alkalinity before making another change.");
+    }
     const secondary = this._dosingProduct(system.secondaryProduct);
     const secondaryIsKalk = secondary?.classId === "kalkwasser" && product?.classId !== "kalkwasser" && ["alkalinity", "calcium"].includes(sensorId);
     if (secondaryIsKalk) {
@@ -3617,7 +3706,7 @@ class OpenReefPanel extends HTMLElement {
       } else if (!Number.isFinite(kalkContext.phValue)) {
         warnings.push("Mapped pH guard is unavailable or non-numeric right now.");
       } else if (kalkContext.phStatus === "high") {
-        locks.push(`Current pH ${this._format(kalkContext.phValue, 2)} is at or above the kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser.`);
+        locks.push(`Kalkwasser high-pH safety lock: current pH ${this._format(kalkContext.phValue, 2)} is at or above the kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser.`);
       } else if (kalkContext.phStatus === "near") {
         warnings.push(`Current pH ${this._format(kalkContext.phValue, 2)} is close to the kalk max pH ${this._format(kalkContext.maxPh, 2)}. Do not increase kalkwasser without reviewing the pH pattern.`);
       } else {
@@ -3641,6 +3730,15 @@ class OpenReefPanel extends HTMLElement {
       if (warning.startsWith("Dose Reef Fusion 1 and 2 separately")) return false;
       if (warning.startsWith("Dose DIY calcium, alkalinity, and magnesium parts separately")) return false;
       if (warning.startsWith("Dose ESV B-Ionic parts separately")) return false;
+      if (warning.startsWith("ATI Essentials advice is alkalinity-led")) return false;
+      if (warning.startsWith("Red Sea Complete Reef Care is calcium-led")) return false;
+      if (warning.startsWith("TRITON Core7 Flex is ICP-guided")) return false;
+      if (warning.startsWith("Fauna Marin Balling Light is recipe-dependent")) return false;
+      if (warning.startsWith("Dose Brightwell Reef Code A and B separately")) return false;
+      if (warning.startsWith("Brightwell Kalk+2 is still high-pH")) return false;
+      if (warning.startsWith("Red Sea Foundation and Trace Colors are measured separately")) return false;
+      if (warning.startsWith("Tropic Marin Original Balling uses separate A/B/C parts")) return false;
+      if (warning.startsWith("Calcium reactor advice is tuning guidance")) return false;
       if (warning.startsWith("Secondary kalkwasser support is configured")) return false;
       if (warning.startsWith("Secondary kalk pH guard OK:")) return false;
       if (warning.includes(" is not a ") && warning.includes(" dosing product")) return false;
@@ -3673,6 +3771,9 @@ class OpenReefPanel extends HTMLElement {
     if (safety.locks.length) {
       return `Kalkwasser action is locked: ${safety.locks.join(" ")}`;
     }
+    if (slope > 0) {
+      return `Net rise ~${rateText}. Do not increase kalkwasser. Review whether the current kalk routine is too strong or whether evaporation/pH timing has changed before making further changes.`;
+    }
     if (!context.capacityConfigured) {
       return `Net ${slope < 0 ? "loss" : "rise"} ~${rateText}. Kalk capacity is not configured yet. Add daily kalk volume, concentration, and evaporation ceiling before OpenReef judges whether kalk can keep up.`;
     }
@@ -3688,9 +3789,6 @@ class OpenReefPanel extends HTMLElement {
         return `Net loss ~${rateText}. Kalk may not keep up because the configured daily kalk volume is already at the evaporation limit. Add a primary dosing system or reduce demand rather than pushing kalk harder.`;
       }
       return `Net loss ~${rateText}. Kalk may not keep up if this trend continues. Review a small maintenance increase only within ${headroom}, max pH ${maxPhText}, and max pH rise ${this._format(context.maxPhRise, 2)}; otherwise add a primary dosing system.`;
-    }
-    if (slope > 0) {
-      return `Net rise ~${rateText}. Do not increase kalkwasser. Review whether the current kalk dose is too strong before making further changes.`;
     }
     return `Kalkwasser appears steady. Keep monitoring pH and evaporation before changing the routine.`;
   }

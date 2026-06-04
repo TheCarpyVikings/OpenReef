@@ -11,30 +11,30 @@ review the recommendation text, safety gates, and failure modes one at a time.
 - [x] Build shared expected-output/assertion helpers.
 - [x] Kalkwasser / calcium hydroxide dosing-pump eval.
 - [x] Review kalkwasser eval output and tune the advisor.
-- [ ] Add UI smoke coverage for Dosing Advisor cards after the pure evals are stable.
+- [x] Add UI smoke coverage for Dosing Advisor cards after the pure evals are stable.
 
 ## Product/System Evals
 
 - [x] Tropic Marin All-For-Reef eval.
 - [x] Seachem Reef Fusion 1/2 eval.
-- [ ] Aquaforest Component 1+2+3+ eval.
-- [ ] ATI Essentials / Essentials Pro eval.
-- [ ] Red Sea Complete Reef Care 4-part eval.
-- [ ] TRITON Core7 Flex eval.
-- [ ] Fauna Marin Balling Light eval.
+- [x] Aquaforest Component 1+2+3+ eval.
+- [x] ATI Essentials / Essentials Pro eval.
+- [x] Red Sea Complete Reef Care 4-part eval.
+- [x] TRITON Core7 Flex eval.
+- [x] Fauna Marin Balling Light eval.
 - [x] BRS Pharma 2-Part / DIY recipe eval.
-- [ ] ESV B-Ionic eval.
+- [x] ESV B-Ionic eval.
 - [x] Custom verified-strength product eval.
-- [ ] Hybrid dosing eval: kalkwasser plus two-part/AFR.
-- [ ] Apex/Trident read-only chemistry eval.
+- [x] Hybrid dosing eval: kalkwasser plus two-part/AFR.
+- [x] Apex/Trident read-only chemistry eval.
 
 ## Future Candidate Reviews
 
-- [ ] Brightwell Reef Code.
-- [ ] Brightwell Kalk+2.
-- [ ] Red Sea 7-part.
-- [ ] Tropic Marin Original Balling.
-- [ ] Calcium reactor advisor.
+- [x] Brightwell Reef Code.
+- [x] Brightwell Kalk+2.
+- [x] Red Sea 7-part.
+- [x] Tropic Marin Original Balling.
+- [x] Calcium reactor advisor.
 
 ## Eval Template
 
@@ -55,6 +55,8 @@ Each product eval should record:
 - TRITON Core7 Flex: https://www.triton.de/en/products/core7-flex/
 - BRS Pharma Kalkwasser: https://www.bulkreefsupply.com/brs-pharma-kalkwasser-bulk-reef-supply.html
 - Aquaforest Component 1+2+3+: https://aquaforest.eu/en/product/component-123/
+- ESV B-Ionic product/vendor guidance: https://www.freshnmarine.com/products/esv-b-ionic-calcium-buffer-system-64-oz
+- Neptune Trident: https://www.neptunesystems.com/trident/
 - Red Sea Complete Reef Care: https://redseafish.com/reef-care-program/supplements/complete-4-part/
 - Local deep research: `/home/reece/Desktop/Reef Aquarium Dosing Systems Research for OpenReef.md`
 
@@ -331,6 +333,264 @@ Completed advisor tweaks:
 - DIY/BRS recipe advice includes a separate-parts salinity/pH safety reminder without making stable
   tanks look alarming.
 
-Next eval after DIY three-part:
+Completed sequence after DIY three-part:
 
-- ESV B-Ionic, then Aquaforest Component 1+2+3+.
+- ESV B-Ionic, Aquaforest Component 1+2+3+, Apex/Trident read-only, and hybrid kalk plus
+  primary dosing are now covered.
+
+## Apex/Trident Read-Only Chemistry Eval
+
+Status: complete for the first beta pass. Harness output passes. This eval intentionally has no
+manual CSV import files because it validates mapped HA chemistry entities from an Apex/Trident-style
+source, not manually entered test rows.
+
+Source links checked:
+
+- Neptune Trident: https://www.neptunesystems.com/trident/
+- Local dosing research doc on Apex/Trident read-only beta users.
+
+Product class:
+
+- Recipe-dependent verified-strength three-part in the eval.
+- Primary dosing system can be configured without OpenReef controlling equipment.
+- Exact advisory maintenance/correction is based on mapped chemistry history plus user-entered
+  product strength.
+
+Assumptions:
+
+- 200 L mixed reef.
+- Targets: alkalinity 8.3 dKH, calcium 430 ppm, magnesium 1350 ppm.
+- Three months of simulated mapped alkalinity/calcium/magnesium sensor history.
+- No OpenReef-controlled switches, dosing pumps, or smart plugs are required.
+
+Scenarios:
+
+- [x] Stable Apex/Trident read-only chemistry.
+- [x] Alkalinity demand from mapped chemistry history.
+- [x] Balanced Alk/Ca/Mg demand from mapped chemistry history.
+
+Expected safety rules:
+
+- Monitor-only is valid; missing OpenReef controls must not reduce dosing-advisor usefulness.
+- Mapped chemistry history should not be treated as stale manual data.
+- Recipe-dependent dosing still requires verified strength before exact mL advice appears.
+- Advice remains advisory only; OpenReef must not imply it controls a dosing pump.
+
+Completed advisor tweaks:
+
+- Mapped chemistry history can now satisfy the freshness gate for advisory dosing trend checks.
+
+## ESV B-Ionic Eval
+
+Status: complete for the first beta pass. Harness output passes and manual CSV import files are
+ready for UI review.
+
+Source links checked:
+
+- ESV/vendor B-Ionic guidance: https://www.freshnmarine.com/products/esv-b-ionic-calcium-buffer-system-64-oz
+- Local dosing research doc on two-part systems and variant-specific product strength.
+
+Product class:
+
+- `equal_part_two_part`
+- Primary dosing system.
+- Verified-strength exact advisory model; OpenReef does not assume one universal ESV strength.
+
+Assumptions:
+
+- 200 L mixed reef.
+- Targets: alkalinity 8.3 dKH, calcium 430 ppm, magnesium 1350 ppm.
+- Manual alkalinity/calcium/magnesium tests drive advice.
+- Eval-only verified strengths are entered to simulate the user copying their bottle/recipe details.
+
+Scenarios:
+
+- [x] Stable verified B-Ionic.
+- [x] Alkalinity demand.
+- [x] Calcium demand.
+- [x] Missing alkalinity verified strength.
+- [x] Stale manual tests.
+- [x] Above-target chemistry.
+- [x] Magnesium drift.
+
+Expected safety rules:
+
+- B-Ionic must remain advisory only.
+- OpenReef must remind users to dose parts separately and verify the exact bottle strength.
+- Exact mL advice appears only after tank volume, matching product strength, current daily dose, and
+  fresh test data are available.
+- Missing one part's strength must not block the other verified part.
+- Magnesium must not be assigned to the ESV two-part preset.
+- Above-target chemistry should never suggest chemical correction downward.
+
+Manual import notes:
+
+- CSV files are in `docs/eval-data/esv-b-ionic/`.
+- Start UI review with `alkalinity-demand.csv`, then `calcium-demand.csv`.
+- `missing-alkalinity-strength.csv` requires clearing the alkalinity strength fields in Settings to
+  reproduce the lock in the real UI.
+
+Completed advisor tweaks:
+
+- B-Ionic now has product-specific separate-parts and bottle-strength safety wording.
+
+## Aquaforest Component 1+2+3+ Eval
+
+Status: complete for the first beta pass. Harness output passes and manual CSV import files are
+ready for UI review.
+
+Source links checked:
+
+- Aquaforest Component 1+2+3+: https://aquaforest.eu/en/product/component-123/
+
+Product class:
+
+- `equal_part_three_part`
+- Primary dosing system.
+- Guided equal-part maintenance; no one-off correction calculator in this beta pass.
+
+Assumptions:
+
+- 200 L mixed reef.
+- Targets: alkalinity 8.3 dKH, calcium 430 ppm, magnesium 1350 ppm.
+- Manual alkalinity/calcium/magnesium tests drive advice.
+- Components 1, 2, and 3 are kept equal for routine maintenance.
+
+Scenarios:
+
+- [x] Stable equal-part dosing.
+- [x] Balanced demand increasing.
+- [x] Imbalanced parameters.
+- [x] Stale manual tests.
+- [x] Above-target chemistry.
+
+Expected safety rules:
+
+- Component 1+2+3+ must not produce one-off correction bolus advice.
+- Equal-dose maintenance wording must be clear.
+- If parameters move differently, OpenReef should say to correct the imbalance separately before
+  relying on equal maintenance dosing.
+- Above-target chemistry should suggest hold/review, not chemical correction downward.
+
+Manual import notes:
+
+- CSV files are in `docs/eval-data/aquaforest-component-123/`.
+- Start UI review with `balanced-demand.csv`, then `imbalanced-parameters.csv`.
+
+Completed advisor tweaks:
+
+- Aquaforest now has equal-part maintenance wording and separate-correction imbalance guidance.
+
+## Hybrid Kalkwasser Plus Primary Dosing Eval
+
+Status: complete for the first beta pass. Harness output passes and manual CSV import files are
+ready for UI review.
+
+Source links checked:
+
+- BRS Pharma Kalkwasser: https://www.bulkreefsupply.com/brs-pharma-kalkwasser-bulk-reef-supply.html
+- Tropic Marin All-For-Reef: https://www.tropic-marin-smartinfo.com/all-for-reef
+- Seachem Reef Fusion: https://www.seachem.com/reef-fusion.php
+
+Product class:
+
+- Secondary `kalkwasser` support plus either exact two-part or maintenance-style all-in-one primary.
+- Kalk is support only; primary product owns exact or guided maintenance advice.
+
+Assumptions:
+
+- 200 L mixed reef.
+- Targets: alkalinity 8.3 dKH, calcium 430 ppm, magnesium 1350 ppm.
+- Manual tests drive advice.
+- Secondary kalkwasser has daily volume, concentration, evaporation ceiling, max pH, and delivery
+  type configured.
+
+Scenarios:
+
+- [x] Reef Fusion plus secondary kalk support.
+- [x] High pH risk.
+- [x] No pH guard.
+- [x] All-For-Reef plus secondary kalk support.
+
+Expected safety rules:
+
+- Secondary kalk context must remain visible even when the primary product owns exact advice.
+- High pH must warn users not to increase kalkwasser.
+- Missing pH guard should warn without blocking safe primary two-part advice.
+- Kalkwasser must never be used as a one-off correction bolus.
+- All-For-Reef plus kalk stays maintenance-only.
+
+Manual import notes:
+
+- CSV files are in `docs/eval-data/hybrid-kalk-plus-primary/`.
+- `high-ph-risk.csv` still requires a real mapped pH value above the configured max pH, or a lower
+  max-pH setting, because manual CSV rows cannot simulate live pH state on their own.
+- `no-ph-guard.csv` requires the pH sensor to be unmapped/disabled in OpenReef settings.
+
+Completed advisor tweaks:
+
+- Primary dosing advice now shows secondary kalk pH/evaporation context.
+- Normal secondary kalk context is informational; high pH or missing pH guard becomes visible.
+
+## Remaining Product System Sweep
+
+Status: complete for the first beta pass. These evals close the original dosing product backlog and
+the future-candidate review list. Each product has deterministic 90-day manual-test CSVs in
+`docs/eval-data/<product>/` where a UI import makes sense.
+
+Products covered:
+
+- [x] ATI Essentials / Essentials Pro: guided alkalinity-led maintenance; no universal correction
+  maths assumed.
+- [x] Red Sea Complete Reef Care 4-part: calcium-led maintenance guidance; no collapsed four-bottle
+  correction.
+- [x] TRITON Core7 Flex: ICP-guided maintenance; no one-off correction maths.
+- [x] Fauna Marin Balling Light: verified recipe strength can unlock maintenance mL guidance; one-off
+  correction remains locked in beta.
+- [x] Brightwell Reef Code A/B: exact two-part preset for alkalinity/calcium, with clear separate-part
+  and magnesium-not-covered wording.
+- [x] Brightwell Kalk+2: treated as kalkwasser-style support only, with pH/evaporation safety context
+  and no magnesium correction.
+- [x] Red Sea Foundation + Trace Colors 7-part: measured-uptake multi-bottle guidance only.
+- [x] Tropic Marin Original Balling: verified recipe strength can unlock maintenance mL guidance; Part
+  C ionic-balance wording is visible.
+- [x] Calcium reactor advisor: slow effluent/CO2 tuning guidance, not bottle dosing.
+- [x] Dosing Advisor UI smoke eval: advisor/cards generate complete advisory text without broken
+  placeholders.
+
+Shared scenarios used:
+
+- Stable maintenance.
+- Demand increasing.
+- Stale manual tests.
+- Above-target chemistry.
+- Product-specific edge cases, such as missing recipe strength, missing pH guard, high-pH kalk risk,
+  low-pH calcium reactor context, magnesium drift, and exact two-part Alk/Ca demand.
+
+Expected safety rules:
+
+- OpenReef remains advisory-only and never says it controls dosing pumps.
+- Exact mL correction appears only for products that have verified exact-strength support.
+- Guided systems do not show fake one-off correction boluses.
+- Recipe-dependent products lock exact advice until recipe strength is entered.
+- Above-target chemistry never receives downward chemical correction advice.
+- Stale manual tests lock actionable dose changes until fresh tests are logged.
+- Kalkwasser/Kalk+2 remain pH and evaporation constrained.
+- Calcium reactor advice stays in slow tuning language rather than bottle-dose language.
+
+Manual import notes:
+
+- Stable/demand/above-target CSVs can be imported directly for UI review.
+- Stale CSVs only behave as stale relative to the current Home Assistant clock; adjust dates if needed
+  when retesting later.
+- pH-related scenarios still need real/mocked pH sensor configuration because manual CSVs only contain
+  manual chemistry rows.
+
+Completed advisor tweaks from this sweep:
+
+- Product-specific safety wording now appears for ATI, Red Sea, TRITON, Balling, Brightwell, and
+  calcium reactor workflows.
+- Balling/recipe-dependent systems can unlock exact maintenance guidance without unlocking fake
+  correction boluses.
+- Kalkwasser above-target guidance now explicitly says not to increase kalk.
+- Kalk high-pH locks now read as high-pH safety locks.
