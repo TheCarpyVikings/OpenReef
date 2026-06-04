@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 36
-INTEGRATION_VERSION = "0.4.79"
+CORE_SCHEMA_VERSION = 37
+INTEGRATION_VERSION = "0.4.80"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -140,6 +140,32 @@ MANUAL_TEST_CADENCE_PRESETS = {
     },
 }
 
+# Maintenance Tasks V1 — curated default reef chores (HA-native, no Google). Seeded
+# once into config["maintenance"]["tasks"] (disabled by default); the user enables /
+# edits / removes them and adds their own. Kept OUT of DEFAULT_CORE_CONFIG so a user's
+# deletes stick (a `seeded` flag prevents re-adding them).
+MAINTENANCE_TASK_DEFAULTS = {
+    "water_change": {"label": "Water change", "cadenceDays": 7},
+    "clean_skimmer": {"label": "Clean skimmer cup", "cadenceDays": 7},
+    "replace_filter_sock": {"label": "Replace filter sock / floss", "cadenceDays": 7},
+    "blow_detritus": {"label": "Blow detritus off rocks", "cadenceDays": 7},
+    "clean_glass": {"label": "Clean glass / viewing panes", "cadenceDays": 3},
+    "refill_dosing": {"label": "Refill dosing / kalk reservoir", "cadenceDays": 14},
+    "inspect_ato": {"label": "Check / clean ATO reservoir", "cadenceDays": 14},
+    "replace_carbon": {"label": "Replace carbon", "cadenceDays": 30},
+    "replace_gfo": {"label": "Replace GFO (phosphate media)", "cadenceDays": 30},
+    "calibrate_ph": {"label": "Calibrate pH probe", "cadenceDays": 30},
+    "calibrate_salinity": {"label": "Calibrate salinity / refractometer", "cadenceDays": 30},
+    "clean_pumps": {"label": "Clean / descale pumps & powerheads", "cadenceDays": 90},
+    "replace_rodi": {"label": "Replace RO/DI filters", "cadenceDays": 180},
+}
+
+MAINTENANCE_TASK_CADENCE_MIN = 1
+MAINTENANCE_TASK_CADENCE_MAX = 365
+MAINTENANCE_TASK_CRITICAL_MAX = 730
+MAINTENANCE_COMPLETIONS_MAX = 50   # kept per task
+
+SERVICE_RECORD_TASK_COMPLETION = "record_task_completion"
 SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
 SERVICE_DISARM_EQUIPMENT = "disarm_equipment"
@@ -626,6 +652,12 @@ DEFAULT_CORE_CONFIG = {
             }
             for parameter in MANUAL_TEST_PARAMETERS
         },
+    },
+    "maintenance": {
+        "enabled": True,
+        "seeded": False,
+        "tasks": {},
+        "completions": {},
     },
     "dosing": {
         "enabled": True,

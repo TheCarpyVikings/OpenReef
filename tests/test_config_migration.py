@@ -338,6 +338,53 @@ def test_feedwatch_non_dict_and_sessions_truncated():
     assert all(isinstance(s, dict) for s in result["feedSessions"])
 
 
+def test_maintenance_defaults_seeded():
+    result = normalise({})
+    maintenance = result.get("maintenance")
+    assert isinstance(maintenance, dict)
+    assert maintenance["enabled"] is True
+    assert maintenance["seeded"] is True
+    assert len(maintenance["tasks"]) >= 10
+    wc = maintenance["tasks"]["water_change"]
+    assert wc["enabled"] is False and wc["builtin"] is True
+    assert wc["cadenceDays"] == 7 and wc["criticalAfterDays"] == 14
+
+
+def test_maintenance_deleted_builtin_stays_gone():
+    # seeded already True + a list missing most builtins -> they're NOT re-added.
+    cfg = {"maintenance": {"seeded": True, "tasks": {"water_change": {"label": "WC", "cadenceDays": 5, "enabled": True}}}}
+    maintenance = normalise(cfg)["maintenance"]
+    assert set(maintenance["tasks"].keys()) == {"water_change"}
+    assert maintenance["tasks"]["water_change"]["cadenceDays"] == 5
+
+
+def test_maintenance_custom_task_survives_and_clamps():
+    cfg = {"maintenance": {"seeded": True, "tasks": {
+        "uv": {"label": "UV bulb", "cadenceDays": 9999, "criticalAfterDays": 1, "enabled": True, "builtin": False},
+    }}}
+    task = normalise(cfg)["maintenance"]["tasks"]["uv"]
+    assert task["label"] == "UV bulb" and task["builtin"] is False
+    assert task["cadenceDays"] == 365            # clamped to max
+    assert task["criticalAfterDays"] == 365      # forced >= cadence
+
+
+def test_maintenance_completions_restricted_and_truncated():
+    cfg = {"maintenance": {"seeded": True,
+        "tasks": {"wc": {"label": "WC", "enabled": True}},
+        "completions": {
+            "wc": [{"timestamp": f"2026-01-{(i % 28) + 1:02d}T00:00:00Z", "notes": "x"} for i in range(80)],
+            "ghost": [{"timestamp": "2026-01-01T00:00:00Z"}],
+        }}}
+    completions = normalise(cfg)["maintenance"]["completions"]
+    assert "ghost" not in completions        # completions for unknown tasks dropped
+    assert len(completions["wc"]) == 50      # capped at MAINTENANCE_COMPLETIONS_MAX
+
+
+def test_maintenance_garbage_block_coerced():
+    for junk in ("a string", 7, ["x"], None):
+        assert isinstance(normalise({"maintenance": junk}).get("maintenance"), dict)
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:

@@ -44,6 +44,7 @@ class OpenReefPanel extends HTMLElement {
     this._settingsSections = this._loadSettingsSections();
     this._healthSections = this._loadHealthSections();
     this._manualHistoryOpen = {};
+    this._maintenanceHistoryOpen = {};
     this._manualEntryDefaults = {};
     this._onboarding = null;
     this._onboardingChecked = false;
@@ -115,6 +116,7 @@ class OpenReefPanel extends HTMLElement {
       mission: false,
       sensors: false,
       manualTests: false,
+      maintenance: false,
       equipment: false,
       modes: false,
       alerts: false,
@@ -1033,6 +1035,12 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
+      if (action === "complete-task") this._completeTask(id);
+      if (action === "toggle-task-history") { this._maintenanceHistoryOpen[id] = !this._maintenanceHistoryOpen[id]; this._render(); }
+      if (action === "delete-completion") this._deleteCompletion(id, target.dataset.entry);
+      if (action === "add-maintenance-task") { const input = this.shadowRoot.getElementById("or-add-task-name"); this._addMaintenanceTask((input?.value || "").trim()); }
+      if (action === "remove-maintenance-task") this._removeMaintenanceTask(id);
+      if (action === "load-suggested-tasks") this._loadSuggestedTasks();
       if (action === "remove-equipment") {
         const removed = this._config.equipment[id]?.label || id;
         delete this._config.equipment[id];
@@ -1344,10 +1352,31 @@ class OpenReefPanel extends HTMLElement {
           schedule[field] = value;
         }
       }
+      if (scope === "maintenance") {
+        this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
+        this._config.maintenance[field] = value;
+      }
+      if (scope === "maintenance-task") {
+        this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
+        this._config.maintenance.tasks = this._config.maintenance.tasks || {};
+        this._config.maintenance.tasks[id] = this._config.maintenance.tasks[id] || {};
+        const task = this._config.maintenance.tasks[id];
+        if (field === "cadenceDays") {
+          const cadenceDays = Math.max(1, Math.min(365, Number(value) || 1));
+          task.cadenceDays = cadenceDays;
+          const critical = Number(task.criticalAfterDays);
+          if (!Number.isFinite(critical) || critical < cadenceDays) task.criticalAfterDays = Math.min(730, cadenceDays * 2);
+        } else if (field === "criticalAfterDays") {
+          const cadenceDays = Math.max(1, Number(task.cadenceDays) || 7);
+          task.criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(value) || cadenceDays * 2));
+        } else {
+          task[field] = value;
+        }
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
         && event.type === "change"
       ) this._render();
     };
@@ -2681,6 +2710,7 @@ class OpenReefPanel extends HTMLElement {
       energy: saved.energy !== false,
       dosing: saved.dosing === true || (hasDosingParameters && saved.dosing !== false),
       cameras: saved.cameras === true || (this._cameraList().some(([, c]) => c.entity_id) && saved.cameras !== false),
+      maintenance: saved.maintenance === true || (this._maintenanceConfig().enabled && this._maintenanceTaskList().some(([id]) => this._maintenanceTask(id).enabled) && saved.maintenance !== false),
     };
   }
 
@@ -2692,6 +2722,7 @@ class OpenReefPanel extends HTMLElement {
       ["live", "Live Stats", "Show mapped sensor readings in Mission Control."],
       ["controls", "Controls", "Show armed equipment status in Mission Control."],
       ["energy", "Energy", "Show energy and cost summaries in Mission Control."],
+      ["maintenance", "Maintenance", "Show how many maintenance tasks are due or overdue."],
     ];
   }
 
@@ -4592,6 +4623,20 @@ class OpenReefPanel extends HTMLElement {
       });
     });
 
+    this._maintenanceFreshnessItems().forEach((item) => {
+      if (item.affectsScore && item.points > 0) {
+        addLoss(item.category, item.points, item.label, item.detail, item.status);
+        return;
+      }
+      addInsight("context", {
+        category: item.category,
+        affectsScore: false,
+        label: item.label,
+        detail: item.detail,
+        status: item.status,
+      });
+    });
+
     const categories = Object.fromEntries(this._healthCategoryChoices().map(([id, label]) => {
       const score = Math.max(0, Math.round(100 - Math.min(categoryLoss[id] || 0, 100)));
       return [id, { label, score, weight: weights[id] || 0, lost: Math.round(categoryLoss[id] || 0) }];
@@ -5639,6 +5684,7 @@ class OpenReefPanel extends HTMLElement {
       ["mission", "Mission Control"],
       ["live", "Live Stats"],
       ["manual", "Manual Tests"],
+      ["maintenance", "Maintenance"],
       ["controls", "Controls"],
       ["cameras", "Cameras"],
       ["energy", "Energy"],
@@ -5658,6 +5704,7 @@ class OpenReefPanel extends HTMLElement {
   _activeContent() {
     if (this._activeTab === "live") return this._liveStats();
     if (this._activeTab === "manual") return this._manualTests();
+    if (this._activeTab === "maintenance") return this._maintenance();
     if (this._activeTab === "controls") return this._controls();
     if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
@@ -7277,6 +7324,7 @@ class OpenReefPanel extends HTMLElement {
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
       cards.cameras ? this._missionCameraCard() : "",
+      cards.maintenance ? this._missionMaintenanceCard() : "",
     ].join("");
 
     return `
@@ -7565,6 +7613,16 @@ class OpenReefPanel extends HTMLElement {
     interlocks.forEach((issue) => {
       issues.push(["warning", issue.title, issue.detail, "controls"]);
     });
+    if (this._maintenanceConfig().enabled) {
+      this._maintenanceTaskList()
+        .filter(([id]) => this._maintenanceTask(id).enabled)
+        .forEach(([id]) => {
+          const state = this._maintenanceDueState(id);
+          const task = this._maintenanceTask(id);
+          if (state.status === "critical") issues.push(["critical", `${task.label} overdue`, state.detail, "maintenance"]);
+          else if (state.status === "warning") issues.push(["warning", `${task.label} due`, state.detail, "maintenance"]);
+        });
+    }
     if (disarmedMapped.length) {
       issues.push(["info", "Mapped controls are still disarmed", `${disarmedMapped.length} device(s) need arming in Settings before they can be controlled.`, "settings"]);
     }
@@ -8665,6 +8723,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._missionSettings()}
         ${this._sensorSettings()}
         ${this._manualTestSettings()}
+        ${this._maintenanceSettings()}
         ${this._dosingSettings()}
         ${this._equipmentSettings()}
         ${this._cameraSettings()}
@@ -8838,6 +8897,319 @@ class OpenReefPanel extends HTMLElement {
       `,
       forceOpen,
     );
+  }
+
+  // --- Maintenance Tasks V1 (mirrors Manual Tests; HA-native, no Google) ----
+
+  _maintenanceConfig() {
+    this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
+    this._config.maintenance.tasks = this._config.maintenance.tasks || {};
+    this._config.maintenance.completions = this._config.maintenance.completions || {};
+    return this._config.maintenance;
+  }
+
+  _maintenanceTaskList() {
+    return Object.entries(this._maintenanceConfig().tasks || {});
+  }
+
+  _maintenanceTask(id) {
+    const raw = this._maintenanceConfig().tasks[id] || {};
+    const cadenceDays = Math.max(1, Math.min(365, Number(raw.cadenceDays) || 7));
+    const criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(raw.criticalAfterDays) || cadenceDays * 2));
+    return {
+      label: raw.label || id,
+      cadenceDays,
+      criticalAfterDays,
+      enabled: raw.enabled === true,
+      notes: raw.notes || "",
+      builtin: raw.builtin === true,
+    };
+  }
+
+  _maintenanceCompletions(id) {
+    const list = this._maintenanceConfig().completions?.[id];
+    if (!Array.isArray(list)) return [];
+    return [...list].sort((a, b) => this._maintenanceCompletionTime(b) - this._maintenanceCompletionTime(a));
+  }
+
+  _maintenanceCompletionTime(entry) {
+    const time = Date.parse(entry?.timestamp || entry?.date || "");
+    return Number.isFinite(time) ? time : 0;
+  }
+
+  _maintenanceLatestCompletion(id) {
+    return this._maintenanceCompletions(id)[0] || null;
+  }
+
+  _maintenanceAgeDays(entry) {
+    const time = this._maintenanceCompletionTime(entry);
+    if (!time) return Number.POSITIVE_INFINITY;
+    return Math.max(0, (Date.now() - time) / 86400000);
+  }
+
+  _maintenanceDueState(id) {
+    const task = this._maintenanceTask(id);
+    const latest = this._maintenanceLatestCompletion(id);
+    if (!this._maintenanceConfig().enabled || !task.enabled) {
+      return { status: "unknown", label: "not tracked", detail: "This task isn't being tracked.", latest };
+    }
+    if (!latest) {
+      return { status: "warning", label: "never done", detail: `${task.label} is on a ${task.cadenceDays}-day cadence but hasn't been logged yet.`, latest };
+    }
+    const age = this._maintenanceAgeDays(latest);
+    if (age > task.criticalAfterDays) {
+      return { status: "critical", label: "overdue", detail: `${task.label} last done ${this._format(age, 0)} days ago; overdue past ${task.criticalAfterDays} days.`, latest };
+    }
+    if (age > task.cadenceDays) {
+      return { status: "warning", label: "due", detail: `${task.label} is due. Last done ${this._format(age, 0)} days ago; every ${task.cadenceDays} days.`, latest };
+    }
+    return { status: "ok", label: "done", detail: `${task.label} done ${this._format(age, age < 2 ? 1 : 0)} days ago; every ${task.cadenceDays} days.`, latest };
+  }
+
+  // Overdue/due chores nudge Reef Health via the weighted "maintenance" category —
+  // modest points (less than chemistry) so a missed glass-clean can't tank the score.
+  _maintenanceFreshnessItems() {
+    if (!this._maintenanceConfig().enabled) return [];
+    return this._maintenanceTaskList()
+      .filter(([id]) => this._maintenanceTask(id).enabled)
+      .map(([id]) => {
+        const task = this._maintenanceTask(id);
+        const state = this._maintenanceDueState(id);
+        const points = state.status === "critical" ? 6 : state.status === "warning" ? 2 : 0;
+        return {
+          id: `maintenance:${id}`,
+          label: `${task.label} ${state.label}`,
+          detail: state.detail,
+          status: state.status,
+          category: "maintenance",
+          points,
+          affectsScore: points > 0,
+        };
+      });
+  }
+
+  _maintenanceDueStates() {
+    return this._maintenanceTaskList()
+      .filter(([id]) => this._maintenanceTask(id).enabled)
+      .map(([id]) => this._maintenanceDueState(id).status);
+  }
+
+  _maintenanceDueCount() {
+    return this._maintenanceDueStates().filter((s) => s === "warning" || s === "critical").length;
+  }
+
+  _maintenanceOverdueCount() {
+    return this._maintenanceDueStates().filter((s) => s === "critical").length;
+  }
+
+  _missionMaintenanceCard() {
+    const due = this._maintenanceDueCount();
+    const overdue = this._maintenanceOverdueCount();
+    return this._missionSummaryCard(
+      "Maintenance",
+      due ? `${due} due` : "All done",
+      overdue ? `${overdue} overdue` : due ? "tasks need doing" : "maintenance is current",
+      overdue ? "critical" : due ? "warning" : "ok",
+      "maintenance",
+    );
+  }
+
+  _maintenance() {
+    const enabledTasks = this._maintenanceTaskList().filter(([id]) => this._maintenanceTask(id).enabled);
+    const due = this._maintenanceDueCount();
+    const overdue = this._maintenanceOverdueCount();
+    return `
+      <section class="stack">
+        <div class="section-head">
+          <div>
+            <h2>Maintenance</h2>
+            <p>Your recurring reef chores — tick them off and OpenReef tracks what's due.</p>
+          </div>
+          <div class="button-row">
+            <button class="secondary" data-action="tab" data-id="settings">Edit tasks</button>
+          </div>
+        </div>
+        <div class="summary-grid">
+          ${this._missionSummaryCard("Tracked", String(enabledTasks.length), "tasks on a schedule", enabledTasks.length ? "ok" : "unknown", "settings")}
+          ${this._missionSummaryCard("Due now", String(due), due ? "need doing soon" : "all caught up", due ? (overdue ? "critical" : "warning") : "ok", "maintenance")}
+          ${this._missionSummaryCard("Overdue", String(overdue), overdue ? "past their window" : "none overdue", overdue ? "critical" : "ok", "maintenance")}
+        </div>
+        ${enabledTasks.length
+          ? `<div class="grid four">${enabledTasks.map(([id]) => this._maintenanceTaskCard(id)).join("")}</div>`
+          : this._emptyState("No tasks tracked yet", "Turn on the chores you do in Settings → Maintenance — or add your own.", "settings", "Set up tasks")}
+      </section>
+    `;
+  }
+
+  _maintenanceTaskCard(id) {
+    const task = this._maintenanceTask(id);
+    const state = this._maintenanceDueState(id);
+    const latest = state.latest;
+    const completions = this._maintenanceCompletions(id);
+    const open = this._maintenanceHistoryOpen[id] === true;
+    return `
+      <article class="manual-test-card ${state.status}">
+        <div class="card-head">
+          <div>
+            <h3>${this._escape(task.label)}</h3>
+            <p>Every ${this._escape(task.cadenceDays)} day${task.cadenceDays === 1 ? "" : "s"}</p>
+          </div>
+          <span class="pill ${state.status}">${this._escape(state.label)}</span>
+        </div>
+        <small>${this._escape(latest ? `Last done ${this._formatActivityTime(latest.timestamp)}` : "Never logged")}</small>
+        <p>${this._escape(state.detail)}</p>
+        <div class="button-row">
+          <button class="primary compact-button" data-action="complete-task" data-id="${this._escape(id)}">Mark done</button>
+          <button class="secondary compact-button" data-action="toggle-task-history" data-id="${this._escape(id)}">${open ? "Hide history" : `History (${completions.length})`}</button>
+        </div>
+        ${open ? `
+          <div class="manual-history">
+            ${completions.length ? completions.slice(0, 12).map((entry) => `
+              <div class="manual-history-row">
+                <div>
+                  <strong>${this._escape(this._formatActivityTime(entry.timestamp))}</strong>
+                  ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
+                </div>
+                <button class="danger-text compact-button" data-action="delete-completion" data-id="${this._escape(id)}" data-entry="${this._escape(entry.id)}">Delete</button>
+              </div>
+            `).join("") : `<p class="muted">No history yet.</p>`}
+          </div>
+        ` : ""}
+      </article>
+    `;
+  }
+
+  _maintenanceSettings(forceOpen = false) {
+    const config = this._maintenanceConfig();
+    const tasks = this._maintenanceTaskList();
+    return this._settingsPanel(
+      "maintenance",
+      "Maintenance",
+      "Your recurring reef chores. Enable the ones you do, set cadences, or add your own.",
+      `
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="maintenance" data-field="enabled" ${config.enabled === false ? "" : "checked"}>
+          <span>
+            <strong>Track maintenance tasks</strong>
+            <small>Enabled tasks show on the Maintenance tab; overdue ones surface in Attention and gently nudge Reef Health.</small>
+          </span>
+        </label>
+        <div class="section-head">
+          <div><p class="eyebrow">Add a task</p></div>
+          <div class="button-row">
+            <input id="or-add-task-name" placeholder="e.g. Replace UV bulb" maxlength="80">
+            <button class="secondary" data-action="add-maintenance-task">Add task</button>
+            <button class="secondary" data-action="load-suggested-tasks">Load suggested</button>
+          </div>
+        </div>
+        ${tasks.length ? `
+          <div class="grid four compact">
+            ${tasks.map(([id]) => {
+              const task = this._maintenanceTask(id);
+              const due = this._maintenanceDueState(id);
+              return `
+                <section class="mapping-card manual-schedule-card ${task.enabled ? "manual-enabled" : "disabled-card"}">
+                  <div class="mapping-head">
+                    <div><p class="eyebrow">${task.builtin ? "suggested" : "custom"}</p><h3>${this._escape(task.label)}</h3></div>
+                    <span class="pill ${due.status}">${this._escape(due.label)}</span>
+                  </div>
+                  <label class="toggle-card">
+                    <input type="checkbox" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="enabled" ${task.enabled ? "checked" : ""}>
+                    <span><strong>Track this task</strong><small>Every ${this._escape(task.cadenceDays)} days; overdue after ${this._escape(task.criticalAfterDays)}.</small></span>
+                  </label>
+                  ${task.enabled ? `
+                    <div class="mini-grid">
+                      <label>Name<input data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="label" value="${this._escape(task.label)}" maxlength="80"></label>
+                      <label>Due after days<input type="number" min="1" max="365" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="cadenceDays" value="${this._escape(task.cadenceDays)}"></label>
+                      <label>Overdue after days<input type="number" min="${this._escape(task.cadenceDays)}" max="730" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="criticalAfterDays" value="${this._escape(task.criticalAfterDays)}"></label>
+                      <label>Notes<input data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="notes" value="${this._escape(task.notes)}" maxlength="300"></label>
+                    </div>
+                  ` : ""}
+                  <button class="danger-text compact-button" data-action="remove-maintenance-task" data-id="${this._escape(id)}">Remove task</button>
+                </section>
+              `;
+            }).join("")}
+          </div>
+        ` : `<p class="muted">No tasks yet — add one above or hit "Load suggested".</p>`}
+      `,
+      forceOpen,
+    );
+  }
+
+  async _completeTask(id) {
+    const task = this._maintenanceTask(id);
+    const config = this._maintenanceConfig();
+    if (!Array.isArray(config.completions[id])) config.completions[id] = [];
+    const timestamp = new Date().toISOString();
+    config.completions[id].unshift({
+      id: `${id}:${timestamp}:${config.completions[id].length}`,
+      timestamp,
+      notes: "",
+    });
+    this._setDirty(true);
+    this._recordActivity(`Maintenance done: ${task.label}`, "control");
+    this._render();
+    await this._persistConfigSilently();
+  }
+
+  async _deleteCompletion(id, entryId) {
+    const config = this._maintenanceConfig();
+    const list = config.completions[id];
+    if (Array.isArray(list)) {
+      config.completions[id] = list.filter((entry) => (entry?.id || "") !== entryId);
+    }
+    this._setDirty(true);
+    this._render();
+    await this._persistConfigSilently();
+  }
+
+  async _addMaintenanceTask(label) {
+    const tasks = this._maintenanceConfig().tasks;
+    const base = this._slug(label || "task") || "task";
+    let id = base;
+    let n = 2;
+    while (tasks[id]) id = `${base}_${n++}`;
+    tasks[id] = { label: label || "Task", cadenceDays: 7, criticalAfterDays: 14, enabled: true, notes: "", builtin: false };
+    this._setDirty(true);
+    this._recordActivity(`Added maintenance task: ${label || "Task"}`);
+    this._render();
+    await this._persistConfigSilently();
+  }
+
+  async _removeMaintenanceTask(id) {
+    const config = this._maintenanceConfig();
+    const label = (config.tasks[id] || {}).label || id;
+    delete config.tasks[id];
+    if (config.completions) delete config.completions[id];
+    delete this._maintenanceHistoryOpen[id];
+    this._setDirty(true);
+    this._recordActivity(`Removed maintenance task: ${label}`, "warning");
+    this._render();
+    await this._persistConfigSilently();
+  }
+
+  async _loadSuggestedTasks() {
+    const defaults = {
+      water_change: ["Water change", 7], clean_skimmer: ["Clean skimmer cup", 7],
+      replace_filter_sock: ["Replace filter sock / floss", 7], blow_detritus: ["Blow detritus off rocks", 7],
+      clean_glass: ["Clean glass / viewing panes", 3], refill_dosing: ["Refill dosing / kalk reservoir", 14],
+      inspect_ato: ["Check / clean ATO reservoir", 14], replace_carbon: ["Replace carbon", 30],
+      replace_gfo: ["Replace GFO (phosphate media)", 30], calibrate_ph: ["Calibrate pH probe", 30],
+      calibrate_salinity: ["Calibrate salinity / refractometer", 30], clean_pumps: ["Clean / descale pumps & powerheads", 90],
+      replace_rodi: ["Replace RO/DI filters", 180],
+    };
+    const tasks = this._maintenanceConfig().tasks;
+    let added = 0;
+    for (const [id, [label, cadence]] of Object.entries(defaults)) {
+      if (!tasks[id]) {
+        tasks[id] = { label, cadenceDays: cadence, criticalAfterDays: cadence * 2, enabled: false, notes: "", builtin: true };
+        added += 1;
+      }
+    }
+    this._setDirty(true);
+    this._recordActivity(added ? `Loaded ${added} suggested maintenance task(s)` : "Suggested maintenance tasks already present");
+    this._render();
+    await this._persistConfigSilently();
   }
 
   _dosingSettings() {

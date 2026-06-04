@@ -51,6 +51,11 @@ from .const import (
     ISSUE_LEGACY_LABS_CONFIG,
     ISSUE_MISSING_ENTITIES,
     INTEGRATION_VERSION,
+    MAINTENANCE_COMPLETIONS_MAX,
+    MAINTENANCE_TASK_CADENCE_MAX,
+    MAINTENANCE_TASK_CADENCE_MIN,
+    MAINTENANCE_TASK_CRITICAL_MAX,
+    MAINTENANCE_TASK_DEFAULTS,
     MANUAL_TEST_CADENCE_PRESETS,
     MANUAL_TEST_PARAMETERS,
     MVP_SENSORS,
@@ -69,6 +74,7 @@ from .const import (
     FEEDWATCH_MAX_RETENTION,
     FEEDWATCH_MIN_CADENCE,
     SERVICE_RECORD_MANUAL_READING,
+    SERVICE_RECORD_TASK_COMPLETION,
     TANK_PROFILE_CHOICES,
     TIMELAPSE_DEFAULT_CADENCE,
     TIMELAPSE_DEFAULT_DAILY_DAYS,
@@ -137,6 +143,14 @@ RECORD_MANUAL_READING_SCHEMA = vol.Schema(
     {
         vol.Required("parameter"): cv.string,
         vol.Required("value"): vol.Coerce(float),
+        vol.Optional("date"): cv.string,
+    }
+)
+
+RECORD_TASK_COMPLETION_SCHEMA = vol.Schema(
+    {
+        vol.Required("task_id"): cv.string,
+        vol.Optional("notes"): cv.string,
         vol.Optional("date"): cv.string,
     }
 )
@@ -1087,6 +1101,84 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             "preferredSource": str(raw.get("preferredSource", ""))[:80],
         }
     manual_tests["schedules"] = schedules
+
+    maintenance = config.setdefault("maintenance", {})
+    if not isinstance(maintenance, dict):
+        config["maintenance"] = deepcopy(DEFAULT_CORE_CONFIG["maintenance"])
+        maintenance = config["maintenance"]
+    maintenance["enabled"] = bool(maintenance.get("enabled", True))
+    raw_tasks = maintenance.get("tasks")
+    raw_tasks = raw_tasks if isinstance(raw_tasks, dict) else {}
+    # Seed the curated defaults exactly once; after that the user owns the list
+    # (so deleted/edited tasks persist and are never silently re-added).
+    if not maintenance.get("seeded", False):
+        for task_id, default in MAINTENANCE_TASK_DEFAULTS.items():
+            raw_tasks.setdefault(
+                task_id,
+                {
+                    "label": default["label"],
+                    "cadenceDays": default["cadenceDays"],
+                    "enabled": False,
+                    "builtin": True,
+                },
+            )
+        maintenance["seeded"] = True
+    tasks: dict[str, dict[str, Any]] = {}
+    for task_id, raw in raw_tasks.items():
+        if not isinstance(raw, dict):
+            continue
+        default = MAINTENANCE_TASK_DEFAULTS.get(task_id, {})
+        label = raw.get("label")
+        if not (isinstance(label, str) and label.strip()):
+            label = default.get("label") or task_id
+        try:
+            cadence_days = int(raw.get("cadenceDays", default.get("cadenceDays", 7)))
+        except (TypeError, ValueError):
+            cadence_days = default.get("cadenceDays", 7)
+        cadence_days = max(
+            MAINTENANCE_TASK_CADENCE_MIN, min(cadence_days, MAINTENANCE_TASK_CADENCE_MAX)
+        )
+        try:
+            critical_after_days = int(raw.get("criticalAfterDays", cadence_days * 2))
+        except (TypeError, ValueError):
+            critical_after_days = cadence_days * 2
+        tasks[task_id] = {
+            "label": str(label).strip()[:80],
+            "cadenceDays": cadence_days,
+            "criticalAfterDays": max(
+                cadence_days, min(critical_after_days, MAINTENANCE_TASK_CRITICAL_MAX)
+            ),
+            "enabled": bool(raw.get("enabled", False)),
+            "notes": str(raw.get("notes", ""))[:300],
+            "builtin": bool(raw.get("builtin", task_id in MAINTENANCE_TASK_DEFAULTS)),
+        }
+    maintenance["tasks"] = tasks
+
+    raw_completions = maintenance.get("completions")
+    raw_completions = raw_completions if isinstance(raw_completions, dict) else {}
+    completions: dict[str, list[dict[str, Any]]] = {}
+    for task_id in tasks:
+        entries = raw_completions.get(task_id)
+        if not isinstance(entries, list):
+            continue
+        safe: list[dict[str, Any]] = []
+        for index, item in enumerate(entries[:MAINTENANCE_COMPLETIONS_MAX]):
+            if not isinstance(item, dict):
+                continue
+            timestamp = item.get("timestamp") or item.get("date")
+            if not isinstance(timestamp, str) or not timestamp:
+                continue
+            entry_id = item.get("id") or f"{task_id}:{timestamp}:{index}"
+            safe.append(
+                {
+                    "id": str(entry_id)[:120],
+                    "timestamp": timestamp,
+                    "notes": str(item.get("notes", ""))[:500],
+                }
+            )
+        if safe:
+            completions[task_id] = safe
+    maintenance["completions"] = completions
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):
@@ -3070,6 +3162,50 @@ async def _handle_record_manual_reading(
     await _async_save_config(hass, entry, config)
 
 
+async def _handle_record_task_completion(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+
+    config = _config_from_entry(entry)
+    maintenance = config.setdefault("maintenance", {})
+    if not isinstance(maintenance, dict):
+        maintenance = {}
+        config["maintenance"] = maintenance
+    tasks = maintenance.get("tasks", {})
+    task_id = call.data["task_id"]
+    if not isinstance(tasks, dict) or task_id not in tasks:
+        raise ServiceValidationError(f"Unknown OpenReef maintenance task: {task_id}")
+
+    timestamp = (
+        call.data.get("timestamp")
+        or call.data.get("date")
+        or datetime.now(timezone.utc).isoformat()
+    )
+    completions = maintenance.setdefault("completions", {})
+    if not isinstance(completions, dict):
+        completions = {}
+        maintenance["completions"] = completions
+    entries = completions.setdefault(task_id, [])
+    if not isinstance(entries, list):
+        entries = []
+        completions[task_id] = entries
+    entries.insert(
+        0,
+        {
+            "id": f"{task_id}:{timestamp}:{len(entries)}",
+            "timestamp": timestamp,
+            "notes": str(call.data.get("notes") or ""),
+        },
+    )
+    _append_activity(
+        config, f"Maintenance done: {tasks[task_id].get('label', task_id)}", "control"
+    )
+    await _async_save_config(hass, entry, config)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/get_config"})
 @websocket_api.async_response
 async def websocket_get_config(
@@ -4386,6 +4522,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_RECORD_MANUAL_READING,
         _handle_record_manual_reading,
         schema=RECORD_MANUAL_READING_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RECORD_TASK_COMPLETION,
+        _handle_record_task_completion,
+        schema=RECORD_TASK_COMPLETION_SCHEMA,
     )
     hass.services.async_register(
         DOMAIN,
