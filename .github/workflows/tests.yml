@@ -42,5 +42,8 @@ jobs:
       - name: Alert-evaluation tests
         run: python3 tests/test_alerts.py
 
+      - name: Capture targeting + gating tests
+        run: python3 tests/test_capture.py
+
       - name: Panel JS syntax
         run: node --check custom_components/openreef/frontend/openreef-panel.js

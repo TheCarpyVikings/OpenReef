@@ -83,9 +83,20 @@ class FakeHass:
         self.config = _FakeConfig(config_dir)
         self.config_entries = _FakeConfigEntries(entries or [])
         self.data = {}
+        self.tasks = []  # names passed to async_create_task
 
     async def async_add_executor_job(self, func, *args):
         return func(*args)
+
+    def async_create_task(self, coro, name=None, **kwargs):
+        # We assert that a task was (or wasn't) dispatched; we don't run the
+        # fire-and-forget coroutine. Close it so there's no "never awaited" warning.
+        self.tasks.append(name)
+        try:
+            coro.close()
+        except (AttributeError, RuntimeError):
+            pass
+        return SimpleNamespace(name=name)
 
 
 class FakeConnection:

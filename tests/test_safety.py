@@ -239,6 +239,59 @@ def test_ato_window_active_again_next_interval():
     assert active is True
 
 
+# --- _async_set_ato_duty_cycle_state: the async ATO setter ------------------
+
+def _ato_state_entry(*, mode="running", ato_state_armed=True, with_return_pump=False, block=False):
+    equipment = {"ato": _equip("ato", ato_state_armed, "switch.ato")}
+    if with_return_pump:
+        equipment["rp"] = _equip("return_pump", True, "switch.rp")
+    cfg = {
+        "mode": {"active": mode},
+        "equipment": equipment,
+        "interlocks": {"atoBlockWhenReturnPumpOff": block},
+    }
+    return FakeEntry(options={CONF_SETTINGS: cfg})
+
+
+def _set_ato(hass, entry, target):
+    run(integration._async_set_ato_duty_cycle_state(hass, entry, target, "window-1", "started"))
+
+
+def test_ato_setter_is_noop_outside_running_mode():
+    entry = _ato_state_entry(mode="feed")
+    hass = FakeHass(states={"switch.ato": "off"}, entries=[entry])
+    _set_ato(hass, entry, "on")
+    assert not any(c.domain == "switch" for c in hass.services.calls)  # ATO only cycles in Running
+
+
+def test_ato_setter_on_is_blocked_when_return_pump_off():
+    entry = _ato_state_entry(mode="running", with_return_pump=True, block=True)
+    hass = FakeHass(states={"switch.ato": "off", "switch.rp": "off"}, entries=[entry])
+    _set_ato(hass, entry, "on")
+    assert not any(c.domain == "switch" for c in hass.services.calls)  # not energised while pump off
+
+
+def test_ato_setter_on_fires_when_clear():
+    entry = _ato_state_entry(mode="running", block=False)
+    hass = FakeHass(states={"switch.ato": "off"}, entries=[entry])
+    _set_ato(hass, entry, "on")
+    assert any(c.service == "turn_on" and "switch.ato" in c.data.values() for c in hass.services.calls)
+
+
+def test_ato_setter_off_turns_ato_off():
+    entry = _ato_state_entry(mode="running")
+    hass = FakeHass(states={"switch.ato": "on"}, entries=[entry])
+    _set_ato(hass, entry, "off")
+    assert any(c.service == "turn_off" and "switch.ato" in c.data.values() for c in hass.services.calls)
+
+
+def test_ato_setter_skips_when_already_in_target_state():
+    entry = _ato_state_entry(mode="running")
+    hass = FakeHass(states={"switch.ato": "on"}, entries=[entry])
+    _set_ato(hass, entry, "on")  # already on
+    assert not any(c.domain == "switch" for c in hass.services.calls)
+
+
 # --- tiny standalone runner -------------------------------------------------
 
 def _main() -> int:
