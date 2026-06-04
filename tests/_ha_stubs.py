@@ -18,13 +18,25 @@ import sys
 import types
 
 
-def _u(*args, **kwargs):
-    # Bare decorator (`@dec`): return the decorated object unchanged.
-    if len(args) == 1 and callable(args[0]) and not kwargs:
-        return args[0]
-    # Factory decorator (`@dec(...)`) or a plain value: return self, which is
-    # itself callable, so it also works as the resulting bare decorator.
-    return _u
+class _Universal:
+    """A harmless stand-in that is simultaneously a value, a (bare/factory)
+    decorator, and a namespace. Attribute access yields itself, so deep framework
+    chains a tested code path may touch — e.g. ``ir.IssueSeverity.WARNING`` or
+    ``dt_util.UTC`` — resolve without exploding in tests that don't exercise them.
+    """
+
+    def __call__(self, *args, **kwargs):
+        # Bare decorator (`@dec`): return the decorated object unchanged.
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+        # Factory decorator (`@dec(...)`) or a plain call: return self.
+        return self
+
+    def __getattr__(self, name):  # noqa: D401 - any attribute resolves to self
+        return self
+
+
+_u = _Universal()
 
 
 class _LenientModule(types.ModuleType):

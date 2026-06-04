@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -173,6 +174,69 @@ def test_toggle_happy_path_switches_armed_available_equipment():
     assert (call.domain, call.service) == ("switch", "turn_on")  # was off -> turned on
     assert "switch.light" in call.data.values()  # ATTR_ENTITY_ID is stubbed, assert on the value
     assert conn.results, "a success result should be sent"
+
+
+# --- _async_apply_mode: a mode only ever switches ARMED equipment -----------
+
+def test_apply_mode_only_switches_armed_equipment():
+    cfg = {
+        "equipment": {
+            "heater": _equip("heater", True, "switch.heater"),
+            "skimmer": _equip("skimmer", False, "switch.skimmer"),  # disarmed
+        },
+        "modePreviews": {"feed": {"heater": "off", "skimmer": "off"}},
+    }
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(states={"switch.heater": "on", "switch.skimmer": "on"}, entries=[entry])
+    result = run(integration._async_apply_mode(hass, entry, "feed", None))
+    # the armed heater was switched off...
+    assert any(c.service == "turn_off" and "switch.heater" in c.data.values() for c in hass.services.calls)
+    # ...and the disarmed skimmer was never touched.
+    assert not any("switch.skimmer" in c.data.values() for c in hass.services.calls)
+    assert any(s.get("equipment_id") == "skimmer" for s in result.get("skipped_locked", []))
+
+
+def test_apply_mode_skips_unavailable_switch():
+    cfg = {
+        "equipment": {"heater": _equip("heater", True, "switch.heater")},
+        "modePreviews": {"feed": {"heater": "off"}},
+    }
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(states={"switch.heater": "unavailable"}, entries=[entry])
+    result = run(integration._async_apply_mode(hass, entry, "feed", None))
+    # an unavailable switch is never driven (alert-notification housekeeping calls are fine)
+    assert not any(call.domain == "switch" for call in hass.services.calls)
+    assert any(s.get("equipment_id") == "heater" for s in result.get("skipped_missing", []))
+
+
+# --- ATO duty-cycle window math (anchor 00:00, hourly interval, 120s on) -----
+
+def _ato_cfg():
+    return {
+        "interlocks": {
+            "atoDutyCycleAnchorTime": "00:00",
+            "atoDutyCycleIntervalMinutes": 60,
+            "atoDutyCycleOnSeconds": 120,
+        }
+    }
+
+
+def test_ato_window_active_at_window_start():
+    now = datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc)  # 30s into the on-period
+    active, _key, _off = integration._ato_duty_cycle_window(_ato_cfg(), now)
+    assert active is True
+
+
+def test_ato_window_inactive_after_on_period():
+    now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=timezone.utc)  # 5 min in -> past the 120s on
+    active, _key, _off = integration._ato_duty_cycle_window(_ato_cfg(), now)
+    assert active is False
+
+
+def test_ato_window_active_again_next_interval():
+    now = datetime(2026, 1, 1, 1, 0, 30, tzinfo=timezone.utc)  # 30s into the 2nd hourly window
+    active, _key, _off = integration._ato_duty_cycle_window(_ato_cfg(), now)
+    assert active is True
 
 
 # --- tiny standalone runner -------------------------------------------------
