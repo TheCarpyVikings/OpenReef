@@ -36,5 +36,8 @@ jobs:
       - name: Timelapse retention ladder tests
         run: python3 tests/test_timelapse_retention.py
 
+      - name: Safety tests (armed gate + ATO interlock)
+        run: python3 tests/test_safety.py
+
       - name: Panel JS syntax
         run: node --check custom_components/openreef/frontend/openreef-panel.js
