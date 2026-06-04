@@ -19,7 +19,7 @@ reef-related or pokes fun at Neptune Apex — nothing else.
   (reef-focused, no controller jabs). `_hasApex()` picks: the explicit Apex answer (apex/no) else
   auto-detect from mapped entity IDs (apex/trident/neptune/fusion). Professional lines don't vary;
   the apex-throne finale sticker AND the marine-spec reagent link show **only for Apex users**.
-- **Mini-me is introduced** on setup step 1 (avatar + "Hi, I'm your reef guide" bubble) and in the
+- **Reef Buddy is introduced** on setup step 1 (avatar + "Hi, I'm your reef guide" bubble) and in the
   tour's welcome step.
 - **Always escapable.** Skip and "Don't show again" on every step. Re-runnable from a button.
 - **Every step always shows** (so all poses + the supplier tip appear). If a step's anchor element

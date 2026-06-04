@@ -6060,7 +6060,7 @@ class OpenReefPanel extends HTMLElement {
     const body = `
       <label class="toggle-card">
         <input type="checkbox" data-scope="overlay" data-field="enabled" ${cfg.enabled ? "checked" : ""}>
-        <span><strong>Show stats on the live feed</strong><small>Burn selected readings (and the mini-me) onto the camera view, and into a shareable tank card.</small></span>
+        <span><strong>Show stats on the live feed</strong><small>Burn selected readings (and the Reef Buddy) onto the camera view, and into a shareable tank card.</small></span>
       </label>
       <p class="eyebrow">Stats to show</p>
       ${sensors.length
@@ -6074,7 +6074,7 @@ class OpenReefPanel extends HTMLElement {
       <div class="grid two compact">
         ${extra("showReefHealth", "Reef Health score", "Show the overall health grade.")}
         ${extra("showTankName", "Tank name", "Title the overlay with your tank's name.")}
-        ${extra("showAvatar", "Mini-me avatar", "Your reef guide, reacting to the tank's health.")}
+        ${extra("showAvatar", "Reef Buddy avatar", "Your reef guide, reacting to the tank's health.")}
         ${extra("showQuip", "Cheeky one-liner", "A rotating Apex jab — cheeky mode + calm tank only. Your dig to share.")}
       </div>
       <p class="eyebrow">Position</p>

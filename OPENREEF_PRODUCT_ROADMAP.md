@@ -128,7 +128,7 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
   (every frame → 1/day → 1/week → 1/month) keeps months of growth in a few hundred frames. Reuses A's
   storage + serving. *(shipped, v0.4.73)*
 - [x] **C. Live overlay + shareable tank card** — user-selected stats (+ Reef Health, tank name) burned
-  onto the live feed with the health-reactive mini-me and a rotating anti-Apex quip (cheeky + calm only,
+  onto the live feed with the health-reactive Reef Buddy and a rotating anti-Apex quip (cheeky + calm only,
   shown to everyone — the dig is the point). One-tap **Share card** bakes it all into an image via canvas
   → native share sheet / download. *(shipped, v0.4.74)*
 - [x] **D. Feed-watch** — applying Feed mode records a **snapshot burst** across the whole feeding window

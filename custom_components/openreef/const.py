@@ -523,7 +523,7 @@ DEFAULT_CORE_CONFIG = {
         },
     },
     # Camera V2 — live overlay + shareable tank card (Phase C). Selected stats (+ optional
-    # mini-me avatar and a cheeky anti-Apex quip) burned onto the live feed and into a
+    # Reef Buddy avatar and a cheeky anti-Apex quip) burned onto the live feed and into a
     # one-tap shareable image. Purely a frontend read of live state; config just persists
     # the user's selections.
     "overlay": {
