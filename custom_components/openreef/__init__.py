@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
+import json
 import logging
 import re
 import uuid
@@ -9,7 +12,9 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
+from aiohttp import ClientError, ClientTimeout
 import voluptuous as vol
 
 from homeassistant.components import panel_custom, websocket_api
@@ -26,6 +31,7 @@ from homeassistant.helpers.event import (
     async_track_time_change,
     async_track_time_interval,
 )
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
@@ -99,6 +105,8 @@ SEARCH_LIMIT = 10
 UNAVAILABLE_STATES = {"unknown", "unavailable"}
 BUILT_IN_MODES = {"running", "feed", "maintenance"}
 WEEK_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+STRATON_PROBE_MAX_BYTES = 60_000
+STRATON_PROBE_TIMEOUT = 8
 MODE_TIMER_UNSUB = "mode_timer_unsub"
 MODE_SCHEDULE_UNSUB = "mode_schedule_unsub"
 ATO_DUTY_CYCLE_UNSUB = "ato_duty_cycle_unsub"
@@ -189,6 +197,75 @@ def _normalise_entity_id(value: Any) -> str:
     if isinstance(value, str) and "." in value:
         return value.strip()
     return ""
+
+
+def _redact_straton_probe_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "x.x.x.x", text)
+    text = re.sub(
+        r"([?&](?:token|key|auth|password|secret|session|sid)=)[^&\s]+",
+        r"\1redacted",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"Bearer\s+[A-Za-z0-9._-]+", "Bearer redacted", text)
+    return text[:160]
+
+
+def _straton_probe_host_allowed(hostname: str) -> bool:
+    host = hostname.strip().lower().strip("[]")
+    if not host or host in {"localhost", "0.0.0.0", "::"}:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # Fixture names should be local names, not arbitrary public domains.
+        return "." not in host or host.endswith((".local", ".lan", ".home", ".internal"))
+    return (address.is_private or address.is_link_local) and not (
+        address.is_loopback
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+def _straton_probe_target(host: Any, path: Any) -> dict[str, str]:
+    host_text = str(host or "").strip()[:160]
+    path_text = str(path or "").strip()[:180]
+    if not host_text:
+        raise HomeAssistantError("Add the Straton fixture IP or local hostname first")
+    if not path_text:
+        raise HomeAssistantError("Enter a read-only fixture path first")
+    if re.match(r"^(?:https?:)?//", path_text, flags=re.IGNORECASE):
+        raise HomeAssistantError("Enter only a path, not a full URL")
+    if re.match(r"^(?:javascript|data|file|blob):", path_text, flags=re.IGNORECASE):
+        raise HomeAssistantError("That probe path scheme is not allowed")
+
+    host_url = host_text if re.match(r"^https?://", host_text, flags=re.IGNORECASE) else f"http://{host_text}"
+    host_parts = urlsplit(host_url)
+    if host_parts.scheme not in {"http", "https"} or not host_parts.netloc:
+        raise HomeAssistantError("Fixture host must be an IP address or local hostname")
+    if host_parts.username or host_parts.password:
+        raise HomeAssistantError("Fixture host must not contain credentials")
+    if host_parts.path not in {"", "/"} or host_parts.query or host_parts.fragment:
+        raise HomeAssistantError("Fixture host must not include a path or query string")
+    if not host_parts.hostname or not _straton_probe_host_allowed(host_parts.hostname):
+        raise HomeAssistantError("Only private or local fixture hosts can be probed")
+
+    path_parts = urlsplit(path_text if path_text.startswith("/") else f"/{path_text}")
+    if path_parts.scheme or path_parts.netloc or path_parts.fragment:
+        raise HomeAssistantError("Probe path must stay on the selected fixture host")
+    target_path = path_parts.path or "/"
+    target_url = urlunsplit(
+        (host_parts.scheme, host_parts.netloc, target_path, path_parts.query, "")
+    )
+    redacted_path = f"{target_path}{'?redacted' if path_parts.query else ''}"
+    return {
+        "url": target_url,
+        "host": _redact_straton_probe_text(host_parts.netloc),
+        "path": _redact_straton_probe_text(redacted_path),
+        "scheme": host_parts.scheme,
+    }
 
 
 def _normalise_text(value: Any) -> str:
@@ -437,6 +514,7 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(equipment_aliases, dict)
                 else equipment_id,
                 "switch_entity_id": _normalise_entity_id(config.get("switch")),
+                "light_entity_id": _normalise_entity_id(config.get("light")),
                 "power_entity_id": _normalise_entity_id(config.get("power")),
                 "energy_entity_id": _normalise_entity_id(config.get("energy")),
                 "cost_entity_id": "",
@@ -712,6 +790,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             equipment_config["label"] = equipment_config.get("label") or equipment_id
             equipment_config["switch_entity_id"] = _normalise_entity_id(
                 equipment_config.get("switch_entity_id")
+            )
+            equipment_config["light_entity_id"] = _normalise_entity_id(
+                equipment_config.get("light_entity_id")
             )
             equipment_config["power_entity_id"] = _normalise_entity_id(
                 equipment_config.get("power_entity_id")
@@ -1340,6 +1421,7 @@ def _collect_entity_ids(config: dict[str, Any]) -> set[str]:
             continue
         for key in (
             "switch_entity_id",
+            "light_entity_id",
             "power_entity_id",
             "energy_entity_id",
             "cost_entity_id",
@@ -3520,6 +3602,90 @@ async def _handle_record_task_completion(
     await _async_save_config(hass, entry, config)
 
 
+async def _async_probe_straton_fixture(
+    hass: HomeAssistant, host: Any, path: Any
+) -> dict[str, Any]:
+    """Run a read-only GET from Home Assistant to a local Straton target."""
+    target = _straton_probe_target(host, path)
+    session = async_get_clientsession(hass)
+    headers = {"Accept": "application/json,text/plain,*/*"}
+    timeout = ClientTimeout(total=STRATON_PROBE_TIMEOUT)
+    try:
+        async with session.get(
+            target["url"],
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        ) as response:
+            raw = await response.content.read(STRATON_PROBE_MAX_BYTES + 1)
+            truncated = len(raw) > STRATON_PROBE_MAX_BYTES
+            if truncated:
+                raw = raw[:STRATON_PROBE_MAX_BYTES]
+            charset = response.charset or "utf-8"
+            body = raw.decode(charset, errors="replace")
+            try:
+                json.loads(body)
+                mode = "json"
+            except (TypeError, ValueError):
+                mode = "text"
+            response_ok = 200 <= response.status < 300
+            warning = " ".join(
+                item
+                for item in (
+                    "" if response_ok else "The fixture returned a non-2xx status.",
+                    "" if mode == "json" else "The response was not structured JSON.",
+                    "The response was truncated before analysis." if truncated else "",
+                )
+                if item
+            )
+            return {
+                "success": response_ok and mode == "json",
+                "source": "home_assistant",
+                "method": "GET",
+                "host": target["host"],
+                "path": target["path"],
+                "status": response.status,
+                "status_text": response.reason or "",
+                "content_type": _redact_straton_probe_text(
+                    response.headers.get("content-type", "unknown")
+                ),
+                "bytes": len(raw),
+                "mode": mode,
+                "warning": warning,
+                "body": body,
+            }
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "source": "home_assistant",
+            "method": "GET",
+            "host": target["host"],
+            "path": target["path"],
+            "status": 0,
+            "status_text": "timeout",
+            "content_type": "none",
+            "bytes": 0,
+            "mode": "error",
+            "warning": f"The fixture did not answer within {STRATON_PROBE_TIMEOUT} seconds.",
+            "body": "",
+        }
+    except ClientError as err:
+        return {
+            "success": False,
+            "source": "home_assistant",
+            "method": "GET",
+            "host": target["host"],
+            "path": target["path"],
+            "status": 0,
+            "status_text": "blocked",
+            "content_type": "none",
+            "bytes": 0,
+            "mode": "error",
+            "warning": f"Home Assistant could not read this fixture path: {err.__class__.__name__}.",
+            "body": "",
+        }
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/get_config"})
 @websocket_api.async_response
 async def websocket_get_config(
@@ -3639,6 +3805,43 @@ async def websocket_validate_config(
     validation = _validate_config(hass, config)
     await _async_sync_alert_notifications(hass, config)
     connection.send_result(msg["id"], validation)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/straton_probe",
+        vol.Required("host"): cv.string,
+        vol.Required("path"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_straton_probe(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Run a read-only Straton GET from Home Assistant for adapter evidence."""
+    try:
+        result = await _async_probe_straton_fixture(hass, msg["host"], msg["path"])
+    except HomeAssistantError as err:
+        connection.send_result(
+            msg["id"],
+            {
+                "success": False,
+                "source": "home_assistant",
+                "method": "GET",
+                "host": _redact_straton_probe_text(msg.get("host")),
+                "path": _redact_straton_probe_text(msg.get("path")),
+                "status": 0,
+                "status_text": "not run",
+                "content_type": "none",
+                "bytes": 0,
+                "mode": "invalid",
+                "warning": str(err),
+                "body": "",
+            },
+        )
+        return
+    connection.send_result(msg["id"], result)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/validate_mappings"})
@@ -4835,6 +5038,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_update_config_alias)
     websocket_api.async_register_command(hass, websocket_search_entities)
     websocket_api.async_register_command(hass, websocket_validate_config)
+    websocket_api.async_register_command(hass, websocket_straton_probe)
     websocket_api.async_register_command(hass, websocket_validate_mappings_alias)
     websocket_api.async_register_command(hass, websocket_mute_alert)
     websocket_api.async_register_command(hass, websocket_clear_alert_history)

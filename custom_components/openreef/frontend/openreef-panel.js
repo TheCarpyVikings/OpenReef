@@ -52,6 +52,25 @@ class OpenReefPanel extends HTMLElement {
     this._stickerReady = false;
     this._walkReady = false;
     this._buddy = { dismissed: false, expanded: false, lastKey: "", timer: null };
+    this._stratonEvidence = {
+      before: "",
+      after: "",
+      notes: "",
+      fixtureState: "",
+      probeFixtureId: "",
+      probePath: "",
+      extraProbePaths: "",
+      result: null,
+      fixtureStateResult: null,
+      probeResult: null,
+      probeScanResult: null,
+      testerNoteScenario: "strong",
+      testerNote: "",
+      testerNoteResult: null,
+      probeLoading: false,
+      probeScanning: false,
+    };
+    this._stratonProgramImport = "";
   }
 
   set hass(hass) {
@@ -1024,6 +1043,32 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "setup-add-starter-equipment") this._addStarterEquipment();
+      if (action === "add-straton-fixture") this._addStratonFixture();
+      if (action === "remove-straton-fixture") this._removeStratonFixture(id);
+      if (action === "apply-straton-template") this._applyStratonTemplate(id);
+      if (action === "preview-straton-template") this._previewStratonTemplate(id);
+      if (action === "straton-quick") this._setStratonQuickMode(id);
+      if (action === "confirm-straton-program") this._confirmStratonProgram();
+      if (action === "add-straton-light-equipment") this._addEquipment("ATI Straton Lights");
+      if (action === "analyze-straton-evidence") this._analyzeStratonEvidence();
+      if (action === "clear-straton-evidence") this._clearStratonEvidence();
+      if (action === "analyze-straton-tester-note") this._analyzeStratonTesterNote();
+      if (action === "clear-straton-tester-note") this._clearStratonTesterNote();
+      if (action === "load-straton-example-note") this._loadStratonExampleTesterNote();
+      if (action === "analyze-straton-fixture-state") this._analyzeStratonFixtureState();
+      if (action === "clear-straton-fixture-state") this._clearStratonFixtureState();
+      if (action === "probe-straton-fixture-state") this._probeStratonFixtureState();
+      if (action === "probe-straton-path") this._probeStratonFixturePath(id);
+      if (action === "probe-straton-scan") this._scanStratonProbePaths();
+      if (action === "straton-ap-fallback") this._applyStratonApFallback();
+      if (action === "copy-straton-evidence") this._copyStratonEvidenceSummary();
+      if (action === "copy-straton-adapter-request") this._copyStratonAdapterEvidenceRequest();
+      if (action === "copy-straton-program") this._copyStratonProgramPackage();
+      if (action === "copy-straton-support") this._copyStratonSupportNote();
+      if (action === "copy-straton-beta-update") this._copyStratonBetaUpdate();
+      if (action === "copy-straton-tester-steps") this._copyStratonTesterSteps();
+      if (action === "import-straton-program") this._importStratonProgramPackage();
+      if (action === "clear-straton-program-import") { this._stratonProgramImport = ""; this._render(); }
       if (action === "add-custom-mode") this._addCustomMode();
       if (action === "remove-custom-mode") this._removeCustomMode(target.dataset.mode);
       if (action === "add-mode-schedule") this._addModeSchedule();
@@ -1193,6 +1238,14 @@ class OpenReefPanel extends HTMLElement {
         this._manualEntryDefaults.importText = value;
         return;
       }
+      if (target.dataset.stratonEvidence) {
+        this._stratonEvidence[target.dataset.stratonEvidence] = value;
+        return;
+      }
+      if (target.dataset.stratonProgramImport) {
+        this._stratonProgramImport = value;
+        return;
+      }
       if (scope === "tank") this._config.tank[field] = value;
       if (scope === "display") this._config.display[field] = value;
       if (scope === "sensor") {
@@ -1215,6 +1268,31 @@ class OpenReefPanel extends HTMLElement {
         this._config.cameras[id][field] = value;
       }
       if (scope === "energy") this._config.energy[field] = value;
+      if (scope === "straton") {
+        const straton = this._stratonConfig();
+        straton[field] = value;
+      }
+      if (scope === "straton-program") {
+        const program = this._stratonProgram();
+        if (field === "peak") program[field] = Math.max(0, Math.min(100, Number(value) || 0));
+        else if (field === "startTime") program[field] = String(value || "10:00").slice(0, 5);
+        else if (field === "photoperiodHours") program[field] = Math.max(1, Math.min(16, Number(value) || 10));
+        else if (field === "rampMinutes") program[field] = Math.max(15, Math.min(240, Number(value) || 90));
+        else if (field === "acclimationStart" || field === "acclimationTarget") program[field] = Math.max(0, Math.min(100, Number(value) || 0));
+        else if (field === "acclimationDays") program[field] = Math.max(1, Math.min(120, Number(value) || 1));
+        else if (field === "moonlight") program[field] = Math.max(0, Math.min(5, Number(value) || 0));
+        else if (field === "cloudDim") program[field] = Math.max(0, Math.min(60, Number(value) || 0));
+        else program[field] = value;
+      }
+      if (scope === "straton-fixture") {
+        const fixture = this._stratonFixtures().find((item) => item.id === id);
+        if (fixture) {
+          if (field === "selected") fixture[field] = Boolean(value);
+          else if (field === "connectionMode") fixture[field] = ["unknown", "lan", "ap"].includes(value) ? value : "unknown";
+          else if (field === "setupState") fixture[field] = ["unknown", "already_on_lan", "brand_new", "stuck_setup"].includes(value) ? value : "unknown";
+          else fixture[field] = value;
+        }
+      }
       if (scope === "alerts") {
         this._config.alerts = this._config.alerts || {};
         this._config.alerts[field] = value;
@@ -1391,7 +1469,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "straton" || scope === "straton-program" || scope === "straton-fixture" || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
         && event.type === "change"
       ) this._render();
     };
@@ -1414,6 +1492,7 @@ class OpenReefPanel extends HTMLElement {
       label: label || "Equipment",
       type,
       switch_entity_id: "",
+      light_entity_id: "",
       power_entity_id: "",
       energy_entity_id: "",
       cost_entity_id: "",
@@ -1490,6 +1569,7 @@ class OpenReefPanel extends HTMLElement {
         label,
         type,
         switch_entity_id: "",
+        light_entity_id: "",
         power_entity_id: "",
         energy_entity_id: "",
         cost_entity_id: "",
@@ -1741,6 +1821,13 @@ class OpenReefPanel extends HTMLElement {
         keywords: [label, "plug", "switch", "socket", "outlet"],
       };
     }
+    if (field === "light_entity_id") {
+      return {
+        ...base,
+        domains: ["light"],
+        keywords: [label, "straton", "light", "reef", "aquarium"],
+      };
+    }
     if (field === "power_entity_id") {
       return {
         ...base,
@@ -1812,6 +1899,10 @@ class OpenReefPanel extends HTMLElement {
 
   _stateValue(entityId) {
     return this._state(entityId)?.state ?? "--";
+  }
+
+  _entityDomain(entityId) {
+    return String(entityId || "").split(".")[0] || "";
   }
 
   _number(entityId) {
@@ -4910,7 +5001,8 @@ class OpenReefPanel extends HTMLElement {
       .map(([id, item]) => {
         const profile = this._equipmentProfileLabel(this._equipmentProfile(id, item));
         const state = this._equipmentStateLabel(item);
-        return `- ${item.label || id}: ${profile}, switch ${item.switch_entity_id || "not mapped"}, ${item.armed ? "armed" : "disarmed"}, ${state}`;
+        const light = item.light_entity_id ? `, light ${item.light_entity_id}` : "";
+        return `- ${item.label || id}: ${profile}, switch ${item.switch_entity_id || "not mapped"}${light}, ${item.armed ? "armed" : "disarmed"}, ${state}`;
       });
     const energy = this._energyTotalMappings()
       .map(([label, energyKey, costKey]) => `- ${label}: energy ${this._config.energy?.[energyKey] || "not mapped"}, cost ${this._config.energy?.[costKey] || "not mapped"}`);
@@ -5303,6 +5395,7 @@ class OpenReefPanel extends HTMLElement {
     Object.values(this._config?.sensors || {}).forEach((s) => { if (s.entity_id) ids.push(s.entity_id); });
     Object.values(this._config?.equipment || {}).forEach((e) => {
       if (e.switch_entity_id) ids.push(e.switch_entity_id);
+      if (e.light_entity_id) ids.push(e.light_entity_id);
       if (e.power_entity_id) ids.push(e.power_entity_id);
     });
     return ids.some((id) => /apex|trident|neptune|fusion/i.test(id));
@@ -5701,6 +5794,7 @@ class OpenReefPanel extends HTMLElement {
       ["manual", "Manual Tests"],
       ["maintenance", "Maintenance"],
       ["controls", "Controls"],
+      ["lights", "Lights"],
       ["cameras", "Cameras"],
       ["energy", "Energy"],
       ["settings", "Settings"],
@@ -5721,10 +5815,4336 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
     if (this._activeTab === "controls") return this._controls();
+    if (this._activeTab === "lights") return this._lights();
     if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
     if (this._activeTab === "settings") return this._settings();
     return this._mission();
+  }
+
+  // --- ATI Straton lighting ---------------------------------------------
+
+  _stratonConfig() {
+    const defaults = {
+      enabled: true,
+      adapter: "reeftech_wifi",
+      selectedTemplate: "mixed_reef_safe",
+      lastReceipt: "",
+      fixtures: [],
+      endpoints: {
+        reachability: "",
+        currentState: "",
+        program: "",
+        firmware: "",
+        groups: "",
+        lastScanAt: "",
+        lastOutcome: "",
+      },
+      program: {
+        peak: 62,
+        startTime: "10:00",
+        photoperiodHours: 10,
+        rampMinutes: 90,
+        acclimationStart: 30,
+        acclimationTarget: 70,
+        acclimationDays: 42,
+        quickMode: "auto",
+        moonlight: 1,
+        lunarMode: "manual",
+        cloudDim: 18,
+      },
+    };
+    const current = this._config.straton && typeof this._config.straton === "object" ? this._config.straton : {};
+    this._config.straton = {
+      ...defaults,
+      ...current,
+      program: {
+        ...defaults.program,
+        ...(current.program && typeof current.program === "object" ? current.program : {}),
+      },
+      endpoints: {
+        ...defaults.endpoints,
+        ...(current.endpoints && typeof current.endpoints === "object" ? current.endpoints : {}),
+      },
+    };
+    const fixtures = Array.isArray(this._config.straton.fixtures) ? this._config.straton.fixtures : [];
+    this._config.straton.fixtures = fixtures.slice(0, 12).map((fixture, index) => {
+      const item = fixture && typeof fixture === "object" ? fixture : {};
+      const fallbackId = `straton_${index + 1}`;
+      const host = String(item.host || item.ip || "192.168.100.1").slice(0, 80);
+      const connectionModes = ["unknown", "lan", "ap"];
+      const setupStates = ["unknown", "already_on_lan", "brand_new", "stuck_setup"];
+      return {
+        id: this._slug(item.id || item.name || fallbackId) || fallbackId,
+        name: String(item.name || `Straton ${index + 1}`).slice(0, 60),
+        host,
+        firmware: String(item.firmware || "unknown").slice(0, 32),
+        group: String(item.group || "Display").slice(0, 40),
+        connectionMode: connectionModes.includes(item.connectionMode) ? item.connectionMode : host === "192.168.100.1" ? "ap" : "unknown",
+        setupState: setupStates.includes(item.setupState) ? item.setupState : "unknown",
+        selected: item.selected !== false,
+      };
+    });
+    return this._config.straton;
+  }
+
+  _stratonProgram() {
+    return this._stratonConfig().program;
+  }
+
+  _stratonFixtures() {
+    return this._stratonConfig().fixtures;
+  }
+
+  _stratonEndpoints() {
+    return this._stratonConfig().endpoints;
+  }
+
+  _stratonCatalogPath(path) {
+    const text = String(path || "").trim();
+    if (!text || /^(?:https?:)?\/\//i.test(text)) return "";
+    const clean = text.replace(/[?#].*$/, "");
+    return clean.startsWith("/") ? clean.slice(0, 120) : `/${clean.slice(0, 119)}`;
+  }
+
+  _promoteStratonEndpoint(kind, path, outcome = "") {
+    const key = ["reachability", "currentState", "program", "firmware", "groups"].includes(kind) ? kind : "currentState";
+    const cleanPath = this._stratonCatalogPath(path);
+    if (!cleanPath) return false;
+    const endpoints = this._stratonEndpoints();
+    endpoints[key] = cleanPath;
+    endpoints.lastScanAt = new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    endpoints.lastOutcome = String(outcome || "Candidate read path").slice(0, 80);
+    this._setDirty(true);
+    return true;
+  }
+
+  _stratonTemplates() {
+    return [
+      {
+        id: "mixed_reef_safe",
+        name: "Mixed reef safe",
+        source: "OpenReef Straton research",
+        tags: "mixed, LPS, starter",
+        peak: 62,
+        photoperiodHours: 10,
+        detail: "Balanced blue-white program with enough guardrail for most mixed reefs.",
+        notes: ["Manual IP fallback ready", "Use acclimation when changing from lower output lights"],
+      },
+      {
+        id: "sps_blue_peak",
+        name: "SPS blue peak",
+        source: "Mobius AB+ style pattern",
+        tags: "SPS, blue, high PAR",
+        peak: 76,
+        photoperiodHours: 10,
+        detail: "Strong blue-biased peak for SPS systems with measured PAR and nutrient stability.",
+        notes: ["Acclimation strongly recommended", "Measure PAR before running long peaks"],
+      },
+      {
+        id: "saxby_inspired",
+        name: "Saxby inspired",
+        source: "AI community preset pattern",
+        tags: "mixed, community, long day",
+        peak: 64,
+        photoperiodHours: 12,
+        detail: "Community-style long viewing day with smooth ramps and moderate peak.",
+        notes: ["Popular import/share pattern", "Watch total daily light on newer tanks"],
+      },
+      {
+        id: "soft_lps_low_shock",
+        name: "Soft and LPS low shock",
+        source: "ReefBeat/Kessil gentle pattern",
+        tags: "soft, LPS, acclimation",
+        peak: 48,
+        photoperiodHours: 8,
+        detail: "Lower intensity template for soft coral, LPS, and recently moved livestock.",
+        notes: ["Good first program after setup", "Pairs well with cloud dimming"],
+      },
+      {
+        id: "photo_maintenance",
+        name: "Photo and maintenance",
+        source: "Quick-view feature request",
+        tags: "viewing, photo, temporary",
+        peak: 38,
+        photoperiodHours: 4,
+        detail: "Warmer temporary look for photos, inspection, and maintenance.",
+        notes: ["Not intended as a growth program", "Use as a temporary override"],
+      },
+    ];
+  }
+
+  _stratonTemplate(id = this._stratonConfig().selectedTemplate) {
+    return this._stratonTemplates().find((template) => template.id === id) || this._stratonTemplates()[0];
+  }
+
+  _stratonLightingEquipment() {
+    return Object.entries(this._config.equipment || {}).filter(([id, item]) => this._equipmentProfile(id, item) === "lighting");
+  }
+
+  _stratonLightEntityId(item) {
+    if (item?.light_entity_id) return item.light_entity_id;
+    return this._entityDomain(item?.switch_entity_id) === "light" ? item.switch_entity_id : "";
+  }
+
+  _stratonLightLiveRows() {
+    const program = this._stratonProgram();
+    return this._stratonLightingEquipment().map(([id, item]) => {
+      const entityId = this._stratonLightEntityId(item);
+      const state = this._state(entityId);
+      const attributes = state?.attributes || {};
+      const brightness = Number(attributes.brightness);
+      const brightnessPct = Number.isFinite(brightness) ? Math.round((brightness / 255) * 100) : null;
+      const effect = attributes.effect || attributes.mode || attributes.preset || "";
+      const colorTempKelvin = attributes.color_temp_kelvin || "";
+      const colorTempMired = !colorTempKelvin ? attributes.color_temp || "" : "";
+      const colorMode = attributes.color_mode || "";
+      const colorLabel = colorTempKelvin
+        ? `${colorTempKelvin}K`
+        : colorTempMired
+          ? `${colorTempMired} mired`
+          : colorMode;
+      let status = "unknown";
+      let statusLabel = "Not mapped";
+      let detail = "Map a Home Assistant light entity to read live state.";
+      if (entityId && !state) {
+        status = "critical";
+        statusLabel = "Missing";
+        detail = "Home Assistant is not reporting this light entity.";
+      } else if (state?.state === "unavailable") {
+        status = "critical";
+        statusLabel = "Unavailable";
+        detail = "The mapped light entity exists but is unavailable.";
+      } else if (state?.state === "unknown") {
+        status = "warning";
+        statusLabel = "Unknown";
+        detail = "The mapped light entity is not reporting a clear state.";
+      } else if (state) {
+        status = state.state === "on" ? "ok" : "unknown";
+        statusLabel = state.state === "on" ? "Live" : "Off";
+        if (state.state === "on" && brightnessPct !== null) {
+          const peak = Number(program.peak) || 0;
+          detail = brightnessPct > peak + 5
+            ? `${brightnessPct}% live brightness is above the ${peak}% planned peak.`
+            : `${brightnessPct}% live brightness read from Home Assistant.`;
+        } else {
+          detail = `State: ${state.state}.`;
+        }
+      }
+      return {
+        id,
+        item,
+        entityId,
+        status,
+        statusLabel,
+        detail,
+        brightnessPct,
+        effect,
+        colorLabel,
+      };
+    });
+  }
+
+  _stratonLiveBridgeSummary(rows = this._stratonLightLiveRows()) {
+    const mapped = rows.filter((row) => row.entityId);
+    const live = mapped.filter((row) => row.status === "ok");
+    if (!rows.length) return ["unknown", "No lighting equipment", "Add lighting equipment to connect OpenReef with Home Assistant light entities."];
+    if (!mapped.length) return ["warning", "No light entity", "Map a light.* entity for read-only live status."];
+    if (!live.length) return ["warning", "Bridge not live", "Mapped light entities are missing, off, unknown, or unavailable."];
+    return ["ok", `${live.length}/${mapped.length} live`, "OpenReef is reading live Home Assistant light state."];
+  }
+
+  _stratonLiveBridgeRows(rows = this._stratonLightLiveRows()) {
+    if (!rows.length) {
+      return `<p class="muted">Add lighting equipment if you want OpenReef to compare its plan with live Home Assistant light state.</p>`;
+    }
+    return rows.map((row) => `
+      <div class="row">
+        <div>
+          <strong>${this._escape(row.item.label || row.id)}</strong>
+          <span>${this._escape(row.entityId || "No light entity mapped")}</span>
+          <small>${this._escape(row.detail)}</small>
+        </div>
+        <div class="pill-stack inline">
+          <span class="pill ${this._escape(row.status)}">${this._escape(row.statusLabel)}</span>
+          ${row.brightnessPct !== null ? `<span class="pill">${this._escape(row.brightnessPct)}%</span>` : ""}
+          ${row.effect ? `<span class="pill">${this._escape(row.effect)}</span>` : ""}
+          ${row.colorLabel ? `<span class="pill">${this._escape(row.colorLabel)}</span>` : ""}
+        </div>
+      </div>
+    `).join("");
+  }
+
+  _stratonMatchTokens(value) {
+    const ignored = new Set(["ati", "reef", "openreef", "open", "light", "lights", "straton", "fixture"]);
+    return String(value || "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !ignored.has(token));
+  }
+
+  _stratonFixtureLiveMatch(fixture, liveRows, selectedFixtures) {
+    const mappedRows = liveRows.filter((row) => row.entityId);
+    if (!mappedRows.length) return null;
+    const fixtureTokens = new Set([
+      ...this._stratonMatchTokens(fixture.name),
+      ...this._stratonMatchTokens(fixture.host),
+    ]);
+    let best = null;
+    mappedRows.forEach((row) => {
+      const rowTokens = new Set([
+        ...this._stratonMatchTokens(row.id),
+        ...this._stratonMatchTokens(row.item?.label),
+        ...this._stratonMatchTokens(row.entityId),
+        ...this._stratonMatchTokens(this._friendlyEntityName(row.entityId)),
+      ]);
+      const score = [...fixtureTokens].filter((token) => rowTokens.has(token)).length;
+      if (score > 0 && (!best || score > best.score)) {
+        best = { row, score, confidence: "name" };
+      }
+    });
+    if (best) return best;
+    if (mappedRows.length === 1 && selectedFixtures.length === 1 && fixture.selected) {
+      return { row: mappedRows[0], score: 1, confidence: "single target" };
+    }
+    return null;
+  }
+
+  _stratonFixtureSyncRows(liveRows = this._stratonLightLiveRows()) {
+    const fixtures = this._stratonFixtures();
+    const selectedFixtures = fixtures.filter((fixture) => fixture.selected);
+    const groupCounts = fixtures.reduce((counts, fixture) => {
+      const group = String(fixture.group || "Display").trim() || "Display";
+      const current = counts.get(group) || { total: 0, selected: 0 };
+      current.total += 1;
+      if (fixture.selected) current.selected += 1;
+      counts.set(group, current);
+      return counts;
+    }, new Map());
+    return fixtures.map((fixture) => {
+      const group = String(fixture.group || "Display").trim() || "Display";
+      const groupState = groupCounts.get(group) || { total: 1, selected: fixture.selected ? 1 : 0 };
+      const firmwareReady = this._stratonFirmwareReady(fixture.firmware);
+      const liveMatch = this._stratonFixtureLiveMatch(fixture, liveRows, selectedFixtures);
+      let liveClass = "unknown";
+      let liveLabel = "no bridge";
+      let liveDetail = "Map a Home Assistant light entity for read-only fixture confidence.";
+      if (liveMatch?.row) {
+        liveClass = liveMatch.row.status;
+        liveLabel = liveMatch.row.statusLabel;
+        const source = liveMatch.confidence === "single target" ? "single selected target" : "matching fixture label";
+        liveDetail = `Matched ${liveMatch.row.entityId} by ${source}. ${liveMatch.row.detail}`;
+      } else if (liveRows.some((row) => row.entityId)) {
+        liveClass = "warning";
+        liveLabel = "unmatched";
+        liveDetail = "A light entity is mapped, but its name does not clearly match this fixture. Match fixture names or host-specific labels for per-fixture confidence.";
+      } else if (liveRows.length) {
+        liveClass = "warning";
+        liveLabel = "not mapped";
+        liveDetail = "Lighting equipment exists, but no read-only light entity is mapped yet.";
+      }
+      const groupLabel = groupState.total > 1
+        ? `${groupState.selected}/${groupState.total} in ${group}`
+        : group;
+      const groupClass = groupState.total > 1
+        ? groupState.selected === groupState.total ? "ok" : "warning"
+        : "unknown";
+      return {
+        fixture,
+        group,
+        groupClass,
+        groupLabel,
+        targetClass: fixture.selected ? "ok" : "disabled",
+        targetLabel: fixture.selected ? "targeted" : "skipped",
+        firmwareClass: firmwareReady ? "ok" : "warning",
+        firmwareLabel: firmwareReady ? "firmware ready" : "review firmware",
+        firmwareReady,
+        liveClass,
+        liveLabel,
+        liveDetail,
+        liveEntityId: liveMatch?.row?.entityId || "",
+      };
+    });
+  }
+
+  _stratonSyncMatrix(liveRows = this._stratonLightLiveRows()) {
+    const rows = this._stratonFixtureSyncRows(liveRows);
+    const targets = rows.filter((row) => row.fixture.selected);
+    const groups = new Set(targets.map((row) => row.group));
+    const firmwareReady = targets.filter((row) => row.firmwareReady).length;
+    const liveMatched = targets.filter((row) => row.liveEntityId && row.liveClass === "ok").length;
+    if (!rows.length) {
+      return `
+        <article class="panel straton-sync-matrix">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Sync</p>
+              <h3>Fixture sync matrix</h3>
+              <p class="muted">Add fixtures to see target, firmware, group, live bridge, and write-readiness in one place.</p>
+            </div>
+            <span class="pill disabled">write locked</span>
+          </div>
+          <p class="muted">No Straton fixtures are configured yet.</p>
+        </article>
+      `;
+    }
+    return `
+      <article class="panel straton-sync-matrix">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Sync</p>
+            <h3>Fixture sync matrix</h3>
+            <p class="muted">Per-fixture confidence before saving: target state, group coverage, firmware readiness, and read-only live bridge matching.</p>
+          </div>
+          <div class="pill-stack">
+            <span class="pill ${targets.length ? "ok" : "warning"}">${this._escape(targets.length)} target(s)</span>
+            <span class="pill ${groups.size ? "ok" : "unknown"}">${this._escape(groups.size)} group(s)</span>
+            <span class="pill ${firmwareReady === targets.length && targets.length ? "ok" : "warning"}">${this._escape(firmwareReady)}/${this._escape(targets.length)} firmware</span>
+            <span class="pill ${liveMatched ? "ok" : "unknown"}">${this._escape(liveMatched)}/${this._escape(targets.length)} live</span>
+            <span class="pill disabled">write locked</span>
+          </div>
+        </div>
+        <div class="status-list">
+          ${rows.map((row) => `
+            <div class="row">
+              <div>
+                <strong>${this._escape(row.fixture.name)}</strong>
+                <span>${this._escape(row.fixture.host || "No host")} · ${this._escape(row.group)} · ${this._escape(this._stratonConnectionModeLabel(row.fixture.connectionMode))} · ${this._escape(this._stratonSetupStateLabel(row.fixture.setupState))}</span>
+                <small>${this._escape(row.liveDetail)} Hardware write remains locked until adapter evidence is verified.</small>
+              </div>
+              <div class="pill-stack inline">
+                <span class="pill ${row.targetClass}">${this._escape(row.targetLabel)}</span>
+                <span class="pill ${row.firmwareClass}">${this._escape(row.firmwareLabel)}</span>
+                <span class="pill ${row.groupClass}">${this._escape(row.groupLabel)}</span>
+                <span class="pill ${row.liveClass}">${this._escape(row.liveLabel)}</span>
+                <span class="pill disabled">planned only</span>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      </article>
+    `;
+  }
+
+  _stratonTimeMinutes(value, fallback = "10:00") {
+    const text = String(value || fallback);
+    const match = text.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return this._stratonTimeMinutes(fallback, "10:00");
+    const hours = Math.max(0, Math.min(23, Number(match[1]) || 0));
+    const minutes = Math.max(0, Math.min(59, Number(match[2]) || 0));
+    return hours * 60 + minutes;
+  }
+
+  _stratonClock(minutes) {
+    const value = ((Math.round(minutes) % 1440) + 1440) % 1440;
+    const hours = Math.floor(value / 60);
+    const mins = value % 60;
+    return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`;
+  }
+
+  _stratonSchedulePlan() {
+    const program = this._stratonProgram();
+    const start = this._stratonTimeMinutes(program.startTime || "10:00");
+    const photoperiod = Math.max(60, Math.min(16 * 60, Math.round((Number(program.photoperiodHours) || 10) * 60)));
+    const ramp = Math.max(15, Math.min(Number(program.rampMinutes) || 90, Math.floor(photoperiod / 2)));
+    const end = start + photoperiod;
+    const peak = Math.max(0, Math.min(100, Number(program.peak) || 0));
+    const cloudPeak = Math.max(0, peak - Math.max(0, Math.min(60, Number(program.cloudDim) || 0)));
+    return [
+      { label: "Ramp up", kind: "ramp", start, end: start + ramp, level: `0-${peak}%` },
+      { label: "Peak window", kind: "peak", start: start + ramp, end: end - ramp, level: `${peak}%` },
+      { label: "Ramp down", kind: "ramp", start: end - ramp, end, level: `${peak}-0%` },
+      { label: "Cloud floor", kind: "cloud", start: start + ramp, end: end - ramp, level: `${cloudPeak}% when dimmed` },
+      { label: "Moonlight", kind: "moon", start: end, end: start + 1440, level: `${Number(program.moonlight) || 0}%` },
+    ].filter((phase) => phase.end > phase.start);
+  }
+
+  _stratonDaybarSegments(phases) {
+    const segments = [];
+    phases
+      .filter((phase) => phase.kind !== "moon")
+      .forEach((phase) => {
+        let remaining = Math.max(0, phase.end - phase.start);
+        let cursor = ((phase.start % 1440) + 1440) % 1440;
+        while (remaining > 0) {
+          const span = Math.min(remaining, 1440 - cursor);
+          const left = Math.max(0, Math.min(100, (cursor / 1440) * 100));
+          const width = Math.max(0.5, Math.min(100 - left, (span / 1440) * 100));
+          segments.push(`<span class="${this._escape(phase.kind)}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%" title="${this._escape(`${phase.label}: ${this._stratonClock(phase.start)}-${this._stratonClock(phase.end)}`)}"></span>`);
+          remaining -= span;
+          cursor = 0;
+        }
+      });
+    return segments.join("");
+  }
+
+  _stratonSchedulePreview() {
+    const program = this._stratonProgram();
+    const phases = this._stratonSchedulePlan();
+    const daylight = phases.filter((phase) => phase.kind !== "moon");
+    const moon = phases.find((phase) => phase.kind === "moon");
+    return `
+      <article class="panel straton-schedule-preview">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Schedule</p>
+            <h3>Daily light plan preview</h3>
+            <p class="muted">Visual check for ramps, peak window, cloud dimming, and moonlight before saving.</p>
+          </div>
+          <span class="pill ${Number(program.peak) > 72 ? "warning" : "ok"}">${this._escape(program.peak)}% peak</span>
+        </div>
+        <div class="grid three compact">
+          <label>Start time<input type="time" data-scope="straton-program" data-field="startTime" value="${this._escape(program.startTime || "10:00")}"></label>
+          <label>Photoperiod hours<input type="number" min="1" max="16" data-scope="straton-program" data-field="photoperiodHours" value="${this._escape(program.photoperiodHours)}"></label>
+          <label>Ramp minutes<input type="number" min="15" max="240" step="5" data-scope="straton-program" data-field="rampMinutes" value="${this._escape(program.rampMinutes || 90)}"></label>
+        </div>
+        <div class="straton-daybar" aria-label="Straton daily schedule preview">
+          ${this._stratonDaybarSegments(phases)}
+        </div>
+        <div class="straton-time-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+        <div class="status-list">
+          ${daylight.map((phase) => `
+            <div class="row">
+              <div><strong>${this._escape(phase.label)}</strong><span>${this._escape(this._stratonClock(phase.start))} to ${this._escape(this._stratonClock(phase.end))}</span></div>
+              <span class="pill ${phase.kind === "peak" ? "ok" : "unknown"}">${this._escape(phase.level)}</span>
+            </div>
+          `).join("")}
+          ${moon ? `
+            <div class="row">
+              <div><strong>${this._escape(moon.label)}</strong><span>${this._escape(this._stratonClock(moon.start))} to ${this._escape(this._stratonClock(moon.end))}</span></div>
+              <span class="pill ${Number(program.moonlight) > 2 ? "warning" : "unknown"}">${this._escape(moon.level)}</span>
+            </div>
+          ` : ""}
+        </div>
+      </article>
+    `;
+  }
+
+  _stratonEvidenceDraft() {
+    const fixtures = this._stratonFixtures();
+    const fallbackFixture = fixtures.find((fixture) => fixture.selected) || fixtures[0] || null;
+    const fallbackFixtureId = fallbackFixture?.id || "";
+    const defaults = {
+      before: "",
+      after: "",
+      notes: "",
+      fixtureState: "",
+      probeFixtureId: fallbackFixtureId,
+      probePath: "",
+      extraProbePaths: "",
+      result: null,
+      fixtureStateResult: null,
+      probeResult: null,
+      probeScanResult: null,
+      testerNoteScenario: "strong",
+      testerNote: "",
+      testerNoteResult: null,
+      probeLoading: false,
+      probeScanning: false,
+    };
+    if (!this._stratonEvidence || typeof this._stratonEvidence !== "object") {
+      this._stratonEvidence = { ...defaults };
+    }
+    this._stratonEvidence.before = this._stratonEvidence.before || "";
+    this._stratonEvidence.after = this._stratonEvidence.after || "";
+    this._stratonEvidence.notes = this._stratonEvidence.notes || "";
+    this._stratonEvidence.fixtureState = this._stratonEvidence.fixtureState || "";
+    if (!fixtures.some((fixture) => fixture.id === this._stratonEvidence.probeFixtureId)) {
+      this._stratonEvidence.probeFixtureId = fallbackFixtureId;
+    }
+    this._stratonEvidence.probePath = this._stratonEvidence.probePath || "";
+    this._stratonEvidence.extraProbePaths = this._stratonEvidence.extraProbePaths || "";
+    this._stratonEvidence.result = this._stratonEvidence.result || null;
+    this._stratonEvidence.fixtureStateResult = this._stratonEvidence.fixtureStateResult || null;
+    this._stratonEvidence.probeResult = this._stratonEvidence.probeResult || null;
+    this._stratonEvidence.probeScanResult = this._stratonEvidence.probeScanResult || null;
+    this._stratonEvidence.testerNoteScenario = this._stratonEvidence.testerNoteScenario || "strong";
+    this._stratonEvidence.testerNote = this._stratonEvidence.testerNote || "";
+    this._stratonEvidence.testerNoteResult = this._stratonEvidence.testerNoteResult || null;
+    this._stratonEvidence.probeLoading = Boolean(this._stratonEvidence.probeLoading);
+    this._stratonEvidence.probeScanning = Boolean(this._stratonEvidence.probeScanning);
+    return this._stratonEvidence;
+  }
+
+  _stratonParseEvidence(text) {
+    const raw = String(text || "").trim();
+    if (!raw) return { kind: "empty", value: null, lines: [], warning: "No text pasted." };
+    try {
+      return { kind: "json", value: JSON.parse(raw), lines: [] };
+    } catch {
+      return {
+        kind: "lines",
+        value: null,
+        lines: raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+        warning: "Not valid JSON; comparing as redacted lines.",
+      };
+    }
+  }
+
+  _stratonValueSignature(value) {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return `array:${value.length}`;
+    if (typeof value === "object") return `object:${Object.keys(value).length}`;
+    return `${typeof value}:${String(value)}`;
+  }
+
+  _stratonFlatten(value, prefix = "$", map = new Map(), state = { count: 0, max: 1200 }) {
+    if (state.count >= state.max) {
+      map.set(`${prefix}.__truncated`, "boolean:true");
+      return map;
+    }
+    state.count += 1;
+    if (Array.isArray(value)) {
+      value.slice(0, 80).forEach((item, index) => this._stratonFlatten(item, `${prefix}[${index}]`, map, state));
+      if (value.length > 80) map.set(`${prefix}.__more_items`, `number:${value.length - 80}`);
+      return map;
+    }
+    if (value && typeof value === "object") {
+      const keys = Object.keys(value).sort();
+      if (!keys.length) map.set(prefix, "object:0");
+      keys.forEach((key) => this._stratonFlatten(value[key], `${prefix}.${key}`, map, state));
+      return map;
+    }
+    map.set(prefix, this._stratonValueSignature(value));
+    return map;
+  }
+
+  _stratonEvidenceFocus(path) {
+    const text = String(path || "").toLowerCase();
+    if (/spectrum|channel|colour|color|white|blue|uv|violet|red|green|brightness|intensity|power|peak/.test(text)) return "spectrum";
+    if (/schedule|program|time|ramp|day|photoperiod/.test(text)) return "schedule";
+    if (/group|fixture|device|master|slave/.test(text)) return "grouping";
+    if (/firmware|model|version|serial/.test(text)) return "firmware";
+    if (/endpoint|api|url|http|method/.test(text)) return "endpoint";
+    return "other";
+  }
+
+  _stratonRedactSnippet(text) {
+    return String(text || "")
+      .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "x.x.x.x")
+      .replace(/([?&](?:token|key|auth|password|secret|session|sid)=)[^&\s]+/gi, "$1redacted")
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer redacted")
+      .slice(0, 120);
+  }
+
+  _stratonEndpointRows(...texts) {
+    const rows = [];
+    const seen = new Set();
+    const pattern = /\b(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b\s+([^\s"']+)/gi;
+    texts.forEach((text) => {
+      String(text || "").replace(pattern, (_match, method, rawUrl) => {
+        let path = String(rawUrl || "");
+        try {
+          const url = new URL(path);
+          path = `${url.pathname}${url.search ? "?redacted" : ""}`;
+        } catch {
+          path = path.replace(/\?.*$/, "?redacted");
+        }
+        path = this._stratonRedactSnippet(path);
+        const key = `${method.toUpperCase()} ${path}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          rows.push({ method: method.toUpperCase(), path });
+        }
+        return "";
+      });
+    });
+    return rows.slice(0, 12);
+  }
+
+  _stratonProbeHostAllowed(hostname) {
+    const host = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+    if (!host || host === "localhost" || host === "0.0.0.0" || host === "::") return false;
+    if (/^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true;
+    const private172 = host.match(/^172\.(\d{1,2})\./);
+    if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31) return true;
+    if (/^fe80:/i.test(host)) return true;
+    return !host.includes(".") || /\.(local|lan|home|internal)$/.test(host);
+  }
+
+  _stratonProbePathPresets() {
+    return [
+      {
+        path: "/",
+        label: "Test root",
+        detail: "First reachability check. HTML or text is still useful because it proves the controller can talk to the fixture.",
+      },
+      {
+        path: "/settings",
+        label: "Try settings",
+        detail: "Common read path to test for a current settings response.",
+      },
+      {
+        path: "/api/settings",
+        label: "Try API settings",
+        detail: "Alternate API-style read path seen in many device apps.",
+      },
+      {
+        path: "/ati.settings.json",
+        label: "Try backup JSON",
+        detail: "Checks whether the fixture exposes the same style of settings backup file users export manually.",
+      },
+    ];
+  }
+
+  _stratonExtraProbePathPresets(text = this._stratonEvidenceDraft().extraProbePaths) {
+    const seen = new Set(this._stratonProbePathPresets().map((preset) => preset.path));
+    return String(text || "")
+      .split(/[\s,]+/)
+      .map((path) => this._stratonCatalogPath(path))
+      .filter(Boolean)
+      .filter((path) => {
+        if (seen.has(path)) return false;
+        seen.add(path);
+        return true;
+      })
+      .slice(0, 8)
+      .map((path) => ({
+        path,
+        label: `Try ${path}`,
+        detail: "Extra read-only GET path supplied by tester evidence.",
+        extra: true,
+      }));
+  }
+
+  _stratonProbeTarget(fixture, path) {
+    const host = String(fixture?.host || "").trim();
+    const cleanPath = String(path || "").trim();
+    if (!fixture) return { error: "Choose a configured Straton fixture before probing." };
+    if (!host) return { error: "Add the fixture IP or host before probing." };
+    if (!cleanPath) return { error: "Enter a read-only path from an ATI export or browser network capture." };
+    if (/^(?:https?:)?\/\//i.test(cleanPath)) {
+      return { error: "Enter only the fixture path, such as /settings. The host comes from the selected fixture." };
+    }
+    if (/^(?:javascript|data|file|blob):/i.test(cleanPath)) {
+      return { error: "That path scheme is not allowed for fixture evidence collection." };
+    }
+    const hostText = /^https?:\/\//i.test(host) ? host : `http://${host}`;
+    try {
+      const base = new URL(hostText);
+      if (!this._stratonProbeHostAllowed(base.hostname)) {
+        return { error: "Only private or local fixture hosts can be probed." };
+      }
+      const pathText = cleanPath.startsWith("/") ? cleanPath : `/${cleanPath}`;
+      const target = new URL(pathText, base.origin);
+      if (target.origin !== base.origin) {
+        return { error: "The probe path must stay on the selected fixture host." };
+      }
+      return {
+        url: target.toString(),
+        fixtureName: fixture.name || "Straton fixture",
+        host: this._stratonRedactSnippet(base.host),
+        path: `${target.pathname}${target.search ? "?redacted" : ""}`,
+      };
+    } catch {
+      return { error: "The fixture host is not a valid IP, hostname, or URL." };
+    }
+  }
+
+  _stratonApplyProbeResponse(draft, payload, fixtureName, body, promote = true) {
+    const text = String(body || "");
+    const parsed = text ? this._stratonParseEvidence(text) : { kind: payload.mode || "empty" };
+    const status = payload.status
+      ? `${payload.status}${payload.status_text ? ` ${payload.status_text}` : ""}`
+      : payload.status_text || "not run";
+    const responseOk = Number(payload.status) >= 200 && Number(payload.status) < 300;
+    draft.probeLoading = false;
+    if (text) draft.fixtureState = text;
+    draft.probeResult = {
+      checkedAt: new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" }),
+      source: payload.source === "home_assistant" ? "Home Assistant backend" : "browser",
+      method: payload.method || "GET",
+      path: payload.path || "unknown path",
+      fixtureName,
+      host: payload.host || "redacted",
+      status,
+      statusClass: payload.success && parsed.kind === "json" ? "ok" : responseOk ? "unknown" : "warning",
+      contentType: this._stratonRedactSnippet(payload.content_type || payload.contentType || "unknown"),
+      bytes: Number(payload.bytes) || text.length,
+      mode: parsed.kind || payload.mode || "unknown",
+      warning: payload.warning || (text ? "" : "The probe did not return text for analysis."),
+      preview: this._stratonRedactSnippet(text),
+    };
+    this._recordActivity(`Straton ${draft.probeResult.source} GET ${status} from ${fixtureName}: ${draft.probeResult.path}`, draft.probeResult.statusClass === "ok" ? "control" : "warning");
+    if (promote && draft.probeResult.statusClass === "ok" && draft.probeResult.mode === "json") {
+      this._promoteStratonEndpoint("currentState", draft.probeResult.path, "Manual probe JSON path");
+    } else if (promote && draft.probeResult.statusClass === "unknown" && draft.probeResult.path === "/") {
+      this._promoteStratonEndpoint("reachability", draft.probeResult.path, "Root reachable");
+    }
+    if (text) this._analyzeStratonFixtureState();
+    else this._render();
+  }
+
+  _stratonProbeRowFromPayload(path, payload = {}, body = "", fallbackWarning = "") {
+    const parsed = body ? this._stratonParseEvidence(body) : { kind: payload.mode || "empty" };
+    const status = payload.status
+      ? `${payload.status}${payload.status_text ? ` ${payload.status_text}` : ""}`
+      : payload.status_text || "not run";
+    const responseOk = Number(payload.status) >= 200 && Number(payload.status) < 300;
+    const statusClass = payload.success && parsed.kind === "json" ? "ok" : responseOk ? "unknown" : "warning";
+    return {
+      path: payload.path || this._stratonRedactSnippet(path || "unknown"),
+      source: payload.source === "home_assistant" ? "Home Assistant backend" : payload.source || "unknown",
+      status,
+      statusClass,
+      contentType: this._stratonRedactSnippet(payload.content_type || payload.contentType || "unknown"),
+      bytes: Number(payload.bytes) || body.length,
+      mode: parsed.kind || payload.mode || "unknown",
+      warning: fallbackWarning || payload.warning || "",
+    };
+  }
+
+  async _scanStratonProbePaths() {
+    const draft = this._stratonEvidenceDraft();
+    const fixture = this._stratonProbeFixture();
+    const checkedAt = new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    if (!fixture) {
+      draft.probeScanResult = {
+        checkedAt,
+        fixtureName: "not selected",
+        host: "not set",
+        rows: [],
+        reachableCount: 0,
+        jsonCount: 0,
+        warning: "Add a Straton fixture target before scanning safe paths.",
+      };
+      this._render();
+      return;
+    }
+    draft.probeScanning = true;
+    draft.probeScanResult = {
+      checkedAt,
+      fixtureName: fixture.name || "Straton fixture",
+      host: this._stratonRedactSnippet(fixture.host || "not set"),
+      rows: [],
+      reachableCount: 0,
+      jsonCount: 0,
+      warning: "Safe path scan in progress.",
+    };
+    this._render();
+    const rows = [];
+    let best = null;
+    const presets = [
+      ...this._stratonProbePathPresets(),
+      ...this._stratonExtraProbePathPresets(draft.extraProbePaths),
+    ];
+    for (const preset of presets) {
+      const target = this._stratonProbeTarget(fixture, preset.path);
+      if (target.error) {
+        rows.push({
+          label: preset.label,
+          path: this._stratonRedactSnippet(preset.path),
+          source: "not run",
+          status: "not run",
+          statusClass: "warning",
+          contentType: "none",
+          bytes: 0,
+          mode: "invalid",
+          warning: target.error,
+        });
+        continue;
+      }
+      try {
+        const payload = await this._callWS({
+          type: "openreef/straton_probe",
+          host: fixture.host || "",
+          path: preset.path,
+        });
+        const body = String(payload?.body || "");
+        const row = {
+          label: preset.label,
+          ...this._stratonProbeRowFromPayload(preset.path, payload || {}, body),
+        };
+        rows.push(row);
+        if (!best && row.mode === "json" && row.statusClass === "ok") {
+          best = { payload, body, preset };
+        }
+      } catch {
+        rows.push({
+          label: preset.label,
+          path: this._stratonRedactSnippet(preset.path),
+          source: "Home Assistant backend",
+          status: "blocked",
+          statusClass: "warning",
+          contentType: "none",
+          bytes: 0,
+          mode: "error",
+          warning: "OpenReef could not run the backend probe command.",
+        });
+      }
+    }
+    const reachableCount = rows.filter((row) => ["ok", "unknown"].includes(row.statusClass)).length;
+    const jsonCount = rows.filter((row) => row.mode === "json").length;
+    const rootReachable = rows.find((row) => row.path === "/" && ["ok", "unknown"].includes(row.statusClass));
+    draft.probeScanning = false;
+    draft.probeScanResult = {
+      checkedAt: new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" }),
+      fixtureName: fixture.name || "Straton fixture",
+      host: this._stratonRedactSnippet(fixture.host || "not set"),
+      rows,
+      reachableCount,
+      jsonCount,
+      bestPath: best?.payload?.path || "",
+      warning: best ? "" : reachableCount ? "Controller reached the fixture, but no JSON path was found yet." : "No safe path was reachable from the controller.",
+    };
+    if (rootReachable) this._promoteStratonEndpoint("reachability", rootReachable.path, "Root reachable");
+    if (best) {
+      draft.probePath = best.preset.path;
+      this._promoteStratonEndpoint("currentState", best.preset.path, "Safe scan JSON path");
+      this._stratonApplyProbeResponse(draft, best.payload || {}, fixture.name || "Straton fixture", best.body, false);
+      return;
+    }
+    this._recordActivity(`Straton safe path scan complete: ${reachableCount} reachable, ${jsonCount} JSON`, reachableCount ? "control" : "warning");
+    this._render();
+  }
+
+  async _probeStratonFixtureState() {
+    const draft = this._stratonEvidenceDraft();
+    const fixtures = this._stratonFixtures();
+    const fixture = fixtures.find((item) => item.id === draft.probeFixtureId) || fixtures.find((item) => item.selected) || fixtures[0];
+    const target = this._stratonProbeTarget(fixture, draft.probePath);
+    const checkedAt = new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    if (target.error) {
+      draft.probeResult = {
+        checkedAt,
+        source: "not run",
+        method: "GET",
+        path: this._stratonRedactSnippet(draft.probePath || "not set"),
+        fixtureName: fixture?.name || "not selected",
+        host: this._stratonRedactSnippet(fixture?.host || "not set"),
+        status: "not run",
+        statusClass: "warning",
+        contentType: "none",
+        bytes: 0,
+        mode: "invalid",
+        warning: target.error,
+      };
+      this._recordActivity(`Straton read-only probe not run: ${target.error}`, "warning");
+      this._render();
+      return;
+    }
+    draft.probeLoading = true;
+    draft.probeResult = {
+      checkedAt,
+      source: "Home Assistant backend",
+      method: "GET",
+      path: target.path,
+      fixtureName: target.fixtureName,
+      host: target.host,
+      status: "reading",
+      statusClass: "unknown",
+      contentType: "pending",
+      bytes: 0,
+      mode: "pending",
+      warning: "Read-only GET is in progress.",
+    };
+    this._render();
+    try {
+      const result = await this._callWS({
+        type: "openreef/straton_probe",
+        host: fixture.host || "",
+        path: draft.probePath || "",
+      });
+      this._stratonApplyProbeResponse(draft, result || {}, target.fixtureName, result?.body || "");
+      return;
+    } catch {
+      // Fall back to a direct browser GET for older OpenReef backends or local static testing.
+    }
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeout = controller ? window.setTimeout(() => controller.abort(), 10000) : null;
+    try {
+      const response = await fetch(target.url, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        mode: "cors",
+        signal: controller?.signal,
+      });
+      if (timeout) window.clearTimeout(timeout);
+      const contentType = response.headers?.get?.("content-type") || "unknown";
+      const rawText = await response.text();
+      const text = rawText.length > 60000 ? rawText.slice(0, 60000) : rawText;
+      const parsed = this._stratonParseEvidence(text);
+      const truncated = rawText.length > text.length;
+      draft.probeLoading = false;
+      draft.fixtureState = text;
+      draft.probeResult = {
+        checkedAt: new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" }),
+        source: "browser fallback",
+        method: "GET",
+        path: target.path,
+        fixtureName: target.fixtureName,
+        host: target.host,
+        status: `${response.status} ${response.statusText || ""}`.trim(),
+        statusClass: response.ok && parsed.kind === "json" ? "ok" : response.ok ? "unknown" : "warning",
+        contentType: this._stratonRedactSnippet(contentType),
+        bytes: rawText.length,
+        mode: parsed.kind,
+        warning: [
+          response.ok ? "" : "The fixture returned a non-2xx status.",
+          parsed.kind === "json" ? "" : "The response was not structured JSON for planned-vs-observed comparison.",
+          truncated ? "The response was truncated before analysis." : "",
+        ].filter(Boolean).join(" "),
+        preview: this._stratonRedactSnippet(text),
+      };
+      this._recordActivity(`Straton read-only GET ${response.status} from ${target.fixtureName}: ${target.path}`, response.ok ? "control" : "warning");
+      this._analyzeStratonFixtureState();
+    } catch (error) {
+      if (timeout) window.clearTimeout(timeout);
+      const timedOut = error?.name === "AbortError";
+      draft.probeLoading = false;
+      draft.probeResult = {
+        checkedAt: new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" }),
+        source: "browser fallback",
+        method: "GET",
+        path: target.path,
+        fixtureName: target.fixtureName,
+        host: target.host,
+        status: timedOut ? "timeout" : "blocked",
+        statusClass: "warning",
+        contentType: "none",
+        bytes: 0,
+        mode: "error",
+        warning: timedOut
+          ? "The fixture did not answer within 10 seconds."
+          : "The browser could not read this fixture path. This may be CORS, mixed-content, network, or offline fixture behavior.",
+      };
+      this._recordActivity(`Straton read-only probe failed for ${target.fixtureName}: ${draft.probeResult.warning}`, "warning");
+      this._render();
+    }
+  }
+
+  _stratonLineDiff(beforeLines, afterLines) {
+    const before = new Set(beforeLines.map((line) => this._stratonRedactSnippet(line)));
+    const after = new Set(afterLines.map((line) => this._stratonRedactSnippet(line)));
+    const added = [...after].filter((line) => !before.has(line));
+    const removed = [...before].filter((line) => !after.has(line));
+    return {
+      mode: "line",
+      changedCount: added.length + removed.length,
+      addedCount: added.length,
+      removedCount: removed.length,
+      rows: [
+        ...added.slice(0, 8).map((path) => ({ kind: "added", path, focus: "line" })),
+        ...removed.slice(0, 8).map((path) => ({ kind: "removed", path, focus: "line" })),
+      ].slice(0, 12),
+    };
+  }
+
+  _stratonJsonDiff(beforeValue, afterValue) {
+    const before = this._stratonFlatten(beforeValue);
+    const after = this._stratonFlatten(afterValue);
+    const paths = [...new Set([...before.keys(), ...after.keys()])].sort();
+    const added = [];
+    const removed = [];
+    const changed = [];
+    paths.forEach((path) => {
+      if (!before.has(path)) added.push(path);
+      else if (!after.has(path)) removed.push(path);
+      else if (before.get(path) !== after.get(path)) changed.push(path);
+    });
+    return {
+      mode: "json",
+      changedCount: changed.length,
+      addedCount: added.length,
+      removedCount: removed.length,
+      rows: [
+        ...changed.slice(0, 10).map((path) => ({ kind: "changed", path, focus: this._stratonEvidenceFocus(path) })),
+        ...added.slice(0, 6).map((path) => ({ kind: "added", path, focus: this._stratonEvidenceFocus(path) })),
+        ...removed.slice(0, 6).map((path) => ({ kind: "removed", path, focus: this._stratonEvidenceFocus(path) })),
+      ].slice(0, 14),
+    };
+  }
+
+  _stratonFlattenLeaves(value, prefix = "$", rows = [], state = { count: 0, max: 1600 }) {
+    if (state.count >= state.max) {
+      rows.push({ path: `${prefix}.__truncated`, value: true, focus: "other" });
+      return rows;
+    }
+    state.count += 1;
+    if (Array.isArray(value)) {
+      value.slice(0, 120).forEach((item, index) => this._stratonFlattenLeaves(item, `${prefix}[${index}]`, rows, state));
+      if (value.length > 120) rows.push({ path: `${prefix}.__more_items`, value: value.length - 120, focus: "other" });
+      return rows;
+    }
+    if (value && typeof value === "object") {
+      Object.keys(value).sort().forEach((key) => this._stratonFlattenLeaves(value[key], `${prefix}.${key}`, rows, state));
+      return rows;
+    }
+    rows.push({ path: prefix, value, focus: this._stratonEvidenceFocus(prefix) });
+    return rows;
+  }
+
+  _stratonSchemaFingerprint(rows = []) {
+    const signatures = rows
+      .map((row) => `${row.path}:${Array.isArray(row.value) ? "array" : row.value === null ? "null" : typeof row.value}`)
+      .sort();
+    let hash = 2166136261;
+    signatures.join("|").split("").forEach((char) => {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    });
+    const focusCounts = rows.reduce((counts, row) => {
+      counts[row.focus] = (counts[row.focus] || 0) + 1;
+      return counts;
+    }, {});
+    return {
+      id: hash.toString(16).padStart(8, "0"),
+      leafCount: rows.length,
+      focusCounts,
+    };
+  }
+
+  _stratonDisplayValue(value) {
+    if (typeof value === "number") return Number.isFinite(value) ? String(Math.round(value * 1000) / 1000) : "unknown";
+    if (typeof value === "boolean") return value ? "true" : "false";
+    if (value === null || value === undefined) return "unknown";
+    return this._stratonRedactSnippet(String(value));
+  }
+
+  _stratonNumberFromValue(value) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const match = value.match(/-?\d+(?:\.\d+)?/);
+      if (match) return Number(match[0]);
+    }
+    return null;
+  }
+
+  _stratonFixtureCandidate(rows, pattern, validate = () => true) {
+    return rows.find((row) => pattern.test(row.path) && validate(row.value, row));
+  }
+
+  _stratonFixtureNumberCandidate(rows, pattern, min = -Infinity, max = Infinity) {
+    const row = this._stratonFixtureCandidate(rows, pattern, (value) => {
+      const number = this._stratonNumberFromValue(value);
+      return number !== null && number >= min && number <= max;
+    });
+    if (!row) return null;
+    return { row, value: this._stratonNumberFromValue(row.value) };
+  }
+
+  _stratonFixtureTimeCandidate(rows, pattern) {
+    const row = this._stratonFixtureCandidate(rows, pattern, (value) => typeof value === "string" && /\b\d{1,2}:\d{2}\b/.test(value));
+    if (!row) return null;
+    const match = String(row.value).match(/\b\d{1,2}:\d{2}\b/);
+    return { row, value: match ? match[0] : "" };
+  }
+
+  _stratonFixtureCompareNumber(label, planned, candidate, unit = "", tolerance = 0) {
+    if (!candidate) {
+      return { label, status: "unknown", planned: `${planned}${unit}`, observed: "not found", detail: "No obvious matching field in the pasted fixture sample." };
+    }
+    const observed = Math.round(candidate.value * 10) / 10;
+    const delta = Math.abs(observed - planned);
+    return {
+      label,
+      status: delta <= tolerance ? "ok" : "warning",
+      planned: `${planned}${unit}`,
+      observed: `${observed}${unit}`,
+      detail: `Candidate path ${candidate.row.path}`,
+    };
+  }
+
+  _stratonFixtureCompareTime(label, planned, candidate) {
+    if (!candidate) {
+      return { label, status: "unknown", planned, observed: "not found", detail: "No obvious matching time field in the pasted fixture sample." };
+    }
+    return {
+      label,
+      status: candidate.value === planned ? "ok" : "warning",
+      planned,
+      observed: candidate.value,
+      detail: `Candidate path ${candidate.row.path}`,
+    };
+  }
+
+  _stratonProbeEvidencePath(draft = this._stratonEvidenceDraft()) {
+    const probe = draft.probeResult;
+    if (probe?.mode !== "json" || !probe.path) return "";
+    return this._stratonCatalogPath(probe.path);
+  }
+
+  _promoteStratonReadRoleCandidates(sourcePath, roles = []) {
+    const cleanPath = this._stratonCatalogPath(sourcePath);
+    if (!cleanPath) return [];
+    const endpoints = this._stratonEndpoints();
+    const promoted = [];
+    roles.forEach(({ kind, label, reason }) => {
+      if (!["program", "firmware", "groups"].includes(kind)) return;
+      if (endpoints[kind] === cleanPath) {
+        promoted.push({ kind, label, path: cleanPath, state: "already mapped", reason });
+        return;
+      }
+      if (this._promoteStratonEndpoint(kind, cleanPath, reason || `${label} candidate from fixture JSON`)) {
+        promoted.push({ kind, label, path: cleanPath, state: "promoted", reason });
+      }
+    });
+    return promoted;
+  }
+
+  _analyzeStratonFixtureState() {
+    const draft = this._stratonEvidenceDraft();
+    const parsed = this._stratonParseEvidence(draft.fixtureState);
+    const endpoints = this._stratonEndpointRows(draft.fixtureState);
+    const checkedAt = new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    if (parsed.kind !== "json") {
+      draft.fixtureStateResult = {
+        checkedAt,
+        mode: parsed.kind,
+        warning: parsed.warning || "Paste a JSON fixture export or response for planned-vs-observed comparison.",
+        leafCount: 0,
+        focusCounts: {},
+        endpoints,
+        observations: [
+          { label: "Fixture sample", status: "warning", planned: "JSON", observed: parsed.kind, detail: "Read-only comparison needs structured JSON." },
+        ],
+        rows: [],
+      };
+      this._recordActivity("Straton fixture sample needs JSON for read-only comparison", "warning");
+      this._render();
+      return;
+    }
+    const program = this._stratonProgram();
+    const rows = this._stratonFlattenLeaves(parsed.value);
+    const schemaFingerprint = this._stratonSchemaFingerprint(rows);
+    const focusCounts = rows.reduce((counts, row) => {
+      counts[row.focus] = (counts[row.focus] || 0) + 1;
+      return counts;
+    }, {});
+    const observedPeak = this._stratonFixtureNumberCandidate(rows, /\.(?:peak|brightness|intensity|output|power|maxPower|maxIntensity)(?:\.|$)/i, 0, 100);
+    const observedStart = this._stratonFixtureTimeCandidate(rows, /\.(?:start|sunrise|on|begin|from|time)(?:Time)?(?:\.|$)/i);
+    const observedPhotoperiod = this._stratonFixtureNumberCandidate(rows, /\.(?:photoperiod(?:Hours)?|duration|dayLength|daylight|period|hours)(?:\.|$)/i, 1, 24);
+    const observedRamp = this._stratonFixtureNumberCandidate(rows, /\.(?:ramp|fade|transition)(?:Minutes|Duration|Time)?(?:\.|$)/i, 1, 360);
+    const observedMoon = this._stratonFixtureNumberCandidate(rows, /\.(?:moon|moonlight|lunar)(?:Intensity|Power|Brightness)?(?:\.|$)/i, 0, 10);
+    const firmwareRow = this._stratonFixtureCandidate(rows, /firmware|version|fw/i, (value) => value !== null && value !== undefined && String(value).trim() !== "");
+    const modelRow = this._stratonFixtureCandidate(rows, /model|product|fixture|deviceType/i, (value) => value !== null && value !== undefined && String(value).trim() !== "");
+    const groupRows = rows.filter((row) => row.focus === "grouping").slice(0, 4);
+    const sourcePath = this._stratonProbeEvidencePath(draft);
+    const roleCandidates = [];
+    if ([observedPeak, observedStart, observedPhotoperiod, observedRamp, observedMoon].some(Boolean) || focusCounts.schedule || focusCounts.spectrum) {
+      roleCandidates.push({ kind: "program", label: "Program", reason: "Fixture JSON includes schedule/spectrum candidates" });
+    }
+    if (firmwareRow || modelRow) {
+      roleCandidates.push({ kind: "firmware", label: "Firmware/model", reason: "Fixture JSON includes firmware/model candidates" });
+    }
+    if (groupRows.length) {
+      roleCandidates.push({ kind: "groups", label: "Groups", reason: "Fixture JSON includes grouping candidates" });
+    }
+    const promotedEndpoints = this._promoteStratonReadRoleCandidates(sourcePath, roleCandidates);
+    const notable = [
+      ...(firmwareRow ? [{ path: firmwareRow.path, focus: "firmware", value: this._stratonDisplayValue(firmwareRow.value) }] : []),
+      ...(modelRow ? [{ path: modelRow.path, focus: "firmware", value: this._stratonDisplayValue(modelRow.value) }] : []),
+      ...groupRows.map((row) => ({ path: row.path, focus: row.focus, value: this._stratonDisplayValue(row.value) })),
+      ...rows.filter((row) => row.focus === "schedule" || row.focus === "spectrum").slice(0, 8).map((row) => ({
+        path: row.path,
+        focus: row.focus,
+        value: this._stratonDisplayValue(row.value),
+      })),
+    ].slice(0, 14);
+    const observations = [
+      this._stratonFixtureCompareNumber("Peak output", Number(program.peak) || 0, observedPeak, "%", 5),
+      this._stratonFixtureCompareTime("Start time", program.startTime || "10:00", observedStart),
+      this._stratonFixtureCompareNumber("Photoperiod", Number(program.photoperiodHours) || 10, observedPhotoperiod, "h", 0.5),
+      this._stratonFixtureCompareNumber("Ramp", Number(program.rampMinutes) || 90, observedRamp, "m", 10),
+      this._stratonFixtureCompareNumber("Moonlight", Number(program.moonlight) || 0, observedMoon, "%", 0.5),
+      {
+        label: "Firmware",
+        status: firmwareRow && this._stratonFirmwareReady(firmwareRow.value) ? "ok" : firmwareRow ? "warning" : "unknown",
+        planned: "2024+ baseline",
+        observed: firmwareRow ? this._stratonDisplayValue(firmwareRow.value) : "not found",
+        detail: firmwareRow ? `Candidate path ${firmwareRow.path}` : "No obvious firmware field in the pasted fixture sample.",
+      },
+    ];
+    draft.fixtureStateResult = {
+      checkedAt,
+      mode: parsed.kind,
+      warning: "",
+      leafCount: rows.length,
+      focusCounts,
+      schemaFingerprint,
+      endpoints,
+      observations,
+      promotedEndpoints,
+      rows: notable,
+    };
+    this._recordActivity(`Straton fixture sample analyzed: ${rows.length} leaf value(s), ${observations.filter((item) => item.status === "ok").length} close match(es)`);
+    this._render();
+  }
+
+  _clearStratonFixtureState() {
+    const draft = this._stratonEvidenceDraft();
+    draft.fixtureState = "";
+    draft.fixtureStateResult = null;
+    draft.probeResult = null;
+    draft.probeScanResult = null;
+    draft.probeLoading = false;
+    draft.probeScanning = false;
+    this._render();
+  }
+
+  _stratonProbeFixture() {
+    const draft = this._stratonEvidenceDraft();
+    const fixtures = this._stratonFixtures();
+    return fixtures.find((item) => item.id === draft.probeFixtureId) || fixtures.find((item) => item.selected) || fixtures[0] || null;
+  }
+
+  _applyStratonApFallback() {
+    const draft = this._stratonEvidenceDraft();
+    let fixture = this._stratonProbeFixture();
+    if (!fixture) {
+      this._addStratonFixture();
+      fixture = this._stratonFixtures()[0] || null;
+    }
+    if (fixture) {
+      fixture.host = "192.168.100.1";
+      fixture.selected = true;
+      fixture.connectionMode = "ap";
+      draft.probeFixtureId = fixture.id;
+    }
+    draft.probePath = "/";
+    draft.probeResult = null;
+    draft.probeScanResult = null;
+    draft.probeScanning = false;
+    this._recordActivity("Straton AP fallback staged: 192.168.100.1 with root reachability test");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _probeStratonFixturePath(path) {
+    const draft = this._stratonEvidenceDraft();
+    draft.probePath = path || "/";
+    return this._probeStratonFixtureState();
+  }
+
+  _analyzeStratonEvidence() {
+    const draft = this._stratonEvidenceDraft();
+    const before = this._stratonParseEvidence(draft.before);
+    const after = this._stratonParseEvidence(draft.after);
+    const endpoints = this._stratonEndpointRows(draft.notes, draft.before, draft.after);
+    let diff;
+    if (before.kind === "json" && after.kind === "json") {
+      diff = this._stratonJsonDiff(before.value, after.value);
+    } else {
+      diff = this._stratonLineDiff(before.lines, after.lines);
+    }
+    const focusCounts = diff.rows.reduce((counts, row) => {
+      counts[row.focus] = (counts[row.focus] || 0) + 1;
+      return counts;
+    }, {});
+    draft.result = {
+      checkedAt: new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" }),
+      beforeKind: before.kind,
+      afterKind: after.kind,
+      warning: [before.warning, after.warning].filter(Boolean).join(" "),
+      endpoints,
+      focusCounts,
+      ...diff,
+    };
+    this._recordActivity(`Straton adapter evidence analyzed: ${diff.changedCount} changed, ${diff.addedCount} added, ${diff.removedCount} removed`);
+    this._render();
+  }
+
+  _clearStratonEvidence() {
+    const draft = this._stratonEvidenceDraft();
+    draft.before = "";
+    draft.after = "";
+    draft.notes = "";
+    draft.result = null;
+    this._render();
+  }
+
+  _stratonTesterNoteValue(lines, label) {
+    const prefix = `- ${String(label || "").toLowerCase()}:`;
+    const line = (lines || []).find((item) => String(item || "").toLowerCase().startsWith(prefix));
+    if (!line) return "";
+    return String(line).slice(line.indexOf(":") + 1).trim();
+  }
+
+  _stratonTesterNotePath(value) {
+    const text = String(value || "").trim();
+    if (!text || /^(?:not mapped|none|unknown|n\/a)$/i.test(text)) return "";
+    return this._stratonCatalogPath(text);
+  }
+
+  _stratonTesterNoteFingerprint(value) {
+    const text = String(value || "").trim();
+    if (!text || /^(?:not available|not mapped|none|unknown|n\/a)$/i.test(text)) return "";
+    const match = text.match(/\b([a-f0-9]{6,16})\b/i);
+    return (match ? match[1] : text.split(/\s+/)[0]).toLowerCase();
+  }
+
+  _stratonReturnedSetupEvidence(parts = {}) {
+    const setupClaimTitle = String(parts.setupClaimTitle || "");
+    const setupClaimStatus = String(parts.setupClaimStatus || "");
+    const apRouteTitle = String(parts.apRouteTitle || "");
+    const apRouteStatus = String(parts.apRouteStatus || "");
+    const bypassTitle = String(parts.title || "");
+    const bypassStatus = String(parts.status || "");
+    const currentState = String(parts.currentState || "");
+    const jsonCount = Number(parts.jsonCount) || 0;
+    const reachableCount = Number(parts.reachableCount) || 0;
+    const hasJson = jsonCount > 0 || Boolean(currentState);
+    const apRouteOk = apRouteStatus === "ok" && /^AP\b/i.test(apRouteTitle);
+    const apRouteWarning = apRouteStatus === "warning" || /not reachable/i.test(apRouteTitle);
+    const preSetupClaim = /pre-setup bypass candidate/i.test(setupClaimTitle) && setupClaimStatus === "ok";
+    const lanOnly = /LAN confidence only/i.test(setupClaimTitle) || /^LAN\b/i.test(apRouteTitle);
+    if (preSetupClaim && apRouteOk && hasJson) {
+      return {
+        status: "ok",
+        title: "Strong pre-setup evidence",
+        detail: "Returned note has AP route proof, pre-setup fixture state, and a JSON read path.",
+        next: "Use this for read-adapter mapping, but keep writes locked until program readback and save/apply endpoints are verified.",
+      };
+    }
+    if (apRouteWarning) {
+      return {
+        status: "warning",
+        title: "Route blocker",
+        detail: "Returned note says the controller could not reach the Straton AP route.",
+        next: "Fix controller-to-AP routing before treating this as an ATI setup or Straton endpoint failure.",
+      };
+    }
+    if (lanOnly && hasJson) {
+      return {
+        status: "unknown",
+        title: "LAN read evidence only",
+        detail: "Returned note has useful read evidence, but it appears to be from an already-networked fixture.",
+        next: "Use it for read mapping, then test AP fallback on a brand-new/reset or stuck setup fixture.",
+      };
+    }
+    if (apRouteOk && hasJson) {
+      return {
+        status: "unknown",
+        title: "AP read, setup state unclear",
+        detail: "Returned note has AP JSON evidence, but setup state was not strong enough to prove ATI onboarding was bypassed.",
+        next: "Ask whether the fixture was brand new/reset, stuck in setup, or already configured.",
+      };
+    }
+    if (apRouteStatus === "unknown" && reachableCount > 0 && !hasJson) {
+      return {
+        status: "unknown",
+        title: "Reachable but no setup proof",
+        detail: "Returned note has reachability evidence but no useful JSON read path yet.",
+        next: "Collect safe read paths from ATI exports or redacted network notes, then scan again.",
+      };
+    }
+    if (bypassStatus === "warning" || /not proven|untested/i.test(bypassTitle)) {
+      return {
+        status: "warning",
+        title: "Setup bypass not proven",
+        detail: "Returned note does not prove OpenReef can reach and read the fixture before ATI setup.",
+        next: "Run AP fallback and Scan safe paths again after confirming the controller can reach the fixture network.",
+      };
+    }
+    return {
+      status: "unknown",
+      title: "Setup evidence incomplete",
+      detail: "Returned note does not include enough AP route, setup-state, and JSON-read evidence to make a setup-bypass claim.",
+      next: "Ask for the full support note after AP fallback and safe path scanning.",
+    };
+  }
+
+  _stratonTesterNoteResultFromText(text) {
+    const raw = String(text || "").trim();
+    const checkedAt = new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    const isExample = /^Created:\s*example only$/im.test(raw) || /^Example scenario:/im.test(raw);
+    if (!raw) {
+      return {
+        checkedAt,
+        status: "warning",
+        title: "No tester note",
+        detail: "Paste the Straton support note returned by the beta tester.",
+        next: "Use Copy tester steps, then ask the tester to send back the copied support note.",
+        reachableCount: 0,
+        jsonCount: 0,
+        endpoints: {},
+        promoted: [],
+        apRouteTitle: "",
+        apRouteStatus: "",
+        apRouteDetail: "",
+        apRouteNext: "",
+        setupEvidenceStatus: "warning",
+        setupEvidenceTitle: "No returned evidence",
+        setupEvidenceDetail: "No returned support note has been pasted yet.",
+        setupEvidenceNext: "Use Copy tester steps, then ask the tester to send back the copied support note.",
+        schemaFingerprint: "",
+        localSchemaFingerprint: "",
+        schemaFingerprintStatus: "unknown",
+        schemaFingerprintTitle: "Schema not included",
+        schemaFingerprintDetail: "No returned schema fingerprint was found in the pasted note.",
+      };
+    }
+    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const verdictRaw = this._stratonTesterNoteValue(lines, "verdict");
+    const outcomeRaw = this._stratonTesterNoteValue(lines, "outcome");
+    const verdictText = `${verdictRaw} ${outcomeRaw}`.trim();
+    const setupClaimRaw = this._stratonTesterNoteValue(lines, "setup claim");
+    const setupClaimStatus = (setupClaimRaw.match(/\((ok|unknown|warning)\)\s*$/i)?.[1] || "").toLowerCase();
+    const setupClaimTitle = setupClaimRaw.replace(/\s*\((ok|unknown|warning)\)\s*$/i, "").trim();
+    const setupClaimDetail = this._stratonTesterNoteValue(lines, "setup claim detail");
+    const apRouteRaw = this._stratonTesterNoteValue(lines, "AP route");
+    const apRouteStatus = (apRouteRaw.match(/\((ok|unknown|warning)\)\s*$/i)?.[1] || "").toLowerCase();
+    const apRouteTitle = apRouteRaw.replace(/\s*\((ok|unknown|warning)\)\s*$/i, "").trim();
+    const apRouteDetail = this._stratonTesterNoteValue(lines, "AP route detail");
+    const apRouteNext = this._stratonTesterNoteValue(lines, "AP route next");
+    const hardwareGeneration = this._stratonTesterNoteValue(lines, "hardware generation");
+    const bluetoothControl = this._stratonTesterNoteValue(lines, "Bluetooth evidence");
+    const liveParEnergy = this._stratonTesterNoteValue(lines, "Live PAR/Energy");
+    const templatesGroups = this._stratonTesterNoteValue(lines, "templates/groups");
+    const scheduleSave = this._stratonTesterNoteValue(lines, "schedule save");
+    const reefPilotEvidence = /reef pilot|bluetooth|straton x/i.test([
+      raw,
+      hardwareGeneration,
+      bluetoothControl,
+      liveParEnergy,
+      templatesGroups,
+      scheduleSave,
+    ].join(" "));
+    const reachability = this._stratonTesterNotePath(this._stratonTesterNoteValue(lines, "reachability"));
+    let currentState = this._stratonTesterNotePath(this._stratonTesterNoteValue(lines, "current state"));
+    const bestPath = this._stratonTesterNotePath(this._stratonTesterNoteValue(lines, "best path"));
+    const request = this._stratonTesterNoteValue(lines, "request");
+    const requestMatch = request.match(/\bGET\s+([^\s,]+)/i);
+    if (!currentState) currentState = bestPath || this._stratonTesterNotePath(requestMatch?.[1] || "");
+    const endpoints = {
+      reachability,
+      currentState,
+      program: this._stratonTesterNotePath(this._stratonTesterNoteValue(lines, "program")),
+      firmware: this._stratonTesterNotePath(this._stratonTesterNoteValue(lines, "firmware")),
+      groups: this._stratonTesterNotePath(this._stratonTesterNoteValue(lines, "groups")),
+    };
+    const reachableCount = Math.max(0, Number(this._stratonTesterNoteValue(lines, "reachable paths")) || 0);
+    const jsonCount = Math.max(0, Number(this._stratonTesterNoteValue(lines, "JSON paths")) || 0);
+    const schemaFingerprint = this._stratonTesterNoteFingerprint(this._stratonTesterNoteValue(lines, "schema fingerprint"));
+    const localSchemaFingerprint = String(this._stratonEvidence?.fixtureStateResult?.schemaFingerprint?.id || "").trim().toLowerCase();
+    let schemaFingerprintStatus = "unknown";
+    let schemaFingerprintTitle = "Schema not included";
+    let schemaFingerprintDetail = "No returned schema fingerprint was found in the pasted note.";
+    if (schemaFingerprint && localSchemaFingerprint && schemaFingerprint === localSchemaFingerprint) {
+      schemaFingerprintStatus = "ok";
+      schemaFingerprintTitle = "Schema match";
+      schemaFingerprintDetail = "The returned note has the same redacted JSON shape as the current local fixture sample.";
+    } else if (schemaFingerprint && localSchemaFingerprint) {
+      schemaFingerprintStatus = "warning";
+      schemaFingerprintTitle = "Schema mismatch";
+      schemaFingerprintDetail = "The returned note has a different redacted JSON shape from the current local fixture sample.";
+    } else if (schemaFingerprint) {
+      schemaFingerprintStatus = "unknown";
+      schemaFingerprintTitle = "Schema captured";
+      schemaFingerprintDetail = "The returned note included a schema fingerprint, but there is no local fixture sample to compare against yet.";
+    }
+    let status = "unknown";
+    let title = "Bypass unclear";
+    let detail = "The note was parsed, but it does not include a clear bypass verdict.";
+    let next = "Ask the tester for the full Straton support note, including the safe path scan section.";
+    if (reefPilotEvidence) {
+      status = "unknown";
+      title = "Reef Pilot Bluetooth evidence";
+      detail = "The returned note is for Straton X/Reef Pilot Bluetooth. AP route does not prove this adapter generation.";
+      next = "Collect pairing/control, Live PAR/Energy, template/group, and schedule-save confirmation; keep writes locked.";
+    } else if (/read-only bypass proven|read path found/i.test(verdictText) || jsonCount > 0 || currentState) {
+      status = "ok";
+      title = "Read-only bypass proven";
+      detail = "The tester note includes a JSON/read path candidate from real fixture evidence.";
+      next = "Use this as candidate adapter evidence; keep writes locked until current program and save/apply endpoints are verified.";
+    } else if (/reachability bypass only|reachable,\s*no json/i.test(verdictText) || reachableCount > 0) {
+      status = "unknown";
+      title = "Reachability bypass only";
+      detail = "The controller reached the fixture, but the note does not include a usable current-state JSON path.";
+      next = "Collect ATI export links or browser network read paths, then retry Controller GET.";
+    } else if (/bypass not proven|not reachable/i.test(verdictText)) {
+      status = "warning";
+      title = "Bypass not proven";
+      detail = "The tester note says OpenReef could not reach/read the fixture from that network state.";
+      next = "Confirm AP/LAN routing, try the LAN IP, or collect the tester's ATI setup state before promising a bypass.";
+    } else if (/bypass untested|not scanned/i.test(verdictText)) {
+      status = "warning";
+      title = "Bypass untested";
+      detail = "The note does not show a completed safe path scan.";
+      next = "Ask the tester to run Scan safe paths and resend the support note.";
+    }
+    const promoted = [];
+    if (!isExample && !reefPilotEvidence && endpoints.reachability && this._promoteStratonEndpoint("reachability", endpoints.reachability, "Tester note reachability path")) {
+      promoted.push(`reachability ${endpoints.reachability}`);
+    }
+    if (!isExample && !reefPilotEvidence && status === "ok" && endpoints.currentState && this._promoteStratonEndpoint("currentState", endpoints.currentState, "Tester note current-state path")) {
+      promoted.push(`current state ${endpoints.currentState}`);
+    }
+    const setupEvidence = reefPilotEvidence
+      ? {
+        status: "unknown",
+        title: "Reef Pilot Bluetooth evidence",
+        detail: "Returned note is for Straton X/Reef Pilot Bluetooth; AP route does not prove this adapter.",
+        next: "Use the Bluetooth observations for generation mapping, then collect protocol/readback evidence before any control work.",
+      }
+      : this._stratonReturnedSetupEvidence({
+        status,
+        title,
+        setupClaimTitle,
+        setupClaimStatus,
+        apRouteTitle,
+        apRouteStatus,
+        currentState: endpoints.currentState,
+        reachableCount,
+        jsonCount,
+      });
+    return {
+      checkedAt,
+      status,
+      title,
+      detail,
+      next,
+      verdict: verdictRaw || outcomeRaw || "not found",
+      setupClaimTitle,
+      setupClaimStatus,
+      setupClaimDetail,
+      apRouteTitle,
+      apRouteStatus,
+      apRouteDetail,
+      apRouteNext,
+      hardwareGeneration,
+      bluetoothControl,
+      liveParEnergy,
+      templatesGroups,
+      scheduleSave,
+      reefPilotEvidence,
+      setupEvidenceStatus: setupEvidence.status,
+      setupEvidenceTitle: setupEvidence.title,
+      setupEvidenceDetail: setupEvidence.detail,
+      setupEvidenceNext: setupEvidence.next,
+      reachableCount,
+      jsonCount,
+      endpoints,
+      promoted,
+      example: isExample,
+      schemaFingerprint,
+      localSchemaFingerprint,
+      schemaFingerprintStatus,
+      schemaFingerprintTitle,
+      schemaFingerprintDetail,
+      warning: [
+        raw.length > 12000 ? "Only the redacted summary was needed; avoid pasting raw ATI exports into this box." : "",
+        isExample ? "Example note only; no endpoint candidates were promoted and no hardware access is proven." : "",
+      ].filter(Boolean).join(" "),
+    };
+  }
+
+  _analyzeStratonTesterNote() {
+    const draft = this._stratonEvidenceDraft();
+    draft.testerNoteResult = this._stratonTesterNoteResultFromText(draft.testerNote);
+    this._recordActivity(`Straton tester note analyzed: ${draft.testerNoteResult.title}`, draft.testerNoteResult.status === "ok" ? "control" : "warning");
+    this._render();
+  }
+
+  _clearStratonTesterNote() {
+    const draft = this._stratonEvidenceDraft();
+    draft.testerNote = "";
+    draft.testerNoteResult = null;
+    this._render();
+  }
+
+  _stratonTesterNoteScenarioLabel(value) {
+    return ({
+      strong: "Strong AP read",
+      lan: "LAN-only read",
+      route: "AP route blocker",
+      reachable: "Reachability only",
+      bluetooth: "Reef Pilot Bluetooth",
+    })[value] || "Strong AP read";
+  }
+
+  _stratonExampleTesterNoteText(scenario = "strong") {
+    const key = ["strong", "lan", "route", "reachable", "bluetooth"].includes(scenario) ? scenario : "strong";
+    const examples = {
+      strong: {
+        label: "Strong AP read",
+        verdict: "Read-only bypass proven (ok)",
+        detail: "Example note says OpenReef reached a brand-new/reset fixture through AP fallback and found JSON without using schedule writes.",
+        next: "Use this as candidate adapter evidence; keep writes locked until current program and save/apply endpoints are verified.",
+        setupClaim: "Pre-setup bypass candidate (ok)",
+        setupDetail: "Example fixture was marked brand new/reset, AP fallback was selected, and a JSON read path was found.",
+        setupNext: "Treat this as strong setup-bypass evidence only after a real tester reproduces it.",
+        apRoute: "AP pre-setup read route (ok)",
+        apRouteDetail: "Example controller route reached the direct Straton AP address and returned JSON.",
+        apRouteNext: "Send the support note; keep writes locked until program readback and save/apply endpoints are verified.",
+        reachablePaths: 3,
+        jsonPaths: 1,
+        scanRows: [
+          "- best path: /api/config",
+          "- /: /, ok, text, browser-direct",
+          "- config: /api/config, ok, json, controller",
+          "- status: /api/status, ok, text, controller",
+        ],
+        endpoints: {
+          reachability: "/",
+          current: "/api/config",
+          program: "/api/config",
+          firmware: "/api/config",
+          groups: "/api/config",
+        },
+        fingerprint: "example1234",
+        leaves: 18,
+      },
+      lan: {
+        label: "LAN-only read",
+        verdict: "Read-only bypass proven (ok)",
+        detail: "Example note says OpenReef read JSON from an already-networked Straton on the home LAN.",
+        next: "Use this for read mapping only; it does not prove ATI first-time setup was bypassed.",
+        setupClaim: "LAN confidence only (unknown)",
+        setupDetail: "Example fixture was already configured on the home network, so the read is not onboarding proof.",
+        setupNext: "Repeat with AP fallback on a brand-new/reset or stuck setup fixture before claiming ATI setup replacement.",
+        apRoute: "LAN configured route (unknown)",
+        apRouteDetail: "Example route used the configured LAN host rather than the direct Straton AP address.",
+        apRouteNext: "Use this as LAN read evidence only, then test AP fallback separately.",
+        reachablePaths: 2,
+        jsonPaths: 1,
+        scanRows: [
+          "- best path: /api/status",
+          "- /: /, ok, text, controller",
+          "- status: /api/status, ok, json, controller",
+        ],
+        endpoints: {
+          reachability: "/",
+          current: "/api/status",
+          program: "not mapped",
+          firmware: "/api/status",
+          groups: "not mapped",
+        },
+        fingerprint: "lanread5678",
+        leaves: 11,
+      },
+      route: {
+        label: "AP route blocker",
+        verdict: "Bypass not proven (warning)",
+        detail: "Example note says the controller could not reach the direct Straton AP route.",
+        next: "Fix controller-to-AP routing before treating this as an ATI setup or Straton endpoint failure.",
+        setupClaim: "Pre-setup bypass candidate (warning)",
+        setupDetail: "Example fixture was marked brand new/reset, but the controller could not route to the Straton AP address.",
+        setupNext: "Move the controller/network onto a path that can reach the fixture AP, then scan again.",
+        apRoute: "AP route not reachable (warning)",
+        apRouteDetail: "Example controller could not reach 192.168.100.1 from the Home Assistant network.",
+        apRouteNext: "Solve controller/AP routing before testing endpoint paths.",
+        reachablePaths: 0,
+        jsonPaths: 0,
+        scanRows: [
+          "- best path: not mapped",
+          "- /: /, failed, none, controller",
+          "- config: /api/config, failed, none, controller",
+        ],
+        endpoints: {
+          reachability: "not mapped",
+          current: "not mapped",
+          program: "not mapped",
+          firmware: "not mapped",
+          groups: "not mapped",
+        },
+        fingerprint: "not available",
+        leaves: 0,
+      },
+      reachable: {
+        label: "Reachability only",
+        verdict: "Reachability bypass only (unknown)",
+        detail: "Example note says the controller reached the fixture root but did not find a useful JSON state path.",
+        next: "Collect ATI export links or redacted browser network read paths, then retry Controller GET.",
+        setupClaim: "Pre-setup evidence incomplete (unknown)",
+        setupDetail: "Example fixture was reachable, but no current-state JSON path was found.",
+        setupNext: "Scan more safe read paths before claiming setup replacement.",
+        apRoute: "AP route reachable, no JSON (unknown)",
+        apRouteDetail: "Example controller reached the direct Straton AP address, but only text/root responses were found.",
+        apRouteNext: "Collect safe read-path hints and scan again.",
+        reachablePaths: 1,
+        jsonPaths: 0,
+        scanRows: [
+          "- best path: not mapped",
+          "- /: /, ok, text, controller",
+          "- config: /api/config, failed, none, controller",
+        ],
+        endpoints: {
+          reachability: "/",
+          current: "not mapped",
+          program: "not mapped",
+          firmware: "not mapped",
+          groups: "not mapped",
+        },
+        fingerprint: "not available",
+        leaves: 0,
+      },
+      bluetooth: {
+        label: "Reef Pilot Bluetooth",
+        verdict: "Reef Pilot Bluetooth evidence returned (unknown)",
+        detail: "Example note reports Straton X/Reef Pilot Bluetooth app observations, not a ReefTECH AP read.",
+        next: "Collect pairing/control, Live PAR/Energy, template/group, and schedule-save confirmation; keep writes locked.",
+        setupClaim: "Bluetooth generation evidence (unknown)",
+        setupDetail: "Example tester identified Straton X / Reef Pilot Bluetooth, so ReefTECH AP setup bypass was not tested.",
+        setupNext: "Use this for Bluetooth adapter mapping only; do not treat it as Wi-Fi/AP setup proof.",
+        apRoute: "Not Reef Pilot proof (unknown)",
+        apRouteDetail: "AP route checks do not prove the Reef Pilot Bluetooth generation.",
+        apRouteNext: "Collect real pairing/control, Live PAR/Energy, template/group, and schedule-save observations.",
+        reachablePaths: 0,
+        jsonPaths: 0,
+        scanRows: [
+          "- best path: not mapped",
+          "- reef pilot: Bluetooth app evidence, not a GET endpoint",
+        ],
+        endpoints: {
+          reachability: "not mapped",
+          current: "not mapped",
+          program: "not mapped",
+          firmware: "not mapped",
+          groups: "not mapped",
+        },
+        fingerprint: "not available",
+        leaves: 0,
+        hardwareGeneration: "Straton X / Reef Pilot Bluetooth",
+        bluetoothControl: "Pairing/control notes returned",
+        liveParEnergy: "Observed in Reef Pilot, values not exported",
+        templatesGroups: "Template and group behavior observed",
+        scheduleSave: "Save confirmation unclear",
+      },
+    };
+    const item = examples[key];
+    return [
+      "OpenReef Straton support note",
+      "Created: example only",
+      `Example scenario: ${item.label}`,
+      "",
+      "Safety boundary",
+      "- Hardware write: locked",
+      "- Save local plan: saves OpenReef config/receipt only",
+      "- Raw ATI exports/network notes: not included in this note",
+      "",
+      "ATI setup bypass test",
+      `- verdict: ${item.verdict}`,
+      `- detail: ${item.detail}`,
+      `- next: ${item.next}`,
+      `- setup claim: ${item.setupClaim}`,
+      `- setup claim detail: ${item.setupDetail}`,
+      `- setup claim next: ${item.setupNext}`,
+      `- AP route: ${item.apRoute}`,
+      `- AP route detail: ${item.apRouteDetail}`,
+      `- AP route next: ${item.apRouteNext}`,
+      ...(item.hardwareGeneration ? [
+        "",
+        "Hardware generation",
+        `- hardware generation: ${item.hardwareGeneration}`,
+        `- Bluetooth evidence: ${item.bluetoothControl}`,
+        `- Live PAR/Energy: ${item.liveParEnergy}`,
+        `- templates/groups: ${item.templatesGroups}`,
+        `- schedule save: ${item.scheduleSave}`,
+      ] : []),
+      "",
+      "Safe path scan",
+      `- reachable paths: ${item.reachablePaths}`,
+      `- JSON paths: ${item.jsonPaths}`,
+      ...item.scanRows,
+      "",
+      "Read endpoint catalog",
+      `- reachability: ${item.endpoints.reachability}`,
+      `- current state: ${item.endpoints.current}`,
+      `- program: ${item.endpoints.program}`,
+      `- firmware: ${item.endpoints.firmware}`,
+      `- groups: ${item.endpoints.groups}`,
+      "",
+      "Current fixture sample",
+      `- schema fingerprint: ${item.fingerprint}`,
+      `- leaf values: ${item.leaves}`,
+      "",
+      "Privacy",
+      "- This example is synthetic and only rehearses the intake parser without a Straton.",
+    ].join("\n");
+  }
+
+  _loadStratonExampleTesterNote() {
+    const draft = this._stratonEvidenceDraft();
+    const scenario = draft.testerNoteScenario || "strong";
+    draft.testerNote = this._stratonExampleTesterNoteText(scenario);
+    draft.testerNoteResult = this._stratonTesterNoteResultFromText(draft.testerNote);
+    this._recordActivity(`Loaded example Straton tester note: ${this._stratonTesterNoteScenarioLabel(scenario)}`, "control");
+    this._render();
+  }
+
+  _stratonReturnReviewRows(result) {
+    if (!result || result.title === "No tester note") {
+      return [
+        {
+          label: "Return type",
+          status: "warning",
+          state: "needed",
+          detail: "Paste the tester's returned support note before judging setup bypass or adapter mapping.",
+        },
+        {
+          label: "Write safety",
+          status: "warning",
+          state: "locked",
+          detail: "No returned note can unlock writes until readback, save/apply, and rollback are verified on real hardware.",
+        },
+      ];
+    }
+
+    const title = String(result.title || "");
+    const setupTitle = String(result.setupEvidenceTitle || "");
+    const isExample = Boolean(result.example);
+    const reefPilot = Boolean(result.reefPilotEvidence || /Reef Pilot Bluetooth/i.test(`${title} ${setupTitle}`));
+    const strongSetup = !isExample && /Strong pre-setup evidence/i.test(setupTitle);
+    const lanOnly = !isExample && /LAN read evidence only/i.test(setupTitle);
+    const routeBlocker = !isExample && /Route blocker|Bypass not proven/i.test(`${title} ${setupTitle}`);
+    const hasJsonRead = !isExample && (Number(result.jsonCount) > 0 || Boolean(result.endpoints?.currentState));
+    const hasReachability = !isExample && (Number(result.reachableCount) > 0 || Boolean(result.endpoints?.reachability));
+    const promotedCount = isExample ? 0 : Number(result.promoted?.length) || 0;
+
+    const returnType = isExample
+      ? {
+        status: "unknown",
+        state: "example only",
+        detail: "Synthetic rehearsal note. Useful for checking the parser, but not hardware evidence.",
+      }
+      : reefPilot
+        ? {
+          status: "unknown",
+          state: "Reef Pilot Bluetooth",
+          detail: "Returned evidence belongs to the Straton X Bluetooth path, not ReefTECH Wi-Fi AP setup proof.",
+        }
+        : strongSetup
+          ? {
+            status: "ok",
+            state: "AP setup evidence",
+            detail: "Returned note claims AP route, pre-setup state, and JSON read evidence.",
+          }
+          : lanOnly
+            ? {
+              status: "unknown",
+              state: "LAN read only",
+              detail: "Useful adapter evidence, but it does not prove first-time ATI onboarding was bypassed.",
+            }
+            : routeBlocker
+              ? {
+                status: "warning",
+                state: "route blocker",
+                detail: "Controller/AP routing must be fixed before blaming the fixture or ATI endpoint contract.",
+              }
+              : hasJsonRead
+                ? {
+                  status: "unknown",
+                  state: "read candidate",
+                  detail: "Returned note has read evidence, but setup-bypass strength is still incomplete.",
+                }
+                : hasReachability
+                  ? {
+                    status: "unknown",
+                    state: "reachable only",
+                    detail: "The controller reached something, but no useful current-state JSON path was returned.",
+                  }
+                  : {
+                    status: "warning",
+                    state: "incomplete",
+                    detail: "Returned note is missing the evidence needed to classify setup or read mapping.",
+                  };
+
+    const setupReview = isExample
+      ? {
+        status: "warning",
+        state: "not proven",
+        detail: "Examples must never count as ATI setup-bypass proof.",
+      }
+      : reefPilot
+        ? {
+          status: "unknown",
+          state: "not AP proof",
+          detail: "For Straton X, collect Bluetooth pairing/control evidence instead of AP-route proof.",
+        }
+        : strongSetup
+          ? {
+            status: "ok",
+            state: "candidate supported",
+            detail: "This supports the setup-bypass claim, but hardware writes remain separate.",
+          }
+          : routeBlocker
+            ? {
+              status: "warning",
+              state: "blocked",
+              detail: "The controller cannot prove setup bypass until it can route to the fixture/AP.",
+            }
+            : {
+              status: "unknown",
+              state: "not proven",
+              detail: "Current return does not prove OpenReef avoids ATI's first setup path.",
+            };
+
+    const readReview = isExample
+      ? {
+        status: "warning",
+        state: "ignored",
+        detail: "Example JSON paths are rehearsal data only.",
+      }
+      : reefPilot
+        ? {
+          status: "unknown",
+          state: "Bluetooth observations",
+          detail: "Use Live PAR/Energy, control-state, template/group, and schedule-save observations for the Bluetooth adapter path.",
+        }
+        : hasJsonRead
+          ? {
+            status: "ok",
+            state: "candidate found",
+            detail: "A safe read candidate exists for adapter mapping; verify repeatability before writes.",
+          }
+          : hasReachability
+            ? {
+              status: "unknown",
+              state: "reachable only",
+              detail: "Collect a current-state JSON/read path before mapping program behavior.",
+            }
+            : {
+              status: "warning",
+              state: "needed",
+              detail: "No usable read evidence was returned.",
+            };
+
+    const catalogReview = promotedCount
+      ? {
+        status: "ok",
+        state: `${promotedCount} promoted`,
+        detail: "Only safe read-path candidates were promoted from the real returned note.",
+      }
+      : isExample
+        ? {
+          status: "unknown",
+          state: "none",
+          detail: "Examples do not promote endpoint candidates.",
+        }
+        : reefPilot
+          ? {
+            status: "unknown",
+            state: "not Wi-Fi endpoints",
+            detail: "Bluetooth evidence is kept separate from the ReefTECH Wi-Fi read catalog.",
+          }
+          : {
+            status: "warning",
+            state: "none",
+            detail: "No safe endpoint candidate was promoted from this return.",
+          };
+
+    return [
+      { label: "Return type", ...returnType },
+      { label: "Setup bypass", ...setupReview },
+      { label: "Read mapping", ...readReview },
+      { label: "Endpoint catalog", ...catalogReview },
+      {
+        label: "Write safety",
+        status: "warning",
+        state: "locked",
+        detail: "This review never unlocks hardware writes; save/apply still needs verified readback and rollback proof.",
+      },
+    ];
+  }
+
+  _stratonEvidenceSummaryText() {
+    const draft = this._stratonEvidenceDraft();
+    const result = draft.result;
+    const testerNote = draft.testerNoteResult;
+    if (!result && !testerNote) return "No Straton adapter evidence summary yet.";
+    const probe = draft.probeResult;
+    const scan = draft.probeScanResult;
+    const fixtureState = draft.fixtureStateResult;
+    const scanOutcome = scan ? this._stratonScanOutcome(scan) : null;
+    const bypass = this._stratonSetupBypassStatus(scan, this._stratonProbeFixture());
+    const bypassClaim = this._stratonSetupBypassClaim(scan, this._stratonProbeFixture());
+    const route = this._stratonApRouteStatus(scan, this._stratonProbeFixture());
+    const endpoints = this._stratonEndpoints();
+    const proofSummaryLines = this._stratonProofSummaryRows()
+      .map((row) => `- ${row.label}: ${row.state}, ${row.status} - ${row.detail}`);
+    const betaEvidenceLines = this._stratonBetaEvidenceRows()
+      .map((row) => `- ${row.label}: ${row.state}, ${row.status} - ${row.detail}`);
+    const extraProbePaths = this._stratonExtraProbePathPresets(draft.extraProbePaths);
+    const focus = Object.entries(result?.focusCounts || {})
+      .map(([name, count]) => `${name}: ${count}`)
+      .join(", ") || "none";
+    const coverageLines = this._stratonEvidenceCoverageRows(result)
+      .map((row) => `- ${row.label}: ${row.state}, ${row.status}`);
+    const painPointCoverageLines = this._stratonPainPointCoverageRows()
+      .map((row) => `- ${row.label}: ${row.state}, ${row.status}`);
+    const returnReviewLines = this._stratonReturnReviewRows(testerNote)
+      .map((row) => `- ${row.label}: ${row.state}, ${row.status} - ${row.detail}`);
+    return [
+      "OpenReef Straton adapter evidence summary",
+      `Checked: ${result?.checkedAt || testerNote?.checkedAt || "not checked"}`,
+      `Mode: ${result?.mode || "tester-note"}`,
+      `Changed: ${result?.changedCount || 0}, added: ${result?.addedCount || 0}, removed: ${result?.removedCount || 0}`,
+      `Focus: ${focus}`,
+      result?.warning ? `Parse note: ${result.warning}` : "",
+      "",
+      "Changed paths",
+      ...(result?.rows?.length ? result.rows.map((row) => `- ${row.kind}: ${row.path} (${row.focus})`) : ["- none"]),
+      "",
+      "Endpoint hints",
+      ...(result?.endpoints?.length ? result.endpoints.map((row) => `- ${row.method} ${row.path}`) : ["- none pasted"]),
+      "",
+      "Evidence coverage",
+      ...coverageLines,
+      "",
+      "Proof summary",
+      ...proofSummaryLines,
+      "",
+      "Beta hardware evidence checklist",
+      ...betaEvidenceLines,
+      "",
+      "Pain-point coverage",
+      ...painPointCoverageLines,
+      "",
+      "Returned tester note",
+      ...(testerNote ? [
+        `- checked: ${testerNote.checkedAt}`,
+        `- verdict: ${testerNote.title} (${testerNote.status})`,
+        `- reachable/json: ${testerNote.reachableCount || 0}/${testerNote.jsonCount || 0}`,
+        `- setup evidence: ${testerNote.setupEvidenceTitle || "not assessed"} (${testerNote.setupEvidenceStatus || "unknown"})`,
+        testerNote.setupEvidenceDetail ? `- setup evidence detail: ${testerNote.setupEvidenceDetail}` : "",
+        testerNote.apRouteTitle ? `- AP route: ${testerNote.apRouteTitle} (${testerNote.apRouteStatus || "unknown"})` : "",
+        testerNote.apRouteDetail ? `- AP route detail: ${testerNote.apRouteDetail}` : "",
+        testerNote.reefPilotEvidence ? `- hardware generation: ${testerNote.hardwareGeneration || "Straton X / Reef Pilot Bluetooth"}` : "",
+        testerNote.bluetoothControl ? `- Bluetooth evidence: ${testerNote.bluetoothControl}` : "",
+        testerNote.liveParEnergy ? `- Live PAR/Energy: ${testerNote.liveParEnergy}` : "",
+        testerNote.templatesGroups ? `- templates/groups: ${testerNote.templatesGroups}` : "",
+        testerNote.scheduleSave ? `- schedule save: ${testerNote.scheduleSave}` : "",
+        `- schema fingerprint: ${testerNote.schemaFingerprint || "not included"}`,
+        `- local schema fingerprint: ${testerNote.localSchemaFingerprint || "not analyzed"}`,
+        `- schema compare: ${testerNote.schemaFingerprintTitle || "not compared"} (${testerNote.schemaFingerprintStatus || "unknown"})`,
+        `- next: ${testerNote.next}`,
+        ...(testerNote.promoted || []).map((item) => `- promoted: ${item}`),
+      ] : ["- not analyzed"]),
+      "",
+      "Beta return review",
+      ...returnReviewLines,
+      "",
+      "Read-only endpoint probe",
+      ...(probe ? [
+        `- ${probe.method || "GET"} ${probe.path || "unknown"} on ${probe.fixtureName || "unknown fixture"}`,
+        `- source: ${probe.source || "unknown"}`,
+        `- status: ${probe.status}`,
+        `- content: ${probe.contentType || "unknown"}, ${probe.bytes || 0} bytes, ${probe.mode || "unknown"}`,
+        probe.warning ? `- note: ${probe.warning}` : "",
+      ].filter(Boolean) : ["- not run"]),
+      "",
+      "Current fixture sample",
+      ...(fixtureState ? [
+        `- schema fingerprint: ${fixtureState.schemaFingerprint?.id || "not available"}`,
+        `- leaf values: ${fixtureState.leafCount || 0}`,
+        `- focus counts: ${Object.entries(fixtureState.focusCounts || {}).map(([name, count]) => `${name}: ${count}`).join(", ") || "none"}`,
+        ...(fixtureState.promotedEndpoints || []).map((item) => `- promoted ${item.kind}: ${item.path}, ${item.state}`),
+      ] : ["- not analyzed"]),
+      "",
+      "Safe path scan",
+      ...(scan ? [
+        `- fixture: ${scan.fixtureName || "unknown"} (${scan.host || "redacted"})`,
+        `- extra safe paths queued: ${extraProbePaths.length}`,
+        `- reachable/json: ${scan.reachableCount || 0}/${scan.jsonCount || 0}`,
+        scanOutcome ? `- outcome: ${scanOutcome.title}` : "",
+        scanOutcome ? `- next: ${scanOutcome.next}` : "",
+        scan.bestPath ? `- best path: ${scan.bestPath}` : "",
+        ...(scan.rows || []).map((row) => `- ${row.path}: ${row.status}, ${row.mode}, ${row.contentType}`),
+      ].filter(Boolean) : ["- not run"]),
+      "",
+      "ATI setup bypass status",
+      `- verdict: ${bypass.title}`,
+      `- detail: ${bypass.detail}`,
+      `- next: ${bypass.next}`,
+      `- setup claim: ${bypassClaim.title} (${bypassClaim.status})`,
+      `- setup claim detail: ${bypassClaim.detail}`,
+      `- AP route: ${route.title} (${route.status})`,
+      `- AP route detail: ${route.detail}`,
+      `- AP route next: ${route.next}`,
+      "",
+      "Read endpoint catalog",
+      `- reachability: ${endpoints.reachability || "not mapped"}`,
+      `- current state: ${endpoints.currentState || "not mapped"}`,
+      `- program: ${endpoints.program || "not mapped"}`,
+      `- firmware: ${endpoints.firmware || "not mapped"}`,
+      `- groups: ${endpoints.groups || "not mapped"}`,
+      "",
+      "Privacy",
+      "- Raw exports and network text were not saved by this panel.",
+    ].filter(Boolean).join("\n");
+  }
+
+  async _copyStratonEvidenceSummary() {
+    await this._copyText(this._stratonEvidenceSummaryText(), "Straton evidence summary copied", "Could not copy Straton evidence summary");
+  }
+
+  _stratonSupportNoteText() {
+    const straton = this._stratonConfig();
+    const program = this._stratonProgram();
+    const template = this._stratonTemplate(straton.selectedTemplate);
+    const liveRows = this._stratonLightLiveRows();
+    const syncRows = this._stratonFixtureSyncRows(liveRows);
+    const [readinessClass, readinessTitle, readinessDetail] = this._stratonReadiness();
+    const [bridgeClass, bridgeTitle, bridgeDetail] = this._stratonLiveBridgeSummary(liveRows);
+    const draft = this._stratonEvidenceDraft();
+    const evidence = draft.result;
+    const fixtureState = draft.fixtureStateResult;
+    const probe = draft.probeResult;
+    const scan = draft.probeScanResult;
+    const testerNote = draft.testerNoteResult;
+    const scanOutcome = scan ? this._stratonScanOutcome(scan) : null;
+    const bypass = this._stratonSetupBypassStatus(scan, this._stratonProbeFixture());
+    const bypassClaim = this._stratonSetupBypassClaim(scan, this._stratonProbeFixture());
+    const route = this._stratonApRouteStatus(scan, this._stratonProbeFixture());
+    const endpoints = this._stratonEndpoints();
+    const adapterGateRows = this._stratonAdapterGateRows();
+    const proofSummaryRows = this._stratonProofSummaryRows(adapterGateRows);
+    const betaEvidenceRows = this._stratonBetaEvidenceRows();
+    const evidenceCoverageRows = this._stratonEvidenceCoverageRows(evidence);
+    const painPointCoverageRows = this._stratonPainPointCoverageRows();
+    const extraProbePaths = this._stratonExtraProbePathPresets(draft.extraProbePaths);
+    const targets = syncRows.filter((row) => row.fixture.selected);
+    const groups = [...new Set(syncRows.map((row) => row.group))];
+    const fixtures = syncRows.length
+      ? syncRows.map((row) => [
+        `- ${row.fixture.name || "Straton fixture"}`,
+        `target: ${row.targetLabel}`,
+        `group: ${row.groupLabel}`,
+        `host: ${this._stratonRedactSnippet(row.fixture.host || "not set")}`,
+        `connection: ${this._stratonConnectionModeLabel(row.fixture.connectionMode)}`,
+        `setup: ${this._stratonSetupStateLabel(row.fixture.setupState)}`,
+        `firmware: ${row.fixture.firmware || "unknown"} (${row.firmwareLabel})`,
+        `live bridge: ${row.liveLabel}${row.liveEntityId ? ` via ${row.liveEntityId}` : ""}`,
+        `write: planned only`,
+      ].join(", "))
+      : ["- none configured"];
+    const live = liveRows.length
+      ? liveRows.map((row) => [
+        `- ${row.item?.label || row.id}`,
+        `entity: ${row.entityId || "not mapped"}`,
+        `status: ${row.statusLabel}`,
+        row.brightnessPct !== null ? `brightness: ${row.brightnessPct}%` : "",
+        row.effect ? `effect: ${row.effect}` : "",
+        row.colorLabel ? `colour: ${row.colorLabel}` : "",
+        row.detail,
+      ].filter(Boolean).join(", "))
+      : ["- no lighting equipment rows"];
+    const evidenceLines = evidence
+      ? [
+        `- checked: ${evidence.checkedAt}`,
+        `- comparison: ${evidence.mode}`,
+        `- changed/added/removed: ${evidence.changedCount}/${evidence.addedCount}/${evidence.removedCount}`,
+        `- focus: ${Object.entries(evidence.focusCounts || {}).map(([name, count]) => `${name}: ${count}`).join(", ") || "none"}`,
+        `- endpoint hints: ${evidence.endpoints?.length || 0}`,
+      ]
+      : ["- no adapter evidence analyzed in this browser session"];
+    const testerNoteLines = testerNote
+      ? [
+        `- checked: ${testerNote.checkedAt}`,
+        `- verdict: ${testerNote.title} (${testerNote.status})`,
+        `- reachable/json: ${testerNote.reachableCount || 0}/${testerNote.jsonCount || 0}`,
+        `- setup evidence: ${testerNote.setupEvidenceTitle || "not assessed"} (${testerNote.setupEvidenceStatus || "unknown"})`,
+        testerNote.setupEvidenceDetail ? `- setup evidence detail: ${testerNote.setupEvidenceDetail}` : "",
+        testerNote.apRouteTitle ? `- AP route: ${testerNote.apRouteTitle} (${testerNote.apRouteStatus || "unknown"})` : "",
+        testerNote.apRouteDetail ? `- AP route detail: ${testerNote.apRouteDetail}` : "",
+        testerNote.reefPilotEvidence ? `- hardware generation: ${testerNote.hardwareGeneration || "Straton X / Reef Pilot Bluetooth"}` : "",
+        testerNote.bluetoothControl ? `- Bluetooth evidence: ${testerNote.bluetoothControl}` : "",
+        testerNote.liveParEnergy ? `- Live PAR/Energy: ${testerNote.liveParEnergy}` : "",
+        testerNote.templatesGroups ? `- templates/groups: ${testerNote.templatesGroups}` : "",
+        testerNote.scheduleSave ? `- schedule save: ${testerNote.scheduleSave}` : "",
+        `- schema fingerprint: ${testerNote.schemaFingerprint || "not included"}`,
+        `- local schema fingerprint: ${testerNote.localSchemaFingerprint || "not analyzed"}`,
+        `- schema compare: ${testerNote.schemaFingerprintTitle || "not compared"} (${testerNote.schemaFingerprintStatus || "unknown"})`,
+        `- next: ${testerNote.next}`,
+        ...(testerNote.promoted || []).map((item) => `- promoted: ${item}`),
+      ].filter(Boolean)
+      : ["- no returned tester note analyzed in this browser session"];
+    const returnReviewLines = this._stratonReturnReviewRows(testerNote)
+      .map((row) => `- ${row.label}: ${row.state}, ${row.status} - ${row.detail}`);
+    const fixtureStateLines = fixtureState
+      ? [
+        `- checked: ${fixtureState.checkedAt}`,
+        `- mode: ${fixtureState.mode}`,
+        `- schema fingerprint: ${fixtureState.schemaFingerprint?.id || "not available"}`,
+        `- leaf values: ${fixtureState.leafCount}`,
+        `- focus counts: ${Object.entries(fixtureState.focusCounts || {}).map(([name, count]) => `${name}: ${count}`).join(", ") || "none"}`,
+        `- close matches: ${fixtureState.observations?.filter((item) => item.status === "ok").length || 0}/${fixtureState.observations?.length || 0}`,
+        ...(fixtureState.promotedEndpoints || []).map((item) => `- promoted ${item.kind}: ${item.path}, ${item.state}`),
+        ...(fixtureState.observations || []).map((item) => `- ${item.label}: planned ${item.planned}, observed ${item.observed}, ${item.status}`),
+      ]
+      : ["- no current fixture sample analyzed in this browser session"];
+    const probeLines = probe
+      ? [
+        `- checked: ${probe.checkedAt}`,
+        `- source: ${probe.source || "unknown"}`,
+        `- fixture: ${probe.fixtureName}`,
+        `- host: ${probe.host}`,
+        `- request: ${probe.method || "GET"} ${probe.path || "unknown"}`,
+        `- status: ${probe.status}`,
+        `- content: ${probe.contentType || "unknown"}, ${probe.bytes || 0} bytes, ${probe.mode || "unknown"}`,
+        probe.warning ? `- note: ${probe.warning}` : "",
+      ].filter(Boolean)
+      : ["- no read-only endpoint probe run in this browser session"];
+    const scanLines = scan
+      ? [
+        `- checked: ${scan.checkedAt}`,
+        `- fixture: ${scan.fixtureName || "unknown"}`,
+        `- host: ${scan.host || "redacted"}`,
+        `- extra safe paths queued: ${extraProbePaths.length}`,
+        `- reachable paths: ${scan.reachableCount || 0}`,
+        `- JSON paths: ${scan.jsonCount || 0}`,
+        scanOutcome ? `- outcome: ${scanOutcome.title}` : "",
+        scanOutcome ? `- next: ${scanOutcome.next}` : "",
+        scan.bestPath ? `- best path: ${scan.bestPath}` : "",
+        ...(scan.rows || []).map((row) => `- ${row.label || row.path}: ${row.path}, ${row.status}, ${row.mode}`),
+        scan.warning ? `- note: ${scan.warning}` : "",
+      ].filter(Boolean)
+      : ["- no safe path scan run in this browser session"];
+    const endpointLines = [
+      `- reachability: ${endpoints.reachability || "not mapped"}`,
+      `- current state: ${endpoints.currentState || "not mapped"}`,
+      `- program: ${endpoints.program || "not mapped"}`,
+      `- firmware: ${endpoints.firmware || "not mapped"}`,
+      `- groups: ${endpoints.groups || "not mapped"}`,
+      endpoints.lastScanAt ? `- last scan: ${endpoints.lastScanAt} (${endpoints.lastOutcome || "candidate updated"})` : "- last scan: none",
+    ];
+    const gateLines = [
+      "- write state: locked",
+      ...adapterGateRows.map((row) => `- ${row.label}: ${row.state}, ${row.status}`),
+    ];
+    const proofSummaryLines = proofSummaryRows.map((row) => `- ${row.label}: ${row.state}, ${row.status} - ${row.detail}`);
+    const betaEvidenceLines = betaEvidenceRows.map((row) => `- ${row.label}: ${row.state}, ${row.status} - ${row.detail}`);
+    const coverageLines = evidenceCoverageRows.map((row) => `- ${row.label}: ${row.state}, ${row.status}`);
+    const painPointCoverageLines = painPointCoverageRows.map((row) => `- ${row.label}: ${row.state}, ${row.status}`);
+    return [
+      "OpenReef Straton support note",
+      `Created: ${new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`,
+      `OpenReef version: ${this._integrationVersion || "unknown"}`,
+      "",
+      "Safety boundary",
+      "- Hardware write: locked",
+      "- Save local plan: saves OpenReef config/receipt only",
+      "- Raw ATI exports/network notes: not included in this note",
+      "",
+      "ATI setup bypass test",
+      `- verdict: ${bypass.title} (${bypass.status})`,
+      `- detail: ${bypass.detail}`,
+      `- next: ${bypass.next}`,
+      `- setup claim: ${bypassClaim.title} (${bypassClaim.status})`,
+      `- setup claim detail: ${bypassClaim.detail}`,
+      `- setup claim next: ${bypassClaim.next}`,
+      `- AP route: ${route.title} (${route.status})`,
+      `- AP route detail: ${route.detail}`,
+      `- AP route next: ${route.next}`,
+      "",
+      "Proof summary",
+      ...proofSummaryLines,
+      "",
+      "Beta hardware evidence checklist",
+      ...betaEvidenceLines,
+      "",
+      "Pain-point coverage",
+      ...painPointCoverageLines,
+      "",
+      "Planner",
+      `- readiness: ${readinessTitle} (${readinessClass}) - ${readinessDetail}`,
+      `- adapter: ${this._stratonAdapterLabel(straton.adapter)}`,
+      `- template: ${template.name} (${template.source})`,
+      `- selected targets: ${targets.length}/${syncRows.length}`,
+      `- groups: ${groups.join(", ") || "none"}`,
+      `- receipt: ${straton.lastReceipt || "none"}`,
+      "",
+      "Program",
+      `- peak: ${Number(program.peak) || 0}%`,
+      `- start: ${program.startTime || "10:00"}`,
+      `- photoperiod: ${Number(program.photoperiodHours) || 10} hours`,
+      `- ramp: ${Number(program.rampMinutes) || 90} minutes`,
+      `- quick mode: ${this._stratonQuickLabel(program.quickMode)}`,
+      `- cloud dim: ${Number(program.cloudDim) || 0}%`,
+      `- moonlight: ${Number(program.moonlight) || 0}% (${program.lunarMode || "manual"})`,
+      `- acclimation: ${Number(program.acclimationStart) || 0}% to ${Number(program.acclimationTarget) || 0}% over ${Number(program.acclimationDays) || 1} days`,
+      "",
+      "Fixtures",
+      ...fixtures,
+      "",
+      "Live Home Assistant bridge",
+      `- summary: ${bridgeTitle} (${bridgeClass}) - ${bridgeDetail}`,
+      ...live,
+      "",
+      "Adapter evidence",
+      ...evidenceLines,
+      "",
+      "Evidence coverage",
+      ...coverageLines,
+      "",
+      "Returned tester note intake",
+      ...testerNoteLines,
+      "",
+      "Beta return review",
+      ...returnReviewLines,
+      "",
+      "Read-only endpoint probe",
+      ...probeLines,
+      "",
+      "Safe path scan",
+      ...scanLines,
+      "",
+      "Read endpoint catalog",
+      ...endpointLines,
+      "",
+      "Hardware adapter gate",
+      ...gateLines,
+      "",
+      "Current fixture sample",
+      ...fixtureStateLines,
+      "",
+      "Next evidence needed",
+      "- ATI settings export before and after one schedule edit",
+      "- ATI settings export before and after one spectrum/channel edit",
+      "- ATI settings export before and after grouping two fixtures",
+      "- Browser network method/path notes for load, save, and apply",
+      "- Firmware/model strings for each Straton generation being tested",
+    ].join("\n");
+  }
+
+  async _copyStratonSupportNote() {
+    await this._copyText(this._stratonSupportNoteText(), "Straton support note copied", "Could not copy Straton support note");
+  }
+
+  _stratonBetaUpdateText() {
+    return [
+      "OpenReef Straton beta update",
+      "",
+      "I have pushed a new read-only Straton light test into OpenReef. Please update/reload your OpenReef install first, then open:",
+      "",
+      "Home Assistant -> OpenReef -> Lights",
+      "",
+      "Important safety boundary:",
+      "- Please do not apply an OpenReef schedule to the Straton yet.",
+      "- Save local plan only creates an OpenReef receipt.",
+      "- Hardware writes are still locked until readback, save/apply, and rollback evidence are proven.",
+      "",
+      "First thing to tell me:",
+      "1. Is your light ReefTECH Wi-Fi Straton/Flex/Pro, or Straton X with Reef Pilot Bluetooth?",
+      "2. Is the light already on your LAN, brand new/reset, or stuck in ATI setup?",
+      "",
+      "If it is ReefTECH Wi-Fi:",
+      "1. Add/select the fixture in the Lights tab.",
+      "2. Set the adapter to ReefTECH Wi-Fi.",
+      "3. Set Connection path and Setup state.",
+      "4. Expand Advanced Straton tools.",
+      "5. If testing first-time/stuck setup, click Use AP fallback.",
+      "6. Click Scan safe paths.",
+      "7. Copy the Straton support note back to me.",
+      "",
+      "If it is Straton X / Reef Pilot Bluetooth:",
+      "1. Set the adapter to Reef Pilot Bluetooth.",
+      "2. Do not treat AP route as proof for this hardware.",
+      "3. Send pairing/control notes, Live PAR/Energy observations, template/group behaviour, and whether schedule saves are clearly confirmed.",
+      "",
+      "What I need back:",
+      "- The copied Straton support note.",
+      "- Whether OpenReef found a JSON/read path, reached only the root page, or could not reach the light.",
+      "- Any redacted screenshots or notes that do not include passwords, tokens, Wi-Fi credentials, account details, or public IPs.",
+      "",
+      "The goal of this test is only to prove whether OpenReef can reach/read the light or collect Bluetooth evidence before guessing any hardware adapter.",
+    ].join("\n");
+  }
+
+  async _copyStratonBetaUpdate() {
+    await this._copyText(this._stratonBetaUpdateText(), "Straton beta update copied", "Could not copy Straton beta update");
+  }
+
+  _stratonTesterStepsText() {
+    const fixture = this._stratonProbeFixture();
+    const draft = this._stratonEvidenceDraft();
+    const adapterLabel = this._stratonAdapterLabel(this._stratonConfig().adapter);
+    const bypass = this._stratonSetupBypassStatus(draft.probeScanResult, fixture);
+    const claim = this._stratonSetupBypassClaim(draft.probeScanResult, fixture);
+    const route = this._stratonApRouteStatus(draft.probeScanResult, fixture);
+    return [
+      "OpenReef Straton beta connection test",
+      "",
+      "Please test the OpenReef Straton connection only. Do not change your live ATI lighting schedule yet.",
+      "",
+      "Steps:",
+      "1. Open Home Assistant.",
+      "2. Open OpenReef.",
+      "3. Go to Lights.",
+      "4. Tell me the hardware generation: ReefTECH Wi-Fi Straton/Flex/Pro, or Straton X with Reef Pilot Bluetooth.",
+      "5. Set Adapter to the matching generation.",
+      "6. Add your ATI Straton as a fixture if it is not already listed.",
+      "7. If you know the Straton LAN IP, enter it in IP or host.",
+      "8. Set Connection path to LAN IP/host, AP fallback, or Unknown path.",
+      "9. Set Setup state to Already on LAN, Brand new/reset, Stuck in setup, or Unknown setup.",
+      "10. Expand Advanced Straton tools.",
+      "11. For ReefTECH Wi-Fi, click Use AP fallback if testing first-time/stuck setup.",
+      "12. Click Scan safe paths for ReefTECH Wi-Fi evidence.",
+      "13. For Straton X / Reef Pilot Bluetooth, do not treat AP fallback as proof; collect Bluetooth app/control evidence instead.",
+      "14. Copy the Straton support note.",
+      "15. Send the support note back with the result shown on screen.",
+      "",
+      "Tell me which result you saw:",
+      "- Read-only bypass proven",
+      "- Reachability bypass only",
+      "- Bypass not proven",
+      "- Bypass untested",
+      "- JSON/read path found, root only, or not reachable",
+      "- Hardware generation: ReefTECH Wi-Fi or Reef Pilot Bluetooth",
+      "",
+      "What this test means:",
+      "- It is read-only.",
+      "- It does not save a schedule to the light.",
+      "- It does not push Wi-Fi credentials.",
+      "- For ReefTECH Wi-Fi it checks whether OpenReef can reach/read the Straton before relying on ATI's app setup flow.",
+      "- For Reef Pilot Bluetooth it only records the separate evidence path; OpenReef does not speak Bluetooth yet.",
+      "",
+      "AP fallback note:",
+      "- AP fallback only works if the Home Assistant controller can actually reach the Straton AP network.",
+      "- A phone connected to the Straton AP is not enough if the Home Assistant box is still on the home LAN with no route to 192.168.100.1.",
+      "- If AP route says not reachable, do not treat this as a failed light. Treat it as a network-route problem to solve first.",
+      "",
+      "Current OpenReef status:",
+      `- adapter: ${adapterLabel}`,
+      `- fixture: ${fixture?.name || "not selected"}`,
+      `- bypass verdict: ${bypass.title}`,
+      `- setup claim: ${claim.title}`,
+      `- AP route: ${route.title} (${route.status})`,
+      `- AP route detail: ${route.detail}`,
+      `- next: ${bypass.next}`,
+    ].join("\n");
+  }
+
+  async _copyStratonTesterSteps() {
+    await this._copyText(this._stratonTesterStepsText(), "Straton tester steps copied", "Could not copy Straton tester steps");
+  }
+
+  _stratonAdapterEvidenceRequestText() {
+    const gateRows = this._stratonAdapterGateRows();
+    const blocked = gateRows.filter((row) => row.status === "warning");
+    const adapterLabel = this._stratonAdapterLabel(this._stratonConfig().adapter);
+    return [
+      "OpenReef Straton adapter evidence request",
+      "",
+      "Please collect this only if you are comfortable using ATI's app and browser/network tools. Do not change your normal reef schedule permanently for this test.",
+      "",
+      "Goal:",
+      "- Map ATI Straton read/save/apply behavior safely.",
+      "- Keep each test to one tiny change so OpenReef can identify exactly which fields changed.",
+      "- Do not send passwords, Wi-Fi credentials, tokens, or full private URLs.",
+      `- Current OpenReef adapter selection: ${adapterLabel}.`,
+      "",
+      "Before each mini-test:",
+      "1. Write down the hardware generation: ReefTECH Wi-Fi Straton/Flex/Pro, or Straton X with Reef Pilot Bluetooth.",
+      "2. Copy/export the current ATI settings if the ATI app offers an export/backup option.",
+      "3. Write down the fixture model, firmware, and whether it is in a group.",
+      "4. Write down whether the light is already on LAN, brand new/reset, stuck in setup, or paired through Reef Pilot Bluetooth.",
+      "5. If using browser developer tools, keep only method/path notes such as GET /settings or POST /api/...",
+      "",
+      "ReefTECH Wi-Fi mini-tests to run one at a time:",
+      "1. Change only peak intensity by a small amount, then export/capture again.",
+      "2. Change only one schedule time by a small amount, then export/capture again.",
+      "3. Change only one spectrum/channel value by a small amount, then export/capture again.",
+      "4. If you have multiple Stratons, change only grouping or target membership, then export/capture again.",
+      "5. If there is an apply/save button, capture the method/path only. Do not send raw tokens or credentials.",
+      "",
+      "Straton X / Reef Pilot Bluetooth evidence to collect instead:",
+      "1. App name/version and phone OS.",
+      "2. Whether Bluetooth pairing/discovery worked first time, needed retries, or lost the fixture.",
+      "3. Whether Reef Pilot shows Live PAR and Live Energy, and whether those values change after a small intensity change.",
+      "4. Whether templates/coral-farmer presets can be viewed, applied, exported, or shared.",
+      "5. Whether group control can target one fixture versus all fixtures clearly.",
+      "6. Whether schedule changes visibly confirm saved/applied state.",
+      "7. Screenshots are okay only if they do not include private network/account details.",
+      "",
+      "Send back:",
+      "- Before export and after export for each mini-test, if available.",
+      "- Redacted method/path notes for load, save, and apply flows.",
+      "- Reef Pilot Bluetooth pairing/control notes if testing Straton X.",
+      "- Live PAR/Energy, template/group, and schedule-save observations if Reef Pilot exposes them.",
+      "- Model and firmware strings.",
+      "- Setup state: already on LAN, brand new/reset, stuck in setup, paired through Reef Pilot Bluetooth, or unknown.",
+      "- Whether this was AP mode, normal LAN mode, or Reef Pilot Bluetooth.",
+      "- The OpenReef Straton support note after any safe path scan.",
+      "- Any extra relative GET paths tested through Extra safe GET paths.",
+      "",
+      "Current OpenReef write gate:",
+      ...gateRows.map((row) => `- ${row.label}: ${row.state} (${row.status})`),
+      "",
+      blocked.length
+        ? `Main blockers right now: ${blocked.map((row) => row.label).join(", ")}.`
+        : "No blocked rows are shown, but OpenReef still needs real hardware readback before writes are enabled.",
+      "",
+      "Safety boundary:",
+      "- OpenReef is still read-only for Straton hardware.",
+      "- Do not expect OpenReef to push a schedule yet.",
+      "- The evidence is used to build and verify the future adapter.",
+    ].join("\n");
+  }
+
+  async _copyStratonAdapterEvidenceRequest() {
+    await this._copyText(this._stratonAdapterEvidenceRequestText(), "Straton adapter evidence request copied", "Could not copy Straton adapter evidence request");
+  }
+
+  _stratonScanOutcome(result, fixture = this._stratonProbeFixture()) {
+    if (!result) {
+      return {
+        status: "unknown",
+        title: "Not scanned",
+        detail: "Run a safe path scan before judging Straton reachability.",
+        next: "Use AP fallback or enter a LAN IP, then scan safe paths.",
+      };
+    }
+    if (result.jsonCount > 0) {
+      return {
+        status: "ok",
+        title: "Read path found",
+        detail: `${result.jsonCount} JSON path(s) found; ${result.bestPath || "the best response"} is ready for comparison.`,
+        next: "Send the support note so the endpoint can be mapped into the adapter.",
+      };
+    }
+    if (result.reachableCount > 0) {
+      return {
+        status: "unknown",
+        title: "Reachable, no JSON",
+        detail: "The controller can talk to the fixture, but the built-in paths did not return usable JSON.",
+        next: "Capture ATI app network paths or export links, then try the exact read path in the adapter lab.",
+      };
+    }
+    const host = String(fixture?.host || "").trim();
+    const apMode = host === "192.168.100.1" || fixture?.connectionMode === "ap";
+    return {
+      status: "warning",
+      title: "Not reachable",
+      detail: apMode
+        ? "The AP fallback address did not answer from the OpenReef controller."
+        : "No safe path answered from the configured fixture host.",
+      next: apMode
+        ? "Check whether the controller is on the Straton AP network; otherwise try the fixture LAN IP."
+      : "Try AP fallback or confirm the fixture LAN IP/hostname from the router.",
+    };
+  }
+
+  _stratonApRouteStatus(result = this._stratonEvidenceDraft().probeScanResult, fixture = this._stratonProbeFixture()) {
+    const draft = this._stratonEvidenceDraft();
+    const probe = draft.probeResult;
+    const host = String(fixture?.host || "").trim();
+    const apMode = host === "192.168.100.1" || fixture?.connectionMode === "ap";
+    const setupState = fixture?.setupState || "unknown";
+    const preSetup = ["brand_new", "stuck_setup"].includes(setupState);
+    const scanning = Boolean(draft.probeScanning || result?.warning === "Safe path scan in progress.");
+    const scanReachable = Number(result?.reachableCount) || 0;
+    const scanJson = Number(result?.jsonCount) || 0;
+    const probeReachable = Boolean(probe && ["ok", "unknown"].includes(probe.statusClass) && !["not run", "reading"].includes(probe.status));
+    const probeJson = probe?.mode === "json" && probe.statusClass === "ok";
+    const reachable = scanReachable > 0 || probeReachable;
+    const jsonReady = scanJson > 0 || probeJson;
+    const sourceList = [
+      ...(result?.rows || []).map((row) => row.source),
+      probe?.source,
+    ].filter(Boolean);
+    const source = [...new Set(sourceList)].slice(0, 2).join(", ") || "not tested";
+    if (!fixture) {
+      return {
+        status: "warning",
+        title: "No route target",
+        detail: "Add a Straton fixture before testing AP or LAN reachability.",
+        next: "Add a fixture, then choose LAN IP/host or AP fallback.",
+        source,
+      };
+    }
+    if (!apMode) {
+      return {
+        status: reachable ? "ok" : "unknown",
+        title: reachable ? "LAN route reachable" : "LAN route selected",
+        detail: reachable
+          ? "OpenReef has reachability evidence for the configured LAN host. This does not prove ATI setup was bypassed."
+          : "OpenReef is targeting the fixture's LAN host/IP, so this is not an AP setup-bypass test yet.",
+        next: "Use AP fallback on a brand-new/reset or stuck setup fixture before claiming setup replacement.",
+        source,
+      };
+    }
+    if (scanning) {
+      return {
+        status: "unknown",
+        title: "AP route scanning",
+        detail: "OpenReef is checking whether the controller can reach the direct Straton AP address.",
+        next: "Wait for the safe path scan before opening ATI's app.",
+        source,
+      };
+    }
+    if (jsonReady) {
+      return {
+        status: "ok",
+        title: preSetup ? "AP pre-setup read route" : "AP JSON route found",
+        detail: preSetup
+          ? "AP fallback is selected, the fixture is marked brand new/reset or stuck in setup, and OpenReef found JSON."
+          : "AP fallback is selected and OpenReef found JSON. Confirm setup state before calling it a setup bypass.",
+        next: "Send the support note; keep writes locked until program readback and save/apply endpoints are verified.",
+        source,
+      };
+    }
+    if (reachable) {
+      return {
+        status: "unknown",
+        title: "AP route reachable",
+        detail: "The controller can reach the Straton AP address, but OpenReef has not found useful JSON yet.",
+        next: "Collect safe read paths from ATI exports or redacted network notes, then scan again.",
+        source,
+      };
+    }
+    if (result || probe) {
+      return {
+        status: "warning",
+        title: "AP route not reachable",
+        detail: "The selected OpenReef read path cannot currently reach 192.168.100.1.",
+        next: "Put the Home Assistant/controller network where it can reach the Straton AP, or use the fixture LAN IP if setup is already complete.",
+        source,
+      };
+    }
+    return {
+      status: "unknown",
+      title: "AP route untested",
+      detail: "AP fallback is staged, but OpenReef has not checked controller-to-fixture reachability yet.",
+      next: "Click Scan safe paths before asking the tester to use ATI's app.",
+      source,
+    };
+  }
+
+  _stratonSetupBypassStatus(result, fixture = this._stratonProbeFixture()) {
+    const host = String(fixture?.host || "").trim();
+    const apMode = host === "192.168.100.1" || fixture?.connectionMode === "ap";
+    if (!result) {
+      return {
+        status: "unknown",
+        title: "Bypass untested",
+        detail: "OpenReef has not yet checked whether it can reach this Straton before ATI app setup.",
+        next: "Run Scan safe paths before asking the tester to use ATI's app.",
+      };
+    }
+    if (result.warning === "Safe path scan in progress.") {
+      return {
+        status: "unknown",
+        title: "Bypass scan running",
+        detail: "OpenReef is checking safe read-only paths from the controller.",
+        next: "Wait for the scan result before changing ATI app settings.",
+      };
+    }
+    const outcome = this._stratonScanOutcome(result, fixture);
+    if (outcome.status === "ok") {
+      return {
+        status: "ok",
+        title: "Read-only bypass proven",
+        detail: "OpenReef reached the fixture and found JSON without using schedule writes.",
+        next: "Send the support note so this read path can be mapped; keep hardware writes locked.",
+      };
+    }
+    if (result.reachableCount > 0) {
+      return {
+        status: "unknown",
+        title: "Reachability bypass only",
+        detail: "OpenReef can talk to the fixture, but it has not found a useful current-state JSON path yet.",
+        next: "Use ATI exports or browser network notes only to discover the exact read path, then retry Controller GET.",
+      };
+    }
+    return {
+      status: "warning",
+      title: "Bypass not proven",
+      detail: apMode
+        ? "The AP fallback address did not answer from the controller's current network path."
+        : "The configured fixture host did not answer from the controller.",
+      next: apMode
+        ? "Put the controller/network where it can reach the Straton AP, or try the fixture's LAN IP if it is already joined to Wi-Fi."
+        : "Try AP fallback, confirm the LAN IP from the router, or collect the tester's current ATI setup state.",
+    };
+  }
+
+  _stratonSetupBypassClaim(result, fixture = this._stratonProbeFixture()) {
+    const setupState = fixture?.setupState || "unknown";
+    const connectionMode = fixture?.connectionMode || (String(fixture?.host || "").trim() === "192.168.100.1" ? "ap" : "unknown");
+    const bypass = this._stratonSetupBypassStatus(result, fixture);
+    const preSetup = ["brand_new", "stuck_setup"].includes(setupState);
+    const alreadySetup = setupState === "already_on_lan" || connectionMode === "lan";
+    if (!result) {
+      return {
+        status: "unknown",
+        title: "Setup bypass claim untested",
+        detail: "No safe scan has been run, so OpenReef cannot claim it avoids ATI setup yet.",
+        next: "Set connection path/setup state, then run Scan safe paths.",
+      };
+    }
+    if (bypass.status === "ok" && preSetup && connectionMode === "ap") {
+      return {
+        status: "ok",
+        title: "Pre-setup bypass candidate",
+        detail: "The tester marked the fixture as brand new/reset or stuck in setup, used AP fallback, and OpenReef found JSON from that route.",
+        next: "Treat this as the strongest setup-bypass evidence, but keep writes locked until readback/save/apply endpoints are verified.",
+      };
+    }
+    if (bypass.status === "ok" && alreadySetup) {
+      return {
+        status: "unknown",
+        title: "LAN confidence only",
+        detail: "OpenReef read a fixture that appears to have already reached the LAN, so this does not prove ATI setup was bypassed.",
+        next: "Use this for read-adapter mapping, but test AP fallback on a brand-new/reset or stuck fixture before claiming setup replacement.",
+      };
+    }
+    if (bypass.status === "ok") {
+      return {
+        status: "unknown",
+        title: "Read proof, setup state unknown",
+        detail: "OpenReef found JSON, but the fixture setup state is not known.",
+        next: "Ask the tester whether the light was already on LAN, brand new/reset, or stuck in setup.",
+      };
+    }
+    if (bypass.status === "unknown" && preSetup && connectionMode === "ap") {
+      return {
+        status: "unknown",
+        title: "Pre-setup reachability candidate",
+        detail: "OpenReef may be reaching a pre-setup fixture over AP fallback, but it has not found usable JSON yet.",
+        next: "Collect read paths from ATI exports/network notes, then retry Controller GET.",
+      };
+    }
+    if (bypass.status === "warning") {
+      return {
+        status: "warning",
+        title: "Setup bypass not proven",
+        detail: "OpenReef could not reach/read the fixture in this setup state.",
+        next: bypass.next,
+      };
+    }
+    return {
+      status: "unknown",
+      title: "Setup bypass evidence incomplete",
+      detail: "Connection or setup state is still unclear.",
+      next: "Set Connection path and Setup state, then rerun Scan safe paths.",
+    };
+  }
+
+  _stratonSetupBypassBanner(result, fixture = this._stratonProbeFixture()) {
+    const bypass = this._stratonSetupBypassStatus(result, fixture);
+    const claim = this._stratonSetupBypassClaim(result, fixture);
+    const route = this._stratonApRouteStatus(result, fixture);
+    return `
+      <div class="notice ${bypass.status === "ok" ? "success" : "warning-notice"}">
+        <strong>${this._escape(bypass.title)}.</strong> ${this._escape(bypass.detail)}
+      </div>
+      <div class="setup-next-list">
+        <div><span class="pill ${this._escape(bypass.status)}">test</span><p>${this._escape(bypass.next)}</p></div>
+        <div><span class="pill ${this._escape(claim.status)}">claim</span><p><strong>${this._escape(claim.title)}.</strong> ${this._escape(claim.detail)} ${this._escape(claim.next)}</p></div>
+        <div><span class="pill ${this._escape(route.status)}">route</span><p><strong>${this._escape(route.title)}.</strong> ${this._escape(route.detail)} ${this._escape(route.next)}</p></div>
+        <div><span class="pill disabled">write locked</span><p>OpenReef will not push schedules, Wi-Fi credentials, firmware, or save/apply commands during this evidence pass.</p></div>
+      </div>
+    `;
+  }
+
+  _stratonProbeScanResult(result) {
+    if (!result) return "";
+    const outcome = this._stratonScanOutcome(result);
+    return `
+      <div class="summary-grid">
+        <article class="summary-card ${result.reachableCount ? "ok" : "warning"}"><span>Reachable paths</span><strong>${this._escape(result.reachableCount || 0)}</strong><small>${this._escape(result.checkedAt)}</small></article>
+        <article class="summary-card ${result.jsonCount ? "ok" : "unknown"}"><span>JSON paths</span><strong>${this._escape(result.jsonCount || 0)}</strong><small>${this._escape(result.bestPath || "none selected")}</small></article>
+        <article class="summary-card ${this._escape(outcome.status)}"><span>Outcome</span><strong>${this._escape(outcome.title)}</strong><small>${this._escape(outcome.next)}</small></article>
+      </div>
+      <div class="notice ${outcome.status === "ok" ? "success" : "warning-notice"}"><strong>${this._escape(outcome.title)}.</strong> ${this._escape(outcome.detail)}</div>
+      ${result.warning ? `<p class="hint">${this._escape(result.warning)}</p>` : ""}
+      <div class="status-list">
+        ${(result.rows || []).map((row) => `
+          <div class="row">
+            <div>
+              <strong>${this._escape(row.label || row.path)}</strong>
+              <span>${this._escape(row.path || "unknown path")} · ${this._escape(row.contentType || "unknown")}</span>
+              <small>${this._escape(row.warning || `${row.bytes || 0} bytes via ${row.source || "unknown"}`)}</small>
+            </div>
+            <div class="pill-stack inline">
+              <span class="pill ${this._escape(row.statusClass || "unknown")}">${this._escape(row.status || "not run")}</span>
+              <span class="pill ${row.mode === "json" ? "ok" : "unknown"}">${this._escape(row.mode || "unknown")}</span>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  _stratonEndpointCatalog() {
+    const endpoints = this._stratonEndpoints();
+    const rows = [
+      ["reachability", "Reachability", "First proof the controller can talk to the fixture."],
+      ["currentState", "Current state", "Candidate JSON path for fixture state/program comparison."],
+      ["program", "Program", "Future verified current program read path."],
+      ["firmware", "Firmware", "Future verified model/firmware read path."],
+      ["groups", "Groups", "Future verified group membership read path."],
+    ];
+    return `
+      <section class="mapping-section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Read catalog</p>
+            <h3>Candidate endpoint paths</h3>
+            <p class="muted">Read-only paths discovered by setup rescue. These are candidates until confirmed on real Straton hardware.</p>
+          </div>
+          <span class="pill disabled">writes locked</span>
+        </div>
+        <div class="status-list">
+          ${rows.map(([key, label, detail]) => {
+            const value = endpoints[key] || "";
+            return `
+              <div class="row">
+                <div>
+                  <strong>${this._escape(label)}</strong>
+                  <span>${this._escape(value || "not mapped")}</span>
+                  <small>${this._escape(detail)}</small>
+                </div>
+                <span class="pill ${value ? "ok" : "unknown"}">${value ? "candidate" : "needed"}</span>
+              </div>
+            `;
+          }).join("")}
+        </div>
+        <p class="hint">${this._escape(endpoints.lastScanAt ? `Last scan: ${endpoints.lastScanAt} - ${endpoints.lastOutcome || "candidate updated"}` : "No endpoint candidate has been promoted yet.")}</p>
+      </section>
+    `;
+  }
+
+  _stratonAdapterGateRows() {
+    const draft = this._stratonEvidenceDraft();
+    const endpoints = this._stratonEndpoints();
+    const fixture = this._stratonProbeFixture();
+    const returnedTesterNote = draft.testerNoteResult;
+    const testerNote = returnedTesterNote && !returnedTesterNote.example ? returnedTesterNote : null;
+    const bypass = testerNote
+      ? {
+        status: testerNote.status,
+        title: testerNote.title,
+        detail: testerNote.detail,
+        next: testerNote.next,
+      }
+      : this._stratonSetupBypassStatus(draft.probeScanResult, fixture);
+    const setupProof = testerNote?.setupEvidenceTitle
+      ? {
+        status: testerNote.setupEvidenceStatus || "unknown",
+        title: testerNote.setupEvidenceTitle,
+        detail: testerNote.setupEvidenceDetail || "Returned support note was assessed for setup-bypass evidence.",
+        next: testerNote.setupEvidenceNext || "",
+      }
+      : this._stratonSetupBypassClaim(draft.probeScanResult, fixture);
+    const route = testerNote?.apRouteTitle
+      ? {
+        status: testerNote.apRouteStatus || "unknown",
+        title: testerNote.apRouteTitle,
+        detail: testerNote.apRouteDetail || testerNote.apRouteNext || "Returned support note included AP route readiness.",
+        next: testerNote.apRouteNext || "",
+      }
+      : this._stratonApRouteStatus(draft.probeScanResult, fixture);
+    const apRouteReady = route.status === "ok" && /^AP\b/i.test(route.title || "");
+    const apRouteStatus = apRouteReady ? "ok" : route.status === "warning" ? "warning" : "unknown";
+    const writeHints = (draft.result?.endpoints || []).filter((row) => !["GET", "HEAD", "OPTIONS"].includes(row.method));
+    const firmwareGroupCount = [endpoints.firmware, endpoints.groups].filter(Boolean).length;
+    return [
+      {
+        label: "Setup-bypass proof",
+        status: setupProof.status === "ok" ? "ok" : setupProof.status === "warning" ? "warning" : "unknown",
+        state: setupProof.title,
+        detail: `${setupProof.detail} ${setupProof.next || ""}`.trim(),
+      },
+      {
+        label: "Fixture read proof",
+        status: bypass.status === "ok" ? "ok" : bypass.status === "unknown" ? "unknown" : "warning",
+        state: bypass.title,
+        detail: `${bypass.detail} ${bypass.next} ${bypass.status === "ok" ? "This supports adapter mapping, but setup replacement is judged separately." : ""}`.trim(),
+      },
+      {
+        label: "AP route proof",
+        status: apRouteStatus,
+        state: route.title,
+        detail: apRouteReady
+          ? `${route.detail} ${route.next}`.trim()
+          : `${route.detail} ${route.next || "A LAN route or staged AP host is not enough to prove first-time setup replacement."}`.trim(),
+      },
+      {
+        label: "Current-state read",
+        status: endpoints.currentState ? "ok" : "warning",
+        state: endpoints.currentState ? `candidate ${endpoints.currentState}` : "needed",
+        detail: endpoints.currentState
+          ? "A read path candidate exists for comparing the fixture state with the OpenReef plan."
+          : "Needed before any write work: OpenReef must read the fixture before it can safely change it.",
+      },
+      {
+        label: "Program readback",
+        status: endpoints.program ? "unknown" : "warning",
+        state: endpoints.program ? `candidate ${endpoints.program}` : "needed",
+        detail: "Required before writes so OpenReef can prove the active program before and after any save/apply call.",
+      },
+      {
+        label: "Firmware and groups",
+        status: firmwareGroupCount === 2 ? "unknown" : "warning",
+        state: firmwareGroupCount === 2 ? "candidates captured" : `${firmwareGroupCount}/2 mapped`,
+        detail: "Firmware/model and group membership reads are needed for multi-light confidence and generation-specific adapter behavior.",
+      },
+      {
+        label: "Save/apply endpoint",
+        status: "warning",
+        state: writeHints.length ? `${writeHints.length} hint(s), locked` : "needed",
+        detail: writeHints.length
+          ? "Network notes include possible write endpoint hints, but real save/apply remains locked until readback is verified on hardware."
+          : "Still missing verified ATI save/apply endpoint evidence. OpenReef will not guess this contract.",
+      },
+      {
+        label: "Rollback package",
+        status: "ok",
+        state: "available",
+        detail: "OpenReef can copy the local program package and redacted support note before any future adapter work.",
+      },
+    ];
+  }
+
+  _stratonProofSummaryRows(rows = this._stratonAdapterGateRows()) {
+    const byLabel = Object.fromEntries((rows || []).map((row) => [row.label, row]));
+    const setup = byLabel["Setup-bypass proof"] || {};
+    const read = byLabel["Fixture read proof"] || {};
+    const save = byLabel["Save/apply endpoint"] || {};
+    return [
+      {
+        label: "Setup bypass",
+        status: setup.status || "unknown",
+        state: setup.status === "ok" ? "supported" : setup.status === "warning" ? "not proven" : "candidate only",
+        detail: setup.status === "ok"
+          ? `Evidence supports setup bypass: ${setup.state || "ready"}.`
+          : setup.status === "warning"
+            ? `Does not prove setup bypass: ${setup.state || "blocked"}.`
+            : `Setup bypass still needs stronger proof: ${setup.state || "candidate"}.`,
+      },
+      {
+        label: "Fixture read",
+        status: read.status || "unknown",
+        state: read.status === "ok" ? "read evidence found" : read.status === "warning" ? "not readable yet" : "reachable/candidate",
+        detail: read.status === "ok"
+          ? `Useful adapter read evidence exists: ${read.state || "read found"}.`
+          : read.status === "warning"
+            ? `OpenReef still needs a fixture read path: ${read.state || "needed"}.`
+            : `Read evidence is still incomplete: ${read.state || "candidate"}.`,
+      },
+      {
+        label: "Hardware writes",
+        status: "warning",
+        state: "locked",
+        detail: save.state && save.state !== "needed"
+          ? `Write hints exist (${save.state}), but save/apply remains locked until real readback verifies them.`
+          : "No verified ATI save/apply flow yet; OpenReef must not write schedules to the light.",
+      },
+    ];
+  }
+
+  _stratonPainPointCoverageRows() {
+    const straton = this._stratonConfig();
+    const draft = this._stratonEvidenceDraft();
+    const endpoints = this._stratonEndpoints();
+    const fixtures = this._stratonFixtures();
+    const selected = fixtures.filter((fixture) => fixture.selected);
+    const probe = draft.probeResult;
+    const scan = draft.probeScanResult;
+    const returnedTesterNote = draft.testerNoteResult;
+    const testerNote = returnedTesterNote && !returnedTesterNote.example ? returnedTesterNote : null;
+    const fixture = this._stratonProbeFixture();
+    const fixtureState = draft.fixtureStateResult;
+    const [bridgeClass, bridgeTitle, bridgeDetail] = this._stratonLiveBridgeSummary();
+    const remoteSetupClaim = testerNote?.setupEvidenceTitle
+      ? {
+        status: testerNote.setupEvidenceStatus || testerNote.status || "unknown",
+        title: testerNote.setupEvidenceTitle,
+        detail: testerNote.setupEvidenceDetail || testerNote.detail || "Returned support note was assessed for setup-bypass evidence.",
+        next: testerNote.setupEvidenceNext || testerNote.next || "",
+      }
+      : testerNote?.setupClaimTitle
+      ? {
+        status: testerNote.setupClaimStatus || testerNote.status || "unknown",
+        title: testerNote.setupClaimTitle,
+        detail: testerNote.setupClaimDetail || testerNote.detail || "Returned support note included a setup-replacement claim.",
+        next: testerNote.next || "",
+      }
+      : null;
+    const setupClaim = remoteSetupClaim || this._stratonSetupBypassClaim(scan, fixture);
+    const route = testerNote?.apRouteTitle
+      ? {
+        status: testerNote.apRouteStatus || "unknown",
+        title: testerNote.apRouteTitle,
+        detail: testerNote.apRouteDetail || testerNote.apRouteNext || "Returned support note included AP route readiness.",
+        next: testerNote.apRouteNext || "",
+      }
+      : this._stratonApRouteStatus(scan, fixture);
+    const reachable = Boolean(
+      endpoints.reachability ||
+      (scan && Number(scan.reachableCount) > 0) ||
+      (probe && ["ok", "unknown"].includes(probe.statusClass) && probe.status !== "not run")
+    );
+    const currentStateReady = Boolean(
+      endpoints.currentState ||
+      (scan && Number(scan.jsonCount) > 0) ||
+      probe?.mode === "json" ||
+      fixtureState?.mode === "json"
+    );
+    const groupNames = new Set(selected.map((item) => String(item.group || "").trim()).filter(Boolean));
+    const grouped = fixtures.length > 1
+      ? selected.length > 1 && groupNames.size > 0
+      : fixtures.length === 1;
+    const saveGate = this._stratonAdapterGateRows().find((row) => row.label === "Save/apply endpoint");
+    return [
+      {
+        label: "ATI setup bypass",
+        status: setupClaim.status === "ok" ? "ok" : setupClaim.status === "warning" ? "warning" : "unknown",
+        state: setupClaim.title,
+        detail: `${setupClaim.detail} ${setupClaim.next || ""} AP route: ${route.title} - ${route.detail}`.trim(),
+      },
+      {
+        label: "Discovery and reachability",
+        status: reachable ? "ok" : fixtures.length ? "unknown" : "warning",
+        state: reachable ? endpoints.reachability || scan?.bestPath || probe?.path || "reachable" : fixtures.length ? "fixture staged" : "fixture needed",
+        detail: reachable
+          ? "OpenReef has controller-side reachability evidence for this target."
+          : fixtures.length
+            ? "Run Test root or Scan safe paths before asking the tester to use ATI setup."
+            : "Add a fixture, LAN host/IP, or AP fallback target first.",
+      },
+      {
+        label: "Current fixture read",
+        status: currentStateReady ? "ok" : "warning",
+        state: endpoints.currentState ? `candidate ${endpoints.currentState}` : currentStateReady ? "JSON sample found" : "needed",
+        detail: currentStateReady
+          ? "OpenReef has a candidate read/sample path for planned-vs-observed comparison."
+          : "A useful read path is needed before OpenReef can safely replace ATI setup or writes.",
+      },
+      {
+        label: "Schedule editing",
+        status: "ok",
+        state: "local planner ready",
+        detail: "Templates, quick modes, day preview, acclimation, clouds, and moonlight can be edited without touching hardware.",
+      },
+      {
+        label: "Multi-light grouping",
+        status: grouped ? "ok" : fixtures.length ? "unknown" : "warning",
+        state: fixtures.length > 1 ? `${selected.length}/${fixtures.length} target(s), ${groupNames.size} group(s)` : fixtures.length ? "single fixture" : "needed",
+        detail: fixtures.length > 1
+          ? "Fixture cards and the sync matrix show target and group coverage before future adapter writes."
+          : fixtures.length
+            ? "Single-fixture setup is staged; multi-light confidence appears when more fixtures are added."
+            : "Add fixtures before testing group confidence.",
+      },
+      {
+        label: "Save confidence",
+        status: straton.lastReceipt ? "ok" : "unknown",
+        state: straton.lastReceipt ? "local receipt recorded" : "local receipt pending",
+        detail: straton.lastReceipt
+          ? "OpenReef can prove what it saved locally, but this is not ATI hardware acknowledgement."
+          : "Use Save local plan to create an OpenReef receipt after reviewing the plan.",
+      },
+      {
+        label: "Controller visibility",
+        status: bridgeClass === "ok" ? "ok" : bridgeClass === "warning" ? "warning" : "unknown",
+        state: bridgeTitle,
+        detail: bridgeDetail,
+      },
+      {
+        label: "Backup and support handoff",
+        status: "ok",
+        state: "copy flows ready",
+        detail: "Program packages, tester steps, evidence requests, and redacted support notes are available.",
+      },
+      {
+        label: "Hardware save/apply",
+        status: "warning",
+        state: saveGate?.state || "needed",
+        detail: saveGate?.detail || "OpenReef keeps Straton hardware writes locked until save/apply is verified on real hardware.",
+      },
+    ];
+  }
+
+  _stratonPainPointCoveragePanel() {
+    const rows = this._stratonPainPointCoverageRows();
+    const fixed = rows.filter((row) => row.status === "ok").length;
+    const candidate = rows.filter((row) => row.status === "unknown").length;
+    const blocked = rows.filter((row) => row.status === "warning").length;
+    return `
+      <article class="panel straton-painpoint-coverage">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Coverage</p>
+            <h3>Pain-point status</h3>
+            <p class="muted">Research complaints mapped to the current OpenReef Straton state.</p>
+          </div>
+          <div class="pill-stack">
+            <span class="pill ok">${this._escape(fixed)} fixed</span>
+            <span class="pill unknown">${this._escape(candidate)} candidate</span>
+            <span class="pill warning">${this._escape(blocked)} blocked</span>
+          </div>
+        </div>
+        <div class="status-list">
+          ${rows.map((row) => `
+            <div class="row">
+              <div>
+                <strong>${this._escape(row.label)}</strong>
+                <span>${this._escape(row.state)}</span>
+                <small>${this._escape(row.detail)}</small>
+              </div>
+              <span class="pill ${this._escape(row.status)}">${this._escape(row.status === "ok" ? "fixed" : row.status === "unknown" ? "candidate" : "blocked")}</span>
+            </div>
+          `).join("")}
+        </div>
+      </article>
+    `;
+  }
+
+  _stratonBetaEvidenceRows() {
+    const draft = this._stratonEvidenceDraft();
+    const straton = this._stratonConfig();
+    const adapterLabel = this._stratonAdapterLabel(straton.adapter);
+    const selectedReefPilot = straton.adapter === "reefpilot_bluetooth";
+    const selectedReefTech = straton.adapter === "reeftech_wifi";
+    const fixture = this._stratonProbeFixture();
+    const endpoints = this._stratonEndpoints();
+    const scan = draft.probeScanResult;
+    const probe = draft.probeResult;
+    const fixtureState = draft.fixtureStateResult;
+    const returnedTesterNote = draft.testerNoteResult;
+    const testerNote = returnedTesterNote && !returnedTesterNote.example ? returnedTesterNote : null;
+    const testerReefPilot = Boolean(testerNote?.reefPilotEvidence || testerNote?.title === "Reef Pilot Bluetooth evidence");
+    const reefPilot = selectedReefPilot || testerReefPilot;
+    const reefTech = selectedReefTech && !testerReefPilot;
+    const adapterState = testerReefPilot && !selectedReefPilot ? "Returned note: Reef Pilot Bluetooth" : adapterLabel;
+    const route = testerNote?.apRouteTitle
+      ? {
+        status: testerNote.apRouteStatus || "unknown",
+        title: testerNote.apRouteTitle,
+        detail: testerNote.apRouteDetail || testerNote.apRouteNext || "Returned support note included AP route readiness.",
+      }
+      : this._stratonApRouteStatus(scan, fixture);
+    const setupProof = testerNote?.setupEvidenceTitle
+      ? {
+        status: testerNote.setupEvidenceStatus || "unknown",
+        title: testerNote.setupEvidenceTitle,
+        detail: testerNote.setupEvidenceDetail || testerNote.setupEvidenceNext || "Returned support note was assessed for setup-bypass evidence.",
+      }
+      : this._stratonSetupBypassClaim(scan, fixture);
+    const hasRealTesterNote = Boolean(testerNote);
+    const hasJsonRead = Boolean(
+      endpoints.currentState ||
+      (scan && Number(scan.jsonCount) > 0) ||
+      (probe && probe.mode === "json") ||
+      (fixtureState && fixtureState.mode === "json") ||
+      (hasRealTesterNote && Number(testerNote.jsonCount) > 0)
+    );
+    const schemaId = testerNote?.schemaFingerprint || fixtureState?.schemaFingerprint?.id || "";
+    const setupState = fixture?.setupState || "unknown";
+    const setupStateLabel = this._stratonSetupStateLabel(setupState);
+    const firstSetupState = ["brand_new", "stuck_setup"].includes(setupState);
+    const apTarget = fixture?.connectionMode === "ap" || fixture?.host === "192.168.100.1";
+    const routeOk = route.status === "ok" && /^AP\b/i.test(route.title || "");
+    return [
+      {
+        label: "Fixture target",
+        status: fixture ? "ok" : "warning",
+        state: fixture ? `${fixture.name || "Straton"} at ${this._stratonRedactSnippet(fixture.host || "no host")}` : "needed",
+        detail: fixture
+          ? `Connection path is ${this._stratonConnectionModeLabel(fixture.connectionMode)}; setup state is ${setupStateLabel}.`
+          : "Add or select a Straton fixture before asking the tester to run AP/LAN evidence.",
+      },
+      {
+        label: "Adapter generation",
+        status: reefTech ? "ok" : reefPilot ? "unknown" : "warning",
+        state: adapterState,
+        detail: testerReefPilot
+          ? "Returned tester note identifies Straton X / Reef Pilot Bluetooth. AP route evidence should not be interpreted as ReefTECH Wi-Fi proof."
+          : reefTech
+          ? "ReefTECH Wi-Fi fixtures use the LAN/AP safe-read evidence path below."
+          : reefPilot
+            ? "Straton X / Reef Pilot uses a separate Bluetooth path. AP route evidence does not prove this adapter."
+            : "This adapter path is for read-only bridge/manual backup use, not direct ATI setup replacement.",
+      },
+      {
+        label: "First-setup route",
+        status: reefPilot ? "unknown" : apTarget && firstSetupState ? "ok" : apTarget ? "unknown" : "warning",
+        state: reefPilot ? "Bluetooth setup path" : apTarget ? "AP fallback staged" : "LAN or unknown route",
+        detail: reefPilot
+          ? "For Reef Pilot Bluetooth, collect real pairing/control evidence from Straton X instead of treating AP fallback as setup proof."
+          : apTarget && firstSetupState
+            ? "Fixture is staged for the real ATI setup-bypass test: AP fallback plus brand-new/reset or stuck setup state."
+            : apTarget
+              ? "AP fallback is staged, but setup state still needs brand-new/reset or stuck setup proof before claiming ATI onboarding replacement."
+              : "A LAN read can map endpoints, but it does not prove first-time ATI setup replacement.",
+      },
+      {
+        label: "Controller/AP route",
+        status: reefPilot ? "unknown" : routeOk ? "ok" : route.status === "warning" ? "warning" : "unknown",
+        state: reefPilot ? "not Bluetooth proof" : route.title,
+        detail: reefPilot
+          ? "AP route checks are still useful for ReefTECH Wi-Fi fixtures, but Straton X/Reef Pilot needs separate Bluetooth evidence."
+          : route.detail,
+      },
+      {
+        label: "Returned tester note",
+        status: hasRealTesterNote ? testerNote.status === "warning" ? "warning" : "unknown" : returnedTesterNote?.example ? "unknown" : "warning",
+        state: hasRealTesterNote ? testerNote.title : returnedTesterNote?.example ? "example only" : "needed",
+        detail: hasRealTesterNote
+          ? `${testerNote.detail} ${testerNote.next || ""}`.trim()
+          : returnedTesterNote?.example
+            ? "Synthetic examples rehearse the parser but do not prove hardware access or promote endpoints."
+            : "Paste the tester's copied support note after they run Scan safe paths.",
+      },
+      {
+        label: "Setup-bypass evidence",
+        status: reefPilot ? "unknown" : setupProof.status === "ok" ? "ok" : setupProof.status === "warning" ? "warning" : "unknown",
+        state: reefPilot ? "Bluetooth proof needed" : setupProof.title,
+        detail: reefPilot
+          ? "Need real Reef Pilot Bluetooth evidence for pairing, template/group control, Live PAR/Energy, and schedule behavior."
+          : setupProof.detail,
+      },
+      {
+        label: "Readback candidate",
+        status: hasJsonRead ? "unknown" : "warning",
+        state: endpoints.currentState ? `candidate ${endpoints.currentState}` : hasJsonRead ? "JSON found" : "needed",
+        detail: reefPilot
+          ? "For Reef Pilot Bluetooth, readback evidence should include Live PAR/Energy or current schedule/control state from real Straton X hardware."
+          : hasJsonRead
+            ? "Useful read evidence exists, but hardware writes still need program readback and save/apply proof."
+            : "OpenReef still needs a safe current-state JSON/read path from real fixture evidence.",
+      },
+      {
+        label: "Schema fingerprint",
+        status: schemaId ? "unknown" : "warning",
+        state: schemaId || "missing",
+        detail: schemaId
+          ? "A redacted schema fingerprint exists for comparing repeated tester reads without sharing raw settings."
+          : "Capture a redacted schema fingerprint from a current fixture sample or returned tester note.",
+      },
+      {
+        label: "Write safety",
+        status: "warning",
+        state: "locked",
+        detail: "Save/apply remains locked until verified current-state readback, program readback, firmware/group context, save/apply endpoint evidence, and rollback proof all exist.",
+      },
+    ];
+  }
+
+  _stratonBetaEvidencePanel() {
+    const rows = this._stratonBetaEvidenceRows();
+    const ready = rows.filter((row) => row.status === "ok").length;
+    const candidate = rows.filter((row) => row.status === "unknown").length;
+    const blocked = rows.filter((row) => row.status === "warning").length;
+    return `
+      <article class="panel straton-beta-evidence">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Beta proof</p>
+            <h3>Hardware evidence checklist</h3>
+            <p class="muted">The simple tester-facing view of what is proven, candidate, or still blocked.</p>
+          </div>
+          <div class="pill-stack">
+            <span class="pill ok">${this._escape(ready)} ready</span>
+            <span class="pill unknown">${this._escape(candidate)} candidate</span>
+            <span class="pill warning">${this._escape(blocked)} blocked</span>
+          </div>
+        </div>
+        <div class="status-list">
+          ${rows.map((row) => `
+            <div class="row">
+              <div>
+                <strong>${this._escape(row.label)}</strong>
+                <span>${this._escape(row.state)}</span>
+                <small>${this._escape(row.detail)}</small>
+              </div>
+              <span class="pill ${this._escape(row.status)}">${this._escape(row.status === "ok" ? "ready" : row.status === "unknown" ? "candidate" : "blocked")}</span>
+            </div>
+          `).join("")}
+        </div>
+      </article>
+    `;
+  }
+
+  _stratonAdapterGatePanel() {
+    const rows = this._stratonAdapterGateRows();
+    const proofRows = this._stratonProofSummaryRows(rows);
+    const candidateRows = rows.filter((row) => row.status === "ok" || row.status === "unknown").length;
+    const blockingRows = rows.filter((row) => row.status === "warning").length;
+    return `
+      <article class="panel straton-adapter-gate">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Adapter gate</p>
+            <h3>Hardware write unlock checklist</h3>
+            <p class="muted">OpenReef must pass these evidence checks before replacing ATI save/apply flows.</p>
+          </div>
+          <div class="pill-stack">
+            <span class="pill disabled">writes locked</span>
+            <span class="pill ${candidateRows ? "unknown" : "warning"}">${this._escape(candidateRows)}/${this._escape(rows.length)} evidence items</span>
+            <span class="pill warning">${this._escape(blockingRows)} blocker(s)</span>
+            <button class="secondary compact-button" data-action="copy-straton-adapter-request">Copy evidence request</button>
+          </div>
+        </div>
+        <div class="notice warning-notice"><strong>Do not unlock writes yet.</strong> Candidate read paths are useful evidence, but a safe adapter still needs verified program readback and save/apply confirmation on real Straton hardware.</div>
+        <div class="setup-next-list">
+          ${proofRows.map((row) => `
+            <div><span class="pill ${this._escape(row.status)}">${this._escape(row.label)}</span><p><strong>${this._escape(row.state)}.</strong> ${this._escape(row.detail)}</p></div>
+          `).join("")}
+        </div>
+        <div class="status-list">
+          ${rows.map((row) => `
+            <div class="row">
+              <div>
+                <strong>${this._escape(row.label)}</strong>
+                <span>${this._escape(row.state)}</span>
+                <small>${this._escape(row.detail)}</small>
+              </div>
+              <span class="pill ${this._escape(row.status)}">${this._escape(row.status === "ok" ? "ready" : row.status === "unknown" ? "candidate" : "blocked")}</span>
+            </div>
+          `).join("")}
+        </div>
+      </article>
+    `;
+  }
+
+  _stratonProbeResult(result) {
+    if (!result) {
+      return `
+        <div class="setup-next-list">
+          <div><span class="pill unknown">optional</span><p>Use this only after you have a likely read-only path from ATI exports or browser network notes.</p></div>
+          <div><span class="pill warning">GET only</span><p>The probe asks OpenReef's Home Assistant backend to read the selected fixture path. It does not write, save, or call light services.</p></div>
+        </div>
+      `;
+    }
+    return `
+      <div class="summary-grid">
+        <article class="summary-card ${this._escape(result.statusClass || "unknown")}"><span>GET status</span><strong>${this._escape(result.status)}</strong><small>${this._escape(result.checkedAt)}</small></article>
+        <article class="summary-card ${result.mode === "json" ? "ok" : "warning"}"><span>Response</span><strong>${this._escape(result.mode)}</strong><small>${this._escape(result.bytes || 0)} bytes</small></article>
+        <article class="summary-card unknown"><span>Source</span><strong>${this._escape(result.source || "unknown")}</strong><small>${this._escape(result.host || "redacted")}</small></article>
+      </div>
+      <div class="setup-next-list">
+        <div><span class="pill ${this._escape(result.statusClass || "unknown")}">${this._escape(result.method || "GET")}</span><p>${this._escape(result.path || "unknown path")}</p></div>
+        <div><span class="pill ${result.warning ? "warning" : "ok"}">${result.warning ? "review" : "usable"}</span><p>${this._escape(result.warning || "Response copied into the fixture sample box for planned-vs-observed comparison.")}</p></div>
+        <div><span class="pill unknown">private</span><p>Raw probe text is transient. Copied notes include status and redacted path only.</p></div>
+      </div>
+    `;
+  }
+
+  _stratonFixtureStateResult(result) {
+    if (!result) {
+      return `
+        <div class="setup-next-list">
+          <div><span class="pill unknown">read only</span><p>Paste a current fixture JSON export or GET response to compare obvious fields against the OpenReef plan.</p></div>
+          <div><span class="pill warning">no write</span><p>This does not call a fixture or apply settings. It only analyzes the pasted sample in this browser session.</p></div>
+        </div>
+      `;
+    }
+    const close = result.observations?.filter((item) => item.status === "ok").length || 0;
+    return `
+      <div class="summary-grid">
+        <article class="summary-card ${result.mode === "json" ? "ok" : "warning"}"><span>Sample</span><strong>${this._escape(result.mode)}</strong><small>${this._escape(result.checkedAt)}</small></article>
+        <article class="summary-card ${result.leafCount ? "ok" : "unknown"}"><span>Leaf values</span><strong>${this._escape(result.leafCount)}</strong><small>candidate fields scanned</small></article>
+        <article class="summary-card ${close ? "ok" : "warning"}"><span>Close matches</span><strong>${this._escape(close)} / ${this._escape(result.observations?.length || 0)}</strong><small>planned vs observed</small></article>
+        <article class="summary-card unknown"><span>Schema</span><strong>${this._escape(result.schemaFingerprint?.id || "none")}</strong><small>redacted fingerprint</small></article>
+      </div>
+      ${result.warning ? `<p class="hint">${this._escape(result.warning)}</p>` : ""}
+      <div class="status-list">
+        ${(result.observations || []).map((item) => `
+          <div class="row">
+            <div>
+              <strong>${this._escape(item.label)}</strong>
+              <span>Planned ${this._escape(item.planned)} · observed ${this._escape(item.observed)}</span>
+              <small>${this._escape(item.detail)}</small>
+            </div>
+            <span class="pill ${this._escape(item.status)}">${this._escape(item.status)}</span>
+          </div>
+        `).join("")}
+      </div>
+      <div class="setup-next-list">
+        ${(result.promotedEndpoints || []).length ? result.promotedEndpoints.map((item) => `
+          <div><span class="pill ok">${this._escape(item.label)}</span><p>${this._escape(`${item.path} - ${item.state}`)}</p></div>
+        `).join("") : ""}
+        ${(result.rows || []).length ? result.rows.map((row) => `
+          <div><span class="pill ${row.focus === "other" ? "unknown" : "ok"}">${this._escape(row.focus)}</span><p>${this._escape(row.path)} = ${this._escape(row.value)}</p></div>
+        `).join("") : `<div><span class="pill warning">needed</span><p>No obvious schedule, spectrum, grouping, firmware, or model fields found in this sample.</p></div>`}
+      </div>
+    `;
+  }
+
+  _stratonTesterNoteResult(result) {
+    if (!result) {
+      return `
+        <div class="setup-next-list">
+          <div><span class="pill unknown">paste</span><p>Paste the tester's copied Straton support note here after they run Scan safe paths.</p></div>
+          <div><span class="pill warning">candidate</span><p>The intake can promote safe read paths into the candidate endpoint catalog, but it does not unlock hardware writes.</p></div>
+        </div>
+      `;
+    }
+    const endpointRows = Object.entries(result.endpoints || {})
+      .filter(([, value]) => value)
+      .map(([key, value]) => [key.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`), value]);
+    const returnReviewRows = this._stratonReturnReviewRows(result);
+    const reefPilotRows = result.reefPilotEvidence ? [
+      {
+        label: "Hardware generation",
+        status: "unknown",
+        state: result.hardwareGeneration || "Straton X / Reef Pilot Bluetooth",
+        detail: "Returned note identified the newer Bluetooth control path; do not treat AP route as proof for this adapter.",
+      },
+      {
+        label: "Bluetooth evidence",
+        status: result.bluetoothControl ? "unknown" : "warning",
+        state: result.bluetoothControl || "needed",
+        detail: result.bluetoothControl || "Ask for pairing and direct control observations from the Reef Pilot app.",
+      },
+      {
+        label: "Live PAR/Energy",
+        status: result.liveParEnergy ? "unknown" : "warning",
+        state: result.liveParEnergy || "needed",
+        detail: result.liveParEnergy || "Ask whether Reef Pilot shows Live PAR and Live Energy for the tested Straton X.",
+      },
+      {
+        label: "Templates/groups",
+        status: result.templatesGroups ? "unknown" : "warning",
+        state: result.templatesGroups || "needed",
+        detail: result.templatesGroups || "Ask whether template loading and grouped fixture control were observed.",
+      },
+      {
+        label: "Schedule save",
+        status: result.scheduleSave ? "unknown" : "warning",
+        state: result.scheduleSave || "needed",
+        detail: result.scheduleSave || "Ask whether saving a schedule was confirmed or only changed on screen.",
+      },
+    ] : [];
+    return `
+      <div class="summary-grid">
+        <article class="summary-card ${this._escape(result.status || "unknown")}"><span>Bypass verdict</span><strong>${this._escape(result.title)}</strong><small>${this._escape(result.checkedAt)}</small></article>
+        <article class="summary-card ${this._escape(result.setupEvidenceStatus || "unknown")}"><span>Setup evidence</span><strong>${this._escape(result.setupEvidenceTitle || "not assessed")}</strong><small>${this._escape(result.setupEvidenceNext || "review returned note")}</small></article>
+        <article class="summary-card ${result.jsonCount ? "ok" : result.reachableCount ? "unknown" : "warning"}"><span>Reachable / JSON</span><strong>${this._escape(result.reachableCount || 0)} / ${this._escape(result.jsonCount || 0)}</strong><small>${this._escape(result.verdict || "no verdict line")}</small></article>
+        <article class="summary-card ${result.promoted?.length ? "ok" : "unknown"}"><span>Catalog updates</span><strong>${this._escape(result.promoted?.length || 0)}</strong><small>${this._escape(result.promoted?.join(", ") || "none promoted")}</small></article>
+        <article class="summary-card ${this._escape(result.schemaFingerprintStatus || "unknown")}"><span>Schema</span><strong>${this._escape(result.schemaFingerprint || "none")}</strong><small>${this._escape(result.schemaFingerprintTitle || "not compared")}</small></article>
+      </div>
+      <div class="notice ${result.status === "ok" ? "success" : "warning-notice"}"><strong>${this._escape(result.title)}.</strong> ${this._escape(result.detail)}</div>
+      ${result.warning ? `<p class="hint">${this._escape(result.warning)}</p>` : ""}
+      <div class="status-list">
+        ${returnReviewRows.map((row) => `
+          <div class="row">
+            <div>
+              <strong>${this._escape(row.label)}</strong>
+              <span>${this._escape(row.state)}</span>
+              <small>${this._escape(row.detail)}</small>
+            </div>
+            <span class="pill ${this._escape(row.status)}">${this._escape(row.status === "ok" ? "ready" : row.status === "unknown" ? "candidate" : "blocked")}</span>
+          </div>
+        `).join("")}
+        <div class="row">
+          <div><strong>Next step</strong><span>${this._escape(result.next)}</span></div>
+          <span class="pill ${this._escape(result.status || "unknown")}">${this._escape(result.status || "unknown")}</span>
+        </div>
+        <div class="row">
+          <div>
+            <strong>Setup evidence</strong>
+            <span>${this._escape(result.setupEvidenceTitle || "Setup evidence incomplete")}</span>
+            <small>${this._escape(result.setupEvidenceDetail || result.setupEvidenceNext || "Returned note does not include enough setup-bypass evidence yet.")}</small>
+          </div>
+          <span class="pill ${this._escape(result.setupEvidenceStatus || "unknown")}">${this._escape(result.setupEvidenceStatus || "unknown")}</span>
+        </div>
+        ${result.setupClaimTitle ? `
+          <div class="row">
+            <div>
+              <strong>Setup claim</strong>
+              <span>${this._escape(result.setupClaimTitle)}</span>
+              <small>${this._escape(result.setupClaimDetail || "Returned support note included a setup-replacement claim.")}</small>
+            </div>
+            <span class="pill ${this._escape(result.setupClaimStatus || "unknown")}">${this._escape(result.setupClaimStatus || "unknown")}</span>
+          </div>
+        ` : ""}
+        ${result.apRouteTitle ? `
+          <div class="row">
+            <div>
+              <strong>AP route</strong>
+              <span>${this._escape(result.apRouteTitle)}</span>
+              <small>${this._escape(result.apRouteDetail || result.apRouteNext || "Returned support note included AP route readiness.")}</small>
+            </div>
+            <span class="pill ${this._escape(result.apRouteStatus || "unknown")}">${this._escape(result.apRouteStatus || "unknown")}</span>
+          </div>
+        ` : ""}
+        ${reefPilotRows.map((row) => `
+          <div class="row">
+            <div>
+              <strong>${this._escape(row.label)}</strong>
+              <span>${this._escape(row.state)}</span>
+              <small>${this._escape(row.detail)}</small>
+            </div>
+            <span class="pill ${this._escape(row.status)}">${this._escape(row.status === "warning" ? "needed" : "candidate")}</span>
+          </div>
+        `).join("")}
+        <div class="row">
+          <div>
+            <strong>Schema fingerprint</strong>
+            <span>${this._escape(result.schemaFingerprintTitle || "Schema not compared")}</span>
+            <small>${this._escape(result.schemaFingerprintDetail || "No returned schema fingerprint was found in the pasted note.")}</small>
+          </div>
+          <span class="pill ${this._escape(result.schemaFingerprintStatus || "unknown")}">${this._escape(result.schemaFingerprintStatus || "unknown")}</span>
+        </div>
+        ${endpointRows.length ? endpointRows.map(([key, value]) => `
+          <div class="row">
+            <div><strong>${this._escape(key)}</strong><span>${this._escape(value)}</span><small>Candidate path from returned support note.</small></div>
+            <span class="pill ok">candidate</span>
+          </div>
+        `).join("") : `
+          <div class="row">
+            <div><strong>Endpoint candidates</strong><span>None found in the pasted note.</span><small>Ask for the full support note if the tester ran Scan safe paths.</small></div>
+            <span class="pill warning">needed</span>
+          </div>
+        `}
+      </div>
+    `;
+  }
+
+  _stratonEvidenceCoverageRows(result = this._stratonEvidenceDraft().result) {
+    const focusCounts = result?.focusCounts || {};
+    const endpoints = result?.endpoints || [];
+    const readHints = endpoints.filter((row) => ["GET", "HEAD"].includes(row.method));
+    const writeHints = endpoints.filter((row) => ["POST", "PUT", "PATCH", "DELETE"].includes(row.method));
+    const coverage = (label, key, detail) => {
+      const count = Number(focusCounts[key]) || 0;
+      return {
+        label,
+        status: count ? "ok" : "warning",
+        state: count ? `${count} changed path(s)` : "needed",
+        detail,
+      };
+    };
+    return [
+      coverage("Schedule mapping", "schedule", "Run one small ATI schedule-time change and compare before/after exports."),
+      coverage("Spectrum mapping", "spectrum", "Run one small ATI channel/intensity change and compare before/after exports."),
+      coverage("Grouping mapping", "grouping", "Run one grouping or fixture-target change on a multi-light setup where possible."),
+      coverage("Firmware/model context", "firmware", "Capture model and firmware strings so adapter behavior can be generation-aware."),
+      {
+        label: "Read endpoint hints",
+        status: readHints.length ? "ok" : "warning",
+        state: readHints.length ? `${readHints.length} read hint(s)` : "needed",
+        detail: "GET/HEAD method-path notes help map load/current-state reads before writes.",
+      },
+      {
+        label: "Save/apply hints",
+        status: writeHints.length ? "unknown" : "warning",
+        state: writeHints.length ? `${writeHints.length} write hint(s), locked` : "needed",
+        detail: "POST/PUT/PATCH/DELETE hints are evidence only. Save/apply stays locked until readback is verified on hardware.",
+      },
+    ];
+  }
+
+  _stratonEvidenceCoverage(result = this._stratonEvidenceDraft().result) {
+    const rows = this._stratonEvidenceCoverageRows(result);
+    const ready = rows.filter((row) => row.status === "ok" || row.status === "unknown").length;
+    return `
+      <section class="mapping-section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Coverage</p>
+            <h3>Adapter evidence coverage</h3>
+            <p class="muted">Shows which ATI one-change tests are already represented in the pasted evidence.</p>
+          </div>
+          <div class="pill-stack">
+            <span class="pill ${ready ? "unknown" : "warning"}">${this._escape(ready)}/${this._escape(rows.length)} covered</span>
+            <span class="pill disabled">writes locked</span>
+          </div>
+        </div>
+        <div class="status-list">
+          ${rows.map((row) => `
+            <div class="row">
+              <div>
+                <strong>${this._escape(row.label)}</strong>
+                <span>${this._escape(row.state)}</span>
+                <small>${this._escape(row.detail)}</small>
+              </div>
+              <span class="pill ${this._escape(row.status)}">${this._escape(row.status === "ok" ? "covered" : row.status === "unknown" ? "candidate" : "needed")}</span>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    `;
+  }
+
+  _stratonEvidenceLab() {
+    const draft = this._stratonEvidenceDraft();
+    const result = draft.result;
+    const fixtureStateResult = draft.fixtureStateResult;
+    const probeResult = draft.probeResult;
+    const testerNoteResult = draft.testerNoteResult;
+    const fixtures = this._stratonFixtures();
+    const probeBusy = draft.probeLoading || draft.probeScanning;
+    return `
+      <article class="panel straton-evidence-lab">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Adapter lab</p>
+            <h3>ATI evidence collector</h3>
+            <p class="muted">Paste before/after ATI exports or network notes to find changed keys for a safe fixture adapter.</p>
+          </div>
+          <div class="button-row end">
+            <button class="secondary compact-button" data-action="clear-straton-evidence">Clear</button>
+            <button class="secondary compact-button" data-action="copy-straton-adapter-request">Copy evidence request</button>
+            <button class="secondary compact-button" data-action="copy-straton-evidence" ${result || testerNoteResult ? "" : "disabled"}>Copy summary</button>
+            <button class="primary compact-button" data-action="analyze-straton-evidence">Analyze</button>
+          </div>
+        </div>
+        <div class="notice warning-notice"><strong>Privacy boundary.</strong> Raw pasted exports stay in this browser session and are not saved to OpenReef config. The copied summary is redacted.</div>
+        <section class="mapping-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Beta return</p>
+              <h3>Tester support-note intake</h3>
+              <p class="muted">Paste the returned Straton support note to summarize the bypass verdict and promote safe candidate read paths.</p>
+            </div>
+            <div class="button-row end">
+              <button class="secondary compact-button" data-action="clear-straton-tester-note">Clear note</button>
+              <button class="secondary compact-button" data-action="load-straton-example-note">Load example note</button>
+              <button class="primary compact-button" data-action="analyze-straton-tester-note">Analyze note</button>
+            </div>
+          </div>
+          <div class="grid three compact">
+            <label>Example scenario
+              <select data-straton-evidence="testerNoteScenario">
+                <option value="strong" ${draft.testerNoteScenario === "strong" ? "selected" : ""}>Strong AP read</option>
+                <option value="lan" ${draft.testerNoteScenario === "lan" ? "selected" : ""}>LAN-only read</option>
+                <option value="route" ${draft.testerNoteScenario === "route" ? "selected" : ""}>AP route blocker</option>
+                <option value="reachable" ${draft.testerNoteScenario === "reachable" ? "selected" : ""}>Reachability only</option>
+                <option value="bluetooth" ${draft.testerNoteScenario === "bluetooth" ? "selected" : ""}>Reef Pilot Bluetooth</option>
+              </select>
+            </label>
+          </div>
+          <label>Returned support note<textarea data-straton-evidence="testerNote" rows="7" placeholder="Paste the copied OpenReef Straton support note from the beta tester.">${this._escape(draft.testerNote || "")}</textarea></label>
+          ${this._stratonTesterNoteResult(testerNoteResult)}
+        </section>
+        <section class="mapping-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Read-only adapter</p>
+              <h3>Current fixture sample</h3>
+              <p class="muted">Paste a current Straton JSON export or run a read-only GET against a mapped fixture path, then compare candidate fields with the OpenReef plan.</p>
+            </div>
+            <div class="button-row end">
+              <button class="secondary compact-button" data-action="clear-straton-fixture-state">Clear sample</button>
+              <button class="primary compact-button" data-action="analyze-straton-fixture-state">Analyze sample</button>
+            </div>
+          </div>
+          <div class="grid three compact">
+            <label>Probe fixture
+              <select data-straton-evidence="probeFixtureId">
+                ${fixtures.length ? fixtures.map((fixture) => `
+                  <option value="${this._escape(fixture.id)}" ${draft.probeFixtureId === fixture.id ? "selected" : ""}>${this._escape(fixture.name)} - ${this._escape(this._stratonRedactSnippet(fixture.host || "no host"))}</option>
+                `).join("") : `<option value="">Add a fixture first</option>`}
+              </select>
+            </label>
+            <label>GET path<input data-straton-evidence="probePath" value="${this._escape(draft.probePath)}" placeholder="/settings or path from network capture"></label>
+            <div class="button-row end">
+              <button class="secondary compact-button" data-action="probe-straton-fixture-state" ${fixtures.length && !probeBusy ? "" : "disabled"}>${probeBusy ? "Reading..." : "Controller GET"}</button>
+            </div>
+          </div>
+          ${this._stratonProbeResult(probeResult)}
+          <label>Fixture sample<textarea data-straton-evidence="fixtureState" rows="7" placeholder="{&#10;  &quot;program&quot;: { &quot;peak&quot;: 62, &quot;startTime&quot;: &quot;10:00&quot; },&#10;  &quot;firmware&quot;: &quot;2024.4&quot;&#10;}">${this._escape(draft.fixtureState)}</textarea></label>
+          <div class="notice compact-notice"><strong>Candidate comparison only.</strong> This does not prove an ATI endpoint contract; it helps map likely fields before a real read-only adapter is built.</div>
+          ${this._stratonFixtureStateResult(fixtureStateResult)}
+        </section>
+        <div class="grid three compact">
+          <label>Before export<textarea data-straton-evidence="before" rows="6" placeholder="{...before schedule or spectrum edit...}">${this._escape(draft.before)}</textarea></label>
+          <label>After export<textarea data-straton-evidence="after" rows="6" placeholder="{...after one small edit...}">${this._escape(draft.after)}</textarea></label>
+          <label>Network notes<textarea data-straton-evidence="notes" rows="6" placeholder="POST /api/...&#10;GET /settings?...">${this._escape(draft.notes)}</textarea></label>
+        </div>
+        ${this._stratonEvidenceCoverage(result)}
+        ${result ? `
+          <div class="summary-grid">
+            <article class="summary-card ${result.changedCount ? "warning" : "ok"}"><span>Changed</span><strong>${this._escape(result.changedCount)}</strong><small>${this._escape(result.mode)} comparison</small></article>
+            <article class="summary-card ${result.addedCount || result.removedCount ? "warning" : "unknown"}"><span>Added / removed</span><strong>${this._escape(result.addedCount)} / ${this._escape(result.removedCount)}</strong><small>Key or line presence</small></article>
+            <article class="summary-card ${result.endpoints.length ? "ok" : "unknown"}"><span>Endpoint hints</span><strong>${this._escape(result.endpoints.length)}</strong><small>${this._escape(result.checkedAt)}</small></article>
+          </div>
+          ${result.warning ? `<p class="hint">${this._escape(result.warning)}</p>` : ""}
+          <div class="status-list">
+            ${result.rows?.length ? result.rows.map((row) => `
+              <div class="row">
+                <div><strong>${this._escape(row.kind)}</strong><span>${this._escape(row.path)}</span></div>
+                <span class="pill ${row.focus === "other" || row.focus === "line" ? "unknown" : "ok"}">${this._escape(row.focus)}</span>
+              </div>
+            `).join("") : `<p class="muted">No differences detected between the pasted evidence blocks.</p>`}
+          </div>
+          <div class="setup-next-list">
+            ${result.endpoints.length ? result.endpoints.map((row) => `
+              <div><span class="pill ok">${this._escape(row.method)}</span><p>${this._escape(row.path)}</p></div>
+            `).join("") : `<div><span class="pill warning">needed</span><p>Paste method/path notes from the browser network panel to map load/save endpoints.</p></div>`}
+          </div>
+        ` : `
+          <div class="setup-next-list">
+            <div><span class="pill unknown">1</span><p>Export ATI settings before one small schedule, channel, or grouping edit.</p></div>
+            <div><span class="pill unknown">2</span><p>Export again after the edit, then paste both exports here.</p></div>
+            <div><span class="pill unknown">3</span><p>Add method/path notes from the browser network panel if available.</p></div>
+          </div>
+        `}
+      </article>
+    `;
+  }
+
+  _stratonProgramPackage() {
+    const straton = this._stratonConfig();
+    const template = this._stratonTemplate(straton.selectedTemplate);
+    return {
+      kind: "openreef-straton-program",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      selectedTemplate: straton.selectedTemplate,
+      templateName: template.name,
+      adapter: straton.adapter,
+      program: {
+        peak: Number(straton.program.peak) || 0,
+        startTime: straton.program.startTime || "10:00",
+        photoperiodHours: Number(straton.program.photoperiodHours) || 10,
+        rampMinutes: Number(straton.program.rampMinutes) || 90,
+        acclimationStart: Number(straton.program.acclimationStart) || 0,
+        acclimationTarget: Number(straton.program.acclimationTarget) || 0,
+        acclimationDays: Number(straton.program.acclimationDays) || 1,
+        quickMode: straton.program.quickMode || "auto",
+        moonlight: Number(straton.program.moonlight) || 0,
+        lunarMode: straton.program.lunarMode || "manual",
+        cloudDim: Number(straton.program.cloudDim) || 0,
+      },
+      endpoints: {
+        ...this._stratonEndpoints(),
+      },
+      fixtures: this._stratonFixtures().map((fixture) => ({
+        name: fixture.name,
+        host: fixture.host,
+        firmware: fixture.firmware,
+        group: fixture.group,
+        connectionMode: fixture.connectionMode || "unknown",
+        setupState: fixture.setupState || "unknown",
+        selected: fixture.selected !== false,
+      })),
+      receipt: straton.lastReceipt || "",
+    };
+  }
+
+  _stratonProgramPackageText() {
+    return JSON.stringify(this._stratonProgramPackage(), null, 2);
+  }
+
+  async _copyStratonProgramPackage() {
+    await this._copyText(this._stratonProgramPackageText(), "Straton program package copied", "Could not copy Straton program package");
+  }
+
+  _stratonImportedProgram(source) {
+    const program = source?.program && typeof source.program === "object" ? source.program : {};
+    const startTime = String(program.startTime || "10:00").slice(0, 5);
+    return {
+      peak: Math.max(0, Math.min(100, Number(program.peak) || 0)),
+      startTime: /^\d{1,2}:\d{2}$/.test(startTime) ? startTime : "10:00",
+      photoperiodHours: Math.max(1, Math.min(16, Number(program.photoperiodHours) || 10)),
+      rampMinutes: Math.max(15, Math.min(240, Number(program.rampMinutes) || 90)),
+      acclimationStart: Math.max(0, Math.min(100, Number(program.acclimationStart) || 0)),
+      acclimationTarget: Math.max(0, Math.min(100, Number(program.acclimationTarget) || 0)),
+      acclimationDays: Math.max(1, Math.min(120, Number(program.acclimationDays) || 1)),
+      quickMode: ["auto", "blue", "photo", "feeding"].includes(program.quickMode) ? program.quickMode : "auto",
+      moonlight: Math.max(0, Math.min(5, Number(program.moonlight) || 0)),
+      lunarMode: ["manual", "seasonal", "off"].includes(program.lunarMode) ? program.lunarMode : "manual",
+      cloudDim: Math.max(0, Math.min(60, Number(program.cloudDim) || 0)),
+    };
+  }
+
+  _stratonImportedFixtures(source) {
+    const fixtures = Array.isArray(source?.fixtures) ? source.fixtures : [];
+    return fixtures.slice(0, 12).map((fixture, index) => {
+      const item = fixture && typeof fixture === "object" ? fixture : {};
+      const connectionModes = ["unknown", "lan", "ap"];
+      const setupStates = ["unknown", "already_on_lan", "brand_new", "stuck_setup"];
+      const host = String(item.host || item.ip || "192.168.100.1").slice(0, 80);
+      return {
+        id: this._slug(item.id || item.name || `straton_${index + 1}`) || `straton_${index + 1}`,
+        name: String(item.name || `Straton ${index + 1}`).slice(0, 60),
+        host,
+        firmware: String(item.firmware || "unknown").slice(0, 32),
+        group: String(item.group || "Display").slice(0, 40),
+        connectionMode: connectionModes.includes(item.connectionMode) ? item.connectionMode : host === "192.168.100.1" ? "ap" : "unknown",
+        setupState: setupStates.includes(item.setupState) ? item.setupState : "unknown",
+        selected: item.selected !== false,
+      };
+    });
+  }
+
+  _importStratonProgramPackage() {
+    const raw = String(this._stratonProgramImport || "").trim();
+    if (!raw) {
+      this._error = "Paste an OpenReef Straton program package before importing.";
+      this._render();
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      this._error = "That Straton program package is not valid JSON.";
+      this._render();
+      return;
+    }
+    const source = parsed?.kind === "openreef-straton-program"
+      ? parsed
+      : parsed?.straton && typeof parsed.straton === "object"
+        ? parsed.straton
+        : null;
+    if (!source || !source.program || typeof source.program !== "object") {
+      this._error = "That JSON does not look like an OpenReef Straton program package.";
+      this._render();
+      return;
+    }
+    const straton = this._stratonConfig();
+    const knownTemplate = this._stratonTemplates().some((template) => template.id === source.selectedTemplate);
+    const knownAdapter = ["reeftech_wifi", "reefpilot_bluetooth", "home_assistant", "manual_backup"].includes(source.adapter);
+    straton.selectedTemplate = knownTemplate ? source.selectedTemplate : straton.selectedTemplate;
+    straton.adapter = knownAdapter ? source.adapter : straton.adapter;
+    straton.program = this._stratonImportedProgram(source);
+    if (source.endpoints && typeof source.endpoints === "object") {
+      straton.endpoints = {
+        ...this._stratonEndpoints(),
+        reachability: this._stratonCatalogPath(source.endpoints.reachability),
+        currentState: this._stratonCatalogPath(source.endpoints.currentState),
+        program: this._stratonCatalogPath(source.endpoints.program),
+        firmware: this._stratonCatalogPath(source.endpoints.firmware),
+        groups: this._stratonCatalogPath(source.endpoints.groups),
+        lastScanAt: String(source.endpoints.lastScanAt || "").slice(0, 40),
+        lastOutcome: String(source.endpoints.lastOutcome || "").slice(0, 80),
+      };
+    }
+    const importedFixtures = this._stratonImportedFixtures(source);
+    if (importedFixtures.length) straton.fixtures = importedFixtures;
+    const timestamp = new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    straton.lastReceipt = `${timestamp}: Imported Straton program package locally. Save local plan after review.`;
+    this._stratonProgramImport = "";
+    this._recordActivity("Imported Straton program package locally", "control");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _stratonBackupPanel() {
+    const packageText = this._stratonProgramPackageText();
+    return `
+      <article class="panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Backup</p>
+            <h3>Program package</h3>
+            <p class="muted">Copy, restore, or share a local Straton plan without touching hardware.</p>
+          </div>
+          <div class="button-row end">
+            <button class="secondary compact-button" data-action="clear-straton-program-import">Clear import</button>
+            <button class="secondary compact-button" data-action="import-straton-program">Import</button>
+            <button class="primary compact-button" data-action="copy-straton-program">Copy package</button>
+          </div>
+        </div>
+        <div class="grid two compact">
+          <label>Current package<textarea rows="8" readonly>${this._escape(packageText)}</textarea></label>
+          <label>Import package<textarea data-straton-program-import="text" rows="8" placeholder="{&#10;  &quot;kind&quot;: &quot;openreef-straton-program&quot;,&#10;  ...&#10;}">${this._escape(this._stratonProgramImport || "")}</textarea></label>
+        </div>
+        <div class="notice warning-notice"><strong>Review before saving.</strong> Program packages include fixture host/IP fields for backup restore. Use the support summary when you need a redacted diagnostic note.</div>
+      </article>
+    `;
+  }
+
+  _stratonAdapterLabel(value) {
+    return {
+      reeftech_wifi: "ReefTECH Wi-Fi",
+      reefpilot_bluetooth: "Reef Pilot Bluetooth",
+      home_assistant: "Home Assistant light entity",
+      manual_backup: "Manual backup only",
+    }[value] || "Unknown adapter";
+  }
+
+  _stratonQuickLabel(value) {
+    return {
+      auto: "Auto schedule",
+      blue: "Blue phase",
+      photo: "Photo white",
+      feeding: "Feeding hold",
+    }[value] || "Auto schedule";
+  }
+
+  _stratonConnectionModeLabel(value) {
+    return {
+      lan: "LAN IP/host",
+      ap: "AP fallback",
+      unknown: "Unknown path",
+    }[value] || "Unknown path";
+  }
+
+  _stratonSetupStateLabel(value) {
+    return {
+      already_on_lan: "Already on LAN",
+      brand_new: "Brand new/reset",
+      stuck_setup: "Stuck in setup",
+      unknown: "Unknown setup",
+    }[value] || "Unknown setup";
+  }
+
+  _stratonFirmwareReady(firmware) {
+    const year = Number(String(firmware || "").split(".")[0]);
+    return Number.isFinite(year) && year >= 2024;
+  }
+
+  _stratonReadiness() {
+    const fixtures = this._stratonFixtures();
+    const selected = fixtures.filter((fixture) => fixture.selected);
+    if (!fixtures.length) return ["warning", "Add fixtures", "Add each Straton by IP, host, or AP fallback before using the program planner."];
+    if (!selected.length) return ["warning", "No targets", "Select at least one fixture target before saving a local plan."];
+    const oldFirmware = selected.filter((fixture) => !this._stratonFirmwareReady(fixture.firmware));
+    if (oldFirmware.length) return ["warning", "Firmware review", `${oldFirmware.length} selected fixture(s) need firmware confirmation before future app control.`];
+    return ["ok", "Local planner ready", "Targets are selected. Hardware write support still waits for a verified adapter."];
+  }
+
+  _addStratonFixture() {
+    const fixtures = this._stratonFixtures();
+    const index = fixtures.length + 1;
+    fixtures.push({
+      id: `straton_${Date.now().toString(36)}`,
+      name: `Straton ${index}`,
+      host: index === 1 ? "192.168.100.1" : `192.168.1.${47 + index}`,
+      firmware: "unknown",
+      group: "Display",
+      connectionMode: index === 1 ? "ap" : "unknown",
+      setupState: "unknown",
+      selected: true,
+    });
+    this._recordActivity("Added ATI Straton fixture");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _removeStratonFixture(id) {
+    const fixture = this._stratonFixtures().find((item) => item.id === id);
+    this._stratonConfig().fixtures = this._stratonFixtures().filter((item) => item.id !== id);
+    this._recordActivity(`Removed Straton fixture: ${fixture?.name || id}`, "warning");
+    this._setDirty(true);
+    this._render();
+  }
+
+  _applyStratonTemplate(id) {
+    const template = this._stratonTemplate(id);
+    const straton = this._stratonConfig();
+    const program = this._stratonProgram();
+    straton.selectedTemplate = template.id;
+    program.peak = template.peak;
+    program.photoperiodHours = template.photoperiodHours;
+    straton.lastReceipt = `Draft: ${template.name} applied locally. Save local plan before any future hardware sync.`;
+    this._recordActivity(`Straton template staged: ${template.name}`);
+    this._setDirty(true);
+    this._render();
+  }
+
+  _previewStratonTemplate(id) {
+    const template = this._stratonTemplate(id);
+    this._stratonConfig().lastReceipt = `Preview: ${template.name} - ${template.detail}`;
+    this._render();
+  }
+
+  _setStratonQuickMode(mode) {
+    const program = this._stratonProgram();
+    program.quickMode = mode || "auto";
+    if (mode === "blue") program.peak = 34;
+    if (mode === "photo") program.peak = 38;
+    if (mode === "feeding") program.peak = 18;
+    this._stratonConfig().lastReceipt = `Draft quick mode: ${this._stratonQuickLabel(program.quickMode)}. Temporary until saved as a local plan.`;
+    this._recordActivity(`Straton quick mode staged: ${this._stratonQuickLabel(program.quickMode)}`);
+    this._setDirty(true);
+    this._render();
+  }
+
+  async _confirmStratonProgram() {
+    const straton = this._stratonConfig();
+    const selected = this._stratonFixtures().filter((fixture) => fixture.selected);
+    if (!selected.length) {
+      this._error = "Select at least one Straton fixture before saving a local plan.";
+      this._render();
+      return;
+    }
+    const template = this._stratonTemplate(straton.selectedTemplate);
+    const timestamp = new Date().toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    straton.lastReceipt = `${timestamp}: ${template.name} saved as a local plan for ${selected.length} fixture target(s). Hardware write adapter not enabled yet.`;
+    this._recordActivity(`Straton local plan saved: ${template.name}`, "control");
+    this._setDirty(true);
+    await this._saveConfig();
+  }
+
+  _stratonFixtureRows() {
+    const fixtures = this._stratonFixtures();
+    if (!fixtures.length) {
+      return `<p class="muted">No ATI Straton fixtures yet. Add one with the AP fallback address or the fixture's LAN host/IP.</p>`;
+    }
+    return fixtures.map((fixture) => {
+      const ready = this._stratonFirmwareReady(fixture.firmware);
+      return `
+        <section class="mapping-card entity-card straton-fixture-card">
+          <div class="mapping-head">
+            <div>
+              <p class="eyebrow">${this._escape(fixture.group || "Display")}</p>
+              <h3>${this._escape(fixture.name)}</h3>
+            </div>
+            <div class="pill-stack inline">
+              <span class="pill ${fixture.connectionMode === "ap" ? "warning" : fixture.connectionMode === "lan" ? "ok" : "unknown"}">${this._escape(this._stratonConnectionModeLabel(fixture.connectionMode))}</span>
+              <span class="pill ${ready ? "ok" : "warning"}">${ready ? "firmware ready" : "review firmware"}</span>
+            </div>
+          </div>
+          <div class="grid two compact">
+            <label>Name<input data-scope="straton-fixture" data-id="${this._escape(fixture.id)}" data-field="name" value="${this._escape(fixture.name)}"></label>
+            <label>IP or host<input data-scope="straton-fixture" data-id="${this._escape(fixture.id)}" data-field="host" value="${this._escape(fixture.host)}" placeholder="192.168.100.1"></label>
+            <label>Firmware<input data-scope="straton-fixture" data-id="${this._escape(fixture.id)}" data-field="firmware" value="${this._escape(fixture.firmware)}" placeholder="2024.4"></label>
+            <label>Group<input data-scope="straton-fixture" data-id="${this._escape(fixture.id)}" data-field="group" value="${this._escape(fixture.group)}" placeholder="Display"></label>
+            <label>Connection path
+              <select data-scope="straton-fixture" data-id="${this._escape(fixture.id)}" data-field="connectionMode">
+                <option value="unknown" ${fixture.connectionMode === "unknown" ? "selected" : ""}>Unknown path</option>
+                <option value="lan" ${fixture.connectionMode === "lan" ? "selected" : ""}>LAN IP/host</option>
+                <option value="ap" ${fixture.connectionMode === "ap" ? "selected" : ""}>AP fallback</option>
+              </select>
+            </label>
+            <label>Setup state
+              <select data-scope="straton-fixture" data-id="${this._escape(fixture.id)}" data-field="setupState">
+                <option value="unknown" ${fixture.setupState === "unknown" ? "selected" : ""}>Unknown setup</option>
+                <option value="already_on_lan" ${fixture.setupState === "already_on_lan" ? "selected" : ""}>Already on LAN</option>
+                <option value="brand_new" ${fixture.setupState === "brand_new" ? "selected" : ""}>Brand new/reset</option>
+                <option value="stuck_setup" ${fixture.setupState === "stuck_setup" ? "selected" : ""}>Stuck in setup</option>
+              </select>
+            </label>
+          </div>
+          <div class="control-row">
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="straton-fixture" data-id="${this._escape(fixture.id)}" data-field="selected" ${fixture.selected ? "checked" : ""}>
+              <span><strong>Target this fixture</strong><small>Included in local receipts and future adapter sync.</small></span>
+            </label>
+            <button class="danger-text compact-button" data-action="remove-straton-fixture" data-id="${this._escape(fixture.id)}">Remove</button>
+          </div>
+        </section>
+      `;
+    }).join("");
+  }
+
+  _stratonTemplateCards() {
+    const straton = this._stratonConfig();
+    return this._stratonTemplates().map((template) => `
+      <article class="mapping-card entity-card straton-template ${straton.selectedTemplate === template.id ? "active-template" : ""}">
+        <div class="mapping-head">
+          <div>
+            <p class="eyebrow">${this._escape(template.source)}</p>
+            <h3>${this._escape(template.name)}</h3>
+          </div>
+          <span class="pill ${template.peak > 70 ? "warning" : "ok"}">${this._escape(template.peak)}% peak</span>
+        </div>
+        <p class="muted">${this._escape(template.detail)}</p>
+        <div class="pill-stack inline">
+          <span class="pill">${this._escape(template.photoperiodHours)} h</span>
+          <span class="pill">${this._escape(template.tags)}</span>
+        </div>
+        <div class="setup-next-list">
+          ${template.notes.map((note) => `<div><span class="pill unknown">note</span><p>${this._escape(note)}</p></div>`).join("")}
+        </div>
+        <div class="button-row end">
+          <button class="secondary compact-button" data-action="preview-straton-template" data-id="${this._escape(template.id)}">Preview</button>
+          <button class="primary compact-button" data-action="apply-straton-template" data-id="${this._escape(template.id)}">Apply</button>
+        </div>
+      </article>
+    `).join("");
+  }
+
+  _stratonConnectionRescuePanel() {
+    const draft = this._stratonEvidenceDraft();
+    const fixture = this._stratonProbeFixture();
+    const result = draft.probeResult;
+    const reachable = result && ["ok", "unknown"].includes(result.statusClass) && result.status !== "not run";
+    const jsonReady = result?.mode === "json";
+    const presets = this._stratonProbePathPresets();
+    const extraPresets = this._stratonExtraProbePathPresets(draft.extraProbePaths);
+    const probeBusy = draft.probeLoading || draft.probeScanning;
+    const route = this._stratonApRouteStatus(draft.probeScanResult, fixture);
+    return `
+      <article class="panel straton-connection-rescue">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Setup rescue</p>
+            <h3>Controller reachability</h3>
+            <p class="muted">First prove OpenReef can reach the Straton directly. Program reads and writes come after this.</p>
+          </div>
+          <div class="button-row end">
+            <button class="secondary compact-button" data-action="straton-ap-fallback">Use AP fallback</button>
+            <button class="secondary compact-button" data-action="copy-straton-beta-update">Copy beta update</button>
+            <button class="secondary compact-button" data-action="copy-straton-tester-steps">Copy tester steps</button>
+            <button class="secondary compact-button" data-action="probe-straton-scan" ${fixture && !probeBusy ? "" : "disabled"}>${draft.probeScanning ? "Scanning..." : "Scan safe paths"}</button>
+            <button class="primary compact-button" data-action="probe-straton-path" data-id="/" ${fixture && !probeBusy ? "" : "disabled"}>${probeBusy ? "Reading..." : "Test root"}</button>
+          </div>
+        </div>
+        <div class="summary-grid">
+          <article class="summary-card ${fixture ? "ok" : "warning"}"><span>Fixture host</span><strong>${this._escape(fixture?.host || "none")}</strong><small>${this._escape(fixture?.name || "add a fixture")}</small></article>
+          <article class="summary-card ${reachable ? "ok" : result ? "warning" : "unknown"}"><span>Reachability</span><strong>${this._escape(result?.status || "not tested")}</strong><small>${this._escape(result?.source || "controller probe")}</small></article>
+          <article class="summary-card ${jsonReady ? "ok" : reachable ? "unknown" : "warning"}"><span>Fixture JSON</span><strong>${jsonReady ? "found" : reachable ? "not yet" : "unknown"}</strong><small>${this._escape(result?.path || draft.probePath || "/")}</small></article>
+          <article class="summary-card ${this._escape(route.status)}"><span>AP route</span><strong>${this._escape(route.title)}</strong><small>${this._escape(route.source)}</small></article>
+          <article class="summary-card ${extraPresets.length ? "unknown" : "ok"}"><span>Extra paths</span><strong>${this._escape(extraPresets.length)}</strong><small>GET-only queue</small></article>
+        </div>
+        ${this._stratonSetupBypassBanner(draft.probeScanResult, fixture)}
+        <div class="setup-next-list">
+          <div><span class="pill ${fixture ? "ok" : "warning"}">1</span><p>${fixture ? `Target ${this._escape(fixture.name)} at ${this._escape(this._stratonRedactSnippet(fixture.host))}` : "Add a Straton fixture target."}</p></div>
+          <div><span class="pill ${reachable ? "ok" : "warning"}">2</span><p>${reachable ? `Controller reached ${this._escape(result.path || "/")}.` : "Use AP fallback or a LAN IP, then test root."}</p></div>
+          <div><span class="pill ${jsonReady ? "ok" : "unknown"}">3</span><p>${jsonReady ? "JSON response is ready for planned-vs-observed comparison." : "Try read-only candidate paths until a JSON response appears."}</p></div>
+        </div>
+        <div class="button-row">
+          ${presets.map((preset) => `
+            <button class="secondary compact-button" data-action="probe-straton-path" data-id="${this._escape(preset.path)}" ${fixture && !probeBusy ? "" : "disabled"} title="${this._escape(preset.detail)}">${this._escape(preset.label)}</button>
+          `).join("")}
+        </div>
+        <label>Extra safe GET paths<textarea data-straton-evidence="extraProbePaths" rows="2" placeholder="/api/config&#10;/data/settings">${this._escape(draft.extraProbePaths || "")}</textarea></label>
+        <p class="hint">${this._escape(extraPresets.length ? `${extraPresets.length} extra path(s) will be included in Scan safe paths.` : "Optional: paste relative GET paths from ATI exports or redacted network notes. Full URLs are ignored.")}</p>
+        ${this._stratonProbeScanResult(draft.probeScanResult)}
+        ${this._stratonEndpointCatalog()}
+      </article>
+    `;
+  }
+
+  _stratonAdvancedTools() {
+    return `
+      <details class="straton-advanced-tools">
+        <summary>
+          <span>Advanced Straton tools</span>
+          <small>Connection rescue, beta evidence, adapter gates, and read-only mapping.</small>
+        </summary>
+        <div class="stack tight">
+          ${this._stratonConnectionRescuePanel()}
+          ${this._stratonBetaEvidencePanel()}
+          ${this._stratonAdapterGatePanel()}
+          ${this._stratonPainPointCoveragePanel()}
+          ${this._stratonEvidenceLab()}
+        </div>
+      </details>
+    `;
+  }
+
+  _lights() {
+    const straton = this._stratonConfig();
+    const program = this._stratonProgram();
+    const fixtures = this._stratonFixtures();
+    const targets = fixtures.filter((fixture) => fixture.selected);
+    const template = this._stratonTemplate(straton.selectedTemplate);
+    const equipment = this._stratonLightingEquipment();
+    const liveRows = this._stratonLightLiveRows();
+    const [bridgeClass, bridgeTitle, bridgeDetail] = this._stratonLiveBridgeSummary(liveRows);
+    const [readinessClass, readinessTitle, readinessDetail] = this._stratonReadiness();
+    const dailyChange = program.acclimationDays
+      ? Math.round(((Number(program.acclimationTarget) - Number(program.acclimationStart)) / Number(program.acclimationDays)) * 10) / 10
+      : 0;
+    return `
+      <section class="missionControl straton-screen">
+        <div class="hero">
+          <div>
+            <p class="eyebrow">ATI Straton</p>
+            <h2>OpenReef light planner</h2>
+            <p class="muted">Native controller planning for Straton fixtures. Saves local plans and receipts now; hardware writes wait for a verified adapter.</p>
+          </div>
+          <div class="pill-stack">
+            <span class="pill ${readinessClass}">${this._escape(readinessTitle)}</span>
+            <button class="secondary compact-button" data-action="copy-straton-support">Copy support note</button>
+            <button class="primary compact-button" data-action="confirm-straton-program">Save local plan</button>
+          </div>
+        </div>
+
+        <div class="summary-grid">
+          <article class="summary-card ${fixtures.length ? "ok" : "warning"}"><span>Fixtures</span><strong>${this._escape(fixtures.length)}</strong><small>${this._escape(targets.length)} selected target(s)</small></article>
+          <article class="summary-card ok"><span>Template</span><strong>${this._escape(template.name)}</strong><small>${this._escape(template.source)}</small></article>
+          <article class="summary-card ${program.peak > 72 ? "warning" : "ok"}"><span>Peak</span><strong>${this._escape(program.peak)}%</strong><small>${this._escape(program.photoperiodHours)} hour photoperiod</small></article>
+          <article class="summary-card ${bridgeClass}"><span>Live bridge</span><strong>${this._escape(bridgeTitle)}</strong><small>${this._escape(this._stratonAdapterLabel(straton.adapter))}</small></article>
+        </div>
+
+        <div class="notice ${readinessClass === "ok" ? "success" : "warning-notice"}"><strong>${this._escape(readinessTitle)}.</strong> ${this._escape(readinessDetail)}</div>
+
+        <div class="grid two">
+          <article class="panel">
+            <div class="section-head">
+              <div><p class="eyebrow">Fixtures</p><h3>Targets and direct-IP fallback</h3></div>
+              <button class="secondary compact-button" data-action="add-straton-fixture">Add fixture</button>
+            </div>
+            <div class="stack tight">${this._stratonFixtureRows()}</div>
+          </article>
+
+          <article class="panel">
+            <div class="section-head">
+              <div><p class="eyebrow">Live</p><h3>Quick controls and natural effects</h3></div>
+              <span class="pill ok">${this._escape(this._stratonQuickLabel(program.quickMode))}</span>
+            </div>
+            <div class="mode-actions">
+              ${["auto", "blue", "photo", "feeding"].map((mode) => `
+                <button class="mode-button ${program.quickMode === mode ? "active" : ""}" data-action="straton-quick" data-id="${this._escape(mode)}">
+                  <strong>${this._escape(this._stratonQuickLabel(mode))}</strong>
+                  <span>${mode === "auto" ? "Return to planned schedule" : mode === "blue" ? "Actinic coral check" : mode === "photo" ? "Warmer inspection light" : "Soft feeding hold"}</span>
+                </button>
+              `).join("")}
+            </div>
+            <div class="grid two compact">
+              <label>Peak output<input type="number" min="0" max="100" data-scope="straton-program" data-field="peak" value="${this._escape(program.peak)}"></label>
+              <label>Photoperiod hours<input type="number" min="1" max="16" data-scope="straton-program" data-field="photoperiodHours" value="${this._escape(program.photoperiodHours)}"></label>
+              <label>Cloud dim %<input type="number" min="0" max="60" data-scope="straton-program" data-field="cloudDim" value="${this._escape(program.cloudDim)}"></label>
+              <label>Moonlight %<input type="number" min="0" max="5" step="0.1" data-scope="straton-program" data-field="moonlight" value="${this._escape(program.moonlight)}"></label>
+              <label>Lunar mode
+                <select data-scope="straton-program" data-field="lunarMode">
+                  <option value="manual" ${program.lunarMode === "manual" ? "selected" : ""}>Manual moon</option>
+                  <option value="seasonal" ${program.lunarMode === "seasonal" ? "selected" : ""}>Seasonal moon sync</option>
+                  <option value="off" ${program.lunarMode === "off" ? "selected" : ""}>Off</option>
+                </select>
+              </label>
+              <label>Adapter
+                <select data-scope="straton" data-field="adapter">
+                  <option value="reeftech_wifi" ${straton.adapter === "reeftech_wifi" ? "selected" : ""}>ReefTECH Wi-Fi</option>
+                  <option value="reefpilot_bluetooth" ${straton.adapter === "reefpilot_bluetooth" ? "selected" : ""}>Reef Pilot Bluetooth</option>
+                  <option value="home_assistant" ${straton.adapter === "home_assistant" ? "selected" : ""}>Home Assistant light entity</option>
+                  <option value="manual_backup" ${straton.adapter === "manual_backup" ? "selected" : ""}>Manual backup only</option>
+                </select>
+              </label>
+            </div>
+          </article>
+        </div>
+
+        ${this._stratonSyncMatrix(liveRows)}
+
+        ${this._stratonSchedulePreview()}
+
+        <article class="panel">
+          <div class="section-head">
+            <div><p class="eyebrow">Templates</p><h3>Research-backed program library</h3></div>
+            <span class="pill">${this._escape(this._stratonTemplates().length)} templates</span>
+          </div>
+          <div class="grid three compact">${this._stratonTemplateCards()}</div>
+        </article>
+
+        <div class="grid two">
+          <article class="panel">
+            <div class="section-head">
+              <div><p class="eyebrow">Acclimation</p><h3>Ramp guardrail</h3></div>
+              <span class="pill ${Math.abs(dailyChange) > 1.5 ? "warning" : "ok"}">${this._escape(dailyChange)}% per day</span>
+            </div>
+            <div class="grid three compact">
+              <label>Start %<input type="number" min="0" max="100" data-scope="straton-program" data-field="acclimationStart" value="${this._escape(program.acclimationStart)}"></label>
+              <label>Target %<input type="number" min="0" max="100" data-scope="straton-program" data-field="acclimationTarget" value="${this._escape(program.acclimationTarget)}"></label>
+              <label>Days<input type="number" min="1" max="120" data-scope="straton-program" data-field="acclimationDays" value="${this._escape(program.acclimationDays)}"></label>
+            </div>
+            <p class="hint">Acclimation reduces shock when changing lights, fixtures, mounting height, or template intensity. It is still advisory until hardware write support is enabled.</p>
+          </article>
+
+          <article class="panel">
+            <div class="section-head">
+              <div><p class="eyebrow">Controller bridge</p><h3>OpenReef integration status</h3></div>
+              ${equipment.length ? `<span class="pill ok">${this._escape(equipment.length)} light equipment item(s)</span>` : `<button class="secondary compact-button" data-action="add-straton-light-equipment">Add lighting equipment</button>`}
+            </div>
+            <p class="hint">${this._escape(bridgeDetail)}</p>
+            <div class="status-list">${this._stratonLiveBridgeRows(liveRows)}</div>
+            <div class="setup-next-list">
+              <div><span class="pill warning">needed</span><p>Exported ATI settings before and after schedule/color changes.</p></div>
+              <div><span class="pill warning">needed</span><p>Browser network capture or fixture endpoint proof for safe read/write.</p></div>
+              <div><span class="pill ok">read only</span><p>Home Assistant light entity bridge reads live state; it does not write programs.</p></div>
+            </div>
+          </article>
+        </div>
+
+        ${this._stratonBackupPanel()}
+
+        ${this._stratonAdvancedTools()}
+
+        <article class="panel">
+          <div class="section-head">
+            <div><p class="eyebrow">Receipt</p><h3>Save confidence</h3></div>
+            <span class="pill ${straton.lastReceipt ? "ok" : "unknown"}">${straton.lastReceipt ? "recorded" : "none"}</span>
+          </div>
+          <p class="muted">${this._escape(straton.lastReceipt || "No Straton program receipt yet. Apply a template or confirm a program to create one.")}</p>
+        </article>
+      </section>
+    `;
   }
 
   // --- Live cameras ------------------------------------------------------
@@ -9011,7 +13431,7 @@ class OpenReefPanel extends HTMLElement {
   _maintenanceFormatDate(date) {
     try {
       return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
-    } catch (e) {
+    } catch {
       return date.toISOString().slice(0, 10);
     }
   }
@@ -9889,6 +14309,7 @@ class OpenReefPanel extends HTMLElement {
     const [risk, riskLabel] = this._equipmentRisk(id, item);
     const profile = this._equipmentProfile(id, item);
     const isDisplayWavemaker = profile === "display_wavemaker";
+    const isLighting = profile === "lighting";
     return `
       <div class="equipment-editor ${item.armed ? "armed-editor" : "disarmed-editor"} ${open ? "open-editor" : "collapsed-editor"}">
         <div class="equipment-editor-head">
@@ -9899,6 +14320,7 @@ class OpenReefPanel extends HTMLElement {
               <span class="pill ${stateClass}">${this._escape(stateLabel)}</span>
               <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
               <span class="pill">${this._escape(this._equipmentProfileLabel(profile))}</span>
+              ${isLighting ? `<span class="pill ${item.light_entity_id ? "ok" : "unknown"}">${item.light_entity_id ? "light mapped" : "no light entity"}</span>` : ""}
               <span class="pill ${optionalMapped ? "ok" : "unknown"}">${optionalMapped}/3 energy</span>
             </div>
           </div>
@@ -9962,6 +14384,26 @@ class OpenReefPanel extends HTMLElement {
               <button class="secondary" data-action="search-equipment" data-id="${this._escape(id)}" data-field="switch_entity_id">${this._searchResults[`equipment:${id}:switch_entity_id`]?.loading ? "Finding..." : "Find matches"}</button>
               ${this._candidateList(`equipment:${id}:switch_entity_id`, "choose-equipment", id, "switch_entity_id")}
             </section>
+            ${isLighting ? `
+              <section class="picker mapping-card entity-card lighting-card">
+                <div class="mapping-head">
+                  <div>
+                    <h3>Light entity</h3>
+                    <p class="muted">Read live brightness, state, effect, and colour from Home Assistant without writing programs.</p>
+                  </div>
+                  <span class="pill">read only</span>
+                </div>
+                <label>Light entity<input data-scope="equipment" data-id="${this._escape(id)}" data-field="light_entity_id" value="${this._escape(item.light_entity_id || "")}" placeholder="light.display_lights"></label>
+                ${item.light_entity_id ? `
+                  <div class="selected-entity">
+                    <span>${this._escape(this._friendlyEntityName(item.light_entity_id))}</span>
+                    <button class="secondary compact-button" data-action="clear-equipment-field" data-id="${this._escape(id)}" data-field="light_entity_id">Clear</button>
+                  </div>
+                ` : ""}
+                <button class="secondary" data-action="search-equipment" data-id="${this._escape(id)}" data-field="light_entity_id">${this._searchResults[`equipment:${id}:light_entity_id`]?.loading ? "Finding..." : "Find matches"}</button>
+                ${this._candidateList(`equipment:${id}:light_entity_id`, "choose-equipment", id, "light_entity_id")}
+              </section>
+            ` : ""}
             <section class="mapping-card entity-card energy-mapping-summary">
               <div class="mapping-head">
                 <div>
@@ -11337,6 +15779,27 @@ class OpenReefPanel extends HTMLElement {
         .stat.no-trend { text-align: left; cursor: default; }
         .mapping-card.entity-card { border-color: #3b4257; background: #101d2c; }
         .mapping-card.disabled-card { border-color: #334155; background: #101824; box-shadow: inset 4px 0 0 #475569; }
+        .straton-screen { display: grid; gap: 16px; }
+        .straton-screen > .hero .pill-stack { align-items: center; }
+        .straton-advanced-tools { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #0e1a28; }
+        .straton-advanced-tools > summary { display: flex; justify-content: space-between; gap: 12px; align-items: center; cursor: pointer; list-style: none; color: #dcecff; font-weight: 800; }
+        .straton-advanced-tools > summary::-webkit-details-marker { display: none; }
+        .straton-advanced-tools > summary small { color: #8da2ba; font-weight: 700; }
+        .straton-advanced-tools > .stack { margin-top: 12px; }
+        .straton-fixture-card, .straton-template { background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(16, 29, 44, .92) 34%, #101d2c); }
+        .straton-sync-matrix .section-head { align-items: flex-start; }
+        .straton-sync-matrix .row { align-items: flex-start; }
+        .straton-sync-matrix .pill-stack { max-width: 560px; }
+        .straton-template.active-template { border-color: var(--openreef-accent); box-shadow: inset 4px 0 0 var(--openreef-accent); }
+        .straton-template .setup-next-list { margin-top: 4px; }
+        .straton-daybar { position: relative; height: 38px; border: 1px solid #24364a; border-radius: 8px; overflow: hidden; background: linear-gradient(90deg, #07111a, #0f2234 50%, #07111a); margin-top: 12px; }
+        .straton-daybar span { position: absolute; top: 0; bottom: 0; display: block; border-left: 1px solid rgba(255,255,255,.12); border-right: 1px solid rgba(0,0,0,.24); }
+        .straton-daybar .ramp { background: linear-gradient(90deg, rgba(34, 211, 238, .18), rgba(34, 211, 238, .72)); }
+        .straton-daybar .peak { background: rgba(45, 212, 191, .88); }
+        .straton-daybar .cloud { top: 24px; bottom: 0; background: rgba(148, 163, 184, .45); }
+        .straton-time-axis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; color: #8da2ba; font-size: 12px; font-weight: 800; margin-top: 6px; }
+        .straton-time-axis span:not(:first-child):not(:last-child) { text-align: center; }
+        .straton-time-axis span:last-child { text-align: right; }
         .mapping-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
         .mapping-head h3 { margin-bottom: 0; }
         .mapping-section { display: grid; gap: 12px; border: 1px solid color-mix(in srgb, var(--openreef-accent) 22%, #223447); border-radius: 8px; padding: 14px; background: rgba(11, 23, 36, .82); }
@@ -11538,6 +16001,8 @@ class OpenReefPanel extends HTMLElement {
           .or-buddy-bubble { max-width: calc(100vw - 24px); }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
+          .straton-screen > .hero .pill-stack { align-items: stretch; flex-direction: column; justify-content: flex-start; width: 100%; }
+          .straton-screen > .hero .pill-stack .pill, .straton-screen > .hero .pill-stack button { width: 100%; }
         }
         /* Tablet tier: re-expand content grids that the phone collapse would
            otherwise force into a single wasteful column. Bounded at 641px so

@@ -23,6 +23,8 @@ For tester handoff, use [BETA_TESTER_INSTALL_GUIDE.md](BETA_TESTER_INSTALL_GUIDE
 
 Product direction is tracked in [OPENREEF_PRODUCT_ROADMAP.md](OPENREEF_PRODUCT_ROADMAP.md), with Apex comparison and Labs migration detail in [OPENREEF_COMPETITIVE_AUDIT.md](OPENREEF_COMPETITIVE_AUDIT.md).
 
+The native panel now includes an ATI Straton planning surface under `Lights`. The normal view focuses on fixtures, templates, quick controls, schedule preview, backup, local receipts, and read-only Home Assistant light state. AP fallback, safe path scanning, returned support-note intake, safety checks, and adapter evidence tools live behind `Advanced Straton tools` while hardware write support is being mapped. See [docs/straton-controller-integration.md](docs/straton-controller-integration.md) and [docs/straton-beta-test-guide.md](docs/straton-beta-test-guide.md).
+
 The add-on is no longer required for the MVP controller. OpenReef Labs is intentionally separate and private while experimental advanced screens are being rebuilt.
 
 ## Development
