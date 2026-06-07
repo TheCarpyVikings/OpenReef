@@ -42,7 +42,6 @@ async def async_get_config_entry_diagnostics(
                     value
                     for value in [
                         equipment.get("switch_entity_id"),
-                        equipment.get("light_entity_id"),
                         equipment.get("power_entity_id"),
                         equipment.get("energy_entity_id"),
                         equipment.get("cost_entity_id"),

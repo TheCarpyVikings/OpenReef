@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 39
-INTEGRATION_VERSION = "0.4.84"
+CORE_SCHEMA_VERSION = 38
+INTEGRATION_VERSION = "0.4.82"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -583,35 +583,6 @@ DEFAULT_CORE_CONFIG = {
         "daily_cost_entity_id": "",
         "weekly_cost_entity_id": "",
         "monthly_cost_entity_id": "",
-    },
-    "straton": {
-        "enabled": True,
-        "adapter": "reeftech_wifi",
-        "selectedTemplate": "mixed_reef_safe",
-        "lastReceipt": "",
-        "fixtures": [],
-        "endpoints": {
-            "reachability": "",
-            "currentState": "",
-            "program": "",
-            "firmware": "",
-            "groups": "",
-            "lastScanAt": "",
-            "lastOutcome": "",
-        },
-        "program": {
-            "peak": 62,
-            "startTime": "10:00",
-            "photoperiodHours": 10,
-            "rampMinutes": 90,
-            "acclimationStart": 30,
-            "acclimationTarget": 70,
-            "acclimationDays": 42,
-            "quickMode": "auto",
-            "moonlight": 1,
-            "lunarMode": "manual",
-            "cloudDim": 18,
-        },
     },
     "mode": {
         "active": "running",
