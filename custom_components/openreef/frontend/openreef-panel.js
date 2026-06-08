@@ -7,6 +7,9 @@ class OpenReefPanel extends HTMLElement {
     this._integrationVersion = "";
     this._sensorMeta = {};
     this._validation = null;
+    this._trustCheck = null;
+    this._heartbeat = null;
+    this._reefReplay = [];
     this._activeTab = "mission";
     this._setupOpen = false;
     this._setupStep = 0;
@@ -203,6 +206,9 @@ class OpenReefPanel extends HTMLElement {
       this._integrationVersion = result.version || this._integrationVersion;
       this._sensorMeta = result.sensor_meta || {};
       this._validation = result.validation || null;
+      this._trustCheck = result.trust_check || null;
+      this._heartbeat = result.heartbeat || null;
+      this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : [];
       this._setupOpen = !this._config?.display?.setupComplete;
       this._configDirty = false;
       this._error = "";
@@ -223,6 +229,9 @@ class OpenReefPanel extends HTMLElement {
       this._integrationVersion = result.version || this._integrationVersion;
       this._sensorMeta = result.sensor_meta || this._sensorMeta;
       this._validation = result.validation || this._validation;
+      this._trustCheck = result.trust_check || this._trustCheck;
+      this._heartbeat = result.heartbeat || this._heartbeat;
+      this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : this._reefReplay;
       this._configDirty = false;
       if (message) this._message = message;
       this._error = "";
@@ -249,6 +258,9 @@ class OpenReefPanel extends HTMLElement {
       this._config = result.config || nextConfig;
       this._integrationVersion = result.version || this._integrationVersion;
       this._validation = result.validation || null;
+      this._trustCheck = result.trust_check || this._trustCheck;
+      this._heartbeat = result.heartbeat || this._heartbeat;
+      this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : this._reefReplay;
       this._configDirty = false;
       this._message = "Saved";
     } catch (err) {
@@ -267,6 +279,9 @@ class OpenReefPanel extends HTMLElement {
     this._config = result.config || nextConfig;
     this._integrationVersion = result.version || this._integrationVersion;
     this._validation = result.validation || null;
+    this._trustCheck = result.trust_check || this._trustCheck;
+    this._heartbeat = result.heartbeat || this._heartbeat;
+    this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : this._reefReplay;
     this._configDirty = false;
   }
 
@@ -481,6 +496,78 @@ class OpenReefPanel extends HTMLElement {
       this._message = "Alert history cleared";
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not clear alert history";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _acknowledgeAlert(sensorId) {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._callWS({
+        type: "openreef/acknowledge_alert",
+        sensor_id: sensorId,
+      });
+      this._config = result.config || this._config;
+      this._integrationVersion = result.version || this._integrationVersion;
+      this._validation = result.validation || this._validation;
+      this._trustCheck = result.trust_check || this._trustCheck;
+      this._heartbeat = result.heartbeat || this._heartbeat;
+      this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : this._reefReplay;
+      this._message = "Alert acknowledged";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not acknowledge alert";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _testNotification() {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._callWS({
+        type: "openreef/test_notification",
+        message: "OpenReef notification test delivered.",
+      });
+      this._config = result.config || this._config;
+      this._integrationVersion = result.version || this._integrationVersion;
+      this._validation = result.validation || this._validation;
+      this._trustCheck = result.trust_check || this._trustCheck;
+      this._heartbeat = result.heartbeat || this._heartbeat;
+      this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : this._reefReplay;
+      this._message = "Notification test sent";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not send notification test";
+    } finally {
+      this._busy = false;
+      this._render();
+    }
+  }
+
+  async _refreshTrustCheck() {
+    this._busy = true;
+    this._message = "";
+    this._error = "";
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/refresh_trust_check" });
+      this._config = result.config || this._config;
+      this._integrationVersion = result.version || this._integrationVersion;
+      this._validation = result.validation || this._validation;
+      this._trustCheck = result.trust_check || this._trustCheck;
+      this._heartbeat = result.heartbeat || this._heartbeat;
+      this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : this._reefReplay;
+      this._message = "Trust Check refreshed";
+    } catch (err) {
+      this._error = err instanceof Error ? err.message : "Could not refresh Trust Check";
     } finally {
       this._busy = false;
       this._render();
@@ -890,7 +977,10 @@ class OpenReefPanel extends HTMLElement {
       if (action === "validate") this._validateConfig();
       if (action === "mute-alert") this._muteAlert(id, Number(target.dataset.minutes || 60));
       if (action === "unmute-alert") this._muteAlert(id, 0);
+      if (action === "ack-alert") this._acknowledgeAlert(id);
       if (action === "clear-alert-history") this._clearAlertHistory();
+      if (action === "test-notification") this._testNotification();
+      if (action === "refresh-trust-check") this._refreshTrustCheck();
       if (action === "search-sensor") {
         const meta = this._sensorMeta[id] || {};
         this._searchEntities(`sensor:${id}`, {
@@ -1219,6 +1309,26 @@ class OpenReefPanel extends HTMLElement {
         this._config.alerts = this._config.alerts || {};
         this._config.alerts[field] = value;
       }
+      if (scope === "watchdog") {
+        this._config.watchdog = this._config.watchdog || {};
+        this._config.watchdog[field] = value;
+      }
+      if (scope === "sensor-health") {
+        this._config.sensorHealth = this._config.sensorHealth || {};
+        this._config.sensorHealth[field] = value;
+      }
+      if (scope === "alert-escalation") {
+        this._config.alertEscalation = this._config.alertEscalation || {};
+        this._config.alertEscalation[field] = value;
+      }
+      if (scope === "trust-check") {
+        this._config.trustCheck = this._config.trustCheck || {};
+        this._config.trustCheck[field] = value;
+      }
+      if (scope === "edge-failsafes") {
+        this._config.edgeFailsafes = this._config.edgeFailsafes || {};
+        this._config.edgeFailsafes[field] = value;
+      }
       if (scope === "interlocks") {
         this._config.interlocks = this._config.interlocks || {};
         this._config.interlocks[field] = value;
@@ -1391,7 +1501,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes")
         && event.type === "change"
       ) this._render();
     };
@@ -2719,6 +2829,7 @@ class OpenReefPanel extends HTMLElement {
     const saved = this._config?.display?.missionCards || {};
     const hasDosingParameters = this._dosingActiveParameters().length > 0;
     return {
+      trust: saved.trust !== false,
       health: saved.health !== false,
       live: saved.live !== false,
       controls: saved.controls !== false,
@@ -2731,6 +2842,7 @@ class OpenReefPanel extends HTMLElement {
 
   _missionCardChoices() {
     return [
+      ["trust", "Trust Check", "Show the local readiness and heartbeat panel."],
       ["health", "Reef Health", "Show an explainable 0-100 health score."],
       ["dosing", "Dosing Advisor", "Show consumption, projections, and advisory dose tips."],
       ["cameras", "Live Camera", "Show a live tank snapshot that opens the Cameras tab."],
@@ -4719,6 +4831,55 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
+  _trustCheckData() {
+    const fallback = this._config?.trustCheck || {};
+    return this._trustCheck || {
+      status: fallback.lastStatus || "unknown",
+      checkedAt: fallback.lastRun || "",
+      items: [],
+    };
+  }
+
+  _trustStatusLabel(status) {
+    if (status === "ok") return "ready";
+    if (status === "critical") return "action";
+    if (status === "warning") return "review";
+    return "unknown";
+  }
+
+  _trustCounts(trust = this._trustCheckData()) {
+    const items = Array.isArray(trust.items) ? trust.items : [];
+    return {
+      critical: items.filter((item) => item.status === "critical").length,
+      warning: items.filter((item) => item.status === "warning").length,
+      unknown: items.filter((item) => item.status === "unknown").length,
+      ok: items.filter((item) => item.status === "ok").length,
+      total: items.length,
+    };
+  }
+
+  _trustSummaryText(trust = this._trustCheckData()) {
+    const counts = this._trustCounts(trust);
+    if (!counts.total) return "Trust Check has not reported yet";
+    if (counts.critical) return `${counts.critical} action item${counts.critical === 1 ? "" : "s"}`;
+    if (counts.warning) return `${counts.warning} review item${counts.warning === 1 ? "" : "s"}`;
+    if (counts.unknown) return `${counts.unknown} unknown item${counts.unknown === 1 ? "" : "s"}`;
+    return "all readiness checks clear";
+  }
+
+  _trustCheckRows(limit = 12) {
+    const trust = this._trustCheckData();
+    const items = Array.isArray(trust.items) ? trust.items.slice(0, limit) : [];
+    if (!items.length) return `<p class="muted">Run Trust Check to build a readiness snapshot.</p>`;
+    return items.map((item) => `
+      <article class="system-card ${this._escape(item.status || "unknown")}">
+        <span>${this._escape(item.label || item.key || "Check")}</span>
+        <strong>${this._escape(this._trustStatusLabel(item.status || "unknown"))}</strong>
+        <small>${this._escape(item.detail || "")}</small>
+      </article>
+    `).join("");
+  }
+
   _systemCheck() {
     const sensors = Object.entries(this._config.sensors || {});
     const enabledSensors = sensors.filter(([, sensor]) => this._sensorEnabled(sensor));
@@ -4797,6 +4958,9 @@ class OpenReefPanel extends HTMLElement {
     const reminderMinutes = Number(this._config.alerts?.wavemakerReminderMinutes || 10);
     const missing = Number(check.missing || 0);
     const armedUnavailable = Number(check.armedUnavailable || 0);
+    const trust = this._trustCheckData();
+    const trustCounts = this._trustCounts(trust);
+    const notificationTested = Boolean(this._config.watchdog?.lastNotificationTest);
     return [
       {
         state: this._config.display?.setupComplete ? "ok" : "warning",
@@ -4839,6 +5003,18 @@ class OpenReefPanel extends HTMLElement {
           : remindersOn
             ? "Warns while a display wavemaker remains off in Running."
             : "Turn this on before giving control access to a tester.",
+      },
+      {
+        state: trust.status || "unknown",
+        label: "Trust Check",
+        status: this._trustStatusLabel(trust.status || "unknown"),
+        detail: `${this._trustSummaryText(trust)}; ${notificationTested ? "notification test recorded" : "notification test not recorded"}.`,
+      },
+      {
+        state: trustCounts.warning || trustCounts.critical ? "warning" : trustCounts.total ? "ok" : "unknown",
+        label: "Trust Moat evidence",
+        status: trustCounts.total ? `${trustCounts.ok}/${trustCounts.total} clear` : "not checked",
+        detail: "Includes heartbeat, probe health, camera reachability, backup review, incident history, and edge-failsafe review.",
       },
       {
         state: "unknown",
@@ -4947,6 +5123,17 @@ class OpenReefPanel extends HTMLElement {
       ? this._config.activity.slice(0, 5).map((item) => `- ${this._formatActivityTime(item.timestamp)}: ${item.message || item.type || "activity"}`)
       : [];
     const checklist = this._betaChecklist(check).map((item) => `- ${item.label}: ${item.status}${item.detail ? ` - ${item.detail}` : ""}`);
+    const trust = this._trustCheckData();
+    const trustCounts = this._trustCounts(trust);
+    const heartbeat = this._heartbeat || {};
+    const watchdog = this._config.watchdog || {};
+    const sensorHealth = this._config.sensorHealth || {};
+    const escalation = this._config.alertEscalation || {};
+    const edgeFailsafes = this._config.edgeFailsafes || {};
+    const reefReplay = Array.isArray(this._reefReplay) ? this._reefReplay : [];
+    const trustRows = Array.isArray(trust.items) && trust.items.length
+      ? trust.items.map((item) => `- ${item.label || item.key || "Check"}: ${this._trustStatusLabel(item.status || "unknown")} - ${item.detail || ""}`)
+      : ["- not run yet"];
     const health = check.health || this._reefHealthScore();
     const healthCategories = this._healthCategoryChoices()
       .map(([id]) => health.categories?.[id])
@@ -4989,6 +5176,10 @@ class OpenReefPanel extends HTMLElement {
       `Alerts: ${check.alerts}`,
       `Interlock warnings: ${check.interlocks}`,
       `ATO duty cycle: ${check.atoDutyCycle}`,
+      `Trust Check: ${this._trustStatusLabel(trust.status || "unknown")} (${this._trustSummaryText(trust)})`,
+      `Trust Check counts: ${trustCounts.ok || 0} ok / ${trustCounts.warning || 0} warning / ${trustCounts.critical || 0} critical / ${trustCounts.unknown || 0} unknown`,
+      `Heartbeat: ${heartbeat.status || "unknown"}${heartbeat.lastHeartbeat ? `, last ${this._formatActivityTime(heartbeat.lastHeartbeat)}` : ", not recorded"}`,
+      `Reef Replay incidents: ${reefReplay.length}`,
       `Missing entities: ${check.missing}`,
       `Armed unavailable: ${check.armedUnavailable}`,
       `Custom modes: ${check.customModes}`,
@@ -5049,6 +5240,16 @@ class OpenReefPanel extends HTMLElement {
       `- wavemaker reminders: ${alerts.wavemakerReminders !== false ? "on" : "off"} (${alerts.wavemakerReminderMinutes || 10}m)`,
       `- HA persistent notifications: ${alerts.persistentNotifications ? "on" : "off"}`,
       "",
+      "Trust Moat",
+      `- watchdog: ${watchdog.enabled !== false ? "on" : "off"}, heartbeat ${watchdog.heartbeatEnabled !== false ? "on" : "off"}, every ${watchdog.heartbeatEveryHours || 24}h, missed after ${watchdog.missedAfterHours || 30}h`,
+      `- notification test: ${watchdog.lastNotificationTest ? this._formatActivityTime(watchdog.lastNotificationTest) : "not recorded"}`,
+      `- probe health: ${sensorHealth.enabled !== false ? "on" : "off"}, stale ${sensorHealth.staleAfterMinutes || 180}m, flatline ${sensorHealth.flatlineHours || 12}h, jump ${sensorHealth.jumpPercent || 25}%/${sensorHealth.jumpWindowMinutes || 30}m`,
+      `- alert escalation: ${escalation.enabled ? "on" : "off"}, repeat ${escalation.repeatMinutes || 30}m, critical only ${escalation.criticalOnly !== false ? "yes" : "no"}, notify target ${escalation.notifyTarget ? "set" : "not set"}`,
+      `- edge failsafes: ${edgeFailsafes.enabled ? "reviewed" : "not reviewed"}, heater ${edgeFailsafes.heater ? "yes" : "no"}, ATO ${edgeFailsafes.ato ? "yes" : "no"}, return pump ${edgeFailsafes.returnPump ? "yes" : "no"}, review date ${edgeFailsafes.lastReviewed || "not set"}`,
+      "",
+      "Trust Check items",
+      ...trustRows,
+      "",
       "Beta handoff checklist",
       ...checklist,
       "",
@@ -5060,11 +5261,6 @@ class OpenReefPanel extends HTMLElement {
 
   _betaSmokeTestText() {
     const check = this._systemCheck();
-    const enabledSensors = Object.entries(this._config.sensors || {})
-      .filter(([, sensor]) => this._sensorEnabled(sensor))
-      .map(([, sensor]) => sensor.label || "Sensor");
-    const equipment = Object.values(this._config.equipment || {})
-      .map((item) => item.label || "Equipment");
     const lines = [
       "OpenReef beta smoke-test checklist",
       `OpenReef version: ${check.version}`,
@@ -5085,7 +5281,7 @@ class OpenReefPanel extends HTMLElement {
       "- Pick the closest tank type/profile and confirm the wording matches the reef being tested.",
       "- If testing Neptune data, choose the closest guide: Apex controller, Apex + Trident, Apex + Trident NP, Apex + Trident + Trident NP, Apex + FMM, or Apex full ecosystem.",
       "- Confirm Apex/Trident entities already exist in Home Assistant; OpenReef maps HA entities and does not connect directly to Apex hardware yet.",
-      `- Confirm enabled sensors match the tester's system: ${enabledSensors.join(", ") || "none enabled"}.`,
+      "- Confirm enabled sensors match the tester's system. Note any missing, duplicated, or wrongly labelled mappings.",
       "- Use Find matches for at least two sensors and confirm suggestions are sensible.",
       "- Do not paste HA tokens or secrets anywhere in OpenReef.",
       "",
@@ -5104,12 +5300,30 @@ class OpenReefPanel extends HTMLElement {
       "- Test 1 hour, 24 hours, 7 days, and 30 days. Long ranges may be limited by HA recorder history.",
       "- Repeat one trend test on a phone or narrow browser window.",
       "",
+      "Trust Check and alerts",
+      "- Open Settings -> System Check -> Trust Check.",
+      "- Press Refresh and confirm the rows are honest about sensors, mappings, notifications, heartbeat, cameras, incident history, backup review, and edge failsafes.",
+      "- Press Test notification and confirm a Home Assistant persistent notification appears. If a notify target is configured, confirm the phone push arrives.",
+      "- Record or clear the backup review date and confirm Trust Check changes status honestly.",
+      "- Trigger a safe test warning if possible, then confirm the alert can be acknowledged and does not keep repeating after acknowledgement.",
+      "- Call the openreef.heartbeat service or wait for the scheduled heartbeat, then confirm the heartbeat status updates after refreshing OpenReef.",
+      "",
+      "Probe health",
+      "- Review stale, flatline, sudden-jump, and display/sump temperature mismatch settings.",
+      "- If using test entities, simulate stale or flatline data and confirm OpenReef reports a warning instead of treating bad data as trusted control input.",
+      "",
+      "Reef Replay",
+      "- Create a harmless test alert or review an existing alert history item.",
+      "- Open Settings -> System Check -> Reef Replay and confirm the incident timeline links nearby activity, captures, or feed-watch sessions when present.",
+      "",
       "Controls and safety",
-      `- Review mapped equipment: ${equipment.join(", ") || "none mapped"}.`,
+      "- Review mapped equipment for the tester's actual system. Note any missing, duplicated, or wrongly labelled controls.",
       "- Only arm equipment the tester is comfortable controlling.",
       "- Confirm disarmed equipment switches are greyed/locked.",
       "- Toggle one safe mapped switch, then return it to the expected state.",
       "- If display wavemakers are mapped, confirm the warning/reminder wording is visible and understood.",
+      "- If heater, ATO, or return pump control is armed, confirm Trust Check warns until matching on-device failsafe review is marked.",
+      "- Do not mark an edge failsafe as reviewed until the actual relay/probe behaviour has been bench-tested.",
       "",
       "Modes",
       "- Open Feed and Maintenance confirmation dialogs.",
@@ -5173,6 +5387,15 @@ class OpenReefPanel extends HTMLElement {
       "- Did Feed, Maintenance, Running, or custom modes do what the preview said?",
       "- Did ATO duty cycle behaviour match your expectation?",
       "- If display wavemakers were used, were the warnings clear?",
+      "",
+      "Trust Moat",
+      "- What did Trust Check report? ready / review / action / unknown:",
+      "- Did the notification test arrive in Home Assistant and on the phone if configured?",
+      "- Did alert acknowledgement stop repeat/escalation noise as expected?",
+      "- Did heartbeat status update after refresh or the openreef.heartbeat service?",
+      "- Did probe-health warnings make sense, or did any stale/flatline/jump warning feel wrong?",
+      "- Did Reef Replay show useful incident context?",
+      "- If heater, ATO, or return pump was armed, did the edge-failsafe warning/review wording feel clear?",
       "",
       "Mobile",
       "- Phone/tablet tested:",
@@ -7362,8 +7585,10 @@ class OpenReefPanel extends HTMLElement {
     const health = this._reefHealthScore(sensors, equipment, sensorAlerts, interlocks);
     const status = sensorSummary.criticalCount || armedUnavailable.length ? "Action needed" : sensorSummary.warningCount || sensorSummary.contextCount || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
+    const trust = this._trustCheckData();
     const dosing = this._dosingEnabled() ? this._dosingMissionState() : null;
     const summaryCards = [
+      cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings") : "",
       cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission") : "",
       cards.dosing && dosing ? this._missionSummaryCard("Dosing Advisor", dosing.value, dosing.detail, dosing.status, "mission") : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
@@ -7388,6 +7613,7 @@ class OpenReefPanel extends HTMLElement {
           </div>
         </div>
         ${this._modePanel()}
+        ${cards.trust ? this._trustCheckMissionPanel() : ""}
         ${summaryCards ? `<div class="summary-grid">${summaryCards}</div>` : ""}
         ${cards.health ? this._reefHealthBreakdown(health) : ""}
         ${cards.dosing ? this._dosingBreakdown() : ""}
@@ -7424,6 +7650,25 @@ class OpenReefPanel extends HTMLElement {
         <strong>${this._escape(value)}</strong>
         <small>${this._escape(detail)}</small>
       </button>
+    `;
+  }
+
+  _trustCheckMissionPanel() {
+    const trust = this._trustCheckData();
+    return `
+      <article class="panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Trust Check</p>
+            <h3>${this._escape(this._trustStatusLabel(trust.status || "unknown"))}</h3>
+            <p>${this._escape(this._trustSummaryText(trust))}</p>
+          </div>
+          <button class="secondary compact-button" data-action="refresh-trust-check">Refresh</button>
+        </div>
+        <div class="system-grid">
+          ${this._trustCheckRows(4)}
+        </div>
+      </article>
     `;
   }
 
@@ -10254,15 +10499,20 @@ class OpenReefPanel extends HTMLElement {
 
   _alertsSettings() {
     const alerts = this._config.alerts || {};
+    const escalation = this._config.alertEscalation || {};
     const sensors = this._enabledSensors();
     const alertRows = sensors.map(([id, sensor]) => {
       const status = this._sensorStatus(sensor, id);
       const mutedUntil = this._formatMutedUntil(id);
+      const acknowledged = Boolean(escalation.acknowledged?.[id]);
       const statusDetail = mutedUntil
         ? `Muted until ${mutedUntil}`
+        : acknowledged
+          ? "Acknowledged until this alert resolves"
         : sensor.alertsEnabled === false
           ? "Alerts muted for this sensor"
           : this._escape(sensor.entity_id || "No entity mapped");
+      const canAck = ["critical", "warning", "unknown"].includes(status) && !acknowledged;
       return `
         <div class="row alert-row">
           <div>
@@ -10274,6 +10524,7 @@ class OpenReefPanel extends HTMLElement {
             ${this._isAlertMuted(id)
               ? `<button class="secondary compact-button" data-action="unmute-alert" data-id="${this._escape(id)}">Unmute</button>`
               : `
+                ${canAck ? `<button class="secondary compact-button" data-action="ack-alert" data-id="${this._escape(id)}">Ack</button>` : ""}
                 <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="60">Mute 1h</button>
                 <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="1440">Mute 24h</button>
               `}
@@ -10318,6 +10569,45 @@ class OpenReefPanel extends HTMLElement {
             <small>Helps prevent readings near a threshold from flickering between warning and resolved.</small>
           </label>
         </div>
+        <section class="mapping-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Escalation</p>
+              <h4>Acknowledge, repeat, and route critical alerts.</h4>
+              <p class="muted">Optional HA notify, siren, and light outputs stay local to Home Assistant.</p>
+            </div>
+            <button class="secondary compact-button" data-action="test-notification">Test notification</button>
+          </div>
+          <div class="grid three compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="alert-escalation" data-field="enabled" ${escalation.enabled ? "checked" : ""}>
+              <span>
+                <strong>Escalation</strong>
+                <small>Repeat active alert notifications until acknowledged or resolved.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="alert-escalation" data-field="criticalOnly" ${escalation.criticalOnly !== false ? "checked" : ""}>
+              <span>
+                <strong>Critical only</strong>
+                <small>Warnings stay visible in OpenReef without repeated pushes.</small>
+              </span>
+            </label>
+            <label>Repeat minutes
+              <input type="number" min="1" max="1440" step="1" data-scope="alert-escalation" data-field="repeatMinutes" value="${this._escape(String(escalation.repeatMinutes || 30))}">
+            </label>
+            <label>Notify target
+              <input data-scope="alert-escalation" data-field="notifyTarget" value="${this._escape(escalation.notifyTarget || "")}" placeholder="mobile_app_yourphone">
+              <small>Enter the service name after <code>notify.</code>.</small>
+            </label>
+            <label>Siren entity
+              <input data-scope="alert-escalation" data-field="sirenEntityId" value="${this._escape(escalation.sirenEntityId || "")}" placeholder="siren.reef_alarm">
+            </label>
+            <label>Light entity
+              <input data-scope="alert-escalation" data-field="lightEntityId" value="${this._escape(escalation.lightEntityId || "")}" placeholder="light.reef_warning">
+            </label>
+          </div>
+        </section>
         <div class="status-list">
           ${alertRows || `<p class="muted">Enable sensor types to see their alert state here.</p>`}
         </div>
@@ -10445,10 +10735,19 @@ class OpenReefPanel extends HTMLElement {
   _systemCheckSettings() {
     const check = this._systemCheck();
     const checklist = this._betaChecklist(check);
+    const trust = this._trustCheckData();
+    const heartbeat = this._heartbeat || {};
+    const watchdog = this._config.watchdog || {};
+    const sensorHealth = this._config.sensorHealth || {};
+    const trustConfig = this._config.trustCheck || {};
+    const edgeFailsafes = this._config.edgeFailsafes || {};
+    const replay = Array.isArray(this._reefReplay) ? this._reefReplay.slice(0, 6) : [];
     const rows = [
       ["OpenReef version", check.version],
       ["Config schema", check.schema],
       ["Tank profile", check.tankProfile],
+      ["Trust Check", `${this._trustStatusLabel(trust.status || "unknown")} (${this._trustSummaryText(trust)})`],
+      ["Heartbeat", heartbeat.lastHeartbeat ? this._formatActivityTime(heartbeat.lastHeartbeat) : "not recorded"],
       ["Reef Health", `${check.health.score}/100 (${check.health.grade})`],
       ["Health trend data", check.health.trendFreshness],
       ["Active mode", check.activeMode],
@@ -10481,6 +10780,159 @@ class OpenReefPanel extends HTMLElement {
             </article>
           `).join("")}
         </div>
+        <section class="mapping-section beta-checklist">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Trust Check</p>
+              <h4>Readiness scan before unattended control.</h4>
+              <p class="muted">${this._escape(trust.checkedAt ? `Checked ${this._formatActivityTime(trust.checkedAt)}` : "No Trust Check run recorded yet.")}</p>
+            </div>
+            <div class="button-row">
+              <button class="secondary compact-button" data-action="refresh-trust-check">Refresh</button>
+              <button class="secondary compact-button" data-action="test-notification">Test notification</button>
+            </div>
+          </div>
+          <div class="system-grid">
+            ${this._trustCheckRows()}
+          </div>
+          <div class="grid two compact">
+            <label>Last backup review
+              <input type="date" data-scope="trust-check" data-field="lastBackupReview" value="${this._escape(String(trustConfig.lastBackupReview || "").slice(0, 10))}">
+              <small>Record the date you last verified a Home Assistant/OpenReef backup exists.</small>
+            </label>
+          </div>
+        </section>
+        <section class="mapping-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Watchdog</p>
+              <h4>Heartbeat and silence alarm settings.</h4>
+              <p class="muted">The heartbeat is local to Home Assistant. Use a notify target for a daily all-clear push.</p>
+            </div>
+            <span class="pill ${heartbeat.status || "unknown"}">${this._escape(heartbeat.status || "unknown")}</span>
+          </div>
+          <div class="grid four compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="watchdog" data-field="enabled" ${watchdog.enabled !== false ? "checked" : ""}>
+              <span>
+                <strong>Watchdog</strong>
+                <small>Track OpenReef heartbeat readiness.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="watchdog" data-field="heartbeatEnabled" ${watchdog.heartbeatEnabled !== false ? "checked" : ""}>
+              <span>
+                <strong>Heartbeat</strong>
+                <small>Record scheduled all-clear check-ins.</small>
+              </span>
+            </label>
+            <label>Every hours
+              <input type="number" min="1" max="168" step="1" data-scope="watchdog" data-field="heartbeatEveryHours" value="${this._escape(String(watchdog.heartbeatEveryHours || 24))}">
+            </label>
+            <label>Missed after hours
+              <input type="number" min="2" max="336" step="1" data-scope="watchdog" data-field="missedAfterHours" value="${this._escape(String(watchdog.missedAfterHours || 30))}">
+            </label>
+            <label>All-clear notify target
+              <input data-scope="watchdog" data-field="notifyTarget" value="${this._escape(watchdog.notifyTarget || "")}" placeholder="mobile_app_yourphone">
+            </label>
+          </div>
+        </section>
+        <section class="mapping-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Probe Health</p>
+              <h4>Stale, flatline, jump, and redundant-probe hints.</h4>
+              <p class="muted">These warnings sit before automation so bad data does not quietly become bad control.</p>
+            </div>
+          </div>
+          <div class="grid four compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="sensor-health" data-field="enabled" ${sensorHealth.enabled !== false ? "checked" : ""}>
+              <span>
+                <strong>Probe health</strong>
+                <small>Include health checks in alert and Trust Check state.</small>
+              </span>
+            </label>
+            <label>Stale after minutes
+              <input type="number" min="5" max="10080" step="5" data-scope="sensor-health" data-field="staleAfterMinutes" value="${this._escape(String(sensorHealth.staleAfterMinutes || 180))}">
+            </label>
+            <label>Flatline hours
+              <input type="number" min="1" max="336" step="1" data-scope="sensor-health" data-field="flatlineHours" value="${this._escape(String(sensorHealth.flatlineHours || 12))}">
+            </label>
+            <label>Jump window minutes
+              <input type="number" min="1" max="1440" step="1" data-scope="sensor-health" data-field="jumpWindowMinutes" value="${this._escape(String(sensorHealth.jumpWindowMinutes || 30))}">
+            </label>
+            <label>Jump percent
+              <input type="number" min="1" max="100" step="1" data-scope="sensor-health" data-field="jumpPercent" value="${this._escape(String(sensorHealth.jumpPercent || 25))}">
+            </label>
+            <label>Temp mismatch °C
+              <input type="number" min="0.1" max="10" step="0.1" data-scope="sensor-health" data-field="temperatureMismatchC" value="${this._escape(String(sensorHealth.temperatureMismatchC || 1.5))}">
+            </label>
+          </div>
+        </section>
+        <section class="mapping-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Edge Failsafes</p>
+              <h4>On-device safety for life-support controls.</h4>
+              <p class="muted">Use the ESPHome recipes in <code>docs/OPENREEF_EDGE_FAILSAFE_RECIPES.md</code>, then mark what has been reviewed on the actual hardware.</p>
+            </div>
+          </div>
+          <div class="grid three compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="edge-failsafes" data-field="enabled" ${edgeFailsafes.enabled ? "checked" : ""}>
+              <span>
+                <strong>Edge failsafes reviewed</strong>
+                <small>Trust Check will validate the marked recipes against armed heater, ATO, and return-pump equipment.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="edge-failsafes" data-field="heater" ${edgeFailsafes.heater ? "checked" : ""}>
+              <span>
+                <strong>Heater recipe</strong>
+                <small>Local temperature guard can turn heater power off without HA.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="edge-failsafes" data-field="ato" ${edgeFailsafes.ato ? "checked" : ""}>
+              <span>
+                <strong>ATO recipe</strong>
+                <small>Local runtime, high-water, and leak guards can stop top-off.</small>
+              </span>
+            </label>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="edge-failsafes" data-field="returnPump" ${edgeFailsafes.returnPump ? "checked" : ""}>
+              <span>
+                <strong>Return pump recipe</strong>
+                <small>Return pump relay restores to the chosen safe state on boot.</small>
+              </span>
+            </label>
+            <label>Review date
+              <input type="date" data-scope="edge-failsafes" data-field="lastReviewed" value="${this._escape(String(edgeFailsafes.lastReviewed || "").slice(0, 10))}">
+            </label>
+            <label>Notes
+              <input data-scope="edge-failsafes" data-field="notes" value="${this._escape(edgeFailsafes.notes || "")}" placeholder="Board, relay, probe, or kit note">
+            </label>
+          </div>
+        </section>
+        <section class="mapping-section">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Reef Replay</p>
+              <h4>Tank Black Box incident timeline.</h4>
+              <p class="muted">Combines alert history, activity, captures, and feed-watch sessions into a support-friendly timeline.</p>
+            </div>
+          </div>
+          <div class="alert-history">
+            ${replay.length ? replay.map((incident) => `
+              <div class="activity-item ${this._escape(incident.severity || "info")}">
+                <span>${this._escape(this._formatActivityTime(incident.timestamp))}</span>
+                <strong>${this._escape(incident.title || "OpenReef incident")}</strong>
+                <small>${this._escape(incident.message || `${Array.isArray(incident.events) ? incident.events.length : 0} related event(s)`)}</small>
+              </div>
+            `).join("") : `<p class="muted">No incidents yet. Alert history, captures, and activity will appear here.</p>`}
+          </div>
+        </section>
         <section class="mapping-section beta-checklist">
           <div class="section-head">
             <div>

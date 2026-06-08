@@ -65,8 +65,11 @@ from .const import (
     PANEL_STATIC_URL,
     PANEL_URL,
     SERVICE_APPLY_MODE,
+    SERVICE_ACKNOWLEDGE_ALERT,
     SERVICE_ARM_EQUIPMENT,
     SERVICE_DISARM_EQUIPMENT,
+    SERVICE_HEARTBEAT,
+    SERVICE_REFRESH_TRUST_CHECK,
     FEEDS_SUBDIR,
     FEEDWATCH_DEFAULT_CADENCE,
     FEEDWATCH_DEFAULT_RETENTION,
@@ -76,6 +79,7 @@ from .const import (
     FEEDWATCH_MIN_CADENCE,
     SERVICE_RECORD_MANUAL_READING,
     SERVICE_RECORD_TASK_COMPLETION,
+    SERVICE_TEST_NOTIFICATION,
     TANK_PROFILE_CHOICES,
     TIMELAPSE_DEFAULT_CADENCE,
     TIMELAPSE_DEFAULT_DAILY_DAYS,
@@ -109,6 +113,7 @@ WAVEMAKER_REMINDER_UNSUB = "wavemaker_reminder_unsub"
 WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
 MAINTENANCE_REMINDER_UNSUB = "maintenance_reminder_unsub"
 MAINTENANCE_REMINDER_LAST = "maintenance_reminder_last"
+WATCHDOG_UNSUB = "watchdog_unsub"
 CAPTURES_PATH_REGISTERED = "captures_path_registered"
 CAPTURE_LAST = "capture_last"
 CAPTURE_INFLIGHT = "capture_inflight"
@@ -160,6 +165,12 @@ RECORD_TASK_COMPLETION_SCHEMA = vol.Schema(
         vol.Optional("volume_unit"): cv.string,
     }
 )
+
+ACKNOWLEDGE_ALERT_SCHEMA = vol.Schema({vol.Required("sensor_id"): cv.string})
+
+TEST_NOTIFICATION_SCHEMA = vol.Schema({vol.Optional("message"): cv.string})
+
+EMPTY_SERVICE_SCHEMA = vol.Schema({})
 
 
 def _entries(hass: HomeAssistant) -> list[OpenReefConfigEntry]:
@@ -960,6 +971,154 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             else []
         )
 
+    watchdog = config.setdefault("watchdog", {})
+    if not isinstance(watchdog, dict):
+        watchdog = {}
+        config["watchdog"] = watchdog
+    watchdog["enabled"] = bool(watchdog.get("enabled", True))
+    watchdog["heartbeatEnabled"] = bool(watchdog.get("heartbeatEnabled", True))
+    watchdog["heartbeatEveryHours"] = _clamp_int(
+        watchdog.get("heartbeatEveryHours"), 24, 1, 168
+    )
+    watchdog["missedAfterHours"] = _clamp_int(
+        watchdog.get("missedAfterHours"), 30, 2, 336
+    )
+    watchdog["notifyTarget"] = str(watchdog.get("notifyTarget", "")).strip()[:120]
+    for field in ("lastCheck", "lastHeartbeat", "lastNotificationTest", "lastMissedAlert"):
+        watchdog[field] = (
+            watchdog.get(field) if isinstance(watchdog.get(field), str) else ""
+        )
+
+    sensor_health = config.setdefault("sensorHealth", {})
+    if not isinstance(sensor_health, dict):
+        sensor_health = {}
+        config["sensorHealth"] = sensor_health
+    sensor_health["enabled"] = bool(sensor_health.get("enabled", True))
+    sensor_health["staleAfterMinutes"] = _clamp_int(
+        sensor_health.get("staleAfterMinutes"), 180, 5, 10080
+    )
+    sensor_health["flatlineHours"] = _clamp_int(
+        sensor_health.get("flatlineHours"), 12, 1, 336
+    )
+    sensor_health["jumpWindowMinutes"] = _clamp_int(
+        sensor_health.get("jumpWindowMinutes"), 30, 1, 1440
+    )
+    try:
+        jump_percent = float(sensor_health.get("jumpPercent", 25))
+    except (TypeError, ValueError):
+        jump_percent = 25
+    sensor_health["jumpPercent"] = max(1, min(jump_percent, 100))
+    try:
+        mismatch_c = float(sensor_health.get("temperatureMismatchC", 1.5))
+    except (TypeError, ValueError):
+        mismatch_c = 1.5
+    sensor_health["temperatureMismatchC"] = max(0.1, min(mismatch_c, 10))
+    last_values = sensor_health.get("lastValues")
+    sensor_health["lastValues"] = (
+        {
+            sensor_id: item
+            for sensor_id, item in last_values.items()
+            if sensor_id in MVP_SENSORS and isinstance(item, dict)
+        }
+        if isinstance(last_values, dict)
+        else {}
+    )
+    last_jumps = sensor_health.get("lastJumps")
+    sensor_health["lastJumps"] = (
+        {
+            sensor_id: item
+            for sensor_id, item in last_jumps.items()
+            if sensor_id in MVP_SENSORS and isinstance(item, dict)
+        }
+        if isinstance(last_jumps, dict)
+        else {}
+    )
+
+    escalation = config.setdefault("alertEscalation", {})
+    if not isinstance(escalation, dict):
+        escalation = {}
+        config["alertEscalation"] = escalation
+    escalation["enabled"] = bool(escalation.get("enabled", False))
+    escalation["criticalOnly"] = bool(escalation.get("criticalOnly", True))
+    escalation["repeatMinutes"] = _clamp_int(
+        escalation.get("repeatMinutes"), 30, 1, 1440
+    )
+    escalation["notifyTarget"] = str(escalation.get("notifyTarget", "")).strip()[:120]
+    escalation["acknowledgeRequired"] = bool(
+        escalation.get("acknowledgeRequired", True)
+    )
+    escalation["sirenEntityId"] = _normalise_entity_id(escalation.get("sirenEntityId"))
+    escalation["lightEntityId"] = _normalise_entity_id(escalation.get("lightEntityId"))
+    escalation["outputsActive"] = bool(escalation.get("outputsActive", False))
+    acknowledged = escalation.get("acknowledged")
+    escalation["acknowledged"] = (
+        {
+            sensor_id: timestamp
+            for sensor_id, timestamp in acknowledged.items()
+            if sensor_id in MVP_SENSORS and isinstance(timestamp, str)
+        }
+        if isinstance(acknowledged, dict)
+        else {}
+    )
+    last_escalated = escalation.get("lastEscalated")
+    escalation["lastEscalated"] = (
+        {
+            sensor_id: timestamp
+            for sensor_id, timestamp in last_escalated.items()
+            if sensor_id in MVP_SENSORS and isinstance(timestamp, str)
+        }
+        if isinstance(last_escalated, dict)
+        else {}
+    )
+
+    trust_check = config.setdefault("trustCheck", {})
+    if not isinstance(trust_check, dict):
+        trust_check = {}
+        config["trustCheck"] = trust_check
+    trust_check["enabled"] = bool(trust_check.get("enabled", True))
+    trust_check["lastRun"] = (
+        trust_check.get("lastRun") if isinstance(trust_check.get("lastRun"), str) else ""
+    )
+    trust_check["lastStatus"] = (
+        trust_check.get("lastStatus")
+        if trust_check.get("lastStatus") in {"ok", "warning", "critical", "unknown"}
+        else "unknown"
+    )
+    trust_check["lastBackupReview"] = (
+        trust_check.get("lastBackupReview")
+        if isinstance(trust_check.get("lastBackupReview"), str)
+        else ""
+    )
+
+    edge_failsafes = config.setdefault("edgeFailsafes", {})
+    if not isinstance(edge_failsafes, dict):
+        edge_failsafes = {}
+        config["edgeFailsafes"] = edge_failsafes
+    edge_failsafes["enabled"] = bool(edge_failsafes.get("enabled", False))
+    edge_failsafes["heater"] = bool(edge_failsafes.get("heater", False))
+    edge_failsafes["ato"] = bool(edge_failsafes.get("ato", False))
+    edge_failsafes["returnPump"] = bool(edge_failsafes.get("returnPump", False))
+    edge_failsafes["lastReviewed"] = (
+        edge_failsafes.get("lastReviewed")
+        if isinstance(edge_failsafes.get("lastReviewed"), str)
+        else ""
+    )
+    edge_failsafes["notes"] = (
+        edge_failsafes.get("notes").strip()[:500]
+        if isinstance(edge_failsafes.get("notes"), str)
+        else ""
+    )
+
+    reef_replay = config.setdefault("reefReplay", {})
+    if not isinstance(reef_replay, dict):
+        reef_replay = {}
+        config["reefReplay"] = reef_replay
+    reef_replay["enabled"] = bool(reef_replay.get("enabled", True))
+    reef_replay["incidentWindowMinutes"] = _clamp_int(
+        reef_replay.get("incidentWindowMinutes"), 20, 5, 120
+    )
+    reef_replay["retention"] = _clamp_int(reef_replay.get("retention"), 25, 5, 100)
+
     interlocks = config.setdefault("interlocks", {})
     if not isinstance(interlocks, dict):
         config["interlocks"] = deepcopy(DEFAULT_CORE_CONFIG["interlocks"])
@@ -1730,6 +1889,445 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
     return alerts
 
 
+def _state_timestamp(state: Any, attr: str, fallback_attr: str = "last_changed") -> datetime | None:
+    value = getattr(state, attr, None) or getattr(state, fallback_attr, None)
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return _parse_datetime(value)
+
+
+def _sensor_numeric_value(hass: HomeAssistant, sensor: dict[str, Any]) -> float | None:
+    entity_id = _normalise_entity_id(sensor.get("entity_id"))
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    if state is None or state.state in UNAVAILABLE_STATES:
+        return None
+    try:
+        return float(state.state)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sensor_health_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
+    sensor_health = config.get("sensorHealth", {})
+    if not isinstance(sensor_health, dict) or not sensor_health.get("enabled", False):
+        return []
+    sensors = config.get("sensors", {})
+    if not isinstance(sensors, dict):
+        return []
+
+    now = datetime.now(timezone.utc)
+    stale_after = int(sensor_health.get("staleAfterMinutes", 180))
+    flatline_hours = int(sensor_health.get("flatlineHours", 12))
+    jump_window = int(sensor_health.get("jumpWindowMinutes", 30))
+    jump_percent = float(sensor_health.get("jumpPercent", 25))
+    mismatch_c = float(sensor_health.get("temperatureMismatchC", 1.5))
+    last_values = sensor_health.setdefault("lastValues", {})
+    last_jumps = sensor_health.setdefault("lastJumps", {})
+    items: list[dict[str, str]] = []
+
+    for sensor_id, sensor in sensors.items():
+        if not isinstance(sensor, dict) or not sensor.get("enabled", False):
+            continue
+        if sensor.get("alertsEnabled", True) is False:
+            continue
+        if _sensor_kind(sensor_id, sensor) == "binary":
+            continue
+        entity_id = _normalise_entity_id(sensor.get("entity_id"))
+        if not entity_id:
+            continue
+        state = hass.states.get(entity_id)
+        if state is None or state.state in UNAVAILABLE_STATES:
+            continue
+        label = str(sensor.get("label") or sensor_id)
+        last_updated = _state_timestamp(state, "last_updated")
+        if last_updated is not None and now - last_updated > timedelta(minutes=stale_after):
+            items.append(
+                {
+                    "id": sensor_id,
+                    "severity": "warning",
+                    "title": f"{label} has stale data",
+                    "message": f"{entity_id} has not updated for more than {stale_after} minutes.",
+                }
+            )
+
+        value = _sensor_numeric_value(hass, sensor)
+        if value is None:
+            continue
+        last_changed = _state_timestamp(state, "last_changed")
+        if last_changed is not None and now - last_changed > timedelta(hours=flatline_hours):
+            items.append(
+                {
+                    "id": sensor_id,
+                    "severity": "warning",
+                    "title": f"{label} looks flatlined",
+                    "message": f"{entity_id} has not changed for more than {flatline_hours} hours.",
+                }
+            )
+
+        previous = last_values.get(sensor_id) if isinstance(last_values, dict) else None
+        if isinstance(previous, dict):
+            previous_time = _parse_datetime(previous.get("updatedAt"))
+            try:
+                previous_value = float(previous.get("value"))
+                minimum = float(sensor.get("min"))
+                maximum = float(sensor.get("max"))
+            except (TypeError, ValueError):
+                previous_time = None
+            if (
+                previous_time is not None
+                and now - previous_time <= timedelta(minutes=jump_window)
+                and maximum > minimum
+            ):
+                span = maximum - minimum
+                if abs(value - previous_value) > span * jump_percent / 100:
+                    last_jumps[sensor_id] = {
+                        "timestamp": now.isoformat(),
+                        "previous": previous_value,
+                        "current": value,
+                    }
+
+        jump = last_jumps.get(sensor_id) if isinstance(last_jumps, dict) else None
+        jump_time = _parse_datetime(jump.get("timestamp")) if isinstance(jump, dict) else None
+        if jump_time is not None and now - jump_time <= timedelta(minutes=jump_window):
+            unit = str(sensor.get("unit") or "").strip()
+            items.append(
+                {
+                    "id": sensor_id,
+                    "severity": "warning",
+                    "title": f"{label} jumped suddenly",
+                    "message": f"{entity_id} changed faster than the configured probe-health limit. Current reading: {value:g} {unit}".strip(),
+                }
+            )
+        elif isinstance(last_jumps, dict):
+            last_jumps.pop(sensor_id, None)
+
+    temp = sensors.get("temp")
+    sump_temp = sensors.get("sump_temp")
+    if isinstance(temp, dict) and isinstance(sump_temp, dict):
+        temp_value = _sensor_numeric_value(hass, temp)
+        sump_value = _sensor_numeric_value(hass, sump_temp)
+        if temp_value is not None and sump_value is not None and abs(temp_value - sump_value) > mismatch_c:
+            items.append(
+                {
+                    "id": "temp",
+                    "severity": "warning",
+                    "title": "Display and sump temperature disagree",
+                    "message": f"Display and sump probes differ by {abs(temp_value - sump_value):g} °C.",
+                }
+            )
+
+    return items
+
+
+def _store_sensor_health_values(hass: HomeAssistant, config: dict[str, Any]) -> None:
+    sensor_health = config.get("sensorHealth", {})
+    sensors = config.get("sensors", {})
+    if (
+        not isinstance(sensor_health, dict)
+        or not sensor_health.get("enabled", False)
+        or not isinstance(sensors, dict)
+    ):
+        return
+    last_values = sensor_health.setdefault("lastValues", {})
+    if not isinstance(last_values, dict):
+        last_values = {}
+        sensor_health["lastValues"] = last_values
+    now = datetime.now(timezone.utc).isoformat()
+    for sensor_id, sensor in sensors.items():
+        if not isinstance(sensor, dict) or _sensor_kind(sensor_id, sensor) == "binary":
+            continue
+        value = _sensor_numeric_value(hass, sensor)
+        if value is None:
+            continue
+        last_values[sensor_id] = {"value": value, "updatedAt": now}
+
+
+def _severity_rank(severity: str) -> int:
+    return {"ok": 0, "unknown": 1, "warning": 2, "critical": 3}.get(severity, 0)
+
+
+def _active_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
+    by_sensor: dict[str, dict[str, str]] = {}
+    for item in [*_sensor_alert_items(hass, config), *_sensor_health_items(hass, config)]:
+        sensor_id = item.get("id")
+        if not sensor_id:
+            continue
+        previous = by_sensor.get(sensor_id)
+        if previous is None or _severity_rank(item.get("severity", "ok")) > _severity_rank(
+            previous.get("severity", "ok")
+        ):
+            by_sensor[sensor_id] = item
+    return list(by_sensor.values())
+
+
+def _alert_acknowledged(config: dict[str, Any], sensor_id: str) -> bool:
+    escalation = config.get("alertEscalation", {})
+    acknowledged = escalation.get("acknowledged", {}) if isinstance(escalation, dict) else {}
+    return isinstance(acknowledged, dict) and sensor_id in acknowledged
+
+
+def _watchdog_status(config: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    watchdog = config.get("watchdog", {})
+    if not isinstance(watchdog, dict) or not watchdog.get("enabled", True):
+        return {"status": "disabled", "lastHeartbeat": "", "missed": False, "nextDue": ""}
+    now = now or datetime.now(timezone.utc)
+    heartbeat = _parse_datetime(watchdog.get("lastHeartbeat"))
+    every_hours = int(watchdog.get("heartbeatEveryHours", 24))
+    missed_after = int(watchdog.get("missedAfterHours", 30))
+    if heartbeat is None:
+        return {"status": "unknown", "lastHeartbeat": "", "missed": False, "nextDue": ""}
+    missed = now - heartbeat > timedelta(hours=missed_after)
+    next_due = heartbeat + timedelta(hours=every_hours)
+    return {
+        "status": "critical" if missed else "ok",
+        "lastHeartbeat": heartbeat.isoformat(),
+        "missed": missed,
+        "nextDue": next_due.isoformat(),
+    }
+
+
+def _trust_item(key: str, label: str, status: str, detail: str) -> dict[str, str]:
+    return {"key": key, "label": label, "status": status, "detail": detail}
+
+
+def _trust_check_summary(
+    hass: HomeAssistant, config: dict[str, Any], *, update: bool = False
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    items: list[dict[str, str]] = []
+    sensors = config.get("sensors", {})
+    enabled_sensors = [
+        (sensor_id, sensor)
+        for sensor_id, sensor in sensors.items()
+        if isinstance(sensor, dict) and sensor.get("enabled", False)
+    ] if isinstance(sensors, dict) else []
+    mapped_sensors = [
+        (sensor_id, sensor)
+        for sensor_id, sensor in enabled_sensors
+        if _normalise_entity_id(sensor.get("entity_id"))
+    ]
+    active_alerts = _active_alert_items(hass, config)
+    critical_alerts = [item for item in active_alerts if item.get("severity") == "critical"]
+    warning_alerts = [item for item in active_alerts if item.get("severity") == "warning"]
+    if critical_alerts:
+        items.append(_trust_item("sensors", "Sensor trust", "critical", f"{len(critical_alerts)} critical sensor alert(s) active."))
+    elif warning_alerts:
+        items.append(_trust_item("sensors", "Sensor trust", "warning", f"{len(warning_alerts)} sensor warning(s) active."))
+    elif enabled_sensors and len(mapped_sensors) == len(enabled_sensors):
+        items.append(_trust_item("sensors", "Sensor trust", "ok", f"{len(mapped_sensors)}/{len(enabled_sensors)} enabled sensors mapped and reporting within current rules."))
+    else:
+        items.append(_trust_item("sensors", "Sensor trust", "warning", f"{len(mapped_sensors)}/{len(enabled_sensors)} enabled sensors mapped."))
+
+    validation = _validate_config(hass, config)
+    missing = validation.get("missing_entities", [])
+    armed_unavailable = validation.get("armed_unavailable", [])
+    if armed_unavailable:
+        items.append(_trust_item("mappings", "Unsafe mappings", "critical", f"{len(armed_unavailable)} armed device(s) are unavailable."))
+    elif missing:
+        items.append(_trust_item("mappings", "Unsafe mappings", "warning", f"{len(missing)} mapped entity/entities need review."))
+    else:
+        items.append(_trust_item("mappings", "Unsafe mappings", "ok", "No missing mapped entities or armed unavailable devices found."))
+
+    alert_config = config.get("alerts", {})
+    escalation = config.get("alertEscalation", {})
+    watchdog = config.get("watchdog", {})
+    has_persistent = isinstance(alert_config, dict) and alert_config.get("persistentNotifications", False)
+    has_escalation_target = isinstance(escalation, dict) and bool(escalation.get("notifyTarget"))
+    notification_test = (
+        watchdog.get("lastNotificationTest")
+        if isinstance(watchdog, dict) and isinstance(watchdog.get("lastNotificationTest"), str)
+        else ""
+    )
+    if has_persistent or has_escalation_target:
+        state = "ok" if notification_test else "warning"
+        detail = "Notification path configured"
+        if not notification_test:
+            detail += ", but no test has been recorded."
+        items.append(_trust_item("notifications", "Notification path", state, detail))
+    else:
+        items.append(_trust_item("notifications", "Notification path", "warning", "No persistent notification or escalation target is configured."))
+
+    heartbeat_status = _watchdog_status(config, now)
+    if heartbeat_status["status"] == "disabled":
+        items.append(_trust_item("heartbeat", "Heartbeat", "warning", "Watchdog heartbeat is disabled."))
+    elif heartbeat_status["status"] == "critical":
+        items.append(_trust_item("heartbeat", "Heartbeat", "critical", "OpenReef missed its configured heartbeat window."))
+    elif heartbeat_status["status"] == "ok":
+        items.append(_trust_item("heartbeat", "Heartbeat", "ok", f"Last heartbeat {heartbeat_status['lastHeartbeat']}."))
+    else:
+        items.append(_trust_item("heartbeat", "Heartbeat", "warning", "No heartbeat has been recorded yet."))
+
+    cameras = config.get("cameras", {})
+    mapped_cameras = [
+        camera
+        for camera in cameras.values()
+        if isinstance(camera, dict) and _normalise_entity_id(camera.get("entity_id"))
+    ] if isinstance(cameras, dict) else []
+    unavailable_cameras = [
+        camera
+        for camera in mapped_cameras
+        if (
+            hass.states.get(_normalise_entity_id(camera.get("entity_id"))) is None
+            or hass.states.get(_normalise_entity_id(camera.get("entity_id"))).state in UNAVAILABLE_STATES
+        )
+    ]
+    if unavailable_cameras:
+        items.append(_trust_item("cameras", "Camera reachability", "warning", f"{len(unavailable_cameras)} mapped camera(s) are unavailable."))
+    elif mapped_cameras:
+        items.append(_trust_item("cameras", "Camera reachability", "ok", f"{len(mapped_cameras)} mapped camera(s) reachable."))
+    else:
+        items.append(_trust_item("cameras", "Camera reachability", "unknown", "No camera is mapped, so incident clips cannot be proven yet."))
+
+    captures = config.get("captures", [])
+    alert_history = config.get("alerts", {}).get("history", []) if isinstance(config.get("alerts"), dict) else []
+    if isinstance(captures, list) or isinstance(alert_history, list):
+        items.append(_trust_item("recorder", "Incident history", "ok", "OpenReef local alert/capture history store is present."))
+    else:
+        items.append(_trust_item("recorder", "Incident history", "unknown", "OpenReef could not verify the local incident history store."))
+
+    trust = config.get("trustCheck", {})
+    backup_review = (
+        _parse_datetime(trust.get("lastBackupReview"))
+        if isinstance(trust, dict)
+        else None
+    )
+    if backup_review is None:
+        items.append(_trust_item("backup", "Backup review", "unknown", "No backup review has been recorded in OpenReef."))
+    elif now - backup_review > timedelta(days=14):
+        items.append(_trust_item("backup", "Backup review", "warning", "Backup review is older than 14 days."))
+    else:
+        items.append(_trust_item("backup", "Backup review", "ok", "Backup review recorded within the last 14 days."))
+
+    equipment = config.get("equipment", {})
+    edge_failsafes = config.get("edgeFailsafes", {})
+    required_failsafes: set[str] = set()
+    if isinstance(equipment, dict):
+        for equipment_id, mapped in equipment.items():
+            if not isinstance(mapped, dict) or not mapped.get("armed", False):
+                continue
+            profile = _equipment_profile_for_config(equipment_id, mapped)
+            if profile == "heater":
+                required_failsafes.add("heater")
+            elif profile == "ato":
+                required_failsafes.add("ato")
+            elif profile == "return_pump":
+                required_failsafes.add("returnPump")
+    if not required_failsafes:
+        items.append(_trust_item("edge_failsafes", "Edge failsafes", "unknown", "No armed heater, ATO, or return pump needs an on-device failsafe yet."))
+    elif not isinstance(edge_failsafes, dict) or not edge_failsafes.get("enabled", False):
+        items.append(_trust_item("edge_failsafes", "Edge failsafes", "warning", "Life-support equipment is armed, but ESPHome/on-device failsafes are not marked as reviewed."))
+    else:
+        missing_failsafes = sorted(
+            label
+            for key, label in (
+                ("heater", "heater"),
+                ("ato", "ATO"),
+                ("returnPump", "return pump"),
+            )
+            if key in required_failsafes and not edge_failsafes.get(key, False)
+        )
+        review_time = _parse_datetime(edge_failsafes.get("lastReviewed"))
+        if missing_failsafes:
+            items.append(_trust_item("edge_failsafes", "Edge failsafes", "warning", "Missing reviewed on-device failsafe(s): " + ", ".join(missing_failsafes) + "."))
+        elif review_time is None:
+            items.append(_trust_item("edge_failsafes", "Edge failsafes", "warning", "On-device failsafes are marked, but no review date is recorded."))
+        elif now - review_time > timedelta(days=180):
+            items.append(_trust_item("edge_failsafes", "Edge failsafes", "warning", "On-device failsafe review is older than 180 days."))
+        else:
+            items.append(_trust_item("edge_failsafes", "Edge failsafes", "ok", "Required heater/ATO/return-pump failsafes are marked as reviewed."))
+
+    worst = max(items, key=lambda item: _severity_rank(item["status"]))["status"] if items else "unknown"
+    summary = {"status": worst, "checkedAt": now.isoformat(), "items": items}
+    if update:
+        trust_config = config.setdefault("trustCheck", {})
+        if isinstance(trust_config, dict):
+            trust_config["lastRun"] = summary["checkedAt"]
+            trust_config["lastStatus"] = worst
+    return summary
+
+
+def _incident_events_near(
+    events: list[dict[str, Any]], timestamp: datetime, window_minutes: int
+) -> list[dict[str, Any]]:
+    start = timestamp - timedelta(minutes=window_minutes)
+    end = timestamp + timedelta(minutes=window_minutes)
+    near: list[dict[str, Any]] = []
+    for event in events:
+        parsed = _parse_datetime(event.get("timestamp") or event.get("startedAt"))
+        if parsed is not None and start <= parsed <= end:
+            near.append(event)
+    return near[:12]
+
+
+def _reef_replay_incidents(config: dict[str, Any]) -> list[dict[str, Any]]:
+    replay = config.get("reefReplay", {})
+    if not isinstance(replay, dict) or not replay.get("enabled", True):
+        return []
+    window = int(replay.get("incidentWindowMinutes", 20))
+    retention = int(replay.get("retention", 25))
+    alerts = config.get("alerts", {})
+    history = alerts.get("history", []) if isinstance(alerts, dict) else []
+    activity = config.get("activity", [])
+    captures = config.get("captures", [])
+    feeds = config.get("feedSessions", [])
+    event_pool: list[dict[str, Any]] = []
+    if isinstance(activity, list):
+        event_pool.extend(
+            {**event, "source": "activity"}
+            for event in activity
+            if isinstance(event, dict)
+        )
+    if isinstance(captures, list):
+        event_pool.extend(
+            {**event, "source": "capture", "timestamp": event.get("timestamp") or event.get("startedAt")}
+            for event in captures
+            if isinstance(event, dict)
+        )
+    if isinstance(feeds, list):
+        event_pool.extend(
+            {**event, "source": "feed", "timestamp": event.get("startedAt")}
+            for event in feeds
+            if isinstance(event, dict)
+        )
+
+    incidents: list[dict[str, Any]] = []
+    if isinstance(history, list):
+        for alert in history:
+            if not isinstance(alert, dict):
+                continue
+            timestamp = _parse_datetime(alert.get("timestamp"))
+            if timestamp is None:
+                continue
+            incidents.append(
+                {
+                    "id": f"alert-{alert.get('sensor_id', 'sensor')}-{int(timestamp.timestamp())}",
+                    "timestamp": timestamp.isoformat(),
+                    "title": alert.get("title") or alert.get("label") or "OpenReef alert",
+                    "severity": alert.get("state") or "warning",
+                    "message": alert.get("message") or "",
+                    "events": _incident_events_near(event_pool, timestamp, window),
+                }
+            )
+    if not incidents:
+        for event in event_pool[:retention]:
+            timestamp = _parse_datetime(event.get("timestamp") or event.get("startedAt"))
+            if timestamp is None:
+                continue
+            incidents.append(
+                {
+                    "id": f"{event.get('source', 'event')}-{int(timestamp.timestamp())}",
+                    "timestamp": timestamp.isoformat(),
+                    "title": event.get("message") or event.get("label") or "OpenReef event",
+                    "severity": event.get("type") or "info",
+                    "message": event.get("message") or "",
+                    "events": [event],
+                }
+            )
+    return incidents[:retention]
+
+
 def _equipment_label(equipment_id: str, mapped: dict[str, Any]) -> str:
     return str(mapped.get("label") or equipment_id)
 
@@ -1801,10 +2399,16 @@ def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[
     if not isinstance(sensors, dict):
         return transitions
 
-    active_items = {item["id"]: item for item in _sensor_alert_items(hass, config)}
+    active_items = {item["id"]: item for item in _active_alert_items(hass, config)}
     previous_states = alert_config.get("lastStates", {})
     if not isinstance(previous_states, dict):
         previous_states = {}
+    escalation = config.get("alertEscalation", {})
+    acknowledged = (
+        escalation.get("acknowledged", {})
+        if isinstance(escalation, dict) and isinstance(escalation.get("acknowledged"), dict)
+        else {}
+    )
     next_states: dict[str, str] = {}
     now = datetime.now(timezone.utc)
 
@@ -1828,6 +2432,7 @@ def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[
             state = "resolved"
             title = f"{label} resolved"
             message = "Reading is back inside the configured alert behaviour."
+            acknowledged.pop(sensor_id, None)
 
         previous = previous_states.get(sensor_id)
         if previous != state and (previous is not None or state != "resolved"):
@@ -1838,6 +2443,7 @@ def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[
         next_states[sensor_id] = state
 
     alert_config["lastStates"] = next_states
+    _store_sensor_health_values(hass, config)
     return transitions
 
 
@@ -1968,7 +2574,8 @@ def _maintenance_due_items(
 
 async def _async_sync_alert_notifications(
     hass: HomeAssistant, config: dict[str, Any]
-) -> None:
+) -> bool:
+    changed = False
     sensors = config.get("sensors", {})
     sensor_ids = list(sensors) if isinstance(sensors, dict) else list(MVP_SENSORS)
     alert_config = config.get("alerts", {})
@@ -1978,11 +2585,13 @@ async def _async_sync_alert_notifications(
     critical_only = not isinstance(alert_config, dict) or alert_config.get(
         "notifyCriticalOnly", True
     )
-    alert_items = _sensor_alert_items(hass, config) if enabled else []
+    all_alert_items = _active_alert_items(hass, config)
+    alert_items = all_alert_items if enabled else []
     active_ids = {
         item["id"]
         for item in alert_items
         if not critical_only or item["severity"] == "critical"
+        if not _alert_acknowledged(config, item["id"])
     }
 
     for sensor_id in sensor_ids:
@@ -1998,6 +2607,8 @@ async def _async_sync_alert_notifications(
     for item in alert_items:
         if critical_only and item["severity"] != "critical":
             continue
+        if _alert_acknowledged(config, item["id"]):
+            continue
         await hass.services.async_call(
             "persistent_notification",
             "create",
@@ -2008,6 +2619,9 @@ async def _async_sync_alert_notifications(
             },
             blocking=False,
         )
+
+    if await _async_sync_alert_escalation(hass, config, all_alert_items):
+        changed = True
 
     equipment = config.get("equipment", {})
     equipment_ids = list(equipment) if isinstance(equipment, dict) else []
@@ -2091,6 +2705,102 @@ async def _async_sync_alert_notifications(
             blocking=False,
         )
 
+    return changed
+
+
+async def _async_toggle_escalation_outputs(
+    hass: HomeAssistant, config: dict[str, Any], turn_on: bool
+) -> bool:
+    escalation = config.get("alertEscalation", {})
+    if not isinstance(escalation, dict):
+        return False
+    changed = False
+    for field in ("sirenEntityId", "lightEntityId"):
+        entity_id = _normalise_entity_id(escalation.get(field))
+        if not entity_id:
+            continue
+        await hass.services.async_call(
+            _domain(entity_id),
+            "turn_on" if turn_on else "turn_off",
+            {ATTR_ENTITY_ID: entity_id},
+            blocking=False,
+        )
+        changed = True
+    return changed
+
+
+async def _async_sync_alert_escalation(
+    hass: HomeAssistant, config: dict[str, Any], alert_items: list[dict[str, str]]
+) -> bool:
+    escalation = config.get("alertEscalation", {})
+    if not isinstance(escalation, dict):
+        return False
+    changed = False
+    now = datetime.now(timezone.utc)
+    active_items = [
+        item
+        for item in alert_items
+        if (not escalation.get("criticalOnly", True) or item.get("severity") == "critical")
+        and not _alert_acknowledged(config, item.get("id", ""))
+    ]
+
+    if not escalation.get("enabled", False):
+        if escalation.get("outputsActive", False):
+            await _async_toggle_escalation_outputs(hass, config, False)
+            escalation["outputsActive"] = False
+            changed = True
+        return changed
+
+    last_escalated = escalation.setdefault("lastEscalated", {})
+    if not isinstance(last_escalated, dict):
+        last_escalated = {}
+        escalation["lastEscalated"] = last_escalated
+        changed = True
+    repeat_minutes = int(escalation.get("repeatMinutes", 30))
+    notify_target = str(escalation.get("notifyTarget", "")).strip()
+    for item in active_items:
+        sensor_id = item.get("id", "")
+        previous = _parse_datetime(last_escalated.get(sensor_id))
+        due = previous is None or now - previous >= timedelta(minutes=repeat_minutes)
+        if not due:
+            continue
+        message = item.get("message") or item.get("title") or "OpenReef alert"
+        if notify_target:
+            await hass.services.async_call(
+                "notify",
+                notify_target,
+                {"title": f"OpenReef: {item.get('title', 'Alert')}", "message": message},
+                blocking=False,
+            )
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "notification_id": f"openreef_escalation_{sensor_id}",
+                "title": f"OpenReef escalation: {item.get('title', 'Alert')}",
+                "message": f"{message}\n\nAcknowledge this alert in OpenReef to stop escalation repeats.",
+            },
+            blocking=False,
+        )
+        last_escalated[sensor_id] = now.isoformat()
+        changed = True
+
+    if active_items and not escalation.get("outputsActive", False):
+        if await _async_toggle_escalation_outputs(hass, config, True):
+            escalation["outputsActive"] = True
+            changed = True
+    elif not active_items and escalation.get("outputsActive", False):
+        await _async_toggle_escalation_outputs(hass, config, False)
+        escalation["outputsActive"] = False
+        changed = True
+
+    for sensor_id in list(last_escalated):
+        if sensor_id not in {item.get("id") for item in alert_items}:
+            last_escalated.pop(sensor_id, None)
+            changed = True
+
+    return changed
+
 
 def _clear_mode_timer(hass: HomeAssistant) -> None:
     unsub = hass.data.setdefault(DOMAIN, {}).pop(MODE_TIMER_UNSUB, None)
@@ -2137,6 +2847,107 @@ def _clear_feedwatch(hass: HomeAssistant) -> None:
     unsub = hass.data.setdefault(DOMAIN, {}).pop(FEEDWATCH_UNSUB, None)
     if unsub is not None:
         unsub()
+
+
+def _clear_watchdog(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(WATCHDOG_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+def _persist_entry_config(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
+) -> dict[str, Any]:
+    normalised = _normalise_core_config(config)
+    options = dict(entry.options)
+    options[CONF_SETTINGS] = normalised
+    hass.config_entries.async_update_entry(entry, options=options)
+    return normalised
+
+
+async def _async_run_watchdog(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    config: dict[str, Any] | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    config = config or _config_from_entry(entry)
+    watchdog = config.get("watchdog", {})
+    if not isinstance(watchdog, dict) or not watchdog.get("enabled", True):
+        return config
+
+    now = datetime.now(timezone.utc)
+    heartbeat = _parse_datetime(watchdog.get("lastHeartbeat"))
+    every_hours = int(watchdog.get("heartbeatEveryHours", 24))
+    missed_after = int(watchdog.get("missedAfterHours", 30))
+    due = force or heartbeat is None or now - heartbeat >= timedelta(hours=every_hours)
+    missed = heartbeat is not None and now - heartbeat > timedelta(hours=missed_after)
+    if not due and not missed:
+        return config
+
+    if missed:
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "notification_id": "openreef_watchdog_missed",
+                "title": "OpenReef heartbeat recovered late",
+                "message": (
+                    f"OpenReef last checked in at {heartbeat.isoformat()}. "
+                    "Review Home Assistant uptime, restart history, and notification delivery."
+                ),
+            },
+            blocking=False,
+        )
+        watchdog["lastMissedAlert"] = now.isoformat()
+        _append_activity(config, "OpenReef heartbeat recovered after a missed window", "warning")
+
+    watchdog["lastCheck"] = now.isoformat()
+    if watchdog.get("heartbeatEnabled", True):
+        watchdog["lastHeartbeat"] = now.isoformat()
+        target = str(watchdog.get("notifyTarget", "")).strip()
+        if target:
+            await hass.services.async_call(
+                "notify",
+                target,
+                {
+                    "title": "OpenReef heartbeat OK",
+                    "message": "OpenReef completed its scheduled trust heartbeat.",
+                },
+                blocking=False,
+            )
+        _append_activity(config, "OpenReef heartbeat OK", "info")
+
+    _trust_check_summary(hass, config, update=True)
+    return _persist_entry_config(hass, entry, config)
+
+
+async def _async_schedule_watchdog(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    _clear_watchdog(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    watchdog = config.get("watchdog", {})
+    if not isinstance(watchdog, dict) or not watchdog.get("enabled", True):
+        return
+
+    await _async_run_watchdog(hass, entry, config)
+
+    async def _handle_watchdog(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            _clear_watchdog(hass)
+            return
+        await _async_run_watchdog(hass, latest_entry)
+
+    hass.data.setdefault(DOMAIN, {})[WATCHDOG_UNSUB] = async_track_time_interval(
+        hass, _handle_watchdog, timedelta(minutes=30)
+    )
 
 
 def _wavemaker_reminder_interval(config: dict[str, Any]) -> int:
@@ -2282,7 +3093,8 @@ async def _async_fire_maintenance_reminder(
     extracted from the scheduler so it's unit-testable."""
     latest_config = _config_from_entry(entry)
     # Keep the in-HA persistent notifications matching current due state.
-    await _async_sync_alert_notifications(hass, latest_config)
+    if await _async_sync_alert_notifications(hass, latest_config):
+        _persist_entry_config(hass, entry, latest_config)
     maintenance = latest_config.get("maintenance", {})
     reminders = maintenance.get("reminders", {}) if isinstance(maintenance, dict) else {}
     if not isinstance(reminders, dict) or not reminders.get("enabled", True):
@@ -2993,17 +3805,22 @@ async def _async_save_config(
 ) -> dict[str, Any]:
     normalised = _normalise_core_config(config)
     transitions = _sync_alert_state(hass, normalised)
+    _trust_check_summary(hass, normalised, update=True)
     options = dict(entry.options)
     options[CONF_SETTINGS] = normalised
     hass.config_entries.async_update_entry(entry, options=options)
     await _async_refresh_issues(hass, entry)
-    await _async_sync_alert_notifications(hass, normalised)
+    if await _async_sync_alert_notifications(hass, normalised):
+        options = dict(entry.options)
+        options[CONF_SETTINGS] = normalised
+        hass.config_entries.async_update_entry(entry, options=options)
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     await _async_schedule_maintenance_reminders(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
+    await _async_schedule_watchdog(hass, entry, normalised)
     # Event-triggered camera capture on a fresh ok->warning/critical transition.
     for transition in transitions:
         if transition.get("state") == "critical":
@@ -3409,6 +4226,108 @@ async def _handle_apply_mode(hass: HomeAssistant, call: ServiceCall) -> None:
     await _async_apply_mode(hass, entry, call.data["mode_id"], call.context)
 
 
+async def _async_acknowledge_alert(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, sensor_id: str
+) -> dict[str, Any]:
+    config = _config_from_entry(entry)
+    sensors = config.get("sensors", {})
+    if not isinstance(sensors, dict) or sensor_id not in sensors:
+        raise ServiceValidationError("Unknown OpenReef sensor")
+    escalation = config.setdefault("alertEscalation", {})
+    acknowledged = escalation.setdefault("acknowledged", {})
+    if not isinstance(acknowledged, dict):
+        acknowledged = {}
+        escalation["acknowledged"] = acknowledged
+    acknowledged[sensor_id] = datetime.now(timezone.utc).isoformat()
+    last_escalated = escalation.setdefault("lastEscalated", {})
+    if isinstance(last_escalated, dict):
+        last_escalated.pop(sensor_id, None)
+    await hass.services.async_call(
+        "persistent_notification",
+        "dismiss",
+        {"notification_id": f"openreef_alert_{sensor_id}"},
+        blocking=False,
+    )
+    await hass.services.async_call(
+        "persistent_notification",
+        "dismiss",
+        {"notification_id": f"openreef_escalation_{sensor_id}"},
+        blocking=False,
+    )
+    _append_activity(config, f"Alert acknowledged: {sensor_id}", "info")
+    return await _async_save_config(hass, entry, config)
+
+
+async def _handle_acknowledge_alert(hass: HomeAssistant, call: ServiceCall) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+    await _async_acknowledge_alert(hass, entry, str(call.data["sensor_id"]))
+
+
+async def _async_test_notification(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    message: str = "",
+) -> dict[str, Any]:
+    config = _config_from_entry(entry)
+    text = (
+        message.strip()
+        if isinstance(message, str) and message.strip()
+        else "OpenReef notification test delivered."
+    )
+    await hass.services.async_call(
+        "persistent_notification",
+        "create",
+        {
+            "notification_id": "openreef_notification_test",
+            "title": "OpenReef notification test",
+            "message": text,
+        },
+        blocking=False,
+    )
+    watchdog = config.setdefault("watchdog", {})
+    escalation = config.get("alertEscalation", {})
+    target = str(escalation.get("notifyTarget", "")).strip() if isinstance(escalation, dict) else ""
+    if not target and isinstance(watchdog, dict):
+        target = str(watchdog.get("notifyTarget", "")).strip()
+    if target:
+        await hass.services.async_call(
+            "notify",
+            target,
+            {"title": "OpenReef notification test", "message": text},
+            blocking=False,
+        )
+    if isinstance(watchdog, dict):
+        watchdog["lastNotificationTest"] = datetime.now(timezone.utc).isoformat()
+    _append_activity(config, "Notification test sent", "info")
+    return await _async_save_config(hass, entry, config)
+
+
+async def _handle_test_notification(hass: HomeAssistant, call: ServiceCall) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+    await _async_test_notification(hass, entry, str(call.data.get("message") or ""))
+
+
+async def _handle_refresh_trust_check(hass: HomeAssistant, call: ServiceCall) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+    config = _config_from_entry(entry)
+    _trust_check_summary(hass, config, update=True)
+    _append_activity(config, "Trust Check refreshed", "info")
+    await _async_save_config(hass, entry, config)
+
+
+async def _handle_heartbeat(hass: HomeAssistant, call: ServiceCall) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+    await _async_run_watchdog(hass, entry, force=True)
+
+
 async def _handle_arm_equipment(
     hass: HomeAssistant, call: ServiceCall, armed: bool
 ) -> None:
@@ -3528,12 +4447,16 @@ async def websocket_get_config(
     """Return the current OpenReef core configuration."""
     entry = _first_entry(hass)
     config = _config_from_entry(entry)
+    trust_check = _trust_check_summary(hass, config, update=True)
     if entry is not None:
         _sync_alert_state(hass, config)
         hass.config_entries.async_update_entry(
             entry, options={**entry.options, CONF_SETTINGS: config}
         )
-        await _async_sync_alert_notifications(hass, config)
+        if await _async_sync_alert_notifications(hass, config):
+            hass.config_entries.async_update_entry(
+                entry, options={**entry.options, CONF_SETTINGS: config}
+            )
     connection.send_result(
         msg["id"],
         {
@@ -3543,6 +4466,9 @@ async def websocket_get_config(
             "settings": config,
             "sensor_meta": MVP_SENSORS,
             "validation": _validate_config(hass, config),
+            "trust_check": trust_check,
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
         },
     )
 
@@ -3572,6 +4498,9 @@ async def websocket_save_config(
             "version": INTEGRATION_VERSION,
             "config": config,
             "validation": _validate_config(hass, config),
+            "trust_check": _trust_check_summary(hass, config),
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
         },
     )
 
@@ -3596,7 +4525,14 @@ async def websocket_update_config_alias(
     config = await _async_save_config(hass, entry, msg["settings"])
     connection.send_result(
         msg["id"],
-        {"success": True, "version": INTEGRATION_VERSION, "config": config},
+        {
+            "success": True,
+            "version": INTEGRATION_VERSION,
+            "config": config,
+            "trust_check": _trust_check_summary(hass, config),
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
+        },
     )
 
 
@@ -3637,7 +4573,10 @@ async def websocket_validate_config(
             entry, options={**entry.options, CONF_SETTINGS: config}
         )
     validation = _validate_config(hass, config)
-    await _async_sync_alert_notifications(hass, config)
+    if await _async_sync_alert_notifications(hass, config) and entry is not None:
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SETTINGS: config}
+        )
     connection.send_result(msg["id"], validation)
 
 
@@ -3655,7 +4594,10 @@ async def websocket_validate_mappings_alias(
             entry, options={**entry.options, CONF_SETTINGS: config}
         )
     validation = _validate_config(hass, config)
-    await _async_sync_alert_notifications(hass, config)
+    if await _async_sync_alert_notifications(hass, config) and entry is not None:
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SETTINGS: config}
+        )
     connection.send_result(msg["id"], validation)
 
 
@@ -3703,6 +4645,9 @@ async def websocket_mute_alert(
             "version": INTEGRATION_VERSION,
             "config": config,
             "validation": _validate_config(hass, config),
+            "trust_check": _trust_check_summary(hass, config),
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
         },
     )
 
@@ -3729,8 +4674,129 @@ async def websocket_clear_alert_history(
             "version": INTEGRATION_VERSION,
             "config": config,
             "validation": _validate_config(hass, config),
+            "trust_check": _trust_check_summary(hass, config),
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
         },
     )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/acknowledge_alert",
+        vol.Required("sensor_id"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_acknowledge_alert(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Acknowledge one active OpenReef alert and stop escalation repeats."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    try:
+        config = await _async_acknowledge_alert(hass, entry, msg["sensor_id"])
+    except ServiceValidationError as exc:
+        connection.send_error(msg["id"], "invalid_sensor", str(exc))
+        return
+    connection.send_result(
+        msg["id"],
+        {
+            "success": True,
+            "version": INTEGRATION_VERSION,
+            "config": config,
+            "validation": _validate_config(hass, config),
+            "trust_check": _trust_check_summary(hass, config),
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/test_notification",
+        vol.Optional("message", default=""): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_test_notification(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Send a Home Assistant persistent notification and optional notify target push."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = await _async_test_notification(hass, entry, msg.get("message", ""))
+    connection.send_result(
+        msg["id"],
+        {
+            "success": True,
+            "version": INTEGRATION_VERSION,
+            "config": config,
+            "validation": _validate_config(hass, config),
+            "trust_check": _trust_check_summary(hass, config),
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
+        },
+    )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/refresh_trust_check"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_refresh_trust_check(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Refresh and persist the OpenReef Trust Check summary."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    trust_check = _trust_check_summary(hass, config, update=True)
+    _append_activity(config, "Trust Check refreshed", "info")
+    config = await _async_save_config(hass, entry, config)
+    connection.send_result(
+        msg["id"],
+        {
+            "success": True,
+            "version": INTEGRATION_VERSION,
+            "config": config,
+            "validation": _validate_config(hass, config),
+            "trust_check": trust_check,
+            "heartbeat": _watchdog_status(config),
+            "reef_replay": _reef_replay_incidents(config),
+        },
+    )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/get_heartbeat"})
+@websocket_api.async_response
+async def websocket_get_heartbeat(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return watchdog heartbeat status."""
+    entry = _first_entry(hass)
+    config = _config_from_entry(entry)
+    connection.send_result(msg["id"], _watchdog_status(config))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/list_reef_replay"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_list_reef_replay(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return the Tank Black Box / Reef Replay incident timeline."""
+    entry = _first_entry(hass)
+    config = _config_from_entry(entry)
+    connection.send_result(msg["id"], {"incidents": _reef_replay_incidents(config)})
 
 
 @websocket_api.websocket_command(
@@ -4838,6 +5904,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_validate_mappings_alias)
     websocket_api.async_register_command(hass, websocket_mute_alert)
     websocket_api.async_register_command(hass, websocket_clear_alert_history)
+    websocket_api.async_register_command(hass, websocket_acknowledge_alert)
+    websocket_api.async_register_command(hass, websocket_test_notification)
+    websocket_api.async_register_command(hass, websocket_refresh_trust_check)
+    websocket_api.async_register_command(hass, websocket_get_heartbeat)
+    websocket_api.async_register_command(hass, websocket_list_reef_replay)
     websocket_api.async_register_command(hass, websocket_apply_mode)
     websocket_api.async_register_command(hass, websocket_toggle_equipment)
     websocket_api.async_register_command(hass, websocket_list_recordings)
@@ -4880,6 +5951,30 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         _handle_disarm_equipment_service,
         schema=EQUIPMENT_ARM_SCHEMA,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ACKNOWLEDGE_ALERT,
+        _handle_acknowledge_alert,
+        schema=ACKNOWLEDGE_ALERT_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_TEST_NOTIFICATION,
+        _handle_test_notification,
+        schema=TEST_NOTIFICATION_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REFRESH_TRUST_CHECK,
+        _handle_refresh_trust_check,
+        schema=EMPTY_SERVICE_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_HEARTBEAT,
+        _handle_heartbeat,
+        schema=EMPTY_SERVICE_SCHEMA,
+    )
 
     return True
 
@@ -4900,13 +5995,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
             entry, options={**entry.options, CONF_SETTINGS: normalised}
         )
     await _async_refresh_issues(hass, entry)
-    await _async_sync_alert_notifications(hass, normalised)
+    if await _async_sync_alert_notifications(hass, normalised):
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SETTINGS: normalised}
+        )
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     await _async_schedule_maintenance_reminders(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
+    await _async_schedule_watchdog(hass, entry, normalised)
     await _async_finalize_orphaned_feed_sessions(hass, entry)
     return True
 
@@ -4921,6 +6020,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_maintenance_reminders(hass)
     _clear_timelapse(hass)
     _clear_feedwatch(hass)
+    _clear_watchdog(hass)
     hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).pop(
         entry.entry_id, None
     )
@@ -4943,6 +6043,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
             "persistent_notification",
             "dismiss",
             {"notification_id": f"openreef_alert_{sensor_id}"},
+            blocking=False,
+        )
+        await hass.services.async_call(
+            "persistent_notification",
+            "dismiss",
+            {"notification_id": f"openreef_escalation_{sensor_id}"},
+            blocking=False,
+        )
+    for notification_id in (
+        "openreef_watchdog_missed",
+        "openreef_notification_test",
+    ):
+        await hass.services.async_call(
+            "persistent_notification",
+            "dismiss",
+            {"notification_id": notification_id},
             blocking=False,
         )
     equipment = config.get("equipment", {})

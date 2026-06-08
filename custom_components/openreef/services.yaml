@@ -78,3 +78,33 @@ disarm_equipment:
       required: true
       selector:
         text:
+
+acknowledge_alert:
+  name: Acknowledge alert
+  description: Acknowledges one OpenReef sensor alert and stops escalation repeats until it resolves or changes state.
+  fields:
+    sensor_id:
+      name: Sensor ID
+      description: The OpenReef sensor key, such as temp, ph, leak, or alkalinity.
+      required: true
+      selector:
+        text:
+
+test_notification:
+  name: Test notification
+  description: Sends an OpenReef persistent notification and, if configured, a Home Assistant notify target push.
+  fields:
+    message:
+      name: Message
+      description: Optional test message.
+      required: false
+      selector:
+        text:
+
+refresh_trust_check:
+  name: Refresh Trust Check
+  description: Re-runs OpenReef Trust Check and stores the latest readiness status.
+
+heartbeat:
+  name: Heartbeat
+  description: Forces an OpenReef watchdog heartbeat and optional all-clear notification.

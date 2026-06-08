@@ -1,14 +1,56 @@
 # OpenReef Product Roadmap
 
-OpenReef is an open-source, Home Assistant-native reef controller intended to compete with Neptune Apex on capability while being easier to install, understand, and trust.
+OpenReef is the open, Home Assistant-native **intelligence layer for reefing** — software that runs on any HA hardware (including a reefer's existing Apex, Trident, HYDROS, ESPHome, probes, and smart plugs) and adds the trust, prediction, and camera/control-event context that hardware-led controller ecosystems still leave exposed. It reaches Apex parity, then leapfrogs.
 
-Use this roadmap as the working checklist. Detailed Apex comparison and Labs inventory live in [OPENREEF_COMPETITIVE_AUDIT.md](OPENREEF_COMPETITIVE_AUDIT.md).
+Use this roadmap as the working checklist. The full market teardown (Apex, HYDROS, GHL, Red Sea, Reef Factory, open-source peers, AI frontier), the 6 universal failures, and the leapfrog ladder live in [OPENREEF_COMPETITIVE_AUDIT.md](OPENREEF_COMPETITIVE_AUDIT.md).
+
+## Strategy: Intelligence Layer + Trust Moat
+
+The whole controller category still leaves the same software trust gap — reliability confidence, silent failure, notification confidence, setup clarity, cross-vendor intelligence, and incident context. **Nobody owns trust.** That is OpenReef's headline bet.
+
+### Trust Moat (headline leapfrog)
+
+The category's deepest unmet need: a controller you can trust to catch problems and keep a tank alive when things fail. Build these as HA-native slices, reusing the shipped alert-notification + daily-tick + maintenance-reminder engines.
+
+- [x] **OpenReef Trust Check V1** — visible readiness panel for stale sensors, notification test status, camera reachability, local incident-history health, unsafe mappings, armed unavailable devices, backup-review age, and heartbeat/restart survival.
+- [x] **Controller watchdog + heartbeat V1** — scheduled all-clear heartbeat, optional HA notify target, and missed-heartbeat recovery notification.
+- [x] **Probe/sensor health V1** — stale last-updated detection, flatline detection, impossible-jump hints, and display/sump temperature mismatch cross-check.
+- [x] **Escalating multi-channel alerts V1** — persistent notification + optional phone push + repeat cadence + acknowledgement + optional siren/light outputs.
+- [x] **Tank Black Box / Reef Replay V1** — incident timeline combining alert history, activity log, captures, and feed-watch sessions. Parameter-graph overlays and share/export bundles remain future polish.
+- [x] **Edge failsafes V1** — parameterised ESPHome recipes for heater/ATO/return-pump local safety plus Trust Check review gating. Kit-specific pin maps and bench validation remain part of the curated-kit hardware track.
+
+### Trust Moat Implementation Contract
+
+Keep the first Trust Moat pass additive only:
+
+- [x] Add config blocks for `watchdog`, `sensorHealth`, `alertEscalation`, and `trustCheck`.
+- [x] Add HA service/websocket actions for alert acknowledgement, notification test, trust-check refresh, and heartbeat status.
+- [x] Preserve existing configs through normal migration; no breaking schema or service changes.
+- [x] Keep automated dosing behind a hard safety wall. Advisory dosing is already a strength; unsafe automation would damage the trust brand.
+
+### Tier 2 — Intelligence (longer-horizon vision)
+
+Software-intelligence plays OpenReef can make defensible when grounded in local HA data and OpenReef's own event history. These are what get the community — and Neptune — talking.
+
+- [ ] **Predictive Reef Guardian** — local-first forecasting ("KH trending below 7 in ~5 days at current consumption — nudge the dose"); builds on the Dosing Advisor + Reef Health trends.
+- [ ] **Computer-vision tank intelligence** (on Camera V2) — fish not eating / head-count ("is a fish missing") / aggression / coral growth / pest & disease spotting / equipment anomalies.
+- [ ] **Natural-language "ask your tank" copilot** — Q&A over the user's real data + activity log.
+- [ ] **Opt-in, privacy-first benchmarking** — "tanks like yours dose X; your alk consumption is 80th percentile."
+
+Do not overclaim AI. ReefMind/ReefCtrl-style tools are real; OpenReef's defensible angle is local-first intelligence tied directly to HA control events, camera evidence, safety interlocks, and private user data.
 
 ## What Is Next
 
 These are the next useful passes before widening beta beyond trusted testers.
 
-- [ ] Make copied smoke-test text setup-neutral so it does not list only the current user's sensors/equipment.
+- [x] Build Trust Check V1 with readiness categories, notification test, and heartbeat status.
+- [x] Add probe/sensor health V1: stale last-updated, flatline, impossible jump, and redundant-temperature mismatch hints.
+- [x] Add alert acknowledgement + repeat/escalation settings before adding more automation.
+- [x] Add Tank Black Box / Reef Replay V1 using existing alert history, activity log, captures, and feed-watch sessions.
+- [x] Add ESPHome edge-failsafe recipe V1 and Trust Check review gate.
+- [x] Add Trust Moat smoke-test checklist for live HA/browser/hardware verification.
+- [ ] Polish Apex switcher flow: Trident/Trident NP synced chemistry display, import summary, support summary wording.
+- [x] Make copied smoke-test text setup-neutral so it does not list only the current user's sensors/equipment.
 - [ ] Add low-memory HA OS smoke-test notes.
 - [x] Add rollback and beta reset instructions (docs/BETA_ROLLBACK_AND_RESET.md).
 - [x] Add first Python tests for config migration (dependency-free, `tests/test_config_migration.py`; caught and fixed a corrupted-block migration crash). Entity-search/safe-toggle tests still need a HA test harness.
@@ -21,7 +63,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] Add Manual Chemistry V1.1: charted manual-test trends and batch historical test entry.
 - [x] Add Manual Chemistry V1.2: per-parameter target/freshness tuning plus CSV export/import helpers.
 - [x] Add Dosing Advisor V1.3 safety overhaul: product-system setup, verified-strength gates, kalkwasser safety handling, and copied dosing summaries.
-- [ ] Add Maintenance Tasks V1 without Google dependency.
+- [x] Add Maintenance Tasks V1 without Google dependency: HA-native recurring tasks (curated + custom), every-N-days cadence, due/overdue tracking, mark-done + history, Maintenance tab + Mission card + Attention surfacing + modest Reef Health nudge, and a `record_task_completion` service. (v0.4.80)
 
 ## Product Rules
 
@@ -102,6 +144,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] Settings sections collapsed by default.
 - [x] Theme color picker.
 - [x] System Check.
+- [x] Trust Check V1: readiness panel, watchdog heartbeat, probe-health checks, alert acknowledgement/escalation, and Reef Replay incident timeline.
 
 ## In Progress / Needs Smoke Testing
 
@@ -152,8 +195,9 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 - [x] PAR sensor mapping.
 - [ ] Additional probe/module grouping.
 - [ ] Probe calibration helpers.
-- [ ] Probe health/last-seen checks.
+- [x] Probe health/last-seen checks.
 - [x] Apex/Trident import helper for HA-synced entities.
+- [x] Trust Check surface for stale/unavailable mapped sensors.
 
 ### Control Parity
 
@@ -171,12 +215,13 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 - [ ] Flow-triggered warnings and actions.
 - [ ] Water-level-triggered warnings and actions.
 - [ ] Power-monitor anomaly warnings.
+- [x] Heartbeat/silence alarm for OpenReef runtime health.
 
 ### Chemistry And Dosing Parity
 
-- [ ] Manual water test entry.
-- [ ] Chemistry history dashboard.
-- [ ] Target ranges by parameter.
+- [x] Manual water test entry.
+- [x] Chemistry history dashboard.
+- [x] Target ranges by parameter.
 - [ ] Dosing log.
 - [ ] Dosing reminders.
 - [x] Advisory dose calculator.
@@ -185,11 +230,12 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 - [ ] Trident NP-style nitrate/phosphate trend cards.
 - [ ] Controlled dosing guardrails, advisory first.
 - [ ] Automated dosing only after safety review and smoke tests.
+- [ ] Dosing remains advisory until Trust Check, alert acknowledgement, and dose-log guardrails are smoke-tested.
 
 ### Water And Maintenance Parity
 
-- [ ] Maintenance task list.
-- [ ] Recurring task generation.
+- [x] Maintenance task list.
+- [x] Recurring task generation.
 - [ ] Reagent tracking.
 - [ ] Filter/media replacement tracking.
 - [ ] Manual water-change logging.
@@ -213,6 +259,11 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 
 ## Better Than Apex
 
+- [x] OpenReef Trust Check readiness panel.
+- [x] Controller heartbeat + silence alarm.
+- [x] Sensor/probe stale, flatline, redundant-temperature mismatch, and impossible-jump detection.
+- [x] Alert acknowledgement + escalating multi-channel loop.
+- [x] Tank Black Box / Reef Replay incident timeline.
 - [ ] Beginner setup with no programming language.
 - [ ] Visual safety builder instead of Apex-style text programming.
 - [ ] Explainable alerts: what changed, why it matters, and what to check.
@@ -227,21 +278,28 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 - [ ] Shareable support bundle with redaction.
 - [ ] Read-only AI Guardian summaries.
 - [ ] AI report drafting.
-- [x] Guided onboarding tour V1 (Phase 1): in-panel cartoon guide with spotlight coach-marks over Mission Control, Cheeky/Professional tone toggle, emoji placeholder avatar that auto-swaps to real art. Phases 2 (walking avatar), 3 (live-state reactions), 4 (optional TTS) to follow.
+- [x] Guided onboarding tour: in-panel cartoon Reef Buddy guide with spotlight coach-marks, Cheeky/Professional tone toggle, and real avatar art. Phase 2 (walking avatar between cards) and Phase 3 (live-state reactive corner buddy) shipped; Phase 4 (optional TTS/voice) shelved by decision.
 - [ ] Open hardware recommendations.
 - [ ] Ready-made OpenReef units for non-technical reef keepers.
 
-## Ready-Made Unit Track
+## Hardware — Two Tracks
 
-- [ ] Supported hardware list.
+**Track A (owned): curated starter kits + recommended-hardware list.** For reefers who want Apex-like capability without learning HA from scratch. Lean, hardware-agnostic, no inventory lock-in.
+
+- [ ] Supported / recommended-hardware list (probes, smart plugs, leak, ATO relay, dosing path).
 - [ ] Recommended HA OS device profile.
-- [ ] Preinstalled OpenReef image or appliance setup guide.
+- [ ] Curated starter-kit hardware map: temp probe, pH path, smart plugs, leak sensor, ATO relay, dosing path.
+- [x] Blessed ESPHome edge-failsafe recipes V1: parameterised heater/ATO/return-pump example and review checklist.
+- [x] Trust Check validates the recommended kit path V1: mapped sensors, notification test, camera status, and on-device failsafe notes.
+- [ ] Kit-specific ESPHome pin maps and bench-test records for the chosen starter-kit hardware.
+
+**Track B (partner, under NDA, royalty model): ready-made OpenReef appliance.** A separate reefing company manufactures turnkey units; OpenReef provides the software. This repo does not document the partner's hardware internals — but the software must support a clean appliance experience:
+
 - [ ] First-run setup checklist for customers.
 - [ ] Backup and restore instructions.
 - [ ] Remote support-safe diagnostics workflow.
 - [ ] Update strategy.
 - [ ] Recovery/reset instructions.
-- [ ] Optional starter kit hardware map: temp probe, pH path, smart plugs, leak sensor, ATO relay, dosing path.
 
 ## Labs Migration Tracker
 
@@ -260,7 +318,7 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 | Water change/AWC | `WaterChangeScreen.tsx` | Labs/reference | Water phase |
 | Analytics | `AnalyticsScreen.tsx`, analytics components | Labs/reference | Read-only analytics phase |
 | Reports | `ReportsScreen.tsx` | Labs/reference | Reports phase |
-| Camera | `CameraScreen.tsx`, camera API routes | Live Cameras V1 in Core (MJPEG, grid + focus, Mission Control card) | Add HLS/recording/PTZ |
+| Camera | `CameraScreen.tsx`, camera API routes | Camera V2 A→D in Core: live WebRTC, event capture, timelapse, live overlay + shareable card, feed-watch | HLS high-quality / PTZ / motion alerts later |
 | Reef diagram | `ReefDiagramScreen.tsx` | Labs/reference | Equipment visualization phase |
 | Calibration | `SettingsScreen.tsx` calibration section | Labs/reference | Monitoring parity |
 | AI advisor | `AIChemistryAdvisor.tsx`, `ai-service.ts` | Labs/reference | Read-only AI phase |
@@ -271,6 +329,8 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 
 ## Release Gate For Every New Feature
 
+- [ ] Trust Check still reports an honest status after the feature is enabled.
+- [ ] Notification test still works, and alerts can be acknowledged.
 - [ ] Fresh install opens without setup crash.
 - [ ] Existing install migrates config.
 - [ ] Settings can be edited for 60 seconds without losing focus.
@@ -294,3 +354,11 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 - [x] 2026-06-01: Dosing Advisor V1.1 adds manual-test freshness gates, stricter confidence checks, solution-strength calculator fields, and support-summary diagnostics before beta handoff.
 - [x] 2026-06-02: Dosing Advisor V1.2 adds product presets for common dosing systems, separates exact-strength products from maintenance-style methods, and keeps Custom as the safe fallback.
 - [x] 2026-06-02: Dosing Advisor V1.3 moves from per-parameter product picks to an advisory-only product-system safety model with primary/secondary products, kalkwasser guardrails, exact-advice locks, and standalone dosing summaries.
+- [x] 2026-06-04: Maintenance V2 ships HA-native reminders (daily tick → persistent notification + optional phone push), fixed-day scheduling, skip/snooze, and minimal water-change volume logging.
+- [x] 2026-06-04: Positioning set to "the intelligence layer for reefing"; the **Trust Moat** (watchdog/heartbeat, probe-health/drift, escalating multi-channel alerts, ESPHome edge failsafes) is the headline leapfrog after a full-market competitive audit. Predictive/vision/copilot are Tier-2 vision.
+- [x] 2026-06-04: Hardware is two tracks — owner sells/recommends curated starter kits + recommended hardware; an NDA partner manufactures ready-made units for royalties (software must stay appliance-ready).
+- [x] 2026-06-08: Competitive strategy tightened around evidence levels, softened anti-vendor wording, current 2026 competitors, no AI overclaim, and a reordered Trust-first build path: Trust Check/heartbeat → probe health → alert escalation → Tank Black Box/Reef Replay → Apex switcher polish → parity automation.
+- [x] 2026-06-08: Trust Moat V1 implemented in Core: additive config migration, Trust Check panel, watchdog heartbeat, probe-health alerts, alert acknowledgement/escalation, notification test, heartbeat/trust WebSockets/services, and Reef Replay V1 with unit coverage.
+- [x] 2026-06-08: Edge failsafe V1 added: ESPHome heater/ATO/return-pump recipe example, validation checklist, `edgeFailsafes` config, System Check review controls, and Trust Check warnings for armed life-support equipment without reviewed on-device failsafes.
+- [x] 2026-06-08: Trust Moat smoke-test checklist added for live HA, browser, notification, restart, Reef Replay, and edge-failsafe review gates.
+- [x] 2026-06-08: Trust Moat handoff copy completed: support summaries now include Trust Check, heartbeat, probe-health, escalation, edge-failsafe, and Reef Replay state; copied smoke-test text is setup-neutral for beta testers.

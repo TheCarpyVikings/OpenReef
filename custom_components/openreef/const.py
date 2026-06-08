@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 38
-INTEGRATION_VERSION = "0.4.82"
+CORE_SCHEMA_VERSION = 39
+INTEGRATION_VERSION = "0.4.83"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -176,6 +176,10 @@ SERVICE_APPLY_MODE = "apply_mode"
 SERVICE_ARM_EQUIPMENT = "arm_equipment"
 SERVICE_DISARM_EQUIPMENT = "disarm_equipment"
 SERVICE_RECORD_MANUAL_READING = "record_manual_reading"
+SERVICE_ACKNOWLEDGE_ALERT = "acknowledge_alert"
+SERVICE_TEST_NOTIFICATION = "test_notification"
+SERVICE_REFRESH_TRUST_CHECK = "refresh_trust_check"
+SERVICE_HEARTBEAT = "heartbeat"
 
 ISSUE_MISSING_ENTITIES = "missing_entities"
 ISSUE_ARMED_UNAVAILABLE = "armed_unavailable"
@@ -630,6 +634,58 @@ DEFAULT_CORE_CONFIG = {
         "muteUntil": {},
         "history": [],
         "lastStates": {},
+    },
+    "watchdog": {
+        "enabled": True,
+        "heartbeatEnabled": True,
+        "heartbeatEveryHours": 24,
+        "missedAfterHours": 30,
+        "notifyTarget": "",
+        "lastCheck": "",
+        "lastHeartbeat": "",
+        "lastNotificationTest": "",
+        "lastMissedAlert": "",
+    },
+    "sensorHealth": {
+        "enabled": True,
+        "staleAfterMinutes": 180,
+        "flatlineHours": 12,
+        "jumpWindowMinutes": 30,
+        "jumpPercent": 25,
+        "temperatureMismatchC": 1.5,
+        "lastValues": {},
+        "lastJumps": {},
+    },
+    "alertEscalation": {
+        "enabled": False,
+        "criticalOnly": True,
+        "repeatMinutes": 30,
+        "notifyTarget": "",
+        "acknowledgeRequired": True,
+        "sirenEntityId": "",
+        "lightEntityId": "",
+        "acknowledged": {},
+        "lastEscalated": {},
+        "outputsActive": False,
+    },
+    "trustCheck": {
+        "enabled": True,
+        "lastRun": "",
+        "lastStatus": "unknown",
+        "lastBackupReview": "",
+    },
+    "edgeFailsafes": {
+        "enabled": False,
+        "heater": False,
+        "ato": False,
+        "returnPump": False,
+        "lastReviewed": "",
+        "notes": "",
+    },
+    "reefReplay": {
+        "enabled": True,
+        "incidentWindowMinutes": 20,
+        "retention": 25,
     },
     "interlocks": {
         "heaterRequiresTankTemp": True,

@@ -1,0 +1,165 @@
+# OpenReef ESPHome edge-failsafe example.
+#
+# This is a parameterised recipe, not a finished device profile. Change every GPIO,
+# bench-test relay polarity, and confirm the fail-safe state before connecting life
+# support. Prefer normally-closed/default-on wiring for return pumps where possible.
+
+substitutions:
+  name: openreef-edge-failsafe
+  friendly_name: OpenReef Edge Failsafe
+  one_wire_pin: GPIO4
+  heater_relay_pin: GPIO16
+  ato_relay_pin: GPIO17
+  return_pump_relay_pin: GPIO18
+  high_water_pin: GPIO25
+  leak_pin: GPIO26
+  heater_enable_below_c: "25.5"
+  heater_cutoff_c: "26.5"
+  ato_max_run: 20s
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+one_wire:
+  - platform: gpio
+    pin: ${one_wire_pin}
+    id: one_wire_bus
+
+sensor:
+  - platform: dallas_temp
+    one_wire_id: one_wire_bus
+    id: tank_temp
+    name: Tank Temperature
+    update_interval: 10s
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: |-
+                return isnan(x) || x >= ${heater_cutoff_c};
+            then:
+              - switch.turn_off: heater_relay
+
+binary_sensor:
+  - platform: gpio
+    id: high_water_sensor
+    name: High Water Cutoff
+    pin:
+      number: ${high_water_pin}
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on_off: 250ms
+    on_press:
+      then:
+        - switch.turn_off: ato_pump_relay
+
+  - platform: gpio
+    id: leak_sensor
+    name: Leak Cutoff
+    pin:
+      number: ${leak_pin}
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on_off: 250ms
+    on_press:
+      then:
+        - switch.turn_off: ato_pump_relay
+        - switch.turn_off: heater_relay
+
+switch:
+  - platform: gpio
+    id: heater_relay
+    name: Heater Relay Raw
+    pin: ${heater_relay_pin}
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+  - platform: template
+    id: heater_guarded
+    name: Heater Guarded
+    optimistic: true
+    turn_on_action:
+      - if:
+          condition:
+            lambda: |-
+              return !isnan(id(tank_temp).state) && id(tank_temp).state <= ${heater_enable_below_c};
+          then:
+            - switch.turn_on: heater_relay
+          else:
+            - switch.turn_off: heater_relay
+    turn_off_action:
+      - switch.turn_off: heater_relay
+
+  - platform: gpio
+    id: ato_pump_relay
+    name: ATO Pump Relay Raw
+    pin: ${ato_relay_pin}
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+  - platform: template
+    id: ato_guarded
+    name: ATO Guarded
+    optimistic: true
+    turn_on_action:
+      - if:
+          condition:
+            and:
+              - binary_sensor.is_off: high_water_sensor
+              - binary_sensor.is_off: leak_sensor
+          then:
+            - script.execute: ato_timed_run
+          else:
+            - switch.turn_off: ato_pump_relay
+    turn_off_action:
+      - script.stop: ato_timed_run
+      - switch.turn_off: ato_pump_relay
+
+  - platform: gpio
+    id: return_pump_relay
+    name: Return Pump Guarded
+    pin: ${return_pump_relay_pin}
+    restore_mode: RESTORE_DEFAULT_ON
+
+script:
+  - id: ato_timed_run
+    mode: restart
+    then:
+      - switch.turn_on: ato_pump_relay
+      - delay: ${ato_max_run}
+      - switch.turn_off: ato_pump_relay
+
+interval:
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return isnan(id(tank_temp).state) || id(tank_temp).state >= ${heater_cutoff_c};
+          then:
+            - switch.turn_off: heater_relay
+      - if:
+          condition:
+            or:
+              - binary_sensor.is_on: high_water_sensor
+              - binary_sensor.is_on: leak_sensor
+          then:
+            - script.stop: ato_timed_run
+            - switch.turn_off: ato_pump_relay
