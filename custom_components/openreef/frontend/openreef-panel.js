@@ -1223,7 +1223,10 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "toggle-health-section") {
         const section = target.dataset.section;
-        this._healthSections[section] = !this._healthSectionOpen(section);
+        // Flip relative to what's actually on screen (data-open), so an explicit
+        // collapse always wins even when a section is open-by-default/urgency.
+        const current = target.dataset.open != null ? target.dataset.open === "1" : this._healthSectionOpen(section);
+        this._healthSections[section] = !current;
         this._saveHealthSections();
         this._render();
       }
@@ -2903,6 +2906,12 @@ class OpenReefPanel extends HTMLElement {
     return Boolean(this._healthSections?.[section] ?? defaults[section]);
   }
 
+  // Collapse state for a Mission Control section. The default can be dynamic
+  // (e.g. open-when-urgent); a stored value (user toggle) always overrides it.
+  _missionSectionOpen(key, defaultOpen = false) {
+    return Boolean(this._healthSections?.[key] ?? defaultOpen);
+  }
+
   _healthTrendMultiplier() {
     return {
       fish_only_fowlr: 1.25,
@@ -4510,45 +4519,40 @@ class OpenReefPanel extends HTMLElement {
       : secondary.classId === "kalkwasser"
         ? "No primary two-part/AFR selected"
         : "Choose in Settings";
-    return `
-      <article class="panel" data-tour="dosing">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">Dosing &amp; Consumption Advisor</p>
-            <h3>Consumption, projections &amp; advisory dosing</h3>
-            <p class="muted">Estimated from mapped chemistry history or manual tests. Trend data: ${this._escape(this._consumptionFreshness())}.</p>
-          </div>
-          <div class="pill-stack">
-            <button class="secondary compact-button" data-action="validate">Refresh advisor</button>
-            <button class="secondary compact-button" data-action="toggle-health-section" data-section="dosing-advice">${methodOpen ? "Hide how this works" : "How this works"}</button>
-          </div>
+    const mission = this._dosingMissionState();
+    const pill = mission ? `<span class="pill ${this._escape(mission.status)}">${this._escape(mission.value)}</span>` : "";
+    const body = `
+      <p class="muted">Estimated from mapped chemistry history or manual tests. Trend data: ${this._escape(this._consumptionFreshness())}.</p>
+      <div class="notice warning-notice"><strong>Advisory only.</strong> OpenReef never doses for you. Verify every figure against your own test kit before changing your doser.</div>
+      <div class="health-reason-grid">
+        <div class="health-reason-card">
+          <span>Primary system</span>
+          <strong>${this._escape(primaryTitle)}</strong>
+          <p>${this._escape(primaryDetail)}</p>
         </div>
-        <div class="notice warning-notice"><strong>Advisory only.</strong> OpenReef never doses for you. Verify every figure against your own test kit before changing your doser.</div>
-        <div class="health-reason-grid">
-          <div class="health-reason-card">
-            <span>Primary system</span>
-            <strong>${this._escape(primaryTitle)}</strong>
-            <p>${this._escape(primaryDetail)}</p>
-          </div>
-          <div class="health-reason-card">
-            <span>Secondary supplement</span>
-            <strong>${this._escape(secondary.id ? secondary.label : "None")}</strong>
-            <p>${this._escape(secondary.id ? `Delivery: ${delivery}` : "Optional")}</p>
-          </div>
-          <div class="health-reason-card">
-            <span>Safety state</span>
-            <strong>${this._escape(system.safetyAcknowledged ? "Acknowledged" : "Locked")}</strong>
-            <p>${this._escape(system.tankVolumeLitres ? `${this._format(system.tankVolumeLitres, 0)} L net volume` : "Enter real net tank volume")}</p>
-          </div>
+        <div class="health-reason-card">
+          <span>Secondary supplement</span>
+          <strong>${this._escape(secondary.id ? secondary.label : "None")}</strong>
+          <p>${this._escape(secondary.id ? `Delivery: ${delivery}` : "Optional")}</p>
         </div>
-        <div class="dosing-grid">${cards}</div>
-        ${methodOpen ? `
-          <div class="notice">
-            <strong>How this works.</strong> OpenReef starts with your dosing system, then applies product-class safety rules. Maintenance advice estimates net daily movement after your current dose. Correction advice stays locked unless the product supports exact strength, tank volume is set, and a fresh manual test confirms the reading. Kalkwasser is always treated as high-pH maintenance support, never a one-off correction bolus.
-          </div>
-        ` : ""}
-      </article>
+        <div class="health-reason-card">
+          <span>Safety state</span>
+          <strong>${this._escape(system.safetyAcknowledged ? "Acknowledged" : "Locked")}</strong>
+          <p>${this._escape(system.tankVolumeLitres ? `${this._format(system.tankVolumeLitres, 0)} L net volume` : "Enter real net tank volume")}</p>
+        </div>
+      </div>
+      <div class="dosing-grid">${cards}</div>
+      <div class="button-row">
+        <button class="secondary compact-button" data-action="validate">Refresh advisor</button>
+        <button class="secondary compact-button" data-action="toggle-health-section" data-section="dosing-advice" data-open="${methodOpen ? 1 : 0}">${methodOpen ? "Hide how this works" : "How this works"}</button>
+      </div>
+      ${methodOpen ? `
+        <div class="notice">
+          <strong>How this works.</strong> OpenReef starts with your dosing system, then applies product-class safety rules. Maintenance advice estimates net daily movement after your current dose. Correction advice stays locked unless the product supports exact strength, tank volume is set, and a fresh manual test confirms the reading. Kalkwasser is always treated as high-pH maintenance support, never a one-off correction bolus.
+        </div>
+      ` : ""}
     `;
+    return this._missionSection("dosing", "Advisory", "Dosing & Consumption Advisor", pill, body, false, "dosing");
   }
 
   _sensorHealthCategory(sensorId, sensor) {
@@ -7633,6 +7637,29 @@ class OpenReefPanel extends HTMLElement {
       cards.cameras ? this._missionCameraCard() : "",
       cards.maintenance ? this._missionMaintenanceCard() : "",
     ].join("");
+    const attentionCount = sensorSummary.criticalCount + sensorSummary.warningCount + missing.length + armedUnavailable.length + interlocks.length;
+    const attentionStatus = sensorSummary.criticalCount || armedUnavailable.length ? "critical" : "warning";
+    const activityItems = (Array.isArray(this._config.activity) ? this._config.activity : []).slice(0, 12);
+    const activityBody = activityItems.length ? `
+      <div class="activity-list">
+        ${activityItems.map((item) => `
+          <div class="activity-item ${this._escape(item.type || "info")}">
+            <span>${this._escape(this._formatActivityTime(item.timestamp))}</span>
+            <strong>${this._escape(item.message)}</strong>
+          </div>
+        `).join("")}
+      </div>
+      <div class="button-row"><button class="secondary compact-button" data-action="clear-activity">Clear activity</button></div>
+    ` : `<p class="muted">No OpenReef activity has been recorded yet.</p>`;
+    const tankCols = [
+      cards.live ? `<div class="mission-detail-col"><h4>Core Sensors</h4>${sensors.length ? sensors.map(([id, sensor]) => this._sensorRow(id, sensor)).join("") : this._emptyState("No sensors enabled", "Enable the sensor types you own in Settings. Disabled sensors stay out of Mission Control.", "settings", "Choose sensors")}</div>` : "",
+      cards.controls ? `<div class="mission-detail-col"><h4>Armed Equipment</h4>${this._armedEquipmentRows()}</div>` : "",
+      cards.energy ? `<div class="mission-detail-col"><h4>Energy</h4>${this._missionEnergyRows()}</div>` : "",
+    ].filter(Boolean);
+    const tankPill = `<span class="pill ${sensorSummary.status}">${mappedSensors}/${sensors.length} sensors · ${armedEquipment} on</span>`;
+    const tankSection = tankCols.length
+      ? this._missionSection("mission-tank", "Detail", "Tank details", tankPill, `<div class="grid ${tankCols.length === 1 ? "" : tankCols.length === 2 ? "two" : "three"}">${tankCols.join("")}</div>`, false, "sensors")
+      : "";
 
     return `
       <section class="stack">
@@ -7653,28 +7680,16 @@ class OpenReefPanel extends HTMLElement {
         ${summaryCards ? `<div class="summary-grid">${summaryCards}</div>` : ""}
         ${cards.health ? this._reefHealthBreakdown(health) : ""}
         ${cards.dosing ? this._dosingBreakdown() : ""}
-        <article class="panel" data-tour="attention">
-          <div class="section-head">
-            <h3>Attention</h3>
-            <p>Only configured OpenReef entities are checked here.</p>
-          </div>
-          ${this._missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks)}
-        </article>
-        ${this._activityPanel()}
-        <div class="grid two">
-          ${cards.live ? `<article class="panel" data-tour="sensors">
-            <h3>Core Sensors</h3>
-            ${sensors.length ? sensors.map(([id, sensor]) => this._sensorRow(id, sensor)).join("") : this._emptyState("No sensors enabled", "Enable the sensor types you own in Settings. Disabled sensors stay out of Mission Control.", "settings", "Choose sensors")}
-          </article>` : ""}
-          ${cards.controls ? `<article class="panel">
-            <h3>Armed Equipment</h3>
-            ${this._armedEquipmentRows()}
-          </article>` : ""}
-          ${cards.energy ? `<article class="panel">
-            <h3>Energy</h3>
-            ${this._missionEnergyRows()}
-          </article>` : ""}
-        </div>
+        ${this._missionSection("mission-attention", "Watch", "Attention",
+          attentionCount
+            ? `<span class="pill ${attentionStatus}">${attentionCount} to check</span>`
+            : `<span class="pill ok">all clear</span>`,
+          this._missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks),
+          attentionCount > 0, "attention")}
+        ${this._missionSection("mission-activity", "Log", "Activity",
+          activityItems.length ? `<span class="pill unknown">${activityItems.length} recent</span>` : `<span class="pill ok">quiet</span>`,
+          activityBody, false)}
+        ${tankSection}
       </section>
     `;
   }
@@ -7686,6 +7701,29 @@ class OpenReefPanel extends HTMLElement {
         <strong>${this._escape(value)}</strong>
         <small>${this._escape(detail)}</small>
       </button>
+    `;
+  }
+
+  // Reusable collapsible Mission Control section: eyebrow + title + summary pill
+  // + a working chevron. `pill` is a full <span class="pill ..."> string (kept
+  // visible when collapsed so collapsed never means hidden info). `defaultOpen`
+  // may be dynamic (e.g. auto-open on attention); an explicit toggle overrides it.
+  _missionSection(key, eyebrow, title, pill, body, defaultOpen = false, tourId = "") {
+    const open = this._missionSectionOpen(key, defaultOpen);
+    return `
+      <article class="panel mission-section ${open ? "open" : "collapsed"}" ${tourId ? `data-tour="${this._escape(tourId)}"` : ""}>
+        <button class="mission-section-head" data-action="toggle-health-section" data-section="${this._escape(key)}" data-open="${open ? 1 : 0}" aria-expanded="${open ? "true" : "false"}">
+          <span class="mission-section-title">
+            <span class="eyebrow">${this._escape(eyebrow)}</span>
+            <strong>${this._escape(title)}</strong>
+          </span>
+          <span class="mission-section-aside">
+            ${pill || ""}
+            <span class="mission-chevron">${open ? "▾" : "▸"}</span>
+          </span>
+        </button>
+        ${open ? `<div class="mission-section-body">${body}</div>` : ""}
+      </article>
     `;
   }
 
@@ -7711,12 +7749,13 @@ class OpenReefPanel extends HTMLElement {
   _reefHealthInsightGroup(key, title, group, emptyText, summary) {
     const items = group || [];
     const hasUrgentScoreItem = ["action", "watch"].includes(key) && items.some((item) => item.affectsScore);
-    const open = this._healthSectionOpen(key) || hasUrgentScoreItem;
+    // Urgent groups open by default, but an explicit user collapse now wins.
+    const open = this._missionSectionOpen(key, hasUrgentScoreItem);
     const scoreItems = items.filter((item) => item.affectsScore).length;
     const countLabel = items.length ? `${items.length} item${items.length === 1 ? "" : "s"}` : "Clear";
     return `
       <section class="health-insight-group ${open ? "open" : "collapsed"}">
-        <button class="health-insight-head" data-action="toggle-health-section" data-section="${this._escape(key)}" aria-expanded="${open ? "true" : "false"}">
+        <button class="health-insight-head" data-action="toggle-health-section" data-section="${this._escape(key)}" data-open="${open ? 1 : 0}" aria-expanded="${open ? "true" : "false"}">
           <span>
             <strong>${this._escape(title)}</strong>
             <small>${this._escape(summary || emptyText)}</small>
@@ -11901,6 +11940,18 @@ class OpenReefPanel extends HTMLElement {
         .live-stat .stat-foot small { color: #8da2ba; overflow-wrap: anywhere; }
         .live-stat .trend-chip { border: 1px solid #294055; border-radius: 999px; padding: 4px 10px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; white-space: nowrap; }
         .live-stat.stat-button:hover .trend-chip, .live-stat.stat-button:focus-visible .trend-chip { border-color: var(--openreef-accent); }
+        /* Collapsible Mission Control sections (quiet by default) */
+        .mission-section { padding: 0; overflow: hidden; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
+        .mission-section.collapsed { border-color: #24364a; background: #121f2f; }
+        .mission-section-head { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 15px 18px; background: transparent; border: 0; border-radius: 0; text-align: left; }
+        .mission-section-head:hover { background: rgba(103, 232, 249, .04); }
+        .mission-section-title { display: grid; gap: 3px; min-width: 0; }
+        .mission-section-title .eyebrow { margin-bottom: 0; }
+        .mission-section-title strong { color: #e5edf5; font-size: 16px; }
+        .mission-section-aside { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+        .mission-chevron { color: #8da2ba; font-size: 13px; width: 14px; text-align: center; }
+        .mission-section-body { padding: 2px 18px 16px; display: grid; gap: 14px; }
+        .mission-detail-col h4 { margin-bottom: 10px; }
         label { display: grid; gap: 7px; color: #a7b7ca; font-size: 13px; font-weight: 700; }
         input, select { width: 100%; min-width: 0; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
         select { cursor: pointer; }
