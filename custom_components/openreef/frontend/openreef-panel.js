@@ -11937,7 +11937,7 @@ class OpenReefPanel extends HTMLElement {
         .live-stat-value strong { font-size: 32px; color: #67e8f9; line-height: 1.05; }
         .live-stat-value span { color: #9fb2c7; font-weight: 800; font-size: 14px; }
         .live-stat .stat-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-        .live-stat .stat-foot small { color: #8da2ba; overflow-wrap: anywhere; }
+        .live-stat .stat-foot small { color: #8da2ba; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .live-stat .trend-chip { border: 1px solid #294055; border-radius: 999px; padding: 4px 10px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; white-space: nowrap; }
         .live-stat.stat-button:hover .trend-chip, .live-stat.stat-button:focus-visible .trend-chip { border-color: var(--openreef-accent); }
         /* Collapsible Mission Control sections (quiet by default) */
