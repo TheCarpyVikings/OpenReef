@@ -6884,20 +6884,36 @@ class OpenReefPanel extends HTMLElement {
 
   _cameras() {
     const cams = this._cameraList();
+    const mapped = cams.filter(([, c]) => c.entity_id);
+    const online = mapped.filter(([, c]) => this._cameraOnline(c.entity_id));
+    const primary = online[0] || mapped[0] || null;
+    const recCount = this._recordingsList().length;
+    const frameCount = (this._timelapse?.frames || []).length;
+    const sessionCount = (this._feedWatch?.sessions || []).length;
+    const others = primary ? cams.filter(([id]) => id !== primary[0]) : cams;
     return `
       <section class="stack">
         <div class="section-head">
           <div>
             <h2>Cameras</h2>
-            <p>Watch your tank live. Camera entities are mapped in Settings.</p>
+            <p>Watch your tank live — feeds, captures, and timelapse in one place.</p>
           </div>
           <div class="actions">
             <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
             <button class="secondary compact-button" data-action="tab" data-id="settings">Manage cameras</button>
           </div>
         </div>
+        ${cams.length ? `
+          <div class="summary-grid">
+            ${this._missionSummaryCard("Cameras", `${online.length}/${mapped.length || cams.length}`, online.length ? "online now" : mapped.length ? "mapped · offline" : "not mapped yet", online.length ? "ok" : mapped.length ? "warning" : "unknown", "cameras")}
+            ${this._missionSummaryCard("Recordings", String(recCount), recCount ? "event + manual clips" : "none captured yet", recCount ? "ok" : "unknown", "cameras")}
+            ${this._missionSummaryCard("Timelapse", String(frameCount), frameCount ? "frames captured" : "no frames yet", frameCount ? "ok" : "unknown", "cameras")}
+            ${this._missionSummaryCard("Feed-watch", String(sessionCount), sessionCount ? "feeding sessions" : "no sessions yet", sessionCount ? "ok" : "unknown", "cameras")}
+          </div>
+        ` : ""}
+        ${primary ? this._cameraHero(primary[0], primary[1]) : ""}
         ${cams.length
-          ? `<div class="cam-grid">${cams.map(([id, cam]) => this._cameraTile(id, cam)).join("")}</div>`
+          ? (others.length ? `<div class="cam-grid">${others.map(([id, cam]) => this._cameraTile(id, cam)).join("")}</div>` : "")
           : this._emptyState(
               "No cameras yet",
               "Add a camera in Settings. Set it up in Home Assistant first (Generic Camera, ONVIF, RTSP or go2rtc), then map its camera.* entity here.",
@@ -6913,11 +6929,31 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  _cameraHero(id, cam) {
+    const online = cam.entity_id && this._cameraOnline(cam.entity_id);
+    const snap = online ? this._cameraSnapshotUrl(cam.entity_id) : "";
+    return `
+      <section class="cam-hero-wrap stat-accent ${online ? "ok" : "unknown"}">
+        <button class="cam-hero-stage" data-action="focus-camera" data-id="${this._escape(id)}" title="Open ${this._escape(cam.label || id)} live">
+          ${online
+            ? `<img class="cam-feed" src="${this._escape(snap)}" alt="${this._escape(cam.label || id)}" loading="lazy" decoding="async"><span class="cam-live"><span class="cam-dot"></span>ONLINE</span><span class="cam-hero-open">▶ Open live</span>`
+            : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Offline or unavailable" : "Not mapped"}</small></div>`}
+          <span class="cam-label">${this._escape(cam.label || id)}</span>
+        </button>
+        <div class="cam-hero-actions">
+          <button class="primary compact-button" data-action="focus-camera" data-id="${this._escape(id)}" ${online ? "" : "disabled"}>Open live view</button>
+          <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
+          <button class="secondary compact-button" data-action="tab" data-id="settings">Camera settings</button>
+        </div>
+      </section>
+    `;
+  }
+
   _cameraTile(id, cam) {
     const online = cam.entity_id && this._cameraOnline(cam.entity_id);
     const snap = online ? this._cameraSnapshotUrl(cam.entity_id) : "";
     return `
-      <button class="cam-tile ${online ? "" : "offline"}" data-action="focus-camera" data-id="${this._escape(id)}" title="${this._escape(cam.label || id)}">
+      <button class="cam-tile stat-accent ${online ? "ok" : "unknown"} ${online ? "" : "offline"}" data-action="focus-camera" data-id="${this._escape(id)}" title="${this._escape(cam.label || id)}">
         ${online
           ? `<img class="cam-feed" src="${this._escape(snap)}" alt="${this._escape(cam.label || id)}" loading="lazy" decoding="async">`
           : `<div class="cam-placeholder"><span class="cam-glyph">📷</span><small>${cam.entity_id ? "Offline" : "Not mapped"}</small></div>`}
@@ -7990,50 +8026,123 @@ class OpenReefPanel extends HTMLElement {
 
   _liveStats() {
     const sensors = this._enabledSensors();
+    if (!sensors.length) {
+      return `
+        <section class="stack">
+          <h2>Live Stats</h2>
+          ${this._emptyState("No live sensors enabled", "Enable the sensor types you own in Settings, then map them to Home Assistant entities.", "settings", "Choose sensors")}
+        </section>
+      `;
+    }
+    const mapped = sensors.filter(([, s]) => s.entity_id).length;
+    const badges = sensors.map(([id, s]) => this._liveStatBadge(id, s).status);
+    const inRange = badges.filter((s) => s === "ok").length;
+    const attention = badges.filter((s) => s === "warning" || s === "critical").length;
+    const attentionStatus = attention ? (badges.includes("critical") ? "critical" : "warning") : "ok";
+    const groupLabel = { tank: "Tank", sump: "Sump", chemistry: "Chemistry", water: "Water level", flow: "Flow", lighting: "Lighting", safety: "Safety", room: "Environment" };
+    const groupOrder = ["tank", "sump", "chemistry", "water", "flow", "lighting", "safety", "room"];
+    const buckets = {};
+    sensors.forEach(([id, s]) => {
+      const g = s.group && groupLabel[s.group] ? s.group : "tank";
+      (buckets[g] = buckets[g] || []).push([id, s]);
+    });
     return `
       <section class="stack">
-        <h2>Live Stats</h2>
-        <div class="grid three">
-          ${sensors.length ? sensors.map(([id, sensor]) => {
-            const display = this._sensorDisplayValue(id, sensor);
-            const unit = this._sensorDisplayUnit(id, sensor);
-            const trendEnabled = this._sensorKind(sensor, id) !== "binary" && Boolean(sensor.entity_id);
-            const content = `
-                <p>${this._escape(sensor.label)}</p>
-                <strong>${this._escape(display)}</strong>
-                <span>${this._escape(unit)}</span>
-                <small>${this._escape(sensor.entity_id || "Not mapped")}</small>
-                <span class="trend-hint">${trendEnabled ? "Trend" : "State"}</span>
-            `;
-            return trendEnabled ? `
-              <button class="stat stat-button ${this._sensorGroupClass(sensor)}" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
-                ${content}
-              </button>
-            ` : `
-              <article class="stat ${this._sensorGroupClass(sensor)} no-trend">
-                ${content}
-              </article>
-            `;
-          }).join("") : this._emptyState("No live sensors enabled", "Enable the sensor types you own in Settings, then map them to Home Assistant entities.", "settings", "Choose sensors")}
+        <div class="section-head">
+          <div><h2>Live Stats</h2><p>Your reef readings at a glance — grouped and range-checked.</p></div>
         </div>
+        <div class="summary-grid">
+          ${this._missionSummaryCard("Sensors", `${mapped}/${sensors.length}`, mapped === sensors.length ? "all mapped" : "mapped to Home Assistant", mapped ? "ok" : "unknown", "settings")}
+          ${this._missionSummaryCard("In range", String(inRange), inRange === sensors.length ? "everything nominal" : "inside safe range", inRange ? "ok" : "unknown", "live")}
+          ${this._missionSummaryCard("Attention", String(attention), attention ? "near or out of range" : "nothing flagged", attentionStatus, attention ? "mission" : "live")}
+        </div>
+        ${groupOrder.filter((g) => buckets[g]?.length).map((g) => `
+          <section class="live-group">
+            <div class="live-group-head">
+              <p class="eyebrow">${this._escape(groupLabel[g])}</p>
+              <span class="muted">${buckets[g].length} sensor${buckets[g].length === 1 ? "" : "s"}</span>
+            </div>
+            <div class="grid three">
+              ${buckets[g].map(([id, s]) => this._liveStatCard(id, s)).join("")}
+            </div>
+          </section>
+        `).join("")}
       </section>
+    `;
+  }
+
+  // Friendly status badge for a sensor card: in range / near limit / high / low / —.
+  _liveStatBadge(id, sensor) {
+    const status = this._sensorStatus(sensor, id);
+    if (this._sensorKind(sensor, id) === "binary") {
+      if (status === "ok") return { status: "ok", label: "normal" };
+      if (status === "critical") return { status: "critical", label: "alert" };
+      if (status === "unknown") return { status: "unknown", label: "—" };
+      return { status: "warning", label: this._sensorStatusLabel(status) };
+    }
+    if (status === "unknown") return { status: "unknown", label: "—" };
+    if (status === "muted") return { status: "unknown", label: "alerts off" };
+    const value = this._number(sensor.entity_id);
+    if (value !== null) {
+      if (value > Number(sensor.max)) return { status: "critical", label: "high" };
+      if (value < Number(sensor.min)) return { status: "critical", label: "low" };
+    }
+    if (status === "warning") return { status: "warning", label: "near limit" };
+    return { status: "ok", label: "in range" };
+  }
+
+  _liveStatCard(id, sensor) {
+    const display = this._sensorDisplayValue(id, sensor);
+    const unit = this._sensorDisplayUnit(id, sensor);
+    const badge = this._liveStatBadge(id, sensor);
+    const trendEnabled = this._sensorKind(sensor, id) !== "binary" && Boolean(sensor.entity_id);
+    const inner = `
+      <div class="live-stat-head">
+        <p>${this._escape(sensor.label)}</p>
+        <span class="pill ${badge.status}">${this._escape(badge.label)}</span>
+      </div>
+      <div class="live-stat-value">
+        <strong>${this._escape(display)}</strong>
+        ${unit ? `<span>${this._escape(unit)}</span>` : ""}
+      </div>
+      <div class="stat-foot">
+        <small>${this._escape(sensor.entity_id || "Not mapped")}</small>
+        ${trendEnabled ? `<span class="trend-chip">Trend ›</span>` : ""}
+      </div>
+    `;
+    return trendEnabled ? `
+      <button class="stat live-stat stat-accent ${badge.status} stat-button" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
+        ${inner}
+      </button>
+    ` : `
+      <article class="stat live-stat stat-accent ${badge.status} no-trend">
+        ${inner}
+      </article>
     `;
   }
 
   _controls() {
     const rows = Object.entries(this._config.equipment || {});
     const groups = this._equipmentGroups(rows);
+    const armedCount = rows.filter(([, i]) => i.armed).length;
+    const mappedCount = rows.filter(([, i]) => i.switch_entity_id).length;
     return `
       <section class="stack">
         <div class="section-head">
-          <h2>Controls</h2>
-          <p>Controls stay locked until each device is explicitly armed.</p>
+          <div><h2>Controls</h2><p>Controls stay locked until each device is explicitly armed.</p></div>
         </div>
         ${this._modeBanner()}
+        ${rows.length ? `
+          <div class="summary-grid">
+            ${this._missionSummaryCard("Armed", `${armedCount}/${rows.length}`, armedCount ? "OpenReef can switch these" : "all locked", armedCount ? "ok" : "unknown", "controls")}
+            ${this._missionSummaryCard("Locked", String(rows.length - armedCount), "held safe · disarmed", "unknown", "controls")}
+            ${this._missionSummaryCard("Mapped", `${mappedCount}/${rows.length}`, "have a switch entity", mappedCount === rows.length ? "ok" : "warning", "settings")}
+          </div>
+        ` : ""}
         ${rows.length ? groups.map(([label, items]) => `
           <section class="equipment-group">
             <div class="section-head">
-              <h3>${this._escape(label)}</h3>
+              <div><h3>${this._escape(label)}</h3></div>
               <p>${items.length} device${items.length === 1 ? "" : "s"}</p>
             </div>
             <div class="grid two">${items.map(([id, item]) => this._controlCard(id, item)).join("")}</div>
@@ -8055,7 +8164,7 @@ class OpenReefPanel extends HTMLElement {
     const action = this._controlActionLabel(item);
     const displayWavemakerOff = this._isDisplayWavemaker(id, item) && state === "off";
     return `
-      <article class="panel control-card ${enabled ? "" : "locked-card"}">
+      <article class="panel control-card stat-accent ${enabled ? risk : "unknown"} ${enabled ? "" : "locked-card"}">
         <div class="card-head">
           <div>
             <h3>${this._escape(item.label || id)}</h3>
@@ -8239,24 +8348,34 @@ class OpenReefPanel extends HTMLElement {
 
   _energy() {
     const tariff = Number(this._config.energy.tariff || 0);
+    const currency = this._config.energy.currency || "GBP";
     const totals = this._energyTotalMappings();
-    const hasEnergyMappings = totals.some(([, energyKey]) => this._config.energy[energyKey]) || Object.values(this._config.equipment || {}).some((item) => item.energy_entity_id || item.power_entity_id);
+    const deviceEntries = Object.entries(this._config.equipment || {});
+    const totalsMapped = totals.filter(([, energyKey]) => this._config.energy[energyKey]).length;
+    const deviceMapped = deviceEntries.filter(([, item]) => item.energy_entity_id || item.power_entity_id || item.cost_entity_id).length;
+    const hasEnergyMappings = totalsMapped > 0 || deviceMapped > 0;
+    const monthly = totals.find(([label]) => label === "Monthly");
+    const monthlyCost = monthly ? this._formatMoney(this._energyCost(this._config.energy[monthly[1]], this._number(this._config.energy[monthly[2]]))) : "--";
     return `
       <section class="stack">
         <div class="section-head">
-          <h2>Energy</h2>
-          <p>${this._escape(this._config.energy.currency || "GBP")} ${tariff.toFixed(2)} per kWh</p>
+          <div><h2>Energy</h2><p>Track usage and running cost across your reef equipment.</p></div>
+          <span class="pill unknown">${this._escape(currency)} ${tariff.toFixed(2)} / kWh</span>
+        </div>
+        <div class="summary-grid">
+          ${this._missionSummaryCard("Totals", `${totalsMapped}/3`, "daily · weekly · monthly", totalsMapped ? "ok" : "unknown", "settings")}
+          ${this._missionSummaryCard("Per-device", `${deviceMapped}/${deviceEntries.length || 0}`, deviceEntries.length ? "devices tracked" : "no equipment yet", deviceMapped ? "ok" : "unknown", "settings")}
+          ${this._missionSummaryCard("Monthly cost", monthlyCost, "at the current tariff", monthly && this._config.energy[monthly[1]] ? "ok" : "unknown", "energy")}
         </div>
         ${hasEnergyMappings ? "" : this._emptyState("Energy is not mapped yet", "Map daily, weekly, monthly, or per-device energy entities in Settings. OpenReef will show blanks until then.", "settings", "Map energy")}
         <div class="grid three">
           ${totals.map(([label, energyKey, costKey]) => this._energyTotalCard(label, energyKey, costKey)).join("")}
         </div>
         <div class="section-head">
-          <h3>Per-device energy</h3>
-          <p>Optional per-equipment mappings from Settings.</p>
+          <div><h3>Per-device energy</h3><p>Optional per-equipment mappings from Settings.</p></div>
         </div>
         <div class="grid two">
-          ${Object.entries(this._config.equipment || {}).length ? Object.entries(this._config.equipment || {}).map(([id, item]) => this._deviceEnergyCard(id, item)).join("") : this._emptyState("No per-device energy", "Add equipment energy or power entities in Settings when you want device-level usage.", "settings", "Open settings")}
+          ${deviceEntries.length ? deviceEntries.map(([id, item]) => this._deviceEnergyCard(id, item)).join("") : this._emptyState("No per-device energy", "Add equipment energy or power entities in Settings when you want device-level usage.", "settings", "Open settings")}
         </div>
       </section>
     `;
@@ -8268,15 +8387,17 @@ class OpenReefPanel extends HTMLElement {
     const mappedCost = this._number(costEntity);
     const cost = this._energyCost(energyEntity, mappedCost);
     const [status, statusLabel] = this._entityStatus(energyEntity);
+    const cardStatus = energyEntity ? status : "unknown";
     return `
-      <article class="stat energy-total-card">
-        <div class="card-head">
+      <article class="stat live-stat energy-total-card stat-accent ${cardStatus}">
+        <div class="live-stat-head">
           <p>${this._escape(label)}</p>
-          <span class="pill ${status}">${this._escape(statusLabel)}</span>
+          <span class="pill ${energyEntity ? status : "unknown"}">${this._escape(energyEntity ? statusLabel : "optional")}</span>
         </div>
-        <strong>${this._formatEnergyWh(energyEntity)}</strong>
-        <span>${this._escape(this._formatMoney(cost))}</span>
-        <small>${this._escape(energyEntity || "Optional energy mapping missing")}</small>
+        <div class="live-stat-value">
+          <strong>${this._formatEnergyWh(energyEntity)}</strong>
+        </div>
+        <div class="stat-foot"><small>${this._escape(this._formatMoney(cost))} · ${this._escape(energyEntity || "not mapped")}</small></div>
         <small>${costEntity ? `Cost source: ${this._escape(costEntity)}` : "Cost is estimated from tariff when energy is mapped."}</small>
       </article>
     `;
@@ -8290,7 +8411,7 @@ class OpenReefPanel extends HTMLElement {
     const [switchStatus, switchStatusLabel] = this._entityStatus(item.switch_entity_id);
     const [energyStatus, energyStatusLabel] = this._bestEntityStatus([item.energy_entity_id, item.power_entity_id, item.cost_entity_id]);
     return `
-      <article class="panel device-energy-card ${hasAnyEnergy ? "" : "locked-card"}">
+      <article class="panel device-energy-card stat-accent ${hasAnyEnergy ? energyStatus : "unknown"} ${hasAnyEnergy ? "" : "locked-card"}">
         <div class="card-head">
           <div>
             <h3>${this._escape(item.label || id)}</h3>
@@ -11760,6 +11881,26 @@ class OpenReefPanel extends HTMLElement {
         .energy-metrics div { border: 1px solid #24364a; border-radius: 8px; background: rgba(11, 23, 36, .72); padding: 12px; display: grid; gap: 5px; }
         .energy-metrics span { color: #8da2ba; font-size: 12px; font-weight: 800; }
         .energy-metrics strong { color: #67e8f9; overflow-wrap: anywhere; }
+        /* Shared status-accent card language (Live Stats / Energy / Controls) */
+        .stat-accent { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); box-shadow: inset 4px 0 0 var(--openreef-accent); }
+        .stat-accent.ok { border-color: #1f7a45; box-shadow: inset 4px 0 0 #22c55e; }
+        .stat-accent.warning { border-color: #a16207; box-shadow: inset 4px 0 0 #f59e0b; }
+        .stat-accent.critical { border-color: #b91c1c; box-shadow: inset 4px 0 0 #ef4444; }
+        .stat-accent.unknown { border-color: #334155; background: linear-gradient(180deg, rgba(51, 65, 85, .14), rgba(16, 29, 44, .96)); box-shadow: inset 4px 0 0 #475569; }
+        /* Live Stats groups */
+        .live-group { display: grid; gap: 12px; }
+        .live-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; border-bottom: 1px solid rgba(148, 163, 184, .14); padding-bottom: 6px; }
+        .live-group-head .eyebrow { margin-bottom: 0; }
+        .live-group-head span.muted { font-size: 12px; font-weight: 800; }
+        .live-stat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+        .live-stat-head p { color: #dcecff; font-weight: 800; }
+        .live-stat-value { display: flex; align-items: baseline; gap: 7px; }
+        .live-stat-value strong { font-size: 32px; color: #67e8f9; line-height: 1.05; }
+        .live-stat-value span { color: #9fb2c7; font-weight: 800; font-size: 14px; }
+        .live-stat .stat-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+        .live-stat .stat-foot small { color: #8da2ba; overflow-wrap: anywhere; }
+        .live-stat .trend-chip { border: 1px solid #294055; border-radius: 999px; padding: 4px 10px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; white-space: nowrap; }
+        .live-stat.stat-button:hover .trend-chip, .live-stat.stat-button:focus-visible .trend-chip { border-color: var(--openreef-accent); }
         label { display: grid; gap: 7px; color: #a7b7ca; font-size: 13px; font-weight: 700; }
         input, select { width: 100%; min-width: 0; border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 11px 12px; min-height: 42px; }
         select { cursor: pointer; }
@@ -11816,6 +11957,11 @@ class OpenReefPanel extends HTMLElement {
         .cam-live { position: absolute; right: 8px; top: 8px; display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; background: rgba(4, 12, 20, .66); color: #fecaca; font-weight: 800; font-size: 11px; letter-spacing: .06em; }
         .cam-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; animation: or-pulse 1.4s ease-in-out infinite; }
         .cam-dialog { max-width: 1100px; }
+        .cam-hero-wrap { display: grid; gap: 12px; padding: 14px; border: 1px solid #24364a; border-radius: 8px; background: #121f2f; }
+        .cam-hero-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; border: 1px solid #24364a; border-radius: 10px; overflow: hidden; background: #04080d; padding: 0; cursor: pointer; display: block; }
+        .cam-hero-stage:hover { border-color: var(--openreef-accent); }
+        .cam-hero-open { position: absolute; right: 12px; bottom: 12px; display: inline-flex; align-items: center; gap: 8px; padding: 9px 15px; border-radius: 999px; background: rgba(4, 12, 20, .74); color: #e5edf5; font-weight: 800; border: 1px solid var(--openreef-accent-border); }
+        .cam-hero-actions { display: flex; gap: 10px; flex-wrap: wrap; }
         .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #04080d; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
         .cam-feed-large { width: 100%; height: 100%; object-fit: contain; display: block; background: #04080d; }
         .cam-card { position: relative; padding: 0; overflow: hidden; min-height: 0; border: 1px solid #24364a; }
