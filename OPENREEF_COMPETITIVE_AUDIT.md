@@ -226,7 +226,7 @@ make defensible when grounded in local HA data and OpenReef's own event history:
 | --- | --- | --- |
 | Install | HACS custom integration | Add-on not required for stable Core |
 | Panel | HA-native sidebar custom panel | Browser receives HA `hass` object, not tokens |
-| Setup | Wizard with presets and entity suggestions | Apex/Trident beta preset exists |
+| Setup | Wizard with presets and entity suggestions | Apex/Trident helper choices exist |
 | Entity access | Targeted search/runtime/history | Avoids full `/api/states` crash path |
 | Monitoring | Temp, sump temp, pH, salinity, ORP, alk, Ca, Mg, nitrate, phosphate, DO, leak, high/low level, flow, PAR, room temp, CO2, humidity | Add liquid-level/depth + probe health |
 | Trends | Single-entity targeted history with selectable ranges | Long ranges depend on HA recorder |

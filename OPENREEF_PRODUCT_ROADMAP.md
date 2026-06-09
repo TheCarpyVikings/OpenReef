@@ -56,7 +56,7 @@ These are the next useful passes before widening beta beyond trusted testers.
 - [x] Add first Python tests for config migration (dependency-free, `tests/test_config_migration.py`; caught and fixed a corrupted-block migration crash). Entity-search/safe-toggle tests still need a HA test harness.
 - [ ] Add first frontend smoke-test notes/screenshots for desktop and mobile.
 - [x] Add nitrate, phosphate, dissolved oxygen, leak, water-level, flow, and PAR sensors as optional Core mappings.
-- [x] Add Apex/Trident beta setup guide with Apex controller, Trident, Trident NP, FMM, and full-ecosystem presets.
+- [x] Add Apex/Trident setup guide with helper choices for Apex controller, Trident, Trident NP, FMM, and full-ecosystem presets.
 - [x] Add Reef Health Score V2.3 in Core: Apex/read-only friendly, parameter-specific trends, learning mode, compact default with expandable insight UI.
 - [x] Add Dosing & Consumption Advisor V1 (advisory): Trident-style Alk/Ca/Mg consumption rates, projection-to-limit, and advisory dose tips. Reuses Reef Health Score stability as the single source of truth.
 - [x] Add Manual Chemistry V1: manual entry, configurable profile-based schedules, freshness scoring, history, and Dosing Advisor fallback from manual results.

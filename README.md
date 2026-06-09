@@ -1,6 +1,6 @@
 # OpenReef
 
-OpenReef is a private-beta reef aquarium controller for Home Assistant OS.
+OpenReef is the open **intelligence layer for reefing** — a private-beta, Home Assistant-native reef controller that runs on any HA hardware (including your existing Apex, Trident, HYDROS, ESPHome, probes, and smart plugs) and adds the trust, prediction, and vision the hardware vendors can't ship.
 
 The stable controller now lives in the Home Assistant custom integration:
 
@@ -8,6 +8,13 @@ The stable controller now lives in the Home Assistant custom integration:
 - `src` — preserved Next.js dashboard application code for future migration work.
 
 The optional OpenReef Labs add-on has moved to a separate private repository so normal users cannot discover it from the main OpenReef install path.
+
+## Start Here
+
+If you are new to OpenReef or Home Assistant, start with
+[OPENREEF_DIY_MANUAL.md](OPENREEF_DIY_MANUAL.md). It walks through choosing a
+Home Assistant install route, installing OpenReef through HACS, mapping sensors
+safely, and running the first Trust Check.
 
 ## Private Beta Install
 
@@ -19,7 +26,7 @@ The optional OpenReef Labs add-on has moved to a separate private repository so 
 
 Controls are locked by default. Each equipment switch must be explicitly mapped and armed before OpenReef will send control service calls.
 
-For tester handoff, use [BETA_TESTER_INSTALL_GUIDE.md](BETA_TESTER_INSTALL_GUIDE.md), [OPENREEF_BETA_SMOKE_TEST.md](OPENREEF_BETA_SMOKE_TEST.md), and [OPENREEF_BETA_FEEDBACK_TEMPLATE.md](OPENREEF_BETA_FEEDBACK_TEMPLATE.md).
+For tester handoff, use [BETA_TESTER_INSTALL_GUIDE.md](BETA_TESTER_INSTALL_GUIDE.md), [APEX_BETA_TESTER_GUIDE.md](APEX_BETA_TESTER_GUIDE.md), [OPENREEF_BETA_SMOKE_TEST.md](OPENREEF_BETA_SMOKE_TEST.md), and [OPENREEF_BETA_FEEDBACK_TEMPLATE.md](OPENREEF_BETA_FEEDBACK_TEMPLATE.md).
 
 Product direction is tracked in [OPENREEF_PRODUCT_ROADMAP.md](OPENREEF_PRODUCT_ROADMAP.md), with Apex comparison and Labs migration detail in [OPENREEF_COMPETITIVE_AUDIT.md](OPENREEF_COMPETITIVE_AUDIT.md).
 
