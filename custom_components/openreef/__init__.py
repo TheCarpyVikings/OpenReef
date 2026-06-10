@@ -1393,12 +1393,18 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         "showBuddy",
         "showClock",
         "kioskAutoStart",
+        "showSparklines",
+        "showCategories",
+        "showEquipment",
+        "showToday",
     ):
         pulse[field] = bool(pulse.get(field, pulse_defaults[field]))
     camera_id = pulse.get("cameraId")
     cameras_block = config.get("cameras")
     known_cameras = cameras_block if isinstance(cameras_block, dict) else {}
     pulse["cameraId"] = camera_id if isinstance(camera_id, str) and camera_id in known_cameras else ""
+    pulse["backdrop"] = pulse.get("backdrop") if pulse.get("backdrop") in ("auto", "camera", "wall") else "auto"
+    pulse["graphRange"] = pulse.get("graphRange") if pulse.get("graphRange") in ("24h", "7d") else "24h"
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):

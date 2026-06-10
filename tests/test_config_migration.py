@@ -491,6 +491,26 @@ def test_pulse_known_camera_kept():
     assert normalise(cfg)["pulse"]["cameraId"] == "display"
 
 
+def test_pulse_wall_defaults_injected():
+    pulse = normalise({})["pulse"]
+    assert pulse["backdrop"] == "auto"
+    assert pulse["graphRange"] == "24h"
+    assert pulse["showSparklines"] is True
+    assert pulse["showCategories"] is True
+    assert pulse["showEquipment"] is True
+    assert pulse["showToday"] is True
+
+
+def test_pulse_enums_validated():
+    pulse = normalise({"pulse": {"backdrop": "hologram", "graphRange": "1y"}})["pulse"]
+    assert pulse["backdrop"] == "auto"        # unknown -> default
+    assert pulse["graphRange"] == "24h"
+    pulse = normalise({"pulse": {"backdrop": "wall", "graphRange": "7d", "showToday": 0}})["pulse"]
+    assert pulse["backdrop"] == "wall"        # valid values kept
+    assert pulse["graphRange"] == "7d"
+    assert pulse["showToday"] is False
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:

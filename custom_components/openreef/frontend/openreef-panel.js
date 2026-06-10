@@ -62,6 +62,9 @@ class OpenReefPanel extends HTMLElement {
     this._pulseEnteredFs = false;
     this._pulseKeyHandler = null;
     this._pulseFsHandler = null;
+    this._pulseSparks = {};
+    this._pulseSparksAt = 0;
+    this._pulseSparksLoading = false;
   }
 
   set hass(hass) {
@@ -1522,6 +1525,8 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "pulse") {
         this._config.pulse = this._config.pulse || {};
         this._config.pulse[field] = value;
+        // New range needs fresh history next time the wall opens.
+        if (field === "graphRange") { this._pulseSparks = {}; this._pulseSparksAt = 0; }
       }
       if (scope === "maintenance-task") {
         this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
@@ -6994,15 +6999,32 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
-  _startPulseRuntime() {
+  // Which backdrop to show: "camera" only when allowed AND one is online;
+  // anything else (preference, offline, unmapped) lands on the data wall.
+  _pulseBackdrop() {
+    const pref = this._pulseCfg().backdrop;
+    if (pref === "wall") return "wall";
     const cam = this._pulseCamera();
-    if (cam && cam[1].entity_id) this._startCameraWebRTC(cam[1].entity_id);
+    return cam ? "camera" : "wall";
+  }
+
+  _startPulseRuntime() {
+    if (this._pulseBackdrop() === "camera") {
+      const cam = this._pulseCamera();
+      if (cam && cam[1].entity_id) this._startCameraWebRTC(cam[1].entity_id);
+    } else {
+      this._loadPulseSparklines();
+    }
     if (!this._pulseTimer) {
       this._pulseTimer = window.setInterval(() => {
         this._pulseTick += 1;
         // Fresh quip roughly every 40s keeps the buddy alive without spamming.
         if (this._pulseCfg().showBuddy !== false && this._pulseTick % 4 === 0) {
           this._overlayQuip = this._pickOverlayQuip();
+        }
+        // Refresh sparkline history every ~5 minutes on the data wall.
+        if (this._pulseTick % 30 === 0 && this._pulseBackdrop() === "wall") {
+          this._loadPulseSparklines(true);
         }
         this._updatePulse();
       }, 10000);
@@ -7074,15 +7096,183 @@ class OpenReefPanel extends HTMLElement {
     `).join("");
   }
 
+  // The data-wall tiles: numeric, mapped, enabled sensors (capped).
+  _pulseTileSensors() {
+    return this._enabledSensors()
+      .filter(([id, s]) => s.entity_id && this._sensorKind(s, id) !== "binary")
+      .slice(0, 8);
+  }
+
+  _pulseSparkSvg(points) {
+    if (!Array.isArray(points) || points.length < 2) {
+      return `<svg viewBox="0 0 100 30" preserveAspectRatio="none" class="pulse-spark-svg empty"><line x1="0" y1="15" x2="100" y2="15" /></svg>`;
+    }
+    const t0 = points[0].time;
+    const t1 = points[points.length - 1].time;
+    const values = points.map((p) => p.value);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const dt = t1 - t0 || 1;
+    const dv = max - min || 1;
+    const coords = points.map((p) => `${((p.time - t0) / dt * 100).toFixed(1)},${(27 - (p.value - min) / dv * 24).toFixed(1)}`);
+    return `<svg viewBox="0 0 100 30" preserveAspectRatio="none" class="pulse-spark-svg"><polyline points="${coords.join(" ")}" vector-effect="non-scaling-stroke" /></svg>`;
+  }
+
+  _pulseRangeBarMarkup(id, sensor) {
+    const value = this._number(sensor.entity_id);
+    const min = Number(sensor.min);
+    const max = Number(sensor.max);
+    if (value === null || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) return "";
+    const pct = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+    const badge = this._liveStatBadge(id, sensor);
+    return `
+      <div class="pulse-range">
+        <small>${this._escape(this._format(min, 1))}</small>
+        <div class="pulse-range-track"><span class="pulse-range-marker ${badge.status}" data-pulse-marker="${this._escape(id)}" style="left:${pct.toFixed(1)}%"></span></div>
+        <small>${this._escape(this._format(max, 1))}</small>
+      </div>
+    `;
+  }
+
+  _pulseTileMarkup(id, sensor) {
+    const badge = this._liveStatBadge(id, sensor);
+    const value = this._sensorDisplayValue(id, sensor);
+    const unit = this._sensorDisplayUnit(id, sensor);
+    const sparks = this._pulseCfg().showSparklines !== false;
+    return `
+      <article class="pulse-tile">
+        <div class="pulse-tile-head">
+          <small>${this._escape(sensor.label)}</small>
+          <span class="pill ${badge.status}" data-pulse-badge="${this._escape(id)}">${this._escape(badge.label)}</span>
+        </div>
+        <strong data-overlay-stat="${this._escape(id)}">${this._escape(value)}${unit ? ` ${this._escape(unit)}` : ""}</strong>
+        ${sparks ? `<div class="pulse-spark" data-pulse-spark="${this._escape(id)}">${this._pulseSparkSvg(this._pulseSparks[id])}</div>` : ""}
+        ${this._pulseRangeBarMarkup(id, sensor)}
+      </article>
+    `;
+  }
+
+  _pulseCategoryBarsMarkup(health) {
+    const categories = this._healthCategoryChoices().map(([cid]) => health.categories[cid]).filter(Boolean);
+    if (!categories.length) return "";
+    return `
+      <article class="pulse-block" data-pulse-categories>
+        <small class="pulse-block-title">Health breakdown</small>
+        ${categories.map((cat) => `
+          <div class="pulse-cat">
+            <small>${this._escape(cat.label)}</small>
+            <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "ok" : cat.score >= 70 ? "warning" : "critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+            <strong>${this._escape(cat.score)}</strong>
+          </div>
+        `).join("")}
+      </article>
+    `;
+  }
+
+  _pulseEquipmentMarkup() {
+    const rows = Object.entries(this._config.equipment || {}).filter(([, item]) => item.switch_entity_id).slice(0, 10);
+    if (!rows.length) return "";
+    return `
+      <article class="pulse-block" data-pulse-equipment>
+        <small class="pulse-block-title">Equipment</small>
+        <div class="pulse-equip-list">
+          ${rows.map(([id, item]) => {
+            const state = this._stateValue(item.switch_entity_id);
+            const dot = state === "on" ? "on" : state === "off" ? "off" : "gone";
+            return `<span class="pulse-equip ${dot}"><i></i>${this._escape(item.label || id)}</span>`;
+          }).join("")}
+        </div>
+      </article>
+    `;
+  }
+
+  _pulseTodayMarkup() {
+    const next = this._maintenanceUpcoming(7)[0] || null;
+    const nextLabel = next ? next.task.label : "All caught up";
+    let nextWhen = "";
+    if (next) {
+      const dueNow = next.state.status === "warning" || next.state.status === "critical";
+      const days = Math.max(0, Math.round((next.nextMs - Date.now()) / 86400000));
+      nextWhen = dueNow ? (next.state.status === "critical" ? "overdue" : "due now") : days <= 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
+    }
+    const totals = this._energyTotalMappings();
+    const daily = totals.find(([label]) => label === "Daily");
+    const monthly = totals.find(([label]) => label === "Monthly");
+    const energyLine = (pair) => {
+      if (!pair || !this._config.energy[pair[1]]) return "--";
+      const cost = this._energyCost(this._config.energy[pair[1]], this._number(this._config.energy[pair[2]]));
+      return `${this._formatEnergyWh(this._config.energy[pair[1]])} · ${this._formatMoney(cost)}`;
+    };
+    return `
+      <article class="pulse-block" data-pulse-today>
+        <small class="pulse-block-title">Today</small>
+        <div class="pulse-today-row"><small>Next task</small><strong>${this._escape(nextLabel)}${nextWhen ? ` · ${this._escape(nextWhen)}` : ""}</strong></div>
+        <div class="pulse-today-row"><small>Energy today</small><strong>${this._escape(energyLine(daily))}</strong></div>
+        <div class="pulse-today-row"><small>This month</small><strong>${this._escape(energyLine(monthly))}</strong></div>
+      </article>
+    `;
+  }
+
+  _pulseWallMarkup(cfg, health) {
+    const tiles = this._pulseTileSensors();
+    const blocks = [
+      cfg.showCategories !== false ? this._pulseCategoryBarsMarkup(health) : "",
+      cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
+      cfg.showToday !== false ? this._pulseTodayMarkup() : "",
+    ].filter(Boolean);
+    return `
+      <div class="pulse-wall">
+        ${cfg.showHealthRing !== false ? `
+          <div class="pulse-hero">
+            ${this._pulseRingMarkup(health)}
+            <p class="pulse-hero-reason" data-pulse-reason>${this._escape(health.topReason || "")}</p>
+          </div>
+        ` : ""}
+        ${cfg.showStats !== false && tiles.length ? `
+          <div class="pulse-tiles">${tiles.map(([id, sensor]) => this._pulseTileMarkup(id, sensor)).join("")}</div>
+        ` : ""}
+        ${blocks.length ? `<div class="pulse-blocks">${blocks.join("")}</div>` : ""}
+      </div>
+    `;
+  }
+
+  // Fetch sparkline history for the visible tiles — sequential + capped, so the
+  // recorder is never hammered (targeted-and-capped product rule). Cached for
+  // ~4 minutes; the runtime tick refreshes every 5.
+  async _loadPulseSparklines(force = false) {
+    if (this._pulseSparksLoading) return;
+    if (!force && this._pulseSparksAt && Date.now() - this._pulseSparksAt < 4 * 60 * 1000) return;
+    if (this._pulseCfg().showSparklines === false) return;
+    this._pulseSparksLoading = true;
+    try {
+      const range = this._pulseCfg().graphRange === "7d" ? "7d" : "24h";
+      for (const [id, sensor] of this._pulseTileSensors()) {
+        if (!this._pulseActive) break;
+        try {
+          const points = await this._fetchTrendPoints(sensor.entity_id, range);
+          this._pulseSparks[id] = points;
+        } catch {
+          // Leave whatever we had; a flat placeholder is fine.
+        }
+        const el = this.shadowRoot && this.shadowRoot.querySelector(`[data-pulse-spark="${id}"]`);
+        if (el) el.innerHTML = this._pulseSparkSvg(this._pulseSparks[id]);
+      }
+      this._pulseSparksAt = Date.now();
+    } finally {
+      this._pulseSparksLoading = false;
+    }
+  }
+
   _pulseScreen() {
     const cfg = this._pulseCfg();
     const tank = this._config.tank || {};
-    const cam = this._pulseCamera();
+    const wall = this._pulseBackdrop() === "wall";
+    const cam = wall ? null : this._pulseCamera();
     const entityId = cam ? cam[1].entity_id : "";
     const snap = entityId ? this._cameraSnapshotUrl(entityId) : "";
     const health = this._reefHealthScore();
     const alert = this._pulseAlertState();
-    const chips = cfg.showStats !== false ? this._overlayStatList() : [];
+    const chips = !wall && cfg.showStats !== false ? this._overlayStatList() : [];
     const quip = this._overlayQuipText();
     return `
       <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""}" data-pulse-root>
@@ -7090,7 +7280,7 @@ class OpenReefPanel extends HTMLElement {
           <video class="pulse-video" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video>
           <img class="pulse-video" data-camera-fallback alt="" style="display:none">
         ` : `<div class="pulse-datawall"></div>`}
-        <div class="pulse-shade"></div>
+        <div class="pulse-shade ${wall ? "wall" : ""}"></div>
         <header class="pulse-head">
           <div class="pulse-title">
             ${cfg.showClock !== false ? `<span class="pulse-clock" data-pulse-clock>${this._escape(this._pulseClock())}</span>` : ""}
@@ -7099,9 +7289,10 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <div class="pulse-head-right">
             <span class="pulse-alert-chip" data-pulse-alert ${alert.status === "ok" ? 'style="display:none"' : ""}>${this._escape(alert.label)}</span>
-            ${cfg.showHealthRing !== false ? this._pulseRingMarkup(health) : ""}
+            ${!wall && cfg.showHealthRing !== false ? this._pulseRingMarkup(health) : ""}
           </div>
         </header>
+        ${wall ? this._pulseWallMarkup(cfg, health) : ""}
         <div class="pulse-foot">
           ${chips.length ? `
             <div class="pulse-chips">
@@ -7172,6 +7363,38 @@ class OpenReefPanel extends HTMLElement {
     if (ticker) ticker.innerHTML = this._pulseTickerMarkup();
     const quipEl = root.querySelector("[data-pulse-quip]");
     if (quipEl && this._overlayQuipText()) quipEl.textContent = this._overlayQuipText();
+    // Data-wall blocks: badges, range markers, hero reason, and the side blocks.
+    if (root.querySelector(".pulse-wall")) {
+      const health = this._reefHealthScore();
+      root.querySelectorAll("[data-pulse-badge]").forEach((el) => {
+        const key = el.getAttribute("data-pulse-badge");
+        const sensor = sensors[key];
+        if (!sensor) return;
+        const badge = this._liveStatBadge(key, sensor);
+        el.className = `pill ${badge.status}`;
+        el.textContent = badge.label;
+      });
+      root.querySelectorAll("[data-pulse-marker]").forEach((el) => {
+        const key = el.getAttribute("data-pulse-marker");
+        const sensor = sensors[key];
+        if (!sensor) return;
+        const value = this._number(sensor.entity_id);
+        const min = Number(sensor.min);
+        const max = Number(sensor.max);
+        if (value === null || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
+        const pct = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+        el.style.left = `${pct.toFixed(1)}%`;
+        el.className = `pulse-range-marker ${this._liveStatBadge(key, sensor).status}`;
+      });
+      const reason = root.querySelector("[data-pulse-reason]");
+      if (reason) reason.textContent = health.topReason || "";
+      const cats = root.querySelector("[data-pulse-categories]");
+      if (cats) cats.outerHTML = this._pulseCategoryBarsMarkup(health);
+      const equip = root.querySelector("[data-pulse-equipment]");
+      if (equip) equip.outerHTML = this._pulseEquipmentMarkup();
+      const today = root.querySelector("[data-pulse-today]");
+      if (today) today.outerHTML = this._pulseTodayMarkup();
+    }
   }
 
   _cameras() {
@@ -10228,12 +10451,16 @@ class OpenReefPanel extends HTMLElement {
     const cfg = this._pulseCfg();
     const cams = this._cameraList();
     const blocks = [
-      ["showHealthRing", "Reef Health ring", "Animated score gauge in the top corner."],
-      ["showStats", "Live stat chips", "Follows the stat selection from Camera overlay settings."],
+      ["showHealthRing", "Reef Health ring", "Animated score gauge — corner on camera, centrepiece on the data wall."],
+      ["showStats", "Live stats", "Overlay chips on camera; big tiles with graphs on the data wall."],
       ["showTicker", "Event ticker", "Recent activity and alerts along the bottom."],
       ["showMode", "Current mode", "Running / Feed / Maintenance pill in the header."],
       ["showBuddy", "Reef Buddy", "Corner avatar with rotating calm-only quips."],
       ["showClock", "Clock", "Live clock next to the tank name."],
+      ["showSparklines", "Sparkline graphs", "Mini history graphs on the data-wall tiles."],
+      ["showCategories", "Health breakdown", "Six category bars on the data wall — the why behind the ring."],
+      ["showEquipment", "Equipment dots", "Read-only running/off/unavailable chips on the data wall."],
+      ["showToday", "Today panel", "Next maintenance task plus energy today / this month on the data wall."],
     ];
     return this._settingsPanel(
       "pulse",
@@ -10249,10 +10476,23 @@ class OpenReefPanel extends HTMLElement {
         </label>
         ${cfg.enabled === false ? "" : `
           <div class="mini-grid">
+            <label>Backdrop
+              <select data-scope="pulse" data-field="backdrop">
+                <option value="auto" ${cfg.backdrop !== "camera" && cfg.backdrop !== "wall" ? "selected" : ""}>Auto — camera when online, else data wall</option>
+                <option value="camera" ${cfg.backdrop === "camera" ? "selected" : ""}>Camera</option>
+                <option value="wall" ${cfg.backdrop === "wall" ? "selected" : ""}>Data wall</option>
+              </select>
+            </label>
             <label>Camera
               <select data-scope="pulse" data-field="cameraId">
                 <option value="" ${!cfg.cameraId ? "selected" : ""}>Auto (first online)</option>
                 ${cams.map(([id, cam]) => `<option value="${this._escape(id)}" ${cfg.cameraId === id ? "selected" : ""}>${this._escape(cam.label || id)}</option>`).join("")}
+              </select>
+            </label>
+            <label>Graph range
+              <select data-scope="pulse" data-field="graphRange">
+                <option value="24h" ${cfg.graphRange !== "7d" ? "selected" : ""}>24 hours</option>
+                <option value="7d" ${cfg.graphRange === "7d" ? "selected" : ""}>7 days</option>
               </select>
             </label>
           </div>
@@ -12398,6 +12638,51 @@ class OpenReefPanel extends HTMLElement {
         .pulse-buddy .or-avatar-ph { display: grid; place-items: center; font-size: 52px; }
         .pulse-close { position: absolute; top: 22px; right: 22px; z-index: 2; width: 42px; height: 42px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .25); background: rgba(4, 10, 16, .55); color: #e5edf5; font-size: 17px; opacity: .35; transition: opacity .2s ease; backdrop-filter: blur(8px); }
         .pulse-close:hover, .pulse-close:focus-visible { opacity: 1; }
+        /* Reef Pulse data wall (no camera, or Backdrop = Data wall) */
+        .pulse-shade.wall { background: linear-gradient(180deg, rgba(4, 8, 13, .4), transparent 24%), linear-gradient(0deg, rgba(4, 8, 13, .5), transparent 26%); }
+        .pulse-wall { position: absolute; top: 96px; bottom: 84px; left: 30px; right: 30px; display: grid; gap: 18px; align-content: center; justify-items: center; overflow-y: auto; scrollbar-width: none; }
+        .pulse-wall::-webkit-scrollbar { display: none; }
+        .pulse-hero { display: grid; justify-items: center; gap: 8px; }
+        .pulse-hero .pulse-ring { width: clamp(150px, 24vh, 250px); }
+        .pulse-hero .pulse-ring-text strong { font-size: clamp(38px, 6vh, 64px); }
+        .pulse-hero .pulse-ring-text small { font-size: 12px; }
+        .pulse-hero-reason { max-width: 560px; text-align: center; color: #9fc7e0; font-weight: 700; font-size: 14px; text-shadow: 0 2px 8px rgba(0, 0, 0, .5); }
+        .pulse-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; width: 100%; max-width: 1380px; }
+        .pulse-tile { display: grid; gap: 7px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 14px; padding: 14px 16px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); align-content: start; }
+        .pulse-tile-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+        .pulse-tile-head small { font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
+        .pulse-tile-head .pill { min-width: 0; min-height: 22px; padding: 2px 9px; font-size: 10px; }
+        .pulse-tile > strong { font-size: clamp(22px, 2.6vw, 32px); font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
+        .pulse-spark { height: 34px; }
+        .pulse-spark-svg { width: 100%; height: 100%; display: block; }
+        .pulse-spark-svg polyline { fill: none; stroke: var(--openreef-accent); stroke-width: 2; filter: drop-shadow(0 0 4px var(--openreef-accent-soft)); }
+        .pulse-spark-svg.empty line { stroke: rgba(255, 255, 255, .18); stroke-width: 1.5; stroke-dasharray: 4 5; }
+        .pulse-range { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
+        .pulse-range small { font-size: 10px; font-weight: 800; color: #8da2ba; font-variant-numeric: tabular-nums; }
+        .pulse-range-track { position: relative; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .14); }
+        .pulse-range-marker { position: absolute; top: 50%; width: 11px; height: 11px; border-radius: 50%; transform: translate(-50%, -50%); background: #22c55e; box-shadow: 0 0 7px rgba(34, 197, 94, .7); transition: left .5s ease; }
+        .pulse-range-marker.warning { background: #f59e0b; box-shadow: 0 0 7px rgba(245, 158, 11, .7); }
+        .pulse-range-marker.critical { background: #ef4444; box-shadow: 0 0 7px rgba(239, 68, 68, .75); }
+        .pulse-range-marker.unknown { background: #64748b; box-shadow: none; }
+        .pulse-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: 100%; max-width: 1380px; }
+        .pulse-block { display: grid; gap: 9px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 14px; padding: 14px 16px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); align-content: start; }
+        .pulse-block-title { font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
+        .pulse-cat { display: grid; grid-template-columns: minmax(80px, auto) 1fr auto; align-items: center; gap: 9px; }
+        .pulse-cat small { font-size: 11px; font-weight: 700; color: #cfe7f5; }
+        .pulse-cat strong { font-size: 12px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
+        .pulse-cat-track { height: 7px; border-radius: 999px; background: rgba(255, 255, 255, .12); overflow: hidden; }
+        .pulse-cat-track span { display: block; height: 100%; border-radius: 999px; }
+        .pulse-cat-track span.ok { background: #22c55e; }
+        .pulse-cat-track span.warning { background: #f59e0b; }
+        .pulse-cat-track span.critical { background: #ef4444; }
+        .pulse-equip-list { display: flex; flex-wrap: wrap; gap: 9px; }
+        .pulse-equip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #cfe7f5; }
+        .pulse-equip i { width: 9px; height: 9px; border-radius: 50%; background: #64748b; }
+        .pulse-equip.on i { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .7); }
+        .pulse-equip.gone i { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .7); }
+        .pulse-today-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+        .pulse-today-row small { font-size: 11px; font-weight: 800; color: #9fc7e0; }
+        .pulse-today-row strong { font-size: 13px; font-weight: 800; color: #fff; text-align: right; }
         .pulse-root.pulse-alert-warning::after, .pulse-root.pulse-alert-critical::after { content: ""; position: absolute; inset: 0; pointer-events: none; animation: pulse-edge 1.8s ease-in-out infinite; }
         .pulse-root.pulse-alert-warning::after { box-shadow: inset 0 0 90px rgba(245, 158, 11, .4); }
         .pulse-root.pulse-alert-critical::after { box-shadow: inset 0 0 110px rgba(239, 68, 68, .5); }
@@ -12408,6 +12693,10 @@ class OpenReefPanel extends HTMLElement {
           .pulse-foot { padding: 0 16px 14px; }
           .pulse-buddy { display: none; }
           .pulse-mode { display: none; }
+          .pulse-wall { top: 64px; bottom: 70px; left: 14px; right: 14px; gap: 12px; align-content: start; }
+          .pulse-hero .pulse-ring { width: clamp(110px, 18vh, 160px); }
+          .pulse-tiles { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+          .pulse-blocks { grid-template-columns: 1fr; gap: 10px; }
         }
         .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #04080d; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
         .cam-feed-large { width: 100%; height: 100%; object-fit: contain; display: block; background: #04080d; }
