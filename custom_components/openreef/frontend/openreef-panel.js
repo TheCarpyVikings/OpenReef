@@ -55,6 +55,13 @@ class OpenReefPanel extends HTMLElement {
     this._stickerReady = false;
     this._walkReady = false;
     this._buddy = { dismissed: false, expanded: false, lastKey: "", timer: null };
+    this._pulseActive = false;
+    this._pulseTimer = null;
+    this._pulseTick = 0;
+    this._pulseChecked = false;
+    this._pulseEnteredFs = false;
+    this._pulseKeyHandler = null;
+    this._pulseFsHandler = null;
   }
 
   set hass(hass) {
@@ -62,6 +69,10 @@ class OpenReefPanel extends HTMLElement {
     if (this._config) {
       if (this._shouldRenderForHassUpdate()) {
         this._render();
+      } else if (this._pulseActive) {
+        // Reef Pulse open: patch stats/ring/alert state in place — a full render
+        // would tear down the full-screen layer and restart the live video.
+        this._updatePulse();
       } else if (this._cameraFocus) {
         // Modal open: patch the live overlay stat values without re-rendering
         // (a full render would restart the WebRTC video).
@@ -80,6 +91,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _shouldRenderForHassUpdate() {
+    if (this._pulseActive) return false;
     if (this._setupOpen || this._trend || this._activeTab === "settings") return false;
     if (this._onboarding && this._onboarding.active) return false;
     // Don't recreate camera <img> elements on hass updates — it would restart the
@@ -101,15 +113,41 @@ class OpenReefPanel extends HTMLElement {
         this._updateModeCountdownElements();
       }, 10000);
     }
+    if (!this._pulseKeyHandler) {
+      this._pulseKeyHandler = (ev) => {
+        if (ev.key === "Escape" && this._pulseActive) this._closePulse();
+      };
+      window.addEventListener("keydown", this._pulseKeyHandler);
+    }
+    if (!this._pulseFsHandler) {
+      // Browser Esc exits fullscreen directly; treat that as closing Pulse too
+      // (when Pulse was the thing that entered fullscreen).
+      this._pulseFsHandler = () => {
+        if (!document.fullscreenElement && this._pulseActive && this._pulseEnteredFs) {
+          this._pulseEnteredFs = false;
+          this._closePulse();
+        }
+      };
+      document.addEventListener("fullscreenchange", this._pulseFsHandler);
+    }
   }
 
   disconnectedCallback() {
     this._stopCameraWebRTC();
     this._stopTimelapse();
     this._stopFeedPlayer();
+    this._stopPulseRuntime();
     if (this._modeCountdownTimer) {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
+    }
+    if (this._pulseKeyHandler) {
+      window.removeEventListener("keydown", this._pulseKeyHandler);
+      this._pulseKeyHandler = null;
+    }
+    if (this._pulseFsHandler) {
+      document.removeEventListener("fullscreenchange", this._pulseFsHandler);
+      this._pulseFsHandler = null;
     }
   }
 
@@ -125,6 +163,7 @@ class OpenReefPanel extends HTMLElement {
       alerts: false,
       interlocks: false,
       energy: false,
+      pulse: false,
       system: false,
     };
   }
@@ -217,6 +256,7 @@ class OpenReefPanel extends HTMLElement {
     } finally {
       this._busy = false;
       this._render();
+      this._maybeAutoStartPulse();
     }
   }
 
@@ -1010,6 +1050,8 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "focus-camera") { this._cameraFocus = id; this._overlayQuip = this._pickOverlayQuip(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._render(); }
+      if (action === "open-pulse") this._openPulse(true);
+      if (action === "close-pulse") this._closePulse();
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
@@ -1477,6 +1519,10 @@ class OpenReefPanel extends HTMLElement {
         this._config.maintenance.reminders = this._config.maintenance.reminders || {};
         this._config.maintenance.reminders[field] = value;
       }
+      if (scope === "pulse") {
+        this._config.pulse = this._config.pulse || {};
+        this._config.pulse[field] = value;
+      }
       if (scope === "maintenance-task") {
         this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
         this._config.maintenance.tasks = this._config.maintenance.tasks || {};
@@ -1504,7 +1550,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes")
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes")
         && event.type === "change"
       ) this._render();
     };
@@ -5450,6 +5496,16 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
 
+    if (this._pulseActive) {
+      // Reef Pulse replaces the whole page with a full-viewport presentation
+      // layer; hass updates patch it in place (no re-render while active).
+      // If something else does force a render (e.g. a background config
+      // refresh), re-attach the live stream — the old <video> node is gone.
+      this.shadowRoot.innerHTML = `${this._styles()}${this._pulseScreen()}`;
+      this._startPulseRuntime();
+      return;
+    }
+
     const scrollState = this._captureScrollState();
     const preserveSetupScroll =
       this._setupOpen &&
@@ -6886,6 +6942,238 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
+  // --- Reef Pulse: full-screen presentation / kiosk mode -------------------
+  // Display-only by design: no control actions exist on this screen, so a wall
+  // tablet can show it permanently without any arming/safety surface.
+
+  _pulseCfg() {
+    const raw = this._config?.pulse;
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  _pulseEnabled() {
+    return this._pulseCfg().enabled !== false;
+  }
+
+  // Resolve the camera Pulse should use: the configured one if it's online,
+  // else the first online camera, else null (-> data-wall backdrop).
+  _pulseCamera() {
+    const cams = this._cameraList();
+    const cfg = this._pulseCfg();
+    const chosen = cfg.cameraId && cams.find(([id, cam]) => id === cfg.cameraId && cam.entity_id && this._cameraOnline(cam.entity_id));
+    if (chosen) return chosen;
+    return cams.find(([, cam]) => cam.entity_id && this._cameraOnline(cam.entity_id)) || null;
+  }
+
+  _openPulse(fromGesture = false) {
+    if (!this._pulseEnabled() || this._pulseActive) return;
+    // Pulse owns the single live-video session; close the camera modal if open.
+    this._stopCameraWebRTC();
+    this._cameraFocus = null;
+    this._recordingFocus = null;
+    this._overlayQuip = this._pickOverlayQuip();
+    this._pulseActive = true;
+    this._pulseTick = 0;
+    this._render(); // the pulse render branch starts the stream + timer
+    if (fromGesture) {
+      const root = this.shadowRoot.querySelector(".pulse-root");
+      if (root && root.requestFullscreen) {
+        root.requestFullscreen().then(() => { this._pulseEnteredFs = true; }).catch(() => {});
+      }
+    }
+  }
+
+  _closePulse() {
+    if (!this._pulseActive) return;
+    this._stopPulseRuntime();
+    if (document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+    this._pulseEnteredFs = false;
+    this._pulseActive = false;
+    this._render();
+  }
+
+  _startPulseRuntime() {
+    const cam = this._pulseCamera();
+    if (cam && cam[1].entity_id) this._startCameraWebRTC(cam[1].entity_id);
+    if (!this._pulseTimer) {
+      this._pulseTimer = window.setInterval(() => {
+        this._pulseTick += 1;
+        // Fresh quip roughly every 40s keeps the buddy alive without spamming.
+        if (this._pulseCfg().showBuddy !== false && this._pulseTick % 4 === 0) {
+          this._overlayQuip = this._pickOverlayQuip();
+        }
+        this._updatePulse();
+      }, 10000);
+    }
+  }
+
+  _stopPulseRuntime() {
+    this._stopCameraWebRTC();
+    if (this._pulseTimer) {
+      window.clearInterval(this._pulseTimer);
+      this._pulseTimer = null;
+    }
+  }
+
+  // Kiosk auto-start: ?pulse=1 forces Pulse, ?pulse=0 forces it off, otherwise
+  // the saved kioskAutoStart setting decides. Checked once per page load, and
+  // never over the setup wizard.
+  _maybeAutoStartPulse() {
+    if (this._pulseChecked || this._pulseActive || !this._config || this._setupOpen) return;
+    this._pulseChecked = true;
+    let param = null;
+    try { param = new URLSearchParams(window.location.search).get("pulse"); } catch { /* ignore */ }
+    if (param === "0") return;
+    if (param === "1" || param === "true" || this._pulseCfg().kioskAutoStart === true) {
+      if (this._pulseEnabled()) this._openPulse(false);
+    }
+  }
+
+  _pulseClock() {
+    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  _pulseAlertState() {
+    const summary = this._sensorSummaryState(this._sensorAlerts());
+    const first = summary.scoringCritical[0] || summary.scoringWarning[0] || null;
+    const label = first ? (first.sensor?.label || first.id || "Alert") : "";
+    return {
+      status: summary.criticalCount ? "critical" : summary.warningCount ? "warning" : "ok",
+      label,
+    };
+  }
+
+  _pulseRingMarkup(health) {
+    const C = 326.7; // 2πr for r=52
+    const score = Math.max(0, Math.min(100, Number(health.score) || 0));
+    const offset = (C * (1 - score / 100)).toFixed(1);
+    return `
+      <div class="pulse-ring ${this._escape(health.status)}" data-pulse-ring>
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="pulse-ring-track" cx="60" cy="60" r="52" stroke-dasharray="${C}" />
+          <circle class="pulse-ring-arc" cx="60" cy="60" r="52" stroke-dasharray="${C}" stroke-dashoffset="${offset}" data-pulse-ring-arc />
+        </svg>
+        <div class="pulse-ring-text">
+          <strong data-pulse-ring-score>${this._escape(score)}</strong>
+          <small data-pulse-ring-grade>${this._escape(health.grade || "")} · reef health</small>
+        </div>
+      </div>
+    `;
+  }
+
+  _pulseTickerMarkup() {
+    const items = (Array.isArray(this._config.activity) ? this._config.activity : []).slice(0, 4);
+    if (!items.length) return `<span class="pulse-ticker-item"><small>—</small><strong>Quiet reef, steady readings</strong></span>`;
+    return items.map((item, idx) => `
+      <span class="pulse-ticker-item ${idx === 0 ? "latest" : ""} ${this._escape(item.type || "info")}">
+        <small>${this._escape(this._formatActivityTime(item.timestamp))}</small>
+        <strong>${this._escape(item.message)}</strong>
+      </span>
+    `).join("");
+  }
+
+  _pulseScreen() {
+    const cfg = this._pulseCfg();
+    const tank = this._config.tank || {};
+    const cam = this._pulseCamera();
+    const entityId = cam ? cam[1].entity_id : "";
+    const snap = entityId ? this._cameraSnapshotUrl(entityId) : "";
+    const health = this._reefHealthScore();
+    const alert = this._pulseAlertState();
+    const chips = cfg.showStats !== false ? this._overlayStatList() : [];
+    const quip = this._overlayQuipText();
+    return `
+      <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""}" data-pulse-root>
+        ${entityId ? `
+          <video class="pulse-video" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video>
+          <img class="pulse-video" data-camera-fallback alt="" style="display:none">
+        ` : `<div class="pulse-datawall"></div>`}
+        <div class="pulse-shade"></div>
+        <header class="pulse-head">
+          <div class="pulse-title">
+            ${cfg.showClock !== false ? `<span class="pulse-clock" data-pulse-clock>${this._escape(this._pulseClock())}</span>` : ""}
+            <strong>${this._escape(tank.name || "OpenReef")}</strong>
+            ${cfg.showMode !== false ? `<span class="pulse-mode" data-pulse-mode>${this._escape(this._activeModeLabel())}</span>` : ""}
+          </div>
+          <div class="pulse-head-right">
+            <span class="pulse-alert-chip" data-pulse-alert ${alert.status === "ok" ? 'style="display:none"' : ""}>${this._escape(alert.label)}</span>
+            ${cfg.showHealthRing !== false ? this._pulseRingMarkup(health) : ""}
+          </div>
+        </header>
+        <div class="pulse-foot">
+          ${chips.length ? `
+            <div class="pulse-chips">
+              ${chips.map((chip) => `
+                <span class="pulse-chip ${chip.key === "reefHealth" ? "is-health" : ""}">
+                  <small>${this._escape(chip.label)}</small>
+                  <strong data-overlay-stat="${this._escape(chip.key)}">${this._escape(chip.value)}${chip.unit ? ` ${this._escape(chip.unit)}` : ""}</strong>
+                </span>
+              `).join("")}
+            </div>
+          ` : ""}
+          ${cfg.showTicker !== false ? `<div class="pulse-ticker" data-pulse-ticker>${this._pulseTickerMarkup()}</div>` : ""}
+        </div>
+        ${cfg.showBuddy !== false ? `
+          <div class="pulse-buddy">
+            ${quip ? `<span class="cam-overlay-bubble" data-pulse-quip>${this._escape(quip)}</span>` : ""}
+            ${this._avatarMarkup(this._overlayPose())}
+          </div>
+        ` : ""}
+        <button class="pulse-close" data-action="close-pulse" title="Exit Reef Pulse (Esc)">✕</button>
+      </div>
+    `;
+  }
+
+  // Patch the live Pulse screen in place — the video must never restart.
+  _updatePulse() {
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    if (!root) return;
+    const sensors = this._config.sensors || {};
+    root.querySelectorAll("[data-overlay-stat]").forEach((el) => {
+      const key = el.getAttribute("data-overlay-stat");
+      if (key === "reefHealth") {
+        const h = this._reefHealthScore();
+        el.textContent = `${h.score ?? "--"}${h.grade ? ` ${h.grade}` : ""}`;
+        return;
+      }
+      const sensor = sensors[key];
+      if (!sensor) return;
+      const value = this._sensorDisplayValue(key, sensor);
+      const unit = this._sensorDisplayUnit(key, sensor);
+      el.textContent = `${value}${unit ? ` ${unit}` : ""}`;
+    });
+    const clock = root.querySelector("[data-pulse-clock]");
+    if (clock) clock.textContent = this._pulseClock();
+    const mode = root.querySelector("[data-pulse-mode]");
+    if (mode) mode.textContent = this._activeModeLabel();
+    const ring = root.querySelector("[data-pulse-ring]");
+    if (ring) {
+      const health = this._reefHealthScore();
+      const score = Math.max(0, Math.min(100, Number(health.score) || 0));
+      const arc = ring.querySelector("[data-pulse-ring-arc]");
+      if (arc) arc.setAttribute("stroke-dashoffset", (326.7 * (1 - score / 100)).toFixed(1));
+      const scoreEl = ring.querySelector("[data-pulse-ring-score]");
+      if (scoreEl) scoreEl.textContent = String(score);
+      const gradeEl = ring.querySelector("[data-pulse-ring-grade]");
+      if (gradeEl) gradeEl.textContent = `${health.grade || ""} · reef health`;
+      ring.className = `pulse-ring ${health.status}`;
+    }
+    const alert = this._pulseAlertState();
+    root.classList.toggle("pulse-alert-warning", alert.status === "warning");
+    root.classList.toggle("pulse-alert-critical", alert.status === "critical");
+    const alertChip = root.querySelector("[data-pulse-alert]");
+    if (alertChip) {
+      alertChip.style.display = alert.status === "ok" ? "none" : "";
+      alertChip.textContent = alert.label;
+    }
+    const ticker = root.querySelector("[data-pulse-ticker]");
+    if (ticker) ticker.innerHTML = this._pulseTickerMarkup();
+    const quipEl = root.querySelector("[data-pulse-quip]");
+    if (quipEl && this._overlayQuipText()) quipEl.textContent = this._overlayQuipText();
+  }
+
   _cameras() {
     const cams = this._cameraList();
     const mapped = cams.filter(([, c]) => c.entity_id);
@@ -6903,6 +7191,7 @@ class OpenReefPanel extends HTMLElement {
             <p>Watch your tank live — feeds, captures, and timelapse in one place.</p>
           </div>
           <div class="actions">
+            ${this._pulseEnabled() ? `<button class="secondary compact-button" data-action="open-pulse">✨ Present</button>` : ""}
             <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
             <button class="secondary compact-button" data-action="tab" data-id="settings">Manage cameras</button>
           </div>
@@ -7670,6 +7959,7 @@ class OpenReefPanel extends HTMLElement {
             <p>${sensorSummary.criticalCount} critical alert(s), ${sensorSummary.warningCount} warning(s), ${sensorSummary.contextCount} context warning(s), ${interlocks.length} interlock warning(s), ${missing.length} missing mapping(s), ${armedUnavailable.length} armed device issue(s).</p>
           </div>
           <div class="actions">
+            ${this._pulseEnabled() ? `<button class="secondary" data-action="open-pulse" title="Full-screen presentation mode">✨ Present</button>` : ""}
             <button class="secondary" data-action="onboarding-start" title="Take the guided tour">👋 Tour</button>
             <button class="secondary" data-action="validate">Refresh checks</button>
             <button class="primary" data-action="tab" data-id="settings" data-tour="settings">Open settings</button>
@@ -9182,6 +9472,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._timelapseSettings()}
         ${this._overlaySettings()}
         ${this._feedWatchSettings()}
+        ${this._pulseSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._interlockSettings()}
@@ -9931,6 +10222,60 @@ class OpenReefPanel extends HTMLElement {
     this._recordActivity(added ? `Loaded ${added} suggested maintenance task(s)` : "Suggested maintenance tasks already present");
     this._render();
     await this._persistConfigSilently();
+  }
+
+  _pulseSettings(forceOpen = false) {
+    const cfg = this._pulseCfg();
+    const cams = this._cameraList();
+    const blocks = [
+      ["showHealthRing", "Reef Health ring", "Animated score gauge in the top corner."],
+      ["showStats", "Live stat chips", "Follows the stat selection from Camera overlay settings."],
+      ["showTicker", "Event ticker", "Recent activity and alerts along the bottom."],
+      ["showMode", "Current mode", "Running / Feed / Maintenance pill in the header."],
+      ["showBuddy", "Reef Buddy", "Corner avatar with rotating calm-only quips."],
+      ["showClock", "Clock", "Live clock next to the tank name."],
+    ];
+    return this._settingsPanel(
+      "pulse",
+      "Reef Pulse",
+      "Full-screen presentation mode — a live wall display for a tank-side tablet or showing off. Display-only: no equipment can be controlled from the Pulse screen.",
+      `
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="pulse" data-field="enabled" ${cfg.enabled === false ? "" : "checked"}>
+          <span>
+            <strong>Enable Reef Pulse</strong>
+            <small>Adds a ✨ Present button to Mission Control and Cameras.</small>
+          </span>
+        </label>
+        ${cfg.enabled === false ? "" : `
+          <div class="mini-grid">
+            <label>Camera
+              <select data-scope="pulse" data-field="cameraId">
+                <option value="" ${!cfg.cameraId ? "selected" : ""}>Auto (first online)</option>
+                ${cams.map(([id, cam]) => `<option value="${this._escape(id)}" ${cfg.cameraId === id ? "selected" : ""}>${this._escape(cam.label || id)}</option>`).join("")}
+              </select>
+            </label>
+          </div>
+          <div class="grid two compact">
+            ${blocks.map(([field, label, hint]) => `
+              <label class="toggle-card">
+                <input type="checkbox" data-scope="pulse" data-field="${field}" ${cfg[field] === false ? "" : "checked"}>
+                <span><strong>${this._escape(label)}</strong><small>${this._escape(hint)}</small></span>
+              </label>
+            `).join("")}
+          </div>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="pulse" data-field="kioskAutoStart" ${cfg.kioskAutoStart === true ? "checked" : ""}>
+            <span>
+              <strong>Kiosk auto-start on this URL</strong>
+              <small>Opens straight into Pulse after loading — for a dedicated wall tablet. Add ?pulse=0 to the URL to get back to the normal panel, or press Esc / ✕.</small>
+            </span>
+          </label>
+          <p class="muted">No camera mapped or online? Pulse still works as a full-screen data wall.</p>
+        `}
+      `,
+      forceOpen,
+    );
   }
 
   _dosingSettings() {
@@ -12013,6 +12358,57 @@ class OpenReefPanel extends HTMLElement {
         .cam-hero-stage:hover { border-color: var(--openreef-accent); }
         .cam-hero-open { position: absolute; right: 12px; bottom: 12px; display: inline-flex; align-items: center; gap: 8px; padding: 9px 15px; border-radius: 999px; background: rgba(4, 12, 20, .74); color: #e5edf5; font-weight: 800; border: 1px solid var(--openreef-accent-border); }
         .cam-hero-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        /* Reef Pulse — full-screen presentation / kiosk mode */
+        .pulse-root { position: fixed; inset: 0; z-index: 9000; background: #04080d; overflow: hidden; color: #f4fbff; }
+        .pulse-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #04080d; }
+        .pulse-datawall { position: absolute; inset: 0; background: radial-gradient(circle at 22% 8%, var(--openreef-accent-soft), transparent 42%), radial-gradient(circle at 80% 88%, rgba(34, 197, 94, .12), transparent 46%), #060e17; }
+        .pulse-shade { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(4, 8, 13, .66), transparent 26%), linear-gradient(0deg, rgba(4, 8, 13, .78), transparent 36%); }
+        .pulse-head { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 26px 30px 0; }
+        .pulse-title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; min-width: 0; }
+        .pulse-title strong { font-size: clamp(26px, 4vw, 46px); font-weight: 800; color: #fff; text-shadow: 0 2px 14px rgba(0, 0, 0, .55); }
+        .pulse-clock { font-size: clamp(20px, 2.6vw, 30px); font-weight: 700; color: #cfe7f5; text-shadow: 0 2px 10px rgba(0, 0, 0, .5); font-variant-numeric: tabular-nums; }
+        .pulse-mode { border: 1px solid rgba(255, 255, 255, .22); border-radius: 999px; padding: 5px 14px; font-size: 13px; font-weight: 800; background: rgba(4, 10, 16, .5); backdrop-filter: blur(8px); color: #bbf7d0; }
+        .pulse-head-right { display: flex; align-items: flex-start; gap: 14px; }
+        .pulse-alert-chip { align-self: center; border-radius: 999px; padding: 8px 16px; font-weight: 800; background: rgba(127, 29, 29, .82); color: #fecaca; box-shadow: 0 4px 18px rgba(0, 0, 0, .4); animation: pulse-edge 1.6s ease-in-out infinite; }
+        .pulse-alert-warning .pulse-alert-chip { background: rgba(113, 63, 18, .85); color: #fde68a; }
+        .pulse-ring { position: relative; width: clamp(96px, 11vw, 150px); aspect-ratio: 1; animation: pulse-breathe 5.5s ease-in-out infinite; }
+        .pulse-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+        .pulse-ring-track { fill: none; stroke: rgba(255, 255, 255, .15); stroke-width: 9; }
+        .pulse-ring-arc { fill: none; stroke: #22c55e; stroke-width: 9; stroke-linecap: round; transition: stroke-dashoffset .8s ease; filter: drop-shadow(0 0 7px rgba(34, 197, 94, .55)); }
+        .pulse-ring.warning .pulse-ring-arc { stroke: #f59e0b; filter: drop-shadow(0 0 7px rgba(245, 158, 11, .55)); }
+        .pulse-ring.critical .pulse-ring-arc { stroke: #ef4444; filter: drop-shadow(0 0 7px rgba(239, 68, 68, .6)); }
+        .pulse-ring-text { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 2px; }
+        .pulse-ring-text strong { font-size: clamp(26px, 3.2vw, 40px); font-weight: 800; color: #fff; line-height: 1; text-shadow: 0 2px 10px rgba(0, 0, 0, .5); }
+        .pulse-ring-text small { font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: #9fc7e0; }
+        .pulse-foot { position: absolute; left: 0; right: 0; bottom: 0; display: grid; gap: 12px; padding: 0 30px 22px; }
+        .pulse-chips { display: flex; gap: 10px; flex-wrap: wrap; }
+        .pulse-chip { display: grid; gap: 2px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 12px; padding: 9px 16px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); }
+        .pulse-chip small { font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
+        .pulse-chip strong { font-size: clamp(17px, 2vw, 24px); font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
+        .pulse-chip.is-health small { color: #7fe0c4; }
+        .pulse-ticker { display: flex; gap: 22px; align-items: baseline; overflow: hidden; white-space: nowrap; mask-image: linear-gradient(90deg, #000 86%, transparent); }
+        .pulse-ticker-item { display: inline-flex; gap: 8px; align-items: baseline; opacity: .55; }
+        .pulse-ticker-item.latest { opacity: 1; }
+        .pulse-ticker-item small { color: #9fc7e0; font-weight: 800; font-size: 11px; }
+        .pulse-ticker-item strong { color: #e9f4fb; font-weight: 700; font-size: 13px; }
+        .pulse-ticker-item.critical strong { color: #fecaca; }
+        .pulse-ticker-item.warning strong { color: #fde68a; }
+        .pulse-buddy { position: absolute; right: 26px; bottom: 120px; display: flex; flex-direction: column; align-items: center; gap: 8px; width: 120px; pointer-events: none; }
+        .pulse-buddy .or-avatar-img, .pulse-buddy .or-avatar-ph { width: 104px; height: 104px; object-fit: contain; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, .5)); }
+        .pulse-buddy .or-avatar-ph { display: grid; place-items: center; font-size: 52px; }
+        .pulse-close { position: absolute; top: 22px; right: 22px; z-index: 2; width: 42px; height: 42px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .25); background: rgba(4, 10, 16, .55); color: #e5edf5; font-size: 17px; opacity: .35; transition: opacity .2s ease; backdrop-filter: blur(8px); }
+        .pulse-close:hover, .pulse-close:focus-visible { opacity: 1; }
+        .pulse-root.pulse-alert-warning::after, .pulse-root.pulse-alert-critical::after { content: ""; position: absolute; inset: 0; pointer-events: none; animation: pulse-edge 1.8s ease-in-out infinite; }
+        .pulse-root.pulse-alert-warning::after { box-shadow: inset 0 0 90px rgba(245, 158, 11, .4); }
+        .pulse-root.pulse-alert-critical::after { box-shadow: inset 0 0 110px rgba(239, 68, 68, .5); }
+        @keyframes pulse-edge { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+        @keyframes pulse-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.025); } }
+        @media (max-width: 700px) {
+          .pulse-head { padding: 16px 16px 0; }
+          .pulse-foot { padding: 0 16px 14px; }
+          .pulse-buddy { display: none; }
+          .pulse-mode { display: none; }
+        }
         .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #04080d; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
         .cam-feed-large { width: 100%; height: 100%; object-fit: contain; display: block; background: #04080d; }
         .cam-card { position: relative; padding: 0; overflow: hidden; min-height: 0; border: 1px solid #24364a; }

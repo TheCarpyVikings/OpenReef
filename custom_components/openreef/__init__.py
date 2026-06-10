@@ -1377,6 +1377,29 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         "persistent": bool(raw_reminders.get("persistent", True)),
     }
 
+    # Reef Pulse (presentation/kiosk mode) — display-only frontend feature; the
+    # backend just keeps its config block well-formed.
+    pulse = config.setdefault("pulse", {})
+    if not isinstance(pulse, dict):
+        config["pulse"] = deepcopy(DEFAULT_CORE_CONFIG["pulse"])
+        pulse = config["pulse"]
+    pulse_defaults = DEFAULT_CORE_CONFIG["pulse"]
+    for field in (
+        "enabled",
+        "showHealthRing",
+        "showStats",
+        "showTicker",
+        "showMode",
+        "showBuddy",
+        "showClock",
+        "kioskAutoStart",
+    ):
+        pulse[field] = bool(pulse.get(field, pulse_defaults[field]))
+    camera_id = pulse.get("cameraId")
+    cameras_block = config.get("cameras")
+    known_cameras = cameras_block if isinstance(cameras_block, dict) else {}
+    pulse["cameraId"] = camera_id if isinstance(camera_id, str) and camera_id in known_cameras else ""
+
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):
         config["dosing"] = deepcopy(DEFAULT_CORE_CONFIG["dosing"])

@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 39
-INTEGRATION_VERSION = "0.4.84"
+CORE_SCHEMA_VERSION = 40
+INTEGRATION_VERSION = "0.4.85"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -726,6 +726,19 @@ DEFAULT_CORE_CONFIG = {
             "notifyTarget": "",
             "persistent": True,
         },
+    },
+    # Reef Pulse — full-screen presentation / kiosk mode. Display-only (no control
+    # actions); every block is user-toggleable. cameraId "" = auto (first online).
+    "pulse": {
+        "enabled": True,
+        "showHealthRing": True,
+        "showStats": True,
+        "showTicker": True,
+        "showMode": True,
+        "showBuddy": True,
+        "showClock": True,
+        "kioskAutoStart": False,
+        "cameraId": "",
     },
     "dosing": {
         "enabled": True,

@@ -451,6 +451,46 @@ def test_maintenance_water_change_logs_volume_default():
     assert seeded["clean_glass"]["logsVolume"] is False
 
 
+# --- Reef Pulse (presentation/kiosk mode) ------------------------------------
+
+def test_pulse_defaults_injected():
+    pulse = normalise({})["pulse"]
+    assert pulse["enabled"] is True
+    assert pulse["showHealthRing"] is True
+    assert pulse["showStats"] is True
+    assert pulse["showTicker"] is True
+    assert pulse["showMode"] is True
+    assert pulse["showBuddy"] is True
+    assert pulse["showClock"] is True
+    assert pulse["kioskAutoStart"] is False   # kiosk must be opt-in
+    assert pulse["cameraId"] == ""
+
+
+def test_pulse_garbage_block_coerced():
+    for junk in ("a string", 7, ["x"], None):
+        assert isinstance(normalise({"pulse": junk}).get("pulse"), dict)
+
+
+def test_pulse_booleans_coerced_and_unknown_camera_cleared():
+    cfg = {
+        "pulse": {"enabled": 0, "showTicker": "", "kioskAutoStart": 1, "cameraId": "ghost"},
+        "cameras": {"display": {"entity_id": "camera.tank", "label": "Display"}},
+    }
+    pulse = normalise(cfg)["pulse"]
+    assert pulse["enabled"] is False
+    assert pulse["showTicker"] is False
+    assert pulse["kioskAutoStart"] is True
+    assert pulse["cameraId"] == ""          # unknown camera id dropped
+
+
+def test_pulse_known_camera_kept():
+    cfg = {
+        "pulse": {"cameraId": "display"},
+        "cameras": {"display": {"entity_id": "camera.tank", "label": "Display"}},
+    }
+    assert normalise(cfg)["pulse"]["cameraId"] == "display"
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:
