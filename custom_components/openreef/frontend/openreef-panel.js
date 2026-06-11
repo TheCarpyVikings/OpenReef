@@ -8782,18 +8782,21 @@ class OpenReefPanel extends HTMLElement {
     const rows = Object.entries(this._config.equipment || {});
     const groups = this._equipmentGroups(rows);
     const armedCount = rows.filter(([, i]) => i.armed).length;
-    const mappedCount = rows.filter(([, i]) => i.switch_entity_id).length;
+    const healths = rows.map(([id, item]) => this._equipmentHealth(id, item).status);
+    const healthy = healths.filter((s) => s === "ok").length;
+    const attention = healths.filter((s) => s === "warning" || s === "critical").length;
+    const attentionStatus = attention ? (healths.includes("critical") ? "critical" : "warning") : "ok";
     return `
       <section class="stack">
         <div class="section-head">
-          <div><h2>Controls</h2><p>Controls stay locked until each device is explicitly armed.</p></div>
+          <div><h2>Controls</h2><p>Controls stay locked until each device is explicitly armed. Card colour shows whether each device is in the state it should be.</p></div>
         </div>
         ${this._modeBanner()}
         ${rows.length ? `
           <div class="summary-grid">
+            ${this._missionSummaryCard("Healthy", `${healthy}/${rows.length}`, healthy === rows.length ? "all behaving as expected" : "in their expected state", healthy === rows.length ? "ok" : attentionStatus, "controls")}
+            ${this._missionSummaryCard("Attention", String(attention), attention ? "need a look" : "nothing flagged", attentionStatus, "controls")}
             ${this._missionSummaryCard("Armed", `${armedCount}/${rows.length}`, armedCount ? "OpenReef can switch these" : "all locked", armedCount ? "ok" : "unknown", "controls")}
-            ${this._missionSummaryCard("Locked", String(rows.length - armedCount), "held safe · disarmed", "unknown", "controls")}
-            ${this._missionSummaryCard("Mapped", `${mappedCount}/${rows.length}`, "have a switch entity", mappedCount === rows.length ? "ok" : "warning", "settings")}
           </div>
         ` : ""}
         ${rows.length ? groups.map(([label, items]) => `
@@ -8809,6 +8812,41 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  // Equipment "health" = is this device in the state it should be in right now?
+  // Green when everything's as expected; amber/red when a state or safety check
+  // is off (wavemaker off when it should run, ATO on against its safeguard, an
+  // unreachable switch, etc.). This drives the card colour and the health pill.
+  _equipmentHealth(id, item) {
+    if (!item?.switch_entity_id) {
+      return { status: "unknown", label: "Not mapped", detail: "Map a switch entity in Settings to monitor this device." };
+    }
+    const state = this._stateValue(item.switch_entity_id);
+    const armed = item.armed === true;
+    if (state !== "on" && state !== "off") {
+      return { status: armed ? "critical" : "warning", label: "Unavailable", detail: "Home Assistant is not reporting a usable state for this switch." };
+    }
+    // A display wavemaker should be running — off is a flow risk for corals.
+    if (this._isDisplayWavemaker(id, item) && state === "off") {
+      return { status: "critical", label: "Off · flow risk", detail: "Display wavemaker is off. Flow is critical for corals — inspect the tank and restart." };
+    }
+    // ATO held by the return-pump safeguard: running against it is unsafe (red);
+    // held off is the safeguard doing its job while the return pump is off (amber).
+    if (this._equipmentProfile(id, item) === "ato" && this._atoHeldByReturnPump()) {
+      const issues = this._returnPumpDependencyIssues().join(", ");
+      return state === "on"
+        ? { status: "critical", label: "On · unsafe", detail: `ATO is adding water while return flow is unconfirmed: ${issues}.` }
+        : { status: "warning", label: "Held safe", detail: `ATO is held off while return flow is unconfirmed: ${issues}.` };
+    }
+    // Other interlock / safety conditions (skimmer dependency, etc.).
+    const safety = this._equipmentSafetyStatus(id, item);
+    if (safety && (safety[0] === "critical" || safety[0] === "warning")) {
+      return { status: safety[0], label: safety[1], detail: safety[2] };
+    }
+    return armed
+      ? { status: "ok", label: "Healthy", detail: "Armed, available, and behaving as expected." }
+      : { status: "ok", label: "Standby", detail: "Disarmed and held safe. Arm it in Settings to let OpenReef switch it." };
+  }
+
   _controlCard(id, item) {
     const state = this._stateValue(item.switch_entity_id);
     const isOn = state === "on";
@@ -8816,12 +8854,13 @@ class OpenReefPanel extends HTMLElement {
     const stateClass = this._equipmentStateClass(item);
     const stateLabel = this._equipmentStateLabel(item);
     const [risk, riskLabel, riskDetail] = this._equipmentRisk(id, item);
+    const health = this._equipmentHealth(id, item);
     const reason = this._controlBlockReason(item, id);
     const safetyStatus = this._equipmentSafetyStatus(id, item);
     const action = this._controlActionLabel(item);
     const displayWavemakerOff = this._isDisplayWavemaker(id, item) && state === "off";
     return `
-      <article class="panel control-card stat-accent ${enabled ? risk : "unknown"} ${enabled ? "" : "locked-card"}">
+      <article class="panel control-card stat-accent ${health.status} ${enabled ? "" : "locked-card"}">
         <div class="card-head">
           <div>
             <h3>${this._escape(item.label || id)}</h3>
@@ -8829,7 +8868,7 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <div class="pill-stack">
             <span class="pill ${stateClass}">${this._escape(stateLabel)}</span>
-            <span class="pill risk-${risk}">${this._escape(riskLabel)}</span>
+            <span class="pill ${health.status}" title="${this._escape(health.detail)}">${this._escape(health.label)}</span>
           </div>
         </div>
         <div class="control-detail">
