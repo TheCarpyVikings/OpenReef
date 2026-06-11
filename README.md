@@ -1,6 +1,6 @@
 # OpenReef
 
-OpenReef is the open **intelligence layer for reefing** — a private-beta, Home Assistant-native reef controller that runs on any HA hardware (including your existing Apex, Trident, HYDROS, ESPHome, probes, and smart plugs) and adds the trust, prediction, and vision the hardware vendors can't ship.
+OpenReef is the open **intelligence layer for reefing** — a private-beta, Home Assistant-native reef controller that runs on any HA hardware (including your existing Apex, Trident, ESPHome, probes, and smart plugs) and adds the trust, prediction, and vision the hardware vendors can't ship.
 
 The stable controller now lives in the Home Assistant custom integration:
 
