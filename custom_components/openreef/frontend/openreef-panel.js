@@ -65,6 +65,10 @@ class OpenReefPanel extends HTMLElement {
     this._pulseSparks = {};
     this._pulseSparksAt = 0;
     this._pulseSparksLoading = false;
+    this._liveStatsMode = this._loadLiveStatsMode();
+    this._liveSparks = {};
+    this._liveSparksAt = 0;
+    this._liveSparksLoading = false;
   }
 
   set hass(hass) {
@@ -196,6 +200,25 @@ class OpenReefPanel extends HTMLElement {
       window.localStorage?.setItem("openreef:settingsSections:v1", JSON.stringify(this._settingsSections));
     } catch {
       // Section memory is a convenience only; OpenReef still works without localStorage.
+    }
+  }
+
+  // Live Stats card display preference (number | graph | gauge). View-only, so it
+  // lives in localStorage like the other view toggles — no save/dirty round-trip.
+  _loadLiveStatsMode() {
+    try {
+      const stored = window.localStorage?.getItem("openreef:liveStatsMode:v1");
+      return ["number", "graph", "gauge"].includes(stored) ? stored : "number";
+    } catch {
+      return "number";
+    }
+  }
+
+  _saveLiveStatsMode() {
+    try {
+      window.localStorage?.setItem("openreef:liveStatsMode:v1", this._liveStatsMode);
+    } catch {
+      // Convenience only.
     }
   }
 
@@ -1282,6 +1305,14 @@ class OpenReefPanel extends HTMLElement {
       if (action === "clear-activity") {
         this._config.activity = [];
         this._saveConfig();
+      }
+      if (action === "live-mode") {
+        const mode = target.dataset.mode;
+        if (["number", "graph", "gauge"].includes(mode) && mode !== this._liveStatsMode) {
+          this._liveStatsMode = mode;
+          this._saveLiveStatsMode();
+          this._render();
+        }
       }
       if (action === "show-trend") this._loadTrend(id);
       if (action === "trend-range") {
@@ -5552,6 +5583,9 @@ class OpenReefPanel extends HTMLElement {
       requestAnimationFrame(() => this._positionOnboarding());
     }
     this._maybeAutoStartOnboarding();
+    if (this._activeTab === "live" && this._liveStatsMode === "graph") {
+      this._loadLiveSparklines();
+    }
   }
 
   // --- Avatar onboarding tour (Phase 1) -----------------------------------
@@ -8602,6 +8636,10 @@ class OpenReefPanel extends HTMLElement {
       <section class="stack">
         <div class="section-head">
           <div><h2>Live Stats</h2><p>Your reef readings at a glance — grouped and range-checked.</p></div>
+          <div class="range-picker live-mode-picker">
+            ${[["number", "Numbers"], ["graph", "Graphs"], ["gauge", "Gauges"]].map(([m, label]) =>
+              `<button class="compact-button ${this._liveStatsMode === m ? "active" : ""}" data-action="live-mode" data-mode="${m}">${label}</button>`).join("")}
+          </div>
         </div>
         <div class="summary-grid">
           ${this._missionSummaryCard("Sensors", `${mapped}/${sensors.length}`, mapped === sensors.length ? "all mapped" : "mapped to Home Assistant", mapped ? "ok" : "unknown", "settings")}
@@ -8647,23 +8685,43 @@ class OpenReefPanel extends HTMLElement {
     const display = this._sensorDisplayValue(id, sensor);
     const unit = this._sensorDisplayUnit(id, sensor);
     const badge = this._liveStatBadge(id, sensor);
-    const trendEnabled = this._sensorKind(sensor, id) !== "binary" && Boolean(sensor.entity_id);
-    const inner = `
+    const mapped = Boolean(sensor.entity_id);
+    const numeric = this._sensorKind(sensor, id) !== "binary";
+    const trendEnabled = numeric && mapped;
+    // Graph/gauge only make sense for a mapped numeric sensor; everything else
+    // (binary safety sensors, unmapped) falls back to the number card.
+    const mode = trendEnabled ? this._liveStatsMode : "number";
+    const valueMarkup = (cls = "") => `
+      <div class="live-stat-value ${cls}">
+        <strong>${this._escape(display)}</strong>
+        ${unit ? `<span>${this._escape(unit)}</span>` : ""}
+      </div>`;
+    const head = `
       <div class="live-stat-head">
         <p>${this._escape(sensor.label)}</p>
         <span class="pill ${badge.status}">${this._escape(badge.label)}</span>
-      </div>
-      <div class="live-stat-value">
-        <strong>${this._escape(display)}</strong>
-        ${unit ? `<span>${this._escape(unit)}</span>` : ""}
-      </div>
+      </div>`;
+    // Entity IDs are intentionally gone; keep only the "Not mapped" status and the
+    // Trend affordance, right-aligned.
+    const foot = `
       <div class="stat-foot">
-        <small>${this._escape(sensor.entity_id || "Not mapped")}</small>
+        ${mapped ? "<span></span>" : `<small>Not mapped</small>`}
         ${trendEnabled ? `<span class="trend-chip">Trend ›</span>` : ""}
-      </div>
-    `;
+      </div>`;
+    let inner;
+    if (mode === "graph") {
+      inner = `${head}${valueMarkup("compact")}
+        <div class="live-spark" data-live-spark="${this._escape(id)}">${this._pulseSparkSvg(this._liveSparks[id])}</div>
+        ${foot}`;
+    } else if (mode === "gauge") {
+      inner = `${head}
+        ${this._liveGaugeMarkup(id, sensor, badge, display, unit)}
+        ${foot}`;
+    } else {
+      inner = `${head}${valueMarkup()}${foot}`;
+    }
     return trendEnabled ? `
-      <button class="stat live-stat stat-accent ${badge.status} stat-button" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
+      <button class="stat live-stat stat-accent ${badge.status} stat-button mode-${mode}" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
         ${inner}
       </button>
     ` : `
@@ -8671,6 +8729,53 @@ class OpenReefPanel extends HTMLElement {
         ${inner}
       </article>
     `;
+  }
+
+  // Semicircle gauge showing where the reading sits between its min and max,
+  // filled + coloured by the status badge. Arc length for r=44 ≈ 138.2.
+  _liveGaugeMarkup(id, sensor, badge, display, unit) {
+    const value = this._number(sensor.entity_id);
+    const min = Number(sensor.min);
+    const max = Number(sensor.max);
+    const hasRange = value !== null && Number.isFinite(min) && Number.isFinite(max) && max > min;
+    const pct = hasRange ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
+    const len = 138.2;
+    const offset = (len * (1 - pct)).toFixed(1);
+    return `
+      <div class="live-gauge ${badge.status}">
+        <svg viewBox="0 0 100 58" class="live-gauge-svg" preserveAspectRatio="xMidYMax meet" aria-hidden="true">
+          <path class="live-gauge-track" d="M 6 50 A 44 44 0 0 1 94 50" />
+          <path class="live-gauge-arc" d="M 6 50 A 44 44 0 0 1 94 50" stroke-dasharray="${len}" stroke-dashoffset="${hasRange ? offset : len}" />
+        </svg>
+        <div class="live-gauge-value">
+          <strong>${this._escape(display)}</strong>${unit ? `<span>${this._escape(unit)}</span>` : ""}
+        </div>
+        ${hasRange ? `<div class="live-gauge-bounds"><small>${this._escape(this._format(min, 1))}</small><small>${this._escape(this._format(max, 1))}</small></div>` : ""}
+      </div>`;
+  }
+
+  // Fetch 24h sparkline history for the visible numeric sensors when Live Stats is
+  // in graph mode — sequential + capped + cached ~4 min (targeted-and-capped rule).
+  async _loadLiveSparklines(force = false) {
+    if (this._liveSparksLoading) return;
+    if (!force && this._liveSparksAt && Date.now() - this._liveSparksAt < 4 * 60 * 1000) return;
+    this._liveSparksLoading = true;
+    try {
+      for (const [id, sensor] of this._enabledSensors()) {
+        if (this._activeTab !== "live" || this._liveStatsMode !== "graph") break;
+        if (!sensor.entity_id || this._sensorKind(sensor, id) === "binary") continue;
+        try {
+          this._liveSparks[id] = await this._fetchTrendPoints(sensor.entity_id, "24h");
+        } catch {
+          // Keep whatever we had; a flat placeholder is fine.
+        }
+        const el = this.shadowRoot && this.shadowRoot.querySelector(`[data-live-spark="${id}"]`);
+        if (el) el.innerHTML = this._pulseSparkSvg(this._liveSparks[id]);
+      }
+      this._liveSparksAt = Date.now();
+    } finally {
+      this._liveSparksLoading = false;
+    }
   }
 
   _controls() {
@@ -12525,6 +12630,23 @@ class OpenReefPanel extends HTMLElement {
         .live-stat .stat-foot small { color: #8da2ba; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .live-stat .trend-chip { border: 1px solid #294055; border-radius: 999px; padding: 4px 10px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; white-space: nowrap; }
         .live-stat.stat-button:hover .trend-chip, .live-stat.stat-button:focus-visible .trend-chip { border-color: var(--openreef-accent); }
+        /* Live Stats display modes: Numbers / Graphs / Gauges */
+        .live-mode-picker { flex-wrap: nowrap; }
+        .live-stat-value.compact strong { font-size: 24px; }
+        .live-spark { height: 58px; margin: 2px 0; }
+        .live-spark .pulse-spark-svg { width: 100%; height: 100%; display: block; }
+        .live-gauge { display: grid; justify-items: center; gap: 2px; position: relative; }
+        .live-gauge-svg { width: 100%; max-width: 220px; height: auto; display: block; }
+        .live-gauge-track { fill: none; stroke: rgba(255, 255, 255, .12); stroke-width: 9; stroke-linecap: round; }
+        .live-gauge-arc { fill: none; stroke: #22c55e; stroke-width: 9; stroke-linecap: round; transition: stroke-dashoffset .7s ease; filter: drop-shadow(0 0 5px rgba(34, 197, 94, .5)); }
+        .live-gauge.warning .live-gauge-arc { stroke: #f59e0b; filter: drop-shadow(0 0 5px rgba(245, 158, 11, .5)); }
+        .live-gauge.critical .live-gauge-arc { stroke: #ef4444; filter: drop-shadow(0 0 5px rgba(239, 68, 68, .55)); }
+        .live-gauge.unknown .live-gauge-arc { stroke: #64748b; filter: none; }
+        .live-gauge-value { margin-top: -18px; display: flex; align-items: baseline; gap: 6px; }
+        .live-gauge-value strong { font-size: 30px; color: #67e8f9; line-height: 1; }
+        .live-gauge-value span { color: #9fb2c7; font-weight: 800; font-size: 13px; }
+        .live-gauge-bounds { width: 100%; max-width: 220px; display: flex; justify-content: space-between; margin-top: 2px; }
+        .live-gauge-bounds small { color: #8da2ba; font-size: 10px; font-weight: 800; font-variant-numeric: tabular-nums; }
         /* Collapsible Mission Control sections (quiet by default) */
         .mission-section { padding: 0; overflow: hidden; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .mission-section.collapsed { border-color: #24364a; background: #121f2f; }
