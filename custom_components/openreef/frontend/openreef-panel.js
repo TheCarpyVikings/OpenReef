@@ -6095,7 +6095,7 @@ class OpenReefPanel extends HTMLElement {
     return "";
   }
 
-  _spawning() {
+  _spawningTab() {
     const sp = (this._config && this._config.spawningProgram) || {};
     const st = this._spawning;
     const head = `
@@ -6251,7 +6251,7 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
     if (this._activeTab === "controls") return this._controls();
-    if (this._activeTab === "spawning") return this._spawning();
+    if (this._activeTab === "spawning") return this._spawningTab();
     if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
     if (this._activeTab === "settings") return this._settings();
