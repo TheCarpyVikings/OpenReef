@@ -35,6 +35,7 @@ class OpenReefPanel extends HTMLElement {
     this._feedPlayer = { sessionId: "", frames: [], index: 0, playing: false, loading: false };
     this._feedPlayerTimer = null;
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
+    this._lightingWindow = { data: null, loading: false };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -169,6 +170,7 @@ class OpenReefPanel extends HTMLElement {
       equipment: false,
       modes: false,
       alerts: false,
+      lighting: false,
       interlocks: false,
       energy: false,
       pulse: false,
@@ -1048,6 +1050,7 @@ class OpenReefPanel extends HTMLElement {
         const text = this._spawningCopyText(target.dataset.id);
         if (text) this._copyText(text, "Copied to clipboard", "Could not copy");
       }
+      if (action === "lighting-refresh-window") this._loadLightingWindow(true);
       if (action === "mute-alert") this._muteAlert(id, Number(target.dataset.minutes || 60));
       if (action === "unmute-alert") this._muteAlert(id, 0);
       if (action === "ack-alert") this._acknowledgeAlert(id);
@@ -1391,6 +1394,16 @@ class OpenReefPanel extends HTMLElement {
         this._config.cameras[id][field] = value;
       }
       if (scope === "energy") this._config.energy[field] = value;
+      if (scope === "lighting") {
+        this._config.lightingSchedule = this._config.lightingSchedule || {};
+        if (field === "offsetHours") {
+          this._config.lightingSchedule.offsetHours = Number(value) || 0;
+        } else if (field === "rampGraceMinutes") {
+          this._config.lightingSchedule.rampGraceMinutes = Math.max(0, Math.min(240, Number(value) || 0));
+        } else {
+          this._config.lightingSchedule[field] = value;
+        }
+      }
       if (scope === "alerts") {
         this._config.alerts = this._config.alerts || {};
         this._config.alerts[field] = value;
@@ -1593,7 +1606,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes")
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting")
         && event.type === "change"
       ) this._render();
     };
@@ -10011,6 +10024,84 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  async _loadLightingWindow(force = false) {
+    if (this._lightingWindow.loading) return;
+    if (this._lightingWindow.data && !force) return;
+    this._lightingWindow.loading = true;
+    try {
+      const res = await this._callWS({ type: "openreef/lighting_window" });
+      this._lightingWindow.data = res?.lighting || { configured: false };
+    } catch (err) {
+      this._lightingWindow.data = { configured: false };
+    } finally {
+      this._lightingWindow.loading = false;
+      this._render();
+    }
+  }
+
+  _lightingScheduleSettings() {
+    const ls = this._config.lightingSchedule || { mode: "off" };
+    const mode = ls.mode || "off";
+
+    if (mode === "reef" && this._spawning.presets === null && !this._spawning.loading) {
+      setTimeout(() => this._loadReefPresets(), 0);
+    }
+    if (mode !== "off" && this._lightingWindow.data === null && !this._lightingWindow.loading) {
+      setTimeout(() => this._loadLightingWindow(), 0);
+    }
+
+    const presetOptions = (this._spawning.presets || [])
+      .map((p) => `<option value="${this._escape(p.id)}" ${p.id === (ls.reefPreset || "gbr_central") ? "selected" : ""}>${this._escape(p.label)}</option>`)
+      .join("");
+
+    const modeBody = mode === "simple" ? `
+      <div class="mini-grid">
+        <label>Lights on<input type="time" data-scope="lighting" data-field="onTime" value="${this._escape(ls.onTime || "08:00")}"></label>
+        <label>Lights off<input type="time" data-scope="lighting" data-field="offTime" value="${this._escape(ls.offTime || "20:00")}"></label>
+      </div>
+    ` : mode === "reef" ? `
+      <div class="mini-grid">
+        <label>Reef to mimic<select data-scope="lighting" data-field="reefPreset">${presetOptions || `<option>Loading…</option>`}</select></label>
+        <label>Offset (hours)<input type="number" step="0.5" min="-12" max="12" data-scope="lighting" data-field="offsetHours" value="${this._escape(String(ls.offsetHours ?? 0))}"></label>
+      </div>
+      <p class="hint">Mimics the reef's sunrise/sunset by day length, shifted by your offset — e.g. Cairns time + 2h. Tune the offset until the window below matches your real lights.</p>
+    ` : `<p class="hint">No gating — light-dependent alerts (like PAR) are evaluated 24/7.</p>`;
+
+    const win = this._lightingWindow.data;
+    const windowCard = mode === "off" ? "" : (win && win.configured ? `
+      <div class="notice info-notice">
+        <strong>Today: lights ${this._escape(win.onTime)}–${this._escape(win.offTime)}</strong>
+        · currently <strong>${win.lightsOnNow ? "ON ☀️" : "OFF 🌙"}</strong>${win.graceMinutes ? ` · ${this._escape(String(win.graceMinutes))}-min ramp grace` : ""}${win.reefLabel ? ` · ${this._escape(win.reefLabel)} (~${this._escape(String(win.dayLengthHours))}h day)` : ""}
+        <div class="button-row"><button class="secondary compact-button" data-action="lighting-refresh-window">Refresh</button><small>Reflects saved settings — save changes first.</small></div>
+      </div>
+    ` : `<p class="hint">${this._lightingWindow.loading ? "Calculating today's window…" : "Save your schedule to see today's computed window."}</p>`);
+
+    const body = `
+      <label>Schedule mode
+        <select data-scope="lighting" data-field="mode">
+          <option value="off" ${mode === "off" ? "selected" : ""}>Off — no gating</option>
+          <option value="simple" ${mode === "simple" ? "selected" : ""}>Simple — on/off times</option>
+          <option value="reef" ${mode === "reef" ? "selected" : ""}>Reef — mimic a location</option>
+        </select>
+      </label>
+      ${modeBody}
+      ${mode !== "off" ? `
+        <label>Ramp grace (minutes)
+          <input type="number" min="0" max="240" step="5" data-scope="lighting" data-field="rampGraceMinutes" value="${this._escape(String(ls.rampGraceMinutes ?? 30))}">
+          <small>No low-reading alerts within this buffer after lights-on / before lights-off, so the dawn/dusk ramp doesn't false-alarm.</small>
+        </label>
+      ` : ""}
+      ${windowCard}
+      <p class="hint">Choose which sensors this gates in each sensor's settings ("Only alert during lighting hours"). PAR is gated by default.</p>
+    `;
+    return this._settingsPanel(
+      "lighting",
+      "Lighting schedule",
+      "Stop low-PAR (and other light-dependent) alerts firing when your lights are intentionally off.",
+      body,
+    );
+  }
+
   _saveControls() {
     return `
       <div class="settings-save">
@@ -10051,6 +10142,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._pulseSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
+        ${this._lightingScheduleSettings()}
         ${this._interlockSettings()}
         ${this._energySettings()}
         ${this._systemCheckSettings()}
@@ -11187,6 +11279,15 @@ class OpenReefPanel extends HTMLElement {
               <small>Warn when this reading is missing, near a threshold, or outside range.</small>
             </span>
           </label>
+          ${sensor.group === "lighting" ? `
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="sensor" data-id="${this._escape(id)}" data-field="lightGated" ${sensor.lightGated ? "checked" : ""}>
+            <span>
+              <strong>Only alert during lighting hours</strong>
+              <small>Skip low-reading alerts when the lights are off. Set the schedule in <em>Lighting schedule</em> below.</small>
+            </span>
+          </label>
+          ` : ""}
           <div class="mini-grid">
             <label>Min<input type="number" step="0.01" data-scope="sensor" data-id="${this._escape(id)}" data-field="min" value="${this._escape(sensor.min)}"></label>
             <label>Max<input type="number" step="0.01" data-scope="sensor" data-id="${this._escape(id)}" data-field="max" value="${this._escape(sensor.max)}"></label>

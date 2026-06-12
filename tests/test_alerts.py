@@ -26,6 +26,8 @@ import openreef as integration  # noqa: E402
 
 from _fake_ha import FakeHass  # noqa: E402
 
+from datetime import datetime  # noqa: E402
+
 items = integration._sensor_alert_items
 sync = integration._sync_alert_state
 
@@ -142,6 +144,82 @@ def test_critical_to_resolved_is_a_transition():
 
 
 # --- tiny standalone runner -------------------------------------------------
+
+# --- lighting-schedule gating of light-dependent (PAR) low alerts -----------
+
+def _par(**over):
+    base = {
+        "entity_id": "sensor.par", "label": "PAR", "enabled": True, "alertsEnabled": True,
+        "kind": "numeric", "unit": "PAR", "min": 50, "max": 350, "warningBuffer": 10,
+        "lightGated": True,
+    }
+    base.update(over)
+    return base
+
+
+def _light_cfg(par, schedule):
+    return {"sensors": {"par": par}, "alerts": {}, "lightingSchedule": schedule}
+
+
+SIMPLE = {"mode": "simple", "onTime": "08:00", "offTime": "20:00", "rampGraceMinutes": 0}
+NIGHT = datetime(2026, 1, 15, 2, 0)
+DAY = datetime(2026, 1, 15, 14, 0)
+
+
+def test_low_par_at_night_is_suppressed():
+    hass = FakeHass(states={"sensor.par": "0"})
+    assert _sev(items(hass, _light_cfg(_par(), SIMPLE), now_local=NIGHT)) == {}
+
+
+def test_low_par_during_day_alerts():
+    hass = FakeHass(states={"sensor.par": "0"})
+    assert _sev(items(hass, _light_cfg(_par(), SIMPLE), now_local=DAY)) == {"par": "critical"}
+
+
+def test_high_par_alerts_even_at_night():
+    # Too much light is always wrong — the high side is never gated.
+    hass = FakeHass(states={"sensor.par": "400"})
+    assert _sev(items(hass, _light_cfg(_par(), SIMPLE), now_local=NIGHT)) == {"par": "critical"}
+
+
+def test_non_gated_sensor_alerts_at_night():
+    hass = FakeHass(states={"sensor.par": "0"})
+    assert _sev(items(hass, _light_cfg(_par(lightGated=False), SIMPLE), now_local=NIGHT)) == {"par": "critical"}
+
+
+def test_schedule_off_means_no_suppression():
+    hass = FakeHass(states={"sensor.par": "0"})
+    assert _sev(items(hass, _light_cfg(_par(), {"mode": "off"}), now_local=NIGHT)) == {"par": "critical"}
+
+
+def test_ramp_grace_suppresses_low_par_at_sunrise():
+    sched = {"mode": "simple", "onTime": "08:00", "offTime": "20:00", "rampGraceMinutes": 60}
+    hass = FakeHass(states={"sensor.par": "20"})
+    # 08:30 is inside the dawn ramp grace -> suppressed; 09:30 (ramp done) -> alert
+    assert _sev(items(hass, _light_cfg(_par(), sched), now_local=datetime(2026, 1, 15, 8, 30))) == {}
+    assert _sev(items(hass, _light_cfg(_par(), sched), now_local=datetime(2026, 1, 15, 9, 30))) == {"par": "critical"}
+
+
+def test_low_par_warning_band_suppressed_at_night():
+    hass = FakeHass(states={"sensor.par": "60"})  # above min, inside warning band
+    assert _sev(items(hass, _light_cfg(_par(), SIMPLE), now_local=NIGHT)) == {}
+    assert _sev(items(hass, _light_cfg(_par(), SIMPLE), now_local=DAY)) == {"par": "warning"}
+
+
+def test_equal_time_schedule_never_suppresses_low_par():
+    # A degenerate onTime == offTime schedule must NOT silence a real low-PAR alert.
+    sched = {"mode": "simple", "onTime": "08:00", "offTime": "08:00", "rampGraceMinutes": 0}
+    hass = FakeHass(states={"sensor.par": "0"})
+    assert _sev(items(hass, _light_cfg(_par(), sched), now_local=NIGHT)) == {"par": "critical"}
+    assert _sev(items(hass, _light_cfg(_par(), sched), now_local=DAY)) == {"par": "critical"}
+
+
+def test_reef_mode_gates_par():
+    sched = {"mode": "reef", "reefPreset": "gbr_central", "offsetHours": 2, "rampGraceMinutes": 30}
+    hass = FakeHass(states={"sensor.par": "0"})
+    assert _sev(items(hass, _light_cfg(_par(), sched), now_local=datetime(2026, 1, 15, 3, 0))) == {}
+    assert _sev(items(hass, _light_cfg(_par(), sched), now_local=datetime(2026, 1, 15, 14, 0))) == {"par": "critical"}
+
 
 def _main() -> int:
     tests = sorted(

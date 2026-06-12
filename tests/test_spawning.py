@@ -222,6 +222,76 @@ def test_normalise_negative_offset_floors_to_zero():
     assert cfg["spawningProgram"]["tempUnit"] == "C"
 
 
+# --- Lighting schedule (drives alert gating) ---------------------------------
+
+def test_lighting_window_off_is_none():
+    assert spawning.lighting_window({"mode": "off"}, _d(2026, 1, 15)) is None
+    assert spawning.lighting_window(None, _d(2026, 1, 15)) is None
+
+
+def test_lighting_window_simple():
+    win = spawning.lighting_window({"mode": "simple", "onTime": "08:00", "offTime": "20:00"}, _d(2026, 1, 15))
+    assert win == (480, 1200)
+
+
+def test_is_lights_on_no_schedule_is_true():
+    assert spawning.is_lights_on({"mode": "off"}, datetime(2026, 1, 15, 3, 0), 30) is True
+    assert spawning.is_lights_on(None, datetime(2026, 1, 15, 3, 0), 30) is True
+
+
+def test_is_lights_on_simple_boundaries():
+    s = {"mode": "simple", "onTime": "08:00", "offTime": "20:00"}
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 7, 59), 0) is False
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 8, 0), 0) is True
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 19, 59), 0) is True
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 20, 0), 0) is False
+
+
+def test_grace_narrows_window():
+    s = {"mode": "simple", "onTime": "08:00", "offTime": "20:00"}
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 8, 15), 30) is False
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 8, 45), 30) is True
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 19, 45), 30) is False
+
+
+def test_grace_clamped_when_window_short():
+    # Absurd grace on a 2h window must not invert it — the midpoint stays alertable.
+    s = {"mode": "simple", "onTime": "12:00", "offTime": "14:00"}
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 13, 0), 600) is True
+
+
+def test_equal_times_never_suppress():
+    # Degenerate schedule (onTime == offTime) must read as lights-on 24h so a real
+    # low reading is never silently suppressed — at any grace, any hour.
+    s = {"mode": "simple", "onTime": "08:00", "offTime": "08:00"}
+    for grace in (0, 30):
+        for h in (2, 8, 14, 23):
+            assert spawning.is_lights_on(s, datetime(2026, 1, 1, h, 0), grace) is True, (grace, h)
+
+
+def test_midnight_wrap_window():
+    s = {"mode": "simple", "onTime": "20:00", "offTime": "06:00"}
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 23, 0), 0) is True
+    assert spawning.is_lights_on(s, datetime(2026, 1, 1, 12, 0), 0) is False
+
+
+def test_reef_window_tracks_offset():
+    base = spawning.lighting_window({"mode": "reef", "reefPreset": "gbr_central", "offsetHours": 0}, _d(2026, 1, 15))
+    shifted = spawning.lighting_window({"mode": "reef", "reefPreset": "gbr_central", "offsetHours": 2}, _d(2026, 1, 15))
+    assert shifted[0] == (base[0] + 120) % 1440
+    assert shifted[1] == (base[1] + 120) % 1440
+
+
+def test_lighting_window_summary_reef():
+    summ = spawning.lighting_window_summary(
+        {"mode": "reef", "reefPreset": "gbr_central", "offsetHours": 2, "rampGraceMinutes": 30},
+        datetime(2026, 1, 15, 14, 0),
+    )
+    assert summ["configured"] is True and summ["lightsOnNow"] is True
+    assert ":" in summ["onTime"] and ":" in summ["offTime"]
+    assert summ["reefLabel"] == "Great Barrier Reef (Central)"
+
+
 # --- Websocket handlers (the real backend entry points) ----------------------
 
 def test_ws_list_reef_presets():

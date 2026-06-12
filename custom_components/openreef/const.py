@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 42
-INTEGRATION_VERSION = "0.4.90"
+CORE_SCHEMA_VERSION = 43
+INTEGRATION_VERSION = "0.4.91"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -507,6 +507,13 @@ SPAWNING_SUNUP_RAMP_MIN = 60              # default dawn ramp (minutes)
 SPAWNING_SUNSET_RAMP_MIN = 60             # default dusk ramp (minutes) — proximate spawn trigger
 SPAWNING_OFFSET_MONTHS_MAX = 11
 
+# Lighting schedule — gates light-dependent alerts (PAR especially) to the hours
+# the lights are actually meant to be on, so a 0-PAR reading at night doesn't fire
+# a false "below minimum" alert. Reuses the spawning solar math for reef mode.
+LIGHTING_SCHEDULE_DEFAULT_GRACE_MIN = 30  # dawn/dusk ramp grace (minutes) — no low alert inside it
+LIGHTING_SCHEDULE_GRACE_MAX = 240
+LIGHTING_OFFSET_HOURS_MAX = 12.0
+
 REEF_PRESETS: dict[str, dict] = {
     "gbr_central": {
         "label": "Great Barrier Reef (Central)",
@@ -594,6 +601,10 @@ DEFAULT_CORE_CONFIG = {
             "max": meta["max"],
             "alertsEnabled": True,
             "warningBuffer": 10,
+            # Gate low-side alerts to the lighting schedule (light-dependent sensors
+            # like PAR read ~0 when lights are off — don't alert then). Default on
+            # for lighting-group sensors only.
+            "lightGated": meta.get("group") == "lighting",
         }
         for sensor_id, meta in MVP_SENSORS.items()
     },
@@ -850,6 +861,16 @@ DEFAULT_CORE_CONFIG = {
             }
             for parameter in DOSING_PARAMETERS
         },
+    },
+    # Lighting schedule — drives when light-dependent (lightGated) sensor alerts
+    # may fire. mode "off" = no gating (alerts always evaluated, legacy behaviour).
+    "lightingSchedule": {
+        "mode": "off",                 # off | simple | reef
+        "onTime": "08:00",             # simple mode
+        "offTime": "20:00",            # simple mode
+        "reefPreset": "gbr_central",   # reef mode — reuses REEF_PRESETS
+        "offsetHours": 0,              # reef mode — shift the photoperiod to your clock
+        "rampGraceMinutes": LIGHTING_SCHEDULE_DEFAULT_GRACE_MIN,
     },
     # Coral Spawning — reef-location simulator. Persists the user's selection; the
     # program itself is compiled on demand (openreef/generate_spawning_program).

@@ -577,6 +577,105 @@ def generate_program(
     }
 
 
+# --------------------------------------------------------------------------- #
+# Lighting schedule — used to gate light-dependent alerts (e.g. PAR) to the
+# hours the lights are actually meant to be on. Reuses the same solar day-length
+# math as the spawning compiler. Two modes:
+#   simple — explicit on/off clock times
+#   reef   — a reef preset's seasonal day length, centered on mean solar noon
+#            (12:00) then shifted by the user's offset, so it tracks how a reefer
+#            runs a mimicked reef's sunrise/sunset (e.g. "Cairns time + 2h").
+# A ramp-grace buffer narrows the *alertable* window at both ends so the dawn/dusk
+# ramp (when PAR is legitimately low) doesn't trip a false low-PAR alert.
+# --------------------------------------------------------------------------- #
+def _parse_hhmm(value: Any, default_minutes: int) -> int:
+    try:
+        hh, mm = str(value).split(":")
+        return (int(hh) % 24) * 60 + (int(mm) % 60)
+    except (ValueError, AttributeError):
+        return default_minutes
+
+
+def lighting_window(lighting_cfg: dict[str, Any] | None, local_date: date) -> tuple[int, int] | None:
+    """Lights-on window as (start, end) minutes since local midnight, or None when
+    no schedule is configured (mode 'off'). ``end`` may be < ``start`` if it wraps
+    past midnight."""
+    cfg = lighting_cfg or {}
+    mode = cfg.get("mode", "off")
+    if mode == "simple":
+        start = _parse_hhmm(cfg.get("onTime"), 8 * 60)
+        end = _parse_hhmm(cfg.get("offTime"), 20 * 60)
+        return start, end
+    if mode == "reef":
+        preset = REEF_PRESETS.get(cfg.get("reefPreset"))
+        if not preset:
+            return None
+        try:
+            offset = float(cfg.get("offsetHours", 0))
+        except (TypeError, ValueError):
+            offset = 0.0
+        dl = day_length_hours(preset["lat"], local_date)
+        start = int(round((12.0 - dl / 2 + offset) * 60)) % 1440
+        end = int(round((12.0 + dl / 2 + offset) * 60)) % 1440
+        return start, end
+    return None
+
+
+def _in_window(minute: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start < end:
+        return start <= minute < end
+    return minute >= start or minute < end  # wraps past midnight
+
+
+def is_lights_on(lighting_cfg: dict[str, Any] | None, local_dt: datetime, grace_minutes: int = 0) -> bool:
+    """Is ``local_dt`` inside the lights-on window (narrowed by the ramp grace at
+    both ends)? Returns True when no schedule is configured, so callers never
+    suppress alerts unless the user opted into a schedule."""
+    win = lighting_window(lighting_cfg, local_dt.date())
+    if win is None:
+        return True
+    start, end = win
+    if start == end:
+        # Degenerate window (equal on/off times, or a zero-length day): treat as
+        # lights-on 24h so a real low reading is NEVER silently suppressed. To turn
+        # gating off entirely, use mode "off".
+        return True
+    length = (end - start) % 1440 or 1440
+    grace = max(0, int(grace_minutes))
+    if 2 * grace >= length:
+        grace = max(0, (length - 1) // 2)
+    start2 = (start + grace) % 1440
+    end2 = (end - grace) % 1440
+    minute = local_dt.hour * 60 + local_dt.minute
+    return _in_window(minute, start2, end2)
+
+
+def lighting_window_summary(lighting_cfg: dict[str, Any] | None, local_dt: datetime) -> dict[str, Any]:
+    """Human-facing summary of today's lighting window for the panel."""
+    cfg = lighting_cfg or {}
+    mode = cfg.get("mode", "off")
+    win = lighting_window(cfg, local_dt.date())
+    try:
+        grace = int(cfg.get("rampGraceMinutes", 0))
+    except (TypeError, ValueError):
+        grace = 0
+    out: dict[str, Any] = {"mode": mode, "configured": win is not None}
+    if win is not None:
+        start, end = win
+        out["onTime"] = _fmt_hhmm(start / 60)
+        out["offTime"] = _fmt_hhmm(end / 60)
+        out["graceMinutes"] = max(0, grace)
+        out["lightsOnNow"] = is_lights_on(cfg, local_dt, grace)
+        if mode == "reef":
+            preset = REEF_PRESETS.get(cfg.get("reefPreset"))
+            if preset:
+                out["reefLabel"] = preset["label"]
+                out["dayLengthHours"] = round(day_length_hours(preset["lat"], local_dt.date()), 2)
+    return out
+
+
 def list_presets() -> list[dict[str, Any]]:
     """Lightweight metadata for the reef picker (no heavy computation)."""
     out: list[dict[str, Any]] = []

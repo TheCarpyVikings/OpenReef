@@ -67,6 +67,9 @@ from .const import (
     REEF_PRESETS,
     SPAWNING_DEFAULT_SOLAR_NOON_HOUR,
     SPAWNING_OFFSET_MONTHS_MAX,
+    LIGHTING_SCHEDULE_DEFAULT_GRACE_MIN,
+    LIGHTING_SCHEDULE_GRACE_MAX,
+    LIGHTING_OFFSET_HOURS_MAX,
     SERVICE_APPLY_MODE,
     SERVICE_ACKNOWLEDGE_ALERT,
     SERVICE_ARM_EQUIPMENT,
@@ -544,6 +547,10 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         except (TypeError, ValueError):
             sensor["warningBuffer"] = 10
         sensor["warningBuffer"] = max(0, min(sensor["warningBuffer"], 50))
+        if "lightGated" in raw_sensor:
+            sensor["lightGated"] = bool(raw_sensor.get("lightGated"))
+        else:
+            sensor["lightGated"] = bool(sensor.get("lightGated", meta.get("group") == "lighting"))
 
     custom_modes = config.setdefault("customModes", [])
     normalised_custom_modes: list[dict[str, str]] = []
@@ -1507,6 +1514,36 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             parameters[parameter] = entry
         dosing["parameters"] = parameters
 
+    lighting_cfg = config.setdefault("lightingSchedule", {})
+    if not isinstance(lighting_cfg, dict):
+        config["lightingSchedule"] = deepcopy(DEFAULT_CORE_CONFIG["lightingSchedule"])
+    else:
+        ls_defaults = DEFAULT_CORE_CONFIG["lightingSchedule"]
+        mode = lighting_cfg.get("mode")
+        lighting_cfg["mode"] = mode if mode in {"off", "simple", "reef"} else "off"
+        lighting_cfg["onTime"] = (
+            _normalise_schedule_time(lighting_cfg.get("onTime")) or ls_defaults["onTime"]
+        )
+        lighting_cfg["offTime"] = (
+            _normalise_schedule_time(lighting_cfg.get("offTime")) or ls_defaults["offTime"]
+        )
+        ls_preset = lighting_cfg.get("reefPreset")
+        lighting_cfg["reefPreset"] = (
+            ls_preset if ls_preset in REEF_PRESETS else ls_defaults["reefPreset"]
+        )
+        try:
+            ls_offset = float(lighting_cfg.get("offsetHours", 0))
+        except (TypeError, ValueError):
+            ls_offset = 0.0
+        lighting_cfg["offsetHours"] = round(
+            max(-LIGHTING_OFFSET_HOURS_MAX, min(ls_offset, LIGHTING_OFFSET_HOURS_MAX)), 2
+        )
+        try:
+            ls_grace = int(lighting_cfg.get("rampGraceMinutes", LIGHTING_SCHEDULE_DEFAULT_GRACE_MIN))
+        except (TypeError, ValueError):
+            ls_grace = LIGHTING_SCHEDULE_DEFAULT_GRACE_MIN
+        lighting_cfg["rampGraceMinutes"] = max(0, min(ls_grace, LIGHTING_SCHEDULE_GRACE_MAX))
+
     spawning_cfg = config.setdefault("spawningProgram", {})
     if not isinstance(spawning_cfg, dict):
         config["spawningProgram"] = deepcopy(DEFAULT_CORE_CONFIG["spawningProgram"])
@@ -1830,7 +1867,9 @@ def _sensor_binary_state(state: str) -> str:
     return "warning"
 
 
-def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
+def _sensor_alert_items(
+    hass: HomeAssistant, config: dict[str, Any], *, now_local: datetime | None = None
+) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
     sensors = config.get("sensors", {})
     if not isinstance(sensors, dict):
@@ -1852,6 +1891,26 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
         hysteresis_percent = 2
     hysteresis_percent = max(0, min(hysteresis_percent, 20))
     now = datetime.now(timezone.utc)
+
+    # Lighting-schedule gating: light-dependent sensors (e.g. PAR) read ~0 when the
+    # lights are off, which would otherwise trip a false "below minimum" alert.
+    lighting_cfg = config.get("lightingSchedule")
+    if not isinstance(lighting_cfg, dict) or lighting_cfg.get("mode", "off") == "off":
+        lighting_cfg = None
+    try:
+        light_grace = int((lighting_cfg or {}).get("rampGraceMinutes", 0))
+    except (TypeError, ValueError):
+        light_grace = 0
+    _local_now_holder: list[datetime | None] = [now_local]
+
+    def _light_suppress_low(sensor_obj: dict[str, Any]) -> bool:
+        """True when a light-gated sensor's low readings should be ignored because
+        the lights aren't in their (grace-narrowed) on window right now."""
+        if lighting_cfg is None or not sensor_obj.get("lightGated"):
+            return False
+        if _local_now_holder[0] is None:
+            _local_now_holder[0] = dt_util.now()
+        return not spawning.is_lights_on(lighting_cfg, _local_now_holder[0], light_grace)
 
     for sensor_id, sensor in sensors.items():
         if not isinstance(sensor, dict):
@@ -1916,7 +1975,8 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
             continue
 
         unit = str(sensor.get("unit") or "").strip()
-        if value < minimum or value > maximum:
+        suppress_low = _light_suppress_low(sensor)
+        if value > maximum or (value < minimum and not suppress_low):
             alerts.append(
                 {
                     "id": sensor_id,
@@ -1927,16 +1987,22 @@ def _sensor_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dic
                 }
             )
             continue
+        if value < minimum:
+            # Below minimum but the lights are off / still ramping — expected for a
+            # light-dependent sensor, so don't alert (and skip the warning band).
+            continue
 
         buffer = (maximum - minimum) * max(0, min(warning_buffer, 50)) / 100
         hysteresis = (maximum - minimum) * hysteresis_percent / 100
         lower_warning = minimum + buffer
         upper_warning = maximum - buffer
         previous_state = last_states.get(sensor_id)
-        sticky_warning = previous_state in {"warning", "critical"} and (
-            value < lower_warning + hysteresis or value > upper_warning - hysteresis
-        )
-        if value < lower_warning or value > upper_warning or sticky_warning:
+        was_alerting = previous_state in {"warning", "critical"}
+        low_warn = value < lower_warning or (was_alerting and value < lower_warning + hysteresis)
+        high_warn = value > upper_warning or (was_alerting and value > upper_warning - hysteresis)
+        if suppress_low:
+            low_warn = False
+        if low_warn or high_warn:
             alerts.append(
                 {
                     "id": sensor_id,
@@ -5990,6 +6056,23 @@ def websocket_generate_spawning_program(
     connection.send_result(msg["id"], {"program": program})
 
 
+@websocket_api.websocket_command({vol.Required("type"): "openreef/lighting_window"})
+@callback
+def websocket_lighting_window(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return today's computed lighting-on window + whether the lights are on now."""
+    config = _config_from_entry(_first_entry(hass))
+    lighting_cfg = (
+        config.get("lightingSchedule")
+        if isinstance(config.get("lightingSchedule"), dict)
+        else {}
+    )
+    connection.send_result(
+        msg["id"], {"lighting": spawning.lighting_window_summary(lighting_cfg, dt_util.now())}
+    )
+
+
 async def _async_register_panel(hass: HomeAssistant) -> None:
     """Register the OpenReef native sidebar panel once."""
     if hass.data.setdefault(DOMAIN, {}).get("panel_registered"):
@@ -6048,6 +6131,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_delete_feed_session)
     websocket_api.async_register_command(hass, websocket_list_reef_presets)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
+    websocket_api.async_register_command(hass, websocket_lighting_window)
 
     hass.services.async_register(
         DOMAIN,
