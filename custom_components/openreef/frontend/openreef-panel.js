@@ -985,7 +985,6 @@ class OpenReefPanel extends HTMLElement {
         this._controlConfirm = null;
         this._cameraFocus = null;
         this._recordingFocus = null;
-        if (id === "spawning" && this._spawning.presets === null) this._loadReefPresets();
         this._render();
       }
       if (action === "onboarding-start") { this._activeTab = "mission"; this._startOnboarding(); }
