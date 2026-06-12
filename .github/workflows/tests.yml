@@ -28,10 +28,13 @@ jobs:
           python-version: "3.12"
 
       - name: Backend compiles
-        run: python3 -m py_compile custom_components/openreef/__init__.py custom_components/openreef/const.py
+        run: python3 -m py_compile custom_components/openreef/__init__.py custom_components/openreef/const.py custom_components/openreef/spawning.py
 
       - name: Config migration tests
         run: python3 tests/test_config_migration.py
+
+      - name: Coral spawning engine tests (astronomy, compiler, presets)
+        run: python3 tests/test_spawning.py
 
       - name: Timelapse retention ladder tests
         run: python3 tests/test_timelapse_retention.py

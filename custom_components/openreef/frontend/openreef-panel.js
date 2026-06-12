@@ -34,6 +34,7 @@ class OpenReefPanel extends HTMLElement {
     this._feedWatch = { sessions: [], loaded: false, loading: false, error: "" };
     this._feedPlayer = { sessionId: "", frames: [], index: 0, playing: false, loading: false };
     this._feedPlayerTimer = null;
+    this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._modeConfirm = null;
@@ -984,6 +985,7 @@ class OpenReefPanel extends HTMLElement {
         this._controlConfirm = null;
         this._cameraFocus = null;
         this._recordingFocus = null;
+        if (id === "spawning" && this._spawning.presets === null) this._loadReefPresets();
         this._render();
       }
       if (action === "onboarding-start") { this._activeTab = "mission"; this._startOnboarding(); }
@@ -1041,6 +1043,12 @@ class OpenReefPanel extends HTMLElement {
         this._saveConfig();
       }
       if (action === "validate") this._validateConfig();
+      if (action === "spawn-generate") this._generateSpawningProgram();
+      if (action === "spawn-reload") { this._spawning.presets = null; this._loadReefPresets(); }
+      if (action === "spawn-copy") {
+        const text = this._spawningCopyText(target.dataset.id);
+        if (text) this._copyText(text, "Copied to clipboard", "Could not copy");
+      }
       if (action === "mute-alert") this._muteAlert(id, Number(target.dataset.minutes || 60));
       if (action === "unmute-alert") this._muteAlert(id, 0);
       if (action === "ack-alert") this._acknowledgeAlert(id);
@@ -6016,6 +6024,206 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  // --- Coral Spawning ----------------------------------------------------
+
+  async _loadReefPresets() {
+    if (this._spawning.loading) return;
+    this._spawning.loading = true;
+    this._spawning.error = "";
+    try {
+      const res = await this._callWS({ type: "openreef/list_reef_presets" });
+      this._spawning.presets = Array.isArray(res?.presets) ? res.presets : [];
+    } catch (err) {
+      this._spawning.presets = [];
+      this._spawning.error = err?.message || "Could not load reef presets";
+    } finally {
+      this._spawning.loading = false;
+      this._render();
+    }
+  }
+
+  async _generateSpawningProgram() {
+    if (this._spawning.generating) return;
+    const root = this.shadowRoot;
+    const val = (field, fallback) => {
+      const el = root.querySelector(`[data-spawn-field="${field}"]`);
+      return el && el.value !== "" ? el.value : fallback;
+    };
+    const reefPreset = val("reefPreset", "gbr_central");
+    const offsetMonths = Math.max(0, Math.min(11, Number(val("offsetMonths", 0)) || 0));
+    const solarNoonHour = Math.max(0, Math.min(23.5, Number(val("solarNoonHour", 13)) || 13));
+    const tempUnit = val("tempUnit", "C") === "F" ? "F" : "C";
+    const tempProbe = String(val("tempProbe", "Tmp")).trim().slice(0, 16) || "Tmp";
+
+    // Persist the selection so it survives reloads (same pattern as every other section).
+    this._config.spawningProgram = {
+      ...(this._config.spawningProgram || {}),
+      enabled: true, reefPreset, offsetMonths, solarNoonHour, tempUnit, tempProbe,
+    };
+    this._saveConfig();
+
+    this._spawning.generating = true;
+    this._spawning.error = "";
+    this._render();
+    try {
+      const res = await this._callWS({
+        type: "openreef/generate_spawning_program",
+        reefPreset, offsetMonths, solarNoonHour, tempUnit, tempProbe,
+      });
+      this._spawning.program = res?.program || null;
+    } catch (err) {
+      this._spawning.error = err?.message || "Could not generate the spawning program";
+    } finally {
+      this._spawning.generating = false;
+      this._render();
+    }
+  }
+
+  _spawningCopyText(key) {
+    const prog = this._spawning.program;
+    if (!prog) return "";
+    if (prog.codeSnippets && prog.codeSnippets[key]) return prog.codeSnippets[key].code;
+    if (key === "seasonTable") {
+      const unit = prog.params?.tempUnit || "C";
+      const header = `Month\tSunrise\tSunset\tDay length (h)\tTemp (°${unit})`;
+      const rows = (prog.seasonTable || []).map(
+        (r) => `${r.localDate}\t${r.sunrise}\t${r.sunset}\t${r.dayLengthHours}\t${r.temp}`
+      );
+      return [header, ...rows].join("\n");
+    }
+    if (key === "newMoonDates") return (prog.newMoonDates || []).join("\n");
+    if (key === "walkthrough") return (prog.walkthrough || []).map((s, i) => `${i + 1}. ${s}`).join("\n");
+    return "";
+  }
+
+  _spawning() {
+    const sp = (this._config && this._config.spawningProgram) || {};
+    const st = this._spawning;
+    const head = `
+      <div class="section-head">
+        <div><h2>Coral Spawning</h2><p>Pick a reef — OpenReef compiles the seasonal photoperiod, temperature &amp; lunar program your Apex needs, so you never hand-build the data tables again.</p></div>
+      </div>`;
+
+    if (st.presets === null) {
+      if (!st.loading) setTimeout(() => this._loadReefPresets(), 0);
+      return `<section class="stack">${head}<article class="panel"><p class="hint">${st.error ? this._escape(st.error) : "Loading reef presets…"}</p></article></section>`;
+    }
+
+    const selPreset = sp.reefPreset || "gbr_central";
+    const offset = Number.isFinite(Number(sp.offsetMonths)) ? Number(sp.offsetMonths) : 0;
+    const noon = Number.isFinite(Number(sp.solarNoonHour)) ? Number(sp.solarNoonHour) : 13;
+    const unit = sp.tempUnit === "F" ? "F" : "C";
+    const probe = sp.tempProbe || "Tmp";
+
+    const presetOptions = (st.presets || [])
+      .map((p) => `<option value="${this._escape(p.id)}" ${p.id === selPreset ? "selected" : ""}>${this._escape(p.label)} — ${this._escape(p.region)}</option>`)
+      .join("");
+    const offsetOptions = Array.from({ length: 12 }, (_, i) =>
+      `<option value="${i}" ${i === offset ? "selected" : ""}>${i === 0 ? "None — run the reef's own calendar" : `+${i} month${i > 1 ? "s" : ""}`}</option>`
+    ).join("");
+
+    const fieldStyle = "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
+    const ctrlStyle = "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
+    const form = `
+      <article class="panel stack">
+        <div class="grid two">
+          <label style="${fieldStyle}"><span>Reef location</span><select style="${ctrlStyle}" data-spawn-field="reefPreset">${presetOptions}</select></label>
+          <label style="${fieldStyle}"><span>Seasonal offset <small>(align the reef's season to your calendar)</small></span><select style="${ctrlStyle}" data-spawn-field="offsetMonths">${offsetOptions}</select></label>
+          <label style="${fieldStyle}"><span>Solar-noon hour <small>(local clock the photoperiod centers on)</small></span><input style="${ctrlStyle}" type="number" min="0" max="23.5" step="0.5" value="${noon}" data-spawn-field="solarNoonHour" /></label>
+          <label style="${fieldStyle}"><span>Temperature unit</span><select style="${ctrlStyle}" data-spawn-field="tempUnit"><option value="C" ${unit === "C" ? "selected" : ""}>°C</option><option value="F" ${unit === "F" ? "selected" : ""}>°F</option></select></label>
+          <label style="${fieldStyle}"><span>Apex temp probe name</span><input style="${ctrlStyle}" type="text" maxlength="16" value="${this._escape(probe)}" data-spawn-field="tempProbe" /></label>
+        </div>
+        <div class="button-row">
+          <button class="primary" data-action="spawn-generate" ${st.generating ? "disabled" : ""}>${st.generating ? "Generating…" : "Generate program"}</button>
+          <button class="secondary compact-button" data-action="spawn-reload">Refresh reefs</button>
+        </div>
+        ${st.error ? `<p class="hint" style="color:var(--error-color,#e5484d)">${this._escape(st.error)}</p>` : ""}
+      </article>`;
+
+    const advisory = `
+      <article class="panel">
+        <p class="hint">⚠️ Spawning needs sexually mature, same-species colonies, genuinely dark nights, and many months of conditioning. OpenReef generates the program; your Apex executes it with its own failsafes. Curated presets use approximate monthly SST climatology — the GBR &amp; Singapore curves are validated against Craggs' published profiles.</p>
+      </article>`;
+
+    const program = st.program ? this._spawningProgramView(st.program) : "";
+    return `<section class="stack">${head}${form}${program}${advisory}</section>`;
+  }
+
+  _spawningProgramView(prog) {
+    const unit = prog.params?.tempUnit || "C";
+    const copyBtn = (key, label) => `<button class="secondary compact-button" data-action="spawn-copy" data-id="${this._escape(key)}">${this._escape(label || "Copy")}</button>`;
+
+    const pred = prog.spawnPrediction || {};
+    const nightsStart = pred.nightsUntilWindowStart;
+    const countdown = Number.isFinite(nightsStart)
+      ? (nightsStart > 0 ? `${nightsStart} nights to the window` : (Number.isFinite(pred.nightsUntilWindowEnd) && pred.nightsUntilWindowEnd >= 0 ? "Spawning window is open now" : "This year's window has passed"))
+      : "";
+    const predictionCard = `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>🌙 Predicted spawn window</h3><p>${this._escape(prog.preset?.label || "")} · spawns ~${this._escape(String(pred.daysAfterFullMoon?.[0] ?? ""))}–${this._escape(String(pred.daysAfterFullMoon?.[1] ?? ""))} nights after the ${this._escape(pred.localSpawnMonthName || "")} full moon</p></div>${countdown ? `<span class="pill ok">${this._escape(countdown)}</span>` : ""}</div>
+        <div class="grid three">
+          <div><span class="hint">Full moon</span><br><strong>${this._escape((pred.fullMoonUtc || "").slice(0, 10) || "—")}</strong></div>
+          <div><span class="hint">Window opens</span><br><strong>${this._escape(pred.windowStart || "—")}</strong></div>
+          <div><span class="hint">Window closes</span><br><strong>${this._escape(pred.windowEnd || "—")}</strong></div>
+        </div>
+      </article>`;
+
+    const seasonRows = (prog.seasonTable || [])
+      .map((r) => `<tr><td>${this._escape(r.localDate)}</td><td>${this._escape(r.sunrise)}</td><td>${this._escape(r.sunset)}</td><td>${this._escape(String(r.dayLengthHours))}</td><td>${this._escape(String(r.temp))}°${this._escape(unit)}</td><td><small>${this._escape(r.reefMonthName)}</small></td></tr>`)
+      .join("");
+    const seasonTable = `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>📋 Apex Season Table</h3><p>Enter these 12 monthly rows in Apex Local (gear → wrench → sun icon).</p></div>${copyBtn("seasonTable", "Copy as TSV")}</div>
+        <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+          <thead><tr style="text-align:left;border-bottom:1px solid var(--divider-color,#444)"><th>Month</th><th>Sunrise</th><th>Sunset</th><th>Day&nbsp;len</th><th>Temp&nbsp;(RT)</th><th>Mimics</th></tr></thead>
+          <tbody>${seasonRows}</tbody>
+        </table></div>
+      </article>`;
+
+    const profileCards = (prog.profiles || [])
+      .map((p) => `<article class="panel"><div class="card-head"><div><h4>${this._escape(p.name)}</h4></div><span class="pill unknown">${this._escape(String(p.intensityPercent))}%</span></div><p class="hint">${this._escape(p.note)}${p.rampMinutes ? ` · ${this._escape(String(p.rampMinutes))}-min ramp` : ""}</p></article>`)
+      .join("");
+    const profiles = `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>💡 Light Profiles (MXM Radions)</h3><p>Create these four Profiles; intensities are starting points to match to your fixture.</p></div></div>
+        <div class="grid two">${profileCards}</div>
+      </article>`;
+
+    const codeCards = Object.entries(prog.codeSnippets || {})
+      .map(([key, snip]) => `
+        <article class="panel stack">
+          <div class="section-head"><div><h4>${this._escape(snip.label)}</h4><p class="hint">${this._escape(snip.target)}</p></div>${copyBtn(key, "Copy")}</div>
+          <pre style="white-space:pre-wrap;background:var(--code-editor-background-color,#0c0c0c);padding:10px;border-radius:8px;overflow-x:auto;margin:0;font-family:monospace;font-size:0.82rem;">${this._escape(snip.code)}</pre>
+          <small class="hint">${this._escape(snip.note)}</small>
+        </article>`)
+      .join("");
+    const code = `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>⌨️ Apex code</h3><p>Paste into the matching outlets / virtual outputs. RT is the seasonal reference temp the table drives.</p></div></div>
+        ${codeCards}
+      </article>`;
+
+    const moonChips = (prog.newMoonDates || [])
+      .map((d) => `<span class="pill unknown">${this._escape(d)}</span>`)
+      .join(" ");
+    const moons = `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>🌑 New-moon dates ${this._escape(String(prog.params?.year || ""))}</h3><p>Enter these in the Apex lunar / Season Table. ⚠️ Re-check every January 1 — the Apex auto-resets them.</p></div>${copyBtn("newMoonDates", "Copy")}</div>
+        <div class="pill-stack" style="flex-wrap:wrap">${moonChips}</div>
+      </article>`;
+
+    const steps = (prog.walkthrough || []).map((s) => `<li>${this._escape(s)}</li>`).join("");
+    const walkthrough = `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>🧭 Set it up in Apex Local</h3></div>${copyBtn("walkthrough", "Copy steps")}</div>
+        <ol style="margin:0;padding-left:1.2rem;line-height:1.6;">${steps}</ol>
+      </article>`;
+
+    const sources = `<p class="hint">Sources: ${(prog.sources || []).map((s) => `<a href="${this._escape(s.url)}" target="_blank" rel="noopener">${this._escape(s.label)}</a>`).join(" · ")}</p>`;
+
+    return `${predictionCard}${seasonTable}${profiles}${code}${moons}${walkthrough}${sources}`;
+  }
+
   _tabs() {
     const tabs = [
       ["mission", "Mission Control"],
@@ -6023,6 +6231,7 @@ class OpenReefPanel extends HTMLElement {
       ["manual", "Manual Tests"],
       ["maintenance", "Maintenance"],
       ["controls", "Controls"],
+      ["spawning", "Spawning"],
       ["cameras", "Cameras"],
       ["energy", "Energy"],
       ["settings", "Settings"],
@@ -6043,6 +6252,7 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
     if (this._activeTab === "controls") return this._controls();
+    if (this._activeTab === "spawning") return this._spawning();
     if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
     if (this._activeTab === "settings") return this._settings();

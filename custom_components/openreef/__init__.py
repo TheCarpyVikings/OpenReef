@@ -64,6 +64,9 @@ from .const import (
     PANEL_ICON,
     PANEL_STATIC_URL,
     PANEL_URL,
+    REEF_PRESETS,
+    SPAWNING_DEFAULT_SOLAR_NOON_HOUR,
+    SPAWNING_OFFSET_MONTHS_MAX,
     SERVICE_APPLY_MODE,
     SERVICE_ACKNOWLEDGE_ALERT,
     SERVICE_ARM_EQUIPMENT,
@@ -93,6 +96,7 @@ from .const import (
     TIMELAPSE_MIN_CADENCE,
     TIMELAPSE_SUBDIR,
 )
+from . import spawning
 
 type OpenReefConfigEntry = ConfigEntry
 
@@ -1502,6 +1506,34 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 entry[field] = max(0.0, value)
             parameters[parameter] = entry
         dosing["parameters"] = parameters
+
+    spawning_cfg = config.setdefault("spawningProgram", {})
+    if not isinstance(spawning_cfg, dict):
+        config["spawningProgram"] = deepcopy(DEFAULT_CORE_CONFIG["spawningProgram"])
+    else:
+        sp_defaults = DEFAULT_CORE_CONFIG["spawningProgram"]
+        spawning_cfg["enabled"] = bool(spawning_cfg.get("enabled", False))
+        preset = spawning_cfg.get("reefPreset")
+        spawning_cfg["reefPreset"] = preset if preset in REEF_PRESETS else sp_defaults["reefPreset"]
+        try:
+            offset = int(spawning_cfg.get("offsetMonths", 0))
+        except (TypeError, ValueError):
+            offset = 0
+        spawning_cfg["offsetMonths"] = max(0, min(offset, SPAWNING_OFFSET_MONTHS_MAX))
+        try:
+            noon = float(spawning_cfg.get("solarNoonHour", SPAWNING_DEFAULT_SOLAR_NOON_HOUR))
+        except (TypeError, ValueError):
+            noon = SPAWNING_DEFAULT_SOLAR_NOON_HOUR
+        spawning_cfg["solarNoonHour"] = round(max(0.0, min(noon, 23.5)), 2)
+        unit = str(spawning_cfg.get("tempUnit", "C")).upper()
+        spawning_cfg["tempUnit"] = "F" if unit == "F" else "C"
+        probe = spawning_cfg.get("tempProbe")
+        spawning_cfg["tempProbe"] = (
+            probe.strip()[:16]
+            if isinstance(probe, str) and probe.strip()
+            else sp_defaults["tempProbe"]
+        )
+        spawning_cfg["acknowledgedAdvisory"] = bool(spawning_cfg.get("acknowledgedAdvisory", False))
 
     return config
 
@@ -5893,6 +5925,71 @@ async def websocket_delete_feed_session(
     connection.send_result(msg["id"], {"success": True, "sessionId": session_id, "config": saved})
 
 
+@websocket_api.websocket_command({vol.Required("type"): "openreef/list_reef_presets"})
+@callback
+def websocket_list_reef_presets(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return the curated reef presets for the spawning location picker."""
+    connection.send_result(msg["id"], {"presets": spawning.list_presets()})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/generate_spawning_program",
+        vol.Optional("reefPreset"): cv.string,
+        vol.Optional("year"): vol.All(vol.Coerce(int), vol.Range(min=2000, max=2100)),
+        vol.Optional("offsetMonths"): vol.All(
+            vol.Coerce(int), vol.Range(min=0, max=SPAWNING_OFFSET_MONTHS_MAX)
+        ),
+        vol.Optional("solarNoonHour"): vol.All(vol.Coerce(float), vol.Range(min=0, max=23.5)),
+        vol.Optional("tempUnit"): vol.In(["C", "F", "c", "f"]),
+        vol.Optional("tempProbe"): cv.string,
+    }
+)
+@callback
+def websocket_generate_spawning_program(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Compile a copy-paste-ready Apex spawning program for a reef preset.
+
+    Read-only computation — falls back to the saved spawningProgram selection for
+    any param the caller omits.
+    """
+    config = _config_from_entry(_first_entry(hass))
+    saved = config.get("spawningProgram", {})
+    if not isinstance(saved, dict):
+        saved = {}
+    preset_id = msg.get("reefPreset") or saved.get("reefPreset") or "gbr_central"
+    if preset_id not in REEF_PRESETS:
+        connection.send_error(msg["id"], "unknown_preset", f"Unknown reef preset '{preset_id}'")
+        return
+    now = datetime.now(timezone.utc)
+    year = msg.get("year") or now.year
+    offset = msg.get("offsetMonths")
+    if offset is None:
+        offset = saved.get("offsetMonths", 0)
+    noon = msg.get("solarNoonHour")
+    if noon is None:
+        noon = saved.get("solarNoonHour", SPAWNING_DEFAULT_SOLAR_NOON_HOUR)
+    unit = msg.get("tempUnit") or saved.get("tempUnit") or "C"
+    probe = msg.get("tempProbe") or saved.get("tempProbe") or "Tmp"
+    try:
+        program = spawning.generate_program(
+            preset_id,
+            int(year),
+            offset_months=int(offset or 0),
+            solar_noon_hour=float(noon),
+            temp_unit=str(unit),
+            temp_probe=str(probe).strip()[:16] or "Tmp",
+            today=now,
+        )
+    except KeyError:
+        connection.send_error(msg["id"], "unknown_preset", f"Unknown reef preset '{preset_id}'")
+        return
+    connection.send_result(msg["id"], {"program": program})
+
+
 async def _async_register_panel(hass: HomeAssistant) -> None:
     """Register the OpenReef native sidebar panel once."""
     if hass.data.setdefault(DOMAIN, {}).get("panel_registered"):
@@ -5949,6 +6046,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_list_feed_sessions)
     websocket_api.async_register_command(hass, websocket_list_feed_frames)
     websocket_api.async_register_command(hass, websocket_delete_feed_session)
+    websocket_api.async_register_command(hass, websocket_list_reef_presets)
+    websocket_api.async_register_command(hass, websocket_generate_spawning_program)
 
     hass.services.async_register(
         DOMAIN,

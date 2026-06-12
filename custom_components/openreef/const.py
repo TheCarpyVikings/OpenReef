@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 41
+CORE_SCHEMA_VERSION = 42
 INTEGRATION_VERSION = "0.4.88"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
@@ -495,6 +495,77 @@ MVP_SENSORS = {
     },
 }
 
+# Coral Spawning — the reef-location simulator. OpenReef compiles a curated reef's
+# seasonal photoperiod + temperature + lunar program into the exact Apex Season
+# Table / Profiles / code reefers hand-author today (Craggs / Rich Ross method).
+# Monthly SST is approximate climatology (the GBR/Singapore curves are validated
+# against Craggs' published profiles); these are intentionally curated presets,
+# with dynamic SST data a later phase. spawn windows follow the documented
+# "N nights after the full moon" of the spawning month.
+SPAWNING_DEFAULT_SOLAR_NOON_HOUR = 13.0   # local clock time the photoperiod centers on
+SPAWNING_SUNUP_RAMP_MIN = 60              # default dawn ramp (minutes)
+SPAWNING_SUNSET_RAMP_MIN = 60             # default dusk ramp (minutes) — proximate spawn trigger
+SPAWNING_OFFSET_MONTHS_MAX = 11
+
+REEF_PRESETS: dict[str, dict] = {
+    "gbr_central": {
+        "label": "Great Barrier Reef (Central)",
+        "region": "Coral Sea, Australia",
+        "lat": -18.5,
+        "lon": 147.5,
+        # Davies/central GBR monthly SST (austral summer Dec–Mar). Jan…Dec °C.
+        "sstMonthlyC": [28.6, 29.0, 28.7, 27.6, 26.1, 24.7, 23.8, 23.7, 24.6, 26.2, 27.6, 28.2],
+        "spawnReefMonth": 11,                 # November mass spawning
+        "daysAfterFullMoon": (12, 15),        # per Rich Ross GBR template (packedhead.net)
+        "middayParBand": (378, 498),          # Craggs 2017 insolation band
+        "note": "Classic Acropora mass spawning. Austral seasons — offset +6 to align to a N-hemisphere summer.",
+    },
+    "singapore": {
+        "label": "Singapore (Kusu Reef)",
+        "region": "Coral Triangle, equatorial",
+        "lat": 1.3,
+        "lon": 103.85,
+        "sstMonthlyC": [27.6, 28.0, 28.6, 29.4, 29.9, 29.6, 29.1, 29.0, 28.6, 28.6, 28.1, 27.7],
+        "spawnReefMonth": 4,                  # Craggs recorded April spawning
+        "daysAfterFullMoon": (2, 6),
+        "middayParBand": (378, 498),
+        "note": "Equatorial — tiny day-length swing (~minutes); temperature + lunar do the work.",
+    },
+    "red_sea_aqaba": {
+        "label": "Red Sea (Gulf of Aqaba)",
+        "region": "Northern Red Sea",
+        "lat": 29.5,
+        "lon": 34.9,
+        "sstMonthlyC": [22.0, 21.4, 21.5, 22.6, 24.2, 25.6, 26.6, 27.0, 26.8, 25.6, 24.2, 22.8],
+        "spawnReefMonth": 7,                  # summer spawning
+        "daysAfterFullMoon": (2, 7),
+        "middayParBand": (300, 450),
+        "note": "Strong seasonal swing (cool ~21°C winter). Higher-latitude reef.",
+    },
+    "hawaii_oahu": {
+        "label": "Hawaiʻi (Oʻahu)",
+        "region": "Central Pacific",
+        "lat": 21.4,
+        "lon": -157.8,
+        "sstMonthlyC": [24.6, 24.2, 24.2, 24.6, 25.2, 26.0, 26.6, 27.0, 27.1, 26.6, 25.8, 25.0],
+        "spawnReefMonth": 7,
+        "daysAfterFullMoon": (2, 6),
+        "middayParBand": (300, 450),
+        "note": "Montipora-led summer spawning; many local spawners cue to the new moon.",
+    },
+    "caribbean_florida": {
+        "label": "Caribbean / Florida Keys",
+        "region": "Tropical W. Atlantic",
+        "lat": 24.7,
+        "lon": -81.0,
+        "sstMonthlyC": [23.9, 24.1, 25.0, 26.6, 28.0, 29.4, 30.0, 30.1, 29.6, 28.2, 26.3, 24.7],
+        "spawnReefMonth": 8,                  # Acropora palmata/cervicornis, August
+        "daysAfterFullMoon": (2, 6),
+        "middayParBand": (300, 450),
+        "note": "Acropora palmata / cervicornis — restoration-priority Atlantic species.",
+    },
+}
+
 DEFAULT_CORE_CONFIG = {
     "schemaVersion": CORE_SCHEMA_VERSION,
     "tank": {
@@ -779,6 +850,17 @@ DEFAULT_CORE_CONFIG = {
             }
             for parameter in DOSING_PARAMETERS
         },
+    },
+    # Coral Spawning — reef-location simulator. Persists the user's selection; the
+    # program itself is compiled on demand (openreef/generate_spawning_program).
+    "spawningProgram": {
+        "enabled": False,
+        "reefPreset": "gbr_central",
+        "offsetMonths": 0,
+        "solarNoonHour": SPAWNING_DEFAULT_SOLAR_NOON_HOUR,
+        "tempUnit": "C",
+        "tempProbe": "Tmp",
+        "acknowledgedAdvisory": False,
     },
 }
 
