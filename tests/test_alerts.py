@@ -221,6 +221,36 @@ def test_reef_mode_gates_par():
     assert _sev(items(hass, _light_cfg(_par(), sched), now_local=datetime(2026, 1, 15, 14, 0))) == {"par": "critical"}
 
 
+# --- suppression helper + transition carry-forward (no dusk/dawn churn) -------
+
+supp = integration._sensor_low_suppressed
+
+
+def test_low_suppressed_helper():
+    assert supp({"lightingSchedule": SIMPLE}, _par(), NIGHT) is True
+    assert supp({"lightingSchedule": SIMPLE}, _par(), DAY) is False
+    assert supp({"lightingSchedule": {"mode": "off"}}, _par(), NIGHT) is False
+    assert supp({"lightingSchedule": SIMPLE}, _par(lightGated=False), NIGHT) is False
+
+
+def test_gated_sensor_holds_state_overnight_without_churn():
+    # A genuinely-critical daytime PAR must NOT log a "resolved" transition at dusk
+    # (and re-alert at dawn). The state is held while the lights are off.
+    cfg = {"sensors": {"par": _par()}, "alerts": {"lastStates": {"par": "critical"}}, "lightingSchedule": SIMPLE}
+    hass = FakeHass(states={"sensor.par": "0"})
+    assert sync(hass, cfg, now_local=NIGHT) == []                       # no transition at night
+    assert cfg["alerts"]["lastStates"]["par"] == "critical"            # held, not resolved
+    assert sync(hass, cfg, now_local=DAY) == []                        # still critical by day -> no new transition
+    assert cfg["alerts"]["lastStates"]["par"] == "critical"
+
+
+def test_gated_sensor_resolves_during_day_when_recovered():
+    cfg = {"sensors": {"par": _par()}, "alerts": {"lastStates": {"par": "critical"}}, "lightingSchedule": SIMPLE}
+    hass = FakeHass(states={"sensor.par": "200"})  # back in range (50-350)
+    transitions = sync(hass, cfg, now_local=DAY)
+    assert any(t["state"] == "resolved" for t in transitions)
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

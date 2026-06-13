@@ -101,6 +101,26 @@ normalisation, and the WS handlers end-to-end.
   camera-based night-lux light-pollution coaching.
 - **v3:** dynamic SST data (NOAA Coral Reef Watch / AIMS); larval-rearing guidance.
 
+## Related: lighting-schedule alert gating
+
+The same solar engine powers a separate feature — **light-dependent alert gating**
+(`lightingSchedule` config + `spawning.is_lights_on()`). Light sensors (PAR) read ~0
+when the lights are off, which would trip a false "below minimum" alert; the lighting
+schedule (off / simple on-off times / reef-mimic-with-offset) gates the **low side** of
+`lightGated` sensor alerts to the lights-on window, with a ramp-grace buffer. High alerts
+always fire; mode `off` (default) keeps legacy behaviour. See `_sensor_low_suppressed` and
+`_sensor_alert_items` in `__init__.py`.
+
+**Known limitations:**
+- **DST drift.** The window is evaluated in Home Assistant's local (DST-aware) time, but a
+  reef/simple schedule is a fixed clock offset. When local time crosses a DST boundary the
+  window shifts ±1h until the user re-tunes the offset (the ramp grace, default 30 min, only
+  partly absorbs this). Reefers mimicking a no-DST locale on a no-DST HA box (e.g. Cairns /
+  Queensland) are unaffected. A future enhancement could auto-correct using the HA tzinfo.
+- **History churn (mitigated).** A genuinely-low daytime reading is now *held* across the
+  lights-off window rather than flapping resolved→alert each dusk/dawn (`_sync_alert_state`
+  carries the last state forward while suppressed); recovery is still detected during lit hours.
+
 ## Open questions to validate with spawning reefers
 - Exact Season-Table granularity the Apex accepts (12 monthly rows vs. fewer anchors).
 - Per-preset spawn-timing conventions beyond GBR (we use the field-literature

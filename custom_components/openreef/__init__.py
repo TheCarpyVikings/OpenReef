@@ -1867,6 +1867,25 @@ def _sensor_binary_state(state: str) -> str:
     return "warning"
 
 
+def _sensor_low_suppressed(
+    config: dict[str, Any], sensor: dict[str, Any], now_local: datetime | None = None
+) -> bool:
+    """True when a light-gated sensor's low readings should be ignored right now
+    because the lighting schedule says the lights are off / still ramping. Cheap
+    early-outs first, so non-gated sensors and the default (mode 'off') never touch
+    the clock and behave exactly as before this feature existed."""
+    if not isinstance(sensor, dict) or not sensor.get("lightGated"):
+        return False
+    lighting_cfg = config.get("lightingSchedule")
+    if not isinstance(lighting_cfg, dict) or lighting_cfg.get("mode", "off") == "off":
+        return False
+    try:
+        grace = int(lighting_cfg.get("rampGraceMinutes", 0))
+    except (TypeError, ValueError):
+        grace = 0
+    return not spawning.is_lights_on(lighting_cfg, now_local or dt_util.now(), grace)
+
+
 def _sensor_alert_items(
     hass: HomeAssistant, config: dict[str, Any], *, now_local: datetime | None = None
 ) -> list[dict[str, str]]:
@@ -1891,26 +1910,6 @@ def _sensor_alert_items(
         hysteresis_percent = 2
     hysteresis_percent = max(0, min(hysteresis_percent, 20))
     now = datetime.now(timezone.utc)
-
-    # Lighting-schedule gating: light-dependent sensors (e.g. PAR) read ~0 when the
-    # lights are off, which would otherwise trip a false "below minimum" alert.
-    lighting_cfg = config.get("lightingSchedule")
-    if not isinstance(lighting_cfg, dict) or lighting_cfg.get("mode", "off") == "off":
-        lighting_cfg = None
-    try:
-        light_grace = int((lighting_cfg or {}).get("rampGraceMinutes", 0))
-    except (TypeError, ValueError):
-        light_grace = 0
-    _local_now_holder: list[datetime | None] = [now_local]
-
-    def _light_suppress_low(sensor_obj: dict[str, Any]) -> bool:
-        """True when a light-gated sensor's low readings should be ignored because
-        the lights aren't in their (grace-narrowed) on window right now."""
-        if lighting_cfg is None or not sensor_obj.get("lightGated"):
-            return False
-        if _local_now_holder[0] is None:
-            _local_now_holder[0] = dt_util.now()
-        return not spawning.is_lights_on(lighting_cfg, _local_now_holder[0], light_grace)
 
     for sensor_id, sensor in sensors.items():
         if not isinstance(sensor, dict):
@@ -1975,7 +1974,7 @@ def _sensor_alert_items(
             continue
 
         unit = str(sensor.get("unit") or "").strip()
-        suppress_low = _light_suppress_low(sensor)
+        suppress_low = _sensor_low_suppressed(config, sensor, now_local)
         if value > maximum or (value < minimum and not suppress_low):
             alerts.append(
                 {
@@ -2175,9 +2174,11 @@ def _severity_rank(severity: str) -> int:
     return {"ok": 0, "unknown": 1, "warning": 2, "critical": 3}.get(severity, 0)
 
 
-def _active_alert_items(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
+def _active_alert_items(
+    hass: HomeAssistant, config: dict[str, Any], *, now_local: datetime | None = None
+) -> list[dict[str, str]]:
     by_sensor: dict[str, dict[str, str]] = {}
-    for item in [*_sensor_alert_items(hass, config), *_sensor_health_items(hass, config)]:
+    for item in [*_sensor_alert_items(hass, config, now_local=now_local), *_sensor_health_items(hass, config)]:
         sensor_id = item.get("id")
         if not sensor_id:
             continue
@@ -2512,7 +2513,9 @@ def _display_wavemaker_warning_items(
     return items
 
 
-def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[str, str]]:
+def _sync_alert_state(
+    hass: HomeAssistant, config: dict[str, Any], *, now_local: datetime | None = None
+) -> list[dict[str, str]]:
     """Reconcile alert states, append history on transitions, and return new transitions.
 
     The returned list (one entry per ok->warning/critical/etc transition this call detected)
@@ -2526,7 +2529,7 @@ def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[
     if not isinstance(sensors, dict):
         return transitions
 
-    active_items = {item["id"]: item for item in _active_alert_items(hass, config)}
+    active_items = {item["id"]: item for item in _active_alert_items(hass, config, now_local=now_local)}
     previous_states = alert_config.get("lastStates", {})
     if not isinstance(previous_states, dict):
         previous_states = {}
@@ -2555,6 +2558,13 @@ def _sync_alert_state(hass: HomeAssistant, config: dict[str, Any]) -> list[dict[
             state = item["severity"]
             title = item["title"]
             message = item["message"]
+        elif _sensor_low_suppressed(config, sensor, now_local):
+            # Lights are off — we can't judge a light-dependent sensor now, so hold the
+            # last known state rather than flapping resolved->alert at every dusk/dawn.
+            carried = previous_states.get(sensor_id)
+            if carried is not None:
+                next_states[sensor_id] = carried
+            continue
         else:
             state = "resolved"
             title = f"{label} resolved"
