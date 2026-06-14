@@ -11935,12 +11935,29 @@ class OpenReefPanel extends HTMLElement {
     const check = this._systemCheck();
     const checklist = this._betaChecklist(check);
     const trust = this._trustCheckData();
+    const trustCounts = this._trustCounts(trust);
     const heartbeat = this._heartbeat || {};
     const watchdog = this._config.watchdog || {};
     const sensorHealth = this._config.sensorHealth || {};
     const trustConfig = this._config.trustCheck || {};
     const edgeFailsafes = this._config.edgeFailsafes || {};
     const replay = Array.isArray(this._reefReplay) ? this._reefReplay.slice(0, 6) : [];
+    const readinessState = !trustCounts.total
+      ? "unknown"
+      : trustCounts.critical
+      ? "critical"
+      : (trustCounts.warning || trustCounts.unknown ? "warning" : "ok");
+    const readinessTitle = !trustCounts.total
+      ? "Run Trust Check"
+      : trustCounts.critical
+      ? "Action needed"
+      : (trustCounts.warning || trustCounts.unknown ? "Review needed" : "Ready");
+    const readinessDetail = trustCounts.total
+      ? this._trustSummaryText(trust)
+      : "Run Trust Check to build a readiness snapshot.";
+    const reviewItems = Array.isArray(trust.items)
+      ? trust.items.filter((item) => (item.status || "unknown") !== "ok").slice(0, 3)
+      : [];
     const rows = [
       ["OpenReef version", check.version],
       ["Config schema", check.schema],
@@ -11969,30 +11986,32 @@ class OpenReefPanel extends HTMLElement {
     return this._settingsPanel(
       "system",
       "System Check",
-      "A beta-tester snapshot with counts only. No tokens or secrets are included.",
+      "A simple readiness check first. Advanced beta diagnostics stay tucked away unless you need them.",
       `
-        <div class="system-grid">
-          ${rows.map(([label, value]) => `
-            <article class="system-card">
-              <span>${this._escape(label)}</span>
-              <strong>${this._escape(value)}</strong>
-            </article>
-          `).join("")}
-        </div>
-        <section class="mapping-section beta-checklist">
+        <section class="mapping-section readiness-panel ${readinessState}">
           <div class="section-head">
             <div>
               <p class="eyebrow">Trust Check</p>
-              <h4>Readiness scan before unattended control.</h4>
-              <p class="muted">${this._escape(trust.checkedAt ? `Checked ${this._formatActivityTime(trust.checkedAt)}` : "No Trust Check run recorded yet.")}</p>
+              <h3>${this._escape(readinessTitle)}</h3>
+              <p class="muted">${this._escape(readinessDetail)} ${this._escape(trust.checkedAt ? `Checked ${this._formatActivityTime(trust.checkedAt)}.` : "No Trust Check run recorded yet.")}</p>
             </div>
             <div class="button-row">
               <button class="secondary compact-button" data-action="refresh-trust-check">Refresh</button>
               <button class="secondary compact-button" data-action="test-notification">Test notification</button>
             </div>
           </div>
+          ${reviewItems.length ? `
+            <div class="next-actions">
+              <strong>Next to review</strong>
+              ${reviewItems.map((item) => `<span>${this._escape(item.label || item.key || "Check")}: ${this._escape(item.detail || this._trustStatusLabel(item.status || "unknown"))}</span>`).join("")}
+            </div>
+          ` : trustCounts.total ? `
+            <div class="notice compact-notice">Everything OpenReef can currently verify looks ready. Keep backups and notification tests current.</div>
+          ` : `
+            <div class="notice compact-notice">Press Refresh to scan sensors, notifications, heartbeat, cameras, backup review, and edge-failsafe readiness.</div>
+          `}
           <div class="system-grid">
-            ${this._trustCheckRows()}
+            ${this._trustCheckRows(8)}
           </div>
           <div class="grid two compact">
             <label>Last backup review
@@ -12001,16 +12020,38 @@ class OpenReefPanel extends HTMLElement {
             </label>
           </div>
         </section>
-        <section class="mapping-section">
-          <div class="section-head">
+
+        <details class="mapping-section advanced-settings">
+          <summary>
+            <div>
+              <p class="eyebrow">Advanced diagnostics</p>
+              <h4>Version, counts, and raw status snapshot.</h4>
+              <p class="muted">Useful for support, but not required for day-to-day reef keeping.</p>
+            </div>
+            <span class="pill unknown">optional</span>
+          </summary>
+          <div class="advanced-body">
+            <div class="system-grid">
+              ${rows.map(([label, value]) => `
+                <article class="system-card">
+                  <span>${this._escape(label)}</span>
+                  <strong>${this._escape(value)}</strong>
+                </article>
+              `).join("")}
+            </div>
+          </div>
+        </details>
+
+        <details class="mapping-section advanced-settings">
+          <summary>
             <div>
               <p class="eyebrow">Watchdog</p>
               <h4>Heartbeat and silence alarm settings.</h4>
               <p class="muted">The heartbeat is local to Home Assistant. Use a notify target for a daily all-clear push.</p>
             </div>
             <span class="pill ${heartbeat.status || "unknown"}">${this._escape(heartbeat.status || "unknown")}</span>
-          </div>
-          <div class="grid four compact">
+          </summary>
+          <div class="advanced-body grid four compact">
             <label class="toggle-card">
               <input type="checkbox" data-scope="watchdog" data-field="enabled" ${watchdog.enabled !== false ? "checked" : ""}>
               <span>
@@ -12035,16 +12076,18 @@ class OpenReefPanel extends HTMLElement {
               <input data-scope="watchdog" data-field="notifyTarget" value="${this._escape(watchdog.notifyTarget || "")}" placeholder="mobile_app_yourphone">
             </label>
           </div>
-        </section>
-        <section class="mapping-section">
-          <div class="section-head">
+        </details>
+
+        <details class="mapping-section advanced-settings">
+          <summary>
             <div>
               <p class="eyebrow">Probe Health</p>
               <h4>Stale, flatline, jump, and redundant-probe hints.</h4>
               <p class="muted">These warnings sit before automation so bad data does not quietly become bad control.</p>
             </div>
-          </div>
-          <div class="grid four compact">
+            <span class="pill ${sensorHealth.enabled === false ? "unknown" : "ok"}">${sensorHealth.enabled === false ? "off" : "on"}</span>
+          </summary>
+          <div class="advanced-body grid four compact">
             <label class="toggle-card">
               <input type="checkbox" data-scope="sensor-health" data-field="enabled" ${sensorHealth.enabled !== false ? "checked" : ""}>
               <span>
@@ -12068,16 +12111,18 @@ class OpenReefPanel extends HTMLElement {
               <input type="number" min="0.1" max="10" step="0.1" data-scope="sensor-health" data-field="temperatureMismatchC" value="${this._escape(String(sensorHealth.temperatureMismatchC || 1.5))}">
             </label>
           </div>
-        </section>
-        <section class="mapping-section">
-          <div class="section-head">
+        </details>
+
+        <details class="mapping-section advanced-settings">
+          <summary>
             <div>
               <p class="eyebrow">Edge Failsafes</p>
               <h4>On-device safety for life-support controls.</h4>
               <p class="muted">Use the ESPHome recipes in <code>docs/OPENREEF_EDGE_FAILSAFE_RECIPES.md</code>, then mark what has been reviewed on the actual hardware.</p>
             </div>
-          </div>
-          <div class="grid three compact">
+            <span class="pill ${edgeFailsafes.enabled ? "ok" : "unknown"}">${edgeFailsafes.enabled ? "reviewed" : "not marked"}</span>
+          </summary>
+          <div class="advanced-body grid three compact">
             <label class="toggle-card">
               <input type="checkbox" data-scope="edge-failsafes" data-field="enabled" ${edgeFailsafes.enabled ? "checked" : ""}>
               <span>
@@ -12113,16 +12158,18 @@ class OpenReefPanel extends HTMLElement {
               <input data-scope="edge-failsafes" data-field="notes" value="${this._escape(edgeFailsafes.notes || "")}" placeholder="Board, relay, probe, or kit note">
             </label>
           </div>
-        </section>
-        <section class="mapping-section">
-          <div class="section-head">
+        </details>
+
+        <details class="mapping-section advanced-settings">
+          <summary>
             <div>
               <p class="eyebrow">Reef Replay</p>
               <h4>Tank Black Box incident timeline.</h4>
               <p class="muted">Combines alert history, activity, captures, and feed-watch sessions into a support-friendly timeline.</p>
             </div>
-          </div>
-          <div class="alert-history">
+            <span class="pill ${replay.length ? "ok" : "unknown"}">${replay.length ? `${replay.length} item${replay.length === 1 ? "" : "s"}` : "empty"}</span>
+          </summary>
+          <div class="advanced-body alert-history">
             ${replay.length ? replay.map((incident) => `
               <div class="activity-item ${this._escape(incident.severity || "info")}">
                 <span>${this._escape(this._formatActivityTime(incident.timestamp))}</span>
@@ -12131,30 +12178,37 @@ class OpenReefPanel extends HTMLElement {
               </div>
             `).join("") : `<p class="muted">No incidents yet. Alert history, captures, and activity will appear here.</p>`}
           </div>
-        </section>
-        <section class="mapping-section beta-checklist">
-          <div class="section-head">
+        </details>
+
+        <details class="mapping-section advanced-settings beta-checklist">
+          <summary>
             <div>
               <p class="eyebrow">Beta handoff</p>
               <h4>Quick readiness checklist for your tester.</h4>
               <p class="muted">This does not expose tokens or secrets. It turns the support summary into a simple go/no-go scan.</p>
             </div>
+            <span class="pill unknown">beta</span>
+          </summary>
+          <div class="advanced-body">
+            <div class="system-grid">
+              ${checklist.map((item) => `
+                <article class="system-card ${this._escape(item.state)}">
+                  <span>${this._escape(item.label)}</span>
+                  <strong>${this._escape(item.status)}</strong>
+                  <small>${this._escape(item.detail)}</small>
+                </article>
+              `).join("")}
+            </div>
+            <div class="button-row">
+              <button class="secondary" data-action="copy-beta-smoke-test">Copy beta smoke test</button>
+              <button class="secondary" data-action="copy-beta-feedback-template">Copy feedback template</button>
+              <button class="secondary" data-action="copy-dosing-summary">Copy dosing summary</button>
+            </div>
           </div>
-          <div class="system-grid">
-            ${checklist.map((item) => `
-              <article class="system-card ${this._escape(item.state)}">
-                <span>${this._escape(item.label)}</span>
-                <strong>${this._escape(item.status)}</strong>
-                <small>${this._escape(item.detail)}</small>
-              </article>
-            `).join("")}
-          </div>
-        </section>
+        </details>
+
         <div class="button-row">
           <button class="secondary" data-action="validate">Refresh checks</button>
-          <button class="secondary" data-action="copy-beta-smoke-test">Copy beta smoke test</button>
-          <button class="secondary" data-action="copy-beta-feedback-template">Copy feedback template</button>
-          <button class="secondary" data-action="copy-dosing-summary">Copy dosing summary</button>
           <button class="primary" data-action="copy-support-summary">Copy support summary</button>
         </div>
       `,
@@ -13288,6 +13342,20 @@ class OpenReefPanel extends HTMLElement {
         .system-card small, .status-detail { color: #a8bed4; line-height: 1.35; }
         .status-detail { margin-top: -2px; }
         .beta-checklist { border-color: var(--openreef-accent-border); background: rgba(11, 23, 36, .74); }
+        .readiness-panel { border-width: 2px; background: linear-gradient(180deg, rgba(11, 43, 36, .82), rgba(11, 23, 36, .82)); }
+        .readiness-panel.warning { border-color: #a16207; background: linear-gradient(180deg, rgba(47, 38, 20, .78), rgba(11, 23, 36, .86)); }
+        .readiness-panel.critical { border-color: #7f1d1d; background: linear-gradient(180deg, rgba(43, 23, 28, .86), rgba(11, 23, 36, .88)); }
+        .readiness-panel.unknown { border-color: #334155; background: linear-gradient(180deg, rgba(16, 29, 44, .86), rgba(11, 23, 36, .88)); }
+        .next-actions { display: grid; gap: 6px; border: 1px solid rgba(148, 163, 184, .18); border-radius: 8px; padding: 12px; background: rgba(7, 17, 26, .48); }
+        .next-actions strong { color: #dcecff; }
+        .next-actions span { color: #b9cce0; line-height: 1.35; }
+        details.advanced-settings > summary { cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+        details.advanced-settings > summary::-webkit-details-marker { display: none; }
+        details.advanced-settings > summary h4 { margin: 0; }
+        details.advanced-settings > summary::after { content: "Show"; color: #dcecff; font-weight: 800; border: 1px solid #294055; border-radius: 999px; padding: 7px 12px; background: #172536; }
+        details.advanced-settings[open] > summary::after { content: "Hide"; }
+        details.advanced-settings .pill { margin-left: auto; }
+        .advanced-body { display: grid; gap: 12px; border-top: 1px solid #223447; padding-top: 12px; }
         .setup-next-list { display: grid; gap: 10px; }
         .setup-next-list div { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding-top: 10px; }
         .setup-next-list div:first-child { border-top: 0; padding-top: 0; }
