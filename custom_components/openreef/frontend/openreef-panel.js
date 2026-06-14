@@ -23,6 +23,7 @@ class OpenReefPanel extends HTMLElement {
     this._trend = null;
     this._trendRequest = "";
     this._cameraFocus = null;
+    this._cameraFullscreenFallback = false;
     this._recordingFocus = null;
     this._webrtcSession = null;
     this._timelapse = {
@@ -986,6 +987,7 @@ class OpenReefPanel extends HTMLElement {
         this._equipmentDetail = null;
         this._controlConfirm = null;
         this._cameraFocus = null;
+        this._cameraFullscreenFallback = false;
         this._recordingFocus = null;
         this._render();
       }
@@ -1084,8 +1086,8 @@ class OpenReefPanel extends HTMLElement {
         this._setDirty(true);
         this._render();
       }
-      if (action === "focus-camera") { this._cameraFocus = id; this._overlayQuip = this._pickOverlayQuip(); this._render(); this._startCameraWebRTCForFocus(); }
-      if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._render(); }
+      if (action === "focus-camera") { this._cameraFocus = id; this._cameraFullscreenFallback = false; this._overlayQuip = this._pickOverlayQuip(); this._render(); this._startCameraWebRTCForFocus(); }
+      if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._cameraFullscreenFallback = false; this._render(); }
       if (action === "open-pulse") this._openPulse(true);
       if (action === "close-pulse") this._closePulse();
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
@@ -1096,10 +1098,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "delete-feed") this._deleteFeedSession(id);
       if (action === "feed-play") this._feedTogglePlay();
       if (action === "feed-reload") this._loadFeedSessions();
-      if (action === "fullscreen-camera") {
-        const stage = this.shadowRoot.querySelector("[data-camera-stage]");
-        if (stage && stage.requestFullscreen) stage.requestFullscreen().catch(() => {});
-      }
+      if (action === "fullscreen-camera") this._enterCameraFullscreen();
+      if (action === "exit-camera-fullscreen") this._exitCameraFullscreen();
       if (action === "add-camera") {
         const input = this.shadowRoot.getElementById("or-add-camera-name");
         const label = (input?.value || "").trim();
@@ -6304,6 +6304,53 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  async _enterCameraFullscreen() {
+    const root = this.shadowRoot;
+    const stage = root && root.querySelector("[data-camera-stage]");
+    const video = root && root.querySelector("video[data-camera-video]");
+    const requestStageFullscreen = stage && (
+      stage.requestFullscreen
+      || stage.webkitRequestFullscreen
+      || stage.msRequestFullscreen
+    );
+    if (stage && requestStageFullscreen) {
+      try {
+        await requestStageFullscreen.call(stage);
+        return;
+      } catch {
+        // iPadOS Safari often rejects element fullscreen for custom containers.
+      }
+    }
+    const requestVideoFullscreen = video && (
+      video.webkitEnterFullscreen
+      || video.webkitRequestFullscreen
+      || video.requestFullscreen
+    );
+    if (video && requestVideoFullscreen) {
+      try {
+        const result = requestVideoFullscreen.call(video);
+        if (result && result.then) await result;
+        return;
+      } catch {
+        // Fall back to OpenReef's full-window view below.
+      }
+    }
+    this._cameraFullscreenFallback = true;
+    this._render();
+    this._startCameraWebRTCForFocus();
+  }
+
+  async _exitCameraFullscreen() {
+    const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+    if (document.fullscreenElement && exitFullscreen) {
+      try { await exitFullscreen.call(document); } catch {}
+    }
+    if (!this._cameraFullscreenFallback) return;
+    this._cameraFullscreenFallback = false;
+    this._render();
+    this._startCameraWebRTCForFocus();
+  }
+
   // Smooth live view: negotiate WebRTC through Home Assistant's own same-origin
   // websocket API (the flow ha-web-rtc-player uses). No external library, no
   // backend. Falls back to the MJPEG <img> if anything fails, so the worst case
@@ -7740,9 +7787,10 @@ class OpenReefPanel extends HTMLElement {
     if (!cam) return "";
     const online = cam.entity_id && this._cameraOnline(cam.entity_id);
     const snap = online ? this._cameraSnapshotUrl(cam.entity_id) : "";
+    const fullWindow = this._cameraFullscreenFallback;
     return `
-      <div class="modal">
-        <section class="wizard cam-dialog">
+      <div class="modal ${fullWindow ? "cam-fullscreen-modal" : ""}">
+        <section class="wizard cam-dialog ${fullWindow ? "cam-dialog-fullscreen" : ""}">
           <button class="close" data-action="close-camera">x</button>
           <div class="section-head">
             <div>
@@ -7759,7 +7807,7 @@ class OpenReefPanel extends HTMLElement {
           <div class="actions">
             ${online ? `<button class="secondary compact-button" data-action="snapshot-camera">Snapshot</button>` : ""}
             ${online ? `<button class="secondary compact-button" data-action="share-card">Share card</button>` : ""}
-            ${online ? `<button class="secondary compact-button" data-action="fullscreen-camera">Fullscreen</button>` : ""}
+            ${online ? `<button class="secondary compact-button" data-action="${fullWindow ? "exit-camera-fullscreen" : "fullscreen-camera"}">${fullWindow ? "Exit fullscreen" : "Fullscreen"}</button>` : ""}
             <button class="secondary compact-button" data-action="refresh-cameras">Refresh</button>
           </div>
         </section>
@@ -13286,6 +13334,11 @@ class OpenReefPanel extends HTMLElement {
         .wizard { position: relative; width: min(1100px, 100%); max-height: min(900px, 92vh); overflow: auto; overscroll-behavior: contain; padding: 28px; display: grid; gap: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
         .setup-wizard { width: min(1180px, 100%); }
         .close { position: absolute; top: 14px; right: 14px; width: 38px; height: 38px; border-radius: 50%; border: 1px solid #294055; background: #172536; color: #dcecff; }
+        .cam-fullscreen-modal { padding: 0; align-items: stretch; background: #02060a; overflow: hidden; }
+        .cam-fullscreen-modal .cam-dialog { width: 100%; min-height: 100dvh; max-height: none; border-radius: 0; box-shadow: none; grid-template-rows: auto minmax(0, 1fr) auto; padding: calc(14px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left)); }
+        .cam-dialog-fullscreen .section-head { padding-right: 46px; }
+        .cam-dialog-fullscreen .cam-stage { aspect-ratio: auto; height: auto; min-height: 0; border-radius: 8px; }
+        .cam-dialog-fullscreen .actions { justify-content: center; }
         .setup-progress { display: grid; gap: 8px; justify-items: center; color: #8da2ba; font-size: 12px; font-weight: 800; }
         .stepper { display: flex; gap: 10px; justify-content: center; }
         .stepper span, .stepper button { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; border: 0; background: #203247; color: #94a3b8; font-weight: 800; padding: 0; }
@@ -13386,6 +13439,8 @@ class OpenReefPanel extends HTMLElement {
           .page { padding: 8px; }
           .modal { padding: 8px; align-items: stretch; overflow: auto; }
           .wizard { width: 100%; max-height: calc(100vh - 16px); padding: 18px; }
+          .cam-fullscreen-modal { padding: 0; overflow: hidden; }
+          .cam-fullscreen-modal .cam-dialog { max-height: none; min-height: 100dvh; padding: calc(12px + env(safe-area-inset-top)) calc(10px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(10px + env(safe-area-inset-left)); }
           .close { top: 10px; right: 10px; width: 34px; height: 34px; }
           .setup-progress { padding-right: 40px; }
           .stepper { gap: 6px; flex-wrap: wrap; }
