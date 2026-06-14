@@ -22,6 +22,7 @@ class OpenReefPanel extends HTMLElement {
     this._lastRenderedSetupStep = null;
     this._trend = null;
     this._trendRequest = "";
+    this._pendingScroll = "";
     this._cameraFocus = null;
     this._cameraFullscreenFallback = false;
     this._recordingFocus = null;
@@ -989,6 +990,19 @@ class OpenReefPanel extends HTMLElement {
         this._cameraFocus = null;
         this._cameraFullscreenFallback = false;
         this._recordingFocus = null;
+        // Optional deep-link: a card can request that a specific settings section
+        // be expanded and/or that the page scroll to an anchor after render.
+        const sectionToOpen = target.dataset.section;
+        if (sectionToOpen) {
+          this._settingsSections[sectionToOpen] = true;
+          this._saveSettingsSections();
+        }
+        const msectionToOpen = target.dataset.msection;
+        if (msectionToOpen) {
+          this._healthSections[msectionToOpen] = true;
+          this._saveHealthSections();
+        }
+        this._pendingScroll = target.dataset.scroll || (sectionToOpen ? `or-section-${sectionToOpen}` : "");
         this._render();
       }
       if (action === "onboarding-start") { this._activeTab = "mission"; this._startOnboarding(); }
@@ -4590,7 +4604,7 @@ class OpenReefPanel extends HTMLElement {
     const active = this._dosingActiveParameters();
     if (!active.length) {
       return `
-        <article class="panel">
+        <article class="panel" id="or-msection-dosing">
           <div class="section-head">
             <div>
               <p class="eyebrow">Dosing &amp; Consumption Advisor</p>
@@ -4973,17 +4987,22 @@ class OpenReefPanel extends HTMLElement {
     return "all readiness checks clear";
   }
 
-  _trustCheckRows(limit = 12) {
+  _trustCheckRows(limit = 12, link = false) {
     const trust = this._trustCheckData();
     const items = Array.isArray(trust.items) ? trust.items.slice(0, limit) : [];
     if (!items.length) return `<p class="muted">Run Trust Check to build a readiness snapshot.</p>`;
-    return items.map((item) => `
-      <article class="system-card ${this._escape(item.status || "unknown")}">
+    return items.map((item) => {
+      const status = this._escape(item.status || "unknown");
+      const inner = `
         <span>${this._escape(item.label || item.key || "Check")}</span>
         <strong>${this._escape(this._trustStatusLabel(item.status || "unknown"))}</strong>
-        <small>${this._escape(item.detail || "")}</small>
-      </article>
-    `).join("");
+        <small>${this._escape(item.detail || "")}</small>`;
+      // In Mission Control these cards deep-link into the System Check section in
+      // Settings; inside Settings itself they stay as plain (non-link) cards.
+      return link
+        ? `<button class="system-card system-card-link ${status}" data-action="tab" data-id="settings" data-section="system" aria-label="${this._escape(item.label || item.key || "Check")} — Open System Check">${inner}</button>`
+        : `<article class="system-card ${status}">${inner}</article>`;
+    }).join("");
   }
 
   _systemCheck() {
@@ -5605,6 +5624,14 @@ class OpenReefPanel extends HTMLElement {
     this._maybeAutoStartOnboarding();
     if (this._activeTab === "live" && this._liveStatsMode === "graph") {
       this._loadLiveSparklines();
+    }
+    if (this._pendingScroll) {
+      const anchor = this._pendingScroll;
+      this._pendingScroll = "";
+      requestAnimationFrame(() => {
+        const el = this.shadowRoot.getElementById(anchor);
+        if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+      });
     }
   }
 
@@ -8444,9 +8471,9 @@ class OpenReefPanel extends HTMLElement {
     const trust = this._trustCheckData();
     const dosing = this._dosingEnabled() ? this._dosingMissionState() : null;
     const summaryCards = [
-      cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings") : "",
-      cards.health ? this._missionSummaryCard("Doughnut Dick Score", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission") : "",
-      cards.dosing && dosing ? this._missionSummaryCard("Dosing Advisor", dosing.value, dosing.detail, dosing.status, "mission") : "",
+      cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings", { section: "system" }) : "",
+      cards.health ? this._missionSummaryCard("Doughnut Dick Score", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission", { scroll: "or-anchor-health" }) : "",
+      cards.dosing && dosing ? this._missionSummaryCard("Dosing Advisor", dosing.value, dosing.detail, dosing.status, "mission", { scroll: "or-msection-dosing", msection: "dosing" }) : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -8511,9 +8538,14 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
-  _missionSummaryCard(label, value, detail, status, tab) {
+  _missionSummaryCard(label, value, detail, status, tab, opts = {}) {
+    const sectionAttr = opts.section ? ` data-section="${this._escape(opts.section)}"` : "";
+    const msectionAttr = opts.msection ? ` data-msection="${this._escape(opts.msection)}"` : "";
+    const scrollAttr = opts.scroll ? ` data-scroll="${this._escape(opts.scroll)}"` : "";
+    // One coherent accessible name instead of three separate inline nodes.
+    const ariaLabel = this._escape([label, value, detail].filter(Boolean).join(" — "));
     return `
-      <button class="summary-card ${status}" data-action="tab" data-id="${this._escape(tab)}">
+      <button class="summary-card ${status}" data-action="tab" data-id="${this._escape(tab)}"${sectionAttr}${msectionAttr}${scrollAttr} aria-label="${ariaLabel}">
         <span>${this._escape(label)}</span>
         <strong>${this._escape(value)}</strong>
         <small>${this._escape(detail)}</small>
@@ -8528,7 +8560,7 @@ class OpenReefPanel extends HTMLElement {
   _missionSection(key, eyebrow, title, pill, body, defaultOpen = false, tourId = "") {
     const open = this._missionSectionOpen(key, defaultOpen);
     return `
-      <article class="panel mission-section ${open ? "open" : "collapsed"}" ${tourId ? `data-tour="${this._escape(tourId)}"` : ""}>
+      <article class="panel mission-section ${open ? "open" : "collapsed"}" id="or-msection-${this._escape(key)}" ${tourId ? `data-tour="${this._escape(tourId)}"` : ""}>
         <button class="mission-section-head" data-action="toggle-health-section" data-section="${this._escape(key)}" data-open="${open ? 1 : 0}" aria-expanded="${open ? "true" : "false"}">
           <span class="mission-section-title">
             <span class="eyebrow">${this._escape(eyebrow)}</span>
@@ -8557,7 +8589,7 @@ class OpenReefPanel extends HTMLElement {
           <button class="secondary compact-button" data-action="refresh-trust-check">Refresh</button>
         </div>
         <div class="system-grid">
-          ${this._trustCheckRows(4)}
+          ${this._trustCheckRows(4, true)}
         </div>
       </article>
     `;
@@ -8601,7 +8633,7 @@ class OpenReefPanel extends HTMLElement {
     const groups = health.groups || {};
     const detailsOpen = this._healthSectionOpen("details");
     return `
-      <article class="panel health-breakdown ${this._escape(health.status)}" data-tour="reef-health">
+      <article class="panel health-breakdown ${this._escape(health.status)}" id="or-anchor-health" data-tour="reef-health">
         <div class="section-head">
           <div>
             <p class="eyebrow">Why this score?</p>
@@ -8834,14 +8866,24 @@ class OpenReefPanel extends HTMLElement {
     const status = this._sensorStatus(sensor, id);
     const display = this._sensorDisplayValue(id, sensor);
     const unit = this._sensorDisplayUnit(id, sensor);
+    // Numeric readings open their own trend screen; binary safety sensors have no
+    // trend, so they jump to Live Stats where their state is shown in context.
+    const numeric = this._sensorKind(sensor, id) !== "binary";
+    const linkAttrs = numeric
+      ? `data-action="show-trend" data-id="${this._escape(id)}"`
+      : `data-action="tab" data-id="live"`;
+    const hint = numeric ? "Open trend" : "Open Live Stats";
     return `
-      <div class="row">
+      <button class="row row-link" ${linkAttrs} aria-label="${this._escape(sensor.label)} — ${hint}">
         <div>
           <strong>${this._escape(sensor.label)}</strong>
           <span>${this._escape(sensor.entity_id || "Not mapped")}</span>
         </div>
-        <div class="pill ${status}">${this._escape(display)} ${this._escape(unit)}</div>
-      </div>
+        <div class="row-link-aside">
+          <span class="pill ${status}">${this._escape(display)} ${this._escape(unit)}</span>
+          <span class="row-go" aria-hidden="true">›</span>
+        </div>
+      </button>
     `;
   }
 
@@ -8849,13 +8891,16 @@ class OpenReefPanel extends HTMLElement {
     const armed = Object.entries(this._config.equipment || {}).filter(([, item]) => item.armed);
     if (!armed.length) return `<p class="muted">No equipment has been armed yet.</p>`;
     return armed.map(([id, item]) => `
-      <div class="row">
+      <button class="row row-link" data-action="show-equipment-detail" data-id="${this._escape(id)}" aria-label="${this._escape(item.label || id)} — Open equipment detail">
         <div>
           <strong>${this._escape(item.label || id)}</strong>
           <span>${this._escape(item.switch_entity_id || "No switch mapped")}</span>
         </div>
-        <div class="pill ${this._equipmentStateClass(item)}">${this._escape(this._equipmentStateLabel(item))}</div>
-      </div>
+        <div class="row-link-aside">
+          <span class="pill ${this._equipmentStateClass(item)}">${this._escape(this._equipmentStateLabel(item))}</span>
+          <span class="row-go" aria-hidden="true">›</span>
+        </div>
+      </button>
     `).join("");
   }
 
@@ -8869,13 +8914,16 @@ class OpenReefPanel extends HTMLElement {
       const mappedCost = this._number(this._config.energy[costKey]);
       const cost = this._energyCost(this._config.energy[energyKey], mappedCost);
       return `
-        <div class="row">
+        <button class="row row-link" data-action="tab" data-id="energy" aria-label="${this._escape(label)} energy — Open Energy">
           <div>
             <strong>${label}</strong>
             <span>${this._escape(this._config.energy[energyKey] || "Energy entity not mapped")}</span>
           </div>
-          <div class="pill">${this._formatEnergyWh(this._config.energy[energyKey])} / ${this._escape(this._formatMoney(cost))}</div>
-        </div>
+          <div class="row-link-aside">
+            <span class="pill">${this._formatEnergyWh(this._config.energy[energyKey])} / ${this._escape(this._formatMoney(cost))}</span>
+            <span class="row-go" aria-hidden="true">›</span>
+          </div>
+        </button>
       `;
     }).join("");
   }
@@ -10059,7 +10107,7 @@ class OpenReefPanel extends HTMLElement {
   _settingsPanel(id, title, description, content, forceOpen = false) {
     const open = forceOpen || this._settingsSectionOpen(id);
     return `
-      <article class="panel settings-section themed-settings-card">
+      <article class="panel settings-section themed-settings-card" id="or-section-${this._escape(id)}">
         <button class="settings-section-head ${forceOpen ? "static-section-head" : ""}" ${forceOpen ? "disabled" : `data-action="toggle-settings-section" data-id="${this._escape(id)}"`}>
           <span>
             <strong>${this._escape(title)}</strong>
@@ -12841,6 +12889,10 @@ class OpenReefPanel extends HTMLElement {
         .summary-card.warning { border-color: #a16207; background: #2f2614; }
         .summary-card.critical { border-color: #7f1d1d; background: #2b171c; }
         .summary-card.unknown { border-color: #334155; background: #101d2c; }
+        /* Clickable Mission Control cards: visible hover + keyboard focus */
+        button.summary-card, button.issue-item { transition: border-color .12s ease, box-shadow .12s ease; }
+        button.summary-card:hover, button.summary-card:focus-visible,
+        button.issue-item:hover, button.issue-item:focus-visible { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent-border); outline: none; }
         .health-breakdown { display: grid; gap: 14px; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .health-breakdown.warning { border-color: #a16207; }
         .health-breakdown.critical { border-color: #7f1d1d; }
@@ -13035,6 +13087,14 @@ class OpenReefPanel extends HTMLElement {
         .row:first-of-type { border-top: 0; }
         .row div { display: grid; gap: 4px; min-width: 0; }
         .row strong, .row span { overflow-wrap: anywhere; }
+        /* Clickable Tank-details rows: reset native button chrome, keep the row look */
+        button.row { display: flex; width: 100%; text-align: left; font: inherit; color: inherit; appearance: none; -webkit-appearance: none; background: transparent; border-left: 0; border-right: 0; border-bottom: 0; border-radius: 6px; }
+        .row-link { cursor: pointer; transition: background .12s ease, box-shadow .12s ease; }
+        .row-link:hover { background: var(--openreef-accent-soft, rgba(103, 232, 249, .07)); }
+        .row-link:focus-visible { background: var(--openreef-accent-soft, rgba(103, 232, 249, .07)); box-shadow: inset 0 0 0 2px var(--openreef-accent); outline: none; }
+        .row .row-link-aside { display: flex; align-items: center; gap: 8px; }
+        .row-go { color: #8da2ba; font-size: 20px; line-height: 1; font-weight: 800; }
+        .row-link:hover .row-go, .row-link:focus-visible .row-go { color: var(--openreef-accent, #67e8f9); }
         .pill { display: inline-flex; align-items: center; justify-content: center; min-width: 74px; min-height: 30px; padding: 5px 10px; border-radius: 999px; background: #203247; color: #dbeafe; font-weight: 800; }
         .pill.ok { background: #14532d; color: #bbf7d0; }
         .pill.warning { background: #713f12; color: #fde68a; }
@@ -13393,6 +13453,10 @@ class OpenReefPanel extends HTMLElement {
         .system-card span { color: #8da2ba; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
         .system-card strong { color: #dcecff; overflow-wrap: anywhere; }
         .system-card small, .status-detail { color: #a8bed4; line-height: 1.35; }
+        /* Clickable Trust Check cards (Mission Control) deep-link to System Check */
+        button.system-card { text-align: left; width: 100%; font: inherit; appearance: none; -webkit-appearance: none; }
+        .system-card-link { cursor: pointer; transition: border-color .12s ease, box-shadow .12s ease; }
+        .system-card-link:hover, .system-card-link:focus-visible { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent-border); outline: none; }
         .status-detail { margin-top: -2px; }
         .beta-checklist { border-color: var(--openreef-accent-border); background: rgba(11, 23, 36, .74); }
         .readiness-panel { border-width: 2px; background: linear-gradient(180deg, rgba(11, 43, 36, .82), rgba(11, 23, 36, .82)); }
