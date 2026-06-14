@@ -12029,7 +12029,6 @@ class OpenReefPanel extends HTMLElement {
 
   _systemCheckSettings() {
     const check = this._systemCheck();
-    const checklist = this._betaChecklist(check);
     const trust = this._trustCheckData();
     const trustCounts = this._trustCounts(trust);
     const heartbeat = this._heartbeat || {};
@@ -12273,33 +12272,6 @@ class OpenReefPanel extends HTMLElement {
                 <small>${this._escape(incident.message || `${Array.isArray(incident.events) ? incident.events.length : 0} related event(s)`)}</small>
               </div>
             `).join("") : `<p class="muted">No incidents yet. Alert history, captures, and activity will appear here.</p>`}
-          </div>
-        </details>
-
-        <details class="mapping-section advanced-settings beta-checklist">
-          <summary>
-            <div>
-              <p class="eyebrow">Beta handoff</p>
-              <h4>Quick readiness checklist for your tester.</h4>
-              <p class="muted">This does not expose tokens or secrets. It turns the support summary into a simple go/no-go scan.</p>
-            </div>
-            <span class="pill unknown">beta</span>
-          </summary>
-          <div class="advanced-body">
-            <div class="system-grid">
-              ${checklist.map((item) => `
-                <article class="system-card ${this._escape(item.state)}">
-                  <span>${this._escape(item.label)}</span>
-                  <strong>${this._escape(item.status)}</strong>
-                  <small>${this._escape(item.detail)}</small>
-                </article>
-              `).join("")}
-            </div>
-            <div class="button-row">
-              <button class="secondary" data-action="copy-beta-smoke-test">Copy beta smoke test</button>
-              <button class="secondary" data-action="copy-beta-feedback-template">Copy feedback template</button>
-              <button class="secondary" data-action="copy-dosing-summary">Copy dosing summary</button>
-            </div>
           </div>
         </details>
 
@@ -13458,7 +13430,6 @@ class OpenReefPanel extends HTMLElement {
         .system-card-link { cursor: pointer; transition: border-color .12s ease, box-shadow .12s ease; }
         .system-card-link:hover, .system-card-link:focus-visible { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent-border); outline: none; }
         .status-detail { margin-top: -2px; }
-        .beta-checklist { border-color: var(--openreef-accent-border); background: rgba(11, 23, 36, .74); }
         .readiness-panel { border-width: 2px; background: linear-gradient(180deg, rgba(11, 43, 36, .82), rgba(11, 23, 36, .82)); }
         .readiness-panel.warning { border-color: #a16207; background: linear-gradient(180deg, rgba(47, 38, 20, .78), rgba(11, 23, 36, .86)); }
         .readiness-panel.critical { border-color: #7f1d1d; background: linear-gradient(180deg, rgba(43, 23, 28, .86), rgba(11, 23, 36, .88)); }
