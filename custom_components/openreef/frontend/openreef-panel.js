@@ -8877,7 +8877,7 @@ class OpenReefPanel extends HTMLElement {
       <button class="row row-link" ${linkAttrs} aria-label="${this._escape(sensor.label)} — ${hint}">
         <div>
           <strong>${this._escape(sensor.label)}</strong>
-          <span>${this._escape(sensor.entity_id || "Not mapped")}</span>
+          ${sensor.entity_id ? "" : `<span>Not mapped</span>`}
         </div>
         <div class="row-link-aside">
           <span class="pill ${status}">${this._escape(display)} ${this._escape(unit)}</span>
@@ -8894,7 +8894,7 @@ class OpenReefPanel extends HTMLElement {
       <button class="row row-link" data-action="show-equipment-detail" data-id="${this._escape(id)}" aria-label="${this._escape(item.label || id)} — Open equipment detail">
         <div>
           <strong>${this._escape(item.label || id)}</strong>
-          <span>${this._escape(item.switch_entity_id || "No switch mapped")}</span>
+          ${item.switch_entity_id ? "" : `<span>No switch mapped</span>`}
         </div>
         <div class="row-link-aside">
           <span class="pill ${this._equipmentStateClass(item)}">${this._escape(this._equipmentStateLabel(item))}</span>
@@ -8917,7 +8917,7 @@ class OpenReefPanel extends HTMLElement {
         <button class="row row-link" data-action="tab" data-id="energy" aria-label="${this._escape(label)} energy — Open Energy">
           <div>
             <strong>${label}</strong>
-            <span>${this._escape(this._config.energy[energyKey] || "Energy entity not mapped")}</span>
+            ${this._config.energy[energyKey] ? "" : `<span>Energy entity not mapped</span>`}
           </div>
           <div class="row-link-aside">
             <span class="pill">${this._formatEnergyWh(this._config.energy[energyKey])} / ${this._escape(this._formatMoney(cost))}</span>
