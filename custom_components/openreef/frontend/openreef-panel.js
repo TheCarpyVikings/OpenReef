@@ -6324,7 +6324,7 @@ class OpenReefPanel extends HTMLElement {
   // about a value, only to package candidate rows and render what comes back.
 
   _icpCtrl() {
-    return "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
+    return "padding:6px 8px;border-radius:8px;border:1px solid #334155;background:#0b1724;color:#f8fafc;color-scheme:dark;";
   }
   _icpField() {
     return "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
@@ -14017,6 +14017,10 @@ class OpenReefPanel extends HTMLElement {
         .icp-status-pill.warning { background: #f59e0b; color: #111827; }
         .icp-status-pill.critical { background: #dc2626; color: #fff1f2; }
         .icp-status-pill.unknown { background: #475569; color: #e2e8f0; }
+        select[data-action^="icp-"] { background: #0b1724 !important; color: #f8fafc !important; border-color: #334155 !important; }
+        select[data-action^="icp-"] option { background: #ffffff; color: #0f172a; }
+        input[type="file"][data-action="icp-file"] { color: #f8fafc !important; background: #0b1724 !important; border-color: #334155 !important; }
+        input[type="file"][data-action="icp-file"]::file-selector-button { color: #0f172a; background: #f8fafc; border: 0; border-radius: 5px; padding: 4px 8px; font-weight: 700; }
         .stat { display: grid; gap: 8px; min-height: 150px; color: #e5edf5; }
         .stat p { color: #dcecff; font-weight: 800; }
         .stat strong { font-size: 34px; color: #67e8f9; }
