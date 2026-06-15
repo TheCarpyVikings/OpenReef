@@ -38,7 +38,7 @@ class OpenReefPanel extends HTMLElement {
     this._feedPlayer = { sessionId: "", frames: [], index: 0, playing: false, loading: false };
     this._feedPlayerTimer = null;
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
-    this._icp = { view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", busy: false, error: "", message: "" };
+    this._icp = { view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._lightingWindow = { data: null, loading: false };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
@@ -1070,7 +1070,7 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "icp-parse-paste") this._icpParsePaste();
       if (action === "icp-import") this._icpImportPending();
-      if (action === "icp-cancel") { this._icp.pending = null; this._icp.error = ""; this._icp.message = ""; this._render(); }
+      if (action === "icp-cancel") { this._icp.pending = null; this._icp.lastText = null; this._icp.error = ""; this._icp.message = ""; this._render(); }
       if (action === "icp-view") { this._icp.selectedReportId = id; this._icp.view = "report"; this._icp.drift = []; this._render(); }
       if (action === "icp-delete") this._icpDeleteReport(id);
       if (action === "lighting-refresh-window") this._loadLightingWindow(true);
@@ -1374,6 +1374,11 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
       if (target.dataset.action === "icp-file") { this._icpHandleFile(target.files && target.files[0]); return; }
+      if (target.dataset.action === "icp-lab") {
+        this._icp.lab = target.value;
+        this._icpReparse();   // re-run the template on an already-loaded file
+        return;
+      }
       if (target.dataset.action === "icp-sampletype") {
         this._icp.sampleType = target.value;
         if (this._icp.pending) this._icp.pending.report.sampleType = target.value;
@@ -6602,6 +6607,30 @@ class OpenReefPanel extends HTMLElement {
     return null;
   }
 
+  // The labs a user can explicitly select. "adapter" picks the parser/template:
+  // ati_pdf = ATI's multi-line layout, triton_csv = column table, generic = the
+  // tabular/line fallback (used until a lab gets its own tuned template).
+  _icpLabs() {
+    return [
+      { id: "auto", label: "Auto-detect", method: "", adapter: "auto" },
+      { id: "ati", label: "ATI", method: "ICP-OES", adapter: "ati_pdf" },
+      { id: "triton", label: "Triton", method: "ICP-OES", adapter: "triton_csv" },
+      { id: "fauna_marin", label: "Fauna Marin", method: "ICP-OES", adapter: "generic" },
+      { id: "oceamo", label: "Oceamo / Reef Moonshiner's", method: "ICP-MS", adapter: "generic" },
+      { id: "aquaforest", label: "Aquaforest", method: "ICP-OES", adapter: "generic" },
+      { id: "reefzlements", label: "ReefZlements", method: "ICP-OES", adapter: "generic" },
+      { id: "other", label: "Other / generic", method: "", adapter: "generic" },
+    ];
+  }
+
+  _icpForcedLab() {
+    const id = this._icp.lab || "auto";
+    if (id === "auto") return null;
+    const l = this._icpLabs().find((x) => x.id === id);
+    // Normalise to the same shape _icpDetectLab returns ({lab, method, adapter}).
+    return l ? { lab: l.label, method: l.method, adapter: l.adapter } : null;
+  }
+
   _icpDetectLab(text) {
     const t = String(text || "").toLowerCase();
     const has = (subs) => subs.some((s) => t.includes(s));
@@ -6657,21 +6686,29 @@ class OpenReefPanel extends HTMLElement {
     return m ? m[1].replace(/\s+/g, " ").trim().slice(0, 40) : "";
   }
 
+  // Run the parser for a given adapter/template. The generic adapter picks tabular
+  // (CSV) vs line (PDF) and cross-checks the other.
+  _icpParseWith(adapter, text, kind) {
+    if (adapter === "ati_pdf") return this._icpParseAti(text);
+    if (adapter === "triton_csv") return this._icpParseTabular(this._icpSplitRows(text).rows);
+    if (kind === "pdf") return this._icpParseLines(text);
+    const tab = this._icpParseTabular(this._icpSplitRows(text).rows);
+    if (this._icpCountRecognized(tab) >= 3) return tab;
+    const lines = this._icpParseLines(text);
+    return this._icpCountRecognized(lines) > this._icpCountRecognized(tab) ? lines : tab;
+  }
+
   _icpParseFromText(text, fileName, kind) {
-    const detected = this._icpDetectLab(text) || this._icpDetectLab(fileName) || { lab: "Unknown", method: "", adapter: "generic" };
-    let elements;
-    if (kind === "pdf") {
-      elements = detected.adapter === "ati_pdf" ? this._icpParseAti(text) : this._icpParseLines(text);
-      if (this._icpCountRecognized(elements) < 3) {
-        const alt = detected.adapter === "ati_pdf" ? this._icpParseLines(text) : this._icpParseAti(text);
+    // A user-selected lab forces that template; otherwise auto-detect from content.
+    const forced = this._icpForcedLab();
+    const detected = forced || this._icpDetectLab(text) || this._icpDetectLab(fileName) || { lab: "Unknown", method: "", adapter: "generic" };
+    let elements = this._icpParseWith(detected.adapter, text, kind);
+    // If the chosen template found little (wrong selection, or a lab whose layout we
+    // don't have a template for yet), try every parser and keep the best — so import
+    // never hard-fails. The report keeps the lab the user selected / we detected.
+    if (this._icpCountRecognized(elements) < 3) {
+      for (const alt of [this._icpParseAti(text), this._icpParseLines(text), this._icpParseTabular(this._icpSplitRows(text).rows)]) {
         if (this._icpCountRecognized(alt) > this._icpCountRecognized(elements)) elements = alt;
-      }
-    } else {
-      const { rows } = this._icpSplitRows(text);
-      elements = this._icpParseTabular(rows);
-      if (this._icpCountRecognized(elements) < 3) {
-        const viaLines = this._icpParseLines(text);
-        if (this._icpCountRecognized(viaLines) > this._icpCountRecognized(elements)) elements = viaLines;
       }
     }
     const report = {
@@ -6687,7 +6724,7 @@ class OpenReefPanel extends HTMLElement {
       source: { fileName: fileName || "" },
       elements,
     };
-    return { report, recognized: this._icpCountRecognized(elements), detected };
+    return { report, recognized: this._icpCountRecognized(elements), detected, forced: !!forced };
   }
 
   _icpSetPending(parsed) {
@@ -6751,14 +6788,15 @@ class OpenReefPanel extends HTMLElement {
     try {
       const name = file.name || "";
       const lower = name.toLowerCase();
-      if (lower.endsWith(".pdf")) {
-        const text = await this._icpExtractPdfText(file);
-        this._icpSetPending(this._icpParseFromText(text, name, "pdf"));
-      } else if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
+      if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
         this._icp.error = "Excel files aren't supported yet — open it and 'Save As' CSV, then import that. (Triton offers a CSV download.)";
       } else {
-        const text = await file.text();
-        this._icpSetPending(this._icpParseFromText(text, name, "csv"));
+        const kind = lower.endsWith(".pdf") ? "pdf" : "csv";
+        const text = kind === "pdf" ? await this._icpExtractPdfText(file) : await file.text();
+        this._icp.lastText = text;
+        this._icp.lastFileName = name;
+        this._icp.lastKind = kind;
+        this._icpSetPending(this._icpParseFromText(text, name, kind));
       }
     } catch (err) {
       this._icp.error = err && err.message ? err.message : "Could not read that file";
@@ -6776,7 +6814,18 @@ class OpenReefPanel extends HTMLElement {
       this._render();
       return;
     }
+    this._icp.lastText = text;
+    this._icp.lastFileName = "pasted.txt";
+    this._icp.lastKind = "paste";
     this._icpSetPending(this._icpParseFromText(text, "pasted.txt", "paste"));
+    this._render();
+  }
+
+  // Re-run the parser on the already-loaded file with the current lab selection,
+  // so changing the lab dropdown updates the preview without re-uploading.
+  _icpReparse() {
+    if (!this._icp.lastText) return;
+    this._icpSetPending(this._icpParseFromText(this._icp.lastText, this._icp.lastFileName, this._icp.lastKind));
     this._render();
   }
 
@@ -6792,6 +6841,7 @@ class OpenReefPanel extends HTMLElement {
       this._icp.drift = Array.isArray(res && res.drift) ? res.drift : [];
       this._icp.selectedReportId = (res && res.report && res.report.id) || "";
       this._icp.pending = null;
+      this._icp.lastText = null;
       this._icp.view = "report";
       this._icp.message = `Imported ${(res && res.report && res.report.lab) || "ICP"} report — ${((res && res.report && res.report.elements) || []).length} elements stored.`;
     } catch (err) {
@@ -6842,9 +6892,15 @@ class OpenReefPanel extends HTMLElement {
   _icpRenderImport() {
     const st = this._icp;
     const sampleType = st.sampleType || "tank";
+    const lab = st.lab || "auto";
+    const labOptions = this._icpLabs()
+      .map((l) => `<option value="${l.id}" ${lab === l.id ? "selected" : ""}>${this._escape(l.label)}</option>`)
+      .join("");
     return `
       <article class="panel stack">
         <div class="grid two">
+          <label style="${this._icpField()}"><span>ICP lab <small>(picks the template)</small></span>
+            <select style="${this._icpCtrl()}" data-action="icp-lab">${labOptions}</select></label>
           <label style="${this._icpField()}"><span>ICP results file <small>(.csv or .pdf)</small></span>
             <input type="file" accept=".csv,.txt,.pdf,.xlsx" data-action="icp-file" ${st.busy ? "disabled" : ""}></label>
           <label style="${this._icpField()}"><span>Sample is from</span>
@@ -6871,10 +6927,13 @@ class OpenReefPanel extends HTMLElement {
       const name = known ? this._icpElementName(symbol) : (el.label || el.symbol || "?");
       return `<tr style="${known ? "" : "opacity:0.45"}"><td>${this._escape(name)}</td><td>${this._escape(String(el.rawValue))}</td><td>${this._escape(el.rawUnit || "")}</td><td>${known ? "" : "<small class='hint'>not recognised</small>"}</td></tr>`;
     }).join("");
+    const via = p.forced
+      ? `${this._escape(r.lab)} template (selected)`
+      : (r.lab === "Unknown" ? "generic template — pick your lab above if this looks wrong" : `${this._escape(r.lab)} template (auto-detected)`);
     return `
       <article class="panel stack">
         <div class="section-head"><div><h3>Preview — ${this._escape(r.lab)}${r.method ? ` · ${this._escape(r.method)}` : ""}</h3>
-          <p>${p.recognized} recognised of ${r.elements.length} parsed${p.detected && p.detected.lab === "Unknown" ? " · lab not auto-detected" : ""}. Values are normalised &amp; flagged on import.</p></div></div>
+          <p>${p.recognized} recognised of ${r.elements.length} parsed · ${via}. Values are normalised &amp; flagged on import.</p></div></div>
         ${this._icpTable("<th>Element</th><th>Value</th><th>Unit</th><th></th>", body)}
         <div class="button-row">
           <button class="primary" data-action="icp-import" ${this._icp.busy ? "disabled" : ""}>Import ${p.recognized} element${p.recognized === 1 ? "" : "s"}</button>
