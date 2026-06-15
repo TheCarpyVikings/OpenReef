@@ -223,6 +223,35 @@ def test_triton_lab_display_fields_survive_normalise_and_renormalise():
     assert _element(again, "S")["labName"] == "Sulphur"
 
 
+def test_ati_lab_display_fields_survive_with_bdl_status():
+    raw = {"lab": "ATI", "sampleType": "tank", "sampleDate": "2026-04-20", "elements": [
+        {
+            "symbol": "Mn",
+            "rawValue": "---",
+            "rawUnit": "µg/l",
+            "labStatus": "low",
+            "labGroup": "Minor elements",
+            "labName": "Manganese",
+            "labResult": "---",
+            "labUnit": "µg/l",
+            "labSetpoint": "Ideal value: 0.98 µg/l",
+            "labStatusLabel": "BELOW NORMAL",
+            "labAssessment": "Attention",
+        },
+    ]}
+    mn = _element(icp.normalise_report(raw), "Mn")
+    assert mn["status"] == "bdl"                         # canonical BDL is preserved
+    assert mn["labStatus"] == "low"                      # ATI verdict survives for display
+    assert mn["labGroup"] == "Minor elements"
+    assert mn["labResult"] == "---"
+    assert mn["labSetpoint"] == "Ideal value: 0.98 µg/l"
+    assert mn["labStatusLabel"] == "BELOW NORMAL"
+    assert mn["labAssessment"] == "Attention"
+
+    again = icp.normalise_report({"lab": "ATI", "elements": [mn]})
+    assert _element(again, "Mn")["labStatusLabel"] == "BELOW NORMAL"
+
+
 # --- report normalisation ---------------------------------------------------- #
 
 def test_normalise_report_recomputes_status_ignoring_client():

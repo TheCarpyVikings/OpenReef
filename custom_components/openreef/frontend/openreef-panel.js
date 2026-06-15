@@ -6610,34 +6610,55 @@ class OpenReefPanel extends HTMLElement {
     return elements;
   }
 
-  // ATI's PDF lists each element across several lines (symbol / name / value+unit /
-  // "Ideal value: X" / status word). Anchor on the reliable "Ideal value:" line: the
-  // value is the line just before it, the element name is the nearest recognised
-  // element line before that, and ATI's own verdict is the line(s) just after.
+  // ATI's PDF lists each result as two text rows: symbol/value/status, then
+  // name/Ideal value/assessment. Anchor on the "Ideal value:" row and pair it
+  // with the previous value row so BDL rows ("---") and lab sections survive.
   _icpParseAti(text) {
     const lines = String(text || "").split(/\r\n|\r|\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
-    const valRe = /^(<\s*[\d.,]+|[-–—]+|n\.?d\.?|n\.?n\.?|[\d.,]+)\s*(µg\/l|μg\/l|mg\/l|ug\/l|ppm|ppb|psu|dkh|°dh|g\/l)?/i;
-    const idealRe = /ideal value[:\s]*([\d.,]+)\s*(µg\/l|μg\/l|mg\/l|ug\/l|ppm|ppb|psu|dkh|°dh|g\/l)?/i;
+    const valRe = /^(.+?)\s+(<\s*[\d.,]+|[-–—]+|n\.?d\.?|n\.?n\.?|[\d.,]+)\s*(µg\/l|μg\/l|mg\/l|ug\/l|ppm|ppb|psu|ppt|dkh|°dh|g\/l)?\s*(.*)$/i;
+    const idealRe = /^(.+?)\s+ideal value[:\s]*(<\s*[\d.,]+|[-–—]+|[\d.,]+)\s*(µg\/l|μg\/l|mg\/l|ug\/l|ppm|ppb|psu|ppt|dkh|°dh|g\/l)?\s*(.*)$/i;
+    const groupLabels = {
+      "base elements": "Base elements",
+      "major elements": "Major elements",
+      "minor elements": "Minor elements",
+      "nutrients": "Nutrients",
+      "pollutants": "Pollutants",
+    };
     const elements = [];
     const seen = new Set();
+    let group = "";
     for (let k = 0; k < lines.length; k++) {
+      const lower = lines[k].toLowerCase();
+      if (groupLabels[lower]) {
+        group = groupLabels[lower];
+        continue;
+      }
+      if (lower === "recommendations" || lower === "diagrams") group = "";
       const ideal = lines[k].match(idealRe);
       if (!ideal) continue;
       const vm = (lines[k - 1] || "").match(valRe);
       if (!vm) continue;
-      let symbol = null;
-      let nameLine = "";
-      for (let b = k - 2; b >= Math.max(0, k - 4); b--) {
-        const s = this._icpMatchNameLine(lines[b]);
-        if (s) { symbol = s; nameLine = lines[b]; break; }
-      }
+      const nameLine = ideal[1].trim();
+      let symbol = this._icpMatchSymbol(nameLine) || this._icpMatchSymbol(vm[1]);
       if (!symbol || seen.has(symbol)) continue;
       seen.add(symbol);
-      const token = vm[1].replace(/\s+/g, "");
-      const el = this._icpMakeElement(nameLine, /^[-–—]+$/.test(token) ? "n.d." : token, (vm[2] || "").trim(), "");
+      const token = vm[2].replace(/\s+/g, "");
+      const unit = (vm[3] || "").trim();
+      const idealValue = ideal[2].replace(/\s+/g, "");
+      const idealUnit = this._icpCleanUnit((ideal[3] || unit || "").trim());
+      const primaryStatus = (vm[4] || "").trim();
+      const assessment = (ideal[4] || "").trim();
+      const el = this._icpMakeElement(nameLine, token, unit, "");
       el.symbol = symbol;
-      el.labTarget = ideal[1];
-      const status = this._icpMapAtiStatus(`${lines[k + 1] || ""} ${lines[k + 2] || ""}`);
+      el.labTarget = idealValue;
+      if (group) el.labGroup = group;
+      el.labName = nameLine;
+      el.labResult = token;
+      if (unit) el.labUnit = this._icpCleanUnit(unit);
+      if (idealValue) el.labSetpoint = `Ideal value: ${idealValue}${idealUnit ? ` ${idealUnit}` : ""}`;
+      if (primaryStatus) el.labStatusLabel = primaryStatus;
+      if (assessment) el.labAssessment = assessment;
+      const status = this._icpMapAtiStatus(`${primaryStatus} ${assessment}`);
       if (status) el.labStatus = status;
       elements.push(el);
     }
@@ -7021,7 +7042,7 @@ class OpenReefPanel extends HTMLElement {
       </article>`;
   }
 
-  _icpStatusPill(status) {
+  _icpStatusPill(status, labelOverride = "") {
     const map = {
       ok: ["ok", "In range"],
       low: ["warning", "Low"],
@@ -7031,7 +7052,7 @@ class OpenReefPanel extends HTMLElement {
       unknown: ["unknown", "—"],
     };
     const [cls, label] = map[status] || ["unknown", status || "—"];
-    return `<span class="pill ${cls}">${this._escape(label)}</span>`;
+    return `<span class="pill ${cls}">${this._escape(labelOverride || label)}</span>`;
   }
 
   _icpRenderReport(report, drift) {
@@ -7040,8 +7061,7 @@ class OpenReefPanel extends HTMLElement {
       ["nutrient", "Nutrients"], ["trace", "Trace elements"],
       ["heavy_metal", "Heavy metals &amp; contaminants"], ["organic", "Organics"], ["unknown", "Other"],
     ];
-    const useLabGroups = (report.lab || "").toLowerCase() === "triton"
-      && (report.elements || []).some((el) => el && el.labGroup);
+    const useLabGroups = (report.elements || []).some((el) => el && el.labGroup);
     const sectionOrder = [];
     const byCat = {};
     for (const el of report.elements || []) {
@@ -7070,7 +7090,11 @@ class OpenReefPanel extends HTMLElement {
       ? sectionOrder.map((key) => [key, key])
       : groups.filter(([key]) => (byCat[key] || []).length);
     const sections = orderedSections.map(([k, label]) => {
-      const body = (byCat[k] || []).map((el) => `<tr><td>${this._escape(el.labName || el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${fmtUnit(el)}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(el.status)}</td></tr>`).join("");
+      const body = (byCat[k] || []).map((el) => {
+        const statusKey = useLabGroups && el.labStatus ? el.labStatus : el.status;
+        const statusLabel = useLabGroups ? (el.labStatusLabel || "") : "";
+        return `<tr><td>${this._escape(el.labName || el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${fmtUnit(el)}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(statusKey, statusLabel)}</td></tr>`;
+      }).join("");
       const heading = useLabGroups ? this._escape(label) : label;
       return `<article class="panel stack"><div class="section-head"><div><h4>${heading}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body)}</article>`;
     }).join("");

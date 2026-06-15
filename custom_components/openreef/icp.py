@@ -307,10 +307,14 @@ def _normalise_element(item: Any) -> dict[str, Any] | None:
         ("labResult", 40),
         ("labUnit", 20),
         ("labSetpoint", 80),
+        ("labStatusLabel", 40),
+        ("labAssessment", 40),
     ):
         cleaned = _clamp_str(item.get(key), limit)
         if cleaned:
             out[key] = cleaned
+    if lab_status is not None:
+        out["labStatus"] = lab_status
     return out
 
 
