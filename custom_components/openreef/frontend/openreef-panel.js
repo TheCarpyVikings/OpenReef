@@ -38,7 +38,8 @@ class OpenReefPanel extends HTMLElement {
     this._feedPlayer = { sessionId: "", frames: [], index: 0, playing: false, loading: false };
     this._feedPlayerTimer = null;
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
-    this._icp = { view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
+    this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
+    this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
     this._icpFileInput = null;
     this._icpFileInputTimer = null;
     this._lightingWindow = { data: null, loading: false };
@@ -1071,11 +1072,21 @@ class OpenReefPanel extends HTMLElement {
         const text = this._spawningCopyText(target.dataset.id);
         if (text) this._copyText(text, "Copied to clipboard", "Could not copy");
       }
+      if (action === "icp-subview") {
+        this._icp.subview = id || "dashboard";
+        if (this._icp.subview === "dashboard") this._loadIcpDashboard(true);
+        this._render();
+      }
+      if (action === "icp-dashboard-refresh") this._loadIcpDashboard(true);
+      if (action === "icp-dashboard-lab") this._icpDashboardToggleLab(id || "");
+      if (action === "icp-dashboard-range") this._icpDashboardUpdate({ range: id || "all" });
+      if (action === "icp-dashboard-group") this._icpDashboardUpdate({ group: id || "core" });
+      if (action === "icp-dashboard-symbol") this._icpDashboardUpdate({ symbol: id || "" });
       if (action === "icp-parse-paste") this._icpParsePaste();
       if (action === "icp-choose-file") this._icpChooseFile();
       if (action === "icp-import") this._icpImportPending();
       if (action === "icp-cancel") { this._icp.pending = null; this._icp.lastText = null; this._icp.error = ""; this._icp.message = ""; this._render(); }
-      if (action === "icp-view") { this._icp.selectedReportId = id; this._icp.view = "report"; this._icp.drift = []; this._render(); }
+      if (action === "icp-view") { this._icp.selectedReportId = id; this._icp.view = "report"; this._icp.subview = "reports"; this._icp.drift = []; this._render(); }
       if (action === "icp-delete") this._icpDeleteReport(id);
       if (action === "lighting-refresh-window") this._loadLightingWindow(true);
       if (action === "mute-alert") this._muteAlert(id, Number(target.dataset.minutes || 60));
@@ -7074,6 +7085,8 @@ class OpenReefPanel extends HTMLElement {
       this._icp.pending = null;
       this._icp.lastText = null;
       this._icp.view = "report";
+      this._icp.subview = "reports";
+      this._icpDashboard.payload = null;
       this._icp.message = `Imported ${(res && res.report && res.report.lab) || "ICP"} report — ${((res && res.report && res.report.elements) || []).length} elements stored.`;
     } catch (err) {
       this._icp.error = err && err.message ? err.message : "Could not import the report";
@@ -7094,6 +7107,7 @@ class OpenReefPanel extends HTMLElement {
         this._icp.selectedReportId = "";
         this._icp.view = "import";
       }
+      this._icpDashboard.payload = null;
       this._icp.message = "Report deleted.";
     } catch (err) {
       this._icp.error = err && err.message ? err.message : "Could not delete the report";
@@ -7103,21 +7117,274 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  _icpDashboardConfig() {
+    this._config.icpDashboard = this._config.icpDashboard || {
+      includedLabs: [],
+      range: "all",
+      group: "core",
+      symbol: "Ca",
+    };
+    if (!Array.isArray(this._config.icpDashboard.includedLabs)) this._config.icpDashboard.includedLabs = [];
+    this._config.icpDashboard.range = this._config.icpDashboard.range || "all";
+    this._config.icpDashboard.group = this._config.icpDashboard.group || "core";
+    this._config.icpDashboard.symbol = this._config.icpDashboard.symbol || "Ca";
+    return this._config.icpDashboard;
+  }
+
+  async _loadIcpDashboard(force = false) {
+    if (!this._hass || !this._config || (!force && this._icpDashboard.loading)) return;
+    if (!force && this._icpDashboard.payload) return;
+    const requestId = (this._icpDashboard.requestId || 0) + 1;
+    this._icpDashboard.requestId = requestId;
+    this._icpDashboard.loading = true;
+    this._icpDashboard.error = "";
+    try {
+      const payload = await this._callWS({
+        type: "openreef/icp_dashboard",
+        settings: this._icpDashboardConfig(),
+      });
+      if (requestId !== this._icpDashboard.requestId) return;
+      this._icpDashboard.payload = payload;
+      if (payload && payload.settings) {
+        this._config.icpDashboard = {
+          ...this._icpDashboardConfig(),
+          ...payload.settings,
+        };
+      }
+    } catch (err) {
+      if (requestId !== this._icpDashboard.requestId) return;
+      this._icpDashboard.error = err && err.message ? err.message : "Could not load ICP dashboard";
+    } finally {
+      if (requestId !== this._icpDashboard.requestId) return;
+      this._icpDashboard.loading = false;
+      this._render();
+    }
+  }
+
+  _icpDashboardPersist() {
+    this._persistConfigSilently(this._config).catch((err) => {
+      this._icpDashboard.error = err && err.message ? err.message : "Could not save ICP dashboard filters";
+      this._render();
+    });
+  }
+
+  _icpDashboardUpdate(patch) {
+    const cfg = this._icpDashboardConfig();
+    Object.assign(cfg, patch || {});
+    this._icpDashboard.payload = null;
+    this._loadIcpDashboard(true);
+    this._icpDashboardPersist();
+    this._render();
+  }
+
+  _icpDashboardToggleLab(lab) {
+    const cfg = this._icpDashboardConfig();
+    const payload = this._icpDashboard.payload || {};
+    const allLabs = (payload.labs || []).map((item) => item.lab).filter(Boolean);
+    if (!lab || lab === "__all") {
+      this._icpDashboardUpdate({ includedLabs: [] });
+      return;
+    }
+    const active = new Set((cfg.includedLabs || []).filter(Boolean));
+    if (active.size === 0) {
+      active.add(lab);
+    } else if (active.has(lab)) {
+      active.delete(lab);
+    } else {
+      active.add(lab);
+    }
+    const next = [...active].filter((item) => allLabs.includes(item));
+    this._icpDashboardUpdate({ includedLabs: next.length === allLabs.length ? [] : next });
+  }
+
   // --- rendering ------------------------------------------------------------
   _icpTab() {
     const st = this._icp;
     const reports = Array.isArray(this._config && this._config.icpReports) ? this._config.icpReports : [];
+    const subview = st.subview || (st.view === "report" ? "reports" : "dashboard");
     const head = `
       <div class="section-head">
-        <div><h2>ICP Import</h2><p>Import your lab's ICP results (Triton, ATI, Fauna Marin, Oceamo…). OpenReef stores the lab report, normalises values internally, and feeds Alk/Ca/Mg/NO₃/PO₄ into your trends, reef score &amp; dosing advisor.</p></div>
+        <div><h2>ICP</h2><p>Import lab reports faithfully, then use OpenReef Analysis to compare trends across Triton, ATI, Fauna Marin, and generic results.</p></div>
+      </div>`;
+    const nav = `
+      <div class="icp-subnav">
+        ${[["dashboard", "Dashboard"], ["import", "Import"], ["reports", "Reports"]].map(([id, label]) => `
+          <button class="${subview === id ? "active" : ""}" data-action="icp-subview" data-id="${id}">${label}</button>
+        `).join("")}
       </div>`;
     const banner = st.error
       ? `<p class="hint" style="color:var(--error-color,#e5484d)">${this._escape(st.error)}</p>`
       : (st.message ? `<p class="hint">${this._escape(st.message)}</p>` : "");
-    const pending = st.pending ? this._icpRenderPending() : "";
     const selected = reports.find((r) => r.id === st.selectedReportId);
-    const reportView = (st.view === "report" && selected) ? this._icpRenderReport(selected) : "";
-    return `<section class="stack">${head}${banner}${this._icpRenderImport()}${pending}${reportView}${this._icpRenderReportList(reports)}</section>`;
+    if (subview === "dashboard" && !this._icpDashboard.loading && !this._icpDashboard.payload) {
+      this._loadIcpDashboard();
+    }
+    const content = subview === "dashboard"
+      ? this._icpRenderDashboard(reports)
+      : (subview === "reports"
+        ? `${selected ? this._icpRenderReport(selected) : ""}${this._icpRenderReportList(reports)}`
+        : `${this._icpRenderImport()}${st.pending ? this._icpRenderPending() : ""}`);
+    return `<section class="stack">${head}${nav}${banner}${content}</section>`;
+  }
+
+  _icpLabColor(lab) {
+    const fixed = {
+      triton: "#38bdf8",
+      ati: "#f59e0b",
+      "fauna marin": "#22c55e",
+      oceamo: "#a78bfa",
+      aquaforest: "#f472b6",
+      reefzlements: "#2dd4bf",
+      unknown: "#94a3b8",
+    };
+    const key = String(lab || "unknown").toLowerCase();
+    if (fixed[key]) return fixed[key];
+    let hash = 0;
+    for (let i = 0; i < key.length; i += 1) hash = ((hash << 5) - hash) + key.charCodeAt(i);
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${hue}, 72%, 62%)`;
+  }
+
+  _icpDashboardValue(point, series) {
+    if (!point) return "—";
+    const unit = point.labUnit || point.unit || (series && series.unit) || "";
+    if (point.bdl) {
+      const threshold = point.threshold != null ? String(point.threshold) : "LOD";
+      return `<${threshold}${unit ? ` ${unit}` : ""}`;
+    }
+    if (point.labResult) return `${point.labResult}${unit ? ` ${unit}` : ""}`;
+    const value = Number(point.value);
+    const digits = Math.abs(value) < 1 ? 4 : (Math.abs(value) < 20 ? 2 : 1);
+    return `${Number.isFinite(value) ? this._format(value, digits) : "—"}${unit ? ` ${unit}` : ""}`;
+  }
+
+  _icpDashboardChart(series, range) {
+    const points = (series && Array.isArray(series.points)) ? series.points : [];
+    if (!points.length) return `<div class="empty-chart">No line-chart points yet. Below-detection values stay in the table below.</div>`;
+    const width = 720;
+    const height = 260;
+    const pad = 28;
+    const minTime = points.length > 1 ? points[0].time : points[0].time - 24 * 60 * 60 * 1000;
+    const maxTime = points.length > 1 ? points[points.length - 1].time : points[0].time + 24 * 60 * 60 * 1000;
+    const values = points.map((point) => Number(point.value)).filter((value) => Number.isFinite(value));
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const valueRange = max - min || Math.max(1, Math.abs(max || 1) * 0.1);
+    const timeRange = maxTime - minTime || 1;
+    const coord = (point) => {
+      const x = pad + ((point.time - minTime) / timeRange) * (width - pad * 2);
+      const y = height - pad - ((point.value - min) / valueRange) * (height - pad * 2);
+      return { x, y };
+    };
+    const coords = points.map((point) => coord(point));
+    const polyline = coords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+    const circles = points.map((point) => {
+      const { x, y } = coord(point);
+      const label = `${point.lab} ${this._icpDashboardValue(point, series)} ${String(point.date || "").slice(0, 10)}`;
+      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.5" fill="${this._escape(this._icpLabColor(point.lab))}"><title>${this._escape(label)}</title></circle>`;
+    }).join("");
+    const labLegend = [...new Set(points.map((point) => point.lab || "Unknown"))]
+      .map((lab) => `<span class="icp-lab-dot"><span style="background:${this._escape(this._icpLabColor(lab))}"></span>${this._escape(lab)}</span>`)
+      .join("");
+    return `
+      <div class="chart-wrap icp-chart-wrap">
+        <svg class="trend-chart icp-trend-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${this._escape(series.name || series.symbol)} ICP trend">
+          <line x1="${pad}" y1="${pad}" x2="${width - pad}" y2="${pad}" vector-effect="non-scaling-stroke" />
+          <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" vector-effect="non-scaling-stroke" />
+          ${points.length > 1 ? `<polyline points="${polyline}" vector-effect="non-scaling-stroke" />` : ""}
+          ${circles}
+        </svg>
+        <div class="chart-labels">
+          <span>${this._formatTrendTime(minTime, range)}</span>
+          <strong>${this._format(max, Math.abs(max) < 1 ? 4 : 2)} ${this._escape(series.unit || "")}</strong>
+          <span>${this._formatTrendTime(maxTime, range)}</span>
+        </div>
+        <div class="icp-lab-legend">${labLegend}</div>
+      </div>
+    `;
+  }
+
+  _icpRenderDashboard(reports) {
+    const dash = this._icpDashboard;
+    const payload = dash.payload || {};
+    const settings = payload.settings || this._icpDashboardConfig();
+    if (!reports.length) {
+      return `<article class="panel stack"><h3>Unified ICP Dashboard</h3><p class="hint">Import your first Triton, ATI, Fauna Marin, or generic report to start building cross-brand trends.</p><div class="button-row"><button class="primary" data-action="icp-subview" data-id="import">Import a report</button></div></article>`;
+    }
+    if (dash.loading && !dash.payload) {
+      return `<article class="panel"><p class="hint">Loading ICP dashboard...</p></article>`;
+    }
+    if (dash.error) {
+      return `<article class="panel stack"><p class="hint" style="color:var(--error-color,#e5484d)">${this._escape(dash.error)}</p><div class="button-row"><button class="secondary compact-button" data-action="icp-dashboard-refresh">Try again</button></div></article>`;
+    }
+    if (!dash.payload) {
+      return `<article class="panel"><p class="hint">Preparing ICP dashboard...</p></article>`;
+    }
+
+    const labs = payload.labs || [];
+    const groups = payload.groups || [];
+    const summary = payload.summary || {};
+    const included = new Set(settings.includedLabs || []);
+    const allLabs = included.size === 0;
+    const ranges = [["90d", "90d"], ["180d", "180d"], ["365d", "365d"], ["all", "All"]];
+    const activeGroup = groups.find((group) => group.id === settings.group) || groups[0] || { symbols: [] };
+    const selectedSeries = payload.selectedSeries;
+    const points = selectedSeries ? [...(selectedSeries.points || []), ...(selectedSeries.bdlPoints || [])]
+      .sort((a, b) => b.time - a.time)
+      .slice(0, 12) : [];
+    const summaryCards = [
+      ["Reports", summary.reports || 0, `${summary.tankReports || 0} tank-water`],
+      ["Labs", labs.length, allLabs ? "all included" : `${included.size} included`],
+      ["Trend points", summary.points || 0, `${summary.elements || 0} elements`],
+      ["Latest", summary.latest ? String(summary.latest).slice(0, 10) : "—", "tank ICP"],
+    ].map(([label, value, note]) => `<div class="metric-card"><span class="hint">${this._escape(label)}</span><strong>${this._escape(String(value))}</strong><small>${this._escape(note)}</small></div>`).join("");
+    const labButtons = `
+      <button class="${allLabs ? "active" : ""}" data-action="icp-dashboard-lab" data-id="__all">All labs</button>
+      ${labs.map((lab) => `<button class="${included.has(lab.lab) ? "active" : ""}" data-action="icp-dashboard-lab" data-id="${this._escape(lab.lab)}"><span class="icp-lab-swatch" style="background:${this._escape(this._icpLabColor(lab.lab))}"></span>${this._escape(lab.lab)} <small>${this._escape(String(lab.tankCount || lab.count || 0))}</small></button>`).join("")}`;
+    const rangeButtons = ranges.map(([id, label]) => `<button class="${settings.range === id ? "active" : ""}" data-action="icp-dashboard-range" data-id="${id}">${label}</button>`).join("");
+    const groupButtons = groups.map((group) => `<button class="${settings.group === group.id ? "active" : ""}" data-action="icp-dashboard-group" data-id="${this._escape(group.id)}">${this._escape(group.label)} <small>${(group.symbols || []).length}</small></button>`).join("");
+    const symbolButtons = (activeGroup.symbols || []).map((symbol) => {
+      const rec = payload.series && payload.series[symbol];
+      return `<button class="${settings.symbol === symbol ? "active" : ""}" data-action="icp-dashboard-symbol" data-id="${this._escape(symbol)}"><strong>${this._escape(symbol)}</strong>${rec ? `<small>${this._escape(rec.name || "")}</small>` : ""}</button>`;
+    }).join("");
+    const pointRows = points.map((point) => `
+      <tr>
+        <td>${this._escape(String(point.date || "").slice(0, 10))}</td>
+        <td><span class="icp-lab-dot"><span style="background:${this._escape(this._icpLabColor(point.lab))}"></span>${this._escape(point.lab || "Unknown")}</span></td>
+        <td>${this._escape(this._icpDashboardValue(point, selectedSeries))}</td>
+        <td>${point.bdl ? "<span class='pill unknown'>BDL</span>" : `<span class="pill ${point.status === "ok" ? "ok" : (point.status === "contaminant" ? "critical" : (["low", "high"].includes(point.status) ? "warning" : "unknown"))}">${this._escape(point.status || "—")}</span>`}</td>
+      </tr>`).join("");
+    const cards = (payload.analysisCards || []).length
+      ? payload.analysisCards.map((card) => `
+        <article class="icp-analysis-card ${this._escape(card.severity || "info")}">
+          <span class="hint">${this._escape(card.kind || "analysis")}</span>
+          <strong>${this._escape(card.title || "OpenReef Analysis")}</strong>
+          <p>${this._escape(card.summary || "")}</p>
+          ${card.detail ? `<small>${this._escape(card.detail)}</small>` : ""}
+        </article>`).join("")
+      : `<article class="icp-analysis-card info"><span class="hint">analysis</span><strong>No dashboard concerns</strong><p>OpenReef has not found a cross-report clue in the selected filters yet.</p></article>`;
+
+    return `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>Unified ICP Dashboard</h3><p class="hint">Dashboard filters change this view only. Reef score, dosing advisor, and core fan-out stay unchanged.</p></div><button class="secondary compact-button" data-action="icp-dashboard-refresh" ${dash.loading ? "disabled" : ""}>Refresh</button></div>
+        <div class="grid four">${summaryCards}</div>
+        <div class="icp-filter-block"><span class="hint">Labs</span><div class="icp-choice-row">${labButtons}</div></div>
+        <div class="grid two">
+          <div class="icp-filter-block"><span class="hint">Range</span><div class="icp-choice-row">${rangeButtons}</div></div>
+          <div class="icp-filter-block"><span class="hint">Group</span><div class="icp-choice-row">${groupButtons}</div></div>
+        </div>
+        <div class="icp-filter-block"><span class="hint">Element</span><div class="icp-symbol-row">${symbolButtons || "<small class='hint'>No tank-water values in this filter.</small>"}</div></div>
+      </article>
+      <article class="panel stack">
+        <div class="section-head"><div><h3>${selectedSeries ? `${this._escape(selectedSeries.name)} trend` : "Trend"}</h3><p class="hint">${selectedSeries ? `${this._escape(selectedSeries.symbol)} · ${this._escape(selectedSeries.unit || "")} · lab-coloured points` : "Choose an element above."}</p></div></div>
+        ${selectedSeries ? this._icpDashboardChart(selectedSeries, settings.range) : `<div class="empty-chart">No element selected.</div>`}
+        ${selectedSeries ? this._icpTable("<th>Date</th><th>Lab</th><th>Value shown by lab</th><th>OpenReef status</th>", pointRows || "<tr><td colspan='4'><small class='hint'>No point details in this filter.</small></td></tr>", "icp-dashboard-table") : ""}
+      </article>
+      <article class="panel stack">
+        <div class="section-head"><div><h3>OpenReef Analysis</h3><p class="hint">Evidence cards from normalised ICP data. These are OpenReef interpretations, not lab verdicts and not dosing instructions.</p></div></div>
+        <div class="grid two">${cards}</div>
+      </article>
+    `;
   }
 
   _icpRenderImport() {
@@ -13904,6 +14171,28 @@ class OpenReefPanel extends HTMLElement {
         .summary-card.warning { border-color: #a16207; background: #2f2614; }
         .summary-card.critical { border-color: #7f1d1d; background: #2b171c; }
         .summary-card.unknown { border-color: #334155; background: #101d2c; }
+        .metric-card { border: 1px solid #24364a; border-radius: 8px; background: #0b1724; padding: 14px; display: grid; gap: 6px; min-height: 92px; }
+        .metric-card strong { color: #67e8f9; font-size: 24px; line-height: 1.1; overflow-wrap: anywhere; }
+        .metric-card small { color: #9fb2c7; }
+        .icp-subnav, .icp-choice-row, .icp-symbol-row, .icp-lab-legend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .icp-subnav { margin-top: -6px; }
+        .icp-subnav button, .icp-choice-row button, .icp-symbol-row button { border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #dcecff; min-height: 36px; padding: 8px 12px; }
+        .icp-subnav button.active, .icp-choice-row button.active, .icp-symbol-row button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
+        .icp-choice-row button, .icp-symbol-row button { display: inline-flex; gap: 7px; align-items: center; }
+        .icp-symbol-row button { flex-direction: column; align-items: flex-start; min-width: 112px; }
+        .icp-symbol-row button small { color: inherit; opacity: .75; }
+        .icp-filter-block { display: grid; gap: 8px; min-width: 0; }
+        .icp-lab-swatch, .icp-lab-dot span { display: inline-block; width: 10px; height: 10px; border-radius: 999px; flex: 0 0 auto; }
+        .icp-lab-dot { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+        .icp-chart-wrap { background: #08131f; }
+        .icp-trend-chart circle { stroke: #e5edf5; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+        .icp-lab-legend { color: #9fb2c7; font-size: 12px; }
+        .icp-analysis-card { border: 1px solid #24364a; border-radius: 8px; background: #0b1724; padding: 14px; display: grid; gap: 7px; min-height: 120px; }
+        .icp-analysis-card strong { color: #e5edf5; }
+        .icp-analysis-card p, .icp-analysis-card small { color: #9fb2c7; }
+        .icp-analysis-card.info { border-color: #2563eb; background: #0b1d33; }
+        .icp-analysis-card.warning { border-color: #f59e0b; background: #2f2614; }
+        .icp-analysis-card.critical { border-color: #ef4444; background: #2b171c; }
         /* Clickable Mission Control cards: visible hover + keyboard focus */
         button.summary-card, button.issue-item { transition: border-color .12s ease, box-shadow .12s ease; }
         button.summary-card:hover, button.summary-card:focus-visible,

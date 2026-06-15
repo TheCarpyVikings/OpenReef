@@ -502,6 +502,9 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
     core["icpTemplates"] = (
         settings.get("icpTemplates") if isinstance(settings.get("icpTemplates"), list) else []
     )
+    core["icpDashboard"] = (
+        settings.get("icpDashboard") if isinstance(settings.get("icpDashboard"), dict) else {}
+    )
     core["display"]["setupComplete"] = any(
         sensor.get("entity_id") for sensor in core["sensors"].values()
     )
@@ -1267,6 +1270,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 safe_reports.append(report)
         config["icpReports"] = safe_reports
     config["icpTemplates"] = icp.normalise_templates(config.get("icpTemplates"))
+    config["icpDashboard"] = icp.normalise_dashboard_settings(config.get("icpDashboard"))
 
     manual_tests = config.setdefault("manualTests", {})
     if not isinstance(manual_tests, dict):
@@ -6175,6 +6179,40 @@ async def websocket_import_icp_report(
 
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): "openreef/icp_dashboard",
+        vol.Optional("settings"): dict,
+    }
+)
+@callback
+def websocket_icp_dashboard(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return the unified ICP dashboard payload.
+
+    Brand/range/group filters are dashboard-only. They do not change stored reports,
+    manual-reading fan-out, reef score, or dosing-advisor inputs.
+    """
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    settings = {
+        **(config.get("icpDashboard") if isinstance(config.get("icpDashboard"), dict) else {}),
+        **(msg.get("settings") if isinstance(msg.get("settings"), dict) else {}),
+    }
+    connection.send_result(
+        msg["id"],
+        icp.dashboard_payload(
+            config.get("icpReports", []),
+            config.get("manualReadings", {}),
+            settings,
+        ),
+    )
+
+
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): "openreef/delete_icp_report",
         vol.Required("reportId"): cv.string,
     }
@@ -6268,6 +6306,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_list_reef_presets)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)
+    websocket_api.async_register_command(hass, websocket_icp_dashboard)
     websocket_api.async_register_command(hass, websocket_import_icp_report)
     websocket_api.async_register_command(hass, websocket_delete_icp_report)
 

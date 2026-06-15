@@ -64,6 +64,42 @@ def _triton_raw(report_id="icp:triton:20260601", sample_date="2026-06-01T00:00:0
     }
 
 
+def _ati_raw(report_id="icp:ati:20260610", sample_date="2026-06-10T00:00:00Z", sample_type="tank"):
+    """A compact ATI-style report carrying lab display fields and a BDL row."""
+    return {
+        "id": report_id,
+        "lab": "ATI",
+        "adapter": "ati_pdf_text",
+        "method": "ICP-OES",
+        "sampleType": sample_type,
+        "sampleDate": sample_date,
+        "elements": [
+            {"symbol": "Ca", "rawValue": 445, "rawUnit": "mg/l", "labGroup": "Major elements", "labName": "Calcium", "labResult": "445", "labUnit": "mg/l"},
+            {"symbol": "Mg", "rawValue": 1403, "rawUnit": "mg/l", "labGroup": "Major elements", "labName": "Magnesium", "labResult": "1403", "labUnit": "mg/l"},
+            {"symbol": "PO4", "rawValue": 0.08, "rawUnit": "mg/l", "labGroup": "Nutrients", "labName": "Phosphate", "labResult": "0.08", "labUnit": "mg/l"},
+            {"symbol": "Al", "rawValue": 20.26, "rawUnit": "µg/l", "labGroup": "Pollutants", "labName": "Aluminium", "labResult": "20.26", "labUnit": "µg/l"},
+            {"symbol": "Ni", "rawValue": "---", "rawUnit": "µg/l", "labGroup": "Minor elements", "labName": "Nickel", "labResult": "---", "labUnit": "µg/l"},
+        ],
+    }
+
+
+def _fauna_raw(report_id="icp:fauna:20260620", sample_date="2026-06-20T00:00:00Z", sample_type="tank"):
+    """A compact Fauna Marin-style report with mg/l nutrients."""
+    return {
+        "id": report_id,
+        "lab": "Fauna Marin",
+        "adapter": "fauna_marin_csv",
+        "method": "ICP-OES",
+        "sampleType": sample_type,
+        "sampleDate": sample_date,
+        "elements": [
+            {"symbol": "Ca", "rawValue": "420", "rawUnit": "mg/l", "labGroup": "Macro elements", "labName": "Calcium", "labResult": "420", "labUnit": "mg/l"},
+            {"symbol": "PO4", "rawValue": "0.095", "rawUnit": "mg/l", "labGroup": "Nutrients", "labName": "Phosphate calculated", "labResult": "0.095", "labUnit": "mg/l"},
+            {"symbol": "Si", "rawValue": "0.035", "rawUnit": "mg/l", "labGroup": "Nutrients", "labName": "Silicon", "labResult": "0.035", "labUnit": "mg/l"},
+        ],
+    }
+
+
 def _element(report, symbol):
     return next(e for e in report["elements"] if e["symbol"] == symbol)
 
@@ -367,6 +403,115 @@ def test_normalise_core_config_drops_bad_icp():
     assert out["icpReports"] == []
 
 
+def test_normalise_core_config_sanitises_icp_dashboard_filters():
+    out = normalise({
+        "icpDashboard": {
+            "includedLabs": ["ATI", "ATI", "", "Fauna Marin"],
+            "range": "bogus",
+            "group": "major/minor",
+            "symbol": "Mg",
+        }
+    })
+    assert out["icpDashboard"] == {
+        "includedLabs": ["ATI", "Fauna Marin"],
+        "range": "all",
+        "group": "major_minor",
+        "symbol": "Mg",
+    }
+
+
+# --- ICP v2 dashboard -------------------------------------------------------- #
+
+def test_dashboard_series_unifies_labs_and_excludes_rodi():
+    reports = [
+        icp.normalise_report(_triton_raw()),
+        icp.normalise_report(_ati_raw()),
+        icp.normalise_report(_fauna_raw()),
+        icp.normalise_report(_triton_raw(report_id="icp:triton:rodi", sample_type="rodi")),
+    ]
+    payload = icp.dashboard_payload(
+        reports,
+        {},
+        {"range": "all", "group": "core", "symbol": "Ca"},
+        now=icp._parse_dt("2026-06-30T00:00:00Z"),
+    )
+    assert payload["summary"]["reports"] == 4
+    assert payload["summary"]["tankReports"] == 3
+    assert payload["summary"]["filteredTankReports"] == 3
+    assert payload["selectedSeries"]["symbol"] == "Ca"
+    assert [point["lab"] for point in payload["selectedSeries"]["points"]] == [
+        "Triton",
+        "ATI",
+        "Fauna Marin",
+    ]
+    triton_lab = next(item for item in payload["labs"] if item["lab"] == "Triton")
+    assert triton_lab["count"] == 2 and triton_lab["tankCount"] == 1
+
+
+def test_dashboard_brand_filter_is_dashboard_only_not_fanout():
+    triton = icp.normalise_report(_triton_raw())
+    ati = icp.normalise_report(_ati_raw())
+    payload = icp.dashboard_payload(
+        [triton, ati],
+        {},
+        {"includedLabs": ["ATI"], "range": "all", "group": "core", "symbol": "Ca"},
+        now=icp._parse_dt("2026-06-30T00:00:00Z"),
+    )
+    assert [point["lab"] for point in payload["selectedSeries"]["points"]] == ["ATI"]
+    # Dashboard filters do not change the stored report's normal core fan-out.
+    fan = icp.core_fanout(triton)
+    assert "calcium" in fan and fan["calcium"][0]["source"] == "ICP:Triton"
+
+
+def test_dashboard_preserves_bdl_details_but_skips_line_points():
+    report = icp.normalise_report(_ati_raw())
+    payload = icp.dashboard_payload(
+        [report],
+        {},
+        {"range": "all", "group": "all", "symbol": "Ni"},
+        now=icp._parse_dt("2026-06-30T00:00:00Z"),
+    )
+    nickel = payload["selectedSeries"]
+    assert nickel["symbol"] == "Ni"
+    assert nickel["points"] == []
+    assert len(nickel["bdlPoints"]) == 1
+    assert nickel["bdlPoints"][0]["labResult"] == "---"
+
+
+def test_dashboard_keeps_species_and_unit_traps_separate():
+    report = icp.normalise_report({
+        "lab": "Fauna Marin",
+        "sampleType": "tank",
+        "sampleDate": "2026-06-20",
+        "elements": [
+            {"symbol": "P", "rawValue": "0.0312", "rawUnit": "mg/l"},
+            {"symbol": "PO4", "rawValue": "0.0956592", "rawUnit": "mg/l"},
+            {"symbol": "S", "rawValue": "900", "rawUnit": "mg/l"},
+            {"symbol": "SO4", "rawValue": "2700", "rawUnit": "mg/l"},
+        ],
+    })
+    payload = icp.dashboard_payload([report], {}, {"range": "all", "group": "all", "symbol": "P"})
+    assert payload["series"]["P"]["points"][0]["value"] == 31.2
+    assert payload["series"]["PO4"]["points"][0]["value"] == 0.095659
+    assert payload["series"]["S"]["points"][0]["value"] == 900.0
+    assert payload["series"]["SO4"]["points"][0]["value"] == 2700.0
+
+
+def test_dashboard_analysis_cards_are_separate_openreef_interpretations():
+    reports = [
+        icp.normalise_report(_ati_raw(report_id="icp:ati:1", sample_date="2026-06-01T00:00:00Z")),
+        icp.normalise_report(_ati_raw(report_id="icp:ati:2", sample_date="2026-06-20T00:00:00Z")),
+    ]
+    payload = icp.dashboard_payload(
+        reports,
+        {},
+        {"range": "all", "group": "pollutants", "symbol": "Al"},
+        now=icp._parse_dt("2026-06-30T00:00:00Z"),
+    )
+    assert any(card["kind"] == "contaminant" for card in payload["analysisCards"])
+    assert payload["selectedSeries"]["symbol"] == "Al"
+
+
 # --- websocket handlers ------------------------------------------------------ #
 # Stub the heavy save machinery (scheduling, notifications) with a minimal seam
 # that still runs the real _normalise_core_config and persists to entry.options.
@@ -382,6 +527,13 @@ integration._async_save_config = _fake_save
 
 def _import(hass, conn, msg_id, raw):
     run(integration.websocket_import_icp_report(hass, conn, {"id": msg_id, "report": raw}))
+
+
+def _dashboard(hass, conn, msg_id, settings=None):
+    msg = {"id": msg_id}
+    if settings is not None:
+        msg["settings"] = settings
+    integration.websocket_icp_dashboard(hass, conn, msg)
 
 
 def test_ws_import_persists_and_fans_out():
@@ -445,6 +597,18 @@ def test_ws_import_preserves_existing_manual_readings():
     cal = entry.options[CONF_SETTINGS]["manualReadings"]["calcium"]
     sources = {r["source"] for r in cal}
     assert "Trident" in sources and "ICP:Triton" in sources   # kit row not clobbered
+
+
+def test_ws_icp_dashboard_returns_filtered_payload():
+    entry = FakeEntry(options={CONF_SETTINGS: {"icpReports": [_triton_raw(), _ati_raw()]}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    _dashboard(hass, conn, 1, {"includedLabs": ["ATI"], "range": "all", "group": "core", "symbol": "Ca"})
+    assert not conn.errors, conn.error_codes
+    payload = conn.results[0].payload
+    assert payload["settings"]["includedLabs"] == ["ATI"]
+    assert payload["selectedSeries"]["symbol"] == "Ca"
+    assert [point["lab"] for point in payload["selectedSeries"]["points"]] == ["ATI"]
 
 
 # --- tiny standalone runner -------------------------------------------------- #

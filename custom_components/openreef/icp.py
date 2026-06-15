@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .const import (
@@ -496,3 +496,427 @@ def drift_check(report: Any, manual_readings: Any) -> list[dict[str, Any]]:
                 "direction": "icp_higher" if delta > 0 else "icp_lower",
             })
     return out
+
+
+# --------------------------------------------------------------------------- #
+# ICP v2 dashboard payload (read-only analysis layer)
+# --------------------------------------------------------------------------- #
+_DASHBOARD_RANGE_DAYS = {"90d": 90, "180d": 180, "365d": 365, "all": None}
+_DASHBOARD_GROUPS = (
+    ("core", "Core"),
+    ("nutrients", "Nutrients"),
+    ("major_minor", "Major / Minor"),
+    ("trace", "Trace"),
+    ("pollutants", "Pollutants"),
+    ("organics", "Organics"),
+    ("all", "All"),
+)
+_DASHBOARD_GROUP_ALIASES = {
+    "major/minor": "major_minor",
+    "major-minor": "major_minor",
+    "majorMinor": "major_minor",
+    "nutrient": "nutrients",
+    "pollutant": "pollutants",
+    "organic": "organics",
+}
+_DASHBOARD_CORE_SYMBOLS = tuple(ICP_CORE_PARAM_MAP.keys())
+_DASHBOARD_INSIGHT_LIMIT = 8
+
+
+def normalise_dashboard_settings(raw: Any) -> dict[str, Any]:
+    """Sanitise the optional ICP dashboard filter block.
+
+    Empty ``includedLabs`` means "all labs". These settings drive the dashboard
+    payload only; they deliberately do not change ICP fan-out, reef score, or dosing.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    included: list[str] = []
+    labs = raw.get("includedLabs")
+    if isinstance(labs, list):
+        seen: set[str] = set()
+        for lab in labs[:20]:
+            clean = _clamp_str(lab, 60)
+            key = clean.lower()
+            if clean and key not in seen:
+                seen.add(key)
+                included.append(clean)
+    rng = raw.get("range")
+    if rng not in _DASHBOARD_RANGE_DAYS:
+        rng = "all"
+    group = _DASHBOARD_GROUP_ALIASES.get(str(raw.get("group") or ""), raw.get("group"))
+    if group not in {item[0] for item in _DASHBOARD_GROUPS}:
+        group = "core"
+    symbol = _clamp_str(raw.get("symbol"), 24) or "Ca"
+    return {
+        "includedLabs": included,
+        "range": rng,
+        "group": group,
+        "symbol": symbol,
+    }
+
+
+def _report_dt(report: Any) -> datetime | None:
+    if not isinstance(report, dict):
+        return None
+    return _parse_dt(report.get("sampleDate")) or _parse_dt(report.get("importedAt"))
+
+
+def _report_date(report: Any, dt: datetime | None = None) -> str:
+    text = ""
+    if isinstance(report, dict):
+        text = str(report.get("sampleDate") or report.get("importedAt") or "").strip()
+    if text:
+        return text
+    return dt.isoformat() if dt is not None else ""
+
+
+def _dashboard_group_matches(symbol: str, category: str, group: str) -> bool:
+    if group == "all":
+        return True
+    if group == "core":
+        return symbol in _DASHBOARD_CORE_SYMBOLS
+    if group == "nutrients":
+        return category == "nutrient"
+    if group == "major_minor":
+        return category in ("major", "minor")
+    if group == "trace":
+        return category == "trace"
+    if group == "pollutants":
+        return category == "heavy_metal"
+    if group == "organics":
+        return category == "organic"
+    return False
+
+
+def _symbol_sort_key(symbol: str) -> tuple[int, str]:
+    order = {sym: index for index, sym in enumerate(ICP_ELEMENTS)}
+    return (order.get(symbol, len(order) + 1), symbol.lower())
+
+
+def _element_meta(symbol: str, fallback: Any = None) -> dict[str, Any]:
+    meta = ICP_ELEMENTS.get(symbol)
+    fallback = fallback if isinstance(fallback, dict) else {}
+    return {
+        "symbol": symbol,
+        "name": meta.get("name") if meta else (fallback.get("name") or fallback.get("labName") or symbol),
+        "category": meta.get("category") if meta else (fallback.get("category") or "unknown"),
+        "unit": meta.get("unit") if meta else (fallback.get("unit") or fallback.get("rawUnit") or ""),
+    }
+
+
+def _dashboard_point(report: dict[str, Any], element: dict[str, Any], dt: datetime) -> dict[str, Any]:
+    value = _f(element.get("value"))
+    return {
+        "reportId": _clamp_str(report.get("id"), 120),
+        "date": _report_date(report, dt),
+        "time": int(dt.timestamp() * 1000),
+        "lab": _clamp_str(report.get("lab"), 60) or "Unknown",
+        "value": value,
+        "unit": _clamp_str(element.get("unit"), 20),
+        "bdl": bool(element.get("bdl")),
+        "threshold": _f(element.get("threshold")),
+        "status": _clamp_str(element.get("status"), 20),
+        "labName": _clamp_str(element.get("labName"), 80),
+        "labResult": _clamp_str(element.get("labResult"), 40),
+        "labUnit": _clamp_str(element.get("labUnit"), 20),
+        "sampleType": _clamp_str(report.get("sampleType"), 20),
+    }
+
+
+def _filtered_dashboard_reports(
+    reports: Any,
+    settings: dict[str, Any],
+    now: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    all_reports: list[dict[str, Any]] = []
+    tank_reports: list[dict[str, Any]] = []
+    included_labs = {lab.lower() for lab in settings.get("includedLabs", [])}
+    days = _DASHBOARD_RANGE_DAYS.get(settings.get("range"))
+    cutoff = now - timedelta(days=days) if days is not None else None
+    if not isinstance(reports, list):
+        return all_reports, tank_reports
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        dt = _report_dt(report)
+        lab = _clamp_str(report.get("lab"), 60) or "Unknown"
+        all_reports.append(report)
+        if report.get("sampleType") != "tank":
+            continue
+        if included_labs and lab.lower() not in included_labs:
+            continue
+        if cutoff is not None and dt is not None and dt < cutoff:
+            continue
+        if dt is None:
+            continue
+        tank_reports.append(report)
+    tank_reports.sort(key=lambda item: _report_dt(item) or datetime.min.replace(tzinfo=timezone.utc))
+    return all_reports, tank_reports
+
+
+def _lab_counts(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_lab: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        lab = _clamp_str(report.get("lab"), 60) or "Unknown"
+        rec = by_lab.setdefault(lab, {"lab": lab, "count": 0, "tankCount": 0, "latest": ""})
+        rec["count"] += 1
+        if report.get("sampleType") == "tank":
+            rec["tankCount"] += 1
+        date = _report_date(report, _report_dt(report))
+        if date and date > rec["latest"]:
+            rec["latest"] = date
+    return sorted(by_lab.values(), key=lambda item: item["lab"].lower())
+
+
+def _build_series(reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    series: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        dt = _report_dt(report)
+        if dt is None:
+            continue
+        for element in report.get("elements", []):
+            if not isinstance(element, dict):
+                continue
+            symbol = _clamp_str(element.get("symbol"), 24)
+            if not symbol:
+                continue
+            meta = _element_meta(symbol, element)
+            rec = series.setdefault(
+                symbol,
+                {
+                    **meta,
+                    "points": [],
+                    "bdlPoints": [],
+                    "reportCount": 0,
+                    "labs": [],
+                },
+            )
+            lab = _clamp_str(report.get("lab"), 60) or "Unknown"
+            if lab not in rec["labs"]:
+                rec["labs"].append(lab)
+            rec["reportCount"] += 1
+            point = _dashboard_point(report, element, dt)
+            if point["bdl"] or point["value"] is None:
+                rec["bdlPoints"].append(point)
+            else:
+                rec["points"].append(point)
+    for rec in series.values():
+        rec["points"].sort(key=lambda point: point["time"])
+        rec["bdlPoints"].sort(key=lambda point: point["time"])
+        rec["labs"].sort(key=str.lower)
+    return dict(sorted(series.items(), key=lambda item: _symbol_sort_key(item[0])))
+
+
+def _dashboard_groups(series: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for group_id, label in _DASHBOARD_GROUPS:
+        symbols = [
+            symbol for symbol, rec in series.items()
+            if _dashboard_group_matches(symbol, rec.get("category", "unknown"), group_id)
+        ]
+        groups.append({"id": group_id, "label": label, "symbols": symbols})
+    return groups
+
+
+def _material_delta(symbol: str, a: float, b: float) -> float:
+    param = ICP_CORE_PARAM_MAP.get(symbol)
+    if param in ICP_DRIFT_TOLERANCE:
+        return ICP_DRIFT_TOLERANCE[param]
+    unit = ICP_ELEMENTS.get(symbol, {}).get("unit")
+    avg = (abs(a) + abs(b)) / 2.0
+    floor = 0.02 if symbol == "PO4" else (1.0 if unit == "ppm" else 5.0)
+    return max(floor, avg * 0.15)
+
+
+def _analysis_card(kind: str, severity: str, title: str, summary: str, detail: str = "", symbol: str = "") -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "severity": severity,
+        "title": title,
+        "summary": summary,
+        "detail": detail,
+        "symbol": symbol,
+    }
+
+
+def _dashboard_analysis_cards(
+    reports: list[dict[str, Any]],
+    manual_readings: Any,
+    series: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+
+    for report in sorted(reports, key=lambda item: _report_date(item, _report_dt(item)), reverse=True):
+        for drift in drift_check(report, manual_readings):
+            param = drift["parameter"]
+            direction = "above" if drift["delta"] > 0 else "below"
+            cards.append(_analysis_card(
+                "drift",
+                "warning",
+                "Kit/probe drift",
+                f"{param.title()} ICP is {abs(drift['delta'])} {direction} your recent kit/probe median.",
+                f"ICP {drift['icpValue']} vs recent non-ICP {drift['kitValue']} (tolerance {drift['tolerance']}).",
+            ))
+            if len(cards) >= 2:
+                break
+        if len(cards) >= 2:
+            break
+
+    for symbol, rec in series.items():
+        points = rec.get("points", [])
+        found = False
+        for idx, first in enumerate(points):
+            for second in points[idx + 1:]:
+                if second["time"] - first["time"] > 30 * 24 * 60 * 60 * 1000:
+                    break
+                if first["lab"] == second["lab"]:
+                    continue
+                delta = abs(first["value"] - second["value"])
+                if delta > _material_delta(symbol, first["value"], second["value"]):
+                    cards.append(_analysis_card(
+                        "cross_lab",
+                        "warning",
+                        "Cross-lab disagreement",
+                        f"{rec['name']} differs materially between {first['lab']} and {second['lab']}.",
+                        f"{first['lab']} {round(first['value'], 4)} {rec['unit']} vs {second['lab']} {round(second['value'], 4)} {rec['unit']} within 30 days.",
+                        symbol,
+                    ))
+                    found = True
+                    break
+            if found:
+                break
+        if len(cards) >= _DASHBOARD_INSIGHT_LIMIT:
+            return cards[:_DASHBOARD_INSIGHT_LIMIT]
+
+    for symbol, rec in series.items():
+        points = rec.get("points", [])
+        if len(points) < 3:
+            continue
+        recent = points[-3:]
+        values = [point["value"] for point in recent]
+        rising = all(values[i] > values[i - 1] for i in range(1, len(values)))
+        falling = all(values[i] < values[i - 1] for i in range(1, len(values)))
+        if not (rising or falling):
+            continue
+        delta = values[-1] - values[0]
+        if abs(delta) <= _material_delta(symbol, values[0], values[-1]):
+            continue
+        direction = "rising" if rising else "falling"
+        severity = "warning" if recent[-1].get("status") in ("low", "high", "contaminant") else "info"
+        cards.append(_analysis_card(
+            "trend",
+            severity,
+            "Trend movement",
+            f"{rec['name']} has been {direction} across the last 3 tank ICP reports.",
+            f"Moved from {round(values[0], 4)} to {round(values[-1], 4)} {rec['unit']}.",
+            symbol,
+        ))
+        if len(cards) >= _DASHBOARD_INSIGHT_LIMIT:
+            return cards[:_DASHBOARD_INSIGHT_LIMIT]
+
+    contaminant_counts: dict[str, list[dict[str, Any]]] = {}
+    for report in reports:
+        for element in report.get("elements", []):
+            if not isinstance(element, dict):
+                continue
+            symbol = _clamp_str(element.get("symbol"), 24)
+            if element.get("category") == "heavy_metal" and element.get("status") == "contaminant":
+                contaminant_counts.setdefault(symbol, []).append(element)
+    for symbol, items in contaminant_counts.items():
+        if len(items) < 2:
+            continue
+        meta = _element_meta(symbol, items[-1])
+        cards.append(_analysis_card(
+            "contaminant",
+            "critical",
+            "Contaminant review",
+            f"{meta['name']} has repeated OpenReef contaminant flags.",
+            "OpenReef interpretation only: check recent hardware changes, magnets, pumps, clips, media, and source water before reacting.",
+            symbol,
+        ))
+        if len(cards) >= _DASHBOARD_INSIGHT_LIMIT:
+            return cards[:_DASHBOARD_INSIGHT_LIMIT]
+
+    for symbol, rec in series.items():
+        points = rec.get("points", [])
+        if len(points) != 1:
+            continue
+        latest = points[-1]
+        if latest.get("status") not in ("low", "high", "contaminant"):
+            continue
+        cards.append(_analysis_card(
+            "retest",
+            "info",
+            "Retest prompt",
+            f"{rec['name']} has one odd ICP value without trend support yet.",
+            "Treat as a recheck cue before making any major correction.",
+            symbol,
+        ))
+        if len(cards) >= _DASHBOARD_INSIGHT_LIMIT:
+            return cards[:_DASHBOARD_INSIGHT_LIMIT]
+
+    recurring_metals = sorted(
+        symbol for symbol, items in contaminant_counts.items()
+        if len(items) >= 2 and symbol in {"Al", "Cu", "Sn", "Pb", "Hg", "Cd", "Ni", "Zn"}
+    )
+    if recurring_metals and len(cards) < _DASHBOARD_INSIGHT_LIMIT:
+        cards.append(_analysis_card(
+            "maintenance",
+            "warning",
+            "Maintenance clue",
+            f"Recurring metals: {', '.join(recurring_metals)}.",
+            "Evidence-only prompt: inspect magnets, pump shafts, clips, rust points, media, and RO/DI before choosing a fix.",
+        ))
+
+    return cards[:_DASHBOARD_INSIGHT_LIMIT]
+
+
+def dashboard_payload(
+    reports: Any,
+    manual_readings: Any | None = None,
+    settings: Any | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build the unified cross-brand ICP dashboard payload.
+
+    This is a separate OpenReef analysis layer over stored lab-faithful reports.
+    It only uses tank-water reports for trend series; RO/DI reports remain visible
+    in the raw report list but do not influence dashboard trends.
+    """
+    settings = normalise_dashboard_settings(settings)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    all_reports, tank_reports = _filtered_dashboard_reports(reports, settings, now)
+    series = _build_series(tank_reports)
+    groups = _dashboard_groups(series)
+    groups_by_id = {group["id"]: group for group in groups}
+    selected_group = groups_by_id.get(settings["group"]) or groups_by_id["core"]
+    available_symbols = selected_group["symbols"]
+    if available_symbols and settings["symbol"] not in available_symbols:
+        settings["symbol"] = available_symbols[0] if available_symbols else settings["symbol"]
+    selected = series.get(settings["symbol"]) if settings["symbol"] in available_symbols else None
+    latest = ""
+    point_count = 0
+    for rec in series.values():
+        point_count += len(rec.get("points", []))
+        for point in [*rec.get("points", []), *rec.get("bdlPoints", [])]:
+            if point.get("date") and point["date"] > latest:
+                latest = point["date"]
+
+    return {
+        "settings": settings,
+        "labs": _lab_counts(all_reports),
+        "groups": groups,
+        "series": series,
+        "selectedSeries": selected,
+        "summary": {
+            "reports": len(all_reports),
+            "tankReports": len([r for r in all_reports if r.get("sampleType") == "tank"]),
+            "filteredTankReports": len(tank_reports),
+            "elements": len(series),
+            "points": point_count,
+            "latest": latest,
+        },
+        "analysisCards": _dashboard_analysis_cards(tank_reports, manual_readings or {}, series),
+    }

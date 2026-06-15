@@ -593,6 +593,7 @@ REEF_PRESETS: dict[str, dict] = {
 # list (lab + German/locale labels, slugified) used to map a lab label → symbol.
 ICP_STORAGE_KEY = "icpReports"
 ICP_TEMPLATES_KEY = "icpTemplates"
+ICP_DASHBOARD_KEY = "icpDashboard"
 ICP_REPORTS_MAX = 60            # stored ICP reports kept (oldest dropped)
 ICP_REPORT_ELEMENTS_MAX = 100   # element rows kept per report
 ICP_TEMPLATES_MAX = 25          # saved generic-mapper templates kept
@@ -1078,6 +1079,12 @@ DEFAULT_CORE_CONFIG = {
     # into manualReadings (see ICP_CORE_PARAM_MAP).
     "icpReports": [],
     "icpTemplates": [],
+    "icpDashboard": {
+        "includedLabs": [],
+        "range": "all",
+        "group": "core",
+        "symbol": "Ca",
+    },
 }
 
 DEFAULT_SETTINGS = {
