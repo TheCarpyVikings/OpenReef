@@ -41,6 +41,8 @@ class OpenReefPanel extends HTMLElement {
     this._icp = { view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._icpLastFileSignature = "";
     this._icpLastFileHandledAt = 0;
+    this._icpFileReadActive = false;
+    this._icpEmptyFileTimer = null;
     this._lightingWindow = { data: null, loading: false };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
@@ -112,6 +114,9 @@ class OpenReefPanel extends HTMLElement {
     // Don't recreate camera <img> elements on hass updates — it would restart the
     // live MJPEG streams. A manual Refresh button re-renders on demand.
     if (this._activeTab === "cameras" || this._cameraFocus) return false;
+    // iPadOS can deliver file input data a moment after the picker closes. Avoid
+    // replacing the ICP upload control while that handoff/read is in flight.
+    if (this._activeTab === "icp" && (this._icpFileReadActive || this._icp?.busy)) return false;
     // While a clip is open, don't re-render — it would interrupt <video> playback.
     if (this._recordingFocus) return false;
     if (this._isEditingFormControl()) return false;
@@ -6897,9 +6902,18 @@ class OpenReefPanel extends HTMLElement {
     const file = input && input.files && input.files.length ? input.files[0] : null;
     if (!file) {
       if (eventType !== "change" || Date.now() - this._icpLastFileHandledAt < 1500) return;
-      this._icp.message = "No file was received. On iPad, make sure the file has downloaded locally, then try Choose File again.";
-      this._render();
+      if (this._icpEmptyFileTimer) window.clearTimeout(this._icpEmptyFileTimer);
+      this._icpEmptyFileTimer = window.setTimeout(() => {
+        this._icpEmptyFileTimer = null;
+        if (this._icpFileReadActive || this._icp.busy || Date.now() - this._icpLastFileHandledAt < 1500) return;
+        this._icp.message = "No file was received. On iPad, make sure the file has downloaded locally, then try Choose File again.";
+        this._render();
+      }, 700);
       return;
+    }
+    if (this._icpEmptyFileTimer) {
+      window.clearTimeout(this._icpEmptyFileTimer);
+      this._icpEmptyFileTimer = null;
     }
     const signature = this._icpFileSignature(file);
     const now = Date.now();
@@ -6915,10 +6929,10 @@ class OpenReefPanel extends HTMLElement {
 
   async _icpHandleFile(file) {
     if (!file) return;
+    this._icpFileReadActive = true;
     this._icp.busy = true;
     this._icp.error = "";
     this._icp.message = "";
-    this._render();
     try {
       const name = file.name || "";
       const lower = name.toLowerCase();
@@ -6937,6 +6951,7 @@ class OpenReefPanel extends HTMLElement {
       this._icp.error = err && err.message ? err.message : "Could not read that file";
     } finally {
       this._icp.busy = false;
+      this._icpFileReadActive = false;
       this._render();
     }
   }
