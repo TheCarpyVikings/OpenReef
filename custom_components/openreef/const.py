@@ -10,7 +10,7 @@ PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
 CORE_SCHEMA_VERSION = 43
-INTEGRATION_VERSION = "0.4.96"
+INTEGRATION_VERSION = "0.4.97"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -573,6 +573,196 @@ REEF_PRESETS: dict[str, dict] = {
     },
 }
 
+# --------------------------------------------------------------------------- #
+# ICP test importer
+# --------------------------------------------------------------------------- #
+# Reefers post water samples to ICP labs (Triton, ATI, Fauna Marin, Oceamo, …)
+# and get back a panel of ~40 elements. The importer parses a lab file (CSV/PDF)
+# in the panel, the backend re-validates it here, stores the full report under
+# config["icpReports"], and *fans out* the overlapping core params (Alk/Ca/Mg/
+# NO3/PO4/salinity) into the existing manualReadings streams so reef-score,
+# the dosing advisor and trends pick them up automatically. ICP also acts as a
+# calibration/drift check against the user's frequent test-kit readings.
+#
+# The registry below is the canonical element table, keyed by chemical symbol
+# (plus a few compound tokens — KH/NO3/PO4/Sal — for the non-element params labs
+# report). It is OPEN-ENDED: a lab element with no registry entry is still stored
+# (category "unknown"), it just gets no canonical range/flag. Each entry carries
+# the canonical UNIT OpenReef stores in (units are normalised per-element, never
+# per-file — that's what defeats the Si/P mg/L-vs-µg/L 1000× trap) and an alias
+# list (lab + German/locale labels, slugified) used to map a lab label → symbol.
+ICP_STORAGE_KEY = "icpReports"
+ICP_TEMPLATES_KEY = "icpTemplates"
+ICP_REPORTS_MAX = 60            # stored ICP reports kept (oldest dropped)
+ICP_REPORT_ELEMENTS_MAX = 100   # element rows kept per report
+ICP_TEMPLATES_MAX = 25          # saved generic-mapper templates kept
+
+# symbol/token → existing MANUAL_TEST_PARAMETERS id. Only these fan out into the
+# core reading streams. The registry's canonical unit for each of these MATCHES
+# the MVP_SENSORS unit for the target param, so the fanned value needs no further
+# conversion (Ca/Mg/NO3/PO4 → ppm, KH → dKH, Sal → ppt).
+ICP_CORE_PARAM_MAP = {
+    "Ca": "calcium",
+    "Mg": "magnesium",
+    "KH": "alkalinity",
+    "NO3": "nitrate",
+    "PO4": "phosphate",
+    "Sal": "salinity",
+}
+
+# Drift/calibration check: how far an ICP value may sit from the user's recent
+# (non-ICP) test-kit trend before we flag a divergence, per core param.
+ICP_DRIFT_TOLERANCE = {"alkalinity": 0.5, "calcium": 20.0, "magnesium": 50.0}
+ICP_DRIFT_WINDOW_DAYS = 14
+
+# category: major | minor | nutrient | trace | heavy_metal | organic | physical
+# unit: canonical unit stored (ppm = mg/L, ppb = µg/L). range: OpenReef canonical
+# fallback (used only when the lab file carries no range); None = no opinion.
+# Heavy-metal "high" is a contamination threshold — any value above it flags
+# "contaminant"; a heavy metal with no range flags "contaminant" on any detection.
+ICP_ELEMENTS = {
+    # --- core / fan-out (canonical unit matches MVP_SENSORS) ---------------- #
+    "Ca": {"name": "Calcium", "category": "major", "unit": "ppm", "range": {"low": 380, "high": 450},
+           "aliases": ["ca", "calcium", "kalzium", "calcio"]},
+    "Mg": {"name": "Magnesium", "category": "major", "unit": "ppm", "range": {"low": 1250, "high": 1400},
+           "aliases": ["mg", "magnesium"]},
+    "KH": {"name": "Alkalinity", "category": "physical", "unit": "dKH", "range": {"low": 7.0, "high": 9.5},
+           "aliases": ["kh", "alk", "alkalinity", "alkalinitaet", "alkalinitat", "carbonate hardness",
+                       "karbonathaerte", "karbonatharte", "dkh", "acid binding capacity", "saeurebindungsvermoegen"]},
+    "NO3": {"name": "Nitrate", "category": "nutrient", "unit": "ppm", "range": {"low": 1.0, "high": 10.0},
+            "aliases": ["no3", "nitrate", "nitrat"]},
+    "PO4": {"name": "Phosphate", "category": "nutrient", "unit": "ppm", "range": {"low": 0.02, "high": 0.10},
+            "aliases": ["po4", "phosphate", "phosphat", "orthophosphate", "orthophosphat"],
+            "species_note": "phosphate ion; PO4 = P × 3.066 — distinct from elemental P"},
+    "Sal": {"name": "Salinity", "category": "physical", "unit": "ppt", "range": {"low": 33.0, "high": 35.0},
+            "aliases": ["sal", "salinity", "salinitaet", "salinitat", "salt", "psu"]},
+    # --- other major / minor ions ------------------------------------------ #
+    "Na": {"name": "Sodium", "category": "major", "unit": "ppm", "range": {"low": 10500, "high": 11500},
+           "aliases": ["na", "sodium", "natrium"]},
+    "K": {"name": "Potassium", "category": "major", "unit": "ppm", "range": {"low": 380, "high": 420},
+          "aliases": ["k", "potassium", "kalium"]},
+    "Sr": {"name": "Strontium", "category": "minor", "unit": "ppm", "range": {"low": 7.0, "high": 9.0},
+           "aliases": ["sr", "strontium"]},
+    "B": {"name": "Boron", "category": "minor", "unit": "ppm", "range": {"low": 4.0, "high": 5.0},
+          "aliases": ["b", "boron", "bor"]},
+    "S": {"name": "Sulfur", "category": "major", "unit": "ppm", "range": {"low": 840, "high": 960},
+          "aliases": ["s", "sulfur", "sulphur", "schwefel"],
+          "species_note": "elemental sulfur; distinct from sulfate (SO4 = S × 2.996)"},
+    "SO4": {"name": "Sulfate", "category": "major", "unit": "ppm", "range": {"low": 2400, "high": 2900},
+            "aliases": ["so4", "sulfate", "sulphate", "sulfat"],
+            "species_note": "sulfate ion; distinct from elemental S"},
+    "Br": {"name": "Bromine", "category": "minor", "unit": "ppm", "range": {"low": 60, "high": 75},
+           "aliases": ["br", "bromine", "bromide", "brom", "bromid"]},
+    "Cl": {"name": "Chloride", "category": "major", "unit": "ppm", "range": {"low": 19000, "high": 20000},
+           "aliases": ["cl", "chloride", "chlor", "chlorid", "chlorine"]},
+    "F": {"name": "Fluoride", "category": "minor", "unit": "ppm", "range": {"low": 1.0, "high": 1.5},
+          "aliases": ["f", "fluoride", "fluorid", "fluorine"]},
+    "Li": {"name": "Lithium", "category": "trace", "unit": "ppb", "range": {"low": 150, "high": 200},
+           "aliases": ["li", "lithium"]},
+    # --- nutrients --------------------------------------------------------- #
+    "P": {"name": "Phosphorus", "category": "nutrient", "unit": "ppb", "range": {"low": 0, "high": 40},
+          "aliases": ["p", "phosphorus", "phosphor"],
+          "species_note": "elemental P; some labs report mg/L, others µg/L — PO4 = P × 3.066"},
+    "Si": {"name": "Silicon", "category": "nutrient", "unit": "ppb", "range": {"low": 0, "high": 100},
+           "aliases": ["si", "silicon", "silicate", "silicat", "silizium", "silica", "silikat"],
+           "species_note": "Si; reported mg/L on some labs (e.g. Fauna Marin), µg/L on most — 1000× hazard"},
+    "NO2": {"name": "Nitrite", "category": "nutrient", "unit": "ppm", "range": {"low": 0, "high": 0.05},
+            "aliases": ["no2", "nitrite", "nitrit"]},
+    # --- trace elements (µg/L) --------------------------------------------- #
+    "I": {"name": "Iodine", "category": "trace", "unit": "ppb", "range": {"low": 50, "high": 70},
+          "aliases": ["i", "iodine", "iod", "jod", "iodide", "iodid"]},
+    "Fe": {"name": "Iron", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["fe", "iron", "eisen"]},
+    "Mn": {"name": "Manganese", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["mn", "manganese", "mangan"]},
+    "Mo": {"name": "Molybdenum", "category": "trace", "unit": "ppb", "range": {"low": 8, "high": 14},
+           "aliases": ["mo", "molybdenum", "molybdaen", "molybdan"]},
+    "Ni": {"name": "Nickel", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["ni", "nickel"]},
+    "Co": {"name": "Cobalt", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["co", "cobalt", "kobalt"]},
+    "Cr": {"name": "Chromium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["cr", "chromium", "chrom"]},
+    "V": {"name": "Vanadium", "category": "trace", "unit": "ppb", "range": None,
+          "aliases": ["v", "vanadium", "vanadin"]},
+    "Zn": {"name": "Zinc", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["zn", "zinc", "zink"]},
+    "Ba": {"name": "Barium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["ba", "barium"]},
+    "Be": {"name": "Beryllium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["be", "beryllium"]},
+    "Se": {"name": "Selenium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["se", "selenium", "selen"]},
+    "Rb": {"name": "Rubidium", "category": "trace", "unit": "ppb", "range": {"low": 100, "high": 130},
+           "aliases": ["rb", "rubidium"]},
+    "W": {"name": "Tungsten", "category": "trace", "unit": "ppb", "range": None,
+          "aliases": ["w", "tungsten", "wolfram"]},
+    "Ti": {"name": "Titanium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["ti", "titanium", "titan"]},
+    "La": {"name": "Lanthanum", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["la", "lanthanum", "lanthan"],
+           "species_note": "elevated La flags carry-over from lanthanum-chloride phosphate removers"},
+    "Sc": {"name": "Scandium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["sc", "scandium"]},
+    "Ga": {"name": "Gallium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["ga", "gallium"]},
+    "Cs": {"name": "Caesium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["cs", "caesium", "cesium", "caesium"]},
+    "Te": {"name": "Tellurium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["te", "tellurium", "tellur"]},
+    "In": {"name": "Indium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["in", "indium"]},
+    "Zr": {"name": "Zirconium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["zr", "zirconium", "zirkonium"]},
+    "Nd": {"name": "Neodymium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["nd", "neodymium", "neodym"]},
+    "Ru": {"name": "Ruthenium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["ru", "ruthenium"]},
+    "Ce": {"name": "Cerium", "category": "trace", "unit": "ppb", "range": None,
+           "aliases": ["ce", "cerium", "cer"]},
+    # --- heavy metals & contaminants (µg/L; "high" = contamination threshold) #
+    "Cu": {"name": "Copper", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 5},
+           "aliases": ["cu", "copper", "kupfer"], "species_note": "toxic to invertebrates"},
+    "Al": {"name": "Aluminium", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 10},
+           "aliases": ["al", "aluminium", "aluminum"]},
+    "Pb": {"name": "Lead", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 2},
+           "aliases": ["pb", "lead", "blei"]},
+    "Hg": {"name": "Mercury", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 1},
+           "aliases": ["hg", "mercury", "quecksilber"]},
+    "Cd": {"name": "Cadmium", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 1},
+           "aliases": ["cd", "cadmium"]},
+    "As": {"name": "Arsenic", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 3},
+           "aliases": ["as", "arsenic", "arsen"]},
+    "Sb": {"name": "Antimony", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 2},
+           "aliases": ["sb", "antimony", "antimon"]},
+    "Sn": {"name": "Tin", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 2},
+           "aliases": ["sn", "tin", "zinn"]},
+    "Ag": {"name": "Silver", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 1},
+           "aliases": ["ag", "silver", "silber"]},
+    "Bi": {"name": "Bismuth", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 2},
+           "aliases": ["bi", "bismuth", "wismut"]},
+    "Tl": {"name": "Thallium", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 1},
+           "aliases": ["tl", "thallium"]},
+    "U": {"name": "Uranium", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 5},
+          "aliases": ["u", "uranium", "uran"]},
+    "Th": {"name": "Thorium", "category": "heavy_metal", "unit": "ppb", "range": {"low": 0, "high": 2},
+           "aliases": ["th", "thorium"]},
+    # --- organics (heterogeneous — never coerce into one DOC field) -------- #
+    "TOC": {"name": "Total Organic Carbon", "category": "organic", "unit": "mg/L", "range": None,
+            "aliases": ["toc", "total organic carbon"]},
+    "TIC": {"name": "Total Inorganic Carbon", "category": "organic", "unit": "mg/L", "range": None,
+            "aliases": ["tic", "total inorganic carbon"]},
+    "TNb": {"name": "Total Nitrogen (bound)", "category": "organic", "unit": "mg/L", "range": None,
+            "aliases": ["tnb", "total nitrogen", "gebundener stickstoff"]},
+    "DOC": {"name": "Dissolved Organic Carbon", "category": "organic", "unit": "mg/L", "range": None,
+            "aliases": ["doc", "dissolved organic carbon"]},
+    "SAC254": {"name": "Spectral Absorption (254nm)", "category": "organic", "unit": "1/m", "range": None,
+               "aliases": ["sac254", "sak254", "spektraler absorptionskoeffizient"]},
+    # --- physical ---------------------------------------------------------- #
+    "pH": {"name": "pH", "category": "physical", "unit": "", "range": {"low": 7.9, "high": 8.4},
+           "aliases": ["ph", "ph-wert"]},
+}
+
 DEFAULT_CORE_CONFIG = {
     "schemaVersion": CORE_SCHEMA_VERSION,
     "tank": {
@@ -883,6 +1073,11 @@ DEFAULT_CORE_CONFIG = {
         "tempProbe": "Tmp",
         "acknowledgedAdvisory": False,
     },
+    # ICP test importer — stored lab reports + saved generic-mapper templates.
+    # Reports are appended on import; overlapping core params are also fanned out
+    # into manualReadings (see ICP_CORE_PARAM_MAP).
+    "icpReports": [],
+    "icpTemplates": [],
 }
 
 DEFAULT_SETTINGS = {

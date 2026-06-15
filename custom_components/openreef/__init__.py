@@ -57,6 +57,7 @@ from .const import (
     MAINTENANCE_TASK_CADENCE_MIN,
     MAINTENANCE_TASK_CRITICAL_MAX,
     MAINTENANCE_TASK_DEFAULTS,
+    ICP_REPORTS_MAX,
     MANUAL_TEST_CADENCE_PRESETS,
     MANUAL_TEST_PARAMETERS,
     MVP_SENSORS,
@@ -99,6 +100,7 @@ from .const import (
     TIMELAPSE_MIN_CADENCE,
     TIMELAPSE_SUBDIR,
 )
+from . import icp
 from . import spawning
 
 type OpenReefConfigEntry = ConfigEntry
@@ -493,6 +495,12 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
         settings.get("manualReadings")
         if isinstance(settings.get("manualReadings"), dict)
         else {}
+    )
+    core["icpReports"] = (
+        settings.get("icpReports") if isinstance(settings.get("icpReports"), list) else []
+    )
+    core["icpTemplates"] = (
+        settings.get("icpTemplates") if isinstance(settings.get("icpTemplates"), list) else []
     )
     core["display"]["setupComplete"] = any(
         sensor.get("entity_id") for sensor in core["sensors"].values()
@@ -1245,6 +1253,20 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 )
             normalised_readings[parameter] = safe_entries
         config["manualReadings"] = normalised_readings
+
+    # ICP test importer — re-validate every stored report authoritatively (recompute
+    # flags/units; ignore any client-supplied status) and cap to the most recent N.
+    icp_reports = config.get("icpReports")
+    if not isinstance(icp_reports, list):
+        config["icpReports"] = []
+    else:
+        safe_reports: list[dict[str, Any]] = []
+        for item in icp_reports[-ICP_REPORTS_MAX:]:
+            report = icp.normalise_report(item)
+            if report is not None:
+                safe_reports.append(report)
+        config["icpReports"] = safe_reports
+    config["icpTemplates"] = icp.normalise_templates(config.get("icpTemplates"))
 
     manual_tests = config.setdefault("manualTests", {})
     if not isinstance(manual_tests, dict):
@@ -6083,6 +6105,110 @@ def websocket_lighting_window(
     )
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/import_icp_report",
+        vol.Required("report"): dict,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_import_icp_report(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Store a parsed ICP lab report and fan its core params into the reading streams.
+
+    The panel parses the lab file (CSV/PDF/xlsx) client-side; here we re-validate it
+    authoritatively (``icp.normalise_report`` recomputes units/flags), append or
+    replace by id (so a re-import is idempotent), fan the overlapping core params
+    (Alk/Ca/Mg/NO3/PO4/salinity) into ``manualReadings`` tagged ``source="ICP:<lab>"``
+    so reef-score/dosing/trends pick them up, then persist.
+    """
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    report = icp.normalise_report(msg["report"])
+    if report is None:
+        connection.send_error(
+            msg["id"], "invalid_report", "Could not read a valid ICP report from that file"
+        )
+        return
+
+    config = _config_from_entry(entry)
+    reports = config.get("icpReports")
+    reports = (
+        [r for r in reports if isinstance(r, dict) and r.get("id") != report["id"]]
+        if isinstance(reports, list)
+        else []
+    )
+    reports.append(report)
+    config["icpReports"] = reports
+
+    manual = config.setdefault("manualReadings", {})
+    if not isinstance(manual, dict):
+        manual = {}
+        config["manualReadings"] = manual
+    prefix = f"{report['id']}:"
+    for parameter, rows in icp.core_fanout(report).items():
+        existing = manual.get(parameter)
+        kept = (
+            [r for r in existing if isinstance(r, dict) and not str(r.get("id", "")).startswith(prefix)]
+            if isinstance(existing, list)
+            else []
+        )
+        kept.extend(rows)
+        manual[parameter] = kept
+
+    _append_activity(config, f"ICP report imported: {report['lab']} ({len(report['elements'])} elements)")
+    saved = await _async_save_config(hass, entry, config)
+    connection.send_result(
+        msg["id"],
+        {
+            "success": True,
+            "report": report,
+            "config": saved,
+            "drift": icp.drift_check(report, saved.get("manualReadings", {})),
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/delete_icp_report",
+        vol.Required("reportId"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_delete_icp_report(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Delete a stored ICP report and the core readings it fanned out (by id prefix)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    report_id = msg["reportId"]
+    config = _config_from_entry(entry)
+    reports = config.get("icpReports")
+    if isinstance(reports, list):
+        config["icpReports"] = [
+            r for r in reports if not (isinstance(r, dict) and r.get("id") == report_id)
+        ]
+    prefix = f"{report_id}:"
+    manual = config.get("manualReadings")
+    if isinstance(manual, dict):
+        for parameter, rows in list(manual.items()):
+            if isinstance(rows, list):
+                manual[parameter] = [
+                    r for r in rows
+                    if not (isinstance(r, dict) and str(r.get("id", "")).startswith(prefix))
+                ]
+    saved = await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"success": True, "config": saved})
+
+
 async def _async_register_panel(hass: HomeAssistant) -> None:
     """Register the OpenReef native sidebar panel once."""
     if hass.data.setdefault(DOMAIN, {}).get("panel_registered"):
@@ -6142,6 +6268,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_list_reef_presets)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)
+    websocket_api.async_register_command(hass, websocket_import_icp_report)
+    websocket_api.async_register_command(hass, websocket_delete_icp_report)
 
     hass.services.async_register(
         DOMAIN,

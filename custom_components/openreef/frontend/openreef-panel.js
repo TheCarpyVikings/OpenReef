@@ -23,6 +23,7 @@ class OpenReefPanel extends HTMLElement {
     this._trend = null;
     this._trendRequest = "";
     this._pendingScroll = "";
+    this._selectedSensorPreset = "";
     this._cameraFocus = null;
     this._cameraFullscreenFallback = false;
     this._recordingFocus = null;
@@ -37,6 +38,7 @@ class OpenReefPanel extends HTMLElement {
     this._feedPlayer = { sessionId: "", frames: [], index: 0, playing: false, loading: false };
     this._feedPlayerTimer = null;
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
+    this._icp = { view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", busy: false, error: "", message: "" };
     this._lightingWindow = { data: null, loading: false };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
@@ -1066,6 +1068,11 @@ class OpenReefPanel extends HTMLElement {
         const text = this._spawningCopyText(target.dataset.id);
         if (text) this._copyText(text, "Copied to clipboard", "Could not copy");
       }
+      if (action === "icp-parse-paste") this._icpParsePaste();
+      if (action === "icp-import") this._icpImportPending();
+      if (action === "icp-cancel") { this._icp.pending = null; this._icp.error = ""; this._icp.message = ""; this._render(); }
+      if (action === "icp-view") { this._icp.selectedReportId = id; this._icp.view = "report"; this._icp.drift = []; this._render(); }
+      if (action === "icp-delete") this._icpDeleteReport(id);
       if (action === "lighting-refresh-window") this._loadLightingWindow(true);
       if (action === "mute-alert") this._muteAlert(id, Number(target.dataset.minutes || 60));
       if (action === "unmute-alert") this._muteAlert(id, 0);
@@ -1365,6 +1372,20 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "timelapse-seek") { this._timelapseSeek(Number(target.value)); return; }
       if (target.dataset.action === "feed-seek") { this._feedSeek(Number(target.value)); return; }
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
+
+      if (target.dataset.action === "icp-file") { this._icpHandleFile(target.files && target.files[0]); return; }
+      if (target.dataset.action === "icp-sampletype") {
+        this._icp.sampleType = target.value;
+        if (this._icp.pending) this._icp.pending.report.sampleType = target.value;
+        return;
+      }
+      if (target.dataset.icpMap != null) {
+        const idx = Number(target.dataset.icpMap);
+        if (this._icp.pending && this._icp.pending.report.elements[idx]) {
+          this._icp.pending.report.elements[idx].symbol = target.value;
+        }
+        return;
+      }
 
       if (target.dataset.manualField === "parameter") {
         const unitInput = this.shadowRoot.querySelector('[data-manual-field="unit"]');
@@ -1951,8 +1972,30 @@ class OpenReefPanel extends HTMLElement {
     Object.entries(sensors).forEach(([id, sensor]) => {
       sensor.enabled = enabled ? enabled.has(id) : true;
     });
+    // Remember the chosen preset so its card stays highlighted. Kept on the
+    // instance (survives the session) and mirrored into config.display so it can
+    // round-trip if the backend preserves it.
+    this._selectedSensorPreset = preset;
+    if (this._config.display) this._config.display.sensorPreset = preset;
     this._recordActivity(`Setup sensor preset selected: ${definition.label}`);
     this._setDirty(true);
+  }
+
+  // True when applying presetId would reproduce the current enabled-sensor state.
+  _sensorPresetMatches(presetId) {
+    const sensors = Object.entries(this._config.sensors || {});
+    if (!sensors.length) return false;
+    const definition = this._sensorPresetDefinitions()[presetId];
+    if (!definition) return false;
+    const enabled = definition.sensors ? new Set(definition.sensors) : null;
+    return sensors.every(([id, sensor]) => Boolean(sensor.enabled) === (enabled ? enabled.has(id) : true));
+  }
+
+  // The preset whose card should show as selected: the last one chosen, but only
+  // while it still matches the enabled sensors (so manual edits clear it honestly).
+  _activeSensorPreset() {
+    const candidate = this._selectedSensorPreset || this._config.display?.sensorPreset || "";
+    return candidate && this._sensorPresetMatches(candidate) ? candidate : "";
   }
 
   _equipmentTarget(id, equipment, field) {
@@ -6263,11 +6306,598 @@ class OpenReefPanel extends HTMLElement {
     return `${predictionCard}${seasonTable}${profiles}${code}${moons}${walkthrough}${sources}`;
   }
 
+  // ===== ICP test importer ================================================
+  // The panel parses a lab file (CSV/PDF) client-side into a structured report of
+  // {label, rawValue, rawUnit} rows and posts it to openreef/import_icp_report.
+  // The BACKEND (icp.py) is authoritative: it resolves labels→symbols, normalises
+  // units per-element, recomputes flags and fans the core params into the reading
+  // streams. So this code stays deliberately thin — it never has to be "right"
+  // about a value, only to package candidate rows and render what comes back.
+
+  _icpCtrl() {
+    return "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
+  }
+  _icpField() {
+    return "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
+  }
+  _icpTable(head, body) {
+    return `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+      <thead><tr style="text-align:left;border-bottom:1px solid var(--divider-color,#444)">${head}</tr></thead>
+      <tbody>${body}</tbody></table></div>`;
+  }
+
+  // Compact mirror of const.py ICP_ELEMENTS (symbol → name/category/aliases). Only
+  // used for client-side label matching (PDF line filtering, generic-mapper guess,
+  // preview labelling). Stored values/flags always come from the backend.
+  _icpElements() {
+    if (this.__icpElements) return this.__icpElements;
+    const E = (symbol, name, category, aliases) => ({ symbol, name, category, aliases });
+    this.__icpElements = [
+      E("Ca", "Calcium", "major", ["ca", "calcium", "kalzium", "calcio"]),
+      E("Mg", "Magnesium", "major", ["mg", "magnesium"]),
+      E("KH", "Alkalinity", "physical", ["kh", "alk", "alkalinity", "alkalinitaet", "carbonate hardness", "karbonathaerte", "dkh", "acid binding capacity"]),
+      E("NO3", "Nitrate", "nutrient", ["no3", "nitrate", "nitrat"]),
+      E("PO4", "Phosphate", "nutrient", ["po4", "phosphate", "phosphat", "orthophosphate"]),
+      E("Sal", "Salinity", "physical", ["sal", "salinity", "salinitaet", "salt", "psu"]),
+      E("Na", "Sodium", "major", ["na", "sodium", "natrium"]),
+      E("K", "Potassium", "major", ["k", "potassium", "kalium"]),
+      E("Sr", "Strontium", "minor", ["sr", "strontium"]),
+      E("B", "Boron", "minor", ["b", "boron", "bor"]),
+      E("S", "Sulfur", "major", ["s", "sulfur", "sulphur", "schwefel"]),
+      E("SO4", "Sulfate", "major", ["so4", "sulfate", "sulphate", "sulfat"]),
+      E("Br", "Bromine", "minor", ["br", "bromine", "bromide", "brom"]),
+      E("Cl", "Chloride", "major", ["cl", "chloride", "chlor", "chlorid"]),
+      E("F", "Fluoride", "minor", ["f", "fluoride", "fluorid", "fluorine"]),
+      E("Li", "Lithium", "trace", ["li", "lithium"]),
+      E("P", "Phosphorus", "nutrient", ["p", "phosphorus", "phosphor"]),
+      E("Si", "Silicon", "nutrient", ["si", "silicon", "silicate", "silicat", "silizium", "silica"]),
+      E("NO2", "Nitrite", "nutrient", ["no2", "nitrite", "nitrit"]),
+      E("I", "Iodine", "trace", ["i", "iodine", "iod", "jod", "iodide"]),
+      E("Fe", "Iron", "trace", ["fe", "iron", "eisen"]),
+      E("Mn", "Manganese", "trace", ["mn", "manganese", "mangan"]),
+      E("Mo", "Molybdenum", "trace", ["mo", "molybdenum", "molybdaen"]),
+      E("Ni", "Nickel", "trace", ["ni", "nickel"]),
+      E("Co", "Cobalt", "trace", ["co", "cobalt", "kobalt"]),
+      E("Cr", "Chromium", "trace", ["cr", "chromium", "chrom"]),
+      E("V", "Vanadium", "trace", ["v", "vanadium", "vanadin"]),
+      E("Zn", "Zinc", "trace", ["zn", "zinc", "zink"]),
+      E("Ba", "Barium", "trace", ["ba", "barium"]),
+      E("Be", "Beryllium", "trace", ["be", "beryllium"]),
+      E("Se", "Selenium", "trace", ["se", "selenium", "selen"]),
+      E("Rb", "Rubidium", "trace", ["rb", "rubidium"]),
+      E("W", "Tungsten", "trace", ["w", "tungsten", "wolfram"]),
+      E("Ti", "Titanium", "trace", ["ti", "titanium", "titan"]),
+      E("La", "Lanthanum", "trace", ["la", "lanthanum", "lanthan"]),
+      E("Sc", "Scandium", "trace", ["sc", "scandium"]),
+      E("Ga", "Gallium", "trace", ["ga", "gallium"]),
+      E("Cs", "Caesium", "trace", ["cs", "caesium", "cesium"]),
+      E("Te", "Tellurium", "trace", ["te", "tellurium", "tellur"]),
+      E("In", "Indium", "trace", ["in", "indium"]),
+      E("Zr", "Zirconium", "trace", ["zr", "zirconium", "zirkonium"]),
+      E("Nd", "Neodymium", "trace", ["nd", "neodymium", "neodym"]),
+      E("Ru", "Ruthenium", "trace", ["ru", "ruthenium"]),
+      E("Ce", "Cerium", "trace", ["ce", "cerium", "cer"]),
+      E("Cu", "Copper", "heavy_metal", ["cu", "copper", "kupfer"]),
+      E("Al", "Aluminium", "heavy_metal", ["al", "aluminium", "aluminum"]),
+      E("Pb", "Lead", "heavy_metal", ["pb", "lead", "blei"]),
+      E("Hg", "Mercury", "heavy_metal", ["hg", "mercury", "quecksilber"]),
+      E("Cd", "Cadmium", "heavy_metal", ["cd", "cadmium"]),
+      E("As", "Arsenic", "heavy_metal", ["as", "arsenic", "arsen"]),
+      E("Sb", "Antimony", "heavy_metal", ["sb", "antimony", "antimon"]),
+      E("Sn", "Tin", "heavy_metal", ["sn", "tin", "zinn"]),
+      E("Ag", "Silver", "heavy_metal", ["ag", "silver", "silber"]),
+      E("Bi", "Bismuth", "heavy_metal", ["bi", "bismuth", "wismut"]),
+      E("Tl", "Thallium", "heavy_metal", ["tl", "thallium"]),
+      E("U", "Uranium", "heavy_metal", ["u", "uranium", "uran"]),
+      E("Th", "Thorium", "heavy_metal", ["th", "thorium"]),
+      E("TOC", "Total Organic Carbon", "organic", ["toc"]),
+      E("TIC", "Total Inorganic Carbon", "organic", ["tic"]),
+      E("TNb", "Total Nitrogen", "organic", ["tnb"]),
+      E("DOC", "Dissolved Organic Carbon", "organic", ["doc"]),
+      E("SAC254", "Spectral Absorption (254nm)", "organic", ["sac254", "sak254"]),
+      E("pH", "pH", "physical", ["ph", "ph-wert"]),
+    ];
+    return this.__icpElements;
+  }
+
+  _icpNorm(value) {
+    return String(value ?? "")
+      .toLowerCase()
+      .replace(/\(.*?\)/g, " ")
+      .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
+  _icpAliasIndex() {
+    if (this.__icpAlias) return this.__icpAlias;
+    const idx = {};
+    for (const el of this._icpElements()) {
+      for (const alias of [...el.aliases, el.symbol]) {
+        const key = this._icpNorm(alias);
+        if (key && !(key in idx)) idx[key] = el.symbol;
+      }
+    }
+    this.__icpAlias = idx;
+    return idx;
+  }
+
+  _icpMatchSymbol(label) {
+    if (label == null) return null;
+    return this._icpAliasIndex()[this._icpNorm(label)] || null;
+  }
+
+  _icpElementName(symbol) {
+    const el = this._icpElements().find((e) => e.symbol === symbol);
+    return el ? el.name : symbol;
+  }
+
+  // --- value / number parsing (mirrors icp.py for live preview only) --------
+  _icpToFloat(raw) {
+    let s = String(raw).replace(/[\s  ]/g, "").replace(/^[<>=~]+/, "");
+    if (!s) return null;
+    if (s.includes(",") && s.includes(".")) {
+      if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
+      else s = s.replace(/,/g, "");
+    } else if (s.includes(",")) {
+      s = s.replace(",", ".");
+    }
+    const v = Number.parseFloat(s);
+    return Number.isFinite(v) ? v : null;
+  }
+
+  _icpLooksNumeric(cell) {
+    if (cell == null || cell === "") return false;
+    const low = String(cell).toLowerCase().replace(/\s+/g, "");
+    if (low.startsWith("<") || ["nd", "n.d.", "nn", "n.n.", "bdl", "<lod"].includes(low)) return true;
+    return this._icpToFloat(cell) != null;
+  }
+
+  _icpParseRange(cell) {
+    if (!cell) return null;
+    const m = String(cell).match(/(-?\d+(?:[.,]\d+)?)\s*[-–]\s*(-?\d+(?:[.,]\d+)?)/);
+    if (!m) return null;
+    const low = this._icpToFloat(m[1]);
+    const high = this._icpToFloat(m[2]);
+    if (low == null && high == null) return null;
+    return { low, high };
+  }
+
+  _icpMakeElement(label, valueCell, unitCell, rangeCell) {
+    const el = { label: String(label || "").trim(), rawValue: valueCell, rawUnit: String(unitCell || "").trim() };
+    const range = this._icpParseRange(rangeCell);
+    if (range) el.labRange = range;
+    return el;
+  }
+
+  _icpCountRecognized(elements) {
+    return (elements || []).filter((el) => this._icpMatchSymbol(el.symbol || el.label)).length;
+  }
+
+  // --- delimited-row parsing (new; never touches the comma-only _parseCsvLine) --
+  _icpSplitRows(text) {
+    const lines = String(text || "").split(/\r\n|\r|\n/).filter((l) => l.trim().length);
+    const counts = { ";": 0, "\t": 0, ",": 0 };
+    for (const line of lines.slice(0, 12)) {
+      for (const d of Object.keys(counts)) counts[d] += line.split(d).length - 1;
+    }
+    let delim = ",";
+    if (counts["\t"] >= counts[";"] && counts["\t"] >= counts[","]) delim = "\t";
+    else if (counts[";"] >= counts[","]) delim = ";";
+    return { delim, rows: lines.map((line) => this._icpSplitLine(line, delim)) };
+  }
+
+  _icpSplitLine(line, delim) {
+    const out = [];
+    let cur = "";
+    let quoted = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quoted) {
+        if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (c === '"') quoted = false;
+        else cur += c;
+      } else if (c === '"') quoted = true;
+      else if (c === delim) { out.push(cur); cur = ""; }
+      else cur += c;
+    }
+    out.push(cur);
+    return out.map((c) => c.trim());
+  }
+
+  // One-row-per-element tables (the common lab CSV/PDF layout): col0 = label, the
+  // first numeric/BDL cell = value, then a unit token and an optional range cell.
+  _icpParseTabular(rows) {
+    const elements = [];
+    for (const row of rows) {
+      if (!row || !row.length || !row[0]) continue;
+      const label = row[0];
+      let valueCell = null;
+      let unitCell = "";
+      let rangeCell = "";
+      for (let i = 1; i < row.length; i++) {
+        const cell = row[i];
+        if (valueCell == null) {
+          if (this._icpLooksNumeric(cell)) valueCell = cell;
+          continue;
+        }
+        if (!rangeCell && /-?\d+(?:[.,]\d+)?\s*[-–]\s*-?\d+(?:[.,]\d+)?/.test(cell)) rangeCell = cell;
+        else if (!unitCell && /[a-zµμ%/]/i.test(cell) && !/^\d/.test(cell)) unitCell = cell;
+      }
+      if (valueCell == null) continue;
+      elements.push(this._icpMakeElement(label, valueCell, unitCell, rangeCell));
+    }
+    return elements;
+  }
+
+  // PDF-extracted text: keep only lines that begin with a recognised element name
+  // followed by a number (so addresses/headers/totals are dropped automatically).
+  _icpParseLines(text) {
+    const elements = [];
+    const seen = new Set();
+    const re = /^([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß .()/-]*?)\s+(<\s*\d[\d.,]*|n\.?d\.?|n\.?n\.?|\d[\d.,]*)\s*(µg\/l|μg\/l|mg\/l|ug\/l|ppm|ppb|g\/l|mg\/kg|dkh|psu|ppt|°dh)?\b\s*(\d+(?:[.,]\d+)?\s*[-–]\s*\d+(?:[.,]\d+)?)?/i;
+    for (const raw of String(text || "").split(/\r\n|\r|\n/)) {
+      const line = raw.replace(/\s+/g, " ").trim();
+      if (!line) continue;
+      const m = line.match(re);
+      if (!m) continue;
+      const symbol = this._icpMatchSymbol(m[1].trim());
+      if (!symbol || seen.has(symbol)) continue;
+      seen.add(symbol);
+      const el = this._icpMakeElement(m[1].trim(), m[2].replace(/\s+/g, ""), (m[3] || "").trim(), (m[4] || "").trim());
+      el.symbol = symbol;
+      elements.push(el);
+    }
+    return elements;
+  }
+
+  _icpDetectLab(text) {
+    const t = String(text || "").toLowerCase();
+    const has = (subs) => subs.some((s) => t.includes(s));
+    if (has(["triton-lab", "triton lab", "tritonlab", "triton.de", "triton applied"])) return { lab: "Triton", method: "ICP-OES", adapter: "triton_csv" };
+    if (has(["atiaquaristik", "ati-lab", "ati labor", "ati aquaristik", "ati icp"])) return { lab: "ATI", method: "ICP-OES", adapter: "ati_pdf" };
+    if (has(["fauna marin", "faunamarin"])) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "generic" };
+    if (has(["oceamo"])) return { lab: "Oceamo", method: "ICP-MS", adapter: "generic" };
+    if (has(["aquaforest"])) return { lab: "Aquaforest", method: "ICP-OES", adapter: "generic" };
+    if (has(["reefzlements", "zlements"])) return { lab: "ReefZlements", method: "ICP-OES", adapter: "generic" };
+    return null;
+  }
+
+  _icpIso(y, mo, d) {
+    if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
+    const dt = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0));
+    return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+  }
+
+  _icpGuessDate(text) {
+    const t = String(text || "");
+    let m = t.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+    if (m) return this._icpIso(+m[1], +m[2], +m[3]);
+    m = t.match(/\b(\d{1,2})[.\/](\d{1,2})[.\/](20\d{2})\b/);
+    if (m) return this._icpIso(+m[3], +m[2], +m[1]);
+    return null;
+  }
+
+  _icpGuessTestId(text) {
+    const m = String(text || "").match(/\b(?:order|test|sample|auftrag|probe)[\s#:.no-]*([A-Za-z0-9-]{4,})\b/i);
+    return m ? m[1].slice(0, 40) : "";
+  }
+
+  _icpParseFromText(text, fileName, kind) {
+    const detected = this._icpDetectLab(text) || this._icpDetectLab(fileName) || { lab: "Unknown", method: "", adapter: "generic" };
+    let elements;
+    if (kind === "pdf") {
+      elements = this._icpParseLines(text);
+    } else {
+      const { rows } = this._icpSplitRows(text);
+      elements = this._icpParseTabular(rows);
+      if (this._icpCountRecognized(elements) < 3) {
+        const viaLines = this._icpParseLines(text);
+        if (this._icpCountRecognized(viaLines) > this._icpCountRecognized(elements)) elements = viaLines;
+      }
+    }
+    const report = {
+      id: `icp:${this._icpNorm(detected.lab) || "lab"}:${Date.now()}`,
+      lab: detected.lab,
+      adapter: detected.adapter,
+      method: detected.method,
+      sampleType: this._icp.sampleType || "tank",
+      sampleDate: this._icpGuessDate(text) || new Date().toISOString(),
+      importedAt: new Date().toISOString(),
+      testId: this._icpGuessTestId(text),
+      source: { fileName: fileName || "" },
+      elements,
+    };
+    return { report, recognized: this._icpCountRecognized(elements), detected };
+  }
+
+  _icpSetPending(parsed) {
+    this._icp.pending = parsed;
+    this._icp.view = "import";
+    this._icp.error = "";
+    this._icp.message = parsed.recognized === 0
+      ? "No known elements were auto-detected — map the rows below, then import."
+      : "";
+  }
+
+  async _icpLoadPdfJs() {
+    if (this.__pdfjs) return this.__pdfjs;
+    const base = "/openreef_static/vendor";
+    const pdfjs = await import(`${base}/pdf.min.mjs`);
+    try { pdfjs.GlobalWorkerOptions.workerSrc = `${base}/pdf.worker.min.mjs`; } catch { /* worker optional; falls back to main-thread */ }
+    this.__pdfjs = pdfjs;
+    return pdfjs;
+  }
+
+  async _icpExtractPdfText(file) {
+    let pdfjs;
+    try {
+      pdfjs = await this._icpLoadPdfJs();
+    } catch {
+      throw new Error("PDF support isn't installed on this server. Paste the report text instead, or import a CSV.");
+    }
+    const data = new Uint8Array(await file.arrayBuffer());
+    let doc;
+    try {
+      doc = await pdfjs.getDocument({ data }).promise;
+    } catch {
+      doc = await pdfjs.getDocument({ data, disableWorker: true }).promise;
+    }
+    let out = "";
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const content = await page.getTextContent();
+      const items = content.items
+        .filter((it) => typeof it.str === "string")
+        .map((it) => ({ x: it.transform[4], y: it.transform[5], s: it.str }));
+      items.sort((a, b) => (Math.abs(a.y - b.y) > 2 ? b.y - a.y : a.x - b.x));
+      let lastY = null;
+      let line = "";
+      for (const it of items) {
+        if (lastY != null && Math.abs(it.y - lastY) > 2) { out += line.trim() + "\n"; line = ""; }
+        line += (line ? " " : "") + it.s;
+        lastY = it.y;
+      }
+      out += line.trim() + "\n";
+    }
+    return out;
+  }
+
+  async _icpHandleFile(file) {
+    if (!file) return;
+    this._icp.busy = true;
+    this._icp.error = "";
+    this._icp.message = "";
+    this._render();
+    try {
+      const name = file.name || "";
+      const lower = name.toLowerCase();
+      if (lower.endsWith(".pdf")) {
+        const text = await this._icpExtractPdfText(file);
+        this._icpSetPending(this._icpParseFromText(text, name, "pdf"));
+      } else if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
+        this._icp.error = "Excel files aren't supported yet — open it and 'Save As' CSV, then import that. (Triton offers a CSV download.)";
+      } else {
+        const text = await file.text();
+        this._icpSetPending(this._icpParseFromText(text, name, "csv"));
+      }
+    } catch (err) {
+      this._icp.error = err && err.message ? err.message : "Could not read that file";
+    } finally {
+      this._icp.busy = false;
+      this._render();
+    }
+  }
+
+  _icpParsePaste() {
+    const ta = this.shadowRoot.querySelector("[data-icp-paste]");
+    const text = ta ? ta.value : "";
+    if (!text.trim()) {
+      this._icp.error = "Paste some text first.";
+      this._render();
+      return;
+    }
+    this._icpSetPending(this._icpParseFromText(text, "pasted.txt", "paste"));
+    this._render();
+  }
+
+  async _icpImportPending() {
+    const pending = this._icp.pending;
+    if (!pending || !pending.report) return;
+    this._icp.busy = true;
+    this._icp.error = "";
+    this._render();
+    try {
+      const res = await this._callWS({ type: "openreef/import_icp_report", report: pending.report });
+      if (res && res.config) this._config = res.config;
+      this._icp.drift = Array.isArray(res && res.drift) ? res.drift : [];
+      this._icp.selectedReportId = (res && res.report && res.report.id) || "";
+      this._icp.pending = null;
+      this._icp.view = "report";
+      this._icp.message = `Imported ${(res && res.report && res.report.lab) || "ICP"} report — ${((res && res.report && res.report.elements) || []).length} elements stored.`;
+    } catch (err) {
+      this._icp.error = err && err.message ? err.message : "Could not import the report";
+    } finally {
+      this._icp.busy = false;
+      this._render();
+    }
+  }
+
+  async _icpDeleteReport(id) {
+    if (!id) return;
+    this._icp.busy = true;
+    this._render();
+    try {
+      const res = await this._callWS({ type: "openreef/delete_icp_report", reportId: id });
+      if (res && res.config) this._config = res.config;
+      if (this._icp.selectedReportId === id) {
+        this._icp.selectedReportId = "";
+        this._icp.view = "import";
+      }
+      this._icp.message = "Report deleted.";
+    } catch (err) {
+      this._icp.error = err && err.message ? err.message : "Could not delete the report";
+    } finally {
+      this._icp.busy = false;
+      this._render();
+    }
+  }
+
+  // --- rendering ------------------------------------------------------------
+  _icpTab() {
+    const st = this._icp;
+    const reports = Array.isArray(this._config && this._config.icpReports) ? this._config.icpReports : [];
+    const head = `
+      <div class="section-head">
+        <div><h2>ICP Import</h2><p>Import your lab's ICP results (Triton, ATI, Fauna Marin, Oceamo…). OpenReef normalises every element, flags what's out of range, and feeds Alk/Ca/Mg/NO₃/PO₄ into your trends, reef score &amp; dosing advisor.</p></div>
+      </div>`;
+    const banner = st.error
+      ? `<p class="hint" style="color:var(--error-color,#e5484d)">${this._escape(st.error)}</p>`
+      : (st.message ? `<p class="hint">${this._escape(st.message)}</p>` : "");
+    const pending = st.pending ? this._icpRenderPending() : "";
+    const selected = reports.find((r) => r.id === st.selectedReportId);
+    const reportView = (st.view === "report" && selected) ? this._icpRenderReport(selected, st.drift) : "";
+    return `<section class="stack">${head}${banner}${this._icpRenderImport()}${pending}${reportView}${this._icpRenderReportList(reports)}</section>`;
+  }
+
+  _icpRenderImport() {
+    const st = this._icp;
+    const sampleType = st.sampleType || "tank";
+    return `
+      <article class="panel stack">
+        <div class="grid two">
+          <label style="${this._icpField()}"><span>ICP results file <small>(.csv or .pdf)</small></span>
+            <input type="file" accept=".csv,.txt,.pdf,.xlsx" data-action="icp-file" ${st.busy ? "disabled" : ""}></label>
+          <label style="${this._icpField()}"><span>Sample is from</span>
+            <select style="${this._icpCtrl()}" data-action="icp-sampletype">
+              <option value="tank" ${sampleType === "tank" ? "selected" : ""}>Display / tank water</option>
+              <option value="rodi" ${sampleType === "rodi" ? "selected" : ""}>RO/DI source water (excluded from trends)</option>
+            </select></label>
+        </div>
+        <details><summary class="hint">…or paste the file contents</summary>
+          <textarea data-icp-paste rows="6" placeholder="Paste CSV rows or copied PDF text here" style="width:100%;box-sizing:border-box;${this._icpCtrl()}"></textarea>
+          <div class="button-row"><button class="secondary compact-button" data-action="icp-parse-paste" ${st.busy ? "disabled" : ""}>Parse pasted text</button></div>
+        </details>
+        ${st.busy ? `<p class="hint">Reading…</p>` : ""}
+      </article>`;
+  }
+
+  _icpRenderPending() {
+    const p = this._icp.pending;
+    const r = p.report;
+    if (p.recognized === 0) return this._icpRenderMapper();
+    const body = r.elements.map((el) => {
+      const symbol = this._icpMatchSymbol(el.symbol || el.label);
+      const known = !!symbol;
+      const name = known ? this._icpElementName(symbol) : (el.label || el.symbol || "?");
+      return `<tr style="${known ? "" : "opacity:0.45"}"><td>${this._escape(name)}</td><td>${this._escape(String(el.rawValue))}</td><td>${this._escape(el.rawUnit || "")}</td><td>${known ? "" : "<small class='hint'>not recognised</small>"}</td></tr>`;
+    }).join("");
+    return `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>Preview — ${this._escape(r.lab)}${r.method ? ` · ${this._escape(r.method)}` : ""}</h3>
+          <p>${p.recognized} recognised of ${r.elements.length} parsed${p.detected && p.detected.lab === "Unknown" ? " · lab not auto-detected" : ""}. Values are normalised &amp; flagged on import.</p></div></div>
+        ${this._icpTable("<th>Element</th><th>Value</th><th>Unit</th><th></th>", body)}
+        <div class="button-row">
+          <button class="primary" data-action="icp-import" ${this._icp.busy ? "disabled" : ""}>Import ${p.recognized} element${p.recognized === 1 ? "" : "s"}</button>
+          <button class="secondary compact-button" data-action="icp-cancel">Cancel</button>
+        </div>
+      </article>`;
+  }
+
+  _icpRenderMapper() {
+    const p = this._icp.pending;
+    if (!p) return "";
+    const options = (selected) => `<option value="">— ignore —</option>` +
+      this._icpElements().map((e) => `<option value="${e.symbol}" ${selected === e.symbol ? "selected" : ""}>${this._escape(e.name)} (${this._escape(e.symbol)})</option>`).join("");
+    const body = p.report.elements.map((el, i) => {
+      const guess = this._icpMatchSymbol(el.symbol || el.label) || el.symbol || "";
+      return `<tr><td>${this._escape(el.label || el.symbol || "?")}</td><td>${this._escape(String(el.rawValue))}</td><td>${this._escape(el.rawUnit || "")}</td><td><select data-icp-map="${i}" style="${this._icpCtrl()}">${options(guess)}</select></td></tr>`;
+    }).join("");
+    return `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>Map columns — ${this._escape(p.report.lab)}</h3>
+          <p>This lab's labels weren't auto-recognised. Map each row to an element (or leave it ignored), then import.</p></div></div>
+        ${this._icpTable("<th>Label</th><th>Value</th><th>Unit</th><th>Map to</th>", body)}
+        <div class="button-row">
+          <button class="primary" data-action="icp-import" ${this._icp.busy ? "disabled" : ""}>Import mapped elements</button>
+          <button class="secondary compact-button" data-action="icp-cancel">Cancel</button>
+        </div>
+      </article>`;
+  }
+
+  _icpStatusPill(status) {
+    const map = {
+      ok: ["ok", "In range"],
+      low: ["warning", "Low"],
+      high: ["warning", "High"],
+      contaminant: ["critical", "Contaminant"],
+      bdl: ["unknown", "Below detection"],
+      unknown: ["unknown", "—"],
+    };
+    const [cls, label] = map[status] || ["unknown", status || "—"];
+    return `<span class="pill ${cls}">${this._escape(label)}</span>`;
+  }
+
+  _icpRenderReport(report, drift) {
+    const groups = [
+      ["physical", "Physical"], ["major", "Major ions"], ["minor", "Minor ions"],
+      ["nutrient", "Nutrients"], ["trace", "Trace elements"],
+      ["heavy_metal", "Heavy metals &amp; contaminants"], ["organic", "Organics"], ["unknown", "Other"],
+    ];
+    const byCat = {};
+    for (const el of report.elements || []) (byCat[el.category] = byCat[el.category] || []).push(el);
+    const fmtVal = (el) => el.bdl
+      ? `&lt;${el.threshold != null ? this._escape(String(el.threshold)) : "LOD"}`
+      : (el.value != null ? this._escape(String(el.value)) : "—");
+    const fmtRange = (el) => el.labRange
+      ? `${el.labRange.low != null ? this._escape(String(el.labRange.low)) : ""}–${el.labRange.high != null ? this._escape(String(el.labRange.high)) : ""}${el.usedRange === "lab" ? " (lab)" : ""}`
+      : "";
+    const sections = groups.filter(([k]) => (byCat[k] || []).length).map(([k, label]) => {
+      const body = byCat[k].map((el) => `<tr><td>${this._escape(el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${this._escape(el.unit || "")}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(el.status)}</td></tr>`).join("");
+      return `<article class="panel stack"><div class="section-head"><div><h4>${label}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body)}</article>`;
+    }).join("");
+    const driftCard = (drift && drift.length) ? this._icpRenderDrift(drift) : "";
+    const meta = `${this._escape(report.lab)}${report.method ? ` · ${this._escape(report.method)}` : ""}${report.sampleDate ? ` · sampled ${this._escape(String(report.sampleDate).slice(0, 10))}` : ""}${report.sampleType === "rodi" ? " · RO/DI sample (excluded from trends)" : ""}`;
+    return `
+      <article class="panel stack">
+        <div class="section-head"><div><h3>Report — ${this._escape(report.lab)}</h3><p class="hint">${meta}</p></div>
+          <button class="secondary compact-button danger-button" data-action="icp-delete" data-id="${this._escape(report.id)}">Delete</button></div>
+        ${driftCard}
+      </article>
+      ${sections}`;
+  }
+
+  _icpRenderDrift(drift) {
+    const rows = drift.map((d) => {
+      const dir = d.direction === "icp_higher" ? "higher than" : "lower than";
+      return `<li>Your <strong>${this._escape(d.parameter)}</strong> kit reads <strong>${this._escape(String(d.kitValue))}</strong> but ICP says <strong>${this._escape(String(d.icpValue))}</strong> — your kit is ${dir} ICP by ${this._escape(String(Math.abs(d.delta)))}. Worth re-checking your reagent/calibration.</li>`;
+    }).join("");
+    return `
+      <article class="panel">
+        <div class="section-head"><div><h4>⚖️ Calibration check</h4><p class="hint">How your frequent test-kit readings compare to this ICP.</p></div></div>
+        <ul style="margin:0;padding-left:1.2rem;line-height:1.6">${rows}</ul>
+      </article>`;
+  }
+
+  _icpRenderReportList(reports) {
+    if (!reports.length) {
+      return `<article class="panel"><p class="hint">No ICP reports imported yet. Upload your lab's CSV or PDF above to get started.</p></article>`;
+    }
+    const items = reports.slice()
+      .sort((a, b) => String(b.sampleDate || b.importedAt || "").localeCompare(String(a.sampleDate || a.importedAt || "")))
+      .map((r) => {
+        const n = (r.elements || []).length;
+        const flagged = (r.elements || []).filter((e) => ["low", "high", "contaminant"].includes(e.status)).length;
+        return `<button class="recording-open" data-action="icp-view" data-id="${this._escape(r.id)}"><strong>${this._escape(r.lab)}</strong> · ${this._escape(String(r.sampleDate || r.importedAt || "").slice(0, 10))} · ${n} elements${flagged ? ` · <span class="pill warning">${flagged} flagged</span>` : ""}${r.sampleType === "rodi" ? " · RO/DI" : ""}</button>`;
+      }).join("");
+    return `<article class="panel stack"><div class="section-head"><div><h3>Imported reports</h3></div></div><div class="stack">${items}</div></article>`;
+  }
+
   _tabs() {
     const tabs = [
       ["mission", "Mission Control"],
       ["live", "Live Stats"],
       ["manual", "Manual Tests"],
+      ["icp", "ICP"],
       ["maintenance", "Maintenance"],
       ["controls", "Controls"],
       ["spawning", "Spawning"],
@@ -6292,6 +6922,7 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "maintenance") return this._maintenance();
     if (this._activeTab === "controls") return this._controls();
     if (this._activeTab === "spawning") return this._spawningTab();
+    if (this._activeTab === "icp") return this._icpTab();
     if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
     if (this._activeTab === "settings") return this._settings();
@@ -10266,6 +10897,7 @@ class OpenReefPanel extends HTMLElement {
       ["apex_fmm", "Apex + FMM", "Add flow, leak, high-water, and low-water safety sensors."],
       ["apex_full", "Apex full ecosystem", "Enable Apex controller, Trident, Trident NP, and FMM-style sensors."],
     ];
+    const active = this._activeSensorPreset();
     return `
       <article class="apex-guide ${compact ? "compact-guide" : ""}">
         <div>
@@ -10275,7 +10907,7 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="setup-choice-grid">
           ${choices.map(([id, title, description]) => `
-            <button class="setup-choice" data-action="setup-sensor-preset" data-id="${this._escape(id)}">
+            <button class="setup-choice ${active === id ? "selected" : ""}" data-action="setup-sensor-preset" data-id="${this._escape(id)}" ${active === id ? `aria-pressed="true"` : ""}>
               <strong>${this._escape(title)}</strong>
               <span>${this._escape(description)}</span>
             </button>
@@ -12582,17 +13214,18 @@ class OpenReefPanel extends HTMLElement {
 
   _setupSensorStep() {
     const stats = this._setupStats();
+    const active = this._activeSensorPreset();
     return this._setupShell(
       "Choose and map sensors",
       "Start with the probes you own. Missing optional sensors will not count against setup if they are disabled.",
       `
         ${this._apexImportGuide("setup")}
         <div class="setup-choice-grid two-choice">
-          <button class="setup-choice" data-action="setup-sensor-preset" data-id="all">
+          <button class="setup-choice ${active === "all" ? "selected" : ""}" data-action="setup-sensor-preset" data-id="all" ${active === "all" ? `aria-pressed="true"` : ""}>
             <strong>Everything available</strong>
             <span>Add all reef, chemistry, water, safety, flow, lighting, sump, and room sensors.</span>
           </button>
-          <button class="setup-choice" data-action="setup-sensor-preset" data-id="minimal">
+          <button class="setup-choice ${active === "minimal" ? "selected" : ""}" data-action="setup-sensor-preset" data-id="minimal" ${active === "minimal" ? `aria-pressed="true"` : ""}>
             <strong>Temperature only</strong>
             <span>Safest starting point for a basic install.</span>
           </button>
@@ -13394,6 +14027,9 @@ class OpenReefPanel extends HTMLElement {
         .setup-guide article, .setup-choice { display: grid; gap: 6px; min-height: 96px; padding: 14px; text-align: left; }
         .setup-choice { color: #e5edf5; }
         .setup-choice:hover, .setup-choice:focus-visible { border-color: var(--openreef-accent); outline: none; box-shadow: 0 0 0 1px var(--openreef-accent-border); }
+        /* Selected preset stays visibly highlighted (distinct from hover) */
+        .setup-choice.selected { border-color: var(--openreef-accent); box-shadow: inset 4px 0 0 var(--openreef-accent), 0 0 0 1px var(--openreef-accent); background: linear-gradient(180deg, color-mix(in srgb, var(--openreef-accent) 20%, rgba(11, 23, 36, .9)), rgba(11, 23, 36, .92)); }
+        .setup-choice.selected strong::after { content: " ✓"; color: var(--openreef-accent); font-weight: 800; }
         .setup-choice.passive { cursor: default; }
         .setup-guide span, .setup-choice span { color: #9fb2c7; }
         .setup-status-line { border: 1px solid #24364a; border-radius: 8px; background: #0b1724; color: #cbd5e1; padding: 12px 14px; font-weight: 800; }
