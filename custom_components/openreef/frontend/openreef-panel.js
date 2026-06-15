@@ -39,10 +39,8 @@ class OpenReefPanel extends HTMLElement {
     this._feedPlayerTimer = null;
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
     this._icp = { view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
-    this._icpLastFileSignature = "";
-    this._icpLastFileHandledAt = 0;
-    this._icpFileReadActive = false;
-    this._icpEmptyFileTimer = null;
+    this._icpFileInput = null;
+    this._icpFileInputTimer = null;
     this._lightingWindow = { data: null, loading: false };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
@@ -114,9 +112,6 @@ class OpenReefPanel extends HTMLElement {
     // Don't recreate camera <img> elements on hass updates — it would restart the
     // live MJPEG streams. A manual Refresh button re-renders on demand.
     if (this._activeTab === "cameras" || this._cameraFocus) return false;
-    // iPadOS can deliver file input data a moment after the picker closes. Avoid
-    // replacing the ICP upload control while that handoff/read is in flight.
-    if (this._activeTab === "icp" && (this._icpFileReadActive || this._icp?.busy)) return false;
     // While a clip is open, don't re-render — it would interrupt <video> playback.
     if (this._recordingFocus) return false;
     if (this._isEditingFormControl()) return false;
@@ -169,6 +164,7 @@ class OpenReefPanel extends HTMLElement {
       document.removeEventListener("fullscreenchange", this._pulseFsHandler);
       this._pulseFsHandler = null;
     }
+    this._icpRemoveFileInput();
   }
 
   _defaultSettingsSections() {
@@ -1076,6 +1072,7 @@ class OpenReefPanel extends HTMLElement {
         if (text) this._copyText(text, "Copied to clipboard", "Could not copy");
       }
       if (action === "icp-parse-paste") this._icpParsePaste();
+      if (action === "icp-choose-file") this._icpChooseFile();
       if (action === "icp-import") this._icpImportPending();
       if (action === "icp-cancel") { this._icp.pending = null; this._icp.lastText = null; this._icp.error = ""; this._icp.message = ""; this._render(); }
       if (action === "icp-view") { this._icp.selectedReportId = id; this._icp.view = "report"; this._icp.drift = []; this._render(); }
@@ -1380,10 +1377,6 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "feed-seek") { this._feedSeek(Number(target.value)); return; }
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
-      if (target.dataset.action === "icp-file") {
-        this._icpHandleFileInput(target, event.type);
-        return;
-      }
       if (target.dataset.action === "icp-lab") {
         this._icp.lab = target.value;
         this._icpReparse();   // re-run the template on an already-loaded file
@@ -6834,31 +6827,6 @@ class OpenReefPanel extends HTMLElement {
     return pdfjs;
   }
 
-  _icpReadWithFileReader(file, method) {
-    return new Promise((resolve, reject) => {
-      if (typeof FileReader === "undefined") {
-        reject(new Error("This browser could not read that file. Try downloading it locally first, then select it again."));
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error || new Error("Could not read that file"));
-      reader[method](file);
-    });
-  }
-
-  async _icpReadFileText(file) {
-    if (file && typeof file.text === "function") return file.text();
-    const text = await this._icpReadWithFileReader(file, "readAsText");
-    return typeof text === "string" ? text : "";
-  }
-
-  async _icpReadFileBytes(file) {
-    if (file && typeof file.arrayBuffer === "function") return file.arrayBuffer();
-    const data = await this._icpReadWithFileReader(file, "readAsArrayBuffer");
-    return data instanceof ArrayBuffer ? data : new ArrayBuffer(0);
-  }
-
   async _icpExtractPdfText(file) {
     let pdfjs;
     try {
@@ -6866,7 +6834,7 @@ class OpenReefPanel extends HTMLElement {
     } catch {
       throw new Error("PDF support isn't installed on this server. Paste the report text instead, or import a CSV.");
     }
-    const data = new Uint8Array(await this._icpReadFileBytes(file));
+    const data = new Uint8Array(await file.arrayBuffer());
     let doc;
     try {
       doc = await pdfjs.getDocument({ data }).promise;
@@ -6893,55 +6861,69 @@ class OpenReefPanel extends HTMLElement {
     return out;
   }
 
-  _icpFileSignature(file) {
-    if (!file) return "";
-    return [file.name || "", file.size || 0, file.lastModified || 0, file.type || ""].join("|");
+  _icpRemoveFileInput() {
+    if (this._icpFileInputTimer) {
+      window.clearTimeout(this._icpFileInputTimer);
+      this._icpFileInputTimer = null;
+    }
+    if (this._icpFileInput) {
+      try { this._icpFileInput.remove(); } catch { /* already gone */ }
+      this._icpFileInput = null;
+    }
   }
 
-  async _icpHandleFileInput(input, eventType = "change") {
-    const file = input && input.files && input.files.length ? input.files[0] : null;
-    if (!file) {
-      if (eventType !== "change" || Date.now() - this._icpLastFileHandledAt < 1500) return;
-      if (this._icpEmptyFileTimer) window.clearTimeout(this._icpEmptyFileTimer);
-      this._icpEmptyFileTimer = window.setTimeout(() => {
-        this._icpEmptyFileTimer = null;
-        if (this._icpFileReadActive || this._icp.busy || Date.now() - this._icpLastFileHandledAt < 1500) return;
-        this._icp.message = "No file was received. On iPad, make sure the file has downloaded locally, then try Choose File again.";
-        this._render();
-      }, 700);
-      return;
-    }
-    if (this._icpEmptyFileTimer) {
-      window.clearTimeout(this._icpEmptyFileTimer);
-      this._icpEmptyFileTimer = null;
-    }
-    const signature = this._icpFileSignature(file);
-    const now = Date.now();
-    if (signature && signature === this._icpLastFileSignature && now - this._icpLastFileHandledAt < 1500) return;
-    this._icpLastFileSignature = signature;
-    this._icpLastFileHandledAt = now;
+  _icpChooseFile() {
+    if (this._icp.busy || typeof document === "undefined") return;
+    this._icpRemoveFileInput();
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".csv,.txt,.pdf,.xlsx,text/csv,text/plain,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    input.tabIndex = -1;
+    input.setAttribute("aria-hidden", "true");
+    input.style.position = "fixed";
+    input.style.left = "0";
+    input.style.top = "0";
+    input.style.width = "1px";
+    input.style.height = "1px";
+    input.style.opacity = "0";
+
+    input.addEventListener("change", () => {
+      const file = input.files && input.files[0];
+      if (!file) {
+        this._icpRemoveFileInput();
+        return;
+      }
+      this._icpHandleFile(file).finally(() => this._icpRemoveFileInput());
+    }, { once: true });
+
+    document.body.appendChild(input);
+    this._icpFileInput = input;
+    this._icpFileInputTimer = window.setTimeout(() => this._icpRemoveFileInput(), 120000);
+
     try {
-      await this._icpHandleFile(file);
-    } finally {
-      try { input.value = ""; } catch {}
+      input.click();
+    } catch (err) {
+      this._icp.error = err && err.message ? err.message : "Could not open the file picker";
+      this._icpRemoveFileInput();
+      this._render();
     }
   }
 
   async _icpHandleFile(file) {
     if (!file) return;
-    this._icpFileReadActive = true;
     this._icp.busy = true;
     this._icp.error = "";
     this._icp.message = "";
+    this._render();
     try {
       const name = file.name || "";
       const lower = name.toLowerCase();
-      const type = String(file.type || "").toLowerCase();
-      if (lower.endsWith(".xlsx") || lower.endsWith(".xls") || type.includes("spreadsheet")) {
+      if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
         this._icp.error = "Excel files aren't supported yet — open it and 'Save As' CSV, then import that. (Triton offers a CSV download.)";
       } else {
-        const kind = lower.endsWith(".pdf") || type.includes("pdf") ? "pdf" : "csv";
-        const text = kind === "pdf" ? await this._icpExtractPdfText(file) : await this._icpReadFileText(file);
+        const kind = lower.endsWith(".pdf") ? "pdf" : "csv";
+        const text = kind === "pdf" ? await this._icpExtractPdfText(file) : await file.text();
         this._icp.lastText = text;
         this._icp.lastFileName = name;
         this._icp.lastKind = kind;
@@ -6951,7 +6933,6 @@ class OpenReefPanel extends HTMLElement {
       this._icp.error = err && err.message ? err.message : "Could not read that file";
     } finally {
       this._icp.busy = false;
-      this._icpFileReadActive = false;
       this._render();
     }
   }
@@ -7043,6 +7024,7 @@ class OpenReefPanel extends HTMLElement {
     const st = this._icp;
     const sampleType = st.sampleType || "tank";
     const lab = st.lab || "auto";
+    const fileLabel = (st.pending || st.lastText) && st.lastFileName ? st.lastFileName : "No file selected";
     const labOptions = this._icpLabs()
       .map((l) => `<option value="${l.id}" ${lab === l.id ? "selected" : ""}>${this._escape(l.label)}</option>`)
       .join("");
@@ -7052,7 +7034,10 @@ class OpenReefPanel extends HTMLElement {
           <label style="${this._icpField()}"><span>ICP lab <small>(picks the template)</small></span>
             <select style="${this._icpCtrl()}" data-action="icp-lab">${labOptions}</select></label>
           <label style="${this._icpField()}"><span>ICP results file <small>(.csv or .pdf)</small></span>
-            <input type="file" accept=".csv,.txt,.pdf,.xlsx" data-action="icp-file" ${st.busy ? "disabled" : ""}></label>
+            <div class="icp-file-row">
+              <button class="secondary compact-button" data-action="icp-choose-file" ${st.busy ? "disabled" : ""}>Choose file</button>
+              <span>${st.busy ? "Reading..." : this._escape(fileLabel)}</span>
+            </div></label>
           <label style="${this._icpField()}"><span>Sample is from</span>
             <select style="${this._icpCtrl()}" data-action="icp-sampletype">
               <option value="tank" ${sampleType === "tank" ? "selected" : ""}>Display / tank water</option>
@@ -14049,8 +14034,8 @@ class OpenReefPanel extends HTMLElement {
         .icp-status-pill.unknown { background: #475569; color: #e2e8f0; }
         select[data-action^="icp-"] { background: #0b1724 !important; color: #f8fafc !important; border-color: #334155 !important; }
         select[data-action^="icp-"] option { background: #ffffff; color: #0f172a; }
-        input[type="file"][data-action="icp-file"] { color: #f8fafc !important; background: #0b1724 !important; border-color: #334155 !important; }
-        input[type="file"][data-action="icp-file"]::file-selector-button { color: #0f172a; background: #f8fafc; border: 0; border-radius: 5px; padding: 4px 8px; font-weight: 700; }
+        .icp-file-row { min-height: 42px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 10px; border: 1px solid #334155; border-radius: 8px; background: #0b1724; color: #f8fafc; box-sizing: border-box; }
+        .icp-file-row span { color: #f8fafc; font-weight: 700; overflow-wrap: anywhere; }
         .stat { display: grid; gap: 8px; min-height: 150px; color: #e5edf5; }
         .stat p { color: #dcecff; font-weight: 800; }
         .stat strong { font-size: 34px; color: #67e8f9; }
