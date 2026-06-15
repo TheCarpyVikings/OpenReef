@@ -6325,8 +6325,8 @@ class OpenReefPanel extends HTMLElement {
   _icpField() {
     return "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
   }
-  _icpTable(head, body) {
-    return `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+  _icpTable(head, body, className = "") {
+    return `<div style="overflow-x:auto"><table class="icp-table ${this._escape(className)}" style="width:100%;border-collapse:collapse;font-size:0.85rem">
       <thead><tr style="text-align:left;border-bottom:1px solid var(--divider-color,#444)">${head}</tr></thead>
       <tbody>${body}</tbody></table></div>`;
   }
@@ -7052,7 +7052,14 @@ class OpenReefPanel extends HTMLElement {
       unknown: ["unknown", "—"],
     };
     const [cls, label] = map[status] || ["unknown", status || "—"];
-    return `<span class="pill ${cls}">${this._escape(labelOverride || label)}</span>`;
+    const display = labelOverride || label;
+    const displayNorm = String(display).toLowerCase();
+    const displayClass = displayNorm.includes("critical") || displayNorm.includes("contaminant")
+      ? "critical"
+      : (displayNorm.includes("above") || displayNorm.includes("below") || displayNorm.includes("attention") || cls === "warning")
+        ? "warning"
+        : cls;
+    return `<span class="pill icp-status-pill ${displayClass}">${this._escape(display)}</span>`;
   }
 
   _icpRenderReport(report, drift) {
@@ -7096,7 +7103,7 @@ class OpenReefPanel extends HTMLElement {
         return `<tr><td>${this._escape(el.labName || el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${fmtUnit(el)}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(statusKey, statusLabel)}</td></tr>`;
       }).join("");
       const heading = useLabGroups ? this._escape(label) : label;
-      return `<article class="panel stack"><div class="section-head"><div><h4>${heading}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body)}</article>`;
+      return `<article class="panel stack"><div class="section-head"><div><h4>${heading}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body, "icp-report-table")}</article>`;
     }).join("");
     const driftCard = (drift && drift.length) ? this._icpRenderDrift(drift) : "";
     const meta = `${this._escape(report.lab)}${report.method ? ` · ${this._escape(report.method)}` : ""}${report.sampleDate ? ` · sampled ${this._escape(String(report.sampleDate).slice(0, 10))}` : ""}${report.sampleType === "rodi" ? " · RO/DI sample (excluded from trends)" : ""}`;
@@ -13955,6 +13962,20 @@ class OpenReefPanel extends HTMLElement {
         .pill.risk-critical { background: #7f1d1d; color: #fecaca; }
         .pill-stack { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
         .pill-stack.inline { justify-content: flex-start; }
+        .icp-table th, .icp-table td { padding: 8px 10px 8px 0; vertical-align: middle; }
+        .icp-table tbody tr { border-bottom: 1px solid rgba(36, 54, 74, .42); }
+        .icp-table tbody tr:last-child { border-bottom: 0; }
+        .icp-report-table { table-layout: fixed; }
+        .icp-report-table th:nth-child(1), .icp-report-table td:nth-child(1) { width: 26%; }
+        .icp-report-table th:nth-child(2), .icp-report-table td:nth-child(2) { width: 18%; }
+        .icp-report-table th:nth-child(3), .icp-report-table td:nth-child(3) { width: 36%; }
+        .icp-report-table th:nth-child(4), .icp-report-table td:nth-child(4) { width: 20%; text-align: left; }
+        .icp-report-table td:nth-child(1), .icp-report-table td:nth-child(2), .icp-report-table td:nth-child(3) { overflow-wrap: anywhere; }
+        .icp-status-pill { min-width: 132px; min-height: 28px; padding: 5px 12px; font-size: 11px; white-space: nowrap; }
+        .icp-status-pill.ok { background: #15803d; color: #ecfdf5; }
+        .icp-status-pill.warning { background: #f59e0b; color: #111827; }
+        .icp-status-pill.critical { background: #dc2626; color: #fff1f2; }
+        .icp-status-pill.unknown { background: #475569; color: #e2e8f0; }
         .stat { display: grid; gap: 8px; min-height: 150px; color: #e5edf5; }
         .stat p { color: #dcecff; font-weight: 800; }
         .stat strong { font-size: 34px; color: #67e8f9; }
