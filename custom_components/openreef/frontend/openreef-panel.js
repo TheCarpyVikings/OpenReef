@@ -7109,14 +7109,14 @@ class OpenReefPanel extends HTMLElement {
     const reports = Array.isArray(this._config && this._config.icpReports) ? this._config.icpReports : [];
     const head = `
       <div class="section-head">
-        <div><h2>ICP Import</h2><p>Import your lab's ICP results (Triton, ATI, Fauna Marin, Oceamo…). OpenReef normalises every element, flags what's out of range, and feeds Alk/Ca/Mg/NO₃/PO₄ into your trends, reef score &amp; dosing advisor.</p></div>
+        <div><h2>ICP Import</h2><p>Import your lab's ICP results (Triton, ATI, Fauna Marin, Oceamo…). OpenReef stores the lab report, normalises values internally, and feeds Alk/Ca/Mg/NO₃/PO₄ into your trends, reef score &amp; dosing advisor.</p></div>
       </div>`;
     const banner = st.error
       ? `<p class="hint" style="color:var(--error-color,#e5484d)">${this._escape(st.error)}</p>`
       : (st.message ? `<p class="hint">${this._escape(st.message)}</p>` : "");
     const pending = st.pending ? this._icpRenderPending() : "";
     const selected = reports.find((r) => r.id === st.selectedReportId);
-    const reportView = (st.view === "report" && selected) ? this._icpRenderReport(selected, st.drift) : "";
+    const reportView = (st.view === "report" && selected) ? this._icpRenderReport(selected) : "";
     return `<section class="stack">${head}${banner}${this._icpRenderImport()}${pending}${reportView}${this._icpRenderReportList(reports)}</section>`;
   }
 
@@ -7168,7 +7168,7 @@ class OpenReefPanel extends HTMLElement {
     return `
       <article class="panel stack">
         <div class="section-head"><div><h3>Preview — ${this._escape(r.lab)}${r.method ? ` · ${this._escape(r.method)}` : ""}</h3>
-          <p>${p.recognized} recognised of ${r.elements.length} parsed · ${via}. Values are normalised &amp; flagged on import.</p></div></div>
+          <p>${p.recognized} recognised of ${r.elements.length} parsed · ${via}. Values are normalised internally on import.</p></div></div>
         ${this._icpTable("<th>Element</th><th>Value</th><th>Unit</th><th></th>", body)}
         <div class="button-row">
           <button class="primary" data-action="icp-import" ${this._icp.busy ? "disabled" : ""}>Import ${p.recognized} element${p.recognized === 1 ? "" : "s"}</button>
@@ -7218,7 +7218,7 @@ class OpenReefPanel extends HTMLElement {
     return `<span class="pill icp-status-pill ${displayClass}">${this._escape(display)}</span>`;
   }
 
-  _icpRenderReport(report, drift) {
+  _icpRenderReport(report) {
     const groups = [
       ["physical", "Physical"], ["major", "Major ions"], ["minor", "Minor ions"],
       ["nutrient", "Nutrients"], ["trace", "Trace elements"],
@@ -7244,30 +7244,35 @@ class OpenReefPanel extends HTMLElement {
     const fmtRange = (el) => {
       if (el.labSetpoint) return this._escape(String(el.labSetpoint));
       if (el.labRange) {
-        return `${el.labRange.low != null ? this._escape(String(el.labRange.low)) : ""}–${el.labRange.high != null ? this._escape(String(el.labRange.high)) : ""}${el.usedRange === "lab" ? " (lab)" : ""}`;
+        return `${el.labRange.low != null ? this._escape(String(el.labRange.low)) : ""}–${el.labRange.high != null ? this._escape(String(el.labRange.high)) : ""}`;
       }
-      if (el.target != null) return `ideal ${this._escape(String(el.target))}`;
       return "";
     };
+    const fmtLabStatus = (el) => {
+      if (el.labStatusLabel || el.labStatus) return this._icpStatusPill(el.labStatus || "unknown", el.labStatusLabel || "");
+      if (el.labAssessment) return `<span class="hint">${this._escape(String(el.labAssessment))}</span>`;
+      return "";
+    };
+    const allElements = Object.values(byCat).flat();
+    const showReference = allElements.some((el) => el && (el.labSetpoint || el.labRange));
+    const showStatus = allElements.some((el) => el && (el.labStatusLabel || el.labStatus || el.labAssessment));
     const orderedSections = useLabGroups
       ? sectionOrder.map((key) => [key, key])
       : groups.filter(([key]) => (byCat[key] || []).length);
     const sections = orderedSections.map(([k, label]) => {
       const body = (byCat[k] || []).map((el) => {
-        const statusKey = useLabGroups && el.labStatus ? el.labStatus : el.status;
-        const statusLabel = useLabGroups ? (el.labStatusLabel || "") : "";
-        return `<tr><td>${this._escape(el.labName || el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${fmtUnit(el)}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(statusKey, statusLabel)}</td></tr>`;
+        return `<tr><td>${this._escape(el.labName || el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${fmtUnit(el)}</small></td>${showReference ? `<td><small class="hint">${fmtRange(el)}</small></td>` : ""}${showStatus ? `<td>${fmtLabStatus(el)}</td>` : ""}</tr>`;
       }).join("");
       const heading = useLabGroups ? this._escape(label) : label;
-      return `<article class="panel stack"><div class="section-head"><div><h4>${heading}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body, "icp-report-table")}</article>`;
+      const headers = `<th>Element</th><th>Value</th>${showReference ? "<th>Lab reference</th>" : ""}${showStatus ? "<th>Lab status</th>" : ""}`;
+      const tableClass = `icp-report-table ${(!showReference && !showStatus) ? "icp-report-table-two" : ""}`;
+      return `<article class="panel stack"><div class="section-head"><div><h4>${heading}</h4></div></div>${this._icpTable(headers, body, tableClass)}</article>`;
     }).join("");
-    const driftCard = (drift && drift.length) ? this._icpRenderDrift(drift) : "";
     const meta = `${this._escape(report.lab)}${report.method ? ` · ${this._escape(report.method)}` : ""}${report.sampleDate ? ` · sampled ${this._escape(String(report.sampleDate).slice(0, 10))}` : ""}${report.sampleType === "rodi" ? " · RO/DI sample (excluded from trends)" : ""}`;
     return `
       <article class="panel stack">
         <div class="section-head"><div><h3>Report — ${this._escape(report.lab)}</h3><p class="hint">${meta}</p></div>
           <button class="secondary compact-button danger-button" data-action="icp-delete" data-id="${this._escape(report.id)}">Delete</button></div>
-        ${driftCard}
       </article>
       ${sections}`;
   }
@@ -7292,8 +7297,7 @@ class OpenReefPanel extends HTMLElement {
       .sort((a, b) => String(b.sampleDate || b.importedAt || "").localeCompare(String(a.sampleDate || a.importedAt || "")))
       .map((r) => {
         const n = (r.elements || []).length;
-        const flagged = (r.elements || []).filter((e) => ["low", "high", "contaminant"].includes(e.status)).length;
-        return `<button class="recording-open" data-action="icp-view" data-id="${this._escape(r.id)}"><strong>${this._escape(r.lab)}</strong> · ${this._escape(String(r.sampleDate || r.importedAt || "").slice(0, 10))} · ${n} elements${flagged ? ` · <span class="pill warning">${flagged} flagged</span>` : ""}${r.sampleType === "rodi" ? " · RO/DI" : ""}</button>`;
+        return `<button class="recording-open" data-action="icp-view" data-id="${this._escape(r.id)}"><strong>${this._escape(r.lab)}</strong> · ${this._escape(String(r.sampleDate || r.importedAt || "").slice(0, 10))} · ${n} elements${r.sampleType === "rodi" ? " · RO/DI" : ""}</button>`;
       }).join("");
     return `<article class="panel stack"><div class="section-head"><div><h3>Imported reports</h3></div></div><div class="stack">${items}</div></article>`;
   }
@@ -14126,6 +14130,8 @@ class OpenReefPanel extends HTMLElement {
         .icp-report-table th:nth-child(2), .icp-report-table td:nth-child(2) { width: 18%; }
         .icp-report-table th:nth-child(3), .icp-report-table td:nth-child(3) { width: 36%; }
         .icp-report-table th:nth-child(4), .icp-report-table td:nth-child(4) { width: 20%; text-align: left; }
+        .icp-report-table-two th:nth-child(1), .icp-report-table-two td:nth-child(1) { width: 40%; }
+        .icp-report-table-two th:nth-child(2), .icp-report-table-two td:nth-child(2) { width: 60%; }
         .icp-report-table td:nth-child(1), .icp-report-table td:nth-child(2), .icp-report-table td:nth-child(3) { overflow-wrap: anywhere; }
         .icp-status-pill { min-width: 132px; min-height: 28px; padding: 5px 12px; font-size: 11px; white-space: nowrap; }
         .icp-status-pill.ok { background: #15803d; color: #ecfdf5; }
