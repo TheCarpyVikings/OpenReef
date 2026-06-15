@@ -183,6 +183,46 @@ def test_lab_range_overrides_canonical():
     assert ca2["usedRange"] == "canonical" and ca2["status"] == "high"
 
 
+def test_triton_lab_display_fields_survive_normalise_and_renormalise():
+    raw = _triton_raw()
+    raw["elements"].extend([
+        {
+            "symbol": "La",
+            "rawValue": ".00",
+            "rawUnit": "µg/l",
+            "labGroup": "Unwanted heavy metals",
+            "labName": "Lanthanum",
+            "labResult": ".00",
+            "labUnit": "µg/l",
+            "labSetpoint": "0",
+        },
+        {
+            "symbol": "S",
+            "rawValue": "925.00",
+            "rawUnit": "mg/l",
+            "labGroup": "Macro-Elements",
+            "labName": "Sulphur",
+            "labResult": "925.00",
+            "labUnit": "mg/l",
+            "labSetpoint": "900",
+        },
+    ])
+    report = icp.normalise_report(raw)
+    la = _element(report, "La")
+    sulphur = _element(report, "S")
+
+    assert la["category"] == "trace"                       # canonical logic remains intact
+    assert la["labGroup"] == "Unwanted heavy metals"        # Triton display grouping survives
+    assert la["labResult"] == ".00"
+    assert sulphur["name"] == "Sulfur"                      # OpenReef canonical spelling
+    assert sulphur["labName"] == "Sulphur"                  # Triton display spelling
+    assert sulphur["labSetpoint"] == "900"
+
+    again = icp.normalise_report(report)
+    assert _element(again, "La")["labGroup"] == "Unwanted heavy metals"
+    assert _element(again, "S")["labName"] == "Sulphur"
+
+
 # --- report normalisation ---------------------------------------------------- #
 
 def test_normalise_report_recomputes_status_ignoring_client():

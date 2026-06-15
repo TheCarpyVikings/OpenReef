@@ -6554,6 +6554,7 @@ class OpenReefPanel extends HTMLElement {
     const iVal = col(["analysis", "value", "result", "measured"]);
     const iSet = col(["setpoint", "reference", "ideal", "target", "natural"]);
     const iUnit = col(["unit"]);
+    const iGroup = col(["group", "category"]);
     if (iVal < 0 || (iSym < 0 && iName < 0)) return this._icpParseTabular(rows);  // not a Triton header
     const elements = [];
     for (let r = 1; r < rows.length; r++) {
@@ -6562,13 +6563,19 @@ class OpenReefPanel extends HTMLElement {
       const rawSym = iSym >= 0 ? row[iSym] : "";
       const rawName = iName >= 0 ? row[iName] : "";
       const value = iVal >= 0 ? row[iVal] : "";
+      const unit = iUnit >= 0 ? row[iUnit] : "";
+      const set = iSet >= 0 ? row[iSet] : "";
       if (!(rawSym || rawName) || value == null || value === "") continue;
       const matched = this._icpMatchSymbol(rawSym) || this._icpMatchSymbol(rawName);
-      const el = this._icpMakeElement(matched || rawSym || rawName, value, iUnit >= 0 ? row[iUnit] : "", "");
+      const el = this._icpMakeElement(matched || rawSym || rawName, value, unit, "");
       if (matched) el.symbol = matched;
       if (rawName) el.name = rawName;
+      if (iGroup >= 0 && row[iGroup]) el.labGroup = row[iGroup];
+      if (rawName) el.labName = rawName;
+      if (value != null && value !== "") el.labResult = value;
+      if (unit) el.labUnit = this._icpCleanUnit(unit);
+      if (set) el.labSetpoint = set;
       // Setpoint: a range → labRange, a single value (maybe with a unit suffix) → target.
-      const set = iSet >= 0 ? row[iSet] : "";
       if (set) {
         const range = this._icpParseRange(set);
         if (range) el.labRange = range;
@@ -7033,21 +7040,39 @@ class OpenReefPanel extends HTMLElement {
       ["nutrient", "Nutrients"], ["trace", "Trace elements"],
       ["heavy_metal", "Heavy metals &amp; contaminants"], ["organic", "Organics"], ["unknown", "Other"],
     ];
+    const useLabGroups = (report.lab || "").toLowerCase() === "triton"
+      && (report.elements || []).some((el) => el && el.labGroup);
+    const sectionOrder = [];
     const byCat = {};
-    for (const el of report.elements || []) (byCat[el.category] = byCat[el.category] || []).push(el);
-    const fmtVal = (el) => el.bdl
+    for (const el of report.elements || []) {
+      const key = useLabGroups && el.labGroup ? el.labGroup : (el.category || "unknown");
+      if (!byCat[key]) {
+        byCat[key] = [];
+        sectionOrder.push(key);
+      }
+      byCat[key].push(el);
+    }
+    const fmtVal = (el) => (el.labResult != null && el.labResult !== "")
+      ? this._escape(String(el.labResult))
+      : (el.bdl
       ? `&lt;${el.threshold != null ? this._escape(String(el.threshold)) : "LOD"}`
-      : (el.value != null ? this._escape(String(el.value)) : "—");
+      : (el.value != null ? this._escape(String(el.value)) : "—"));
+    const fmtUnit = (el) => this._escape(el.labUnit || el.unit || "");
     const fmtRange = (el) => {
+      if (el.labSetpoint) return this._escape(String(el.labSetpoint));
       if (el.labRange) {
         return `${el.labRange.low != null ? this._escape(String(el.labRange.low)) : ""}–${el.labRange.high != null ? this._escape(String(el.labRange.high)) : ""}${el.usedRange === "lab" ? " (lab)" : ""}`;
       }
       if (el.target != null) return `ideal ${this._escape(String(el.target))}`;
       return "";
     };
-    const sections = groups.filter(([k]) => (byCat[k] || []).length).map(([k, label]) => {
-      const body = byCat[k].map((el) => `<tr><td>${this._escape(el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${this._escape(el.unit || "")}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(el.status)}</td></tr>`).join("");
-      return `<article class="panel stack"><div class="section-head"><div><h4>${label}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body)}</article>`;
+    const orderedSections = useLabGroups
+      ? sectionOrder.map((key) => [key, key])
+      : groups.filter(([key]) => (byCat[key] || []).length);
+    const sections = orderedSections.map(([k, label]) => {
+      const body = (byCat[k] || []).map((el) => `<tr><td>${this._escape(el.labName || el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${fmtUnit(el)}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(el.status)}</td></tr>`).join("");
+      const heading = useLabGroups ? this._escape(label) : label;
+      return `<article class="panel stack"><div class="section-head"><div><h4>${heading}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body)}</article>`;
     }).join("");
     const driftCard = (drift && drift.length) ? this._icpRenderDrift(drift) : "";
     const meta = `${this._escape(report.lab)}${report.method ? ` · ${this._escape(report.method)}` : ""}${report.sampleDate ? ` · sampled ${this._escape(String(report.sampleDate).slice(0, 10))}` : ""}${report.sampleType === "rodi" ? " · RO/DI sample (excluded from trends)" : ""}`;

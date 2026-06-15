@@ -286,7 +286,7 @@ def _normalise_element(item: Any) -> dict[str, Any] | None:
     else:
         status = flag_element(category, canonical_value, bdl, lab_range, canonical_range)
         used = used_range(lab_range, canonical_range)
-    return {
+    out = {
         "symbol": sym,
         "name": name,
         "category": category,
@@ -301,6 +301,17 @@ def _normalise_element(item: Any) -> dict[str, Any] | None:
         "usedRange": used,
         "status": status,
     }
+    for key, limit in (
+        ("labGroup", 80),
+        ("labName", 80),
+        ("labResult", 40),
+        ("labUnit", 20),
+        ("labSetpoint", 80),
+    ):
+        cleaned = _clamp_str(item.get(key), limit)
+        if cleaned:
+            out[key] = cleaned
+    return out
 
 
 def normalise_report(raw: Any) -> dict[str, Any] | None:
