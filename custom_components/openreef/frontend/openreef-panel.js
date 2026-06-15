@@ -1373,7 +1373,11 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "feed-seek") { this._feedSeek(Number(target.value)); return; }
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
-      if (target.dataset.action === "icp-file") { this._icpHandleFile(target.files && target.files[0]); return; }
+      if (target.dataset.action === "icp-file") {
+        if (event.type !== "change") return;
+        this._icpHandleFileInput(target);
+        return;
+      }
       if (target.dataset.action === "icp-lab") {
         this._icp.lab = target.value;
         this._icpReparse();   // re-run the template on an already-loaded file
@@ -6824,6 +6828,31 @@ class OpenReefPanel extends HTMLElement {
     return pdfjs;
   }
 
+  _icpReadWithFileReader(file, method) {
+    return new Promise((resolve, reject) => {
+      if (typeof FileReader === "undefined") {
+        reject(new Error("This browser could not read that file. Try downloading it locally first, then select it again."));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("Could not read that file"));
+      reader[method](file);
+    });
+  }
+
+  async _icpReadFileText(file) {
+    if (file && typeof file.text === "function") return file.text();
+    const text = await this._icpReadWithFileReader(file, "readAsText");
+    return typeof text === "string" ? text : "";
+  }
+
+  async _icpReadFileBytes(file) {
+    if (file && typeof file.arrayBuffer === "function") return file.arrayBuffer();
+    const data = await this._icpReadWithFileReader(file, "readAsArrayBuffer");
+    return data instanceof ArrayBuffer ? data : new ArrayBuffer(0);
+  }
+
   async _icpExtractPdfText(file) {
     let pdfjs;
     try {
@@ -6831,7 +6860,7 @@ class OpenReefPanel extends HTMLElement {
     } catch {
       throw new Error("PDF support isn't installed on this server. Paste the report text instead, or import a CSV.");
     }
-    const data = new Uint8Array(await file.arrayBuffer());
+    const data = new Uint8Array(await this._icpReadFileBytes(file));
     let doc;
     try {
       doc = await pdfjs.getDocument({ data }).promise;
@@ -6858,6 +6887,17 @@ class OpenReefPanel extends HTMLElement {
     return out;
   }
 
+  _icpHandleFileInput(input) {
+    const file = input && input.files && input.files.length ? input.files[0] : null;
+    if (!file) {
+      this._icp.message = "No file was received. On iPad, make sure the file has downloaded locally, then try Choose File again.";
+      this._render();
+      return;
+    }
+    try { input.value = ""; } catch {}
+    this._icpHandleFile(file);
+  }
+
   async _icpHandleFile(file) {
     if (!file) return;
     this._icp.busy = true;
@@ -6867,11 +6907,12 @@ class OpenReefPanel extends HTMLElement {
     try {
       const name = file.name || "";
       const lower = name.toLowerCase();
-      if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
+      const type = String(file.type || "").toLowerCase();
+      if (lower.endsWith(".xlsx") || lower.endsWith(".xls") || type.includes("spreadsheet")) {
         this._icp.error = "Excel files aren't supported yet — open it and 'Save As' CSV, then import that. (Triton offers a CSV download.)";
       } else {
-        const kind = lower.endsWith(".pdf") ? "pdf" : "csv";
-        const text = kind === "pdf" ? await this._icpExtractPdfText(file) : await file.text();
+        const kind = lower.endsWith(".pdf") || type.includes("pdf") ? "pdf" : "csv";
+        const text = kind === "pdf" ? await this._icpExtractPdfText(file) : await this._icpReadFileText(file);
         this._icp.lastText = text;
         this._icp.lastFileName = name;
         this._icp.lastKind = kind;
