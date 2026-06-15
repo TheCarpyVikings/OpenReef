@@ -157,7 +157,9 @@ def parse_value(raw: Any) -> tuple[float | None, bool, float | None]:
         return (None, False, None)
     if s.startswith("<"):
         return (None, True, _to_float(s[1:]))
-    if s.lower().replace(" ", "") in _BDL_WORDS:
+    stripped = s.lower().replace(" ", "")
+    # below-detection words, or a run of dashes ("---" is ATI's "not detected")
+    if stripped in _BDL_WORDS or (stripped and all(ch in "-–—" for ch in stripped)):
         return (None, True, None)
     num = _to_float(s)
     return (None, False, None) if num is None else (num, False, None)
@@ -266,6 +268,21 @@ def _normalise_element(item: Any) -> dict[str, Any] | None:
     canonical_value = to_canonical(sym, value, raw_unit) if value is not None else None
     lab_range = _clean_range(item.get("labRange"))
     canonical_range = meta["range"] if meta else None
+    # The lab's own ideal/target value (a single point, e.g. ATI "Ideal value: 412.9 mg/l").
+    target_value, _, _ = parse_value(item.get("labTarget"))
+    target = to_canonical(sym, target_value, raw_unit) if target_value is not None else None
+    # Some labs (ATI) print their own verdict word per element; honour it when given
+    # (the user's "lab assessment when present, else canonical range" rule). bdl wins.
+    lab_status = item.get("labStatus")
+    if not (isinstance(lab_status, str) and lab_status in ("low", "ok", "high", "contaminant")):
+        lab_status = None
+    if bdl:
+        status, used = "bdl", used_range(lab_range, canonical_range)
+    elif lab_status is not None:
+        status, used = lab_status, "lab"
+    else:
+        status = flag_element(category, canonical_value, bdl, lab_range, canonical_range)
+        used = used_range(lab_range, canonical_range)
     return {
         "symbol": sym,
         "name": name,
@@ -276,9 +293,10 @@ def _normalise_element(item: Any) -> dict[str, Any] | None:
         "unit": canon_unit,
         "bdl": bdl,
         "threshold": _f(threshold),
+        "target": target,
         "labRange": lab_range,
-        "usedRange": used_range(lab_range, canonical_range),
-        "status": flag_element(category, canonical_value, bdl, lab_range, canonical_range),
+        "usedRange": used,
+        "status": status,
     }
 
 

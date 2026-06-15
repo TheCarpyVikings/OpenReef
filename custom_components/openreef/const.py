@@ -682,7 +682,7 @@ ICP_ELEMENTS = {
     "Co": {"name": "Cobalt", "category": "trace", "unit": "ppb", "range": None,
            "aliases": ["co", "cobalt", "kobalt"]},
     "Cr": {"name": "Chromium", "category": "trace", "unit": "ppb", "range": None,
-           "aliases": ["cr", "chromium", "chrom"]},
+           "aliases": ["cr", "chromium", "chrom", "chrome"]},
     "V": {"name": "Vanadium", "category": "trace", "unit": "ppb", "range": None,
           "aliases": ["v", "vanadium", "vanadin"]},
     "Zn": {"name": "Zinc", "category": "trace", "unit": "ppb", "range": None,

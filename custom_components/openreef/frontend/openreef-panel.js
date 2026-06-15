@@ -6358,7 +6358,7 @@ class OpenReefPanel extends HTMLElement {
       E("Mo", "Molybdenum", "trace", ["mo", "molybdenum", "molybdaen"]),
       E("Ni", "Nickel", "trace", ["ni", "nickel"]),
       E("Co", "Cobalt", "trace", ["co", "cobalt", "kobalt"]),
-      E("Cr", "Chromium", "trace", ["cr", "chromium", "chrom"]),
+      E("Cr", "Chromium", "trace", ["cr", "chromium", "chrom", "chrome"]),
       E("V", "Vanadium", "trace", ["v", "vanadium", "vanadin"]),
       E("Zn", "Zinc", "trace", ["zn", "zinc", "zink"]),
       E("Ba", "Barium", "trace", ["ba", "barium"]),
@@ -6449,6 +6449,7 @@ class OpenReefPanel extends HTMLElement {
     if (cell == null || cell === "") return false;
     const low = String(cell).toLowerCase().replace(/\s+/g, "");
     if (low.startsWith("<") || ["nd", "n.d.", "nn", "n.n.", "bdl", "<lod"].includes(low)) return true;
+    if (/^[-–—]+$/.test(low)) return true;   // "---" = not detected (ATI)
     return this._icpToFloat(cell) != null;
   }
 
@@ -6550,6 +6551,57 @@ class OpenReefPanel extends HTMLElement {
     return elements;
   }
 
+  // ATI's PDF lists each element across several lines (symbol / name / value+unit /
+  // "Ideal value: X" / status word). Anchor on the reliable "Ideal value:" line: the
+  // value is the line just before it, the element name is the nearest recognised
+  // element line before that, and ATI's own verdict is the line(s) just after.
+  _icpParseAti(text) {
+    const lines = String(text || "").split(/\r\n|\r|\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+    const valRe = /^(<\s*[\d.,]+|[-–—]+|n\.?d\.?|n\.?n\.?|[\d.,]+)\s*(µg\/l|μg\/l|mg\/l|ug\/l|ppm|ppb|psu|dkh|°dh|g\/l)?/i;
+    const idealRe = /ideal value[:\s]*([\d.,]+)\s*(µg\/l|μg\/l|mg\/l|ug\/l|ppm|ppb|psu|dkh|°dh|g\/l)?/i;
+    const elements = [];
+    const seen = new Set();
+    for (let k = 0; k < lines.length; k++) {
+      const ideal = lines[k].match(idealRe);
+      if (!ideal) continue;
+      const vm = (lines[k - 1] || "").match(valRe);
+      if (!vm) continue;
+      let symbol = null;
+      let nameLine = "";
+      for (let b = k - 2; b >= Math.max(0, k - 4); b--) {
+        const s = this._icpMatchNameLine(lines[b]);
+        if (s) { symbol = s; nameLine = lines[b]; break; }
+      }
+      if (!symbol || seen.has(symbol)) continue;
+      seen.add(symbol);
+      const token = vm[1].replace(/\s+/g, "");
+      const el = this._icpMakeElement(nameLine, /^[-–—]+$/.test(token) ? "n.d." : token, (vm[2] || "").trim(), "");
+      el.symbol = symbol;
+      el.labTarget = ideal[1];
+      const status = this._icpMapAtiStatus(`${lines[k + 1] || ""} ${lines[k + 2] || ""}`);
+      if (status) el.labStatus = status;
+      elements.push(el);
+    }
+    return elements;
+  }
+
+  _icpMatchNameLine(line) {
+    const words = String(line || "").split(/\s+/).filter(Boolean);
+    for (let n = Math.min(3, words.length); n >= 1; n--) {
+      const s = this._icpMatchSymbol(words.slice(0, n).join(" "));
+      if (s) return s;
+    }
+    return null;
+  }
+
+  _icpMapAtiStatus(text) {
+    const t = String(text).toLowerCase();
+    if (t.includes("critically high") || t.includes("above normal")) return "high";
+    if (t.includes("critically low") || t.includes("below normal")) return "low";
+    if (t.includes("normal")) return "ok";
+    return null;
+  }
+
   _icpDetectLab(text) {
     const t = String(text || "").toLowerCase();
     const has = (subs) => subs.some((s) => t.includes(s));
@@ -6573,20 +6625,47 @@ class OpenReefPanel extends HTMLElement {
     let m = t.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
     if (m) return this._icpIso(+m[1], +m[2], +m[3]);
     m = t.match(/\b(\d{1,2})[.\/](\d{1,2})[.\/](20\d{2})\b/);
-    if (m) return this._icpIso(+m[3], +m[2], +m[1]);
+    if (m) {
+      const a = +m[1];
+      const b = +m[2];
+      // disambiguate DD/MM vs MM/DD; a dotted date is European (DD.MM), a slashed
+      // one is treated as US (MM/DD) unless a value >12 forces the order.
+      const dotted = /\./.test(m[0]);
+      let mo;
+      let d;
+      if (a > 12) { d = a; mo = b; }
+      else if (b > 12) { mo = a; d = b; }
+      else if (dotted) { d = a; mo = b; }
+      else { mo = a; d = b; }
+      return this._icpIso(+m[3], mo, d);
+    }
     return null;
   }
 
   _icpGuessTestId(text) {
-    const m = String(text || "").match(/\b(?:order|test|sample|auftrag|probe)[\s#:.no-]*([A-Za-z0-9-]{4,})\b/i);
+    const t = String(text || "");
+    let m = t.match(/\bID:\s*([A-Za-z0-9]{4,})/i);                                   // ATI "(ID: 374648)"
+    if (m) return m[1].slice(0, 40);
+    m = t.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})\b/);             // barcode
+    if (m) return m[1];
+    m = t.match(/\b(?:order|test|sample|auftrag|probe|barcode)[\s#:.no-]*([A-Za-z0-9-]{4,})\b/i);
     return m ? m[1].slice(0, 40) : "";
+  }
+
+  _icpGuessTank(text) {
+    const m = String(text || "").match(/\bTank\b\s+(.+?)\s+(?:Net size|Net volume|Reason|Barcode)\b/is);
+    return m ? m[1].replace(/\s+/g, " ").trim().slice(0, 40) : "";
   }
 
   _icpParseFromText(text, fileName, kind) {
     const detected = this._icpDetectLab(text) || this._icpDetectLab(fileName) || { lab: "Unknown", method: "", adapter: "generic" };
     let elements;
     if (kind === "pdf") {
-      elements = this._icpParseLines(text);
+      elements = detected.adapter === "ati_pdf" ? this._icpParseAti(text) : this._icpParseLines(text);
+      if (this._icpCountRecognized(elements) < 3) {
+        const alt = detected.adapter === "ati_pdf" ? this._icpParseLines(text) : this._icpParseAti(text);
+        if (this._icpCountRecognized(alt) > this._icpCountRecognized(elements)) elements = alt;
+      }
     } else {
       const { rows } = this._icpSplitRows(text);
       elements = this._icpParseTabular(rows);
@@ -6604,6 +6683,7 @@ class OpenReefPanel extends HTMLElement {
       sampleDate: this._icpGuessDate(text) || new Date().toISOString(),
       importedAt: new Date().toISOString(),
       testId: this._icpGuessTestId(text),
+      tank: this._icpGuessTank(text),
       source: { fileName: fileName || "" },
       elements,
     };
@@ -6848,9 +6928,13 @@ class OpenReefPanel extends HTMLElement {
     const fmtVal = (el) => el.bdl
       ? `&lt;${el.threshold != null ? this._escape(String(el.threshold)) : "LOD"}`
       : (el.value != null ? this._escape(String(el.value)) : "—");
-    const fmtRange = (el) => el.labRange
-      ? `${el.labRange.low != null ? this._escape(String(el.labRange.low)) : ""}–${el.labRange.high != null ? this._escape(String(el.labRange.high)) : ""}${el.usedRange === "lab" ? " (lab)" : ""}`
-      : "";
+    const fmtRange = (el) => {
+      if (el.labRange) {
+        return `${el.labRange.low != null ? this._escape(String(el.labRange.low)) : ""}–${el.labRange.high != null ? this._escape(String(el.labRange.high)) : ""}${el.usedRange === "lab" ? " (lab)" : ""}`;
+      }
+      if (el.target != null) return `ideal ${this._escape(String(el.target))}`;
+      return "";
+    };
     const sections = groups.filter(([k]) => (byCat[k] || []).length).map(([k, label]) => {
       const body = byCat[k].map((el) => `<tr><td>${this._escape(el.name)} <small class="hint">${this._escape(el.symbol)}</small></td><td>${fmtVal(el)} <small class="hint">${this._escape(el.unit || "")}</small></td><td><small class="hint">${fmtRange(el)}</small></td><td>${this._icpStatusPill(el.status)}</td></tr>`).join("");
       return `<article class="panel stack"><div class="section-head"><div><h4>${label}</h4></div></div>${this._icpTable("<th>Element</th><th>Value</th><th>Range</th><th>Status</th>", body)}</article>`;

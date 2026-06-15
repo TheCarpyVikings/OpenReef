@@ -115,6 +115,28 @@ def test_below_detection_markers_never_zero():
     assert icp.parse_value("") == (None, False, None)
 
 
+def test_dash_runs_are_below_detection():
+    # ATI prints "---" for not-detected; treat any run of dashes as bdl, never 0.
+    assert icp.parse_value("---") == (None, True, None)
+    assert icp.parse_value("--") == (None, True, None)
+    assert icp.parse_value("—") == (None, True, None)
+
+
+def test_lab_status_honoured_else_range_with_bdl_precedence():
+    raw = {"lab": "ATI", "sampleType": "tank", "sampleDate": "2026-04-20", "elements": [
+        {"symbol": "Zn", "rawValue": 18.33, "rawUnit": "µg/L", "labStatus": "high", "labTarget": "1.96"},
+        {"symbol": "Al", "rawValue": 20.26, "rawUnit": "µg/L", "labStatus": "ok"},   # canonical=contaminant
+        {"symbol": "Ni", "rawValue": "---", "rawUnit": "µg/L", "labStatus": "low"},  # bdl beats labStatus
+        {"symbol": "Ca", "rawValue": 300, "rawUnit": "mg/L", "labStatus": "bogus"},  # invalid → range
+    ]}
+    by = {e["symbol"]: e for e in icp.normalise_report(raw)["elements"]}
+    assert by["Zn"]["status"] == "high" and by["Zn"]["usedRange"] == "lab"
+    assert by["Zn"]["target"] == 1.96                       # ideal normalised (µg/L → ppb)
+    assert by["Al"]["status"] == "ok"                       # lab verdict honoured over canonical
+    assert by["Ni"]["bdl"] is True and by["Ni"]["status"] == "bdl"
+    assert by["Ca"]["status"] == "low"                      # invalid labStatus → canonical range
+
+
 def test_decimal_comma_and_thousands():
     assert icp._to_float("1,23") == 1.23                    # EU decimal
     assert icp._to_float("1.234,56") == 1234.56             # EU thousands + decimal
