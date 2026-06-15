@@ -252,6 +252,30 @@ def test_ati_lab_display_fields_survive_with_bdl_status():
     assert _element(again, "Mn")["labStatusLabel"] == "BELOW NORMAL"
 
 
+def test_fauna_marin_lab_display_fields_and_mg_l_species_survive():
+    raw = {"lab": "Fauna Marin", "adapter": "fauna_marin_csv", "sampleType": "tank", "sampleDate": "2026-06-09", "elements": [
+        {"symbol": "Si", "rawValue": "0.035", "rawUnit": "mg/l", "labGroup": "Nutrients", "labName": "Silicon", "labResult": "0.035", "labUnit": "mg/l"},
+        {"symbol": "P", "rawValue": "0.0312", "rawUnit": "mg/l", "labGroup": "Nutrients", "labName": "Phosphorus", "labResult": "0.0312", "labUnit": "mg/l"},
+        {"symbol": "PO4", "rawValue": "0.0956592", "rawUnit": "mg/l", "labGroup": "Nutrients", "labName": "Phosphate calculated", "labResult": "0.0956592", "labUnit": "mg/l"},
+        {"symbol": "I", "rawValue": "0.0902", "rawUnit": "mg/l", "labGroup": "Trace elements", "labName": "Iodine", "labResult": "0.0902", "labUnit": "mg/l"},
+    ]}
+    report = icp.normalise_report(raw)
+    si = _element(report, "Si")
+    phosphorus = _element(report, "P")
+    phosphate = _element(report, "PO4")
+    iodine = _element(report, "I")
+
+    assert si["value"] == 35.0 and si["unit"] == "ppb"
+    assert phosphorus["value"] == 31.2 and phosphorus["unit"] == "ppb"
+    assert phosphate["value"] == 0.095659 and phosphate["unit"] == "ppm"
+    assert iodine["value"] == 90.2 and iodine["unit"] == "ppb"
+    assert phosphate["labName"] == "Phosphate calculated"
+    assert iodine["labGroup"] == "Trace elements"
+
+    again = icp.normalise_report(report)
+    assert _element(again, "PO4")["labResult"] == "0.0956592"
+
+
 # --- report normalisation ---------------------------------------------------- #
 
 def test_normalise_report_recomputes_status_ignoring_client():

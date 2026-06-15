@@ -6592,6 +6592,102 @@ class OpenReefPanel extends HTMLElement {
     return elements;
   }
 
+  _icpFaunaMarinCsv(text) {
+    const split = this._icpSplitRows(text);
+    const rows = split.rows;
+    if (split.delim !== ";" || rows.length < 2) return null;
+    const header = rows[0].map((h) => this._icpNorm(h));
+    const values = rows[1] || [];
+    const has = (key) => header.includes(key);
+    if (!(has("watertype") && has("analysisdate") && has("alkalinitydkh") && has("po4er"))) return null;
+    const byKey = {};
+    header.forEach((key, index) => {
+      if (key) byKey[key] = values[index] || "";
+    });
+    return { header, values, byKey };
+  }
+
+  _icpFaunaMarinColumnSpecs() {
+    if (this.__icpFaunaMarinSpecs) return this.__icpFaunaMarinSpecs;
+    const trace = "Trace elements";
+    const major = "Major elements";
+    const nutrient = "Nutrients";
+    const pollutant = "Pollutants";
+    const base = "Base elements";
+    const organic = "Organics";
+    const spec = {};
+    const add = (key, symbol, name, unit, group) => { spec[this._icpNorm(key)] = { symbol, name, unit, group }; };
+
+    for (const symbol of ["Ag", "Al", "As", "Cd", "Cu", "Hg", "Pb", "Sb", "Sn", "Tl", "U", "Th"]) {
+      add(symbol, symbol, this._icpElementName(symbol), "µg/l", pollutant);
+    }
+    for (const symbol of ["Ba", "Be", "Co", "Cr", "Cs", "Fe", "Ga", "La", "Li", "Mn", "Mo", "Nd", "Ni", "Sc", "Se", "Te", "Ti", "V", "W", "Zn", "Zr"]) {
+      add(symbol, symbol, this._icpElementName(symbol), "µg/l", trace);
+    }
+    add("Hf", "Hf", "Hafnium", "µg/l", trace);
+    add("Ar", "Ar", "Argon", "µg/l", trace);
+
+    add("B", "B", "Boron", "mg/l", major);
+    add("Br", "Br", "Bromine", "mg/l", major);
+    add("bromide", "Br", "Bromide", "mg/l", major);
+    add("Ca", "Ca", "Calcium", "mg/l", major);
+    add("chloride", "Cl", "Chloride", "mg/l", major);
+    add("fluoride", "F", "Fluoride", "mg/l", major);
+    add("K", "K", "Potassium", "mg/l", major);
+    add("Mg", "Mg", "Magnesium", "mg/l", major);
+    add("Na", "Na", "Sodium", "mg/l", major);
+    add("S", "S", "Sulfur", "mg/l", major);
+    add("Sr", "Sr", "Strontium", "mg/l", major);
+    add("sulfate", "SO4", "Sulfate", "mg/l", major);
+
+    add("I", "I", "Iodine", "mg/l", trace);
+    add("P", "P", "Phosphorus", "mg/l", nutrient);
+    add("Si", "Si", "Silicon", "mg/l", nutrient);
+    add("nitrate", "NO3", "Nitrate", "mg/l", nutrient);
+    add("nitrite", "NO2", "Nitrite", "mg/l", nutrient);
+    add("po4er", "PO4", "Phosphate calculated", "mg/l", nutrient);
+    add("po4g", "PO4g", "Phosphate measured", "mg/l", nutrient);
+
+    add("alkalinityDkH", "KH", "Alkalinity", "dKH", base);
+    add("conductivity", "Cond", "Conductivity", "mS/cm", base);
+    add("density", "Density", "Density", "g/ml", base);
+    add("densityrel", "DensityRel", "Relative density", "", base);
+    add("pH", "pH", "pH", "", base);
+    add("salinity", "Sal", "Salinity", "PSU", base);
+
+    add("sak254", "SAC254", "Spectral absorption 254 nm", "1/m", organic);
+    add("sak410", "SAC410", "Spectral absorption 410 nm", "1/m", organic);
+    add("sak436", "SAC436", "Spectral absorption 436 nm", "1/m", organic);
+    add("npoc", "NPOC", "Non-purgeable organic carbon", "mg/l", organic);
+    add("tnb", "TNb", "Total nitrogen bound", "mg/l", organic);
+    this.__icpFaunaMarinSpecs = spec;
+    return spec;
+  }
+
+  _icpParseFaunaMarinCsv(text) {
+    const data = this._icpFaunaMarinCsv(text);
+    if (!data) return this._icpParseTabular(this._icpSplitRows(text).rows);
+    const specs = this._icpFaunaMarinColumnSpecs();
+    const elements = [];
+    const seen = new Set();
+    data.header.forEach((key, index) => {
+      const spec = specs[key];
+      const raw = data.values[index];
+      if (!spec || raw == null || String(raw).trim() === "") return;
+      if (spec.symbol && seen.has(spec.symbol)) return;
+      const el = this._icpMakeElement(spec.name || spec.symbol || key, raw, spec.unit || "", "");
+      if (spec.symbol) el.symbol = spec.symbol;
+      if (spec.name) el.name = spec.name;
+      el.labGroup = spec.group || "Fauna Marin";
+      el.labName = spec.name || spec.symbol || key;
+      el.labResult = String(raw).trim();
+      if (spec.unit) el.labUnit = spec.unit;
+      elements.push(el);
+      if (spec.symbol) seen.add(spec.symbol);
+    });
+    return elements;
+  }
+
   // PDF-extracted text: keep only lines that begin with a recognised element name
   // followed by a number (so addresses/headers/totals are dropped automatically).
   _icpParseLines(text) {
@@ -6686,14 +6782,14 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // The labs a user can explicitly select. "adapter" picks the parser/template:
-  // ati_pdf = ATI's multi-line layout, triton_csv = column table, generic = the
-  // tabular/line fallback (used until a lab gets its own tuned template).
+  // ati_pdf = ATI's multi-line layout, triton_csv/fauna_marin_csv = tuned CSV
+  // adapters, generic = tabular/line fallback until a lab gets its own template.
   _icpLabs() {
     return [
       { id: "auto", label: "Auto-detect", method: "", adapter: "auto" },
       { id: "ati", label: "ATI", method: "ICP-OES", adapter: "ati_pdf" },
       { id: "triton", label: "Triton", method: "ICP-OES", adapter: "triton_csv" },
-      { id: "fauna_marin", label: "Fauna Marin", method: "ICP-OES", adapter: "generic" },
+      { id: "fauna_marin", label: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_csv" },
       { id: "oceamo", label: "Oceamo / Reef Moonshiner's", method: "ICP-MS", adapter: "generic" },
       { id: "aquaforest", label: "Aquaforest", method: "ICP-OES", adapter: "generic" },
       { id: "reefzlements", label: "ReefZlements", method: "ICP-OES", adapter: "generic" },
@@ -6712,13 +6808,14 @@ class OpenReefPanel extends HTMLElement {
   _icpDetectLab(text) {
     const t = String(text || "").toLowerCase();
     const has = (subs) => subs.some((s) => t.includes(s));
+    if (this._icpFaunaMarinCsv(text)) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_csv" };
     // Triton's CSV export carries no "triton" string — key off its header + group names.
     if (has(["triton-lab", "triton lab", "tritonlab", "triton.de", "triton applied",
              "element,name,analysis", "macro-elements", "unwanted heavy metals", "li-group", "fe-group", "ba-group"])) {
       return { lab: "Triton", method: "ICP-OES", adapter: "triton_csv" };
     }
     if (has(["atiaquaristik", "ati-lab", "ati labor", "ati aquaristik", "ati icp"])) return { lab: "ATI", method: "ICP-OES", adapter: "ati_pdf" };
-    if (has(["fauna marin", "faunamarin"])) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "generic" };
+    if (has(["fauna marin", "faunamarin"])) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_csv" };
     if (has(["oceamo"])) return { lab: "Oceamo", method: "ICP-MS", adapter: "generic" };
     if (has(["aquaforest"])) return { lab: "Aquaforest", method: "ICP-OES", adapter: "generic" };
     if (has(["reefzlements", "zlements"])) return { lab: "ReefZlements", method: "ICP-OES", adapter: "generic" };
@@ -6773,6 +6870,7 @@ class OpenReefPanel extends HTMLElement {
   _icpParseWith(adapter, text, kind) {
     if (adapter === "ati_pdf") return this._icpParseAti(text);
     if (adapter === "triton_csv") return this._icpParseTritonCsv(text);
+    if (adapter === "fauna_marin_csv") return this._icpParseFaunaMarinCsv(text);
     if (kind === "pdf") return this._icpParseLines(text);
     const tab = this._icpParseTabular(this._icpSplitRows(text).rows);
     if (this._icpCountRecognized(tab) >= 3) return tab;
@@ -6789,19 +6887,21 @@ class OpenReefPanel extends HTMLElement {
     // don't have a template for yet), try every parser and keep the best — so import
     // never hard-fails. The report keeps the lab the user selected / we detected.
     if (this._icpCountRecognized(elements) < 3) {
-      for (const alt of [this._icpParseAti(text), this._icpParseLines(text), this._icpParseTabular(this._icpSplitRows(text).rows)]) {
+      for (const alt of [this._icpParseFaunaMarinCsv(text), this._icpParseAti(text), this._icpParseLines(text), this._icpParseTabular(this._icpSplitRows(text).rows)]) {
         if (this._icpCountRecognized(alt) > this._icpCountRecognized(elements)) elements = alt;
       }
     }
+    const fauna = detected.adapter === "fauna_marin_csv" ? this._icpFaunaMarinCsv(text) : null;
+    const faunaFields = fauna ? fauna.byKey : {};
     const report = {
       id: `icp:${this._icpNorm(detected.lab) || "lab"}:${Date.now()}`,
       lab: detected.lab,
       adapter: detected.adapter,
       method: detected.method,
       sampleType: this._icp.sampleType || "tank",
-      sampleDate: this._icpGuessDate(text) || new Date().toISOString(),
+      sampleDate: this._icpGuessDate(faunaFields.analysisdate || text) || new Date().toISOString(),
       importedAt: new Date().toISOString(),
-      testId: this._icpGuessTestId(text),
+      testId: (faunaFields.id || faunaFields.sampleid || this._icpGuessTestId(text)).slice(0, 40),
       tank: this._icpGuessTank(text),
       source: { fileName: fileName || "" },
       elements,
