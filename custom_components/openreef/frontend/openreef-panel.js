@@ -39,6 +39,8 @@ class OpenReefPanel extends HTMLElement {
     this._feedPlayerTimer = null;
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
     this._icp = { view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
+    this._icpLastFileSignature = "";
+    this._icpLastFileHandledAt = 0;
     this._lightingWindow = { data: null, loading: false };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
@@ -1374,8 +1376,7 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
       if (target.dataset.action === "icp-file") {
-        if (event.type !== "change") return;
-        this._icpHandleFileInput(target);
+        this._icpHandleFileInput(target, event.type);
         return;
       }
       if (target.dataset.action === "icp-lab") {
@@ -6887,15 +6888,29 @@ class OpenReefPanel extends HTMLElement {
     return out;
   }
 
-  _icpHandleFileInput(input) {
+  _icpFileSignature(file) {
+    if (!file) return "";
+    return [file.name || "", file.size || 0, file.lastModified || 0, file.type || ""].join("|");
+  }
+
+  async _icpHandleFileInput(input, eventType = "change") {
     const file = input && input.files && input.files.length ? input.files[0] : null;
     if (!file) {
+      if (eventType !== "change" || Date.now() - this._icpLastFileHandledAt < 1500) return;
       this._icp.message = "No file was received. On iPad, make sure the file has downloaded locally, then try Choose File again.";
       this._render();
       return;
     }
-    try { input.value = ""; } catch {}
-    this._icpHandleFile(file);
+    const signature = this._icpFileSignature(file);
+    const now = Date.now();
+    if (signature && signature === this._icpLastFileSignature && now - this._icpLastFileHandledAt < 1500) return;
+    this._icpLastFileSignature = signature;
+    this._icpLastFileHandledAt = now;
+    try {
+      await this._icpHandleFile(file);
+    } finally {
+      try { input.value = ""; } catch {}
+    }
   }
 
   async _icpHandleFile(file) {
