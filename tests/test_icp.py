@@ -88,6 +88,17 @@ def test_kh_meq_per_litre_to_dkh():
     assert icp.to_canonical("KH", 7.9, "dKH") == 7.9
 
 
+def test_mojibaked_micro_unit_normalises():
+    # Triton's CSV emits "Âµg/l" (UTF-8 µ decoded as Latin-1). It must read as µg/L.
+    raw = {"lab": "Triton", "sampleType": "tank", "sampleDate": "2026-06-06", "elements": [
+        {"symbol": "Al", "rawValue": 2.0, "rawUnit": "Âµg/l"},      # already ppb → 2.0
+        {"symbol": "Si", "rawValue": 0.2, "rawUnit": "Âmg/l"},      # mg/L → ppb ×1000 = 200
+    ]}
+    by = {e["symbol"]: e for e in icp.normalise_report(raw)["elements"]}
+    assert by["Al"]["value"] == 2.0 and by["Al"]["unit"] == "ppb"
+    assert by["Si"]["value"] == 200.0
+
+
 def test_species_not_coerced():
     # P vs PO4 and S vs SO4 are distinct registry entries, never merged.
     assert "P" in ICP_ELEMENTS and "PO4" in ICP_ELEMENTS

@@ -57,8 +57,11 @@ def _norm(value: Any) -> str:
 
 
 def _norm_unit(unit: Any) -> str:
-    """Normalise a unit string: lowercase, fold both micro signs to 'u', drop spaces."""
-    s = str(unit or "").strip().lower().replace("µ", "u").replace("μ", "u")
+    """Normalise a unit string: lowercase, strip the 'Â' mojibake some labs emit
+    before µ (UTF-8 µ decoded as Latin-1 → 'Âµ'), fold both micro signs to 'u',
+    drop spaces. So 'Âµg/l', 'µg/L' and 'ug/l' all become 'ug/l'."""
+    s = str(unit or "").strip().lower().replace("Â", "").replace("â", "")
+    s = s.replace("µ", "u").replace("μ", "u")
     return re.sub(r"\s+", "", s)
 
 

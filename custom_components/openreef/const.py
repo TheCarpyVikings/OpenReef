@@ -10,7 +10,7 @@ PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
 CORE_SCHEMA_VERSION = 43
-INTEGRATION_VERSION = "0.4.99"
+INTEGRATION_VERSION = "0.4.100"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -634,7 +634,7 @@ ICP_ELEMENTS = {
     "PO4": {"name": "Phosphate", "category": "nutrient", "unit": "ppm", "range": {"low": 0.02, "high": 0.10},
             "aliases": ["po4", "phosphate", "phosphat", "orthophosphate", "orthophosphat"],
             "species_note": "phosphate ion; PO4 = P × 3.066 — distinct from elemental P"},
-    "Sal": {"name": "Salinity", "category": "physical", "unit": "ppt", "range": {"low": 33.0, "high": 35.0},
+    "Sal": {"name": "Salinity", "category": "physical", "unit": "ppt", "range": {"low": 32.0, "high": 36.0},
             "aliases": ["sal", "salinity", "salinitaet", "salinitat", "salt", "psu"]},
     # --- other major / minor ions ------------------------------------------ #
     "Na": {"name": "Sodium", "category": "major", "unit": "ppm", "range": {"low": 10500, "high": 11500},

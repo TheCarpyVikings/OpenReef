@@ -6468,8 +6468,13 @@ class OpenReefPanel extends HTMLElement {
     return { low, high };
   }
 
+  // Strip the "Â" mojibake some labs (Triton CSV) emit before µ, for clean display.
+  _icpCleanUnit(unit) {
+    return String(unit || "").replace(/[Ââ]/g, "").trim();
+  }
+
   _icpMakeElement(label, valueCell, unitCell, rangeCell) {
-    const el = { label: String(label || "").trim(), rawValue: valueCell, rawUnit: String(unitCell || "").trim() };
+    const el = { label: String(label || "").trim(), rawValue: valueCell, rawUnit: this._icpCleanUnit(unitCell) };
     const range = this._icpParseRange(rangeCell);
     if (range) el.labRange = range;
     return el;
@@ -6531,6 +6536,48 @@ class OpenReefPanel extends HTMLElement {
       }
       if (valueCell == null) continue;
       elements.push(this._icpMakeElement(label, valueCell, unitCell, rangeCell));
+    }
+    return elements;
+  }
+
+  // Triton's CSV is header-mapped: columns Element,Name,Analysis,Setpoint,Unit,...
+  // The value is the "Analysis" column; "Setpoint" holds the range ("415 - 520") or
+  // a single target ("19500", "35 PSU"). We map by header name, not position, and
+  // fall back to the generic tabular parser if the header isn't recognised.
+  _icpParseTritonCsv(text) {
+    const rows = String(text || "").split(/\r\n|\r|\n/).filter((l) => l.trim()).map((l) => this._icpSplitLine(l, ","));
+    if (rows.length < 2) return this._icpParseTabular(rows);
+    const header = rows[0].map((h) => this._icpNorm(h));
+    const col = (names) => { for (const n of names) { const i = header.indexOf(n); if (i >= 0) return i; } return -1; };
+    const iSym = col(["element", "symbol"]);
+    const iName = col(["name"]);
+    const iVal = col(["analysis", "value", "result", "measured"]);
+    const iSet = col(["setpoint", "reference", "ideal", "target", "natural"]);
+    const iUnit = col(["unit"]);
+    if (iVal < 0 || (iSym < 0 && iName < 0)) return this._icpParseTabular(rows);  // not a Triton header
+    const elements = [];
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || !row.length) continue;
+      const rawSym = iSym >= 0 ? row[iSym] : "";
+      const rawName = iName >= 0 ? row[iName] : "";
+      const value = iVal >= 0 ? row[iVal] : "";
+      if (!(rawSym || rawName) || value == null || value === "") continue;
+      const matched = this._icpMatchSymbol(rawSym) || this._icpMatchSymbol(rawName);
+      const el = this._icpMakeElement(matched || rawSym || rawName, value, iUnit >= 0 ? row[iUnit] : "", "");
+      if (matched) el.symbol = matched;
+      if (rawName) el.name = rawName;
+      // Setpoint: a range → labRange, a single value (maybe with a unit suffix) → target.
+      const set = iSet >= 0 ? row[iSet] : "";
+      if (set) {
+        const range = this._icpParseRange(set);
+        if (range) el.labRange = range;
+        else {
+          const t = this._icpToFloat(String(set).replace(/[^\d.,-]/g, ""));
+          if (t != null) el.labTarget = String(t);
+        }
+      }
+      elements.push(el);
     }
     return elements;
   }
@@ -6634,7 +6681,11 @@ class OpenReefPanel extends HTMLElement {
   _icpDetectLab(text) {
     const t = String(text || "").toLowerCase();
     const has = (subs) => subs.some((s) => t.includes(s));
-    if (has(["triton-lab", "triton lab", "tritonlab", "triton.de", "triton applied"])) return { lab: "Triton", method: "ICP-OES", adapter: "triton_csv" };
+    // Triton's CSV export carries no "triton" string — key off its header + group names.
+    if (has(["triton-lab", "triton lab", "tritonlab", "triton.de", "triton applied",
+             "element,name,analysis", "macro-elements", "unwanted heavy metals", "li-group", "fe-group", "ba-group"])) {
+      return { lab: "Triton", method: "ICP-OES", adapter: "triton_csv" };
+    }
     if (has(["atiaquaristik", "ati-lab", "ati labor", "ati aquaristik", "ati icp"])) return { lab: "ATI", method: "ICP-OES", adapter: "ati_pdf" };
     if (has(["fauna marin", "faunamarin"])) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "generic" };
     if (has(["oceamo"])) return { lab: "Oceamo", method: "ICP-MS", adapter: "generic" };
@@ -6690,7 +6741,7 @@ class OpenReefPanel extends HTMLElement {
   // (CSV) vs line (PDF) and cross-checks the other.
   _icpParseWith(adapter, text, kind) {
     if (adapter === "ati_pdf") return this._icpParseAti(text);
-    if (adapter === "triton_csv") return this._icpParseTabular(this._icpSplitRows(text).rows);
+    if (adapter === "triton_csv") return this._icpParseTritonCsv(text);
     if (kind === "pdf") return this._icpParseLines(text);
     const tab = this._icpParseTabular(this._icpSplitRows(text).rows);
     if (this._icpCountRecognized(tab) >= 3) return tab;
