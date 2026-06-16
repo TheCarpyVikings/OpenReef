@@ -6699,6 +6699,187 @@ class OpenReefPanel extends HTMLElement {
     return elements;
   }
 
+  _icpFaunaMarinPdfSpecs() {
+    if (this.__icpFaunaMarinPdfSpecs) return this.__icpFaunaMarinPdfSpecs;
+    const specs = [];
+    const add = (label, symbol, unit, group, symbolRe = "") => {
+      specs.push({
+        label,
+        symbol,
+        unit,
+        group,
+        symbolRe: symbolRe ? new RegExp(`^${symbolRe}\\s+`, "i") : null,
+        key: this._icpNorm(label),
+      });
+    };
+
+    const base = "Physical-chemical basic values";
+    add("Electrical Conductivity", "Cond", "mS/cm", base);
+    add("Density", "Density", "kg/Liter", base);
+    add("Relative Density", "DensityRel", "", base);
+    add("Salinity", "Sal", "psu", base);
+    add("pH Value", "pH", "", base);
+    add("Carbonate Hardness", "KH", "dKH", base);
+    add("CO2 Content", "CO2", "mg/l", base);
+    add("Alkalinity pH 4.3", "Alk43", "mmol/L", base);
+
+    const major = "Macro elements, calcium balance elements, and halogens";
+    add("Bromine (total bromine, ICP-OES)", "Br", "mg/l", major, "Br");
+    add("Iodine (Total Iodine, ICP-OES)", "I", "mg/l", major, "I");
+    add("Sodium", "Na", "mg/l", major, "Na");
+    add("Sulfur", "S", "mg/l", major, "S");
+    add("Sulfate", "SO4", "mg/l", major, "SO\\s*2-\\s*4|SO42-|SO4");
+    add("Potassium", "K", "mg/l", major, "K");
+    add("Boron", "B", "mg/l", major, "B");
+    add("Magnesium", "Mg", "mg/l", major, "Mg");
+    add("Calcium", "Ca", "mg/l", major, "Ca");
+    add("Strontium", "Sr", "mg/l", major, "Sr");
+    add("Chloride", "Cl", "mg/l", major, "Cl-?|Cl");
+    add("Fluoride", "F", "mg/l", major, "F-?|F");
+
+    const nutrient = "Macro nutrients";
+    add("Total Phosphate (calculated)", "PO4tot", "mg/l", nutrient, "PO4\\s*3-\\s*tot\\.?|PO43-?tot\\.?|PO4");
+    add("ortho-Phosphate (photometric)", "PO4", "mg/l", nutrient, "PO4\\s*3-|PO4");
+    add("Nitrate", "NO3", "mg/l", nutrient, "NO\\s*-\\s*3|NO3");
+    add("Nitrite", "NO2", "mg/l", nutrient, "NO\\s*-\\s*2|NO2");
+    add("Phosphorus (ICP-OES)", "P", "mg/l", nutrient, "P");
+    add("Silicon", "Si", "mg/l", nutrient, "Si");
+    add("Silicate (calculated)", "SiO2", "mg/l", nutrient, "SiO2");
+
+    const organic = "Organic factors";
+    add("SAK254", "SAC254", "1/m", organic);
+    add("NPOC", "NPOC", "mg/l", organic, "C");
+    add("TNb", "TNb", "mg/l", organic, "N");
+
+    const trace = "Trace elements";
+    for (const symbol of ["Zn", "V", "Cu", "Ni", "Mo", "Ba", "Co", "Cr", "Fe", "Li", "Mn", "Se", "Rb", "Cs", "Ga", "Hf", "Nd", "Te", "Th", "Tl", "U"]) {
+      add(this._icpElementName(symbol), symbol, "µg/l", trace, symbol);
+    }
+
+    const pollutant = "Other trace elements and potential pollutants";
+    for (const symbol of ["Al", "Sb", "As", "Be", "Pb", "Cd", "La", "Hg", "Ag", "Ti", "W", "Sn", "Zr"]) {
+      add(this._icpElementName(symbol), symbol, "µg/l", pollutant, symbol);
+    }
+    // Fauna Marin spells aluminium in US English on the PDF.
+    add("Aluminum", "Al", "µg/l", pollutant, "Al");
+
+    // Longer labels first stops "Calcium" from stealing "Calcium : Salinity" if
+    // a relation section ever slips through the section filter.
+    this.__icpFaunaMarinPdfSpecs = specs.sort((a, b) => b.label.length - a.label.length);
+    return this.__icpFaunaMarinPdfSpecs;
+  }
+
+  _icpFaunaMarinCleanLine(line) {
+    return String(line || "")
+      .replace(/\u00ad/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  _icpFaunaMarinPdfRange(ref) {
+    const text = this._icpFaunaMarinCleanLine(ref);
+    if (!text) return { setpoint: "", range: null, target: "" };
+    const lower = text.toLowerCase();
+    if (lower === "n.d." || lower === "none" || lower === "colorless") {
+      return { setpoint: text, range: null, target: "" };
+    }
+    const nums = [...text.matchAll(/\d+(?:[.,]\d+)?/g)].map((m) => this._icpToFloat(m[0])).filter((n) => n != null);
+    if (!nums.length) return { setpoint: text, range: null, target: "" };
+    if (lower.includes("max")) {
+      const high = nums[nums.length - 1];
+      const low = lower.includes("n.d") ? 0 : (nums.length > 1 ? nums[0] : null);
+      return { setpoint: text, range: { low, high }, target: "" };
+    }
+    if (nums.length >= 3) return { setpoint: text, range: { low: nums[0], high: nums[nums.length - 1] }, target: String(nums[1]) };
+    if (nums.length === 2) return { setpoint: text, range: { low: nums[0], high: nums[1] }, target: "" };
+    return { setpoint: text, range: null, target: String(nums[0]) };
+  }
+
+  _icpFaunaMarinPdfValueAndReference(rest) {
+    const valueRe = /^(not measured|n\.d\.|n\.n\.|<\s*\d[\d.,]*|[-–—]+|\d[\d.,]*)(?=\s|$)\s*(.*)$/i;
+    const m = this._icpFaunaMarinCleanLine(rest).match(valueRe);
+    if (!m) return null;
+    const value = m[1].replace(/\s+/g, "");
+    let ref = this._icpFaunaMarinCleanLine(m[2] || "");
+    const refMatch = ref.match(/^(?:(?:n\.d\.|none|colorless)\s*(?:-\s*(?:max\.\s*)?\d[\d.,]*)?|(?:\d[\d.,]*|n\.d\.)\s*-\s*(?:max\.\s*)?\d[\d.,]*(?:\s*-\s*\d[\d.,]*)?)/i);
+    ref = refMatch ? this._icpFaunaMarinCleanLine(refMatch[0]) : "";
+    return { value, ref };
+  }
+
+  _icpParseFaunaMarinPdf(text) {
+    const rawLines = String(text || "").split(/\r\n|\r|\n/).map((line) => this._icpFaunaMarinCleanLine(line)).filter(Boolean);
+    const looksFauna = rawLines.some((line) => /Sampling Point:|Analysis ID:|Reef ICP Total|Fauna Marin/i.test(line))
+      && rawLines.some((line) => /PHYSICAL-CHEMICAL BASIC VALUES|MACROELEMENTS|OSMOSIS WATER/i.test(line));
+    if (!looksFauna) return null;
+
+    const wantRodi = (this._icp.sampleType || "tank") === "rodi";
+    const specs = this._icpFaunaMarinPdfSpecs();
+    const elements = [];
+    const seen = new Set();
+    let active = "";
+    let inOsmosis = false;
+
+    const sectionFor = (line) => {
+      const upper = line.toUpperCase();
+      if (upper.includes("OSMOSIS WATER")) return "osmosis";
+      if (upper.includes("PHYSICAL-CHEMICAL BASIC VALUES")) return "base";
+      if (upper.includes("MACROELEMENTS, CALCIUM BALANCE")) return "major";
+      if (upper.includes("RELATION VALUES OF MACROELEMENTS")) return "relations";
+      if (upper.includes("MACRO NUTRIENTS")) return "nutrient";
+      if (upper.includes("ORGANIC FACTORS")) return "organic";
+      if (upper.includes("DYNAMIC ELEMENTS")) return "trace";
+      if (upper.includes("PHYSIOLOGICALLY RELEVANT TRACE ELEMENTS")) return "trace";
+      if (upper.includes("OTHER TRACE ELEMENTS AND POTENTIAL POLLUTANTS")) return "pollutant";
+      if (upper.includes("OVERVIEW OF DOSAGES")) return "dosage";
+      return "";
+    };
+
+    for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex += 1) {
+      const line = rawLines[lineIndex];
+      const section = sectionFor(line);
+      if (section) {
+        if (section === "osmosis") {
+          inOsmosis = true;
+          active = "osmosis";
+        } else {
+          active = section;
+        }
+        continue;
+      }
+      if (wantRodi !== inOsmosis) continue;
+      if (["relations", "dosage"].includes(active)) continue;
+      if (/^(measured|Reference Range|rel\. 35 psu|only with|Upgrade options|To the dosing)/i.test(line)) continue;
+
+      for (const spec of specs) {
+        if (seen.has(`${inOsmosis ? "rodi" : "tank"}:${spec.symbol}`)) continue;
+        if (!this._icpNorm(line).startsWith(spec.key)) continue;
+        let rest = this._icpFaunaMarinCleanLine(line.slice(spec.label.length));
+        rest = rest.replace(/^\([^)]*\)\s*/, ""); // unit detail already captured in spec/unit.
+        if (spec.symbolRe) rest = rest.replace(spec.symbolRe, "");
+        let parsed = this._icpFaunaMarinPdfValueAndReference(rest);
+        if (!parsed && rawLines[lineIndex + 1]) {
+          parsed = this._icpFaunaMarinPdfValueAndReference(`${rest} ${rawLines[lineIndex + 1]}`);
+        }
+        if (!parsed) continue;
+        const range = this._icpFaunaMarinPdfRange(parsed.ref);
+        const el = this._icpMakeElement(spec.label, parsed.value, spec.unit, "");
+        el.symbol = spec.symbol;
+        el.name = spec.label;
+        el.labGroup = inOsmosis ? "Osmosis water" : spec.group;
+        el.labName = spec.label;
+        el.labResult = parsed.value;
+        el.labUnit = spec.unit.replace("mg/l", "mg/Liter").replace("µg/l", "µg/Liter");
+        if (range.setpoint) el.labSetpoint = range.setpoint;
+        if (range.range) el.labRange = range.range;
+        if (range.target) el.labTarget = range.target;
+        elements.push(el);
+        seen.add(`${inOsmosis ? "rodi" : "tank"}:${spec.symbol}`);
+        break;
+      }
+    }
+    return elements;
+  }
+
   // PDF-extracted text: keep only lines that begin with a recognised element name
   // followed by a number (so addresses/headers/totals are dropped automatically).
   _icpParseLines(text) {
@@ -6793,8 +6974,8 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // The labs a user can explicitly select. "adapter" picks the parser/template:
-  // ati_pdf = ATI's multi-line layout, triton_csv/fauna_marin_csv = tuned CSV
-  // adapters, generic = tabular/line fallback until a lab gets its own template.
+  // ati_pdf = ATI's multi-line layout, triton_csv/fauna_marin_csv = tuned CSV,
+  // fauna_marin_pdf = Fauna Marin's Reef ICP Total PDF, generic = fallback.
   _icpLabs() {
     return [
       { id: "auto", label: "Auto-detect", method: "", adapter: "auto" },
@@ -6820,13 +7001,16 @@ class OpenReefPanel extends HTMLElement {
     const t = String(text || "").toLowerCase();
     const has = (subs) => subs.some((s) => t.includes(s));
     if (this._icpFaunaMarinCsv(text)) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_csv" };
+    if (has(["reef icp total", "sampling point:", "analysis id:", "physical-chemical basic values", "osmosis water"]) && has(["macro nutrients", "fauna marin", "sample arrival"])) {
+      return { lab: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_pdf" };
+    }
     // Triton's CSV export carries no "triton" string — key off its header + group names.
     if (has(["triton-lab", "triton lab", "tritonlab", "triton.de", "triton applied",
              "element,name,analysis", "macro-elements", "unwanted heavy metals", "li-group", "fe-group", "ba-group"])) {
       return { lab: "Triton", method: "ICP-OES", adapter: "triton_csv" };
     }
     if (has(["atiaquaristik", "ati-lab", "ati labor", "ati aquaristik", "ati icp"])) return { lab: "ATI", method: "ICP-OES", adapter: "ati_pdf" };
-    if (has(["fauna marin", "faunamarin"])) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_csv" };
+    if (has(["fauna marin", "faunamarin"])) return { lab: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_pdf" };
     if (has(["oceamo"])) return { lab: "Oceamo", method: "ICP-MS", adapter: "generic" };
     if (has(["aquaforest"])) return { lab: "Aquaforest", method: "ICP-OES", adapter: "generic" };
     if (has(["reefzlements", "zlements"])) return { lab: "ReefZlements", method: "ICP-OES", adapter: "generic" };
@@ -6843,27 +7027,30 @@ class OpenReefPanel extends HTMLElement {
     const t = String(text || "");
     let m = t.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
     if (m) return this._icpIso(+m[1], +m[2], +m[3]);
-    m = t.match(/\b(\d{1,2})[.\/](\d{1,2})[.\/](20\d{2})\b/);
+    m = t.match(/\b(\d{1,2})([.\/-])(\d{1,2})\2(20\d{2})\b/);
     if (m) {
       const a = +m[1];
-      const b = +m[2];
+      const sep = m[2];
+      const b = +m[3];
       // disambiguate DD/MM vs MM/DD; a dotted date is European (DD.MM), a slashed
-      // one is treated as US (MM/DD) unless a value >12 forces the order.
-      const dotted = /\./.test(m[0]);
+      // or hyphen date is treated as US (MM/DD) unless a value >12 forces the order.
+      const dotted = sep === ".";
       let mo;
       let d;
       if (a > 12) { d = a; mo = b; }
       else if (b > 12) { mo = a; d = b; }
       else if (dotted) { d = a; mo = b; }
       else { mo = a; d = b; }
-      return this._icpIso(+m[3], mo, d);
+      return this._icpIso(+m[4], mo, d);
     }
     return null;
   }
 
   _icpGuessTestId(text) {
     const t = String(text || "");
-    let m = t.match(/\bID:\s*([A-Za-z0-9]{4,})/i);                                   // ATI "(ID: 374648)"
+    let m = t.match(/\bAnalysis ID:\s*([A-Za-z0-9-]{3,})/i);
+    if (m) return m[1].slice(0, 40);
+    m = t.match(/\bID:\s*([A-Za-z0-9]{4,})/i);                                       // ATI "(ID: 374648)"
     if (m) return m[1].slice(0, 40);
     m = t.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})\b/);             // barcode
     if (m) return m[1];
@@ -6872,7 +7059,9 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _icpGuessTank(text) {
-    const m = String(text || "").match(/\bTank\b\s+(.+?)\s+(?:Net size|Net volume|Reason|Barcode)\b/is);
+    let m = String(text || "").match(/\bSampling Point:\s*(.+?)(?:\s{2,}|\n|\r|$)/i);
+    if (m) return m[1].replace(/\s+/g, " ").trim().slice(0, 40);
+    m = String(text || "").match(/\bTank\b\s+(.+?)\s+(?:Net size|Net volume|Reason|Barcode)\b/is);
     return m ? m[1].replace(/\s+/g, " ").trim().slice(0, 40) : "";
   }
 
@@ -6882,6 +7071,7 @@ class OpenReefPanel extends HTMLElement {
     if (adapter === "ati_pdf") return this._icpParseAti(text);
     if (adapter === "triton_csv") return this._icpParseTritonCsv(text);
     if (adapter === "fauna_marin_csv") return this._icpParseFaunaMarinCsv(text);
+    if (adapter === "fauna_marin_pdf") return this._icpParseFaunaMarinPdf(text) || this._icpParseLines(text);
     if (kind === "pdf") return this._icpParseLines(text);
     const tab = this._icpParseTabular(this._icpSplitRows(text).rows);
     if (this._icpCountRecognized(tab) >= 3) return tab;
@@ -6892,13 +7082,17 @@ class OpenReefPanel extends HTMLElement {
   _icpParseFromText(text, fileName, kind) {
     // A user-selected lab forces that template; otherwise auto-detect from content.
     const forced = this._icpForcedLab();
-    const detected = forced || this._icpDetectLab(text) || this._icpDetectLab(fileName) || { lab: "Unknown", method: "", adapter: "generic" };
+    const autoDetected = this._icpDetectLab(text) || this._icpDetectLab(fileName);
+    const detected = forced || autoDetected || { lab: "Unknown", method: "", adapter: "generic" };
+    if (forced && forced.lab === "Fauna Marin" && autoDetected && autoDetected.adapter === "fauna_marin_pdf") {
+      detected.adapter = "fauna_marin_pdf";
+    }
     let elements = this._icpParseWith(detected.adapter, text, kind);
     // If the chosen template found little (wrong selection, or a lab whose layout we
     // don't have a template for yet), try every parser and keep the best — so import
     // never hard-fails. The report keeps the lab the user selected / we detected.
     if (this._icpCountRecognized(elements) < 3) {
-      for (const alt of [this._icpParseFaunaMarinCsv(text), this._icpParseAti(text), this._icpParseLines(text), this._icpParseTabular(this._icpSplitRows(text).rows)]) {
+      for (const alt of [this._icpParseFaunaMarinPdf(text), this._icpParseFaunaMarinCsv(text), this._icpParseAti(text), this._icpParseLines(text), this._icpParseTabular(this._icpSplitRows(text).rows)]) {
         if (this._icpCountRecognized(alt) > this._icpCountRecognized(elements)) elements = alt;
       }
     }
