@@ -6603,6 +6603,75 @@ class OpenReefPanel extends HTMLElement {
     return elements;
   }
 
+  _icpTritonPdfGroups() {
+    return {
+      "unwanted heavy metals": "Unwanted heavy metals",
+      "macro-elements": "Macro-Elements",
+      "li-group": "Li-Group",
+      "i-group": "I-Group",
+      "fe-group": "Fe-Group",
+      "ba-group": "Ba-Group",
+      "si-group": "Si-Group",
+      "nutrient-group": "Nutrient-Group",
+      "salinity": "Salinity",
+    };
+  }
+
+  _icpParseTritonPdf(text) {
+    const rawLines = String(text || "")
+      .split(/\r\n|\r|\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const groupLabels = this._icpTritonPdfGroups();
+    const looksTriton = rawLines.some((line) => /TRITON Lab ICP-OES test results/i.test(line))
+      && rawLines.some((line) => groupLabels[line.toLowerCase()]);
+    if (!looksTriton) return null;
+
+    const valueRe = /^\(([^)]+)\)\s+(.+?)\s+(<\s*\d[\d.,]*|-?\d[\d.,]*)\s*(µg\/l|μg\/l|ug\/l|mg\/l|psu|ppt|ppm|ppb)\s+(.+?)(?:\s+(lamp))?$/i;
+    const elements = [];
+    const seen = new Set();
+    let group = "";
+    for (const line of rawLines) {
+      const lower = line.toLowerCase();
+      if (groupLabels[lower]) {
+        group = groupLabels[lower];
+        continue;
+      }
+      if (!group || /^(analysis|www\.triton-lab\.de|your triton lab|waterbox\b|\d+\/\d+)/i.test(line)) continue;
+      const m = line.match(valueRe);
+      if (!m) continue;
+      const rawSym = m[1].trim();
+      const labName = m[2].trim();
+      const value = m[3].replace(/\s+/g, "");
+      const unit = this._icpCleanUnit(m[4]);
+      const labSetpoint = String(m[5] || "").replace(/\s+/g, " ").trim();
+      const warning = (m[6] || "").trim();
+      const symbol = this._icpMatchSymbol(rawSym) || this._icpMatchSymbol(labName) || rawSym;
+      const seenKey = `${group}:${symbol}`;
+      if (seen.has(seenKey)) continue;
+      const el = this._icpMakeElement(symbol || labName, value, unit, "");
+      if (symbol) el.symbol = symbol;
+      if (labName) el.name = labName;
+      el.labGroup = group;
+      el.labName = labName || symbol;
+      el.labResult = value;
+      if (unit) el.labUnit = unit;
+      if (labSetpoint) {
+        el.labSetpoint = labSetpoint;
+        const range = this._icpParseRange(labSetpoint);
+        if (range) el.labRange = range;
+        else {
+          const target = this._icpToFloat(String(labSetpoint).replace(/[^\d.,-]/g, ""));
+          if (target != null) el.labTarget = String(target);
+        }
+      }
+      if (warning) el.labAssessment = warning;
+      elements.push(el);
+      seen.add(seenKey);
+    }
+    return elements;
+  }
+
   _icpFaunaMarinCsv(text) {
     const split = this._icpSplitRows(text);
     const rows = split.rows;
@@ -7004,6 +7073,10 @@ class OpenReefPanel extends HTMLElement {
     if (has(["reef icp total", "sampling point:", "analysis id:", "physical-chemical basic values", "osmosis water"]) && has(["macro nutrients", "fauna marin", "sample arrival"])) {
       return { lab: "Fauna Marin", method: "ICP-OES", adapter: "fauna_marin_pdf" };
     }
+    const tritonPdfRows = /\([a-z0-9]{1,4}\)\s+[a-z][a-z ]+\s+-?\d[\d.,]*\s*(?:µg\/l|μg\/l|ug\/l|mg\/l|psu)/i.test(String(text || ""));
+    if (has(["your triton lab icp-oes test results", "www.triton-lab.de"]) || (has(["triton-lab"]) && has(["warning"]) && tritonPdfRows)) {
+      return { lab: "Triton", method: "ICP-OES", adapter: "triton_pdf" };
+    }
     // Triton's CSV export carries no "triton" string — key off its header + group names.
     if (has(["triton-lab", "triton lab", "tritonlab", "triton.de", "triton applied",
              "element,name,analysis", "macro-elements", "unwanted heavy metals", "li-group", "fe-group", "ba-group"])) {
@@ -7027,6 +7100,14 @@ class OpenReefPanel extends HTMLElement {
     const t = String(text || "");
     let m = t.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
     if (m) return this._icpIso(+m[1], +m[2], +m[3]);
+    m = t.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s*(20\d{2})\b/i);
+    if (m) {
+      const months = {
+        january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+        july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+      };
+      return this._icpIso(+m[3], months[m[1].toLowerCase()], +m[2]);
+    }
     m = t.match(/\b(\d{1,2})([.\/-])(\d{1,2})\2(20\d{2})\b/);
     if (m) {
       const a = +m[1];
@@ -7059,6 +7140,9 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _icpGuessTank(text) {
+    const lines = String(text || "").split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean);
+    const tritonIndex = lines.findIndex((line) => /TRITON Lab ICP-OES test results for:/i.test(line));
+    if (tritonIndex >= 0 && lines[tritonIndex + 1]) return lines[tritonIndex + 1].replace(/\s+/g, " ").trim().slice(0, 40);
     let m = String(text || "").match(/\bSampling Point:\s*(.+?)(?:\s{2,}|\n|\r|$)/i);
     if (m) return m[1].replace(/\s+/g, " ").trim().slice(0, 40);
     m = String(text || "").match(/\bTank\b\s+(.+?)\s+(?:Net size|Net volume|Reason|Barcode)\b/is);
@@ -7070,6 +7154,7 @@ class OpenReefPanel extends HTMLElement {
   _icpParseWith(adapter, text, kind) {
     if (adapter === "ati_pdf") return this._icpParseAti(text);
     if (adapter === "triton_csv") return this._icpParseTritonCsv(text);
+    if (adapter === "triton_pdf") return this._icpParseTritonPdf(text) || this._icpParseLines(text);
     if (adapter === "fauna_marin_csv") return this._icpParseFaunaMarinCsv(text);
     if (adapter === "fauna_marin_pdf") return this._icpParseFaunaMarinPdf(text) || this._icpParseLines(text);
     if (kind === "pdf") return this._icpParseLines(text);
@@ -7084,6 +7169,9 @@ class OpenReefPanel extends HTMLElement {
     const forced = this._icpForcedLab();
     const autoDetected = this._icpDetectLab(text) || this._icpDetectLab(fileName);
     const detected = forced || autoDetected || { lab: "Unknown", method: "", adapter: "generic" };
+    if (forced && forced.lab === "Triton" && autoDetected && autoDetected.adapter === "triton_pdf") {
+      detected.adapter = "triton_pdf";
+    }
     if (forced && forced.lab === "Fauna Marin" && autoDetected && autoDetected.adapter === "fauna_marin_pdf") {
       detected.adapter = "fauna_marin_pdf";
     }
@@ -7092,7 +7180,7 @@ class OpenReefPanel extends HTMLElement {
     // don't have a template for yet), try every parser and keep the best — so import
     // never hard-fails. The report keeps the lab the user selected / we detected.
     if (this._icpCountRecognized(elements) < 3) {
-      for (const alt of [this._icpParseFaunaMarinPdf(text), this._icpParseFaunaMarinCsv(text), this._icpParseAti(text), this._icpParseLines(text), this._icpParseTabular(this._icpSplitRows(text).rows)]) {
+      for (const alt of [this._icpParseTritonPdf(text), this._icpParseFaunaMarinPdf(text), this._icpParseFaunaMarinCsv(text), this._icpParseAti(text), this._icpParseLines(text), this._icpParseTabular(this._icpSplitRows(text).rows)]) {
         if (this._icpCountRecognized(alt) > this._icpCountRecognized(elements)) elements = alt;
       }
     }
