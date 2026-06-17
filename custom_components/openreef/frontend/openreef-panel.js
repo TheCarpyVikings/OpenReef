@@ -1388,7 +1388,6 @@ class OpenReefPanel extends HTMLElement {
         if (this._trend?.source === "manual") this._loadManualTrend(id, this._trend?.range || "all");
         else this._loadTrend(id, this._trend?.range || "24h");
       }
-      if (action === "awc-setup-toggle") { this._awcSetupOpen = !this._awcSetupOpen; this._render(); }
       if (action === "awc-run") this._awcRunNow();
       if (action === "awc-abort") this._awcAction("openreef/awc_abort");
       if (action === "awc-resume") this._awcAction("openreef/awc_resume");
@@ -8186,7 +8185,7 @@ class OpenReefPanel extends HTMLElement {
           <p>Calibrated, volume-accurate water changes with layered safety — knows litres changed and litres remaining, unlike sensor-only systems.</p>
         </div>
         <div class="button-row">
-          <button class="secondary" data-action="awc-setup-toggle">${this._awcSetupOpen ? "Hide setup" : "Setup & calibration"}</button>
+          <button class="secondary" data-action="tab" data-id="settings" data-section="awc" data-scroll="or-section-awc">Setup &amp; calibration</button>
         </div>
       </div>`;
 
@@ -8218,7 +8217,6 @@ class OpenReefPanel extends HTMLElement {
         ${reservoirs}
         ${this._awcMetrics(sum)}
         ${this._awcHistory(awc)}
-        ${this._awcSetupOpen ? this._awcSetup(awc) : ""}
       </section>`;
   }
 
@@ -8322,7 +8320,16 @@ class OpenReefPanel extends HTMLElement {
       </section>`;
   }
 
-  _awcSetup(awc) {
+  _awcSettings() {
+    return this._settingsPanel(
+      "awc",
+      "Automatic Water Change",
+      "Pumps & calibration, reservoirs, safety sensors, ATO coordination, and schedule.",
+      this._awcSetupBody(this._config?.automaticWaterChange || {}),
+    );
+  }
+
+  _awcSetupBody(awc) {
     const pumps = awc.pumps || {};
     const res = awc.reservoirs || {};
     const safety = awc.safety || {};
@@ -8353,11 +8360,6 @@ class OpenReefPanel extends HTMLElement {
     };
 
     return `
-      <section class="setting-card" id="or-section-awc">
-        <div class="section-head"><div><p class="eyebrow">Setup</p><h3>Configuration &amp; calibration</h3></div>
-          <div class="button-row"><button class="primary" data-action="save">Save</button></div>
-        </div>
-
         <label class="toggle-card">
           <input type="checkbox" data-scope="awc" data-field="enabled" ${awc.enabled ? "checked" : ""}>
           <span><strong>Enable automatic water change</strong><small>Master switch for scheduling &amp; safety orchestration.</small></span>
@@ -8446,8 +8448,7 @@ class OpenReefPanel extends HTMLElement {
             </div>
             <div class="chip-row" style="display:flex;gap:8px;flex-wrap:wrap;">${dayBtns}</div>
             <small>Leave all days unticked to run every day.</small>`}
-        </div>
-      </section>`;
+        </div>`;
   }
 
   // --- Live cameras ------------------------------------------------------
@@ -12387,6 +12388,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._manualTestSettings()}
         ${this._maintenanceSettings()}
         ${this._dosingSettings()}
+        ${this._awcSettings()}
         ${this._equipmentSettings()}
         ${this._cameraSettings()}
         ${this._captureSettings()}
