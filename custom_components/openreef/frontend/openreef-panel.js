@@ -2528,7 +2528,9 @@ class OpenReefPanel extends HTMLElement {
     const parts = [];
     if (timer.startDelaySeconds > 0) parts.push(`starts after ${this._fmtDuration(timer.startDelaySeconds)}`);
     if (timer.timerMode === "cycle") {
-      parts.push(`cycle ${this._fmtDuration(timer.onSeconds)} on / ${this._fmtDuration(timer.offSeconds)} off`);
+      const first = action === "off" ? "off" : "on";
+      const second = action === "off" ? "on" : "off";
+      parts.push(`cycle ${this._fmtDuration(timer.onSeconds)} ${first} / ${this._fmtDuration(timer.offSeconds)} ${second}`);
     } else {
       parts.push(`${action || "on"} for ${this._fmtDuration(timer.holdSeconds)} then revert`);
     }
@@ -13372,9 +13374,11 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
-  // Per-equipment timer controls (Mode Actions V2). Only shown when the device's mode
-  // action is on/off. Renders a start delay, a once/cycle toggle, and the relevant
-  // duration inputs (minutes + seconds). Cycle is offered only when the action is "on".
+  // Per-equipment timer controls (Mode Actions V2). Shown when the device's mode action
+  // is on/off. Renders a start delay, a "Hold then revert" / "Repeat cycle" toggle, and
+  // the relevant duration inputs (minutes + seconds). Cycle works from either action:
+  // the first phase holds the chosen action state, the second flips to the opposite, and
+  // it repeats until the mode ends.
   _modeEquipmentTimerEditor(modeId, equipmentId, item, selected) {
     const timer = this._modeEquipmentTimer(modeId, equipmentId);
     const protectedWavemaker = Boolean(item.displayWavemaker && !item.allowAutoRestart);
@@ -13388,32 +13392,33 @@ class OpenReefPanel extends HTMLElement {
           <input type="number" min="0" max="59" step="1" value="${sec}" data-scope="mode-equip-timer" data-mode="${m}" data-equipment="${e}" data-field="${base}Sec"> s
         </span>`;
     };
-    const cycleAllowed = selected === "on";
-    const showCycle = cycleAllowed && timer.timerMode === "cycle";
+    const showCycle = timer.timerMode === "cycle";
+    // Cycle phase labels follow the device's action: the first phase holds the action
+    // state (onSeconds), the second flips to the opposite (offSeconds).
+    const actionLabel = selected === "on" ? "On" : "Off";
+    const oppositeLabel = selected === "on" ? "Off" : "On";
     return `
       <div class="mode-equip-timer ${timer.enabled ? "on" : ""}">
         <label class="toggle-card compact">
           <input type="checkbox" data-scope="mode-equip-timer" data-mode="${m}" data-equipment="${e}" data-field="enabled" ${timer.enabled ? "checked" : ""}>
           <span>
             <strong>Per-device timer</strong>
-            <small>Stagger when it fires, hold then revert, or cycle on/off.</small>
+            <small>Stagger when it fires, hold then revert, or repeat on/off through the mode.</small>
           </span>
         </label>
         ${timer.enabled ? `
           <div class="mode-equip-timer-grid">
+            <div class="seg">
+              <button type="button" class="${timer.timerMode === "once" ? "active" : ""}" data-action="mode-equip-timer-mode" data-mode="${m}" data-equipment="${e}" data-value="once">Hold then revert</button>
+              <button type="button" class="${timer.timerMode === "cycle" ? "active" : ""}" data-action="mode-equip-timer-mode" data-mode="${m}" data-equipment="${e}" data-value="cycle">Repeat cycle</button>
+            </div>
             <label class="dur-field">Start delay ${durInputs("startDelay", timer.startDelaySeconds)}
               <small>Wait this long after the mode starts before acting (0 = immediately).</small>
             </label>
-            ${cycleAllowed ? `
-              <div class="seg">
-                <button type="button" class="${timer.timerMode === "once" ? "active" : ""}" data-action="mode-equip-timer-mode" data-mode="${m}" data-equipment="${e}" data-value="once">Hold then revert</button>
-                <button type="button" class="${timer.timerMode === "cycle" ? "active" : ""}" data-action="mode-equip-timer-mode" data-mode="${m}" data-equipment="${e}" data-value="cycle">Repeat cycle</button>
-              </div>
-            ` : ""}
             ${showCycle ? `
-              <label class="dur-field">On for ${durInputs("on", timer.onSeconds)}</label>
-              <label class="dur-field">Off for ${durInputs("off", timer.offSeconds)}
-                <small>Repeats until the mode ends (min 10s per phase), then reverts to the pre-mode state.</small>
+              <label class="dur-field">${this._escape(actionLabel)} for ${durInputs("on", timer.onSeconds)}</label>
+              <label class="dur-field">${this._escape(oppositeLabel)} for ${durInputs("off", timer.offSeconds)}
+                <small>Repeats ${this._escape(actionLabel.toLowerCase())} → ${this._escape(oppositeLabel.toLowerCase())} until the mode ends (min 10s per phase), then reverts to the pre-mode state.</small>
               </label>
               ${protectedWavemaker ? `<small class="warn">This display wavemaker blocks automatic restart, so the on phase may be skipped for livestock safety.</small>` : ""}
             ` : `

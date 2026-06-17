@@ -175,6 +175,33 @@ def test_cycle_toggles_and_rearms():
     assert _mode(entry)["equipmentTimers"]["wave"]["phase"] == "on"
 
 
+def test_cycle_from_off_action():
+    # Cycle must work when the device's action is "off" too (e.g. a feed mode that
+    # mostly keeps a pump off but pulses it on). Phase 1 = off, phase 2 = on.
+    cfg = _cfg(
+        {"wave": _equip("flow_pump", "switch.wave")},
+        {"feed": {"wave": "off"}},
+        {"feed": {"wave": {"enabled": True, "timerMode": "cycle", "onSeconds": 30, "offSeconds": 30}}},
+    )
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(states={"switch.wave": "on"}, entries=[entry])
+    sched = install_scheduler(integration)
+
+    run(integration._async_apply_mode(hass, entry, "feed", None))
+    assert _has_call(hass.services.calls, "turn_off", "switch.wave")
+    assert _mode(entry)["equipmentTimers"]["wave"]["phase"] == "off"
+
+    n = len(hass.services.calls)
+    run(sched.fire_all())  # off -> on
+    assert _has_call(hass.services.calls[n:], "turn_on", "switch.wave")
+    assert _mode(entry)["equipmentTimers"]["wave"]["phase"] == "on"
+
+    n2 = len(hass.services.calls)
+    run(sched.fire_all())  # on -> off
+    assert _has_call(hass.services.calls[n2:], "turn_off", "switch.wave")
+    assert _mode(entry)["equipmentTimers"]["wave"]["phase"] == "off"
+
+
 # --- Start-delay staggering -------------------------------------------------
 
 def test_start_delay_defers_action():
