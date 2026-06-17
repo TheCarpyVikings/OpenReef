@@ -311,6 +311,8 @@ def _cfg_ready():
                   "fill": {"switchEntity": "switch.fill", "mlPerS": 100}},
         "guards": {"blockDuringFeed": True, "blockOnReturnPumpIssue": True,
                    "quietHoursEnabled": True, "quietStart": "01:00", "quietEnd": "05:00"},
+        "reservoirs": {"fresh": {"capacityLitres": 25, "remainingMl": 25000},
+                       "waste": {"capacityLitres": 25, "filledMl": 0}},
         "safety": {"maxSingleChangePercent": 25},
         "state": {"fault": ""},
     }
@@ -347,6 +349,26 @@ def test_start_guards_uncalibrated_and_latched():
     cfg["state"]["fault"] = "Leak detected"
     codes = {r["code"] for r in awc.start_guard_reasons(cfg, {}, awc.parse_hhmm("02:00"), manual=True)}
     assert "no_calibration" in codes and "latched" in codes
+
+
+def test_start_guards_block_paused_change():
+    cfg = _cfg_ready()
+    cfg["state"]["status"] = "paused"
+    codes = {r["code"] for r in awc.start_guard_reasons(cfg, {}, awc.parse_hhmm("02:00"), manual=True)}
+    assert "paused" in codes
+
+
+def test_reservoir_preflight_blocks_insufficient_capacity():
+    cfg = _cfg_ready()
+    cfg["reservoirs"]["fresh"]["remainingMl"] = 1000
+    cfg["reservoirs"]["waste"]["filledMl"] = 24500
+    codes = {r["code"] for r in awc.reservoir_preflight_reasons(cfg, 2.0)}
+    assert "fresh_insufficient" in codes
+    assert "waste_insufficient" in codes
+
+
+def test_reservoir_preflight_allows_known_capacity():
+    assert awc.reservoir_preflight_reasons(_cfg_ready(), 2.0) == []
 
 
 def test_in_run_safety_leak_and_overfill_latch():

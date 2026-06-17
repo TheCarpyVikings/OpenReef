@@ -183,9 +183,8 @@ EQUIPMENT_MAX_OFF_MAX_SECONDS = 86400     # ceiling on the per-equipment max-off
 
 # Automatic Water Change (AWC). Volume-primary (calibrated pump-math) with physical
 # float/cutoff sensors as arbiters. Two pumps (drain + fill), single tank, premixed
-# saltwater (pure swap). All three change methods; fully-flexible scheduling; two-tier
-# trip policy (benign limits pause+resume, real faults latch + manual re-arm). The
-# maths live in awc.py; these are the *config* clamps applied during normalisation.
+# saltwater (pure swap). v1 live control is sequential-only; simultaneous/continuous
+# maths remain in awc.py for projections and future per-pump-timer work.
 AWC_METHODS = ("continuous", "batch_simultaneous", "batch_sequential")
 AWC_AMOUNT_UNITS = ("litres", "percent")
 AWC_PERIODS = ("day", "week")
@@ -1186,10 +1185,10 @@ DEFAULT_CORE_CONFIG = {
             "blockDuringFeed": True,
             "blockOnReturnPumpIssue": True,
         },
-        # Fully-flexible schedule: litres OR %, per day OR week, any method.
+        # Schedule: litres OR %, per day OR week. v1 live control is sequential-only.
         "schedule": {
             "enabled": False,
-            "method": "batch_simultaneous",
+            "method": "batch_sequential",
             "amountUnit": "percent",
             "amount": 0,
             "period": "week",

@@ -8086,7 +8086,7 @@ class OpenReefPanel extends HTMLElement {
     const methodEl = this.shadowRoot.querySelector("[data-awc-run-method]");
     const unitEl = this.shadowRoot.querySelector("[data-awc-run-unit]");
     const amount = Number(litresEl && litresEl.value) || 0;
-    const payload = { type: "openreef/awc_run_now", method: (methodEl && methodEl.value) || undefined };
+    const payload = { type: "openreef/awc_run_now", method: (methodEl && methodEl.value) || "batch_sequential" };
     if (unitEl && unitEl.value === "percent") payload.percent = amount;
     else payload.litres = amount;
     this._busy = true;
@@ -8271,13 +8271,7 @@ class OpenReefPanel extends HTMLElement {
               <option value="percent">% of tank</option>
             </select>
           </label>
-          <label>Method
-            <select data-awc-run-method ${running ? "disabled" : ""}>
-              <option value="batch_simultaneous">Batch — simultaneous</option>
-              <option value="batch_sequential">Batch — drain then fill</option>
-              <option value="continuous">Continuous (one-shot)</option>
-            </select>
-          </label>
+          <input type="hidden" data-awc-run-method value="batch_sequential">
         </div>
         <div class="button-row">
           <button class="primary" data-action="awc-run" ${running || this._busy ? "disabled" : ""}>Change now</button>
@@ -8367,7 +8361,6 @@ class OpenReefPanel extends HTMLElement {
 
         <div class="mini-grid">
           <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="awc" data-field="tankVolumeLitres" value="${awc.tankVolumeLitres || 0}"></label>
-          <label>Continuous tick (s)<input type="number" min="10" max="3600" step="5" data-scope="awc" data-field="continuousTickSeconds" value="${awc.continuousTickSeconds || 60}"></label>
         </div>
 
         <div class="section-head"><div><p class="eyebrow">Pumps (ESP32 peristaltic)</p></div></div>
@@ -8397,7 +8390,6 @@ class OpenReefPanel extends HTMLElement {
             <label>Drift warn (%)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="driftWarnPercent" value="${safety.driftWarnPercent ?? 10}"></label>
             <label>Net-imbalance warn (L)<input type="number" min="0" step="0.1" data-scope="awc-safety" data-field="netImbalanceWarnLitres" value="${safety.netImbalanceWarnLitres ?? 2}"></label>
           </div>
-          <label class="chip"><input type="checkbox" data-scope="awc-safety" data-field="autoTrimImbalance" ${safety.autoTrimImbalance ? "checked" : ""}> Auto-trim net imbalance</label>
         </div>
 
         <div class="section-head"><div><p class="eyebrow">ATO coordination &amp; run guards</p></div></div>
@@ -8416,14 +8408,8 @@ class OpenReefPanel extends HTMLElement {
         <div class="section-head"><div><p class="eyebrow">Schedule</p></div></div>
         <div class="setting-card subtle-card">
           <label class="chip"><input type="checkbox" data-scope="awc-schedule" data-field="enabled" ${sched.enabled ? "checked" : ""}> Enable scheduled changes</label>
+          <input type="hidden" data-scope="awc-schedule" data-field="method" value="batch_sequential">
           <div class="mini-grid">
-            <label>Method
-              <select data-scope="awc-schedule" data-field="method">
-                <option value="batch_simultaneous" ${sched.method === "batch_simultaneous" ? "selected" : ""}>Batch — simultaneous</option>
-                <option value="batch_sequential" ${sched.method === "batch_sequential" ? "selected" : ""}>Batch — drain then fill</option>
-                <option value="continuous" ${sched.method === "continuous" ? "selected" : ""}>Continuous trickle</option>
-              </select>
-            </label>
             <label>Amount<input type="number" min="0" step="0.1" data-scope="awc-schedule" data-field="amount" value="${sched.amount || 0}"></label>
             <label>Unit
               <select data-scope="awc-schedule" data-field="amountUnit">
@@ -8438,16 +8424,11 @@ class OpenReefPanel extends HTMLElement {
               </select>
             </label>
           </div>
-          ${sched.method === "continuous" ? `
-            <div class="mini-grid">
-              <label>Window start<input type="time" data-scope="awc-schedule" data-field="windowStart" value="${sched.windowStart || "01:00"}"></label>
-              <label>Window end<input type="time" data-scope="awc-schedule" data-field="windowEnd" value="${sched.windowEnd || "05:00"}"></label>
-            </div>` : `
-            <div class="mini-grid">
-              <label>Run at<input type="time" data-scope="awc-schedule" data-field="startTime" value="${(Array.isArray(sched.times) && sched.times[0]) || "02:00"}"></label>
-            </div>
-            <div class="chip-row" style="display:flex;gap:8px;flex-wrap:wrap;">${dayBtns}</div>
-            <small>Leave all days unticked to run every day.</small>`}
+          <div class="mini-grid">
+            <label>Run at<input type="time" data-scope="awc-schedule" data-field="startTime" value="${(Array.isArray(sched.times) && sched.times[0]) || "02:00"}"></label>
+          </div>
+          <div class="chip-row" style="display:flex;gap:8px;flex-wrap:wrap;">${dayBtns}</div>
+          <small>Leave all days unticked to run every day.</small>
         </div>`;
   }
 

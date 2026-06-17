@@ -512,6 +512,9 @@ def start_guard_reasons(
     if state.get("fault"):
         out.append({"code": "latched", "severity": "block",
                     "message": f"A latched fault must be cleared first: {state.get('fault')}"})
+    if state.get("status") == "paused":
+        out.append({"code": "paused", "severity": "block",
+                    "message": "A water change is paused; resume or stop it before starting another"})
     if _live(live, "leak"):
         out.append({"code": "leak", "severity": "fault", "message": "Leak detected"})
     if _live(live, "highLevel"):
@@ -544,6 +547,37 @@ def start_guard_reasons(
         ):
             out.append({"code": "quiet_hours", "severity": "block",
                         "message": "Outside the allowed quiet-hours window"})
+    return out
+
+
+def reservoir_preflight_reasons(cfg: dict[str, Any], target_litres: float) -> list[dict[str, str]]:
+    """Dead-reckoned reservoir guards before a change starts.
+
+    Float sensors are still the hardware arbiters, but OpenReef's own reservoir model
+    should never knowingly start a change it does not have fresh/waste capacity for.
+    """
+    target_ml = _f(target_litres) * 1000.0
+    if target_ml <= 0:
+        return []
+    reservoirs = (cfg or {}).get("reservoirs", {}) if isinstance((cfg or {}).get("reservoirs"), dict) else {}
+    fresh = reservoirs.get("fresh", {}) if isinstance(reservoirs.get("fresh"), dict) else {}
+    waste = reservoirs.get("waste", {}) if isinstance(reservoirs.get("waste"), dict) else {}
+    out: list[dict[str, str]] = []
+
+    remaining = _f(fresh.get("remainingMl"))
+    if remaining + 1e-6 < target_ml:
+        out.append({"code": "fresh_insufficient", "severity": "block",
+                    "message": "Fresh saltwater reservoir does not have enough recorded volume"})
+
+    waste_capacity = _f(waste.get("capacityLitres")) * 1000.0
+    if waste_capacity <= 0:
+        out.append({"code": "waste_capacity_unknown", "severity": "block",
+                    "message": "Waste reservoir capacity must be set before running AWC"})
+    else:
+        available = waste_capacity - _f(waste.get("filledMl"))
+        if available + 1e-6 < target_ml:
+            out.append({"code": "waste_insufficient", "severity": "block",
+                        "message": "Waste reservoir does not have enough recorded free capacity"})
     return out
 
 

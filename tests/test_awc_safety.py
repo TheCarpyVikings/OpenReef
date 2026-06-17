@@ -42,7 +42,7 @@ _SENSORS = {
 }
 
 
-def _awc_block(method="batch_simultaneous", **over):
+def _awc_block(method="batch_sequential", **over):
     awc = {
         "enabled": True,
         "tankVolumeLitres": 200,
@@ -67,7 +67,7 @@ def _awc_block(method="batch_simultaneous", **over):
     return awc
 
 
-def _entry(method="batch_simultaneous", equipment=None, awc_over=None):
+def _entry(method="batch_sequential", equipment=None, awc_over=None):
     cfg = {"automaticWaterChange": _awc_block(method, **(awc_over or {}))}
     if equipment is not None:
         cfg["equipment"] = equipment
@@ -115,26 +115,14 @@ def _close(a, b, tol=1.0):
 
 # --- Happy paths -------------------------------------------------------------
 
-def test_batch_simultaneous_completes():
-    entry = _entry("batch_simultaneous")
+def test_unsupported_simultaneous_method_is_blocked():
+    entry = _entry("batch_sequential")
     hass = _hass(entry)
-    started, reasons = _start(hass, entry, 2.0)
-    assert started and not reasons
-    assert _state(entry)["status"] == "exchanging"
-    assert _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
-    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
-
-    _fire_leg(hass, entry)
-    awc = _awc(entry)
-    assert awc["state"]["status"] == "idle"
-    assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
-    assert _has_call(hass.services.calls, "turn_off", "switch.awc_fill")
-    assert len(awc["history"]) == 1 and not awc["history"][0]["partial"]
-    assert _close(awc["history"][0]["filledL"], 2.0, 1e-6)
-    assert _close(awc["todayLitres"], 2.0, 1e-6)
-    # dead-reckoned reservoirs: fresh 25L−2L=23L, waste 0+2L=2L
-    assert _close(awc["reservoirs"]["fresh"]["remainingMl"], 23000)
-    assert _close(awc["reservoirs"]["waste"]["filledMl"], 2000)
+    started, reasons = _start(hass, entry, 2.0, method="batch_simultaneous")
+    assert not started
+    assert any(r["code"] == "unsupported_method" for r in reasons)
+    assert _state(entry)["status"] == "idle"
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
 
 
 def test_sequential_drains_then_fills():
@@ -156,12 +144,14 @@ def test_sequential_drains_then_fills():
 
 def test_leg_timer_is_armed_via_scheduler():
     sched = install_scheduler(integration)
-    entry = _entry("batch_simultaneous")
+    entry = _entry("batch_sequential")
     hass = _hass(entry)
     _start(hass, entry, 1.0)
     # Exactly the AWC leg timer should be pending (mode is 'running', nothing else arms).
     pending = sched.pending()
     assert len(pending) >= 1
+    run(sched.fire_all())
+    assert _state(entry)["status"] == "filling"
     run(sched.fire_all())
     assert _state(entry)["status"] == "idle"
     # restore real scheduler for subsequent tests
@@ -268,11 +258,56 @@ def test_start_blocked_by_single_change_cap():
     assert any(r["code"] == "max_single_change" for r in reasons)
 
 
+def test_start_blocked_when_paused():
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    _start(hass, entry, 2.0, method="batch_sequential")
+    hass.states.set("binary_sensor.fresh_empty", "on")
+    _fire_leg(hass, entry)
+    assert _state(entry)["status"] == "paused"
+
+    started, reasons = _start(hass, entry, 2.0, method="batch_sequential")
+    assert not started
+    assert any(r["code"] == "paused" for r in reasons)
+
+
+def test_start_blocked_by_dead_reckoned_reservoir_capacity():
+    entry = _entry(awc_over={"reservoirs": {
+        "fresh": {"capacityLitres": 25, "remainingMl": 1000, "emptyEntity": "binary_sensor.fresh_empty"},
+        "waste": {"capacityLitres": 25, "filledMl": 24500, "fullEntity": "binary_sensor.waste_full"},
+    }})
+    hass = _hass(entry)
+    started, reasons = _start(hass, entry, 2.0)
+    assert not started
+    codes = {r["code"] for r in reasons}
+    assert "fresh_insufficient" in codes
+    assert "waste_insufficient" in codes
+
+
+def test_pump_start_failure_latches_fault_and_stops_pumps():
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    original_call = hass.services.async_call
+
+    async def fail_drain_start(domain, service, data=None, **kwargs):
+        if domain == "switch" and service == "turn_on" and "switch.awc_drain" in (data or {}).values():
+            raise RuntimeError("simulated switch failure")
+        await original_call(domain, service, data, **kwargs)
+
+    hass.services.async_call = fail_drain_start
+    started, reasons = _start(hass, entry, 2.0, method="batch_sequential")
+    assert not started
+    assert any(r["code"] == "pump_start_failed" for r in reasons)
+    assert _state(entry)["status"] == "fault"
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_fill")
+
+
 # --- ATO coordination --------------------------------------------------------
 
 def test_ato_suspended_during_change_and_blocks_turn_on():
     equipment = {"ato": {"type": "ato", "armed": True, "switch_entity_id": "switch.ato"}}
-    entry = _entry("batch_simultaneous", equipment=equipment)
+    entry = _entry("batch_sequential", equipment=equipment)
     hass = _hass(entry, {"switch.ato": "on"})
     _start(hass, entry, 2.0)
     # ATO physically turned off at start...
@@ -284,7 +319,7 @@ def test_ato_suspended_during_change_and_blocks_turn_on():
     reason = integration._equipment_safety_block_reason(hass, config, "ato", mapped, "on")
     assert "water change" in reason.lower()
 
-    _fire_leg(hass, entry)  # finalize → hold-off window
+    _drive(hass, entry)  # finalize → hold-off window
     # still suspended during the post-change stabilization hold-off
     assert integration._awc_ato_suspended(entry.options[CONF_SETTINGS]) is True
 
@@ -335,7 +370,7 @@ def test_ws_run_now_starts_then_abort():
     conn = FakeConnection()
     run(integration.websocket_awc_run_now(hass, conn, {"id": 1, "litres": 2}))
     assert conn.results[0].payload["started"] is True
-    assert _state(entry)["status"] == "exchanging"
+    assert _state(entry)["status"] == "draining"
 
     conn2 = FakeConnection()
     run(integration.websocket_awc_abort(hass, conn2, {"id": 2}))
@@ -374,6 +409,12 @@ def test_ws_acknowledge_clears_fault():
 
     conn = FakeConnection()
     run(integration.websocket_awc_acknowledge(hass, conn, {"id": 1}))
+    assert conn.error_codes == ["hazard_active"]
+    assert _state(entry)["status"] == "fault"
+
+    hass.states.set("binary_sensor.leak", "off")
+    conn = FakeConnection()
+    run(integration.websocket_awc_acknowledge(hass, conn, {"id": 2}))
     assert not conn.errors, conn.error_codes
     st = _state(entry)
     assert st["status"] == "idle" and st["fault"] == ""
@@ -419,17 +460,17 @@ def _now(h, m, day=17):
     return datetime(2026, 6, day, h, m, tzinfo=timezone.utc)  # 2026-06-17 is a Wednesday
 
 
-def test_scheduler_starts_due_batch_change():
-    entry = _sched_entry("batch_simultaneous")
+def test_scheduler_starts_due_sequential_change():
+    entry = _sched_entry("batch_sequential")
     hass = _hass(entry)
     run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))
     st = _state(entry)
-    assert st["status"] == "exchanging"
+    assert st["status"] == "draining"
     assert _close(st["targetLitres"], 4.0, 1e-6)
 
 
 def test_scheduler_skips_before_due_time():
-    entry = _sched_entry("batch_simultaneous")
+    entry = _sched_entry("batch_sequential")
     hass = _hass(entry)
     run(integration._async_awc_schedule_tick(hass, entry, _now(1, 0)))
     assert _state(entry)["status"] == "idle"
@@ -437,24 +478,25 @@ def test_scheduler_skips_before_due_time():
     assert _state(entry)["nextRun"]
 
 
-def test_scheduler_continuous_trickles_in_window():
+def test_scheduler_legacy_continuous_is_migrated_to_sequential():
     entry = _sched_entry("continuous", windowStart="00:00", windowEnd="00:00", amount=4.8)
     hass = _hass(entry)
     run(integration._async_awc_schedule_tick(hass, entry, _now(12, 0)))
-    # a small continuous micro-exchange has begun
-    assert _state(entry)["status"] == "exchanging"
-    assert 0 < _state(entry)["targetLitres"] < 0.1
+    assert _awc(entry)["schedule"]["method"] == "batch_sequential"
+    assert _state(entry)["status"] == "draining"
+    assert _close(_state(entry)["targetLitres"], 4.8, 1e-6)
 
 
-def test_scheduler_continuous_skips_outside_window():
-    entry = _sched_entry("continuous", windowStart="01:00", windowEnd="05:00", amount=4.8)
+def test_scheduler_legacy_simultaneous_is_migrated_to_sequential():
+    entry = _sched_entry("batch_simultaneous")
     hass = _hass(entry)
-    run(integration._async_awc_schedule_tick(hass, entry, _now(12, 0)))
-    assert _state(entry)["status"] == "idle"
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))
+    assert _awc(entry)["schedule"]["method"] == "batch_sequential"
+    assert _state(entry)["status"] == "draining"
 
 
 def test_scheduler_does_nothing_when_schedule_disabled():
-    entry = _sched_entry("batch_simultaneous", enabled=False)
+    entry = _sched_entry("batch_sequential", enabled=False)
     hass = _hass(entry)
     run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))
     assert _state(entry)["status"] == "idle"
