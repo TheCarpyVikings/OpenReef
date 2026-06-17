@@ -1322,6 +1322,7 @@ class OpenReefPanel extends HTMLElement {
           holdSeconds: 0, onSeconds: 0, offSeconds: 0,
         };
         timer.timerMode = target.dataset.value === "cycle" ? "cycle" : "once";
+        this._seedEquipmentTimerDefaults(timer);
         this._setDirty(true);
         this._render();
       }
@@ -1565,6 +1566,10 @@ class OpenReefPanel extends HTMLElement {
         };
         if (field === "enabled") {
           timer.enabled = target.checked;
+          // Seed a sensible default so a freshly-enabled timer is valid — the backend
+          // strips enabled timers that have no usable duration (which made the checkbox
+          // revert on save).
+          if (timer.enabled) this._seedEquipmentTimerDefaults(timer);
         } else {
           // Combine the min + sec sibling inputs of this duration into canonical seconds.
           const base = field.replace(/(Min|Sec)$/, "");
@@ -2490,6 +2495,18 @@ class OpenReefPanel extends HTMLElement {
       onSeconds: clampSecs(raw.onSeconds),
       offSeconds: clampSecs(raw.offSeconds),
     };
+  }
+
+  // Give an enabled timer a usable default for its current mode, so the backend (which
+  // strips zero-duration enabled timers) keeps it enabled across a save.
+  _seedEquipmentTimerDefaults(timer) {
+    if (!timer || !timer.enabled) return;
+    if (timer.timerMode === "cycle") {
+      if (!(Number(timer.onSeconds) > 0)) timer.onSeconds = 30;
+      if (!(Number(timer.offSeconds) > 0)) timer.offSeconds = 30;
+    } else if (!(Number(timer.holdSeconds) > 0)) {
+      timer.holdSeconds = 60;
+    }
   }
 
   _splitMinSec(seconds) {

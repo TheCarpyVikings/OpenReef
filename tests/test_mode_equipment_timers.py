@@ -91,6 +91,20 @@ def test_normalise_clamps_floors_and_strips():
     assert timers["rp"]["enabled"] is False
 
 
+def test_normalise_keeps_valid_enabled_timer():
+    # A freshly-enabled timer with a real duration must survive the save round-trip
+    # (regression: the UI checkbox reverted when the backend stripped it).
+    cfg = {
+        "modePreviews": {"feed": {"wave": "on"}},
+        "modeEquipmentTimers": {
+            "feed": {"wave": {"enabled": True, "timerMode": "once", "holdSeconds": 60}}
+        },
+    }
+    out = integration._normalise_core_config(cfg)
+    assert out["modeEquipmentTimers"]["feed"]["wave"]["enabled"] is True
+    assert out["modeEquipmentTimers"]["feed"]["wave"]["holdSeconds"] == 60
+
+
 def test_normalise_running_clears_runtime_state():
     cfg = {
         "mode": {
