@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 43
-INTEGRATION_VERSION = "0.4.104"
+CORE_SCHEMA_VERSION = 44
+INTEGRATION_VERSION = "0.4.105"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -180,6 +180,35 @@ MODE_EQUIPMENT_TIMER_MAX_SECONDS = 86400  # 24h ceiling on any per-equipment dur
 MODE_EQUIPMENT_CYCLE_MIN_SECONDS = 10     # hardware-protection floor per cycle phase
 MODE_VERIFY_DEFAULT_DELAY_SECONDS = 8     # read-back delay after a mode apply/return
 EQUIPMENT_MAX_OFF_MAX_SECONDS = 86400     # ceiling on the per-equipment max-off cap
+
+# Automatic Water Change (AWC). Volume-primary (calibrated pump-math) with physical
+# float/cutoff sensors as arbiters. Two pumps (drain + fill), single tank, premixed
+# saltwater (pure swap). All three change methods; fully-flexible scheduling; two-tier
+# trip policy (benign limits pause+resume, real faults latch + manual re-arm). The
+# maths live in awc.py; these are the *config* clamps applied during normalisation.
+AWC_METHODS = ("continuous", "batch_simultaneous", "batch_sequential")
+AWC_AMOUNT_UNITS = ("litres", "percent")
+AWC_PERIODS = ("day", "week")
+AWC_STATUSES = (
+    "idle", "preflight", "draining", "filling", "exchanging", "paused", "fault", "complete",
+)
+AWC_PUMP_ROLES = ("drain", "fill")
+AWC_RESERVOIR_KINDS = ("fresh", "waste")
+AWC_PUMP_MAX_ML_PER_S = 2000.0            # sanity ceiling on a calibration value
+AWC_RESERVOIR_MAX_L = 2000.0              # sanity ceiling on a container size
+AWC_TANK_MAX_L = 100000.0                 # sanity ceiling on net display volume
+AWC_RUNTIME_CEILING_SECONDS = 7200        # 2h absolute ceiling on any per-leg max-runtime cap
+AWC_RUNTIME_FLOOR_SECONDS = 5             # floor so a cap can never be set absurdly low
+AWC_DEFAULT_RUNTIME_MARGIN = 1.5          # cap = expected_runtime x margin when not set explicitly
+AWC_TICK_MIN_SECONDS = 10                 # continuous-mode tick floor (relay/pump protection)
+AWC_TICK_MAX_SECONDS = 3600
+AWC_TICK_DEFAULT_SECONDS = 60
+AWC_DEFAULT_MAX_SINGLE_CHANGE_PCT = 25    # refuse a single cycle moving more than this % of tank
+AWC_DEFAULT_HOLDOFF_MINUTES = 15          # keep ATO suspended this long after a change
+AWC_HOLDOFF_MAX_MINUTES = 1440
+AWC_DEFAULT_DRIFT_WARN_PCT = 10.0         # |model vs sensor| beyond this ⇒ recalibration prompt
+AWC_DEFAULT_NET_IMBALANCE_L = 2.0         # cumulative drain≠fill litres before we warn
+AWC_HISTORY_MAX = 100                     # completed changes kept
 
 SERVICE_RECORD_TASK_COMPLETION = "record_task_completion"
 SERVICE_APPLY_MODE = "apply_mode"
@@ -1104,6 +1133,93 @@ DEFAULT_CORE_CONFIG = {
         "tempUnit": "C",
         "tempProbe": "Tmp",
         "acknowledgedAdvisory": False,
+    },
+    # Automatic Water Change — volume-primary (calibrated pump-math) with float/cutoff
+    # sensors as arbiters. Two pumps (drain + fill), single tank, premixed saltwater.
+    # The maths live in awc.py; the orchestration/state machine lives in __init__.py.
+    "automaticWaterChange": {
+        "enabled": False,
+        "tankVolumeLitres": 0,          # net display volume — drives % amounts + dilution maths
+        "continuousTickSeconds": AWC_TICK_DEFAULT_SECONDS,
+        # Two pumps. mlPerS/interceptMl from calibration; exchangeFactor is the two-stage
+        # correction so OUT and IN move matched volumes despite tube-length/head differences.
+        "pumps": {
+            role: {
+                "switchEntity": "",
+                "mlPerS": 0,
+                "interceptMl": 0,
+                "exchangeFactor": 1.0,
+                "calibratedAt": "",
+                "tubingInstalledAt": "",
+            }
+            for role in AWC_PUMP_ROLES
+        },
+        # fresh = premixed saltwater IN; waste = old water OUT. remainingMl/filledMl are the
+        # dead-reckoned dead-reckoning counters; the float entities arbitrate them.
+        "reservoirs": {
+            "fresh": {"capacityLitres": 25, "remainingMl": 0, "emptyEntity": ""},
+            "waste": {"capacityLitres": 25, "filledMl": 0, "fullEntity": ""},
+        },
+        # Layered safety. highLevel = display/sump overfill cutoff; leak = master kill.
+        "safety": {
+            "highLevelEntity": "",
+            "leakEntity": "",
+            "maxRuntimeSeconds": 0,                 # 0 = derive from calibration x margin
+            "maxRuntimeMargin": AWC_DEFAULT_RUNTIME_MARGIN,
+            "anomalyWarnMult": 2.0,
+            "anomalyAbortMult": 3.0,
+            "maxSingleChangePercent": AWC_DEFAULT_MAX_SINGLE_CHANGE_PCT,
+            "driftWarnPercent": AWC_DEFAULT_DRIFT_WARN_PCT,
+            "netImbalanceWarnLitres": AWC_DEFAULT_NET_IMBALANCE_L,
+            "autoTrimImbalance": False,             # bias next fill to correct net drift
+        },
+        # ATO coordination — suspend the auto-top-off for the whole change + a hold-off
+        # afterwards (prevents the GHL-style salinity crash). Reuses the interlock helpers.
+        "ato": {
+            "suspendDuringChange": True,
+            "stabilizationHoldoffMinutes": AWC_DEFAULT_HOLDOFF_MINUTES,
+        },
+        "guards": {
+            "quietHoursEnabled": False,
+            "quietStart": "01:00",
+            "quietEnd": "05:00",
+            "blockDuringFeed": True,
+            "blockOnReturnPumpIssue": True,
+        },
+        # Fully-flexible schedule: litres OR %, per day OR week, any method.
+        "schedule": {
+            "enabled": False,
+            "method": "batch_simultaneous",
+            "amountUnit": "percent",
+            "amount": 0,
+            "period": "week",
+            "times": ["02:00"],
+            "days": [],                             # [] = every day
+            "windowStart": "01:00",                 # continuous active window
+            "windowEnd": "05:00",
+        },
+        # Runtime state — persisted so an in-flight change survives an HA restart and
+        # resumes-to-balance. status/fault drive the panel + interlocks.
+        "state": {
+            "status": "idle",
+            "fault": "",                            # latched reason ("" = none)
+            "faultSince": "",
+            "method": "",
+            "startedAt": "",
+            "lastRun": "",
+            "nextRun": "",
+            "targetLitres": 0,
+            "drainedMl": 0,                         # progress within the current change
+            "filledMl": 0,
+            "legStartedAt": "",                     # current pump-leg start (anomaly timing)
+            "legEndsAt": "",                        # scheduled end of the current leg (timer arm)
+            "pausedReason": "",
+            "atoSuspendedUntil": "",
+        },
+        "history": [],                              # [{completedAt, drainedL, filledL, method, partial, notes}]
+        "todayLitres": 0,
+        "weekLitres": 0,
+        "monthLitres": 0,
     },
     # ICP test importer — stored lab reports + saved generic-mapper templates.
     # Reports are appended on import; overlapping core params are also fanned out

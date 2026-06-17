@@ -1,0 +1,188 @@
+# =============================================================================
+# OpenReef — Reference ESPHome config for a DIY Automatic Water Change node
+# =============================================================================
+# This is a REFERENCE you adapt to your board/wiring — not a drop-in. It builds
+# the two peristaltic pumps + the safety sensors OpenReef's AWC feature expects,
+# and — critically — puts the NON-NEGOTIABLE hard safety LOCALLY in firmware so a
+# Wi-Fi / Home Assistant outage can never strand a running pump. The OpenReef
+# backend orchestrates, accounts litres, and mirrors these caps; this node is the
+# last line that keeps working when the network doesn't.
+#
+# Safety model implemented here (mirror of the OpenReef AWC design):
+#   1. Relays/MOSFETs default OFF on boot/brownout (restore_mode ALWAYS_OFF).
+#   2. Per-pump MAX-RUNTIME watchdog that FAIL-LOCKS the node (latched re-arm).
+#   3. Leak = master kill: cut BOTH pumps immediately and latch.
+#   4. Display high-level cutoff: cut the FILL pump immediately and latch.
+#   5. Reservoir floats: empty fresh => block fill; full waste => block drain.
+#   6. Debounced inputs (delayed_on/off) + pull resistors so a chattering or a
+#      disconnected (floating) sensor doesn't cause spurious starts/stops.
+#   7. A latched global lock: once tripped, pumps stay off until you clear it
+#      (a human must look — no silent auto-retry).
+#
+# DOCUMENTED RESIDUAL RISK (v1): a WELDED relay or shorted driver defeats every
+# software/firmware cutoff above — turning the GPIO off cannot stop a stuck
+# actuator. v1 ships software/firmware caps only; an independent series/master
+# power-cut relay (and/or a mechanical float valve on the fill line) is the v2
+# mitigation. Size the fresh reservoir so a total dump can't crash salinity.
+# =============================================================================
+
+substitutions:
+  node_name: openreef-awc
+  # Tune to your pumps. The watchdog is a BACKSTOP comfortably above a normal
+  # full-change runtime — OpenReef stops pumps at the calibrated time; this only
+  # fires if that never happened (network down + something wrong).
+  drain_max_runtime: "180s"
+  fill_max_runtime: "180s"
+
+esphome:
+  name: ${node_name}
+
+esp32:
+  board: esp32dev
+
+# Local network/API — but NONE of the safety below depends on it being up.
+api:
+ota:
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+
+# --- Latched safety lock -----------------------------------------------------
+# Once any hard trip fires this stays true and the pump on_turn_on guards refuse
+# to run. Cleared from the OpenReef panel (via the template switch below).
+globals:
+  - id: awc_locked
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+script:
+  - id: kill_all_pumps
+    then:
+      - switch.turn_off: drain_pump
+      - switch.turn_off: fill_pump
+  - id: trip_lock
+    then:
+      - globals.set: { id: awc_locked, value: "true" }
+      - script.execute: kill_all_pumps
+      - logger.log:
+          level: WARN
+          format: "AWC HARD TRIP — pumps killed, node latched. Manual re-arm required."
+  # Per-pump max-runtime watchdogs. mode: restart => re-armed on each turn-on and
+  # cancelled (script.stop) on a normal turn-off, so they only fire on overrun.
+  - id: drain_watchdog
+    mode: restart
+    then:
+      - delay: ${drain_max_runtime}
+      - logger.log: "Drain pump exceeded max-runtime — tripping."
+      - script.execute: trip_lock
+  - id: fill_watchdog
+    mode: restart
+    then:
+      - delay: ${fill_max_runtime}
+      - logger.log: "Fill pump exceeded max-runtime — tripping."
+      - script.execute: trip_lock
+
+# --- Pumps -------------------------------------------------------------------
+# GPIO -> relay board or MOSFET gate. ALWAYS_OFF so a reboot/brownout mid-change
+# leaves the pumps OFF (OpenReef resumes-to-balance on its side).
+switch:
+  - platform: gpio
+    id: drain_pump
+    name: "AWC Drain Pump"
+    pin: GPIO16
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            or:
+              - lambda: "return id(awc_locked);"
+              - binary_sensor.is_on: waste_full
+          then:
+            - switch.turn_off: drain_pump
+            - logger.log: "Drain blocked (latched or waste reservoir full)."
+          else:
+            - script.execute: drain_watchdog
+    on_turn_off:
+      - script.stop: drain_watchdog
+
+  - platform: gpio
+    id: fill_pump
+    name: "AWC Fill Pump"
+    pin: GPIO17
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            or:
+              - lambda: "return id(awc_locked);"
+              - binary_sensor.is_on: fresh_empty
+              - binary_sensor.is_on: display_high
+          then:
+            - switch.turn_off: fill_pump
+            - logger.log: "Fill blocked (latched, fresh empty, or display high-level)."
+          else:
+            - script.execute: fill_watchdog
+    on_turn_off:
+      - script.stop: fill_watchdog
+
+  # Template switch OpenReef toggles to clear the latch remotely (maps to a HA
+  # switch entity). Turning it on clears the lock, then resets itself.
+  - platform: template
+    name: "AWC Clear Lock"
+    optimistic: true
+    turn_on_action:
+      - globals.set: { id: awc_locked, value: "false" }
+      - logger.log: "AWC lock cleared."
+
+# --- Safety sensors ----------------------------------------------------------
+# Pull resistors + debounce so a noisy/disconnected input can't false-trigger.
+binary_sensor:
+  - platform: gpio
+    id: leak
+    name: "AWC Leak"
+    device_class: moisture
+    pin: { number: GPIO25, mode: { input: true, pulldown: true } }
+    filters: [ delayed_on: 200ms, delayed_off: 500ms ]
+    on_press:
+      - logger.log: "LEAK detected — master kill."
+      - script.execute: trip_lock
+
+  - platform: gpio
+    id: display_high
+    name: "AWC Display High-Level Cutoff"
+    device_class: problem
+    pin: { number: GPIO26, mode: { input: true, pulldown: true } }
+    filters: [ delayed_on: 200ms, delayed_off: 500ms ]
+    on_press:
+      - logger.log: "Display high-level cutoff — fill killed."
+      - switch.turn_off: fill_pump
+      - script.execute: trip_lock
+
+  - platform: gpio
+    id: fresh_empty
+    name: "AWC Fresh Reservoir Empty"
+    device_class: problem
+    pin: { number: GPIO27, mode: { input: true, pullup: true } }
+    filters: [ delayed_on: 300ms, delayed_off: 300ms ]
+    on_press:
+      - switch.turn_off: fill_pump      # never dry-run the fill pump
+
+  - platform: gpio
+    id: waste_full
+    name: "AWC Waste Reservoir Full"
+    device_class: problem
+    pin: { number: GPIO14, mode: { input: true, pullup: true } }
+    filters: [ delayed_on: 300ms, delayed_off: 300ms ]
+    on_press:
+      - switch.turn_off: drain_pump     # never overflow the waste reservoir
+
+# In OpenReef -> Water Change -> Setup & calibration, map:
+#   Drain pump          -> switch.awc_drain_pump
+#   Fill pump           -> switch.awc_fill_pump
+#   Leak sensor         -> binary_sensor.awc_leak
+#   Display high-level  -> binary_sensor.awc_display_high_level_cutoff
+#   Fresh-empty float   -> binary_sensor.awc_fresh_reservoir_empty
+#   Waste-full float    -> binary_sensor.awc_waste_reservoir_full

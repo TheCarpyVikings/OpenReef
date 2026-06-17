@@ -1388,6 +1388,13 @@ class OpenReefPanel extends HTMLElement {
         if (this._trend?.source === "manual") this._loadManualTrend(id, this._trend?.range || "all");
         else this._loadTrend(id, this._trend?.range || "24h");
       }
+      if (action === "awc-setup-toggle") { this._awcSetupOpen = !this._awcSetupOpen; this._render(); }
+      if (action === "awc-run") this._awcRunNow();
+      if (action === "awc-abort") this._awcAction("openreef/awc_abort");
+      if (action === "awc-resume") this._awcAction("openreef/awc_resume");
+      if (action === "awc-ack") this._awcAction("openreef/awc_acknowledge");
+      if (action === "awc-reset") this._awcResetReservoir(id);
+      if (action === "awc-calibrate") this._awcCalibrate(id);
     });
 
     const handleFieldInput = (event) => {
@@ -1703,10 +1710,56 @@ class OpenReefPanel extends HTMLElement {
           task[field] = value;
         }
       }
+      if (scope === "awc") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a[field] = (field === "enabled") ? value
+          : (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+      }
+      if (scope === "awc-pump") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.pumps = a.pumps || {}; a.pumps[id] = a.pumps[id] || {};
+        a.pumps[id][field] = (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+      }
+      if (scope === "awc-reservoir") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.reservoirs = a.reservoirs || {}; a.reservoirs[id] = a.reservoirs[id] || {};
+        a.reservoirs[id][field] = (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+      }
+      if (scope === "awc-safety") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.safety = a.safety || {};
+        a.safety[field] = (target.type === "checkbox") ? value
+          : (target.type === "number") ? Number(value) || 0 : value;
+      }
+      if (scope === "awc-ato") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.ato = a.ato || {};
+        a.ato[field] = (target.type === "checkbox") ? value
+          : (target.type === "number") ? Number(value) || 0 : value;
+      }
+      if (scope === "awc-guards") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.guards = a.guards || {};
+        a.guards[field] = value;
+      }
+      if (scope === "awc-schedule") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.schedule = a.schedule || {};
+        if (field === "startTime") {
+          a.schedule.times = [value];
+        } else if (field === "scheduleDay") {
+          const day = target.dataset.day;
+          const set = new Set(Array.isArray(a.schedule.days) ? a.schedule.days : []);
+          if (value) set.add(day); else set.delete(day);
+          a.schedule.days = [...set];
+        } else {
+          a.schedule[field] = (target.type === "number") ? Number(value) || 0 : value;
+        }
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting")
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)))
         && event.type === "change"
       ) this._render();
     };
@@ -7966,6 +8019,7 @@ class OpenReefPanel extends HTMLElement {
       ["manual", "Manual Tests"],
       ["icp", "ICP"],
       ["maintenance", "Maintenance"],
+      ["awc", "Water Change"],
       ["controls", "Controls"],
       ["spawning", "Spawning"],
       ["cameras", "Cameras"],
@@ -7987,6 +8041,7 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "live") return this._liveStats();
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
+    if (this._activeTab === "awc") return this._automaticWaterChange();
     if (this._activeTab === "controls") return this._controls();
     if (this._activeTab === "spawning") return this._spawningTab();
     if (this._activeTab === "icp") return this._icpTab();
@@ -7994,6 +8049,405 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "energy") return this._energy();
     if (this._activeTab === "settings") return this._settings();
     return this._mission();
+  }
+
+  // --- Automatic Water Change -------------------------------------------
+
+  async _awcLoadSummary() {
+    if (this._awcSummaryLoading) return;
+    this._awcSummaryLoading = true;
+    try {
+      this._awcSummary = await this._callWS({ type: "openreef/awc_summary" });
+      this._awcSummaryAt = Date.now();
+    } catch (err) {
+      /* leave the last summary in place */
+    } finally {
+      this._awcSummaryLoading = false;
+      this._render();
+    }
+  }
+
+  async _awcAction(type) {
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type });
+      this._config = result.config || this._config;
+      this._awcMessage = "";
+    } catch (err) {
+      this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._awcSummaryAt = 0;
+    await this._awcLoadSummary();
+  }
+
+  async _awcRunNow() {
+    const litresEl = this.shadowRoot.querySelector("[data-awc-run-amount]");
+    const methodEl = this.shadowRoot.querySelector("[data-awc-run-method]");
+    const unitEl = this.shadowRoot.querySelector("[data-awc-run-unit]");
+    const amount = Number(litresEl && litresEl.value) || 0;
+    const payload = { type: "openreef/awc_run_now", method: (methodEl && methodEl.value) || undefined };
+    if (unitEl && unitEl.value === "percent") payload.percent = amount;
+    else payload.litres = amount;
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS(payload);
+      this._config = result.config || this._config;
+      if (!result.started && Array.isArray(result.reasons) && result.reasons.length) {
+        this._awcMessage = "Blocked: " + result.reasons.map((r) => r.message).join("; ");
+      } else {
+        this._awcMessage = "Water change started.";
+      }
+    } catch (err) {
+      this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._awcSummaryAt = 0;
+    await this._awcLoadSummary();
+  }
+
+  async _awcResetReservoir(kind) {
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/awc_reset_reservoir", reservoir: kind });
+      this._config = result.config || this._config;
+    } catch (err) {
+      this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._awcSummaryAt = 0;
+    await this._awcLoadSummary();
+  }
+
+  async _awcCalibrate(role) {
+    const secEl = this.shadowRoot.querySelector(`[data-awc-cal="${role}-seconds"]`);
+    const mlEl = this.shadowRoot.querySelector(`[data-awc-cal="${role}-ml"]`);
+    const seconds = Number(secEl && secEl.value) || 0;
+    const volume_ml = Number(mlEl && mlEl.value) || 0;
+    if (seconds <= 0 || volume_ml <= 0) {
+      this._awcMessage = "Enter both run-time (s) and measured volume (ml) to calibrate.";
+      this._render();
+      return;
+    }
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/awc_calibrate", role, seconds, volume_ml });
+      this._config = result.config || this._config;
+      this._awcMessage = `${role} pump calibrated: ${result.mlPerS} ml/s.`;
+    } catch (err) {
+      this._awcMessage = "Calibration failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._render();
+  }
+
+  _awcEntitySelect(scope, idAttr, field, value, domain) {
+    const states = (this._hass && this._hass.states) || {};
+    const opts = Object.keys(states)
+      .filter((e) => e.startsWith(domain + "."))
+      .sort()
+      .map((e) => `<option value="${this._escape(e)}" ${e === value ? "selected" : ""}>${this._escape(e)}</option>`)
+      .join("");
+    return `<select data-scope="${scope}" ${idAttr} data-field="${field}">
+      <option value="">— none —</option>${opts}</select>`;
+  }
+
+  _awcBar(label, percent, litres, capacity, color) {
+    const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+    return `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;min-width:96px;">
+        <div style="position:relative;width:64px;height:150px;border:2px solid var(--divider-color,#3a3a3a);border-radius:8px;overflow:hidden;background:rgba(255,255,255,0.04);">
+          <div style="position:absolute;bottom:0;left:0;right:0;height:${pct}%;background:${color};transition:height .4s ease;"></div>
+          <div style="position:absolute;top:4px;left:0;right:0;text-align:center;font-size:0.8rem;font-weight:700;">${Math.round(pct)}%</div>
+        </div>
+        <strong style="font-size:0.85rem;">${this._escape(label)}</strong>
+        <small>${this._format(litres, 1)} / ${this._format(capacity, 0)} L</small>
+      </div>`;
+  }
+
+  _automaticWaterChange() {
+    const awc = this._config?.automaticWaterChange || {};
+    const state = awc.state || {};
+    if (!this._awcSummary || Date.now() - (this._awcSummaryAt || 0) > 4000) {
+      if (!this._awcSummaryLoading) this._awcLoadSummary();
+    }
+    const sum = this._awcSummary?.summary || null;
+    const res = sum?.reservoirs || {};
+
+    const head = `
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Intelligence layer</p>
+          <h2>Automatic Water Change</h2>
+          <p>Calibrated, volume-accurate water changes with layered safety — knows litres changed and litres remaining, unlike sensor-only systems.</p>
+        </div>
+        <div class="button-row">
+          <button class="secondary" data-action="awc-setup-toggle">${this._awcSetupOpen ? "Hide setup" : "Setup & calibration"}</button>
+        </div>
+      </div>`;
+
+    const banner = this._awcStatusBanner(state);
+    const message = this._awcMessage
+      ? `<div class="setting-card subtle-card"><small>${this._escape(this._awcMessage)}</small></div>`
+      : "";
+
+    const reservoirs = `
+      <section class="setting-card">
+        <div class="section-head"><div><p class="eyebrow">Reservoirs</p><h3>Fresh saltwater in · waste out</h3></div>
+          <div class="button-row">
+            <button class="secondary" data-action="awc-reset" data-id="fresh">Fresh refilled</button>
+            <button class="secondary" data-action="awc-reset" data-id="waste">Waste emptied</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:24px;justify-content:center;padding:12px 0;flex-wrap:wrap;">
+          ${this._awcBar("Fresh", res.fresh?.percent, res.fresh?.remainingL, res.fresh?.capacityL, "linear-gradient(180deg,#2196f3,#0d47a1)")}
+          ${this._awcBar("Waste", res.waste?.percent, res.waste?.filledL, res.waste?.capacityL, "linear-gradient(180deg,#8d6e63,#4e342e)")}
+        </div>
+      </section>`;
+
+    return `
+      <section class="stack">
+        ${head}
+        ${banner}
+        ${message}
+        ${this._awcControls(state)}
+        ${reservoirs}
+        ${this._awcMetrics(sum)}
+        ${this._awcHistory(awc)}
+        ${this._awcSetupOpen ? this._awcSetup(awc) : ""}
+      </section>`;
+  }
+
+  _awcStatusBanner(state) {
+    const status = state.status || "idle";
+    if (status === "fault") {
+      return `<div class="setting-card" style="border-left:4px solid var(--error-color,#d32f2f);">
+        <strong>⛔ Faulted — manual re-arm required</strong>
+        <p>${this._escape(state.fault || "A safety fault latched the water changer.")}</p>
+        <div class="button-row"><button class="primary" data-action="awc-ack">Acknowledge &amp; clear</button></div>
+      </div>`;
+    }
+    if (status === "paused") {
+      return `<div class="setting-card" style="border-left:4px solid var(--warning-color,#ffa000);">
+        <strong>⏸ Paused</strong>
+        <p>${this._escape(state.pausedReason || "Paused — will auto-resume when clear.")}</p>
+        <div class="button-row">
+          <button class="secondary" data-action="awc-resume">Resume now</button>
+          <button class="secondary" data-action="awc-abort">Stop</button>
+        </div>
+      </div>`;
+    }
+    if (["draining", "filling", "exchanging"].includes(status)) {
+      const target = Number(state.targetLitres) || 0;
+      const filled = (Number(state.filledMl) || 0) / 1000;
+      const drained = (Number(state.drainedMl) || 0) / 1000;
+      const pct = target > 0 ? Math.min(100, Math.round((Math.max(filled, drained) / target) * 100)) : 0;
+      return `<div class="setting-card" style="border-left:4px solid var(--info-color,#1976d2);">
+        <strong>💧 ${this._escape(status.charAt(0).toUpperCase() + status.slice(1))} — ${pct}%</strong>
+        <p>Drained ${this._format(drained, 2)} L · filled ${this._format(filled, 2)} L of ${this._format(target, 1)} L target.</p>
+        <div class="button-row"><button class="secondary" data-action="awc-abort">Stop</button></div>
+      </div>`;
+    }
+    const last = state.lastRun ? this._formatActivityTime(state.lastRun) : "never";
+    const next = state.nextRun ? this._formatActivityTime(state.nextRun) : "—";
+    return `<div class="setting-card subtle-card">
+      <strong>✅ Idle</strong>
+      <p>Last change: ${this._escape(last)} · Next scheduled: ${this._escape(next)}</p>
+    </div>`;
+  }
+
+  _awcControls(state) {
+    const running = ["draining", "filling", "exchanging", "paused"].includes(state.status);
+    return `
+      <section class="setting-card">
+        <div class="section-head"><div><p class="eyebrow">Manual change</p><h3>Change water now</h3></div></div>
+        <div class="mini-grid">
+          <label>Amount<input type="number" min="0" step="0.1" data-awc-run-amount value="${this._config?.automaticWaterChange?.schedule?.amount || ""}" ${running ? "disabled" : ""}></label>
+          <label>Unit
+            <select data-awc-run-unit ${running ? "disabled" : ""}>
+              <option value="litres">litres</option>
+              <option value="percent">% of tank</option>
+            </select>
+          </label>
+          <label>Method
+            <select data-awc-run-method ${running ? "disabled" : ""}>
+              <option value="batch_simultaneous">Batch — simultaneous</option>
+              <option value="batch_sequential">Batch — drain then fill</option>
+              <option value="continuous">Continuous (one-shot)</option>
+            </select>
+          </label>
+        </div>
+        <div class="button-row">
+          <button class="primary" data-action="awc-run" ${running || this._busy ? "disabled" : ""}>Change now</button>
+        </div>
+      </section>`;
+  }
+
+  _awcMetrics(sum) {
+    if (!sum) return "";
+    const ni = sum.netImbalance || {};
+    const days = sum.daysOfFreshRemaining;
+    const daysTxt = days == null ? "—" : `${this._format(days, 1)} d`;
+    const niStatus = ni.status === "warning" ? "warning" : "ok";
+    const pumpNag = ["drain", "fill"].some((r) => sum.pumps?.[r]?.recalibrationDue);
+    return `
+      <div class="summary-grid">
+        ${this._missionSummaryCard("Fresh remaining", daysTxt, "days at current rate", days != null && days < 3 ? "warning" : "ok", "awc")}
+        ${this._missionSummaryCard("Weekly change", `${this._format(sum.weeklyPercentOfTank, 1)}%`, "of tank volume", "ok", "awc")}
+        ${this._missionSummaryCard("Net drift", `${this._format(ni.netL, 2)} L`, ni.status === "warning" ? "rebalance suggested" : "in balance", niStatus, "awc")}
+        ${this._missionSummaryCard("Calibration", pumpNag ? "Due" : "OK", pumpNag ? "recalibrate pumps" : "within window", pumpNag ? "warning" : "ok", "awc")}
+        ${this._missionSummaryCard("30-day dilution", `${this._format(sum.projectedRemovalPct30d, 0)}%`, "old water removed", "ok", "awc")}
+      </div>`;
+  }
+
+  _awcHistory(awc) {
+    const history = Array.isArray(awc.history) ? awc.history.slice(0, 8) : [];
+    if (!history.length) return "";
+    const rows = history.map((h) => `
+      <div class="manual-history-row">
+        <div>
+          <strong>${this._escape(this._formatActivityTime(h.completedAt))}</strong>
+          <small>${this._format(h.filledL, 1)} L${h.partial ? " · partial" : ""}${h.method ? " · " + this._escape(h.method.replace("_", " ")) : ""}</small>
+          ${h.notes ? `<p>${this._escape(h.notes)}</p>` : ""}
+        </div>
+      </div>`).join("");
+    return `
+      <section class="setting-card subtle-card">
+        <div class="section-head"><div><p class="eyebrow">History</p><h3>Recent changes</h3></div></div>
+        <div class="manual-history">${rows}</div>
+      </section>`;
+  }
+
+  _awcSetup(awc) {
+    const pumps = awc.pumps || {};
+    const res = awc.reservoirs || {};
+    const safety = awc.safety || {};
+    const ato = awc.ato || {};
+    const guards = awc.guards || {};
+    const sched = awc.schedule || {};
+    const days = Array.isArray(sched.days) ? sched.days : [];
+    const dayBtns = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `
+      <label class="chip"><input type="checkbox" data-scope="awc-schedule" data-field="scheduleDay" data-day="${d}" ${days.includes(d) ? "checked" : ""}> ${d}</label>`).join("");
+
+    const pumpRow = (role) => {
+      const p = pumps[role] || {};
+      return `
+        <div class="setting-card subtle-card">
+          <strong>${role === "drain" ? "Drain" : "Fill"} pump</strong>
+          <label>Switch entity ${this._awcEntitySelect("awc-pump", `data-id="${role}"`, "switchEntity", p.switchEntity || "", "switch")}</label>
+          <div class="mini-grid">
+            <label>Flow (ml/s)<input type="number" min="0" step="0.1" data-scope="awc-pump" data-id="${role}" data-field="mlPerS" value="${p.mlPerS || 0}"></label>
+            <label>Exchange factor<input type="number" min="0.1" max="10" step="0.01" data-scope="awc-pump" data-id="${role}" data-field="exchangeFactor" value="${p.exchangeFactor || 1}"></label>
+          </div>
+          <div class="mini-grid">
+            <label>Calibrate: ran (s)<input type="number" min="0" step="1" data-awc-cal="${role}-seconds"></label>
+            <label>measured (ml)<input type="number" min="0" step="1" data-awc-cal="${role}-ml"></label>
+          </div>
+          <div class="button-row"><button class="secondary" data-action="awc-calibrate" data-id="${role}">Calibrate ${role}</button></div>
+          <small>${p.mlPerS ? `Calibrated to ${p.mlPerS} ml/s${p.calibratedAt ? " · " + this._escape(this._formatActivityTime(p.calibratedAt)) : ""}` : "Not calibrated yet."}</small>
+        </div>`;
+    };
+
+    return `
+      <section class="setting-card" id="or-section-awc">
+        <div class="section-head"><div><p class="eyebrow">Setup</p><h3>Configuration &amp; calibration</h3></div>
+          <div class="button-row"><button class="primary" data-action="save">Save</button></div>
+        </div>
+
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="awc" data-field="enabled" ${awc.enabled ? "checked" : ""}>
+          <span><strong>Enable automatic water change</strong><small>Master switch for scheduling &amp; safety orchestration.</small></span>
+        </label>
+
+        <div class="mini-grid">
+          <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="awc" data-field="tankVolumeLitres" value="${awc.tankVolumeLitres || 0}"></label>
+          <label>Continuous tick (s)<input type="number" min="10" max="3600" step="5" data-scope="awc" data-field="continuousTickSeconds" value="${awc.continuousTickSeconds || 60}"></label>
+        </div>
+
+        <div class="section-head"><div><p class="eyebrow">Pumps (ESP32 peristaltic)</p></div></div>
+        ${pumpRow("drain")}
+        ${pumpRow("fill")}
+
+        <div class="section-head"><div><p class="eyebrow">Reservoirs</p></div></div>
+        <div class="setting-card subtle-card">
+          <div class="mini-grid">
+            <label>Fresh capacity (L)<input type="number" min="0" step="1" data-scope="awc-reservoir" data-id="fresh" data-field="capacityLitres" value="${res.fresh?.capacityLitres || 0}"></label>
+            <label>Fresh-empty sensor ${this._awcEntitySelect("awc-reservoir", `data-id="fresh"`, "emptyEntity", res.fresh?.emptyEntity || "", "binary_sensor")}</label>
+          </div>
+          <div class="mini-grid">
+            <label>Waste capacity (L)<input type="number" min="0" step="1" data-scope="awc-reservoir" data-id="waste" data-field="capacityLitres" value="${res.waste?.capacityLitres || 0}"></label>
+            <label>Waste-full sensor ${this._awcEntitySelect("awc-reservoir", `data-id="waste"`, "fullEntity", res.waste?.fullEntity || "", "binary_sensor")}</label>
+          </div>
+        </div>
+
+        <div class="section-head"><div><p class="eyebrow">Safety sensors &amp; thresholds</p></div></div>
+        <div class="setting-card subtle-card">
+          <div class="mini-grid">
+            <label>Display high-level cutoff ${this._awcEntitySelect("awc-safety", "", "highLevelEntity", safety.highLevelEntity || "", "binary_sensor")}</label>
+            <label>Leak sensor ${this._awcEntitySelect("awc-safety", "", "leakEntity", safety.leakEntity || "", "binary_sensor")}</label>
+          </div>
+          <div class="mini-grid">
+            <label>Max single change (% tank)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="maxSingleChangePercent" value="${safety.maxSingleChangePercent ?? 25}"></label>
+            <label>Drift warn (%)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="driftWarnPercent" value="${safety.driftWarnPercent ?? 10}"></label>
+            <label>Net-imbalance warn (L)<input type="number" min="0" step="0.1" data-scope="awc-safety" data-field="netImbalanceWarnLitres" value="${safety.netImbalanceWarnLitres ?? 2}"></label>
+          </div>
+          <label class="chip"><input type="checkbox" data-scope="awc-safety" data-field="autoTrimImbalance" ${safety.autoTrimImbalance ? "checked" : ""}> Auto-trim net imbalance</label>
+        </div>
+
+        <div class="section-head"><div><p class="eyebrow">ATO coordination &amp; run guards</p></div></div>
+        <div class="setting-card subtle-card">
+          <label class="chip"><input type="checkbox" data-scope="awc-ato" data-field="suspendDuringChange" ${ato.suspendDuringChange !== false ? "checked" : ""}> Suspend ATO during a change</label>
+          <label>Stabilization hold-off (min)<input type="number" min="0" max="1440" step="1" data-scope="awc-ato" data-field="stabilizationHoldoffMinutes" value="${ato.stabilizationHoldoffMinutes ?? 15}"></label>
+          <label class="chip"><input type="checkbox" data-scope="awc-guards" data-field="blockDuringFeed" ${guards.blockDuringFeed !== false ? "checked" : ""}> Never run during Feed mode</label>
+          <label class="chip"><input type="checkbox" data-scope="awc-guards" data-field="blockOnReturnPumpIssue" ${guards.blockOnReturnPumpIssue !== false ? "checked" : ""}> Pause on return-pump / ATO issue</label>
+          <label class="chip"><input type="checkbox" data-scope="awc-guards" data-field="quietHoursEnabled" ${guards.quietHoursEnabled ? "checked" : ""}> Restrict to quiet hours</label>
+          <div class="mini-grid">
+            <label>Quiet start<input type="time" data-scope="awc-guards" data-field="quietStart" value="${guards.quietStart || "01:00"}"></label>
+            <label>Quiet end<input type="time" data-scope="awc-guards" data-field="quietEnd" value="${guards.quietEnd || "05:00"}"></label>
+          </div>
+        </div>
+
+        <div class="section-head"><div><p class="eyebrow">Schedule</p></div></div>
+        <div class="setting-card subtle-card">
+          <label class="chip"><input type="checkbox" data-scope="awc-schedule" data-field="enabled" ${sched.enabled ? "checked" : ""}> Enable scheduled changes</label>
+          <div class="mini-grid">
+            <label>Method
+              <select data-scope="awc-schedule" data-field="method">
+                <option value="batch_simultaneous" ${sched.method === "batch_simultaneous" ? "selected" : ""}>Batch — simultaneous</option>
+                <option value="batch_sequential" ${sched.method === "batch_sequential" ? "selected" : ""}>Batch — drain then fill</option>
+                <option value="continuous" ${sched.method === "continuous" ? "selected" : ""}>Continuous trickle</option>
+              </select>
+            </label>
+            <label>Amount<input type="number" min="0" step="0.1" data-scope="awc-schedule" data-field="amount" value="${sched.amount || 0}"></label>
+            <label>Unit
+              <select data-scope="awc-schedule" data-field="amountUnit">
+                <option value="percent" ${sched.amountUnit === "percent" ? "selected" : ""}>% of tank</option>
+                <option value="litres" ${sched.amountUnit === "litres" ? "selected" : ""}>litres</option>
+              </select>
+            </label>
+            <label>Per
+              <select data-scope="awc-schedule" data-field="period">
+                <option value="day" ${sched.period === "day" ? "selected" : ""}>day</option>
+                <option value="week" ${sched.period === "week" ? "selected" : ""}>week</option>
+              </select>
+            </label>
+          </div>
+          ${sched.method === "continuous" ? `
+            <div class="mini-grid">
+              <label>Window start<input type="time" data-scope="awc-schedule" data-field="windowStart" value="${sched.windowStart || "01:00"}"></label>
+              <label>Window end<input type="time" data-scope="awc-schedule" data-field="windowEnd" value="${sched.windowEnd || "05:00"}"></label>
+            </div>` : `
+            <div class="mini-grid">
+              <label>Run at<input type="time" data-scope="awc-schedule" data-field="startTime" value="${(Array.isArray(sched.times) && sched.times[0]) || "02:00"}"></label>
+            </div>
+            <div class="chip-row" style="display:flex;gap:8px;flex-wrap:wrap;">${dayBtns}</div>
+            <small>Leave all days unticked to run every day.</small>`}
+        </div>
+      </section>`;
   }
 
   // --- Live cameras ------------------------------------------------------

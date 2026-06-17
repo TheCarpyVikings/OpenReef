@@ -42,6 +42,27 @@ from .const import (
     CAPTURE_MIN_DURATION,
     CAPTURES_DIR_NAME,
     CAPTURES_STATIC_URL,
+    AWC_AMOUNT_UNITS,
+    AWC_DEFAULT_DRIFT_WARN_PCT,
+    AWC_DEFAULT_HOLDOFF_MINUTES,
+    AWC_DEFAULT_MAX_SINGLE_CHANGE_PCT,
+    AWC_DEFAULT_NET_IMBALANCE_L,
+    AWC_DEFAULT_RUNTIME_MARGIN,
+    AWC_HISTORY_MAX,
+    AWC_HOLDOFF_MAX_MINUTES,
+    AWC_METHODS,
+    AWC_PERIODS,
+    AWC_PUMP_MAX_ML_PER_S,
+    AWC_PUMP_ROLES,
+    AWC_RESERVOIR_KINDS,
+    AWC_RESERVOIR_MAX_L,
+    AWC_RUNTIME_CEILING_SECONDS,
+    AWC_RUNTIME_FLOOR_SECONDS,
+    AWC_STATUSES,
+    AWC_TANK_MAX_L,
+    AWC_TICK_DEFAULT_SECONDS,
+    AWC_TICK_MAX_SECONDS,
+    AWC_TICK_MIN_SECONDS,
     CONF_SETTINGS,
     DEFAULT_CORE_CONFIG,
     DEFAULT_TANK_PROFILE,
@@ -104,6 +125,7 @@ from .const import (
     TIMELAPSE_MIN_CADENCE,
     TIMELAPSE_SUBDIR,
 )
+from . import awc as awc_engine
 from . import icp
 from . import spawning
 
@@ -141,6 +163,12 @@ TIMELAPSE_UNSUB = "timelapse_unsub"
 TIMELAPSE_LAST = "timelapse_last"
 FEEDWATCH_UNSUB = "feedwatch_unsub"
 FEEDWATCH_SESSION = "feedwatch_session"
+# Automatic Water Change: AWC_UNSUB is the single in-flight leg/tick timer (re-armed
+# each leg, like MODE_TIMER_UNSUB); AWC_ATO_RESTORE_UNSUB is the post-change ATO
+# stabilization hold-off; AWC_SCHEDULE_UNSUB is the periodic scheduled-change tick.
+AWC_UNSUB = "awc_unsub"
+AWC_ATO_RESTORE_UNSUB = "awc_ato_restore_unsub"
+AWC_SCHEDULE_UNSUB = "awc_schedule_unsub"
 # Maps an OpenReef event type -> the user-configurable trigger toggle that gates it.
 CAPTURE_TRIGGER_FIELD = {
     "critical_alert": "criticalAlerts",
@@ -519,6 +547,168 @@ def _legacy_to_core_config(settings: dict[str, Any]) -> dict[str, Any]:
         sensor.get("entity_id") for sensor in core["sensors"].values()
     )
     return core
+
+
+_AWC_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _awc_str(value: Any, maxlen: int) -> str:
+    """Preserve free text / ISO timestamps (unlike _normalise_text, which slugs)."""
+    if value is None:
+        return ""
+    return str(value).strip()[:maxlen]
+
+
+def _awc_num(value: Any, default: float, lo: float, hi: float | None = None) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        out = float(default)
+    if out != out or out in (float("inf"), float("-inf")):
+        out = float(default)
+    out = max(lo, out)
+    if hi is not None:
+        out = min(out, hi)
+    return float(out)  # max/min can return an int bound; keep the type stable
+
+
+def _normalise_awc_config(config: dict[str, Any]) -> None:
+    """Clamp/validate the Automatic Water Change section in place. Volume-primary AWC:
+    calibration, reservoirs, layered safety, ATO coordination, run guards, the flexible
+    schedule, and the persisted runtime state (so an in-flight change survives a restart)."""
+    defaults = DEFAULT_CORE_CONFIG["automaticWaterChange"]
+    awc_cfg = config.get("automaticWaterChange")
+    if not isinstance(awc_cfg, dict):
+        config["automaticWaterChange"] = deepcopy(defaults)
+        return
+    config["automaticWaterChange"] = awc_cfg
+
+    awc_cfg["enabled"] = bool(awc_cfg.get("enabled", False))
+    awc_cfg["tankVolumeLitres"] = round(_awc_num(awc_cfg.get("tankVolumeLitres"), 0, 0, AWC_TANK_MAX_L), 2)
+    awc_cfg["continuousTickSeconds"] = int(
+        _awc_num(awc_cfg.get("continuousTickSeconds"), AWC_TICK_DEFAULT_SECONDS,
+                 AWC_TICK_MIN_SECONDS, AWC_TICK_MAX_SECONDS)
+    )
+
+    raw_pumps = awc_cfg.get("pumps") if isinstance(awc_cfg.get("pumps"), dict) else {}
+    pumps: dict[str, Any] = {}
+    for role in AWC_PUMP_ROLES:
+        raw = raw_pumps.get(role) if isinstance(raw_pumps.get(role), dict) else {}
+        # exchangeFactor: a non-positive / junk value means "no correction" (1.0),
+        # never a runaway multiplier.
+        factor = _awc_num(raw.get("exchangeFactor"), 1.0, 0.0, 10.0)
+        pumps[role] = {
+            "switchEntity": _normalise_entity_id(raw.get("switchEntity")),
+            "mlPerS": round(_awc_num(raw.get("mlPerS"), 0, 0, AWC_PUMP_MAX_ML_PER_S), 3),
+            "interceptMl": round(_awc_num(raw.get("interceptMl"), 0, -100000, 100000), 3),
+            "exchangeFactor": round(factor if factor > 0 else 1.0, 4),
+            "calibratedAt": _awc_str(raw.get("calibratedAt"), 40),
+            "tubingInstalledAt": _awc_str(raw.get("tubingInstalledAt"), 40),
+        }
+    awc_cfg["pumps"] = pumps
+
+    raw_res = awc_cfg.get("reservoirs") if isinstance(awc_cfg.get("reservoirs"), dict) else {}
+    fresh = raw_res.get("fresh") if isinstance(raw_res.get("fresh"), dict) else {}
+    waste = raw_res.get("waste") if isinstance(raw_res.get("waste"), dict) else {}
+    awc_cfg["reservoirs"] = {
+        "fresh": {
+            "capacityLitres": round(_awc_num(fresh.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
+            "remainingMl": round(_awc_num(fresh.get("remainingMl"), 0, 0, AWC_RESERVOIR_MAX_L * 1000), 1),
+            "emptyEntity": _normalise_entity_id(fresh.get("emptyEntity")),
+        },
+        "waste": {
+            "capacityLitres": round(_awc_num(waste.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
+            "filledMl": round(_awc_num(waste.get("filledMl"), 0, 0, AWC_RESERVOIR_MAX_L * 1000), 1),
+            "fullEntity": _normalise_entity_id(waste.get("fullEntity")),
+        },
+    }
+
+    raw_safety = awc_cfg.get("safety") if isinstance(awc_cfg.get("safety"), dict) else {}
+    warn_mult = round(_awc_num(raw_safety.get("anomalyWarnMult"), 2.0, 1.0, 100.0), 2)
+    abort_mult = round(_awc_num(raw_safety.get("anomalyAbortMult"), 3.0, 1.0, 100.0), 2)
+    awc_cfg["safety"] = {
+        "highLevelEntity": _normalise_entity_id(raw_safety.get("highLevelEntity")),
+        "leakEntity": _normalise_entity_id(raw_safety.get("leakEntity")),
+        "maxRuntimeSeconds": int(_awc_num(raw_safety.get("maxRuntimeSeconds"), 0, 0, AWC_RUNTIME_CEILING_SECONDS)),
+        "maxRuntimeMargin": round(_awc_num(raw_safety.get("maxRuntimeMargin"), AWC_DEFAULT_RUNTIME_MARGIN, 1.0, 10.0), 2),
+        "anomalyWarnMult": warn_mult,
+        "anomalyAbortMult": max(abort_mult, warn_mult),  # abort can never trip before warn
+        "maxSingleChangePercent": round(_awc_num(raw_safety.get("maxSingleChangePercent"), AWC_DEFAULT_MAX_SINGLE_CHANGE_PCT, 1, 100), 1),
+        "driftWarnPercent": round(_awc_num(raw_safety.get("driftWarnPercent"), AWC_DEFAULT_DRIFT_WARN_PCT, 1, 100), 1),
+        "netImbalanceWarnLitres": round(_awc_num(raw_safety.get("netImbalanceWarnLitres"), AWC_DEFAULT_NET_IMBALANCE_L, 0, 1000), 2),
+        "autoTrimImbalance": bool(raw_safety.get("autoTrimImbalance", False)),
+    }
+
+    raw_ato = awc_cfg.get("ato") if isinstance(awc_cfg.get("ato"), dict) else {}
+    awc_cfg["ato"] = {
+        "suspendDuringChange": bool(raw_ato.get("suspendDuringChange", True)),
+        "stabilizationHoldoffMinutes": int(_awc_num(raw_ato.get("stabilizationHoldoffMinutes"), AWC_DEFAULT_HOLDOFF_MINUTES, 0, AWC_HOLDOFF_MAX_MINUTES)),
+    }
+
+    raw_guards = awc_cfg.get("guards") if isinstance(awc_cfg.get("guards"), dict) else {}
+    awc_cfg["guards"] = {
+        "quietHoursEnabled": bool(raw_guards.get("quietHoursEnabled", False)),
+        "quietStart": _normalise_schedule_time(raw_guards.get("quietStart")) or "01:00",
+        "quietEnd": _normalise_schedule_time(raw_guards.get("quietEnd")) or "05:00",
+        "blockDuringFeed": bool(raw_guards.get("blockDuringFeed", True)),
+        "blockOnReturnPumpIssue": bool(raw_guards.get("blockOnReturnPumpIssue", True)),
+    }
+
+    raw_sched = awc_cfg.get("schedule") if isinstance(awc_cfg.get("schedule"), dict) else {}
+    method = str(raw_sched.get("method", "batch_simultaneous"))
+    unit = str(raw_sched.get("amountUnit", "percent")).lower()
+    period = str(raw_sched.get("period", "week")).lower()
+    awc_cfg["schedule"] = {
+        "enabled": bool(raw_sched.get("enabled", False)),
+        "method": method if method in AWC_METHODS else "batch_simultaneous",
+        "amountUnit": unit if unit in AWC_AMOUNT_UNITS else "percent",
+        "amount": round(_awc_num(raw_sched.get("amount"), 0, 0, 100000), 2),
+        "period": period if period in AWC_PERIODS else "week",
+        "times": _normalise_schedule_times(raw_sched.get("times"), "02:00"),
+        "days": [d for d in (raw_sched.get("days") or []) if d in _AWC_WEEKDAYS],
+        "windowStart": _normalise_schedule_time(raw_sched.get("windowStart")) or "01:00",
+        "windowEnd": _normalise_schedule_time(raw_sched.get("windowEnd")) or "05:00",
+    }
+
+    raw_state = awc_cfg.get("state") if isinstance(awc_cfg.get("state"), dict) else {}
+    status = str(raw_state.get("status", "idle"))
+    state_method = str(raw_state.get("method", ""))
+    awc_cfg["state"] = {
+        "status": status if status in AWC_STATUSES else "idle",
+        "fault": _awc_str(raw_state.get("fault"), 200),
+        "faultSince": _awc_str(raw_state.get("faultSince"), 40),
+        "method": state_method if state_method in AWC_METHODS else "",
+        "startedAt": _awc_str(raw_state.get("startedAt"), 40),
+        "lastRun": _awc_str(raw_state.get("lastRun"), 40),
+        "nextRun": _awc_str(raw_state.get("nextRun"), 40),
+        "targetLitres": round(_awc_num(raw_state.get("targetLitres"), 0, 0, AWC_TANK_MAX_L), 3),
+        "drainedMl": round(_awc_num(raw_state.get("drainedMl"), 0, 0, 1e9), 1),
+        "filledMl": round(_awc_num(raw_state.get("filledMl"), 0, 0, 1e9), 1),
+        "legStartedAt": _awc_str(raw_state.get("legStartedAt"), 40),
+        "legEndsAt": _awc_str(raw_state.get("legEndsAt"), 40),
+        "pausedReason": _awc_str(raw_state.get("pausedReason"), 200),
+        "atoSuspendedUntil": _awc_str(raw_state.get("atoSuspendedUntil"), 40),
+    }
+
+    raw_history = awc_cfg.get("history")
+    history: list[dict[str, Any]] = []
+    if isinstance(raw_history, list):
+        for item in raw_history[:AWC_HISTORY_MAX]:
+            if not isinstance(item, dict):
+                continue
+            h_method = str(item.get("method", ""))
+            history.append({
+                "completedAt": _awc_str(item.get("completedAt"), 40),
+                "drainedL": round(_awc_num(item.get("drainedL"), 0, 0, AWC_RESERVOIR_MAX_L), 3),
+                "filledL": round(_awc_num(item.get("filledL"), 0, 0, AWC_RESERVOIR_MAX_L), 3),
+                "method": h_method if h_method in AWC_METHODS else "",
+                "partial": bool(item.get("partial", False)),
+                "notes": _awc_str(item.get("notes"), 200),
+            })
+    awc_cfg["history"] = history
+    awc_cfg["todayLitres"] = round(_awc_num(awc_cfg.get("todayLitres"), 0, 0, 1e6), 3)
+    awc_cfg["weekLitres"] = round(_awc_num(awc_cfg.get("weekLitres"), 0, 0, 1e6), 3)
+    awc_cfg["monthLitres"] = round(_awc_num(awc_cfg.get("monthLitres"), 0, 0, 1e6), 3)
 
 
 def _normalise_core_config(settings: Any) -> dict[str, Any]:
@@ -1711,6 +1901,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             else sp_defaults["tempProbe"]
         )
         spawning_cfg["acknowledgedAdvisory"] = bool(spawning_cfg.get("acknowledgedAdvisory", False))
+
+    _normalise_awc_config(config)
 
     return config
 
@@ -3803,6 +3995,8 @@ def _equipment_safety_block_reason(
         desired_state == "on"
         and _equipment_profile_for_config(equipment_id, mapped) == "ato"
     ):
+        if _awc_ato_suspended(config):
+            return "ATO held: an automatic water change is in progress"
         return _ato_return_pump_block_reason(hass, config)
     return ""
 
@@ -3865,6 +4059,8 @@ async def _async_set_ato_duty_cycle_state(
 
     if target_state == "on":
         block_reason = _ato_return_pump_block_reason(hass, latest_config)
+        if not block_reason and _awc_ato_suspended(latest_config):
+            block_reason = "automatic water change in progress"
         if block_reason:
             interlocks = latest_config.setdefault("interlocks", {})
             last_block = (
@@ -4129,6 +4325,8 @@ async def _async_save_config(
     await _async_schedule_maintenance_reminders(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
     await _async_schedule_watchdog(hass, entry, normalised)
+    await _async_schedule_awc(hass, entry, normalised)
+    await _async_schedule_awc_scheduler(hass, entry, normalised)
     # Event-triggered camera capture on a fresh ok->warning/critical transition.
     for transition in transitions:
         if transition.get("state") == "critical":
@@ -4679,6 +4877,592 @@ async def _async_schedule_max_off_timers(
         return
     for equipment_id, state in cap_timers.items():
         await _async_arm_max_off_timer(hass, entry, equipment_id, state)
+
+
+# --------------------------------------------------------------------------- #
+# Automatic Water Change — orchestration (state machine + actuation). The pure
+# decisions live in awc.py; this layer reads live HA state, drives the switches,
+# persists state, and arms the single in-flight leg timer (re-armed each leg via
+# _async_schedule_awc from _async_save_config, mirroring the per-equipment timers).
+# --------------------------------------------------------------------------- #
+_AWC_RUNNING_STATES = ("draining", "filling", "exchanging")
+_AWC_ON_STATES = {"on", "true", "1", "detected", "wet", "open", "problem"}
+
+
+def _awc_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    awc = config.get("automaticWaterChange")
+    return awc if isinstance(awc, dict) else {}
+
+
+def _awc_binary_on(hass: HomeAssistant, entity_id: str | None) -> bool:
+    """True when a configured binary safety sensor reads active. Unavailable/unset →
+    False (the firmware owns real-time guarding; the backend won't act on a flaky read)."""
+    if not entity_id:
+        return False
+    state = hass.states.get(entity_id)
+    if state is None or state.state in UNAVAILABLE_STATES:
+        return False
+    return str(state.state).lower() in _AWC_ON_STATES
+
+
+def _awc_live_state(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
+    awc = _awc_cfg(config)
+    safety = awc.get("safety", {}) if isinstance(awc.get("safety"), dict) else {}
+    reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
+    fresh = reservoirs.get("fresh", {}) if isinstance(reservoirs.get("fresh"), dict) else {}
+    waste = reservoirs.get("waste", {}) if isinstance(reservoirs.get("waste"), dict) else {}
+    mode = config.get("mode", {})
+    return {
+        "leak": _awc_binary_on(hass, safety.get("leakEntity")),
+        "highLevel": _awc_binary_on(hass, safety.get("highLevelEntity")),
+        "freshEmpty": _awc_binary_on(hass, fresh.get("emptyEntity")),
+        "wasteFull": _awc_binary_on(hass, waste.get("fullEntity")),
+        "returnPumpIssue": bool(_return_pump_dependency_issues(hass, config)),
+        "inFeedMode": isinstance(mode, dict) and mode.get("active") == "feed",
+    }
+
+
+def _awc_ato_suspended(config: dict[str, Any]) -> bool:
+    """ATO is held while a change is running/paused, while a fault is latched, and for
+    the post-change stabilization hold-off (prevents the GHL-style salinity crash)."""
+    awc = _awc_cfg(config)
+    state = awc.get("state", {}) if isinstance(awc.get("state"), dict) else {}
+    if not awc.get("ato", {}).get("suspendDuringChange", True):
+        return False
+    if state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
+        return True
+    until = _parse_datetime(state.get("atoSuspendedUntil"))
+    return until is not None and until > datetime.now(timezone.utc)
+
+
+async def _async_awc_set_pump(
+    hass: HomeAssistant, config: dict[str, Any], role: str, on: bool, context: Any
+) -> None:
+    pump = _awc_cfg(config).get("pumps", {}).get(role, {})
+    entity = _normalise_entity_id(pump.get("switchEntity")) if isinstance(pump, dict) else ""
+    if not entity:
+        return
+    await hass.services.async_call(
+        "switch", "turn_on" if on else "turn_off",
+        {ATTR_ENTITY_ID: entity}, blocking=True, context=context,
+    )
+
+
+async def _async_awc_stop_pumps(
+    hass: HomeAssistant, config: dict[str, Any], roles: Iterable[str], context: Any
+) -> None:
+    for role in roles:
+        await _async_awc_set_pump(hass, config, role, False, context)
+
+
+async def _async_awc_kill_equipment_profile(
+    hass: HomeAssistant, config: dict[str, Any], profile: str, context: Any
+) -> None:
+    for equipment_id, mapped in _armed_equipment_by_profile(config, profile):
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        if not switch_entity:
+            continue
+        state = hass.states.get(switch_entity)
+        if state is not None and state.state == "off":
+            continue
+        await hass.services.async_call(
+            "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity},
+            blocking=True, context=context,
+        )
+
+
+def _clear_awc_timer(hass: HomeAssistant) -> None:
+    store = hass.data.setdefault(DOMAIN, {})
+    unsub = store.pop(AWC_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_awc_begin_leg(
+    hass: HomeAssistant, config: dict[str, Any], method: str, leg: dict[str, Any],
+    now: datetime, context: Any,
+) -> None:
+    """Turn on the leg's pumps and stamp the leg timing into state. The caller
+    persists (which re-arms the leg timer via _async_schedule_awc)."""
+    acfg = _awc_cfg(config)
+    state = acfg["state"]
+    pumps = leg["pumps"]
+    slice_l = float(leg["sliceMl"]) / 1000.0
+    expected = awc_engine.leg_runtime_s(slice_l, acfg, pumps)
+    for role in pumps:
+        await _async_awc_set_pump(hass, config, role, True, context)
+    if "drain" in pumps and "fill" in pumps:
+        state["status"] = "exchanging"
+    elif "drain" in pumps:
+        state["status"] = "draining"
+    else:
+        state["status"] = "filling"
+    state["legStartedAt"] = now.isoformat()
+    state["legEndsAt"] = (now + timedelta(seconds=max(1.0, expected))).isoformat()
+    state["pausedReason"] = ""
+
+
+async def _async_awc_suspend_ato(hass: HomeAssistant, config: dict[str, Any], context: Any) -> None:
+    """Actively turn off any armed ATO equipment; the safety-block gate then keeps it
+    off for the whole change + hold-off."""
+    await _async_awc_kill_equipment_profile(hass, config, "ato", context)
+
+
+async def _async_awc_start(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    target_litres: float, method: str | None, manual: bool, context: Any,
+) -> tuple[bool, list[dict[str, str]]]:
+    """Preflight a change and begin its first leg. Returns (started, blocking_reasons)."""
+    acfg = _awc_cfg(config)
+    state = acfg["state"]
+    if state.get("status") in _AWC_RUNNING_STATES:
+        return False, [{"code": "busy", "severity": "block", "message": "A water change is already running"}]
+    method = method if method in AWC_METHODS else acfg.get("schedule", {}).get("method", "batch_simultaneous")
+    target = round(float(target_litres or 0), 3)
+
+    # Local time is only needed for the quiet-hours guard; compute it lazily.
+    now_min = 0
+    if acfg.get("guards", {}).get("quietHoursEnabled"):
+        local_now = dt_util.now()
+        now_min = local_now.hour * 60 + local_now.minute
+    live = _awc_live_state(hass, config)
+    reasons = awc_engine.start_guard_reasons(acfg, live, now_min, manual)
+    if target <= 0:
+        reasons.append({"code": "no_volume", "severity": "block", "message": "Enter a volume to change"})
+    if awc_engine.exceeds_single_change_cap(acfg, target):
+        pct = acfg.get("safety", {}).get("maxSingleChangePercent", 25)
+        reasons.append({"code": "max_single_change", "severity": "block",
+                        "message": f"Exceeds the {pct}% single-change cap"})
+    if reasons:
+        return False, reasons
+
+    now = datetime.now(timezone.utc)
+    if acfg.get("ato", {}).get("suspendDuringChange", True):
+        await _async_awc_suspend_ato(hass, config, context)
+        state["atoSuspendedUntil"] = ""  # the "running" status covers the suspension
+    state["method"] = method
+    state["targetLitres"] = target
+    state["drainedMl"] = 0
+    state["filledMl"] = 0
+    state["startedAt"] = now.isoformat()
+    state["fault"] = ""
+    state["faultSince"] = ""
+    state["pausedReason"] = ""
+
+    target_ml = target * 1000.0
+    leg = awc_engine.plan_leg(method, 0, 0, target_ml, target_ml)
+    if leg is None:
+        return True, []
+    await _async_awc_begin_leg(hass, config, method, leg, now, context)
+    _append_activity(config, f"Water change started: {target:.1f} L ({method.replace('_', ' ')})", "control")
+    await _async_save_config(hass, entry, config)
+    return True, []
+
+
+async def _async_awc_pause(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    reason: str, context: Any,
+) -> None:
+    await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
+    state = _awc_cfg(config)["state"]
+    state["status"] = "paused"
+    state["pausedReason"] = reason
+    state["legStartedAt"] = ""
+    state["legEndsAt"] = ""
+    _append_activity(config, f"Water change paused: {reason}", "warning")
+    await _async_send_mode_notification(
+        hass, config, "openreef_awc_paused", "Water change paused", reason,
+    )
+    await _async_save_config(hass, entry, config)
+
+
+async def _async_awc_abort(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    reason: str, latch: bool, master_kill: bool, context: Any,
+) -> None:
+    await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
+    if master_kill:
+        await _async_awc_kill_equipment_profile(hass, config, "return_pump", context)
+    awc = _awc_cfg(config)
+    state = awc["state"]
+    now = datetime.now(timezone.utc)
+    drained_l = state.get("drainedMl", 0) / 1000.0
+    filled_l = state.get("filledMl", 0) / 1000.0
+    if drained_l > 0 or filled_l > 0:
+        _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), True, reason)
+    if latch:
+        state["status"] = "fault"
+        state["fault"] = reason
+        state["faultSince"] = now.isoformat()
+    else:
+        state["status"] = "idle"
+        state["fault"] = ""
+        state["atoSuspendedUntil"] = ""  # user abort restores the ATO
+    state["legStartedAt"] = ""
+    state["legEndsAt"] = ""
+    state["drainedMl"] = 0
+    state["filledMl"] = 0
+    state["targetLitres"] = 0
+    _append_activity(config, f"Water change {'FAULT' if latch else 'aborted'}: {reason}",
+                     "warning" if latch else "control")
+    await _async_send_mode_notification(
+        hass, config, "openreef_awc_fault",
+        "Water change fault" if latch else "Water change aborted", reason,
+    )
+    await _async_save_config(hass, entry, config)
+
+
+def _awc_record_history(
+    awc: dict[str, Any], now: datetime, drained_l: float, filled_l: float,
+    method: str, partial: bool, notes: str,
+) -> None:
+    history = awc.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        awc["history"] = history
+    history.insert(0, {
+        "completedAt": now.isoformat(),
+        "drainedL": round(drained_l, 3),
+        "filledL": round(filled_l, 3),
+        "method": method if method in AWC_METHODS else "",
+        "partial": bool(partial),
+        "notes": notes[:200],
+    })
+    awc["history"] = history[:AWC_HISTORY_MAX]
+
+
+async def _async_awc_finalize(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
+) -> None:
+    await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
+    awc = _awc_cfg(config)
+    state = awc["state"]
+    now = datetime.now(timezone.utc)
+    drained_l = state.get("drainedMl", 0) / 1000.0
+    filled_l = state.get("filledMl", 0) / 1000.0
+    _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), False, "")
+    awc["todayLitres"] = round(awc.get("todayLitres", 0) + filled_l, 3)
+    awc["weekLitres"] = round(awc.get("weekLitres", 0) + filled_l, 3)
+    awc["monthLitres"] = round(awc.get("monthLitres", 0) + filled_l, 3)
+    holdoff = awc.get("ato", {}).get("stabilizationHoldoffMinutes", AWC_DEFAULT_HOLDOFF_MINUTES)
+    if awc.get("ato", {}).get("suspendDuringChange", True) and holdoff > 0:
+        state["atoSuspendedUntil"] = (now + timedelta(minutes=holdoff)).isoformat()
+    else:
+        state["atoSuspendedUntil"] = ""
+    state["status"] = "idle"
+    state["lastRun"] = now.isoformat()
+    state["legStartedAt"] = ""
+    state["legEndsAt"] = ""
+    state["drainedMl"] = 0
+    state["filledMl"] = 0
+    state["targetLitres"] = 0
+    state["method"] = ""
+    state["pausedReason"] = ""
+    _append_activity(config, f"Water change complete: {filled_l:.1f} L exchanged", "control")
+    await _async_save_config(hass, entry, config)
+    await _async_arm_awc_ato_restore(hass, entry, config)
+
+
+async def _async_awc_leg_complete(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
+) -> None:
+    """A leg timer fired: stop the leg, account its volume, check safety, then begin the
+    next leg / pause / fault / finalize."""
+    awc = _awc_cfg(config)
+    state = awc["state"]
+    if state.get("status") not in _AWC_RUNNING_STATES:
+        return
+    method = state.get("method") or awc.get("schedule", {}).get("method", "batch_simultaneous")
+    target_ml = state.get("targetLitres", 0) * 1000.0
+    drained = state.get("drainedMl", 0)
+    filled = state.get("filledMl", 0)
+
+    leg = awc_engine.plan_leg(method, drained, filled, target_ml, target_ml)
+    if leg is None:
+        await _async_awc_finalize(hass, entry, config, context)
+        return
+    pumps = leg["pumps"]
+    await _async_awc_stop_pumps(hass, config, pumps, context)
+
+    # Anomaly: did this leg run far longer than its calibrated runtime?
+    slice_l = float(leg["sliceMl"]) / 1000.0
+    expected = awc_engine.leg_runtime_s(slice_l, awc, pumps)
+    started = _parse_datetime(state.get("legStartedAt"))
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds() if started else expected
+    safety = awc.get("safety", {})
+    verdict = awc_engine.anomaly_verdict(elapsed, expected,
+                                         safety.get("anomalyWarnMult", 2.0),
+                                         safety.get("anomalyAbortMult", 3.0))
+    if verdict == "abort":
+        await _async_awc_abort(
+            hass, entry, config,
+            f"Runtime anomaly on {'/'.join(pumps)} leg ({elapsed:.0f}s vs {expected:.0f}s expected)",
+            True, False, context,
+        )
+        return
+
+    # Account the leg's volume against progress + the dead-reckoned reservoirs.
+    slice_ml = float(leg["sliceMl"])
+    reservoirs = awc.get("reservoirs", {})
+    if "drain" in pumps:
+        state["drainedMl"] = drained + slice_ml
+        waste = reservoirs.get("waste", {})
+        cap_ml = waste.get("capacityLitres", 0) * 1000.0
+        waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + slice_ml) if cap_ml else waste.get("filledMl", 0) + slice_ml
+    if "fill" in pumps:
+        state["filledMl"] = filled + slice_ml
+        fresh = reservoirs.get("fresh", {})
+        fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - slice_ml)
+
+    next_leg = awc_engine.plan_leg(method, state["drainedMl"], state["filledMl"], target_ml, target_ml)
+    if next_leg is None:
+        await _async_awc_finalize(hass, entry, config, context)
+        return
+
+    needs_drain = "drain" in next_leg["pumps"]
+    needs_fill = "fill" in next_leg["pumps"]
+    live = _awc_live_state(hass, config)
+    verdict = awc_engine.in_run_safety(awc, live, needs_drain, needs_fill)
+    if verdict["action"] == "fault":
+        await _async_awc_abort(hass, entry, config, verdict["reason"], True, verdict.get("masterKill", False), context)
+        return
+    if verdict["action"] == "pause":
+        await _async_awc_pause(hass, entry, config, verdict["reason"], context)
+        return
+
+    await _async_awc_begin_leg(hass, config, method, next_leg, datetime.now(timezone.utc), context)
+    await _async_save_config(hass, entry, config)
+
+
+async def _async_arm_awc_timer(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, run_at: datetime,
+) -> None:
+    now = datetime.now(timezone.utc)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+    _clear_awc_timer(hass)
+
+    async def _handle(_now: datetime) -> None:
+        hass.data.setdefault(DOMAIN, {}).pop(AWC_UNSUB, None)
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        config = _config_from_entry(latest_entry)
+        await _async_awc_leg_complete(hass, latest_entry, config, None)
+
+    hass.data.setdefault(DOMAIN, {})[AWC_UNSUB] = async_track_point_in_time(hass, _handle, run_at)
+
+
+async def _async_schedule_awc(
+    hass: HomeAssistant, entry: OpenReefConfigEntry | None, config: dict[str, Any] | None = None,
+) -> None:
+    """Clear and (if a leg is in flight) re-arm the single AWC leg timer. Called from
+    _async_save_config and startup. Pumps are driven at leg-begin, not here."""
+    _clear_awc_timer(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    awc = _awc_cfg(config)
+    state = awc.get("state", {})
+    if not isinstance(state, dict) or state.get("status") not in _AWC_RUNNING_STATES:
+        return
+    ends = _parse_datetime(state.get("legEndsAt"))
+    if ends is None:
+        return
+    await _async_arm_awc_timer(hass, entry, ends)
+
+
+async def _async_arm_awc_ato_restore(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+) -> None:
+    """Arm the post-change ATO stabilization hold-off expiry: clears the suspension so
+    the ATO resumes normal control."""
+    store = hass.data.setdefault(DOMAIN, {})
+    old = store.pop(AWC_ATO_RESTORE_UNSUB, None)
+    if old is not None:
+        old()
+    until = _parse_datetime(_awc_cfg(config).get("state", {}).get("atoSuspendedUntil"))
+    if until is None:
+        return
+    now = datetime.now(timezone.utc)
+    run_at = until if until > now else now + timedelta(seconds=1)
+
+    async def _handle(_now: datetime) -> None:
+        hass.data.setdefault(DOMAIN, {}).pop(AWC_ATO_RESTORE_UNSUB, None)
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        latest_config = _config_from_entry(latest_entry)
+        state = _awc_cfg(latest_config).get("state", {})
+        if state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
+            return
+        u = _parse_datetime(state.get("atoSuspendedUntil"))
+        if u is not None and u > datetime.now(timezone.utc):
+            return
+        state["atoSuspendedUntil"] = ""
+        _append_activity(latest_config, "ATO resumed after water-change stabilization hold-off", "control")
+        await _async_save_config(hass, latest_entry, latest_config)
+
+    store[AWC_ATO_RESTORE_UNSUB] = async_track_point_in_time(hass, _handle, run_at)
+
+
+async def _async_awc_try_resume(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
+) -> bool:
+    """Attempt to resume a paused change. Returns True if it resumed/completed."""
+    awc = _awc_cfg(config)
+    state = awc["state"]
+    if state.get("status") != "paused":
+        return False
+    method = state.get("method") or awc.get("schedule", {}).get("method", "batch_simultaneous")
+    target_ml = state.get("targetLitres", 0) * 1000.0
+    leg = awc_engine.plan_leg(method, state.get("drainedMl", 0), state.get("filledMl", 0), target_ml, target_ml)
+    if leg is None:
+        await _async_awc_finalize(hass, entry, config, context)
+        return True
+    live = _awc_live_state(hass, config)
+    verdict = awc_engine.in_run_safety(awc, live, "drain" in leg["pumps"], "fill" in leg["pumps"])
+    if verdict["action"] == "fault":
+        await _async_awc_abort(hass, entry, config, verdict["reason"], True, verdict.get("masterKill", False), context)
+        return False
+    if verdict["action"] == "pause":
+        if verdict["reason"] != state.get("pausedReason"):
+            state["pausedReason"] = verdict["reason"]
+            await _async_save_config(hass, entry, config)
+        return False
+    await _async_awc_begin_leg(hass, config, method, leg, datetime.now(timezone.utc), context)
+    _append_activity(config, "Water change resumed", "control")
+    await _async_save_config(hass, entry, config)
+    return True
+
+
+async def _async_awc_resume_on_startup(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+) -> None:
+    """On startup, recover an interrupted change. A running leg is re-begun from
+    scratch (resume-to-balance from the persisted drained/filled); a paused change is
+    re-evaluated for resume."""
+    awc = _awc_cfg(config)
+    state = awc.get("state", {})
+    status = state.get("status")
+    if status in _AWC_RUNNING_STATES:
+        method = state.get("method") or awc.get("schedule", {}).get("method", "batch_simultaneous")
+        target_ml = state.get("targetLitres", 0) * 1000.0
+        leg = awc_engine.plan_leg(method, state.get("drainedMl", 0), state.get("filledMl", 0), target_ml, target_ml)
+        if leg is None:
+            await _async_awc_finalize(hass, entry, config, None)
+            return
+        live = _awc_live_state(hass, config)
+        verdict = awc_engine.in_run_safety(awc, live, "drain" in leg["pumps"], "fill" in leg["pumps"])
+        if verdict["action"] == "fault":
+            await _async_awc_abort(hass, entry, config, verdict["reason"], True, verdict.get("masterKill", False), None)
+            return
+        if verdict["action"] == "pause":
+            await _async_awc_pause(hass, entry, config, verdict["reason"], None)
+            return
+        await _async_awc_begin_leg(hass, config, method, leg, datetime.now(timezone.utc), None)
+        _append_activity(config, "Water change resumed after restart (resume-to-balance)", "control")
+        await _async_save_config(hass, entry, config)
+    elif status == "paused":
+        await _async_awc_try_resume(hass, entry, config, None)
+
+
+def _awc_refresh_next_run(config: dict[str, Any], now_local: datetime) -> None:
+    acfg = _awc_cfg(config)
+    sched = acfg.get("schedule", {})
+    last_run = _parse_datetime(acfg.get("state", {}).get("lastRun"))
+    nxt = awc_engine.next_run(sched, last_run, now_local) if sched.get("enabled") else None
+    acfg.get("state", {})["nextRun"] = nxt.isoformat() if nxt else ""
+
+
+async def _async_awc_schedule_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime,
+) -> None:
+    """One scheduler tick (called ~every minute). Auto-resumes a paused change, starts a
+    due batch change, or trickles a continuous-mode exchange while inside its window."""
+    config = _config_from_entry(entry)
+    acfg = _awc_cfg(config)
+    state = acfg.get("state", {})
+
+    # Auto-resume a paused change as soon as its blocking condition clears.
+    if state.get("status") == "paused":
+        await _async_awc_try_resume(hass, entry, config, None)
+        return
+    if state.get("status") in (*_AWC_RUNNING_STATES, "fault"):
+        return  # busy or latched — never auto-start over a fault
+
+    if not acfg.get("enabled"):
+        return
+    sched = acfg.get("schedule", {})
+    _awc_refresh_next_run(config, now_local)
+    if not sched.get("enabled"):
+        await _async_save_config(hass, entry, config)
+        return
+
+    method = sched.get("method", "batch_simultaneous")
+    tank = acfg.get("tankVolumeLitres", 0)
+    last_run = _parse_datetime(state.get("lastRun"))
+
+    if method == "continuous":
+        win_start = awc_engine.parse_hhmm(sched.get("windowStart"), 60)
+        win_end = awc_engine.parse_hhmm(sched.get("windowEnd"), 300)
+        now_min = now_local.hour * 60 + now_local.minute
+        if not awc_engine.within_window(now_min, win_start, win_end):
+            await _async_save_config(hass, entry, config)
+            return
+        tick_s = acfg.get("continuousTickSeconds", AWC_TICK_DEFAULT_SECONDS)
+        if last_run is not None and (now_local - last_run).total_seconds() < tick_s * 0.9:
+            await _async_save_config(hass, entry, config)
+            return
+        daily = awc_engine.daily_equivalent_litres(sched, tank)
+        litres = awc_engine.continuous_tick_ml(daily, win_start, win_end, tick_s) / 1000.0
+        if litres <= 0:
+            await _async_save_config(hass, entry, config)
+            return
+        # A continuous micro-exchange runs both pumps together (matched in/out).
+        await _async_awc_start(hass, entry, config, litres, "batch_simultaneous", False, None)
+        return
+
+    if awc_engine.is_due(sched, last_run, now_local):
+        litres = awc_engine.per_change_litres(sched, tank)
+        if litres > 0:
+            await _async_awc_start(hass, entry, config, litres, method, False, None)
+            return
+    await _async_save_config(hass, entry, config)
+
+
+def _clear_awc_scheduler(hass: HomeAssistant) -> None:
+    store = hass.data.setdefault(DOMAIN, {})
+    unsub = store.pop(AWC_SCHEDULE_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_schedule_awc_scheduler(
+    hass: HomeAssistant, entry: OpenReefConfigEntry | None, config: dict[str, Any] | None = None,
+) -> None:
+    """Arm/disarm the ~minute scheduler tick that drives scheduled + continuous changes
+    and auto-resumes paused ones."""
+    _clear_awc_scheduler(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    acfg = _awc_cfg(config)
+    if not acfg.get("enabled"):
+        return
+    # Run the tick if there's a schedule to drive OR a paused change to recover.
+    if not acfg.get("schedule", {}).get("enabled") and acfg.get("state", {}).get("status") != "paused":
+        return
+
+    async def _handle(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        await _async_awc_schedule_tick(hass, latest_entry, dt_util.now())
+
+    hass.data.setdefault(DOMAIN, {})[AWC_SCHEDULE_UNSUB] = async_track_time_interval(
+        hass, _handle, timedelta(seconds=60)
+    )
 
 
 async def _async_verify_mode_state(
@@ -5811,6 +6595,236 @@ async def websocket_toggle_equipment(
             "validation": _validate_config(hass, config),
         },
     )
+
+
+# --- Automatic Water Change: websocket actions --------------------------------------------
+
+def _awc_send(connection: websocket_api.ActiveConnection, msg: dict[str, Any],
+              hass: HomeAssistant, config: dict[str, Any], **extra: Any) -> None:
+    connection.send_result(
+        msg["id"], {"success": True, "config": config,
+                    "validation": _validate_config(hass, config), **extra},
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/awc_run_now",
+        vol.Optional("litres"): vol.Coerce(float),
+        vol.Optional("percent"): vol.Coerce(float),
+        vol.Optional("method"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_run_now(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Manual 'change N litres now' — full interlocks apply, quiet-hours bypassed."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    acfg = _awc_cfg(config)
+    litres = msg.get("litres")
+    if litres is None and msg.get("percent") is not None:
+        litres = acfg.get("tankVolumeLitres", 0) * float(msg["percent"]) / 100.0
+    started, reasons = await _async_awc_start(
+        hass, entry, config, litres or 0, msg.get("method"), True, connection.context(msg)
+    )
+    config = _config_from_entry(entry)
+    _awc_send(connection, msg, hass, config, started=started, reasons=reasons)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/awc_abort"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_abort(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """User-initiated stop of an in-flight or paused change (no latch, ATO restored)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    status = _awc_cfg(config).get("state", {}).get("status")
+    if status not in (*_AWC_RUNNING_STATES, "paused"):
+        connection.send_error(msg["id"], "not_running", "No water change is in progress")
+        return
+    await _async_awc_abort(hass, entry, config, "Stopped by user", False, False, connection.context(msg))
+    _awc_send(connection, msg, hass, _config_from_entry(entry))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/awc_resume"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_resume(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Re-attempt a paused change now (e.g. after refilling the reservoir)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    if _awc_cfg(config).get("state", {}).get("status") != "paused":
+        connection.send_error(msg["id"], "not_paused", "No paused water change to resume")
+        return
+    resumed = await _async_awc_try_resume(hass, entry, config, connection.context(msg))
+    _awc_send(connection, msg, hass, _config_from_entry(entry), resumed=resumed)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/awc_acknowledge"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_acknowledge(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Clear a latched fault and re-arm the feature (manual re-arm, two-tier policy)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    state = _awc_cfg(config).get("state", {})
+    if state.get("status") != "fault":
+        connection.send_error(msg["id"], "no_fault", "There is no latched fault to clear")
+        return
+    state.update({
+        "status": "idle", "fault": "", "faultSince": "", "atoSuspendedUntil": "",
+        "drainedMl": 0, "filledMl": 0, "targetLitres": 0,
+        "legStartedAt": "", "legEndsAt": "", "method": "", "pausedReason": "",
+    })
+    _append_activity(config, "Water change fault acknowledged and cleared", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/awc_calibrate",
+        vol.Required("role"): cv.string,
+        vol.Optional("volume_ml"): vol.Coerce(float),
+        vol.Optional("seconds"): vol.Coerce(float),
+        vol.Optional("points"): [vol.All([vol.Coerce(float)], vol.Length(min=2, max=2))],
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_calibrate(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Store a pump's ml/s (single-point) or slope+intercept (multi-point) calibration."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    role = msg["role"]
+    if role not in AWC_PUMP_ROLES:
+        connection.send_error(msg["id"], "invalid_role", "Pump role must be 'drain' or 'fill'")
+        return
+    config = _config_from_entry(entry)
+    pump = _awc_cfg(config).get("pumps", {}).get(role, {})
+    if msg.get("points"):
+        fit = awc_engine.calibrate_linear([(p[0], p[1]) for p in msg["points"]])
+        ml_per_s, intercept = fit["mlPerS"], fit["interceptMl"]
+    else:
+        if msg.get("seconds") is None or msg.get("volume_ml") is None:
+            connection.send_error(msg["id"], "missing_data", "Provide volume_ml + seconds, or points")
+            return
+        ml_per_s = awc_engine.ml_per_s_from_run(msg["volume_ml"], msg["seconds"])
+        intercept = 0.0
+    if ml_per_s <= 0:
+        connection.send_error(msg["id"], "invalid_calibration", "Calibration produced a non-positive flow rate")
+        return
+    pump["mlPerS"] = round(ml_per_s, 3)
+    pump["interceptMl"] = round(intercept, 3)
+    pump["calibratedAt"] = datetime.now(timezone.utc).isoformat()
+    _append_activity(config, f"AWC {role} pump calibrated: {pump['mlPerS']} ml/s", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, role=role, mlPerS=pump["mlPerS"])
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/awc_reset_reservoir",
+        vol.Required("reservoir"): cv.string,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_reset_reservoir(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Reset a reservoir's dead-reckoned level: fresh→full, waste→empty (after a refill)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    kind = msg["reservoir"]
+    if kind not in AWC_RESERVOIR_KINDS:
+        connection.send_error(msg["id"], "invalid_reservoir", "Reservoir must be 'fresh' or 'waste'")
+        return
+    config = _config_from_entry(entry)
+    reservoirs = _awc_cfg(config).get("reservoirs", {})
+    if kind == "fresh":
+        fresh = reservoirs.get("fresh", {})
+        fresh["remainingMl"] = fresh.get("capacityLitres", 0) * 1000.0
+        _append_activity(config, "Fresh saltwater reservoir marked full", "control")
+    else:
+        reservoirs.get("waste", {})["filledMl"] = 0
+        _append_activity(config, "Waste reservoir marked empty", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/awc_summary"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_summary(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Derived AWC metrics for the panel: reservoir levels, days remaining, net-imbalance,
+    honest dilution projection, calibration/tubing-age nags, plus the live state snapshot."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    acfg = _awc_cfg(config)
+    summary = awc_engine.summary(acfg, dt_util.now())
+    connection.send_result(msg["id"], {
+        "summary": summary,
+        "state": acfg.get("state", {}),
+        "schedule": acfg.get("schedule", {}),
+        "live": _awc_live_state(hass, config),
+        "atoSuspended": _awc_ato_suspended(config),
+    })
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/awc_set_schedule",
+        vol.Required("schedule"): dict,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_set_schedule(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Update the AWC schedule (normalisation validates/clamps the merged result)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    acfg = _awc_cfg(config)
+    acfg["schedule"] = {**acfg.get("schedule", {}), **msg["schedule"]}
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
 
 
 # --- Camera V2 / Phase A: event-triggered capture -----------------------------------------
@@ -7046,6 +8060,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_icp_dashboard)
     websocket_api.async_register_command(hass, websocket_import_icp_report)
     websocket_api.async_register_command(hass, websocket_delete_icp_report)
+    websocket_api.async_register_command(hass, websocket_awc_run_now)
+    websocket_api.async_register_command(hass, websocket_awc_abort)
+    websocket_api.async_register_command(hass, websocket_awc_resume)
+    websocket_api.async_register_command(hass, websocket_awc_acknowledge)
+    websocket_api.async_register_command(hass, websocket_awc_calibrate)
+    websocket_api.async_register_command(hass, websocket_awc_reset_reservoir)
+    websocket_api.async_register_command(hass, websocket_awc_set_schedule)
+    websocket_api.async_register_command(hass, websocket_awc_summary)
 
     hass.services.async_register(
         DOMAIN,
@@ -7134,6 +8156,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_maintenance_reminders(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
     await _async_schedule_watchdog(hass, entry, normalised)
+    await _async_awc_resume_on_startup(hass, entry, normalised)
+    await _async_schedule_awc(hass, entry, normalised)
+    await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_finalize_orphaned_feed_sessions(hass, entry)
     return True
 
@@ -7152,6 +8177,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_timelapse(hass)
     _clear_feedwatch(hass)
     _clear_watchdog(hass)
+    _clear_awc_timer(hass)
+    _clear_awc_scheduler(hass)
+    _store = hass.data.setdefault(DOMAIN, {})
+    _awc_restore = _store.pop(AWC_ATO_RESTORE_UNSUB, None)
+    if _awc_restore is not None:
+        _awc_restore()
     hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).pop(
         entry.entry_id, None
     )

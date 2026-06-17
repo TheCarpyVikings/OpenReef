@@ -1,0 +1,689 @@
+"""Automatic Water Change — the volume/dilution/scheduling engine ("the maths").
+
+Like :mod:`spawning` and :mod:`icp`, this module is a **pure, dependency-free,
+side-effect-free** computation (stdlib only — no Home Assistant, no I/O). All the
+arithmetic that decides *how long to run a pump*, *how much water is left*, *how
+far a parameter will dilute*, *whether the pumps have drifted*, and *when the next
+scheduled change is due* lives here so it is trivially unit-testable and identical
+in CI and on a Pi. The orchestration layer in ``__init__.py`` reads live Home
+Assistant state, calls these functions, and actuates switches; it owns no maths.
+
+Design stance (from the AWC research briefing)
+----------------------------------------------
+* **Volume-primary, sensor-arbitrated.** We drive changes by *calibrated volume*
+  (the Apex DOS / Kamoer model — the only architecture that can report "litres
+  changed" and "litres remaining"), and use physical float/cutoff sensors to
+  *arbitrate* that estimate, not to drive the change. The dominant real-world
+  failure of this architecture is silent **calibration drift**, so drift
+  detection (:func:`drift_pct`) and cumulative **net-imbalance** tracking
+  (:func:`net_imbalance_state`) are first-class.
+* **Honest dilution maths.** Continuous (trickle) exchange is a series of
+  infinitesimal changes and is therefore *slightly less efficient per litre* than
+  one equal batch — e.g. 1%/day for 30 days removes ~25.9% of the original water,
+  not 30% (``1 - e^(-0.30)``). We surface the real maths rather than the naive
+  sum (:func:`batch_removed`, :func:`continuous_removed`).
+* **Two-stage calibration.** Each pump has a base ml/s plus an *exchange-
+  correction factor* so the OUT and IN pumps can be volume-matched despite
+  different tube lengths/heights (Kamoer's key accuracy step).
+
+Sources: Randy Holmes-Farley, "Water Changes in Reef Aquaria" (Reefkeeping,
+2005); the dilution derivation at imsolidstate.com; BRS/Neptune DOS AWC setup;
+Kamoer X2SR two-stage calibration. The dilution identities below were independently
+re-derived and verified during research.
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime, timedelta
+from typing import Any, Iterable
+
+# --------------------------------------------------------------------------- #
+# Engine defaults (the *config* clamps live in const.py; these are the maths
+# defaults so the engine is callable in isolation / in tests).
+# --------------------------------------------------------------------------- #
+ANOMALY_WARN_MULT = 2.0      # warn when a leg runs >2x its expected time
+ANOMALY_ABORT_MULT = 3.0     # abort+latch when a leg runs >3x its expected time
+DRIFT_WARN_PCT = 10.0        # |model vs sensor| beyond this ⇒ recalibration prompt
+DEFAULT_NET_IMBALANCE_L = 2.0  # cumulative drain≠fill litres before we warn
+
+_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+# --------------------------------------------------------------------------- #
+# Small helpers
+# --------------------------------------------------------------------------- #
+def _f(value: Any, default: float = 0.0) -> float:
+    """Coerce to float, falling back to ``default`` on junk."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(out) or math.isinf(out):
+        return default
+    return out
+
+
+def parse_hhmm(value: Any, default_minutes: int = 0) -> int:
+    """'HH:MM' → minutes since midnight (0–1439); ``default_minutes`` on junk."""
+    try:
+        hh, mm = str(value).split(":")
+        return (int(hh) % 24) * 60 + (int(mm) % 60)
+    except (ValueError, AttributeError):
+        return default_minutes
+
+
+def within_window(minute: int, start: int, end: int) -> bool:
+    """Is ``minute`` inside [start, end)? Handles windows that wrap past midnight.
+    ``start == end`` is treated as a 24h window (always within)."""
+    minute %= 1440
+    start %= 1440
+    end %= 1440
+    if start == end:
+        return True
+    if start < end:
+        return start <= minute < end
+    return minute >= start or minute < end
+
+
+def window_minutes(start: int, end: int) -> int:
+    """Length of a [start, end) window in minutes (24h when start == end)."""
+    length = (end - start) % 1440
+    return length or 1440
+
+
+# --------------------------------------------------------------------------- #
+# Calibration & pump-run primitive
+# --------------------------------------------------------------------------- #
+def runtime_for_volume_s(litres: float, ml_per_s: float, exchange_factor: float = 1.0) -> float:
+    """Seconds to move ``litres`` at ``ml_per_s`` (the core pump-run primitive).
+
+    ``exchange_factor`` is the per-pump two-stage correction (Kamoer-style): a
+    multiplier on runtime so a pump whose *effective* throughput differs from its
+    bench ml/s (longer tube, more head) still moves the intended volume. 1.0 = no
+    correction. Returns 0.0 for a non-positive rate (caller must treat as "pump
+    not calibrated")."""
+    rate = _f(ml_per_s)
+    if rate <= 0:
+        return 0.0
+    factor = _f(exchange_factor, 1.0)
+    if factor <= 0:
+        factor = 1.0
+    return max(0.0, _f(litres) * 1000.0 / rate * factor)
+
+
+def volume_for_runtime_l(seconds: float, ml_per_s: float, exchange_factor: float = 1.0) -> float:
+    """Litres moved by running ``seconds`` at ``ml_per_s`` — inverse of
+    :func:`runtime_for_volume_s`. Used to account a partial / aborted run."""
+    factor = _f(exchange_factor, 1.0)
+    if factor <= 0:
+        factor = 1.0
+    return max(0.0, _f(seconds) * _f(ml_per_s) / factor / 1000.0)
+
+
+def ml_per_s_from_run(volume_ml: float, seconds: float) -> float:
+    """Single-point calibration: dispensed ``volume_ml`` over ``seconds`` → ml/s."""
+    secs = _f(seconds)
+    if secs <= 0:
+        return 0.0
+    return max(0.0, _f(volume_ml) / secs)
+
+
+def calibrate_linear(points: Iterable[Any]) -> dict[str, float]:
+    """Optional multi-point calibration: fit ``volume_ml = slope*seconds + intercept``
+    by least squares over 2+ ``(seconds, volume_ml)`` points.
+
+    ``slope`` is the steady-state ml/s; ``intercept`` captures the pump's priming /
+    startup offset that a single multiplier misses (lab practice). Falls back to a
+    pure single-point slope (intercept 0) when given one point. Returns
+    ``{"mlPerS", "interceptMl", "points"}``."""
+    pts = [(_f(s), _f(v)) for s, v in points]
+    pts = [(s, v) for s, v in pts if s > 0]
+    n = len(pts)
+    if n == 0:
+        return {"mlPerS": 0.0, "interceptMl": 0.0, "points": 0}
+    if n == 1:
+        s, v = pts[0]
+        return {"mlPerS": v / s, "interceptMl": 0.0, "points": 1}
+    sx = sum(s for s, _ in pts)
+    sy = sum(v for _, v in pts)
+    sxx = sum(s * s for s, _ in pts)
+    sxy = sum(s * v for s, v in pts)
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return {"mlPerS": sy / sx if sx else 0.0, "interceptMl": 0.0, "points": n}
+    slope = (n * sxy - sx * sy) / denom
+    intercept = (sy - slope * sx) / n
+    return {"mlPerS": max(0.0, slope), "interceptMl": intercept, "points": n}
+
+
+# --------------------------------------------------------------------------- #
+# Reservoir accounting (dead-reckoning) — the "litres remaining" UX
+# --------------------------------------------------------------------------- #
+def reservoir_remaining_l(container_l: float, dispensed_ml: float) -> float:
+    """Litres left after dispensing ``dispensed_ml`` from a ``container_l`` reservoir
+    (clamped to ≥ 0). Primary, sensor-arbitrated estimate."""
+    return max(0.0, _f(container_l) - _f(dispensed_ml) / 1000.0)
+
+
+def reservoir_percent(container_l: float, remaining_l: float) -> float:
+    """Remaining fraction as 0–100, for the fill-level visual."""
+    cap = _f(container_l)
+    if cap <= 0:
+        return 0.0
+    return max(0.0, min(100.0, _f(remaining_l) / cap * 100.0))
+
+
+def days_of_supply(remaining_l: float, daily_use_l: float) -> float | None:
+    """Days of premixed saltwater left at the current daily change rate, or None
+    when the rate is zero (infinite supply)."""
+    rate = _f(daily_use_l)
+    if rate <= 0:
+        return None
+    return max(0.0, _f(remaining_l) / rate)
+
+
+def changes_remaining(remaining_l: float, per_change_l: float) -> float | None:
+    """Whole changes left in the reservoir, or None when per-change volume is zero."""
+    per = _f(per_change_l)
+    if per <= 0:
+        return None
+    return max(0.0, _f(remaining_l) / per)
+
+
+# --------------------------------------------------------------------------- #
+# Dilution maths — honest projections (no naive "30 x 1% = 30%")
+# --------------------------------------------------------------------------- #
+def batch_fraction_remaining(x: float, n: float) -> float:
+    """Fraction of the *original* water (or any conserved dissolved substance)
+    remaining after ``n`` batch changes of fraction ``x``: ``(1 - x)^n``."""
+    frac = max(0.0, min(1.0, _f(x)))
+    return (1.0 - frac) ** max(0.0, _f(n))
+
+
+def batch_removed(x: float, n: float) -> float:
+    """Fraction removed after ``n`` batch changes of fraction ``x``."""
+    return 1.0 - batch_fraction_remaining(x, n)
+
+
+def continuous_remaining(v_exchanged_l: float, v_tank_l: float) -> float:
+    """Well-mixed exponential decay: fraction of original water remaining after a
+    *continuous* exchange of ``v_exchanged_l`` on a ``v_tank_l`` tank:
+    ``e^(-V_exchanged / V_tank)``."""
+    vt = _f(v_tank_l)
+    if vt <= 0:
+        return 1.0
+    return math.exp(-max(0.0, _f(v_exchanged_l)) / vt)
+
+
+def continuous_removed(v_exchanged_l: float, v_tank_l: float) -> float:
+    """Fraction removed by a continuous exchange — the honest counterpart to the
+    naive sum. 1%/day x 30 days on equal tank volume ⇒ ~0.259, not 0.30."""
+    return 1.0 - continuous_remaining(v_exchanged_l, v_tank_l)
+
+
+def litres_to_reach_target_continuous(v_tank_l: float, current: float, target: float) -> float | None:
+    """Litres of continuous exchange needed to bring a conserved contaminant from
+    ``current`` to ``target`` (both same units): ``-V_tank * ln(target/current)``.
+    None when the target is unreachable by dilution (target ≥ current, or ≤ 0)."""
+    vt = _f(v_tank_l)
+    cur = _f(current)
+    tgt = _f(target)
+    if vt <= 0 or cur <= 0 or tgt <= 0 or tgt >= cur:
+        return None
+    return -vt * math.log(tgt / cur)
+
+
+def steady_state(production_per_period: float, change_fraction_per_period: float, source: float = 0.0) -> float | None:
+    """Where a contaminant plateaus under regular changes:
+    ``production / change_fraction + source_water_level``. None when the change
+    fraction is zero (no ceiling). NB: assumes a *conserved* substance — for
+    biologically consumed nutrients (nitrate/phosphate) this is an upper bound."""
+    frac = max(0.0, min(1.0, _f(change_fraction_per_period)))
+    if frac <= 0:
+        return None
+    return _f(production_per_period) / frac + _f(source)
+
+
+# --------------------------------------------------------------------------- #
+# Safety maths — anomaly, drift, net-imbalance
+# --------------------------------------------------------------------------- #
+def anomaly_verdict(
+    elapsed_s: float,
+    expected_s: float,
+    warn_mult: float = ANOMALY_WARN_MULT,
+    abort_mult: float = ANOMALY_ABORT_MULT,
+) -> str:
+    """Time-vs-baseline check (the AutoAqua QST / HYDROS pattern). Because we know
+    the expected runtime from calibration, a leg running far longer than expected
+    simultaneously catches an empty reservoir, a clogged/kinked tube, and a stuck
+    sensor. Returns ``"ok"`` | ``"warn"`` | ``"abort"``. With no expected baseline
+    (uncalibrated) we cannot judge ⇒ ``"ok"`` (other interlocks still apply)."""
+    exp = _f(expected_s)
+    if exp <= 0:
+        return "ok"
+    ratio = _f(elapsed_s) / exp
+    if ratio >= max(warn_mult, abort_mult):
+        return "abort"
+    if ratio >= warn_mult:
+        return "warn"
+    return "ok"
+
+
+def drift_pct(model_dispensed_ml: float, actual_volume_ml: float) -> float | None:
+    """Calibration drift: when a reservoir float trips, the pump *model* claims it
+    dispensed ``model_dispensed_ml`` while the *known* usable volume between floats
+    was ``actual_volume_ml``. Returns the signed % error of the model vs reality
+    (positive ⇒ model over-estimates ⇒ pump is actually moving less than calibrated
+    — the classic tube-fatigue/scale drift). None when no reference volume."""
+    actual = _f(actual_volume_ml)
+    if actual <= 0:
+        return None
+    return (_f(model_dispensed_ml) - actual) / actual * 100.0
+
+
+def drift_state(
+    model_dispensed_ml: float, actual_volume_ml: float, warn_pct: float = DRIFT_WARN_PCT
+) -> dict[str, Any]:
+    """Drift verdict for the panel: ``{driftPct, status, recalibrate}``."""
+    pct = drift_pct(model_dispensed_ml, actual_volume_ml)
+    if pct is None:
+        return {"driftPct": None, "status": "unknown", "recalibrate": False}
+    over = abs(pct) >= _f(warn_pct, DRIFT_WARN_PCT)
+    return {
+        "driftPct": round(pct, 1),
+        "status": "warning" if over else "ok",
+        "recalibrate": over,
+    }
+
+
+def net_imbalance_state(
+    events: Iterable[Any], threshold_l: float = DEFAULT_NET_IMBALANCE_L
+) -> dict[str, Any]:
+    """Cumulative drain-vs-fill tracking — the anti-salinity-drift leapfrog (pure
+    software, no probe). Each event is ``{"drainedL", "filledL"}``. If, over time,
+    we drain more than we fill, the ATO tops the deficit with *fresh* water and
+    salinity slowly crashes (the verified Apex/Kamoer failure). We log the net and,
+    when it exceeds ``threshold_l``, warn and suggest a corrective trim on the next
+    change.
+
+    Returns ``{drainedL, filledL, netL, status, suggestedTrimL}`` where ``netL`` =
+    filled − drained (negative ⇒ net drained ⇒ salinity-drop risk) and
+    ``suggestedTrimL`` is the litres to add to the next fill (or remove, if
+    negative) to rebalance."""
+    drained = 0.0
+    filled = 0.0
+    for ev in events:
+        drained += max(0.0, _f((ev or {}).get("drainedL")))
+        filled += max(0.0, _f((ev or {}).get("filledL")))
+    net = filled - drained
+    over = abs(net) >= _f(threshold_l, DEFAULT_NET_IMBALANCE_L)
+    return {
+        "drainedL": round(drained, 3),
+        "filledL": round(filled, 3),
+        "netL": round(net, 3),
+        "status": "warning" if over else "ok",
+        "suggestedTrimL": round(-net, 3),  # add this much fill to get back to balance
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Schedule resolution — "fully flexible": litres OR %, per day OR per week
+# --------------------------------------------------------------------------- #
+def resolve_period_litres(schedule: dict[str, Any], tank_volume_l: float) -> float:
+    """The litres to change over the schedule's *period* (day or week), resolving a
+    percent amount against ``tank_volume_l``."""
+    sched = schedule or {}
+    amount = max(0.0, _f(sched.get("amount")))
+    if str(sched.get("amountUnit", "litres")).lower() == "percent":
+        return max(0.0, _f(tank_volume_l) * amount / 100.0)
+    return amount
+
+
+def runs_per_week(schedule: dict[str, Any]) -> int:
+    """How many discrete batch runs occur per week = (active days) x (times/day).
+    Continuous schedules return 0 (they don't run as discrete batches)."""
+    sched = schedule or {}
+    if str(sched.get("method", "")).startswith("continuous"):
+        return 0
+    days = sched.get("days") or _WEEKDAYS
+    n_days = len([d for d in days if d in _WEEKDAYS]) or len(_WEEKDAYS)
+    times = sched.get("times")
+    if not times:
+        times = [sched.get("startTime", "02:00")]
+    n_times = max(1, len([t for t in times if t]))
+    if str(sched.get("period", "day")).lower() == "week":
+        return n_times if n_days == 0 else max(n_times, n_days)  # week amount spread over slots
+    return n_days * n_times
+
+
+def per_change_litres(schedule: dict[str, Any], tank_volume_l: float) -> float:
+    """Litres to move in a single batch run, spreading the period amount across the
+    period's run-slots. For ``period == "day"`` the daily amount is split across the
+    day's times; for ``period == "week"`` the weekly amount is split across all
+    weekly run-slots."""
+    sched = schedule or {}
+    period_l = resolve_period_litres(sched, tank_volume_l)
+    period = str(sched.get("period", "day")).lower()
+    if period == "week":
+        slots = max(1, runs_per_week(sched))
+        return period_l / slots
+    times = sched.get("times") or [sched.get("startTime", "02:00")]
+    slots = max(1, len([t for t in times if t]))
+    return period_l / slots
+
+
+def daily_equivalent_litres(schedule: dict[str, Any], tank_volume_l: float) -> float:
+    """Average litres/day this schedule changes — drives days-of-supply and the
+    dilution projection regardless of method/period."""
+    sched = schedule or {}
+    period_l = resolve_period_litres(sched, tank_volume_l)
+    return period_l if str(sched.get("period", "day")).lower() == "day" else period_l / 7.0
+
+
+def continuous_tick_ml(
+    daily_litres: float, window_start: int, window_end: int, tick_seconds: float
+) -> float:
+    """ml to exchange on one continuous-mode tick: the day's litres spread evenly
+    across the active window. ``window_start``/``window_end`` are minutes since
+    midnight (wrap-aware); a tick fires every ``tick_seconds`` while in-window."""
+    win_min = window_minutes(int(window_start), int(window_end))
+    win_s = win_min * 60.0
+    if win_s <= 0:
+        return 0.0
+    tick = max(0.0, _f(tick_seconds))
+    return max(0.0, _f(daily_litres) * 1000.0 * tick / win_s)
+
+
+def next_run(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> datetime | None:
+    """Next due datetime for a *batch* schedule strictly after ``now`` (and after
+    ``last_run`` if given), honouring days-of-week and one or more daily times.
+    Returns None for disabled or continuous schedules. Mirrors the modeSchedule
+    evaluator's day/time semantics. ``now``/``last_run`` are naive-local or aware;
+    comparisons use them as-is (caller passes a consistent tz)."""
+    sched = schedule or {}
+    if not sched.get("enabled", True):
+        return None
+    if str(sched.get("method", "")).startswith("continuous"):
+        return None
+    times = sched.get("times") or [sched.get("startTime", "02:00")]
+    minutes = sorted({parse_hhmm(t) for t in times if t})
+    if not minutes:
+        return None
+    allowed_days = sched.get("days")
+    allowed = {_WEEKDAYS.index(d) for d in allowed_days if d in _WEEKDAYS} if allowed_days else set(range(7))
+    if not allowed:
+        allowed = set(range(7))
+    for day_offset in range(0, 8):
+        day = now + timedelta(days=day_offset)
+        if day.weekday() not in allowed:
+            continue
+        for minute in minutes:
+            candidate = day.replace(hour=minute // 60, minute=minute % 60, second=0, microsecond=0)
+            if candidate <= now:
+                continue
+            if last_run is not None and candidate <= last_run:
+                continue
+            return candidate
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# State-machine decisions — pure, so the async orchestrator in __init__.py owns
+# no logic, only actuation. ``cfg`` is the normalised automaticWaterChange dict;
+# ``live`` is a snapshot of the booleans the orchestrator reads from HA:
+#   {leak, highLevel, freshEmpty, wasteFull, returnPumpIssue, inFeedMode}
+# --------------------------------------------------------------------------- #
+def _live(live: dict[str, Any] | None, key: str) -> bool:
+    return bool((live or {}).get(key))
+
+
+def plan_leg(
+    method: str, drained_ml: float, filled_ml: float, target_ml: float, tick_ml: float
+) -> dict[str, Any] | None:
+    """Decide the next pump leg given progress so far. Returns
+    ``{"pumps": [...], "sliceMl": ...}`` or None when the change is complete.
+
+    This also IS the resume-to-balance logic: fed the persisted drained/filled, it
+    naturally drives whichever side is behind — so a power-loss mid-change resumes
+    toward a balanced drain==fill==target.
+      * continuous          — both pumps, a ``tick_ml`` slice, kept matched
+      * batch_simultaneous  — both pumps, the whole remaining slice at once
+      * batch_sequential    — all drain first, then all fill
+    """
+    target = max(0.0, _f(target_ml))
+    drained = max(0.0, _f(drained_ml))
+    filled = max(0.0, _f(filled_ml))
+    eps = 1e-6
+    if drained >= target - eps and filled >= target - eps:
+        return None
+    if method == "batch_sequential":
+        if drained < target - eps:
+            return {"pumps": ["drain"], "sliceMl": target - drained}
+        return {"pumps": ["fill"], "sliceMl": target - filled}
+    if method == "continuous":
+        behind = max(drained, filled)
+        slice_ml = min(max(0.0, _f(tick_ml)), target - behind)
+        if slice_ml <= eps:
+            slice_ml = target - behind
+        return {"pumps": ["drain", "fill"], "sliceMl": slice_ml}
+    # batch_simultaneous (default): both pumps, remaining volume in one leg
+    remaining = target - min(drained, filled)
+    return {"pumps": ["drain", "fill"], "sliceMl": remaining}
+
+
+def leg_runtime_s(slice_l: float, cfg: dict[str, Any], roles: Iterable[str]) -> float:
+    """Wall-clock seconds for a leg that runs ``roles`` concurrently for ``slice_l``
+    litres each — the max of the per-pump runtimes (they run together)."""
+    pumps = (cfg or {}).get("pumps", {})
+    longest = 0.0
+    for role in roles:
+        pump = pumps.get(role, {}) if isinstance(pumps, dict) else {}
+        longest = max(longest, runtime_for_volume_s(
+            slice_l, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0)
+        ))
+    return longest
+
+
+def exceeds_single_change_cap(cfg: dict[str, Any], litres: float) -> bool:
+    """True when a requested change exceeds the configured max single-change % of
+    tank volume (the salinity-swing guardrail). No cap when tank volume unset."""
+    cfg = cfg or {}
+    tank = _f(cfg.get("tankVolumeLitres"))
+    if tank <= 0:
+        return False
+    pct = _f((cfg.get("safety") or {}).get("maxSingleChangePercent"), 100.0)
+    return _f(litres) > tank * pct / 100.0 + 1e-6
+
+
+def start_guard_reasons(
+    cfg: dict[str, Any], live: dict[str, Any], now_minutes: int, manual: bool = False
+) -> list[dict[str, str]]:
+    """Reasons a change must NOT start now. ``severity`` is ``"fault"`` for hazards
+    that should latch (leak, display overfill) and ``"block"`` for benign deferrals.
+    A manual run bypasses the quiet-hours and feed-mode *convenience* guards but never
+    the hardware/safety ones."""
+    cfg = cfg or {}
+    pumps = cfg.get("pumps", {}) if isinstance(cfg.get("pumps"), dict) else {}
+    guards = cfg.get("guards", {}) if isinstance(cfg.get("guards"), dict) else {}
+    state = cfg.get("state", {}) if isinstance(cfg.get("state"), dict) else {}
+    out: list[dict[str, str]] = []
+
+    if state.get("fault"):
+        out.append({"code": "latched", "severity": "block",
+                    "message": f"A latched fault must be cleared first: {state.get('fault')}"})
+    if _live(live, "leak"):
+        out.append({"code": "leak", "severity": "fault", "message": "Leak detected"})
+    if _live(live, "highLevel"):
+        out.append({"code": "high_level", "severity": "fault",
+                    "message": "Display high-level cutoff is active"})
+    if _live(live, "freshEmpty"):
+        out.append({"code": "fresh_empty", "severity": "block",
+                    "message": "Fresh saltwater reservoir is empty"})
+    if _live(live, "wasteFull"):
+        out.append({"code": "waste_full", "severity": "block",
+                    "message": "Waste reservoir is full"})
+    for role in ("drain", "fill"):
+        pump = pumps.get(role, {}) if isinstance(pumps.get(role), dict) else {}
+        if not pump.get("switchEntity"):
+            out.append({"code": "no_pump_entity", "severity": "block",
+                        "message": f"No {role} pump entity configured"})
+        elif _f(pump.get("mlPerS")) <= 0:
+            out.append({"code": "no_calibration", "severity": "block",
+                        "message": f"{role.capitalize()} pump is not calibrated"})
+    if guards.get("blockOnReturnPumpIssue", True) and _live(live, "returnPumpIssue"):
+        out.append({"code": "return_pump", "severity": "block",
+                    "message": "Return flow is not confirmed"})
+    if not manual:
+        if guards.get("blockDuringFeed", True) and _live(live, "inFeedMode"):
+            out.append({"code": "feed_mode", "severity": "block",
+                        "message": "Feed mode is active"})
+        if guards.get("quietHoursEnabled") and not within_window(
+            int(now_minutes), parse_hhmm(guards.get("quietStart"), 60),
+            parse_hhmm(guards.get("quietEnd"), 300),
+        ):
+            out.append({"code": "quiet_hours", "severity": "block",
+                        "message": "Outside the allowed quiet-hours window"})
+    return out
+
+
+def in_run_safety(
+    cfg: dict[str, Any], live: dict[str, Any], needs_drain: bool, needs_fill: bool
+) -> dict[str, Any]:
+    """Safety verdict checked at every leg boundary. Faults LATCH (two-tier policy);
+    benign reservoir/return-flow limits PAUSE for auto-resume. Returns
+    ``{"action": "ok"|"pause"|"fault", "reason": str, "latch": bool}``."""
+    cfg = cfg or {}
+    guards = cfg.get("guards", {}) if isinstance(cfg.get("guards"), dict) else {}
+    if _live(live, "leak"):
+        # Master kill — a leak fails-closed ALL pumps incl. the return pump, since a
+        # leak the level sensors can't see (cracked sump, blown union) means any pump
+        # running makes it worse.
+        return {"action": "fault", "reason": "Leak detected — all pumps stopped",
+                "latch": True, "masterKill": True}
+    if _live(live, "highLevel"):
+        return {"action": "fault", "reason": "Display high-level cutoff — change aborted",
+                "latch": True, "masterKill": False}
+    if needs_fill and _live(live, "freshEmpty"):
+        return {"action": "pause", "reason": "Fresh saltwater reservoir empty",
+                "latch": False, "masterKill": False}
+    if needs_drain and _live(live, "wasteFull"):
+        return {"action": "pause", "reason": "Waste reservoir full",
+                "latch": False, "masterKill": False}
+    if guards.get("blockOnReturnPumpIssue", True) and _live(live, "returnPumpIssue"):
+        return {"action": "pause", "reason": "Return flow not confirmed",
+                "latch": False, "masterKill": False}
+    return {"action": "ok", "reason": "", "latch": False, "masterKill": False}
+
+
+# --------------------------------------------------------------------------- #
+# Panel-facing summary — the "intelligence layer" derived values (reservoir
+# levels, days remaining, net-imbalance, honest dilution projection, and
+# calibration/tubing-age nags). Pure; the WS handler passes `now`.
+# --------------------------------------------------------------------------- #
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def _age_days(value: Any, now: datetime) -> float | None:
+    dt = _parse_iso(value)
+    if dt is None:
+        return None
+    try:
+        return max(0.0, (now - dt).total_seconds() / 86400.0)
+    except TypeError:
+        return None
+
+
+def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_days: int = 365) -> dict[str, Any]:
+    """Derived, panel-facing AWC metrics. ``recal_days``/``tubing_days`` set the
+    maintenance-nag thresholds (research: recalibrate ~every 2 months; replace tubing
+    ~yearly under AWC duty)."""
+    cfg = cfg or {}
+    reservoirs = cfg.get("reservoirs", {}) if isinstance(cfg.get("reservoirs"), dict) else {}
+    fresh = reservoirs.get("fresh", {}) if isinstance(reservoirs.get("fresh"), dict) else {}
+    waste = reservoirs.get("waste", {}) if isinstance(reservoirs.get("waste"), dict) else {}
+    fresh_cap = _f(fresh.get("capacityLitres"))
+    fresh_rem = _f(fresh.get("remainingMl")) / 1000.0
+    waste_cap = _f(waste.get("capacityLitres"))
+    waste_fill = _f(waste.get("filledMl")) / 1000.0
+
+    sched = cfg.get("schedule", {}) if isinstance(cfg.get("schedule"), dict) else {}
+    tank = _f(cfg.get("tankVolumeLitres"))
+    daily = daily_equivalent_litres(sched, tank) if sched.get("enabled") else 0.0
+    weekly = daily * 7.0
+    per_change = per_change_litres(sched, tank) if sched.get("enabled") else 0.0
+
+    ni = net_imbalance_state(
+        cfg.get("history", []),
+        (cfg.get("safety", {}) or {}).get("netImbalanceWarnLitres", DEFAULT_NET_IMBALANCE_L),
+    )
+    removed_30d = continuous_removed(daily * 30.0, tank) if (tank > 0 and daily > 0) else 0.0
+
+    pumps: dict[str, Any] = {}
+    for role in ("drain", "fill"):
+        p = cfg.get("pumps", {}).get(role, {}) if isinstance(cfg.get("pumps"), dict) else {}
+        cal_age = _age_days(p.get("calibratedAt"), now)
+        tub_age = _age_days(p.get("tubingInstalledAt"), now)
+        pumps[role] = {
+            "mlPerS": _f(p.get("mlPerS")),
+            "calibrated": _f(p.get("mlPerS")) > 0,
+            "calibrationAgeDays": None if cal_age is None else round(cal_age, 1),
+            "recalibrationDue": cal_age is not None and cal_age >= recal_days,
+            "tubingAgeDays": None if tub_age is None else round(tub_age, 1),
+            "tubingReplaceDue": tub_age is not None and tub_age >= tubing_days,
+        }
+
+    return {
+        "reservoirs": {
+            "fresh": {
+                "remainingL": round(fresh_rem, 2),
+                "capacityL": round(fresh_cap, 2),
+                "percent": round(reservoir_percent(fresh_cap, fresh_rem), 1),
+            },
+            "waste": {
+                "filledL": round(waste_fill, 2),
+                "capacityL": round(waste_cap, 2),
+                "percent": round(reservoir_percent(waste_cap, waste_fill), 1),
+                "remainingCapacityL": round(max(0.0, waste_cap - waste_fill), 2),
+            },
+        },
+        "dailyChangeL": round(daily, 3),
+        "weeklyChangeL": round(weekly, 3),
+        "weeklyPercentOfTank": round(weekly / tank * 100.0, 2) if tank > 0 else 0.0,
+        "daysOfFreshRemaining": days_of_supply(fresh_rem, daily),
+        "changesRemaining": changes_remaining(fresh_rem, per_change),
+        "netImbalance": ni,
+        "projectedRemovalPct30d": round(removed_30d * 100.0, 1),
+        "pumps": pumps,
+    }
+
+
+def is_due(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> bool:
+    """True when a batch change should fire now: a scheduled time on an allowed day
+    has passed since ``last_run`` (or since the start of today if never run)."""
+    sched = schedule or {}
+    if not sched.get("enabled", True):
+        return False
+    if str(sched.get("method", "")).startswith("continuous"):
+        return False
+    if now.weekday() not in (
+        {_WEEKDAYS.index(d) for d in (sched.get("days") or []) if d in _WEEKDAYS} or set(range(7))
+    ):
+        return False
+    times = sched.get("times") or [sched.get("startTime", "02:00")]
+    now_min = now.hour * 60 + now.minute
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for t in times:
+        slot = parse_hhmm(t)
+        if slot > now_min:
+            continue
+        fire_at = today_start + timedelta(minutes=slot)
+        if last_run is None or last_run < fire_at:
+            return True
+    return False
