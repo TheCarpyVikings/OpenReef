@@ -10,7 +10,7 @@ PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
 CORE_SCHEMA_VERSION = 43
-INTEGRATION_VERSION = "0.4.101"
+INTEGRATION_VERSION = "0.4.102"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -170,6 +170,16 @@ MAINTENANCE_COMPLETIONS_MAX = 50   # kept per task
 # plus an optional one-shot phone push (HA companion app) — free, unlimited, and
 # never paywalled, unlike the apps. The single daily time IS the anti-spam control.
 MAINTENANCE_REMINDER_DEFAULT_TIME = "09:00"
+
+# Mode Actions V2 — per-equipment timers + safety verification.
+# Per-equipment timers express, inside a mode, an optional start delay, a single-shot
+# "hold then revert to pre-mode state", or a repeating on/off cycle. Durations are
+# stored canonically in SECONDS. The cycle floor protects mechanical relays / pump
+# motors from rapid power-cycling (this is on/off switching, not pump-speed control).
+MODE_EQUIPMENT_TIMER_MAX_SECONDS = 86400  # 24h ceiling on any per-equipment duration
+MODE_EQUIPMENT_CYCLE_MIN_SECONDS = 10     # hardware-protection floor per cycle phase
+MODE_VERIFY_DEFAULT_DELAY_SECONDS = 8     # read-back delay after a mode apply/return
+EQUIPMENT_MAX_OFF_MAX_SECONDS = 86400     # ceiling on the per-equipment max-off cap
 
 SERVICE_RECORD_TASK_COMPLETION = "record_task_completion"
 SERVICE_APPLY_MODE = "apply_mode"
@@ -867,8 +877,21 @@ DEFAULT_CORE_CONFIG = {
         "expiresAt": "",
         "autoReturn": False,
         "returnPlan": {},
+        # Runtime state for in-flight per-equipment timers and max-off caps. Persisted
+        # so they survive an HA restart and re-arm in async_setup_entry. {} in running.
+        "equipmentTimers": {},
+        "maxOffTimers": {},
     },
     "modePreviews": {
+        "feed": {},
+        "maintenance": {},
+    },
+    # Per-equipment timers (Mode Actions V2). Sibling to modePreviews (which stays the
+    # on/off/unchanged action source). One entry per equipment that has a timer:
+    #   { enabled, startDelaySeconds, timerMode: "once"|"cycle",
+    #     holdSeconds,                 # once: hold the action, then revert to pre-mode
+    #     onSeconds, offSeconds }      # cycle: ON for onSeconds / OFF for offSeconds
+    "modeEquipmentTimers": {
         "feed": {},
         "maintenance": {},
     },
@@ -904,6 +927,14 @@ DEFAULT_CORE_CONFIG = {
         "hysteresisPercent": 2,
         "wavemakerReminders": True,
         "wavemakerReminderMinutes": 10,
+        # Mode Actions V2 — exit verification. After a mode applies or returns, read
+        # back each intended device and alert if it failed to reach its target state
+        # (catches stranded/offline gear, e.g. an MP40 stuck in feed). Plus a push when
+        # auto-return is blocked. modeNotifyTarget = optional notify.<service> phone push.
+        "modeVerifyEnabled": True,
+        "modeVerifyDelaySeconds": MODE_VERIFY_DEFAULT_DELAY_SECONDS,
+        "modeStuckNotify": True,
+        "modeNotifyTarget": "",
         "muteUntil": {},
         "history": [],
         "lastStates": {},

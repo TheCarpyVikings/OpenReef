@@ -57,6 +57,10 @@ from .const import (
     MAINTENANCE_TASK_CADENCE_MIN,
     MAINTENANCE_TASK_CRITICAL_MAX,
     MAINTENANCE_TASK_DEFAULTS,
+    MODE_EQUIPMENT_TIMER_MAX_SECONDS,
+    MODE_EQUIPMENT_CYCLE_MIN_SECONDS,
+    MODE_VERIFY_DEFAULT_DELAY_SECONDS,
+    EQUIPMENT_MAX_OFF_MAX_SECONDS,
     ICP_REPORTS_MAX,
     MANUAL_TEST_CADENCE_PRESETS,
     MANUAL_TEST_PARAMETERS,
@@ -118,6 +122,12 @@ ATO_DUTY_CYCLE_UNSUB = "ato_duty_cycle_unsub"
 ATO_DUTY_CYCLE_OFF_UNSUB = "ato_duty_cycle_off_unsub"
 ATO_DUTY_CYCLE_LAST = "ato_duty_cycle_last"
 DELAYED_EQUIPMENT_UNSUBS = "delayed_equipment_unsubs"
+# Mode Actions V2 registries. EQUIPMENT_TIMER_UNSUBS / MAX_OFF_UNSUBS are dict
+# registries keyed f"{entry_id}:{equipment_id}" (mirroring DELAYED_EQUIPMENT_UNSUBS);
+# MODE_VERIFY_UNSUB is a single one-shot read-back unsub like MODE_TIMER_UNSUB.
+EQUIPMENT_TIMER_UNSUBS = "equipment_timer_unsubs"
+MAX_OFF_UNSUBS = "max_off_unsubs"
+MODE_VERIFY_UNSUB = "mode_verify_unsub"
 WAVEMAKER_REMINDER_UNSUB = "wavemaker_reminder_unsub"
 WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
 MAINTENANCE_REMINDER_UNSUB = "maintenance_reminder_unsub"
@@ -598,6 +608,55 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 for equipment_id, desired_state in return_plan.items()
                 if isinstance(equipment_id, str) and desired_state in {"on", "off"}
             }
+        # Per-equipment timer runtime state (Mode Actions V2). Cleared in running; kept
+        # corruption-proof so the restart re-arm path can never crash.
+        equipment_timers = mode.get("equipmentTimers")
+        if not isinstance(equipment_timers, dict) or mode["active"] == "running":
+            mode["equipmentTimers"] = {}
+        else:
+            cleaned_timers: dict[str, dict[str, Any]] = {}
+            for equipment_id, timer_state in equipment_timers.items():
+                if not isinstance(equipment_id, str) or not isinstance(timer_state, dict):
+                    continue
+                phase = timer_state.get("phase")
+                action = timer_state.get("action")
+                if phase not in {"delay", "hold", "on", "off", "done"}:
+                    continue
+                if action not in {"on", "off"}:
+                    continue
+                cleaned_timers[equipment_id] = {
+                    "timerMode": timer_state.get("timerMode")
+                    if timer_state.get("timerMode") in {"once", "cycle"}
+                    else "once",
+                    "phase": phase,
+                    "action": action,
+                    "nextFireAt": timer_state.get("nextFireAt")
+                    if isinstance(timer_state.get("nextFireAt"), str)
+                    else "",
+                    "onSeconds": _clamp_seconds(timer_state.get("onSeconds")),
+                    "offSeconds": _clamp_seconds(timer_state.get("offSeconds")),
+                    "holdSeconds": _clamp_seconds(timer_state.get("holdSeconds")),
+                }
+            mode["equipmentTimers"] = cleaned_timers
+        # Per-equipment max-off cap runtime state.
+        max_off_timers = mode.get("maxOffTimers")
+        if not isinstance(max_off_timers, dict) or mode["active"] == "running":
+            mode["maxOffTimers"] = {}
+        else:
+            cleaned_caps: dict[str, dict[str, str]] = {}
+            for equipment_id, cap_state in max_off_timers.items():
+                if not isinstance(equipment_id, str) or not isinstance(cap_state, dict):
+                    continue
+                fire_at = cap_state.get("fireAt")
+                if not isinstance(fire_at, str) or not fire_at:
+                    continue
+                cleaned_caps[equipment_id] = {
+                    "fireAt": fire_at,
+                    "switch_entity_id": _normalise_entity_id(
+                        cap_state.get("switch_entity_id")
+                    ),
+                }
+            mode["maxOffTimers"] = cleaned_caps
 
     mode_previews = config.setdefault("modePreviews", {})
     if not isinstance(mode_previews, dict):
@@ -646,6 +705,45 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 timer["durationMinutes"] = defaults["durationMinutes"]
             timer["durationMinutes"] = max(0, min(timer["durationMinutes"], 720))
             timer["autoReturn"] = bool(timer.get("autoReturn", defaults["autoReturn"]))
+
+    # Per-equipment timers (Mode Actions V2). Sibling to modePreviews; one entry per
+    # equipment with a timer. Clamp durations, enforce the cycle floor, auto-disable
+    # degenerate timers, and strip timers whose preview action is not on/off.
+    mode_equipment_timers = config.setdefault("modeEquipmentTimers", {})
+    normalised_previews = config.get("modePreviews", {})
+    if not isinstance(mode_equipment_timers, dict):
+        config["modeEquipmentTimers"] = deepcopy(
+            DEFAULT_CORE_CONFIG["modeEquipmentTimers"]
+        )
+    else:
+        for mode_id in list(mode_equipment_timers):
+            if mode_id == "running" or mode_id not in allowed_mode_ids:
+                mode_equipment_timers.pop(mode_id)
+        for mode_id in sorted(allowed_mode_ids - {"running"}):
+            block = mode_equipment_timers.setdefault(mode_id, {})
+            if not isinstance(block, dict):
+                mode_equipment_timers[mode_id] = {}
+                continue
+            preview_block = (
+                normalised_previews.get(mode_id, {})
+                if isinstance(normalised_previews, dict)
+                else {}
+            )
+            for equipment_id, timer in list(block.items()):
+                if not isinstance(equipment_id, str) or not isinstance(timer, dict):
+                    block.pop(equipment_id)
+                    continue
+                if not isinstance(preview_block, dict) or preview_block.get(
+                    equipment_id
+                ) not in {"on", "off"}:
+                    block.pop(equipment_id)
+                    continue
+                normalised_timer = _normalise_equipment_timer(timer)
+                if normalised_timer["enabled"] and not _equipment_timer_active(
+                    normalised_timer
+                ):
+                    normalised_timer["enabled"] = False
+                block[equipment_id] = normalised_timer
 
     mode_settings = config.setdefault("modeSettings", {})
     if not isinstance(mode_settings, dict):
@@ -787,6 +885,11 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             except (TypeError, ValueError):
                 power_on_delay = 0
             equipment_config["powerOnDelaySeconds"] = max(0, min(power_on_delay, 1800))
+            # Max-off safety cap (Mode Actions V2): 0 = disabled. Force-restores a
+            # device held off by a mode/timer past this limit.
+            equipment_config["maxOffSeconds"] = _equipment_max_off_seconds(
+                equipment_config
+            )
 
     cameras = config.setdefault("cameras", {})
     if not isinstance(cameras, dict):
@@ -957,6 +1060,17 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         except (TypeError, ValueError):
             reminder_minutes = 10
         alerts["wavemakerReminderMinutes"] = max(1, min(reminder_minutes, 240))
+        # Mode Actions V2 — exit verification + stuck alerts.
+        alerts["modeVerifyEnabled"] = bool(alerts.get("modeVerifyEnabled", True))
+        try:
+            verify_delay = int(
+                alerts.get("modeVerifyDelaySeconds", MODE_VERIFY_DEFAULT_DELAY_SECONDS)
+            )
+        except (TypeError, ValueError):
+            verify_delay = MODE_VERIFY_DEFAULT_DELAY_SECONDS
+        alerts["modeVerifyDelaySeconds"] = max(2, min(verify_delay, 120))
+        alerts["modeStuckNotify"] = bool(alerts.get("modeStuckNotify", True))
+        alerts["modeNotifyTarget"] = str(alerts.get("modeNotifyTarget", "")).strip()[:120]
         mute_until = alerts.get("muteUntil")
         alerts["muteUntil"] = (
             {
@@ -2994,6 +3108,28 @@ def _clear_delayed_equipment_calls(hass: HomeAssistant) -> None:
                 unsub()
 
 
+def _clear_equipment_timers(hass: HomeAssistant) -> None:
+    timers = hass.data.setdefault(DOMAIN, {}).pop(EQUIPMENT_TIMER_UNSUBS, {})
+    if isinstance(timers, dict):
+        for unsub in timers.values():
+            if unsub is not None:
+                unsub()
+
+
+def _clear_max_off_timers(hass: HomeAssistant) -> None:
+    timers = hass.data.setdefault(DOMAIN, {}).pop(MAX_OFF_UNSUBS, {})
+    if isinstance(timers, dict):
+        for unsub in timers.values():
+            if unsub is not None:
+                unsub()
+
+
+def _clear_mode_verify(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MODE_VERIFY_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
 def _clear_wavemaker_reminders(hass: HomeAssistant) -> None:
     unsub = hass.data.setdefault(DOMAIN, {}).pop(WAVEMAKER_REMINDER_UNSUB, None)
     if unsub is not None:
@@ -3392,6 +3528,13 @@ async def _async_schedule_mode_timer(
                 latest_config,
                 f"Auto-return to Running blocked: {err}",
                 "warning",
+            )
+            await _async_send_mode_notification(
+                hass,
+                latest_config,
+                "openreef_mode_auto_return_blocked",
+                "Auto-return to Running blocked",
+                f"The timed mode could not return to Running: {err}. Equipment may still be in the mode state — review the dashboard.",
             )
             await _async_save_config(hass, latest_entry, latest_config)
 
@@ -3978,6 +4121,8 @@ async def _async_save_config(
         options[CONF_SETTINGS] = normalised
         hass.config_entries.async_update_entry(entry, options=options)
     await _async_schedule_mode_timer(hass, entry, normalised)
+    await _async_schedule_equipment_timers(hass, entry, normalised)
+    await _async_schedule_max_off_timers(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
@@ -4126,6 +4271,490 @@ async def _async_schedule_delayed_equipment_on(
     delayed[key] = async_track_point_in_time(hass, _turn_on_after_delay, run_at)
 
 
+# --- Mode Actions V2: per-equipment timers, max-off caps, exit verification ------- #
+
+
+def _clamp_seconds(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 0
+    return max(0, min(number, MODE_EQUIPMENT_TIMER_MAX_SECONDS))
+
+
+def _equipment_max_off_seconds(mapped: dict[str, Any]) -> int:
+    try:
+        value = int(mapped.get("maxOffSeconds", 0))
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, min(value, EQUIPMENT_MAX_OFF_MAX_SECONDS))
+
+
+def _normalise_equipment_timer(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce/clamp a single per-equipment timer dict. Stores durations in seconds and
+    enforces the cycle phase floor. Does NOT decide enablement validity (callers/
+    normalisation disable degenerate timers)."""
+    timer_mode = raw.get("timerMode")
+    timer_mode = timer_mode if timer_mode in {"once", "cycle"} else "once"
+    on_seconds = _clamp_seconds(raw.get("onSeconds"))
+    off_seconds = _clamp_seconds(raw.get("offSeconds"))
+    if timer_mode == "cycle":
+        on_seconds = max(MODE_EQUIPMENT_CYCLE_MIN_SECONDS, on_seconds) if on_seconds else 0
+        off_seconds = max(MODE_EQUIPMENT_CYCLE_MIN_SECONDS, off_seconds) if off_seconds else 0
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "startDelaySeconds": _clamp_seconds(raw.get("startDelaySeconds")),
+        "timerMode": timer_mode,
+        "holdSeconds": _clamp_seconds(raw.get("holdSeconds")),
+        "onSeconds": on_seconds,
+        "offSeconds": off_seconds,
+    }
+
+
+def _equipment_timer_active(timer: dict[str, Any]) -> bool:
+    """True when a normalised timer is enabled AND has a usable duration."""
+    if not timer.get("enabled"):
+        return False
+    if timer.get("timerMode") == "cycle":
+        return timer.get("onSeconds", 0) > 0 and timer.get("offSeconds", 0) > 0
+    return timer.get("holdSeconds", 0) > 0
+
+
+async def _async_send_mode_notification(
+    hass: HomeAssistant,
+    config: dict[str, Any],
+    notification_id: str,
+    title: str,
+    message: str,
+) -> None:
+    """Create an in-HA persistent notification and, if configured, a phone push.
+    Mirrors the maintenance/watchdog notification pattern."""
+    await hass.services.async_call(
+        "persistent_notification",
+        "create",
+        {
+            "notification_id": notification_id,
+            "title": f"OpenReef: {title}",
+            "message": message,
+        },
+        blocking=False,
+    )
+    alerts = config.get("alerts", {})
+    target = (
+        str(alerts.get("modeNotifyTarget", "")).strip()
+        if isinstance(alerts, dict)
+        else ""
+    )
+    if target:
+        await hass.services.async_call(
+            "notify",
+            target,
+            {"title": f"OpenReef: {title}", "message": message},
+            blocking=False,
+        )
+
+
+def _update_max_off_state(
+    mode_state: dict[str, Any],
+    mapped: dict[str, Any],
+    equipment_id: str,
+    switch_entity: str,
+    target_state: str,
+) -> None:
+    """Arm (on a fresh off) or cancel (on an on) a device's max-off safety cap in the
+    persisted mode runtime state."""
+    timers = mode_state.setdefault("maxOffTimers", {})
+    if not isinstance(timers, dict):
+        timers = {}
+        mode_state["maxOffTimers"] = timers
+    if target_state == "off":
+        seconds = _equipment_max_off_seconds(mapped)
+        if seconds > 0 and switch_entity and equipment_id not in timers:
+            timers[equipment_id] = {
+                "fireAt": (
+                    datetime.now(timezone.utc) + timedelta(seconds=seconds)
+                ).isoformat(),
+                "switch_entity_id": switch_entity,
+            }
+    elif target_state == "on":
+        timers.pop(equipment_id, None)
+
+
+async def _async_timer_drive_switch(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    config: dict[str, Any],
+    equipment_id: str,
+    mapped: dict[str, Any],
+    target_state: str,
+    context: Any,
+) -> tuple[bool, str]:
+    """Drive one switch for a per-equipment timer transition, re-running the SAME safety
+    guards as apply-mode. Returns (driven, reason). Updates max-off cap bookkeeping."""
+    switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+    if not switch_entity:
+        return (False, "No switch entity mapped")
+    if target_state == "on" and _is_protected_display_wavemaker(mapped):
+        return (False, "Display wavemaker automatic restart blocked")
+    block_reason = _equipment_safety_block_reason(
+        hass, config, equipment_id, mapped, target_state
+    )
+    if block_reason:
+        return (False, block_reason)
+    await hass.services.async_call(
+        "switch",
+        f"turn_{target_state}",
+        {ATTR_ENTITY_ID: switch_entity},
+        blocking=True,
+        context=context,
+    )
+    if (
+        target_state == "off"
+        and _equipment_profile_for_config(equipment_id, mapped) == "return_pump"
+    ):
+        await _async_auto_off_skimmers_for_return_pump(hass, config, context)
+    mode_state = config.get("mode", {})
+    if isinstance(mode_state, dict):
+        _update_max_off_state(mode_state, mapped, equipment_id, switch_entity, target_state)
+    return (True, "")
+
+
+async def _async_arm_equipment_timer(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    equipment_id: str,
+    state: dict[str, Any],
+) -> None:
+    """Arm one per-equipment timer's next transition. Mirrors
+    _async_schedule_delayed_equipment_on; the on-fire callback transitions phase and
+    persists, letting _async_save_config re-arm the following phase (single path)."""
+    if not isinstance(state, dict) or state.get("phase") in (None, "done"):
+        return
+    now = datetime.now(timezone.utc)
+    run_at = _parse_datetime(state.get("nextFireAt"))
+    if run_at is None or run_at <= now:
+        run_at = now + timedelta(seconds=1)
+
+    key = _delayed_equipment_key(entry, equipment_id)
+    store = hass.data.setdefault(DOMAIN, {}).setdefault(EQUIPMENT_TIMER_UNSUBS, {})
+    old_unsub = store.pop(key, None)
+    if old_unsub is not None:
+        old_unsub()
+
+    config_now = _config_from_entry(entry)
+    mode_now = config_now.get("mode", {})
+    mode_snapshot = mode_now.get("active") if isinstance(mode_now, dict) else None
+
+    async def _handle(_now: datetime) -> None:
+        timer_store = hass.data.setdefault(DOMAIN, {}).setdefault(
+            EQUIPMENT_TIMER_UNSUBS, {}
+        )
+        timer_store.pop(key, None)
+
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        latest_config = _config_from_entry(latest_entry)
+        latest_mode = latest_config.get("mode", {})
+        if not isinstance(latest_mode, dict):
+            return
+        active = latest_mode.get("active")
+        if active in (None, "running") or active != mode_snapshot:
+            return
+        timers = latest_mode.get("equipmentTimers", {})
+        tstate = timers.get(equipment_id) if isinstance(timers, dict) else None
+        if not isinstance(tstate, dict) or tstate.get("phase") in (None, "done"):
+            return
+
+        equipment = latest_config.get("equipment", {})
+        mapped = equipment.get(equipment_id) if isinstance(equipment, dict) else None
+        if not isinstance(mapped, dict) or not mapped.get("armed", False):
+            return
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        if not switch_entity:
+            return
+
+        phase = tstate.get("phase")
+        action = tstate.get("action") if tstate.get("action") in {"on", "off"} else "on"
+        label = _equipment_label(equipment_id, mapped)
+        fire_now = datetime.now(timezone.utc)
+
+        sw_state = hass.states.get(switch_entity)
+        if sw_state is None or sw_state.state in UNAVAILABLE_STATES:
+            # Transient unavailable: cycles self-heal on the next phase; once-timers finish.
+            if phase in {"on", "off", "delay"}:
+                tstate["nextFireAt"] = (
+                    fire_now + timedelta(seconds=MODE_EQUIPMENT_CYCLE_MIN_SECONDS)
+                ).isoformat()
+            else:
+                tstate["phase"] = "done"
+            await _async_save_config(hass, latest_entry, latest_config)
+            return
+
+        if phase == "delay":
+            driven, reason = await _async_timer_drive_switch(
+                hass, latest_entry, latest_config, equipment_id, mapped, action, None
+            )
+            if not driven:
+                tstate["phase"] = "done"
+                _append_activity(
+                    latest_config, f"Per-device timer skipped {label}: {reason}", "warning"
+                )
+                await _async_save_config(hass, latest_entry, latest_config)
+                return
+            if tstate.get("timerMode") == "cycle":
+                tstate["phase"] = action
+                duration = tstate.get("onSeconds") or MODE_EQUIPMENT_CYCLE_MIN_SECONDS
+            else:
+                tstate["phase"] = "hold"
+                duration = tstate.get("holdSeconds") or 1
+            tstate["nextFireAt"] = (
+                fire_now + timedelta(seconds=duration)
+            ).isoformat()
+            _append_activity(
+                latest_config, f"Per-device timer started {label} ({action})", "control"
+            )
+
+        elif phase == "hold":
+            return_plan = latest_mode.get("returnPlan", {})
+            target = (
+                return_plan.get(equipment_id)
+                if isinstance(return_plan, dict)
+                else None
+            )
+            if target in {"on", "off"}:
+                driven, reason = await _async_timer_drive_switch(
+                    hass, latest_entry, latest_config, equipment_id, mapped, target, None
+                )
+                if driven:
+                    _append_activity(
+                        latest_config,
+                        f"Per-device timer reverted {label} to {target}",
+                        "control",
+                    )
+                else:
+                    _append_activity(
+                        latest_config,
+                        f"Per-device timer could not revert {label}: {reason}",
+                        "warning",
+                    )
+            tstate["phase"] = "done"
+            tstate["nextFireAt"] = ""
+
+        elif phase in {"on", "off"}:
+            target = "off" if phase == "on" else "on"
+            driven, reason = await _async_timer_drive_switch(
+                hass, latest_entry, latest_config, equipment_id, mapped, target, None
+            )
+            if not driven:
+                tstate["phase"] = "done"
+                _append_activity(
+                    latest_config, f"Per-device cycle stopped {label}: {reason}", "warning"
+                )
+                await _async_save_config(hass, latest_entry, latest_config)
+                return
+            tstate["phase"] = target
+            duration = (
+                tstate.get("onSeconds") if target == action else tstate.get("offSeconds")
+            ) or MODE_EQUIPMENT_CYCLE_MIN_SECONDS
+            tstate["nextFireAt"] = (
+                fire_now + timedelta(seconds=duration)
+            ).isoformat()
+        else:
+            return
+
+        await _async_save_config(hass, latest_entry, latest_config)
+
+    store[key] = async_track_point_in_time(hass, _handle, run_at)
+
+
+async def _async_schedule_equipment_timers(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Clear and re-arm every in-flight per-equipment timer for the active mode.
+    Called from _async_save_config and on startup; cancels all when in running."""
+    _clear_equipment_timers(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    mode = config.get("mode", {})
+    if not isinstance(mode, dict) or mode.get("active") in (None, "running"):
+        return
+    timers = mode.get("equipmentTimers", {})
+    if not isinstance(timers, dict):
+        return
+    for equipment_id, state in timers.items():
+        if not isinstance(state, dict) or state.get("phase") in (None, "done"):
+            continue
+        await _async_arm_equipment_timer(hass, entry, equipment_id, state)
+
+
+async def _async_arm_max_off_timer(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    equipment_id: str,
+    state: dict[str, Any],
+) -> None:
+    """Arm one per-equipment max-off safety cap. On fire, force the device back on."""
+    if not isinstance(state, dict):
+        return
+    run_at = _parse_datetime(state.get("fireAt"))
+    if run_at is None:
+        return
+    now = datetime.now(timezone.utc)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+
+    key = _delayed_equipment_key(entry, equipment_id)
+    store = hass.data.setdefault(DOMAIN, {}).setdefault(MAX_OFF_UNSUBS, {})
+    old_unsub = store.pop(key, None)
+    if old_unsub is not None:
+        old_unsub()
+
+    async def _handle(_now: datetime) -> None:
+        cap_store = hass.data.setdefault(DOMAIN, {}).setdefault(MAX_OFF_UNSUBS, {})
+        cap_store.pop(key, None)
+
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        latest_config = _config_from_entry(latest_entry)
+        latest_mode = latest_config.get("mode", {})
+        if not isinstance(latest_mode, dict):
+            return
+        cap_timers = latest_mode.get("maxOffTimers", {})
+        if not isinstance(cap_timers, dict) or equipment_id not in cap_timers:
+            return
+        equipment = latest_config.get("equipment", {})
+        mapped = equipment.get(equipment_id) if isinstance(equipment, dict) else None
+        if not isinstance(mapped, dict):
+            cap_timers.pop(equipment_id, None)
+            await _async_save_config(hass, latest_entry, latest_config)
+            return
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        label = _equipment_label(equipment_id, mapped)
+        sw_state = hass.states.get(switch_entity) if switch_entity else None
+        if switch_entity and (sw_state is None or sw_state.state != "on"):
+            await hass.services.async_call(
+                "switch",
+                "turn_on",
+                {ATTR_ENTITY_ID: switch_entity},
+                blocking=True,
+                context=None,
+            )
+        cap_timers.pop(equipment_id, None)
+        _append_activity(
+            latest_config,
+            f"Safety cap: {label} force-restored after its max-off limit",
+            "warning",
+        )
+        await _async_send_mode_notification(
+            hass,
+            latest_config,
+            f"openreef_max_off_{equipment_id}",
+            "Equipment force-restored",
+            f"{label} was held off past its safety limit and has been turned back on.",
+        )
+        await _async_save_config(hass, latest_entry, latest_config)
+
+    store[key] = async_track_point_in_time(hass, _handle, run_at)
+
+
+async def _async_schedule_max_off_timers(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry | None,
+    config: dict[str, Any] | None = None,
+) -> None:
+    _clear_max_off_timers(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    mode = config.get("mode", {})
+    if not isinstance(mode, dict):
+        return
+    cap_timers = mode.get("maxOffTimers", {})
+    if not isinstance(cap_timers, dict):
+        return
+    for equipment_id, state in cap_timers.items():
+        await _async_arm_max_off_timer(hass, entry, equipment_id, state)
+
+
+async def _async_verify_mode_state(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    intended: list[dict[str, Any]],
+) -> None:
+    """Read back each intended device and alert on any that did not reach its target
+    (catches stranded/offline gear). Read-only check plus notification; no control."""
+    latest_config = _config_from_entry(entry)
+    alerts = latest_config.get("alerts", {})
+    if not isinstance(alerts, dict) or not alerts.get("modeStuckNotify", True):
+        return
+    mismatches: list[str] = []
+    for item in intended:
+        entity_id = item.get("entity_id")
+        target = item.get("state")
+        if not entity_id or target not in {"on", "off"}:
+            continue
+        name = item.get("label") or item.get("equipment_id") or entity_id
+        sw_state = hass.states.get(entity_id)
+        if sw_state is None or sw_state.state in UNAVAILABLE_STATES:
+            mismatches.append(f"{name} (unavailable)")
+        elif sw_state.state != target:
+            mismatches.append(f"{name} (is {sw_state.state}, expected {target})")
+    if not mismatches:
+        return
+    detail = "; ".join(mismatches)
+    _append_activity(
+        latest_config,
+        f"Mode verification: {len(mismatches)} device(s) not in the expected state: {detail}",
+        "warning",
+    )
+    await _async_send_mode_notification(
+        hass,
+        latest_config,
+        "openreef_mode_verify",
+        "Equipment did not switch as expected",
+        detail,
+    )
+    await _async_save_config(hass, entry, latest_config)
+
+
+async def _async_schedule_mode_verify(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    config: dict[str, Any],
+    intended: list[dict[str, Any]],
+) -> None:
+    """Schedule a one-shot read-back verification a few seconds after a mode apply."""
+    _clear_mode_verify(hass)
+    if not intended:
+        return
+    alerts = config.get("alerts", {})
+    if not isinstance(alerts, dict) or not alerts.get("modeVerifyEnabled", True):
+        return
+    try:
+        delay = int(alerts.get("modeVerifyDelaySeconds", MODE_VERIFY_DEFAULT_DELAY_SECONDS))
+    except (TypeError, ValueError):
+        delay = MODE_VERIFY_DEFAULT_DELAY_SECONDS
+    delay = max(2, min(delay, 120))
+    run_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+    snapshot = [dict(item) for item in intended]
+
+    async def _handle(_now: datetime) -> None:
+        hass.data.setdefault(DOMAIN, {}).pop(MODE_VERIFY_UNSUB, None)
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        await _async_verify_mode_state(hass, latest_entry, snapshot)
+
+    hass.data.setdefault(DOMAIN, {})[MODE_VERIFY_UNSUB] = async_track_point_in_time(
+        hass, _handle, run_at
+    )
+
+
 async def _async_apply_mode(
     hass: HomeAssistant,
     entry: OpenReefConfigEntry,
@@ -4149,6 +4778,16 @@ async def _async_apply_mode(
     skipped_locked: list[dict[str, str]] = []
     skipped_missing: list[dict[str, str]] = []
     return_pump_turned_off = False
+    now = datetime.now(timezone.utc)
+
+    # Per-equipment timers (Mode Actions V2). Only non-running modes carry them.
+    equip_timer_cfg = config.get("modeEquipmentTimers", {})
+    equip_timer_cfg = (
+        equip_timer_cfg.get(mode_id, {}) if isinstance(equip_timer_cfg, dict) else {}
+    )
+    if not isinstance(equip_timer_cfg, dict):
+        equip_timer_cfg = {}
+    equipment_timer_state: dict[str, dict[str, Any]] = {}
 
     for equipment_key, desired_state in equipment_config.items():
         if desired_state not in {"on", "off"}:
@@ -4238,6 +4877,39 @@ async def _async_apply_mode(
             )
             continue
 
+        # Per-equipment timer (non-running modes only). With a start delay, defer the
+        # whole action and seed phase "delay"; otherwise drive now and seed the
+        # post-action phase (hold-then-revert or cycle).
+        timer_cfg = None
+        if should_capture_return_plan:
+            raw_timer = equip_timer_cfg.get(equipment_key)
+            if isinstance(raw_timer, dict) and raw_timer.get("enabled"):
+                candidate = _normalise_equipment_timer(raw_timer)
+                if _equipment_timer_active(candidate):
+                    timer_cfg = candidate
+        if timer_cfg is not None and timer_cfg["startDelaySeconds"] > 0:
+            equipment_timer_state[equipment_key] = {
+                "timerMode": timer_cfg["timerMode"],
+                "phase": "delay",
+                "action": desired_state,
+                "nextFireAt": (
+                    now + timedelta(seconds=timer_cfg["startDelaySeconds"])
+                ).isoformat(),
+                "onSeconds": timer_cfg["onSeconds"],
+                "offSeconds": timer_cfg["offSeconds"],
+                "holdSeconds": timer_cfg["holdSeconds"],
+            }
+            applied.append(
+                {
+                    "equipment_id": equipment_key,
+                    "entity_id": switch_entity,
+                    "label": str(mapped.get("label") or equipment_key),
+                    "state": "timer_scheduled",
+                    "delay_seconds": str(timer_cfg["startDelaySeconds"]),
+                }
+            )
+            continue
+
         if (
             mode_id == "running"
             and desired_state == "on"
@@ -4280,6 +4952,37 @@ async def _async_apply_mode(
         ):
             return_pump_turned_off = True
 
+        # Start-delay 0: device is already in its action state — seed the follow-up phase.
+        if timer_cfg is not None:
+            if timer_cfg["timerMode"] == "cycle":
+                equipment_timer_state[equipment_key] = {
+                    "timerMode": "cycle",
+                    "phase": desired_state,
+                    "action": desired_state,
+                    "nextFireAt": (
+                        now
+                        + timedelta(
+                            seconds=timer_cfg["onSeconds"]
+                            or MODE_EQUIPMENT_CYCLE_MIN_SECONDS
+                        )
+                    ).isoformat(),
+                    "onSeconds": timer_cfg["onSeconds"],
+                    "offSeconds": timer_cfg["offSeconds"],
+                    "holdSeconds": timer_cfg["holdSeconds"],
+                }
+            else:
+                equipment_timer_state[equipment_key] = {
+                    "timerMode": "once",
+                    "phase": "hold",
+                    "action": desired_state,
+                    "nextFireAt": (
+                        now + timedelta(seconds=timer_cfg["holdSeconds"] or 1)
+                    ).isoformat(),
+                    "onSeconds": 0,
+                    "offSeconds": 0,
+                    "holdSeconds": timer_cfg["holdSeconds"],
+                }
+
     if return_pump_turned_off:
         applied.extend(
             await _async_auto_off_skimmers_for_return_pump(hass, config, context)
@@ -4295,7 +4998,6 @@ async def _async_apply_mode(
             "OpenReef mode matched equipment, but all mapped controls are locked"
         )
 
-    now = datetime.now(timezone.utc)
     mode_timer = (
         config.get("modeTimers", {}).get(mode_id, {})
         if isinstance(config.get("modeTimers"), dict)
@@ -4314,12 +5016,33 @@ async def _async_apply_mode(
             expires_at = (now + timedelta(minutes=duration_minutes)).isoformat()
             auto_return = bool(mode_timer.get("autoReturn", False))
 
+    # Max-off safety caps: arm for any device this apply drove OFF (return-to-running
+    # clears all caps — the "holding" is over). Cancel happens implicitly: devices
+    # driven on/restored simply aren't re-added here.
+    max_off_state: dict[str, dict[str, str]] = {}
+    if should_capture_return_plan:
+        for item in applied:
+            if item.get("state") != "off":
+                continue
+            mapped_item = equipment.get(item.get("equipment_id"))
+            if not isinstance(mapped_item, dict):
+                continue
+            cap_seconds = _equipment_max_off_seconds(mapped_item)
+            entity_item = _normalise_entity_id(mapped_item.get("switch_entity_id"))
+            if cap_seconds > 0 and entity_item:
+                max_off_state[item["equipment_id"]] = {
+                    "fireAt": (now + timedelta(seconds=cap_seconds)).isoformat(),
+                    "switch_entity_id": entity_item,
+                }
+
     config["mode"] = {
         "active": mode_id,
         "startedAt": now.isoformat(),
         "expiresAt": expires_at,
         "autoReturn": auto_return,
         "returnPlan": return_plan if should_capture_return_plan else {},
+        "equipmentTimers": equipment_timer_state if should_capture_return_plan else {},
+        "maxOffTimers": max_off_state if should_capture_return_plan else {},
     }
     mode_label = _mode_label(config, mode_id)
     timer_detail = ""
@@ -4343,6 +5066,20 @@ async def _async_apply_mode(
         "control",
     )
     await _async_save_config(hass, entry, config)
+
+    # Exit verification: read back the devices we drove to a definite state and alert if
+    # any didn't get there (stranded/offline gear). One-shot, a few seconds out.
+    intended_verify = [
+        {
+            "equipment_id": item["equipment_id"],
+            "entity_id": item.get("entity_id"),
+            "state": item["state"],
+            "label": item.get("label"),
+        }
+        for item in applied
+        if item.get("state") in {"on", "off"}
+    ]
+    await _async_schedule_mode_verify(hass, entry, config, intended_verify)
 
     # Feed-watch (Phase D) supersedes the single Phase A feed clip: start a snapshot burst
     # when entering feed (if enabled), and finalize any active session when leaving feed.
@@ -6389,6 +7126,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
             entry, options={**entry.options, CONF_SETTINGS: normalised}
         )
     await _async_schedule_mode_timer(hass, entry, normalised)
+    await _async_schedule_equipment_timers(hass, entry, normalised)
+    await _async_schedule_max_off_timers(hass, entry, normalised)
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
@@ -6402,6 +7141,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
 async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> bool:
     """Unload an OpenReef config entry."""
     _clear_mode_timer(hass)
+    _clear_equipment_timers(hass)
+    _clear_max_off_timers(hass)
+    _clear_mode_verify(hass)
     _clear_mode_schedule(hass)
     _clear_ato_duty_cycle(hass)
     _clear_delayed_equipment_calls(hass)

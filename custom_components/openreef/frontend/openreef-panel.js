@@ -1312,6 +1312,19 @@ class OpenReefPanel extends HTMLElement {
         this._applyModePreset(target.dataset.mode, target.dataset.preset);
         this._render();
       }
+      if (action === "mode-equip-timer-mode") {
+        const modeId = target.dataset.mode;
+        const equipmentId = target.dataset.equipment;
+        this._config.modeEquipmentTimers = this._config.modeEquipmentTimers || {};
+        const byMode = this._config.modeEquipmentTimers[modeId] = this._config.modeEquipmentTimers[modeId] || {};
+        const timer = byMode[equipmentId] = byMode[equipmentId] || {
+          enabled: true, startDelaySeconds: 0, timerMode: "once",
+          holdSeconds: 0, onSeconds: 0, offSeconds: 0,
+        };
+        timer.timerMode = target.dataset.value === "cycle" ? "cycle" : "once";
+        this._setDirty(true);
+        this._render();
+      }
       if (action === "close-mode-confirm") {
         this._modeConfirm = null;
         this._render();
@@ -1541,6 +1554,34 @@ class OpenReefPanel extends HTMLElement {
           ? Math.max(0, Math.min(Number(value), 720))
           : value;
       }
+      if (scope === "mode-equip-timer") {
+        const modeId = target.dataset.mode;
+        const equipmentId = target.dataset.equipment;
+        this._config.modeEquipmentTimers = this._config.modeEquipmentTimers || {};
+        const byMode = this._config.modeEquipmentTimers[modeId] = this._config.modeEquipmentTimers[modeId] || {};
+        const timer = byMode[equipmentId] = byMode[equipmentId] || {
+          enabled: false, startDelaySeconds: 0, timerMode: "once",
+          holdSeconds: 0, onSeconds: 0, offSeconds: 0,
+        };
+        if (field === "enabled") {
+          timer.enabled = target.checked;
+        } else {
+          // Combine the min + sec sibling inputs of this duration into canonical seconds.
+          const base = field.replace(/(Min|Sec)$/, "");
+          const wrap = target.closest(".dur-inputs");
+          const minEl = wrap && wrap.querySelector(`[data-field="${base}Min"]`);
+          const secEl = wrap && wrap.querySelector(`[data-field="${base}Sec"]`);
+          const minV = Math.max(0, Number(minEl && minEl.value) || 0);
+          const secV = Math.max(0, Math.min(59, Number(secEl && secEl.value) || 0));
+          let total = Math.max(0, Math.min(minV * 60 + secV, 86400));
+          const key = base === "startDelay" ? "startDelaySeconds"
+            : base === "hold" ? "holdSeconds"
+            : base === "on" ? "onSeconds" : "offSeconds";
+          // Cycle phase floor (relay protection) — mirror the backend.
+          if ((key === "onSeconds" || key === "offSeconds") && total > 0 && total < 10) total = 10;
+          timer[key] = total;
+        }
+      }
       if (scope === "mode-settings") {
         const modeId = target.dataset.mode;
         this._config.modeSettings = this._config.modeSettings || {};
@@ -1660,7 +1701,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting")
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting")
         && event.type === "change"
       ) this._render();
     };
@@ -2433,6 +2474,50 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
+  // Per-equipment timer (Mode Actions V2). Durations are stored in seconds; the editor
+  // shows minutes + seconds. Cycle phases are floored to 10s (relay protection).
+  _modeEquipmentTimer(modeId, equipmentId) {
+    const raw = this._config?.modeEquipmentTimers?.[modeId]?.[equipmentId] || {};
+    const clampSecs = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(0, Math.min(Math.round(n), 86400)) : 0;
+    };
+    return {
+      enabled: Boolean(raw.enabled),
+      startDelaySeconds: clampSecs(raw.startDelaySeconds),
+      timerMode: raw.timerMode === "cycle" ? "cycle" : "once",
+      holdSeconds: clampSecs(raw.holdSeconds),
+      onSeconds: clampSecs(raw.onSeconds),
+      offSeconds: clampSecs(raw.offSeconds),
+    };
+  }
+
+  _splitMinSec(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    return { min: Math.floor(total / 60), sec: total % 60 };
+  }
+
+  _fmtDuration(seconds) {
+    const { min, sec } = this._splitMinSec(seconds);
+    if (min && sec) return `${min}m ${sec}s`;
+    if (min) return `${min}m`;
+    return `${sec}s`;
+  }
+
+  // One-line summary of a device's timer for the confirm modal / rows.
+  _equipmentTimerSummary(modeId, equipmentId, action) {
+    const timer = this._modeEquipmentTimer(modeId, equipmentId);
+    if (!timer.enabled) return "";
+    const parts = [];
+    if (timer.startDelaySeconds > 0) parts.push(`starts after ${this._fmtDuration(timer.startDelaySeconds)}`);
+    if (timer.timerMode === "cycle") {
+      parts.push(`cycle ${this._fmtDuration(timer.onSeconds)} on / ${this._fmtDuration(timer.offSeconds)} off`);
+    } else {
+      parts.push(`${action || "on"} for ${this._fmtDuration(timer.holdSeconds)} then revert`);
+    }
+    return parts.join(", ");
+  }
+
   _activeModeExpiresAt() {
     const raw = this._config?.mode?.expiresAt;
     if (!raw) return null;
@@ -2927,6 +3012,9 @@ class OpenReefPanel extends HTMLElement {
               : `${switchEntity} is currently ${current}`;
           }
         }
+        const timerSummary = modeId === "running"
+          ? ""
+          : this._equipmentTimerSummary(modeId, equipmentId, desiredState);
         return {
           equipmentId,
           label: item.label || equipmentId,
@@ -2936,6 +3024,7 @@ class OpenReefPanel extends HTMLElement {
           armed: Boolean(item.armed),
           displayWavemaker: Boolean(item.displayWavemaker),
           autoRestartBlocked,
+          timerSummary,
         };
       });
   }
@@ -10285,6 +10374,9 @@ class OpenReefPanel extends HTMLElement {
     const durationText = durationLabel === "Not started yet" ? durationLabel : `for ${durationLabel}`;
     const countdownText = this._activeModeCountdownText();
     const restoreRows = active === "running" ? [] : this._modeActionRows("running");
+    const deviceTimers = active === "running"
+      ? 0
+      : Object.values(this._config?.mode?.equipmentTimers || {}).filter((t) => t && t.phase && t.phase !== "done").length;
     return `
       <article class="panel mode-panel">
         <div class="section-head">
@@ -10296,6 +10388,7 @@ class OpenReefPanel extends HTMLElement {
           <div class="pill-stack">
             <span class="pill">${this._escape(startedLabel)}</span>
             <span class="pill ${active === "running" ? "ok" : "warning"}">${this._escape(durationText)}</span>
+            ${deviceTimers ? `<span class="pill">⏱ ${deviceTimers} device timer${deviceTimers === 1 ? "" : "s"}</span>` : ""}
             ${active !== "running" ? `<span class="pill warning" data-mode-countdown>${this._escape(countdownText)}</span>` : ""}
             ${active !== "running" ? `<button class="primary compact-button" data-action="set-mode" data-mode="running">${this._modeTimerExpired() ? "Return now" : "Return to Running"}</button>` : ""}
           </div>
@@ -13077,6 +13170,10 @@ class OpenReefPanel extends HTMLElement {
                 <input type="number" min="0" max="1800" step="5" data-scope="equipment" data-id="${this._escape(id)}" data-field="powerOnDelaySeconds" value="${this._escape(item.powerOnDelaySeconds ?? 0)}">
                 <small>Useful for skimmers and ATO after return-pump pauses while water levels stabilise.</small>
               </label>
+              <label>Max time off (seconds)
+                <input type="number" min="0" max="86400" step="30" data-scope="equipment" data-id="${this._escape(id)}" data-field="maxOffSeconds" value="${this._escape(item.maxOffSeconds ?? 0)}">
+                <small>Safety cap: if a mode or per-device timer holds this off longer than this, OpenReef forces it back on (0 = no cap). Recommended for return pumps and heaters — e.g. 600 = 10 min.</small>
+              </label>
             </section>
             <section class="picker mapping-card entity-card">
               <div class="mapping-head">
@@ -13242,16 +13339,75 @@ class OpenReefPanel extends HTMLElement {
           ${equipment.map(([equipmentId, item]) => {
             const selected = preview[equipmentId] || "unchanged";
             return `
-              <label>${this._escape(item.label || equipmentId)}
-                <small>${this._escape(this._equipmentUseHint(equipmentId, item))}</small>
-                <select data-scope="mode-preview" data-mode="${this._escape(modeId)}" data-equipment="${this._escape(equipmentId)}">
-                  ${options.map(([value, label]) => `<option value="${this._escape(value)}" ${selected === value ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
-                </select>
-              </label>
+              <div class="mode-equip-row">
+                <label>${this._escape(item.label || equipmentId)}
+                  <small>${this._escape(this._equipmentUseHint(equipmentId, item))}</small>
+                  <select data-scope="mode-preview" data-mode="${this._escape(modeId)}" data-equipment="${this._escape(equipmentId)}">
+                    ${options.map(([value, label]) => `<option value="${this._escape(value)}" ${selected === value ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
+                  </select>
+                </label>
+                ${selected !== "unchanged" ? this._modeEquipmentTimerEditor(modeId, equipmentId, item, selected) : ""}
+              </div>
             `;
           }).join("")}
         </div>` : `<p class="muted">Add equipment first, then choose what this mode should do.</p>`}
       </section>
+    `;
+  }
+
+  // Per-equipment timer controls (Mode Actions V2). Only shown when the device's mode
+  // action is on/off. Renders a start delay, a once/cycle toggle, and the relevant
+  // duration inputs (minutes + seconds). Cycle is offered only when the action is "on".
+  _modeEquipmentTimerEditor(modeId, equipmentId, item, selected) {
+    const timer = this._modeEquipmentTimer(modeId, equipmentId);
+    const protectedWavemaker = Boolean(item.displayWavemaker && !item.allowAutoRestart);
+    const m = this._escape(modeId);
+    const e = this._escape(equipmentId);
+    const durInputs = (base, seconds) => {
+      const { min, sec } = this._splitMinSec(seconds);
+      return `
+        <span class="dur-inputs">
+          <input type="number" min="0" max="1440" step="1" value="${min}" data-scope="mode-equip-timer" data-mode="${m}" data-equipment="${e}" data-field="${base}Min"> m
+          <input type="number" min="0" max="59" step="1" value="${sec}" data-scope="mode-equip-timer" data-mode="${m}" data-equipment="${e}" data-field="${base}Sec"> s
+        </span>`;
+    };
+    const cycleAllowed = selected === "on";
+    const showCycle = cycleAllowed && timer.timerMode === "cycle";
+    return `
+      <div class="mode-equip-timer ${timer.enabled ? "on" : ""}">
+        <label class="toggle-card compact">
+          <input type="checkbox" data-scope="mode-equip-timer" data-mode="${m}" data-equipment="${e}" data-field="enabled" ${timer.enabled ? "checked" : ""}>
+          <span>
+            <strong>Per-device timer</strong>
+            <small>Stagger when it fires, hold then revert, or cycle on/off.</small>
+          </span>
+        </label>
+        ${timer.enabled ? `
+          <div class="mode-equip-timer-grid">
+            <label class="dur-field">Start delay ${durInputs("startDelay", timer.startDelaySeconds)}
+              <small>Wait this long after the mode starts before acting (0 = immediately).</small>
+            </label>
+            ${cycleAllowed ? `
+              <div class="seg">
+                <button type="button" class="${timer.timerMode === "once" ? "active" : ""}" data-action="mode-equip-timer-mode" data-mode="${m}" data-equipment="${e}" data-value="once">Hold then revert</button>
+                <button type="button" class="${timer.timerMode === "cycle" ? "active" : ""}" data-action="mode-equip-timer-mode" data-mode="${m}" data-equipment="${e}" data-value="cycle">Repeat cycle</button>
+              </div>
+            ` : ""}
+            ${showCycle ? `
+              <label class="dur-field">On for ${durInputs("on", timer.onSeconds)}</label>
+              <label class="dur-field">Off for ${durInputs("off", timer.offSeconds)}
+                <small>Repeats until the mode ends (min 10s per phase), then reverts to the pre-mode state.</small>
+              </label>
+              ${protectedWavemaker ? `<small class="warn">This display wavemaker blocks automatic restart, so the on phase may be skipped for livestock safety.</small>` : ""}
+            ` : `
+              <label class="dur-field">Hold for ${durInputs("hold", timer.holdSeconds)}
+                <small>Then revert to the state this device had before the mode started.</small>
+              </label>
+              ${protectedWavemaker && selected === "on" ? `<small class="warn">This display wavemaker blocks automatic restart, so the timed turn-on may be skipped for livestock safety.</small>` : ""}
+            `}
+          </div>
+        ` : ""}
+      </div>
     `;
   }
 
@@ -13453,6 +13609,28 @@ class OpenReefPanel extends HTMLElement {
           <label>Alert hysteresis %
             <input type="number" min="0" max="20" step="0.5" data-scope="alerts" data-field="hysteresisPercent" value="${this._escape(String(alerts.hysteresisPercent ?? 2))}">
             <small>Helps prevent readings near a threshold from flickering between warning and resolved.</small>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="alerts" data-field="modeVerifyEnabled" ${alerts.modeVerifyEnabled !== false ? "checked" : ""}>
+            <span>
+              <strong>Mode exit verification</strong>
+              <small>After a mode applies or returns, read back each device and alert if any didn't switch as expected (catches stranded/offline gear).</small>
+            </span>
+          </label>
+          <label>Verification delay seconds
+            <input type="number" min="2" max="120" step="1" data-scope="alerts" data-field="modeVerifyDelaySeconds" value="${this._escape(String(alerts.modeVerifyDelaySeconds ?? 8))}">
+            <small>How long to wait after a mode change before reading back device states.</small>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="alerts" data-field="modeStuckNotify" ${alerts.modeStuckNotify !== false ? "checked" : ""}>
+            <span>
+              <strong>Stuck-device & timed-mode alerts</strong>
+              <small>Notify when a device fails to exit a mode, a safety cap force-restores a device, or a timed mode can't auto-return.</small>
+            </span>
+          </label>
+          <label>Mode alert notify target
+            <input data-scope="alerts" data-field="modeNotifyTarget" value="${this._escape(alerts.modeNotifyTarget || "")}" placeholder="notify service e.g. mobile_app_phone">
+            <small>Optional Home Assistant notify service for mode alerts (in addition to the in-HA notification). Leave blank for in-HA only.</small>
           </label>
         </div>
         <section class="mapping-section">
@@ -14049,6 +14227,7 @@ class OpenReefPanel extends HTMLElement {
                   <div>
                     <strong>${this._escape(row.label)}</strong>
                     <span>${this._escape(row.detail)}</span>
+                    ${row.timerSummary ? `<span class="mode-confirm-timer">⏱ ${this._escape(row.timerSummary)}</span>` : ""}
                   </div>
                   <span class="pill ${row.autoRestartBlocked ? "warning" : row.status === "ready" ? "ok" : row.status === "locked" ? "disabled" : "warning"}">${this._escape(row.status === "ready" ? `turn ${row.desiredState}` : row.autoRestartBlocked ? "blocked" : row.status)}</span>
                 </div>
@@ -14610,6 +14789,20 @@ class OpenReefPanel extends HTMLElement {
         .mode-mini-row small { color: #8da2ba; }
         .mode-name-grid { display: grid; grid-template-columns: minmax(160px, .35fr) minmax(240px, 1fr); gap: 12px; }
         .mode-timer-card { display: grid; grid-template-columns: minmax(160px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: stretch; border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); }
+        .mode-equip-row { display: grid; gap: 8px; border-top: 1px solid #1b2a3c; padding-top: 8px; }
+        .mode-equip-row:first-child { border-top: 0; padding-top: 0; }
+        .mode-equip-timer { border: 1px dashed #24364a; border-radius: 8px; padding: 10px; background: rgba(11, 23, 36, .5); display: grid; gap: 10px; }
+        .mode-equip-timer.on { border-style: solid; border-color: #2c4a66; }
+        .mode-equip-timer .toggle-card.compact { padding: 0; border: 0; background: transparent; }
+        .mode-equip-timer-grid { display: grid; gap: 10px; }
+        .dur-field { display: grid; gap: 4px; font-size: 12px; font-weight: 700; color: #b8c8da; }
+        .dur-inputs { display: inline-flex; align-items: center; gap: 6px; color: #8da2ba; font-weight: 700; }
+        .dur-inputs input { width: 64px; }
+        .seg { display: inline-flex; gap: 0; border: 1px solid #24364a; border-radius: 8px; overflow: hidden; width: fit-content; }
+        .seg button { border: 0; background: #0b1724; color: #8da2ba; padding: 6px 12px; font-weight: 800; cursor: pointer; }
+        .seg button.active { background: #1f6feb; color: #fff; }
+        .mode-confirm-timer { color: #6fd3a8; font-size: 12px; font-weight: 700; }
+        small.warn { color: #f0b760; }
         .activity-list { display: grid; gap: 8px; }
         .activity-item { display: grid; grid-template-columns: minmax(130px, .22fr) 1fr; gap: 12px; align-items: center; border-top: 1px solid #223447; padding: 10px 0; }
         .activity-item:first-child { border-top: 0; }

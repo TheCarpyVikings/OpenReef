@@ -39,13 +39,31 @@ class _FakeStates:
 
 
 class _FakeServices:
-    def __init__(self):
+    def __init__(self, states=None):
         self.calls = []  # SimpleNamespace(domain, service, data, kwargs)
+        # When wired to a _FakeStates, switch.turn_on/off mutate the entity state so
+        # scheduled-callback re-checks (per-equipment timers, max-off) behave like HA.
+        self._states = states
 
     async def async_call(self, domain, service, data=None, **kwargs):
+        data = dict(data or {})
         self.calls.append(
-            SimpleNamespace(domain=domain, service=service, data=dict(data or {}), kwargs=kwargs)
+            SimpleNamespace(domain=domain, service=service, data=data, kwargs=kwargs)
         )
+        if (
+            domain == "switch"
+            and service in ("turn_on", "turn_off")
+            and self._states is not None
+        ):
+            new_state = "on" if service == "turn_on" else "off"
+            # ATTR_ENTITY_ID is stubbed, so the key is opaque — mutate by value(s).
+            for value in data.values():
+                if isinstance(value, str):
+                    self._states.set(value, new_state)
+                elif isinstance(value, (list, tuple)):
+                    for item in value:
+                        if isinstance(item, str):
+                            self._states.set(item, new_state)
 
 
 class _FakeConfig:
@@ -79,7 +97,7 @@ class FakeEntry:
 class FakeHass:
     def __init__(self, states=None, entries=None, config_dir="/tmp/openreef_test"):
         self.states = _FakeStates(states)
-        self.services = _FakeServices()
+        self.services = _FakeServices(self.states)
         self.config = _FakeConfig(config_dir)
         self.config_entries = _FakeConfigEntries(entries or [])
         self.data = {}
@@ -116,6 +134,61 @@ class FakeConnection:
     @property
     def error_codes(self):
         return [error.code for error in self.errors]
+
+
+class FakeScheduler:
+    """Captures callbacks registered via ``async_track_point_in_time`` so tests can
+    fire them deterministically. The integration imports the helper by name, so a test
+    installs this by monkeypatching ``integration.async_track_point_in_time``
+    (see ``install_scheduler``). Re-arms (e.g. a cycling timer that schedules its next
+    phase) register new records, so firing again advances the cycle.
+    """
+
+    def __init__(self):
+        self.scheduled = []  # list of {callback, run_at, cancelled}
+
+    def track(self, hass, callback, run_at):
+        record = {"callback": callback, "run_at": run_at, "cancelled": False}
+        self.scheduled.append(record)
+
+        def _unsub():
+            record["cancelled"] = True
+
+        return _unsub
+
+    def pending(self):
+        return [r for r in self.scheduled if not r["cancelled"]]
+
+    async def fire_all(self, now=None):
+        """Fire every currently-pending callback once (snapshot pass). Records armed
+        during this pass (future phases) are NOT fired here — call again to advance."""
+        fired = 0
+        for record in list(self.scheduled):
+            if record["cancelled"]:
+                continue
+            record["cancelled"] = True
+            fired += 1
+            await record["callback"](now if now is not None else record["run_at"])
+        return fired
+
+    async def fire_due(self, now):
+        """Fire only callbacks whose run_at <= now (snapshot pass)."""
+        fired = 0
+        for record in list(self.scheduled):
+            if record["cancelled"] or record["run_at"] > now:
+                continue
+            record["cancelled"] = True
+            fired += 1
+            await record["callback"](now)
+        return fired
+
+
+def install_scheduler(integration):
+    """Replace the integration's point-in-time scheduler with a capturing fake.
+    Returns the FakeScheduler so tests can fire timers."""
+    scheduler = FakeScheduler()
+    integration.async_track_point_in_time = scheduler.track
+    return scheduler
 
 
 def run(coro):
