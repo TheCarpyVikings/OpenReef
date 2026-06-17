@@ -472,6 +472,64 @@ def plan_leg(
     return {"pumps": ["drain", "fill"], "sliceMl": remaining}
 
 
+def exchange_side_progress(
+    remaining_s: float, ml_per_s: float, exchange_factor: float, target_ml: float
+) -> tuple[float, bool]:
+    """Simultaneous mode: dead-reckoned volume (ml) one pump has moved, given the
+    seconds remaining until its OWN scheduled stop. Each pump has an independent timer
+    sized to move exactly ``target_ml`` at its calibrated rate, so neither over-pumps —
+    the fix for the shared-timer problem that got simultaneous deferred. Returns
+    ``(volume_ml, done)``; ``done`` is volume-aware (also true at/over target or for a
+    non-positive rate) so an uncalibrated/finished side never reads 'not done'."""
+    target = max(0.0, _f(target_ml))
+    rem_s = _f(remaining_s)
+    rate = _f(ml_per_s)
+    if rem_s <= 0 or rate <= 0:
+        return target, True
+    remaining_ml = volume_for_runtime_l(rem_s, rate, exchange_factor) * 1000.0
+    vol = min(max(0.0, target - max(0.0, remaining_ml)), target)
+    return vol, vol >= target - 1e-6
+
+
+def exchange_imbalance_exceeds(
+    drained_ml: float, filled_ml: float, cap_litres: float, baseline_ml: float = 0.0
+) -> bool:
+    """True when the *new* sump excursion this leg exceeds the cap. We measure
+    divergence relative to the gap that existed when the leg began (``baseline_ml``),
+    not the cumulative drain/fill totals — so a resume-to-balance leg (which starts with
+    a large pre-existing gap it is *correcting*) is never aborted, and a fresh leg
+    (baseline 0) is bounded by the cap. The start-time guard
+    (:func:`simultaneous_max_excursion_l`) prevents a fresh leg from ever needing to hit
+    this. ``cap_litres <= 0`` disables the check."""
+    cap = _f(cap_litres)
+    if cap <= 0:
+        return False
+    gap = abs(_f(drained_ml) - _f(filled_ml))
+    new_divergence = gap - abs(_f(baseline_ml))
+    return new_divergence > cap * 1000.0 + 1e-6
+
+
+def simultaneous_max_excursion_l(cfg: dict[str, Any], target_l: float) -> float:
+    """Predicted worst-case sump excursion (litres) for a *fresh* simultaneous change of
+    ``target_l``: the faster pump finishes and stops while the slower is still mid-way,
+    so the peak |drained − filled| = ``target · (1 − t_fast/t_slow)``. Used as a start
+    guard — if this exceeds the imbalance cap, the pumps are too rate-mismatched to run
+    simultaneously at this size (use sequential, or rate-match). Uncalibrated ⇒ worst
+    case (the calibration guard blocks first anyway)."""
+    target = max(0.0, _f(target_l))
+    if target <= 0:
+        return 0.0
+    pumps = (cfg or {}).get("pumps", {}) if isinstance((cfg or {}).get("pumps"), dict) else {}
+    drain = pumps.get("drain", {}) if isinstance(pumps.get("drain"), dict) else {}
+    fill = pumps.get("fill", {}) if isinstance(pumps.get("fill"), dict) else {}
+    drain_rt = runtime_for_volume_s(target, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0))
+    fill_rt = runtime_for_volume_s(target, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0))
+    if drain_rt <= 0 or fill_rt <= 0:
+        return target
+    t_fast, t_slow = min(drain_rt, fill_rt), max(drain_rt, fill_rt)
+    return target * (1.0 - t_fast / t_slow)
+
+
 def leg_runtime_s(slice_l: float, cfg: dict[str, Any], roles: Iterable[str]) -> float:
     """Wall-clock seconds for a leg that runs ``roles`` concurrently for ``slice_l``
     litres each — the max of the per-pump runtimes (they run together)."""

@@ -115,14 +115,28 @@ def _close(a, b, tol=1.0):
 
 # --- Happy paths -------------------------------------------------------------
 
-def test_unsupported_simultaneous_method_is_blocked():
+def test_continuous_method_is_blocked():
+    # continuous/trickle is projection-only; only sequential + simultaneous run live.
     entry = _entry("batch_sequential")
     hass = _hass(entry)
-    started, reasons = _start(hass, entry, 2.0, method="batch_simultaneous")
+    started, reasons = _start(hass, entry, 2.0, method="continuous")
     assert not started
     assert any(r["code"] == "unsupported_method" for r in reasons)
     assert _state(entry)["status"] == "idle"
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+
+
+def _fire_exchange(hass, entry, age_done=()):
+    """Fire one simultaneous monitor tick. ``age_done`` lists roles ('drain'/'fill')
+    whose stop time should be pushed into the past to simulate that pump finishing."""
+    config = integration._config_from_entry(entry)
+    st = config["automaticWaterChange"]["state"]
+    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    if "drain" in age_done:
+        st["drainEndsAt"] = past
+    if "fill" in age_done:
+        st["fillEndsAt"] = past
+    run(integration._async_awc_exchange_tick(hass, entry, config, None))
 
 
 def test_sequential_drains_then_fills():
@@ -487,12 +501,12 @@ def test_scheduler_legacy_continuous_is_migrated_to_sequential():
     assert _close(_state(entry)["targetLitres"], 4.8, 1e-6)
 
 
-def test_scheduler_legacy_simultaneous_is_migrated_to_sequential():
+def test_scheduler_runs_simultaneous():
     entry = _sched_entry("batch_simultaneous")
     hass = _hass(entry)
     run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))
-    assert _awc(entry)["schedule"]["method"] == "batch_sequential"
-    assert _state(entry)["status"] == "draining"
+    assert _awc(entry)["schedule"]["method"] == "batch_simultaneous"
+    assert _state(entry)["status"] == "exchanging"
 
 
 def test_scheduler_does_nothing_when_schedule_disabled():
@@ -513,6 +527,147 @@ def test_scheduler_auto_resumes_paused_change():
     hass.states.set("binary_sensor.fresh_empty", "off")
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
     assert _state(entry)["status"] == "filling"
+
+
+# --- Simultaneous (independent per-pump timers + imbalance abort) ------------
+
+def test_simultaneous_starts_both_pumps():
+    entry = _entry("batch_simultaneous")
+    hass = _hass(entry)
+    started, reasons = _start(hass, entry, 2.0, method="batch_simultaneous")
+    assert started and not reasons
+    assert _state(entry)["status"] == "exchanging"
+    assert _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    # each pump got its own stop time
+    assert _state(entry)["drainEndsAt"] and _state(entry)["fillEndsAt"]
+
+
+def test_simultaneous_completes_balanced():
+    entry = _entry("batch_simultaneous")
+    hass = _hass(entry)
+    _start(hass, entry, 2.0, method="batch_simultaneous")
+    _fire_exchange(hass, entry, age_done=("drain", "fill"))  # both pumps reached their stop
+    awc = _awc(entry)
+    assert awc["state"]["status"] == "idle"
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_fill")
+    assert len(awc["history"]) == 1 and not awc["history"][0]["partial"]
+    assert _close(awc["history"][0]["drainedL"], 2.0, 1e-3)
+    assert _close(awc["history"][0]["filledL"], 2.0, 1e-3)
+
+
+def test_simultaneous_fast_pump_does_not_overpump():
+    # drain 100 ml/s (fast), fill 50 ml/s (slow): for 1 L, drain ends at 10s, fill at 20s.
+    entry = _entry("batch_simultaneous", awc_over={"pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 50},
+        # generous imbalance cap so this test isolates the over-pump check
+    }, "safety": {"highLevelEntity": "binary_sensor.high", "leakEntity": "binary_sensor.leak",
+                  "maxSingleChangePercent": 25, "maxInstantaneousImbalanceLitres": 5}})
+    hass = _hass(entry)
+    _start(hass, entry, 1.0, method="batch_simultaneous")
+    # drain finishes first; its own timer stops it at exactly target — no over-pump
+    _fire_exchange(hass, entry, age_done=("drain",))
+    st = _state(entry)
+    assert st["status"] == "exchanging"               # fill still running
+    assert _close(st["drainedMl"], 1000.0, 1.0)        # drain capped at target
+    assert st["drainedMl"] <= 1000.0 + 1e-6            # never exceeds target
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
+    # then fill finishes → finalize, balanced
+    _fire_exchange(hass, entry, age_done=("drain", "fill"))
+    assert _state(entry)["status"] == "idle"
+    assert _close(_awc(entry)["history"][0]["filledL"], 1.0, 1e-3)
+
+
+def test_simultaneous_start_blocked_when_pumps_too_mismatched():
+    # Very mismatched pumps (100/10) ⇒ predicted ~0.9 L sump swing for a 1 L change
+    # exceeds the 0.1 L cap ⇒ blocked at START (never starts → never a mid-run abort).
+    entry = _entry("batch_simultaneous", awc_over={"pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 10},
+    }, "safety": {"highLevelEntity": "binary_sensor.high", "leakEntity": "binary_sensor.leak",
+                  "maxSingleChangePercent": 25, "maxInstantaneousImbalanceLitres": 0.1}})
+    hass = _hass(entry)
+    started, reasons = _start(hass, entry, 1.0, method="batch_simultaneous")
+    assert not started
+    assert any(r["code"] == "imbalance_too_large" for r in reasons)
+    assert _state(entry)["status"] == "idle"
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+
+
+def test_simultaneous_intermediate_tick_no_false_abort():
+    # Regression: a healthy rate-mismatched pair (100/50) must NOT false-abort on a real
+    # mid-run tick. 2 L peak swing = 1.0 L, so a 1.5 L cap allows the start; the gap grows
+    # to 1.0 L mid-run and must stay 'exchanging'.
+    entry = _entry("batch_simultaneous", awc_over={"pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 50},
+    }, "safety": {"highLevelEntity": "binary_sensor.high", "leakEntity": "binary_sensor.leak",
+                  "maxSingleChangePercent": 25, "maxInstantaneousImbalanceLitres": 1.5}})
+    hass = _hass(entry)
+    started, reasons = _start(hass, entry, 2.0, method="batch_simultaneous")
+    assert started, reasons
+    # Simulate a consistent t=20 s: drain just finished, fill has 20 s of its 40 s left.
+    config = integration._config_from_entry(entry)
+    st = config["automaticWaterChange"]["state"]
+    now = datetime.now(timezone.utc)
+    st["drainEndsAt"] = now.isoformat()
+    st["fillEndsAt"] = (now + timedelta(seconds=20)).isoformat()
+    run(integration._async_awc_exchange_tick(hass, entry, config, None))
+    s2 = _state(entry)
+    assert s2["status"] == "exchanging"           # 1.0 L gap < 1.5 L cap ⇒ no abort
+    assert _close(s2["drainedMl"], 2000, 5) and _close(s2["filledMl"], 1000, 40)
+
+
+def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
+    # crash after drain done (2 L) but fill only 0.5 L: resume must NOT re-run drain,
+    # and the 1.5 L pre-existing gap must NOT false-abort (re-baselined imbalance cap).
+    entry = _entry("batch_simultaneous")  # default cap 0.5 L — would abort without baseline
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
+        "drainedMl": 2000, "filledMl": 500,
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    st = _state(entry)
+    assert st["status"] == "exchanging"
+    assert _close(st["exchangeBaselineGapMl"], 1500, 1)
+    # fill restarts, drain does NOT (already complete)
+    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+    # a real intermediate tick (fill half-done) must NOT abort despite the big gap
+    config = integration._config_from_entry(entry)
+    now = datetime.now(timezone.utc)
+    config["automaticWaterChange"]["state"]["fillEndsAt"] = (now + timedelta(seconds=7.5)).isoformat()
+    run(integration._async_awc_exchange_tick(hass, entry, config, None))
+    assert _state(entry)["status"] == "exchanging"
+    _fire_exchange(hass, entry, age_done=("drain", "fill"))
+    assert _state(entry)["status"] == "idle"
+    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-3)
+
+
+def test_simultaneous_resume_uncalibrated_faults_not_completes():
+    # both pumps uncalibrated on resume must FAULT, never finalize as a phantom complete.
+    entry = _entry("batch_simultaneous", awc_over={"pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 0},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 0},
+    }})
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
+        "drainedMl": 0, "filledMl": 0,
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    st = _state(entry)
+    assert st["status"] == "fault" and "calibrat" in st["fault"].lower()
+    assert not _awc(entry)["history"]  # never recorded a (zero-volume) completion
 
 
 # --- tiny standalone runner --------------------------------------------------

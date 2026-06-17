@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 44
-INTEGRATION_VERSION = "0.4.105"
+CORE_SCHEMA_VERSION = 45
+INTEGRATION_VERSION = "0.4.106"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -182,10 +182,15 @@ MODE_VERIFY_DEFAULT_DELAY_SECONDS = 8     # read-back delay after a mode apply/r
 EQUIPMENT_MAX_OFF_MAX_SECONDS = 86400     # ceiling on the per-equipment max-off cap
 
 # Automatic Water Change (AWC). Volume-primary (calibrated pump-math) with physical
-# float/cutoff sensors as arbiters. Two pumps (drain + fill), single tank, premixed
-# saltwater (pure swap). v1 live control is sequential-only; simultaneous/continuous
-# maths remain in awc.py for projections and future per-pump-timer work.
+# float/cutoff sensors as arbiters. Two pumps (drain + fill), premixed saltwater
+# (pure swap). Live control supports sequential (drain-then-fill) AND simultaneous
+# (both pumps together) via INDEPENDENT per-pump timers — each pump stops at its own
+# calibrated runtime, so neither over-pumps — plus an instantaneous imbalance cap that
+# bounds the mid-run sump excursion. Continuous/trickle stays projection-only for now.
 AWC_METHODS = ("continuous", "batch_simultaneous", "batch_sequential")
+AWC_LIVE_METHODS = ("batch_sequential", "batch_simultaneous")  # methods the live controller runs
+AWC_EXCHANGE_TICK_SECONDS = 2             # simultaneous monitor cadence (imbalance + safety)
+AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L = 0.5  # max |drained-filled| mid-run before abort (0 = off)
 AWC_AMOUNT_UNITS = ("litres", "percent")
 AWC_PERIODS = ("day", "week")
 AWC_STATUSES = (
@@ -1140,6 +1145,8 @@ DEFAULT_CORE_CONFIG = {
         "enabled": False,
         "tankVolumeLitres": 0,          # net display volume — drives % amounts + dilution maths
         "continuousTickSeconds": AWC_TICK_DEFAULT_SECONDS,
+        "sumpEnabled": False,           # topology: True = drain from / fill into a sump chamber
+        "diagramInPulse": False,        # show the live AWC diagram as a Reef Pulse kiosk block
         # Two pumps. mlPerS/interceptMl from calibration; exchangeFactor is the two-stage
         # correction so OUT and IN move matched volumes despite tube-length/head differences.
         "pumps": {
@@ -1171,6 +1178,9 @@ DEFAULT_CORE_CONFIG = {
             "driftWarnPercent": AWC_DEFAULT_DRIFT_WARN_PCT,
             "netImbalanceWarnLitres": AWC_DEFAULT_NET_IMBALANCE_L,
             "autoTrimImbalance": False,             # bias next fill to correct net drift
+            # Simultaneous-mode guard: abort if the live drain/fill dead-reckoned volumes
+            # diverge by more than this mid-run (bounds the sump excursion; 0 = disabled).
+            "maxInstantaneousImbalanceLitres": AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L,
         },
         # ATO coordination — suspend the auto-top-off for the whole change + a hold-off
         # afterwards (prevents the GHL-style salinity crash). Reuses the interlock helpers.
@@ -1211,7 +1221,10 @@ DEFAULT_CORE_CONFIG = {
             "drainedMl": 0,                         # progress within the current change
             "filledMl": 0,
             "legStartedAt": "",                     # current pump-leg start (anomaly timing)
-            "legEndsAt": "",                        # scheduled end of the current leg (timer arm)
+            "legEndsAt": "",                        # next timer fire (leg end / exchange monitor tick)
+            "drainEndsAt": "",                      # simultaneous: drain pump's own stop time
+            "fillEndsAt": "",                       # simultaneous: fill pump's own stop time
+            "exchangeBaselineGapMl": 0,             # |drained-filled| at exchange-leg start (resume baseline)
             "pausedReason": "",
             "atoSuspendedUntil": "",
         },

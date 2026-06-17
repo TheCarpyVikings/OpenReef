@@ -163,6 +163,39 @@ def test_net_imbalance_within_threshold_is_ok():
     assert state["netL"] == 0.0 and state["status"] == "ok"
 
 
+# --- Simultaneous exchange (independent per-pump timing) ---------------------
+
+def test_exchange_side_progress_dead_reckons_from_remaining():
+    # 2 L target at 100 ml/s ⇒ 20 s full runtime. With 5 s remaining, 15 s done ⇒ 1.5 L.
+    vol, done = awc.exchange_side_progress(5.0, 100.0, 1.0, 2000.0)
+    assert _close(vol, 1500.0, 1e-6) and not done
+
+
+def test_exchange_side_progress_done_caps_at_target():
+    vol, done = awc.exchange_side_progress(0.0, 100.0, 1.0, 2000.0)
+    assert vol == 2000.0 and done
+    # negative remaining (overdue) also caps at target, never above
+    vol2, done2 = awc.exchange_side_progress(-5.0, 100.0, 1.0, 2000.0)
+    assert vol2 == 2000.0 and done2
+
+
+def test_exchange_imbalance_cap():
+    assert not awc.exchange_imbalance_exceeds(1000, 950, 0.1)  # 50 ml < 100 ml cap
+    assert awc.exchange_imbalance_exceeds(1000, 800, 0.1)      # 200 ml > 100 ml cap
+    assert not awc.exchange_imbalance_exceeds(1000, 0, 0)      # cap 0 ⇒ disabled
+    # baseline (resume-to-balance): a pre-existing gap being CORRECTED never trips
+    assert not awc.exchange_imbalance_exceeds(1500, 0, 0.1, baseline_ml=1500)   # new divergence 0
+    assert not awc.exchange_imbalance_exceeds(1000, 0, 0.1, baseline_ml=1500)   # gap shrank
+    assert awc.exchange_imbalance_exceeds(1700, 0, 0.1, baseline_ml=1500)       # new 200 ml > cap
+
+
+def test_simultaneous_max_excursion():
+    # 100/50 pair, 2 L: drain 20 s, fill 40 s ⇒ peak gap = 2·(1−20/40) = 1.0 L
+    assert _close(awc.simultaneous_max_excursion_l({"pumps": {"drain": {"mlPerS": 100}, "fill": {"mlPerS": 50}}}, 2.0), 1.0)
+    # matched pumps ⇒ no excursion
+    assert _close(awc.simultaneous_max_excursion_l({"pumps": {"drain": {"mlPerS": 100}, "fill": {"mlPerS": 100}}}, 2.0), 0.0)
+
+
 # --- Schedule resolution -----------------------------------------------------
 
 def test_resolve_percent_and_litres():

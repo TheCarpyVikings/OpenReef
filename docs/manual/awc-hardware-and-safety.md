@@ -2,14 +2,15 @@
 
 OpenReef's Automatic Water Change (AWC) does calibrated, **volume-accurate** water
 changes: it knows how many litres it moved and how many are left in the reservoir —
-something sensor-only controllers (HYDROS, GHL) structurally can't tell you. v1 runs
-sequential drain-then-fill changes only, on a flexible schedule (litres **or** %, per
-day **or** week), or on demand ("change N litres now").
+something sensor-only controllers (HYDROS, GHL) structurally can't tell you. It runs
+**sequential** (drain-then-fill) and **simultaneous** (both pumps together) changes, on
+a flexible schedule (litres **or** %, per day **or** week), or on demand ("change N
+litres now"). Continuous/trickle remains projection-only.
 
-## What you need (v1)
+## What you need
 
-- **ESP32 + two peristaltic pumps** (standard DC is fine for the v1 sequential prototype;
-  steppers can wait until the safety stack is proven) exposed to
+- **ESP32 + two peristaltic pumps** (standard DC is fine; steppers can wait until the
+  safety stack is proven) exposed to
   Home Assistant as `switch` entities — one **drain** (sump → waste), one **fill**
   (premixed saltwater → sump). See [`awc-esphome-reference.yaml`](awc-esphome-reference.yaml).
 - **Premixed, heated, aged saltwater** in the fresh reservoir — v1 is a pure swap; it
@@ -43,6 +44,8 @@ volumes despite different tube lengths/heads.
 | Calibration-drift nag | Flags stale calibration / tubing age. |
 | ATO coordination | Suspends auto-top-off for the whole change + a post-change hold-off (prevents the GHL-style salinity crash). |
 | Max single-change cap | Refuses any one change larger than a configurable % of tank volume. |
+| Simultaneous: independent per-pump timers | Each pump stops at its **own** calibrated runtime, so neither over-pumps (no shared-timer drift). |
+| Simultaneous: imbalance guard | Start is **blocked** if the predicted sump swing (rate mismatch × volume) exceeds the cap; a re-baselined mid-run check backstops it. |
 
 **Two-tier trip policy:** benign limits (reservoir empty/full) **pause and
 auto-resume**; genuine faults (leak, overfill, runtime/volume anomaly) **latch** and
@@ -52,20 +55,28 @@ require a manual *Acknowledge & clear* — never a silent auto-retry.
 Assistant outage can never strand a running pump. OpenReef mirrors them and owns the
 orchestration, litre accounting, scheduling, and resume-to-balance after a restart.
 
-**Not yet exposed in v1:** simultaneous and continuous/trickle exchange are kept out
-of live control until OpenReef has independent per-pump timers. DIY pump rates drift,
-so one shared timer can silently over-drain or over-fill the tank.
+**Simultaneous mode — choose rate-matched pumps.** Both pumps run together on
+independent calibrated timers, so each moves exactly the target volume. The start guard
+refuses a simultaneous change whose predicted sump swing (the faster pump finishing
+first) would exceed your imbalance cap — pick closely-matched pumps, tune the
+**exchange factor**, or fall back to **sequential** (which has no excursion). Sequential
+is the safe default.
 
-## ⚠️ Documented residual risk (v1)
+## ⚠️ Documented residual risks
 
 A **welded relay or shorted pump driver** defeats *every* software and firmware
-cutoff above — turning a GPIO off cannot stop a physically stuck actuator. v1 ships
-software/firmware caps only. Mitigate by:
+cutoff — turning a GPIO off cannot stop a physically stuck actuator. The same blind spot
+applies to **simultaneous mode without a sump-low sensor**: progress is dead-reckoned
+from calibrated pump rates, so a fill pump that runs but moves no water (air-lock,
+detached tube) isn't detected mid-run — the sump can over-drain until the timers elapse.
+Mitigate by:
 
 1. Keeping the **fresh reservoir small** enough that a total dump can't crash
    salinity (treat reservoir size as a safety parameter).
-2. Planning the **v2 hardware backstop**: an independent series / master power-cut
-   relay on the AWC power rail, and/or a mechanical float valve on the fill line.
+2. Keeping **simultaneous changes modest and rate-matched**; the display high-level
+   cutoff still guards overfill, and sequential avoids the over-drain blind spot.
+3. Planning the **v2 hardware backstop**: an independent series / master power-cut
+   relay on the AWC power rail, a mechanical float valve on the fill line, and an
+   optional sump-low cutoff for simultaneous mode.
 
-Until then, don't run unattended changes larger than you'd be comfortable losing to a
-stuck pump.
+Don't run unattended changes larger than you'd be comfortable losing to a stuck pump.

@@ -1389,6 +1389,10 @@ class OpenReefPanel extends HTMLElement {
         else this._loadTrend(id, this._trend?.range || "24h");
       }
       if (action === "awc-run") this._awcRunNow();
+      if (action === "awc-focus-run") {
+        const el = this.shadowRoot.querySelector("[data-awc-run-amount]");
+        if (el) { el.focus(); el.scrollIntoView({ block: "center", behavior: "smooth" }); }
+      }
       if (action === "awc-abort") this._awcAction("openreef/awc_abort");
       if (action === "awc-resume") this._awcAction("openreef/awc_resume");
       if (action === "awc-ack") this._awcAction("openreef/awc_acknowledge");
@@ -8057,10 +8061,12 @@ class OpenReefPanel extends HTMLElement {
     this._awcSummaryLoading = true;
     try {
       this._awcSummary = await this._callWS({ type: "openreef/awc_summary" });
-      this._awcSummaryAt = Date.now();
     } catch (err) {
       /* leave the last summary in place */
     } finally {
+      // Always stamp the time — even on failure — so the refresh-threshold gate prevents
+      // a render→reload→render hot loop when the WS call keeps failing.
+      this._awcSummaryAt = Date.now();
       this._awcSummaryLoading = false;
       this._render();
     }
@@ -8155,27 +8161,145 @@ class OpenReefPanel extends HTMLElement {
       <option value="">— none —</option>${opts}</select>`;
   }
 
-  _awcBar(label, percent, litres, capacity, color) {
-    const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+  _awcStatusLabel(status) {
+    return ({
+      idle: "Idle", draining: "Draining…", filling: "Filling…",
+      exchanging: "Exchanging — both pumps", paused: "Paused",
+      fault: "Faulted", complete: "Complete",
+    })[status] || "Idle";
+  }
+
+  // Interactive SVG: tank (+ optional sump) joined to the fresh/waste containers by
+  // pipework. Flow + direction animate on whichever pump is running (draining → drain
+  // pipe, filling → fill pipe, exchanging → both); container levels, progress, pump
+  // spin and safety badges are live. Clickable: pumps → calibration, containers →
+  // refill/empty, tank → start a change.
+  _awcDiagram(awc, state, sum) {
     return `
-      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;min-width:96px;">
-        <div style="position:relative;width:64px;height:150px;border:2px solid var(--divider-color,#3a3a3a);border-radius:8px;overflow:hidden;background:rgba(255,255,255,0.04);">
-          <div style="position:absolute;bottom:0;left:0;right:0;height:${pct}%;background:${color};transition:height .4s ease;"></div>
-          <div style="position:absolute;top:4px;left:0;right:0;text-align:center;font-size:0.8rem;font-weight:700;">${Math.round(pct)}%</div>
+      <section class="setting-card">
+        <div class="section-head"><div><p class="eyebrow">Live view</p><h3>${this._escape(this._awcStatusLabel(state.status || "idle"))}</h3></div>
+          <div class="button-row">
+            <button class="secondary" data-action="awc-reset" data-id="fresh">Fresh refilled</button>
+            <button class="secondary" data-action="awc-reset" data-id="waste">Waste emptied</button>
+          </div>
         </div>
-        <strong style="font-size:0.85rem;">${this._escape(label)}</strong>
-        <small>${this._format(litres, 1)} / ${this._format(capacity, 0)} L</small>
-      </div>`;
+        ${this._awcDiagramSvg(awc, state, sum)}
+      </section>`;
+  }
+
+  _awcDiagramSvg(awc, state, sum) {
+    const live = this._awcSummary?.live || {};
+    const status = state.status || "idle";
+    const drainActive = status === "draining" || status === "exchanging";
+    const fillActive = status === "filling" || status === "exchanging";
+    const sump = !!awc.sumpEnabled;
+    const res = sum?.reservoirs || {};
+    const freshPct = Math.max(0, Math.min(100, Number(res.fresh?.percent) || 0));
+    const wastePct = Math.max(0, Math.min(100, Number(res.waste?.percent) || 0));
+    const target = Number(state.targetLitres) || 0;
+    const drainedL = (Number(state.drainedMl) || 0) / 1000;
+    const filledL = (Number(state.filledMl) || 0) / 1000;
+    const running = ["draining", "filling", "exchanging"].includes(status);
+    const leak = !!live.leak, high = !!live.highLevel, freshEmpty = !!live.freshEmpty, wasteFull = !!live.wasteFull;
+
+    const fillDestX = sump ? 188 : 158, fillDestY = sump ? 116 : 70;
+    const drainSrcX = sump ? 232 : 262, drainSrcY = sump ? 116 : 70;
+    const fillPath = `M 64 148 V 120 H ${fillDestX} V ${fillDestY}`;
+    const drainPath = `M ${drainSrcX} ${drainSrcY} V 120 H 356 V 148`;
+    const freshFillH = 108 * freshPct / 100, freshFillY = 258 - freshFillH;
+    const wasteFillH = 108 * wastePct / 100, wasteFillY = 258 - wasteFillH;
+
+    const pump = (cx, role, active) => `
+      <g data-action="tab" data-id="settings" data-section="awc" data-scroll="or-section-awc" style="cursor:pointer;">
+        <title>${role === "drain" ? "Drain" : "Fill"} pump — tap to calibrate</title>
+        <circle cx="${cx}" cy="134" r="13" fill="${active ? "#1b5e20" : "#2a2a2a"}" stroke="${active ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
+        <g class="${active ? "awc-spin" : ""}"><path d="M ${cx} 127 L ${cx} 141 M ${cx - 7} 134 L ${cx + 7} 134" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g>
+      </g>`;
+    const badge = (x, y, text, color) =>
+      `<g><rect x="${x}" y="${y}" width="54" height="16" rx="8" fill="${color}"></rect>` +
+      `<text x="${x + 27}" y="${y + 12}" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${text}</text></g>`;
+
+    return `
+        <svg viewBox="0 0 420 282" style="width:100%;max-width:560px;display:block;margin:0 auto;${leak ? "filter:drop-shadow(0 0 9px #d32f2f);" : ""}" role="img" aria-label="Automatic water change diagram — ${this._escape(this._awcStatusLabel(status))}">
+          <style>
+            @keyframes awc-flow { to { stroke-dashoffset: -28; } }
+            @keyframes awc-spin { to { transform: rotate(360deg); } }
+            .awc-flow { stroke-dasharray: 7 7; animation: awc-flow .6s linear infinite; }
+            .awc-spin { transform-box: fill-box; transform-origin: center; animation: awc-spin 1.3s linear infinite; }
+          </style>
+          <defs>
+            <linearGradient id="awcTank" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26c6da"/><stop offset="1" stop-color="#00838f"/></linearGradient>
+            <linearGradient id="awcFresh" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#42a5f5"/><stop offset="1" stop-color="#0d47a1"/></linearGradient>
+            <linearGradient id="awcWaste" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8d6e63"/><stop offset="1" stop-color="#4e342e"/></linearGradient>
+            <marker id="awcArrowF" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#26c6da"/></marker>
+            <marker id="awcArrowD" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#a1887f"/></marker>
+            <clipPath id="awcTankClip"><rect x="150" y="22" width="120" height="84" rx="8"/></clipPath>
+            <clipPath id="awcFreshClip"><rect x="26" y="150" width="76" height="108" rx="6"/></clipPath>
+            <clipPath id="awcWasteClip"><rect x="318" y="150" width="76" height="108" rx="6"/></clipPath>
+          </defs>
+          <path d="${fillPath}" fill="none" stroke="#37474f" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"></path>
+          <path d="${drainPath}" fill="none" stroke="#37474f" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"></path>
+          ${fillActive ? `<path d="${fillPath}" fill="none" stroke="#26c6da" stroke-width="3" class="awc-flow" marker-end="url(#awcArrowF)"></path>` : ""}
+          ${drainActive ? `<path d="${drainPath}" fill="none" stroke="#a1887f" stroke-width="3" class="awc-flow" marker-end="url(#awcArrowD)"></path>` : ""}
+          <g data-action="awc-focus-run" style="cursor:pointer;"><title>Tank — tap to start a change</title>
+            <rect x="150" y="22" width="120" height="84" rx="8" fill="rgba(38,198,218,0.08)" stroke="#4dd0e1" stroke-width="2"></rect>
+            <g clip-path="url(#awcTankClip)">
+              <rect x="150" y="44" width="120" height="62" fill="url(#awcTank)" opacity="0.5"></rect>
+              <ellipse cx="178" cy="104" rx="12" ry="7" fill="#2e7d32" opacity="0.5"></ellipse>
+              <ellipse cx="210" cy="104" rx="9" ry="6" fill="#ef6c00" opacity="0.5"></ellipse>
+              <ellipse cx="240" cy="104" rx="11" ry="7" fill="#6a1b9a" opacity="0.45"></ellipse>
+            </g>
+            <text x="210" y="16" text-anchor="middle" font-size="11" fill="#90a4ae">Display tank</text>
+          </g>
+          ${sump ? `<rect x="176" y="106" width="68" height="20" rx="3" fill="rgba(38,198,218,0.12)" stroke="#4dd0e1" stroke-width="1.5"></rect><text x="210" y="120" text-anchor="middle" font-size="8" fill="#90a4ae">sump</text>` : ""}
+          ${high ? badge(183, 2, "HIGH ⚠", "#d32f2f") : ""}
+          <g data-action="awc-reset" data-id="fresh" style="cursor:pointer;"><title>Fresh saltwater — tap to mark refilled</title>
+            <rect x="26" y="150" width="76" height="108" rx="6" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
+            <g clip-path="url(#awcFreshClip)"><rect x="26" y="${freshFillY}" width="76" height="${freshFillH}" fill="url(#awcFresh)" style="transition:y .4s ease,height .4s ease;"></rect></g>
+            <text x="64" y="273" text-anchor="middle" font-size="10" fill="#b0bec5">Fresh ${this._format(res.fresh?.remainingL, 1)}L</text>
+            ${freshEmpty ? badge(37, 156, "EMPTY", "#c62828") : ""}
+          </g>
+          <g data-action="awc-reset" data-id="waste" style="cursor:pointer;"><title>Waste — tap to mark emptied</title>
+            <rect x="318" y="150" width="76" height="108" rx="6" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
+            <g clip-path="url(#awcWasteClip)"><rect x="318" y="${wasteFillY}" width="76" height="${wasteFillH}" fill="url(#awcWaste)" style="transition:y .4s ease,height .4s ease;"></rect></g>
+            <text x="356" y="273" text-anchor="middle" font-size="10" fill="#b0bec5">Waste ${this._format(res.waste?.filledL, 1)}L</text>
+            ${wasteFull ? badge(329, 156, "FULL", "#c62828") : ""}
+          </g>
+          ${pump(64, "fill", fillActive)}
+          ${pump(356, "drain", drainActive)}
+          ${leak ? badge(183, 132, "LEAK ⚠", "#d32f2f") : ""}
+          ${running && target > 0 ? `<text x="210" y="146" text-anchor="middle" font-size="10" font-weight="700" fill="#eceff1">drained ${this._format(drainedL, 2)} · filled ${this._format(filledL, 2)} / ${this._format(target, 1)} L</text>` : ""}
+        </svg>`;
+  }
+
+  // Compact AWC diagram block for the Reef Pulse kiosk wall.
+  _pulseAwcMarkup() {
+    const awc = this._config?.automaticWaterChange;
+    if (!awc || !awc.enabled || !awc.diagramInPulse) return "";
+    const state = awc.state || {};
+    const liveRun = ["draining", "filling", "exchanging"].includes(state.status);
+    const refreshMs = liveRun ? 1000 : 4000;
+    if (!this._awcSummary || Date.now() - (this._awcSummaryAt || 0) > refreshMs) {
+      if (!this._awcSummaryLoading) this._awcLoadSummary();
+    }
+    const sum = this._awcSummary?.summary || null;
+    return `
+      <article class="pulse-block">
+        <small class="pulse-block-title">Water change — ${this._escape(this._awcStatusLabel(state.status || "idle"))}</small>
+        ${this._awcDiagramSvg(awc, state, sum)}
+      </article>`;
   }
 
   _automaticWaterChange() {
     const awc = this._config?.automaticWaterChange || {};
     const state = awc.state || {};
-    if (!this._awcSummary || Date.now() - (this._awcSummaryAt || 0) > 4000) {
+    // Poll faster while a change is running so the diagram animates smoothly.
+    const live = ["draining", "filling", "exchanging"].includes(state.status);
+    const refreshMs = live ? 1000 : 4000;
+    if (!this._awcSummary || Date.now() - (this._awcSummaryAt || 0) > refreshMs) {
       if (!this._awcSummaryLoading) this._awcLoadSummary();
     }
     const sum = this._awcSummary?.summary || null;
-    const res = sum?.reservoirs || {};
 
     const head = `
       <div class="section-head">
@@ -8194,27 +8318,13 @@ class OpenReefPanel extends HTMLElement {
       ? `<div class="setting-card subtle-card"><small>${this._escape(this._awcMessage)}</small></div>`
       : "";
 
-    const reservoirs = `
-      <section class="setting-card">
-        <div class="section-head"><div><p class="eyebrow">Reservoirs</p><h3>Fresh saltwater in · waste out</h3></div>
-          <div class="button-row">
-            <button class="secondary" data-action="awc-reset" data-id="fresh">Fresh refilled</button>
-            <button class="secondary" data-action="awc-reset" data-id="waste">Waste emptied</button>
-          </div>
-        </div>
-        <div style="display:flex;gap:24px;justify-content:center;padding:12px 0;flex-wrap:wrap;">
-          ${this._awcBar("Fresh", res.fresh?.percent, res.fresh?.remainingL, res.fresh?.capacityL, "linear-gradient(180deg,#2196f3,#0d47a1)")}
-          ${this._awcBar("Waste", res.waste?.percent, res.waste?.filledL, res.waste?.capacityL, "linear-gradient(180deg,#8d6e63,#4e342e)")}
-        </div>
-      </section>`;
-
     return `
       <section class="stack">
         ${head}
         ${banner}
         ${message}
+        ${this._awcDiagram(awc, state, sum)}
         ${this._awcControls(state)}
-        ${reservoirs}
         ${this._awcMetrics(sum)}
         ${this._awcHistory(awc)}
       </section>`;
@@ -8267,11 +8377,16 @@ class OpenReefPanel extends HTMLElement {
           <label>Amount<input type="number" min="0" step="0.1" data-awc-run-amount value="${this._config?.automaticWaterChange?.schedule?.amount || ""}" ${running ? "disabled" : ""}></label>
           <label>Unit
             <select data-awc-run-unit ${running ? "disabled" : ""}>
-              <option value="litres">litres</option>
-              <option value="percent">% of tank</option>
+              <option value="litres" ${(this._config?.automaticWaterChange?.schedule?.amountUnit || "percent") === "litres" ? "selected" : ""}>litres</option>
+              <option value="percent" ${(this._config?.automaticWaterChange?.schedule?.amountUnit || "percent") === "percent" ? "selected" : ""}>% of tank</option>
             </select>
           </label>
-          <input type="hidden" data-awc-run-method value="batch_sequential">
+          <label>Method
+            <select data-awc-run-method ${running ? "disabled" : ""}>
+              <option value="batch_sequential">Sequential (drain → fill)</option>
+              <option value="batch_simultaneous">Simultaneous (both pumps)</option>
+            </select>
+          </label>
         </div>
         <div class="button-row">
           <button class="primary" data-action="awc-run" ${running || this._busy ? "disabled" : ""}>Change now</button>
@@ -8362,6 +8477,8 @@ class OpenReefPanel extends HTMLElement {
         <div class="mini-grid">
           <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="awc" data-field="tankVolumeLitres" value="${awc.tankVolumeLitres || 0}"></label>
         </div>
+        <label class="chip"><input type="checkbox" data-scope="awc" data-field="sumpEnabled" ${awc.sumpEnabled ? "checked" : ""}> Sump-based plumbing (drain from / fill into a sump)</label>
+        <label class="chip"><input type="checkbox" data-scope="awc" data-field="diagramInPulse" ${awc.diagramInPulse ? "checked" : ""}> Show the live diagram on the Reef Pulse kiosk</label>
 
         <div class="section-head"><div><p class="eyebrow">Pumps (ESP32 peristaltic)</p></div></div>
         ${pumpRow("drain")}
@@ -8389,7 +8506,9 @@ class OpenReefPanel extends HTMLElement {
             <label>Max single change (% tank)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="maxSingleChangePercent" value="${safety.maxSingleChangePercent ?? 25}"></label>
             <label>Drift warn (%)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="driftWarnPercent" value="${safety.driftWarnPercent ?? 10}"></label>
             <label>Net-imbalance warn (L)<input type="number" min="0" step="0.1" data-scope="awc-safety" data-field="netImbalanceWarnLitres" value="${safety.netImbalanceWarnLitres ?? 2}"></label>
+            <label>Simultaneous imbalance cap (L)<input type="number" min="0" step="0.1" data-scope="awc-safety" data-field="maxInstantaneousImbalanceLitres" value="${safety.maxInstantaneousImbalanceLitres ?? 0.5}"></label>
           </div>
+          <small>Imbalance cap bounds how far drain/fill may diverge mid-run in simultaneous mode (0 = off).</small>
         </div>
 
         <div class="section-head"><div><p class="eyebrow">ATO coordination &amp; run guards</p></div></div>
@@ -8408,8 +8527,13 @@ class OpenReefPanel extends HTMLElement {
         <div class="section-head"><div><p class="eyebrow">Schedule</p></div></div>
         <div class="setting-card subtle-card">
           <label class="chip"><input type="checkbox" data-scope="awc-schedule" data-field="enabled" ${sched.enabled ? "checked" : ""}> Enable scheduled changes</label>
-          <input type="hidden" data-scope="awc-schedule" data-field="method" value="batch_sequential">
           <div class="mini-grid">
+            <label>Method
+              <select data-scope="awc-schedule" data-field="method">
+                <option value="batch_sequential" ${sched.method === "batch_sequential" ? "selected" : ""}>Sequential (drain → fill)</option>
+                <option value="batch_simultaneous" ${sched.method === "batch_simultaneous" ? "selected" : ""}>Simultaneous (both pumps)</option>
+              </select>
+            </label>
             <label>Amount<input type="number" min="0" step="0.1" data-scope="awc-schedule" data-field="amount" value="${sched.amount || 0}"></label>
             <label>Unit
               <select data-scope="awc-schedule" data-field="amountUnit">
@@ -9680,6 +9804,7 @@ class OpenReefPanel extends HTMLElement {
   _pulseWallMarkup(cfg, health) {
     const tiles = this._pulseTileSensors();
     const blocks = [
+      this._pulseAwcMarkup(),
       cfg.showCategories !== false ? this._pulseCategoryBarsMarkup(health) : "",
       cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
       cfg.showToday !== false ? this._pulseTodayMarkup() : "",
