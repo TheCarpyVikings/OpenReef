@@ -10178,8 +10178,10 @@ class OpenReefPanel extends HTMLElement {
       cards.cameras ? this._missionCameraCard() : "",
       cards.maintenance ? this._missionMaintenanceCard() : "",
     ].join("");
-    const attentionCount = sensorSummary.criticalCount + sensorSummary.warningCount + missing.length + armedUnavailable.length + interlocks.length;
-    const attentionStatus = sensorSummary.criticalCount || armedUnavailable.length ? "critical" : "warning";
+    const maintenanceDueCount = this._maintenanceConfig().enabled ? this._maintenanceDueCount() : 0;
+    const maintenanceOverdueCount = this._maintenanceConfig().enabled ? this._maintenanceOverdueCount() : 0;
+    const attentionCount = sensorSummary.criticalCount + sensorSummary.warningCount + missing.length + armedUnavailable.length + interlocks.length + maintenanceDueCount;
+    const attentionStatus = sensorSummary.criticalCount || armedUnavailable.length || maintenanceOverdueCount ? "critical" : "warning";
     const activityItems = (Array.isArray(this._config.activity) ? this._config.activity : []).slice(0, 12);
     const activityBody = activityItems.length ? `
       <div class="activity-list">
