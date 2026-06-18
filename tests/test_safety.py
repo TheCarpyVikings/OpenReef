@@ -196,6 +196,20 @@ def test_apply_mode_only_switches_armed_equipment():
     assert any(s.get("equipment_id") == "skimmer" for s in result.get("skipped_locked", []))
 
 
+def test_apply_mode_fires_config_update_event():
+    cfg = {
+        "equipment": {"heater": _equip("heater", True, "switch.heater")},
+        "modePreviews": {"feed": {"heater": "off"}},
+    }
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(states={"switch.heater": "on"}, entries=[entry])
+    run(integration._async_apply_mode(hass, entry, "feed", None))
+    events = [event for event in hass.bus.events if event.event_type == integration.CONFIG_UPDATED_EVENT]
+    assert events
+    assert events[-1].data["entry_id"] == entry.entry_id
+    assert events[-1].data["active_mode"] == "feed"
+
+
 def test_apply_mode_skips_unavailable_switch():
     cfg = {
         "equipment": {"heater": _equip("heater", True, "switch.heater")},

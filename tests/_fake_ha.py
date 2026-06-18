@@ -88,6 +88,14 @@ class _FakeConfigEntries:
         return True
 
 
+class _FakeBus:
+    def __init__(self):
+        self.events = []  # SimpleNamespace(event_type, data)
+
+    def async_fire(self, event_type, event_data=None):
+        self.events.append(SimpleNamespace(event_type=event_type, data=dict(event_data or {})))
+
+
 class FakeEntry:
     def __init__(self, options=None, entry_id="test_entry"):
         self.entry_id = entry_id
@@ -100,6 +108,7 @@ class FakeHass:
         self.services = _FakeServices(self.states)
         self.config = _FakeConfig(config_dir)
         self.config_entries = _FakeConfigEntries(entries or [])
+        self.bus = _FakeBus()
         self.data = {}
         self.tasks = []  # names passed to async_create_task
 

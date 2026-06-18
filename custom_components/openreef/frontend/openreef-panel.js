@@ -5,6 +5,7 @@ class OpenReefPanel extends HTMLElement {
     this._hass = null;
     this._config = null;
     this._integrationVersion = "";
+    this._entryId = "";
     this._sensorMeta = {};
     this._validation = null;
     this._trustCheck = null;
@@ -51,6 +52,9 @@ class OpenReefPanel extends HTMLElement {
     this._configDirty = false;
     this._modeCountdownTimer = null;
     this._lastModeAutoReturnRefresh = 0;
+    this._configEventUnsub = null;
+    this._configEventSubscribing = false;
+    this._configEventRefreshTimer = null;
     this._equipmentEditors = {};
     this._equipmentEnergyEditors = {};
     this._settingsSections = this._loadSettingsSections();
@@ -82,6 +86,7 @@ class OpenReefPanel extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this._subscribeConfigEvents();
     if (this._config) {
       if (this._shouldRenderForHassUpdate()) {
         this._render();
@@ -123,6 +128,7 @@ class OpenReefPanel extends HTMLElement {
     this._attachEvents();
     this._renderLoading();
     this._loadConfig();
+    this._subscribeConfigEvents();
     if (!this._modeCountdownTimer) {
       this._modeCountdownTimer = window.setInterval(() => {
         this._refreshAfterAutoReturnIfDue();
@@ -157,6 +163,15 @@ class OpenReefPanel extends HTMLElement {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
     }
+    if (this._configEventRefreshTimer) {
+      window.clearTimeout(this._configEventRefreshTimer);
+      this._configEventRefreshTimer = null;
+    }
+    if (this._configEventUnsub) {
+      try { this._configEventUnsub(); } catch {}
+      this._configEventUnsub = null;
+    }
+    this._configEventSubscribing = false;
     if (this._pulseKeyHandler) {
       window.removeEventListener("keydown", this._pulseKeyHandler);
       this._pulseKeyHandler = null;
@@ -273,11 +288,51 @@ class OpenReefPanel extends HTMLElement {
     throw new Error("Home Assistant WebSocket helper is unavailable");
   }
 
+  async _subscribeConfigEvents() {
+    const conn = this._hass?.connection;
+    if (!this.isConnected || this._configEventUnsub || this._configEventSubscribing || !conn?.subscribeMessage) return;
+    this._configEventSubscribing = true;
+    try {
+      this._configEventUnsub = await conn.subscribeMessage(
+        (msg) => this._handleConfigUpdatedEvent(msg),
+        { type: "subscribe_events", event_type: "openreef_config_updated" },
+      );
+    } catch {
+      this._configEventUnsub = null;
+    } finally {
+      this._configEventSubscribing = false;
+    }
+  }
+
+  _handleConfigUpdatedEvent(msg) {
+    const event = msg?.event || msg || {};
+    const data = event.data || msg?.data || {};
+    if (data.entry_id && this._entryId && data.entry_id !== this._entryId) return;
+    this._queueExternalConfigRefresh();
+  }
+
+  _canRefreshFromConfigEvent() {
+    if (!this._hass || this._busy || this._configDirty || this._isEditingFormControl()) return false;
+    if (this._pulseActive || this._cameraFocus || this._recordingFocus || this._trend) return false;
+    if (this._onboarding?.active || this._setupOpen) return false;
+    return true;
+  }
+
+  _queueExternalConfigRefresh() {
+    if (this._configEventRefreshTimer) window.clearTimeout(this._configEventRefreshTimer);
+    this._configEventRefreshTimer = window.setTimeout(() => {
+      this._configEventRefreshTimer = null;
+      if (!this._canRefreshFromConfigEvent()) return;
+      this._refreshConfigSilently();
+    }, 250);
+  }
+
   async _loadConfig() {
     if (!this._hass || this._busy) return;
     this._busy = true;
     try {
       const result = await this._callWS({ type: "openreef/get_config" });
+      this._entryId = result.entry_id || this._entryId;
       this._config = result.config || result.settings;
       this._integrationVersion = result.version || this._integrationVersion;
       this._sensorMeta = result.sensor_meta || {};
@@ -302,6 +357,7 @@ class OpenReefPanel extends HTMLElement {
     this._busy = true;
     try {
       const result = await this._callWS({ type: "openreef/get_config" });
+      this._entryId = result.entry_id || this._entryId;
       this._config = result.config || result.settings || this._config;
       this._integrationVersion = result.version || this._integrationVersion;
       this._sensorMeta = result.sensor_meta || this._sensorMeta;
@@ -332,6 +388,7 @@ class OpenReefPanel extends HTMLElement {
         type: "openreef/save_config",
         config: nextConfig,
       });
+      this._entryId = result.entry_id || this._entryId;
       this._config = result.config || nextConfig;
       this._integrationVersion = result.version || this._integrationVersion;
       this._validation = result.validation || null;
@@ -353,6 +410,7 @@ class OpenReefPanel extends HTMLElement {
       type: "openreef/save_config",
       config: nextConfig,
     });
+    this._entryId = result.entry_id || this._entryId;
     this._config = result.config || nextConfig;
     this._integrationVersion = result.version || this._integrationVersion;
     this._validation = result.validation || null;

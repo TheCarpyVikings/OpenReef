@@ -143,6 +143,7 @@ BUILT_IN_MODES = {"running", "feed", "maintenance"}
 WEEK_DAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 MODE_TIMER_UNSUB = "mode_timer_unsub"
 MODE_SCHEDULE_UNSUB = "mode_schedule_unsub"
+CONFIG_UPDATED_EVENT = f"{DOMAIN}_config_updated"
 ATO_DUTY_CYCLE_UNSUB = "ato_duty_cycle_unsub"
 ATO_DUTY_CYCLE_OFF_UNSUB = "ato_duty_cycle_off_unsub"
 ATO_DUTY_CYCLE_LAST = "ato_duty_cycle_last"
@@ -4354,6 +4355,17 @@ async def _async_save_config(
             _dispatch_capture(hass, entry, "critical_alert", transition.get("title", "Critical alert"))
         elif transition.get("state") == "warning":
             _dispatch_capture(hass, entry, "warning_alert", transition.get("title", "Warning"))
+    bus = getattr(hass, "bus", None)
+    if bus is not None and hasattr(bus, "async_fire"):
+        mode = normalised.get("mode", {}) if isinstance(normalised.get("mode"), dict) else {}
+        bus.async_fire(
+            CONFIG_UPDATED_EVENT,
+            {
+                "entry_id": entry.entry_id,
+                "active_mode": str(mode.get("active") or "running"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     return normalised
 
 
@@ -6386,6 +6398,7 @@ async def websocket_get_config(
         {
             "configured": entry is not None,
             "version": INTEGRATION_VERSION,
+            "entry_id": entry.entry_id if entry is not None else "",
             "config": config,
             "settings": config,
             "sensor_meta": MVP_SENSORS,
@@ -6420,6 +6433,7 @@ async def websocket_save_config(
         {
             "success": True,
             "version": INTEGRATION_VERSION,
+            "entry_id": entry.entry_id,
             "config": config,
             "validation": _validate_config(hass, config),
             "trust_check": _trust_check_summary(hass, config),
@@ -6452,6 +6466,7 @@ async def websocket_update_config_alias(
         {
             "success": True,
             "version": INTEGRATION_VERSION,
+            "entry_id": entry.entry_id,
             "config": config,
             "trust_check": _trust_check_summary(hass, config),
             "heartbeat": _watchdog_status(config),
