@@ -128,6 +128,13 @@ def test_disarmed_by_default_after_migration():
     assert heater.get("armed", False) is False
 
 
+def test_air_pump_profile_survives_migration():
+    result = normalise({"equipment": {"air_pump": {"label": "Air Pump", "type": "air_pump"}}})
+    pump = result["equipment"].get("air_pump", {})
+    assert pump.get("type") == "air_pump"
+    assert pump.get("armed", False) is False
+
+
 def test_camera_mapping_survives_migration():
     cfg = {"cameras": {"display": {"label": "Display Tank", "entity_id": "camera.reef_display"}}}
     result = normalise(cfg)

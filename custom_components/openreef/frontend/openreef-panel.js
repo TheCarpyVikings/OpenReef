@@ -1815,6 +1815,7 @@ class OpenReefPanel extends HTMLElement {
       ["return_pump", "Return pump"],
       ["display_wavemaker", "Display wavemaker"],
       ["flow_pump", "Flow pump"],
+      ["air_pump", "Air pump"],
       ["heater", "Heater / chiller"],
       ["skimmer", "Skimmer"],
       ["ato", "ATO / top-off"],
@@ -1832,6 +1833,7 @@ class OpenReefPanel extends HTMLElement {
   _inferEquipmentProfile(label, id = "") {
     const text = `${id} ${label || ""}`.toLowerCase();
     if (this._looksLikeDisplayWavemaker(label, id)) return "display_wavemaker";
+    if (text.includes("air pump") || text.includes("airpump") || text.includes("aerator")) return "air_pump";
     if (text.includes("return")) return "return_pump";
     if (text.includes("heater") || text.includes("chiller")) return "heater";
     if (text.includes("skimmer")) return "skimmer";
@@ -2863,6 +2865,9 @@ class OpenReefPanel extends HTMLElement {
     }
     if (profile === "flow_pump") {
       return "Flow equipment is a good candidate for Feed mode presets.";
+    }
+    if (profile === "air_pump") {
+      return "Aeration is usually left running unless you deliberately pause it for maintenance.";
     }
     if (profile === "lighting") {
       return "Lighting is usually left unchanged by Feed and Maintenance presets.";
@@ -13704,7 +13709,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _equipmentSettings(forceOpen = false) {
-    const quick = ["Return Pump", "Heater", "Skimmer", "ATO", "Wave Maker", "Lights"];
+    const quick = ["Return Pump", "Heater", "Skimmer", "ATO", "Wave Maker", "Air Pump", "Lights"];
     return this._settingsPanel(
       "equipment",
       "Equipment",

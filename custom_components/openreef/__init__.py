@@ -185,6 +185,7 @@ EQUIPMENT_PROFILE_TYPES = {
     "return_pump",
     "display_wavemaker",
     "flow_pump",
+    "air_pump",
     "heater",
     "skimmer",
     "ato",
@@ -273,6 +274,10 @@ def _normalise_equipment_profile(value: Any) -> str:
         "flow": "flow_pump",
         "flow_pump": "flow_pump",
         "pump": "flow_pump",
+        "air": "air_pump",
+        "airpump": "air_pump",
+        "air_pump": "air_pump",
+        "aerator": "air_pump",
         "temperature": "heater",
         "heater": "heater",
         "chiller": "heater",
@@ -313,6 +318,8 @@ def _infer_equipment_profile(equipment_id: str, equipment_config: dict[str, Any]
     text = _normalise_text(f"{equipment_id} {equipment_config.get('label') or ''}")
     if any(term in text for term in ("wave", "wavemaker", "powerhead", "gyre")):
         return "display_wavemaker"
+    if any(term in text for term in ("air pump", "airpump", "aerator")):
+        return "air_pump"
     if "return" in text:
         return "return_pump"
     if any(term in text for term in ("heater", "chiller")):
