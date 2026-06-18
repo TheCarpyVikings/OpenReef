@@ -8451,9 +8451,13 @@ class OpenReefPanel extends HTMLElement {
 
     const pumpRow = (role) => {
       const p = pumps[role] || {};
+      const label = role === "drain" ? "Drain" : "Fill";
       return `
-        <div class="setting-card subtle-card">
-          <strong>${role === "drain" ? "Drain" : "Fill"} pump</strong>
+        <article class="awc-pump-card">
+          <div class="awc-pump-head">
+            <strong>${label} pump</strong>
+            <small>${role === "drain" ? "Waste water out" : "Fresh saltwater in"}</small>
+          </div>
           <label>Switch entity ${this._awcEntitySelect("awc-pump", `data-id="${role}"`, "switchEntity", p.switchEntity || "", "switch")}</label>
           <div class="mini-grid">
             <label>Flow (ml/s)<input type="number" min="0" step="0.1" data-scope="awc-pump" data-id="${role}" data-field="mlPerS" value="${p.mlPerS || 0}"></label>
@@ -8465,27 +8469,42 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <div class="button-row"><button class="secondary" data-action="awc-calibrate" data-id="${role}">Calibrate ${role}</button></div>
           <small>${p.mlPerS ? `Calibrated to ${p.mlPerS} ml/s${p.calibratedAt ? " · " + this._escape(this._formatActivityTime(p.calibratedAt)) : ""}` : "Not calibrated yet."}</small>
-        </div>`;
+        </article>`;
     };
 
     return `
-        <label class="toggle-card">
-          <input type="checkbox" data-scope="awc" data-field="enabled" ${awc.enabled ? "checked" : ""}>
-          <span><strong>Enable automatic water change</strong><small>Master switch for scheduling &amp; safety orchestration.</small></span>
-        </label>
+      <div class="awc-settings-stack">
+        <section class="mapping-section awc-settings-block awc-primary-block">
+          <div class="awc-section-title"><p class="eyebrow">Core setup</p></div>
+          <label class="toggle-card compact-toggle awc-master-toggle">
+            <input type="checkbox" data-scope="awc" data-field="enabled" ${awc.enabled ? "checked" : ""}>
+            <span><strong>Enable automatic water change</strong><small>Master switch for scheduling and safety orchestration.</small></span>
+          </label>
+          <div class="mini-grid">
+            <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="awc" data-field="tankVolumeLitres" value="${awc.tankVolumeLitres || 0}"></label>
+          </div>
+          <div class="awc-compact-toggles">
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="awc" data-field="sumpEnabled" ${awc.sumpEnabled ? "checked" : ""}>
+              <span><strong>Sump-based plumbing</strong><small>Drain from and fill into a sump.</small></span>
+            </label>
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="awc" data-field="diagramInPulse" ${awc.diagramInPulse ? "checked" : ""}>
+              <span><strong>Reef Pulse diagram</strong><small>Show live AWC flow in kiosk mode.</small></span>
+            </label>
+          </div>
+        </section>
 
-        <div class="mini-grid">
-          <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="awc" data-field="tankVolumeLitres" value="${awc.tankVolumeLitres || 0}"></label>
-        </div>
-        <label class="chip"><input type="checkbox" data-scope="awc" data-field="sumpEnabled" ${awc.sumpEnabled ? "checked" : ""}> Sump-based plumbing (drain from / fill into a sump)</label>
-        <label class="chip"><input type="checkbox" data-scope="awc" data-field="diagramInPulse" ${awc.diagramInPulse ? "checked" : ""}> Show the live diagram on the Reef Pulse kiosk</label>
+        <section class="mapping-section awc-settings-block">
+          <div class="awc-section-title"><p class="eyebrow">Pumps (ESP32 peristaltic)</p></div>
+          <div class="awc-pump-grid">
+            ${pumpRow("drain")}
+            ${pumpRow("fill")}
+          </div>
+        </section>
 
-        <div class="section-head"><div><p class="eyebrow">Pumps (ESP32 peristaltic)</p></div></div>
-        ${pumpRow("drain")}
-        ${pumpRow("fill")}
-
-        <div class="section-head"><div><p class="eyebrow">Reservoirs</p></div></div>
-        <div class="setting-card subtle-card">
+        <section class="mapping-section awc-settings-block">
+          <div class="awc-section-title"><p class="eyebrow">Reservoirs</p></div>
           <div class="mini-grid">
             <label>Fresh capacity (L)<input type="number" min="0" step="1" data-scope="awc-reservoir" data-id="fresh" data-field="capacityLitres" value="${res.fresh?.capacityLitres || 0}"></label>
             <label>Fresh-empty sensor ${this._awcEntitySelect("awc-reservoir", `data-id="fresh"`, "emptyEntity", res.fresh?.emptyEntity || "", "binary_sensor")}</label>
@@ -8494,10 +8513,10 @@ class OpenReefPanel extends HTMLElement {
             <label>Waste capacity (L)<input type="number" min="0" step="1" data-scope="awc-reservoir" data-id="waste" data-field="capacityLitres" value="${res.waste?.capacityLitres || 0}"></label>
             <label>Waste-full sensor ${this._awcEntitySelect("awc-reservoir", `data-id="waste"`, "fullEntity", res.waste?.fullEntity || "", "binary_sensor")}</label>
           </div>
-        </div>
+        </section>
 
-        <div class="section-head"><div><p class="eyebrow">Safety sensors &amp; thresholds</p></div></div>
-        <div class="setting-card subtle-card">
+        <section class="mapping-section awc-settings-block">
+          <div class="awc-section-title"><p class="eyebrow">Safety sensors and thresholds</p></div>
           <div class="mini-grid">
             <label>Display high-level cutoff ${this._awcEntitySelect("awc-safety", "", "highLevelEntity", safety.highLevelEntity || "", "binary_sensor")}</label>
             <label>Leak sensor ${this._awcEntitySelect("awc-safety", "", "leakEntity", safety.leakEntity || "", "binary_sensor")}</label>
@@ -8508,25 +8527,42 @@ class OpenReefPanel extends HTMLElement {
             <label>Net-imbalance warn (L)<input type="number" min="0" step="0.1" data-scope="awc-safety" data-field="netImbalanceWarnLitres" value="${safety.netImbalanceWarnLitres ?? 2}"></label>
             <label>Simultaneous imbalance cap (L)<input type="number" min="0" step="0.1" data-scope="awc-safety" data-field="maxInstantaneousImbalanceLitres" value="${safety.maxInstantaneousImbalanceLitres ?? 0.5}"></label>
           </div>
-          <small>Imbalance cap bounds how far drain/fill may diverge mid-run in simultaneous mode (0 = off).</small>
-        </div>
+          <small class="awc-hint">Imbalance cap bounds how far drain/fill may diverge mid-run in simultaneous mode (0 = off).</small>
+        </section>
 
-        <div class="section-head"><div><p class="eyebrow">ATO coordination &amp; run guards</p></div></div>
-        <div class="setting-card subtle-card">
-          <label class="chip"><input type="checkbox" data-scope="awc-ato" data-field="suspendDuringChange" ${ato.suspendDuringChange !== false ? "checked" : ""}> Suspend ATO during a change</label>
-          <label>Stabilization hold-off (min)<input type="number" min="0" max="1440" step="1" data-scope="awc-ato" data-field="stabilizationHoldoffMinutes" value="${ato.stabilizationHoldoffMinutes ?? 15}"></label>
-          <label class="chip"><input type="checkbox" data-scope="awc-guards" data-field="blockDuringFeed" ${guards.blockDuringFeed !== false ? "checked" : ""}> Never run during Feed mode</label>
-          <label class="chip"><input type="checkbox" data-scope="awc-guards" data-field="blockOnReturnPumpIssue" ${guards.blockOnReturnPumpIssue !== false ? "checked" : ""}> Pause on return-pump / ATO issue</label>
-          <label class="chip"><input type="checkbox" data-scope="awc-guards" data-field="quietHoursEnabled" ${guards.quietHoursEnabled ? "checked" : ""}> Restrict to quiet hours</label>
+        <section class="mapping-section awc-settings-block">
+          <div class="awc-section-title"><p class="eyebrow">ATO coordination and run guards</p></div>
+          <div class="awc-compact-toggles">
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="awc-ato" data-field="suspendDuringChange" ${ato.suspendDuringChange !== false ? "checked" : ""}>
+              <span><strong>Suspend ATO</strong><small>During active water changes.</small></span>
+            </label>
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="awc-guards" data-field="blockDuringFeed" ${guards.blockDuringFeed !== false ? "checked" : ""}>
+              <span><strong>Block during Feed mode</strong><small>Never start while feeding.</small></span>
+            </label>
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="awc-guards" data-field="blockOnReturnPumpIssue" ${guards.blockOnReturnPumpIssue !== false ? "checked" : ""}>
+              <span><strong>Pause on return or ATO issue</strong><small>Hold if related equipment looks unsafe.</small></span>
+            </label>
+            <label class="toggle-card compact-toggle">
+              <input type="checkbox" data-scope="awc-guards" data-field="quietHoursEnabled" ${guards.quietHoursEnabled ? "checked" : ""}>
+              <span><strong>Restrict to quiet hours</strong><small>Only run inside the time window.</small></span>
+            </label>
+          </div>
           <div class="mini-grid">
+            <label>Stabilization hold-off (min)<input type="number" min="0" max="1440" step="1" data-scope="awc-ato" data-field="stabilizationHoldoffMinutes" value="${ato.stabilizationHoldoffMinutes ?? 15}"></label>
             <label>Quiet start<input type="time" data-scope="awc-guards" data-field="quietStart" value="${guards.quietStart || "01:00"}"></label>
             <label>Quiet end<input type="time" data-scope="awc-guards" data-field="quietEnd" value="${guards.quietEnd || "05:00"}"></label>
           </div>
-        </div>
+        </section>
 
-        <div class="section-head"><div><p class="eyebrow">Schedule</p></div></div>
-        <div class="setting-card subtle-card">
-          <label class="chip"><input type="checkbox" data-scope="awc-schedule" data-field="enabled" ${sched.enabled ? "checked" : ""}> Enable scheduled changes</label>
+        <section class="mapping-section awc-settings-block">
+          <div class="awc-section-title"><p class="eyebrow">Schedule</p></div>
+          <label class="toggle-card compact-toggle">
+            <input type="checkbox" data-scope="awc-schedule" data-field="enabled" ${sched.enabled ? "checked" : ""}>
+            <span><strong>Enable scheduled changes</strong><small>Manual runs still work when this is off.</small></span>
+          </label>
           <div class="mini-grid">
             <label>Method
               <select data-scope="awc-schedule" data-field="method">
@@ -8551,9 +8587,10 @@ class OpenReefPanel extends HTMLElement {
           <div class="mini-grid">
             <label>Run at<input type="time" data-scope="awc-schedule" data-field="startTime" value="${(Array.isArray(sched.times) && sched.times[0]) || "02:00"}"></label>
           </div>
-          <div class="chip-row" style="display:flex;gap:8px;flex-wrap:wrap;">${dayBtns}</div>
-          <small>Leave all days unticked to run every day.</small>
-        </div>`;
+          <div class="chip-row awc-day-row">${dayBtns}</div>
+          <small class="awc-hint">Leave all days unticked to run every day.</small>
+        </section>
+      </div>`;
   }
 
   // --- Live cameras ------------------------------------------------------
@@ -15564,6 +15601,23 @@ class OpenReefPanel extends HTMLElement {
         .toggle-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: rgba(14, 26, 40, .88); grid-template-columns: auto 1fr; align-items: start; }
         .toggle-card input { width: 20px; min-height: 20px; margin-top: 2px; accent-color: var(--openreef-accent); }
         .toggle-card span { display: grid; gap: 4px; }
+        .toggle-card.compact-toggle { min-width: 0; min-height: 52px; padding: 10px 12px; align-items: center; gap: 10px; }
+        .toggle-card.compact-toggle input { width: 18px; min-height: 18px; margin-top: 0; }
+        .toggle-card.compact-toggle small { color: #8da2ba; line-height: 1.25; }
+        .awc-settings-stack { display: grid; gap: 12px; }
+        .awc-settings-block { gap: 12px; }
+        .awc-primary-block { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(11, 23, 36, .86)); }
+        .awc-section-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+        .awc-section-title .eyebrow { margin: 0; }
+        .awc-compact-toggles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px; }
+        .awc-master-toggle { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
+        .awc-pump-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .awc-pump-card { display: grid; gap: 10px; border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: #101d2c; }
+        .awc-pump-head { display: grid; gap: 3px; min-width: 0; }
+        .awc-pump-head strong { color: #e5edf5; font-size: 15px; }
+        .awc-pump-head small, .awc-hint { color: #8da2ba; line-height: 1.35; }
+        .awc-day-row { display: flex; gap: 8px; flex-wrap: wrap; }
+        .awc-settings-block .mini-grid { gap: 10px; }
         .theme-picker { display: grid; grid-template-columns: repeat(8, minmax(34px, 1fr)); gap: 8px; }
         .theme-swatch { min-height: 42px; border: 1px solid #2b4056; border-radius: 8px; background: var(--swatch); padding: 0; }
         .theme-swatch.active { border-color: #f8fafc; box-shadow: 0 0 0 2px var(--openreef-accent-border); }
@@ -15885,6 +15939,7 @@ class OpenReefPanel extends HTMLElement {
           .health-insight-head, .health-insight-row { flex-direction: column; align-items: stretch; }
           .setup-guide, .setup-choice-grid, .setup-choice-grid.two-choice { grid-template-columns: 1fr; }
           .setup-next-list div { grid-template-columns: 1fr; }
+          .awc-pump-grid { grid-template-columns: 1fr; }
         }
         @media (max-width: 640px) {
           .page { padding: 8px; }
@@ -15917,6 +15972,7 @@ class OpenReefPanel extends HTMLElement {
           .or-buddy-bubble { max-width: calc(100vw - 24px); }
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
+          .awc-settings-block .mini-grid, .awc-compact-toggles { grid-template-columns: 1fr; }
         }
         /* Tablet tier: re-expand content grids that the phone collapse would
            otherwise force into a single wasteful column. Bounded at 641px so

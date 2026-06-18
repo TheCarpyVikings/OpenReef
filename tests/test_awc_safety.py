@@ -156,6 +156,23 @@ def test_sequential_drains_then_fills():
     assert _close(awc["history"][0]["filledL"], 2.0, 1e-6)
 
 
+def test_new_run_clears_stale_simultaneous_timing_fields():
+    entry = _entry("batch_sequential")
+    st = _state(entry)
+    st.update({
+        "drainEndsAt": "2026-01-01T00:00:00+00:00",
+        "fillEndsAt": "2026-01-01T00:00:00+00:00",
+        "exchangeBaselineGapMl": 750,
+    })
+    hass = _hass(entry)
+    _start(hass, entry, 2.0, method="batch_sequential")
+    saved = _state(entry)
+    assert saved["status"] == "draining"
+    assert saved["drainEndsAt"] == ""
+    assert saved["fillEndsAt"] == ""
+    assert saved["exchangeBaselineGapMl"] == 0
+
+
 def test_leg_timer_is_armed_via_scheduler():
     sched = install_scheduler(integration)
     entry = _entry("batch_sequential")

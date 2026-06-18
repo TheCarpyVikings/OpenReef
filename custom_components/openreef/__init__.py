@@ -5174,6 +5174,11 @@ async def _async_awc_start(
     state["fault"] = ""
     state["faultSince"] = ""
     state["pausedReason"] = ""
+    state["legStartedAt"] = ""
+    state["legEndsAt"] = ""
+    state["drainEndsAt"] = ""
+    state["fillEndsAt"] = ""
+    state["exchangeBaselineGapMl"] = 0
 
     target_ml = target * 1000.0
     if method == "batch_simultaneous":
@@ -5473,7 +5478,7 @@ async def _async_arm_awc_timer(
             return
         config = _config_from_entry(latest_entry)
         # Dispatch by method: simultaneous runs the monitor tick, sequential the leg handler.
-        if _awc_cfg(config).get("state", {}).get("status") == "exchanging":
+        if _awc_cfg(config).get("state", {}).get("method") == "batch_simultaneous":
             await _async_awc_exchange_tick(hass, latest_entry, config, None)
         else:
             await _async_awc_leg_complete(hass, latest_entry, config, None)
