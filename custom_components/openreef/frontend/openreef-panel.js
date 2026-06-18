@@ -8447,7 +8447,10 @@ class OpenReefPanel extends HTMLElement {
     const sched = awc.schedule || {};
     const days = Array.isArray(sched.days) ? sched.days : [];
     const dayBtns = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `
-      <label class="chip"><input type="checkbox" data-scope="awc-schedule" data-field="scheduleDay" data-day="${d}" ${days.includes(d) ? "checked" : ""}> ${d}</label>`).join("");
+      <label class="awc-day-toggle">
+        <input type="checkbox" data-scope="awc-schedule" data-field="scheduleDay" data-day="${d}" ${days.includes(d) ? "checked" : ""}>
+        <span>${d}</span>
+      </label>`).join("");
 
     const pumpRow = (role) => {
       const p = pumps[role] || {};
@@ -15616,7 +15619,11 @@ class OpenReefPanel extends HTMLElement {
         .awc-pump-head { display: grid; gap: 3px; min-width: 0; }
         .awc-pump-head strong { color: #e5edf5; font-size: 15px; }
         .awc-pump-head small, .awc-hint { color: #8da2ba; line-height: 1.35; }
-        .awc-day-row { display: flex; gap: 8px; flex-wrap: wrap; }
+        .awc-day-row { display: grid; grid-template-columns: repeat(7, minmax(58px, 74px)); gap: 8px; align-items: stretch; }
+        .awc-day-toggle { display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 7px; min-height: 38px; padding: 8px 9px; border: 1px solid #24364a; border-radius: 8px; background: #0b1724; color: #dcecff; font-size: 12px; font-weight: 800; }
+        .awc-day-toggle input, .day-toggle input { width: 18px; height: 18px; min-height: 18px; padding: 0; margin: 0; accent-color: var(--openreef-accent); }
+        .awc-day-toggle span { line-height: 1; white-space: nowrap; }
+        .day-toggle { display: inline-grid; grid-template-columns: 18px auto; align-items: center; gap: 7px; min-height: 36px; padding: 8px 9px; border: 1px solid #24364a; border-radius: 8px; background: #0b1724; color: #dcecff; font-size: 12px; font-weight: 800; }
         .awc-settings-block .mini-grid { gap: 10px; }
         .theme-picker { display: grid; grid-template-columns: repeat(8, minmax(34px, 1fr)); gap: 8px; }
         .theme-swatch { min-height: 42px; border: 1px solid #2b4056; border-radius: 8px; background: var(--swatch); padding: 0; }
@@ -15973,6 +15980,7 @@ class OpenReefPanel extends HTMLElement {
           .manual-history-row { flex-direction: column; }
           .manual-batch-row { grid-template-columns: 1fr; }
           .awc-settings-block .mini-grid, .awc-compact-toggles { grid-template-columns: 1fr; }
+          .awc-day-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         /* Tablet tier: re-expand content grids that the phone collapse would
            otherwise force into a single wasteful column. Bounded at 641px so
