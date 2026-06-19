@@ -3542,7 +3542,7 @@ class OpenReefPanel extends HTMLElement {
     return {
       ...this._dosingSystemDefaults(),
       ...raw,
-      tankVolumeLitres: Number(raw.tankVolumeLitres) || Math.max(0, ...parameterVolumes),
+      tankVolumeLitres: Number(raw.tankVolumeLitres) || Math.max(0, ...parameterVolumes) || Number(this._config?.tank?.volumeLitres) || 0,
       sharedDailyDoseMl: Math.max(0, Number(raw.sharedDailyDoseMl) || 0),
       kalkDailyDoseMl: Math.max(0, Number(raw.kalkDailyDoseMl) || 0),
       kalkConcentrationTspPerGallon: Math.max(0, Number(raw.kalkConcentrationTspPerGallon) || 0),
@@ -8547,7 +8547,7 @@ class OpenReefPanel extends HTMLElement {
             <span><strong>Enable automatic water change</strong><small>Master switch for scheduling and safety orchestration.</small></span>
           </label>
           <div class="mini-grid">
-            <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="awc" data-field="tankVolumeLitres" value="${awc.tankVolumeLitres || 0}"></label>
+            <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="awc" data-field="tankVolumeLitres" value="${awc.tankVolumeLitres || 0}">${this._tankVolumeInheritHint(awc.tankVolumeLitres)}</label>
           </div>
           <div class="awc-compact-toggles">
             <label class="toggle-card compact-toggle">
@@ -13094,9 +13094,46 @@ class OpenReefPanel extends HTMLElement {
     return groups;
   }
 
+  // Net tank water volume (L) used to convert between litres and % water changed.
+  // Falls back from the dosing system's net volume to the AWC setting.
+  _maintenanceTankVolumeLitres() {
+    const tank = Number(this._config?.tank?.volumeLitres) || 0;
+    if (tank > 0) return tank;
+    const dosing = Number(this._dosingSystem()?.tankVolumeLitres) || 0;
+    if (dosing > 0) return dosing;
+    return Number(this._config?.automaticWaterChange?.tankVolumeLitres) || 0;
+  }
+
+  // Hint under a Dosing/AWC volume input when it's blank but the Profile has a tank
+  // volume — shows the inherited value and that typing here overrides it.
+  _tankVolumeInheritHint(ownValue) {
+    const own = Number(ownValue) || 0;
+    const tank = Number(this._config?.tank?.volumeLitres) || 0;
+    if (own > 0 || tank <= 0) return "";
+    return `<small class="hint">Using ${this._escape(this._maintenanceVolNum(tank))} L from your tank profile — enter a value to override.</small>`;
+  }
+
+  // Both sides of a logged water-change volume: { litres, pct }. The unconverted
+  // side is null when tank volume is unknown so callers can show only what's known.
+  _maintenanceVolumeParts(entry, tankVol) {
+    if (typeof entry?.volume !== "number") return { litres: null, pct: null };
+    if (entry.volumeUnit === "L") {
+      return { litres: entry.volume, pct: tankVol > 0 ? (entry.volume / tankVol) * 100 : null };
+    }
+    return { litres: tankVol > 0 ? (entry.volume / 100) * tankVol : null, pct: entry.volume };
+  }
+
+  // Trim a volume to ≤1 decimal without forcing a trailing ".0" (10 -> "10", 6.67 -> "6.7").
+  _maintenanceVolNum(value) {
+    return String(Math.round(value * 10) / 10);
+  }
+
   // Render a task's history grouped under Mon–Sun week headers (newest week first).
+  // Each water-change entry shows both litres and % changed; each week header shows
+  // the week's total litres and % next to the date range.
   _renderCompletionWeeks(id, completions) {
     const groups = this._groupCompletionsByWeek(completions.slice(0, 50));
+    const tankVol = this._maintenanceTankVolumeLitres();
     const thisWeek = this._weekKey(Date.now());
     const prevWeek = new Date(thisWeek);
     prevWeek.setDate(prevWeek.getDate() - 7);
@@ -13104,8 +13141,17 @@ class OpenReefPanel extends HTMLElement {
     return groups.map((group) => {
       const header = group.key === null ? "Undated" : this._weekRangeLabel(group.key);
       const rel = group.key === thisWeek ? "This week" : group.key === lastWeek ? "Last week" : "";
+      let litresTotal = 0, pctTotal = 0, hasLitres = false, hasPct = false;
       const rows = group.entries.map((entry) => {
-        const vol = (typeof entry.volume === "number") ? ` · ${entry.volume}${entry.volumeUnit === "L" ? " L" : "%"}` : "";
+        const { litres, pct } = this._maintenanceVolumeParts(entry, tankVol);
+        if (!entry.skipped) {
+          if (litres !== null) { litresTotal += litres; hasLitres = true; }
+          if (pct !== null) { pctTotal += pct; hasPct = true; }
+        }
+        const parts = [];
+        if (litres !== null) parts.push(`${this._maintenanceVolNum(litres)} L`);
+        if (pct !== null) parts.push(`${this._maintenanceVolNum(pct)}%`);
+        const vol = parts.length ? ` · ${parts.join(" · ")}` : "";
         return `
               <div class="manual-history-row">
                 <div>
@@ -13115,9 +13161,16 @@ class OpenReefPanel extends HTMLElement {
                 <button class="danger-text compact-button" data-action="delete-completion" data-id="${this._escape(id)}" data-entry="${this._escape(entry.id)}">Delete</button>
               </div>`;
       }).join("");
+      const totalParts = [];
+      if (hasLitres) totalParts.push(`${this._maintenanceVolNum(litresTotal)} L`);
+      if (hasPct) totalParts.push(`${this._maintenanceVolNum(pctTotal)}%`);
+      const totalLabel = totalParts.join(" · ");
       return `
             <div class="maintenance-week-group">
-              <p class="eyebrow maintenance-week-head">${this._escape(header)}${rel ? ` <span class="muted">· ${this._escape(rel)}</span>` : ""}</p>
+              <p class="eyebrow maintenance-week-head">
+                <span>${this._escape(header)}${rel ? ` · ${this._escape(rel)}` : ""}</span>
+                ${totalLabel ? `<span class="maintenance-week-total">${this._escape(totalLabel)}</span>` : ""}
+              </p>
               ${rows}
             </div>`;
     }).join("");
@@ -13549,8 +13602,9 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <div class="grid two compact">
           <label>Net tank water volume (L)
-            <input type="number" min="0" step="1" data-scope="dosing-system" data-field="tankVolumeLitres" value="${this._escape(system.tankVolumeLitres || 0)}">
+            <input type="number" min="0" step="1" data-scope="dosing-system" data-field="tankVolumeLitres" value="${this._escape(this._config?.dosing?.system?.tankVolumeLitres || 0)}">
             <small>Use real system water volume after rock, sand, sump level, and displacement.</small>
+            ${this._tankVolumeInheritHint(this._config?.dosing?.system?.tankVolumeLitres)}
           </label>
           <label>Primary dosing system
             <select data-scope="dosing-system" data-field="primaryProduct">
@@ -13750,6 +13804,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="grid two compact">
           <label>Tank name<input data-scope="tank" data-field="name" value="${this._escape(this._config.tank.name)}"></label>
           <label>Owner<input data-scope="tank" data-field="owner" value="${this._escape(this._config.tank.owner)}"></label>
+          <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="tank" data-field="volumeLitres" value="${this._escape(this._config.tank.volumeLitres || 0)}"><small>Real water volume after rock, sand &amp; sump. Powers water-change %, and feeds Dosing &amp; AWC when their own volume is blank.</small></label>
           <label>Tank type
             <select data-scope="tank" data-field="profile">
               ${this._tankProfileChoices().map(([id, label]) => `<option value="${this._escape(id)}" ${this._tankProfile() === id ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
@@ -15087,6 +15142,7 @@ class OpenReefPanel extends HTMLElement {
           <div class="grid two compact">
             <label>Tank name<input data-scope="tank" data-field="name" value="${this._escape(this._config.tank.name)}"></label>
             <label>Owner<input data-scope="tank" data-field="owner" value="${this._escape(this._config.tank.owner)}"></label>
+            <label>Net tank volume (L)<input type="number" min="0" step="1" data-scope="tank" data-field="volumeLitres" value="${this._escape(this._config.tank.volumeLitres || 0)}"><small>Real water volume after rock, sand &amp; sump — powers water-change % and dosing maths.</small></label>
             <label>Tank type
               <select data-scope="tank" data-field="profile">
                 ${this._tankProfileChoices().map(([id, label]) => `<option value="${this._escape(id)}" ${this._tankProfile() === id ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
@@ -15531,7 +15587,8 @@ class OpenReefPanel extends HTMLElement {
         .maintenance-when { grid-column: 1 / -1; }
         .maintenance-week-group { display: grid; gap: 8px; }
         .maintenance-week-group + .maintenance-week-group { margin-top: 6px; }
-        .maintenance-week-head { margin: 0; }
+        .maintenance-week-head { margin: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+        .maintenance-week-total { color: #d6e2f0; letter-spacing: .02em; white-space: nowrap; }
         .manual-history-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; border: 1px solid #24364a; border-radius: 8px; padding: 10px; background: rgba(11, 23, 36, .72); }
         .manual-history-row div { display: grid; gap: 4px; min-width: 0; }
         .manual-history-row strong, .manual-history-row small { overflow-wrap: anywhere; }

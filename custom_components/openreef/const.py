@@ -813,6 +813,7 @@ DEFAULT_CORE_CONFIG = {
         "name": NAME,
         "owner": "",
         "profile": DEFAULT_TANK_PROFILE,
+        "volumeLitres": 0,
     },
     "display": {
         "themeColor": "#00b4d8",

@@ -757,6 +757,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             else ""
         )
         tank["profile"] = _normalise_tank_profile(tank.get("profile"))
+        tank["volumeLitres"] = round(_awc_num(tank.get("volumeLitres"), 0, 0, AWC_TANK_MAX_L), 2)
 
     raw_sensors = settings.get("sensors") if isinstance(settings.get("sensors"), dict) else {}
 
@@ -4928,6 +4929,30 @@ def _awc_cfg(config: dict[str, Any]) -> dict[str, Any]:
     return awc if isinstance(awc, dict) else {}
 
 
+def _awc_effective_tank_l(config: dict[str, Any]) -> float:
+    """Net tank volume (L) the AWC engine should use: the AWC tab's own override when
+    set, otherwise the Profile tank volume. Resolved at read time and never persisted,
+    so editing the Profile volume flows through live — and the scheduler, the panel
+    projection and the single-change safety cap all stay on one shared number."""
+    own = _awc_num(_awc_cfg(config).get("tankVolumeLitres"), 0, 0, AWC_TANK_MAX_L)
+    if own > 0:
+        return own
+    tank = config.get("tank") if isinstance(config.get("tank"), dict) else {}
+    return _awc_num(tank.get("volumeLitres"), 0, 0, AWC_TANK_MAX_L)
+
+
+def _awc_cfg_eff(config: dict[str, Any]) -> dict[str, Any]:
+    """`_awc_cfg` with ``tankVolumeLitres`` resolved to the effective (possibly
+    inherited) volume. READ-ONLY view for engine helpers that read tank volume out of
+    the config dict (``summary``, the single-change cap). The state-mutation path keeps
+    using `_awc_cfg` directly so writes still persist by reference."""
+    acfg = _awc_cfg(config)
+    eff = _awc_effective_tank_l(config)
+    if not acfg or eff == _awc_num(acfg.get("tankVolumeLitres"), 0, 0, AWC_TANK_MAX_L):
+        return acfg
+    return {**acfg, "tankVolumeLitres": eff}
+
+
 def _awc_binary_on(hass: HomeAssistant, entity_id: str | None) -> bool:
     """True when a configured binary safety sensor reads active. Unavailable/unset →
     False (the firmware owns real-time guarding; the backend won't act on a flaky read)."""
@@ -5167,7 +5192,7 @@ async def _async_awc_start(
     if target <= 0:
         reasons.append({"code": "no_volume", "severity": "block", "message": "Enter a volume to change"})
     reasons.extend(awc_engine.reservoir_preflight_reasons(acfg, target))
-    if awc_engine.exceeds_single_change_cap(acfg, target):
+    if awc_engine.exceeds_single_change_cap(_awc_cfg_eff(config), target):
         pct = acfg.get("safety", {}).get("maxSingleChangePercent", 25)
         reasons.append({"code": "max_single_change", "severity": "block",
                         "message": f"Exceeds the {pct}% single-change cap"})
@@ -5672,7 +5697,7 @@ async def _async_awc_schedule_tick(
     method = sched.get("method", _AWC_SAFE_METHOD)
     if method not in AWC_LIVE_METHODS:  # continuous is projection-only; fall back to safe default
         method = _AWC_SAFE_METHOD
-    tank = acfg.get("tankVolumeLitres", 0)
+    tank = _awc_effective_tank_l(config)
     last_run = _parse_datetime(state.get("lastRun"))
 
     if awc_engine.is_due(sched, last_run, now_local):
@@ -6884,7 +6909,7 @@ async def websocket_awc_run_now(
     acfg = _awc_cfg(config)
     litres = msg.get("litres")
     if litres is None and msg.get("percent") is not None:
-        litres = acfg.get("tankVolumeLitres", 0) * float(msg["percent"]) / 100.0
+        litres = _awc_effective_tank_l(config) * float(msg["percent"]) / 100.0
     started, reasons = await _async_awc_start(
         hass, entry, config, litres or 0, msg.get("method"), True, connection.context(msg)
     )
@@ -7062,7 +7087,7 @@ async def websocket_awc_summary(
         return
     config = _config_from_entry(entry)
     acfg = _awc_cfg(config)
-    summary = awc_engine.summary(acfg, dt_util.now())
+    summary = awc_engine.summary(_awc_cfg_eff(config), dt_util.now())
     connection.send_result(msg["id"], {
         "summary": summary,
         "state": acfg.get("state", {}),
