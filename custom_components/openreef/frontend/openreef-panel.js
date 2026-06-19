@@ -13055,6 +13055,96 @@ class OpenReefPanel extends HTMLElement {
       </section>`;
   }
 
+  // Monday-start week key: local-midnight ms of the Monday whose week contains
+  // `timestamp`. Returns null for unparseable timestamps so they bucket on their own.
+  _weekKey(timestamp) {
+    const d = new Date(timestamp);
+    if (!Number.isFinite(d.getTime())) return null;
+    const local = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const mondayOffset = (local.getDay() + 6) % 7; // Sun=0..Sat=6 -> Mon=0..Sun=6
+    local.setDate(local.getDate() - mondayOffset);
+    local.setHours(0, 0, 0, 0);
+    return local.getTime();
+  }
+
+  // Locale-formatted Mon–Sun range for a week-start ms, e.g. "16/06/26 – 22/06/26".
+  _weekRangeLabel(weekStartMs) {
+    const start = new Date(weekStartMs);
+    const end = new Date(weekStartMs);
+    end.setDate(end.getDate() + 6);
+    const fmt = (d) => d.toLocaleDateString([], { day: "2-digit", month: "2-digit", year: "2-digit" });
+    return `${fmt(start)} – ${fmt(end)}`;
+  }
+
+  // Bucket already-sorted (newest-first) completions into Mon–Sun week groups,
+  // preserving the descending order of weeks and of entries within each week.
+  _groupCompletionsByWeek(completions) {
+    const groups = [];
+    const byKey = new Map();
+    for (const entry of completions) {
+      const key = this._weekKey(entry?.timestamp);
+      let group = byKey.get(key);
+      if (!group) {
+        group = { key, entries: [] };
+        byKey.set(key, group);
+        groups.push(group);
+      }
+      group.entries.push(entry);
+    }
+    return groups;
+  }
+
+  // Render a task's history grouped under Mon–Sun week headers (newest week first).
+  _renderCompletionWeeks(id, completions) {
+    const groups = this._groupCompletionsByWeek(completions.slice(0, 50));
+    const thisWeek = this._weekKey(Date.now());
+    const prevWeek = new Date(thisWeek);
+    prevWeek.setDate(prevWeek.getDate() - 7);
+    const lastWeek = prevWeek.getTime();
+    return groups.map((group) => {
+      const header = group.key === null ? "Undated" : this._weekRangeLabel(group.key);
+      const rel = group.key === thisWeek ? "This week" : group.key === lastWeek ? "Last week" : "";
+      const rows = group.entries.map((entry) => {
+        const vol = (typeof entry.volume === "number") ? ` · ${entry.volume}${entry.volumeUnit === "L" ? " L" : "%"}` : "";
+        return `
+              <div class="manual-history-row">
+                <div>
+                  <strong>${this._escape(this._formatActivityTime(entry.timestamp))}${this._escape(vol)}</strong>${entry.skipped ? ` <span class="pill warning">skipped</span>` : ""}
+                  ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
+                </div>
+                <button class="danger-text compact-button" data-action="delete-completion" data-id="${this._escape(id)}" data-entry="${this._escape(entry.id)}">Delete</button>
+              </div>`;
+      }).join("");
+      return `
+            <div class="maintenance-week-group">
+              <p class="eyebrow maintenance-week-head">${this._escape(header)}${rel ? ` <span class="muted">· ${this._escape(rel)}</span>` : ""}</p>
+              ${rows}
+            </div>`;
+    }).join("");
+  }
+
+  // Resolve the completion time for a task from its "Completed" field.
+  // Empty -> now. Returns null (surfacing an error) for an invalid or future time.
+  _readCompletionTimestamp(id) {
+    const input = this.shadowRoot.getElementById(`or-done-at-${id}`);
+    const raw = (input?.value || "").trim();
+    if (!raw) return new Date().toISOString();
+    const parsed = Date.parse(raw);
+    if (!Number.isFinite(parsed)) {
+      this._error = "Choose a valid date and time for this completion.";
+      this._message = "";
+      this._render();
+      return null;
+    }
+    if (parsed > Date.now() + 60000) {
+      this._error = "A completion can't be logged in the future.";
+      this._message = "";
+      this._render();
+      return null;
+    }
+    return new Date(raw).toISOString();
+  }
+
   _maintenanceTaskCard(id) {
     const task = this._maintenanceTask(id);
     const state = this._maintenanceDueState(id);
@@ -13077,12 +13167,13 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <small>${this._escape(latest ? `Last done ${this._formatActivityTime(latest.timestamp)}` : "Never logged")}</small>
         <p>${this._escape(state.detail)}</p>
-        ${task.logsVolume ? `
-          <div class="mini-grid">
+        <div class="mini-grid">
+          <label class="maintenance-when">Completed<input id="or-done-at-${this._escape(id)}" type="datetime-local" value="${this._escape(this._nowLocalInputValue())}" max="${this._escape(this._nowLocalInputValue())}"></label>
+          ${task.logsVolume ? `
             <label>Volume logged<input id="or-vol-${this._escape(id)}" type="number" min="0" step="1" placeholder="optional"></label>
             <label>Unit<select id="or-volunit-${this._escape(id)}"><option value="pct">%</option><option value="L">litres</option></select></label>
-          </div>
-        ` : ""}
+          ` : ""}
+        </div>
         <div class="button-row">
           <button class="primary compact-button" data-action="complete-task" data-id="${this._escape(id)}">Mark done</button>
           ${due ? `
@@ -13095,18 +13186,7 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${open ? `
           <div class="manual-history">
-            ${completions.length ? completions.slice(0, 12).map((entry) => {
-              const vol = (typeof entry.volume === "number") ? ` · ${entry.volume}${entry.volumeUnit === "L" ? " L" : "%"}` : "";
-              return `
-              <div class="manual-history-row">
-                <div>
-                  <strong>${this._escape(this._formatActivityTime(entry.timestamp))}${this._escape(vol)}</strong>${entry.skipped ? ` <span class="pill warning">skipped</span>` : ""}
-                  ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
-                </div>
-                <button class="danger-text compact-button" data-action="delete-completion" data-id="${this._escape(id)}" data-entry="${this._escape(entry.id)}">Delete</button>
-              </div>
-            `;
-            }).join("") : `<p class="muted">No history yet.</p>`}
+            ${completions.length ? this._renderCompletionWeeks(id, completions) : `<p class="muted">No history yet.</p>`}
           </div>
         ` : ""}
       </article>
@@ -13224,7 +13304,9 @@ class OpenReefPanel extends HTMLElement {
     const task = this._maintenanceTask(id);
     const config = this._maintenanceConfig();
     if (!Array.isArray(config.completions[id])) config.completions[id] = [];
-    const timestamp = new Date().toISOString();
+    const timestamp = this._readCompletionTimestamp(id);
+    if (timestamp === null) return;
+    this._error = "";
     const entry = {
       id: `${id}:${timestamp}:${config.completions[id].length}`,
       timestamp,
@@ -15446,6 +15528,10 @@ class OpenReefPanel extends HTMLElement {
         .manual-test-card > strong { color: #67e8f9; font-size: 24px; overflow-wrap: anywhere; }
         .manual-test-card p { color: #9fb2c7; }
         .manual-history { display: grid; gap: 8px; border-top: 1px solid #24364a; padding-top: 10px; }
+        .maintenance-when { grid-column: 1 / -1; }
+        .maintenance-week-group { display: grid; gap: 8px; }
+        .maintenance-week-group + .maintenance-week-group { margin-top: 6px; }
+        .maintenance-week-head { margin: 0; }
         .manual-history-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; border: 1px solid #24364a; border-radius: 8px; padding: 10px; background: rgba(11, 23, 36, .72); }
         .manual-history-row div { display: grid; gap: 4px; min-width: 0; }
         .manual-history-row strong, .manual-history-row small { overflow-wrap: anywhere; }
