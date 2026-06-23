@@ -765,7 +765,13 @@ class OpenReefPanel extends HTMLElement {
 
   _loadManualTrend(parameterId, range = this._trend?.source === "manual" ? this._trend.range : "all") {
     const meta = this._manualTestMeta(parameterId);
-    const points = this._manualTrendPoints(parameterId, range);
+    let points = this._manualTrendPoints(parameterId, range);
+    // Plot in the user's selected unit. Stored points are canonical ppt; if the
+    // latest salinity result was logged in SG, convert the series so the axis,
+    // summary and labels all read SG (digits widened for the 4-dp SG scale).
+    const sg = this._manualDisplaysSg(parameterId);
+    const displayMeta = sg ? { ...meta, unit: "SG" } : meta;
+    if (sg) points = points.map((point) => ({ ...point, value: this._pptToSg(point.value) }));
     this._trendRequest = `manual:${parameterId}:${range}:${Date.now()}`;
     this._trend = {
       sensorId: parameterId,
@@ -775,7 +781,8 @@ class OpenReefPanel extends HTMLElement {
       loading: false,
       points,
       error: points.length >= 2 ? "" : "Add at least two dated manual results to chart this parameter.",
-      manualMeta: meta,
+      manualMeta: displayMeta,
+      digits: sg ? 4 : undefined,
     };
     this._render();
   }
@@ -1502,6 +1509,21 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.manualBatchSource) {
         this._manualEntryDefaults.sources = this._manualEntryDefaults.sources || {};
         this._manualEntryDefaults.sources[target.dataset.manualBatchSource] = value;
+        return;
+      }
+      if (target.dataset.manualBatchUnit) {
+        const paramId = target.dataset.manualBatchUnit;
+        this._manualEntryDefaults.units = this._manualEntryDefaults.units || {};
+        this._manualEntryDefaults.units[paramId] = value;
+        // Update the matching value input in place (placeholder/step) so we don't
+        // re-render and wipe other rows' unsaved typing.
+        const valueInput = this.shadowRoot.querySelector(`[data-manual-batch-value="${paramId}"]`);
+        if (valueInput) {
+          const isSg = String(value).toUpperCase() === "SG";
+          const meta = this._manualTestMeta(paramId);
+          valueInput.step = isSg ? "0.0001" : "0.001";
+          valueInput.placeholder = isSg ? "1.0264" : (meta.min && meta.max ? `${meta.min} - ${meta.max}` : "0.00");
+        }
         return;
       }
       if (target.dataset.manualImportField) {
@@ -11833,7 +11855,83 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _manualTestSourceChoices() {
-    return ["", "Hanna", "Salifert", "Red Sea", "Nyos", "API", "ICP", "Apex", "Trident", "Trident NP", "Other"];
+    return ["", "Hanna", "Salifert", "Red Sea", "Tropic Marin", "Nyos", "API", "ICP", "Apex", "Trident", "Trident NP", "Other"];
+  }
+
+  // --- Salinity: specific gravity <-> ppt ---------------------------------
+  // Salinity is ALWAYS stored canonically in ppt. Some reefers measure with a
+  // hydrometer (e.g. Tropic Marin) that reads specific gravity, so we let them
+  // enter/see SG and convert. Hobby/Tropic-Marin standard: 35 ppt = 1.0264 SG
+  // at 25 °C / 77 °F; linear across the reef band. Kept in lockstep with the
+  // backend (const.py salinity_sg_to_ppt) so the panel just mirrors it.
+  get _SAL_PPT_PER_SG_UNIT() {
+    return 35 / 0.0264; // ≈ 1325.76 ppt per 1.000 SG
+  }
+
+  _sgToPpt(sg) {
+    const n = Number(sg);
+    return Number.isFinite(n) ? (n - 1) * this._SAL_PPT_PER_SG_UNIT : NaN;
+  }
+
+  _pptToSg(ppt) {
+    const n = Number(ppt);
+    return Number.isFinite(n) ? 1 + n / this._SAL_PPT_PER_SG_UNIT : NaN;
+  }
+
+  // A reef salinity in ppt is ~26–40; an SG reading is ~1.00–1.05. The magnitude
+  // alone disambiguates, which keeps an accidental unit mismatch from poisoning
+  // the canonical ppt value.
+  _salinityLooksLikeSg(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0.95 && n <= 1.15;
+  }
+
+  // Which input units a manual parameter accepts. Only salinity is dual-unit.
+  _manualInputUnitChoices(id) {
+    return id === "salinity" ? ["ppt", "SG"] : null;
+  }
+
+  // Resolve a typed salinity value (+ chosen unit) to a canonical ppt reading.
+  // Returns { value, displayUnit } or { error }. Respects the chosen unit but
+  // auto-corrects an obvious magnitude mismatch (e.g. "1.026" left on ppt).
+  _normaliseSalinityInput(rawValue, inputUnit) {
+    const n = Number(rawValue);
+    if (!Number.isFinite(n)) return { error: "Enter a numeric salinity value." };
+    const wantsSg = String(inputUnit || "").toUpperCase() === "SG";
+    const looksSg = this._salinityLooksLikeSg(n);
+    if (wantsSg || looksSg) {
+      if (!looksSg) return { error: "Specific gravity should look like 1.0264 (between 0.95 and 1.15)." };
+      return { value: this._sgToPpt(n), displayUnit: "SG" };
+    }
+    return { value: n, displayUnit: "" };
+  }
+
+  _manualReadingIsSg(entry) {
+    return String(entry?.displayUnit || "").toUpperCase() === "SG";
+  }
+
+  // Display form of a stored reading, honouring the SG hint. The canonical value
+  // is ppt; for SG entries we recompute the SG from it so the user sees their own
+  // unit. Returns { value, unit, digits }.
+  _manualReadingDisplay(id, entry) {
+    if (id === "salinity" && this._manualReadingIsSg(entry)) {
+      return { value: this._pptToSg(Number(entry?.value)), unit: "SG", digits: 4 };
+    }
+    const meta = this._manualTestMeta(id);
+    return { value: Number(entry?.value), unit: entry?.unit || meta.unit || "", digits: this._sensorDigits(id) };
+  }
+
+  _manualReadingText(id, entry) {
+    if (!entry || !Number.isFinite(Number(entry.value))) return "--";
+    const d = this._manualReadingDisplay(id, entry);
+    return `${this._format(d.value, d.digits)}${d.unit ? ` ${d.unit}` : ""}`;
+  }
+
+  // Whether this parameter's manual readings should be shown in SG right now —
+  // true for salinity when the latest logged result used a hydrometer (SG). Drives
+  // the card delta AND the trend graph axis so they all follow the user's unit.
+  _manualDisplaysSg(id) {
+    return id === "salinity" && this._manualReadingIsSg(this._manualLatestReading(id));
   }
 
   _manualTestMeta(id) {
@@ -11994,9 +12092,16 @@ class OpenReefPanel extends HTMLElement {
     const latest = readings[0];
     const previous = readings[1];
     const meta = this._manualTestMeta(id);
-    const delta = Number(latest.value) - Number(previous.value);
+    // When the latest reading is logged in SG, express the change in SG too, so
+    // hydrometer users see a delta in the unit they actually read.
+    const sg = this._manualDisplaysSg(id);
+    const latestValue = sg ? this._pptToSg(Number(latest.value)) : Number(latest.value);
+    const previousValue = sg ? this._pptToSg(Number(previous.value)) : Number(previous.value);
+    const unit = sg ? "SG" : meta.unit;
+    const digits = sg ? 4 : this._sensorDigits(id);
+    const delta = latestValue - previousValue;
     const direction = delta > 0 ? "up" : delta < 0 ? "down" : "steady";
-    return `${direction} ${this._format(Math.abs(delta), this._sensorDigits(id))}${meta.unit ? ` ${meta.unit}` : ""} since last test.`;
+    return `${direction} ${this._format(Math.abs(delta), digits)}${unit ? ` ${unit}` : ""} since last test.`;
   }
 
   _nowLocalInputValue() {
@@ -12070,12 +12175,16 @@ class OpenReefPanel extends HTMLElement {
     return this._manualTestParameterIds()
       .flatMap((parameter) => this._manualReadings(parameter).map((entry) => {
         const meta = this._manualTestMeta(parameter);
+        // Export in the unit it was logged in (SG round-trips on re-import). Round
+        // SG to its display precision so the CSV reads clean (no float noise).
+        const display = this._manualReadingDisplay(parameter, entry);
+        const exported = display.unit === "SG" ? Number(display.value.toFixed(display.digits)) : Number(display.value);
         return {
           parameter,
           label: meta.label,
           timestamp: entry.timestamp || "",
-          value: Number(entry.value),
-          unit: entry.unit || meta.unit || "",
+          value: exported,
+          unit: display.unit || entry.unit || meta.unit || "",
           source: entry.source || "",
           notes: entry.notes || "",
         };
@@ -12105,6 +12214,8 @@ class OpenReefPanel extends HTMLElement {
       "magnesium,2026-05-30T19:30,1350,ppm,Salifert,evening test",
       "nitrate,2026-05-30T19:30,8,ppm,Hanna,evening test",
       "phosphate,2026-05-30T19:30,0.06,ppm,Hanna,evening test",
+      "salinity,2026-05-30T19:30,35,ppt,Refractometer,evening test",
+      "salinity,2026-05-30T19:30,1.0264,SG,Tropic Marin,hydrometer (stored as ppt)",
     ].join("\n");
   }
 
@@ -12160,7 +12271,7 @@ class OpenReefPanel extends HTMLElement {
         errors.push(`Row ${rowIndex + start + 1}: unknown parameter.`);
         return;
       }
-      const value = Number(String(raw.value || "").replace(",", "."));
+      let value = Number(String(raw.value || "").replace(",", "."));
       if (!Number.isFinite(value)) {
         errors.push(`Row ${rowIndex + start + 1}: value must be numeric.`);
         return;
@@ -12172,14 +12283,30 @@ class OpenReefPanel extends HTMLElement {
         return;
       }
       const meta = this._manualTestMeta(parameter);
-      rows.push({
+      let unit = raw.unit || meta.unit || "";
+      let displayUnit = "";
+      // Salinity may arrive as specific gravity (unit column says SG, or the
+      // value is in SG magnitude). Convert to canonical ppt and keep the hint.
+      if (parameter === "salinity") {
+        const result = this._normaliseSalinityInput(value, unit);
+        if (result.error) {
+          errors.push(`Row ${rowIndex + start + 1}: ${result.error}`);
+          return;
+        }
+        value = result.value;
+        displayUnit = result.displayUnit;
+        if (displayUnit === "SG") unit = meta.unit || "ppt";
+      }
+      const row = {
         parameter,
         timestamp: new Date(timestampMs).toISOString(),
         value,
-        unit: raw.unit || meta.unit || "",
+        unit,
         source: raw.source || raw.kit || "",
         notes: raw.notes || raw.note || "",
-      });
+      };
+      if (displayUnit === "SG") row.displayUnit = "SG";
+      rows.push(row);
     });
     return { rows, errors };
   }
@@ -12202,14 +12329,16 @@ class OpenReefPanel extends HTMLElement {
     this._config.manualReadings = this._config.manualReadings || {};
     parsed.rows.forEach((row, index) => {
       this._config.manualReadings[row.parameter] = this._manualReadings(row.parameter);
-      this._config.manualReadings[row.parameter].push({
+      const entry = {
         id: `${row.parameter}:import:${Date.now()}:${index}`,
         timestamp: row.timestamp,
         value: row.value,
         unit: row.unit,
         source: row.source,
         notes: row.notes,
-      });
+      };
+      if (row.displayUnit === "SG") entry.displayUnit = "SG";
+      this._config.manualReadings[row.parameter].push(entry);
     });
     this._manualEntryDefaults.importText = "";
     this._recordActivity(`Manual CSV imported: ${parsed.rows.length} result${parsed.rows.length === 1 ? "" : "s"}`, "control");
@@ -12220,7 +12349,7 @@ class OpenReefPanel extends HTMLElement {
     const field = (name) => this.shadowRoot.querySelector(`[data-manual-field="${name}"]`);
     const parameter = field("parameter")?.value || "alkalinity";
     const meta = this._manualTestMeta(parameter);
-    const value = Number(field("value")?.value);
+    let value = Number(field("value")?.value);
     if (!Number.isFinite(value)) {
       this._error = "Enter a numeric manual test value.";
       this._message = "";
@@ -12229,20 +12358,35 @@ class OpenReefPanel extends HTMLElement {
     }
     const localTime = field("timestamp")?.value;
     const timestamp = localTime ? new Date(localTime).toISOString() : new Date().toISOString();
-    const unit = field("unit")?.value || meta.unit || "";
+    let unit = field("unit")?.value || meta.unit || "";
+    let displayUnit = "";
+    if (parameter === "salinity") {
+      const result = this._normaliseSalinityInput(value, unit);
+      if (result.error) {
+        this._error = result.error;
+        this._message = "";
+        this._render();
+        return;
+      }
+      value = result.value;
+      displayUnit = result.displayUnit;
+      if (displayUnit === "SG") unit = meta.unit || "ppt";
+    }
     const source = field("source")?.value || "";
     const notes = field("notes")?.value || "";
     this._config.manualReadings = this._config.manualReadings || {};
     this._config.manualReadings[parameter] = this._manualReadings(parameter);
-    this._config.manualReadings[parameter].push({
+    const entry = {
       id: `${parameter}:${Date.now()}`,
       timestamp,
       value,
       unit,
       source,
       notes,
-    });
-    this._recordActivity(`Manual ${meta.label} test recorded: ${this._format(value, this._sensorDigits(parameter))}${unit ? ` ${unit}` : ""}`, "control");
+    };
+    if (displayUnit === "SG") entry.displayUnit = "SG";
+    this._config.manualReadings[parameter].push(entry);
+    this._recordActivity(`Manual ${meta.label} test recorded: ${this._manualReadingText(parameter, entry)}`, "control");
     this._saveConfig();
   }
 
@@ -12263,17 +12407,26 @@ class OpenReefPanel extends HTMLElement {
         const parameter = input.dataset.manualBatchValue;
         const raw = String(input.value || "").trim();
         if (!raw) return null;
-        const value = Number(raw);
+        let value = Number(raw);
         if (!Number.isFinite(value)) {
-          return { parameter, error: true };
+          return { parameter, error: "Every manual test value must be numeric." };
+        }
+        let displayUnit = "";
+        if (parameter === "salinity") {
+          const inputUnit = this.shadowRoot.querySelector(`[data-manual-batch-unit="${parameter}"]`)?.value || "ppt";
+          const result = this._normaliseSalinityInput(value, inputUnit);
+          if (result.error) return { parameter, error: result.error };
+          value = result.value;
+          displayUnit = result.displayUnit;
         }
         const source = this.shadowRoot.querySelector(`[data-manual-batch-source="${parameter}"]`)?.value || "";
-        return { parameter, value, source };
+        return { parameter, value, source, displayUnit };
       })
       .filter(Boolean);
 
-    if (rows.some((row) => row.error)) {
-      this._error = "Every manual test value must be numeric.";
+    const errorRow = rows.find((row) => row.error);
+    if (errorRow) {
+      this._error = errorRow.error;
       this._message = "";
       this._render();
       return;
@@ -12289,19 +12442,26 @@ class OpenReefPanel extends HTMLElement {
     [...this.shadowRoot.querySelectorAll("[data-manual-batch-source]")].forEach((select) => {
       sources[select.dataset.manualBatchSource] = select.value || "";
     });
-    this._manualEntryDefaults = { timestamp: localTime, sources, notes };
+    const units = {};
+    [...this.shadowRoot.querySelectorAll("[data-manual-batch-unit]")].forEach((select) => {
+      units[select.dataset.manualBatchUnit] = select.value || "";
+    });
+    this._manualEntryDefaults = { timestamp: localTime, sources, units, notes };
     this._config.manualReadings = this._config.manualReadings || {};
     rows.forEach((row, index) => {
       const meta = this._manualTestMeta(row.parameter);
       this._config.manualReadings[row.parameter] = this._manualReadings(row.parameter);
-      this._config.manualReadings[row.parameter].push({
+      const entry = {
         id: `${row.parameter}:${Date.now()}:${index}`,
         timestamp,
         value: row.value,
         unit: meta.unit || "",
         source: row.source,
         notes,
-      });
+      };
+      // Salinity stores canonical ppt; record the SG hint so it shows back in SG.
+      if (row.displayUnit === "SG") entry.displayUnit = "SG";
+      this._config.manualReadings[row.parameter].push(entry);
     });
     this._recordActivity(`Manual test session recorded: ${rows.length} result${rows.length === 1 ? "" : "s"}`, "control");
     this._saveConfig();
@@ -12368,16 +12528,31 @@ class OpenReefPanel extends HTMLElement {
             const meta = this._manualTestMeta(id);
             const schedule = this._manualTestConfig(id);
             const rowSource = this._manualEntryDefaults.sources?.[id] ?? schedule.preferredSource ?? this._manualEntryDefaults.source ?? "";
+            const unitChoices = this._manualInputUnitChoices(id);
+            const inputUnit = unitChoices ? (this._manualEntryDefaults.units?.[id] || unitChoices[0]) : null;
+            const isSg = inputUnit === "SG";
+            const unitLabel = unitChoices ? unitChoices.join(" / ") : (meta.unit || "unitless");
+            const placeholder = isSg ? "1.0264" : (meta.min && meta.max ? `${meta.min} - ${meta.max}` : "0.00");
+            const step = isSg ? "0.0001" : "0.001";
+            const valueCell = unitChoices ? `
+                <div class="manual-value-with-unit">
+                  <input type="number" step="${step}" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(placeholder)}" aria-label="${this._escape(meta.label)} value">
+                  <select class="manual-unit-toggle" data-manual-batch-unit="${this._escape(id)}" aria-label="${this._escape(meta.label)} unit">
+                    ${unitChoices.map((unit) => `<option value="${this._escape(unit)}" ${unit === inputUnit ? "selected" : ""}>${this._escape(unit)}</option>`).join("")}
+                  </select>
+                </div>` : `
+                <input type="number" step="${step}" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(placeholder)}" aria-label="${this._escape(meta.label)} value">`;
             return `
               <div class="manual-batch-row ${schedule.enabled ? "tracked" : ""}">
                 <span>
                   <strong>${this._escape(meta.label)}</strong>
-                  <small>${this._escape(meta.unit || "unitless")}${schedule.enabled ? " · tracked" : " · optional"}</small>
+                  <small>${this._escape(unitLabel)}${schedule.enabled ? " · tracked" : " · optional"}</small>
                 </span>
-                <input type="number" step="0.001" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(meta.min && meta.max ? `${meta.min} - ${meta.max}` : "0.00")}" aria-label="${this._escape(meta.label)} value">
+                ${valueCell}
                 <select data-manual-batch-source="${this._escape(id)}" aria-label="${this._escape(meta.label)} source">
                   ${this._manualTestSourceChoices().map((source) => `<option value="${this._escape(source)}" ${source === rowSource ? "selected" : ""}>${this._escape(source || "Source")}</option>`).join("")}
                 </select>
+                ${unitChoices ? `<small class="manual-row-hint">SG read at 25 °C / 77 °F (e.g. Tropic Marin hydrometer) — stored as ppt. 1.0264 SG ≈ 35 ppt.</small>` : ""}
               </div>
             `;
           }).join("")}
@@ -12408,7 +12583,7 @@ class OpenReefPanel extends HTMLElement {
           <textarea data-manual-import-field="text" rows="5" placeholder="parameter,timestamp,value,unit,source,notes&#10;alkalinity,2026-05-30T19:30,8.1,dKH,Hanna,evening test">${this._escape(this._manualEntryDefaults.importText || "")}</textarea>
         </label>
         <div class="button-row end">
-          <small>${this._escape(count)} saved result${count === 1 ? "" : "s"}. Supported names include alkalinity/alk/dKH, calcium/Ca, magnesium/Mg, nitrate/NO3, phosphate/PO4, salinity, pH, and temp.</small>
+          <small>${this._escape(count)} saved result${count === 1 ? "" : "s"}. Supported names include alkalinity/alk/dKH, calcium/Ca, magnesium/Mg, nitrate/NO3, phosphate/PO4, salinity (ppt or SG), pH, and temp.</small>
           <button class="primary" data-action="import-manual-csv">Import CSV</button>
         </div>
       </article>
@@ -12422,7 +12597,7 @@ class OpenReefPanel extends HTMLElement {
     const latest = state.latest;
     const readings = this._manualReadings(id);
     const open = this._manualHistoryOpen[id] === true;
-    const value = latest ? `${this._format(Number(latest.value), this._sensorDigits(id))}${latest.unit ? ` ${latest.unit}` : meta.unit ? ` ${meta.unit}` : ""}` : "--";
+    const value = latest ? this._manualReadingText(id, latest) : "--";
     return `
       <article class="manual-test-card ${state.status}">
         <div class="card-head">
@@ -12445,7 +12620,7 @@ class OpenReefPanel extends HTMLElement {
             ${readings.length ? readings.slice(0, 12).map((entry) => `
               <div class="manual-history-row">
                 <div>
-                  <strong>${this._escape(this._format(Number(entry.value), this._sensorDigits(id)))}${entry.unit ? ` ${this._escape(entry.unit)}` : ""}</strong>
+                  <strong>${this._escape(this._manualReadingText(id, entry))}</strong>
                   <small>${this._escape(this._formatActivityTime(entry.timestamp))}${entry.source ? ` · ${this._escape(entry.source)}` : ""}</small>
                   ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
                 </div>
@@ -14979,7 +15154,7 @@ class OpenReefPanel extends HTMLElement {
     const points = this._trend.points || [];
     const summary = this._trendSummary(points);
     const range = this._trend.range || "24h";
-    const digits = this._sensorDigits(this._trend.sensorId);
+    const digits = this._trend.digits ?? this._sensorDigits(this._trend.sensorId);
     const coverageMessage = manual ? "" : this._trendCoverageMessage(points, range);
     const ranges = manual ? this._manualTrendRanges() : this._trendRanges();
     return `
@@ -15574,6 +15749,10 @@ class OpenReefPanel extends HTMLElement {
         .manual-batch-row.tracked { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
         .manual-batch-row span { display: grid; gap: 3px; min-width: 0; }
         .manual-batch-row input, .manual-batch-row select { min-height: 38px; }
+        .manual-value-with-unit { display: flex; gap: 6px; align-items: center; min-width: 0; }
+        .manual-value-with-unit input { flex: 1 1 auto; min-width: 0; }
+        .manual-value-with-unit .manual-unit-toggle { flex: 0 0 auto; width: auto; min-width: 64px; }
+        .manual-row-hint { grid-column: 1 / -1; color: var(--secondary-text-color, #94a3b8); font-size: .78rem; }
         .manual-notes { min-width: 0; }
         textarea { width: 100%; min-height: 44px; resize: vertical; border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 10px; }
         .manual-test-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #121f2f; display: grid; gap: 9px; align-content: start; min-height: 220px; }

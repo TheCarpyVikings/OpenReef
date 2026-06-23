@@ -127,6 +127,8 @@ from .const import (
     TIMELAPSE_MAX_DAYS,
     TIMELAPSE_MIN_CADENCE,
     TIMELAPSE_SUBDIR,
+    salinity_sg_to_ppt,
+    salinity_value_looks_like_sg,
 )
 from . import awc as awc_engine
 from . import icp
@@ -1571,16 +1573,37 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 source = item.get("source") or item.get("kit") or ""
                 notes = item.get("notes") or ""
                 entry_id = item.get("id") or f"{timestamp}:{index}"
-                safe_entries.append(
-                    {
-                        "id": str(entry_id)[:120],
-                        "timestamp": timestamp,
-                        "value": value,
-                        "unit": str(unit)[:20],
-                        "source": str(source)[:80],
-                        "notes": str(notes)[:500],
+                # Salinity may be logged as specific gravity (e.g. a Tropic Marin
+                # hydrometer). Canonicalize to ppt here — backend-authoritative —
+                # so reef-score, dosing and AWC always read ppt. Idempotent: a
+                # value already in ppt magnitude is never re-converted, and the
+                # "SG" display hint is preserved so the panel can show it back.
+                display_unit = ""
+                if parameter == "salinity":
+                    raw_du = str(item.get("displayUnit") or item.get("display_unit") or "").strip().upper()
+                    unit_l = str(unit).strip().lower()
+                    flagged_sg = raw_du == "SG" or unit_l in {
+                        "sg", "s.g.", "specific gravity", "specificgravity", "specific_gravity",
                     }
-                )
+                    if salinity_value_looks_like_sg(value):
+                        value = salinity_sg_to_ppt(value)
+                        unit = MVP_SENSORS.get("salinity", {}).get("unit", "ppt")
+                        display_unit = "SG"
+                    elif flagged_sg:
+                        # Already canonical ppt but the user works in SG — keep the hint.
+                        unit = MVP_SENSORS.get("salinity", {}).get("unit", "ppt")
+                        display_unit = "SG"
+                entry: dict[str, Any] = {
+                    "id": str(entry_id)[:120],
+                    "timestamp": timestamp,
+                    "value": value,
+                    "unit": str(unit)[:20],
+                    "source": str(source)[:80],
+                    "notes": str(notes)[:500],
+                }
+                if display_unit:
+                    entry["displayUnit"] = display_unit
+                safe_entries.append(entry)
             normalised_readings[parameter] = safe_entries
         config["manualReadings"] = normalised_readings
 

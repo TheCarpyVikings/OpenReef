@@ -67,6 +67,35 @@ MANUAL_TEST_PARAMETERS = (
     "temp",
 )
 
+# Specific gravity ↔ salinity (ppt). Many reefers measure salinity with a
+# hydrometer (e.g. Tropic Marin) that reads specific gravity rather than ppt.
+# Hobby/Tropic-Marin standard reference: natural seawater 35 ppt = 1.0264 SG at
+# 25 °C / 77 °F. The relationship is linear enough across the reef band
+# (~1.020–1.027 SG / 26–37 ppt) for hobby use. Salinity is ALWAYS stored
+# canonically in ppt; SG is an input/display convenience only.
+SALINITY_PPT_PER_SG_UNIT = 35.0 / 0.0264  # ≈ 1325.76 ppt per 1.000 SG
+SALINITY_SG_MIN = 0.95  # plausible SG-magnitude floor (anything in this band is SG, not ppt)
+SALINITY_SG_MAX = 1.15  # plausible SG-magnitude ceiling
+
+
+def salinity_sg_to_ppt(sg: float) -> float:
+    """Convert a specific-gravity reading to canonical salinity in ppt."""
+    return (float(sg) - 1.0) * SALINITY_PPT_PER_SG_UNIT
+
+
+def salinity_ppt_to_sg(ppt: float) -> float:
+    """Convert canonical salinity (ppt) back to specific gravity for display."""
+    return 1.0 + float(ppt) / SALINITY_PPT_PER_SG_UNIT
+
+
+def salinity_value_looks_like_sg(value: float) -> bool:
+    """True when a numeric salinity value is in SG magnitude (not ppt)."""
+    try:
+        return SALINITY_SG_MIN <= float(value) <= SALINITY_SG_MAX
+    except (TypeError, ValueError):
+        return False
+
+
 DEFAULT_TANK_PROFILE = "mixed_reef"
 TANK_PROFILE_CHOICES = {
     "fish_only_fowlr": "Fish-only / FOWLR",
