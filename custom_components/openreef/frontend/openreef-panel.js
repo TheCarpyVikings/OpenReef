@@ -1153,6 +1153,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "icp-cancel") { this._icp.pending = null; this._icp.lastText = null; this._icp.error = ""; this._icp.message = ""; this._render(); }
       if (action === "icp-view") { this._icp.selectedReportId = id; this._icp.view = "report"; this._icp.subview = "reports"; this._icp.drift = []; this._render(); }
       if (action === "icp-delete") this._icpDeleteReport(id);
+      if (action === "icp-save-date") this._icpSaveReportDate(id);
       if (action === "lighting-refresh-window") this._loadLightingWindow(true);
       if (action === "mute-alert") this._muteAlert(id, Number(target.dataset.minutes || 60));
       if (action === "unmute-alert") this._muteAlert(id, 0);
@@ -7435,13 +7436,19 @@ class OpenReefPanel extends HTMLElement {
     }
     const fauna = detected.adapter === "fauna_marin_csv" ? this._icpFaunaMarinCsv(text) : null;
     const faunaFields = fauna ? fauna.byKey : {};
+    // Guess the test date from the file. If we can't find one, fall back to today
+    // but FLAG it (dateGuessed:false) so the preview warns the user and asks them
+    // to set the real sample date — defaulting silently to today is the #1 ICP
+    // complaint (trends end up on the import date, not the test date).
+    const guessedDate = this._icpGuessDate(faunaFields.analysisdate || text);
     const report = {
       id: `icp:${this._icpNorm(detected.lab) || "lab"}:${Date.now()}`,
       lab: detected.lab,
       adapter: detected.adapter,
       method: detected.method,
       sampleType: this._icp.sampleType || "tank",
-      sampleDate: this._icpGuessDate(faunaFields.analysisdate || text) || new Date().toISOString(),
+      sampleDate: (guessedDate || new Date().toISOString()).slice(0, 10),
+      dateGuessed: !!guessedDate,
       importedAt: new Date().toISOString(),
       testId: (faunaFields.id || faunaFields.sampleid || this._icpGuessTestId(text)).slice(0, 40),
       tank: this._icpGuessTank(text),
@@ -7605,6 +7612,9 @@ class OpenReefPanel extends HTMLElement {
   async _icpImportPending() {
     const pending = this._icp.pending;
     if (!pending || !pending.report) return;
+    // Honour any correction the user made to the sample date in the preview.
+    const dateInput = this.shadowRoot.querySelector("[data-icp-pending-date]");
+    if (dateInput && dateInput.value) pending.report.sampleDate = dateInput.value;
     this._icp.busy = true;
     this._icp.error = "";
     this._render();
@@ -7621,6 +7631,47 @@ class OpenReefPanel extends HTMLElement {
       this._icp.message = `Imported ${(res && res.report && res.report.lab) || "ICP"} report — ${((res && res.report && res.report.elements) || []).length} elements stored.`;
     } catch (err) {
       this._icp.error = err && err.message ? err.message : "Could not import the report";
+    } finally {
+      this._icp.busy = false;
+      this._render();
+    }
+  }
+
+  async _icpSaveReportDate(id) {
+    if (!id) return;
+    const input = this.shadowRoot.querySelector(`[data-icp-report-date="${id}"]`);
+    const newDate = input && input.value ? String(input.value).slice(0, 10) : "";
+    if (!newDate) {
+      this._icp.error = "Pick a sample date first.";
+      this._icp.message = "";
+      this._render();
+      return;
+    }
+    const reports = Array.isArray(this._config && this._config.icpReports) ? this._config.icpReports : [];
+    const report = reports.find((r) => r && r.id === id);
+    if (!report) return;
+    if (String(report.sampleDate || "").slice(0, 10) === newDate) {
+      this._icp.message = "Sample date unchanged.";
+      this._icp.error = "";
+      this._render();
+      return;
+    }
+    // Re-import the stored report with the corrected date. The backend keeps the
+    // report id, replaces it in place, and re-fans the core params (Alk/Ca/Mg/…)
+    // with the new timestamp — so the fanned manual readings move to the right day
+    // too. normalise_report is idempotent (recomputes from rawValue/rawUnit).
+    const updated = { ...report, sampleDate: newDate };
+    this._icp.busy = true;
+    this._icp.error = "";
+    this._render();
+    try {
+      const res = await this._callWS({ type: "openreef/import_icp_report", report: updated });
+      if (res && res.config) this._config = res.config;
+      this._icp.drift = Array.isArray(res && res.drift) ? res.drift : [];
+      this._icpDashboard.payload = null;
+      this._icp.message = "Sample date updated.";
+    } catch (err) {
+      this._icp.error = err && err.message ? err.message : "Could not update the sample date";
     } finally {
       this._icp.busy = false;
       this._render();
@@ -7963,10 +8014,18 @@ class OpenReefPanel extends HTMLElement {
     const via = p.forced
       ? `${this._escape(r.lab)} template (selected)`
       : (r.lab === "Unknown" ? "generic template — pick your lab above if this looks wrong" : `${this._escape(r.lab)} template (auto-detected)`);
+    const dateValue = String(r.sampleDate || "").slice(0, 10);
+    const dateWarn = r.dateGuessed === false
+      ? `<p class="hint" style="color:var(--warning-color,#f59e0b)">⚠ Couldn't find the test date in this file — defaulted to today. Set the real sample date below so trends land on the right day.</p>`
+      : "";
     return `
       <article class="panel stack">
         <div class="section-head"><div><h3>Preview — ${this._escape(r.lab)}${r.method ? ` · ${this._escape(r.method)}` : ""}</h3>
           <p>${p.recognized} recognised of ${r.elements.length} parsed · ${via}. Values are normalised internally on import.</p></div></div>
+        ${dateWarn}
+        <label class="icp-date-field"><span>Sample date</span>
+          <input type="date" data-icp-pending-date value="${this._escape(dateValue)}" style="${this._icpCtrl()}">
+        </label>
         ${this._icpTable("<th>Element</th><th>Value</th><th>Unit</th><th></th>", body)}
         <div class="button-row">
           <button class="primary" data-action="icp-import" ${this._icp.busy ? "disabled" : ""}>Import ${p.recognized} element${p.recognized === 1 ? "" : "s"}</button>
@@ -7984,10 +8043,18 @@ class OpenReefPanel extends HTMLElement {
       const guess = this._icpMatchSymbol(el.symbol || el.label) || el.symbol || "";
       return `<tr><td>${this._escape(el.label || el.symbol || "?")}</td><td>${this._escape(String(el.rawValue))}</td><td>${this._escape(el.rawUnit || "")}</td><td><select data-icp-map="${i}" style="${this._icpCtrl()}">${options(guess)}</select></td></tr>`;
     }).join("");
+    const dateValue = String(p.report.sampleDate || "").slice(0, 10);
+    const dateWarn = p.report.dateGuessed === false
+      ? `<p class="hint" style="color:var(--warning-color,#f59e0b)">⚠ Couldn't find the test date in this file — defaulted to today. Set the real sample date below so trends land on the right day.</p>`
+      : "";
     return `
       <article class="panel stack">
         <div class="section-head"><div><h3>Map columns — ${this._escape(p.report.lab)}</h3>
           <p>This lab's labels weren't auto-recognised. Map each row to an element (or leave it ignored), then import.</p></div></div>
+        ${dateWarn}
+        <label class="icp-date-field"><span>Sample date</span>
+          <input type="date" data-icp-pending-date value="${this._escape(dateValue)}" style="${this._icpCtrl()}">
+        </label>
         ${this._icpTable("<th>Label</th><th>Value</th><th>Unit</th><th>Map to</th>", body)}
         <div class="button-row">
           <button class="primary" data-action="icp-import" ${this._icp.busy ? "disabled" : ""}>Import mapped elements</button>
@@ -8066,11 +8133,19 @@ class OpenReefPanel extends HTMLElement {
       const tableClass = `icp-report-table ${(!showReference && !showStatus) ? "icp-report-table-two" : ""}`;
       return `<article class="panel stack"><div class="section-head"><div><h4>${heading}</h4></div></div>${this._icpTable(headers, body, tableClass)}</article>`;
     }).join("");
-    const meta = `${this._escape(report.lab)}${report.method ? ` · ${this._escape(report.method)}` : ""}${report.sampleDate ? ` · sampled ${this._escape(String(report.sampleDate).slice(0, 10))}` : ""}${report.sampleType === "rodi" ? " · RO/DI sample (excluded from trends)" : ""}`;
+    const meta = `${this._escape(report.lab)}${report.method ? ` · ${this._escape(report.method)}` : ""}${report.sampleType === "rodi" ? " · RO/DI sample (excluded from trends)" : ""}`;
+    const dateValue = String(report.sampleDate || "").slice(0, 10);
     return `
       <article class="panel stack">
-        <div class="section-head"><div><h3>Report — ${this._escape(report.lab)}</h3><p class="hint">${meta}</p></div>
-          <button class="secondary compact-button danger-button" data-action="icp-delete" data-id="${this._escape(report.id)}">Delete</button></div>
+        <div class="section-head">
+          <div><h3>Report — ${this._escape(report.lab)}</h3><p class="hint">${meta}</p></div>
+          <div class="button-row">
+            <label class="icp-date-field"><span>Sample date</span>
+              <input type="date" data-icp-report-date="${this._escape(report.id)}" value="${this._escape(dateValue)}" style="${this._icpCtrl()}"></label>
+            <button class="secondary compact-button" data-action="icp-save-date" data-id="${this._escape(report.id)}" ${this._icp.busy ? "disabled" : ""}>Save date</button>
+            <button class="secondary compact-button danger-button" data-action="icp-delete" data-id="${this._escape(report.id)}">Delete</button>
+          </div>
+        </div>
       </article>
       ${sections}`;
   }
@@ -8091,13 +8166,24 @@ class OpenReefPanel extends HTMLElement {
     if (!reports.length) {
       return `<article class="panel"><p class="hint">No ICP reports imported yet. Upload your lab's CSV or PDF above to get started.</p></article>`;
     }
+    const selectedId = this._icp.selectedReportId;
     const items = reports.slice()
       .sort((a, b) => String(b.sampleDate || b.importedAt || "").localeCompare(String(a.sampleDate || a.importedAt || "")))
       .map((r) => {
         const n = (r.elements || []).length;
-        return `<button class="recording-open" data-action="icp-view" data-id="${this._escape(r.id)}"><strong>${this._escape(r.lab)}</strong> · ${this._escape(String(r.sampleDate || r.importedAt || "").slice(0, 10))} · ${n} elements${r.sampleType === "rodi" ? " · RO/DI" : ""}</button>`;
+        const date = String(r.sampleDate || r.importedAt || "").slice(0, 10) || "no date";
+        const meta = `${this._escape(date)} · ${n} element${n === 1 ? "" : "s"}${r.sampleType === "rodi" ? " · RO/DI" : ""}`;
+        return `
+          <button class="icp-report-row ${r.id === selectedId ? "active" : ""}" data-action="icp-view" data-id="${this._escape(r.id)}" title="${this._escape(r.lab)} — ${this._escape(date)}">
+            <span class="icp-report-dot" style="background:${this._escape(this._icpLabColor(r.lab))}"></span>
+            <span class="icp-report-main">
+              <strong>${this._escape(r.lab)}</strong>
+              <small>${meta}</small>
+            </span>
+            <span class="icp-report-chevron" aria-hidden="true">›</span>
+          </button>`;
       }).join("");
-    return `<article class="panel stack"><div class="section-head"><div><h3>Imported reports</h3></div></div><div class="stack">${items}</div></article>`;
+    return `<article class="panel stack"><div class="section-head"><div><h3>Imported reports</h3></div></div><div class="icp-report-list">${items}</div></article>`;
   }
 
   _tabs() {
@@ -15647,6 +15733,17 @@ class OpenReefPanel extends HTMLElement {
         .icp-filter-block { display: grid; gap: 8px; min-width: 0; }
         .icp-lab-swatch, .icp-lab-dot span { display: inline-block; width: 10px; height: 10px; border-radius: 999px; flex: 0 0 auto; }
         .icp-lab-dot { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+        .icp-report-list { display: grid; gap: 6px; }
+        .icp-report-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 10px 12px; border: 1px solid #24364a; border-radius: 8px; background: #121f2f; color: inherit; cursor: pointer; min-height: 0; }
+        .icp-report-row:hover { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
+        .icp-report-row.active { border-color: var(--openreef-accent); background: var(--openreef-accent-soft); }
+        .icp-report-dot { width: 11px; height: 11px; border-radius: 999px; flex: 0 0 auto; }
+        .icp-report-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+        .icp-report-main strong { color: #e5edf5; line-height: 1.2; }
+        .icp-report-main small { color: #9fb2c7; }
+        .icp-report-chevron { color: #6b7f96; font-size: 1.3rem; line-height: 1; flex: 0 0 auto; }
+        .icp-date-field { display: inline-flex; flex-direction: column; gap: 3px; }
+        .icp-date-field span { font-size: .8rem; color: #9fb2c7; }
         .icp-chart-wrap { background: #08131f; }
         .icp-trend-chart circle { stroke: #e5edf5; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
         .icp-lab-legend { color: #9fb2c7; font-size: 12px; }

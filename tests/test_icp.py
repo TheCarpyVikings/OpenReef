@@ -599,6 +599,28 @@ def test_ws_import_preserves_existing_manual_readings():
     assert "Trident" in sources and "ICP:Triton" in sources   # kit row not clobbered
 
 
+def test_ws_reimport_with_corrected_date_moves_report_and_fanned_rows():
+    """Editing an imported report's sample date (the panel's "Save date" re-imports
+    the same report id with a new date) updates the report in place AND re-stamps the
+    fanned core readings to the corrected day — not the original/import date."""
+    entry = FakeEntry(options={CONF_SETTINGS: {}})
+    hass = FakeHass(entries=[entry])
+    _import(hass, FakeConnection(), 1, _triton_raw(sample_date="2026-06-01"))
+    saved = entry.options[CONF_SETTINGS]
+    assert len(saved["icpReports"]) == 1
+    assert saved["icpReports"][0]["sampleDate"] == "2026-06-01"
+    cal_before = [r for r in saved["manualReadings"]["calcium"] if r["source"] == "ICP:Triton"]
+    assert len(cal_before) == 1 and cal_before[0]["timestamp"] == "2026-06-01"
+
+    # Same report id, corrected date.
+    _import(hass, FakeConnection(), 2, _triton_raw(sample_date="2026-05-20"))
+    saved = entry.options[CONF_SETTINGS]
+    assert len(saved["icpReports"]) == 1                        # replaced, not duplicated
+    assert saved["icpReports"][0]["sampleDate"] == "2026-05-20"
+    cal_after = [r for r in saved["manualReadings"]["calcium"] if r["source"] == "ICP:Triton"]
+    assert len(cal_after) == 1 and cal_after[0]["timestamp"] == "2026-05-20"   # re-fanned to new day
+
+
 def test_ws_icp_dashboard_returns_filtered_payload():
     entry = FakeEntry(options={CONF_SETTINGS: {"icpReports": [_triton_raw(), _ati_raw()]}})
     hass = FakeHass(entries=[entry])
