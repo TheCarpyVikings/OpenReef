@@ -138,7 +138,7 @@ from .const import (
     VISION_ARM_TASK,
     VISION_DEFAULT_FEED_WINDOW,
     VISION_FINGERPRINT,
-    VISION_FLUSH_TICKS,
+    VISION_FLUSH_INTERVAL_S,
     VISION_MAX_FEED_WINDOW,
     VISION_MAX_MISSING_HOURS,
     VISION_MAX_REPORTS,
@@ -1278,6 +1278,12 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     )
     v_camera = vision_cfg.get("cameraName")
     vision_cfg["cameraName"] = v_camera.strip()[:64] if isinstance(v_camera, str) else ""
+    v_surface = vision_cfg.get("surfaceZone")
+    vision_cfg["surfaceZone"] = (
+        v_surface.strip()[:64]
+        if isinstance(v_surface, str) and v_surface.strip()
+        else "surface"
+    )
     for v_key, v_cap in (("species", VISION_MAX_SPECIES), ("zones", VISION_MAX_ZONES)):
         v_raw = vision_cfg.get(v_key)
         v_cleaned: list[str] = []
@@ -2765,8 +2771,15 @@ def _trust_check_summary(
         vision_store = vision_store if isinstance(vision_store, dict) else {}
         vision_runtime = vision_store.get(VISION_RUNTIME)
         last_event_at = vision_runtime.get("lastEventAt") if isinstance(vision_runtime, dict) else None
+        vision_arm_task = vision_store.get(VISION_ARM_TASK)
         if vision_store.get(VISION_UNSUB) is None:
-            items.append(_trust_item("vision", "Vision (Frigate)", "warning", "Vision is enabled but MQTT is not connected; tank intelligence is idle."))
+            if vision_arm_task is not None and not vision_arm_task.done():
+                # Arming is a background task (the broker may take ~50s at boot);
+                # don't report a scary false warning on the very save that
+                # enabled vision.
+                items.append(_trust_item("vision", "Vision (Frigate)", "unknown", "Connecting to the MQTT broker…"))
+            else:
+                items.append(_trust_item("vision", "Vision (Frigate)", "warning", "Vision is enabled but MQTT is not connected; tank intelligence is idle."))
         elif last_event_at is None:
             items.append(_trust_item("vision", "Vision (Frigate)", "unknown", "Subscribed to Frigate events; none received yet."))
         else:
@@ -6270,38 +6283,43 @@ async def _async_apply_mode(
         await _async_start_feed_watch(hass, entry)
 
     # Vision feeding report card: open a response-latency window on entering feed
-    # mode, close + persist the report on leaving. Deliberately independent of
-    # feedWatch — either can be enabled without the other.
+    # mode, close it on leaving. Deliberately independent of feedWatch — either
+    # can be enabled without the other.
     vision_cfg = config.get("vision", {})
     vision_runtime = hass.data.setdefault(DOMAIN, {}).get(VISION_RUNTIME)
-    vision_feed_on = (
-        isinstance(vision_cfg, dict)
-        and vision_cfg.get("enabled")
-        and isinstance(vision_cfg.get("feedReport"), dict)
-        and vision_cfg["feedReport"].get("enabled")
-    )
-    if vision_runtime is not None and vision_feed_on:
+    if vision_runtime is not None and isinstance(vision_cfg, dict) and vision_cfg.get("enabled"):
         vision_now = dt_util.utcnow().timestamp()
+        feed_report_cfg = (
+            vision_cfg.get("feedReport")
+            if isinstance(vision_cfg.get("feedReport"), dict)
+            else {}
+        )
         if mode_id == "feed":
-            vision.start_feed_session(vision_runtime, vision_now)
+            if feed_report_cfg.get("enabled"):
+                vision.start_feed_session(vision_runtime, vision_now)
         elif vision_runtime.get("feedSession") is not None:
+            # Close unconditionally when a session is open (even if feedReport
+            # was disabled mid-feed — a stranded session would report
+            # feeding:true forever); persist only while the feature is on.
             vision_report = vision.close_feed_session(
                 vision_runtime,
                 list(vision_cfg.get("species") or []),
-                int(
-                    vision_cfg["feedReport"].get("windowSeconds")
-                    or VISION_DEFAULT_FEED_WINDOW
-                ),
+                int(feed_report_cfg.get("windowSeconds") or VISION_DEFAULT_FEED_WINDOW),
                 vision_now,
             )
-            if vision_report is not None:
-                vision_reports = config.get("visionReports")
-                if not isinstance(vision_reports, list):
-                    vision_reports = []
-                config["visionReports"] = ([vision_report] + vision_reports)[
+            if vision_report is not None and feed_report_cfg.get("enabled"):
+                # Fresh read + lightweight persist: re-saving this function's
+                # stale `config` snapshot would revert the feedwatch session
+                # finalization saved above and re-fire alert transitions
+                # (duplicate history/notifications/captures).
+                fresh_config = _config_from_entry(entry)
+                fresh_reports = fresh_config.get("visionReports")
+                if not isinstance(fresh_reports, list):
+                    fresh_reports = []
+                fresh_config["visionReports"] = ([vision_report] + fresh_reports)[
                     :VISION_MAX_REPORTS
                 ]
-                await _async_save_config(hass, entry, config)
+                _persist_entry_config(hass, entry, fresh_config)
 
     # One capture per mode action, most-specific enabled trigger wins (feed > safety > mode).
     capture_triggers = config.get("capture", {}).get("triggers", {})
@@ -8490,7 +8508,10 @@ def _clear_vision(hass: HomeAssistant) -> None:
             pass
     tick_unsub = store.pop(VISION_TICK_UNSUB, None)
     if tick_unsub is not None:
-        tick_unsub()
+        try:
+            tick_unsub()
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            pass
     store.pop(VISION_RUNTIME, None)
     store.pop(VISION_FINGERPRINT, None)
 
@@ -8513,16 +8534,17 @@ async def _async_setup_vision(
         if store.get(VISION_FINGERPRINT) == vision_fp:
             return
         _clear_vision(hass)
-        store[VISION_FINGERPRINT] = vision_fp
         if vision_fp == "disabled":
+            store[VISION_FINGERPRINT] = vision_fp
             return
         now_ts = dt_util.utcnow().timestamp()
         runtime = vision.new_runtime(
             list(vision_cfg.get("species") or []),
             list(vision_cfg.get("zones") or []),
             now_ts,
+            str(vision_cfg.get("surfaceZone") or "surface"),
         )
-        vision.rehydrate(runtime, config.get("visionSummary"))
+        vision.rehydrate(runtime, config.get("visionSummary"), now_ts)
         store[VISION_RUNTIME] = runtime
         store[VISION_ARM_TASK] = hass.async_create_task(
             _async_arm_vision(hass, dict(vision_cfg))
@@ -8534,8 +8556,12 @@ async def _async_setup_vision(
         store[VISION_TICK_UNSUB] = async_track_time_interval(
             hass, _tick, timedelta(minutes=VISION_TICK_MINUTES)
         )
+        # Fingerprint is committed LAST: if any wiring step above raised, the
+        # next save retries setup instead of no-opping on a half-built stack.
+        store[VISION_FINGERPRINT] = vision_fp
     except Exception:  # noqa: BLE001 - vision must never break OpenReef setup
-        _LOGGER.exception("OpenReef vision: setup failed; vision idle this session")
+        _clear_vision(hass)
+        _LOGGER.exception("OpenReef vision: setup failed; will retry on next save")
 
 
 async def _async_arm_vision(hass: HomeAssistant, vision_cfg: dict[str, Any]) -> None:
@@ -8572,23 +8598,40 @@ async def _async_arm_vision(hass: HomeAssistant, vision_cfg: dict[str, Any]) -> 
             except Exception:  # noqa: BLE001 - a broker payload must never break us
                 _LOGGER.debug("OpenReef vision: dropped malformed event", exc_info=True)
 
-        store[VISION_UNSUB] = await mqtt.async_subscribe(
-            hass, f"{topic_prefix}/events", _on_frigate_event
-        )
-        state_unsubs = []
-        if camera_name:
-            for state_kind, state_topic in (
-                ("anemone", f"{topic_prefix}/{camera_name}/classification/anemone_state"),
-                ("tank", f"{topic_prefix}/{camera_name}/classification/tank_state"),
-                ("count", f"{topic_prefix}/{camera_name}/all"),
-            ):
+        # Subscribe everything into locals first; the store is only written once
+        # ALL subscriptions exist. VISION_UNSUB doubles as the tick's "armed"
+        # sentinel, so committing it early on a partial failure would both kill
+        # the retry and leak the already-created state subscriptions.
+        created: list = []
+        try:
+            event_unsub = await mqtt.async_subscribe(
+                hass, f"{topic_prefix}/events", _on_frigate_event
+            )
+            created.append(event_unsub)
+            state_unsubs = []
+            if camera_name:
+                for state_kind, state_topic in (
+                    ("anemone", f"{topic_prefix}/{camera_name}/classification/anemone_state"),
+                    ("tank", f"{topic_prefix}/{camera_name}/classification/tank_state"),
+                    ("count", f"{topic_prefix}/{camera_name}/all"),
+                ):
 
-                @callback
-                def _on_state(msg, _kind: str = state_kind) -> None:
-                    vision.apply_state_topic(runtime, _kind, msg.payload)
+                    @callback
+                    def _on_state(msg, _kind: str = state_kind) -> None:
+                        vision.apply_state_topic(runtime, _kind, msg.payload)
 
-                state_unsubs.append(await mqtt.async_subscribe(hass, state_topic, _on_state))
+                    state_unsub = await mqtt.async_subscribe(hass, state_topic, _on_state)
+                    created.append(state_unsub)
+                    state_unsubs.append(state_unsub)
+        except Exception:
+            for unsub in created:
+                try:
+                    unsub()
+                except Exception:  # noqa: BLE001 - cleanup must never raise
+                    pass
+            raise
         store[VISION_STATE_UNSUB] = state_unsubs
+        store[VISION_UNSUB] = event_unsub
         _LOGGER.info("OpenReef vision: subscribed to %s/events", topic_prefix)
     except Exception:  # noqa: BLE001 - arm failures are retried, never fatal
         _LOGGER.exception("OpenReef vision: MQTT subscribe failed; will retry")
@@ -8647,10 +8690,16 @@ async def _async_vision_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     )
             else:
                 vision.clear_notify(runtime, "surface")
-        runtime["_ticks"] = runtime.get("_ticks", 0) + 1
-        if runtime["_ticks"] % VISION_FLUSH_TICKS == 0:
-            config["visionSummary"] = vision.summary(runtime, now_ts)
-            await _async_save_config(hass, entry, config)
+        if now_ts - runtime.get("lastFlushAt", 0) >= VISION_FLUSH_INTERVAL_S:
+            runtime["lastFlushAt"] = now_ts
+            # Lightweight persist of the tiny summary (the watchdog's
+            # _persist_entry_config pattern): a FRESH config read so a user
+            # save landing during the notification awaits above is never
+            # clobbered, and no scheduler re-arms / alert re-evaluation /
+            # capture triggers from the heavy save path.
+            fresh_config = _config_from_entry(entry)
+            fresh_config["visionSummary"] = vision.summary(runtime, now_ts)
+            _persist_entry_config(hass, entry, fresh_config)
     except Exception:  # noqa: BLE001 - the tick shares a loop with safety timers
         _LOGGER.exception("OpenReef vision: tick failed")
 

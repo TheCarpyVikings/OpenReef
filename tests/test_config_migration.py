@@ -527,6 +527,7 @@ def test_vision_defaults_added_to_older_config():
     assert vision["topicPrefix"] == "frigate"
     assert vision["cameraName"] == ""
     assert vision["species"] == [] and vision["zones"] == []
+    assert vision["surfaceZone"] == "surface"
     assert vision["alerts"] == {"missingFishHours": 0, "surfaceDistress": False}
     assert vision["feedReport"]["enabled"] is False
     assert config["visionReports"] == []
@@ -546,6 +547,7 @@ def test_vision_garbage_clamped():
                 "cameraName": 42,
                 "species": ["clownfish", "clownfish", 3, "  wrasse  ", ""],
                 "zones": "anemone",
+                "surfaceZone": 42,
                 "alerts": {"missingFishHours": 99999, "surfaceDistress": "yes"},
                 "feedReport": {"windowSeconds": 5, "enabled": "on"},
             },
@@ -558,6 +560,7 @@ def test_vision_garbage_clamped():
     assert vision["cameraName"] == ""                  # non-string dropped
     assert vision["species"] == ["clownfish", "wrasse"]  # deduped, trimmed, non-strings out
     assert vision["zones"] == []                       # non-list -> empty
+    assert vision["surfaceZone"] == "surface"          # non-string -> default
     assert vision["alerts"]["missingFishHours"] == 168  # clamped to a week
     assert vision["alerts"]["surfaceDistress"] is True
     assert vision["feedReport"]["windowSeconds"] == 30  # clamped to minimum

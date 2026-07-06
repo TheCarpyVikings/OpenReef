@@ -64,7 +64,7 @@ VISION_ARM_TASK = "vision_arm_task"
 VISION_RUNTIME = "vision_runtime"
 VISION_FINGERPRINT = "vision_fingerprint"
 VISION_TICK_MINUTES = 5                     # alert evaluation cadence
-VISION_FLUSH_TICKS = 12                     # persist the tiny summary hourly (12 x 5 min)
+VISION_FLUSH_INTERVAL_S = 3600              # persist the tiny summary hourly
 VISION_MAX_REPORTS = 30                     # feeding report cap, AWC_HISTORY_MAX convention
 VISION_MAX_SPECIES = 24
 VISION_MAX_ZONES = 24
@@ -956,6 +956,7 @@ DEFAULT_CORE_CONFIG = {
         "cameraName": "",               # Frigate camera name, e.g. "reef_tank"
         "species": [],                  # classifier sub_label slugs to track
         "zones": [],                    # Frigate zone names to count visits for
+        "surfaceZone": "surface",       # Frigate zone whose loitering means distress
         "alerts": {
             "missingFishHours": 0,      # 0 = off
             "surfaceDistress": False,

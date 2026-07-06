@@ -45,10 +45,21 @@ from typing import Any
 MAX_TRACKED_OBJECTS = 200
 
 
-def new_runtime(species: list[str], zones: list[str], now: float) -> dict[str, Any]:
+# rehydrate() only restores the observation clock (onlineAt) when the persisted
+# summary is at most this fresh. A short gap is an HA restart, where carrying the
+# clock over keeps "never seen since online" honest; a long gap means vision was
+# OFF, and counting that as observation time produces false missing-fish alarms.
+REHYDRATE_MAX_GAP_S = 2 * 3600
+
+
+def new_runtime(
+    species: list[str], zones: list[str], now: float, surface_zone: str = "surface"
+) -> dict[str, Any]:
     """Fresh in-memory aggregate state. Persisted only via summary()/rehydrate()."""
     return {
         "onlineAt": now,                            # epoch s vision came online
+        "lastFlushAt": now,                         # epoch s summary last persisted
+        "surfaceZone": surface_zone,                # Frigate zone that means "at the surface"
         "lastSeen": {s: None for s in species},     # species -> epoch s | None
         "zoneVisits": {z: 0 for z in zones},        # zone -> distinct-object visits
         "eventZones": {},                           # object id -> [zones already counted]
@@ -62,13 +73,16 @@ def new_runtime(species: list[str], zones: list[str], now: float) -> dict[str, A
     }
 
 
-def rehydrate(runtime: dict[str, Any], summary: Any) -> None:
+def rehydrate(runtime: dict[str, Any], summary: Any, now: float) -> None:
     """Re-seed a fresh runtime from the last persisted summary (restart survival).
 
-    Only restores what must outlive a restart to keep alerts honest: last-seen
-    timestamps (else a fish missing for days can never alert after a reboot)
-    and the online timestamp (else "never seen" windows restart from zero).
-    Zone counters restart per-session by design — they feed daily deltas.
+    Restores last-seen timestamps unconditionally (else a fish missing for days
+    can never alert after a reboot) and notification cooldowns (else a restart
+    re-pages about the same missing fish). The online clock is restored only
+    when the summary is recent (REHYDRATE_MAX_GAP_S): after a long-off period
+    or a re-enable, observation starts NOW — time vision was off must never
+    count toward a "never seen for N hours" alarm. Zone counters restart per
+    session by design — they feed daily deltas.
     """
     if not isinstance(summary, dict):
         return
@@ -77,8 +91,19 @@ def rehydrate(runtime: dict[str, Any], summary: Any) -> None:
         for species, ts in last_seen.items():
             if species in runtime["lastSeen"] and isinstance(ts, (int, float)):
                 runtime["lastSeen"][species] = float(ts)
+    notified = summary.get("notifiedAt")
+    if isinstance(notified, dict):
+        for key, ts in notified.items():
+            if isinstance(key, str) and isinstance(ts, (int, float)):
+                runtime["notifiedAt"][key] = float(ts)
+    as_of = summary.get("asOf")
     online = summary.get("onlineAt")
-    if isinstance(online, (int, float)) and online > 0:
+    if (
+        isinstance(as_of, (int, float))
+        and isinstance(online, (int, float))
+        and online > 0
+        and now - float(as_of) <= REHYDRATE_MAX_GAP_S
+    ):
         runtime["onlineAt"] = min(runtime["onlineAt"], float(online))
 
 
@@ -96,6 +121,7 @@ def fingerprint(cfg: Any) -> str:
             "camera": cfg.get("cameraName", ""),
             "species": sorted(cfg.get("species") or []),
             "zones": sorted(cfg.get("zones") or []),
+            "surfaceZone": cfg.get("surfaceZone", "surface"),
         },
         sort_keys=True,
     )
@@ -152,7 +178,16 @@ def apply_event(runtime: dict[str, Any], event: dict[str, Any], now: float) -> b
     # Zone visits: entered_zones is cumulative + repeated per message, so count
     # each zone once per object id (dedupe set evicted on the end message).
     if object_id:
-        counted = runtime["eventZones"].setdefault(object_id, [])
+        # LRU discipline: re-insert on every event so eviction (which only
+        # matters when Frigate loses `end` messages) removes the object with
+        # the STALEST activity, never a fish that is still being tracked —
+        # evicting a live object would re-count its zones and reset its
+        # surface-distress timer.
+        if object_id in runtime["eventZones"]:
+            counted = runtime["eventZones"].pop(object_id)
+            runtime["eventZones"][object_id] = counted
+        else:
+            counted = runtime["eventZones"][object_id] = []
         if len(runtime["eventZones"]) > MAX_TRACKED_OBJECTS:
             oldest = next(iter(runtime["eventZones"]))
             runtime["eventZones"].pop(oldest, None)
@@ -165,7 +200,7 @@ def apply_event(runtime: dict[str, Any], event: dict[str, Any], now: float) -> b
 
         # Surface loitering is per object: set when THIS object is in the
         # surface zone, cleared when THIS object leaves or ends.
-        if "surface" in event["zones"]:
+        if runtime.get("surfaceZone", "surface") in event["zones"]:
             runtime["surfaceAt"].setdefault(object_id, now)
         else:
             runtime["surfaceAt"].pop(object_id, None)
@@ -273,6 +308,7 @@ def summary(runtime: dict[str, Any], now: float) -> dict[str, Any]:
         "onlineAt": runtime["onlineAt"],
         "asOf": now,
         "lastSeen": dict(runtime["lastSeen"]),
+        "notifiedAt": dict(runtime["notifiedAt"]),
         "zoneVisits": dict(runtime["zoneVisits"]),
         "anemoneState": runtime["anemoneState"],
         "tankState": runtime["tankState"],
