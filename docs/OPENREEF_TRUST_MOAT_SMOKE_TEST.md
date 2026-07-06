@@ -19,15 +19,15 @@ Use this after installing or updating OpenReef Core in a real Home Assistant ins
 ## 2. Trust Check
 
 - Go to Settings -> System Check.
-- Select Refresh in Trust Check.
+- In Trust Check, select Refresh.
 - Confirm the Trust Check panel reports mapped sensors, notification path, heartbeat, camera reachability, incident history, backup review, and edge failsafes.
 - Leave backup review empty and confirm Trust Check reports it honestly as unknown.
 - Add today's backup review date and confirm the backup item improves on refresh.
 
 ## 3. Notification Test And Acknowledgement
 
-- In Alerts, enable Home Assistant persistent notifications.
-- Select Test notification.
+- In Settings -> Alerts, enable Home Assistant persistent notifications.
+- In Settings -> System Check or Settings -> Alerts, select Test notification.
 - Confirm a Home Assistant persistent notification appears.
 - If a notify target is configured, confirm the phone push arrives.
 - Force a safe test warning with a temporary fake sensor value or widened/narrowed threshold.

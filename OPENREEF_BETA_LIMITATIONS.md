@@ -12,6 +12,8 @@ OpenReef Core currently focuses on:
 - Energy totals and per-device energy mapping
 - Settings
 - Alerts
+- Trust Check, watchdog heartbeat, probe-health warnings, alert acknowledgement, and Reef Replay
+- Camera V2 live view, event capture, timelapse, overlay/share, and feed-watch
 - Feed, Maintenance, custom modes, and schedules
 - Equipment safety helpers, including ATO duty cycling and display-wavemaker restart warnings
 
@@ -21,7 +23,7 @@ OpenReef Core currently focuses on:
 - Automated water changes
 - Direct hardware control outside Home Assistant entities
 - AI control or advice-driven automation
-- Camera streaming
+- Advanced camera intelligence such as fish behaviour, coral growth, pest/disease detection, PTZ, and HLS/high-quality stream polish
 - Advanced analytics and reports
 - Full Neptune Apex import automation
 
@@ -46,6 +48,7 @@ OpenReef Core currently focuses on:
 - Confirm setup can be completed on desktop and phone.
 - Confirm Find matches does not crash Home Assistant.
 - Confirm controls only work for mapped and armed equipment.
+- Confirm Trust Check, notification test, alert acknowledgement, and Reef Replay behave honestly on the tester's setup.
 - Confirm the Settings -> System Check beta handoff checklist is clean enough for the tester's setup.
 - Confirm the Settings -> System Check beta smoke-test checklist has been copied or shared.
 - Confirm the Settings -> System Check feedback template has been copied or shared.

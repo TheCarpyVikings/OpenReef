@@ -15,7 +15,7 @@ Copy this into a message or issue when reporting beta feedback.
 - Did OpenReef install/update cleanly?
 - Did OpenReef appear in the sidebar after restart?
 - Did the setup wizard make sense?
-- Which sensor preset did you choose?
+- Which sensor preset or Apex helper choice did you choose?
 - Which entity suggestions were correct?
 - Which entity suggestions were missing or wrong?
 
@@ -33,6 +33,16 @@ Copy this into a message or issue when reporting beta feedback.
 - Did Feed, Maintenance, Running, or custom modes do what the preview said?
 - Did ATO duty cycle behaviour match your expectation?
 - If display wavemakers were used, were the warnings clear?
+
+## Trust Check And Alerts
+
+- What did Trust Check report? ready / review / action / unknown:
+- Did the notification test appear in Home Assistant?
+- Did phone push arrive if a notify target was configured?
+- Did alert acknowledgement stop repeat/escalation noise as expected?
+- Did heartbeat status update after refresh or the `openreef.heartbeat` service?
+- Did Reef Replay show useful incident context?
+- If heater, ATO, or return pump was armed, did the edge-failsafe warning/review wording feel clear?
 
 ## Mobile
 

@@ -2,6 +2,8 @@
 
 This guide is for private beta testers installing OpenReef through Home Assistant Community Store.
 
+If you are starting from no Home Assistant install at all, use `OPENREEF_DIY_MANUAL.md` first, then come back to this shorter beta handoff guide.
+
 ## Before You Start
 
 - Use Home Assistant OS or a Home Assistant install that supports HACS custom integrations.
@@ -25,11 +27,12 @@ If OpenReef does not appear in the sidebar, refresh the browser after Home Assis
 ## First Setup
 
 1. Click **Setup**.
-2. Add your tank name and owner name.
+2. Confirm your tank name, optional owner name, and tank type.
 3. Choose the closest sensor preset:
-   - **Simple** for temperature-first setups.
-   - **Full reef** for common reef sensors.
-   - **Apex / Trident beta** if Neptune Apex or Trident entities are already visible in Home Assistant.
+   - **Temperature only** for the safest basic setup.
+   - **Everything available** if you want to enable all sensor categories, then turn off anything you do not own.
+   - **No Apex / OpenReef sensors** for normal Home Assistant reef sensors such as temperature, pH, and salinity.
+   - **Apex controller**, **Apex + Trident**, **Apex + Trident NP**, **Apex + FMM**, or **Apex full ecosystem** if those Neptune entities are already visible in Home Assistant.
 4. Enable only the sensors you actually own.
 5. Use **Find matches** for each enabled sensor.
 6. Choose the best suggestion, or paste the entity ID if no suggestion is correct.
@@ -37,6 +40,7 @@ If OpenReef does not appear in the sidebar, refresh the browser after Home Assis
 8. Map each equipment switch.
 9. Arm only the equipment you are comfortable testing.
 10. Review safety settings before finishing.
+11. Run Trust Check in **Settings -> System Check** before leaving the install unattended.
 
 ## Safety Rules
 

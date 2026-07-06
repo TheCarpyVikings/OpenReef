@@ -14,8 +14,15 @@ The optional OpenReef Labs add-on is not required for this beta.
 
 ## First Setup
 
-1. In the setup wizard, choose **Apex / Trident beta** on the sensor step.
-2. Map the entities you already have in Home Assistant:
+1. In the setup wizard, use the **Apex / Trident helper** on the sensor step.
+2. Choose the closest helper for the data already visible in Home Assistant:
+   - **Apex controller**
+   - **Apex + Trident**
+   - **Apex + Trident NP**
+   - **Apex + Trident + Trident NP**
+   - **Apex + FMM**
+   - **Apex full ecosystem**
+3. Map the entities you already have in Home Assistant:
    - Display tank temperature
    - Sump temperature
    - Salinity
@@ -24,9 +31,9 @@ The optional OpenReef Labs add-on is not required for this beta.
    - Calcium
    - pH
    - Magnesium
-3. Use **Find matches** first. Paste the entity ID only if OpenReef cannot suggest the right entity.
-4. Add equipment if you want controls. Every switch starts safe until mapped and armed.
-5. Review the Safety step before finishing setup.
+4. Use **Find matches** first. Paste the entity ID only if OpenReef cannot suggest the right entity.
+5. Add equipment if you want controls. Every switch starts safe until mapped and armed.
+6. Review the Safety step before finishing setup.
 
 ## Safety Defaults
 
@@ -39,7 +46,7 @@ The optional OpenReef Labs add-on is not required for this beta.
 ## What To Test
 
 - Open and refresh OpenReef several times.
-- Use the Apex / Trident beta preset and confirm only owned sensors are enabled.
+- Use the Apex / Trident helper choice that matches the tester's existing Home Assistant entities and confirm only owned sensors are enabled.
 - Confirm each mapped sensor appears in Live Stats.
 - Open trends for pH, temperature, alkalinity, calcium, and magnesium.
 - Add equipment, map switch entities, then arm only the devices you are comfortable testing.

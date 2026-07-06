@@ -21,11 +21,21 @@ Use this before giving OpenReef to a beta tester and ask the tester to run the s
 ## Setup And Mapping
 
 - Open **Setup** and step through the wizard.
-- For Apex or Trident testers, choose **Apex / Trident beta** on the sensor step.
+- For Apex or Trident testers, use the **Apex / Trident helper** and choose the closest option: **Apex controller**, **Apex + Trident**, **Apex + Trident NP**, **Apex + Trident + Trident NP**, **Apex + FMM**, or **Apex full ecosystem**.
+- For non-Apex testers, start with **Temperature only** or **No Apex / OpenReef sensors**, then enable only the sensors they actually own.
 - Enable only the sensors the tester actually owns.
 - Use **Find matches** for at least two sensors.
 - Add equipment only if the tester wants real switch control.
 - Review the Safety step before finishing.
+
+## Trust Check And Alerts
+
+- Open **Settings -> System Check**.
+- Press **Refresh checks**.
+- In Trust Check, press **Refresh**.
+- Press **Test notification** and confirm a Home Assistant persistent notification appears.
+- Confirm Trust Check is honest about unmapped sensors, missing notification tests, backup review, cameras, incident history, and edge-failsafe review.
+- If a safe test warning is active, press **Ack** and confirm repeat/escalation stops until the alert resolves or changes.
 
 ## Live Stats And Trends
 

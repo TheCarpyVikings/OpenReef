@@ -9,8 +9,7 @@ eval todo once they become larger feature work.
 
 - [x] Kalkwasser safety: `docs/eval-data/kalkwasser/demand-outgrowing-kalk.csv`
 - [x] Reef Fusion exact advice: `docs/eval-data/reef-fusion/alkalinity-demand.csv`
-- [ ] DIY / custom verified strength: `docs/eval-data/custom-diy-three-part/alkalinity-demand.csv`
-      Safety guardrail fixed in `0.4.79`; repeat the HA smoke test with the same CSV.
+- [x] DIY / custom verified strength: `docs/eval-data/custom-diy-three-part/alkalinity-demand.csv`
 - [ ] All-For-Reef guided behaviour: `docs/eval-data/all-for-reef/demand-increasing.csv`
 - [ ] Above-target safety: `docs/eval-data/reef-fusion/above-target.csv`
 - [ ] Mission Control Dosing Advisor display persistence
@@ -102,7 +101,7 @@ Polish found:
 
 ### DIY / Custom Verified Strength - Alkalinity Demand
 
-Status: blocked issue fixed in `0.4.79`; needs repeat HA smoke test.
+Status: passed after `0.4.79` guardrail fix.
 
 What looked right:
 
@@ -110,6 +109,8 @@ What looked right:
 - Secondary supplement persists as `None`.
 - Safety state is acknowledged with `200 L` net volume.
 - Alkalinity demand is detected.
+- With verified strength settings, alkalinity gives a small holding-dose review
+  (`32.0 mL/day` to `32.5 mL/day`) and a capped correction split.
 - Calcium and magnesium remain steady and are not forced into dosing changes.
 - No automatic dosing language appears.
 
@@ -130,9 +131,13 @@ Fix added:
   DIY maintenance estimates can still appear.
 - The eval now includes an `implausibly-weak-alkalinity-strength` scenario to stop this regressing.
 
-Retest expectation:
+Retest result:
 
-- The DIY alkalinity smoke test should no longer show `544.5 mL/day` holding advice or
+- The DIY alkalinity smoke test no longer shows `544.5 mL/day` holding advice or
   `5300.0 mL/day` correction advice.
-- The alkalinity card should tell the user to verify the custom recipe or "1 mL raises X in Y L"
-  fields before changing a doser.
+- The same scenario works correctly when realistic verified-strength fields are entered.
+
+Polish found:
+
+- Magnesium is technically `2 ppm` above target, so it shows a safe "do not dose downward" note.
+  This is correct, but the wording could be made calmer for tiny above-target differences.
