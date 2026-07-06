@@ -1871,7 +1871,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)))
         && event.type === "change"
       ) this._render();
     };
@@ -8227,7 +8227,7 @@ class OpenReefPanel extends HTMLElement {
       this._vision = await this._callWS({ type: "openreef/vision_summary" });
       this._visionError = "";
     } catch (err) {
-      this._visionError = err instanceof Error ? err.message : String(err);
+      this._visionError = (err && err.message) || "Vision summary unavailable";
     } finally {
       // Always stamp the time — even on failure — so the refresh-threshold gate
       // prevents a render→reload→render hot loop (the AWC summary discipline).
@@ -8238,7 +8238,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _visionAge(epochSeconds) {
-    if (!epochSeconds) return "never";
+    if (!Number.isFinite(epochSeconds) || !epochSeconds) return "never";
     const s = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
     if (s < 90) return `${s}s ago`;
     if (s < 5400) return `${Math.round(s / 60)}m ago`;
@@ -8255,7 +8255,9 @@ class OpenReefPanel extends HTMLElement {
     // Fenced: one exception in this single web component blanks the whole panel.
     try {
       const refreshMs = 15000;
-      if (!this._vision || Date.now() - (this._visionAt || 0) > refreshMs) {
+      // Gate on the timestamp alone: _visionAt is stamped even when the call
+      // fails, so a first-load failure cannot hot-loop render->callWS->render.
+      if (Date.now() - (this._visionAt || 0) > refreshMs) {
         if (!this._visionLoading) this._visionLoadSummary();
       }
       const data = this._vision || {};
@@ -8307,13 +8309,13 @@ class OpenReefPanel extends HTMLElement {
 
       const reportRows = reports.slice(0, 8).map((report) => {
         const rows = Array.isArray(report.rows) ? report.rows : [];
-        const when = report.startedAt ? new Date(report.startedAt * 1000).toLocaleString() : "—";
+        const when = Number.isFinite(report.startedAt) && report.startedAt ? new Date(report.startedAt * 1000).toLocaleString() : "—";
         const detail = rows.map((row) => {
           const latency = row.latency === null || row.latency === undefined ? "—" : `${row.latency}s`;
           return `<span class="pill ${row.responded ? "ok" : ""}">${this._escape(this._visionSpeciesLabel(row.species))} ${this._escape(latency)}</span>`;
         }).join(" ");
         return `
-          <article class="card compact">
+          <article class="panel">
             <div class="row">
               <span>${this._escape(when)}</span>
               <strong>${this._escape(String(report.respondedCount ?? 0))}/${this._escape(String(rows.length))} responded</strong>
@@ -8335,24 +8337,24 @@ class OpenReefPanel extends HTMLElement {
           </div>
           ${this._visionError ? `<div class="notice warning-notice">Vision summary unavailable: ${this._escape(this._visionError)}</div>` : ""}
           <div class="grid two">
-            <article class="card">
+            <article class="panel">
               <p class="eyebrow">Last seen</p>
               ${lastSeenRows || `<p class="muted">No tracked species configured yet — add them under Settings → Vision.</p>`}
             </article>
-            <article class="card">
+            <article class="panel">
               <p class="eyebrow">Zone visits (since vision came online)</p>
               ${zoneRows || `<p class="muted">No zones configured yet — add your Frigate zone names under Settings → Vision.</p>`}
             </article>
           </div>
-          ${stateChips ? `<article class="card"><p class="eyebrow">Tank state</p><div class="vision-chips">${stateChips}</div></article>` : ""}
-          <article class="card">
+          ${stateChips ? `<article class="panel"><p class="eyebrow">Tank state</p><div class="vision-chips">${stateChips}</div></article>` : ""}
+          <article class="panel">
             <p class="eyebrow">Feeding report cards</p>
             ${reportRows || `<p class="muted">No feeding reports yet. Enable the feeding report under Settings → Vision, then run Feed mode.</p>`}
           </article>
         </section>
       `;
     } catch (err) {
-      return `<section class="card"><p class="muted">Vision view failed to render: ${this._escape(err instanceof Error ? err.message : String(err))}</p></section>`;
+      return `<section class="panel"><p class="muted">Vision view failed to render: ${this._escape(err instanceof Error ? err.message : String(err))}</p></section>`;
     }
   }
 
@@ -8375,10 +8377,14 @@ class OpenReefPanel extends HTMLElement {
     if (this._config?.vision?.enabled) {
       tabs.splice(tabs.length - 1, 0, ["vision", "Vision"]);
     }
+    // If vision was disabled while its tab was active, the content falls back
+    // to Mission — highlight Mission so the nav doesn't show no active tab.
+    const activeId = (this._activeTab === "vision" && !this._config?.vision?.enabled)
+      ? "mission" : this._activeTab;
     return `
       <nav class="tabs">
         ${tabs.map(([id, label]) => `
-          <button class="${this._activeTab === id ? "active" : ""}" data-action="tab" data-id="${id}">
+          <button class="${activeId === id ? "active" : ""}" data-action="tab" data-id="${id}">
             ${label}
           </button>
         `).join("")}
@@ -9919,7 +9925,7 @@ class OpenReefPanel extends HTMLElement {
       <label>Coral zones to count visits for — comma-separated Frigate zone names
         <input type="text" data-scope="vision" data-field="zones" placeholder="anemone, torch_coral" value="${this._escape((v.zones || []).join(", "))}">
       </label>
-      <label>Surface zone name (loitering here = distress)
+      <label>Surface zone name — must match a Frigate zone; clearing restores "surface"
         <input type="text" data-scope="vision" data-field="surfaceZone" value="${this._escape(v.surfaceZone ?? "surface")}">
       </label>
       <p class="eyebrow">Alerts</p>
