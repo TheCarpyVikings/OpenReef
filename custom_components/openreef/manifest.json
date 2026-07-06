@@ -1,8 +1,18 @@
 {
   "domain": "openreef",
   "name": "OpenReef",
-  "dependencies": ["http", "frontend", "panel_custom", "websocket_api"],
-  "codeowners": ["@TheCarpyVikings"],
+  "dependencies": [
+    "http",
+    "frontend",
+    "panel_custom",
+    "websocket_api"
+  ],
+  "after_dependencies": [
+    "mqtt"
+  ],
+  "codeowners": [
+    "@TheCarpyVikings"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/TheCarpyVikings/OpenReef",
   "integration_type": "hub",

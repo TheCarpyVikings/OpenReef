@@ -133,6 +133,26 @@ from .const import (
 from . import awc as awc_engine
 from . import icp
 from . import spawning
+from . import vision
+from .const import (
+    VISION_ARM_TASK,
+    VISION_DEFAULT_FEED_WINDOW,
+    VISION_FINGERPRINT,
+    VISION_FLUSH_TICKS,
+    VISION_MAX_FEED_WINDOW,
+    VISION_MAX_MISSING_HOURS,
+    VISION_MAX_REPORTS,
+    VISION_MAX_SPECIES,
+    VISION_MAX_ZONES,
+    VISION_MIN_FEED_WINDOW,
+    VISION_NOTIFY_COOLDOWN_S,
+    VISION_RUNTIME,
+    VISION_STATE_UNSUB,
+    VISION_SURFACE_SECONDS,
+    VISION_TICK_MINUTES,
+    VISION_TICK_UNSUB,
+    VISION_UNSUB,
+)
 
 type OpenReefConfigEntry = ConfigEntry
 
@@ -1244,6 +1264,57 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     config["feedSessions"] = [s for s in feed_sessions if isinstance(s, dict)][
         : feedwatch["retentionSessions"]
     ]
+
+    vision_cfg = config.setdefault("vision", {})
+    if not isinstance(vision_cfg, dict):
+        vision_cfg = deepcopy(DEFAULT_CORE_CONFIG["vision"])
+        config["vision"] = vision_cfg
+    vision_cfg["enabled"] = bool(vision_cfg.get("enabled", False))
+    v_prefix = vision_cfg.get("topicPrefix")
+    vision_cfg["topicPrefix"] = (
+        v_prefix.strip().strip("/")[:64]
+        if isinstance(v_prefix, str) and v_prefix.strip().strip("/")
+        else "frigate"
+    )
+    v_camera = vision_cfg.get("cameraName")
+    vision_cfg["cameraName"] = v_camera.strip()[:64] if isinstance(v_camera, str) else ""
+    for v_key, v_cap in (("species", VISION_MAX_SPECIES), ("zones", VISION_MAX_ZONES)):
+        v_raw = vision_cfg.get(v_key)
+        v_cleaned: list[str] = []
+        if isinstance(v_raw, list):
+            for v_item in v_raw:
+                if isinstance(v_item, str) and v_item.strip():
+                    v_val = v_item.strip()[:64]
+                    if v_val not in v_cleaned:
+                        v_cleaned.append(v_val)
+        vision_cfg[v_key] = v_cleaned[:v_cap]
+    v_alerts = vision_cfg.get("alerts")
+    if not isinstance(v_alerts, dict):
+        v_alerts = {}
+        vision_cfg["alerts"] = v_alerts
+    v_alerts["missingFishHours"] = _clamp_int(
+        v_alerts.get("missingFishHours"), 0, 0, VISION_MAX_MISSING_HOURS
+    )
+    v_alerts["surfaceDistress"] = bool(v_alerts.get("surfaceDistress", False))
+    v_feed = vision_cfg.get("feedReport")
+    if not isinstance(v_feed, dict):
+        v_feed = {}
+        vision_cfg["feedReport"] = v_feed
+    v_feed["enabled"] = bool(v_feed.get("enabled", False))
+    v_feed["windowSeconds"] = _clamp_int(
+        v_feed.get("windowSeconds"),
+        VISION_DEFAULT_FEED_WINDOW,
+        VISION_MIN_FEED_WINDOW,
+        VISION_MAX_FEED_WINDOW,
+    )
+    v_reports = config.get("visionReports")
+    config["visionReports"] = (
+        [r for r in v_reports if isinstance(r, dict)][:VISION_MAX_REPORTS]
+        if isinstance(v_reports, list)
+        else []
+    )
+    v_summary = config.get("visionSummary")
+    config["visionSummary"] = v_summary if isinstance(v_summary, dict) else {}
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -2685,6 +2756,25 @@ def _trust_check_summary(
         items.append(_trust_item("cameras", "Camera reachability", "ok", f"{len(mapped_cameras)} mapped camera(s) reachable."))
     else:
         items.append(_trust_item("cameras", "Camera reachability", "unknown", "No camera is mapped, so incident clips cannot be proven yet."))
+
+    # Vision trust item only exists when the feature is enabled — a tester who
+    # has no Frigate/MQTT never sees a line about hardware they don't own.
+    vision_trust_cfg = config.get("vision", {})
+    if isinstance(vision_trust_cfg, dict) and vision_trust_cfg.get("enabled"):
+        vision_store = hass.data.get(DOMAIN)
+        vision_store = vision_store if isinstance(vision_store, dict) else {}
+        vision_runtime = vision_store.get(VISION_RUNTIME)
+        last_event_at = vision_runtime.get("lastEventAt") if isinstance(vision_runtime, dict) else None
+        if vision_store.get(VISION_UNSUB) is None:
+            items.append(_trust_item("vision", "Vision (Frigate)", "warning", "Vision is enabled but MQTT is not connected; tank intelligence is idle."))
+        elif last_event_at is None:
+            items.append(_trust_item("vision", "Vision (Frigate)", "unknown", "Subscribed to Frigate events; none received yet."))
+        else:
+            event_age_s = dt_util.utcnow().timestamp() - last_event_at
+            if event_age_s < 3600:
+                items.append(_trust_item("vision", "Vision (Frigate)", "ok", "Receiving Frigate detection events."))
+            else:
+                items.append(_trust_item("vision", "Vision (Frigate)", "warning", f"No Frigate events for {int(event_age_s // 3600)}h — camera or NVR may be down."))
 
     captures = config.get("captures", [])
     alert_history = config.get("alerts", {}).get("history", []) if isinstance(config.get("alerts"), dict) else []
@@ -4373,6 +4463,9 @@ async def _async_save_config(
     await _async_schedule_watchdog(hass, entry, normalised)
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
+    # Fingerprint-guarded: a save that does not change the vision config is a
+    # no-op here (runtime state and the MQTT subscription survive untouched).
+    await _async_setup_vision(hass, entry, normalised)
     # Event-triggered camera capture on a fresh ok->warning/critical transition.
     for transition in transitions:
         if transition.get("state") == "critical":
@@ -6175,6 +6268,40 @@ async def _async_apply_mode(
         await _async_stop_feed_watch(hass, entry)
     elif mode_id == "feed" and feedwatch_on:
         await _async_start_feed_watch(hass, entry)
+
+    # Vision feeding report card: open a response-latency window on entering feed
+    # mode, close + persist the report on leaving. Deliberately independent of
+    # feedWatch — either can be enabled without the other.
+    vision_cfg = config.get("vision", {})
+    vision_runtime = hass.data.setdefault(DOMAIN, {}).get(VISION_RUNTIME)
+    vision_feed_on = (
+        isinstance(vision_cfg, dict)
+        and vision_cfg.get("enabled")
+        and isinstance(vision_cfg.get("feedReport"), dict)
+        and vision_cfg["feedReport"].get("enabled")
+    )
+    if vision_runtime is not None and vision_feed_on:
+        vision_now = dt_util.utcnow().timestamp()
+        if mode_id == "feed":
+            vision.start_feed_session(vision_runtime, vision_now)
+        elif vision_runtime.get("feedSession") is not None:
+            vision_report = vision.close_feed_session(
+                vision_runtime,
+                list(vision_cfg.get("species") or []),
+                int(
+                    vision_cfg["feedReport"].get("windowSeconds")
+                    or VISION_DEFAULT_FEED_WINDOW
+                ),
+                vision_now,
+            )
+            if vision_report is not None:
+                vision_reports = config.get("visionReports")
+                if not isinstance(vision_reports, list):
+                    vision_reports = []
+                config["visionReports"] = ([vision_report] + vision_reports)[
+                    :VISION_MAX_REPORTS
+                ]
+                await _async_save_config(hass, entry, config)
 
     # One capture per mode action, most-specific enabled trigger wins (feed > safety > mode).
     capture_triggers = config.get("capture", {}).get("triggers", {})
@@ -8344,6 +8471,221 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     hass.data[DOMAIN]["panel_registered"] = True
 
 
+def _clear_vision(hass: HomeAssistant) -> None:
+    """Tear down all vision wiring (subscriptions, tick, runtime, fingerprint)."""
+    store = hass.data.setdefault(DOMAIN, {})
+    arm_task = store.pop(VISION_ARM_TASK, None)
+    if arm_task is not None:
+        arm_task.cancel()
+    event_unsub = store.pop(VISION_UNSUB, None)
+    if event_unsub is not None:
+        try:
+            event_unsub()
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            pass
+    for state_unsub in store.pop(VISION_STATE_UNSUB, None) or []:
+        try:
+            state_unsub()
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            pass
+    tick_unsub = store.pop(VISION_TICK_UNSUB, None)
+    if tick_unsub is not None:
+        tick_unsub()
+    store.pop(VISION_RUNTIME, None)
+    store.pop(VISION_FINGERPRINT, None)
+
+
+async def _async_setup_vision(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
+) -> None:
+    """Arm (or refresh) vision. Fully fenced — must never raise into entry setup
+    or a config save, mirroring the _async_capture_event discipline.
+
+    Re-arms ONLY when the vision fingerprint changes: _async_save_config calls
+    this from ~50 unrelated call sites (mode applies, captures, AWC legs, panel
+    saves) and none of them may destroy vision runtime state (an open feeding
+    session, last-seen timestamps, zone counters) or churn the MQTT subscription.
+    """
+    try:
+        store = hass.data.setdefault(DOMAIN, {})
+        vision_cfg = config.get("vision") if isinstance(config.get("vision"), dict) else {}
+        vision_fp = vision.fingerprint(vision_cfg)
+        if store.get(VISION_FINGERPRINT) == vision_fp:
+            return
+        _clear_vision(hass)
+        store[VISION_FINGERPRINT] = vision_fp
+        if vision_fp == "disabled":
+            return
+        now_ts = dt_util.utcnow().timestamp()
+        runtime = vision.new_runtime(
+            list(vision_cfg.get("species") or []),
+            list(vision_cfg.get("zones") or []),
+            now_ts,
+        )
+        vision.rehydrate(runtime, config.get("visionSummary"))
+        store[VISION_RUNTIME] = runtime
+        store[VISION_ARM_TASK] = hass.async_create_task(
+            _async_arm_vision(hass, dict(vision_cfg))
+        )
+
+        async def _tick(_now) -> None:
+            await _async_vision_tick(hass, entry)
+
+        store[VISION_TICK_UNSUB] = async_track_time_interval(
+            hass, _tick, timedelta(minutes=VISION_TICK_MINUTES)
+        )
+    except Exception:  # noqa: BLE001 - vision must never break OpenReef setup
+        _LOGGER.exception("OpenReef vision: setup failed; vision idle this session")
+
+
+async def _async_arm_vision(hass: HomeAssistant, vision_cfg: dict[str, Any]) -> None:
+    """Background MQTT subscribe (never inline in entry setup — the broker may be
+    retrying for up to ~50s at boot). Retried by the tick while unsubscribed."""
+    try:
+        try:
+            from homeassistant.components import mqtt  # soft dependency
+        except ImportError:
+            _LOGGER.warning(
+                "OpenReef vision: the MQTT integration is not available; vision stays idle"
+            )
+            return
+        try:
+            mqtt_ready = await mqtt.async_wait_for_mqtt_client(hass)
+        except Exception:  # noqa: BLE001 - no MQTT config entry at all
+            mqtt_ready = False
+        if not mqtt_ready:
+            _LOGGER.warning("OpenReef vision: MQTT not connected yet; will retry")
+            return
+        store = hass.data.setdefault(DOMAIN, {})
+        runtime = store.get(VISION_RUNTIME)
+        if runtime is None:
+            return
+        topic_prefix = str(vision_cfg.get("topicPrefix") or "frigate")
+        camera_name = str(vision_cfg.get("cameraName") or "")
+
+        @callback
+        def _on_frigate_event(msg) -> None:
+            try:
+                event = vision.parse_frigate_event(msg.payload)
+                if event and (not camera_name or event["camera"] == camera_name):
+                    vision.apply_event(runtime, event, dt_util.utcnow().timestamp())
+            except Exception:  # noqa: BLE001 - a broker payload must never break us
+                _LOGGER.debug("OpenReef vision: dropped malformed event", exc_info=True)
+
+        store[VISION_UNSUB] = await mqtt.async_subscribe(
+            hass, f"{topic_prefix}/events", _on_frigate_event
+        )
+        state_unsubs = []
+        if camera_name:
+            for state_kind, state_topic in (
+                ("anemone", f"{topic_prefix}/{camera_name}/classification/anemone_state"),
+                ("tank", f"{topic_prefix}/{camera_name}/classification/tank_state"),
+                ("count", f"{topic_prefix}/{camera_name}/all"),
+            ):
+
+                @callback
+                def _on_state(msg, _kind: str = state_kind) -> None:
+                    vision.apply_state_topic(runtime, _kind, msg.payload)
+
+                state_unsubs.append(await mqtt.async_subscribe(hass, state_topic, _on_state))
+        store[VISION_STATE_UNSUB] = state_unsubs
+        _LOGGER.info("OpenReef vision: subscribed to %s/events", topic_prefix)
+    except Exception:  # noqa: BLE001 - arm failures are retried, never fatal
+        _LOGGER.exception("OpenReef vision: MQTT subscribe failed; will retry")
+
+
+async def _async_vision_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
+    """5-minute cadence: re-arm if the broker was down, evaluate cooldown-gated
+    alerts, and flush the tiny summary hourly for restart rehydration."""
+    try:
+        store = hass.data.setdefault(DOMAIN, {})
+        runtime = store.get(VISION_RUNTIME)
+        if runtime is None:
+            return
+        config = _config_from_entry(entry)
+        vision_cfg = config.get("vision") if isinstance(config.get("vision"), dict) else {}
+        if not vision_cfg.get("enabled"):
+            return
+        arm_task = store.get(VISION_ARM_TASK)
+        if store.get(VISION_UNSUB) is None and (arm_task is None or arm_task.done()):
+            store[VISION_ARM_TASK] = hass.async_create_task(
+                _async_arm_vision(hass, dict(vision_cfg))
+            )
+        now_ts = dt_util.utcnow().timestamp()
+        alerts_cfg = (
+            vision_cfg.get("alerts") if isinstance(vision_cfg.get("alerts"), dict) else {}
+        )
+        missing_hours = float(alerts_cfg.get("missingFishHours") or 0)
+        if missing_hours > 0:
+            missing = vision.missing_species(runtime, now_ts, missing_hours)
+            for species in missing:
+                if vision.should_notify(
+                    runtime, f"missing:{species}", now_ts, VISION_NOTIFY_COOLDOWN_S
+                ):
+                    await _async_send_mode_notification(
+                        hass,
+                        config,
+                        f"openreef_vision_missing_{species.lower().replace(' ', '_')}",
+                        "Fish not seen",
+                        f"{species} has not been positively identified in over "
+                        f"{int(missing_hours)} hours. Last known sighting may need a look.",
+                    )
+            for species in runtime["lastSeen"]:
+                if species not in missing:
+                    vision.clear_notify(runtime, f"missing:{species}")
+        if alerts_cfg.get("surfaceDistress"):
+            loiterers = vision.surface_loiterers(runtime, now_ts, VISION_SURFACE_SECONDS)
+            if loiterers:
+                if vision.should_notify(runtime, "surface", now_ts, VISION_NOTIFY_COOLDOWN_S):
+                    await _async_send_mode_notification(
+                        hass,
+                        config,
+                        "openreef_vision_surface",
+                        "Possible fish distress",
+                        f"A fish has been at the water surface for over "
+                        f"{VISION_SURFACE_SECONDS // 60} minutes. Check oxygen and flow.",
+                    )
+            else:
+                vision.clear_notify(runtime, "surface")
+        runtime["_ticks"] = runtime.get("_ticks", 0) + 1
+        if runtime["_ticks"] % VISION_FLUSH_TICKS == 0:
+            config["visionSummary"] = vision.summary(runtime, now_ts)
+            await _async_save_config(hass, entry, config)
+    except Exception:  # noqa: BLE001 - the tick shares a loop with safety timers
+        _LOGGER.exception("OpenReef vision: tick failed")
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/vision_summary"})
+@websocket_api.async_response
+async def websocket_vision_summary(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return the live vision aggregates + recent feeding reports for the panel."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    vision_cfg = config.get("vision") if isinstance(config.get("vision"), dict) else {}
+    store = hass.data.get(DOMAIN)
+    store = store if isinstance(store, dict) else {}
+    runtime = store.get(VISION_RUNTIME)
+    reports = config.get("visionReports")
+    connection.send_result(
+        msg["id"],
+        {
+            "enabled": bool(vision_cfg.get("enabled")),
+            "connected": store.get(VISION_UNSUB) is not None,
+            "summary": (
+                vision.summary(runtime, dt_util.utcnow().timestamp())
+                if runtime is not None
+                else (config.get("visionSummary") or None)
+            ),
+            "reports": reports[:VISION_MAX_REPORTS] if isinstance(reports, list) else [],
+        },
+    )
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up OpenReef services and websocket commands."""
     websocket_api.async_register_command(hass, websocket_get_config)
@@ -8357,6 +8699,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_acknowledge_alert)
     websocket_api.async_register_command(hass, websocket_test_notification)
     websocket_api.async_register_command(hass, websocket_refresh_trust_check)
+    websocket_api.async_register_command(hass, websocket_vision_summary)
     websocket_api.async_register_command(hass, websocket_get_heartbeat)
     websocket_api.async_register_command(hass, websocket_list_reef_replay)
     websocket_api.async_register_command(hass, websocket_apply_mode)
@@ -8476,6 +8819,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_finalize_orphaned_feed_sessions(hass, entry)
+    await _async_setup_vision(hass, entry, normalised)
     return True
 
 
@@ -8492,6 +8836,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_maintenance_reminders(hass)
     _clear_timelapse(hass)
     _clear_feedwatch(hass)
+    _clear_vision(hass)
     _clear_watchdog(hass)
     _clear_awc_timer(hass)
     _clear_awc_scheduler(hass)

@@ -518,6 +518,53 @@ def test_pulse_enums_validated():
     assert pulse["showToday"] is False
 
 
+def test_vision_defaults_added_to_older_config():
+    """A v45 tester config gains the vision block, disabled, on upgrade."""
+    config = normalise({"tank": {"name": "Ragnar"}})
+    assert config["schemaVersion"] == DEFAULTS["schemaVersion"]
+    vision = config["vision"]
+    assert vision["enabled"] is False
+    assert vision["topicPrefix"] == "frigate"
+    assert vision["cameraName"] == ""
+    assert vision["species"] == [] and vision["zones"] == []
+    assert vision["alerts"] == {"missingFishHours": 0, "surfaceDistress": False}
+    assert vision["feedReport"]["enabled"] is False
+    assert config["visionReports"] == []
+    assert config["visionSummary"] == {}
+
+
+def test_vision_garbage_clamped():
+    """Corrupted vision values normalise to safe defaults instead of crashing."""
+    config = normalise({"vision": "corrupt", "visionReports": "nope", "visionSummary": 7})
+    assert config["vision"]["enabled"] is False
+    assert config["visionReports"] == [] and config["visionSummary"] == {}
+    config = normalise(
+        {
+            "vision": {
+                "enabled": 1,
+                "topicPrefix": "  /frigate/  ",
+                "cameraName": 42,
+                "species": ["clownfish", "clownfish", 3, "  wrasse  ", ""],
+                "zones": "anemone",
+                "alerts": {"missingFishHours": 99999, "surfaceDistress": "yes"},
+                "feedReport": {"windowSeconds": 5, "enabled": "on"},
+            },
+            "visionReports": [{"ok": True}, "junk", {"ok": 2}],
+        }
+    )
+    vision = config["vision"]
+    assert vision["enabled"] is True
+    assert vision["topicPrefix"] == "frigate"          # stripped of slashes/space
+    assert vision["cameraName"] == ""                  # non-string dropped
+    assert vision["species"] == ["clownfish", "wrasse"]  # deduped, trimmed, non-strings out
+    assert vision["zones"] == []                       # non-list -> empty
+    assert vision["alerts"]["missingFishHours"] == 168  # clamped to a week
+    assert vision["alerts"]["surfaceDistress"] is True
+    assert vision["feedReport"]["windowSeconds"] == 30  # clamped to minimum
+    assert config["visionReports"] == [{"ok": True}, {"ok": 2}]  # dicts only
+
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:

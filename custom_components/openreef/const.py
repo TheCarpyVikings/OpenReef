@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 45
+CORE_SCHEMA_VERSION = 46
 INTEGRATION_VERSION = "0.4.106"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
@@ -52,6 +52,28 @@ FEEDWATCH_MAX_CADENCE = 60
 FEEDWATCH_DEFAULT_RETENTION = 25      # feed sessions kept
 FEEDWATCH_MAX_RETENTION = 200
 FEEDWATCH_MAX_MINUTES = 20            # hard cap when the feed timer has no fixed duration
+
+# Vision (Wave 2) — Frigate/MQTT tank intelligence: species last-seen, coral zone
+# visits, surface-distress, feeding response latency. Default-off; soft-depends on
+# the mqtt integration (after_dependencies + runtime guard, never a hard import).
+# The maths live in vision.py; the orchestration lives in __init__.py.
+VISION_UNSUB = "vision_mqtt_unsub"          # flat hass.data keys, FEEDWATCH_* style
+VISION_STATE_UNSUB = "vision_state_unsub"
+VISION_TICK_UNSUB = "vision_tick_unsub"
+VISION_ARM_TASK = "vision_arm_task"
+VISION_RUNTIME = "vision_runtime"
+VISION_FINGERPRINT = "vision_fingerprint"
+VISION_TICK_MINUTES = 5                     # alert evaluation cadence
+VISION_FLUSH_TICKS = 12                     # persist the tiny summary hourly (12 x 5 min)
+VISION_MAX_REPORTS = 30                     # feeding report cap, AWC_HISTORY_MAX convention
+VISION_MAX_SPECIES = 24
+VISION_MAX_ZONES = 24
+VISION_DEFAULT_FEED_WINDOW = 180            # seconds a fish has to respond to feeding
+VISION_MIN_FEED_WINDOW = 30
+VISION_MAX_FEED_WINDOW = 900
+VISION_MAX_MISSING_HOURS = 168              # missing-fish threshold clamp (a week)
+VISION_SURFACE_SECONDS = 300                # continuous surface time that counts as distress
+VISION_NOTIFY_COOLDOWN_S = 6 * 3600         # per-alert-key cooldown between pushes
 
 # Parameters the advisory Dosing & Consumption Advisor tracks. These are the
 # consumable chemistry parameters a doser/Trident owner replenishes daily.
@@ -924,6 +946,27 @@ DEFAULT_CORE_CONFIG = {
         "retentionSessions": FEEDWATCH_DEFAULT_RETENTION,
     },
     "feedSessions": [],
+    # Vision (Wave 2) — Frigate/MQTT tank intelligence. Disabled by default and
+    # invisible unless a Frigate NVR + MQTT broker exist; every alert also ships
+    # off so enabling ingestion alone never pages anyone. Observe-and-report
+    # only: vision output never gates equipment during beta.
+    "vision": {
+        "enabled": False,
+        "topicPrefix": "frigate",       # MQTT topic prefix of the Frigate install
+        "cameraName": "",               # Frigate camera name, e.g. "reef_tank"
+        "species": [],                  # classifier sub_label slugs to track
+        "zones": [],                    # Frigate zone names to count visits for
+        "alerts": {
+            "missingFishHours": 0,      # 0 = off
+            "surfaceDistress": False,
+        },
+        "feedReport": {
+            "enabled": False,
+            "windowSeconds": VISION_DEFAULT_FEED_WINDOW,
+        },
+    },
+    "visionReports": [],                # bounded feeding report cards (VISION_MAX_REPORTS)
+    "visionSummary": {},                # tiny flush for restart rehydration
     "energy": {
         "tariff": 0.28,
         "currency": "GBP",
