@@ -38,6 +38,10 @@ class OpenReefPanel extends HTMLElement {
     this._feedWatch = { sessions: [], loaded: false, loading: false, error: "" };
     this._feedPlayer = { sessionId: "", frames: [], index: 0, playing: false, loading: false };
     this._feedPlayerTimer = null;
+    this._vision = null;
+    this._visionAt = 0;
+    this._visionLoading = false;
+    this._visionError = "";
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
@@ -1630,6 +1634,30 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "feedwatch") {
         this._config.feedWatch = this._config.feedWatch || {};
         this._config.feedWatch[field] = value;
+      }
+      if (scope === "vision") {
+        this._config.vision = this._config.vision || {};
+        if (field === "species" || field === "zones") {
+          // Comma-separated text -> deduped list (backend clamps length/count).
+          const items = String(value).split(",").map((s) => s.trim()).filter(Boolean);
+          this._config.vision[field] = [...new Set(items)];
+        } else {
+          this._config.vision[field] = value;
+        }
+      }
+      if (scope === "vision-alerts") {
+        this._config.vision = this._config.vision || {};
+        this._config.vision.alerts = this._config.vision.alerts || {};
+        this._config.vision.alerts[field] = field === "missingFishHours"
+          ? Math.max(0, Math.min(Number(value) || 0, 168))
+          : value;
+      }
+      if (scope === "vision-feed") {
+        this._config.vision = this._config.vision || {};
+        this._config.vision.feedReport = this._config.vision.feedReport || {};
+        this._config.vision.feedReport[field] = field === "windowSeconds"
+          ? Math.max(30, Math.min(Number(value) || 180, 900))
+          : value;
       }
       if (scope === "mode-preview") {
         const modeId = target.dataset.mode;
@@ -8186,6 +8214,148 @@ class OpenReefPanel extends HTMLElement {
     return `<article class="panel stack"><div class="section-head"><div><h3>Imported reports</h3></div></div><div class="icp-report-list">${items}</div></article>`;
   }
 
+  // --- Vision (Frigate tank intelligence) ---------------------------------
+
+  _visionConfig() {
+    return this._config?.vision || {};
+  }
+
+  async _visionLoadSummary() {
+    if (this._visionLoading) return;
+    this._visionLoading = true;
+    try {
+      this._vision = await this._callWS({ type: "openreef/vision_summary" });
+      this._visionError = "";
+    } catch (err) {
+      this._visionError = err instanceof Error ? err.message : String(err);
+    } finally {
+      // Always stamp the time — even on failure — so the refresh-threshold gate
+      // prevents a render→reload→render hot loop (the AWC summary discipline).
+      this._visionAt = Date.now();
+      this._visionLoading = false;
+      this._render();
+    }
+  }
+
+  _visionAge(epochSeconds) {
+    if (!epochSeconds) return "never";
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+    if (s < 90) return `${s}s ago`;
+    if (s < 5400) return `${Math.round(s / 60)}m ago`;
+    if (s < 172800) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  }
+
+  _visionSpeciesLabel(slug) {
+    // Frigate sub_labels arrive as snake_case slugs; prettify for display only.
+    return String(slug).split("_").map((w) => w ? w[0].toUpperCase() + w.slice(1) : w).join(" ");
+  }
+
+  _visionTab() {
+    // Fenced: one exception in this single web component blanks the whole panel.
+    try {
+      const refreshMs = 15000;
+      if (!this._vision || Date.now() - (this._visionAt || 0) > refreshMs) {
+        if (!this._visionLoading) this._visionLoadSummary();
+      }
+      const data = this._vision || {};
+      const sum = data.summary || null;
+      const reports = Array.isArray(data.reports) ? data.reports : [];
+      const lastEventAge = sum && sum.lastEventAt
+        ? Date.now() / 1000 - sum.lastEventAt
+        : null;
+
+      let statusPill = `<div class="pill">Loading…</div>`;
+      if (this._visionError) {
+        statusPill = `<div class="pill warning">Unavailable</div>`;
+      } else if (this._vision) {
+        if (!data.connected) {
+          statusPill = `<div class="pill warning">MQTT not connected</div>`;
+        } else if (lastEventAge !== null && lastEventAge < 3600) {
+          statusPill = `<div class="pill ok">Receiving events</div>`;
+        } else {
+          statusPill = `<div class="pill">Waiting for events</div>`;
+        }
+      }
+
+      const lastSeen = sum && sum.lastSeen ? sum.lastSeen : {};
+      const lastSeenRows = Object.keys(lastSeen).map((species) => {
+        const ts = lastSeen[species];
+        const stale = ts ? (Date.now() / 1000 - ts) > 6 * 3600 : true;
+        return `
+          <div class="row">
+            <span>${this._escape(this._visionSpeciesLabel(species))}</span>
+            <strong class="${stale ? "muted" : ""}">${this._escape(this._visionAge(ts))}</strong>
+          </div>
+        `;
+      }).join("");
+
+      const zoneVisits = sum && sum.zoneVisits ? sum.zoneVisits : {};
+      const zoneRows = Object.keys(zoneVisits).map((zone) => `
+        <div class="row">
+          <span>${this._escape(this._visionSpeciesLabel(zone))}</span>
+          <strong>${this._escape(String(zoneVisits[zone]))}</strong>
+        </div>
+      `).join("");
+
+      const stateChips = [
+        sum && sum.anemoneState ? `<div class="pill">Anemone: ${this._escape(this._visionSpeciesLabel(sum.anemoneState))}</div>` : "",
+        sum && sum.tankState ? `<div class="pill">Tank: ${this._escape(this._visionSpeciesLabel(sum.tankState))}</div>` : "",
+        sum && sum.fishCount !== null && sum.fishCount !== undefined ? `<div class="pill">Fish in frame: ${this._escape(String(sum.fishCount))}</div>` : "",
+        sum && sum.feeding ? `<div class="pill ok">Feeding window open</div>` : "",
+      ].filter(Boolean).join("");
+
+      const reportRows = reports.slice(0, 8).map((report) => {
+        const rows = Array.isArray(report.rows) ? report.rows : [];
+        const when = report.startedAt ? new Date(report.startedAt * 1000).toLocaleString() : "—";
+        const detail = rows.map((row) => {
+          const latency = row.latency === null || row.latency === undefined ? "—" : `${row.latency}s`;
+          return `<span class="pill ${row.responded ? "ok" : ""}">${this._escape(this._visionSpeciesLabel(row.species))} ${this._escape(latency)}</span>`;
+        }).join(" ");
+        return `
+          <article class="card compact">
+            <div class="row">
+              <span>${this._escape(when)}</span>
+              <strong>${this._escape(String(report.respondedCount ?? 0))}/${this._escape(String(rows.length))} responded</strong>
+            </div>
+            <div class="vision-chips">${detail}</div>
+          </article>
+        `;
+      }).join("");
+
+      return `
+        <section class="stack">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Frigate tank intelligence</p>
+              <h2>Vision</h2>
+              <p class="muted">Species sightings, coral zone visits, and feeding response measured from the tank camera.</p>
+            </div>
+            ${statusPill}
+          </div>
+          ${this._visionError ? `<div class="notice warning-notice">Vision summary unavailable: ${this._escape(this._visionError)}</div>` : ""}
+          <div class="grid two">
+            <article class="card">
+              <p class="eyebrow">Last seen</p>
+              ${lastSeenRows || `<p class="muted">No tracked species configured yet — add them under Settings → Vision.</p>`}
+            </article>
+            <article class="card">
+              <p class="eyebrow">Zone visits (since vision came online)</p>
+              ${zoneRows || `<p class="muted">No zones configured yet — add your Frigate zone names under Settings → Vision.</p>`}
+            </article>
+          </div>
+          ${stateChips ? `<article class="card"><p class="eyebrow">Tank state</p><div class="vision-chips">${stateChips}</div></article>` : ""}
+          <article class="card">
+            <p class="eyebrow">Feeding report cards</p>
+            ${reportRows || `<p class="muted">No feeding reports yet. Enable the feeding report under Settings → Vision, then run Feed mode.</p>`}
+          </article>
+        </section>
+      `;
+    } catch (err) {
+      return `<section class="card"><p class="muted">Vision view failed to render: ${this._escape(err instanceof Error ? err.message : String(err))}</p></section>`;
+    }
+  }
+
   _tabs() {
     const tabs = [
       ["mission", "Mission Control"],
@@ -8200,6 +8370,11 @@ class OpenReefPanel extends HTMLElement {
       ["energy", "Energy"],
       ["settings", "Settings"],
     ];
+    // Vision only exists for installs that opted in (Frigate + MQTT owners):
+    // no permanent empty-state tab advertising hardware a tester doesn't have.
+    if (this._config?.vision?.enabled) {
+      tabs.splice(tabs.length - 1, 0, ["vision", "Vision"]);
+    }
     return `
       <nav class="tabs">
         ${tabs.map(([id, label]) => `
@@ -8221,6 +8396,10 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "icp") return this._icpTab();
     if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
+    if (this._activeTab === "vision") {
+      // Falls back to Mission if vision was disabled while this tab was active.
+      return this._config?.vision?.enabled ? this._visionTab() : this._mission();
+    }
     if (this._activeTab === "settings") return this._settings();
     return this._mission();
   }
@@ -9712,6 +9891,62 @@ class OpenReefPanel extends HTMLElement {
       "feedwatch",
       "Feed-watch",
       "Record each feeding as a scrubbable session — confirm every fish came out and ate.",
+      body,
+    );
+  }
+
+  _visionSettings() {
+    const v = this._visionConfig();
+    const alerts = v.alerts || {};
+    const feed = v.feedReport || {};
+    const body = `
+      <label class="toggle-card">
+        <input type="checkbox" data-scope="vision" data-field="enabled" ${v.enabled ? "checked" : ""}>
+        <span><strong>Vision intelligence (Frigate)</strong><small>Reads fish detections from a Frigate NVR over MQTT: per-fish last-seen, coral zone visits, surface distress, and feeding response. Requires a Frigate install publishing to your MQTT broker — observe-and-report only, never controls equipment.</small></span>
+      </label>
+      <p class="eyebrow">Frigate wiring</p>
+      <div class="grid two compact">
+        <label>MQTT topic prefix
+          <input type="text" data-scope="vision" data-field="topicPrefix" value="${this._escape(v.topicPrefix ?? "frigate")}">
+        </label>
+        <label>Frigate camera name
+          <input type="text" data-scope="vision" data-field="cameraName" placeholder="reef_tank" value="${this._escape(v.cameraName ?? "")}">
+        </label>
+      </div>
+      <label>Tracked species — comma-separated Frigate sub-labels
+        <input type="text" data-scope="vision" data-field="species" placeholder="clownfish, six_line_wrasse, chalk_goby" value="${this._escape((v.species || []).join(", "))}">
+      </label>
+      <label>Coral zones to count visits for — comma-separated Frigate zone names
+        <input type="text" data-scope="vision" data-field="zones" placeholder="anemone, torch_coral" value="${this._escape((v.zones || []).join(", "))}">
+      </label>
+      <label>Surface zone name (loitering here = distress)
+        <input type="text" data-scope="vision" data-field="surfaceZone" value="${this._escape(v.surfaceZone ?? "surface")}">
+      </label>
+      <p class="eyebrow">Alerts</p>
+      <div class="grid two compact">
+        <label>Missing-fish alert after (hours, 0 = off)
+          <input type="number" min="0" max="168" step="1" data-scope="vision-alerts" data-field="missingFishHours" value="${this._escape(alerts.missingFishHours ?? 0)}">
+        </label>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="vision-alerts" data-field="surfaceDistress" ${alerts.surfaceDistress ? "checked" : ""}>
+          <span><strong>Surface-distress alert</strong><small>Notify when a fish loiters at the water surface for 5+ minutes.</small></span>
+        </label>
+      </div>
+      <p class="eyebrow">Feeding report</p>
+      <div class="grid two compact">
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="vision-feed" data-field="enabled" ${feed.enabled ? "checked" : ""}>
+          <span><strong>Feeding report card</strong><small>Time each fish's response when Feed mode runs.</small></span>
+        </label>
+        <label>Response window (s)
+          <input type="number" min="30" max="900" step="10" data-scope="vision-feed" data-field="windowSeconds" value="${this._escape(feed.windowSeconds ?? 180)}">
+        </label>
+      </div>
+    `;
+    return this._settingsPanel(
+      "vision",
+      "Vision (Frigate)",
+      "Fish intelligence from a Frigate NVR: last-seen, zone visits, feeding response.",
       body,
     );
   }
@@ -12865,6 +13100,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._timelapseSettings()}
         ${this._overlaySettings()}
         ${this._feedWatchSettings()}
+        ${this._visionSettings()}
         ${this._pulseSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
@@ -15935,6 +16171,7 @@ class OpenReefPanel extends HTMLElement {
         .settings-section-head small { color: #a8bed4; }
         .settings-section-body { display: grid; gap: 14px; }
         .status-list { display: grid; gap: 6px; margin-top: 14px; }
+        .vision-chips { display: flex; flex-wrap: wrap; gap: 8px; }
         .alert-row { align-items: center; }
         .alert-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
         .alert-history { display: grid; gap: 8px; }
