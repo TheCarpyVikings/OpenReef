@@ -2192,6 +2192,12 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             parameters[parameter] = entry
         dosing["parameters"] = parameters
         _normalise_dosing_channels(dosing)
+        raw_notify = dosing.get("notifications")
+        raw_notify = raw_notify if isinstance(raw_notify, dict) else {}
+        dosing["notifications"] = {
+            key: bool(raw_notify.get(key, True))
+            for key in ("missedDose", "reservoirLow", "tubeLife", "syncIssues")
+        }
 
     lighting_cfg = config.setdefault("lightingSchedule", {})
     if not isinstance(lighting_cfg, dict):
@@ -8075,12 +8081,13 @@ async def _async_dosing_verify(hass: HomeAssistant, entry: OpenReefConfigEntry) 
             sync["lastError"] = f"{len(mismatched)} values did not stick on the device"
             desired_map.pop(cid, None)
             changed = True
-            await _async_send_mode_notification(
-                hass, config, f"openreef_dosing_sync_{cid}",
-                f"Dosing sync failed: {channel.get('name', cid)}",
-                "Settings written to the doser did not read back — the device may be "
-                "offline or rejecting writes. Dosing continues on its LAST synced schedule.",
-            )
+            if _dosing_notify_enabled(config, "syncIssues"):
+                await _async_send_mode_notification(
+                    hass, config, f"openreef_dosing_sync_{cid}",
+                    f"Dosing sync failed: {channel.get('name', cid)}",
+                    "Settings written to the doser did not read back — the device may be "
+                    "offline or rejecting writes. Dosing continues on its LAST synced schedule.",
+                )
 
     if rewrote:
         _async_arm_dosing_verify(hass, entry)
@@ -8171,6 +8178,12 @@ def _dosing_plan_fingerprint(channel: dict[str, Any], plan: dict[str, Any]) -> t
         plan.get("windowStart"), plan.get("windowEnd"),
         plan.get("nightStart"), plan.get("nightEnd"), plan.get("nightPercent"),
     )
+
+
+def _dosing_notify_enabled(config: dict[str, Any], family: str) -> bool:
+    dosing = config.get("dosing") if isinstance(config.get("dosing"), dict) else {}
+    notifications = dosing.get("notifications") if isinstance(dosing.get("notifications"), dict) else {}
+    return bool(notifications.get(family, True))
 
 
 async def _async_dosing_notify_once(
@@ -8309,12 +8322,13 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     state["missedSince"] = now_utc.isoformat()
                     transition = True
                     action = "skipped (kalk default)" if channel.get("chemical") == "kalk" else "awaiting your decision"
-                    await _async_dosing_notify_once(
-                        hass, config, runtime, f"missed_{cid}", 6 * 3600,
-                        f"Missed doses: {channel.get('name', cid)}",
-                        f"{missed['missedMl']:.1f} ml behind schedule — {action}. "
-                        "Open the Dosing tab to re-spread or skip.",
-                    )
+                    if _dosing_notify_enabled(config, "missedDose"):
+                        await _async_dosing_notify_once(
+                            hass, config, runtime, f"missed_{cid}", 6 * 3600,
+                            f"Missed doses: {channel.get('name', cid)}",
+                            f"{missed['missedMl']:.1f} ml behind schedule — {action}. "
+                            "Open the Dosing tab to re-spread or skip.",
+                        )
                 elif state.get("missedSince"):
                     state["missedMl"] = missed["missedMl"]
             else:
@@ -8344,7 +8358,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
         reservoir = channel.get("reservoir", {}) if isinstance(channel.get("reservoir"), dict) else {}
         remaining_eff = max(0.0, (reservoir.get("remainingMl") or 0.0) - rt.get("pendingReservoirMl", 0.0))
         low_threshold = reservoir.get("lowThresholdMl") or 0
-        if (reservoir.get("volumeMl") or 0) > 0 and remaining_eff <= low_threshold:
+        if (reservoir.get("volumeMl") or 0) > 0 and remaining_eff <= low_threshold and _dosing_notify_enabled(config, "reservoirLow"):
             await _async_dosing_notify_once(
                 hass, config, runtime, f"reservoir_{cid}", 12 * 3600,
                 f"Dosing reservoir low: {channel.get('name', cid)}",
@@ -8352,7 +8366,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
             )
         wear = channel.get("wear", {}) if isinstance(channel.get("wear"), dict) else {}
         run_hours = ((wear.get("runSeconds") or 0.0) + rt.get("pendingRunSeconds", 0.0)) / 3600.0
-        if run_hours >= (wear.get("tubeLifeHours") or DOSING_TUBE_LIFE_HOURS_DEFAULT):
+        if run_hours >= (wear.get("tubeLifeHours") or DOSING_TUBE_LIFE_HOURS_DEFAULT) and _dosing_notify_enabled(config, "tubeLife"):
             await _async_dosing_notify_once(
                 hass, config, runtime, f"tube_{cid}", 24 * 3600,
                 f"Replace pump tube: {channel.get('name', cid)}",
@@ -8379,12 +8393,13 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 except (TypeError, ValueError):
                     continue
             if drifted:
-                await _async_dosing_notify_once(
-                    hass, config, runtime, f"drift_{cid}", 6 * 3600,
-                    f"Doser settings drifted: {channel.get('name', cid)}",
-                    "The device's numbers no longer match OpenReef (external edit or device reset). "
-                    "Re-syncing now — OpenReef's configuration is authoritative.",
-                )
+                if _dosing_notify_enabled(config, "syncIssues"):
+                    await _async_dosing_notify_once(
+                        hass, config, runtime, f"drift_{cid}", 6 * 3600,
+                        f"Doser settings drifted: {channel.get('name', cid)}",
+                        "The device's numbers no longer match OpenReef (external edit or device reset). "
+                        "Re-syncing now — OpenReef's configuration is authoritative.",
+                    )
                 _async_kick_dosing_sync(hass, entry)
 
     # --- flush policy: transitions save now; quiet accounting flushes hourly ----------

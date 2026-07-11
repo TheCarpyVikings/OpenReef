@@ -1251,6 +1251,15 @@ DEFAULT_CORE_CONFIG = {
         # Shape is dynamic like `equipment`; the normaliser owns the per-channel
         # schema (see _normalise_dosing_channels), so the default is just empty.
         "channels": {},
+        # One notifications home (research: fragmented per-device alert settings are
+        # a top complaint). Safety alerts default ON; each is a master toggle for
+        # its alert family across all channels.
+        "notifications": {
+            "missedDose": True,
+            "reservoirLow": True,
+            "tubeLife": True,
+            "syncIssues": True,
+        },
     },
     # Lighting schedule — drives when light-dependent (lightGated) sensor alerts
     # may fire. mode "off" = no gating (alerts always evaluated, legacy behaviour).

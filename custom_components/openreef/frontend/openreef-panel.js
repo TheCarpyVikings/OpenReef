@@ -50,6 +50,11 @@ class OpenReefPanel extends HTMLElement {
     this._lightingWindow = { data: null, loading: false };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
+    this._doserSummary = null;
+    this._doserSummaryAt = 0;
+    this._doserSummaryLoading = false;
+    this._doserMessage = "";
+    this._doserRemoveConfirm = "";
     this._modeConfirm = null;
     this._controlConfirm = null;
     this._equipmentDetail = null;
@@ -1468,6 +1473,26 @@ class OpenReefPanel extends HTMLElement {
       if (action === "awc-ack") this._awcAction("openreef/awc_acknowledge");
       if (action === "awc-reset") this._awcResetReservoir(id);
       if (action === "awc-calibrate") this._awcCalibrate(id);
+      if (action === "add-doser-channel") this._addDoserChannel();
+      if (action === "add-doser-kalk") this._addDoserChannel("Kalkwasser", "kalk");
+      if (action === "remove-doser-channel") this._removeDoserChannel(id);
+      if (action === "doser-autobind") this._doserAutoBind(id);
+      if (action === "doser-prime") this._doserCall({ type: "openreef/dosing_prime", channel_id: id, seconds: 10 }, "Priming ~10 s.");
+      if (action === "doser-dose-now") this._doserDoseNow(id);
+      if (action === "doser-cal-run") this._doserCall({ type: "openreef/dosing_calibrate_start", channel_id: id }, "Calibration run started — catch the output and measure it.");
+      if (action === "doser-cal-save") this._doserCalibrateSave(id);
+      if (action === "doser-verify-dose") this._doserCall(
+        { type: "openreef/dosing_dose_now", channel_id: id, ml: this._doserVerifyDoseMl(this._doserChannels()[id]) },
+        "Verification dose requested — compare expected vs delivered on the Dosing tab.",
+      );
+      if (action === "doser-reset-reservoir") this._doserCall({ type: "openreef/dosing_reset_reservoir", channel_id: id }, "Reservoir ledger reset to full — re-prime so the first doses don't run air.");
+      if (action === "doser-reset-tube") this._doserCall({ type: "openreef/dosing_reset_tube", channel_id: id }, "Tube counter reset — recalibrate after a tube change.");
+      if (action === "doser-respread") this._doserCall({ type: "openreef/dosing_respread_missed", channel_id: id }, "Missed volume re-spread across the rest of today, under the caps.");
+      if (action === "doser-skip-missed") this._doserCall({ type: "openreef/dosing_respread_missed", channel_id: id, skip: true }, "Missed volume skipped.");
+      if (action === "doser-ack-no-ph") this._doserCall({ type: "openreef/dosing_acknowledge", channel_id: id, kind: "ph_missing" }, "Acknowledged — schedule and volume caps are the only protection.");
+      if (action === "doser-suspend") this._doserCall({ type: "openreef/dosing_suspend", channel_id: id, hours: 24 }, "Dosing locked out for 24 h (the firmware auto-expires the hold if HA disappears).");
+      if (action === "doser-resume") this._doserCall({ type: "openreef/dosing_resume", channel_id: id }, "Dosing lockout cleared.");
+      if (action === "doser-sync-now") this._doserCall({ type: "openreef/dosing_sync_now", channel_id: id }, "Re-syncing the device — every write is verified by read-back.");
     });
 
     const handleFieldInput = (event) => {
@@ -1868,10 +1893,52 @@ class OpenReefPanel extends HTMLElement {
           a.schedule[field] = (target.type === "number") ? Number(value) || 0 : value;
         }
       }
+      if (scope && scope.startsWith("dosing-channel")) {
+        const dosingCfg = this._config.dosing = this._config.dosing || {};
+        const channels = dosingCfg.channels = dosingCfg.channels || {};
+        const channel = channels[id];
+        if (channel) {
+          const coerced = (target.type === "checkbox") ? value
+            : (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+          if (scope === "dosing-channel") {
+            channel[field] = coerced;
+          } else if (scope === "dosing-channel-schedule") {
+            channel.schedule = channel.schedule || {};
+            channel.schedule[field] = coerced;
+            this._doserUpdateSummaryLine(id);
+          } else if (scope === "dosing-channel-night") {
+            channel.schedule = channel.schedule || {};
+            channel.schedule.night = channel.schedule.night || {};
+            channel.schedule.night[field] = coerced;
+            this._doserUpdateSummaryLine(id);
+          } else if (scope === "dosing-channel-guards") {
+            channel.guards = channel.guards || {};
+            let guardValue = coerced;
+            if ((field === "phPauseAbove" || field === "phResumeBelow") && !(Number(guardValue) > 0)) {
+              // Clearing a pH threshold must not become "pause at pH ≥ 0" (a
+              // silent permanent lockout) — restore the safe default instead.
+              guardValue = field === "phPauseAbove" ? 8.45 : 8.30;
+            }
+            channel.guards[field] = guardValue;
+          } else if (scope === "dosing-channel-reservoir") {
+            channel.reservoir = channel.reservoir || {};
+            channel.reservoir[field] = coerced;
+          } else if (scope === "dosing-channel-entities") {
+            channel.driver = channel.driver || { type: "openreef_esphome_stepper" };
+            channel.driver.entities = channel.driver.entities || {};
+            channel.driver.entities[field] = value;
+          }
+        }
+      }
+      if (scope === "dosing-notifications") {
+        const dosingCfg = this._config.dosing = this._config.dosing || {};
+        dosingCfg.notifications = dosingCfg.notifications || {};
+        dosingCfg.notifications[field] = value;
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)) || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)))
         && event.type === "change"
       ) this._render();
     };
@@ -8372,14 +8439,22 @@ class OpenReefPanel extends HTMLElement {
       ["energy", "Energy"],
       ["settings", "Settings"],
     ];
+    // Dosing sits beside Water Change and is on by default (it also hosts the
+    // Advisor every install already has); the existing dosing.enabled toggle is
+    // its opt-out. Static insert after "awc" so ordering never races Vision's
+    // end-of-list splice.
+    if (this._dosingEnabled()) {
+      tabs.splice(tabs.findIndex(([tabId]) => tabId === "awc") + 1, 0, ["dosing", "Dosing"]);
+    }
     // Vision only exists for installs that opted in (Frigate + MQTT owners):
     // no permanent empty-state tab advertising hardware a tester doesn't have.
     if (this._config?.vision?.enabled) {
       tabs.splice(tabs.length - 1, 0, ["vision", "Vision"]);
     }
-    // If vision was disabled while its tab was active, the content falls back
-    // to Mission — highlight Mission so the nav doesn't show no active tab.
-    const activeId = (this._activeTab === "vision" && !this._config?.vision?.enabled)
+    // If a gated tab was disabled while active, the content falls back to
+    // Mission — highlight Mission so the nav doesn't show no active tab.
+    const activeId = ((this._activeTab === "vision" && !this._config?.vision?.enabled)
+      || (this._activeTab === "dosing" && !this._dosingEnabled()))
       ? "mission" : this._activeTab;
     return `
       <nav class="tabs">
@@ -8402,12 +8477,756 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "icp") return this._icpTab();
     if (this._activeTab === "cameras") return this._cameras();
     if (this._activeTab === "energy") return this._energy();
+    if (this._activeTab === "dosing") {
+      // Falls back to Mission if dosing was disabled while this tab was active.
+      return this._dosingEnabled() ? this._doserTab() : this._mission();
+    }
     if (this._activeTab === "vision") {
       // Falls back to Mission if vision was disabled while this tab was active.
       return this._config?.vision?.enabled ? this._visionTab() : this._mission();
     }
     if (this._activeTab === "settings") return this._settings();
     return this._mission();
+  }
+
+  // --- Dosing channels (pump control) -------------------------------------
+  // The firmware executes the schedule and the guard chain; this page edits,
+  // monitors, and explains. Advisor maths stay in the _dosing* methods; the
+  // control page uses the _doser* prefix to keep the two families apart.
+
+  // The frozen entity-name suffix contract from docs/manual/kalk-doser-esphome-design.md.
+  // Auto-bind discovers a device by these suffixes; the STORED config keeps explicit
+  // entity ids so an ESPHome rename never silently unbinds a channel.
+  static get DOSER_BINDING_SUFFIXES() {
+    return {
+      doseVolumeNumber: "number._kalk_dose_volume_ml",
+      doseIntervalNumber: "number._kalk_dose_interval_min",
+      nightIntervalNumber: "number._kalk_night_interval_min",
+      maxDailyNumber: "number._kalk_max_daily_ml",
+      doseSpeedNumber: "number._kalk_dose_speed_steps_s",
+      runCurrentNumber: "number._kalk_run_current_a",
+      phStopNumber: "number._kalk_ph_high_stop",
+      phResumeNumber: "number._kalk_ph_resume_below",
+      stepsPerMlNumber: "number._kalk_steps_per_ml",
+      windowStartNumber: "number._kalk_window_start_min",
+      windowEndNumber: "number._kalk_window_end_min",
+      nightStartNumber: "number._kalk_night_start_min",
+      nightEndNumber: "number._kalk_night_end_min",
+      manualDoseMlNumber: "number._kalk_manual_dose_ml",
+      enabledSwitch: "switch._kalk_dosing_enabled",
+      haSuspendSwitch: "switch._kalk_ha_suspend",
+      phGuardSwitch: "switch._kalk_ph_guard_enabled",
+      primeButton: "button._kalk_prime_test_run_5s",
+      doseNowButton: "button._kalk_dose_now_one_dose",
+      manualDoseButton: "button._kalk_manual_dose",
+      calibrateButton: "button._kalk_calibrate_100_rev",
+      dosedTodaySensor: "sensor._kalk_dosed_today_ml",
+      reservoirLowSensor: "binary_sensor._kalk_reservoir_low",
+      lastSkipSensor: "text_sensor._kalk_last_skip_reason",
+    };
+  }
+
+  _doserChannels() {
+    const channels = this._config?.dosing?.channels;
+    return channels && typeof channels === "object" ? channels : {};
+  }
+
+  _doserChannelIds() {
+    return Object.keys(this._doserChannels()).sort();
+  }
+
+  _doserChemicalLabel(chem) {
+    return ({ alk: "Alk", ca: "Ca", mg: "Mg", kalk: "Kalk", trace: "Trace", other: "Other" })[chem] || "Other";
+  }
+
+  async _doserLoadSummary() {
+    if (this._doserSummaryLoading) return;
+    this._doserSummaryLoading = true;
+    try {
+      this._doserSummary = await this._callWS({ type: "openreef/dosing_summary" });
+    } catch (err) {
+      /* leave the last summary in place */
+    } finally {
+      // Stamp even on failure so the refresh gate can't hot-loop render→WS→render.
+      this._doserSummaryAt = Date.now();
+      this._doserSummaryLoading = false;
+      this._render();
+    }
+  }
+
+  async _doserCall(payload, okMessage) {
+    // Imperative responses replace this._config with the server's saved copy —
+    // persist pending edits first or an unsaved just-added channel would vanish.
+    if (this._configDirty) {
+      await this._saveConfig();
+      if (this._configDirty) {
+        this._doserMessage = "Couldn't save your pending changes — save manually, then retry the action.";
+        this._render();
+        return;
+      }
+    }
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS(payload);
+      this._config = result.config || this._config;
+      if (result.started === false && Array.isArray(result.reasons) && result.reasons.length) {
+        this._doserMessage = "Blocked: " + result.reasons.map((r) => r.message).join("; ");
+      } else if (result.applied === false && result.reason) {
+        this._doserMessage = result.reason;
+      } else {
+        this._doserMessage = okMessage || "";
+      }
+    } catch (err) {
+      this._doserMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._doserSummaryAt = 0;
+    await this._doserLoadSummary();
+  }
+
+  async _doserDoseNow(id) {
+    const el = this.shadowRoot.querySelector(`[data-doser-ml="${id}"]`);
+    const ml = Number(el && el.value) || 0;
+    if (ml <= 0) {
+      this._doserMessage = "Enter a dose volume (ml) first.";
+      this._render();
+      return;
+    }
+    await this._doserCall(
+      { type: "openreef/dosing_dose_now", channel_id: id, ml },
+      `${ml} ml dose requested — the firmware's guard chain has the final say.`,
+    );
+  }
+
+  async _doserCalibrateSave(id) {
+    const el = this.shadowRoot.querySelector(`[data-doser-cal="${id}"]`);
+    const measured = Number(el && el.value) || 0;
+    if (measured <= 0) {
+      this._doserMessage = "Run the 100-revolution calibration, measure the output, then enter the ml.";
+      this._render();
+      return;
+    }
+    await this._doserCall(
+      { type: "openreef/dosing_calibrate", channel_id: id, measured_ml: measured },
+      `Calibration stored (${(320000 / measured).toFixed(0)} steps/ml) — verify with a small dose.`,
+    );
+  }
+
+  _doserVerifyDoseMl(channel) {
+    const cap = Number(channel?.guards?.maxPerDoseMl) || 10;
+    return Math.min(10, cap);
+  }
+
+  _addDoserChannel(presetLabel, presetChem) {
+    const nameEl = this.shadowRoot.querySelector("#or-add-doser-name");
+    const chemEl = this.shadowRoot.querySelector("#or-add-doser-chem");
+    const label = presetLabel || (nameEl && nameEl.value.trim()) || "";
+    if (!label) {
+      this._doserMessage = "Name the channel first (e.g. Kalkwasser).";
+      this._render();
+      return;
+    }
+    const chemical = presetChem || (chemEl && chemEl.value) || "other";
+    const dosing = this._config.dosing = this._config.dosing || {};
+    const channels = dosing.channels = dosing.channels || {};
+    const base = this._slug(label);
+    let id = base || "channel";
+    let suffix = 2;
+    while (channels[id]) { id = `${base}_${suffix}`; suffix += 1; }
+    // Per-chemical seeded defaults: kalk = continuous micro-dosing with night
+    // weighting; 2-part thinks in doses/day. The backend normaliser owns the rest.
+    channels[id] = {
+      name: label,
+      chemical,
+      enabled: false,
+      createdAt: new Date().toISOString(),
+      schedule: chemical === "kalk"
+        ? { enabled: false, mlPerDay: 0, mode: "continuous",
+            night: { enabled: true, percent: 65, useLightingSchedule: true } }
+        : { enabled: false, mlPerDay: 0, mode: "doses", dosesPerDay: 8 },
+      guards: {},
+      reservoir: {},
+      calibration: {},
+      driver: { type: "openreef_esphome_stepper", entities: {} },
+    };
+    this._doserMessage = "";
+    this._setDirty(true);
+    this._recordActivity(`Added dosing channel: ${label}`);
+    this._render();
+    const anchor = this.shadowRoot.querySelector(`#or-dose-ch-${id}`);
+    if (anchor) anchor.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+
+  _removeDoserChannel(id) {
+    const channels = this._doserChannels();
+    const channel = channels[id];
+    if (!channel) return;
+    const enabledEntity = channel.driver?.entities?.enabledSwitch;
+    const pumpOn = enabledEntity && this._state(enabledEntity)?.state === "on";
+    if (pumpOn && this._doserRemoveConfirm !== id) {
+      // Removing only unlinks OpenReef — the on-device schedule keeps dosing.
+      this._doserRemoveConfirm = id;
+      this._render();
+      return;
+    }
+    this._doserRemoveConfirm = "";
+    this._doserCall({ type: "openreef/dosing_delete_channel", channel_id: id },
+      "Channel removed. The pump's on-device schedule keeps running until its enable switch is turned off.");
+  }
+
+  _doserAutoBind(id) {
+    const channel = this._doserChannels()[id];
+    if (!channel) return;
+    const states = (this._hass && this._hass.states) || {};
+    const keys = Object.keys(states);
+    const suffixes = OpenReefPanel.DOSER_BINDING_SUFFIXES;
+    const driver = channel.driver = channel.driver || {};
+    const entities = driver.entities = driver.entities || {};
+    let bound = 0;
+    for (const [role, pattern] of Object.entries(suffixes)) {
+      const dot = pattern.indexOf(".");
+      const domain = pattern.slice(0, dot);
+      const suffix = pattern.slice(dot + 1); // starts "_kalk_…" per the frozen contract
+      const match = keys.find((e) => e.startsWith(domain + ".") && e.endsWith(suffix));
+      if (match) { entities[role] = match; bound += 1; }
+    }
+    this._doserMessage = bound
+      ? `Auto-bind matched ${bound} of ${Object.keys(suffixes).length} entities by the reference-firmware names. Review the overrides for any misses, then Save.`
+      : "No OpenReef doser entities found — is the device flashed, online, and named per the reference firmware?";
+    if (bound) this._setDirty(true);
+    this._render();
+  }
+
+  // Client-side mirror of the schedule summary for live typing feedback; the
+  // authoritative line (firmware granularity included) comes from dosing_summary.
+  _doserScheduleSummaryText(channel) {
+    const s = channel?.schedule || {};
+    const ml = Number(s.mlPerDay) || 0;
+    if (ml <= 0) return "No daily volume set — nothing will dose.";
+    const windowText = (!s.windowStart || !s.windowEnd || s.windowStart === s.windowEnd)
+      ? "all day" : `${s.windowStart}–${s.windowEnd}`;
+    if (s.mode === "doses") {
+      const n = Math.max(1, Number(s.dosesPerDay) || 1);
+      return `${ml} ml/day in ${n} doses of ${(ml / n).toFixed(2)} ml, ${windowText}`;
+    }
+    const night = s.night || {};
+    if (night.enabled && Number(night.percent) > 0) {
+      const win = night.useLightingSchedule ? "the lights-off window" : `${night.windowStart || "22:00"}–${night.windowEnd || "08:00"}`;
+      return `${ml} ml/day continuous, ${Number(night.percent)}% overnight during ${win}`;
+    }
+    return `${ml} ml/day continuous, ${windowText}`;
+  }
+
+  _doserUpdateSummaryLine(id) {
+    const el = this.shadowRoot.querySelector(`[data-doser-summary="${id}"]`);
+    const channel = this._doserChannels()[id];
+    if (el && channel) el.textContent = this._doserScheduleSummaryText(channel);
+  }
+
+  _doserTab() {
+    // Doses are seconds-long and minutes apart — no 1 s tier needed; 2 s while an
+    // action is in flight (fresh feedback), else 10 s.
+    const refreshMs = this._busy ? 2000 : 10000;
+    if (!this._doserSummary || Date.now() - (this._doserSummaryAt || 0) > refreshMs) {
+      if (!this._doserSummaryLoading) this._doserLoadSummary();
+    }
+    const head = `
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Intelligence layer</p>
+          <h2>Dosing</h2>
+          <p>Your pumps run their schedule on-device — OpenReef edits it, verifies every change, and tells you the moment reality drifts from the plan.</p>
+        </div>
+        <div class="button-row">
+          <button class="secondary" data-action="tab" data-id="settings" data-section="dosing" data-scroll="or-section-dosing">Channels &amp; setup</button>
+        </div>
+      </div>`;
+    const message = this._doserMessage
+      ? `<div class="setting-card subtle-card"><small>${this._escape(this._doserMessage)}</small></div>`
+      : "";
+    return `
+      <section class="stack">
+        ${head}
+        ${this._doserStatusBanner()}
+        ${message}
+        ${this._doserChannelGrid()}
+        ${this._doserActivitySection()}
+      </section>`;
+  }
+
+  _doserStatusBanner() {
+    const ids = this._doserChannelIds();
+    if (!ids.length) {
+      const cheeky = this._tone() === "cheeky";
+      const line = cheeky
+        ? "No dosing channels yet. Your reef's chemistry is running on hopes and water changes — wire up a pump and I'll hold the line while you sleep."
+        : "No dosing channels configured. Add a channel in Settings to schedule, calibrate, and monitor a doser.";
+      return `<div class="setting-card subtle-card">
+        <strong>Nothing dosing yet</strong>
+        <p>${this._escape(line)}</p>
+        <p><small>The Consumption Advisor still lives on Mission Control for now.</small></p>
+        <div class="button-row"><button class="primary" data-action="tab" data-id="settings" data-section="dosing" data-scroll="or-section-dosing">Add a channel</button></div>
+      </div>`;
+    }
+    const data = this._doserSummary;
+    if (!data || !data.summary) {
+      return `<div class="setting-card subtle-card"><strong>Loading channel status…</strong></div>`;
+    }
+    const entries = ids.map((id) => [id, data.summary[id]]).filter(([, e]) => e);
+    const guardsOf = (e) => Array.isArray(e.guards) ? e.guards : [];
+    const has = (e, code) => guardsOf(e).some((g) => g.code === code);
+
+    const offline = entries.filter(([, e]) => has(e, "device_offline"));
+    if (offline.length) {
+      return `<div class="setting-card" style="border-left:4px solid var(--error-color,#d32f2f);">
+        <strong>⛔ Doser offline</strong>
+        <p>${offline.map(([, e]) => this._escape(e.name)).join(", ")}: entities unavailable. The device keeps dosing its last synced schedule if it has power — OpenReef just can't confirm doses right now.</p>
+      </div>`;
+    }
+    const missedPending = entries.filter(([, e]) => e.missed && e.missed.pendingDecision);
+    if (missedPending.length) {
+      const [id, e] = missedPending[0];
+      const kalk = e.chemical === "kalk";
+      return `<div class="setting-card" style="border-left:4px solid var(--warning-color,#ffa000);">
+        <strong>⏸ Missed doses — your call</strong>
+        <p>${this._escape(e.name)} is ${this._format(e.missed.missedMl, 1)} ml behind schedule. Missed volume is never re-dosed automatically${kalk ? " — for kalk, skipping is the safe default" : ""}.</p>
+        <div class="button-row">
+          <button class="${kalk ? "secondary" : "primary"}" data-action="doser-respread" data-id="${this._escape(id)}">Re-spread across today</button>
+          <button class="${kalk ? "primary" : "secondary"}" data-action="doser-skip-missed" data-id="${this._escape(id)}">Skip it</button>
+        </div>
+      </div>`;
+    }
+    const unacked = entries.filter(([, e]) => has(e, "ph_unacknowledged"));
+    if (unacked.length) {
+      const [id, e] = unacked[0];
+      return `<div class="setting-card" style="border-left:4px solid var(--warning-color,#ffa000);">
+        <strong>⚠️ No pH failsafe on ${this._escape(e.name)}</strong>
+        <p>Without a pH sensor, the schedule and volume caps are the only protection. Pick a pH entity in Settings, or acknowledge to dose schedule-only.</p>
+        <div class="button-row">
+          <button class="secondary" data-action="tab" data-id="settings" data-section="dosing" data-scroll="or-dose-ch-${this._escape(id)}">Pick a pH sensor</button>
+          <button class="secondary" data-action="doser-ack-no-ph" data-id="${this._escape(id)}">I understand — schedule-only</button>
+        </div>
+      </div>`;
+    }
+    const blocked = entries.filter(([, e]) => e.enabled
+      && guardsOf(e).some((g) => g.severity === "block" && !["awc_active", "disabled"].includes(g.code)));
+    if (blocked.length) {
+      const items = blocked.map(([, e]) => {
+        const reason = guardsOf(e).find((g) => g.severity === "block" && !["awc_active", "disabled"].includes(g.code));
+        return `${this._escape(e.name)}: ${this._escape(reason ? reason.message : "blocked")}`;
+      }).join(" · ");
+      return `<div class="setting-card" style="border-left:4px solid var(--warning-color,#ffa000);">
+        <strong>⏸ ${blocked.length === 1 ? "Channel blocked" : `${blocked.length} channels blocked`}</strong>
+        <p>${items}</p>
+      </div>`;
+    }
+    if (data.awcSuspended && entries.some(([, e]) => has(e, "awc_active"))) {
+      return `<div class="setting-card" style="border-left:4px solid var(--info-color,#1976d2);">
+        <strong>💧 Dosing suspended — water change running</strong>
+        <p>Channels resume automatically after the change and its stabilisation hold-off.</p>
+      </div>`;
+    }
+    const next = entries
+      .map(([, e]) => e.nextDose ? { name: e.name, ...e.nextDose } : null)
+      .filter(Boolean)
+      .sort((a, b) => a.inMinutes - b.inMinutes)[0];
+    const synced = entries
+      .map(([, e]) => e.sync && e.sync.lastSyncedAt ? e.sync.lastSyncedAt : "")
+      .filter(Boolean).sort().pop();
+    const parts = [];
+    if (next) parts.push(`next: ${this._escape(next.name)} ${this._format(next.ml, 2)} ml at ${this._escape(next.time)}`);
+    parts.push(synced ? `schedule synced to device ${this._escape(this._formatActivityTime(synced))}` : "schedule not yet synced to the device");
+    return `<div class="setting-card subtle-card">
+      <strong>✅ All channels on schedule</strong>
+      <p>${parts.join(" · ")}</p>
+    </div>`;
+  }
+
+  _doserChannelGrid() {
+    const ids = this._doserChannelIds();
+    if (!ids.length) return "";
+    const data = this._doserSummary;
+    return `<div class="dosing-grid">
+      ${ids.map((id) => this._doserChannelCard(id, data && data.summary ? data.summary[id] : null,
+        data && data.bindings ? data.bindings[id] : null)).join("")}
+    </div>`;
+  }
+
+  _doserChannelCard(id, entry, bindings) {
+    const channel = this._doserChannels()[id] || {};
+    const name = this._escape(entry?.name || channel.name || id);
+    const chem = this._doserChemicalLabel(entry?.chemical || channel.chemical);
+    // Before the first summary lands, fall back to the config-side binding count
+    // so ready channels don't flash the setup checklist.
+    const bound = bindings ? bindings.bound
+      : Object.values(channel.driver?.entities || {}).filter(Boolean).length;
+    const calibrated = (entry?.calibration?.stepsPerMl || channel.calibration?.stepsPerMl || 0) > 0;
+    const hasVolume = Number(entry?.plan?.mlPerDay ?? channel.schedule?.mlPerDay) > 0;
+
+    if (!bound || !calibrated || !hasVolume) {
+      return this._doserChannelChecklist(id, name, chem, { bound, calibrated, hasVolume, bindings });
+    }
+
+    const guards = Array.isArray(entry?.guards) ? entry.guards : [];
+    const suspended = guards.some((g) => g.code === "awc_active" || g.code === "suspended");
+    const blockReason = guards.find(
+      (g) => g.severity === "block" && !["disabled", "awc_active", "suspended"].includes(g.code),
+    );
+    let pill = `<span class="pill ok">Dosing OK</span>`;
+    if (!entry?.enabled) pill = `<span class="pill disabled">Off</span>`;
+    else if (blockReason) pill = `<span class="pill warning">Blocked</span>`;
+    else if (suspended) pill = `<span class="pill unknown">Suspended</span>`;
+
+    const plan = entry?.plan || {};
+    const target = Number(plan.realisedMlPerDay) || Number(plan.mlPerDay) || 0;
+    const dosed = Number(entry?.dosedTodayMl) || 0;
+    const cap = Number(plan.maxDailyMl) || 0;
+    // Scale the bar to the CAP so the headroom between target and the hard limit
+    // is visible; ticks mark the target and (implicitly, the bar end) the cap.
+    const scale = Math.max(target, cap, dosed, 1);
+    const pct = Math.min(100, Math.round((dosed / scale) * 100));
+    const targetPct = target > 0 ? Math.min(100, Math.round((target / scale) * 100)) : 0;
+
+    const reservoir = entry?.reservoir || {};
+    const reservoirText = reservoir.daysUntilEmpty != null
+      ? `~${this._format(reservoir.daysUntilEmpty, 1)} days left (${this._format((reservoir.remainingMl || 0) / 1000, 1)} L)`
+      : "no container size set";
+    const integrity = entry?.integrity || { status: "ok", reasons: [] };
+    const integrityText = integrity.status === "ok"
+      ? "Calibration and delivery look honest"
+      : this._escape((integrity.reasons || [])[0] || "Needs attention");
+    const tube = entry?.tube || {};
+    const cal = entry?.calibration || {};
+    const sync = entry?.sync || {};
+    const syncChip = sync.state === "synced" && sync.lastSyncedAt
+      ? `synced ${this._escape(this._formatActivityTime(sync.lastSyncedAt))}`
+      : this._escape(sync.state || "unsynced");
+    const nextText = entry?.nextDose
+      ? `next dose in ${entry.nextDose.inMinutes} min (${this._format(entry.nextDose.ml, 2)} ml)`
+      : "no further doses today";
+    const guardLine = blockReason
+      ? `<li class="warning-text">⏸ ${this._escape(blockReason.message)}</li>`
+      : "";
+    const verifyMl = this._doserVerifyDoseMl(channel);
+
+    return `
+      <article class="dosing-card ${integrity.status === "ok" ? "" : "warning"}" id="or-doser-card-${this._escape(id)}">
+        <div class="dosing-card-head">
+          <strong>${name} <span class="pill muted">${this._escape(chem)}</span></strong>
+          ${pill}
+        </div>
+        <div class="dose-progress" title="Dosed today · target ${this._format(target, 0)} ml · hard cap ${this._format(cap, 0)} ml (bar end)">
+          <div class="dose-progress-fill" style="width:${pct}%"></div>
+          ${targetPct > 0 && targetPct < 100 ? `<div class="dose-progress-cap" style="left:${targetPct}%"></div>` : ""}
+        </div>
+        <ul class="dosing-card-lines">
+          <li><strong>Today</strong> ${this._format(dosed, 1)} / ${this._format(target, 0)} ml · ${this._escape(nextText)}</li>
+          <li><strong>Schedule</strong> ${this._escape(plan.summaryText || this._doserScheduleSummaryText(channel))}</li>
+          <li><strong>Reservoir</strong> ${this._escape(reservoirText)}
+            <button class="secondary inline-btn" data-action="doser-reset-reservoir" data-id="${this._escape(id)}">Refilled ↺</button></li>
+          <li><strong>Integrity</strong> ${integrityText}</li>
+          ${guardLine}
+        </ul>
+        <div class="button-row dose-actions">
+          <button class="secondary" data-action="doser-prime" data-id="${this._escape(id)}">Prime 10 s</button>
+          <input type="number" min="0.1" step="0.1" max="${verifyMl}" placeholder="ml" data-doser-ml="${this._escape(id)}" class="dose-ml-input">
+          <button class="secondary" data-action="doser-dose-now" data-id="${this._escape(id)}">Dose now</button>
+        </div>
+        <small class="dose-footer">tube ${this._format(tube.runHours || 0, 0)} h of ${this._format(tube.tubeLifeHours || 1000, 0)} · cal ${cal.ageDays != null ? `${this._format(cal.ageDays, 0)} d ago` : "—"} · ${syncChip}</small>
+      </article>`;
+  }
+
+  _doserChannelChecklist(id, name, chem, stateInfo) {
+    const { bound, calibrated, hasVolume, bindings } = stateInfo;
+    const total = bindings ? bindings.total : 24;
+    const step = (done, label, extra) => `
+      <li>${done ? "✅" : "⬜"} ${label}${extra || ""}</li>`;
+    const go = `<button class="secondary inline-btn" data-action="tab" data-id="settings" data-section="dosing" data-scroll="or-dose-ch-${this._escape(id)}">Go →</button>`;
+    return `
+      <article class="dosing-card unknown" id="or-doser-card-${this._escape(id)}">
+        <div class="dosing-card-head">
+          <strong>${name} <span class="pill muted">${this._escape(chem)}</span></strong>
+          <span class="pill ${bound && !calibrated ? "critical" : "unknown"}">${!bound ? "Setup needed" : !calibrated ? "Not calibrated" : "Set a volume"}</span>
+        </div>
+        <p><small>Set up this channel — Prime and Calibrate work as soon as entities are bound; scheduled dosing unlocks when all three are done.</small></p>
+        <ul class="dosing-card-lines">
+          ${step(bound > 0, `1. Bind the doser's entities${bindings ? ` (${bound}/${total})` : ""} ${go}`)}
+          ${step(calibrated, `2. Calibrate — run 100 revolutions, measure ${go}`)}
+          ${step(hasVolume, `3. Set the daily volume &amp; window ${go}`)}
+        </ul>
+      </article>`;
+  }
+
+  _doserActivitySection() {
+    const ids = this._doserChannelIds();
+    if (!ids.length) return "";
+    const channels = this._doserChannels();
+    const rows = [];
+    for (const id of ids) {
+      const channel = channels[id] || {};
+      for (const event of (channel.events || []).slice(0, 6)) {
+        rows.push({ at: event.at || "", name: channel.name || id, kind: event.kind || "", detail: event.detail || "" });
+      }
+      for (const day of (channel.dailyLog || []).slice(0, 3)) {
+        rows.push({
+          at: day.date || "", name: channel.name || id, kind: "day",
+          detail: `${this._format(day.deliveredMl || 0, 1)} ml delivered of ${this._format(day.targetMl || 0, 0)} ml target`,
+        });
+      }
+    }
+    rows.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    if (!rows.length) {
+      return `<section class="setting-card subtle-card">
+        <strong>Recent dosing activity</strong>
+        <p><small>Nothing logged yet. Every dose lands in Home Assistant's recorder via the Dosed Today sensor — months of per-dose history, no cloud cap.</small></p>
+      </section>`;
+    }
+    const kindPill = (kind) => ({
+      manual_dose: "ok", prime: "ok", calibrated: "ok", calibrate_run: "ok",
+      missed_respread: "warning", missed_skipped: "warning", refill: "ok",
+      tube_reset: "ok", suspend: "warning", resume: "ok", ack_no_ph: "warning", day: "muted",
+    })[kind] || "muted";
+    return `<section class="setting-card">
+      <strong>Recent dosing activity</strong>
+      <p><small>Manual actions, calibrations, and daily rollups. Per-dose detail lives in the recorder history of each channel's Dosed Today sensor.</small></p>
+      ${rows.slice(0, 10).map((row) => `
+        <div class="manual-history-row">
+          <span>${this._escape(row.at ? this._formatActivityTime(row.at) : "—")}</span>
+          <span>${this._escape(row.name)}</span>
+          <span class="pill ${kindPill(row.kind)}">${this._escape(row.kind.replace(/_/g, " "))}</span>
+          <span>${this._escape(row.detail)}</span>
+        </div>`).join("")}
+    </section>`;
+  }
+
+  // --- Dosing channels: settings sections ---------------------------------
+
+  _doserSettingsSections() {
+    const ids = this._doserChannelIds();
+    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["other", "Other"]];
+    return `
+      <section class="mapping-section awc-settings-block">
+        <div class="awc-section-title"><p class="eyebrow">Dosing channels</p></div>
+        <small class="awc-hint">Each channel is one pump head. The schedule runs on the device (dosing survives an HA outage); OpenReef compiles your daily total into the firmware numbers and verifies every write reads back.</small>
+        <div class="mini-grid">
+          <label>Channel name<input id="or-add-doser-name" placeholder="e.g. Kalkwasser"></label>
+          <label>Chemical<select id="or-add-doser-chem">${chemicals.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></label>
+        </div>
+        <div class="button-row">
+          <button class="secondary" data-action="add-doser-channel">Add channel</button>
+          <button class="secondary" data-action="add-doser-kalk">+ Kalkwasser doser</button>
+        </div>
+        ${ids.map((id) => this._doserChannelSettingsCard(id)).join("")}
+      </section>
+      ${this._doserNotificationsSection()}`;
+  }
+
+  _doserChannelSettingsCard(id) {
+    const channel = this._doserChannels()[id] || {};
+    const s = channel.schedule || {};
+    const night = s.night || {};
+    const guards = channel.guards || {};
+    const reservoir = channel.reservoir || {};
+    const cal = channel.calibration || {};
+    const wear = channel.wear || {};
+    const entities = channel.driver?.entities || {};
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const eid = this._escape(id);
+    const kalkish = channel.chemical === "kalk";
+    const continuous = (s.mode || "continuous") === "continuous";
+    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["other", "Other"]];
+
+    const removeRow = this._doserRemoveConfirm === id
+      ? `<div class="notice warning-notice"><small>The pump's enable switch is ON — removing only unlinks OpenReef; the on-device schedule keeps dosing until that switch is turned off.</small>
+          <div class="button-row">
+            <button class="secondary" data-action="remove-doser-channel" data-id="${eid}">Remove anyway</button>
+          </div></div>`
+      : "";
+
+    const noPhBlock = kalkish && !guards.phEntity && !guards.phMissingAcknowledged
+      ? `<div class="notice warning-notice">
+          <small><strong>No pH failsafe.</strong> Schedule and volume caps are the only protection against a kalk overdose. Pick a pH entity above, or acknowledge to run schedule-only.</small>
+          <div class="button-row"><button class="secondary" data-action="doser-ack-no-ph" data-id="${eid}">I understand — schedule-only</button></div>
+        </div>`
+      : (kalkish && !guards.phEntity
+        ? `<small class="awc-hint">Running without a pH failsafe (acknowledged).</small>` : "");
+
+    const calStatus = (Number(cal.stepsPerMl) || 0) > 0
+      ? `Calibrated: ${this._format(cal.stepsPerMl, 1)} steps/ml (${this._format((cal.measuredMl || 0) / 100, 3)} ml/rev)${cal.calibratedAt ? ` · ${this._escape(this._formatActivityTime(cal.calibratedAt))}` : ""}`
+      : "Not calibrated yet — scheduled dosing is blocked until calibration is stored.";
+    const history = (cal.history || []).slice(0, 3).map((h) => `
+      <div class="manual-history-row">
+        <span>${this._escape(h.calibratedAt ? this._formatActivityTime(h.calibratedAt) : "—")}</span>
+        <span>${this._format(h.stepsPerMl || 0, 1)} steps/ml</span>
+        <span>${this._format(h.measuredMl || 0, 1)} ml / 100 rev</span>
+      </div>`).join("");
+
+    return `
+      <article class="awc-pump-card" id="or-dose-ch-${eid}">
+        <div class="dosing-card-head">
+          <strong>${esc(channel.name || id)} <span class="pill muted">${this._escape(this._doserChemicalLabel(channel.chemical))}</span></strong>
+          <button class="secondary inline-btn" data-action="remove-doser-channel" data-id="${eid}">Remove</button>
+        </div>
+        ${removeRow}
+        <div class="mini-grid">
+          <label>Name<input type="text" data-scope="dosing-channel" data-id="${eid}" data-field="name" value="${esc(channel.name || id)}"></label>
+          <label>Chemical<select data-scope="dosing-channel" data-id="${eid}" data-field="chemical">
+            ${chemicals.map(([v, l]) => `<option value="${v}" ${channel.chemical === v ? "selected" : ""}>${l}</option>`).join("")}
+          </select></label>
+        </div>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel" data-id="${eid}" data-field="enabled" ${channel.enabled ? "checked" : ""}>
+          <span><strong>Channel enabled</strong><small>Master intent. The firmware enable switch only turns on once calibration is stored${kalkish ? " and the pH failsafe is set or acknowledged" : ""}.</small></span>
+        </label>
+
+        ${this._doserEntityBindings(id, entities)}
+
+        <div class="awc-section-title"><p class="eyebrow">Schedule</p></div>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="enabled" ${s.enabled ? "checked" : ""}>
+          <span><strong>Scheduled dosing</strong><small>Compile the daily total below into the device's schedule.</small></span>
+        </label>
+        <div class="mini-grid">
+          <label>Daily volume (ml/day)<input type="number" min="0" step="1" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="mlPerDay" value="${esc(s.mlPerDay || 0)}"><small>The one number that matters — OpenReef derives dose size and cadence.</small></label>
+          <label>Mode<select data-scope="dosing-channel-schedule" data-id="${eid}" data-field="mode">
+            <option value="continuous" ${continuous ? "selected" : ""}>Continuous micro-doses (kalk)</option>
+            <option value="doses" ${!continuous ? "selected" : ""}>N doses per day (2-part)</option>
+          </select></label>
+          ${!continuous ? `<label>Doses per day<input type="number" min="1" max="96" step="1" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="dosesPerDay" value="${esc(s.dosesPerDay || 8)}"></label>` : ""}
+          <label>Window start<input type="time" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="windowStart" value="${esc(s.windowStart || "00:00")}"></label>
+          <label>Window end<input type="time" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="windowEnd" value="${esc(s.windowEnd || "00:00")}"><small>Same start and end = around the clock.</small></label>
+        </div>
+        ${continuous ? `
+          <label class="toggle-card compact-toggle">
+            <input type="checkbox" data-scope="dosing-channel-night" data-id="${eid}" data-field="enabled" ${night.enabled ? "checked" : ""}>
+            <span><strong>Night weighting</strong><small>Bias dosing into lights-off hours to offset the CO₂ sag — the firmware runs two cadences on-device.</small></span>
+          </label>
+          ${night.enabled ? `<div class="mini-grid">
+            <label>% of daily volume at night<input type="number" min="0" max="90" step="5" data-scope="dosing-channel-night" data-id="${eid}" data-field="percent" value="${esc(night.percent ?? 50)}"></label>
+            <label class="toggle-card compact-toggle"><input type="checkbox" data-scope="dosing-channel-night" data-id="${eid}" data-field="useLightingSchedule" ${night.useLightingSchedule !== false ? "checked" : ""}><span><strong>Use tank lighting window</strong><small>Night = your configured lights-off hours.</small></span></label>
+            ${night.useLightingSchedule === false ? `
+              <label>Night start<input type="time" data-scope="dosing-channel-night" data-id="${eid}" data-field="windowStart" value="${esc(night.windowStart || "22:00")}"></label>
+              <label>Night end<input type="time" data-scope="dosing-channel-night" data-id="${eid}" data-field="windowEnd" value="${esc(night.windowEnd || "08:00")}"></label>` : ""}
+          </div>` : ""}` : ""}
+        <small class="awc-hint" data-doser-summary="${eid}">${this._escape(this._doserScheduleSummaryText(channel))}</small>
+
+        <div class="awc-section-title"><p class="eyebrow">Safety &amp; guards</p></div>
+        <div class="mini-grid">
+          <label>pH sensor (failsafe)${this._doserEntitySelect("dosing-channel-guards", `data-id="${eid}"`, "phEntity", guards.phEntity || "", "sensor")}<small>Pause-above / resume-below. pH is a failsafe, never the driver.</small></label>
+          <label>Pause dosing at pH ≥<input type="number" min="7" max="9.5" step="0.05" data-scope="dosing-channel-guards" data-id="${eid}" data-field="phPauseAbove" value="${esc(guards.phPauseAbove ?? 8.45)}"></label>
+          <label>Resume below pH<input type="number" min="7" max="9.5" step="0.05" data-scope="dosing-channel-guards" data-id="${eid}" data-field="phResumeBelow" value="${esc(guards.phResumeBelow ?? 8.30)}"><small>Must sit below the pause threshold (hysteresis).</small></label>
+          <label>Max per dose (ml)<input type="number" min="0.1" max="10" step="0.1" data-scope="dosing-channel-guards" data-id="${eid}" data-field="maxPerDoseMl" value="${esc(guards.maxPerDoseMl ?? 10)}"></label>
+          <label>Max daily (ml)<input type="number" min="0" step="5" data-scope="dosing-channel-guards" data-id="${eid}" data-field="maxDailyMl" value="${esc(guards.maxDailyMl ?? 0)}"><small>0 = automatic (daily volume + 25%). Enforced in firmware.</small></label>
+        </div>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel-guards" data-id="${eid}" data-field="suspendDuringAwc" ${guards.suspendDuringAwc !== false ? "checked" : ""}>
+          <span><strong>Suspend during water changes</strong><small>Holds dosing while an automatic water change runs (plus its stabilisation hold-off). The firmware auto-expires the hold if HA disappears.</small></span>
+        </label>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel-guards" data-id="${eid}" data-field="quietHoursEnabled" ${guards.quietHoursEnabled ? "checked" : ""}>
+          <span><strong>Quiet hours</strong><small>Skip scheduled doses inside a window (the pump is near-silent — most reefers leave this off).</small></span>
+        </label>
+        ${guards.quietHoursEnabled ? `<div class="mini-grid">
+          <label>Quiet start<input type="time" data-scope="dosing-channel-guards" data-id="${eid}" data-field="quietStart" value="${esc(guards.quietStart || "01:00")}"></label>
+          <label>Quiet end<input type="time" data-scope="dosing-channel-guards" data-id="${eid}" data-field="quietEnd" value="${esc(guards.quietEnd || "05:00")}"></label>
+        </div>` : ""}
+        ${noPhBlock}
+        <div class="button-row">
+          <button class="secondary" data-action="doser-suspend" data-id="${eid}">Pause dosing 24 h</button>
+          <button class="secondary" data-action="doser-resume" data-id="${eid}">Resume</button>
+        </div>
+
+        <div class="awc-section-title"><p class="eyebrow">Reservoir</p></div>
+        <div class="mini-grid">
+          <label>Container size (ml)<input type="number" min="0" step="100" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="volumeMl" value="${esc(reservoir.volumeMl || 0)}"><small>Big kalk reservoirs are fine — up to 50 L.</small></label>
+          <label>Low alert below (ml)<input type="number" min="0" step="50" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="lowThresholdMl" value="${esc(reservoir.lowThresholdMl ?? 500)}"></label>
+          <label>Float switch (optional)${this._doserEntitySelect("dosing-channel-entities", `data-id="${eid}"`, "reservoirLowSensor", entities.reservoirLowSensor || "", "binary_sensor")}<small>Hardware cross-check; the software ledger works without it.</small></label>
+        </div>
+        <div class="button-row">
+          <button class="secondary" data-action="doser-reset-reservoir" data-id="${eid}">Refilled — reset ledger</button>
+          <button class="secondary" data-action="doser-prime" data-id="${eid}">Re-prime 10 s</button>
+        </div>
+
+        <div class="awc-section-title"><p class="eyebrow">Calibration</p></div>
+        <small>${calStatus}</small>
+        <div class="button-row">
+          <button class="secondary" data-action="doser-cal-run" data-id="${eid}">Run 100 revolutions</button>
+          <input type="number" min="1" max="1000" step="0.1" placeholder="Measured (ml)" data-doser-cal="${eid}" class="dose-ml-input">
+          <button class="secondary" data-action="doser-cal-save" data-id="${eid}">Save calibration</button>
+          ${(Number(cal.stepsPerMl) || 0) > 0 ? `<button class="secondary" data-action="doser-verify-dose" data-id="${eid}">Verify with ${this._doserVerifyDoseMl(channel)} ml dose</button>` : ""}
+        </div>
+        ${history}
+        <small class="awc-hint">Tube: ${this._format((wear.runSeconds || 0) / 3600, 0)} h run of ${this._format(wear.tubeLifeHours || 1000, 0)} h rated life.
+          <button class="secondary inline-btn" data-action="doser-reset-tube" data-id="${eid}">Reset — tube replaced</button></small>
+      </article>`;
+  }
+
+  _doserEntitySelect(scope, idAttr, field, value, domain) {
+    // _awcEntitySelect builds options from live hass.states only — a stored
+    // binding whose device is offline would render as "— none —" and one stray
+    // click would silently unbind it. Keep the stored id visible instead.
+    const states = (this._hass && this._hass.states) || {};
+    if (value && !states[value]) {
+      const opts = Object.keys(states)
+        .filter((e) => e.startsWith(domain + "."))
+        .sort()
+        .map((e) => `<option value="${this._escape(e)}">${this._escape(e)}</option>`)
+        .join("");
+      return `<select data-scope="${scope}" ${idAttr} data-field="${field}">
+        <option value="">— none —</option>
+        <option value="${this._escape(value)}" selected>${this._escape(value)} (unavailable)</option>${opts}</select>`;
+    }
+    return this._awcEntitySelect(scope, idAttr, field, value, domain);
+  }
+
+  _doserEntityBindings(id, entities) {
+    const eid = this._escape(id);
+    const suffixes = OpenReefPanel.DOSER_BINDING_SUFFIXES;
+    const roles = Object.keys(suffixes);
+    const bound = roles.filter((role) => entities[role]).length;
+    const states = (this._hass && this._hass.states) || {};
+    const unavailable = roles.filter((role) => {
+      const ent = entities[role];
+      if (!ent) return false;
+      const st = states[ent];
+      return !st || st.state === "unavailable" || st.state === "unknown";
+    });
+    const pillClass = bound === roles.length ? "ok" : bound ? "warning" : "unknown";
+    const overrides = roles.map((role) => {
+      const domain = suffixes[role].split(".")[0];
+      return `<label>${this._escape(role)}${this._doserEntitySelect("dosing-channel-entities", `data-id="${eid}"`, role, entities[role] || "", domain)}</label>`;
+    }).join("");
+    return `
+      <div class="awc-section-title"><p class="eyebrow">Device entities</p></div>
+      <small class="awc-hint">Flash the reference firmware, then auto-bind — OpenReef finds the entities by their frozen reference names. Bindings are stored as explicit entity ids, so a rename never silently unbinds.</small>
+      <div class="button-row">
+        <button class="secondary" data-action="doser-autobind" data-id="${eid}">Auto-bind entities</button>
+        <span class="pill ${pillClass}">${bound} of ${roles.length} bound${unavailable.length ? ` · ${unavailable.length} unavailable` : ""}</span>
+        <button class="secondary" data-action="doser-sync-now" data-id="${eid}">Sync to device now</button>
+      </div>
+      <details class="doser-overrides">
+        <summary><small>Entity overrides (${bound}/${roles.length})</small></summary>
+        <div class="mini-grid">${overrides}</div>
+      </details>`;
+  }
+
+  _doserNotificationsSection() {
+    const notifications = this._config?.dosing?.notifications || {};
+    const toggle = (field, title, detail) => `
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="dosing-notifications" data-field="${field}" ${notifications[field] !== false ? "checked" : ""}>
+        <span><strong>${title}</strong><small>${detail}</small></span>
+      </label>`;
+    return `
+      <section class="mapping-section awc-settings-block">
+        <div class="awc-section-title"><p class="eyebrow">Dosing alerts</p></div>
+        <small class="awc-hint">One home for every dosing alert — all on by default, delivered as Home Assistant notifications (not buried in an app tab).</small>
+        ${toggle("missedDose", "Missed doses", "The #1 doser failure is silent non-dosing. Alerts after a debounced shortfall; you decide re-spread or skip.")}
+        ${toggle("reservoirLow", "Reservoir low", "Days-until-empty projection from the dose ledger, plus the float switch if fitted.")}
+        ${toggle("tubeLife", "Pump tube life", "Peristaltic tubes lose accuracy past their rated hours — nags at the configured tube life.")}
+        ${toggle("syncIssues", "Sync & drift", "A write that doesn't read back, or device settings drifting from OpenReef.")}
+      </section>`;
   }
 
   // --- Automatic Water Change -------------------------------------------
@@ -11184,7 +12003,7 @@ class OpenReefPanel extends HTMLElement {
     const summaryCards = [
       cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings", { section: "system" }) : "",
       cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission", { scroll: "or-anchor-health" }) : "",
-      cards.dosing && dosing ? this._missionSummaryCard("Dosing Advisor", dosing.value, dosing.detail, dosing.status, "mission", { scroll: "or-msection-dosing", msection: "dosing" }) : "",
+      cards.dosing && dosing ? this._missionSummaryCard("Dosing", dosing.value, dosing.detail, dosing.status, "dosing") : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -14091,10 +14910,11 @@ class OpenReefPanel extends HTMLElement {
       <label class="toggle-card">
         <input type="checkbox" data-scope="dosing" data-field="enabled" ${enabled ? "checked" : ""}>
         <span>
-          <strong>Show the Dosing Advisor</strong>
-          <small>Advisory only. OpenReef estimates consumption and explains safe dose changes, but never controls dosing pumps.</small>
+          <strong>Show the Dosing tab</strong>
+          <small>Pump channels plus the Consumption Advisor. The Advisor stays advisory — dose changes always need your confirmation.</small>
         </span>
       </label>
+      ${this._doserSettingsSections()}
       <section class="mapping-section">
         <div class="section-head">
           <div>
@@ -16043,6 +16863,16 @@ class OpenReefPanel extends HTMLElement {
         .dosing-card-lines li { display: grid; gap: 2px; min-width: 0; }
         .dosing-card-lines span { color: #8da2ba; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
         .dosing-card-lines small { color: #cbd5e1; overflow-wrap: anywhere; }
+        .dosing-card-lines li.warning-text { color: #fbbf24; }
+        .dose-progress { position: relative; height: 8px; border-radius: 4px; background: rgba(148, 163, 184, .18); overflow: hidden; }
+        .dose-progress-fill { height: 100%; border-radius: 4px; background: var(--openreef-accent, #1976d2); transition: width .4s ease; }
+        .dose-progress-cap { position: absolute; top: 0; bottom: 0; width: 2px; background: #a16207; opacity: .8; }
+        .dose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+        .dose-ml-input { width: 92px; }
+        .inline-btn { padding: 2px 8px; font-size: 12px; }
+        .dose-footer { color: #8da2ba; display: block; margin-top: 4px; }
+        .doser-overrides summary { cursor: pointer; color: #9fb2c7; }
+        .doser-overrides .mini-grid { margin-top: 8px; }
         .or-onboard { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
         .or-spotlight { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(4, 12, 20, .62); outline: 2px solid var(--openreef-accent); outline-offset: 2px; opacity: 0; transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, opacity .2s ease; pointer-events: none; }
         .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(520px, calc(100vw - 28px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; transition: left 1.4s cubic-bezier(.4,.15,.35,1), top 1.4s cubic-bezier(.4,.15,.35,1); }
