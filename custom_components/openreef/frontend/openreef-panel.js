@@ -55,6 +55,8 @@ class OpenReefPanel extends HTMLElement {
     this._doserSummaryLoading = false;
     this._doserMessage = "";
     this._doserRemoveConfirm = "";
+    this._doserDryRun = {};
+    this._doserAdvisorKicked = false;
     this._modeConfirm = null;
     this._controlConfirm = null;
     this._equipmentDetail = null;
@@ -1493,6 +1495,9 @@ class OpenReefPanel extends HTMLElement {
       if (action === "doser-suspend") this._doserCall({ type: "openreef/dosing_suspend", channel_id: id, hours: 24 }, "Dosing locked out for 24 h (the firmware auto-expires the hold if HA disappears).");
       if (action === "doser-resume") this._doserCall({ type: "openreef/dosing_resume", channel_id: id }, "Dosing lockout cleared.");
       if (action === "doser-sync-now") this._doserCall({ type: "openreef/dosing_sync_now", channel_id: id }, "Re-syncing the device — every write is verified by read-back.");
+      if (action === "doser-apply-suggest") this._doserApplySuggestion(id, Number(target.dataset.ml));
+      if (action === "doser-ramp-checkpoint") this._doserRampCheckpoint(id);
+      if (action === "doser-dry-run") this._doserToggleDryRun(id);
     });
 
     const handleFieldInput = (event) => {
@@ -1923,6 +1928,9 @@ class OpenReefPanel extends HTMLElement {
           } else if (scope === "dosing-channel-reservoir") {
             channel.reservoir = channel.reservoir || {};
             channel.reservoir[field] = coerced;
+          } else if (scope === "dosing-channel-ramp") {
+            channel.ramp = channel.ramp || {};
+            channel.ramp[field] = coerced;
           } else if (scope === "dosing-channel-entities") {
             channel.driver = channel.driver || { type: "openreef_esphome_stepper" };
             channel.driver.entities = channel.driver.entities || {};
@@ -1938,7 +1946,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)) || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)) || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -4958,7 +4966,7 @@ class OpenReefPanel extends HTMLElement {
     return { value: ready ? "Ready" : "Guided", detail: `${items.length} parameter${items.length === 1 ? "" : "s"} tracked safely`, status: "ok" };
   }
 
-  _dosingParameterCard(item) {
+  _dosingParameterCard(item, dosedBy = "") {
     const unitSuffix = item.unit ? ` ${item.unit}` : "";
     const statusClass = item.status === "critical"
       ? "critical"
@@ -5001,12 +5009,16 @@ class OpenReefPanel extends HTMLElement {
           <li><span>Safety gate</span><small>${this._escape(item.safetyText || "Advisory only.")}</small></li>
           <li><span>Solution strength</span><small>${this._escape(item.potencyInfo?.label || "No solution strength set")}</small></li>
           <li><span>Stability</span><small>${this._escape(stabilityText)}</small></li>
+          ${dosedBy ? `<li><span>Dosed by</span><small>${this._escape(dosedBy)} — apply suggestions from its channel card above.</small></li>` : ""}
         </ul>
       </article>
     `;
   }
 
-  _dosingBreakdown() {
+  _doserAdvisorSection() {
+    // The Advisor's home since Stage 3: dosing insight next to dosing control
+    // (advisor suggests → user applies, one screen). Keeps the or-msection-dosing
+    // anchor so pre-absorption deep-links still land.
     if (!this._dosingEnabled()) return "";
     const active = this._dosingActiveParameters();
     if (!active.length) {
@@ -5022,7 +5034,9 @@ class OpenReefPanel extends HTMLElement {
         </article>
       `;
     }
-    const cards = active.map(([id, sensor]) => this._dosingParameterCard(this._consumptionItem(id, sensor))).join("");
+    const claimedBy = this._doserAdvisorClaims();
+    const cards = active.map(([id, sensor]) =>
+      this._dosingParameterCard(this._consumptionItem(id, sensor), claimedBy[id])).join("");
     const methodOpen = this._healthSectionOpen("dosing-advice");
     const system = this._dosingSystem();
     const primary = this._dosingProduct(system.primaryProduct);
@@ -5075,7 +5089,52 @@ class OpenReefPanel extends HTMLElement {
         </div>
       ` : ""}
     `;
-    return this._missionSection("dosing", "Advisory", "Dosing & Consumption Advisor", pill, body, false, "dosing");
+    return `
+      <article class="panel" id="or-msection-dosing">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Advisory</p>
+            <h3>Dosing &amp; Consumption Advisor</h3>
+          </div>
+          ${pill}
+        </div>
+        ${body}
+      </article>`;
+  }
+
+  // Which channel "claims" each advisor parameter, keyed by parameter id. A kalk
+  // or alk channel claims alkalinity; ca → calcium; mg → magnesium. First (sorted)
+  // claimant wins when two channels share a chemical.
+  _doserAdvisorClaims() {
+    const claims = {};
+    const channels = this._doserChannels();
+    for (const cid of this._doserChannelIds()) {
+      const paramId = this._doserAdvisorParam(channels[cid]?.chemical);
+      if (paramId && !claims[paramId]) claims[paramId] = channels[cid].name || cid;
+    }
+    return claims;
+  }
+
+  _doserAdvisorParam(chemical) {
+    return ({ kalk: "alkalinity", alk: "alkalinity", ca: "calcium", mg: "magnesium" })[chemical] || null;
+  }
+
+  _doserAdvisorItemFor(chemical) {
+    const paramId = this._doserAdvisorParam(chemical);
+    if (!paramId) return null;
+    const pair = this._dosingActiveParameters().find(([id]) => id === paramId);
+    if (!pair) return null;
+    return this._consumptionItem(pair[0], pair[1]);
+  }
+
+  _doserApplySuggestion(id, ml) {
+    const channel = this._doserChannels()[id];
+    if (!channel || !(ml > 0)) return;
+    channel.schedule = channel.schedule || {};
+    channel.schedule.mlPerDay = Math.round(ml * 10) / 10;
+    this._setDirty(true);
+    this._doserMessage = `Applied ${this._format(ml, 1)} ml/day to ${channel.name || id} — Save to sync it to the pump.`;
+    this._render();
   }
 
   _sensorHealthCategory(sensorId, sensor) {
@@ -8745,14 +8804,82 @@ class OpenReefPanel extends HTMLElement {
     const message = this._doserMessage
       ? `<div class="setting-card subtle-card"><small>${this._escape(this._doserMessage)}</small></div>`
       : "";
+    // Self-populate the Advisor once per session: its consumption maths otherwise
+    // wait for a manual "Refresh advisor" click (the Mission-era behaviour).
+    if (!this._doserAdvisorKicked && !this._consumption?.checkedAt
+        && !this._busy && this._dosingActiveParameters().length) {
+      this._doserAdvisorKicked = true;
+      this._refreshHealthTrends().then(() => this._render()).catch(() => {});
+    }
     return `
       <section class="stack">
         ${head}
         ${this._doserStatusBanner()}
         ${message}
         ${this._doserChannelGrid()}
+        ${this._doserDryRunSection()}
+        ${this._doserAdvisorSection()}
         ${this._doserActivitySection()}
       </section>`;
+  }
+
+  _doserDryRunSection() {
+    const ids = this._doserChannelIds();
+    const data = this._doserSummary;
+    if (!ids.length || !data || !data.summary) return "";
+    const rows = ids.map((id) => {
+      const entry = data.summary[id];
+      if (!entry || !(Number(entry.plan?.mlPerDay) > 0)) return "";
+      const preview = this._doserDryRun[id];
+      let detail = "";
+      if (preview) {
+        const times = (preview.doses || []).map((d) => d.time);
+        const shown = times.slice(0, 24).join(" · ");
+        const more = times.length > 24 ? ` … +${times.length - 24} more` : "";
+        detail = `<small>${preview.count} doses · ${this._format(preview.totalMl, 1)} ml total${preview.truncated ? " (list truncated)" : ""}</small>
+          <small class="dose-footer">${this._escape(shown)}${this._escape(more)}</small>`;
+      }
+      return `<div class="manual-history-row">
+          <span>${this._escape(entry.name)}</span>
+          <span>${this._escape(entry.plan.summaryText || "")}</span>
+          <button class="secondary inline-btn" data-action="doser-dry-run" data-id="${this._escape(id)}">${preview ? "Hide" : "Preview"}</button>
+        </div>${detail}`;
+    }).join("");
+    if (!rows.trim()) return "";
+    return `<section class="setting-card subtle-card">
+      <strong>Tomorrow's plan</strong>
+      <p><small>The schedule computed dose-by-dose — exactly what the firmware granularity will deliver. No motor moves.</small></p>
+      ${rows}
+    </section>`;
+  }
+
+  async _doserToggleDryRun(id) {
+    if (this._doserDryRun[id]) {
+      delete this._doserDryRun[id];
+      this._render();
+      return;
+    }
+    try {
+      const result = await this._callWS({ type: "openreef/dosing_dry_run", channel_id: id });
+      this._doserDryRun[id] = result.preview || { doses: [], count: 0, totalMl: 0 };
+    } catch (err) {
+      this._doserMessage = "Preview failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._render();
+  }
+
+  async _doserRampCheckpoint(id) {
+    const el = this.shadowRoot.querySelector(`[data-doser-ramp="${id}"]`);
+    const value = Number(el && el.value);
+    if (!Number.isFinite(value) || value <= 0) {
+      this._doserMessage = "Enter the test reading first (e.g. today's alkalinity).";
+      this._render();
+      return;
+    }
+    await this._doserCall(
+      { type: "openreef/dosing_ramp_checkpoint", channel_id: id, tested_value: value },
+      "Checkpoint logged — the ramp advisory steps up.",
+    );
   }
 
   _doserStatusBanner() {
@@ -8910,6 +9037,30 @@ class OpenReefPanel extends HTMLElement {
       : "";
     const verifyMl = this._doserVerifyDoseMl(channel);
 
+    // Advisor join: the killer flow — insight suggests, you apply, one screen.
+    let advisorLine = "";
+    const advisorItem = this._doserAdvisorItemFor(entry?.chemical || channel.chemical);
+    if (advisorItem) {
+      const suggest = Number(advisorItem.reviewDoseMlPerDay);
+      const currentMl = Number(channel.schedule?.mlPerDay) || 0;
+      const applyable = Number.isFinite(suggest) && suggest > 0
+        && !["locked", "learning"].includes(advisorItem.recommendationState || "");
+      if (applyable) {
+        const differs = Math.abs(suggest - currentMl) > Math.max(0.5, currentMl * 0.01);
+        advisorLine = `<li><strong>Advisor</strong> suggests ${this._format(suggest, 1)} ml/day${differs
+          ? ` <button class="secondary inline-btn" data-action="doser-apply-suggest" data-id="${this._escape(id)}" data-ml="${suggest}">Apply</button>`
+          : " — matches the current schedule"}</li>`;
+      } else {
+        advisorLine = `<li><strong>Advisor</strong> ${this._escape(advisorItem.recommendationState || "learning")} — details in the Advisor section below</li>`;
+      }
+    }
+    const ramp = entry?.ramp;
+    const rampLine = ramp
+      ? `<li><strong>Ramp</strong> ${this._format(ramp.percent, 0)}% — ${this._escape(ramp.hint || "")}${!ramp.complete
+          ? ` <input type="number" step="0.1" min="0" placeholder="test value" data-doser-ramp="${this._escape(id)}" class="dose-ml-input"><button class="secondary inline-btn" data-action="doser-ramp-checkpoint" data-id="${this._escape(id)}">Log checkpoint</button>`
+          : ""}</li>`
+      : "";
+
     return `
       <article class="dosing-card ${integrity.status === "ok" ? "" : "warning"}" id="or-doser-card-${this._escape(id)}">
         <div class="dosing-card-head">
@@ -8926,6 +9077,8 @@ class OpenReefPanel extends HTMLElement {
           <li><strong>Reservoir</strong> ${this._escape(reservoirText)}
             <button class="secondary inline-btn" data-action="doser-reset-reservoir" data-id="${this._escape(id)}">Refilled ↺</button></li>
           <li><strong>Integrity</strong> ${integrityText}</li>
+          ${advisorLine}
+          ${rampLine}
           ${guardLine}
         </ul>
         <div class="button-row dose-actions">
@@ -9030,6 +9183,7 @@ class OpenReefPanel extends HTMLElement {
     const reservoir = channel.reservoir || {};
     const cal = channel.calibration || {};
     const wear = channel.wear || {};
+    const ramp = channel.ramp || {};
     const entities = channel.driver?.entities || {};
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = this._escape(id);
@@ -9159,6 +9313,17 @@ class OpenReefPanel extends HTMLElement {
         ${history}
         <small class="awc-hint">Tube: ${this._format((wear.runSeconds || 0) / 3600, 0)} h run of ${this._format(wear.tubeLifeHours || 1000, 0)} h rated life.
           <button class="secondary inline-btn" data-action="doser-reset-tube" data-id="${eid}">Reset — tube replaced</button></small>
+
+        <div class="awc-section-title"><p class="eyebrow">New-tank ramp (advisory)</p></div>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel-ramp" data-id="${eid}" data-field="enabled" ${ramp.enabled ? "checked" : ""}>
+          <span><strong>Ramp up a new tank</strong><small>Start below the computed dose and step up after each confirmed test — advisory only, you apply every change yourself.</small></span>
+        </label>
+        ${ramp.enabled ? `<div class="mini-grid">
+          <label>Start at (%)<input type="number" min="10" max="100" step="5" data-scope="dosing-channel-ramp" data-id="${eid}" data-field="startPercent" value="${esc(ramp.startPercent ?? 60)}"></label>
+          <label>Step per checkpoint (%)<input type="number" min="1" max="50" step="1" data-scope="dosing-channel-ramp" data-id="${eid}" data-field="stepPercent" value="${esc(ramp.stepPercent ?? 10)}"></label>
+          <label>Max dKH change/day<input type="number" min="0.1" max="3" step="0.1" data-scope="dosing-channel-ramp" data-id="${eid}" data-field="maxDkhPerDay" value="${esc(ramp.maxDkhPerDay ?? 1)}"><small>The community-safe ceiling — the advisory never suggests stepping past it.</small></label>
+        </div>` : ""}
       </article>`;
   }
 
@@ -9225,6 +9390,7 @@ class OpenReefPanel extends HTMLElement {
         ${toggle("missedDose", "Missed doses", "The #1 doser failure is silent non-dosing. Alerts after a debounced shortfall; you decide re-spread or skip.")}
         ${toggle("reservoirLow", "Reservoir low", "Days-until-empty projection from the dose ledger, plus the float switch if fitted.")}
         ${toggle("tubeLife", "Pump tube life", "Peristaltic tubes lose accuracy past their rated hours — nags at the configured tube life.")}
+        ${toggle("calibrationDue", "Calibration due", "Calibration drift is the #1 cause of creeping chemistry — nags when a channel's calibration passes 60 days.")}
         ${toggle("syncIssues", "Sync & drift", "A write that doesn't read back, or device settings drifting from OpenReef.")}
       </section>`;
   }
@@ -12003,7 +12169,7 @@ class OpenReefPanel extends HTMLElement {
     const summaryCards = [
       cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings", { section: "system" }) : "",
       cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission", { scroll: "or-anchor-health" }) : "",
-      cards.dosing && dosing ? this._missionSummaryCard("Dosing", dosing.value, dosing.detail, dosing.status, "dosing") : "",
+      cards.dosing && dosing ? this._missionSummaryCard("Dosing", dosing.value, dosing.detail, dosing.status, "dosing", { tour: "dosing" }) : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -12055,7 +12221,6 @@ class OpenReefPanel extends HTMLElement {
         ${cards.trust ? this._trustCheckMissionPanel() : ""}
         ${summaryCards ? `<div class="summary-grid">${summaryCards}</div>` : ""}
         ${cards.health ? this._reefHealthBreakdown(health) : ""}
-        ${cards.dosing ? this._dosingBreakdown() : ""}
         ${this._missionSection("mission-attention", "Watch", "Attention",
           attentionCount
             ? `<span class="pill ${attentionStatus}">${attentionCount} to check</span>`
@@ -12074,10 +12239,11 @@ class OpenReefPanel extends HTMLElement {
     const sectionAttr = opts.section ? ` data-section="${this._escape(opts.section)}"` : "";
     const msectionAttr = opts.msection ? ` data-msection="${this._escape(opts.msection)}"` : "";
     const scrollAttr = opts.scroll ? ` data-scroll="${this._escape(opts.scroll)}"` : "";
+    const tourAttr = opts.tour ? ` data-tour="${this._escape(opts.tour)}"` : "";
     // One coherent accessible name instead of three separate inline nodes.
     const ariaLabel = this._escape([label, value, detail].filter(Boolean).join(" — "));
     return `
-      <button class="summary-card ${status}" data-action="tab" data-id="${this._escape(tab)}"${sectionAttr}${msectionAttr}${scrollAttr} aria-label="${ariaLabel}">
+      <button class="summary-card ${status}" data-action="tab" data-id="${this._escape(tab)}"${sectionAttr}${msectionAttr}${scrollAttr}${tourAttr} aria-label="${ariaLabel}">
         <span>${this._escape(label)}</span>
         <strong>${this._escape(value)}</strong>
         <small>${this._escape(detail)}</small>

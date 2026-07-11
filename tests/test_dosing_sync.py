@@ -348,6 +348,33 @@ def test_tick_first_observation_establishes_baseline_without_debit():
     assert saved["wear"]["runSeconds"] == 0.0
 
 
+def test_tick_recalibration_due_nags_and_respects_toggle():
+    stale = (NOW_UTC - timedelta(days=90)).isoformat()
+    entry = _entry(channels={"kalk": _channel(calibration={"stepsPerMl": 11851, "calibratedAt": stale})})
+    hass = _hass(entry)
+    install_scheduler(integration)
+    run(integration._async_dosing_tick(hass, entry))
+    notes = _calls(hass, "persistent_notification", "create")
+    assert any("recalibrate" in str(c.data).lower() for c in notes)
+    # The calibrationDue family toggle silences it.
+    cfg = {"dosing": {"enabled": True, "notifications": {"calibrationDue": False},
+                      "channels": {"kalk": _channel(calibration={"stepsPerMl": 11851, "calibratedAt": stale})}}}
+    entry2 = FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config(cfg)})
+    hass2 = _hass(entry2)
+    run(integration._async_dosing_tick(hass2, entry2))
+    assert not any("recalibrate" in str(c.data).lower()
+                   for c in _calls(hass2, "persistent_notification", "create"))
+
+
+def test_normaliser_notifications_families_default_on():
+    entry = _entry()
+    notifications = entry.options[CONF_SETTINGS]["dosing"]["notifications"]
+    assert notifications == {
+        "missedDose": True, "reservoirLow": True, "tubeLife": True,
+        "calibrationDue": True, "syncIssues": True,
+    }
+
+
 def test_tick_accumulates_wear_and_reservoir_on_flush():
     # lastSensorAt set ⇒ this is a known channel (not first observation), so the
     # 0 → 10 ml delta debits the ledgers and the first-tick flush persists them.

@@ -7,7 +7,7 @@
 Two things in this doc are **not** adapt-to-taste:
 
 - **The entity names are a frozen contract.** The OpenReef panel's auto-bind feature discovers this channel by scanning `hass.states` for the entity-id **suffixes** in §6 (e.g. `button.*_calibrate_100_rev`). Rename the node, the device, the Wi-Fi — never the entity names.
-- **The pins are PENDING AUDIT** (locked decision 12). The remap in §2 is proposed against the repo's 2-pump reference, not against the YAML actually running on the device. **Do not wire until the audit confirms.**
+- **The pins are FINAL for a fresh build** (audit resolved 2026-07-11: neither the AWC pumps nor the doser are built yet, so no device YAML exists to drift from — this document is the wiring authority). Build to the map in §2/§3. Choosing different pins on your fresh build is fine — just update the GPIO table here so doc and copper never disagree, and never touch the entity names.
 
 ---
 
@@ -24,16 +24,16 @@ The AWC stance carries over unchanged: **guards live in firmware.** HA edits the
 | 5 | Only Prime (unguarded) and Dose Now (scheduled size) | New bounded **Kalk Manual Dose (ml)** number + **Kalk Manual Dose** button: runs the **same guard chain** and counts into dosed-today. Prime stays guard-free but hard-bounded (~5 s per press). |
 | 6 | Mixed persistence | Every config number/switch restores across reboot — **except Kalk HA Suspend, which must boot OFF**. |
 | 7 | Skips only visible in the device log | New text sensor **Kalk Last Skip Reason**: every skip publishes a short reason; successful doses publish `ok HH:MM`. |
-| 8 | UART TX GPIO17 / RX GPIO16 / EN GPIO14 | All three collide with the AWC reference — remapped per §2, **pending audit**. |
+| 8 | UART TX GPIO17 / RX GPIO16 / EN GPIO14 | All three collide with the AWC reference — remapped per §2 (**final**: TX→22, RX→21, EN→23). |
 | 9 | Guard order implicit | Guard chain order documented (header comment + here): **enabled → !ha_suspend → reservoir not low → calibrated → in window → pH ok (if guard on) → daily cap**. |
 
 Also unchanged from the brief and deliberate: the pH guard can only *stop* dosing when pH is high. There is no "dose when pH < X" pathway anywhere in this firmware, and none can be configured into existence (locked decision 8).
 
 ---
 
-## 2. Pin audit — **PENDING: do not wire yet**
+## 2. Pin audit — **RESOLVED: this map is final**
 
-> **This section is provisional.** The table below audits the brief's pin claims against the repo's 2-pump reference YAML — **not** against the YAML actually flashed on the device, which may have drifted. Stage 0 requires dumping the real device config and confirming (or re-running) this remap before anything is soldered. Every remapped pin in §4 carries the same caveat as a YAML comment.
+> **Audit outcome (2026-07-11):** there is no flashed device to audit — the AWC pumps and the doser are both unbuilt, so the repo's reference YAML is the single source of truth and the remap below is **final for a fresh build**. The table is kept because it documents *why* these pins were chosen over the brief's claims. If you wire differently, update this table and §3 in the same change.
 
 The brief (§7) asserted "firmware pin assignments are fixed and must not be changed: UART TX GPIO17, RX GPIO16, driver enable GPIO14, index GPIO13, reservoir float GPIO4; GPIO25/26/27/32/33 belong to the AWC." Three of those five kalk pins are already spoken for in the repo's AWC reference, and two of the "belongs to AWC" pins are actually free:
 
@@ -47,7 +47,7 @@ The brief (§7) asserted "firmware pin assignments are fixed and must not be cha
 | 25 / 26 / 27 | `leak` / `display_high` / `fresh_empty` inputs | "belong to the AWC" | consistent — untouched |
 | 32 / 33 | **unused** | "belong to the AWC" (wrong) | actually free — **fallback candidates** |
 
-**Why 32/33 are the fallback, not the first choice:** GPIO21/22 are the ESP32's default I2C pins (SDA/SCL). If the audit finds the real device carrying an I2C peripheral (display, ADS1115, RTC…), take UART TX/RX to **GPIO32/33** instead and put EN wherever remains free. GPIO23 is likewise the default VSPI MOSI — same drill if SPI is in play. GPIO34–39 are input-only and unusable for TX/EN; GPIO0/2/12/15 are strapping pins — avoid.
+**Why 32/33 are the fallback, not the first choice:** GPIO21/22 are the ESP32's default I2C pins (SDA/SCL). If your fresh build adds an I2C peripheral (display, ADS1115, RTC…), take UART TX/RX to **GPIO32/33** instead, put EN wherever remains free, and update this table. GPIO23 is likewise the default VSPI MOSI — same drill if SPI is in play. GPIO34–39 are input-only and unusable for TX/EN; GPIO0/2/12/15 are strapping pins — avoid.
 
 **If your AWC is the 3-pump ESP32-S3 node** ([`awc-esphome-3pump-design.md`](/home/reece/Workspaces/Ragnars_Reef/docs/manual/awc-esphome-3pump-design.md)) rather than the 2-pump classic ESP32: this audit does **not** apply. That board uses GPIO4–7/15–18/21 (GPIO4 is the *drain MOSFET*, GPIO21 the *waste float*) and has different safe/forbidden pin ranges (26–32 flash, 33–37 octal). Re-run the audit from scratch against that map.
 
@@ -125,11 +125,11 @@ Merge notes: this is a **fragment** — the `esphome:`, `esp32:`, `api:`, `ota:`
 # failure — reservoir sizing is the ultimate backstop. v2 mitigation is the
 # master power-cut relay from the 3-pump design. See the risk notes.
 #
-# !! PINS PENDING AUDIT (locked decision 12): GPIO22/21/23 below are the
-# !! PROPOSED remap of the brief's 17/16/14 (which collide with the AWC
-# !! reference's fill/drain/waste-full pins). GPIO21/22 are the default I2C
-# !! pins and GPIO23 the default VSPI MOSI — if the real device uses those
-# !! buses, fall back to GPIO32/33. Do NOT wire until the audit confirms.
+# PINS FINAL for a fresh build (audit resolved: nothing is wired yet, this doc
+# is the authority): GPIO22/21/23 replace the brief's 17/16/14, which collide
+# with the AWC reference's fill/drain/waste-full pins. GPIO21/22 are the
+# default I2C pins and GPIO23 the default VSPI MOSI — if YOUR build adds those
+# buses, take TX/RX to GPIO32/33 instead and update the §2 table to match.
 # =============================================================================
 
 substitutions:
@@ -144,8 +144,8 @@ external_components:
 
 uart:
   id: tmc_uart
-  tx_pin: GPIO22     # PENDING AUDIT — remapped from brief's GPIO17 (AWC fill pump)
-  rx_pin: GPIO21     # PENDING AUDIT — remapped from brief's GPIO16 (AWC drain pump)
+  tx_pin: GPIO22     # FINAL — remapped from brief's GPIO17 (AWC fill pump)
+  rx_pin: GPIO21     # FINAL — remapped from brief's GPIO16 (AWC drain pump)
   baud_rate: 500000
 
 time:
@@ -450,7 +450,7 @@ stepper:
     rsense: 110 mOhm
     vsense: False
     address: 0x00
-    enn_pin: GPIO23    # PENDING AUDIT — remapped from brief's GPIO14 (AWC waste float)
+    enn_pin: GPIO23    # FINAL — remapped from brief's GPIO14 (AWC waste float)
     index_pin: GPIO13  # no conflict — unchanged from the brief
     on_boot:
       - tmc2209.configure:

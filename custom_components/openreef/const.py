@@ -1258,6 +1258,7 @@ DEFAULT_CORE_CONFIG = {
             "missedDose": True,
             "reservoirLow": True,
             "tubeLife": True,
+            "calibrationDue": True,
             "syncIssues": True,
         },
     },

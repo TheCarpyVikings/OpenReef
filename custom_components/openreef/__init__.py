@@ -156,6 +156,7 @@ from .const import (
     DOSING_MIRROR_UNSUB,
     DOSING_ML_PER_DAY_MAX,
     DOSING_PH_MIRROR_ENTITY,
+    DOSING_RECAL_NAG_DAYS,
     DOSING_RESERVOIR_MAX_ML,
     DOSING_ROLLOVER_ANOMALY_MINUTES,
     DOSING_RUNTIME,
@@ -2204,7 +2205,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         raw_notify = raw_notify if isinstance(raw_notify, dict) else {}
         dosing["notifications"] = {
             key: bool(raw_notify.get(key, True))
-            for key in ("missedDose", "reservoirLow", "tubeLife", "syncIssues")
+            for key in ("missedDose", "reservoirLow", "tubeLife", "calibrationDue", "syncIssues")
         }
 
     lighting_cfg = config.setdefault("lightingSchedule", {})
@@ -8402,6 +8403,19 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 hass, config, runtime, f"reservoir_{cid}", 12 * 3600,
                 f"Dosing reservoir low: {channel.get('name', cid)}",
                 f"~{remaining_eff / 1000.0:.1f} L left — refill, then use 'Refilled — re-prime' so the ledger stays honest.",
+            )
+        cal_block = channel.get("calibration", {}) if isinstance(channel.get("calibration"), dict) else {}
+        cal_age = awc_engine._age_days(cal_block.get("calibratedAt"), now_utc) if cal_block.get("calibratedAt") else None
+        if (
+            cal_age is not None and cal_age >= DOSING_RECAL_NAG_DAYS
+            and (cal_block.get("stepsPerMl") or 0) > 0
+            and _dosing_notify_enabled(config, "calibrationDue")
+        ):
+            await _async_dosing_notify_once(
+                hass, config, runtime, f"recal_{cid}", 7 * 24 * 3600,
+                f"Recalibrate doser: {channel.get('name', cid)}",
+                f"Calibration is {cal_age:.0f} days old — peristaltic tubes drift, and calibration "
+                "drift is the #1 cause of creeping chemistry. Run the 100-revolution calibration again.",
             )
         wear = channel.get("wear", {}) if isinstance(channel.get("wear"), dict) else {}
         run_hours = ((wear.get("runSeconds") or 0.0) + rt.get("pendingRunSeconds", 0.0)) / 3600.0
