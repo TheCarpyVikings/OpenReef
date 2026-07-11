@@ -95,30 +95,53 @@ def window_minutes(start: int, end: int) -> int:
 # --------------------------------------------------------------------------- #
 # Calibration & pump-run primitive
 # --------------------------------------------------------------------------- #
-def runtime_for_volume_s(litres: float, ml_per_s: float, exchange_factor: float = 1.0) -> float:
+def runtime_for_volume_s(
+    litres: float, ml_per_s: float, exchange_factor: float = 1.0, spin_up_ml: float = 0.0
+) -> float:
     """Seconds to move ``litres`` at ``ml_per_s`` (the core pump-run primitive).
 
     ``exchange_factor`` is the per-pump two-stage correction (Kamoer-style): a
     multiplier on runtime so a pump whose *effective* throughput differs from its
     bench ml/s (longer tube, more head) still moves the intended volume. 1.0 = no
     correction. Returns 0.0 for a non-positive rate (caller must treat as "pump
-    not calibrated")."""
+    not calibrated").
+
+    ``spin_up_ml`` is the per-dose priming/startup offset from the linear calibration
+    ``volume = slope·t + intercept`` — the small volume a peristaltic pump over- or
+    under-delivers on top of the steady rate because of motor spin-up / roller
+    settling. We invert the fit: ``t = (V − spin_up_ml) / rate · factor`` (clamped
+    ≥ 0). This is *negligible* on litre-scale changes but dominant on the tens-of-mL
+    hourly micro-doses (a fixed few-mL offset is ~6.5% of a 40 mL dose and grows as the
+    dose shrinks), so applying it is what keeps small doses volume-accurate. Default
+    0.0 ⇒ identical to the pure-rate behaviour (back-compatible). NB: only the primed
+    startup term belongs here — a one-time dry-tube *fill* volume must NOT be folded in
+    (it would over-correct every primed run), which is why the config splits ``spinUpMl``
+    (per dose, here) from ``primeMl`` (first run after an air purge, not here)."""
     rate = _f(ml_per_s)
     if rate <= 0:
         return 0.0
     factor = _f(exchange_factor, 1.0)
     if factor <= 0:
         factor = 1.0
-    return max(0.0, _f(litres) * 1000.0 / rate * factor)
+    net_ml = _f(litres) * 1000.0 - _f(spin_up_ml)
+    return max(0.0, net_ml / rate * factor)
 
 
-def volume_for_runtime_l(seconds: float, ml_per_s: float, exchange_factor: float = 1.0) -> float:
+def volume_for_runtime_l(
+    seconds: float, ml_per_s: float, exchange_factor: float = 1.0, spin_up_ml: float = 0.0
+) -> float:
     """Litres moved by running ``seconds`` at ``ml_per_s`` — inverse of
-    :func:`runtime_for_volume_s`. Used to account a partial / aborted run."""
+    :func:`runtime_for_volume_s` (``V = t·rate/factor + spin_up``). Used to account a
+    partial / aborted run. Pass the pump's ``spin_up_ml`` when accounting a run that
+    *started* (the offset is incurred once, at start); leave it 0 when converting a
+    *remaining*-time tail, where no further start occurs."""
     factor = _f(exchange_factor, 1.0)
     if factor <= 0:
         factor = 1.0
-    return max(0.0, _f(seconds) * _f(ml_per_s) / factor / 1000.0)
+    secs = _f(seconds)
+    if secs <= 0:
+        return 0.0
+    return max(0.0, (secs * _f(ml_per_s) / factor + _f(spin_up_ml)) / 1000.0)
 
 
 def ml_per_s_from_run(volume_ml: float, seconds: float) -> float:
@@ -297,6 +320,28 @@ def drift_state(
     }
 
 
+def net_imbalance_from_totals(
+    drained_l: float, filled_l: float, threshold_l: float = DEFAULT_NET_IMBALANCE_L
+) -> dict[str, Any]:
+    """Net-imbalance verdict from cumulative drain/fill totals.
+
+    Returns ``{drainedL, filledL, netL, status, suggestedTrimL}`` where ``netL`` =
+    filled − drained (negative ⇒ net drained ⇒ salinity-drop risk) and
+    ``suggestedTrimL`` is the litres to add to the next fill (or remove, if
+    negative) to rebalance."""
+    drained = max(0.0, _f(drained_l))
+    filled = max(0.0, _f(filled_l))
+    net = filled - drained
+    over = abs(net) >= _f(threshold_l, DEFAULT_NET_IMBALANCE_L)
+    return {
+        "drainedL": round(drained, 3),
+        "filledL": round(filled, 3),
+        "netL": round(net, 3),
+        "status": "warning" if over else "ok",
+        "suggestedTrimL": round(-net, 3),  # add this much fill to get back to balance
+    }
+
+
 def net_imbalance_state(
     events: Iterable[Any], threshold_l: float = DEFAULT_NET_IMBALANCE_L
 ) -> dict[str, Any]:
@@ -307,24 +352,16 @@ def net_imbalance_state(
     when it exceeds ``threshold_l``, warn and suggest a corrective trim on the next
     change.
 
-    Returns ``{drainedL, filledL, netL, status, suggestedTrimL}`` where ``netL`` =
-    filled − drained (negative ⇒ net drained ⇒ salinity-drop risk) and
-    ``suggestedTrimL`` is the litres to add to the next fill (or remove, if
-    negative) to rebalance."""
+    NB: summing a CAPPED event list is only honest while the list holds every change —
+    at high-frequency micro-change cadence (24/day fills a 100-event history in ~4 days)
+    the persistent ledger totals must be used instead (see
+    :func:`net_imbalance_from_totals` and the ``ledger`` block in :func:`summary`)."""
     drained = 0.0
     filled = 0.0
     for ev in events:
         drained += max(0.0, _f((ev or {}).get("drainedL")))
         filled += max(0.0, _f((ev or {}).get("filledL")))
-    net = filled - drained
-    over = abs(net) >= _f(threshold_l, DEFAULT_NET_IMBALANCE_L)
-    return {
-        "drainedL": round(drained, 3),
-        "filledL": round(filled, 3),
-        "netL": round(net, 3),
-        "status": "warning" if over else "ok",
-        "suggestedTrimL": round(-net, 3),  # add this much fill to get back to balance
-    }
+    return net_imbalance_from_totals(drained, filled, threshold_l)
 
 
 # --------------------------------------------------------------------------- #
@@ -342,7 +379,13 @@ def resolve_period_litres(schedule: dict[str, Any], tank_volume_l: float) -> flo
 
 def runs_per_week(schedule: dict[str, Any]) -> int:
     """How many discrete batch runs occur per week = (active days) x (times/day).
-    Continuous schedules return 0 (they don't run as discrete batches)."""
+    Continuous schedules return 0 (they don't run as discrete batches).
+
+    This is the count of times :func:`is_due` fires in a week — each allowed day, at
+    each daily time — and it is period-agnostic (a *weekly* amount is still delivered
+    across ``n_days x n_times`` runs). Using ``max(n_days, n_times)`` here under-counts
+    the runs and makes :func:`per_change_litres` over-dose (e.g. Mon/Wed x 06:00/18:00
+    would split a weekly amount across 2 slots but actually run 4 times ⇒ ~2x change)."""
     sched = schedule or {}
     if str(sched.get("method", "")).startswith("continuous"):
         return 0
@@ -352,8 +395,6 @@ def runs_per_week(schedule: dict[str, Any]) -> int:
     if not times:
         times = [sched.get("startTime", "02:00")]
     n_times = max(1, len([t for t in times if t]))
-    if str(sched.get("period", "day")).lower() == "week":
-        return n_times if n_days == 0 else max(n_times, n_days)  # week amount spread over slots
     return n_days * n_times
 
 
@@ -522,8 +563,8 @@ def simultaneous_max_excursion_l(cfg: dict[str, Any], target_l: float) -> float:
     pumps = (cfg or {}).get("pumps", {}) if isinstance((cfg or {}).get("pumps"), dict) else {}
     drain = pumps.get("drain", {}) if isinstance(pumps.get("drain"), dict) else {}
     fill = pumps.get("fill", {}) if isinstance(pumps.get("fill"), dict) else {}
-    drain_rt = runtime_for_volume_s(target, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0))
-    fill_rt = runtime_for_volume_s(target, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0))
+    drain_rt = runtime_for_volume_s(target, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0), drain.get("spinUpMl", 0.0))
+    fill_rt = runtime_for_volume_s(target, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0), fill.get("spinUpMl", 0.0))
     if drain_rt <= 0 or fill_rt <= 0:
         return target
     t_fast, t_slow = min(drain_rt, fill_rt), max(drain_rt, fill_rt)
@@ -538,7 +579,7 @@ def leg_runtime_s(slice_l: float, cfg: dict[str, Any], roles: Iterable[str]) -> 
     for role in roles:
         pump = pumps.get(role, {}) if isinstance(pumps, dict) else {}
         longest = max(longest, runtime_for_volume_s(
-            slice_l, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0)
+            slice_l, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0), pump.get("spinUpMl", 0.0)
         ))
     return longest
 
@@ -578,6 +619,15 @@ def start_guard_reasons(
     if _live(live, "highLevel"):
         out.append({"code": "high_level", "severity": "fault",
                     "message": "Display high-level cutoff is active"})
+    # Fail-closed: a CONFIGURED flood-hazard sensor that has gone unavailable is a blind
+    # spot with no backend backstop — refuse to start until it reports again. "block" not
+    # "fault": a flaky sensor defers the change, it doesn't latch the feature.
+    if _live(live, "leakUnknown"):
+        out.append({"code": "leak_unavailable", "severity": "block",
+                    "message": "Leak sensor is unavailable — refusing to start blind"})
+    if _live(live, "highLevelUnknown"):
+        out.append({"code": "high_level_unavailable", "severity": "block",
+                    "message": "Display high-level sensor is unavailable — refusing to start blind"})
     if _live(live, "freshEmpty"):
         out.append({"code": "fresh_empty", "severity": "block",
                     "message": "Fresh saltwater reservoir is empty"})
@@ -656,6 +706,15 @@ def in_run_safety(
     if _live(live, "highLevel"):
         return {"action": "fault", "reason": "Display high-level cutoff — change aborted",
                 "latch": True, "masterKill": False}
+    # Fail-closed: a configured flood-hazard sensor going unavailable mid-change means we
+    # are pumping blind — PAUSE (auto-resume when it recovers), never latch on flakiness.
+    if _live(live, "leakUnknown"):
+        return {"action": "pause", "reason": "Leak sensor unavailable — paused until it recovers",
+                "latch": False, "masterKill": False}
+    if _live(live, "highLevelUnknown"):
+        return {"action": "pause",
+                "reason": "Display high-level sensor unavailable — paused until it recovers",
+                "latch": False, "masterKill": False}
     if needs_fill and _live(live, "freshEmpty"):
         return {"action": "pause", "reason": "Fresh saltwater reservoir empty",
                 "latch": False, "masterKill": False}
@@ -711,10 +770,17 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
     weekly = daily * 7.0
     per_change = per_change_litres(sched, tank) if sched.get("enabled") else 0.0
 
-    ni = net_imbalance_state(
-        cfg.get("history", []),
-        (cfg.get("safety", {}) or {}).get("netImbalanceWarnLitres", DEFAULT_NET_IMBALANCE_L),
-    )
+    # Net imbalance from the PERSISTENT ledger when present (survives the capped history —
+    # mandatory at micro-change cadence); fall back to summing history for legacy configs.
+    threshold = (cfg.get("safety", {}) or {}).get("netImbalanceWarnLitres", DEFAULT_NET_IMBALANCE_L)
+    ledger = cfg.get("ledger") if isinstance(cfg.get("ledger"), dict) else None
+    if ledger is not None:
+        ni = net_imbalance_from_totals(
+            ledger.get("cumulativeDrainedL"), ledger.get("cumulativeFilledL"), threshold
+        )
+        ni["since"] = ledger.get("resetAt") or None
+    else:
+        ni = net_imbalance_state(cfg.get("history", []), threshold)
     removed_30d = continuous_removed(daily * 30.0, tank) if (tank > 0 and daily > 0) else 0.0
 
     pumps: dict[str, Any] = {}
@@ -729,6 +795,11 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
             "recalibrationDue": cal_age is not None and cal_age >= recal_days,
             "tubingAgeDays": None if tub_age is None else round(tub_age, 1),
             "tubingReplaceDue": tub_age is not None and tub_age >= tubing_days,
+            # Lifetime wear odometers (persist independently of the capped history):
+            # run-hours vs motor/tube life, start-count vs switching wear — the honest
+            # duty numbers for high-frequency micro-changes (~8,760 starts/yr at hourly).
+            "runHours": round(max(0.0, _f(p.get("runSeconds"))) / 3600.0, 2),
+            "startCount": int(max(0.0, _f(p.get("startCount")))),
         }
 
     return {

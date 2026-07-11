@@ -45,6 +45,25 @@ def test_runtime_zero_rate_is_zero():
     assert awc.runtime_for_volume_s(5.0, -10.0) == 0.0
 
 
+def test_runtime_applies_spin_up_offset():
+    # slope 1.46 ml/s, spin-up -2.6 mL (startup deficit): a 40 mL dose must run LONGER
+    # so V = slope*t + intercept lands on 40. t = (40 - (-2.6))/1.46 = 29.18 s (vs 27.4 without).
+    t = awc.runtime_for_volume_s(0.040, 1.46, 1.0, -2.6)
+    assert _close(t, (40.0 + 2.6) / 1.46, tol=1e-6)
+    # delivered volume at that runtime = 1.46*t - 2.6 ≈ 40 mL
+    assert _close(1.46 * t - 2.6, 40.0, tol=1e-3)
+    # a positive spin-up (startup surge) shortens the run instead
+    t2 = awc.runtime_for_volume_s(0.040, 1.46, 1.0, 2.6)
+    assert _close(t2, (40.0 - 2.6) / 1.46, tol=1e-6)
+    # default spin-up 0.0 is unchanged from the pure-rate primitive
+    assert _close(awc.runtime_for_volume_s(0.040, 1.46), 40.0 / 1.46, tol=1e-6)
+
+
+def test_runtime_spin_up_clamps_tiny_dose_to_zero():
+    # a dose smaller than a positive spin-up surge can't be delivered ⇒ 0 s (caller skips it)
+    assert awc.runtime_for_volume_s(0.001, 1.46, 1.0, 5.0) == 0.0
+
+
 def test_runtime_volume_roundtrip():
     secs = awc.runtime_for_volume_s(1.5, 80.0)
     assert _close(awc.volume_for_runtime_l(secs, 80.0), 1.5)
@@ -215,6 +234,19 @@ def test_per_change_splits_weekly_amount_across_slots():
     # 4 days x 1 time = 4 weekly slots ⇒ 3.5 L per change
     assert awc.runs_per_week(sched) == 4
     assert _close(awc.per_change_litres(sched, 0), 3.5)
+
+
+def test_runs_per_week_multiplies_days_by_times():
+    # Mon/Wed x 06:00/18:00 fires 2 days x 2 times = 4 runs/week — NOT max(2,2)=2.
+    # The old max() split a weekly amount across 2 slots but ran 4x ⇒ ~2x over-change.
+    sched = {"method": "batch_sequential", "amountUnit": "litres", "amount": 14,
+             "period": "week", "days": ["Mon", "Wed"], "times": ["06:00", "18:00"]}
+    assert awc.runs_per_week(sched) == 4
+    # weekly 14 L across 4 real runs ⇒ 3.5 L each (delivering 14 L/week, not 28 L)
+    assert _close(awc.per_change_litres(sched, 0), 3.5)
+    # daily period: 2 days x 3 times = 6 runs/week
+    daily = {"method": "batch_sequential", "days": ["Mon", "Tue"], "times": ["06:00", "12:00", "18:00"]}
+    assert awc.runs_per_week(daily) == 6
 
 
 def test_daily_equivalent_litres():
@@ -410,6 +442,25 @@ def test_in_run_safety_leak_and_overfill_latch():
     assert leak["action"] == "fault" and leak["latch"] and leak["masterKill"]
     overfill = awc.in_run_safety(cfg, {"highLevel": True}, False, True)
     assert overfill["action"] == "fault" and overfill["latch"] and not overfill["masterKill"]
+
+
+def test_flood_sensor_unavailable_fails_closed():
+    # A CONFIGURED leak / high-level sensor gone unavailable blocks start (never latches)...
+    cfg = _cfg_ready()
+    codes = {r["code"]: r["severity"]
+             for r in awc.start_guard_reasons(cfg, {"leakUnknown": True}, awc.parse_hhmm("02:00"), manual=True)}
+    assert codes.get("leak_unavailable") == "block"
+    codes2 = {r["code"]: r["severity"]
+              for r in awc.start_guard_reasons(cfg, {"highLevelUnknown": True}, awc.parse_hhmm("02:00"))}
+    assert codes2.get("high_level_unavailable") == "block"
+    # ...and pauses an in-flight change (auto-resume when the sensor recovers)
+    v = awc.in_run_safety(cfg, {"leakUnknown": True}, True, True)
+    assert v["action"] == "pause" and not v["latch"]
+    v2 = awc.in_run_safety(cfg, {"highLevelUnknown": True}, True, True)
+    assert v2["action"] == "pause" and not v2["latch"]
+    # a real leak still outranks the unknown (fault + master kill)
+    v3 = awc.in_run_safety(cfg, {"leak": True, "highLevelUnknown": True}, True, True)
+    assert v3["action"] == "fault" and v3["masterKill"]
 
 
 def test_in_run_safety_reservoir_limits_pause():

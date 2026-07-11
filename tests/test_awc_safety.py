@@ -358,7 +358,58 @@ def test_ato_suspended_during_change_and_blocks_turn_on():
 # --- Resume-to-balance on restart -------------------------------------------
 
 def test_resume_to_balance_on_startup():
-    # Simulate a crash after draining 2 L but before filling (sequential).
+    # Simulate a crash at a leg boundary: drained 2 L, fill leg NOT yet begun (no stamps).
+    entry = _entry("batch_sequential")
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
+        "drainedMl": 2000, "filledMl": 0,
+        "legStartedAt": "", "legEndsAt": "",
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    # the fill leg is re-begun (resume-to-balance), pumps re-energised
+    assert _state(entry)["status"] == "filling"
+    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    _drive(hass, entry)
+    assert _state(entry)["status"] == "idle"
+    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-6)
+
+
+def test_sequential_restart_mid_leg_credits_elapsed_no_replay():
+    # Crash 8 s into a 20 s fill leg (100 ml/s): the elapsed 0.8 L must be CREDITED, and
+    # the resumed leg must move only the remaining 1.2 L — not replay the whole 2 L
+    # (the old behaviour: 0.8 L already in the tank + 2 L replay = 0.8 L overfill).
+    entry = _entry("batch_sequential")
+    awc = _awc(entry)
+    now = datetime.now(timezone.utc)
+    awc["state"].update({
+        "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
+        "drainedMl": 2000, "filledMl": 0,
+        "legStartedAt": (now - timedelta(seconds=8)).isoformat(),
+        "legEndsAt": (now + timedelta(seconds=12)).isoformat(),
+    })
+    awc["reservoirs"]["fresh"]["remainingMl"] = 25000
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    st = _state(entry)
+    assert st["status"] == "filling"
+    assert _close(st["filledMl"], 800.0, 20.0)  # ~8 s x 100 ml/s credited
+    # the reservoir model was debited for the credited volume too
+    assert _close(_awc(entry)["reservoirs"]["fresh"]["remainingMl"], 25000 - st["filledMl"], 1.0)
+    _drive(hass, entry)
+    assert _state(entry)["status"] == "idle"
+    # total accounted fill is the 2 L target — nothing replayed
+    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 0.05)
+
+
+def test_sequential_restart_after_leg_elapsed_finalizes_no_replay():
+    # Crash discovered AFTER the fill leg's whole window elapsed: full credit ⇒ the change
+    # finalizes instead of re-pumping another 2 L into the tank.
     entry = _entry("batch_sequential")
     awc = _awc(entry)
     awc["state"].update({
@@ -371,11 +422,8 @@ def test_resume_to_balance_on_startup():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     run(integration._async_awc_resume_on_startup(hass, entry, config))
-    # the fill leg is re-begun (resume-to-balance), pumps re-energised
-    assert _state(entry)["status"] == "filling"
-    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
-    _drive(hass, entry)
     assert _state(entry)["status"] == "idle"
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
     assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-6)
 
 
@@ -422,12 +470,164 @@ def test_ws_calibrate_single_and_multi_point():
     assert _close(_awc(entry)["pumps"]["drain"]["mlPerS"], 50.0, 1e-6)
     assert _awc(entry)["pumps"]["drain"]["calibratedAt"]
 
+    # single-point ⇒ no priming offset (can't infer it from one point)
+    assert _awc(entry)["pumps"]["drain"]["spinUpMl"] == 0.0
+
     conn2 = FakeConnection()
     run(integration.websocket_awc_calibrate(hass, conn2, {"id": 2, "role": "fill",
         "points": [[10, 520], [20, 1020], [30, 1520]]}))
     assert not conn2.errors, conn2.error_codes
-    assert _close(_awc(entry)["pumps"]["fill"]["mlPerS"], 50.0, 1e-6)
-    assert _close(_awc(entry)["pumps"]["fill"]["interceptMl"], 20.0, 1e-6)
+    fill = _awc(entry)["pumps"]["fill"]
+    assert _close(fill["mlPerS"], 50.0, 1e-6)
+    assert _close(fill["interceptMl"], 20.0, 1e-6)
+    # intercept 20 mL splits: bounded spin-up (cap = 3 s × 50 ml/s = 150 mL ⇒ all of it) + 0 prime
+    assert _close(fill["spinUpMl"], 20.0, 1e-6)
+    assert _close(fill["primeMl"], 0.0, 1e-6)
+
+    # a slow pump with an over-large intercept clamps the per-dose spin-up and parks the rest in prime
+    conn3 = FakeConnection()
+    run(integration.websocket_awc_calibrate(hass, conn3, {"id": 3, "role": "drain",
+        "points": [[10, 6], [60, 79]]}))  # slope ~1.46 ml/s, intercept ~ -8.6 mL
+    assert not conn3.errors, conn3.error_codes
+    drain = _awc(entry)["pumps"]["drain"]
+    cap = max(5.0, 3.0 * drain["mlPerS"])  # AWC_SPINUP_MIN_CAP_ML / AWC_SPINUP_MAX_SECONDS
+    assert abs(drain["spinUpMl"]) <= cap + 1e-6
+    # spin-up + prime reconstruct the raw intercept
+    assert _close(drain["spinUpMl"] + drain["primeMl"], drain["interceptMl"], 1e-3)
+
+
+def test_ledger_outlives_history_cap_and_resets():
+    # The persistent ledger must accumulate past AWC_HISTORY_MAX (100) — at hourly
+    # micro-changes the capped history is only ~4 days and would silently blind the
+    # net-imbalance number.
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    awc = integration._awc_cfg(config)
+    now = datetime.now(timezone.utc)
+    for _ in range(120):  # > the 100-event cap; drain 1.0 / fill 0.99 each (net −1.2 L)
+        integration._awc_record_history(awc, now, 1.0, 0.99, "batch_sequential", False, "")
+    assert len(awc["history"]) == 100
+    assert _close(awc["ledger"]["cumulativeDrainedL"], 120.0, 1e-6)
+    assert _close(awc["ledger"]["cumulativeFilledL"], 118.8, 1e-6)
+    # summary reads the ledger, not the (truncated) history
+    import openreef.awc as awc_engine
+    s = awc_engine.summary(awc, now)
+    assert _close(s["netImbalance"]["netL"], -1.2, 1e-6)
+    assert _close(s["netImbalance"]["drainedL"], 120.0, 1e-6)
+
+    # reset zeroes it and stamps resetAt
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_ledger(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.error_codes
+    ledger = _awc(entry)["ledger"]
+    assert ledger["cumulativeDrainedL"] == 0.0 and ledger["cumulativeFilledL"] == 0.0
+    assert ledger["resetAt"]
+
+
+def test_ledger_seeds_from_history_on_upgrade():
+    # A pre-ledger config (history only) seeds the ledger from the summed history so the
+    # displayed net-imbalance is continuous across the migration.
+    entry = _entry(awc_over={"history": [
+        {"completedAt": "2026-07-01T00:00:00+00:00", "drainedL": 5.0, "filledL": 4.8,
+         "method": "batch_sequential", "partial": False, "notes": ""},
+    ] * 3})
+    ledger = _awc(entry)["ledger"]
+    assert _close(ledger["cumulativeDrainedL"], 15.0, 1e-6)
+    assert _close(ledger["cumulativeFilledL"], 14.4, 1e-6)
+
+
+def test_pump_odometers_accumulate():
+    # A full 2 L sequential change at 100 ml/s: each pump gains 1 start and ~20 s runtime.
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    _drive(hass, entry)
+    assert _state(entry)["status"] == "idle"
+    pumps = _awc(entry)["pumps"]
+    assert pumps["drain"]["startCount"] == 1
+    assert pumps["fill"]["startCount"] == 1
+    assert _close(pumps["drain"]["runSeconds"], 20.0, 0.5)
+    assert _close(pumps["fill"]["runSeconds"], 20.0, 0.5)
+
+
+def test_concurrent_starts_only_one_wins():
+    # Two overlapping starts (e.g. scheduler tick + manual run-now) must serialise on the
+    # AWC state lock: exactly one begins, the other reports "busy" — never a double-start
+    # that would run both prefights against the same idle state.
+    import asyncio
+
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+
+    async def both():
+        return await asyncio.gather(
+            integration._async_awc_start(hass, entry, config, 2.0, "batch_sequential", True, None),
+            integration._async_awc_start(hass, entry, config, 2.0, "batch_sequential", True, None),
+        )
+
+    r1, r2 = run(both())
+    results = [r1, r2]
+    assert sum(1 for started, _ in results if started) == 1
+    blocked = next(reasons for started, reasons in results if not started)
+    assert {r["code"] for r in blocked} & {"busy", "paused"} == {"busy"}
+    # exactly one drain turn_on was issued
+    ons = [c for c in hass.services.calls if c.service == "turn_on" and "switch.awc_drain" in c.data.values()]
+    assert len(ons) == 1
+
+
+def test_leak_sensor_unavailable_pauses_not_faults():
+    # Fail-closed: the configured leak sensor going unavailable mid-change pauses (pumps
+    # off, no latch) and the change auto-resumes once the sensor reports again.
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+
+    hass.states.set("binary_sensor.leak", "unavailable")
+    _fire_leg(hass, entry)
+    assert _state(entry)["status"] == "paused"
+    assert "unavailable" in _state(entry)["pausedReason"].lower()
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
+
+    # sensor recovers → resume completes the change
+    hass.states.set("binary_sensor.leak", "off")
+    config = integration._config_from_entry(entry)
+    assert run(integration._async_awc_try_resume(hass, entry, config, None))
+    _drive(hass, entry)
+    assert _state(entry)["status"] == "idle"
+
+
+def test_start_blocked_when_leak_sensor_unavailable():
+    entry = _entry("batch_sequential")
+    hass = _hass(entry, states={"binary_sensor.leak": "unavailable"})
+    started, reasons = _start(hass, entry, 2.0, method="batch_sequential")
+    assert not started
+    assert "leak_unavailable" in {r["code"] for r in reasons}
+
+
+def test_abort_best_effort_stops_all_pumps_and_latches():
+    # A failed turn_off on ONE pump must not strand the other or skip the fault latch/save.
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    config = integration._config_from_entry(entry)
+
+    real_call = hass.services.async_call
+
+    async def flaky(domain, service, data=None, **kwargs):
+        if service == "turn_off" and "switch.awc_drain" in (data or {}).values():
+            raise RuntimeError("switch unavailable")
+        return await real_call(domain, service, data, **kwargs)
+
+    hass.services.async_call = flaky
+    run(integration._async_awc_abort(hass, entry, config, "test fault", True, False, None))
+
+    # the fill pump was still commanded off despite the drain turn_off raising
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_fill")
+    # and the state transition completed: fault latched (not left mid-abort)
+    assert _state(entry)["status"] == "fault"
+    assert _state(entry)["fault"] == "test fault"
 
 
 def test_ws_acknowledge_clears_fault():
