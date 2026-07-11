@@ -799,6 +799,9 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                     "date": _awc_str(respread.get("date"), 20),
                     "dayIntervalMin": int(_awc_num(respread.get("dayIntervalMin"), 0, 0, 240)),
                     "nightIntervalMin": int(_awc_num(respread.get("nightIntervalMin"), 0, 0, 240)),
+                    "basePerDoseMl": _awc_num(respread.get("basePerDoseMl"), 0, 0, 100),
+                    "baseDayIntervalMin": int(_awc_num(respread.get("baseDayIntervalMin"), 0, 0, 240)),
+                    "baseNightIntervalMin": int(_awc_num(respread.get("baseNightIntervalMin"), 0, 0, 240)),
                 } if respread else {},
             },
             "dailyLog": [
@@ -7956,11 +7959,31 @@ def _dosing_desired_switches(channel: dict[str, Any]) -> dict[str, bool]:
     guards = channel.get("guards", {}) if isinstance(channel.get("guards"), dict) else {}
     calibrated = (channel.get("calibration", {}).get("stepsPerMl") or 0) > 0
     ph_ok = bool(guards.get("phEntity")) or bool(guards.get("phMissingAcknowledged")) or channel.get("chemical") != "kalk"
-    schedule_on = bool(channel.get("schedule", {}).get("enabled"))
+    schedule = channel.get("schedule", {}) if isinstance(channel.get("schedule"), dict) else {}
+    schedule_on = bool(schedule.get("enabled"))
+    has_volume = (schedule.get("mlPerDay") or 0) > 0
     return {
-        "enabledSwitch": bool(channel.get("enabled") and schedule_on and calibrated and ph_ok),
+        # mlPerDay 0 is a safety edit: the enable switch must go OFF with it, or
+        # the firmware keeps executing its previous schedule (R2).
+        "enabledSwitch": bool(channel.get("enabled") and schedule_on and calibrated and ph_ok and has_volume),
         "phGuardSwitch": bool(guards.get("phEntity")),
     }
+
+
+async def _async_dosing_save(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, stale_config: dict[str, Any]
+) -> None:
+    """Persist dosing-side mutations without clobbering concurrent writers (R32).
+
+    The sync pass and the tick hold a config snapshot across awaited service
+    calls; saving that whole blob could silently revert an AWC leg credit or a
+    user save that landed meanwhile. Re-fetch and graft only what dosing owns —
+    every mutation these paths make lives under ``dosing.channels``."""
+    fresh = _config_from_entry(entry)
+    stale_dosing = stale_config.get("dosing") if isinstance(stale_config.get("dosing"), dict) else {}
+    if isinstance(stale_dosing.get("channels"), dict):
+        fresh.setdefault("dosing", {})["channels"] = stale_dosing["channels"]
+    await _async_save_config(hass, entry, fresh)
 
 
 def _clear_dosing_verify(hass: HomeAssistant) -> None:
@@ -8055,7 +8078,7 @@ async def _async_dosing_sync_pass(
     if wrote_any:
         _async_arm_dosing_verify(hass, entry)
     if changed:
-        await _async_save_config(hass, entry, config)
+        await _async_dosing_save(hass, entry, config)
 
 
 def _async_arm_dosing_verify(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
@@ -8134,7 +8157,7 @@ async def _async_dosing_verify(hass: HomeAssistant, entry: OpenReefConfigEntry) 
     if rewrote:
         _async_arm_dosing_verify(hass, entry)
     if changed:
-        await _async_save_config(hass, entry, config)
+        await _async_dosing_save(hass, entry, config)
 
 
 def _async_kick_dosing_sync(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
@@ -8160,6 +8183,13 @@ async def _async_dosing_awc_suspend(hass: HomeAssistant, config: dict[str, Any],
         ent = channel.get("driver", {}).get("entities", {}).get("haSuspendSwitch")
         if not ent:
             continue
+        if not active:
+            # A user panic lockout owns the switch: an AWC release (finalize/abort/
+            # holdoff/acknowledge) must not cancel it (R15). The tick's suspend
+            # reconciliation releases it when suspendedUntil lapses.
+            until = _parse_datetime((channel.get("state") or {}).get("suspendedUntil"))
+            if until is not None and until > datetime.now(timezone.utc):
+                continue
         try:
             await hass.services.async_call(
                 "switch", "turn_on" if active else "turn_off", {ATTR_ENTITY_ID: ent},
@@ -8293,26 +8323,49 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                         # establish the baseline without debiting the ledgers.
                         prev = new_ml
                 if dosing_engine.detect_rollover(prev, new_ml):
-                    log = channel.setdefault("dailyLog", [])
-                    log.insert(0, {
-                        "date": (now_local.date() - timedelta(days=1)).isoformat(),
-                        "targetMl": plan.get("realisedMlPerDay", 0),
-                        "deliveredMl": round(prev, 2),
-                    })
-                    del log[DOSING_DAILY_LOG_MAX:]
                     near_midnight = (
                         now_minutes <= DOSING_ROLLOVER_ANOMALY_MINUTES
                         or now_minutes >= 1440 - DOSING_ROLLOVER_ANOMALY_MINUTES
                     )
                     state["rolloverAnomaly"] = not near_midnight
+                    gap = 0.0
+                    if near_midnight:
+                        # Pre-midnight blind window (R34): doses landing between the
+                        # tick's last sample and the firmware reset would otherwise
+                        # never be debited from reservoir/wear. Reconcile against
+                        # the plan, clamped to the daily cap headroom.
+                        if channel.get("enabled") and channel.get("schedule", {}).get("enabled"):
+                            expected_eod = dosing_engine.expected_dosed_ml(plan, 1440)
+                            max_daily = plan.get("maxDailyMl") or 0
+                            headroom = max(0.0, max_daily - prev) if max_daily > 0 else float("inf")
+                            gap = min(max(0.0, expected_eod - prev), headroom)
+                        log = channel.setdefault("dailyLog", [])
+                        log.insert(0, {
+                            "date": (now_local.date() - timedelta(days=1)).isoformat(),
+                            "targetMl": plan.get("realisedMlPerDay", 0),
+                            "deliveredMl": round(prev + gap, 2),
+                        })
+                        del log[DOSING_DAILY_LOG_MAX:]
+                        rt["baselineMinute"] = 0
+                        rt["baselineMl"] = 0.0
+                    else:
+                        # Anomalous reset (tz-skewed doser, NVS wipe): anchoring the
+                        # baseline at minute 0 manufactured a giant false "missed"
+                        # alarm (R16); anchor at NOW and skip the bogus dated-
+                        # yesterday log entry instead.
+                        rt["baselineMinute"] = now_minutes
+                        rt["baselineMl"] = new_ml
                     if state.get("respread"):
+                        # The tightened catch-up intervals expire with the day; the
+                        # resulting firmware divergence is expected — resync without
+                        # the scary "settings drifted" notification (R31).
                         state["respread"] = {}
+                        rt["suppressDriftNotify"] = True
+                        _async_kick_dosing_sync(hass, entry)
                     state["missedMl"] = 0.0
                     state["missedSince"] = ""
                     rt["missedStreak"] = 0
-                    rt["baselineMinute"] = 0
-                    rt["baselineMl"] = 0.0
-                    delta = max(0.0, new_ml)
+                    delta = max(0.0, new_ml) + gap
                     transition = True
                 else:
                     delta = max(0.0, new_ml - prev)
@@ -8334,6 +8387,43 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     per_dose = plan.get("perDoseMl") or 0
                     if per_dose > 0:
                         rt["pendingDoses"] = rt.get("pendingDoses", 0) + max(1, round(delta / per_dose))
+
+        # --- respread staleness (R17): a schedule edit after an accepted respread
+        # invalidates the catch-up override — the safety edit wins immediately.
+        if compiled["plan"].get("respreadStale") and state.get("respread"):
+            state["respread"] = {}
+            rt["suppressDriftNotify"] = True
+            _async_kick_dosing_sync(hass, entry)
+            transition = True
+
+        # --- suspend-switch reconciliation (R3): the firmware's 4 h auto-expiry is
+        # a dead-man for a DEAD HA — a live HA must re-assert the hold every tick
+        # so a 24 h panic lockout (or a long AWC fault hold) never silently lapses
+        # at hour 4; conversely a lapsed lockout releases on time, not at expiry.
+        suspend_ent = entities.get("haSuspendSwitch")
+        if suspend_ent:
+            suspend_state = hass.states.get(suspend_ent)
+            if suspend_state is not None and suspend_state.state not in UNAVAILABLE_STATES:
+                until = _parse_datetime(state.get("suspendedUntil"))
+                lockout_active = until is not None and until > now_utc
+                awc_hold = (
+                    bool(channel.get("guards", {}).get("suspendDuringAwc", True))
+                    and _dosing_awc_suspended(config)
+                )
+                switch_on = str(suspend_state.state).lower() == "on"
+                if lockout_active or awc_hold:
+                    # (Re)assert even when already on: the turn_on restarts the
+                    # firmware's auto-expiry window.
+                    await hass.services.async_call(
+                        "switch", "turn_on", {ATTR_ENTITY_ID: suspend_ent}, blocking=True
+                    )
+                elif switch_on:
+                    await hass.services.async_call(
+                        "switch", "turn_off", {ATTR_ENTITY_ID: suspend_ent}, blocking=True
+                    )
+                if until is not None and not lockout_active and state.get("suspendedUntil"):
+                    state["suspendedUntil"] = ""
+                    transition = True
 
         # --- missed-dose watcher (baselined, availability-gated, 2-tick debounce) ----
         # The baseline anchors "expected" to the moment the current plan took effect,
@@ -8448,7 +8538,11 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 except (TypeError, ValueError):
                     continue
             if drifted:
-                if _dosing_notify_enabled(config, "syncIssues"):
+                # A just-expired/invalidated respread makes this divergence
+                # expected — resync silently instead of crying "external edit".
+                if rt.pop("suppressDriftNotify", None):
+                    pass
+                elif _dosing_notify_enabled(config, "syncIssues"):
                     await _async_dosing_notify_once(
                         hass, config, runtime, f"drift_{cid}", 6 * 3600,
                         f"Doser settings drifted: {channel.get('name', cid)}",
@@ -8485,7 +8579,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 state["lastSensorMl"] = rt["lastSensorMl"]
                 state["lastSensorAt"] = now_utc.isoformat()
         runtime["lastFlushAt"] = now_utc.isoformat()
-        await _async_save_config(hass, entry, config)
+        await _async_dosing_save(hass, entry, config)
 
 
 # --- Dosing WebSocket API -------------------------------------------------------------------
@@ -8804,8 +8898,14 @@ async def websocket_dosing_respread_missed(
         return
     now_local = dt_util.now()
     now_minutes = now_local.hour * 60 + now_local.minute
-    compiled = dosing_engine.compile_schedule(channel, _dosing_lighting_off_window(config, now_local), now_local)
     live = _dosing_live_state(hass, channel)
+    if not live.get("dosedSensorTrusted"):
+        # Without a readable dosed-today sensor the cap preflight would run
+        # against 0.0 — refusing beats re-dosing already-delivered volume (R33).
+        _awc_send(connection, msg, hass, config, applied=False,
+                  reason="Dosed-today sensor is unavailable — re-spread refused until OpenReef can verify what's been delivered.")
+        return
+    compiled = dosing_engine.compile_schedule(channel, _dosing_lighting_off_window(config, now_local), now_local)
     plan_result = dosing_engine.respread_plan(channel, compiled["plan"], missed_ml, now_minutes, live["dosedTodayMl"])
     if plan_result.get("recommendation") != "respread":
         state["missedMl"] = 0.0
@@ -8814,10 +8914,19 @@ async def websocket_dosing_respread_missed(
         config = await _async_save_config(hass, entry, config)
         _awc_send(connection, msg, hass, config, applied=False, reason=plan_result.get("reason", ""))
         return
+    # Record the plan this respread was computed AGAINST: a later schedule edit
+    # that changes these base values self-invalidates the override (R17).
+    base_channel = {**channel, "state": {**state, "respread": {}}}
+    base_plan = dosing_engine.compile_schedule(
+        base_channel, _dosing_lighting_off_window(config, now_local), now_local
+    )["plan"]
     state["respread"] = {
         "date": now_local.date().isoformat(),
         "dayIntervalMin": plan_result["dayIntervalMin"],
         "nightIntervalMin": plan_result["nightIntervalMin"],
+        "basePerDoseMl": base_plan["perDoseMl"],
+        "baseDayIntervalMin": base_plan["dayIntervalMin"],
+        "baseNightIntervalMin": base_plan["nightIntervalMin"],
     }
     state["missedMl"] = 0.0
     state["missedSince"] = ""

@@ -155,11 +155,13 @@ def test_compile_warns_kalk_exceeds_evaporation():
     assert "kalk_exceeds_evaporation" in [w["code"] for w in warnings]
 
 
-def test_compile_no_volume_warns_and_writes_nothing():
+def test_compile_no_volume_warns_and_writes_the_zero():
+    # R2: a zeroed schedule is a safety edit — the zero must reach the firmware
+    # (and be drift-checked) or the pump keeps dosing its stale volume.
     ch = _channel(schedule={"mlPerDay": 0})
     out = dosing.compile_schedule(ch, None, NOW)
     assert "no_volume" in [w["code"] for w in out["warnings"]]
-    assert out["writes"] == {}
+    assert out["writes"] == {"doseVolumeNumber": 0.0}
 
 
 def test_compile_night_outside_window_deactivates_weighting():
@@ -175,6 +177,18 @@ def test_compile_respects_max_per_dose_guard():
     ch = _channel(schedule={"mlPerDay": 2000}, guards={"maxPerDoseMl": 5})
     plan = dosing.compile_schedule(ch, None, NOW)["plan"]
     assert plan["perDoseMl"] <= 5.0
+
+
+def test_compile_stale_respread_is_ignored_and_flagged():
+    # R17: base values no longer match the (edited) schedule — the catch-up
+    # override must not apply, and the plan flags it for the tick to clear.
+    ch = _channel(state={"respread": {
+        "date": NOW.date().isoformat(), "dayIntervalMin": 5, "nightIntervalMin": 5,
+        "basePerDoseMl": 9.99, "baseDayIntervalMin": 99, "baseNightIntervalMin": 99,
+    }})
+    out = dosing.compile_schedule(ch, None, NOW)
+    assert out["plan"]["dayIntervalMin"] == 10, "stale override must be ignored"
+    assert out["plan"]["respreadStale"] is True
 
 
 def test_compile_same_day_respread_overrides_interval():

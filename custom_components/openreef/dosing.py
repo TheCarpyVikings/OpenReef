@@ -175,11 +175,24 @@ def compile_schedule(
                 "message": "The computed per-dose volume sits at the firmware floor of 0.1 ml.",
             })
 
-    # --- same-day respread override (accepted catch-up must survive drift repair)
+    # --- same-day respread override (accepted catch-up must survive drift repair) --
+    # The respread records the plan it was computed AGAINST (base*): if the user
+    # edits the schedule afterwards (e.g. halves mlPerDay after a high test), the
+    # base no longer matches and the override is ignored + flagged stale — a
+    # safety edit must never keep dosing at the old catch-up cadence.
+    respread_stale = False
     respread = _cfg(channel, "state").get("respread")
-    if isinstance(respread, dict) and now is not None and respread.get("date") == now.date().isoformat():
-        day_interval = int(_f(respread.get("dayIntervalMin"), day_interval)) or day_interval
-        night_interval = int(_f(respread.get("nightIntervalMin"), night_interval)) or night_interval
+    if isinstance(respread, dict) and respread and now is not None and respread.get("date") == now.date().isoformat():
+        base_matches = (
+            abs(_f(respread.get("basePerDoseMl"), per_dose) - per_dose) <= 0.011
+            and int(_f(respread.get("baseDayIntervalMin"), day_interval)) == day_interval
+            and int(_f(respread.get("baseNightIntervalMin"), night_interval)) == night_interval
+        )
+        if base_matches:
+            day_interval = int(_f(respread.get("dayIntervalMin"), day_interval)) or day_interval
+            night_interval = int(_f(respread.get("nightIntervalMin"), night_interval)) or night_interval
+        else:
+            respread_stale = True
 
     # --- realised totals (dose-count truth, not the requested figure) ----------
     doses_day = (day_min // day_interval) if day_interval else 0
@@ -242,7 +255,13 @@ def compile_schedule(
         )
 
     writes: dict[str, float] = {}
-    if ml_per_day > 0:
+    if ml_per_day <= 0:
+        # A zeroed schedule is a SAFETY edit: write the zero so the firmware
+        # stops sizing doses from its old volume, and so drift detection guards
+        # the zero like any other value (previously writes={} left the pump
+        # dosing its stale schedule while the panel said "nothing will dose").
+        writes = {"doseVolumeNumber": 0.0}
+    else:
         writes = {
             "doseVolumeNumber": per_dose,
             "doseIntervalNumber": float(day_interval),
@@ -279,6 +298,7 @@ def compile_schedule(
         "nightPercent": night_pct,
         "maxDailyMl": max_daily,
         "summaryText": summary_text,
+        "respreadStale": respread_stale,
     }
     return {"writes": writes, "plan": plan, "warnings": warnings}
 

@@ -281,16 +281,47 @@ def test_ph_mirror_source_is_first_kalk_channel():
 # --------------------------------------------------------------------------- #
 # Tick: accounting, rollover, missed doses
 # --------------------------------------------------------------------------- #
-def test_tick_rollover_finalises_daily_log():
+def test_tick_rollover_at_noon_is_anomalous_no_log_no_alarm():
+    # R16: a reset far from midnight (tz-skewed doser, NVS wipe) must not append
+    # a bogus dated-yesterday rollup, and the missed baseline anchors at NOW so
+    # no phantom "missed 150 ml" alarm follows.
     entry = _entry(channels={"kalk": _channel(state={"lastSensorMl": 280.0})})
     hass = _hass(entry, states={"sensor.kalk_dosed_today": "2.08"})
     install_scheduler(integration)
     run(integration._async_dosing_tick(hass, entry))
+    run(integration._async_dosing_tick(hass, entry))
     saved = _saved_channel(entry)
-    assert saved["dailyLog"], "rollover must append a daily rollup"
-    assert saved["dailyLog"][0]["deliveredMl"] == 280.0
-    # Noon is nowhere near midnight — the reset is flagged as an anomaly.
+    assert saved["dailyLog"] == [], "anomalous reset must not log a rollup"
     assert saved["state"]["rolloverAnomaly"] is True
+    assert not saved["state"].get("missedSince"), "baseline must anchor at now"
+
+
+def test_tick_rollover_near_midnight_logs_and_reconciles_blind_window():
+    # Near-midnight reset: rollup appended, and the pre-midnight blind window
+    # (doses between the last sample and the reset) reconciled into the ledgers
+    # (R34) — deliveredMl covers prev + the plan-bounded gap.
+    class _MidnightDt(_FixedDt):
+        def now(self):
+            return datetime(2026, 1, 2, 0, 30, 0)
+
+    original_dt = integration.dt_util
+    integration.dt_util = _MidnightDt()
+    try:
+        entry = _entry(channels={"kalk": _channel(
+            state={"lastSensorMl": 280.0, "lastSensorAt": NOW_UTC.isoformat()})})
+        hass = _hass(entry, states={"sensor.kalk_dosed_today": "2.08"})
+        install_scheduler(integration)
+        run(integration._async_dosing_tick(hass, entry))
+        saved = _saved_channel(entry)
+        assert saved["dailyLog"], "near-midnight rollover must append the rollup"
+        entry_row = saved["dailyLog"][0]
+        assert entry_row["deliveredMl"] >= 280.0
+        assert entry_row["deliveredMl"] <= 375.0  # never past the auto daily cap
+        assert saved["state"]["rolloverAnomaly"] is False
+        # The blind-window gap is debited from the reservoir along with the delta.
+        assert saved["reservoir"]["remainingMl"] < 5000.0 - (entry_row["deliveredMl"] - 280.0)
+    finally:
+        integration.dt_util = original_dt
 
 
 def test_tick_missed_doses_alert_after_debounce():
@@ -388,6 +419,115 @@ def test_tick_accumulates_wear_and_reservoir_on_flush():
     assert saved["state"]["lastSensorMl"] == 10.0
     assert saved["reservoir"]["remainingMl"] == 4990.0
     assert saved["wear"]["runSeconds"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# Hardening Wave 3: dosing firmware-truth & suspend reconciliation
+# --------------------------------------------------------------------------- #
+def test_sync_zero_volume_disables_the_pump():
+    # R2: mlPerDay=0 is a safety edit — the enable switch must go OFF and the
+    # zero must be WRITTEN (previously the firmware kept dosing its old volume
+    # while the panel said "nothing will dose").
+    entry = _entry(channels={"kalk": _channel(schedule={"mlPerDay": 0, "enabled": True})})
+    hass = _hass(entry, states={"switch.kalk_enabled": "on", "number.kalk_dose_volume": "2.08"})
+    install_scheduler(integration)
+    run(integration._async_dosing_sync_pass(hass, entry))
+    assert hass.states.get("switch.kalk_enabled").state == "off"
+    assert float(hass.states.get("number.kalk_dose_volume").state) == 0.0
+
+
+def test_tick_reasserts_and_releases_the_suspend_switch():
+    # R3: the firmware 4 h auto-expiry is a dead-man for a DEAD HA; a live HA
+    # re-asserts the hold every tick and releases a lapsed lockout on time.
+    real_now = datetime.now(timezone.utc)
+    future = (real_now + timedelta(hours=5)).isoformat()
+    entry = _entry(channels={"kalk": _channel(
+        state={"suspendedUntil": future, "lastSensorAt": NOW_UTC.isoformat()})})
+    hass = _hass(entry)  # switch reads off: the firmware expiry released it
+    install_scheduler(integration)
+    run(integration._async_dosing_tick(hass, entry))
+    assert hass.states.get("switch.kalk_ha_suspend").state == "on", "hold must be re-asserted"
+
+    past = (real_now - timedelta(minutes=1)).isoformat()
+    entry2 = _entry(channels={"kalk": _channel(
+        state={"suspendedUntil": past, "lastSensorAt": NOW_UTC.isoformat()})})
+    hass2 = _hass(entry2, states={"switch.kalk_ha_suspend": "on"})
+    run(integration._async_dosing_tick(hass2, entry2))
+    assert hass2.states.get("switch.kalk_ha_suspend").state == "off", "lapsed lockout releases on time"
+    assert not _saved_channel(entry2)["state"]["suspendedUntil"]
+
+
+def test_awc_release_respects_active_panic_lockout():
+    # R15: finalize/abort/holdoff/acknowledge must not cancel a user lockout.
+    future = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
+    entry = _entry(channels={"kalk": _channel(state={"suspendedUntil": future})})
+    hass = _hass(entry, states={"switch.kalk_ha_suspend": "on"})
+    run(integration._async_dosing_awc_suspend(hass, entry.options[CONF_SETTINGS], False, None))
+    assert hass.states.get("switch.kalk_ha_suspend").state == "on"
+
+
+def test_respread_invalidated_by_schedule_edit():
+    # R17: halving the daily volume after a high test must kill the stale
+    # catch-up cadence immediately — the safety edit wins.
+    resp = {"date": NOW_LOCAL.date().isoformat(), "dayIntervalMin": 5, "nightIntervalMin": 5,
+            "basePerDoseMl": 5.0, "baseDayIntervalMin": 90, "baseNightIntervalMin": 90}
+    ch = _channel(chemical="alk",
+                  schedule={"mlPerDay": 20, "mode": "doses", "dosesPerDay": 8,
+                            "windowStart": "08:00", "windowEnd": "20:00"},
+                  state={"respread": resp, "lastSensorAt": NOW_UTC.isoformat()})
+    entry = _entry(channels={"alk": ch})
+    hass = _hass(entry)
+    install_scheduler(integration)
+    run(integration._async_dosing_tick(hass, entry))
+    assert _saved_channel(entry, "alk")["state"]["respread"] == {}
+
+
+def test_drift_after_respread_expiry_is_silent():
+    # R31: the firmware still holding the expired catch-up intervals is EXPECTED
+    # divergence — resync without the scary "settings drifted" notification.
+    ch = _channel(state={"lastSensorAt": NOW_UTC.isoformat()}, sync={"state": "synced"})
+    entry = _entry(channels={"kalk": ch})
+    hass = _hass(entry)  # numbers read "0" vs desired 2.08 -> drift
+    runtime = hass.data.setdefault(integration.DOMAIN, {}).setdefault(integration.DOSING_RUNTIME, {})
+    runtime.setdefault("channels", {})["kalk"] = {"suppressDriftNotify": True, "lastSensorMl": 0.0}
+    install_scheduler(integration)
+    run(integration._async_dosing_tick(hass, entry))
+    assert not any("drifted" in str(c.data).lower()
+                   for c in _calls(hass, "persistent_notification", "create"))
+    assert hass.tasks, "the silent resync must still be kicked"
+
+
+def test_ws_respread_refused_when_sensor_untrusted():
+    # R33: the cap preflight would run against dosedTodayMl=0 — refuse instead
+    # of re-dosing already-delivered volume.
+    ch = _channel(chemical="alk",
+                  schedule={"mlPerDay": 40, "mode": "doses", "dosesPerDay": 8,
+                            "windowStart": "08:00", "windowEnd": "20:00"},
+                  state={"missedMl": 8.0, "missedSince": NOW_UTC.isoformat()})
+    entry = _entry(channels={"alk": ch})
+    hass = _hass(entry, states={"sensor.kalk_dosed_today": "unavailable"})
+    conn = FakeConnection()
+    run(integration.websocket_dosing_respread_missed(hass, conn, {"id": 1, "channel_id": "alk"}))
+    payload = conn.results[-1].payload
+    assert payload["applied"] is False and "unavailable" in payload["reason"]
+    saved = _saved_channel(entry, "alk")
+    assert saved["state"]["missedSince"], "the pending decision must survive the refusal"
+
+
+def test_dosing_save_grafts_only_dosing_keys():
+    # R32: a dosing pass holds a stale snapshot across awaits — its save must
+    # not revert a concurrent AWC write.
+    entry = _entry()
+    hass = _hass(entry)
+    stale = integration._config_from_entry(entry)
+    fresh = integration._config_from_entry(entry)
+    fresh.setdefault("automaticWaterChange", {})["todayLitres"] = 7.5
+    run(integration._async_save_config(hass, entry, fresh))          # concurrent writer lands
+    stale["dosing"]["channels"]["kalk"]["wear"]["runSeconds"] = 123.0
+    run(integration._async_dosing_save(hass, entry, stale))          # dosing flush with stale blob
+    cfg = entry.options[CONF_SETTINGS]
+    assert cfg["automaticWaterChange"]["todayLitres"] == 7.5, "AWC write must survive"
+    assert cfg["dosing"]["channels"]["kalk"]["wear"]["runSeconds"] == 123.0
 
 
 # --------------------------------------------------------------------------- #
