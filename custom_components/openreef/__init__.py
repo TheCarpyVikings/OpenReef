@@ -919,7 +919,9 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         "amount": round(_awc_num(raw_sched.get("amount"), 0, 0, 100000), 2),
         "period": period if period in AWC_PERIODS else "week",
         "times": _normalise_schedule_times(raw_sched.get("times"), "02:00"),
-        "days": [d for d in (raw_sched.get("days") or []) if d in _AWC_WEEKDAYS],
+        # Dedupe while preserving order: runs_per_week counts this list's length,
+        # so a duplicated day would silently halve every per-change amount.
+        "days": list(dict.fromkeys(d for d in (raw_sched.get("days") or []) if d in _AWC_WEEKDAYS)),
         "windowStart": _normalise_schedule_time(raw_sched.get("windowStart")) or "01:00",
         "windowEnd": _normalise_schedule_time(raw_sched.get("windowEnd")) or "05:00",
     }

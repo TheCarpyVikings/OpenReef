@@ -35,7 +35,7 @@ re-derived and verified during research.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 from typing import Any, Iterable
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +172,16 @@ def calibrate_linear(points: Iterable[Any]) -> dict[str, float]:
     sy = sum(v for _, v in pts)
     sxx = sum(s * s for s, _ in pts)
     sxy = sum(s * v for s, v in pts)
+    # Ill-conditioned fits: with the run durations clustered together, least
+    # squares amplifies measurement noise into wild slopes (two ~30 s runs can
+    # yield a 2.3x-wrong rate with a huge negative intercept — and anomaly
+    # detection can't catch it, since expected runtimes derive from the same
+    # fit). Require a meaningful time spread; otherwise fall back to the robust
+    # through-origin slope.
+    smin = min(s for s, _ in pts)
+    smax = max(s for s, _ in pts)
+    if (smax - smin) < max(1.0, 0.1 * (sx / n)):
+        return {"mlPerS": max(0.0, sy / sx) if sx else 0.0, "interceptMl": 0.0, "points": n}
     denom = n * sxx - sx * sx
     if denom == 0:
         return {"mlPerS": sy / sx if sx else 0.0, "interceptMl": 0.0, "points": n}
@@ -332,7 +342,10 @@ def net_imbalance_from_totals(
     drained = max(0.0, _f(drained_l))
     filled = max(0.0, _f(filled_l))
     net = filled - drained
-    over = abs(net) >= _f(threshold_l, DEFAULT_NET_IMBALANCE_L)
+    # threshold <= 0 disables the check (matches the sibling caps' "0 = off"
+    # convention); it previously meant "warn always".
+    threshold = _f(threshold_l, DEFAULT_NET_IMBALANCE_L)
+    over = threshold > 0 and abs(net) >= threshold
     return {
         "drainedL": round(drained, 3),
         "filledL": round(filled, 3),
@@ -416,10 +429,17 @@ def per_change_litres(schedule: dict[str, Any], tank_volume_l: float) -> float:
 
 def daily_equivalent_litres(schedule: dict[str, Any], tank_volume_l: float) -> float:
     """Average litres/day this schedule changes — drives days-of-supply and the
-    dilution projection regardless of method/period."""
+    dilution projection regardless of method/period.
+
+    Batch schedules honour day-of-week restrictions: a "4 L per day, Mondays only"
+    schedule averages 4/7 L/day, not 4 (the naive period read made every projection
+    up to 7x optimistic). Continuous has no run-slots, so the plain period read stands."""
     sched = schedule or {}
     period_l = resolve_period_litres(sched, tank_volume_l)
-    return period_l if str(sched.get("period", "day")).lower() == "day" else period_l / 7.0
+    period_daily = period_l if str(sched.get("period", "day")).lower() == "day" else period_l / 7.0
+    if str(sched.get("method", "")).startswith("continuous"):
+        return period_daily
+    return per_change_litres(sched, tank_volume_l) * runs_per_week(sched) / 7.0
 
 
 def continuous_tick_ml(
@@ -456,11 +476,19 @@ def next_run(schedule: dict[str, Any], last_run: datetime | None, now: datetime)
     if not allowed:
         allowed = set(range(7))
     for day_offset in range(0, 8):
-        day = now + timedelta(days=day_offset)
-        if day.weekday() not in allowed:
+        target_date = (now + timedelta(days=day_offset)).date()
+        if target_date.weekday() not in allowed:
             continue
         for minute in minutes:
-            candidate = day.replace(hour=minute // 60, minute=minute % 60, second=0, microsecond=0)
+            # Build the candidate as a wall-clock time on the target DATE rather
+            # than replace()-ing hours on an aware datetime: timedelta arithmetic
+            # preserves the *old* UTC offset across a DST boundary, so the naive
+            # form displayed 02:00 slots as 01:00/03:00 for the week of the
+            # changeover. zoneinfo tzinfo attached to a combine() localises
+            # correctly (naive inputs keep tzinfo=None — unchanged behaviour).
+            candidate = datetime.combine(
+                target_date, dt_time(minute // 60, minute % 60), tzinfo=now.tzinfo
+            )
             if candidate <= now:
                 continue
             if last_run is not None and candidate <= last_run:

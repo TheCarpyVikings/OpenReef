@@ -471,6 +471,98 @@ def test_in_run_safety_reservoir_limits_pause():
     assert awc.in_run_safety(cfg, {"freshEmpty": True}, True, False)["action"] == "ok"
 
 
+# --- Hardening Wave 4: engine math fixes + the named coverage gaps ------------
+
+def test_calibrate_linear_ill_conditioned_falls_back_to_through_origin():
+    # Two ~30 s runs: least squares would fit slope 40 ml/s / intercept -690 ml
+    # (2.3x wrong); the conditioning guard must fall back to the honest ~17 ml/s.
+    fit = awc.calibrate_linear([(30.0, 510.0), (30.5, 530.0)])
+    assert 16.5 < fit["mlPerS"] < 17.5, fit
+    assert fit["interceptMl"] == 0.0
+    # A properly spread set still least-squares (intercept recovered).
+    fit = awc.calibrate_linear([(10.0, 105.0), (30.0, 305.0), (60.0, 605.0)])
+    assert _close(fit["mlPerS"], 10.0, 1e-6)
+    assert _close(fit["interceptMl"], 5.0, 1e-6)
+
+
+def test_spin_up_round_trips_runtime_and_volume():
+    # t = (V - spinUp)/rate; the inverse (with the offset re-applied) returns V.
+    seconds = awc.runtime_for_volume_s(0.04, 10.0, 1.0, spin_up_ml=5.0)  # 40 ml dose
+    assert _close(seconds, 3.5)
+    litres = awc.volume_for_runtime_l(seconds, 10.0, 1.0, spin_up_ml=5.0)
+    assert _close(litres, 0.04)
+    # Remaining-time tails pass spin_up 0 (no further start occurs).
+    assert _close(awc.volume_for_runtime_l(seconds, 10.0, 1.0), 0.035)
+
+
+def test_runtime_respects_exchange_factor():
+    # factor 1.25: a longer/loaded line needs 25% more runtime for the same volume.
+    base = awc.runtime_for_volume_s(1.0, 100.0)
+    loaded = awc.runtime_for_volume_s(1.0, 100.0, exchange_factor=1.25)
+    assert _close(loaded, base * 1.25)
+    assert _close(awc.volume_for_runtime_l(loaded, 100.0, 1.25), 1.0)
+
+
+def test_net_imbalance_threshold_zero_means_disabled():
+    verdict = awc.net_imbalance_from_totals(100.0, 90.0, threshold_l=0)
+    assert verdict["status"] == "ok"          # previously: "warn always"
+    assert verdict["netL"] == -10.0
+    assert awc.net_imbalance_from_totals(100.0, 90.0, threshold_l=2.0)["status"] == "warning"
+
+
+def test_summary_prefers_ledger_over_capped_history():
+    now = datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc)
+    cfg = {
+        "tankVolumeLitres": 200,
+        "reservoirs": {"fresh": {"capacityLitres": 25, "remainingMl": 20000},
+                       "waste": {"capacityLitres": 25, "filledMl": 0}},
+        "pumps": {"drain": {"mlPerS": 100}, "fill": {"mlPerS": 100}},
+        "schedule": {"enabled": False},
+        "safety": {"netImbalanceWarnLitres": 2.0},
+        # Capped history holds a sliver; the persistent ledger holds the truth.
+        "history": [{"drainedL": 1.0, "filledL": 1.0}],
+        "ledger": {"cumulativeDrainedL": 120.0, "cumulativeFilledL": 110.0},
+    }
+    summary = awc.summary(cfg, now)
+    net = summary["netImbalance"]
+    assert net["drainedL"] == 120.0 and net["filledL"] == 110.0
+    assert net["status"] == "warning" and net["suggestedTrimL"] == 10.0
+
+
+def test_daily_equivalent_honours_day_restrictions():
+    # "4 L per day, Mondays only" averages 4/7 L/day — not 4 (was up to 7x off).
+    sched = {"enabled": True, "method": "batch_sequential", "amountUnit": "litres",
+             "amount": 4, "period": "day", "days": ["Mon"], "times": ["02:00"]}
+    assert _close(awc.daily_equivalent_litres(sched, 200), 4.0 / 7.0)
+    # Unrestricted daily and weekly schedules are unchanged.
+    sched["days"] = []
+    assert _close(awc.daily_equivalent_litres(sched, 200), 4.0)
+    weekly = {**sched, "period": "week", "amount": 14}
+    assert _close(awc.daily_equivalent_litres(weekly, 200), 2.0)
+    # Continuous keeps the plain period read (no run-slots to restrict).
+    cont = {"enabled": True, "method": "continuous", "amountUnit": "litres",
+            "amount": 4, "period": "day"}
+    assert _close(awc.daily_equivalent_litres(cont, 200), 4.0)
+
+
+def test_next_run_is_dst_safe_with_zoneinfo():
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:  # pragma: no cover
+        return
+    tz = ZoneInfo("Europe/London")
+    # BST began 2026-03-29 01:00 UTC; a 02:00 slot after the changeover must
+    # still read 02:00 wall-clock (the timedelta+replace form kept the old offset).
+    now = datetime(2026, 3, 28, 12, 0, tzinfo=tz)
+    sched = {"enabled": True, "method": "batch_sequential", "times": ["02:00"]}
+    first = awc.next_run(sched, None, now)
+    assert (first.hour, first.minute) == (2, 0)   # 02:00 on the 29th = first BST instant
+    assert first.utcoffset() != now.utcoffset()   # crossed the change; wall clock held
+    after = awc.next_run(sched, first, first + timedelta(minutes=1))
+    assert (after.hour, after.minute) == (2, 0)
+    assert after.date() == datetime(2026, 3, 30).date()  # the post-DST day, still 02:00
+
+
 # --- tiny standalone runner --------------------------------------------------
 
 def _main() -> int:
