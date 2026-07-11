@@ -16,7 +16,7 @@ Safety first: dose into a **measuring cylinder or bucket**, never the tank, unti
 - With no channels configured, the tab shows the "Nothing dosing yet" card — friendly copy, an "Add a channel" button, and no errors.
 - The Dosing & Consumption Advisor section renders at the bottom of the tab (it moved here from Mission Control).
 - If alkalinity/calcium/magnesium are mapped, the advisor populates within ~a minute of opening the tab without pressing anything.
-- The Mission Control "Dosing" tile jumps to the Dosing tab.
+- The Mission Control "Dosing" tile (when enabled in the Mission card settings) jumps to the Dosing tab.
 
 ## 2. Channel Setup Flow (no hardware)
 
@@ -56,7 +56,7 @@ Safety first: dose into a **measuring cylinder or bucket**, never the tank, unti
 ## 7. Entity Binding And Sync (doser required)
 
 - On the channel, press "Auto-bind entities": expect "24 of 24 bound" (the reference firmware's names are a frozen contract). Any misses appear by role in the overrides list.
-- Save. Within ~10 seconds the card footer shows "synced HH:MM" — every number OpenReef wrote was read back from the device.
+- Save. Within ~30 seconds (an 8 s read-back verify plus the tab's refresh cadence) the card footer shows the synced timestamp — every number OpenReef wrote was read back from the device.
 - Change the daily volume, Save again: watch the firmware's dose-volume and interval numbers change in HA Developer Tools → States. **No reflash. This is acceptance criterion #2.**
 - Pull the doser's power: the tab banner turns red ("Doser offline") within a minute and explains the device keeps dosing its last synced schedule. Restore power: it clears and re-syncs.
 

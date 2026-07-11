@@ -28,6 +28,12 @@
 
 substitutions:
   node_name: openreef-awc
+  # PART OF THE FROZEN AUTO-BIND CONTRACT (kalk-doser-esphome-design.md §6, rev 2):
+  # friendly_name gives every entity id the `openreef_` prefix the OpenReef panel's
+  # auto-bind expects (e.g. `number.openreef_kalk_dose_volume_ml`). Without it,
+  # ESPHome yields prefix-less ids — auto-bind still accepts those as exact bare
+  # ids, but keep this set so multi-node installs stay unambiguous.
+  friendly_name: OpenReef
   # Tune to your pumps. The watchdog is a BACKSTOP comfortably above a normal
   # full-change runtime — OpenReef stops pumps at the calibrated time; this only
   # fires if that never happened (network down + something wrong).
@@ -36,6 +42,7 @@ substitutions:
 
 esphome:
   name: ${node_name}
+  friendly_name: ${friendly_name}
 
 esp32:
   board: esp32dev
@@ -51,7 +58,10 @@ logger:
 
 # --- Latched safety lock -----------------------------------------------------
 # Once any hard trip fires this stays true and the pump on_turn_on guards refuse
-# to run. Cleared from the OpenReef panel (via the template switch below).
+# to run. Clear it by toggling the "AWC Clear Lock" HA switch (Developer Tools →
+# States, or add it to a dashboard) — the OpenReef panel does not surface this
+# firmware latch yet; its "Acknowledge & clear" button clears only the
+# BACKEND fault latch. Both must be cleared after a hard trip.
 globals:
   - id: awc_locked
     type: bool
@@ -128,8 +138,10 @@ switch:
     on_turn_off:
       - script.stop: fill_watchdog
 
-  # Template switch OpenReef toggles to clear the latch remotely (maps to a HA
-  # switch entity). Turning it on clears the lock, then resets itself.
+  # Template switch to clear the firmware latch remotely — exposed to HA as
+  # switch.openreef_awc_clear_lock; toggle it from Developer Tools or a
+  # dashboard (the OpenReef panel does not surface it yet). Turning it on
+  # clears the lock, then resets itself.
   - platform: template
     name: "AWC Clear Lock"
     optimistic: true
@@ -179,10 +191,13 @@ binary_sensor:
     on_press:
       - switch.turn_off: drain_pump     # never overflow the waste reservoir
 
-# In OpenReef -> Water Change -> Setup & calibration, map:
-#   Drain pump          -> switch.awc_drain_pump
-#   Fill pump           -> switch.awc_fill_pump
-#   Leak sensor         -> binary_sensor.awc_leak
-#   Display high-level  -> binary_sensor.awc_display_high_level_cutoff
-#   Fresh-empty float   -> binary_sensor.awc_fresh_reservoir_empty
-#   Waste-full float    -> binary_sensor.awc_waste_reservoir_full
+# In OpenReef -> Water Change -> Setup & calibration, map (ids assume the
+# friendly_name "OpenReef" above; adjust the prefix if you changed it):
+#   Drain pump          -> switch.openreef_awc_drain_pump
+#   Fill pump           -> switch.openreef_awc_fill_pump
+#   Leak sensor         -> binary_sensor.openreef_awc_leak
+#   Display high-level  -> binary_sensor.openreef_awc_display_high_level_cutoff
+#   Fresh-empty float   -> binary_sensor.openreef_awc_fresh_reservoir_empty
+#   Waste-full float    -> binary_sensor.openreef_awc_waste_reservoir_full
+# Not mapped in the panel (toggle directly in HA when a firmware latch trips):
+#   Firmware latch clear -> switch.openreef_awc_clear_lock

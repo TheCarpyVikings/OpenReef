@@ -133,9 +133,10 @@ Merge notes: this is a **fragment** — the `esphome:`, `esp32:`, `api:`, `ota:`
 # =============================================================================
 
 substitutions:
-  node_name: openreef-awc     # MUST match the existing AWC node — the HA
-                              # entity prefix (and the auto-bind contract's
-                              # <deviceprefix>) derives from the device name
+  node_name: openreef-awc     # MUST match the existing AWC node
+  friendly_name: OpenReef     # MUST match the AWC node's friendly_name — the HA
+                              # entity prefix (the auto-bind contract's <p>)
+                              # derives from it (contract rev 2)
   timezone: Europe/London     # SNTP local time: dosing windows + midnight reset
 
 external_components:
@@ -433,6 +434,8 @@ binary_sensor:
       - delayed_off: 2s
 
 text_sensor:
+  # NB: ESPHome `text_sensor` entities register in HA under the `sensor.`
+  # domain — the auto-bind row is `sensor.<p>_kalk_last_skip_reason` (rev 2).
   - platform: template
     name: "Kalk Last Skip Reason"
     id: kalk_last_skip
@@ -705,7 +708,9 @@ interval:
 
 ## 6. OpenReef entity mapping — the frozen auto-bind contract
 
-**This table is the contract.** The panel's auto-bind scans `hass.states` for these entity-id **suffixes** (the slug ESPHome derives from each entity's name) and fills the channel's explicit per-role bindings. `<p>` is the device prefix HA prepends from the node name (`openreef_awc` here; empty on classic ESPHome naming without `friendly_name`) — the prefix may vary per install, **the suffix may not**. Changing any entity name in the YAML silently breaks auto-bind for every user; treat renames as breaking API changes.
+**This table is the contract.** The panel's auto-bind scans `hass.states` for these entity-id **suffixes** (the slug ESPHome derives from each entity's name) and fills the channel's explicit per-role bindings. `<p>` is the device prefix HA prepends from the node's **`friendly_name`** (`openreef` with the reference YAML's `friendly_name: OpenReef`) — the prefix may vary per install, **the suffix may not**. A node with no `friendly_name` yields prefix-less ids; auto-bind accepts those as exact bare ids (`number.kalk_dose_volume_ml`). Changing any entity name in the YAML silently breaks auto-bind for every user; treat renames as breaking API changes.
+
+> **Contract revision 2 (2026-07-11).** Two corrections to rev 1, both permissible because no rev-1 install could ever have bound the affected rows: (a) `lastSkipSensor` was listed under a `text_sensor.` HA domain that does not exist — ESPHome text sensors register in HA as `sensor.`; the row now reads `sensor.<p>_kalk_last_skip_reason`. (b) The reference AWC node previously set no `friendly_name`, so a verbatim build produced prefix-less ids and the suffix scan matched nothing; `friendly_name` is now set in the reference YAML and declared part of this contract, and the panel additionally accepts exact bare ids for prefix-less nodes.
 
 | OpenReef role | HA entity (frozen suffix) | Node object |
 |---|---|---|
@@ -732,11 +737,11 @@ interval:
 | `calibrateButton` | `button.<p>_kalk_calibrate_100_rev` | `kalk_calibrate_button` |
 | `dosedTodaySensor` | `sensor.<p>_kalk_dosed_today_ml` | `kalk_dosed_today` |
 | `reservoirLowSensor` | `binary_sensor.<p>_kalk_reservoir_low` | `kalk_reservoir_low` |
-| `lastSkipSensor` | `text_sensor.<p>_kalk_last_skip_reason` | `kalk_last_skip` |
+| `lastSkipSensor` | `sensor.<p>_kalk_last_skip_reason` | `kalk_last_skip` |
 
 Not in the binding table but equally frozen: the firmware subscribes to the fixed id **`sensor.openreef_kalk_ph_mirror`** (`DOSING_PH_MIRROR_ENTITY`). That is an HA-side state OpenReef publishes, not an ESPHome entity — the panel's pH picker selects the *source* that gets mirrored there.
 
-`Kalk Last Skip Reason` values (also frozen — the panel maps them to banner copy): `disabled` · `ha_suspend` · `reservoir_low` · `not_calibrated` · `out_of_window` · `ph_guard` · `daily_cap` · `ok HH:MM` on success.
+`Kalk Last Skip Reason` values (also frozen — reserved for panel banner copy; today they surface via the sensor itself and the smoke test): `disabled` · `ha_suspend` · `reservoir_low` · `not_calibrated` · `out_of_window` · `ph_guard` · `daily_cap` · `ok HH:MM` on success.
 
 ---
 

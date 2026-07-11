@@ -8581,7 +8581,9 @@ class OpenReefPanel extends HTMLElement {
       calibrateButton: "button._kalk_calibrate_100_rev",
       dosedTodaySensor: "sensor._kalk_dosed_today_ml",
       reservoirLowSensor: "binary_sensor._kalk_reservoir_low",
-      lastSkipSensor: "text_sensor._kalk_last_skip_reason",
+      // Contract rev 2: ESPHome text sensors register in HA under `sensor.`
+      // (there is no text_sensor domain) — the rev-1 row could never bind.
+      lastSkipSensor: "sensor._kalk_last_skip_reason",
     };
   }
 
@@ -8747,7 +8749,10 @@ class OpenReefPanel extends HTMLElement {
       const dot = pattern.indexOf(".");
       const domain = pattern.slice(0, dot);
       const suffix = pattern.slice(dot + 1); // starts "_kalk_…" per the frozen contract
-      const match = keys.find((e) => e.startsWith(domain + ".") && e.endsWith(suffix));
+      // A node without friendly_name yields prefix-less ids (`number.kalk_…`) —
+      // accept the exact bare id as well as the suffix-with-prefix form.
+      const bare = domain + "." + suffix.slice(1);
+      const match = keys.find((e) => e === bare || (e.startsWith(domain + ".") && e.endsWith(suffix)));
       if (match) { entities[role] = match; bound += 1; }
     }
     this._doserMessage = bound
@@ -15241,8 +15246,8 @@ class OpenReefPanel extends HTMLElement {
     `;
     return this._settingsPanel(
       "dosing",
-      "Dosing Advisor",
-      "Advisory consumption tracking and dose suggestions for alkalinity, calcium, and magnesium.",
+      "Dosing",
+      "Dosing pump channels, calibration, guards and alerts — plus the advisory consumption tracker.",
       body,
     );
   }

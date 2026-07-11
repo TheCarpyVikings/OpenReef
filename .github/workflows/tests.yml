@@ -66,5 +66,8 @@ jobs:
       - name: Dosing orchestration tests (sync write-verify, tick, WS surface)
         run: python3 tests/test_dosing_sync.py
 
+      - name: Entity-binding contract (panel vs const vs design doc)
+        run: python3 tests/test_entity_contract.py
+
       - name: Panel JS syntax
         run: node --check custom_components/openreef/frontend/openreef-panel.js
