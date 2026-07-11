@@ -8004,8 +8004,11 @@ async def _async_dosing_save(
 
     The sync pass and the tick hold a config snapshot across awaited service
     calls; saving that whole blob could silently revert an AWC leg credit or a
-    user save that landed meanwhile. Re-fetch and graft only what dosing owns —
-    every mutation these paths make lives under ``dosing.channels``."""
+    non-dosing user save that landed meanwhile. Re-fetch and graft only what
+    dosing owns — every mutation these paths make lives under
+    ``dosing.channels``. NB: two concurrent dosing-channel writers can still
+    interleave (the graft is wholesale for channels); the single event loop
+    makes that window rare and the 60 s tick self-corrects."""
     fresh = _config_from_entry(entry)
     stale_dosing = stale_config.get("dosing") if isinstance(stale_config.get("dosing"), dict) else {}
     if isinstance(stale_dosing.get("channels"), dict):
@@ -8577,6 +8580,12 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                         "Re-syncing now — OpenReef's configuration is authoritative.",
                     )
                 _async_kick_dosing_sync(hass, entry)
+
+        # One-tick scope for the drift-notify suppression: the expected divergence
+        # is detected (and the flag consumed) in this same iteration, or the kicked
+        # resync removes it before the next — an unconsumed leftover must not
+        # swallow a future GENUINE external-edit notification.
+        rt.pop("suppressDriftNotify", None)
 
     # --- flush policy: transitions save now; quiet accounting flushes hourly ----------
     last_flush = runtime.get("lastFlushAt")
