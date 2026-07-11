@@ -306,6 +306,92 @@ def test_ato_setter_skips_when_already_in_target_state():
     assert not any(c.domain == "switch" for c in hass.services.calls)
 
 
+# --- Boot-time repairs race ---------------------------------------------------
+# Mapped entities and armed equipment read missing/unavailable while HA is still
+# starting other integrations, so evaluating repairs during boot raised the
+# "missing mapped entities" / "armed equipment unavailable" issues on EVERY
+# restart and update (beta-tester report). The first evaluation must be deferred
+# to STARTED + a grace window.
+
+class _IssueRecorder:
+    def __init__(self):
+        self.created = []
+        self.deleted = []
+        self.IssueSeverity = integration.ir.IssueSeverity
+
+    def async_create_issue(self, hass, domain, issue_id, **kwargs):
+        self.created.append(issue_id)
+
+    def async_delete_issue(self, hass, domain, issue_id):
+        self.deleted.append(issue_id)
+
+
+def _issues_entry():
+    # A mapped sensor whose entity doesn't exist + an armed switch that's absent:
+    # exactly what a mid-boot state machine looks like.
+    cfg = {
+        "sensors": {"temp": {"enabled": True, "entity_id": "sensor.gone"}},
+        "equipment": {"heater": _equip("heater", True, "switch.gone")},
+    }
+    return FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config(cfg)})
+
+
+def test_issue_refresh_defers_while_ha_is_booting():
+    entry = _issues_entry()
+    hass = FakeHass(entries=[entry], is_running=False)
+    recorder = _IssueRecorder()
+    original_ir = integration.ir
+    integration.ir = recorder
+    try:
+        run(integration._async_refresh_issues(hass, entry))
+        assert recorder.created == [], "no repairs may be raised during boot"
+        listeners = [l for l in hass.bus.listeners if not l.cancelled]
+        assert listeners, "a STARTED listener must be armed instead"
+        # Second call while still booting must not stack more listeners.
+        run(integration._async_refresh_issues(hass, entry))
+        assert len([l for l in hass.bus.listeners if not l.cancelled]) == 1
+    finally:
+        integration.ir = original_ir
+
+
+def test_issue_refresh_runs_after_started_plus_grace():
+    from _fake_ha import install_scheduler
+
+    entry = _issues_entry()
+    hass = FakeHass(entries=[entry], is_running=False)
+    recorder = _IssueRecorder()
+    original_ir = integration.ir
+    integration.ir = recorder
+    scheduler = install_scheduler(integration)
+    try:
+        run(integration._async_refresh_issues(hass, entry))
+        # HA finishes booting: fire the STARTED listener, which arms the grace timer.
+        hass.is_running = True
+        for listener in list(hass.bus.listeners):
+            if not listener.cancelled:
+                run(listener.callback(None))
+        assert scheduler.pending(), "the grace timer must be armed at STARTED"
+        run(scheduler.fire_all())
+        # Entities are still absent after the grace window ⇒ NOW the repairs are real.
+        assert integration.ISSUE_MISSING_ENTITIES in recorder.created
+        assert integration.ISSUE_ARMED_UNAVAILABLE in recorder.created
+    finally:
+        integration.ir = original_ir
+
+
+def test_issue_refresh_immediate_when_ha_running():
+    entry = _issues_entry()
+    hass = FakeHass(entries=[entry], is_running=True)
+    recorder = _IssueRecorder()
+    original_ir = integration.ir
+    integration.ir = recorder
+    try:
+        run(integration._async_refresh_issues(hass, entry))
+        assert integration.ISSUE_MISSING_ENTITIES in recorder.created
+    finally:
+        integration.ir = original_ir
+
+
 # --- tiny standalone runner -------------------------------------------------
 
 def _main() -> int:

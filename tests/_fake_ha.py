@@ -109,9 +109,19 @@ class _FakeConfigEntries:
 class _FakeBus:
     def __init__(self):
         self.events = []  # SimpleNamespace(event_type, data)
+        self.listeners = []  # SimpleNamespace(event_type, callback, cancelled)
 
     def async_fire(self, event_type, event_data=None):
         self.events.append(SimpleNamespace(event_type=event_type, data=dict(event_data or {})))
+
+    def async_listen_once(self, event_type, callback):
+        record = SimpleNamespace(event_type=event_type, callback=callback, cancelled=False)
+        self.listeners.append(record)
+
+        def _unsub():
+            record.cancelled = True
+
+        return _unsub
 
 
 class FakeEntry:
@@ -121,7 +131,7 @@ class FakeEntry:
 
 
 class FakeHass:
-    def __init__(self, states=None, entries=None, config_dir="/tmp/openreef_test"):
+    def __init__(self, states=None, entries=None, config_dir="/tmp/openreef_test", is_running=True):
         self.states = _FakeStates(states)
         self.services = _FakeServices(self.states)
         self.config = _FakeConfig(config_dir)
@@ -129,6 +139,7 @@ class FakeHass:
         self.bus = _FakeBus()
         self.data = {}
         self.tasks = []  # names passed to async_create_task
+        self.is_running = is_running  # False = HA still booting (startup races)
 
     async def async_add_executor_job(self, func, *args):
         return func(*args)

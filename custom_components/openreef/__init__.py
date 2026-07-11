@@ -17,7 +17,7 @@ import voluptuous as vol
 from homeassistant.components import panel_custom, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_ENTITY_ID
+from homeassistant.const import ATTR_ENTITY_ID, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import area_registry as ar
@@ -212,6 +212,14 @@ WAVEMAKER_REMINDER_LAST = "wavemaker_reminder_last"
 MAINTENANCE_REMINDER_UNSUB = "maintenance_reminder_unsub"
 MAINTENANCE_REMINDER_LAST = "maintenance_reminder_last"
 WATCHDOG_UNSUB = "watchdog_unsub"
+# Boot-time repairs race: mapped entities and armed equipment routinely read
+# missing/unavailable while HA is still starting other integrations (ESPHome
+# nodes connect AFTER their integration sets up). Judging them during boot
+# raised the "missing mapped entities" / "armed equipment unavailable" repairs
+# on EVERY restart/update — alarming and always self-clearing. The first
+# evaluation is deferred to STARTED + a grace window instead.
+ISSUE_REFRESH_UNSUB = "issue_refresh_unsub"
+ISSUE_BOOT_GRACE_SECONDS = 60
 CAPTURES_PATH_REGISTERED = "captures_path_registered"
 CAPTURE_LAST = "capture_last"
 CAPTURE_INFLIGHT = "capture_inflight"
@@ -4631,9 +4639,40 @@ async def _async_schedule_timelapse(
     )
 
 
+def _async_defer_issue_refresh_to_startup(hass: HomeAssistant) -> None:
+    """Arm a one-shot issue refresh for STARTED + grace. Idempotent — the single
+    store key holds whichever unsub is current (the listener, then the timer)."""
+    store = hass.data.setdefault(DOMAIN, {})
+    if store.get(ISSUE_REFRESH_UNSUB) is not None:
+        return
+
+    async def _fire(now: datetime) -> None:
+        hass.data.setdefault(DOMAIN, {}).pop(ISSUE_REFRESH_UNSUB, None)
+        latest_entry = _first_entry(hass)
+        if latest_entry is None:
+            return
+        await _async_refresh_issues(hass, latest_entry)
+
+    async def _started(_event: Any) -> None:
+        # STARTED means every integration finished setting up — but network
+        # devices (ESPHome nodes, controller polls) can still be connecting,
+        # so give them a grace window before judging availability.
+        hass.data.setdefault(DOMAIN, {})[ISSUE_REFRESH_UNSUB] = async_track_point_in_time(
+            hass, _fire, datetime.now(timezone.utc) + timedelta(seconds=ISSUE_BOOT_GRACE_SECONDS)
+        )
+
+    store[ISSUE_REFRESH_UNSUB] = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _started)
+
+
 async def _async_refresh_issues(
     hass: HomeAssistant, entry: OpenReefConfigEntry | None
 ) -> None:
+    if not getattr(hass, "is_running", True):
+        # HA is still booting: entity states are not trustworthy yet. Defer the
+        # first evaluation instead of raising repairs that self-clear minutes
+        # later (they alarmed testers on every single update/restart).
+        _async_defer_issue_refresh_to_startup(hass)
+        return
     config = _config_from_entry(entry)
     validation = _validate_config(hass, config)
 
@@ -10593,6 +10632,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _awc_restore = _store.pop(AWC_ATO_RESTORE_UNSUB, None)
     if _awc_restore is not None:
         _awc_restore()
+    _issue_refresh = _store.pop(ISSUE_REFRESH_UNSUB, None)
+    if _issue_refresh is not None:
+        _issue_refresh()
     hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).pop(
         entry.entry_id, None
     )
