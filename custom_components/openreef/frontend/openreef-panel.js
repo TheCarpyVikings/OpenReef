@@ -57,6 +57,8 @@ class OpenReefPanel extends HTMLElement {
     this._doserRemoveConfirm = "";
     this._doserDryRun = {};
     this._doserAdvisorKicked = false;
+    this._doserApplyConfirm = "";
+    this._awcResetConfirm = "";
     this._modeConfirm = null;
     this._controlConfirm = null;
     this._equipmentDetail = null;
@@ -1475,6 +1477,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "awc-ack") this._awcAction("openreef/awc_acknowledge");
       if (action === "awc-reset") this._awcResetReservoir(id);
       if (action === "awc-calibrate") this._awcCalibrate(id);
+      if (action === "awc-reset-ledger") this._awcAction("openreef/awc_reset_ledger");
+      if (action === "awc-tubing-replaced") this._awcTubingReplaced(id);
       if (action === "add-doser-channel") this._addDoserChannel();
       if (action === "add-doser-kalk") this._addDoserChannel("Kalkwasser", "kalk");
       if (action === "remove-doser-channel") this._removeDoserChannel(id);
@@ -1888,7 +1892,12 @@ class OpenReefPanel extends HTMLElement {
         const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
         a.schedule = a.schedule || {};
         if (field === "startTime") {
-          a.schedule.times = [value];
+          // Edit the first slot IN PLACE — replacing times[] wholesale silently
+          // deleted every other slot of a multi-time (e.g. hourly) setup (T2).
+          const times = Array.isArray(a.schedule.times) && a.schedule.times.length
+            ? [...a.schedule.times] : [value];
+          times[0] = value;
+          a.schedule.times = times;
         } else if (field === "scheduleDay") {
           const day = target.dataset.day;
           const set = new Set(Array.isArray(a.schedule.days) ? a.schedule.days : []);
@@ -5130,10 +5139,23 @@ class OpenReefPanel extends HTMLElement {
   _doserApplySuggestion(id, ml) {
     const channel = this._doserChannels()[id];
     if (!channel || !(ml > 0)) return;
+    // Ramp-aware apply (T4): with a ramp active, one tap of the full advisor
+    // dose would silently blow past the ramp while its card still claimed 60%.
+    const ramp = this._doserSummary?.summary?.[id]?.ramp;
+    const rampActive = ramp && !ramp.complete && Number(ramp.percent) > 0;
+    if (rampActive && this._doserApplyConfirm !== id) {
+      this._doserApplyConfirm = id;
+      const scaled = Math.round(ml * Number(ramp.percent) / 100 * 10) / 10;
+      this._doserMessage = `Ramp is at ${this._format(ramp.percent, 0)}% — tap Apply again to use the ramp-scaled ${this._format(scaled, 1)} ml/day (advisor's full suggestion: ${this._format(ml, 1)}).`;
+      this._render();
+      return;
+    }
+    const applyMl = rampActive ? ml * Number(ramp.percent) / 100 : ml;
+    this._doserApplyConfirm = "";
     channel.schedule = channel.schedule || {};
-    channel.schedule.mlPerDay = Math.round(ml * 10) / 10;
+    channel.schedule.mlPerDay = Math.round(applyMl * 10) / 10;
     this._setDirty(true);
-    this._doserMessage = `Applied ${this._format(ml, 1)} ml/day to ${channel.name || id} — Save to sync it to the pump.`;
+    this._doserMessage = `Applied ${this._format(channel.schedule.mlPerDay, 1)} ml/day to ${channel.name || id} — Save to sync it to the pump.`;
     this._render();
   }
 
@@ -9333,20 +9355,9 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _doserEntitySelect(scope, idAttr, field, value, domain) {
-    // _awcEntitySelect builds options from live hass.states only — a stored
-    // binding whose device is offline would render as "— none —" and one stray
-    // click would silently unbind it. Keep the stored id visible instead.
-    const states = (this._hass && this._hass.states) || {};
-    if (value && !states[value]) {
-      const opts = Object.keys(states)
-        .filter((e) => e.startsWith(domain + "."))
-        .sort()
-        .map((e) => `<option value="${this._escape(e)}">${this._escape(e)}</option>`)
-        .join("");
-      return `<select data-scope="${scope}" ${idAttr} data-field="${field}">
-        <option value="">— none —</option>
-        <option value="${this._escape(value)}" selected>${this._escape(value)} (unavailable)</option>${opts}</select>`;
-    }
+    // Kept as an alias — the stored-id preservation now lives in
+    // _awcEntitySelect itself (R20: the AWC selects, including the LEAK sensor,
+    // had the same silent-unbind flaw this wrapper originally patched).
     return this._awcEntitySelect(scope, idAttr, field, value, domain);
   }
 
@@ -9460,11 +9471,39 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _awcResetReservoir(kind) {
+    // Two-step confirm (T3): the reset targets sit on the big clickable SVG —
+    // one stray tap marked a near-empty bin "full" and defeated the
+    // fresh-insufficient preflight, with no undo.
+    if (this._awcResetConfirm !== kind) {
+      this._awcResetConfirm = kind;
+      this._awcMessage = kind === "fresh"
+        ? "Tap again to confirm: mark the FRESH reservoir as refilled to full."
+        : "Tap again to confirm: mark the WASTE reservoir as emptied.";
+      this._render();
+      return;
+    }
+    this._awcResetConfirm = "";
     this._busy = true;
     this._render();
     try {
       const result = await this._callWS({ type: "openreef/awc_reset_reservoir", reservoir: kind });
       this._config = result.config || this._config;
+      this._awcMessage = kind === "fresh" ? "Fresh reservoir marked refilled." : "Waste reservoir marked emptied.";
+    } catch (err) {
+      this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._awcSummaryAt = 0;
+    await this._awcLoadSummary();
+  }
+
+  async _awcTubingReplaced(role) {
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/awc_tubing_replaced", role });
+      this._config = result.config || this._config;
+      this._awcMessage = `${role} pump tubing install date stamped — recalibrate after a tubing change.`;
     } catch (err) {
       this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
     }
@@ -9503,8 +9542,14 @@ class OpenReefPanel extends HTMLElement {
       .sort()
       .map((e) => `<option value="${this._escape(e)}" ${e === value ? "selected" : ""}>${this._escape(e)}</option>`)
       .join("");
+    // A stored binding whose entity is missing (renamed/offline device) must stay
+    // visible and selected — rendering it as "— none —" meant one stray click
+    // silently unbound a flood-safety sensor with no way back from the UI (R20).
+    const missing = value && !states[value]
+      ? `<option value="${this._escape(value)}" selected>${this._escape(value)} (unavailable)</option>`
+      : "";
     return `<select data-scope="${scope}" ${idAttr} data-field="${field}">
-      <option value="">— none —</option>${opts}</select>`;
+      <option value="">— none —</option>${missing}${opts}</select>`;
   }
 
   _awcStatusLabel(status) {
@@ -9619,10 +9664,20 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // Compact AWC diagram block for the Reef Pulse kiosk wall.
+  // Live AWC state for rendering: prefer the fresh summary snapshot over the
+  // config blob — the config's event refresh is suppressed while the settings
+  // form is dirty or Pulse is open, so banners froze mid-run ("Draining" with a
+  // Stop button after completion; faults invisible on the kiosk). Config stays
+  // the source for settings forms only (R19).
+  _awcLiveState(awc) {
+    const summaryState = this._awcSummary?.state;
+    return (summaryState && typeof summaryState === "object") ? summaryState : (awc.state || {});
+  }
+
   _pulseAwcMarkup() {
     const awc = this._config?.automaticWaterChange;
     if (!awc || !awc.enabled || !awc.diagramInPulse) return "";
-    const state = awc.state || {};
+    const state = this._awcLiveState(awc);
     const liveRun = ["draining", "filling", "exchanging"].includes(state.status);
     const refreshMs = liveRun ? 1000 : 4000;
     if (!this._awcSummary || Date.now() - (this._awcSummaryAt || 0) > refreshMs) {
@@ -9638,7 +9693,7 @@ class OpenReefPanel extends HTMLElement {
 
   _automaticWaterChange() {
     const awc = this._config?.automaticWaterChange || {};
-    const state = awc.state || {};
+    const state = this._awcLiveState(awc);
     // Poll faster while a change is running so the diagram animates smoothly.
     const live = ["draining", "filling", "exchanging"].includes(state.status);
     const refreshMs = live ? 1000 : 4000;
@@ -9697,9 +9752,29 @@ class OpenReefPanel extends HTMLElement {
     }
     if (["draining", "filling", "exchanging"].includes(status)) {
       const target = Number(state.targetLitres) || 0;
-      const filled = (Number(state.filledMl) || 0) / 1000;
-      const drained = (Number(state.drainedMl) || 0) / 1000;
-      const pct = target > 0 ? Math.min(100, Math.round((Math.max(filled, drained) / target) * 100)) : 0;
+      let filled = (Number(state.filledMl) || 0) / 1000;
+      let drained = (Number(state.drainedMl) || 0) / 1000;
+      let pct;
+      if (status === "exchanging") {
+        // Simultaneous: both counters are dead-reckoned live every tick.
+        pct = target > 0 ? Math.min(100, Math.round((Math.max(filled, drained) / target) * 100)) : 0;
+      } else {
+        // Sequential legs only credit volume when the leg COMPLETES — without
+        // interpolation the flagship live view sat at "Draining — 0%" for the
+        // whole drain leg, then jumped (R18). Interpolate the in-flight leg from
+        // its own timer; header % counts both halves of the change.
+        const started = Date.parse(state.legStartedAt || "");
+        const ends = Date.parse(state.legEndsAt || "");
+        let inflight = 0;
+        if (Number.isFinite(started) && Number.isFinite(ends) && ends > started) {
+          const frac = Math.min(1, Math.max(0, (Date.now() - started) / (ends - started)));
+          const legTarget = Math.max(0, status === "draining" ? target - drained : target - filled);
+          inflight = legTarget * frac;
+        }
+        if (status === "draining") drained += inflight;
+        else filled += inflight;
+        pct = target > 0 ? Math.min(100, Math.round(((drained + filled) / (2 * target)) * 100)) : 0;
+      }
       return `<div class="setting-card" style="border-left:4px solid var(--info-color,#1976d2);">
         <strong>💧 ${this._escape(status.charAt(0).toUpperCase() + status.slice(1))} — ${pct}%</strong>
         <p>Drained ${this._format(drained, 2)} L · filled ${this._format(filled, 2)} L of ${this._format(target, 1)} L target.</p>
@@ -9708,8 +9783,15 @@ class OpenReefPanel extends HTMLElement {
     }
     const last = state.lastRun ? this._formatActivityTime(state.lastRun) : "never";
     const next = state.nextRun ? this._formatActivityTime(state.nextRun) : "—";
+    // The post-change stabilisation hold-off looked like a broken ATO — the
+    // exact moment a keeper watching the sump drop would override the safety.
+    // Name it and give the resume time (T10).
+    const holdoff = Date.parse(state.atoSuspendedUntil || "");
+    const holdoffChip = Number.isFinite(holdoff) && holdoff > Date.now()
+      ? ` <span class="pill warning">ATO paused — resumes ${this._escape(new Date(holdoff).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span>`
+      : "";
     return `<div class="setting-card subtle-card">
-      <strong>✅ Idle</strong>
+      <strong>✅ Idle${holdoffChip}</strong>
       <p>Last change: ${this._escape(last)} · Next scheduled: ${this._escape(next)}</p>
     </div>`;
   }
@@ -9746,28 +9828,51 @@ class OpenReefPanel extends HTMLElement {
     const days = sum.daysOfFreshRemaining;
     const daysTxt = days == null ? "—" : `${this._format(days, 1)} d`;
     const niStatus = ni.status === "warning" ? "warning" : "ok";
+    // "OK — within window" for a NEVER-calibrated pump was a lie while the
+    // engine blocked every run on no_calibration (R29).
+    const uncalibrated = ["drain", "fill"].some((r) => sum.pumps?.[r] && sum.pumps[r].calibrated === false);
     const pumpNag = ["drain", "fill"].some((r) => sum.pumps?.[r]?.recalibrationDue);
+    const calValue = uncalibrated ? "Needed" : pumpNag ? "Due" : "OK";
+    const calDetail = uncalibrated ? "runs blocked until calibrated" : pumpNag ? "recalibrate pumps" : "within window";
+    const calStatus = uncalibrated ? "critical" : pumpNag ? "warning" : "ok";
+    // Net drift: an actionable card, not just a number (T9) — say what to do
+    // and expose the ledger reset that previously existed backend-only.
+    const trim = Number(ni.suggestedTrimL);
+    const niDetail = ni.status === "warning"
+      ? `${trim > 0 ? "add" : "remove"} ${this._format(Math.abs(trim), 2)} L on the next fill`
+      : "in balance";
     return `
       <div class="summary-grid">
         ${this._missionSummaryCard("Fresh remaining", daysTxt, "days at current rate", days != null && days < 3 ? "warning" : "ok", "awc")}
         ${this._missionSummaryCard("Weekly change", `${this._format(sum.weeklyPercentOfTank, 1)}%`, "of tank volume", "ok", "awc")}
-        ${this._missionSummaryCard("Net drift", `${this._format(ni.netL, 2)} L`, ni.status === "warning" ? "rebalance suggested" : "in balance", niStatus, "awc")}
-        ${this._missionSummaryCard("Calibration", pumpNag ? "Due" : "OK", pumpNag ? "recalibrate pumps" : "within window", pumpNag ? "warning" : "ok", "awc")}
+        ${this._missionSummaryCard("Net drift", `${this._format(ni.netL, 2)} L`, niDetail, niStatus, "awc")}
+        ${this._missionSummaryCard("Calibration", calValue, calDetail, calStatus, "settings", { section: "awc", scroll: "or-section-awc" })}
         ${this._missionSummaryCard("30-day dilution", `${this._format(sum.projectedRemovalPct30d, 0)}%`, "old water removed", "ok", "awc")}
-      </div>`;
+      </div>
+      ${ni.status === "warning" ? `<div class="setting-card subtle-card"><small>Cumulative ledger: drained ${this._format(ni.drainedL, 1)} L · filled ${this._format(ni.filledL, 1)} L. After correcting (or if you've trimmed manually), reset the ledger baseline.</small>
+        <div class="button-row"><button class="secondary" data-action="awc-reset-ledger">Reset drift ledger</button></div></div>` : ""}`;
   }
 
   _awcHistory(awc) {
     const history = Array.isArray(awc.history) ? awc.history.slice(0, 8) : [];
     if (!history.length) return "";
-    const rows = history.map((h) => `
+    const rows = history.map((h) => {
+      const drained = Number(h.drainedL) || 0;
+      const filled = Number(h.filledL) || 0;
+      // A drain-only abort used to read "0.0 L · partial", hiding the litres
+      // that LEFT the tank (R30) — show both sides whenever they differ.
+      const volume = Math.abs(drained - filled) > 0.05
+        ? `drained ${this._format(drained, 1)} / filled ${this._format(filled, 1)} L`
+        : `${this._format(filled, 1)} L`;
+      return `
       <div class="manual-history-row">
         <div>
           <strong>${this._escape(this._formatActivityTime(h.completedAt))}</strong>
-          <small>${this._format(h.filledL, 1)} L${h.partial ? " · partial" : ""}${h.method ? " · " + this._escape(h.method.replace("_", " ")) : ""}</small>
+          <small>${volume}${h.partial ? " · partial" : ""}${h.method ? " · " + this._escape(h.method.replace("_", " ")) : ""}</small>
           ${h.notes ? `<p>${this._escape(h.notes)}</p>` : ""}
         </div>
-      </div>`).join("");
+      </div>`;
+    }).join("");
     return `
       <section class="setting-card subtle-card">
         <div class="section-head"><div><p class="eyebrow">History</p><h3>Recent changes</h3></div></div>
@@ -9818,6 +9923,8 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <div class="button-row"><button class="secondary" data-action="awc-calibrate" data-id="${role}">Calibrate ${role}</button></div>
           <small>${p.mlPerS ? `Calibrated to ${p.mlPerS} ml/s${p.calibratedAt ? " · " + this._escape(this._formatActivityTime(p.calibratedAt)) : ""}` : "Not calibrated yet."}</small>
+          <small class="awc-hint">Run ${this._format((Number(p.runSeconds) || 0) / 3600, 1)} h · ${Number(p.startCount) || 0} starts · tubing ${p.tubingInstalledAt ? "installed " + this._escape(this._formatActivityTime(p.tubingInstalledAt)) : "install date not set"}
+            <button class="secondary inline-btn" data-action="awc-tubing-replaced" data-id="${role}">Tubing replaced</button></small>
         </article>`;
     };
 
@@ -9934,7 +10041,7 @@ class OpenReefPanel extends HTMLElement {
             </label>
           </div>
           <div class="mini-grid">
-            <label>Run at<input type="time" data-scope="awc-schedule" data-field="startTime" value="${(Array.isArray(sched.times) && sched.times[0]) || "02:00"}"></label>
+            <label>Run at<input type="time" data-scope="awc-schedule" data-field="startTime" value="${(Array.isArray(sched.times) && sched.times[0]) || "02:00"}">${Array.isArray(sched.times) && sched.times.length > 1 ? `<small>…and ${sched.times.length - 1} more time${sched.times.length > 2 ? "s" : ""} (${this._escape(sched.times.slice(1).join(", "))}) — kept as configured.</small>` : ""}</label>
           </div>
           <div class="chip-row awc-day-row">${dayBtns}</div>
           <small class="awc-hint">Leave all days unticked to run every day.</small>

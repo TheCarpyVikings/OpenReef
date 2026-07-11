@@ -7725,6 +7725,33 @@ async def websocket_awc_reset_ledger(
     _awc_send(connection, msg, hass, config)
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/awc_tubing_replaced",
+    vol.Required("role"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_tubing_replaced(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Stamp a pump's tubing install date — the yearly tubing-age nag was dead code
+    end-to-end because nothing ever set tubingInstalledAt (T6)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    role = msg["role"]
+    if role not in AWC_PUMP_ROLES:
+        connection.send_error(msg["id"], "invalid_role", "Pump role must be 'drain' or 'fill'")
+        return
+    config = _config_from_entry(entry)
+    pump = _awc_cfg(config).setdefault("pumps", {}).setdefault(role, {})
+    pump["tubingInstalledAt"] = datetime.now(timezone.utc).isoformat()
+    _append_activity(config, f"AWC {role} pump tubing replaced", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/awc_summary"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -10618,6 +10645,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_awc_calibrate)
     websocket_api.async_register_command(hass, websocket_awc_reset_reservoir)
     websocket_api.async_register_command(hass, websocket_awc_reset_ledger)
+    websocket_api.async_register_command(hass, websocket_awc_tubing_replaced)
     websocket_api.async_register_command(hass, websocket_awc_set_schedule)
     websocket_api.async_register_command(hass, websocket_awc_summary)
     websocket_api.async_register_command(hass, websocket_dosing_summary)

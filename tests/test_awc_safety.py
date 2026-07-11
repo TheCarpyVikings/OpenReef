@@ -524,6 +524,14 @@ def test_ledger_outlives_history_cap_and_resets():
     assert ledger["cumulativeDrainedL"] == 0.0 and ledger["cumulativeFilledL"] == 0.0
     assert ledger["resetAt"]
 
+    # tubing-replaced stamps the install date (the yearly tubing nag was dead
+    # code end-to-end: nothing ever set tubingInstalledAt — hardening T6)
+    run(integration.websocket_awc_tubing_replaced(hass, conn, {"id": 2, "role": "drain"}))
+    assert not conn.errors, conn.error_codes
+    assert _awc(entry)["pumps"]["drain"]["tubingInstalledAt"]
+    run(integration.websocket_awc_tubing_replaced(hass, conn, {"id": 3, "role": "bogus"}))
+    assert "invalid_role" in conn.error_codes
+
 
 def test_ledger_seeds_from_history_on_upgrade():
     # A pre-ledger config (history only) seeds the ledger from the summed history so the
