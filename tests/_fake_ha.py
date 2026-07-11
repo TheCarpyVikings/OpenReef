@@ -34,6 +34,10 @@ class _FakeStates:
     def set(self, entity_id, value, attributes=None):
         self._states[entity_id] = value if isinstance(value, FakeState) else FakeState(value, attributes)
 
+    def async_set(self, entity_id, value, attributes=None):
+        # Bare state-machine write (no entity platform) — the dosing pH mirror uses this.
+        self.set(entity_id, value, attributes)
+
     def get(self, entity_id):
         return self._states.get(entity_id)
 
@@ -64,6 +68,20 @@ class _FakeServices:
                     for item in value:
                         if isinstance(item, str):
                             self._states.set(item, new_state)
+        if (
+            domain == "number"
+            and service == "set_value"
+            and self._states is not None
+        ):
+            # Mirror HA: the number entity's state becomes the written value, so the
+            # dosing sync's read-back verification is testable. Entity ids are the
+            # dotted strings among the values (ATTR_ENTITY_ID's key is opaque).
+            new_value = data.get("value")
+            for key, value in data.items():
+                if key == "value":
+                    continue
+                if isinstance(value, str) and "." in value:
+                    self._states.set(value, str(new_value))
 
 
 class _FakeConfig:

@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 46
+CORE_SCHEMA_VERSION = 47
 INTEGRATION_VERSION = "0.4.107"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
@@ -264,6 +264,63 @@ AWC_HOLDOFF_MAX_MINUTES = 1440
 AWC_DEFAULT_DRIFT_WARN_PCT = 10.0         # |model vs sensor| beyond this ⇒ recalibration prompt
 AWC_DEFAULT_NET_IMBALANCE_L = 2.0         # cumulative drain≠fill litres before we warn
 AWC_HISTORY_MAX = 100                     # completed changes kept
+# Priming / spin-up offset: the per-dose calibration intercept applied to the run time so
+# tens-of-mL micro-doses stay volume-accurate (a fixed few-mL offset is ~6.5% of a 40 mL
+# dose). We bound the *per-dose* spin-up to a few seconds of flow so a bad multi-point fit
+# (or a dry-tube point that smuggled the whole tube-fill volume into the intercept) can't
+# distort the runtime; any excess is parked in the one-time `primeMl`. See
+# awc.runtime_for_volume_s.
+AWC_SPINUP_MAX_SECONDS = 3.0              # calibrate: max plausible spin-up = 3 s of flow
+AWC_SPINUP_MIN_CAP_ML = 5.0              # ...but never clamp the spin-up below 5 mL (slow pumps)
+AWC_SPINUP_MAX_ML = 1000.0                # config-normalise absolute sanity clamp on spinUpMl
+
+# Dosing channels — multi-pump dosing control (kalk stepper doser first). The
+# firmware executes the schedule and the full guard chain (HA edits, never runs,
+# the schedule — dosing must survive an HA outage); HA compiles daily-total-first
+# schedules into firmware numbers, verifies every write, watches for missed doses,
+# and keeps the reservoir/integrity/tube-life ledgers. Maths in dosing.py,
+# orchestration in __init__.py, matching the awc.py split.
+DOSING_MAX_CHANNELS = 8
+DOSING_CHANNEL_CHEMICALS = ("alk", "ca", "mg", "kalk", "trace", "other")
+DOSING_CHANNEL_MODES = ("continuous", "doses")
+DOSING_DRIVER_TYPES = ("openreef_esphome_stepper",)   # adapter-ready: generic HA doser is v2
+DOSING_SYNC_STATES = ("unsynced", "pending", "verifying", "synced", "failed", "offline", "drift")
+DOSING_TICK_SECONDS = 60
+DOSING_FLUSH_INTERVAL_S = 3600            # runtime ledger → config blob cadence (VISION convention)
+DOSING_SYNC_VERIFY_DELAY_S = 8            # write-then-verify read-back delay (mode-verify precedent)
+DOSING_SYNC_RETRIES = 1
+DOSING_CAL_STEPS_PER_100REV = 320000.0    # 200 steps x 16 microsteps x 100 revolutions
+DOSING_CAL_HISTORY_MAX = 10               # calibration history kept for drift comparison
+DOSING_DAILY_LOG_MAX = 60                 # daily rollups kept (per-dose detail lives in recorder)
+DOSING_EVENTS_MAX = 30
+DOSING_ML_PER_DAY_MAX = 5000.0            # sanity ceiling on a daily volume
+DOSING_RESERVOIR_MAX_ML = 50000.0         # 50 L — a big kalk reservoir must never be rejected
+DOSING_TUBE_LIFE_HOURS_DEFAULT = 1000     # Kamoer KPHM tube life
+DOSING_RECAL_NAG_DAYS = 60                # matches AWC recal_days
+DOSING_MISSED_TOLERANCE_PCT = 10.0        # shortfall beyond max(2 doses, this %) ⇒ missed
+DOSING_ROLLOVER_ANOMALY_MINUTES = 90      # sensor reset far from HA midnight ⇒ integrity anomaly
+DOSING_SUSPEND_MAX_HOURS = 24             # panic-lockout ceiling (firmware auto-expiry is 4 h)
+DOSING_MANUAL_PRIME_MAX_S = 30
+DOSING_MAX_PER_DOSE_ML = 10.0             # firmware dose-volume number ceiling
+DOSING_PH_MIRROR_ENTITY = "sensor.openreef_kalk_ph_mirror"  # fixed id firmware subscribes to
+DOSING_RUNTIME = "dosing_runtime"         # flat hass.data keys, VISION_* style
+DOSING_TICK_UNSUB = "dosing_tick_unsub"
+DOSING_MIRROR_UNSUB = "dosing_mirror_unsub"
+DOSING_VERIFY_UNSUB = "dosing_verify_unsub"
+
+# The frozen entity-binding roles for the openreef_esphome_stepper driver. The
+# panel's auto-bind discovers entities by the reference-YAML name suffixes; the
+# stored config always keeps explicit entity ids (renames must not silently
+# unbind — the Kamoer/Jebao lesson).
+DOSING_BINDING_ROLES = (
+    "doseVolumeNumber", "doseIntervalNumber", "nightIntervalNumber", "maxDailyNumber",
+    "doseSpeedNumber", "runCurrentNumber", "phStopNumber", "phResumeNumber",
+    "stepsPerMlNumber", "windowStartNumber", "windowEndNumber",
+    "nightStartNumber", "nightEndNumber", "manualDoseMlNumber",
+    "enabledSwitch", "haSuspendSwitch", "phGuardSwitch",
+    "primeButton", "doseNowButton", "manualDoseButton", "calibrateButton",
+    "dosedTodaySensor", "reservoirLowSensor", "lastSkipSensor",
+)
 
 SERVICE_RECORD_TASK_COMPLETION = "record_task_completion"
 SERVICE_APPLY_MODE = "apply_mode"
@@ -1190,6 +1247,10 @@ DEFAULT_CORE_CONFIG = {
             }
             for parameter in DOSING_PARAMETERS
         },
+        # Dosing channels — user-created pump channels (kalk stepper first).
+        # Shape is dynamic like `equipment`; the normaliser owns the per-channel
+        # schema (see _normalise_dosing_channels), so the default is just empty.
+        "channels": {},
     },
     # Lighting schedule — drives when light-dependent (lightGated) sensor alerts
     # may fire. mode "off" = no gating (alerts always evaluated, legacy behaviour).

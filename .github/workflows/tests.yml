@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Backend compiles
-        run: python3 -m py_compile custom_components/openreef/__init__.py custom_components/openreef/const.py custom_components/openreef/spawning.py custom_components/openreef/vision.py
+        run: python3 -m py_compile custom_components/openreef/__init__.py custom_components/openreef/const.py custom_components/openreef/spawning.py custom_components/openreef/vision.py custom_components/openreef/awc.py custom_components/openreef/dosing.py custom_components/openreef/icp.py
 
       - name: Config migration tests
         run: python3 tests/test_config_migration.py
@@ -53,6 +53,18 @@ jobs:
 
       - name: Maintenance service tests
         run: python3 tests/test_maintenance.py
+
+      - name: AWC engine tests (pure maths)
+        run: python3 tests/test_awc.py
+
+      - name: AWC safety tests (state machine, two-tier safety, ATO suspend)
+        run: python3 tests/test_awc_safety.py
+
+      - name: Dosing engine tests (schedule compile, guards, ledgers)
+        run: python3 tests/test_dosing.py
+
+      - name: Dosing orchestration tests (sync write-verify, tick, WS surface)
+        run: python3 tests/test_dosing_sync.py
 
       - name: Panel JS syntax
         run: node --check custom_components/openreef/frontend/openreef-panel.js
