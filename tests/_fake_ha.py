@@ -48,12 +48,26 @@ class _FakeServices:
         # When wired to a _FakeStates, switch.turn_on/off mutate the entity state so
         # scheduled-callback re-checks (per-equipment timers, max-off) behave like HA.
         self._states = states
+        # Failure injection: add (domain, service) or (domain, service, entity_id)
+        # tuples to make matching calls raise HomeAssistantError — the
+        # ESP-unreachable / rejected-write test hook.
+        self.fail_on = set()
 
     async def async_call(self, domain, service, data=None, **kwargs):
         data = dict(data or {})
         self.calls.append(
             SimpleNamespace(domain=domain, service=service, data=data, kwargs=kwargs)
         )
+        # Yield to the event loop like a real (blocking=True) service call: without
+        # this, asyncio.gather races never interleave, so lock-contention tests
+        # exercised nothing (a task could hold a lock across "awaits" atomically).
+        await asyncio.sleep(0)
+        entity_ids = [v for v in data.values() if isinstance(v, str) and "." in v]
+        if (domain, service) in self.fail_on or any(
+            (domain, service, ent) in self.fail_on for ent in entity_ids
+        ):
+            from homeassistant.exceptions import HomeAssistantError  # stubbed real class
+            raise HomeAssistantError(f"injected failure: {domain}.{service}")
         if (
             domain == "switch"
             and service in ("turn_on", "turn_off")
@@ -226,6 +240,43 @@ def install_scheduler(integration):
     Returns the FakeScheduler so tests can fire timers."""
     scheduler = FakeScheduler()
     integration.async_track_point_in_time = scheduler.track
+    return scheduler
+
+
+class FakeIntervalScheduler:
+    """Captures ``async_track_time_interval`` registrations so tests can assert a
+    periodic tick was (re)armed and fire it deterministically."""
+
+    def __init__(self):
+        self.intervals = []  # list of {callback, interval, cancelled}
+
+    def track(self, hass, callback, interval):
+        record = {"callback": callback, "interval": interval, "cancelled": False}
+        self.intervals.append(record)
+
+        def _unsub():
+            record["cancelled"] = True
+
+        return _unsub
+
+    def pending(self):
+        return [r for r in self.intervals if not r["cancelled"]]
+
+    async def fire_all(self, now=None):
+        fired = 0
+        for record in list(self.intervals):
+            if record["cancelled"]:
+                continue
+            fired += 1
+            await record["callback"](now)
+        return fired
+
+
+def install_interval_scheduler(integration):
+    """Replace ``async_track_time_interval`` with a capturing fake (companion to
+    install_scheduler for the 60 s AWC/dosing ticks)."""
+    scheduler = FakeIntervalScheduler()
+    integration.async_track_time_interval = scheduler.track
     return scheduler
 
 

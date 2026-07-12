@@ -5622,15 +5622,18 @@ async def _async_awc_suspend_ato(hass: HomeAssistant, config: dict[str, Any], co
 
 
 async def _async_awc_start(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    hass: HomeAssistant, entry: OpenReefConfigEntry,
     target_litres: float, method: str | None, manual: bool, context: Any,
 ) -> tuple[bool, list[dict[str, str]]]:
     """Preflight a change and begin its first leg. Returns (started, blocking_reasons).
     Locked: the busy/preflight check and the begin must be atomic, or two overlapping
-    starts (scheduler tick + manual run-now) both pass preflight and double-start."""
+    starts (scheduler tick + manual run-now) both pass preflight and double-start.
+    The config snapshot is taken INSIDE the lock (R1): every entry point previously
+    deep-copied config before acquiring it, so the locked body's status checks ran on
+    stale state — an aborted change could be resurrected by a queued start."""
     async with _awc_lock(hass):
         return await _async_awc_start_locked(
-            hass, entry, config, target_litres, method, manual, context
+            hass, entry, _config_from_entry(entry), target_litres, method, manual, context
         )
 
 
@@ -5842,13 +5845,14 @@ async def _async_awc_finalize(
 
 
 async def _async_awc_leg_complete(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
+    hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any,
 ) -> None:
     """A leg timer fired: stop the leg, account its volume, check safety, then begin the
     next leg / pause / fault / finalize. Locked so the volume accounting can't interleave
-    with a concurrent start/abort and double-credit progress or the reservoirs."""
+    with a concurrent start/abort and double-credit progress or the reservoirs; the
+    config is fetched inside the lock (R1) so the status check sees a concurrent abort."""
     async with _awc_lock(hass):
-        await _async_awc_leg_complete_locked(hass, entry, config, context)
+        await _async_awc_leg_complete_locked(hass, entry, _config_from_entry(entry), context)
 
 
 async def _async_awc_leg_complete_locked(
@@ -5930,15 +5934,16 @@ async def _async_awc_leg_complete_locked(
 
 
 async def _async_awc_exchange_tick(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
+    hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any,
 ) -> None:
     """Simultaneous-mode monitor tick: dead-reckon each pump from its own stop time,
     account the reservoirs incrementally, stop pumps as they finish, enforce the
     instantaneous imbalance cap + live safety, then finalize or re-arm. Independent
     per-pump timing means each pump moves exactly the target — no over-pump. Locked so a
-    re-entrant tick (or a concurrent abort) can't double-debit the reservoirs."""
+    re-entrant tick (or a concurrent abort) can't double-debit the reservoirs; config
+    fetched inside the lock (R1)."""
     async with _awc_lock(hass):
-        await _async_awc_exchange_tick_locked(hass, entry, config, context)
+        await _async_awc_exchange_tick_locked(hass, entry, _config_from_entry(entry), context)
 
 
 async def _async_awc_exchange_tick_locked(
@@ -6032,14 +6037,23 @@ async def _async_arm_awc_timer(
         latest_entry = _first_entry(hass)
         if latest_entry is None or latest_entry.entry_id != entry.entry_id:
             return
-        config = _config_from_entry(latest_entry)
-        # Dispatch by method: simultaneous runs the monitor tick, sequential the leg handler.
-        if _awc_cfg(config).get("state", {}).get("method") == "batch_simultaneous":
-            await _async_awc_exchange_tick(hass, latest_entry, config, None)
-        else:
-            await _async_awc_leg_complete(hass, latest_entry, config, None)
+        await _async_awc_timer_fired(hass, latest_entry, None)
 
     hass.data.setdefault(DOMAIN, {})[AWC_UNSUB] = async_track_point_in_time(hass, _handle, run_at)
+
+
+async def _async_awc_timer_fired(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any,
+) -> None:
+    """Leg/exchange timer target. The method DISPATCH happens inside the lock on the
+    fresh config (R1): with a pre-lock snapshot, a change aborted-and-restarted with a
+    different method could route an exchanging state into the sequential handler."""
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        if _awc_cfg(config).get("state", {}).get("method") == "batch_simultaneous":
+            await _async_awc_exchange_tick_locked(hass, entry, config, context)
+        else:
+            await _async_awc_leg_complete_locked(hass, entry, config, context)
 
 
 async def _async_schedule_awc(
@@ -6081,17 +6095,20 @@ async def _async_arm_awc_ato_restore(
         latest_entry = _first_entry(hass)
         if latest_entry is None or latest_entry.entry_id != entry.entry_id:
             return
-        latest_config = _config_from_entry(latest_entry)
-        state = _awc_cfg(latest_config).get("state", {})
-        if state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
-            return
-        u = _parse_datetime(state.get("atoSuspendedUntil"))
-        if u is not None and u > datetime.now(timezone.utc):
-            return
-        state["atoSuspendedUntil"] = ""
-        await _async_dosing_awc_suspend(hass, latest_config, False, None)
-        _append_activity(latest_config, "ATO resumed after water-change stabilization hold-off", "control")
-        await _async_save_config(hass, latest_entry, latest_config)
+        # Fetch + mutate under the lock (R1): this timer previously raced the leg
+        # handlers' saves with an unlocked read-modify-write of the whole config.
+        async with _awc_lock(hass):
+            latest_config = _config_from_entry(latest_entry)
+            state = _awc_cfg(latest_config).get("state", {})
+            if state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
+                return
+            u = _parse_datetime(state.get("atoSuspendedUntil"))
+            if u is not None and u > datetime.now(timezone.utc):
+                return
+            state["atoSuspendedUntil"] = ""
+            await _async_dosing_awc_suspend(hass, latest_config, False, None)
+            _append_activity(latest_config, "ATO resumed after water-change stabilization hold-off", "control")
+            await _async_save_config(hass, latest_entry, latest_config)
 
     store[AWC_ATO_RESTORE_UNSUB] = async_track_point_in_time(hass, _handle, run_at)
 
@@ -6141,15 +6158,18 @@ def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
 
 
 async def _async_awc_relaunch(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    hass: HomeAssistant, entry: OpenReefConfigEntry,
     context: Any, log_message: str,
 ) -> bool:
     """Resume/relaunch the current change from persisted progress (resume-to-balance),
     dispatching sequential vs simultaneous. Returns True if it relaunched or completed,
     False if blocked (fault latched / paused). Locked: the interrupted-leg credit + the
-    re-begin must be atomic against timers and other resumes."""
+    re-begin must be atomic against timers and other resumes; config fetched inside
+    the lock (R1)."""
     async with _awc_lock(hass):
-        return await _async_awc_relaunch_locked(hass, entry, config, context, log_message)
+        return await _async_awc_relaunch_locked(
+            hass, entry, _config_from_entry(entry), context, log_message
+        )
 
 
 async def _async_awc_relaunch_locked(
@@ -6158,6 +6178,10 @@ async def _async_awc_relaunch_locked(
 ) -> bool:
     awc = _awc_cfg(config)
     state = awc["state"]
+    # Re-validate on the fresh-under-lock status: a queued resume must not
+    # resurrect a change that was aborted/acknowledged while it waited (R1).
+    if state.get("status") not in (*_AWC_RUNNING_STATES, "paused"):
+        return False
     method = state.get("method") or awc.get("schedule", {}).get("method", _AWC_SAFE_METHOD)
     if method != "batch_simultaneous":
         # Credit the elapsed portion of an interrupted sequential leg BEFORE planning, so
@@ -6216,12 +6240,13 @@ async def _async_awc_relaunch_locked(
 
 
 async def _async_awc_try_resume(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
+    hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any,
 ) -> bool:
-    """Attempt to resume a paused change. Returns True if it resumed/completed."""
-    if _awc_cfg(config).get("state", {}).get("status") != "paused":
+    """Attempt to resume a paused change. Returns True if it resumed/completed.
+    The paused peek here is advisory; relaunch re-validates fresh under the lock."""
+    if _awc_cfg(_config_from_entry(entry)).get("state", {}).get("status") != "paused":
         return False
-    return await _async_awc_relaunch(hass, entry, config, context, "Water change resumed")
+    return await _async_awc_relaunch(hass, entry, context, "Water change resumed")
 
 
 async def _async_awc_resume_on_startup(
@@ -6231,9 +6256,9 @@ async def _async_awc_resume_on_startup(
     persisted drained/filled (resume-to-balance); a paused change is re-evaluated."""
     status = _awc_cfg(config).get("state", {}).get("status")
     if status in _AWC_RUNNING_STATES:
-        await _async_awc_relaunch(hass, entry, config, None, "Water change resumed after restart (resume-to-balance)")
+        await _async_awc_relaunch(hass, entry, None, "Water change resumed after restart (resume-to-balance)")
     elif status == "paused":
-        await _async_awc_try_resume(hass, entry, config, None)
+        await _async_awc_try_resume(hass, entry, None)
 
 
 def _awc_refresh_next_run(config: dict[str, Any], now_local: datetime) -> None:
@@ -6250,13 +6275,13 @@ async def _async_awc_schedule_tick(
     """One scheduler tick (called ~every minute). Auto-resumes a paused change, or starts
     a due batch change (sequential or simultaneous). Continuous/trickle stays
     projection-only and is coerced to the safe sequential default."""
-    config = _config_from_entry(entry)
+    config = _config_from_entry(entry)  # read-only peek; mutating paths re-fetch under the lock
     acfg = _awc_cfg(config)
     state = acfg.get("state", {})
 
     # Auto-resume a paused change as soon as its blocking condition clears.
     if state.get("status") == "paused":
-        await _async_awc_try_resume(hass, entry, config, None)
+        await _async_awc_try_resume(hass, entry, None)
         return
     if state.get("status") in (*_AWC_RUNNING_STATES, "fault"):
         return  # busy or latched — never auto-start over a fault
@@ -6264,9 +6289,8 @@ async def _async_awc_schedule_tick(
     if not acfg.get("enabled"):
         return
     sched = acfg.get("schedule", {})
-    _awc_refresh_next_run(config, now_local)
     if not sched.get("enabled"):
-        await _async_save_config(hass, entry, config)
+        await _async_awc_persist_next_run(hass, entry, now_local)
         return
 
     method = sched.get("method", _AWC_SAFE_METHOD)
@@ -6278,9 +6302,24 @@ async def _async_awc_schedule_tick(
     if awc_engine.is_due(sched, last_run, now_local):
         litres = awc_engine.per_change_litres(sched, tank)
         if litres > 0:
-            await _async_awc_start(hass, entry, config, litres, method, False, None)
+            await _async_awc_start(hass, entry, litres, method, False, None)
             return
-    await _async_save_config(hass, entry, config)
+    await _async_awc_persist_next_run(hass, entry, now_local)
+
+
+async def _async_awc_persist_next_run(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime,
+) -> None:
+    """Persist the refreshed nextRun display value. Fetched + saved under the lock
+    (R1): the tick's old trailing save wrote its whole minute-old snapshot back,
+    which could clobber a change that started concurrently. Saves only on change."""
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        state = _awc_cfg(config).get("state", {})
+        before = state.get("nextRun")
+        _awc_refresh_next_run(config, now_local)
+        if state.get("nextRun") != before:
+            await _async_save_config(hass, entry, config)
 
 
 def _clear_awc_scheduler(hass: HomeAssistant) -> None:
@@ -7519,16 +7558,15 @@ async def websocket_awc_run_now(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
-    config = _config_from_entry(entry)
-    acfg = _awc_cfg(config)
+    # Pre-lock read is only used to resolve percent -> litres (benign); the start
+    # itself re-fetches and re-validates under the lock (R1).
     litres = msg.get("litres")
     if litres is None and msg.get("percent") is not None:
-        litres = _awc_effective_tank_l(config) * float(msg["percent"]) / 100.0
+        litres = _awc_effective_tank_l(_config_from_entry(entry)) * float(msg["percent"]) / 100.0
     started, reasons = await _async_awc_start(
-        hass, entry, config, litres or 0, msg.get("method"), True, connection.context(msg)
+        hass, entry, litres or 0, msg.get("method"), True, connection.context(msg)
     )
-    config = _config_from_entry(entry)
-    _awc_send(connection, msg, hass, config, started=started, reasons=reasons)
+    _awc_send(connection, msg, hass, _config_from_entry(entry), started=started, reasons=reasons)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/awc_abort"})
@@ -7542,10 +7580,11 @@ async def websocket_awc_abort(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
-    config = _config_from_entry(entry)
-    # Locked with a re-check inside: the abort must not interleave with a leg timer /
-    # exchange tick mid-transition (inner _async_awc_abort stays unlocked by design).
+    # Locked with the fetch + re-check INSIDE (R1): the old pre-lock snapshot made
+    # the re-check verify nothing — an abort queued behind a leg timer acted on
+    # a minute-old status (inner _async_awc_abort stays unlocked by design).
     async with _awc_lock(hass):
+        config = _config_from_entry(entry)
         status = _awc_cfg(config).get("state", {}).get("status")
         if status not in (*_AWC_RUNNING_STATES, "paused"):
             connection.send_error(msg["id"], "not_running", "No water change is in progress")
@@ -7565,11 +7604,10 @@ async def websocket_awc_resume(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
-    config = _config_from_entry(entry)
-    if _awc_cfg(config).get("state", {}).get("status") != "paused":
+    if _awc_cfg(_config_from_entry(entry)).get("state", {}).get("status") != "paused":
         connection.send_error(msg["id"], "not_paused", "No paused water change to resume")
         return
-    resumed = await _async_awc_try_resume(hass, entry, config, connection.context(msg))
+    resumed = await _async_awc_try_resume(hass, entry, connection.context(msg))
     _awc_send(connection, msg, hass, _config_from_entry(entry), resumed=resumed)
 
 
@@ -7584,8 +7622,8 @@ async def websocket_awc_acknowledge(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
-    config = _config_from_entry(entry)
     async with _awc_lock(hass):
+        config = _config_from_entry(entry)  # fetched INSIDE the lock (R1)
         state = _awc_cfg(config).get("state", {})
         if state.get("status") != "fault":
             connection.send_error(msg["id"], "no_fault", "There is no latched fault to clear")
@@ -7637,10 +7675,9 @@ async def websocket_awc_calibrate(
     if role not in AWC_PUMP_ROLES:
         connection.send_error(msg["id"], "invalid_role", "Pump role must be 'drain' or 'fill'")
         return
-    config = _config_from_entry(entry)
-    pump = _awc_cfg(config).get("pumps", {}).get(role, {})
-    if msg.get("points"):
-        fit = awc_engine.calibrate_linear([(p[0], p[1]) for p in msg["points"]])
+    points = [(p[0], p[1]) for p in msg.get("points") or []]
+    if points:
+        fit = awc_engine.calibrate_linear(points)
         ml_per_s, intercept = fit["mlPerS"], fit["interceptMl"]
     else:
         if msg.get("seconds") is None or msg.get("volume_ml") is None:
@@ -7651,21 +7688,43 @@ async def websocket_awc_calibrate(
     if ml_per_s <= 0:
         connection.send_error(msg["id"], "invalid_calibration", "Calibration produced a non-positive flow rate")
         return
-    # Split the fitted intercept into a per-dose spin-up (bounded to a few seconds of flow —
-    # the only part that belongs in the run maths) and a one-time prime residual (a dry-tube
-    # point that smuggled the tube-fill volume into the intercept lands here, not per-dose, so
-    # it can't over-correct every primed run). Single-point calibrations have intercept 0 ⇒
-    # both stay 0 ⇒ identical to the pre-existing behaviour.
-    spin_cap = max(AWC_SPINUP_MIN_CAP_ML, AWC_SPINUP_MAX_SECONDS * ml_per_s)
-    spin_up = max(-spin_cap, min(spin_cap, intercept))
-    pump["mlPerS"] = round(ml_per_s, 3)
-    pump["interceptMl"] = round(intercept, 3)
-    pump["spinUpMl"] = round(spin_up, 3)
-    pump["primeMl"] = round(intercept - spin_up, 3)
-    pump["calibratedAt"] = datetime.now(timezone.utc).isoformat()
-    _append_activity(config, f"AWC {role} pump calibrated: {pump['mlPerS']} ml/s", "control")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config, role=role, mlPerS=pump["mlPerS"])
+    # Physical plausibility (R14, WS half): a fit whose line predicts NEGATIVE
+    # volume for the shortest run provided is measurement noise, not a pump —
+    # reject it loudly rather than persisting a silently-clamped fantasy.
+    positive_runs = [s for s, _ in points if s > 0]
+    if positive_runs and intercept < 0:
+        if ml_per_s * min(positive_runs) + intercept < 0:
+            connection.send_error(
+                msg["id"], "implausible_calibration",
+                "That fit predicts negative volume for your shortest run — redo the "
+                "calibration with more varied run durations (e.g. 30 s and 90 s).",
+            )
+            return
+    # Locked + busy-rejected (R28): recalibrating mid-run re-scales the live
+    # dead-reckoning (spurious imbalance aborts) and raced the run's own saves.
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        if _awc_cfg(config).get("state", {}).get("status") in (*_AWC_RUNNING_STATES, "paused"):
+            connection.send_error(msg["id"], "busy", "Finish or stop the running water change before recalibrating")
+            return
+        pump = _awc_cfg(config).setdefault("pumps", {}).setdefault(role, {})
+        # Split the fitted intercept into a per-dose spin-up (bounded to a few seconds of
+        # flow — the only part that belongs in the run maths) and a one-time prime residual
+        # (a dry-tube point that smuggled the tube-fill volume into the intercept lands
+        # here, not per-dose, so it can't over-correct every primed run). Single-point
+        # calibrations have intercept 0 ⇒ both stay 0.
+        spin_cap = max(AWC_SPINUP_MIN_CAP_ML, AWC_SPINUP_MAX_SECONDS * ml_per_s)
+        spin_up = max(-spin_cap, min(spin_cap, intercept))
+        pump["mlPerS"] = round(ml_per_s, 3)
+        pump["interceptMl"] = round(intercept, 3)
+        pump["spinUpMl"] = round(spin_up, 3)
+        pump["primeMl"] = round(intercept - spin_up, 3)
+        pump["calibratedAt"] = datetime.now(timezone.utc).isoformat()
+        _append_activity(config, f"AWC {role} pump calibrated: {pump['mlPerS']} ml/s", "control")
+        config = await _async_save_config(hass, entry, config)
+        # Echo the post-normalisation value: the raw fit may have been clamped.
+        saved = _awc_cfg(config).get("pumps", {}).get(role, {}).get("mlPerS", pump["mlPerS"])
+    _awc_send(connection, msg, hass, config, role=role, mlPerS=saved)
 
 
 @websocket_api.websocket_command(

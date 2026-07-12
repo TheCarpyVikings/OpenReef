@@ -93,13 +93,11 @@ def _has_call(calls, service, entity):
 
 
 def _start(hass, entry, litres=2.0, method=None, manual=True):
-    config = integration._config_from_entry(entry)
-    return run(integration._async_awc_start(hass, entry, config, litres, method, manual, None))
+    return run(integration._async_awc_start(hass, entry, litres, method, manual, None))
 
 
 def _fire_leg(hass, entry):
-    config = integration._config_from_entry(entry)
-    run(integration._async_awc_leg_complete(hass, entry, config, None))
+    run(integration._async_awc_leg_complete(hass, entry, None))
 
 
 def _drive(hass, entry, max_legs=12):
@@ -128,15 +126,16 @@ def test_continuous_method_is_blocked():
 
 def _fire_exchange(hass, entry, age_done=()):
     """Fire one simultaneous monitor tick. ``age_done`` lists roles ('drain'/'fill')
-    whose stop time should be pushed into the past to simulate that pump finishing."""
-    config = integration._config_from_entry(entry)
-    st = config["automaticWaterChange"]["state"]
+    whose stop time should be pushed into the past to simulate that pump finishing.
+    Timing is edited in the entry's STORED options — the handler fetches fresh config
+    inside the lock, so a mutated local copy would be invisible to it."""
+    st = _state(entry)
     past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     if "drain" in age_done:
         st["drainEndsAt"] = past
     if "fill" in age_done:
         st["fillEndsAt"] = past
-    run(integration._async_awc_exchange_tick(hass, entry, config, None))
+    run(integration._async_awc_exchange_tick(hass, entry, None))
 
 
 def test_sequential_drains_then_fills():
@@ -236,8 +235,7 @@ def test_fresh_empty_pauses_then_resumes():
 
     # refill the reservoir and resume
     hass.states.set("binary_sensor.fresh_empty", "off")
-    config = integration._config_from_entry(entry)
-    resumed = run(integration._async_awc_try_resume(hass, entry, config, None))
+    resumed = run(integration._async_awc_try_resume(hass, entry, None))
     assert resumed is True
     assert _state(entry)["status"] == "filling"
     _drive(hass, entry)
@@ -253,8 +251,7 @@ def test_resume_blocked_stays_paused():
     _fire_leg(hass, entry)
     assert _state(entry)["status"] == "paused"
     # still empty → resume should fail and remain paused
-    config = integration._config_from_entry(entry)
-    resumed = run(integration._async_awc_try_resume(hass, entry, config, None))
+    resumed = run(integration._async_awc_try_resume(hass, entry, None))
     assert resumed is False
     assert _state(entry)["status"] == "paused"
 
@@ -567,12 +564,14 @@ def test_concurrent_starts_only_one_wins():
 
     entry = _entry("batch_sequential")
     hass = _hass(entry)
-    config = integration._config_from_entry(entry)
 
     async def both():
+        # Each start fetches its own config INSIDE the lock (the R1 refactor), so the
+        # loser sees the winner's saved 'draining' status — this used to pass only
+        # because both shared one config dict, masking the stale-snapshot race.
         return await asyncio.gather(
-            integration._async_awc_start(hass, entry, config, 2.0, "batch_sequential", True, None),
-            integration._async_awc_start(hass, entry, config, 2.0, "batch_sequential", True, None),
+            integration._async_awc_start(hass, entry, 2.0, "batch_sequential", True, None),
+            integration._async_awc_start(hass, entry, 2.0, "batch_sequential", True, None),
         )
 
     r1, r2 = run(both())
@@ -600,8 +599,7 @@ def test_leak_sensor_unavailable_pauses_not_faults():
 
     # sensor recovers → resume completes the change
     hass.states.set("binary_sensor.leak", "off")
-    config = integration._config_from_entry(entry)
-    assert run(integration._async_awc_try_resume(hass, entry, config, None))
+    assert run(integration._async_awc_try_resume(hass, entry, None))
     _drive(hass, entry)
     assert _state(entry)["status"] == "idle"
 
@@ -834,12 +832,11 @@ def test_simultaneous_intermediate_tick_no_false_abort():
     started, reasons = _start(hass, entry, 2.0, method="batch_simultaneous")
     assert started, reasons
     # Simulate a consistent t=20 s: drain just finished, fill has 20 s of its 40 s left.
-    config = integration._config_from_entry(entry)
-    st = config["automaticWaterChange"]["state"]
+    st = _state(entry)
     now = datetime.now(timezone.utc)
     st["drainEndsAt"] = now.isoformat()
     st["fillEndsAt"] = (now + timedelta(seconds=20)).isoformat()
-    run(integration._async_awc_exchange_tick(hass, entry, config, None))
+    run(integration._async_awc_exchange_tick(hass, entry, None))
     s2 = _state(entry)
     assert s2["status"] == "exchanging"           # 1.0 L gap < 1.5 L cap ⇒ no abort
     assert _close(s2["drainedMl"], 2000, 5) and _close(s2["filledMl"], 1000, 40)
@@ -865,10 +862,9 @@ def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
     assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
     # a real intermediate tick (fill half-done) must NOT abort despite the big gap
-    config = integration._config_from_entry(entry)
     now = datetime.now(timezone.utc)
-    config["automaticWaterChange"]["state"]["fillEndsAt"] = (now + timedelta(seconds=7.5)).isoformat()
-    run(integration._async_awc_exchange_tick(hass, entry, config, None))
+    _state(entry)["fillEndsAt"] = (now + timedelta(seconds=7.5)).isoformat()
+    run(integration._async_awc_exchange_tick(hass, entry, None))
     assert _state(entry)["status"] == "exchanging"
     _fire_exchange(hass, entry, age_done=("drain", "fill"))
     assert _state(entry)["status"] == "idle"
@@ -893,6 +889,93 @@ def test_simultaneous_resume_uncalibrated_faults_not_completes():
     st = _state(entry)
     assert st["status"] == "fault" and "calibrat" in st["fault"].lower()
     assert not _awc(entry)["history"]  # never recorded a (zero-volume) completion
+
+
+# --- Two-config races (R1: every entry point fetches config INSIDE the lock) --
+# The fake services yield to the event loop on every call, so asyncio.gather here
+# produces real interleavings — with the old pre-lock snapshots these tests fail.
+
+def _switch_calls(hass, entity):
+    return [c for c in hass.services.calls
+            if c.domain == "switch" and entity in c.data.values()]
+
+
+def test_race_abort_vs_leg_timer_never_resurrects_pumps():
+    # An abort racing the leg timer must end idle with every pump OFF as the LAST
+    # word — the stale-snapshot bug let the timer re-launch the next leg from a
+    # pre-abort 'draining' status (a pump running with the panel showing idle).
+    import asyncio
+
+    for order in ("abort_first", "timer_first"):
+        entry = _entry("batch_sequential")
+        hass = _hass(entry)
+        assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+        conn = FakeConnection()
+
+        async def race():
+            abort = integration.websocket_awc_abort(hass, conn, {"id": 1})
+            timer = integration._async_awc_timer_fired(hass, entry, None)
+            pair = (abort, timer) if order == "abort_first" else (timer, abort)
+            await asyncio.gather(*pair)
+
+        run(race())
+        assert _state(entry)["status"] == "idle", order
+        for pump in ("switch.awc_drain", "switch.awc_fill"):
+            calls = _switch_calls(hass, pump)
+            services = [c.service for c in calls]
+            assert not calls or services[-1] == "turn_off", (order, pump, services)
+            assert hass.states.get(pump).state == "off", (order, pump)
+
+
+def test_race_run_now_vs_scheduler_tick_single_start():
+    # A due scheduler tick racing a manual run-now: exactly one change starts —
+    # the loser must see the winner's saved status under the lock, not a stale
+    # idle snapshot that double-runs the prefight and doubles the drain volume.
+    import asyncio
+
+    for order in ("manual_first", "tick_first"):
+        entry = _entry("batch_sequential", awc_over={"schedule": {
+            "enabled": True, "method": "batch_sequential", "times": ["00:00"],
+            "amount": 2, "amountUnit": "litres", "period": "day",
+        }})
+        hass = _hass(entry)
+        conn = FakeConnection()
+        now_local = datetime(2026, 7, 12, 3, 0)  # past the 00:00 slot, never run ⇒ due
+
+        async def race():
+            manual = integration.websocket_awc_run_now(hass, conn, {"id": 1, "litres": 2})
+            tick = integration._async_awc_schedule_tick(hass, entry, now_local)
+            pair = (manual, tick) if order == "manual_first" else (tick, manual)
+            await asyncio.gather(*pair)
+
+        run(race())
+        assert _state(entry)["status"] == "draining", order
+        ons = [c for c in _switch_calls(hass, "switch.awc_drain") if c.service == "turn_on"]
+        assert len(ons) == 1, (order, [c.service for c in _switch_calls(hass, "switch.awc_drain")])
+
+
+def test_ws_calibrate_busy_during_run():
+    # Recalibrating mid-run would re-scale the live dead-reckoning — rejected.
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    conn = FakeConnection()
+    run(integration.websocket_awc_calibrate(
+        hass, conn, {"id": 1, "role": "drain", "volume_ml": 500, "seconds": 10}))
+    assert "busy" in conn.error_codes
+    assert _close(_awc(entry)["pumps"]["drain"]["mlPerS"], 100.0, 1e-6)  # unchanged
+
+
+def test_ws_calibrate_rejects_implausible_intercept():
+    # Least-squares over convex data: the fitted line predicts NEGATIVE volume at the
+    # 5 s run — that's measurement noise, not a pump; reject instead of storing it.
+    entry = _entry()
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_awc_calibrate(hass, conn, {"id": 1, "role": "drain",
+        "points": [[5, 10], [10, 100], [60, 3000]]}))
+    assert "implausible_calibration" in conn.error_codes
+    assert _close(_awc(entry)["pumps"]["drain"]["mlPerS"], 100.0, 1e-6)  # unchanged
 
 
 # --- tiny standalone runner --------------------------------------------------
