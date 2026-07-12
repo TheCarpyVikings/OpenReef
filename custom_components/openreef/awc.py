@@ -390,13 +390,38 @@ def resolve_period_litres(schedule: dict[str, Any], tank_volume_l: float) -> flo
     return amount
 
 
+def slot_minutes_for_day(schedule: dict[str, Any]) -> list[int]:
+    """Sorted minutes-since-midnight of one active day's run slots.
+
+    ``times`` mode (the default) reads the explicit HH:MM list. ``interval`` mode —
+    the micro-change cadence — generates ``windowStart + k·everyMinutes`` for every
+    slot strictly inside the window (start inclusive, end exclusive). A wrapped
+    window's post-midnight slots land as early-morning minutes of the same calendar
+    day; equal start/end means the full day (24 hourly slots at 60 min)."""
+    sched = schedule or {}
+    if str(sched.get("mode", "times")).lower() == "interval":
+        ws = parse_hhmm(sched.get("windowStart", "01:00"))
+        we = parse_hhmm(sched.get("windowEnd", "05:00"))
+        every = int(_f(sched.get("everyMinutes"), 60) or 60)
+        every = max(15, min(1440, every))
+        length = (we - ws) % 1440 or 1440
+        mins: list[int] = []
+        k = 0
+        while k * every < length:
+            mins.append((ws + k * every) % 1440)
+            k += 1
+        return sorted(set(mins))
+    times = sched.get("times") or [sched.get("startTime", "02:00")]
+    return sorted({parse_hhmm(t) for t in times if t})
+
+
 def runs_per_week(schedule: dict[str, Any]) -> int:
-    """How many discrete batch runs occur per week = (active days) x (times/day).
+    """How many discrete batch runs occur per week = (active days) x (slots/day).
     Continuous schedules return 0 (they don't run as discrete batches).
 
     This is the count of times :func:`is_due` fires in a week — each allowed day, at
-    each daily time — and it is period-agnostic (a *weekly* amount is still delivered
-    across ``n_days x n_times`` runs). Using ``max(n_days, n_times)`` here under-counts
+    each daily slot — and it is period-agnostic (a *weekly* amount is still delivered
+    across ``n_days x n_slots`` runs). Using ``max(n_days, n_slots)`` here under-counts
     the runs and makes :func:`per_change_litres` over-dose (e.g. Mon/Wed x 06:00/18:00
     would split a weekly amount across 2 slots but actually run 4 times ⇒ ~2x change)."""
     sched = schedule or {}
@@ -404,27 +429,22 @@ def runs_per_week(schedule: dict[str, Any]) -> int:
         return 0
     days = sched.get("days") or _WEEKDAYS
     n_days = len([d for d in days if d in _WEEKDAYS]) or len(_WEEKDAYS)
-    times = sched.get("times")
-    if not times:
-        times = [sched.get("startTime", "02:00")]
-    n_times = max(1, len([t for t in times if t]))
-    return n_days * n_times
+    return n_days * max(1, len(slot_minutes_for_day(sched)))
 
 
 def per_change_litres(schedule: dict[str, Any], tank_volume_l: float) -> float:
     """Litres to move in a single batch run, spreading the period amount across the
     period's run-slots. For ``period == "day"`` the daily amount is split across the
-    day's times; for ``period == "week"`` the weekly amount is split across all
-    weekly run-slots."""
+    day's slots; for ``period == "week"`` the weekly amount is split across all
+    weekly run-slots. Interval mode divides across its generated window slots the
+    same way — 0.96 L/day every hour across a full day is 40 ml per change."""
     sched = schedule or {}
     period_l = resolve_period_litres(sched, tank_volume_l)
     period = str(sched.get("period", "day")).lower()
     if period == "week":
         slots = max(1, runs_per_week(sched))
         return period_l / slots
-    times = sched.get("times") or [sched.get("startTime", "02:00")]
-    slots = max(1, len([t for t in times if t]))
-    return period_l / slots
+    return period_l / max(1, len(slot_minutes_for_day(sched)))
 
 
 def daily_equivalent_litres(schedule: dict[str, Any], tank_volume_l: float) -> float:
@@ -456,6 +476,38 @@ def continuous_tick_ml(
     return max(0.0, _f(daily_litres) * 1000.0 * tick / win_s)
 
 
+def schedule_text(schedule: dict[str, Any], tank_volume_l: float) -> str:
+    """One-line plain-language description of what the schedule actually does —
+    the panel's honesty line: '≈ 40 ml every hour (01:00–05:00), 0.96 L/day,
+    drain ∥ fill'. Never jargon, never raw config fields."""
+    sched = schedule or {}
+    if not sched.get("enabled"):
+        return "Schedule off — manual changes only"
+    per = per_change_litres(sched, tank_volume_l)
+    daily = daily_equivalent_litres(sched, tank_volume_l)
+    method_txt = ("drain ∥ fill" if str(sched.get("method", "")) == "batch_simultaneous"
+                  else "drain then fill")
+    vol_txt = f"≈ {per * 1000:.0f} ml" if per < 1.0 else f"{per:g} L"
+    if str(sched.get("mode", "times")).lower() == "interval":
+        every = int(_f(sched.get("everyMinutes"), 60) or 60)
+        if every == 60:
+            cadence = "every hour"
+        elif every % 60 == 0:
+            cadence = f"every {every // 60} h"
+        else:
+            cadence = f"every {every} min"
+        ws = str(sched.get("windowStart", "01:00"))
+        we = str(sched.get("windowEnd", "05:00"))
+        window = "" if parse_hhmm(ws) == parse_hhmm(we) else f" ({ws}–{we})"
+        head = f"{vol_txt} {cadence}{window}"
+    else:
+        times = [t for t in (sched.get("times") or [sched.get("startTime", "02:00")]) if t]
+        days = [d for d in (sched.get("days") or []) if d in _WEEKDAYS]
+        days_txt = "" if not days or len(days) == 7 else " on " + "/".join(days)
+        head = f"{vol_txt} at {', '.join(times)}{days_txt}"
+    return f"{head}, {daily:.2f} L/day, {method_txt}"
+
+
 def next_run(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> datetime | None:
     """Next due datetime for a *batch* schedule strictly after ``now`` (and after
     ``last_run`` if given), honouring days-of-week and one or more daily times.
@@ -467,8 +519,7 @@ def next_run(schedule: dict[str, Any], last_run: datetime | None, now: datetime)
         return None
     if str(sched.get("method", "")).startswith("continuous"):
         return None
-    times = sched.get("times") or [sched.get("startTime", "02:00")]
-    minutes = sorted({parse_hhmm(t) for t in times if t})
+    minutes = slot_minutes_for_day(sched)
     if not minutes:
         return None
     allowed_days = sched.get("days")
@@ -844,6 +895,7 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
                 "remainingCapacityL": round(max(0.0, waste_cap - waste_fill), 2),
             },
         },
+        "scheduleText": schedule_text(sched, tank),
         "dailyChangeL": round(daily, 3),
         "weeklyChangeL": round(weekly, 3),
         "weeklyPercentOfTank": round(weekly / tank * 100.0, 2) if tank > 0 else 0.0,
@@ -855,32 +907,37 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
     }
 
 
+def due_slots(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> list[datetime]:
+    """Every slot that has passed today and is unserved (ascending). The tail is
+    what fires; interval mode folds the earlier ones into one coalesced catch-up
+    change instead of running each missed micro-change back-to-back."""
+    sched = schedule or {}
+    if not sched.get("enabled", True):
+        return []
+    if str(sched.get("method", "")).startswith("continuous"):
+        return []
+    if now.weekday() not in (
+        {_WEEKDAYS.index(d) for d in (sched.get("days") or []) if d in _WEEKDAYS} or set(range(7))
+    ):
+        return []
+    now_min = now.hour * 60 + now.minute
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    out: list[datetime] = []
+    for minute in slot_minutes_for_day(sched):
+        if minute > now_min:
+            continue
+        fire_at = today_start + timedelta(minutes=minute)
+        if last_run is None or last_run < fire_at:
+            out.append(fire_at)
+    return out
+
+
 def due_slot(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> datetime | None:
     """The fire time of the latest scheduled slot that has passed and is unserved
     (nothing run since it), or ``None``. Exposing the slot itself (not just a bool)
     lets the orchestrator judge slot freshness and report which slot was blocked."""
-    sched = schedule or {}
-    if not sched.get("enabled", True):
-        return None
-    if str(sched.get("method", "")).startswith("continuous"):
-        return None
-    if now.weekday() not in (
-        {_WEEKDAYS.index(d) for d in (sched.get("days") or []) if d in _WEEKDAYS} or set(range(7))
-    ):
-        return None
-    times = sched.get("times") or [sched.get("startTime", "02:00")]
-    now_min = now.hour * 60 + now.minute
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    best: datetime | None = None
-    for t in times:
-        slot = parse_hhmm(t)
-        if slot > now_min:
-            continue
-        fire_at = today_start + timedelta(minutes=slot)
-        if last_run is None or last_run < fire_at:
-            if best is None or fire_at > best:
-                best = fire_at
-    return best
+    slots = due_slots(schedule, last_run, now)
+    return slots[-1] if slots else None
 
 
 def is_due(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> bool:

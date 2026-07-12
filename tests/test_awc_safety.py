@@ -748,6 +748,65 @@ def test_scheduler_does_nothing_when_schedule_disabled():
     assert _state(entry)["status"] == "idle"
 
 
+def _interval_entry(**sched_over):
+    base = {"enabled": True, "method": "batch_sequential", "mode": "interval",
+            "everyMinutes": 60, "windowStart": "00:00", "windowEnd": "00:00",
+            "amount": 0.96, "amountUnit": "litres", "period": "day"}
+    base.update(sched_over)
+    return _entry("batch_sequential", awc_over={"schedule": base})
+
+
+def test_interval_schedule_starts_micro_change():
+    # Hourly 40 ml micro-changes: a tick just past a slot starts ONE change at the
+    # per-slot volume (Stage A cadence headline).
+    entry = _interval_entry()
+    _state(entry)["lastRun"] = _now(1, 30).isoformat()  # served through 01:30
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 1)))
+    st = _state(entry)
+    assert st["status"] == "draining"
+    assert _close(st["targetLitres"], 0.04, 1e-6)
+
+
+def test_interval_missed_slots_coalesce_into_one_change():
+    # HA down 02:00→04:55: slots 02/03/04 unserved and fresh → ONE 3× catch-up
+    # change, never three back-to-back micro-changes.
+    entry = _interval_entry()
+    _state(entry)["lastRun"] = _now(1, 30).isoformat()
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(4, 55)))
+    st = _state(entry)
+    assert st["status"] == "draining"
+    assert _close(st["targetLitres"], 0.12, 1e-6)  # 3 × 40 ml, one change
+
+
+def test_interval_coalesce_clamped_to_single_change_cap():
+    # A big catch-up is clamped to the single-change salinity guardrail, not blocked.
+    entry = _entry("batch_sequential", awc_over={
+        "schedule": {"enabled": True, "method": "batch_sequential", "mode": "interval",
+                     "everyMinutes": 60, "windowStart": "00:00", "windowEnd": "00:00",
+                     "amount": 96, "amountUnit": "litres", "period": "day"},
+        "safety": {"highLevelEntity": "binary_sensor.high", "leakEntity": "binary_sensor.leak",
+                   "maxSingleChangePercent": 3},
+    })
+    _state(entry)["lastRun"] = _now(1, 30).isoformat()
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(4, 55)))
+    st = _state(entry)
+    assert st["status"] == "draining"
+    assert _close(st["targetLitres"], 6.0, 1e-6)  # 3 × 4 L clamped to 3% of 200 L
+
+
+def test_editing_interval_cadence_rearms_schedule():
+    # everyMinutes/window edits move slots — they must re-arm like a times edit (R24).
+    entry = _interval_entry()
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    config["automaticWaterChange"]["schedule"]["everyMinutes"] = 120
+    run(integration._async_save_config(hass, entry, config))
+    assert _state(entry)["scheduleArmedAt"]
+
+
 def test_scheduler_auto_resumes_paused_change():
     entry = _entry("batch_sequential")
     hass = _hass(entry)

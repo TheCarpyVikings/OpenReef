@@ -290,6 +290,65 @@ def test_is_due_after_scheduled_time():
     assert not awc.is_due(sched, None, datetime(2026, 6, 17, 1, 0))
 
 
+def test_interval_slot_generation():
+    sched = {"mode": "interval", "everyMinutes": 60, "windowStart": "01:00", "windowEnd": "05:00"}
+    assert awc.slot_minutes_for_day(sched) == [60, 120, 180, 240]
+    # wrapped window: post-midnight slots land as early-morning minutes of the day
+    wrapped = {"mode": "interval", "everyMinutes": 30, "windowStart": "23:00", "windowEnd": "01:00"}
+    assert awc.slot_minutes_for_day(wrapped) == [0, 30, 1380, 1410]
+    # equal bounds = the full day
+    full = {"mode": "interval", "everyMinutes": 60, "windowStart": "00:00", "windowEnd": "00:00"}
+    assert len(awc.slot_minutes_for_day(full)) == 24
+    # a sillily small interval is floored to 15 min
+    tiny = {"mode": "interval", "everyMinutes": 1, "windowStart": "00:00", "windowEnd": "01:00"}
+    assert len(awc.slot_minutes_for_day(tiny)) == 4
+
+
+def test_interval_equivalence_with_24_times():
+    # The old '24 explicit times' stopgap and hourly interval mode are the same
+    # schedule — slots, due decision, per-change volume and weekly run count.
+    times24 = {"enabled": True, "method": "batch_simultaneous", "amount": 0.96,
+               "amountUnit": "litres", "period": "day",
+               "times": [f"{h:02d}:00" for h in range(24)]}
+    interval = {"enabled": True, "method": "batch_simultaneous", "amount": 0.96,
+                "amountUnit": "litres", "period": "day", "mode": "interval",
+                "everyMinutes": 60, "windowStart": "00:00", "windowEnd": "00:00"}
+    now = datetime(2026, 6, 17, 7, 30)
+    assert awc.slot_minutes_for_day(times24) == awc.slot_minutes_for_day(interval)
+    assert awc.due_slot(times24, None, now) == awc.due_slot(interval, None, now)
+    assert abs(awc.per_change_litres(times24, 52) - awc.per_change_litres(interval, 52)) < 1e-9
+    assert abs(awc.per_change_litres(interval, 52) - 0.04) < 1e-9  # the 40 ml micro-change
+    assert awc.runs_per_week(interval) == 24 * 7
+
+
+def test_interval_due_slots_and_next_run():
+    sched = {"enabled": True, "method": "batch_simultaneous", "mode": "interval",
+             "everyMinutes": 60, "windowStart": "01:00", "windowEnd": "05:00"}
+    now = datetime(2026, 6, 17, 3, 30)
+    # nothing ran: 01:00/02:00/03:00 have passed and are unserved (ascending)
+    assert [s.hour for s in awc.due_slots(sched, None, now)] == [1, 2, 3]
+    # served through 02:10 → only 03:00 outstanding
+    served = datetime(2026, 6, 17, 2, 10)
+    assert [s.hour for s in awc.due_slots(sched, served, now)] == [3]
+    assert awc.due_slot(sched, served, now).hour == 3
+    # next slot after 03:30 is 04:00; after the window closes, tomorrow's 01:00
+    assert awc.next_run(sched, None, now) == datetime(2026, 6, 17, 4, 0)
+    assert awc.next_run(sched, None, datetime(2026, 6, 17, 12, 0)) == datetime(2026, 6, 18, 1, 0)
+
+
+def test_schedule_text_lines():
+    interval = {"enabled": True, "method": "batch_simultaneous", "amount": 0.96,
+                "amountUnit": "litres", "period": "day", "mode": "interval",
+                "everyMinutes": 60, "windowStart": "00:00", "windowEnd": "00:00"}
+    text = awc.schedule_text(interval, 52)
+    assert "40 ml" in text and "every hour" in text and "0.96 L/day" in text and "∥" in text
+    times = {"enabled": True, "method": "batch_sequential", "amount": 4,
+             "amountUnit": "litres", "period": "day", "times": ["02:00"], "days": ["Mon"]}
+    text2 = awc.schedule_text(times, 52)
+    assert "4 L at 02:00 on Mon" in text2 and "drain then fill" in text2
+    assert awc.schedule_text({"enabled": False}, 52).startswith("Schedule off")
+
+
 def test_within_window_wraps_midnight():
     # quiet hours 23:00–05:00
     start, end = awc.parse_hhmm("23:00"), awc.parse_hhmm("05:00")

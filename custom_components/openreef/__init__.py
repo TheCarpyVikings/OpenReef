@@ -914,11 +914,16 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
     method = str(raw_sched.get("method", "batch_sequential"))
     unit = str(raw_sched.get("amountUnit", "percent")).lower()
     period = str(raw_sched.get("period", "week")).lower()
+    sched_mode = str(raw_sched.get("mode", "times")).lower()
     awc_cfg["schedule"] = {
         "enabled": bool(raw_sched.get("enabled", False)),
         # Live controller runs sequential + simultaneous; anything else (continuous) is
         # projection-only, so coerce it to the safe sequential default.
         "method": method if method in AWC_LIVE_METHODS else "batch_sequential",
+        # times = explicit HH:MM slots (default); interval = every-N-minutes
+        # micro-change cadence generated inside the window below.
+        "mode": sched_mode if sched_mode in ("times", "interval") else "times",
+        "everyMinutes": int(_awc_num(raw_sched.get("everyMinutes"), 60, 15, 1440)),
         "amountUnit": unit if unit in AWC_AMOUNT_UNITS else "percent",
         "amount": round(_awc_num(raw_sched.get("amount"), 0, 0, 100000), 2),
         "period": period if period in AWC_PERIODS else "week",
@@ -5383,11 +5388,22 @@ def _awc_schedule_fingerprint(config: dict[str, Any] | None) -> tuple:
     days = sched.get("days") or []
     if not isinstance(days, list):
         days = []
+    mode = str(sched.get("mode", "times")).lower()
+    interval_part: tuple = ()
+    if mode == "interval":
+        # Interval cadence/window edits move slots just like a times edit does.
+        interval_part = (
+            str(sched.get("everyMinutes", "")),
+            str(sched.get("windowStart", "")),
+            str(sched.get("windowEnd", "")),
+        )
     return (
         bool(acfg.get("enabled")),
         bool(sched.get("enabled")),
+        mode,
         tuple(str(t) for t in times),
         tuple(str(d) for d in days),
+        interval_part,
     )
 
 
@@ -6568,6 +6584,23 @@ async def _async_awc_schedule_tick(
                 # must not fire a surprise change whenever its blocker finally clears.
                 await _async_awc_expire_slot(hass, entry, slot)
                 return
+            if str(sched.get("mode", "times")).lower() == "interval":
+                # Coalesce missed interval slots into ONE catch-up change (HA down /
+                # a blocked hour): n fresh unserved micro-slots → n× the per-slot
+                # volume, clamped to the single-change cap. Slots past the expiry
+                # window were forfeited (same T7 rule the latest slot lives under).
+                fresh_slots = [
+                    s for s in awc_engine.due_slots(sched, last_run, now_local)
+                    if (now_local - s) < timedelta(hours=AWC_BLOCKED_SLOT_EXPIRY_HOURS)
+                ]
+                if len(fresh_slots) > 1:
+                    litres *= len(fresh_slots)
+                    pct = _awc_num(
+                        acfg.get("safety", {}).get("maxSingleChangePercent"),
+                        AWC_DEFAULT_MAX_SINGLE_CHANGE_PCT, 0, 100,
+                    )
+                    if tank > 0 and pct > 0:
+                        litres = min(litres, tank * pct / 100.0)
             started, reasons = await _async_awc_start(hass, entry, litres, method, False, None)
             if not started:
                 await _async_awc_note_blocked_slot(hass, entry, slot, reasons)
