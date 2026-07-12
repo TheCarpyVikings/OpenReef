@@ -74,6 +74,10 @@ class OpenReefPanel extends HTMLElement {
     this._healthSections = this._loadHealthSections();
     this._manualHistoryOpen = {};
     this._maintenanceHistoryOpen = {};
+    // Per-task completion-form drafts (done-at / volume / unit). Echoed back into
+    // the inputs on render so a background hass update re-render doesn't wipe
+    // half-typed values the moment the field loses focus.
+    this._maintenanceDrafts = {};
     this._manualEntryDefaults = {};
     this._onboarding = null;
     this._onboardingChecked = false;
@@ -1567,6 +1571,15 @@ class OpenReefPanel extends HTMLElement {
       }
       if (target.dataset.manualImportField) {
         this._manualEntryDefaults.importText = value;
+        return;
+      }
+      // Maintenance completion-form fields are ephemeral (not part of config) —
+      // stash the raw typing in a draft store so a re-render echoes it back
+      // instead of clearing the input. Cleared when the completion is logged.
+      if (target.dataset.maintDraft) {
+        const draftId = target.dataset.id;
+        this._maintenanceDrafts[draftId] = this._maintenanceDrafts[draftId] || {};
+        this._maintenanceDrafts[draftId][target.dataset.maintDraft] = target.value;
         return;
       }
       if (scope === "tank") this._config.tank[field] = value;
@@ -14804,6 +14817,7 @@ class OpenReefPanel extends HTMLElement {
     const latest = state.latest;
     const completions = this._maintenanceCompletions(id);
     const open = this._maintenanceHistoryOpen[id] === true;
+    const draft = this._maintenanceDrafts[id] || {};
     const due = state.status === "warning" || state.status === "critical";
     const snoozed = state.snoozed === true;
     const scheduleLine = task.scheduleMode === "fixed"
@@ -14821,10 +14835,10 @@ class OpenReefPanel extends HTMLElement {
         <small>${this._escape(latest ? `Last done ${this._formatActivityTime(latest.timestamp)}` : "Never logged")}</small>
         <p>${this._escape(state.detail)}</p>
         <div class="mini-grid">
-          <label class="maintenance-when">Completed<input id="or-done-at-${this._escape(id)}" type="datetime-local" value="${this._escape(this._nowLocalInputValue())}" max="${this._escape(this._nowLocalInputValue())}"></label>
+          <label class="maintenance-when">Completed<input id="or-done-at-${this._escape(id)}" data-maint-draft="doneAt" data-id="${this._escape(id)}" type="datetime-local" value="${this._escape(draft.doneAt || this._nowLocalInputValue())}" max="${this._escape(this._nowLocalInputValue())}"></label>
           ${task.logsVolume ? `
-            <label>Volume logged<input id="or-vol-${this._escape(id)}" type="number" min="0" step="1" placeholder="optional"></label>
-            <label>Unit<select id="or-volunit-${this._escape(id)}"><option value="pct">%</option><option value="L">litres</option></select></label>
+            <label>Volume logged<input id="or-vol-${this._escape(id)}" data-maint-draft="volume" data-id="${this._escape(id)}" type="number" min="0" step="1" placeholder="optional" value="${this._escape(draft.volume || "")}"></label>
+            <label>Unit<select id="or-volunit-${this._escape(id)}" data-maint-draft="unit" data-id="${this._escape(id)}"><option value="pct" ${draft.unit === "L" ? "" : "selected"}>%</option><option value="L" ${draft.unit === "L" ? "selected" : ""}>litres</option></select></label>
           ` : ""}
         </div>
         <div class="button-row">
@@ -14979,6 +14993,8 @@ class OpenReefPanel extends HTMLElement {
     config.completions[id].unshift(entry);
     // Marking it done clears any active snooze.
     if (config.tasks[id]?.snoozedUntil) config.tasks[id] = { ...config.tasks[id], snoozedUntil: null };
+    // Logged — drop the draft so the form resets (empty volume, "now" again).
+    delete this._maintenanceDrafts[id];
     this._setDirty(true);
     this._recordActivity(`Maintenance done: ${task.label}${volumeNote}`, "control");
     this._render();
@@ -15063,6 +15079,7 @@ class OpenReefPanel extends HTMLElement {
     delete config.tasks[id];
     if (config.completions) delete config.completions[id];
     delete this._maintenanceHistoryOpen[id];
+    delete this._maintenanceDrafts[id];
     this._setDirty(true);
     this._recordActivity(`Removed maintenance task: ${label}`, "warning");
     this._render();
