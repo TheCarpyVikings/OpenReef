@@ -1483,6 +1483,17 @@ class OpenReefPanel extends HTMLElement {
       if (action === "awc-calibrate") this._awcCalibrate(id);
       if (action === "awc-reset-ledger") this._awcAction("openreef/awc_reset_ledger");
       if (action === "awc-tubing-replaced") this._awcTubingReplaced(id);
+      if (action === "awc-cal-run") this._awcCalibrationRun(id, Number(target.dataset.seconds) || 30);
+      if (action === "awc-cal-save-points") this._awcCalibrateSavePoints(id);
+      if (action === "awc-cal-clear-points") {
+        this._awcCalRuns = this._awcCalRuns || {};
+        this._awcCalRuns[id] = [];
+        this._render();
+      }
+      if (action === "awc-sim-toggle") this._awcSimSet({ enabled: !(this._config?.automaticWaterChange?.simulation?.enabled) });
+      if (action === "awc-sim-hazard") this._awcSimSet({ hazard: id, value: target.dataset.value !== "on" });
+      if (action === "config-export") this._configExport();
+      if (action === "config-import") this._configImportChoose();
       if (action === "add-doser-channel") this._addDoserChannel();
       if (action === "add-doser-kalk") this._addDoserChannel("Kalkwasser", "kalk");
       if (action === "remove-doser-channel") this._removeDoserChannel(id);
@@ -1869,6 +1880,14 @@ class OpenReefPanel extends HTMLElement {
           task[field] = value;
         }
       }
+      if (scope === "awc-calrun") {
+        // Transient calibration-ceremony state, not config: store the measured ml so
+        // it survives re-renders (the uncontrolled-input wipe class), never dirty.
+        const runs = (this._awcCalRuns || {})[target.dataset.role];
+        const idx = Number(target.dataset.index);
+        if (runs && runs[idx]) runs[idx].ml = value;
+        return;
+      }
       if (scope === "awc") {
         const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
         a[field] = (field === "enabled") ? value
@@ -1965,10 +1984,15 @@ class OpenReefPanel extends HTMLElement {
         dosingCfg.notifications = dosingCfg.notifications || {};
         dosingCfg.notifications[field] = value;
       }
+      if (scope === "awc-notifications") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.notifications = a.notifications || {};
+        a.notifications[field] = value;
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled"].includes(field)) || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -9548,6 +9572,114 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
+  async _awcCalibrationRun(role, seconds) {
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/awc_calibration_run", role, seconds });
+      this._awcCalRuns = this._awcCalRuns || {};
+      (this._awcCalRuns[role] = this._awcCalRuns[role] || []).push({
+        seconds: Number(result.seconds) || seconds, ml: "",
+      });
+      this._awcCalRunBusy = { role, until: Date.now() + seconds * 1000 };
+      this._awcMessage = `${role} pump running ${seconds} s — catch the output in a measuring jug, then enter the ml below.`;
+      // Unlock the buttons once the timed run has actually finished.
+      window.setTimeout(() => { this._awcCalRunBusy = null; this._render(); }, seconds * 1000 + 750);
+    } catch (err) {
+      this._awcMessage = "Calibration run failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._render();
+  }
+
+  async _awcCalibrateSavePoints(role) {
+    const runs = ((this._awcCalRuns || {})[role] || [])
+      .filter((r) => Number(r.ml) > 0 && Number(r.seconds) > 0);
+    if (runs.length < 2) {
+      this._awcMessage = "Log at least two timed runs (with their measured ml) for a multi-point fit.";
+      this._render();
+      return;
+    }
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({
+        type: "openreef/awc_calibrate", role,
+        points: runs.map((r) => [Number(r.seconds), Number(r.ml)]),
+      });
+      this._config = result.config || this._config;
+      this._awcCalRuns[role] = [];
+      this._awcMessage = `${role} pump multi-point calibration saved: ${result.mlPerS} ml/s (spin-up offset fitted).`;
+    } catch (err) {
+      this._awcMessage = "Calibration failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._render();
+  }
+
+  async _awcSimSet(payload) {
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/awc_sim_set", ...payload });
+      this._config = result.config || this._config;
+      this._awcMessage = "";
+    } catch (err) {
+      this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._awcSummaryAt = 0;
+    await this._awcLoadSummary();
+  }
+
+  async _configExport() {
+    try {
+      const payload = await this._callWS({ type: "openreef/config_export" });
+      const stamp = new Date().toISOString().slice(0, 10);
+      this._downloadBlob(
+        new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+        `openreef-backup-${stamp}.json`,
+      );
+      this._message = "Backup downloaded.";
+    } catch (err) {
+      this._message = "Export failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._render();
+  }
+
+  _configImportChoose() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.style.display = "none";
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      input.remove();
+      if (!file) return;
+      let payload;
+      try {
+        payload = JSON.parse(await file.text());
+      } catch (err) {
+        this._message = "That file isn't valid JSON.";
+        this._render();
+        return;
+      }
+      if (!window.confirm(
+        "Restore settings from this backup? Your current settings will be replaced "
+        + "(histories are kept; run-state and firmware sync reset safely).")) return;
+      try {
+        const result = await this._callWS({ type: "openreef/config_import", payload });
+        this._config = result.config || this._config;
+        this._message = "Settings restored from backup.";
+      } catch (err) {
+        this._message = "Import failed: " + (err instanceof Error ? err.message : err);
+      }
+      this._render();
+    });
+    document.body.appendChild(input);
+    input.click();
+  }
+
   _awcEntitySelect(scope, idAttr, field, value, domain) {
     const states = (this._hass && this._hass.states) || {};
     const opts = Object.keys(states)
@@ -9731,17 +9863,46 @@ class OpenReefPanel extends HTMLElement {
     const message = this._awcMessage
       ? `<div class="setting-card subtle-card"><small>${this._escape(this._awcMessage)}</small></div>`
       : "";
+    const sim = this._awcSummary?.simulation || awc.simulation || {};
+    const demo = sim.enabled ? this._awcDemoStrip(sim) : "";
+    // The plain-language honesty line: what the schedule actually does, in words.
+    const schedLine = sum?.scheduleText
+      ? `<div class="setting-card subtle-card"><small>📅 ${this._escape(sum.scheduleText)}</small></div>`
+      : "";
 
     return `
       <section class="stack">
         ${head}
+        ${demo}
         ${banner}
         ${message}
+        ${schedLine}
         ${this._awcDiagram(awc, state, sum)}
         ${this._awcControls(state)}
         ${this._awcMetrics(sum)}
         ${this._awcHistory(awc)}
       </section>`;
+  }
+
+  _awcDemoStrip(sim) {
+    const hazards = sim.hazards || {};
+    const chip = (key, label) => `
+      <button class="secondary compact-button" data-action="awc-sim-hazard" data-id="${key}"
+        data-value="${hazards[key] ? "on" : "off"}"
+        ${hazards[key] ? 'style="border-color:var(--error-color,#d32f2f);"' : ""}>${label}${hazards[key] ? " ✕" : ""}</button>`;
+    return `
+      <div class="setting-card" style="border-left:4px solid var(--info-color,#1976d2);">
+        <strong>🧪 DEMO MODE — no pumps will run</strong>
+        <p>A live sandbox: virtual pumps, injectable hazards, the real state machine. Tap a hazard to trip it.</p>
+        <div class="button-row">
+          ${chip("leak", "Leak")}
+          ${chip("highLevel", "High level")}
+          ${chip("freshEmpty", "Fresh empty")}
+          ${chip("wasteFull", "Waste full")}
+          ${chip("returnPumpIssue", "Return issue")}
+          <button class="secondary compact-button" data-action="awc-sim-toggle">Exit demo</button>
+        </div>
+      </div>`;
   }
 
   _awcStatusBanner(state) {
@@ -9863,7 +10024,8 @@ class OpenReefPanel extends HTMLElement {
         ${this._missionSummaryCard("30-day dilution", `${this._format(sum.projectedRemovalPct30d, 0)}%`, "old water removed", "ok", "awc")}
       </div>
       ${ni.status === "warning" ? `<div class="setting-card subtle-card"><small>Cumulative ledger: drained ${this._format(ni.drainedL, 1)} L · filled ${this._format(ni.filledL, 1)} L. After correcting (or if you've trimmed manually), reset the ledger baseline.</small>
-        <div class="button-row"><button class="secondary" data-action="awc-reset-ledger">Reset drift ledger</button></div></div>` : ""}`;
+        <div class="button-row"><button class="secondary" data-action="awc-reset-ledger">Reset drift ledger</button></div></div>` : ""}
+      ${sum.reservoirs?.fresh?.driftStatus === "warning" ? `<div class="setting-card" style="border-left:4px solid var(--warning-color,#ffa000);"><small>⚠ Fill-pump calibration drift ${this._format(sum.reservoirs.fresh.driftPct, 0)}%: the model claimed ${this._format(sum.reservoirs.fresh.dispensedSinceFullL, 1)} L dispensed when the reservoir ran empty. Recalibrate the fill pump, then mark the reservoir full to re-arm the check.</small></div>` : ""}`;
   }
 
   _awcHistory(awc) {
@@ -9909,12 +10071,37 @@ class OpenReefPanel extends HTMLElement {
     const ato = awc.ato || {};
     const guards = awc.guards || {};
     const sched = awc.schedule || {};
+    const schedMode = sched.mode === "interval" ? "interval" : "times";
     const days = Array.isArray(sched.days) ? sched.days : [];
     const dayBtns = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `
       <label class="awc-day-toggle">
         <input type="checkbox" data-scope="awc-schedule" data-field="scheduleDay" data-day="${d}" ${days.includes(d) ? "checked" : ""}>
         <span>${d}</span>
       </label>`).join("");
+
+    const calRuns = this._awcCalRuns || {};
+    const calBusy = this._awcCalRunBusy;
+    const calRunsBlock = (role) => {
+      const runs = calRuns[role] || [];
+      const busy = calBusy && calBusy.role === role && calBusy.until > Date.now();
+      const rows = runs.map((r, i) => `
+            <div class="mini-grid awc-calrun-row">
+              <label>Ran (s)<input type="number" value="${Number(r.seconds) || 0}" disabled></label>
+              <label>Measured (ml)<input type="number" min="0" step="1" data-scope="awc-calrun" data-role="${role}" data-index="${i}" value="${r.ml === "" ? "" : Number(r.ml)}"></label>
+            </div>`).join("");
+      const ready = runs.filter((r) => Number(r.ml) > 0).length;
+      return `
+          <div class="awc-calrun-block">
+            <small class="awc-hint">Multi-point fit (recommended before micro-changes): run the pump into a measuring jug at two different durations — the fit separates true flow from the spin-up offset.</small>
+            <div class="button-row">
+              <button class="secondary" data-action="awc-cal-run" data-id="${role}" data-seconds="30" ${busy ? "disabled" : ""}>${busy ? "Running…" : "Run 30 s"}</button>
+              <button class="secondary" data-action="awc-cal-run" data-id="${role}" data-seconds="60" ${busy ? "disabled" : ""}>Run 60 s</button>
+              ${runs.length ? `<button class="secondary" data-action="awc-cal-save-points" data-id="${role}" ${ready >= 2 ? "" : "disabled"}>Save fit (${ready} of ≥2)</button>
+              <button class="secondary" data-action="awc-cal-clear-points" data-id="${role}">Clear</button>` : ""}
+            </div>
+            ${rows}
+          </div>`;
+    };
 
     const pumpRow = (role) => {
       const p = pumps[role] || {};
@@ -9935,6 +10122,7 @@ class OpenReefPanel extends HTMLElement {
             <label>measured (ml)<input type="number" min="0" step="1" data-awc-cal="${role}-ml"></label>
           </div>
           <div class="button-row"><button class="secondary" data-action="awc-calibrate" data-id="${role}">Calibrate ${role}</button></div>
+          ${calRunsBlock(role)}
           <small>${p.mlPerS ? `Calibrated to ${p.mlPerS} ml/s${p.calibratedAt ? " · " + this._escape(this._formatActivityTime(p.calibratedAt)) : ""}` : "Not calibrated yet."}</small>
           <small class="awc-hint">Run ${this._format((Number(p.runSeconds) || 0) / 3600, 1)} h · ${Number(p.startCount) || 0} starts · tubing ${p.tubingInstalledAt ? "installed " + this._escape(this._formatActivityTime(p.tubingInstalledAt)) : "install date not set"}
             <button class="secondary inline-btn" data-action="awc-tubing-replaced" data-id="${role}">Tubing replaced</button></small>
@@ -10021,9 +10209,11 @@ class OpenReefPanel extends HTMLElement {
           </div>
           <div class="mini-grid">
             <label>Stabilization hold-off (min)<input type="number" min="0" max="1440" step="1" data-scope="awc-ato" data-field="stabilizationHoldoffMinutes" value="${ato.stabilizationHoldoffMinutes ?? 15}"></label>
+            <label>Micro-change threshold (ml)<input type="number" min="0" max="100000" step="10" data-scope="awc-ato" data-field="microChangeThresholdMl" value="${ato.microChangeThresholdMl ?? 0}"></label>
             <label>Quiet start<input type="time" data-scope="awc-guards" data-field="quietStart" value="${guards.quietStart || "01:00"}"></label>
             <label>Quiet end<input type="time" data-scope="awc-guards" data-field="quietEnd" value="${guards.quietEnd || "05:00"}"></label>
           </div>
+          <small class="awc-hint">Changes at/under the micro-change threshold skip the ATO/dosing suspends and the hold-off entirely — built for hourly micro-changes (0 = off).</small>
         </section>
 
         <section class="mapping-section awc-settings-block">
@@ -10033,6 +10223,12 @@ class OpenReefPanel extends HTMLElement {
             <span><strong>Enable scheduled changes</strong><small>Manual runs still work when this is off.</small></span>
           </label>
           <div class="mini-grid">
+            <label>Cadence
+              <select data-scope="awc-schedule" data-field="mode">
+                <option value="times" ${schedMode !== "interval" ? "selected" : ""}>At set times</option>
+                <option value="interval" ${schedMode === "interval" ? "selected" : ""}>Every N minutes (micro-changes)</option>
+              </select>
+            </label>
             <label>Method
               <select data-scope="awc-schedule" data-field="method">
                 <option value="batch_sequential" ${sched.method === "batch_sequential" ? "selected" : ""}>Sequential (drain → fill)</option>
@@ -10053,13 +10249,56 @@ class OpenReefPanel extends HTMLElement {
               </select>
             </label>
           </div>
+          ${schedMode === "interval" ? `
+          <div class="mini-grid">
+            <label>Every (min)<input type="number" min="15" max="1440" step="5" data-scope="awc-schedule" data-field="everyMinutes" value="${sched.everyMinutes ?? 60}"></label>
+            <label>Window start<input type="time" data-scope="awc-schedule" data-field="windowStart" value="${sched.windowStart || "01:00"}"></label>
+            <label>Window end<input type="time" data-scope="awc-schedule" data-field="windowEnd" value="${sched.windowEnd || "05:00"}"></label>
+          </div>
+          <small class="awc-hint">The period amount splits evenly across the window's slots — 0.96 L/day hourly around the clock is a 40 ml micro-change. Identical start/end runs around the clock; missed slots coalesce into one catch-up change (capped by the single-change limit).</small>
+          ` : `
           <div class="mini-grid">
             <label>Run at<input type="time" data-scope="awc-schedule" data-field="startTime" value="${(Array.isArray(sched.times) && sched.times[0]) || "02:00"}">${Array.isArray(sched.times) && sched.times.length > 1 ? `<small>…and ${sched.times.length - 1} more time${sched.times.length > 2 ? "s" : ""} (${this._escape(sched.times.slice(1).join(", "))}) — kept as configured.</small>` : ""}</label>
-          </div>
+          </div>`}
           <div class="chip-row awc-day-row">${dayBtns}</div>
           <small class="awc-hint">Leave all days unticked to run every day.</small>
+          ${this._awcSummary?.summary?.scheduleText ? `<small class="awc-hint awc-schedule-line"><strong>In plain English:</strong> ${this._escape(this._awcSummary.summary.scheduleText)} <em>(as last saved)</em></small>` : ""}
         </section>
+
+        ${this._awcNotificationsSection()}
+        ${this._awcSimulationSection(awc)}
       </div>`;
+  }
+
+  _awcNotificationsSection() {
+    const notifications = this._config?.automaticWaterChange?.notifications || {};
+    const toggle = (field, title, detail) => `
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="awc-notifications" data-field="${field}" ${notifications[field] !== false ? "checked" : ""}>
+        <span><strong>${title}</strong><small>${detail}</small></span>
+      </label>`;
+    return `
+      <section class="mapping-section awc-settings-block">
+        <div class="awc-section-title"><p class="eyebrow">Water-change alerts</p></div>
+        <small class="awc-hint">One home for every AWC alert — all on by default, delivered as Home Assistant notifications.</small>
+        ${toggle("pausedFault", "Paused & faults", "A change pausing, faulting, running long, or a scheduled start being blocked.")}
+        ${toggle("reservoirLow", "Fresh reservoir low", "Below 10% or under two days of supply at the current schedule.")}
+        ${toggle("calibrationDue", "Calibration due", "A pump's calibration passing the 60-day window — accuracy drifts with tube wear.")}
+        ${toggle("netDrift", "Net drift", "Cumulative fill vs drain past the warn threshold — the salinity-creep early warning.")}
+        ${toggle("driftDetected", "Calibration drift detected", "The pump model disagreeing with reality when the reservoir runs empty.")}
+      </section>`;
+  }
+
+  _awcSimulationSection(awc) {
+    const sim = awc.simulation || {};
+    return `
+      <section class="mapping-section awc-settings-block">
+        <div class="awc-section-title"><p class="eyebrow">Simulation / demo mode</p></div>
+        <small class="awc-hint">Virtual pumps and injectable hazards: explore every flow — starts, pauses, faults, calibration — with zero hardware and zero water. Hazard buttons appear on the Water Change tab while enabled; no real pump, ATO or doser is ever touched.</small>
+        <div class="button-row">
+          <button class="${sim.enabled ? "primary" : "secondary"}" data-action="awc-sim-toggle">${sim.enabled ? "Exit demo mode" : "Enable demo mode"}</button>
+        </div>
+      </section>`;
   }
 
   // --- Live cameras ------------------------------------------------------
@@ -14224,8 +14463,25 @@ class OpenReefPanel extends HTMLElement {
         ${this._interlockSettings()}
         ${this._energySettings()}
         ${this._systemCheckSettings()}
+        ${this._backupRestoreSettings()}
       </section>
     `;
+  }
+
+  _backupRestoreSettings() {
+    return this._settingsPanel(
+      "backup",
+      "Backup & restore",
+      "Every OpenReef setting as one downloadable file — restore it here or on a rebuilt Home Assistant.",
+      `
+      <section class="mapping-section awc-settings-block">
+        <div class="button-row">
+          <button class="secondary" data-action="config-export">Download backup</button>
+          <button class="secondary" data-action="config-import">Restore from backup…</button>
+        </div>
+        <small class="awc-hint">Backups carry settings, ledgers and history — not captures or the activity feed. Restores are refused mid-water-change; restored dosing channels re-verify against the real firmware before anything doses; older-version backups migrate automatically.</small>
+      </section>`,
+    );
   }
 
   _sensorSettings() {
