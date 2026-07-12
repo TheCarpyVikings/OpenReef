@@ -944,6 +944,38 @@ def test_stale_blocked_slot_expires_instead_of_firing():
     assert _state(entry)["status"] == "idle"
 
 
+def test_micro_change_skips_ato_and_dosing_suspend():
+    # A change at/under ato.microChangeThresholdMl runs without holding the ATO or
+    # dosing, and finalizes with NO stabilization hold-off (Stage A micro-changes).
+    entry = _entry("batch_sequential", awc_over={
+        "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 15,
+                "microChangeThresholdMl": 100}})
+    hass = _hass(entry)
+    assert _start(hass, entry, 0.05, method="batch_sequential")[0]  # 50 ml ≤ 100 ml
+    assert _state(entry)["microChange"] is True
+    assert integration._awc_ato_suspended(entry.options[CONF_SETTINGS]) is False
+    assert integration._dosing_awc_suspended(integration._config_from_entry(entry)) is False
+    _drive(hass, entry)
+    st = _state(entry)
+    assert st["status"] == "idle"
+    assert st["atoSuspendedUntil"] == ""  # no hold-off for a micro-change
+    assert st["microChange"] is False
+
+
+def test_normal_change_still_suspends_ato_with_threshold_set():
+    # Above the threshold everything behaves exactly as before.
+    entry = _entry("batch_sequential", awc_over={
+        "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 15,
+                "microChangeThresholdMl": 100}})
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]  # 2 L > 100 ml
+    assert _state(entry)["microChange"] is False
+    assert integration._awc_ato_suspended(entry.options[CONF_SETTINGS]) is True
+    assert integration._dosing_awc_suspended(integration._config_from_entry(entry)) is True
+    _drive(hass, entry)
+    assert _state(entry)["atoSuspendedUntil"]  # hold-off armed as usual
+
+
 def test_ato_restore_timer_skips_latched_fault():
     # The hold-off expiry firing while a FAULT is latched must not clear the
     # suspension / release the dosing hold out from under it (R12).

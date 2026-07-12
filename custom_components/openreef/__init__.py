@@ -899,6 +899,10 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
     awc_cfg["ato"] = {
         "suspendDuringChange": bool(raw_ato.get("suspendDuringChange", True)),
         "stabilizationHoldoffMinutes": int(_awc_num(raw_ato.get("stabilizationHoldoffMinutes"), AWC_DEFAULT_HOLDOFF_MINUTES, 0, AWC_HOLDOFF_MAX_MINUTES)),
+        # Changes at/under this volume skip the ATO + dosing suspends entirely and get
+        # no stabilization hold-off (0 = off) — hourly 40 ml micro-changes must not
+        # hold the ATO/doser around the clock.
+        "microChangeThresholdMl": int(_awc_num(raw_ato.get("microChangeThresholdMl"), 0, 0, 100000)),
     }
 
     raw_guards = awc_cfg.get("guards") if isinstance(awc_cfg.get("guards"), dict) else {}
@@ -962,6 +966,7 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         "anomalyWarned": bool(raw_state.get("anomalyWarned", False)),
         "scheduleArmedAt": _awc_str(raw_state.get("scheduleArmedAt"), 40),
         "blockedSlotKey": _awc_str(raw_state.get("blockedSlotKey"), 40),
+        "microChange": bool(raw_state.get("microChange", False)),
     }
 
     raw_history = awc_cfg.get("history")
@@ -5483,6 +5488,10 @@ def _awc_ato_suspended(config: dict[str, Any]) -> bool:
     state = awc.get("state", {}) if isinstance(awc.get("state"), dict) else {}
     if not awc.get("ato", {}).get("suspendDuringChange", True):
         return False
+    # Micro-change: too small to fight the ATO — never held. A latched fault keeps
+    # the safety posture regardless (unknown water state).
+    if state.get("microChange") and state.get("status") != "fault":
+        return False
     if state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
         return True
     until = _parse_datetime(state.get("atoSuspendedUntil"))
@@ -5777,10 +5786,16 @@ async def _async_awc_start_locked(
         return False, reasons
 
     now = datetime.now(timezone.utc)
-    if acfg.get("ato", {}).get("suspendDuringChange", True):
-        await _async_awc_suspend_ato(hass, config, context)
-        state["atoSuspendedUntil"] = ""  # the "running" status covers the suspension
-    await _async_dosing_awc_suspend(hass, config, True, context)
+    threshold_ml = _awc_num(acfg.get("ato", {}).get("microChangeThresholdMl"), 0, 0, 1e9)
+    micro = threshold_ml > 0 and target * 1000.0 <= threshold_ml + 1e-6
+    state["microChange"] = micro
+    if not micro:
+        if acfg.get("ato", {}).get("suspendDuringChange", True):
+            await _async_awc_suspend_ato(hass, config, context)
+            state["atoSuspendedUntil"] = ""  # the "running" status covers the suspension
+        await _async_dosing_awc_suspend(hass, config, True, context)
+    # else: a micro-change is too small to fight the ATO or matter to dosing — both
+    # suspends are skipped so the hourly cadence doesn't hold them around the clock.
     state["method"] = method
     state["targetLitres"] = target
     state["drainedMl"] = 0
@@ -5878,6 +5893,7 @@ async def _async_awc_abort(
     state["drainedMl"] = 0
     state["filledMl"] = 0
     state["targetLitres"] = 0
+    state["microChange"] = False  # fault status overrides the flag in both predicates
     if not latch:
         # A latched fault keeps dosing held (status "fault" drives _dosing_awc_suspended);
         # a plain abort releases the firmware suspend switch immediately.
@@ -5932,6 +5948,8 @@ async def _async_awc_finalize(
     awc["weekLitres"] = round(awc.get("weekLitres", 0) + filled_l, 3)
     awc["monthLitres"] = round(awc.get("monthLitres", 0) + filled_l, 3)
     holdoff = awc.get("ato", {}).get("stabilizationHoldoffMinutes", AWC_DEFAULT_HOLDOFF_MINUTES)
+    if state.get("microChange"):
+        holdoff = 0  # micro-changes get no stabilization hold-off
     if awc.get("ato", {}).get("suspendDuringChange", True) and holdoff > 0:
         state["atoSuspendedUntil"] = (now + timedelta(minutes=holdoff)).isoformat()
     else:
@@ -5948,6 +5966,7 @@ async def _async_awc_finalize(
     state["targetLitres"] = 0
     state["method"] = ""
     state["pausedReason"] = ""
+    state["microChange"] = False
     _append_activity(config, f"Water change complete: {filled_l:.1f} L exchanged", "control")
     if not state.get("atoSuspendedUntil"):
         # No stabilisation hold-off ⇒ dosing resumes now. With a hold-off, the ATO-restore
@@ -8015,6 +8034,7 @@ async def websocket_awc_acknowledge(
             "drainedMl": 0, "filledMl": 0, "targetLitres": 0,
             "legStartedAt": "", "legEndsAt": "", "drainEndsAt": "", "fillEndsAt": "",
             "exchangeBaselineGapMl": 0, "method": "", "pausedReason": "",
+            "microChange": False,
         })
         _append_activity(config, "Water change fault acknowledged and cleared", "control")
         await _async_dosing_awc_suspend(hass, config, False, None)
@@ -8249,6 +8269,9 @@ def _dosing_awc_suspended(config: dict[str, Any]) -> bool:
     plus the post-change stabilisation hold-off. Mirrors _awc_ato_suspended but is NOT
     gated on the ATO toggle — each channel opts in via guards.suspendDuringAwc."""
     state = _awc_cfg(config).get("state", {})
+    # Micro-change: dosing keeps running (a latched fault still holds it).
+    if state.get("microChange") and state.get("status") != "fault":
+        return False
     if state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
         return True
     until = state.get("atoSuspendedUntil")
