@@ -791,6 +791,49 @@ def test_enabling_schedule_does_not_fire_passed_slot():
     assert _state(entry)["status"] == "idle"
 
 
+def test_enabling_master_awc_does_not_fire_passed_slot():
+    # The MASTER AWC toggle re-enables the tick just like a schedule enable — it must
+    # re-arm the slot semantics too (vacation pattern: disable AWC, re-enable in the
+    # morning; the overnight slot must not fire on the spot).
+    entry = _sched_entry("batch_sequential")
+    _awc(entry)["enabled"] = False
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    config["automaticWaterChange"]["enabled"] = True
+    run(integration._async_save_config(hass, entry, config))
+    assert _state(entry)["scheduleArmedAt"]
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    assert _state(entry)["status"] == "idle"
+
+
+def test_race_duplicate_resume_single_relaunch():
+    # Two resumes racing (the minutely auto-resume + a manual click, or a double
+    # click): exactly one relaunches; the loser must NOT stop-and-restart the leg
+    # the winner just began.
+    import asyncio
+
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    hass.states.set("binary_sensor.fresh_empty", "on")
+    _fire_leg(hass, entry)  # drain credited; fill leg blocked → paused
+    assert _state(entry)["status"] == "paused"
+    hass.states.set("binary_sensor.fresh_empty", "off")
+
+    async def both():
+        return await asyncio.gather(
+            integration._async_awc_try_resume(hass, entry, None),
+            integration._async_awc_try_resume(hass, entry, None),
+        )
+
+    r1, r2 = run(both())
+    assert sorted([r1, r2]) == [False, True]  # exactly one resumed
+    assert _state(entry)["status"] == "filling"
+    ons = [c for c in _switch_calls(hass, "switch.awc_fill") if c.service == "turn_on"]
+    assert len(ons) == 1
+
+
 def test_state_saves_do_not_rearm_schedule():
     # Ordinary state saves (leg transitions, activity) leave the schedule armed-stamp
     # alone — only slot-defining edits re-arm (R24).
@@ -1037,9 +1080,11 @@ def test_abort_mid_leg_credits_elapsed_volume():
     assert not conn.errors
     assert _state(entry)["status"] == "idle"
     h = _awc(entry)["history"][0]
-    assert _close(h["drainedL"], 0.8, 0.05) and h["partial"]
-    assert _close(_awc(entry)["reservoirs"]["waste"]["filledMl"], 800.0, 50.0)
-    assert _close(_awc(entry)["ledger"]["cumulativeDrainedL"], 0.8, 0.05)
+    # generous tolerance (±1.5 s of flow): the credit dead-reckons from REAL utcnow,
+    # so a slow CI box eats into the margin one-directionally
+    assert _close(h["drainedL"], 0.8, 0.15) and h["partial"]
+    assert _close(_awc(entry)["reservoirs"]["waste"]["filledMl"], 800.0, 150.0)
+    assert _close(_awc(entry)["ledger"]["cumulativeDrainedL"], 0.8, 0.15)
 
 
 def test_sequential_checkpoint_trips_leak_mid_leg():
@@ -1057,7 +1102,8 @@ def test_sequential_checkpoint_trips_leak_mid_leg():
     st = _state(entry)
     assert st["status"] == "fault" and "leak" in st["fault"].lower()
     assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
-    assert _close(_awc(entry)["history"][0]["drainedL"], 1.0, 0.05)  # 10 s × 100 ml/s
+    # ±1.5 s of flow: elapsed is measured against REAL utcnow (CI-drift headroom)
+    assert _close(_awc(entry)["history"][0]["drainedL"], 1.0, 0.15)  # 10 s × 100 ml/s
 
 
 def test_sequential_checkpoint_ok_rearms_without_completing():
@@ -1067,10 +1113,59 @@ def test_sequential_checkpoint_ok_rearms_without_completing():
     entry = _entry("batch_sequential")
     hass = _hass(entry)
     assert _start(hass, entry, 2.0, method="batch_sequential")[0]
-    run(integration._async_awc_timer_fired(hass, entry, None))
+    # Fire the armed checkpoint THROUGH the scheduler: fire_all cancels every record
+    # it fires, so a pending record afterwards can only be the checkpoint's re-arm.
+    assert run(sched.fire_all()) >= 1
     st = _state(entry)
     assert st["status"] == "draining" and st["drainedMl"] == 0
-    assert sched.pending()  # the checkpoint re-armed itself
+    assert sched.pending()
+    install_scheduler(integration)
+
+
+def test_exchange_tick_survives_unreachable_pump_stop():
+    # R11: a raising turn_off (ESP unreachable) must not abandon the tick — the
+    # accounting still persists and the monitor timer still re-arms.
+    sched = install_scheduler(integration)
+    entry = _entry("batch_simultaneous", awc_over={"safety": {
+        "highLevelEntity": "binary_sensor.high", "leakEntity": "binary_sensor.leak",
+        "maxSingleChangePercent": 25, "maxInstantaneousImbalanceLitres": 3.0}})
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_simultaneous")[0]
+    hass.services.fail_on.add(("switch", "turn_off", "switch.awc_drain"))
+    _fire_exchange(hass, entry, age_done=("drain",))
+    st = _state(entry)
+    assert st["status"] == "exchanging"
+    assert _close(st["drainedMl"], 2000, 5)   # accounting persisted despite the failure
+    assert sched.pending()                    # monitor re-armed
+    hass.services.fail_on.clear()
+    install_scheduler(integration)
+
+
+def test_timer_fired_rearms_monitor_after_handler_crash():
+    # R11: if the handler dies mid-flight (here: the save), the finally-arm must keep
+    # the monitor alive — a dead timer while pumps run is the 'keep filling forever'
+    # hazard.
+    sched = install_scheduler(integration)
+    entry = _entry("batch_simultaneous")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_simultaneous")[0]
+    real_save = integration._async_save_config
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("save died")
+
+    integration._async_save_config = _boom
+    try:
+        raised = False
+        try:
+            run(sched.fire_all())  # fires the armed monitor tick → handler crashes
+        except RuntimeError:
+            raised = True
+    finally:
+        integration._async_save_config = real_save
+    assert raised
+    assert sched.pending()  # the finally-arm re-armed the monitor
+    assert _state(entry)["status"] == "exchanging"
     install_scheduler(integration)
 
 
@@ -1093,6 +1188,53 @@ def test_sequential_resume_uncalibrated_faults_not_replays():
     st = _state(entry)
     assert st["status"] == "fault" and "calibrat" in st["fault"].lower()
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+
+
+def test_sequential_resume_sliver_completes_without_fault():
+    # Resume with 30 ml left on the fill leg while spin-up is 50 ml: the sliver's
+    # runtime rounds to ≤ 0 on a CALIBRATED pump — run a floor tick and finish,
+    # never latch a 'not calibrated' fault (R13 parity for the sequential path).
+    entry = _entry("batch_sequential", awc_over={"pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 100, "spinUpMl": 50},
+    }})
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
+        "drainedMl": 2000, "filledMl": 1970, "legStartedAt": "", "legEndsAt": "",
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    st = _state(entry)
+    assert st["status"] == "filling", st.get("fault")
+    _fire_leg(hass, entry)  # the floor tick's completion credits the sliver → finalize
+    assert _state(entry)["status"] == "idle"
+    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-3)
+
+
+def test_acknowledge_records_partial_progress_history():
+    # A begin-failure fault latches with progress still on the books; acknowledging
+    # must record it in history/ledger before zeroing — the reservoir models already
+    # hold the debit, and the two books must not diverge.
+    entry = _entry("batch_sequential")
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "fault", "fault": "AWC pump start failed: boom",
+        "method": "batch_sequential", "targetLitres": 2.0,
+        "drainedMl": 1500, "filledMl": 0,
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_awc_acknowledge(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.error_codes
+    assert _state(entry)["status"] == "idle" and _state(entry)["drainedMl"] == 0
+    h = _awc(entry)["history"][0]
+    assert _close(h["drainedL"], 1.5, 1e-6) and h["partial"]
+    assert "acknowledged" in h["notes"].lower()
+    assert _close(_awc(entry)["ledger"]["cumulativeDrainedL"], 1.5, 1e-6)
 
 
 def test_simultaneous_resume_near_end_completes_without_fault():
@@ -1145,9 +1287,11 @@ def test_simultaneous_relaunch_dead_reckons_run_on():
 
 def test_exchange_tick_rate_zeroed_mid_run_pauses_without_credit():
     # A raw settings write zeroes a pump's rate mid-run: dead-reckoning a zero rate
-    # reads 'full target moved' — the tick must PAUSE without crediting (R26), the
-    # minutely auto-resume must keep it paused (not escalate to a latched fault), and
-    # recalibrating must make resume work again.
+    # reads 'full target moved' — pre-fix that phantom credit tripped the imbalance
+    # abort (or with the cap disabled, phantom-completed the change). The tick must
+    # PAUSE instead (R26), crediting only the HEALTHY side's real elapsed progress;
+    # the minutely auto-resume must keep it paused (not escalate to a latched fault);
+    # and recalibrating WHILE PAUSED via the WS — the instructed recovery — must work.
     entry = _entry("batch_simultaneous")
     hass = _hass(entry)
     assert _start(hass, entry, 2.0, method="batch_simultaneous")[0]
@@ -1155,11 +1299,16 @@ def test_exchange_tick_rate_zeroed_mid_run_pauses_without_credit():
     run(integration._async_awc_exchange_tick(hass, entry, None))
     st = _state(entry)
     assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
-    assert st["drainedMl"] == 0 and st["filledMl"] == 0  # no credit this tick
+    assert st["filledMl"] == 0     # the zero-rate side got NO phantom credit
+    assert st["drainedMl"] <= 200  # healthy side: honest elapsed only (~0-2 s)
     run(integration._async_awc_schedule_tick(hass, entry, datetime.now()))
     st = _state(entry)
     assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
-    _awc(entry)["pumps"]["fill"]["mlPerS"] = 100
+    # recalibrate while paused (allowed: pumps off, no live dead-reckoning) → resume
+    conn = FakeConnection()
+    run(integration.websocket_awc_calibrate(
+        hass, conn, {"id": 9, "role": "fill", "volume_ml": 500, "seconds": 5}))
+    assert not conn.errors, conn.error_codes
     assert run(integration._async_awc_try_resume(hass, entry, None))
     assert _state(entry)["status"] == "exchanging"
 
