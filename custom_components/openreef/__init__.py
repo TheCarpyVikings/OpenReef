@@ -888,6 +888,7 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
                          if isinstance(fresh.get("driftPct"), (int, float)) else None),
             "driftStatus": _awc_str(fresh.get("driftStatus"), 20),
             "driftCheckedAt": _awc_str(fresh.get("driftCheckedAt"), 40),
+            "fullConfirmedAt": _awc_str(fresh.get("fullConfirmedAt"), 40),
         },
         "waste": {
             "capacityLitres": round(_awc_num(waste.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
@@ -941,6 +942,10 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         "hazards": {
             key: bool(raw_hazards.get(key, False)) for key in _AWC_SIM_HAZARDS
         },
+        # The pre-demo accounting snapshot (reservoirs/ledger/history/wear/state),
+        # restored verbatim when the demo ends — carried as-is, only ever written
+        # by awc_sim_set from an already-normalised config.
+        "snapshot": raw_sim.get("snapshot") if isinstance(raw_sim.get("snapshot"), dict) else None,
     }
 
     raw_guards = awc_cfg.get("guards") if isinstance(awc_cfg.get("guards"), dict) else {}
@@ -1005,6 +1010,11 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         "scheduleArmedAt": _awc_str(raw_state.get("scheduleArmedAt"), 40),
         "blockedSlotKey": _awc_str(raw_state.get("blockedSlotKey"), 40),
         "microChange": bool(raw_state.get("microChange", False)),
+        # Timed calibration run in flight (the stop timer is in-memory only — this
+        # persisted trace is what lets a restart stop the orphaned pump).
+        "calRunRole": (str(raw_state.get("calRunRole"))
+                       if raw_state.get("calRunRole") in AWC_PUMP_ROLES else ""),
+        "calRunEndsAt": _awc_str(raw_state.get("calRunEndsAt"), 40),
     }
 
     raw_history = awc_cfg.get("history")
@@ -5546,12 +5556,16 @@ def _awc_ato_suspended(config: dict[str, Any]) -> bool:
     the post-change stabilization hold-off (prevents the GHL-style salinity crash)."""
     awc = _awc_cfg(config)
     state = awc.get("state", {}) if isinstance(awc.get("state"), dict) else {}
+    if _awc_sim_enabled(config):
+        return False  # a VIRTUAL change must never hold the REAL ATO
     if not awc.get("ato", {}).get("suspendDuringChange", True):
         return False
-    # Micro-change: too small to fight the ATO — never held. A latched fault keeps
-    # the safety posture regardless (unknown water state).
+    # Micro-change: too small to fight the ATO — the RUN itself never holds. But a
+    # still-running hold-off stamped by a PREVIOUS (normal) change keeps holding
+    # right through it, and a latched fault keeps the full posture regardless.
     if state.get("microChange") and state.get("status") != "fault":
-        return False
+        until = _parse_datetime(state.get("atoSuspendedUntil"))
+        return until is not None and until > datetime.now(timezone.utc)
     if state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
         return True
     until = _parse_datetime(state.get("atoSuspendedUntil"))
@@ -5736,9 +5750,19 @@ def _awc_grade_fresh_drift(config: dict[str, Any]) -> dict[str, Any] | None:
     fresh = _awc_cfg(config).get("reservoirs", {}).get("fresh", {})
     if not isinstance(fresh, dict) or fresh.get("driftCheckedAt"):
         return None
+    if not fresh.get("fullConfirmedAt"):
+        # No confirmed-full anchor (fresh install / never marked full): the odometer
+        # started counting from an unknown level, so grading it against capacity is
+        # a guess — and false "recalibrate" alarms are exactly what the Trust Moat
+        # forbids. The first mark-full arms the check.
+        return None
     dispensed = _awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9)
     cap_ml = _awc_num(fresh.get("capacityLitres"), 0, 0, 1e9) * 1000.0
     if dispensed <= 0 or cap_ml <= 0:
+        return None
+    if dispensed > cap_ml * 1.5:
+        # Someone topped the reservoir up with a bucket without marking it full —
+        # there is no honest reference for this cycle. Skip rather than accuse.
         return None
     verdict = awc_engine.drift_state(dispensed, cap_ml)
     fresh["driftPct"] = verdict["driftPct"]
@@ -5772,6 +5796,7 @@ async def _async_awc_check_drift_on_empty(hass: HomeAssistant, entry: OpenReefCo
     Cheap unlocked pre-checks; grading + save happen fetch-fresh under the lock."""
     fresh = _awc_cfg(_config_from_entry(entry)).get("reservoirs", {}).get("fresh", {})
     if (not fresh.get("emptyEntity") or fresh.get("driftCheckedAt")
+            or not fresh.get("fullConfirmedAt")
             or not _awc_binary_on(hass, fresh.get("emptyEntity"))):
         return
     async with _awc_lock(hass):
@@ -6091,6 +6116,12 @@ async def _async_awc_abort(
     await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
     if master_kill:
         await _async_awc_kill_equipment_profile(hass, config, "return_pump", context)
+    if latch and _awc_cfg(config).get("ato", {}).get("suspendDuringChange", True):
+        # A latched hazard must leave the ATO physically OFF. Normal changes killed
+        # it at start; a micro-change deliberately skipped that — but a fault is not
+        # a micro situation, and the suspension predicate only blocks FUTURE
+        # turn-ons, never an already-running top-off.
+        await _async_awc_kill_equipment_profile(hass, config, "ato", context)
     awc = _awc_cfg(config)
     state = awc["state"]
     now = datetime.now(timezone.utc)
@@ -6178,9 +6209,14 @@ async def _async_awc_finalize(
     awc["monthLitres"] = round(awc.get("monthLitres", 0) + filled_l, 3)
     holdoff = awc.get("ato", {}).get("stabilizationHoldoffMinutes", AWC_DEFAULT_HOLDOFF_MINUTES)
     if state.get("microChange"):
-        holdoff = 0  # micro-changes get no stabilization hold-off
+        holdoff = 0  # micro-changes get no stabilization hold-off of their own
+    prior_holdoff = _parse_datetime(state.get("atoSuspendedUntil"))
     if awc.get("ato", {}).get("suspendDuringChange", True) and holdoff > 0:
         state["atoSuspendedUntil"] = (now + timedelta(minutes=holdoff)).isoformat()
+    elif prior_holdoff is not None and prior_holdoff > now:
+        # A previous change's hold-off is still running — a micro-change finishing
+        # inside it must not cancel it (or release the dosing hold below).
+        pass
     else:
         state["atoSuspendedUntil"] = ""
     state["status"] = "idle"
@@ -6852,7 +6888,11 @@ async def _async_awc_schedule_tick(
                         AWC_DEFAULT_MAX_SINGLE_CHANGE_PCT, 0, 100,
                     )
                     if tank > 0 and pct > 0:
-                        litres = min(litres, tank * pct / 100.0)
+                        # Floor the cap to the start path's 3-decimal precision: an
+                        # exact-cap clamp re-tripped the cap guard after rounding
+                        # (cap 15.8375 → target rounds to 15.838 > cap) and
+                        # deadlocked the schedule for the rest of the day.
+                        litres = min(litres, math.floor(tank * pct * 10) / 1000.0)
             started, reasons = await _async_awc_start(hass, entry, litres, method, False, None)
             if not started:
                 await _async_awc_note_blocked_slot(hass, entry, slot, reasons)
@@ -6900,7 +6940,11 @@ async def _async_awc_note_blocked_slot(
     codes = {r.get("code") for r in reasons if isinstance(r, dict)}
     if codes & {"busy", "paused"}:
         return  # a change is already in flight — not a real block
-    slot_key = slot.isoformat()
+    # Key on the DAY + blocker, not the slot instant: interval mode mints a new slot
+    # every everyMinutes, and a persistent blocker (quiet hours, an empty reservoir
+    # overnight) would otherwise push a phone notification + a config save per slot,
+    # up to 96 times a day. Same blocker, same day → one note.
+    slot_key = f"{slot.date().isoformat()}|{'|'.join(sorted(str(c) for c in codes))}"
     async with _awc_lock(hass):
         config = _config_from_entry(entry)
         state = _awc_cfg(config).get("state", {})
@@ -8388,6 +8432,9 @@ async def websocket_awc_reset_reservoir(
             fresh["remainingMl"] = fresh.get("capacityLitres", 0) * 1000.0
             fresh["dispensedSinceFullMl"] = 0
             fresh["driftCheckedAt"] = ""  # new fill cycle — re-arm the check
+            # The confirmed-full anchor the drift grade requires: from here the
+            # odometer genuinely counts from a full reservoir.
+            fresh["fullConfirmedAt"] = datetime.now(timezone.utc).isoformat()
             _append_activity(config, "Fresh saltwater reservoir marked full", "control")
         else:
             reservoirs.get("waste", {})["filledMl"] = 0
@@ -8408,6 +8455,7 @@ def _sanitize_imported_config(incoming: dict[str, Any], current: dict[str, Any])
         sim = awc.get("simulation")
         if isinstance(sim, dict):
             sim["enabled"] = False
+            sim["snapshot"] = None  # a foreign snapshot must never restore here
     dosing = incoming.get("dosing")
     if isinstance(dosing, dict) and isinstance(dosing.get("channels"), dict):
         for channel in dosing["channels"].values():
@@ -8475,6 +8523,12 @@ async def websocket_config_import(
             f"This backup is from a newer OpenReef ({payload.get('version', 'unknown')}) "
             "— update the integration first, then import")
         return
+    if hass.data.get(DOMAIN, {}).get(AWC_CALRUN_UNSUB) is not None:
+        # The run's stop timer resolves the pump entity from the LIVE config — an
+        # import could swap it mid-run and strand the physical pump on.
+        connection.send_error(msg["id"], "busy",
+                              "Wait for the calibration run to finish before importing")
+        return
     async with _awc_lock(hass):
         config = _config_from_entry(entry)
         if _awc_cfg(config).get("state", {}).get("status") in (*_AWC_RUNNING_STATES, "paused"):
@@ -8489,6 +8543,29 @@ async def websocket_config_import(
         saved = await _async_save_config(hass, entry, incoming)
     connection.send_result(msg["id"], {
         "success": True, "config": saved, "validation": _validate_config(hass, saved)})
+
+
+async def _async_awc_recover_orphaned_calrun(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """A timed calibration run's stop timer is in-memory only: if HA restarted while
+    one was in flight, the pump is still physically running with nothing armed to
+    stop it. The persisted calRunRole stamp is the trace — stop it and clear."""
+    if not _awc_cfg(_config_from_entry(entry)).get("state", {}).get("calRunRole"):
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        state = _awc_cfg(config).get("state", {})
+        role = state.get("calRunRole")
+        if not role:
+            return
+        await _async_awc_stop_pumps(hass, config, (role,), None)
+        state["calRunRole"] = ""
+        state["calRunEndsAt"] = ""
+        _append_activity(
+            config, f"Calibration run interrupted by a restart — {role} pump stopped",
+            "warning")
+        await _async_save_config(hass, entry, config)
 
 
 @websocket_api.websocket_command({
@@ -8542,19 +8619,31 @@ async def websocket_awc_calibration_run(
         ends_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
         async def _stop(_now: datetime) -> None:
-            hass.data.setdefault(DOMAIN, {}).pop(AWC_CALRUN_UNSUB, None)
             latest = _first_entry(hass)
-            if latest is None:
-                return
             async with _awc_lock(hass):
+                # Pop the start-guard INSIDE the lock: popping before acquiring it
+                # opened a window where a starter parked on the lock (the minutely
+                # tick with a due slot) could begin a change and then have this stop
+                # turn its pump off underneath it.
+                hass.data.setdefault(DOMAIN, {}).pop(AWC_CALRUN_UNSUB, None)
+                if latest is None:
+                    return
                 cfg = _config_from_entry(latest)
                 await _async_awc_stop_pumps(hass, cfg, (role,), None)
                 _awc_bump_odometer(_awc_cfg(cfg), role, seconds=seconds)
+                st = _awc_cfg(cfg).get("state", {})
+                st["calRunRole"] = ""
+                st["calRunEndsAt"] = ""
                 _append_activity(cfg, f"Calibration run finished: {role} pump ran {seconds:.0f} s",
                                  "control")
                 await _async_save_config(hass, latest, cfg)
 
         store[AWC_CALRUN_UNSUB] = async_track_point_in_time(hass, _stop, ends_at)
+        # Persist the in-flight run: the stop timer is in-memory only, so this stamp
+        # is the sole trace a restart has for stopping the orphaned pump.
+        run_state = _awc_cfg(config).get("state", {})
+        run_state["calRunRole"] = role
+        run_state["calRunEndsAt"] = ends_at.isoformat()
         _append_activity(config, f"Calibration run started: {role} pump for {seconds:.0f} s",
                          "control")
         await _async_save_config(hass, entry, config)
@@ -8585,11 +8674,33 @@ async def websocket_awc_sim_set(
         state = acfg.get("state", {})
         if "enabled" in msg:
             want = bool(msg["enabled"])
-            if want and not sim.get("enabled") and state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
-                connection.send_error(
-                    msg["id"], "busy",
-                    "Stop the running water change before entering simulation mode")
+            if want != bool(sim.get("enabled")) and hass.data.get(DOMAIN, {}).get(AWC_CALRUN_UNSUB) is not None:
+                # A timed calibration run is tracked only by its stop timer while
+                # status stays idle — flipping the sandbox under it would strand a
+                # REAL pump on (enable) or virtualise a real stop (disable).
+                connection.send_error(msg["id"], "busy",
+                                      "Wait for the calibration run to finish first")
                 return
+            if want and not sim.get("enabled"):
+                if state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
+                    connection.send_error(
+                        msg["id"], "busy",
+                        "Stop the running water change before entering simulation mode")
+                    return
+                # SANDBOX the accounting: demo runs drive the REAL state machine, so
+                # snapshot everything they mutate — restored verbatim on exit.
+                # Virtual litres must never survive into the real reservoir / drift /
+                # ledger / history / wear models or the schedule state.
+                sim["snapshot"] = deepcopy({
+                    "reservoirs": acfg.get("reservoirs", {}),
+                    "ledger": acfg.get("ledger", {}),
+                    "history": acfg.get("history", []),
+                    "todayLitres": acfg.get("todayLitres", 0),
+                    "weekLitres": acfg.get("weekLitres", 0),
+                    "monthLitres": acfg.get("monthLitres", 0),
+                    "pumps": acfg.get("pumps", {}),
+                    "state": state,
+                })
             if not want and sim.get("enabled") and state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
                 # Leaving the sandbox mid-run: clean up the virtual change first
                 # (sim is still enabled here, so the stops stay virtual).
@@ -8599,6 +8710,22 @@ async def websocket_awc_sim_set(
                     config, f"AWC simulation mode {'enabled' if want else 'disabled'}", "control")
             sim["enabled"] = want
             if not want:
+                snap = sim.get("snapshot")
+                if isinstance(snap, dict):
+                    for key in ("reservoirs", "ledger", "history",
+                                "todayLitres", "weekLitres", "monthLitres", "state"):
+                        if key in snap:
+                            acfg[key] = deepcopy(snap[key])
+                    # Pumps: restore accounting/calibration only — entity/settings
+                    # edits made during the demo are real config and stay.
+                    for role, snap_pump in (snap.get("pumps") or {}).items():
+                        cur = acfg.get("pumps", {}).get(role)
+                        if isinstance(cur, dict) and isinstance(snap_pump, dict):
+                            for f in ("mlPerS", "interceptMl", "spinUpMl", "primeMl",
+                                      "calibratedAt", "runSeconds", "startCount"):
+                                if f in snap_pump:
+                                    cur[f] = snap_pump[f]
+                sim["snapshot"] = None
                 sim["hazards"] = {k: False for k in _AWC_SIM_HAZARDS}
                 hass.data.setdefault(DOMAIN, {}).setdefault(AWC_RUNTIME, {})["simPumps"] = {}
         hazard = msg.get("hazard")
@@ -8730,9 +8857,13 @@ def _dosing_awc_suspended(config: dict[str, Any]) -> bool:
     plus the post-change stabilisation hold-off. Mirrors _awc_ato_suspended but is NOT
     gated on the ATO toggle — each channel opts in via guards.suspendDuringAwc."""
     state = _awc_cfg(config).get("state", {})
-    # Micro-change: dosing keeps running (a latched fault still holds it).
+    if _awc_sim_enabled(config):
+        return False  # a VIRTUAL change must never hold the REAL doser
+    # Micro-change: dosing keeps running through the RUN itself — but a previous
+    # change's still-future hold-off keeps holding, and a fault holds regardless.
     if state.get("microChange") and state.get("status") != "fault":
-        return False
+        until = _parse_datetime(state.get("atoSuspendedUntil"))
+        return until is not None and until > datetime.now(timezone.utc)
     if state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
         return True
     until = state.get("atoSuspendedUntil")
@@ -11688,6 +11819,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     # Fresh fetch: resume may have just finalized a change and stamped a NEW hold-off
     # that the pre-resume snapshot doesn't carry.
     await _async_arm_awc_ato_restore(hass, entry, _config_from_entry(entry))
+    # Stop a calibration-run pump orphaned by a restart mid-run.
+    await _async_awc_recover_orphaned_calrun(hass, entry)
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
@@ -11721,6 +11854,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _awc_restore = _store.pop(AWC_ATO_RESTORE_UNSUB, None)
     if _awc_restore is not None:
         _awc_restore()
+    # Cancel a pending calibration-run stop timer; the persisted calRunRole stamp
+    # lets the next setup stop the pump (reload path).
+    _awc_calrun = _store.pop(AWC_CALRUN_UNSUB, None)
+    if _awc_calrun is not None:
+        _awc_calrun()
     _issue_refresh = _store.pop(ISSUE_REFRESH_UNSUB, None)
     if _issue_refresh is not None:
         _issue_refresh()

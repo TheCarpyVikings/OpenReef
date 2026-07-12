@@ -1883,9 +1883,19 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "awc-calrun") {
         // Transient calibration-ceremony state, not config: store the measured ml so
         // it survives re-renders (the uncontrolled-input wipe class), never dirty.
-        const runs = (this._awcCalRuns || {})[target.dataset.role];
+        const role = target.dataset.role;
+        const runs = (this._awcCalRuns || {})[role];
         const idx = Number(target.dataset.index);
         if (runs && runs[idx]) runs[idx].ml = value;
+        // Targeted refresh: flip the Save-fit button in place — a full re-render
+        // here would wipe the very inputs being typed into, and nothing else
+        // re-renders the settings tab while the user types.
+        const ready = (runs || []).filter((r) => Number(r.ml) > 0).length;
+        const btn = this.shadowRoot.querySelector(`[data-action="awc-cal-save-points"][data-id="${role}"]`);
+        if (btn) {
+          btn.disabled = ready < 2;
+          btn.textContent = `Save fit (${ready} of ≥2)`;
+        }
         return;
       }
       if (scope === "awc") {
@@ -9583,8 +9593,14 @@ class OpenReefPanel extends HTMLElement {
       });
       this._awcCalRunBusy = { role, until: Date.now() + seconds * 1000 };
       this._awcMessage = `${role} pump running ${seconds} s — catch the output in a measuring jug, then enter the ml below.`;
-      // Unlock the buttons once the timed run has actually finished.
-      window.setTimeout(() => { this._awcCalRunBusy = null; this._render(); }, seconds * 1000 + 750);
+      // Unlock the buttons once the timed run has actually finished — but never
+      // stomp a field the user is mid-typing in (the re-render would steal focus
+      // and zero a partially-typed measurement).
+      window.setTimeout(() => {
+        this._awcCalRunBusy = null;
+        if (this._isEditingFormControl && this._isEditingFormControl()) return;
+        this._render();
+      }, seconds * 1000 + 750);
     } catch (err) {
       this._awcMessage = "Calibration run failed: " + (err instanceof Error ? err.message : err);
     }
@@ -9607,7 +9623,9 @@ class OpenReefPanel extends HTMLElement {
         type: "openreef/awc_calibrate", role,
         points: runs.map((r) => [Number(r.seconds), Number(r.ml)]),
       });
-      this._config = result.config || this._config;
+      // Never clobber unsaved settings edits with the server copy — the dirty
+      // local config wins until the user saves it.
+      if (!this._configDirty) this._config = result.config || this._config;
       this._awcCalRuns[role] = [];
       this._awcMessage = `${role} pump multi-point calibration saved: ${result.mlPerS} ml/s (spin-up offset fitted).`;
     } catch (err) {
@@ -9618,11 +9636,19 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _awcSimSet(payload) {
+    if (this._busy) return;  // hazard chips double-tap: one round-trip at a time
     this._busy = true;
     this._render();
     try {
       const result = await this._callWS({ type: "openreef/awc_sim_set", ...payload });
-      this._config = result.config || this._config;
+      // Sim state must always reflect the server (the DEMO strip reads it), but
+      // unsaved settings edits must not be clobbered by the full server copy.
+      if (!this._configDirty) {
+        this._config = result.config || this._config;
+      } else if (result.config?.automaticWaterChange?.simulation) {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.simulation = result.config.automaticWaterChange.simulation;
+      }
       this._awcMessage = "";
     } catch (err) {
       this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
@@ -9648,13 +9674,23 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _configImportChoose() {
+    // Mirrors the hardened ICP picker: 1px/opacity-0 (display:none pickers fail to
+    // open on iOS Safari), tracked instance, and a timed cleanup so a cancelled OS
+    // dialog (which never fires 'change') doesn't leak an input per click.
+    if (this._configImportCleanup) this._configImportCleanup();
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "application/json,.json";
-    input.style.display = "none";
+    input.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;";
+    const cleanup = () => {
+      input.remove();
+      if (this._configImportCleanup === cleanup) this._configImportCleanup = null;
+    };
+    this._configImportCleanup = cleanup;
+    window.setTimeout(cleanup, 120000);
     input.addEventListener("change", async () => {
       const file = input.files && input.files[0];
-      input.remove();
+      cleanup();
       if (!file) return;
       let payload;
       try {
@@ -9888,7 +9924,7 @@ class OpenReefPanel extends HTMLElement {
     const hazards = sim.hazards || {};
     const chip = (key, label) => `
       <button class="secondary compact-button" data-action="awc-sim-hazard" data-id="${key}"
-        data-value="${hazards[key] ? "on" : "off"}"
+        data-value="${hazards[key] ? "on" : "off"}" ${this._busy ? "disabled" : ""}
         ${hazards[key] ? 'style="border-color:var(--error-color,#d32f2f);"' : ""}>${label}${hazards[key] ? " ✕" : ""}</button>`;
     return `
       <div class="setting-card" style="border-left:4px solid var(--info-color,#1976d2);">

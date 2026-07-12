@@ -35,7 +35,7 @@ re-derived and verified during research.
 from __future__ import annotations
 
 import math
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any, Iterable
 
 # --------------------------------------------------------------------------- #
@@ -499,7 +499,9 @@ def schedule_text(schedule: dict[str, Any], tank_volume_l: float) -> str:
         ws = str(sched.get("windowStart", "01:00"))
         we = str(sched.get("windowEnd", "05:00"))
         window = "" if parse_hhmm(ws) == parse_hhmm(we) else f" ({ws}–{we})"
-        head = f"{vol_txt} {cadence}{window}"
+        days = [d for d in (sched.get("days") or []) if d in _WEEKDAYS]
+        days_txt = "" if not days or len(days) == 7 else " on " + "/".join(days)
+        head = f"{vol_txt} {cadence}{window}{days_txt}"
     else:
         times = [t for t in (sched.get("times") or [sched.get("startTime", "02:00")]) if t]
         days = [d for d in (sched.get("days") or []) if d in _WEEKDAYS]
@@ -932,6 +934,15 @@ def due_slots(schedule: dict[str, Any], last_run: datetime | None, now: datetime
         if minute > now_min:
             continue
         fire_at = today_start + timedelta(minutes=minute)
+        # DST spring-forward: a wall time inside the skipped hour maps to a real
+        # instant LATER than now even though its minutes read as "passed" — and the
+        # served check below compares against a UTC lastRun, so treating it as due
+        # made the tick re-fire the slot after every completion for the whole ghost
+        # hour. Compare ABSOLUTE instants explicitly: same-tzinfo aware datetimes
+        # otherwise compare by wall clock (offsets cancel), hiding the anomaly.
+        if fire_at.tzinfo is not None and (
+                fire_at.astimezone(timezone.utc) > now.astimezone(timezone.utc)):
+            continue
         if last_run is None or last_run < fire_at:
             out.append(fire_at)
     return out

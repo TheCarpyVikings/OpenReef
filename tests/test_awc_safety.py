@@ -1164,6 +1164,7 @@ def test_drift_graded_once_when_empty_float_trips():
     # warning + ONE notification per fill cycle; reset-to-full zeroes and re-arms.
     entry = _entry("batch_sequential")
     _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 20000.0
+    _awc(entry)["reservoirs"]["fresh"]["fullConfirmedAt"] = "2026-07-01T00:00:00+00:00"
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
@@ -1187,6 +1188,7 @@ def test_drift_graded_once_when_empty_float_trips():
 def test_drift_within_tolerance_stays_quiet():
     entry = _entry("batch_sequential")
     _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 24500.0  # −2%
+    _awc(entry)["reservoirs"]["fresh"]["fullConfirmedAt"] = "2026-07-01T00:00:00+00:00"
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
@@ -1200,6 +1202,7 @@ def test_reset_to_full_grades_drift_when_float_tripped():
     # Refill-from-empty without the tick having run: the reset itself grades first.
     entry = _entry("batch_sequential")
     _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 20000.0
+    _awc(entry)["reservoirs"]["fresh"]["fullConfirmedAt"] = "2026-07-01T00:00:00+00:00"
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
     conn = FakeConnection()
@@ -1207,9 +1210,36 @@ def test_reset_to_full_grades_drift_when_float_tripped():
     fresh = _awc(entry)["reservoirs"]["fresh"]
     assert fresh["driftStatus"] == "warning"  # graded before zeroing
     assert fresh["dispensedSinceFullMl"] == 0 and fresh["driftCheckedAt"] == ""
+    assert fresh["fullConfirmedAt"]  # the reset itself is the next cycle's anchor
     notes = [c for c in hass.services.calls if c.domain == "persistent_notification"
              and c.data.get("notification_id") == "openreef_awc_drift"]
     assert len(notes) == 1
+
+
+def test_drift_not_graded_without_confirmed_full_anchor():
+    # Fresh install / never marked full: the odometer started from an unknown level —
+    # grading would be a guess, and false recalibrate alarms are forbidden.
+    entry = _entry("batch_sequential")
+    _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 12000.0
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    fresh = _awc(entry)["reservoirs"]["fresh"]
+    assert fresh["driftCheckedAt"] == "" and fresh["driftStatus"] == ""
+    assert not _notes(hass, "openreef_awc_drift")
+
+
+def test_drift_skipped_after_unmarked_bucket_topup():
+    # dispensed way past capacity = someone refilled without 'mark full' — no honest
+    # reference this cycle; skip rather than accuse the pump.
+    entry = _entry("batch_sequential")
+    _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 40000.0  # 1.6× capacity
+    _awc(entry)["reservoirs"]["fresh"]["fullConfirmedAt"] = "2026-07-01T00:00:00+00:00"
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    assert _awc(entry)["reservoirs"]["fresh"]["driftCheckedAt"] == ""
+    assert not _notes(hass, "openreef_awc_drift")
 
 
 def test_micro_change_skips_ato_and_dosing_suspend():
@@ -1242,6 +1272,145 @@ def test_normal_change_still_suspends_ato_with_threshold_set():
     assert integration._dosing_awc_suspended(integration._config_from_entry(entry)) is True
     _drive(hass, entry)
     assert _state(entry)["atoSuspendedUntil"]  # hold-off armed as usual
+
+
+def test_micro_change_preserves_prior_holdoff():
+    # A normal change's stabilization hold-off must survive a micro-change that
+    # starts and finishes inside it — the micro path used to clear the stamp and
+    # release the dosing hold early (review F6).
+    entry = _entry("batch_sequential", awc_over={
+        "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 60,
+                "microChangeThresholdMl": 100}})
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]  # normal change
+    _drive(hass, entry)
+    holdoff_before = _state(entry)["atoSuspendedUntil"]
+    assert holdoff_before  # hold-off armed
+    assert _start(hass, entry, 0.05, method="batch_sequential")[0]  # micro inside it
+    # during the micro run the previous hold-off still holds ATO + dosing
+    assert integration._awc_ato_suspended(entry.options[CONF_SETTINGS]) is True
+    assert integration._dosing_awc_suspended(integration._config_from_entry(entry)) is True
+    _drive(hass, entry)
+    assert _state(entry)["atoSuspendedUntil"] == holdoff_before  # untouched
+    assert integration._awc_ato_suspended(entry.options[CONF_SETTINGS]) is True
+
+
+def test_micro_change_fault_kills_ato_equipment():
+    # A latched hazard mid-micro-change must physically stop the ATO — the micro
+    # start skipped the kill by design, and the predicate only blocks future
+    # turn-ons (review F5).
+    equipment = {"ato1": {"type": "ato", "armed": True, "switch_entity_id": "switch.my_ato"}}
+    entry = _entry("batch_sequential", equipment=equipment, awc_over={
+        "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 15,
+                "microChangeThresholdMl": 100}})
+    hass = _hass(entry, states={"switch.my_ato": "on"})
+    assert _start(hass, entry, 0.05, method="batch_sequential")[0]
+    assert not _has_call(hass.services.calls, "turn_off", "switch.my_ato")  # micro: no kill
+    hass.states.set("binary_sensor.leak", "on")
+    st = _state(entry)
+    now = datetime.now(timezone.utc)
+    st["legStartedAt"] = now.isoformat()
+    st["legEndsAt"] = (now + timedelta(seconds=10)).isoformat()
+    run(integration._async_awc_timer_fired(hass, entry, None))  # checkpoint → fault
+    assert _state(entry)["status"] == "fault"
+    assert _has_call(hass.services.calls, "turn_off", "switch.my_ato")
+
+
+def test_sim_sandbox_restores_real_accounting_on_exit():
+    # Demo runs drive the real state machine — but exiting the demo must restore the
+    # real reservoir/ledger/history/wear models and the schedule state verbatim
+    # (review F7/F12/F13).
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn, {"id": 1, "enabled": True}))
+    assert not conn.errors, conn.error_codes
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    # a virtual change must not hold the real ATO/doser even while "running"
+    assert integration._awc_ato_suspended(entry.options[CONF_SETTINGS]) is False
+    assert integration._dosing_awc_suspended(integration._config_from_entry(entry)) is False
+    _drive(hass, entry)
+    awc = _awc(entry)
+    assert awc["history"] and _close(awc["reservoirs"]["fresh"]["remainingMl"], 23000.0, 5)
+    conn2 = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn2, {"id": 2, "enabled": False}))
+    assert not conn2.errors, conn2.error_codes
+    awc = _awc(entry)
+    assert awc["history"] == []                                # virtual litres gone
+    assert _close(awc["reservoirs"]["fresh"]["remainingMl"], 25000.0, 1e-6)
+    assert awc["reservoirs"]["fresh"]["dispensedSinceFullMl"] == 0
+    assert awc["pumps"]["fill"]["startCount"] == 0             # wear restored
+    assert _state(entry)["lastRun"] == ""                      # schedule state restored
+    assert awc["simulation"]["snapshot"] is None
+
+
+def test_sim_toggle_refused_during_calibration_run():
+    # Flipping the sandbox under a timed calibration run would strand a REAL pump on
+    # (review F9 — the critical one).
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_awc_calibration_run(
+        hass, conn, {"id": 1, "role": "fill", "seconds": 30}))
+    assert not conn.errors, conn.error_codes
+    conn2 = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn2, {"id": 2, "enabled": True}))
+    assert "busy" in conn2.error_codes
+    conn3 = FakeConnection()
+    run(integration.websocket_config_import(hass, conn3, {"id": 3, "payload": {
+        "kind": "openreef-config", "schema": 1, "config": {}}}))
+    assert "busy" in conn3.error_codes  # imports can swap the pump entity mid-run
+    hass.data[integration.DOMAIN].pop(integration.AWC_CALRUN_UNSUB, None)  # cleanup
+
+
+def test_orphaned_calibration_run_recovered_at_startup():
+    # HA restarted mid-run: the in-memory stop timer died — the persisted stamp lets
+    # startup stop the pump (review F10).
+    entry = _entry("batch_sequential")
+    awc = _awc(entry)
+    awc["state"].update({"calRunRole": "fill",
+                         "calRunEndsAt": "2026-07-12T00:00:30+00:00"})
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry, states={"switch.awc_fill": "on"})
+    run(integration._async_awc_recover_orphaned_calrun(hass, entry))
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_fill")
+    st = _state(entry)
+    assert st["calRunRole"] == "" and st["calRunEndsAt"] == ""
+
+
+def test_blocked_slot_notes_once_per_blocker_per_day():
+    # Interval mode mints a new slot every everyMinutes — a persistent blocker must
+    # note ONCE per day per reason, not once per slot (review F3).
+    entry = _interval_entry()
+    hass = _hass(entry, states={"binary_sensor.leak": "unavailable"})
+    _state(entry)["lastRun"] = _now(1, 30).isoformat()
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 1)))
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 1)))  # NEW slot, same blocker
+    assert len(_notes(hass, "openreef_awc_blocked")) == 1
+
+
+def test_interval_coalesce_awkward_cap_still_starts():
+    # An exact-cap clamp used to re-trip the cap guard after 3-decimal rounding
+    # (cap 15.8375 → target 15.838) and deadlock the schedule (review F2).
+    entry = _entry("batch_sequential", awc_over={
+        "tankVolumeLitres": 63.35,
+        "schedule": {"enabled": True, "method": "batch_sequential", "mode": "interval",
+                     "everyMinutes": 60, "windowStart": "00:00", "windowEnd": "00:00",
+                     "amount": 240, "amountUnit": "litres", "period": "day"},
+        "safety": {"highLevelEntity": "binary_sensor.high", "leakEntity": "binary_sensor.leak",
+                   "maxSingleChangePercent": 25},
+        "reservoirs": {
+            "fresh": {"capacityLitres": 25, "remainingMl": 25000, "emptyEntity": "binary_sensor.fresh_empty"},
+            "waste": {"capacityLitres": 25, "filledMl": 0, "fullEntity": "binary_sensor.waste_full"},
+        },
+    })
+    _state(entry)["lastRun"] = _now(1, 30).isoformat()
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(4, 55)))
+    st = _state(entry)
+    assert st["status"] == "draining", st  # started — no cap deadlock
+    assert st["targetLitres"] <= 63.35 * 0.25 + 1e-6
+    assert _close(st["targetLitres"], 15.837, 1e-6)
 
 
 def test_ato_restore_timer_skips_latched_fault():

@@ -336,6 +336,37 @@ def test_interval_due_slots_and_next_run():
     assert awc.next_run(sched, None, datetime(2026, 6, 17, 12, 0)) == datetime(2026, 6, 18, 1, 0)
 
 
+def test_dst_gap_slot_not_due_until_its_instant_arrives():
+    # Spring-forward: a slot inside the skipped hour maps (fold 0) to a UTC instant
+    # LATER than now — it must not read as due, or the minutely tick re-fires it
+    # after every completion for the whole ghost hour (review F1).
+    from datetime import tzinfo
+
+    class _GapTz(tzinfo):
+        # 02:00 wall jumps to 03:00: offset +1 h at/after 02:00 wall, +0 before.
+        def utcoffset(self, dt):
+            if dt is None:
+                return timedelta(0)
+            return timedelta(hours=1) if (dt.hour, dt.minute) >= (2, 0) else timedelta(0)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+        def tzname(self, dt):
+            return "GapTz"
+
+    sched = {"enabled": True, "method": "batch_simultaneous", "mode": "interval",
+             "everyMinutes": 30, "windowStart": "00:00", "windowEnd": "00:00"}
+    now = datetime(2026, 3, 29, 2, 10, tzinfo=_GapTz())          # wall 02:10 = 01:10 UTC
+    served = datetime(2026, 3, 29, 1, 9, tzinfo=timezone.utc)    # served through 01:09 UTC
+    # Pre-fix the 01:30 gap slot (= 01:30 UTC, i.e. the FUTURE) read as due forever;
+    # every other slot is genuinely served. Nothing may fire.
+    assert awc.due_slots(sched, served, now) == []
+    # And no returned slot may ever sit in the absolute future:
+    slots = awc.due_slots(sched, None, now)
+    assert all(s.astimezone(timezone.utc) <= now.astimezone(timezone.utc) for s in slots)
+
+
 def test_schedule_text_lines():
     interval = {"enabled": True, "method": "batch_simultaneous", "amount": 0.96,
                 "amountUnit": "litres", "period": "day", "mode": "interval",
