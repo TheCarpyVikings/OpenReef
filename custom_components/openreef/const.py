@@ -241,6 +241,7 @@ EQUIPMENT_MAX_OFF_MAX_SECONDS = 86400     # ceiling on the per-equipment max-off
 AWC_METHODS = ("continuous", "batch_simultaneous", "batch_sequential")
 AWC_LIVE_METHODS = ("batch_sequential", "batch_simultaneous")  # methods the live controller runs
 AWC_EXCHANGE_TICK_SECONDS = 2             # simultaneous monitor cadence (imbalance + safety)
+AWC_BLOCKED_SLOT_EXPIRY_HOURS = 4         # a schedule slot unserved this long is consumed, not fired late
 AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L = 0.5  # max |drained-filled| mid-run before abort (0 = off)
 AWC_AMOUNT_UNITS = ("litres", "percent")
 AWC_PERIODS = ("day", "week")

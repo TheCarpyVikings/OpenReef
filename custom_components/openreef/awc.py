@@ -855,26 +855,35 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
     }
 
 
-def is_due(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> bool:
-    """True when a batch change should fire now: a scheduled time on an allowed day
-    has passed since ``last_run`` (or since the start of today if never run)."""
+def due_slot(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> datetime | None:
+    """The fire time of the latest scheduled slot that has passed and is unserved
+    (nothing run since it), or ``None``. Exposing the slot itself (not just a bool)
+    lets the orchestrator judge slot freshness and report which slot was blocked."""
     sched = schedule or {}
     if not sched.get("enabled", True):
-        return False
+        return None
     if str(sched.get("method", "")).startswith("continuous"):
-        return False
+        return None
     if now.weekday() not in (
         {_WEEKDAYS.index(d) for d in (sched.get("days") or []) if d in _WEEKDAYS} or set(range(7))
     ):
-        return False
+        return None
     times = sched.get("times") or [sched.get("startTime", "02:00")]
     now_min = now.hour * 60 + now.minute
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    best: datetime | None = None
     for t in times:
         slot = parse_hhmm(t)
         if slot > now_min:
             continue
         fire_at = today_start + timedelta(minutes=slot)
         if last_run is None or last_run < fire_at:
-            return True
-    return False
+            if best is None or fire_at > best:
+                best = fire_at
+    return best
+
+
+def is_due(schedule: dict[str, Any], last_run: datetime | None, now: datetime) -> bool:
+    """True when a batch change should fire now: a scheduled time on an allowed day
+    has passed since ``last_run`` (or since the start of today if never run)."""
+    return due_slot(schedule, last_run, now) is not None

@@ -51,6 +51,7 @@ from .const import (
     AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L,
     AWC_DEFAULT_MAX_SINGLE_CHANGE_PCT,
     AWC_DEFAULT_NET_IMBALANCE_L,
+    AWC_BLOCKED_SLOT_EXPIRY_HOURS,
     AWC_EXCHANGE_TICK_SECONDS,
     AWC_LIVE_METHODS,
     AWC_DEFAULT_RUNTIME_MARGIN,
@@ -954,6 +955,8 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         "pausedReason": _awc_str(raw_state.get("pausedReason"), 200),
         "atoSuspendedUntil": _awc_str(raw_state.get("atoSuspendedUntil"), 40),
         "anomalyWarned": bool(raw_state.get("anomalyWarned", False)),
+        "scheduleArmedAt": _awc_str(raw_state.get("scheduleArmedAt"), 40),
+        "blockedSlotKey": _awc_str(raw_state.get("blockedSlotKey"), 40),
     }
 
     raw_history = awc_cfg.get("history")
@@ -4732,7 +4735,20 @@ async def _async_refresh_issues(
 async def _async_save_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
 ) -> dict[str, Any]:
+    # Re-arming the AWC schedule (enable / slot-time / day edits) stamps the state so
+    # the scheduler tick treats already-passed slots as not-backlog (R24): enabling a
+    # schedule at 15:00 with a 02:00 slot must wait for tomorrow's 02:00, not start a
+    # water change on the spot. Slot-DEFINING fields only — an amount tweak must not
+    # swallow a genuinely pending slot.
+    schedule_rearmed = (
+        _awc_schedule_fingerprint(entry.options.get(CONF_SETTINGS))
+        != _awc_schedule_fingerprint(config)
+    )
     normalised = _normalise_core_config(config)
+    if schedule_rearmed:
+        _awc_cfg(normalised).setdefault("state", {})["scheduleArmedAt"] = (
+            datetime.now(timezone.utc).isoformat()
+        )
     transitions = _sync_alert_state(hass, normalised)
     _trust_check_summary(hass, normalised, update=True)
     options = dict(entry.options)
@@ -5340,6 +5356,27 @@ def _awc_cfg(config: dict[str, Any]) -> dict[str, Any]:
     return awc if isinstance(awc, dict) else {}
 
 
+def _awc_schedule_fingerprint(config: dict[str, Any] | None) -> tuple:
+    """The slot-DEFINING schedule fields (R24): enabled + times + days. A change here
+    means the user re-armed the schedule, which consumes any already-passed slot.
+    Amount/method/unit edits are deliberately excluded — they don't move slots, so
+    they must not swallow a genuinely pending one."""
+    sched = _awc_cfg(config or {}).get("schedule", {})
+    if not isinstance(sched, dict):
+        sched = {}
+    times = sched.get("times") or [sched.get("startTime", "02:00")]
+    if not isinstance(times, list):
+        times = [times]
+    days = sched.get("days") or []
+    if not isinstance(days, list):
+        days = []
+    return (
+        bool(sched.get("enabled")),
+        tuple(str(t) for t in times),
+        tuple(str(d) for d in days),
+    )
+
+
 def _awc_effective_tank_l(config: dict[str, Any]) -> float:
     """Net tank volume (L) the AWC engine should use: the AWC tab's own override when
     set, otherwise the Profile tank volume. Resolved at read time and never persisted,
@@ -5720,6 +5757,7 @@ async def _async_awc_start_locked(
     state["fillEndsAt"] = ""
     state["exchangeBaselineGapMl"] = 0
     state["anomalyWarned"] = False
+    state["blockedSlotKey"] = ""  # the slot (if any) is being served now
 
     target_ml = target * 1000.0
     if method == "batch_simultaneous":
@@ -5790,6 +5828,10 @@ async def _async_awc_abort(
         state["status"] = "idle"
         state["fault"] = ""
         state["atoSuspendedUntil"] = ""  # user abort restores the ATO
+        # A user Stop consumes the schedule slot (R7): without this the minutely tick
+        # sees an idle state whose slot is still unserved and restarts the change —
+        # all day long, 60 s after every Stop.
+        state["lastRun"] = now.isoformat()
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
     state["drainEndsAt"] = ""
@@ -6216,7 +6258,9 @@ async def _async_arm_awc_ato_restore(
         async with _awc_lock(hass):
             latest_config = _config_from_entry(latest_entry)
             state = _awc_cfg(latest_config).get("state", {})
-            if state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
+            # 'fault' included (R12): a latched fault keeps dosing held — this expiry
+            # must not release the suspend switch out from under it.
+            if state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
                 return
             u = _parse_datetime(state.get("atoSuspendedUntil"))
             if u is not None and u > datetime.now(timezone.utc):
@@ -6476,13 +6520,73 @@ async def _async_awc_schedule_tick(
         method = _AWC_SAFE_METHOD
     tank = _awc_effective_tank_l(config)
     last_run = _parse_datetime(state.get("lastRun"))
+    armed_at = _parse_datetime(state.get("scheduleArmedAt"))
+    if armed_at is not None and (last_run is None or armed_at > last_run):
+        # A slot that had already passed when the schedule was (re)armed is not
+        # unserved backlog (R24) — it waits for its next occurrence.
+        last_run = armed_at
 
-    if awc_engine.is_due(sched, last_run, now_local):
+    slot = awc_engine.due_slot(sched, last_run, now_local)
+    if slot is not None:
         litres = awc_engine.per_change_litres(sched, tank)
         if litres > 0:
-            await _async_awc_start(hass, entry, litres, method, False, None)
+            if (now_local - slot) >= timedelta(hours=AWC_BLOCKED_SLOT_EXPIRY_HOURS):
+                # Stale-slot expiry (T7): a slot that stayed blocked/unserved this long
+                # must not fire a surprise change whenever its blocker finally clears.
+                await _async_awc_expire_slot(hass, entry, slot)
+                return
+            started, reasons = await _async_awc_start(hass, entry, litres, method, False, None)
+            if not started:
+                await _async_awc_note_blocked_slot(hass, entry, slot, reasons)
             return
     await _async_awc_persist_next_run(hass, entry, now_local)
+
+
+async def _async_awc_expire_slot(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, slot: datetime,
+) -> None:
+    """Consume a stale unserved schedule slot (T7): stamp it served and say so, so the
+    tick stops retrying and the change can't fire hours late as a surprise."""
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        state = _awc_cfg(config).get("state", {})
+        if state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
+            return
+        state["lastRun"] = datetime.now(timezone.utc).isoformat()
+        state["blockedSlotKey"] = ""
+        _append_activity(
+            config,
+            f"Scheduled water change ({slot.strftime('%H:%M')}) expired unserved after "
+            f"{AWC_BLOCKED_SLOT_EXPIRY_HOURS} h — start one manually if still wanted",
+            "warning",
+        )
+        await _async_save_config(hass, entry, config)
+
+
+async def _async_awc_note_blocked_slot(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, slot: datetime,
+    reasons: list[dict[str, str]],
+) -> None:
+    """Surface a blocked scheduled start ONCE per slot (T7) — the minutely tick used
+    to retry silently, leaving 'why didn't my water change run?' unanswerable."""
+    codes = {r.get("code") for r in reasons if isinstance(r, dict)}
+    if codes & {"busy", "paused"}:
+        return  # a change is already in flight — not a real block
+    slot_key = slot.isoformat()
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        state = _awc_cfg(config).get("state", {})
+        if state.get("blockedSlotKey") == slot_key:
+            return
+        state["blockedSlotKey"] = slot_key
+        detail = "; ".join(
+            str(r.get("message") or r.get("code") or "")
+            for r in reasons[:3] if isinstance(r, dict)
+        ) or "blocked"
+        _append_activity(config, f"Scheduled water change blocked: {detail}", "warning")
+        await _async_send_mode_notification(
+            hass, config, "openreef_awc_blocked", "Scheduled water change blocked", detail)
+        await _async_save_config(hass, entry, config)
 
 
 async def _async_awc_persist_next_run(
@@ -10998,6 +11102,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_timelapse(hass, entry, normalised)
     await _async_schedule_watchdog(hass, entry, normalised)
     await _async_awc_resume_on_startup(hass, entry, normalised)
+    # Restart mid-holdoff: re-arm the post-change ATO-restore expiry (R27) — without
+    # this the dosing suspend only ever released via the firmware's 4 h dead-man.
+    # Fresh fetch: resume may have just finalized a change and stamped a NEW hold-off
+    # that the pre-resume snapshot doesn't carry.
+    await _async_arm_awc_ato_restore(hass, entry, _config_from_entry(entry))
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)

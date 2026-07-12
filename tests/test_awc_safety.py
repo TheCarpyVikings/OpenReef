@@ -726,7 +726,8 @@ def test_scheduler_skips_before_due_time():
 def test_scheduler_legacy_continuous_is_migrated_to_sequential():
     entry = _sched_entry("continuous", windowStart="00:00", windowEnd="00:00", amount=4.8)
     hass = _hass(entry)
-    run(integration._async_awc_schedule_tick(hass, entry, _now(12, 0)))
+    # tick within the slot's freshness window (a 10 h-stale slot now expires, T7)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
     assert _awc(entry)["schedule"]["method"] == "batch_sequential"
     assert _state(entry)["status"] == "draining"
     assert _close(_state(entry)["targetLitres"], 4.8, 1e-6)
@@ -758,6 +759,126 @@ def test_scheduler_auto_resumes_paused_change():
     hass.states.set("binary_sensor.fresh_empty", "off")
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
     assert _state(entry)["status"] == "filling"
+
+
+# --- Wave 7: reconciliation & slot semantics ----------------------------------
+
+def test_abort_consumes_schedule_slot_no_restart_loop():
+    # A user Stop must consume the slot (R7): the next minutely tick used to see an
+    # idle state with an unserved slot and restart the change 60 s later — all day.
+    entry = _sched_entry("batch_sequential")
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))
+    assert _state(entry)["status"] == "draining"
+    conn = FakeConnection()
+    run(integration.websocket_awc_abort(hass, conn, {"id": 1}))
+    assert _state(entry)["status"] == "idle"
+    assert _state(entry)["lastRun"]
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 31)))
+    assert _state(entry)["status"] == "idle"  # not restarted
+
+
+def test_enabling_schedule_does_not_fire_passed_slot():
+    # Enabling a schedule whose slot already passed today must wait for the slot's
+    # next occurrence, not start a change on the spot (R24).
+    entry = _sched_entry("batch_sequential", enabled=False)
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    config["automaticWaterChange"]["schedule"]["enabled"] = True
+    run(integration._async_save_config(hass, entry, config))
+    assert _state(entry)["scheduleArmedAt"]
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    assert _state(entry)["status"] == "idle"
+
+
+def test_state_saves_do_not_rearm_schedule():
+    # Ordinary state saves (leg transitions, activity) leave the schedule armed-stamp
+    # alone — only slot-defining edits re-arm (R24).
+    entry = _sched_entry("batch_sequential")
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_save_config(hass, entry, config))
+    assert not _state(entry)["scheduleArmedAt"]
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))
+    assert _state(entry)["status"] == "draining"  # the pending slot still fires
+
+
+def test_blocked_scheduled_start_logged_once_per_slot():
+    # A due schedule blocked by an unavailable leak sensor is surfaced ONCE per slot
+    # (activity + notification), not every minute (T7).
+    entry = _sched_entry("batch_sequential")
+    hass = _hass(entry, states={"binary_sensor.leak": "unavailable"})
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))
+    assert _state(entry)["status"] == "idle"
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 31)))
+    notes = [c for c in hass.services.calls
+             if c.domain == "persistent_notification"
+             and c.data.get("notification_id") == "openreef_awc_blocked"]
+    assert len(notes) == 1
+    acts = [a for a in integration._config_from_entry(entry).get("activity", [])
+            if "blocked" in a.get("message", "")]
+    assert len(acts) == 1
+    # the sensor recovers within the slot's freshness window → the change starts
+    hass.states.set("binary_sensor.leak", "off")
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 40)))
+    assert _state(entry)["status"] == "draining"
+
+
+def test_stale_blocked_slot_expires_instead_of_firing():
+    # Blocked all morning: once the slot is > 4 h stale the tick consumes it (T7) —
+    # the blocker clearing at 06:30 must NOT fire a surprise water change.
+    entry = _sched_entry("batch_sequential")
+    hass = _hass(entry, states={"binary_sensor.leak": "unavailable"})
+    run(integration._async_awc_schedule_tick(hass, entry, _now(2, 30)))  # blocked, logged
+    hass.states.set("binary_sensor.leak", "off")
+    run(integration._async_awc_schedule_tick(hass, entry, _now(6, 30)))  # 4.5 h stale
+    st = _state(entry)
+    assert st["status"] == "idle"
+    assert st["lastRun"]  # slot consumed
+    acts = [a for a in integration._config_from_entry(entry).get("activity", [])
+            if "expired" in a.get("message", "")]
+    assert len(acts) == 1
+    run(integration._async_awc_schedule_tick(hass, entry, _now(6, 31)))
+    assert _state(entry)["status"] == "idle"
+
+
+def test_ato_restore_timer_skips_latched_fault():
+    # The hold-off expiry firing while a FAULT is latched must not clear the
+    # suspension / release the dosing hold out from under it (R12).
+    sched = install_scheduler(integration)
+    entry = _entry("batch_sequential")
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "fault", "fault": "test fault",
+        "atoSuspendedUntil": (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(),
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_arm_awc_ato_restore(hass, entry, config))
+    assert sched.pending()
+    run(sched.fire_all())
+    assert _state(entry)["atoSuspendedUntil"]  # untouched — the fault is still latched
+    install_scheduler(integration)
+
+
+def test_ato_restore_timer_clears_expired_holdoff_when_idle():
+    # The same expiry with an idle state DOES clear the suspension and release the
+    # dosing hold — the R27 restart re-arm depends on this handler behaviour.
+    sched = install_scheduler(integration)
+    entry = _entry("batch_sequential")
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "idle",
+        "atoSuspendedUntil": (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(),
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_arm_awc_ato_restore(hass, entry, config))
+    run(sched.fire_all())
+    assert _state(entry)["atoSuspendedUntil"] == ""
+    install_scheduler(integration)
 
 
 # --- Simultaneous (independent per-pump timers + imbalance abort) ------------
