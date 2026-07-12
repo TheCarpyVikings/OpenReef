@@ -953,6 +953,7 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         "exchangeBaselineGapMl": round(_awc_num(raw_state.get("exchangeBaselineGapMl"), 0, 0, 1e9), 1),
         "pausedReason": _awc_str(raw_state.get("pausedReason"), 200),
         "atoSuspendedUntil": _awc_str(raw_state.get("atoSuspendedUntil"), 40),
+        "anomalyWarned": bool(raw_state.get("anomalyWarned", False)),
     }
 
     raw_history = awc_cfg.get("history")
@@ -5516,6 +5517,18 @@ async def _async_awc_begin_leg(
     state = acfg["state"]
     slice_l = float(leg["sliceMl"]) / 1000.0
     expected = awc_engine.leg_runtime_s(slice_l, acfg, pumps)
+    # A pump with volume to move but a zero/uncalibrated runtime would be energised on
+    # a zero-length timer and credit the whole slice at the next fire (non-fail-safe).
+    # Refuse — mirrors the exchange-path guard (R8). Unreachable from a normal start
+    # (preflight blocks uncalibrated pumps); this covers mid-run calibration loss.
+    if slice_l > 1e-9 and expected <= 0:
+        state["status"] = "fault"
+        state["fault"] = "Cannot run water change: a pump is not calibrated"
+        state["faultSince"] = now.isoformat()
+        state["legStartedAt"] = ""
+        state["legEndsAt"] = ""
+        state["pausedReason"] = ""
+        return False, state["fault"]
     try:
         for role in pumps:
             await _async_awc_set_pump(hass, config, role, True, context)
@@ -5561,10 +5574,12 @@ async def _async_awc_begin_exchange(
     drain_rt = awc_engine.runtime_for_volume_s(drain_remaining_l, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0), drain.get("spinUpMl", 0.0))
     fill_rt = awc_engine.runtime_for_volume_s(fill_remaining_l, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0), fill.get("spinUpMl", 0.0))
 
-    # A side with volume still to move but a zero/uncalibrated runtime would otherwise be
-    # energised on a zero-length timer and phantom-credit the full target on the next tick
-    # (non-fail-safe). Refuse to begin — mirrors the start-time no_calibration guard.
-    if (drain_remaining_l > 1e-6 and drain_rt <= 0) or (fill_remaining_l > 1e-6 and fill_rt <= 0):
+    # An UNCALIBRATED side with volume still to move would be energised on a zero-length
+    # timer and phantom-credit the full target on the next tick (non-fail-safe). Refuse
+    # to begin — mirrors the start-time no_calibration guard. Judged on the RATE, not
+    # the runtime: a calibrated side with a sliver left is handled below (R13).
+    if (drain_remaining_l > 1e-6 and _awc_num(drain.get("mlPerS"), 0, 0, 1e9) <= 0) or (
+            fill_remaining_l > 1e-6 and _awc_num(fill.get("mlPerS"), 0, 0, 1e9) <= 0):
         state["status"] = "fault"
         state["fault"] = "Cannot run simultaneous change: a pump is not calibrated"
         state["faultSince"] = now.isoformat()
@@ -5573,6 +5588,14 @@ async def _async_awc_begin_exchange(
         state["drainEndsAt"] = ""
         state["fillEndsAt"] = ""
         return False, state["fault"]
+
+    # A CALIBRATED side whose remaining sliver rounds to a non-positive runtime (the
+    # spin-up correction near the very end) is FINISHED, not uncalibrated — resuming a
+    # change 30 ml from its end must not latch a spurious calibration fault (R13).
+    if drain_remaining_l > 1e-6 and drain_rt <= 0:
+        drain_remaining_l = 0.0
+    if fill_remaining_l > 1e-6 and fill_rt <= 0:
+        fill_remaining_l = 0.0
 
     roles_on = []
     if drain_remaining_l > 1e-6:
@@ -5696,6 +5719,7 @@ async def _async_awc_start_locked(
     state["drainEndsAt"] = ""
     state["fillEndsAt"] = ""
     state["exchangeBaselineGapMl"] = 0
+    state["anomalyWarned"] = False
 
     target_ml = target * 1000.0
     if method == "batch_simultaneous":
@@ -5719,7 +5743,13 @@ async def _async_awc_pause(
     reason: str, context: Any,
 ) -> None:
     await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
-    state = _awc_cfg(config)["state"]
+    awc = _awc_cfg(config)
+    # Credit the elapsed portion of an in-flight sequential leg before parking (R9):
+    # resume replans from drained/filled, so an uncredited half-leg would be replayed
+    # in full — overfilling by whatever had already moved. Inert when the leg-complete
+    # path already credited the slice and cleared the stamps.
+    _awc_credit_interrupted_leg(awc, datetime.now(timezone.utc))
+    state = awc["state"]
     state["status"] = "paused"
     state["pausedReason"] = reason
     state["legStartedAt"] = ""
@@ -5744,6 +5774,10 @@ async def _async_awc_abort(
     awc = _awc_cfg(config)
     state = awc["state"]
     now = datetime.now(timezone.utc)
+    # Credit the elapsed portion of an in-flight sequential leg BEFORE reading the
+    # totals (R6): a Stop at 90% of a leg otherwise vanishes that near-whole-leg
+    # volume from the history, ledger and reservoir models.
+    _awc_credit_interrupted_leg(awc, now)
     drained_l = state.get("drainedMl", 0) / 1000.0
     filled_l = state.get("filledMl", 0) / 1000.0
     if drained_l > 0 or filled_l > 0:
@@ -5890,6 +5924,15 @@ async def _async_awc_leg_complete_locked(
             True, False, context,
         )
         return
+    if verdict == "warn" and not state.get("anomalyWarned"):
+        # Surface the warn tier once per change (T8) — previously computed and discarded.
+        state["anomalyWarned"] = True
+        warn_msg = (f"Water change leg on {'/'.join(pumps)} ran {elapsed:.0f}s vs "
+                    f"{expected:.0f}s expected — check for a clogged line, kinked tube, "
+                    "or a slipping pump")
+        _append_activity(config, warn_msg, "warning")
+        await _async_send_mode_notification(
+            hass, config, "openreef_awc_anomaly", "Water change running long", warn_msg)
 
     # Account the leg's volume against progress + the dead-reckoned reservoirs, and bump
     # each pump's lifetime run-seconds by its calibrated time for the credited volume.
@@ -5908,6 +5951,11 @@ async def _async_awc_leg_complete_locked(
         state["filledMl"] = filled + slice_ml
         fresh = reservoirs.get("fresh", {})
         fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - slice_ml)
+    # The slice is credited — clear the leg stamps NOW so the abort/pause paths below
+    # (which dead-reckon interrupted legs from these stamps, R6/R9) can never credit
+    # this same leg a second time. begin_leg re-stamps for the next leg.
+    state["legStartedAt"] = ""
+    state["legEndsAt"] = ""
 
     next_leg = awc_engine.plan_leg(method, state["drainedMl"], state["filledMl"], target_ml, target_ml)
     if next_leg is None:
@@ -5958,6 +6006,20 @@ async def _async_awc_exchange_tick_locked(
     pumps = awc.get("pumps", {})
     drain = pumps.get("drain", {}) if isinstance(pumps.get("drain"), dict) else {}
     fill = pumps.get("fill", {}) if isinstance(pumps.get("fill"), dict) else {}
+
+    # Mid-run rate-zeroing (a raw settings write racing the run — the calibrate WS is
+    # busy-blocked): dead-reckoning a zero rate reads as 'full target moved' and would
+    # phantom-complete the change. Pause WITHOUT crediting this tick (R26).
+    drain_unfinished = target_ml - state.get("drainedMl", 0) > 1e-6
+    fill_unfinished = target_ml - state.get("filledMl", 0) > 1e-6
+    if (drain_unfinished and _awc_num(drain.get("mlPerS"), 0, 0, 1e9) <= 0) or (
+            fill_unfinished and _awc_num(fill.get("mlPerS"), 0, 0, 1e9) <= 0):
+        await _async_awc_pause(
+            hass, entry, config,
+            "Pump calibration was cleared mid-run — recalibrate, then resume", context,
+        )
+        return
+
     drain_ends = _parse_datetime(state.get("drainEndsAt"))
     fill_ends = _parse_datetime(state.get("fillEndsAt"))
     drain_rem_s = (drain_ends - now).total_seconds() if drain_ends else 0.0
@@ -5986,10 +6048,13 @@ async def _async_awc_exchange_tick_locked(
     state["drainedMl"] = drained_ml
     state["filledMl"] = filled_ml
 
+    # Best-effort per-side stops (R11): a raising turn_off (ESP unreachable) must not
+    # abandon the tick half-done — the accounting save and timer re-arm below still run
+    # (the watchdog + read-back cover a genuinely stuck actuator).
     if drain_done:
-        await _async_awc_set_pump(hass, config, "drain", False, context)
+        await _async_awc_stop_pumps(hass, config, ("drain",), context)
     if fill_done:
-        await _async_awc_set_pump(hass, config, "fill", False, context)
+        await _async_awc_stop_pumps(hass, config, ("fill",), context)
 
     cap = awc.get("safety", {}).get("maxInstantaneousImbalanceLitres", AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L)
     baseline = state.get("exchangeBaselineGapMl", 0)
@@ -6047,13 +6112,59 @@ async def _async_awc_timer_fired(
 ) -> None:
     """Leg/exchange timer target. The method DISPATCH happens inside the lock on the
     fresh config (R1): with a pre-lock snapshot, a change aborted-and-restarted with a
-    different method could route an exchanging state into the sequential handler."""
-    async with _awc_lock(hass):
-        config = _config_from_entry(entry)
-        if _awc_cfg(config).get("state", {}).get("method") == "batch_simultaneous":
-            await _async_awc_exchange_tick_locked(hass, entry, config, context)
-        else:
+    different method could route an exchanging state into the sequential handler.
+    Sequential fires route through the mid-leg safety checkpoint (R9). The finally-arm
+    keeps the monitor alive if a handler dies mid-flight — e.g. a save failure after
+    the pumps were driven (R11): a dead timer while pumps run is the 'keep filling
+    forever' hazard."""
+    try:
+        async with _awc_lock(hass):
+            config = _config_from_entry(entry)
+            if _awc_cfg(config).get("state", {}).get("method") == "batch_simultaneous":
+                await _async_awc_exchange_tick_locked(hass, entry, config, context)
+            else:
+                await _async_awc_sequential_checkpoint_locked(hass, entry, config, context)
+    finally:
+        if hass.data.setdefault(DOMAIN, {}).get(AWC_UNSUB) is None:
+            state = _awc_cfg(_config_from_entry(entry)).get("state", {})
+            if state.get("status") in _AWC_RUNNING_STATES:
+                await _async_arm_awc_timer(
+                    hass, entry,
+                    datetime.now(timezone.utc) + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS),
+                )
+
+
+async def _async_awc_sequential_checkpoint_locked(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
+) -> None:
+    """Sequential timer target (R9): until the leg's scheduled end arrives this is a
+    mid-leg SAFETY checkpoint — a leak tripping 10 s into a 3-minute drain leg must
+    stop the pumps NOW, not when the leg finally completes (the exchange path has had
+    this via its 2 s tick all along; this is the sequential parity). At/after the
+    scheduled end it falls through to the ordinary leg-complete accounting."""
+    awc = _awc_cfg(config)
+    state = awc["state"]
+    status = state.get("status")
+    if status not in ("draining", "filling"):
+        if status in _AWC_RUNNING_STATES:
             await _async_awc_leg_complete_locked(hass, entry, config, context)
+        return
+    ends = _parse_datetime(state.get("legEndsAt"))
+    now = datetime.now(timezone.utc)
+    if ends is None or now >= ends - timedelta(milliseconds=500):
+        await _async_awc_leg_complete_locked(hass, entry, config, context)
+        return
+    live = _awc_live_state(hass, config)
+    verdict = awc_engine.in_run_safety(awc, live, status == "draining", status == "filling")
+    if verdict["action"] == "fault":
+        await _async_awc_abort(hass, entry, config, verdict["reason"], True,
+                               verdict.get("masterKill", False), context)
+        return
+    if verdict["action"] == "pause":
+        await _async_awc_pause(hass, entry, config, verdict["reason"], context)
+        return
+    await _async_arm_awc_timer(
+        hass, entry, min(ends, now + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS)))
 
 
 async def _async_schedule_awc(
@@ -6072,7 +6183,12 @@ async def _async_schedule_awc(
     ends = _parse_datetime(state.get("legEndsAt"))
     if ends is None:
         return
-    await _async_arm_awc_timer(hass, entry, ends)
+    run_at = ends
+    if state.get("method") != "batch_simultaneous" and state.get("status") in ("draining", "filling"):
+        # Sequential legs get mid-leg safety checkpoints (R9): fire at the exchange-tick
+        # cadence; the handler completes the leg only once `ends` actually arrives.
+        run_at = min(ends, datetime.now(timezone.utc) + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS))
+    await _async_arm_awc_timer(hass, entry, run_at)
 
 
 async def _async_arm_awc_ato_restore(
@@ -6157,6 +6273,50 @@ def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
     state["legEndsAt"] = ""
 
 
+def _awc_credit_interrupted_exchange(awc: dict[str, Any], now: datetime) -> None:
+    """Dead-reckon run-on for an interrupted SIMULTANEOUS exchange (R10). The tick
+    persists progress every ~2 s while HA is up, but across HA downtime the ESP kept
+    each pump running toward its persisted stop time (nothing told it otherwise) —
+    credit each side up to min(now, its stop time) before replanning, or
+    resume-to-balance re-runs volume that already moved and the reservoir models drift
+    by the same amount. Clears the per-side stop stamps so a re-entry can never
+    double-credit (begin_exchange re-stamps them). Directionally safe on a power cut
+    for the same reason as the sequential credit: over-credit ⇒ under-delivery, never
+    an overfill. Uncalibrated sides are skipped — a zero rate dead-reckons as
+    'phantom-complete', which is exactly the lie this function must not tell."""
+    state = awc.get("state", {})
+    if state.get("status") != "exchanging":
+        return
+    target_ml = state.get("targetLitres", 0) * 1000.0
+    reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
+    pumps = awc.get("pumps", {}) if isinstance(awc.get("pumps"), dict) else {}
+    for role, ends_key, moved_key in (("drain", "drainEndsAt", "drainedMl"),
+                                      ("fill", "fillEndsAt", "filledMl")):
+        ends = _parse_datetime(state.get(ends_key))
+        if ends is None:
+            continue
+        state[ends_key] = ""
+        pump = pumps.get(role, {}) if isinstance(pumps.get(role), dict) else {}
+        if _awc_num(pump.get("mlPerS"), 0, 0, 1e9) <= 0:
+            continue
+        rem_s = max(0.0, (ends - now).total_seconds())
+        moved_ml, _done = awc_engine.exchange_side_progress(
+            rem_s, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0), target_ml)
+        delta = moved_ml - state.get(moved_key, 0)
+        if delta <= 0:
+            continue
+        state[moved_key] = moved_ml
+        _awc_bump_odometer(awc, role, seconds=awc_engine.runtime_for_volume_s(
+            delta / 1000.0, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0)))
+        if role == "drain":
+            waste = reservoirs.get("waste", {})
+            cap_ml = waste.get("capacityLitres", 0) * 1000.0
+            waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + delta) if cap_ml else waste.get("filledMl", 0) + delta
+        else:
+            fresh = reservoirs.get("fresh", {})
+            fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - delta)
+
+
 async def _async_awc_relaunch(
     hass: HomeAssistant, entry: OpenReefConfigEntry,
     context: Any, log_message: str,
@@ -6188,6 +6348,11 @@ async def _async_awc_relaunch_locked(
         # the resumed leg targets only the genuinely-unmoved remainder (a pause path has
         # already cleared the leg stamps, so this is inert for a plain paused resume).
         _awc_credit_interrupted_leg(awc, datetime.now(timezone.utc))
+    else:
+        # Same for a simultaneous exchange interrupted by HA downtime: the ESP kept the
+        # pumps running toward their persisted stop times after the last tick save —
+        # credit that run-on before replanning (R10). Inert for a paused resume.
+        _awc_credit_interrupted_exchange(awc, datetime.now(timezone.utc))
     target_ml = state.get("targetLitres", 0) * 1000.0
     drained = state.get("drainedMl", 0)
     filled = state.get("filledMl", 0)
@@ -6220,6 +6385,19 @@ async def _async_awc_relaunch_locked(
         else:
             await _async_awc_pause(hass, entry, config, verdict["reason"], context)
         return False
+
+    # A pump whose calibration was cleared while paused keeps the change PAUSED
+    # (recalibrate → resume) — otherwise the minutely auto-resume would escalate the
+    # benign pause into a latched fault via the begin-path calibration guards (R26).
+    if state.get("status") == "paused":
+        pumps_cfg = awc.get("pumps", {}) if isinstance(awc.get("pumps"), dict) else {}
+        needed = [r for r, need in (("drain", needs_drain), ("fill", needs_fill)) if need]
+        if any(_awc_num((pumps_cfg.get(r) or {}).get("mlPerS"), 0, 0, 1e9) <= 0 for r in needed):
+            reason = "A pump is not calibrated — recalibrate, then resume"
+            if state.get("pausedReason") != reason:
+                state["pausedReason"] = reason
+                await _async_save_config(hass, entry, config)
+            return False
 
     now = datetime.now(timezone.utc)
     # After an HA-only restart the ESP may still be running the OLD leg's pump (nothing

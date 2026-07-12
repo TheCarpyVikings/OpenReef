@@ -180,8 +180,16 @@ def test_leg_timer_is_armed_via_scheduler():
     # Exactly the AWC leg timer should be pending (mode is 'running', nothing else arms).
     pending = sched.pending()
     assert len(pending) >= 1
+    # Before the leg's scheduled end the fired timer is a SAFETY CHECKPOINT (R9): it
+    # must NOT complete the leg, and it must re-arm itself so monitoring continues.
+    run(sched.fire_all())
+    assert _state(entry)["status"] == "draining"
+    assert sched.pending()
+    # Once the scheduled end has passed, the fired timer completes the leg.
+    _state(entry)["legEndsAt"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     run(sched.fire_all())
     assert _state(entry)["status"] == "filling"
+    _state(entry)["legEndsAt"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     run(sched.fire_all())
     assert _state(entry)["status"] == "idle"
     # restore real scheduler for subsequent tests
@@ -891,6 +899,178 @@ def test_simultaneous_resume_uncalibrated_faults_not_completes():
     assert not _awc(entry)["history"]  # never recorded a (zero-volume) completion
 
 
+# --- Wave 6: sequential/simultaneous parity ------------------------------------
+
+def test_abort_mid_leg_credits_elapsed_volume():
+    # Stop at ~40% of the drain leg: the elapsed volume must land in history, the
+    # ledger and the waste reservoir — not vanish (R6).
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    st = _state(entry)
+    now = datetime.now(timezone.utc)
+    st["legStartedAt"] = (now - timedelta(seconds=8)).isoformat()
+    st["legEndsAt"] = (now + timedelta(seconds=12)).isoformat()
+    conn = FakeConnection()
+    run(integration.websocket_awc_abort(hass, conn, {"id": 1}))
+    assert not conn.errors
+    assert _state(entry)["status"] == "idle"
+    h = _awc(entry)["history"][0]
+    assert _close(h["drainedL"], 0.8, 0.05) and h["partial"]
+    assert _close(_awc(entry)["reservoirs"]["waste"]["filledMl"], 800.0, 50.0)
+    assert _close(_awc(entry)["ledger"]["cumulativeDrainedL"], 0.8, 0.05)
+
+
+def test_sequential_checkpoint_trips_leak_mid_leg():
+    # A leak 10 s into a 20 s drain leg aborts at the mid-leg CHECKPOINT (R9) — with
+    # the elapsed volume credited (R6) — instead of waiting out the leg timer.
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    st = _state(entry)
+    now = datetime.now(timezone.utc)
+    st["legStartedAt"] = (now - timedelta(seconds=10)).isoformat()
+    st["legEndsAt"] = (now + timedelta(seconds=10)).isoformat()
+    hass.states.set("binary_sensor.leak", "on")
+    run(integration._async_awc_timer_fired(hass, entry, None))
+    st = _state(entry)
+    assert st["status"] == "fault" and "leak" in st["fault"].lower()
+    assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
+    assert _close(_awc(entry)["history"][0]["drainedL"], 1.0, 0.05)  # 10 s × 100 ml/s
+
+
+def test_sequential_checkpoint_ok_rearms_without_completing():
+    # A healthy checkpoint mid-leg must neither credit the slice nor advance the leg —
+    # it just re-arms the monitor (R9).
+    sched = install_scheduler(integration)
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    run(integration._async_awc_timer_fired(hass, entry, None))
+    st = _state(entry)
+    assert st["status"] == "draining" and st["drainedMl"] == 0
+    assert sched.pending()  # the checkpoint re-armed itself
+    install_scheduler(integration)
+
+
+def test_sequential_resume_uncalibrated_faults_not_replays():
+    # Resume lands on a fill leg whose pump lost its calibration: begin-leg must fault
+    # (R8), never energise a pump on a zero-length timer.
+    entry = _entry("batch_sequential", awc_over={"pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 0},
+    }})
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
+        "drainedMl": 2000, "filledMl": 0, "legStartedAt": "", "legEndsAt": "",
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    st = _state(entry)
+    assert st["status"] == "fault" and "calibrat" in st["fault"].lower()
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+
+
+def test_simultaneous_resume_near_end_completes_without_fault():
+    # Crash with 30 ml left on the fill side while its spin-up correction is 50 ml:
+    # the sliver's fitted runtime is ≤ 0 — that side is DONE, not 'uncalibrated' (R13).
+    entry = _entry("batch_simultaneous", awc_over={"pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 100, "spinUpMl": 50},
+    }})
+    awc = _awc(entry)
+    awc["state"].update({
+        "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
+        "drainedMl": 2000, "filledMl": 1970,
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    st = _state(entry)
+    assert st["status"] != "fault", st.get("fault")
+    _fire_exchange(hass, entry, age_done=("drain", "fill"))
+    assert _state(entry)["status"] == "idle"
+
+
+def test_simultaneous_relaunch_dead_reckons_run_on():
+    # HA died mid-exchange; by the time it's back both persisted stop times have
+    # passed — the ESP kept pumping toward them, so the run-on must be credited before
+    # replanning (R10): resume finalizes instead of re-running already-moved volume.
+    entry = _entry("batch_simultaneous")
+    awc = _awc(entry)
+    now = datetime.now(timezone.utc)
+    awc["state"].update({
+        "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
+        "drainedMl": 1500, "filledMl": 500,
+        "drainEndsAt": (now - timedelta(seconds=60)).isoformat(),
+        "fillEndsAt": (now - timedelta(seconds=45)).isoformat(),
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    st = _state(entry)
+    assert st["status"] == "idle"
+    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-3)
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    # the run-on was mirrored into the reservoir models (fill delta 1.5 L, drain 0.5 L)
+    assert _close(_awc(entry)["reservoirs"]["fresh"]["remainingMl"], 23500.0, 1.0)
+    assert _close(_awc(entry)["reservoirs"]["waste"]["filledMl"], 500.0, 1.0)
+
+
+def test_exchange_tick_rate_zeroed_mid_run_pauses_without_credit():
+    # A raw settings write zeroes a pump's rate mid-run: dead-reckoning a zero rate
+    # reads 'full target moved' — the tick must PAUSE without crediting (R26), the
+    # minutely auto-resume must keep it paused (not escalate to a latched fault), and
+    # recalibrating must make resume work again.
+    entry = _entry("batch_simultaneous")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_simultaneous")[0]
+    _awc(entry)["pumps"]["fill"]["mlPerS"] = 0
+    run(integration._async_awc_exchange_tick(hass, entry, None))
+    st = _state(entry)
+    assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
+    assert st["drainedMl"] == 0 and st["filledMl"] == 0  # no credit this tick
+    run(integration._async_awc_schedule_tick(hass, entry, datetime.now()))
+    st = _state(entry)
+    assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
+    _awc(entry)["pumps"]["fill"]["mlPerS"] = 100
+    assert run(integration._async_awc_try_resume(hass, entry, None))
+    assert _state(entry)["status"] == "exchanging"
+
+
+def test_leg_anomaly_warn_tier_surfaces_once():
+    # A leg at 2.2× its expected runtime (warn ≥ 2×, abort ≥ 3×) surfaces the warn
+    # tier once per change: activity + notification, non-blocking (T8).
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    st = _state(entry)
+    now = datetime.now(timezone.utc)
+    st["legStartedAt"] = (now - timedelta(seconds=44)).isoformat()
+    st["legEndsAt"] = (now - timedelta(seconds=1)).isoformat()
+    _fire_leg(hass, entry)
+    st = _state(entry)
+    assert st["status"] == "filling"          # warn is non-blocking
+    assert st["anomalyWarned"] is True
+    notes = [c for c in hass.services.calls
+             if c.domain == "persistent_notification"
+             and c.data.get("notification_id") == "openreef_awc_anomaly"]
+    assert len(notes) == 1
+    # a second slow leg in the SAME change does not re-notify
+    st["legStartedAt"] = (now - timedelta(seconds=44)).isoformat()
+    st["legEndsAt"] = (now - timedelta(seconds=1)).isoformat()
+    _fire_leg(hass, entry)
+    notes = [c for c in hass.services.calls
+             if c.domain == "persistent_notification"
+             and c.data.get("notification_id") == "openreef_awc_anomaly"]
+    assert len(notes) == 1
+
+
 # --- Two-config races (R1: every entry point fetches config INSIDE the lock) --
 # The fake services yield to the event loop on every call, so asyncio.gather here
 # produces real interleavings — with the old pre-lock snapshots these tests fail.
@@ -910,6 +1090,10 @@ def test_race_abort_vs_leg_timer_never_resurrects_pumps():
         entry = _entry("batch_sequential")
         hass = _hass(entry)
         assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+        # Age the leg to its end so the timer takes the leg-COMPLETION path (which
+        # advances to the fill leg), not the R9 mid-leg checkpoint — completion vs
+        # abort is the race that used to resurrect pumps.
+        _state(entry)["legEndsAt"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         conn = FakeConnection()
 
         async def race():
