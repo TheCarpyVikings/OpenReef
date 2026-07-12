@@ -944,6 +944,55 @@ def test_stale_blocked_slot_expires_instead_of_firing():
     assert _state(entry)["status"] == "idle"
 
 
+def _notes(hass, notification_id):
+    return [c for c in hass.services.calls if c.domain == "persistent_notification"
+            and c.data.get("notification_id") == notification_id]
+
+
+def test_reservoir_low_advisory_notifies_once_per_cooldown():
+    entry = _entry("batch_sequential")
+    _awc(entry)["reservoirs"]["fresh"]["remainingMl"] = 2000.0  # 8% of 25 L
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    assert len(_notes(hass, "openreef_awc_reservoir_low")) == 1
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 1)))
+    assert len(_notes(hass, "openreef_awc_reservoir_low")) == 1  # cooldown holds
+
+
+def test_reservoir_low_advisory_respects_gate():
+    entry = _entry("batch_sequential", awc_over={"notifications": {"reservoirLow": False}})
+    _awc(entry)["reservoirs"]["fresh"]["remainingMl"] = 2000.0
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    assert not _notes(hass, "openreef_awc_reservoir_low")
+
+
+def test_paused_fault_gate_silences_pause_notification():
+    entry = _entry("batch_sequential", awc_over={"notifications": {"pausedFault": False}})
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    hass.states.set("binary_sensor.fresh_empty", "on")
+    _fire_leg(hass, entry)
+    assert _state(entry)["status"] == "paused"  # behaviour unchanged
+    assert not _notes(hass, "openreef_awc_paused")  # notification silenced
+
+
+def test_net_drift_and_recalibration_advisories():
+    entry = _entry("batch_sequential")
+    awc = _awc(entry)
+    awc["ledger"] = {"cumulativeDrainedL": 30.0, "cumulativeFilledL": 20.0, "resetAt": ""}
+    awc["pumps"]["drain"]["calibratedAt"] = (
+        datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry)
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    assert len(_notes(hass, "openreef_awc_net_drift")) == 1
+    assert len(_notes(hass, "openreef_awc_recal_drain")) == 1
+    assert not _notes(hass, "openreef_awc_recal_fill")  # never calibrated → no age → no nag
+
+
 def test_fresh_debits_accumulate_dispensed_since_full():
     # Every fill-side debit also bumps the drift odometer (Stage A wiring).
     entry = _entry("batch_sequential")

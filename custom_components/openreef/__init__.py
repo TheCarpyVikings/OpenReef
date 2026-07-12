@@ -243,6 +243,9 @@ AWC_SCHEDULE_UNSUB = "awc_schedule_unsub"
 # UNLOCKED and must only be called by a lock-holding entry point (asyncio.Lock is not
 # re-entrant). This lock is also the foundation the N-source orchestration builds on.
 AWC_STATE_LOCK = "awc_state_lock"
+# Non-persistent runtime (cooldown stamps for the advisory notification tier) —
+# mirrors DOSING_RUNTIME; resetting on restart just means at most one re-notify.
+AWC_RUNTIME = "awc_runtime"
 # Maps an OpenReef event type -> the user-configurable trigger toggle that gates it.
 CAPTURE_TRIGGER_FIELD = {
     "critical_alert": "criticalAlerts",
@@ -910,6 +913,15 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         # no stabilization hold-off (0 = off) — hourly 40 ml micro-changes must not
         # hold the ATO/doser around the clock.
         "microChangeThresholdMl": int(_awc_num(raw_ato.get("microChangeThresholdMl"), 0, 0, 100000)),
+    }
+
+    # Notifications home (Stage A) — one place to silence each family, mirroring the
+    # dosing section. All default ON.
+    raw_awc_notify = awc_cfg.get("notifications")
+    raw_awc_notify = raw_awc_notify if isinstance(raw_awc_notify, dict) else {}
+    awc_cfg["notifications"] = {
+        key: bool(raw_awc_notify.get(key, True))
+        for key in ("pausedFault", "reservoirLow", "calibrationDue", "netDrift", "driftDetected")
     }
 
     raw_guards = awc_cfg.get("guards") if isinstance(awc_cfg.get("guards"), dict) else {}
@@ -5568,6 +5580,89 @@ def _awc_bump_odometer(awc: dict[str, Any], role: str, seconds: float = 0.0, sta
         pump["startCount"] = int(_awc_num(pump.get("startCount"), 0, 0, 1e9)) + starts
 
 
+def _awc_notify_enabled(config: dict[str, Any], family: str) -> bool:
+    notifications = _awc_cfg(config).get("notifications")
+    notifications = notifications if isinstance(notifications, dict) else {}
+    return bool(notifications.get(family, True))
+
+
+async def _async_awc_notify(
+    hass: HomeAssistant, config: dict[str, Any], family: str,
+    notification_id: str, title: str, message: str,
+) -> None:
+    """Family-gated AWC notification (automaticWaterChange.notifications)."""
+    if not _awc_notify_enabled(config, family):
+        return
+    await _async_send_mode_notification(hass, config, notification_id, title, message)
+
+
+async def _async_awc_notify_once(
+    hass: HomeAssistant, config: dict[str, Any], key: str, cooldown_s: float,
+    family: str, title: str, message: str,
+) -> None:
+    """Advisory-tier notification with a hass.data cooldown (mirrors the dosing
+    _async_dosing_notify_once pattern) — the minutely tick may re-detect the same
+    condition thousands of times; the user hears about it once per cooldown."""
+    if not _awc_notify_enabled(config, family):
+        return
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(AWC_RUNTIME, {})
+    notified = runtime.setdefault("notified", {})
+    now = datetime.now(timezone.utc)
+    previous = notified.get(key)
+    if previous is not None:
+        try:
+            if (now - datetime.fromisoformat(previous)).total_seconds() < cooldown_s:
+                return
+        except (ValueError, TypeError):
+            pass
+    notified[key] = now.isoformat()
+    await _async_send_mode_notification(hass, config, f"openreef_awc_{key}", title, message)
+
+
+async def _async_awc_advisory_notifications(
+    hass: HomeAssistant, config: dict[str, Any]
+) -> None:
+    """Minutely advisory tier (Stage A notifications home): reservoir-low,
+    calibration-due, net-drift. Read-only on the peeked config — the cooldown map
+    lives in hass.data, so nothing here needs the lock or a save. Rides the AWC
+    scheduler tick, so it evaluates while a schedule is enabled (or a change is
+    paused) — the population these advisories exist for."""
+    acfg = _awc_cfg(config)
+    if not acfg.get("enabled"):
+        return
+    # UTC-aware now: the age stamps (calibratedAt etc.) are UTC-aware, and naive-vs-
+    # aware arithmetic silently yields None ages (= no nag, ever).
+    summary = awc_engine.summary(_awc_cfg_eff(config), datetime.now(timezone.utc))
+    fresh = summary.get("reservoirs", {}).get("fresh", {})
+    pct = fresh.get("percent")
+    days = summary.get("daysOfFreshRemaining")
+    if (pct is not None and 0 < fresh.get("capacityL", 0) and pct <= 10) or (
+            days is not None and 0 < days <= 2):
+        days_txt = f" (~{days:.1f} days at the current schedule)" if days is not None else ""
+        await _async_awc_notify_once(
+            hass, config, "reservoir_low", 24 * 3600, "reservoirLow",
+            "Fresh saltwater running low",
+            f"The fresh reservoir is at {pct:.0f}%{days_txt} — top it up before the "
+            "next water change is blocked.")
+    for role in ("drain", "fill"):
+        pump = summary.get("pumps", {}).get(role, {})
+        if pump.get("recalibrationDue"):
+            age = pump.get("calibrationAgeDays") or 0
+            await _async_awc_notify_once(
+                hass, config, f"recal_{role}", 7 * 24 * 3600, "calibrationDue",
+                f"{role.capitalize()} pump recalibration due",
+                f"The {role} pump was last calibrated {age:.0f} days ago — accuracy "
+                "drifts with tube wear. Run a quick calibration.")
+    ni = summary.get("netImbalance", {})
+    if ni.get("status") == "warning":
+        await _async_awc_notify_once(
+            hass, config, "net_drift", 24 * 3600, "netDrift",
+            "Water changes drifting out of balance",
+            f"Cumulative fill vs drain is off by {ni.get('netL', 0):+.1f} L — trim the "
+            f"next change by {ni.get('suggestedTrimL', 0):+.1f} L, or reset the ledger "
+            "after correcting salinity.")
+
+
 def _awc_debit_fresh(awc: dict[str, Any], ml: float) -> None:
     """Debit the fresh reservoir's dead-reckoned level AND bump the drift odometer
     (dispensedSinceFullMl) — the single choke point for every fill-side debit, so
@@ -5617,8 +5712,9 @@ async def _async_awc_notify_drift(
            f"fresh reservoir just ran empty ({pct:+.0f}%) — the pump is moving {direction} "
            "water than its calibration says. Recalibrate the fill pump.")
     _append_activity(config, msg, "warning")
-    await _async_send_mode_notification(
-        hass, config, "openreef_awc_drift", "Pump calibration drift detected", msg)
+    await _async_awc_notify(
+        hass, config, "driftDetected", "openreef_awc_drift",
+        "Pump calibration drift detected", msg)
 
 
 async def _async_awc_check_drift_on_empty(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
@@ -5925,8 +6021,8 @@ async def _async_awc_pause(
     state["fillEndsAt"] = ""
     state["exchangeBaselineGapMl"] = 0
     _append_activity(config, f"Water change paused: {reason}", "warning")
-    await _async_send_mode_notification(
-        hass, config, "openreef_awc_paused", "Water change paused", reason,
+    await _async_awc_notify(
+        hass, config, "pausedFault", "openreef_awc_paused", "Water change paused", reason,
     )
     await _async_save_config(hass, entry, config)
 
@@ -5976,8 +6072,8 @@ async def _async_awc_abort(
         await _async_dosing_awc_suspend(hass, config, False, context)
     _append_activity(config, f"Water change {'FAULT' if latch else 'aborted'}: {reason}",
                      "warning" if latch else "control")
-    await _async_send_mode_notification(
-        hass, config, "openreef_awc_fault",
+    await _async_awc_notify(
+        hass, config, "pausedFault", "openreef_awc_fault",
         "Water change fault" if latch else "Water change aborted", reason,
     )
     await _async_save_config(hass, entry, config)
@@ -6106,8 +6202,9 @@ async def _async_awc_leg_complete_locked(
                     f"{expected:.0f}s expected — check for a clogged line, kinked tube, "
                     "or a slipping pump")
         _append_activity(config, warn_msg, "warning")
-        await _async_send_mode_notification(
-            hass, config, "openreef_awc_anomaly", "Water change running long", warn_msg)
+        await _async_awc_notify(
+            hass, config, "pausedFault", "openreef_awc_anomaly",
+            "Water change running long", warn_msg)
 
     # Account the leg's volume against progress + the dead-reckoned reservoirs, and bump
     # each pump's lifetime run-seconds by its calibrated time for the credited volume.
@@ -6644,6 +6741,9 @@ async def _async_awc_schedule_tick(
     # Fill-pump drift check (Stage A): grade the model against reality the moment
     # the fresh empty float trips — latched once per fill cycle.
     await _async_awc_check_drift_on_empty(hass, entry)
+    # Advisory notification tier (Stage A): reservoir-low / recalibration-due /
+    # net-drift, each once per cooldown.
+    await _async_awc_advisory_notifications(hass, config)
 
     # Auto-resume a paused change as soon as its blocking condition clears.
     if state.get("status") == "paused":
@@ -6755,8 +6855,9 @@ async def _async_awc_note_blocked_slot(
             for r in reasons[:3] if isinstance(r, dict)
         ) or "blocked"
         _append_activity(config, f"Scheduled water change blocked: {detail}", "warning")
-        await _async_send_mode_notification(
-            hass, config, "openreef_awc_blocked", "Scheduled water change blocked", detail)
+        await _async_awc_notify(
+            hass, config, "pausedFault", "openreef_awc_blocked",
+            "Scheduled water change blocked", detail)
         await _async_save_config(hass, entry, config)
 
 
