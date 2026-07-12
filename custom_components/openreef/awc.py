@@ -613,22 +613,153 @@ def exchange_side_progress(
     return vol, vol >= target - 1e-6
 
 
-def exchange_imbalance_exceeds(
-    drained_ml: float, filled_ml: float, cap_litres: float, baseline_ml: float = 0.0
+# --------------------------------------------------------------------------- #
+# N-source plumbing (Stage B): every pump has a direction and a reservoir; a
+# change draws WHOLLY from one selected fill source. The state machine stays
+# two-actor per change — drain + the active source — only the role name varies.
+# --------------------------------------------------------------------------- #
+_DEFAULT_PUMP_RESERVOIR = {"drain": "waste", "fill": "fresh", "fill2": "fresh2"}
+_DEFAULT_PUMP_DIRECTION = {"drain": "out", "fill": "in", "fill2": "in"}
+
+
+def pump_reservoir_id(cfg: dict[str, Any], role: str) -> str:
+    """The reservoir a pump draws from / discharges into — the explicit
+    ``reservoirId`` when set, else the legacy role mapping."""
+    pumps = (cfg or {}).get("pumps", {}) if isinstance((cfg or {}).get("pumps"), dict) else {}
+    pump = pumps.get(role, {}) if isinstance(pumps.get(role), dict) else {}
+    rid = str(pump.get("reservoirId") or "")
+    return rid or _DEFAULT_PUMP_RESERVOIR.get(role, "fresh")
+
+
+def fill_roles(cfg: dict[str, Any]) -> list[str]:
+    """Fill-direction pump roles present in config, canonical order first. A config
+    with no fill pumps still reports ['fill'] so legacy call sites stay coherent."""
+    pumps = (cfg or {}).get("pumps", {}) if isinstance((cfg or {}).get("pumps"), dict) else {}
+    out = [r for r in ("fill", "fill2") if isinstance(pumps.get(r), dict)]
+    for role, pump in pumps.items():
+        if role in out or not isinstance(pump, dict):
+            continue
+        direction = str(pump.get("direction") or _DEFAULT_PUMP_DIRECTION.get(role, ""))
+        if direction == "in":
+            out.append(role)
+    return out or ["fill"]
+
+
+def select_fill_source(cfg: dict[str, Any], target_l: float) -> dict[str, Any] | None:
+    """Pick THE fill source for a change (each change draws wholly from one source).
+
+    Policy (``sourcePolicy``): ``single`` always uses the first ordered source;
+    ``primary`` uses the first with enough recorded volume, falling through with a
+    warning; ``alternate`` round-robins from ``lastSourceUsed``, skipping
+    empty/insufficient/uncalibrated sources with a warning; ``ratio`` picks the
+    sufficient source furthest BEHIND its ledger share. Returns
+    ``{role, reservoirId, warnings}`` or None when no source can cover the target
+    (the caller blocks with the reservoir preflight reason — pause, never guess)."""
+    cfg = cfg or {}
+    target_ml = max(0.0, _f(target_l)) * 1000.0
+    roles = fill_roles(cfg)
+    policy = cfg.get("sourcePolicy", {}) if isinstance(cfg.get("sourcePolicy"), dict) else {}
+    order = [r for r in (policy.get("order") or []) if r in roles]
+    order += [r for r in roles if r not in order]
+    reservoirs = cfg.get("reservoirs", {}) if isinstance(cfg.get("reservoirs"), dict) else {}
+    pumps = cfg.get("pumps", {}) if isinstance(cfg.get("pumps"), dict) else {}
+
+    def _remaining(role: str) -> float:
+        res = reservoirs.get(pump_reservoir_id(cfg, role))
+        return _f(res.get("remainingMl")) if isinstance(res, dict) else 0.0
+
+    def _sufficient(role: str) -> bool:
+        pump = pumps.get(role, {}) if isinstance(pumps.get(role), dict) else {}
+        return _f(pump.get("mlPerS")) > 0 and _remaining(role) + 1e-6 >= target_ml
+
+    def _pick(rotation: list[str]) -> dict[str, Any] | None:
+        for idx, role in enumerate(rotation):
+            if _sufficient(role):
+                warnings = [
+                    f"Source '{skipped}' skipped — empty, insufficient or uncalibrated"
+                    for skipped in rotation[:idx]
+                ]
+                return {"role": role, "reservoirId": pump_reservoir_id(cfg, role),
+                        "warnings": warnings}
+        return None
+
+    mode = str(policy.get("mode", "single")).lower()
+    if len(order) == 1 or mode == "single":
+        return _pick(order[:1])
+    if mode == "alternate":
+        last = str(policy.get("lastSourceUsed") or "")
+        if last in order:
+            start = (order.index(last) + 1) % len(order)
+            rotation = order[start:] + order[:start]
+        else:
+            rotation = order
+        return _pick(rotation)
+    if mode == "ratio":
+        ratio = policy.get("ratio", {}) if isinstance(policy.get("ratio"), dict) else {}
+        weights = {r: max(0.0, _f(ratio.get(r), 1.0)) for r in order}
+        total_w = sum(weights.values()) or 1.0
+        ledger = cfg.get("ledger", {}) if isinstance(cfg.get("ledger"), dict) else {}
+        per = ledger.get("perSource", {}) if isinstance(ledger.get("perSource"), dict) else {}
+        delivered_total = sum(_f(per.get(r)) for r in order)
+
+        def _deficit(role: str) -> float:
+            share = weights[role] / total_w
+            return share * (delivered_total + max(0.0, _f(target_l))) - _f(per.get(role))
+
+        return _pick(sorted(order, key=_deficit, reverse=True))
+    # "primary" and anything unknown: ordered fall-through.
+    return _pick(order)
+
+
+def net_salt_delta_g(
+    drained_l: float, filled_l: float, tank_ppt: float, source_ppt: float
+) -> float | None:
+    """Approximate net salt (grams) a change added to the system: salt in with the
+    fill minus salt out with the drain. ppt ≈ g/L at reef density (a couple of
+    percent low — fine for a drift indicator, never dosing math). None when either
+    salinity is unknown (<= 0): an honest 'unknown' beats a wrong number."""
+    tank = _f(tank_ppt)
+    source = _f(source_ppt)
+    if tank <= 0 or source <= 0:
+        return None
+    return round(max(0.0, _f(filled_l)) * source - max(0.0, _f(drained_l)) * tank, 2)
+
+
+def source_salt_matched(
+    reservoir: dict[str, Any] | None, tank_ppt: float, tolerance_ppt: float = 0.5
 ) -> bool:
-    """True when the *new* sump excursion this leg exceeds the cap. We measure
-    divergence relative to the gap that existed when the leg began (``baseline_ml``),
-    not the cumulative drain/fill totals — so a resume-to-balance leg (which starts with
-    a large pre-existing gap it is *correcting*) is never aborted, and a fresh leg
-    (baseline 0) is bounded by the cap. The start-time guard
-    (:func:`simultaneous_max_excursion_l`) prevents a fresh leg from ever needing to hit
-    this. ``cap_litres <= 0`` disables the check."""
+    """Micro-change gate (Stage B): the fill source must be salt-matched to the tank
+    within tolerance for the ATO/dosing skip to be safe. Unknown salinities (0 /
+    unset) count as matched — mismatch is opt-in, and the locked hardware setup
+    keeps every source salt-matched."""
+    res_ppt = _f((reservoir or {}).get("saltPpt"))
+    tank = _f(tank_ppt)
+    if res_ppt <= 0 or tank <= 0:
+        return True
+    return abs(res_ppt - tank) <= _f(tolerance_ppt, 0.5) + 1e-9
+
+
+def exchange_imbalance_exceeds(
+    drained_ml: float, filled_ml: float, cap_litres: float, baseline_net_ml: float = 0.0
+) -> bool:
+    """True when the sump excursion leaves this leg's SAFE BAND. The signed net
+    (drained − filled) may travel from its leg-begin value (``baseline_net_ml``,
+    signed) toward zero freely — closing the gap is what a resume-to-balance leg
+    is FOR — but must not push past either edge: more than ``cap`` beyond the
+    baseline on the drained side, or more than ``cap`` past zero on the overfill
+    side. The old |gap|-vs-|baseline| form let a resumed run reverse THROUGH zero
+    and overfill by up to a whole baseline before tripping (the deferred
+    reverse-overshoot gap, closed in Stage B). Fresh legs (baseline 0) behave
+    exactly as before: |net| > cap. ``cap_litres <= 0`` disables the check."""
     cap = _f(cap_litres)
     if cap <= 0:
         return False
-    gap = abs(_f(drained_ml) - _f(filled_ml))
-    new_divergence = gap - abs(_f(baseline_ml))
-    return new_divergence > cap * 1000.0 + 1e-6
+    cap_ml = cap * 1000.0
+    net = _f(drained_ml) - _f(filled_ml)
+    baseline = _f(baseline_net_ml)
+    upper = max(baseline, 0.0) + cap_ml
+    lower = min(baseline, 0.0) - cap_ml
+    return net > upper + 1e-6 or net < lower - 1e-6
 
 
 def simultaneous_max_excursion_l(cfg: dict[str, Any], target_l: float) -> float:
@@ -677,12 +808,14 @@ def exceeds_single_change_cap(cfg: dict[str, Any], litres: float) -> bool:
 
 
 def start_guard_reasons(
-    cfg: dict[str, Any], live: dict[str, Any], now_minutes: int, manual: bool = False
+    cfg: dict[str, Any], live: dict[str, Any], now_minutes: int, manual: bool = False,
+    fill_role: str = "fill",
 ) -> list[dict[str, str]]:
     """Reasons a change must NOT start now. ``severity`` is ``"fault"`` for hazards
     that should latch (leak, display overfill) and ``"block"`` for benign deferrals.
     A manual run bypasses the quiet-hours and feed-mode *convenience* guards but never
-    the hardware/safety ones."""
+    the hardware/safety ones. ``fill_role`` is the SELECTED source for this change —
+    only its pump (plus the drain) must exist and be calibrated."""
     cfg = cfg or {}
     pumps = cfg.get("pumps", {}) if isinstance(cfg.get("pumps"), dict) else {}
     guards = cfg.get("guards", {}) if isinstance(cfg.get("guards"), dict) else {}
@@ -715,7 +848,7 @@ def start_guard_reasons(
     if _live(live, "wasteFull"):
         out.append({"code": "waste_full", "severity": "block",
                     "message": "Waste reservoir is full"})
-    for role in ("drain", "fill"):
+    for role in ("drain", fill_role or "fill"):
         pump = pumps.get(role, {}) if isinstance(pumps.get(role), dict) else {}
         if not pump.get("switchEntity"):
             out.append({"code": "no_pump_entity", "severity": "block",
@@ -739,24 +872,29 @@ def start_guard_reasons(
     return out
 
 
-def reservoir_preflight_reasons(cfg: dict[str, Any], target_litres: float) -> list[dict[str, str]]:
-    """Dead-reckoned reservoir guards before a change starts.
+def reservoir_preflight_reasons(
+    cfg: dict[str, Any], target_litres: float, source_role: str = "fill"
+) -> list[dict[str, str]]:
+    """Dead-reckoned reservoir guards before a change starts, judged against the
+    SELECTED fill source's reservoir (each change draws wholly from one source).
 
     Float sensors are still the hardware arbiters, but OpenReef's own reservoir model
-    should never knowingly start a change it does not have fresh/waste capacity for.
+    should never knowingly start a change it does not have source/waste capacity for.
     """
     target_ml = _f(target_litres) * 1000.0
     if target_ml <= 0:
         return []
     reservoirs = (cfg or {}).get("reservoirs", {}) if isinstance((cfg or {}).get("reservoirs"), dict) else {}
-    fresh = reservoirs.get("fresh", {}) if isinstance(reservoirs.get("fresh"), dict) else {}
+    source_id = pump_reservoir_id(cfg or {}, source_role or "fill")
+    fresh = reservoirs.get(source_id, {}) if isinstance(reservoirs.get(source_id), dict) else {}
     waste = reservoirs.get("waste", {}) if isinstance(reservoirs.get("waste"), dict) else {}
     out: list[dict[str, str]] = []
 
     remaining = _f(fresh.get("remainingMl"))
     if remaining + 1e-6 < target_ml:
+        source_txt = "Fresh saltwater" if source_id == "fresh" else f"'{source_id}'"
         out.append({"code": "fresh_insufficient", "severity": "block",
-                    "message": "Fresh saltwater reservoir does not have enough recorded volume"})
+                    "message": f"{source_txt} reservoir does not have enough recorded volume"})
 
     waste_capacity = _f(waste.get("capacityLitres")) * 1000.0
     if waste_capacity <= 0:

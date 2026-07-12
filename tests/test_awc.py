@@ -203,9 +203,17 @@ def test_exchange_imbalance_cap():
     assert awc.exchange_imbalance_exceeds(1000, 800, 0.1)      # 200 ml > 100 ml cap
     assert not awc.exchange_imbalance_exceeds(1000, 0, 0)      # cap 0 ⇒ disabled
     # baseline (resume-to-balance): a pre-existing gap being CORRECTED never trips
-    assert not awc.exchange_imbalance_exceeds(1500, 0, 0.1, baseline_ml=1500)   # new divergence 0
-    assert not awc.exchange_imbalance_exceeds(1000, 0, 0.1, baseline_ml=1500)   # gap shrank
-    assert awc.exchange_imbalance_exceeds(1700, 0, 0.1, baseline_ml=1500)       # new 200 ml > cap
+    assert not awc.exchange_imbalance_exceeds(1500, 0, 0.1, baseline_net_ml=1500)  # at baseline
+    assert not awc.exchange_imbalance_exceeds(1000, 0, 0.1, baseline_net_ml=1500)  # gap closing ✓
+    assert awc.exchange_imbalance_exceeds(1700, 0, 0.1, baseline_net_ml=1500)      # +200 ml past
+    # Stage B signed band: reversing THROUGH zero into overfill now trips at the
+    # cap — the old |gap| form allowed overshoot up to a whole baseline (net −1400
+    # read as gap 1400 < baseline 1500 = fine) before noticing.
+    assert not awc.exchange_imbalance_exceeds(1500, 1550, 0.1, baseline_net_ml=1500)  # net −50, in band
+    assert awc.exchange_imbalance_exceeds(1500, 1700, 0.1, baseline_net_ml=1500)      # net −200: overfill
+    # negative baseline (fill was ahead at begin) mirrors: drained side trips at +cap
+    assert not awc.exchange_imbalance_exceeds(750, 1500, 0.1, baseline_net_ml=-800)
+    assert awc.exchange_imbalance_exceeds(1650, 1500, 0.1, baseline_net_ml=-800)      # net +150 > +100
 
 
 def test_simultaneous_max_excursion():
@@ -334,6 +342,90 @@ def test_interval_due_slots_and_next_run():
     # next slot after 03:30 is 04:00; after the window closes, tomorrow's 01:00
     assert awc.next_run(sched, None, now) == datetime(2026, 6, 17, 4, 0)
     assert awc.next_run(sched, None, datetime(2026, 6, 17, 12, 0)) == datetime(2026, 6, 18, 1, 0)
+
+
+def _nsource_cfg(**over):
+    cfg = {
+        "pumps": {
+            "drain": {"switchEntity": "switch.d", "mlPerS": 100},
+            "fill": {"switchEntity": "switch.f", "mlPerS": 100},
+            "fill2": {"switchEntity": "switch.f2", "mlPerS": 80},
+        },
+        "reservoirs": {
+            "fresh": {"capacityLitres": 25, "remainingMl": 20000},
+            "fresh2": {"capacityLitres": 25, "remainingMl": 20000},
+            "waste": {"capacityLitres": 25, "filledMl": 0},
+        },
+        "sourcePolicy": {"mode": "alternate", "order": ["fill", "fill2"], "lastSourceUsed": ""},
+    }
+    cfg.update(over)
+    return cfg
+
+
+def test_select_fill_source_alternate_and_primary():
+    cfg = _nsource_cfg()
+    cfg["sourcePolicy"]["lastSourceUsed"] = "fill"
+    assert awc.select_fill_source(cfg, 2.0)["role"] == "fill2"   # round-robin
+    cfg["sourcePolicy"]["lastSourceUsed"] = "fill2"
+    assert awc.select_fill_source(cfg, 2.0)["role"] == "fill"
+    # an empty next-up source is skipped WITH a warning, not guessed around silently
+    cfg["reservoirs"]["fresh"]["remainingMl"] = 500
+    pick = awc.select_fill_source(cfg, 2.0)
+    assert pick["role"] == "fill2" and pick["warnings"]
+    # primary mode: first ordered source with volume, fall-through warns
+    cfg["sourcePolicy"] = {"mode": "primary", "order": ["fill", "fill2"]}
+    pick = awc.select_fill_source(cfg, 2.0)
+    assert pick["role"] == "fill2" and pick["warnings"]
+    # single mode never falls through; nothing sufficient → None (caller pauses)
+    cfg["sourcePolicy"] = {"mode": "single", "order": ["fill", "fill2"]}
+    assert awc.select_fill_source(cfg, 2.0) is None
+    cfg["sourcePolicy"] = {"mode": "alternate", "order": ["fill", "fill2"]}
+    cfg["reservoirs"]["fresh2"]["remainingMl"] = 100
+    assert awc.select_fill_source(cfg, 2.0) is None
+
+
+def test_select_fill_source_ratio_picks_lagging_source():
+    cfg = _nsource_cfg()
+    cfg["sourcePolicy"] = {"mode": "ratio", "order": ["fill", "fill2"],
+                           "ratio": {"fill": 1, "fill2": 1}}
+    cfg["ledger"] = {"perSource": {"fill": 10.0, "fill2": 2.0}}
+    assert awc.select_fill_source(cfg, 2.0)["role"] == "fill2"   # furthest behind
+    cfg["ledger"]["perSource"] = {"fill": 2.0, "fill2": 10.0}
+    assert awc.select_fill_source(cfg, 2.0)["role"] == "fill"
+
+
+def test_select_fill_source_legacy_single_pump():
+    # A classic 2-pump config with no policy keys behaves exactly as before.
+    cfg = {"pumps": {"drain": {"mlPerS": 100}, "fill": {"mlPerS": 100}},
+           "reservoirs": {"fresh": {"remainingMl": 25000}}}
+    assert awc.select_fill_source(cfg, 2.0) == {
+        "role": "fill", "reservoirId": "fresh", "warnings": []}
+    assert awc.fill_roles(cfg) == ["fill"]
+    assert awc.pump_reservoir_id(cfg, "fill2") == "fresh2"  # default mapping
+
+
+def test_net_salt_delta_and_salt_match():
+    assert awc.net_salt_delta_g(10, 10, 35, 35) == 0
+    assert awc.net_salt_delta_g(10, 10, 35, 36) == 10.0   # saltier source adds salt
+    assert awc.net_salt_delta_g(10, 9, 35, 35) == -35.0   # short fill removes salt
+    assert awc.net_salt_delta_g(10, 10, 0, 35) is None    # unknown tank ppt → honest None
+    assert awc.source_salt_matched({"saltPpt": 35.4}, 35.0) is True
+    assert awc.source_salt_matched({"saltPpt": 36.0}, 35.0) is False
+    assert awc.source_salt_matched({}, 35.0) is True      # unknown = matched (opt-in)
+    assert awc.source_salt_matched({"saltPpt": 33}, 0) is True
+
+
+def test_preflight_judges_selected_source():
+    cfg = {
+        "pumps": {"fill": {"mlPerS": 100}, "fill2": {"mlPerS": 100, "reservoirId": "fresh2"}},
+        "reservoirs": {"fresh": {"remainingMl": 500},
+                       "fresh2": {"remainingMl": 25000},
+                       "waste": {"capacityLitres": 25, "filledMl": 0}},
+    }
+    assert {r["code"] for r in awc.reservoir_preflight_reasons(cfg, 2.0, "fill")} == {"fresh_insufficient"}
+    assert not awc.reservoir_preflight_reasons(cfg, 2.0, "fill2")
+    # the default (no source arg) stays the classic fresh check
+    assert {r["code"] for r in awc.reservoir_preflight_reasons(cfg, 2.0)} == {"fresh_insufficient"}
 
 
 def test_dst_gap_slot_not_due_until_its_instant_arrives():
