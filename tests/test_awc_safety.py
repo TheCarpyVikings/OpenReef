@@ -944,6 +944,77 @@ def test_stale_blocked_slot_expires_instead_of_firing():
     assert _state(entry)["status"] == "idle"
 
 
+def test_sim_mode_runs_change_with_zero_real_actuation():
+    # Demo mode: a full change completes with NO switch service calls; virtual pump
+    # states are recorded; dead-reckoned reservoirs/history still move (the demo).
+    entry = _entry("batch_sequential", awc_over={"simulation": {"enabled": True}})
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    assert not [c for c in hass.services.calls if c.domain == "switch"]
+    sim_pumps = hass.data[integration.DOMAIN][integration.AWC_RUNTIME]["simPumps"]
+    assert sim_pumps.get("drain") is True
+    _drive(hass, entry)
+    assert _state(entry)["status"] == "idle"
+    assert not [c for c in hass.services.calls if c.domain == "switch"]
+    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-6)
+    sim_pumps = hass.data[integration.DOMAIN][integration.AWC_RUNTIME]["simPumps"]
+    assert sim_pumps.get("drain") is False and sim_pumps.get("fill") is False
+
+
+def test_sim_mode_needs_no_pump_entities():
+    # The demo works on a box with zero hardware configured.
+    entry = _entry("batch_sequential", awc_over={
+        "simulation": {"enabled": True},
+        "pumps": {"drain": {"switchEntity": "", "mlPerS": 100},
+                  "fill": {"switchEntity": "", "mlPerS": 100}}})
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    _drive(hass, entry)
+    assert _state(entry)["status"] == "idle"
+
+
+def test_sim_hazard_injection_blocks_and_faults():
+    # An injected leak blocks a start, and injected mid-run it latches a fault via
+    # the checkpoint — the real two-tier policy, virtually, zero real actuation.
+    entry = _entry("batch_sequential", awc_over={
+        "simulation": {"enabled": True, "hazards": {"leak": True}}})
+    hass = _hass(entry)
+    started, reasons = _start(hass, entry, 2.0, method="batch_sequential")
+    assert not started and any("leak" in r["code"] for r in reasons)
+    conn = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn, {"id": 1, "hazard": "leak", "value": False}))
+    assert not conn.errors
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    conn2 = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn2, {"id": 2, "hazard": "leak", "value": True}))
+    run(integration._async_awc_timer_fired(hass, entry, None))  # mid-leg checkpoint
+    st = _state(entry)
+    assert st["status"] == "fault" and "leak" in st["fault"].lower()
+    assert not [c for c in hass.services.calls if c.domain == "switch"]
+
+
+def test_sim_toggle_guards():
+    # Entering sim is refused while a real change runs; leaving sim mid-virtual-run
+    # aborts the sandbox change cleanly.
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    conn = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn, {"id": 1, "enabled": True}))
+    assert "busy" in conn.error_codes
+    conn2 = FakeConnection()
+    run(integration.websocket_awc_abort(hass, conn2, {"id": 2}))
+    conn3 = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn3, {"id": 3, "enabled": True}))
+    assert not conn3.errors
+    assert _start(hass, entry, 0.5, method="batch_sequential")[0]
+    conn4 = FakeConnection()
+    run(integration.websocket_awc_sim_set(hass, conn4, {"id": 4, "enabled": False}))
+    assert not conn4.errors
+    assert _state(entry)["status"] == "idle"
+    assert integration._awc_sim_enabled(integration._config_from_entry(entry)) is False
+
+
 def _notes(hass, notification_id):
     return [c for c in hass.services.calls if c.domain == "persistent_notification"
             and c.data.get("notification_id") == notification_id]

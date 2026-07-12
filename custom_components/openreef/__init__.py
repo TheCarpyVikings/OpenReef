@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import uuid
+from collections.abc import Iterable
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -243,9 +244,11 @@ AWC_SCHEDULE_UNSUB = "awc_schedule_unsub"
 # UNLOCKED and must only be called by a lock-holding entry point (asyncio.Lock is not
 # re-entrant). This lock is also the foundation the N-source orchestration builds on.
 AWC_STATE_LOCK = "awc_state_lock"
-# Non-persistent runtime (cooldown stamps for the advisory notification tier) —
-# mirrors DOSING_RUNTIME; resetting on restart just means at most one re-notify.
+# Non-persistent runtime (cooldown stamps for the advisory notification tier and the
+# demo mode's virtual pump states) — mirrors DOSING_RUNTIME; resetting on restart
+# just means at most one re-notify / a fresh sim sandbox.
 AWC_RUNTIME = "awc_runtime"
+_AWC_SIM_HAZARDS = ("leak", "highLevel", "freshEmpty", "wasteFull", "returnPumpIssue")
 # Maps an OpenReef event type -> the user-configurable trigger toggle that gates it.
 CAPTURE_TRIGGER_FIELD = {
     "critical_alert": "criticalAlerts",
@@ -922,6 +925,17 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
     awc_cfg["notifications"] = {
         key: bool(raw_awc_notify.get(key, True))
         for key in ("pausedFault", "reservoirLow", "calibrationDue", "netDrift", "driftDetected")
+    }
+
+    # Simulation / demo mode (Stage A): virtual pumps + injectable hazards; every
+    # real actuation path no-ops while enabled. Default OFF, hazards clear.
+    raw_sim = awc_cfg.get("simulation") if isinstance(awc_cfg.get("simulation"), dict) else {}
+    raw_hazards = raw_sim.get("hazards") if isinstance(raw_sim.get("hazards"), dict) else {}
+    awc_cfg["simulation"] = {
+        "enabled": bool(raw_sim.get("enabled", False)),
+        "hazards": {
+            key: bool(raw_hazards.get(key, False)) for key in _AWC_SIM_HAZARDS
+        },
     }
 
     raw_guards = awc_cfg.get("guards") if isinstance(awc_cfg.get("guards"), dict) else {}
@@ -5395,6 +5409,12 @@ def _awc_cfg(config: dict[str, Any]) -> dict[str, Any]:
     return awc if isinstance(awc, dict) else {}
 
 
+def _awc_sim_enabled(config: dict[str, Any]) -> bool:
+    """Demo mode: virtual pumps, injectable hazards, zero real actuation."""
+    sim = _awc_cfg(config).get("simulation")
+    return isinstance(sim, dict) and bool(sim.get("enabled"))
+
+
 def _awc_schedule_fingerprint(config: dict[str, Any] | None) -> tuple:
     """The slot-DEFINING schedule fields (R24): the master AWC toggle + schedule
     enabled + times + days. A change here means the user (re)armed the schedule,
@@ -5482,6 +5502,22 @@ def _awc_binary_unknown(hass: HomeAssistant, entity_id: str | None) -> bool:
 
 def _awc_live_state(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
     awc = _awc_cfg(config)
+    if _awc_sim_enabled(config):
+        # Demo mode: hazards come from the sim panel, not real sensors. Feed mode
+        # stays real (it's an app state, and blocking on it is part of the demo).
+        hazards = awc.get("simulation", {}).get("hazards", {})
+        hazards = hazards if isinstance(hazards, dict) else {}
+        mode = config.get("mode", {})
+        return {
+            "leak": bool(hazards.get("leak")),
+            "highLevel": bool(hazards.get("highLevel")),
+            "freshEmpty": bool(hazards.get("freshEmpty")),
+            "wasteFull": bool(hazards.get("wasteFull")),
+            "leakUnknown": False,
+            "highLevelUnknown": False,
+            "returnPumpIssue": bool(hazards.get("returnPumpIssue")),
+            "inFeedMode": isinstance(mode, dict) and mode.get("active") == "feed",
+        }
     safety = awc.get("safety", {}) if isinstance(awc.get("safety"), dict) else {}
     reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
     fresh = reservoirs.get("fresh", {}) if isinstance(reservoirs.get("fresh"), dict) else {}
@@ -5520,6 +5556,13 @@ def _awc_ato_suspended(config: dict[str, Any]) -> bool:
 async def _async_awc_set_pump(
     hass: HomeAssistant, config: dict[str, Any], role: str, on: bool, context: Any
 ) -> None:
+    if _awc_sim_enabled(config):
+        # Demo mode: record the virtual pump instead of driving hardware. Before the
+        # entity check on purpose — a demo needs no real switch entities at all.
+        sim_pumps = hass.data.setdefault(DOMAIN, {}).setdefault(
+            AWC_RUNTIME, {}).setdefault("simPumps", {})
+        sim_pumps[role] = bool(on)
+        return
     pump = _awc_cfg(config).get("pumps", {}).get(role, {})
     entity = _normalise_entity_id(pump.get("switchEntity")) if isinstance(pump, dict) else ""
     if not entity:
@@ -5554,6 +5597,8 @@ _async_awc_stop_pumps_best_effort = _async_awc_stop_pumps
 async def _async_awc_kill_equipment_profile(
     hass: HomeAssistant, config: dict[str, Any], profile: str, context: Any
 ) -> None:
+    if _awc_sim_enabled(config):
+        return  # demo mode never touches real equipment
     for equipment_id, mapped in _armed_equipment_by_profile(config, profile):
         switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
         if not switch_entity:
@@ -5940,6 +5985,10 @@ async def _async_awc_start_locked(
         now_min = local_now.hour * 60 + local_now.minute
     live = _awc_live_state(hass, config)
     reasons = awc_engine.start_guard_reasons(acfg, live, now_min, manual)
+    if _awc_sim_enabled(config):
+        # Demo mode: virtual pumps need no real switch entities; every OTHER guard
+        # (calibration, reservoirs, hazards, caps) stays honest — that's the demo.
+        reasons = [r for r in reasons if r.get("code") != "no_pump_entity"]
     if target <= 0:
         reasons.append({"code": "no_volume", "severity": "block", "message": "Enter a volume to change"})
     reasons.extend(awc_engine.reservoir_preflight_reasons(acfg, target))
@@ -8339,6 +8388,55 @@ async def websocket_awc_reset_reservoir(
     _awc_send(connection, msg, hass, config)
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/awc_sim_set",
+    vol.Optional("enabled"): bool,
+    vol.Optional("hazard"): cv.string,
+    vol.Optional("value"): bool,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_sim_set(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Toggle AWC simulation mode / inject a virtual hazard — the demo vehicle."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        acfg = _awc_cfg(config)
+        sim = acfg.setdefault("simulation", {"enabled": False, "hazards": {}})
+        state = acfg.get("state", {})
+        if "enabled" in msg:
+            want = bool(msg["enabled"])
+            if want and not sim.get("enabled") and state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
+                connection.send_error(
+                    msg["id"], "busy",
+                    "Stop the running water change before entering simulation mode")
+                return
+            if not want and sim.get("enabled") and state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
+                # Leaving the sandbox mid-run: clean up the virtual change first
+                # (sim is still enabled here, so the stops stay virtual).
+                await _async_awc_abort(hass, entry, config, "Simulation ended", False, False, None)
+            if want != bool(sim.get("enabled")):
+                _append_activity(
+                    config, f"AWC simulation mode {'enabled' if want else 'disabled'}", "control")
+            sim["enabled"] = want
+            if not want:
+                sim["hazards"] = {k: False for k in _AWC_SIM_HAZARDS}
+                hass.data.setdefault(DOMAIN, {}).setdefault(AWC_RUNTIME, {})["simPumps"] = {}
+        hazard = msg.get("hazard")
+        if hazard is not None:
+            if hazard not in _AWC_SIM_HAZARDS:
+                connection.send_error(msg["id"], "invalid_hazard", "Unknown simulated hazard")
+                return
+            sim.setdefault("hazards", {})[hazard] = bool(msg.get("value", True))
+        config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/awc_reset_ledger"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -8411,6 +8509,9 @@ async def websocket_awc_summary(
         "schedule": acfg.get("schedule", {}),
         "live": _awc_live_state(hass, config),
         "atoSuspended": _awc_ato_suspended(config),
+        "simulation": acfg.get("simulation", {"enabled": False}),
+        "simPumps": (hass.data.get(DOMAIN, {}).get(AWC_RUNTIME, {}).get("simPumps", {})
+                     if _awc_sim_enabled(config) else {}),
     })
 
 
@@ -8847,6 +8948,8 @@ async def _async_dosing_awc_suspend(hass: HomeAssistant, config: dict[str, Any],
     """Flip each opted-in channel's firmware HA-suspend switch. Never the master
     enable — a dead HA mid-suspension must not silently disable dosing forever, so
     the firmware side auto-expires this switch (~4 h) as the dead-man backstop."""
+    if _awc_sim_enabled(config):
+        return  # a simulated change must not flip real firmware suspend switches
     for channel in _dosing_channels(config).values():
         guards = channel.get("guards", {}) if isinstance(channel.get("guards"), dict) else {}
         if not guards.get("suspendDuringAwc", True):
@@ -11295,6 +11398,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_awc_calibrate)
     websocket_api.async_register_command(hass, websocket_awc_reset_reservoir)
     websocket_api.async_register_command(hass, websocket_awc_reset_ledger)
+    websocket_api.async_register_command(hass, websocket_awc_sim_set)
     websocket_api.async_register_command(hass, websocket_awc_tubing_replaced)
     websocket_api.async_register_command(hass, websocket_awc_set_schedule)
     websocket_api.async_register_command(hass, websocket_awc_summary)
