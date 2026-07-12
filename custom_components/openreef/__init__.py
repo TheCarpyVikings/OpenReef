@@ -77,6 +77,7 @@ from .const import (
     CONF_SETTINGS,
     DEFAULT_CORE_CONFIG,
     DEFAULT_TANK_PROFILE,
+    CORE_SCHEMA_VERSION,
     DOMAIN,
     DOSING_PARAMETERS,
     ISSUE_ARMED_UNAVAILABLE,
@@ -248,7 +249,11 @@ AWC_STATE_LOCK = "awc_state_lock"
 # demo mode's virtual pump states) — mirrors DOSING_RUNTIME; resetting on restart
 # just means at most one re-notify / a fresh sim sandbox.
 AWC_RUNTIME = "awc_runtime"
+AWC_CALRUN_UNSUB = "awc_calrun_unsub"  # timed calibration-run stop timer
 _AWC_SIM_HAZARDS = ("leak", "highLevel", "freshEmpty", "wasteFull", "returnPumpIssue")
+# Bulky runtime record lists stripped from a settings export (and preserved through
+# an import) — they describe the tank's past, not its configuration.
+_EXPORT_STRIP_KEYS = ("captures", "feedSessions", "visionReports", "activity")
 # Maps an OpenReef event type -> the user-configurable trigger toggle that gates it.
 CAPTURE_TRIGGER_FIELD = {
     "critical_alert": "criticalAlerts",
@@ -5972,6 +5977,9 @@ async def _async_awc_start_locked(
     if state.get("status") == "paused":
         return False, [{"code": "paused", "severity": "block",
                         "message": "A water change is paused; resume or stop it before starting another"}]
+    if hass.data.get(DOMAIN, {}).get(AWC_CALRUN_UNSUB) is not None:
+        return False, [{"code": "busy", "severity": "block",
+                        "message": "A calibration run is in progress"}]
     method = method or acfg.get("schedule", {}).get("method", _AWC_SAFE_METHOD)
     if method not in AWC_LIVE_METHODS:
         return False, [{"code": "unsupported_method", "severity": "block",
@@ -8386,6 +8394,172 @@ async def websocket_awc_reset_reservoir(
             _append_activity(config, "Waste reservoir marked empty", "control")
         config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
+
+
+def _sanitize_imported_config(incoming: dict[str, Any], current: dict[str, Any]) -> None:
+    """Imported blobs describe SETTINGS, not live state: rebuild the AWC run state
+    from scratch (idle; ledgers/history are data and ride along), force demo mode
+    off, mark every dosing channel unsynced with no pending writes (write-then-
+    verify re-syncs against the real firmware), and carry the CURRENT runtime
+    record lists the export stripped so a restore doesn't wipe them."""
+    awc = incoming.get("automaticWaterChange")
+    if isinstance(awc, dict):
+        awc["state"] = {}  # the normaliser rebuilds a clean idle state
+        sim = awc.get("simulation")
+        if isinstance(sim, dict):
+            sim["enabled"] = False
+    dosing = incoming.get("dosing")
+    if isinstance(dosing, dict) and isinstance(dosing.get("channels"), dict):
+        for channel in dosing["channels"].values():
+            if not isinstance(channel, dict):
+                continue
+            channel["sync"] = {}  # normaliser default = unsynced, no pending writes
+            ch_state = channel.get("state")
+            if isinstance(ch_state, dict):
+                ch_state["suspendedUntil"] = ""
+    for key in _EXPORT_STRIP_KEYS:
+        if key in current:
+            incoming[key] = deepcopy(current[key])
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/config_export"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_config_export(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Portable settings backup: the normalised config minus bulky runtime record
+    lists (captures / feed sessions / vision reports / activity). No secrets live
+    in the blob — bindings are entity ids, never credentials."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    for key in _EXPORT_STRIP_KEYS:
+        config.pop(key, None)
+    connection.send_result(msg["id"], {
+        "kind": "openreef-config",
+        "version": INTEGRATION_VERSION,
+        "schema": CORE_SCHEMA_VERSION,
+        "exportedAt": datetime.now(timezone.utc).isoformat(),
+        "config": config,
+    })
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/config_import",
+    vol.Required("payload"): dict,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_config_import(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Restore a config_export payload. Older schemas are fine — the ordinary
+    normalise/save path IS the migration layer; newer ones are refused (fields
+    from the future can't be guessed at). Refused while a change runs."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    payload = msg["payload"]
+    if payload.get("kind") != "openreef-config" or not isinstance(payload.get("config"), dict):
+        connection.send_error(msg["id"], "invalid_payload",
+                              "That file is not an OpenReef settings backup")
+        return
+    schema = payload.get("schema")
+    if isinstance(schema, (int, float)) and schema > CORE_SCHEMA_VERSION:
+        connection.send_error(
+            msg["id"], "newer_schema",
+            f"This backup is from a newer OpenReef ({payload.get('version', 'unknown')}) "
+            "— update the integration first, then import")
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        if _awc_cfg(config).get("state", {}).get("status") in (*_AWC_RUNNING_STATES, "paused"):
+            connection.send_error(msg["id"], "busy",
+                                  "Stop the running water change before importing settings")
+            return
+        incoming = deepcopy(payload["config"])
+        _sanitize_imported_config(incoming, config)
+        _append_activity(
+            incoming,
+            f"Settings imported from backup (v{payload.get('version', '?')})", "control")
+        saved = await _async_save_config(hass, entry, incoming)
+    connection.send_result(msg["id"], {
+        "success": True, "config": saved, "validation": _validate_config(hass, saved)})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/awc_calibration_run",
+    vol.Required("role"): cv.string,
+    vol.Required("seconds"): vol.All(vol.Coerce(float), vol.Range(min=1, max=120)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_calibration_run(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Timed calibration run: energise ONE pump for exactly N seconds (into a
+    measuring vessel), then stop it — the actuated half of the multi-point
+    calibration ceremony. Idle only; flood hazards must be clear; the scheduler is
+    blocked from starting a change while a run is in flight."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    role = msg["role"]
+    if role not in AWC_PUMP_ROLES:
+        connection.send_error(msg["id"], "invalid_role", "Pump role must be 'drain' or 'fill'")
+        return
+    seconds = float(msg["seconds"])
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        if _awc_cfg(config).get("state", {}).get("status") != "idle":
+            connection.send_error(msg["id"], "busy",
+                                  "Calibration runs need the water change idle")
+            return
+        live = _awc_live_state(hass, config)
+        if live.get("leak") or live.get("highLevel"):
+            connection.send_error(msg["id"], "hazard_active",
+                                  "Clear the leak / high-level hazard before running a pump")
+            return
+        store = hass.data.setdefault(DOMAIN, {})
+        if store.get(AWC_CALRUN_UNSUB) is not None:
+            connection.send_error(msg["id"], "busy", "A calibration run is already in progress")
+            return
+        pump = _awc_cfg(config).get("pumps", {}).get(role, {})
+        if not _awc_sim_enabled(config) and not (isinstance(pump, dict) and pump.get("switchEntity")):
+            connection.send_error(msg["id"], "no_pump_entity", f"No {role} pump entity configured")
+            return
+        try:
+            await _async_awc_set_pump(hass, config, role, True, connection.context(msg))
+        except Exception as exc:  # noqa: BLE001 - surface the failure, nothing started
+            connection.send_error(msg["id"], "pump_start_failed",
+                                  f"Could not start the {role} pump: {exc}")
+            return
+        ends_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+        async def _stop(_now: datetime) -> None:
+            hass.data.setdefault(DOMAIN, {}).pop(AWC_CALRUN_UNSUB, None)
+            latest = _first_entry(hass)
+            if latest is None:
+                return
+            async with _awc_lock(hass):
+                cfg = _config_from_entry(latest)
+                await _async_awc_stop_pumps(hass, cfg, (role,), None)
+                _awc_bump_odometer(_awc_cfg(cfg), role, seconds=seconds)
+                _append_activity(cfg, f"Calibration run finished: {role} pump ran {seconds:.0f} s",
+                                 "control")
+                await _async_save_config(hass, latest, cfg)
+
+        store[AWC_CALRUN_UNSUB] = async_track_point_in_time(hass, _stop, ends_at)
+        _append_activity(config, f"Calibration run started: {role} pump for {seconds:.0f} s",
+                         "control")
+        await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {
+        "success": True, "role": role, "seconds": seconds, "endsAt": ends_at.isoformat()})
 
 
 @websocket_api.websocket_command({
@@ -11399,6 +11573,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_awc_reset_reservoir)
     websocket_api.async_register_command(hass, websocket_awc_reset_ledger)
     websocket_api.async_register_command(hass, websocket_awc_sim_set)
+    websocket_api.async_register_command(hass, websocket_awc_calibration_run)
+    websocket_api.async_register_command(hass, websocket_config_export)
+    websocket_api.async_register_command(hass, websocket_config_import)
     websocket_api.async_register_command(hass, websocket_awc_tubing_replaced)
     websocket_api.async_register_command(hass, websocket_awc_set_schedule)
     websocket_api.async_register_command(hass, websocket_awc_summary)

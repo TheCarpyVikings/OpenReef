@@ -944,6 +944,89 @@ def test_stale_blocked_slot_expires_instead_of_firing():
     assert _state(entry)["status"] == "idle"
 
 
+def test_config_export_strips_runtime_records():
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    config["activity"] = [{"timestamp": "t", "message": "m", "type": "info"}]
+    run(integration._async_save_config(hass, entry, config))
+    conn = FakeConnection()
+    run(integration.websocket_config_export(hass, conn, {"id": 1}))
+    payload = conn.results[0].payload
+    assert payload["kind"] == "openreef-config"
+    assert payload["schema"] == integration.CORE_SCHEMA_VERSION
+    assert "activity" not in payload["config"]
+    assert "automaticWaterChange" in payload["config"]
+
+
+def test_config_import_roundtrip_sanitizes_state():
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_config_export(hass, conn, {"id": 1}))
+    payload = conn.results[0].payload
+    # tamper the backup the way a real restore differs: a setting change, a stale
+    # running state, demo mode left on, a channel claiming firmware sync
+    payload["config"]["automaticWaterChange"]["schedule"]["enabled"] = True
+    payload["config"]["automaticWaterChange"]["state"] = {
+        "status": "exchanging", "drainedMl": 500}
+    payload["config"]["automaticWaterChange"]["simulation"] = {"enabled": True}
+    payload["config"].setdefault("dosing", {}).setdefault("channels", {})["kalk"] = {
+        "name": "Kalk", "chemical": "kalk", "sync": {"state": "synced"}}
+    conn2 = FakeConnection()
+    run(integration.websocket_config_import(hass, conn2, {"id": 2, "payload": payload}))
+    assert not conn2.errors, conn2.error_codes
+    cfg = integration._config_from_entry(entry)
+    awc = integration._awc_cfg(cfg)
+    assert awc["schedule"]["enabled"] is True     # the SETTING imported
+    assert awc["state"]["status"] == "idle"       # the STATE did not
+    assert awc["simulation"]["enabled"] is False  # demo mode never restores silently
+    kalk = cfg["dosing"]["channels"]["kalk"]
+    assert kalk["sync"]["state"] == "unsynced"    # re-syncs against real firmware
+
+
+def test_config_import_rejections():
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_config_import(hass, conn, {"id": 1, "payload": {"kind": "nope"}}))
+    assert "invalid_payload" in conn.error_codes
+    conn2 = FakeConnection()
+    run(integration.websocket_config_import(hass, conn2, {"id": 2, "payload": {
+        "kind": "openreef-config", "schema": integration.CORE_SCHEMA_VERSION + 1,
+        "config": {}}}))
+    assert "newer_schema" in conn2.error_codes
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    conn3 = FakeConnection()
+    run(integration.websocket_config_import(hass, conn3, {"id": 3, "payload": {
+        "kind": "openreef-config", "schema": 1, "config": {}}}))
+    assert "busy" in conn3.error_codes
+
+
+def test_calibration_run_times_out_and_blocks_scheduler():
+    sched = install_scheduler(integration)
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_awc_calibration_run(
+        hass, conn, {"id": 1, "role": "fill", "seconds": 30}))
+    assert not conn.errors, conn.error_codes
+    assert hass.states.get("switch.awc_fill").state == "on"
+    # a second run and any change start are blocked while it's in flight
+    conn2 = FakeConnection()
+    run(integration.websocket_awc_calibration_run(
+        hass, conn2, {"id": 2, "role": "drain", "seconds": 30}))
+    assert "busy" in conn2.error_codes
+    started, reasons = _start(hass, entry, 2.0, method="batch_sequential")
+    assert not started and any(r["code"] == "busy" for r in reasons)
+    # the stop timer fires → pump off, odometer bumped, sandbox free again
+    run(sched.fire_all())
+    assert hass.states.get("switch.awc_fill").state == "off"
+    assert _close(_awc(entry)["pumps"]["fill"]["runSeconds"], 30.0, 0.5)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    install_scheduler(integration)
+
+
 def test_sim_mode_runs_change_with_zero_real_actuation():
     # Demo mode: a full change completes with NO switch service calls; virtual pump
     # states are recorded; dead-reckoned reservoirs/history still move (the demo).
