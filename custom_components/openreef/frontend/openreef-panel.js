@@ -1560,6 +1560,11 @@ class OpenReefPanel extends HTMLElement {
         this._manualEntryDefaults[target.dataset.manualBatchField] = value;
         return;
       }
+      if (target.dataset.manualBatchValue) {
+        this._manualEntryDefaults.values = this._manualEntryDefaults.values || {};
+        this._manualEntryDefaults.values[target.dataset.manualBatchValue] = target.value;
+        return;
+      }
       if (target.dataset.manualBatchSource) {
         this._manualEntryDefaults.sources = this._manualEntryDefaults.sources || {};
         this._manualEntryDefaults.sources[target.dataset.manualBatchSource] = value;
@@ -14158,7 +14163,7 @@ class OpenReefPanel extends HTMLElement {
     [...this.shadowRoot.querySelectorAll("[data-manual-batch-unit]")].forEach((select) => {
       units[select.dataset.manualBatchUnit] = select.value || "";
     });
-    this._manualEntryDefaults = { timestamp: localTime, sources, units, notes };
+    this._manualEntryDefaults = { timestamp: localTime, sources, units, notes, values: {} };
     this._config.manualReadings = this._config.manualReadings || {};
     rows.forEach((row, index) => {
       const meta = this._manualTestMeta(row.parameter);
@@ -14246,16 +14251,17 @@ class OpenReefPanel extends HTMLElement {
             const unitLabel = unitChoices ? unitChoices.join(" / ") : (meta.unit || "unitless");
             const placeholder = isSg ? "1.0264" : (meta.min && meta.max ? `${meta.min} - ${meta.max}` : "0.00");
             const step = isSg ? "0.0001" : "0.001";
+            const draftValue = this._manualEntryDefaults.values?.[id] ?? "";
             const valueCell = unitChoices ? `
                 <div class="manual-value-with-unit">
-                  <input type="number" step="${step}" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(placeholder)}" aria-label="${this._escape(meta.label)} value">
+                  <input type="number" step="${step}" data-manual-batch-value="${this._escape(id)}" value="${this._escape(draftValue)}" placeholder="${this._escape(placeholder)}" aria-label="${this._escape(meta.label)} value">
                   <select class="manual-unit-toggle" data-manual-batch-unit="${this._escape(id)}" aria-label="${this._escape(meta.label)} unit">
                     ${unitChoices.map((unit) => `<option value="${this._escape(unit)}" ${unit === inputUnit ? "selected" : ""}>${this._escape(unit)}</option>`).join("")}
                   </select>
                 </div>` : `
-                <input type="number" step="${step}" data-manual-batch-value="${this._escape(id)}" placeholder="${this._escape(placeholder)}" aria-label="${this._escape(meta.label)} value">`;
+                <input type="number" step="${step}" data-manual-batch-value="${this._escape(id)}" value="${this._escape(draftValue)}" placeholder="${this._escape(placeholder)}" aria-label="${this._escape(meta.label)} value">`;
             return `
-              <div class="manual-batch-row ${schedule.enabled ? "tracked" : ""}">
+              <div class="manual-batch-row ${schedule.enabled ? "tracked" : ""} ${unitChoices ? "has-unit" : ""}">
                 <span>
                   <strong>${this._escape(meta.label)}</strong>
                   <small>${this._escape(unitLabel)}${schedule.enabled ? " · tracked" : " · optional"}</small>
@@ -17502,6 +17508,7 @@ class OpenReefPanel extends HTMLElement {
         .manual-session-grid { display: grid; grid-template-columns: minmax(180px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: end; }
         .manual-batch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
         .manual-batch-row { border: 1px solid #24364a; border-radius: 8px; background: rgba(11, 23, 36, .72); padding: 10px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, .45fr) minmax(116px, .55fr); gap: 10px; align-items: center; }
+        .manual-batch-row.has-unit { grid-template-columns: minmax(0, 1fr) minmax(160px, .7fr) minmax(116px, .45fr); }
         .manual-batch-row.tracked { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
         .manual-batch-row span { display: grid; gap: 3px; min-width: 0; }
         .manual-batch-row input, .manual-batch-row select { min-height: 38px; }
