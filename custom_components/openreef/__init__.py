@@ -870,6 +870,13 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
             "capacityLitres": round(_awc_num(fresh.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
             "remainingMl": round(_awc_num(fresh.get("remainingMl"), 0, 0, AWC_RESERVOIR_MAX_L * 1000), 1),
             "emptyEntity": _normalise_entity_id(fresh.get("emptyEntity")),
+            # Drift detection (Stage A): model-dispensed since the last confirmed full,
+            # graded against capacity when the empty float trips / on reset-to-full.
+            "dispensedSinceFullMl": round(_awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9), 1),
+            "driftPct": (round(_awc_num(fresh.get("driftPct"), 0, -1000, 1000), 1)
+                         if isinstance(fresh.get("driftPct"), (int, float)) else None),
+            "driftStatus": _awc_str(fresh.get("driftStatus"), 20),
+            "driftCheckedAt": _awc_str(fresh.get("driftCheckedAt"), 40),
         },
         "waste": {
             "capacityLitres": round(_awc_num(waste.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
@@ -5561,6 +5568,75 @@ def _awc_bump_odometer(awc: dict[str, Any], role: str, seconds: float = 0.0, sta
         pump["startCount"] = int(_awc_num(pump.get("startCount"), 0, 0, 1e9)) + starts
 
 
+def _awc_debit_fresh(awc: dict[str, Any], ml: float) -> None:
+    """Debit the fresh reservoir's dead-reckoned level AND bump the drift odometer
+    (dispensedSinceFullMl) — the single choke point for every fill-side debit, so
+    the drift check always grades a complete model figure against reality."""
+    if ml <= 0:
+        return
+    reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
+    fresh = reservoirs.get("fresh", {})
+    if not isinstance(fresh, dict):
+        return
+    fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - ml)
+    fresh["dispensedSinceFullMl"] = _awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9) + ml
+
+
+def _awc_grade_fresh_drift(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Grade fill-pump calibration drift (Stage A, the Trust-Moat seed): the model's
+    dispensed-since-full vs the reservoir's known capacity, at the moment reality
+    checks in (empty float trip / refill-from-empty). Stamps the verdict onto the
+    fresh reservoir and latches via driftCheckedAt (once per fill cycle; reset-to-full
+    re-arms). Returns the verdict, or None when there is nothing to grade."""
+    fresh = _awc_cfg(config).get("reservoirs", {}).get("fresh", {})
+    if not isinstance(fresh, dict) or fresh.get("driftCheckedAt"):
+        return None
+    dispensed = _awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9)
+    cap_ml = _awc_num(fresh.get("capacityLitres"), 0, 0, 1e9) * 1000.0
+    if dispensed <= 0 or cap_ml <= 0:
+        return None
+    verdict = awc_engine.drift_state(dispensed, cap_ml)
+    fresh["driftPct"] = verdict["driftPct"]
+    fresh["driftStatus"] = verdict["status"]
+    fresh["driftCheckedAt"] = datetime.now(timezone.utc).isoformat()
+    return verdict
+
+
+async def _async_awc_notify_drift(
+    hass: HomeAssistant, config: dict[str, Any], verdict: dict[str, Any]
+) -> None:
+    """Surface a recalibrate-worthy drift verdict: activity + one notification."""
+    if not verdict.get("recalibrate"):
+        return
+    fresh = _awc_cfg(config).get("reservoirs", {}).get("fresh", {})
+    dispensed_l = _awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9) / 1000.0
+    cap_l = _awc_num(fresh.get("capacityLitres"), 0, 0, 1e9)
+    pct = verdict.get("driftPct") or 0
+    direction = "less" if pct > 0 else "more"
+    msg = (f"The fill-pump model claims {dispensed_l:.1f} L dispensed but the {cap_l:.0f} L "
+           f"fresh reservoir just ran empty ({pct:+.0f}%) — the pump is moving {direction} "
+           "water than its calibration says. Recalibrate the fill pump.")
+    _append_activity(config, msg, "warning")
+    await _async_send_mode_notification(
+        hass, config, "openreef_awc_drift", "Pump calibration drift detected", msg)
+
+
+async def _async_awc_check_drift_on_empty(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
+    """Minutely drift hook: the fresh empty float tripping is the reality reference.
+    Cheap unlocked pre-checks; grading + save happen fetch-fresh under the lock."""
+    fresh = _awc_cfg(_config_from_entry(entry)).get("reservoirs", {}).get("fresh", {})
+    if (not fresh.get("emptyEntity") or fresh.get("driftCheckedAt")
+            or not _awc_binary_on(hass, fresh.get("emptyEntity"))):
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        verdict = _awc_grade_fresh_drift(config)
+        if verdict is None:
+            return
+        await _async_awc_notify_drift(hass, config, verdict)
+        await _async_save_config(hass, entry, config)
+
+
 def _awc_lock(hass: HomeAssistant) -> asyncio.Lock:
     """The per-instance AWC state lock (see AWC_STATE_LOCK). Held by the top-level entry
     points only — never acquire it from an inner helper they call."""
@@ -6048,8 +6124,7 @@ async def _async_awc_leg_complete_locked(
         waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + slice_ml) if cap_ml else waste.get("filledMl", 0) + slice_ml
     if "fill" in pumps:
         state["filledMl"] = filled + slice_ml
-        fresh = reservoirs.get("fresh", {})
-        fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - slice_ml)
+        _awc_debit_fresh(awc, slice_ml)
     # The slice is credited — clear the leg stamps NOW so the abort/pause paths below
     # (which dead-reckon interrupted legs from these stamps, R6/R9) can never credit
     # this same leg a second time. begin_leg re-stamps for the next leg.
@@ -6144,8 +6219,7 @@ async def _async_awc_exchange_tick_locked(
         _awc_bump_odometer(awc, "drain", seconds=awc_engine.runtime_for_volume_s(
             d_drain / 1000.0, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0)))
     if d_fill > 0:
-        fresh = reservoirs.get("fresh", {})
-        fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - d_fill)
+        _awc_debit_fresh(awc, d_fill)
         _awc_bump_odometer(awc, "fill", seconds=awc_engine.runtime_for_volume_s(
             d_fill / 1000.0, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0)))
     state["drainedMl"] = drained_ml
@@ -6372,8 +6446,7 @@ def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
         cap_ml = waste.get("capacityLitres", 0) * 1000.0
         waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + moved_ml) if cap_ml else waste.get("filledMl", 0) + moved_ml
     else:
-        fresh = reservoirs.get("fresh", {})
-        fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - moved_ml)
+        _awc_debit_fresh(awc, moved_ml)
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
 
@@ -6418,8 +6491,7 @@ def _awc_credit_interrupted_exchange(awc: dict[str, Any], now: datetime) -> None
             cap_ml = waste.get("capacityLitres", 0) * 1000.0
             waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + delta) if cap_ml else waste.get("filledMl", 0) + delta
         else:
-            fresh = reservoirs.get("fresh", {})
-            fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - delta)
+            _awc_debit_fresh(awc, delta)
 
 
 async def _async_awc_relaunch(
@@ -6568,6 +6640,10 @@ async def _async_awc_schedule_tick(
     config = _config_from_entry(entry)  # read-only peek; mutating paths re-fetch under the lock
     acfg = _awc_cfg(config)
     state = acfg.get("state", {})
+
+    # Fill-pump drift check (Stage A): grade the model against reality the moment
+    # the fresh empty float trips — latched once per fill cycle.
+    await _async_awc_check_drift_on_empty(hass, entry)
 
     # Auto-resume a paused change as soon as its blocking condition clears.
     if state.get("status") == "paused":
@@ -8140,16 +8216,25 @@ async def websocket_awc_reset_reservoir(
     if kind not in AWC_RESERVOIR_KINDS:
         connection.send_error(msg["id"], "invalid_reservoir", "Reservoir must be 'fresh' or 'waste'")
         return
-    config = _config_from_entry(entry)
-    reservoirs = _awc_cfg(config).get("reservoirs", {})
-    if kind == "fresh":
-        fresh = reservoirs.get("fresh", {})
-        fresh["remainingMl"] = fresh.get("capacityLitres", 0) * 1000.0
-        _append_activity(config, "Fresh saltwater reservoir marked full", "control")
-    else:
-        reservoirs.get("waste", {})["filledMl"] = 0
-        _append_activity(config, "Waste reservoir marked empty", "control")
-    config = await _async_save_config(hass, entry, config)
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)  # fetched INSIDE the lock (R1)
+        reservoirs = _awc_cfg(config).get("reservoirs", {})
+        if kind == "fresh":
+            fresh = reservoirs.get("fresh", {})
+            # Bookend drift check: refilling FROM EMPTY (float tripped) is the other
+            # moment reality checks in — grade the finished fill cycle before zeroing.
+            if _awc_binary_on(hass, fresh.get("emptyEntity")):
+                verdict = _awc_grade_fresh_drift(config)
+                if verdict is not None:
+                    await _async_awc_notify_drift(hass, config, verdict)
+            fresh["remainingMl"] = fresh.get("capacityLitres", 0) * 1000.0
+            fresh["dispensedSinceFullMl"] = 0
+            fresh["driftCheckedAt"] = ""  # new fill cycle — re-arm the check
+            _append_activity(config, "Fresh saltwater reservoir marked full", "control")
+        else:
+            reservoirs.get("waste", {})["filledMl"] = 0
+            _append_activity(config, "Waste reservoir marked empty", "control")
+        config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
 

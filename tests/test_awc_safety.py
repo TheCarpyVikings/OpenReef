@@ -944,6 +944,71 @@ def test_stale_blocked_slot_expires_instead_of_firing():
     assert _state(entry)["status"] == "idle"
 
 
+def test_fresh_debits_accumulate_dispensed_since_full():
+    # Every fill-side debit also bumps the drift odometer (Stage A wiring).
+    entry = _entry("batch_sequential")
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    _drive(hass, entry)
+    assert _close(_awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"], 2000.0, 1.0)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    _drive(hass, entry)
+    assert _close(_awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"], 4000.0, 1.0)
+
+
+def test_drift_graded_once_when_empty_float_trips():
+    # Model says 20 L dispensed when the 25 L reservoir runs empty → −20% drift →
+    # warning + ONE notification per fill cycle; reset-to-full zeroes and re-arms.
+    entry = _entry("batch_sequential")
+    _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 20000.0
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    fresh = _awc(entry)["reservoirs"]["fresh"]
+    assert fresh["driftStatus"] == "warning" and fresh["driftCheckedAt"]
+    assert _close(fresh["driftPct"], -20.0, 0.1)
+    def _drift_notes():
+        return [c for c in hass.services.calls if c.domain == "persistent_notification"
+                and c.data.get("notification_id") == "openreef_awc_drift"]
+    assert len(_drift_notes()) == 1
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 1)))  # latched
+    assert len(_drift_notes()) == 1
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass, conn, {"id": 1, "reservoir": "fresh"}))
+    fresh = _awc(entry)["reservoirs"]["fresh"]
+    assert fresh["dispensedSinceFullMl"] == 0 and fresh["driftCheckedAt"] == ""
+    assert _close(fresh["remainingMl"], 25000.0)
+    assert len(_drift_notes()) == 1  # already graded this cycle — reset doesn't re-notify
+
+
+def test_drift_within_tolerance_stays_quiet():
+    entry = _entry("batch_sequential")
+    _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 24500.0  # −2%
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
+    run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
+    fresh = _awc(entry)["reservoirs"]["fresh"]
+    assert fresh["driftStatus"] == "ok" and fresh["driftCheckedAt"]
+    assert not [c for c in hass.services.calls if c.domain == "persistent_notification"
+                and c.data.get("notification_id") == "openreef_awc_drift"]
+
+
+def test_reset_to_full_grades_drift_when_float_tripped():
+    # Refill-from-empty without the tick having run: the reset itself grades first.
+    entry = _entry("batch_sequential")
+    _awc(entry)["reservoirs"]["fresh"]["dispensedSinceFullMl"] = 20000.0
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass, conn, {"id": 1, "reservoir": "fresh"}))
+    fresh = _awc(entry)["reservoirs"]["fresh"]
+    assert fresh["driftStatus"] == "warning"  # graded before zeroing
+    assert fresh["dispensedSinceFullMl"] == 0 and fresh["driftCheckedAt"] == ""
+    notes = [c for c in hass.services.calls if c.domain == "persistent_notification"
+             and c.data.get("notification_id") == "openreef_awc_drift"]
+    assert len(notes) == 1
+
+
 def test_micro_change_skips_ato_and_dosing_suspend():
     # A change at/under ato.microChangeThresholdMl runs without holding the ATO or
     # dosing, and finalizes with NO stabilization hold-off (Stage A micro-changes).

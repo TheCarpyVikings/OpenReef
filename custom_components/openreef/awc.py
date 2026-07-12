@@ -887,6 +887,11 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
                 "remainingL": round(fresh_rem, 2),
                 "capacityL": round(fresh_cap, 2),
                 "percent": round(reservoir_percent(fresh_cap, fresh_rem), 1),
+                # Drift detection (Stage A): last graded model-vs-reality verdict.
+                "dispensedSinceFullL": round(_f(fresh.get("dispensedSinceFullMl")) / 1000.0, 2),
+                "driftPct": (fresh.get("driftPct")
+                             if isinstance(fresh.get("driftPct"), (int, float)) else None),
+                "driftStatus": str(fresh.get("driftStatus") or ""),
             },
             "waste": {
                 "filledL": round(waste_fill, 2),
