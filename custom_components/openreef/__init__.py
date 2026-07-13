@@ -879,7 +879,9 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
             "startCount": int(_awc_num(raw.get("startCount"), 0, 0, 1e9)),
             # N-source plumbing (Stage B): every pump has a direction and a reservoir.
             "direction": "out" if role == "drain" else "in",
-            "reservoirId": str(rid) if rid in AWC_RESERVOIR_KINDS else default_reservoir[role],
+            "reservoirId": (str(rid)
+                            if rid in (("waste",) if role == "drain" else ("fresh", "fresh2"))
+                            else default_reservoir[role]),
         }
     awc_cfg["pumps"] = pumps
 
@@ -1072,6 +1074,20 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
                        if raw_state.get("calRunRole") in AWC_PUMP_ROLES else ""),
         "calRunEndsAt": _awc_str(raw_state.get("calRunEndsAt"), 40),
     }
+    # The running change's fill source was removed from config (the panel guards
+    # this, but a stale-status save can slip through): the run cannot continue and
+    # its per-role progress just lost its key. Latch a fault so the ATO/dosing
+    # posture holds and the user is told to CHECK THE PUMP — the removed pump's
+    # switch may still be energised and only its firmware watchdog can stop it.
+    _removed_active = raw_state.get("activeSourceRole")
+    if (_removed_active and _removed_active not in valid_fill
+            and awc_cfg["state"]["status"] in ("draining", "filling", "exchanging", "paused")):
+        awc_cfg["state"]["status"] = "fault"
+        awc_cfg["state"]["fault"] = (
+            "The fill source used by the running change was removed — check that "
+            "its pump is physically off, then acknowledge")
+        awc_cfg["state"]["faultSince"] = (
+            awc_cfg["state"]["faultSince"] or datetime.now(timezone.utc).isoformat())
 
     raw_history = awc_cfg.get("history")
     history: list[dict[str, Any]] = []
@@ -6172,7 +6188,7 @@ async def _async_awc_start_locked(
         reasons.append({"code": "no_volume", "severity": "block", "message": "Enter a volume to change"})
     reasons.extend(awc_engine.reservoir_preflight_reasons(acfg, target, source_role=fill_role))
     if (pick is None and target > 0
-            and not any(r.get("code") == "fresh_insufficient" for r in reasons)):
+            and not any(r.get("code") in ("fresh_insufficient", "no_calibration") for r in reasons)):
         # No source can cover the change and the per-source preflight didn't already
         # say so (e.g. the fallback role's reservoir alone would have sufficed).
         reasons.append({"code": "fresh_insufficient", "severity": "block",
@@ -6183,7 +6199,7 @@ async def _async_awc_start_locked(
                         "message": f"Exceeds the {pct}% single-change cap"})
     if method == "batch_simultaneous" and target > 0:
         cap = acfg.get("safety", {}).get("maxInstantaneousImbalanceLitres", AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L)
-        excursion = awc_engine.simultaneous_max_excursion_l(acfg, target)
+        excursion = awc_engine.simultaneous_max_excursion_l(acfg, target, fill_role)
         if cap > 0 and excursion > cap + 1e-6:
             reasons.append({"code": "imbalance_too_large", "severity": "block",
                             "message": f"Pumps too rate-mismatched for a simultaneous {target:.1f} L change "
@@ -6222,9 +6238,6 @@ async def _async_awc_start_locked(
     state["legEndsAt"] = ""
     state["anomalyWarned"] = False
     state["blockedSlotKey"] = ""  # the slot (if any) is being served now
-    source_policy = acfg.get("sourcePolicy")
-    if isinstance(source_policy, dict):
-        source_policy["lastSourceUsed"] = fill_role  # the alternate rotation's anchor
     for warning in (pick.get("warnings") or []) if pick else []:
         _append_activity(config, f"Water change source: {warning}", "warning")
 
@@ -6242,6 +6255,11 @@ async def _async_awc_start_locked(
         _append_activity(config, reason, "control")
         await _async_save_config(hass, entry, config)
         return False, [{"code": "pump_start_failed", "severity": "fault", "message": reason}]
+    source_policy = acfg.get("sourcePolicy")
+    if isinstance(source_policy, dict):
+        # Stamped only AFTER a successful begin: a failed start must not rotate the
+        # alternate anchor and make the policy skip a source that never poured.
+        source_policy["lastSourceUsed"] = fill_role
     _append_activity(config, f"Water change started: {target:.1f} L ({method.replace('_', ' ')})", "control")
     await _async_save_config(hass, entry, config)
     return True, []
@@ -6302,6 +6320,13 @@ async def _async_awc_abort(
         per_source = awc["ledger"].setdefault("perSource", {})
         per_source[fill_role] = round(
             _awc_num(per_source.get(fill_role), 0, 0, 1e9) + filled_l, 3)
+        source_res = awc.get("reservoirs", {}).get(awc_engine.pump_reservoir_id(awc, fill_role), {})
+        salt_delta = awc_engine.net_salt_delta_g(
+            drained_l, filled_l, _awc_tank_ppt(config),
+            source_res.get("saltPpt") if isinstance(source_res, dict) else 0)
+        if salt_delta is not None:
+            awc["ledger"]["netSaltGrams"] = round(
+                _awc_num(awc["ledger"].get("netSaltGrams"), 0, -1e9, 1e9) + salt_delta, 1)
     if latch:
         state["status"] = "fault"
         state["fault"] = reason
@@ -8493,14 +8518,20 @@ async def websocket_awc_acknowledge(
         # Abort-latched faults already recorded (and zeroed) at abort time, so this
         # only fires for begin-failure faults, whose credited volume otherwise
         # vanished from history/ledger while the reservoir models kept the debit.
+        ack_fill_role = _awc_fill_role(state)
         drained_l = _awc_moved(state, "drain") / 1000.0
-        filled_l = _awc_moved(state, _awc_fill_role(state)) / 1000.0
+        filled_l = _awc_moved(state, ack_fill_role) / 1000.0
         if drained_l > 0 or filled_l > 0:
+            ack_awc = _awc_cfg(config)
             _awc_record_history(
-                _awc_cfg(config), datetime.now(timezone.utc), drained_l, filled_l,
+                ack_awc, datetime.now(timezone.utc), drained_l, filled_l,
                 state.get("method", ""), True,
                 f"Fault acknowledged: {state.get('fault', '')}",
             )
+            ack_awc["history"][0]["source"] = ack_fill_role
+            ack_per = ack_awc["ledger"].setdefault("perSource", {})
+            ack_per[ack_fill_role] = round(
+                _awc_num(ack_per.get(ack_fill_role), 0, 0, 1e9) + filled_l, 3)
         state.update({
             "status": "idle", "fault": "", "faultSince": "", "atoSuspendedUntil": "",
             "movedMl": {}, "activeSourceRole": "", "targetLitres": 0,
@@ -8537,6 +8568,10 @@ async def websocket_awc_calibrate(
     if role not in AWC_PUMP_ROLES:
         connection.send_error(msg["id"], "invalid_role",
                               "Pump role must be 'drain', 'fill' or 'fill2'")
+        return
+    if not _awc_role_configured(entry, role):
+        connection.send_error(msg["id"], "no_second_source",
+                              "Add the second source in Water Change settings first")
         return
     points = [(p[0], p[1]) for p in msg.get("points") or []]
     if points:
@@ -8746,6 +8781,16 @@ async def websocket_config_import(
         "success": True, "config": saved, "validation": _validate_config(hass, saved)})
 
 
+
+def _awc_role_configured(entry: OpenReefConfigEntry, role: str) -> bool:
+    """fill2 is opt-in: WS actions naming it are refused until the second source is
+    actually configured — the setdefault-based handlers would otherwise materialise
+    a half-configured fill2/fresh2 pair on a legacy 2-pump setup."""
+    if role != "fill2":
+        return True
+    return "fill2" in _awc_cfg(_config_from_entry(entry)).get("pumps", {})
+
+
 async def _async_awc_recover_orphaned_calrun(
     hass: HomeAssistant, entry: OpenReefConfigEntry
 ) -> None:
@@ -8791,6 +8836,10 @@ async def websocket_awc_calibration_run(
     if role not in AWC_PUMP_ROLES:
         connection.send_error(msg["id"], "invalid_role",
                               "Pump role must be 'drain', 'fill' or 'fill2'")
+        return
+    if not _awc_role_configured(entry, role):
+        connection.send_error(msg["id"], "no_second_source",
+                              "Add the second source in Water Change settings first")
         return
     seconds = float(msg["seconds"])
     async with _awc_lock(hass):
@@ -8901,6 +8950,7 @@ async def websocket_awc_sim_set(
                     "weekLitres": acfg.get("weekLitres", 0),
                     "monthLitres": acfg.get("monthLitres", 0),
                     "pumps": acfg.get("pumps", {}),
+                    "sourcePolicy": acfg.get("sourcePolicy", {}),
                     "state": state,
                 })
             if not want and sim.get("enabled") and state.get("status") in (*_AWC_RUNNING_STATES, "paused"):
@@ -8914,10 +8964,20 @@ async def websocket_awc_sim_set(
             if not want:
                 snap = sim.get("snapshot")
                 if isinstance(snap, dict):
-                    for key in ("reservoirs", "ledger", "history",
+                    # A second source ADDED during the demo keeps its just-configured
+                    # reservoir (the snapshot predates it); a pair REMOVED during the
+                    # demo must not be resurrected by the old reservoirs dict.
+                    fresh2_now = deepcopy(acfg.get("reservoirs", {}).get("fresh2"))
+                    for key in ("reservoirs", "ledger", "history", "sourcePolicy",
                                 "todayLitres", "weekLitres", "monthLitres", "state"):
                         if key in snap:
                             acfg[key] = deepcopy(snap[key])
+                    restored_res = acfg.setdefault("reservoirs", {})
+                    if "fill2" in acfg.get("pumps", {}):
+                        if "fresh2" not in restored_res and isinstance(fresh2_now, dict):
+                            restored_res["fresh2"] = fresh2_now
+                    else:
+                        restored_res.pop("fresh2", None)
                     # Pumps: restore accounting/calibration only — entity/settings
                     # edits made during the demo are real config and stay.
                     for role, snap_pump in (snap.get("pumps") or {}).items():
@@ -8984,6 +9044,10 @@ async def websocket_awc_tubing_replaced(
         connection.send_error(msg["id"], "invalid_role",
                               "Pump role must be 'drain', 'fill' or 'fill2'")
         return
+    if not _awc_role_configured(entry, role):
+        connection.send_error(msg["id"], "no_second_source",
+                              "Add the second source in Water Change settings first")
+        return
     config = _config_from_entry(entry)
     pump = _awc_cfg(config).setdefault("pumps", {}).setdefault(role, {})
     pump["tubingInstalledAt"] = datetime.now(timezone.utc).isoformat()
@@ -9022,7 +9086,7 @@ async def websocket_awc_summary(
         "summary": summary,
         "state": state_out,
         "schedule": acfg.get("schedule", {}),
-        "live": _awc_live_state(hass, config),
+        "live": _awc_live_state(hass, config, fill_role=_awc_fill_role(acfg.get("state", {}))),
         "atoSuspended": _awc_ato_suspended(config),
         "simulation": acfg.get("simulation", {"enabled": False}),
         "simPumps": (hass.data.get(DOMAIN, {}).get(AWC_RUNTIME, {}).get("simPumps", {})

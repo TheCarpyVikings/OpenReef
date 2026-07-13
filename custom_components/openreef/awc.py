@@ -762,7 +762,7 @@ def exchange_imbalance_exceeds(
     return net > upper + 1e-6 or net < lower - 1e-6
 
 
-def simultaneous_max_excursion_l(cfg: dict[str, Any], target_l: float) -> float:
+def simultaneous_max_excursion_l(cfg: dict[str, Any], target_l: float, fill_role: str = "fill") -> float:
     """Predicted worst-case sump excursion (litres) for a *fresh* simultaneous change of
     ``target_l``: the faster pump finishes and stops while the slower is still mid-way,
     so the peak |drained − filled| = ``target · (1 − t_fast/t_slow)``. Used as a start
@@ -774,7 +774,7 @@ def simultaneous_max_excursion_l(cfg: dict[str, Any], target_l: float) -> float:
         return 0.0
     pumps = (cfg or {}).get("pumps", {}) if isinstance((cfg or {}).get("pumps"), dict) else {}
     drain = pumps.get("drain", {}) if isinstance(pumps.get("drain"), dict) else {}
-    fill = pumps.get("fill", {}) if isinstance(pumps.get("fill"), dict) else {}
+    fill = pumps.get(fill_role or "fill", {}) if isinstance(pumps.get(fill_role or "fill"), dict) else {}
     drain_rt = runtime_for_volume_s(target, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0), drain.get("spinUpMl", 0.0))
     fill_rt = runtime_for_volume_s(target, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0), fill.get("spinUpMl", 0.0))
     if drain_rt <= 0 or fill_rt <= 0:

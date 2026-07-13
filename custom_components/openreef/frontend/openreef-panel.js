@@ -9610,7 +9610,7 @@ class OpenReefPanel extends HTMLElement {
     this._render();
     try {
       const result = await this._callWS({ type: "openreef/awc_calibrate", role, seconds, volume_ml });
-      this._config = result.config || this._config;
+      if (!this._configDirty) this._config = result.config || this._config;
       this._awcMessage = `${role} pump calibrated: ${result.mlPerS} ml/s.`;
     } catch (err) {
       this._awcMessage = "Calibration failed: " + (err instanceof Error ? err.message : err);
@@ -9951,6 +9951,7 @@ class OpenReefPanel extends HTMLElement {
       return `
       <section class="stack">
         ${head}
+        ${state.status && state.status !== "idle" ? banner : ""}
         ${message}
         ${this._awcEmptyState()}
       </section>`;
@@ -10334,7 +10335,7 @@ class OpenReefPanel extends HTMLElement {
             <label>Source 1 share<input type="number" min="0" step="0.5" data-scope="awc-policy-ratio" data-id="fill" value="${policy.ratio?.fill ?? 1}"></label>
             <label>Source 2 share<input type="number" min="0" step="0.5" data-scope="awc-policy-ratio" data-id="fill2" value="${policy.ratio?.fill2 ?? 1}"></label>` : ""}
           </div>
-          <small class="awc-hint">Each change draws wholly from ONE source; an empty or uncalibrated source is skipped with a note (pause only when none qualifies). Last used: ${this._escape(policy.lastSourceUsed || "—")}.</small>
+          <small class="awc-hint">Each change draws wholly from ONE source; an empty or uncalibrated source is skipped with a note (pause only when none qualifies). Last used: ${policy.lastSourceUsed ? this._escape(policy.lastSourceUsed === "fill2" ? "source 2" : "source 1") : "—"}.</small>
         </section>` : ""}
 
         <section class="mapping-section awc-settings-block">
