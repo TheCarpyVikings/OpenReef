@@ -285,9 +285,9 @@ AWC_SPINUP_MAX_ML = 1000.0                # config-normalise absolute sanity cla
 # and keeps the reservoir/integrity/tube-life ledgers. Maths in dosing.py,
 # orchestration in __init__.py, matching the awc.py split.
 DOSING_MAX_CHANNELS = 8
-DOSING_CHANNEL_CHEMICALS = ("alk", "ca", "mg", "kalk", "trace", "other")
+DOSING_CHANNEL_CHEMICALS = ("alk", "ca", "mg", "kalk", "trace", "livefood", "other")
 DOSING_CHANNEL_MODES = ("continuous", "doses")
-DOSING_DRIVER_TYPES = ("openreef_esphome_stepper",)   # adapter-ready: generic HA doser is v2
+DOSING_DRIVER_TYPES = ("openreef_esphome_stepper", "openreef_esphome_brushed")  # generic HA adapter is v2
 DOSING_SYNC_STATES = ("unsynced", "pending", "verifying", "synced", "failed", "offline", "drift")
 DOSING_TICK_SECONDS = 60
 DOSING_FLUSH_INTERVAL_S = 3600            # runtime ledger → config blob cadence (VISION convention)
@@ -316,6 +316,19 @@ DOSING_VERIFY_UNSUB = "dosing_verify_unsub"
 # panel's auto-bind discovers entities by the reference-YAML name suffixes; the
 # stored config always keeps explicit entity ids (renames must not silently
 # unbind — the Kamoer/Jebao lesson).
+DOSING_LIVEFOOD_SHELF_LIFE_DAYS = 1.0     # phyto/pods/baby brine: perishable within a day
+DOSING_BRUSHED_CAL_RUN_S = 30.0           # brushed calibration: fixed timed burst (vs 100 rev)
+# Brushed (DC head) driver roles: the shared stepper roles minus stepper/pH-specific
+# ones, plus the flow/spin-up calibration numbers, the post-dose fresh-chaser seconds,
+# and the firmware's chaser-skipped flag.
+DOSING_BRUSHED_BINDING_ROLES = (
+    "doseVolumeNumber", "doseIntervalNumber", "nightIntervalNumber", "maxDailyNumber",
+    "windowStartNumber", "windowEndNumber", "nightStartNumber", "nightEndNumber",
+    "manualDoseMlNumber", "flowMlPerSNumber", "spinUpMlNumber", "chaserSecondsNumber",
+    "enabledSwitch", "haSuspendSwitch",
+    "primeButton", "doseNowButton", "manualDoseButton", "calibrateButton",
+    "dosedTodaySensor", "reservoirLowSensor", "lastSkipSensor", "chaserSkippedSensor",
+)
 DOSING_BINDING_ROLES = (
     "doseVolumeNumber", "doseIntervalNumber", "nightIntervalNumber", "maxDailyNumber",
     "doseSpeedNumber", "runCurrentNumber", "phStopNumber", "phResumeNumber",

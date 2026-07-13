@@ -471,6 +471,54 @@ def test_summary_integrates_everything():
     assert entry["sync"]["state"] == "synced"
 
 
+# --- Stage C: brushed driver + live-food freshness -----------------------------
+
+def test_brushed_calibration_from_run():
+    assert dosing.brushed_calibration_from_run(90, 30) == 3.0
+    assert dosing.brushed_calibration_from_run(45.5) == 1.517  # default 30 s burst
+    assert dosing.brushed_calibration_from_run(0, 30) == 0.0   # invalid → not calibrated
+    assert dosing.brushed_calibration_from_run(90, 0) == 0.0
+
+
+def test_freshness_state_grades_and_fails_closed():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    res = {"shelfLifeDays": 1, "mixedAt": (now - timedelta(hours=2)).isoformat()}
+    assert dosing.freshness_state(res, now)["status"] == "fresh"
+    res["mixedAt"] = (now - timedelta(hours=20)).isoformat()
+    aging = dosing.freshness_state(res, now)
+    assert aging["status"] == "aging" and abs(aging["hoursLeft"] - 4.0) < 0.1
+    res["mixedAt"] = (now - timedelta(hours=25)).isoformat()
+    assert dosing.freshness_state(res, now)["status"] == "stale"
+    # FAIL-CLOSED: unknown age is stale; shelfLifeDays 0 disables expiry
+    assert dosing.freshness_state({"shelfLifeDays": 1}, now)["status"] == "stale"
+    assert dosing.freshness_state({"shelfLifeDays": 0, "mixedAt": ""}, now)["status"] == "fresh"
+
+
+def test_livefood_guard_blocks_stale_and_warns_aging():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    ch = _channel(chemical="livefood")
+    ch.setdefault("reservoir", {})["shelfLifeDays"] = 1
+    ch["reservoir"]["mixedAt"] = (now - timedelta(hours=30)).isoformat()
+    codes = {r["code"] for r in dosing.guard_reasons(ch, {}, 720, now=now)}
+    assert "stale_food" in codes
+    ch["reservoir"]["mixedAt"] = (now - timedelta(hours=20)).isoformat()
+    reasons = dosing.guard_reasons(ch, {}, 720, now=now)
+    assert "stale_food" not in {r["code"] for r in reasons}
+    assert any(r["code"] == "food_aging" and r["severity"] == "warn" for r in reasons)
+    # non-livefood channels never get the freshness gate
+    kalk = _channel(chemical="kalk")
+    assert "stale_food" not in {r["code"] for r in dosing.guard_reasons(kalk, {}, 720, now=now)}
+
+
+def test_is_brushed_driver_detection():
+    ch = _channel()
+    assert dosing.is_brushed(ch) is False
+    ch["driver"] = {"type": "openreef_esphome_brushed", "entities": {}}
+    assert dosing.is_brushed(ch) is True
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

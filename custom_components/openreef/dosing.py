@@ -311,6 +311,7 @@ def guard_reasons(
     live: dict[str, Any] | None,
     now_minutes: int,
     manual: bool = False,
+    now: datetime | None = None,
 ) -> list[dict[str, str]]:
     """Mirror of the firmware guard chain plus the HA-only guards, for display and
     for gating HA-initiated actions. Shape matches awc.start_guard_reasons:
@@ -390,6 +391,16 @@ def guard_reasons(
     dosed = _f(live.get("dosedTodayMl"))
     if max_daily > 0 and dosed >= max_daily:
         block("daily_cap_reached", f"Daily cap reached ({dosed:.1f} of {max_daily:.0f} ml).")
+
+    if channel.get("chemical") == "livefood" and now is not None:
+        fresh = freshness_state(_cfg(channel, "reservoir"), now)
+        if fresh["status"] == "stale":
+            block("stale_food",
+                  "The live-food culture is past its shelf life — refresh the "
+                  "reservoir and tap 'Refreshed', or nothing doses.")
+        elif fresh["status"] == "aging":
+            warn("food_aging",
+                 f"Live food is nearing its shelf life (~{fresh['hoursLeft']:.0f} h left).")
 
     if live.get("reservoirLow") is None and str(_cfg(channel, "driver").get("entities", {}).get("reservoirLowSensor") or "") == "":
         # advisory only: ledger-empty without a float is never a hard stop
@@ -511,6 +522,52 @@ def reservoir_state(reservoir: dict[str, Any], ml_per_day: float, now: datetime)
 # --------------------------------------------------------------------------- #
 # Calibration, wear, integrity
 # --------------------------------------------------------------------------- #
+def brushed_calibration_from_run(measured_ml: float, run_seconds: float = 30.0) -> float:
+    """Brushed-head calibration: the firmware runs the pump for a FIXED timed burst
+    (default 30 s — rhymes with the stepper's exact 100 revolutions), the keeper
+    measures the output, and the flow rate is the quotient. Returns ml/s
+    (0 = invalid measurement; callers treat 0 as not-calibrated)."""
+    secs = _f(run_seconds)
+    ml = _f(measured_ml)
+    if secs <= 0 or ml <= 0:
+        return 0.0
+    return round(ml / secs, 3)
+
+
+def freshness_state(reservoir: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
+    """Live-food freshness: cultures are perishable, so ``mixedAt`` + ``shelfLifeDays``
+    grade the reservoir fresh / aging (final 25% of shelf life) / stale. FAIL-CLOSED:
+    no mixedAt stamp means STALE — never dose food of unknown age. shelfLifeDays <= 0
+    disables expiry (a non-perishable brushed additive)."""
+    res = reservoir or {}
+    shelf_days = _f(res.get("shelfLifeDays"), 1.0)
+    if shelf_days <= 0:
+        return {"status": "fresh", "hoursLeft": None, "ageHours": None}
+    mixed = _parse_iso(res.get("mixedAt"))
+    if mixed is None:
+        return {"status": "stale", "hoursLeft": 0.0, "ageHours": None}
+    try:
+        age_h = max(0.0, (now - mixed).total_seconds() / 3600.0)
+    except TypeError:
+        return {"status": "stale", "hoursLeft": 0.0, "ageHours": None}
+    left_h = shelf_days * 24.0 - age_h
+    if left_h <= 0:
+        status = "stale"
+    elif left_h <= shelf_days * 24.0 * 0.25:
+        status = "aging"
+    else:
+        status = "fresh"
+    return {"status": status, "hoursLeft": round(max(0.0, left_h), 1),
+            "ageHours": round(age_h, 1)}
+
+
+def is_brushed(channel: dict[str, Any]) -> bool:
+    """Driver-awareness helper: brushed DC heads have no stepper motion and no pH
+    guard hardware — guards and calibration flows branch on this."""
+    driver = channel.get("driver") if isinstance(channel.get("driver"), dict) else {}
+    return str(driver.get("type") or "") == "openreef_esphome_brushed"
+
+
 def calibration_from_measured(
     measured_ml: float, steps_per_100rev: float = CAL_STEPS_PER_100REV
 ) -> dict[str, float] | None:
