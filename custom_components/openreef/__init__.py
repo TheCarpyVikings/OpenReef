@@ -5820,20 +5820,25 @@ async def _async_awc_advisory_notifications(
     # UTC-aware now: the age stamps (calibratedAt etc.) are UTC-aware, and naive-vs-
     # aware arithmetic silently yields None ages (= no nag, ever).
     summary = awc_engine.summary(_awc_cfg_eff(config), datetime.now(timezone.utc))
-    fresh = summary.get("reservoirs", {}).get("fresh", {})
-    pct = fresh.get("percent")
-    days = summary.get("daysOfFreshRemaining")
-    if (pct is not None and 0 < fresh.get("capacityL", 0) and pct <= 10) or (
-            days is not None and 0 < days <= 2):
-        days_txt = f" (~{days:.1f} days at the current schedule)" if days is not None else ""
-        await _async_awc_notify_once(
-            hass, config, "reservoir_low", 24 * 3600, "reservoirLow",
-            "Fresh saltwater running low",
-            f"The fresh reservoir is at {pct:.0f}%{days_txt} — top it up before the "
-            "next water change is blocked.")
-    for role in ("drain", "fill"):
-        pump = summary.get("pumps", {}).get(role, {})
-        if pump.get("recalibrationDue"):
+    for res_id, res in summary.get("reservoirs", {}).items():
+        if res_id == "waste" or not isinstance(res, dict):
+            continue
+        pct = res.get("percent")
+        # daysOfFreshRemaining is the primary-source projection; secondary sources
+        # go by percent alone.
+        days = summary.get("daysOfFreshRemaining") if res_id == "fresh" else None
+        if (pct is not None and 0 < res.get("capacityL", 0) and pct <= 10) or (
+                days is not None and 0 < days <= 2):
+            days_txt = f" (~{days:.1f} days at the current schedule)" if days is not None else ""
+            res_name = "fresh" if res_id == "fresh" else f"'{res_id}'"
+            await _async_awc_notify_once(
+                hass, config, f"reservoir_low_{res_id}", 24 * 3600, "reservoirLow",
+                "Fresh saltwater running low",
+                f"The {res_name} reservoir is at {pct:.0f}%{days_txt} — top it up "
+                "before the next water change is blocked.")
+    for role in ("drain", "fill", "fill2"):
+        pump = summary.get("pumps", {}).get(role)
+        if isinstance(pump, dict) and pump.get("recalibrationDue"):
             age = pump.get("calibrationAgeDays") or 0
             await _async_awc_notify_once(
                 hass, config, f"recal_{role}", 7 * 24 * 3600, "calibrationDue",
@@ -5915,8 +5920,10 @@ async def _async_awc_notify_drift(
            f"{res_name} reservoir just ran empty ({pct:+.0f}%) — the pump is moving {direction} "
            f"water than its calibration says. Recalibrate the {pump_name} pump.")
     _append_activity(config, msg, "warning")
+    # Per-reservoir notification id: a fresh2 verdict must not replace a fresh one
+    # in the notification tray.
     await _async_awc_notify(
-        hass, config, "driftDetected", "openreef_awc_drift",
+        hass, config, "driftDetected", f"openreef_awc_drift_{reservoir_id}",
         "Pump calibration drift detected", msg)
 
 

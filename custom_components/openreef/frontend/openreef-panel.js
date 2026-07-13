@@ -1494,6 +1494,27 @@ class OpenReefPanel extends HTMLElement {
       if (action === "awc-sim-hazard") this._awcSimSet({ hazard: id, value: target.dataset.value !== "on" });
       if (action === "config-export") this._configExport();
       if (action === "config-import") this._configImportChoose();
+      if (action === "awc-add-source") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.pumps = a.pumps || {};
+        a.pumps.fill2 = a.pumps.fill2 || { switchEntity: "", mlPerS: 0, exchangeFactor: 1, reservoirId: "fresh2" };
+        a.reservoirs = a.reservoirs || {};
+        a.reservoirs.fresh2 = a.reservoirs.fresh2 || { capacityLitres: 25, remainingMl: 0, emptyEntity: "", saltPpt: 0 };
+        this._setDirty(true);
+        this._render();
+      }
+      if (action === "awc-remove-source") {
+        const status = (this._awcSummary?.state?.status)
+          || this._config?.automaticWaterChange?.state?.status || "idle";
+        if (["draining", "filling", "exchanging", "paused"].includes(status)) {
+          this._awcMessage = "Stop the running water change before removing the second source.";
+        } else {
+          delete (this._config?.automaticWaterChange?.pumps || {}).fill2;
+          delete (this._config?.automaticWaterChange?.reservoirs || {}).fresh2;
+          this._setDirty(true);
+        }
+        this._render();
+      }
       if (action === "add-doser-channel") this._addDoserChannel();
       if (action === "add-doser-kalk") this._addDoserChannel("Kalkwasser", "kalk");
       if (action === "remove-doser-channel") this._removeDoserChannel(id);
@@ -2004,10 +2025,21 @@ class OpenReefPanel extends HTMLElement {
         a.notifications = a.notifications || {};
         a.notifications[field] = value;
       }
+      if (scope === "awc-policy") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.sourcePolicy = a.sourcePolicy || {};
+        a.sourcePolicy[field] = value;
+      }
+      if (scope === "awc-policy-ratio") {
+        const a = this._config.automaticWaterChange = this._config.automaticWaterChange || {};
+        a.sourcePolicy = a.sourcePolicy || {};
+        a.sourcePolicy.ratio = a.sourcePolicy.ratio || {};
+        a.sourcePolicy.ratio[id] = Math.max(0, Number(value) || 0);
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -9911,6 +9943,19 @@ class OpenReefPanel extends HTMLElement {
       ? `<div class="setting-card subtle-card"><small>📅 ${this._escape(sum.scheduleText)}</small></div>`
       : "";
 
+    // First-run empty state: nothing bound yet and not in the demo sandbox — a
+    // checklist beats an all-zero diagram.
+    const pumps = awc.pumps || {};
+    const unconfigured = !pumps.drain?.switchEntity && !pumps.fill?.switchEntity && !sim.enabled;
+    if (unconfigured) {
+      return `
+      <section class="stack">
+        ${head}
+        ${message}
+        ${this._awcEmptyState()}
+      </section>`;
+    }
+
     return `
       <section class="stack">
         ${head}
@@ -9918,11 +9963,57 @@ class OpenReefPanel extends HTMLElement {
         ${banner}
         ${message}
         ${schedLine}
+        ${this._awcSourceStrip(sum)}
         ${this._awcDiagram(awc, state, sum)}
         ${this._awcControls(state)}
         ${this._awcMetrics(sum)}
         ${this._awcHistory(awc)}
       </section>`;
+  }
+
+  _awcEmptyState() {
+    const cheeky = this._tone() === "cheeky";
+    return `
+      <section class="setting-card">
+        <strong>${cheeky
+          ? "No pumps yet — the reef isn't going to water-change itself. Yet."
+          : "Set up your water-change hardware"}</strong>
+        <ol>
+          <li>Wire the drain + fill pumps to your ESP32 node and pick their switch entities in <em>Setup &amp; calibration</em>.</li>
+          <li>Calibrate each pump — two timed runs into a measuring jug; the fit handles the spin-up offset.</li>
+          <li>Set reservoir sizes (and float sensors, if fitted).</li>
+          <li>Pick a schedule — classic weekly batches or hourly micro-changes.</li>
+        </ol>
+        <div class="button-row">
+          <button class="primary" data-action="tab" data-id="settings" data-section="awc" data-scroll="or-section-awc">Open setup</button>
+          <button class="secondary" data-action="awc-sim-toggle">Try demo mode first — no hardware needed</button>
+        </div>
+      </section>`;
+  }
+
+  _awcSourceStrip(sum) {
+    const f2 = sum?.reservoirs?.fresh2;
+    if (!f2) return "";
+    const tile = (name, res) => {
+      const drift = res.driftStatus === "warning"
+        ? ` · <strong>drift ${this._format(res.driftPct, 0)}%</strong>` : "";
+      const salt = res.saltPpt ? ` · ${this._format(res.saltPpt, 1)} ppt` : "";
+      return `<div class="setting-card subtle-card"><small><strong>${name}</strong> —
+        ${this._format(res.remainingL, 1)} / ${this._format(res.capacityL, 0)} L
+        (${this._format(res.percent, 0)}%)${salt}${drift}</small></div>`;
+    };
+    const ni = sum.netImbalance || {};
+    const per = ni.perSource || {};
+    const last = sum.sourcePolicy?.lastSourceUsed || "";
+    const salt = ni.netSaltGrams
+      ? ` · net salt ${ni.netSaltGrams > 0 ? "+" : ""}${this._format(ni.netSaltGrams, 0)} g` : "";
+    return `
+      <div class="summary-grid">
+        ${tile("Source 1 (fresh)", sum.reservoirs.fresh || {})}
+        ${tile("Source 2 (fresh2)", f2)}
+      </div>
+      <small class="awc-hint">Last source used: ${last ? this._escape(last === "fill2" ? "source 2" : "source 1") : "—"}
+        · delivered ${this._format(per.fill || 0, 1)} L / ${this._format(per.fill2 || 0, 1)} L${salt}</small>`;
   }
 
   _awcDemoStrip(sim) {
@@ -10112,6 +10203,7 @@ class OpenReefPanel extends HTMLElement {
     const ato = awc.ato || {};
     const guards = awc.guards || {};
     const sched = awc.schedule || {};
+    const policy = awc.sourcePolicy || {};
     const schedMode = sched.mode === "interval" ? "interval" : "times";
     const days = Array.isArray(sched.days) ? sched.days : [];
     const dayBtns = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `
@@ -10146,12 +10238,12 @@ class OpenReefPanel extends HTMLElement {
 
     const pumpRow = (role) => {
       const p = pumps[role] || {};
-      const label = role === "drain" ? "Drain" : "Fill";
+      const label = role === "drain" ? "Drain" : role === "fill2" ? "Fill (source 2)" : "Fill";
       return `
         <article class="awc-pump-card">
           <div class="awc-pump-head">
             <strong>${label} pump</strong>
-            <small>${role === "drain" ? "Waste water out" : "Fresh saltwater in"}</small>
+            <small>${role === "drain" ? "Waste water out" : role === "fill2" ? "Fresh saltwater in — reservoir 2" : "Fresh saltwater in"}</small>
           </div>
           <label>Switch entity ${this._awcEntitySelect("awc-pump", `data-id="${role}"`, "switchEntity", p.switchEntity || "", "switch")}</label>
           <div class="mini-grid">
@@ -10198,6 +10290,12 @@ class OpenReefPanel extends HTMLElement {
           <div class="awc-pump-grid">
             ${pumpRow("drain")}
             ${pumpRow("fill")}
+            ${pumps.fill2 ? pumpRow("fill2") : ""}
+          </div>
+          <div class="button-row">
+            ${pumps.fill2
+              ? `<button class="secondary" data-action="awc-remove-source">Remove second source</button>`
+              : `<button class="secondary" data-action="awc-add-source">+ Add second fresh source (alternating reservoirs)</button>`}
           </div>
         </section>
 
@@ -10206,12 +10304,38 @@ class OpenReefPanel extends HTMLElement {
           <div class="mini-grid">
             <label>Fresh capacity (L)<input type="number" min="0" step="1" data-scope="awc-reservoir" data-id="fresh" data-field="capacityLitres" value="${res.fresh?.capacityLitres || 0}"></label>
             <label>Fresh-empty sensor ${this._awcEntitySelect("awc-reservoir", `data-id="fresh"`, "emptyEntity", res.fresh?.emptyEntity || "", "binary_sensor")}</label>
+            <label>Salinity (ppt, 0 = unset)<input type="number" min="0" max="45" step="0.1" data-scope="awc-reservoir" data-id="fresh" data-field="saltPpt" value="${res.fresh?.saltPpt || 0}"></label>
           </div>
+          ${pumps.fill2 || res.fresh2 ? `
+          <div class="mini-grid">
+            <label>Source 2 capacity (L)<input type="number" min="0" step="1" data-scope="awc-reservoir" data-id="fresh2" data-field="capacityLitres" value="${res.fresh2?.capacityLitres || 0}"></label>
+            <label>Source 2 empty sensor ${this._awcEntitySelect("awc-reservoir", `data-id="fresh2"`, "emptyEntity", res.fresh2?.emptyEntity || "", "binary_sensor")}</label>
+            <label>Salinity (ppt, 0 = unset)<input type="number" min="0" max="45" step="0.1" data-scope="awc-reservoir" data-id="fresh2" data-field="saltPpt" value="${res.fresh2?.saltPpt || 0}"></label>
+          </div>` : ""}
           <div class="mini-grid">
             <label>Waste capacity (L)<input type="number" min="0" step="1" data-scope="awc-reservoir" data-id="waste" data-field="capacityLitres" value="${res.waste?.capacityLitres || 0}"></label>
             <label>Waste-full sensor ${this._awcEntitySelect("awc-reservoir", `data-id="waste"`, "fullEntity", res.waste?.fullEntity || "", "binary_sensor")}</label>
           </div>
         </section>
+
+        ${pumps.fill2 ? `
+        <section class="mapping-section awc-settings-block">
+          <div class="awc-section-title"><p class="eyebrow">Source policy</p></div>
+          <div class="mini-grid">
+            <label>Mode
+              <select data-scope="awc-policy" data-field="mode">
+                <option value="single" ${policy.mode === "single" || !policy.mode ? "selected" : ""}>Single (always source 1)</option>
+                <option value="alternate" ${policy.mode === "alternate" ? "selected" : ""}>Alternate (round-robin)</option>
+                <option value="primary" ${policy.mode === "primary" ? "selected" : ""}>Primary with fallback</option>
+                <option value="ratio" ${policy.mode === "ratio" ? "selected" : ""}>Ratio</option>
+              </select>
+            </label>
+            ${policy.mode === "ratio" ? `
+            <label>Source 1 share<input type="number" min="0" step="0.5" data-scope="awc-policy-ratio" data-id="fill" value="${policy.ratio?.fill ?? 1}"></label>
+            <label>Source 2 share<input type="number" min="0" step="0.5" data-scope="awc-policy-ratio" data-id="fill2" value="${policy.ratio?.fill2 ?? 1}"></label>` : ""}
+          </div>
+          <small class="awc-hint">Each change draws wholly from ONE source; an empty or uncalibrated source is skipped with a note (pause only when none qualifies). Last used: ${this._escape(policy.lastSourceUsed || "—")}.</small>
+        </section>` : ""}
 
         <section class="mapping-section awc-settings-block">
           <div class="awc-section-title"><p class="eyebrow">Safety sensors and thresholds</p></div>

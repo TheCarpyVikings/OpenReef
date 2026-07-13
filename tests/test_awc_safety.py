@@ -1106,9 +1106,9 @@ def test_reservoir_low_advisory_notifies_once_per_cooldown():
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
-    assert len(_notes(hass, "openreef_awc_reservoir_low")) == 1
+    assert len(_notes(hass, "openreef_awc_reservoir_low_fresh")) == 1
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 1)))
-    assert len(_notes(hass, "openreef_awc_reservoir_low")) == 1  # cooldown holds
+    assert len(_notes(hass, "openreef_awc_reservoir_low_fresh")) == 1  # cooldown holds
 
 
 def test_reservoir_low_advisory_respects_gate():
@@ -1117,7 +1117,7 @@ def test_reservoir_low_advisory_respects_gate():
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
-    assert not _notes(hass, "openreef_awc_reservoir_low")
+    assert not _notes(hass, "openreef_awc_reservoir_low_fresh")
 
 
 def test_paused_fault_gate_silences_pause_notification():
@@ -1170,7 +1170,7 @@ def test_drift_graded_once_when_empty_float_trips():
     assert _close(fresh["driftPct"], -20.0, 0.1)
     def _drift_notes():
         return [c for c in hass.services.calls if c.domain == "persistent_notification"
-                and c.data.get("notification_id") == "openreef_awc_drift"]
+                and c.data.get("notification_id") == "openreef_awc_drift_fresh"]
     assert len(_drift_notes()) == 1
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 1)))  # latched
     assert len(_drift_notes()) == 1
@@ -1192,7 +1192,7 @@ def test_drift_within_tolerance_stays_quiet():
     fresh = _awc(entry)["reservoirs"]["fresh"]
     assert fresh["driftStatus"] == "ok" and fresh["driftCheckedAt"]
     assert not [c for c in hass.services.calls if c.domain == "persistent_notification"
-                and c.data.get("notification_id") == "openreef_awc_drift"]
+                and c.data.get("notification_id") == "openreef_awc_drift_fresh"]
 
 
 def test_reset_to_full_grades_drift_when_float_tripped():
@@ -1209,7 +1209,7 @@ def test_reset_to_full_grades_drift_when_float_tripped():
     assert fresh["dispensedSinceFullMl"] == 0 and fresh["driftCheckedAt"] == ""
     assert fresh["fullConfirmedAt"]  # the reset itself is the next cycle's anchor
     notes = [c for c in hass.services.calls if c.domain == "persistent_notification"
-             and c.data.get("notification_id") == "openreef_awc_drift"]
+             and c.data.get("notification_id") == "openreef_awc_drift_fresh"]
     assert len(notes) == 1
 
 
@@ -1223,7 +1223,7 @@ def test_drift_not_graded_without_confirmed_full_anchor():
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
     fresh = _awc(entry)["reservoirs"]["fresh"]
     assert fresh["driftCheckedAt"] == "" and fresh["driftStatus"] == ""
-    assert not _notes(hass, "openreef_awc_drift")
+    assert not _notes(hass, "openreef_awc_drift_fresh")
 
 
 def test_drift_skipped_after_unmarked_bucket_topup():
@@ -1236,7 +1236,7 @@ def test_drift_skipped_after_unmarked_bucket_topup():
     hass = _hass(entry, states={"binary_sensor.fresh_empty": "on"})
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
     assert _awc(entry)["reservoirs"]["fresh"]["driftCheckedAt"] == ""
-    assert not _notes(hass, "openreef_awc_drift")
+    assert not _notes(hass, "openreef_awc_drift_fresh")
 
 
 def test_micro_change_skips_ato_and_dosing_suspend():

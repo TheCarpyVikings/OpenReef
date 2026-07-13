@@ -978,7 +978,6 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
     reservoirs = cfg.get("reservoirs", {}) if isinstance(cfg.get("reservoirs"), dict) else {}
     fresh = reservoirs.get("fresh", {}) if isinstance(reservoirs.get("fresh"), dict) else {}
     waste = reservoirs.get("waste", {}) if isinstance(reservoirs.get("waste"), dict) else {}
-    fresh_cap = _f(fresh.get("capacityLitres"))
     fresh_rem = _f(fresh.get("remainingMl")) / 1000.0
     waste_cap = _f(waste.get("capacityLitres"))
     waste_fill = _f(waste.get("filledMl")) / 1000.0
@@ -998,12 +997,19 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
             ledger.get("cumulativeDrainedL"), ledger.get("cumulativeFilledL"), threshold
         )
         ni["since"] = ledger.get("resetAt") or None
+        # Stage B per-source surfaces: litres delivered per fill source + the
+        # approximate net salt the changes have moved (None-safe: 0 until known).
+        per_source = ledger.get("perSource") if isinstance(ledger.get("perSource"), dict) else {}
+        ni["perSource"] = {k: round(_f(v), 3) for k, v in per_source.items()}
+        ni["netSaltGrams"] = round(_f(ledger.get("netSaltGrams")), 1)
     else:
         ni = net_imbalance_state(cfg.get("history", []), threshold)
     removed_30d = continuous_removed(daily * 30.0, tank) if (tank > 0 and daily > 0) else 0.0
 
     pumps: dict[str, Any] = {}
-    for role in ("drain", "fill"):
+    cfg_pumps = cfg.get("pumps", {}) if isinstance(cfg.get("pumps"), dict) else {}
+    pump_roles = [r for r in ("drain", "fill", "fill2") if isinstance(cfg_pumps.get(r), dict)]
+    for role in pump_roles or ["drain", "fill"]:
         p = cfg.get("pumps", {}).get(role, {}) if isinstance(cfg.get("pumps"), dict) else {}
         cal_age = _age_days(p.get("calibratedAt"), now)
         tub_age = _age_days(p.get("tubingInstalledAt"), now)
@@ -1021,24 +1027,41 @@ def summary(cfg: dict[str, Any], now: datetime, recal_days: int = 60, tubing_day
             "startCount": int(max(0.0, _f(p.get("startCount")))),
         }
 
+    def _source_block(res: dict[str, Any]) -> dict[str, Any]:
+        cap = _f(res.get("capacityLitres"))
+        rem = _f(res.get("remainingMl")) / 1000.0
+        return {
+            "remainingL": round(rem, 2),
+            "capacityL": round(cap, 2),
+            "percent": round(reservoir_percent(cap, rem), 1),
+            "changesRemaining": changes_remaining(rem, per_change),
+            "saltPpt": round(_f(res.get("saltPpt")), 1),
+            # Drift detection (Stage A): last graded model-vs-reality verdict.
+            "dispensedSinceFullL": round(_f(res.get("dispensedSinceFullMl")) / 1000.0, 2),
+            "driftPct": (res.get("driftPct")
+                         if isinstance(res.get("driftPct"), (int, float)) else None),
+            "driftStatus": str(res.get("driftStatus") or ""),
+        }
+
+    reservoir_blocks: dict[str, Any] = {
+        "fresh": _source_block(fresh),
+        "waste": {
+            "filledL": round(waste_fill, 2),
+            "capacityL": round(waste_cap, 2),
+            "percent": round(reservoir_percent(waste_cap, waste_fill), 1),
+            "remainingCapacityL": round(max(0.0, waste_cap - waste_fill), 2),
+        },
+    }
+    if isinstance(reservoirs.get("fresh2"), dict):
+        reservoir_blocks["fresh2"] = _source_block(reservoirs["fresh2"])
+
+    policy = cfg.get("sourcePolicy", {}) if isinstance(cfg.get("sourcePolicy"), dict) else {}
+
     return {
-        "reservoirs": {
-            "fresh": {
-                "remainingL": round(fresh_rem, 2),
-                "capacityL": round(fresh_cap, 2),
-                "percent": round(reservoir_percent(fresh_cap, fresh_rem), 1),
-                # Drift detection (Stage A): last graded model-vs-reality verdict.
-                "dispensedSinceFullL": round(_f(fresh.get("dispensedSinceFullMl")) / 1000.0, 2),
-                "driftPct": (fresh.get("driftPct")
-                             if isinstance(fresh.get("driftPct"), (int, float)) else None),
-                "driftStatus": str(fresh.get("driftStatus") or ""),
-            },
-            "waste": {
-                "filledL": round(waste_fill, 2),
-                "capacityL": round(waste_cap, 2),
-                "percent": round(reservoir_percent(waste_cap, waste_fill), 1),
-                "remainingCapacityL": round(max(0.0, waste_cap - waste_fill), 2),
-            },
+        "reservoirs": reservoir_blocks,
+        "sourcePolicy": {
+            "mode": str(policy.get("mode") or "single"),
+            "lastSourceUsed": str(policy.get("lastSourceUsed") or ""),
         },
         "scheduleText": schedule_text(sched, tank),
         "dailyChangeL": round(daily, 3),
