@@ -125,16 +125,14 @@ def test_continuous_method_is_blocked():
 
 
 def _fire_exchange(hass, entry, age_done=()):
-    """Fire one simultaneous monitor tick. ``age_done`` lists roles ('drain'/'fill')
-    whose stop time should be pushed into the past to simulate that pump finishing.
-    Timing is edited in the entry's STORED options — the handler fetches fresh config
-    inside the lock, so a mutated local copy would be invisible to it."""
+    """Fire one simultaneous monitor tick. ``age_done`` lists roles ('drain'/'fill'/
+    'fill2') whose stop time should be pushed into the past to simulate that pump
+    finishing. Timing is edited in the entry's STORED options — the handler fetches
+    fresh config inside the lock, so a mutated local copy would be invisible to it."""
     st = _state(entry)
     past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-    if "drain" in age_done:
-        st["drainEndsAt"] = past
-    if "fill" in age_done:
-        st["fillEndsAt"] = past
+    for role in age_done:
+        st.setdefault("endsAt", {})[role] = past
     run(integration._async_awc_exchange_tick(hass, entry, None))
 
 
@@ -159,17 +157,16 @@ def test_new_run_clears_stale_simultaneous_timing_fields():
     entry = _entry("batch_sequential")
     st = _state(entry)
     st.update({
-        "drainEndsAt": "2026-01-01T00:00:00+00:00",
-        "fillEndsAt": "2026-01-01T00:00:00+00:00",
-        "exchangeBaselineGapMl": 750,
+        "endsAt": {"drain": "2026-01-01T00:00:00+00:00", "fill": "2026-01-01T00:00:00+00:00"},
+        "exchangeBaselineNetMl": 750,
     })
     hass = _hass(entry)
     _start(hass, entry, 2.0, method="batch_sequential")
     saved = _state(entry)
     assert saved["status"] == "draining"
-    assert saved["drainEndsAt"] == ""
-    assert saved["fillEndsAt"] == ""
-    assert saved["exchangeBaselineGapMl"] == 0
+    assert not saved["endsAt"].get("drain")
+    assert not saved["endsAt"].get("fill")
+    assert saved["exchangeBaselineNetMl"] == 0
 
 
 def test_leg_timer_is_armed_via_scheduler():
@@ -368,7 +365,7 @@ def test_resume_to_balance_on_startup():
     awc = _awc(entry)
     awc["state"].update({
         "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
-        "drainedMl": 2000, "filledMl": 0,
+        "movedMl": {"drain": 2000, "fill": 0},
         "legStartedAt": "", "legEndsAt": "",
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
@@ -392,7 +389,7 @@ def test_sequential_restart_mid_leg_credits_elapsed_no_replay():
     now = datetime.now(timezone.utc)
     awc["state"].update({
         "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
-        "drainedMl": 2000, "filledMl": 0,
+        "movedMl": {"drain": 2000, "fill": 0},
         "legStartedAt": (now - timedelta(seconds=8)).isoformat(),
         "legEndsAt": (now + timedelta(seconds=12)).isoformat(),
     })
@@ -403,9 +400,9 @@ def test_sequential_restart_mid_leg_credits_elapsed_no_replay():
     run(integration._async_awc_resume_on_startup(hass, entry, config))
     st = _state(entry)
     assert st["status"] == "filling"
-    assert _close(st["filledMl"], 800.0, 20.0)  # ~8 s x 100 ml/s credited
+    assert _close(st["movedMl"]["fill"], 800.0, 20.0)  # ~8 s x 100 ml/s credited
     # the reservoir model was debited for the credited volume too
-    assert _close(_awc(entry)["reservoirs"]["fresh"]["remainingMl"], 25000 - st["filledMl"], 1.0)
+    assert _close(_awc(entry)["reservoirs"]["fresh"]["remainingMl"], 25000 - st["movedMl"]["fill"], 1.0)
     _drive(hass, entry)
     assert _state(entry)["status"] == "idle"
     # total accounted fill is the 2 L target — nothing replayed
@@ -419,7 +416,7 @@ def test_sequential_restart_after_leg_elapsed_finalizes_no_replay():
     awc = _awc(entry)
     awc["state"].update({
         "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
-        "drainedMl": 2000, "filledMl": 0,
+        "movedMl": {"drain": 2000, "fill": 0},
         "legStartedAt": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
         "legEndsAt": (datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
     })
@@ -1463,7 +1460,7 @@ def test_simultaneous_starts_both_pumps():
     assert _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
     assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
     # each pump got its own stop time
-    assert _state(entry)["drainEndsAt"] and _state(entry)["fillEndsAt"]
+    assert _state(entry)["endsAt"]["drain"] and _state(entry)["endsAt"]["fill"]
 
 
 def test_simultaneous_completes_balanced():
@@ -1493,9 +1490,9 @@ def test_simultaneous_fast_pump_does_not_overpump():
     # drain finishes first; its own timer stops it at exactly target — no over-pump
     _fire_exchange(hass, entry, age_done=("drain",))
     st = _state(entry)
-    assert st["status"] == "exchanging"               # fill still running
-    assert _close(st["drainedMl"], 1000.0, 1.0)        # drain capped at target
-    assert st["drainedMl"] <= 1000.0 + 1e-6            # never exceeds target
+    assert st["status"] == "exchanging"                     # fill still running
+    assert _close(st["movedMl"]["drain"], 1000.0, 1.0)      # drain capped at target
+    assert st["movedMl"]["drain"] <= 1000.0 + 1e-6          # never exceeds target
     assert _has_call(hass.services.calls, "turn_off", "switch.awc_drain")
     # then fill finishes → finalize, balanced
     _fire_exchange(hass, entry, age_done=("drain", "fill"))
@@ -1534,12 +1531,12 @@ def test_simultaneous_intermediate_tick_no_false_abort():
     # Simulate a consistent t=20 s: drain just finished, fill has 20 s of its 40 s left.
     st = _state(entry)
     now = datetime.now(timezone.utc)
-    st["drainEndsAt"] = now.isoformat()
-    st["fillEndsAt"] = (now + timedelta(seconds=20)).isoformat()
+    st.setdefault("endsAt", {})["drain"] = now.isoformat()
+    st["endsAt"]["fill"] = (now + timedelta(seconds=20)).isoformat()
     run(integration._async_awc_exchange_tick(hass, entry, None))
     s2 = _state(entry)
     assert s2["status"] == "exchanging"           # 1.0 L gap < 1.5 L cap ⇒ no abort
-    assert _close(s2["drainedMl"], 2000, 5) and _close(s2["filledMl"], 1000, 40)
+    assert _close(s2["movedMl"]["drain"], 2000, 5) and _close(s2["movedMl"]["fill"], 1000, 40)
 
 
 def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
@@ -1549,7 +1546,7 @@ def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
     awc = _awc(entry)
     awc["state"].update({
         "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
-        "drainedMl": 2000, "filledMl": 500,
+        "movedMl": {"drain": 2000, "fill": 500},
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
@@ -1557,13 +1554,13 @@ def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
     run(integration._async_awc_resume_on_startup(hass, entry, config))
     st = _state(entry)
     assert st["status"] == "exchanging"
-    assert _close(st["exchangeBaselineGapMl"], 1500, 1)
+    assert _close(st["exchangeBaselineNetMl"], 1500, 1)  # SIGNED: drained ahead ⇒ positive
     # fill restarts, drain does NOT (already complete)
     assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
     # a real intermediate tick (fill half-done) must NOT abort despite the big gap
     now = datetime.now(timezone.utc)
-    _state(entry)["fillEndsAt"] = (now + timedelta(seconds=7.5)).isoformat()
+    _state(entry).setdefault("endsAt", {})["fill"] = (now + timedelta(seconds=7.5)).isoformat()
     run(integration._async_awc_exchange_tick(hass, entry, None))
     assert _state(entry)["status"] == "exchanging"
     _fire_exchange(hass, entry, age_done=("drain", "fill"))
@@ -1580,7 +1577,7 @@ def test_simultaneous_resume_uncalibrated_faults_not_completes():
     awc = _awc(entry)
     awc["state"].update({
         "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
-        "drainedMl": 0, "filledMl": 0,
+        "movedMl": {"drain": 0, "fill": 0},
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
@@ -1645,7 +1642,7 @@ def test_sequential_checkpoint_ok_rearms_without_completing():
     # it fires, so a pending record afterwards can only be the checkpoint's re-arm.
     assert run(sched.fire_all()) >= 1
     st = _state(entry)
-    assert st["status"] == "draining" and st["drainedMl"] == 0
+    assert st["status"] == "draining" and st["movedMl"].get("drain", 0) == 0
     assert sched.pending()
     install_scheduler(integration)
 
@@ -1663,7 +1660,7 @@ def test_exchange_tick_survives_unreachable_pump_stop():
     _fire_exchange(hass, entry, age_done=("drain",))
     st = _state(entry)
     assert st["status"] == "exchanging"
-    assert _close(st["drainedMl"], 2000, 5)   # accounting persisted despite the failure
+    assert _close(st["movedMl"]["drain"], 2000, 5)  # accounting persisted despite the failure
     assert sched.pending()                    # monitor re-armed
     hass.services.fail_on.clear()
     install_scheduler(integration)
@@ -1707,7 +1704,7 @@ def test_sequential_resume_uncalibrated_faults_not_replays():
     awc = _awc(entry)
     awc["state"].update({
         "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
-        "drainedMl": 2000, "filledMl": 0, "legStartedAt": "", "legEndsAt": "",
+        "movedMl": {"drain": 2000, "fill": 0}, "legStartedAt": "", "legEndsAt": "",
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
@@ -1729,7 +1726,7 @@ def test_sequential_resume_sliver_completes_without_fault():
     awc = _awc(entry)
     awc["state"].update({
         "status": "filling", "method": "batch_sequential", "targetLitres": 2.0,
-        "drainedMl": 2000, "filledMl": 1970, "legStartedAt": "", "legEndsAt": "",
+        "movedMl": {"drain": 2000, "fill": 1970}, "legStartedAt": "", "legEndsAt": "",
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
@@ -1751,14 +1748,15 @@ def test_acknowledge_records_partial_progress_history():
     awc["state"].update({
         "status": "fault", "fault": "AWC pump start failed: boom",
         "method": "batch_sequential", "targetLitres": 2.0,
-        "drainedMl": 1500, "filledMl": 0,
+        "movedMl": {"drain": 1500, "fill": 0},
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     conn = FakeConnection()
     run(integration.websocket_awc_acknowledge(hass, conn, {"id": 1}))
     assert not conn.errors, conn.error_codes
-    assert _state(entry)["status"] == "idle" and _state(entry)["drainedMl"] == 0
+    assert _state(entry)["status"] == "idle"
+    assert not any(_state(entry)["movedMl"].values())  # zeroed (normalised per-pump keys)
     h = _awc(entry)["history"][0]
     assert _close(h["drainedL"], 1.5, 1e-6) and h["partial"]
     assert "acknowledged" in h["notes"].lower()
@@ -1775,7 +1773,7 @@ def test_simultaneous_resume_near_end_completes_without_fault():
     awc = _awc(entry)
     awc["state"].update({
         "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
-        "drainedMl": 2000, "filledMl": 1970,
+        "movedMl": {"drain": 2000, "fill": 1970},
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
@@ -1796,9 +1794,9 @@ def test_simultaneous_relaunch_dead_reckons_run_on():
     now = datetime.now(timezone.utc)
     awc["state"].update({
         "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
-        "drainedMl": 1500, "filledMl": 500,
-        "drainEndsAt": (now - timedelta(seconds=60)).isoformat(),
-        "fillEndsAt": (now - timedelta(seconds=45)).isoformat(),
+        "movedMl": {"drain": 1500, "fill": 500},
+        "endsAt": {"drain": (now - timedelta(seconds=60)).isoformat(),
+                   "fill": (now - timedelta(seconds=45)).isoformat()},
     })
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
@@ -1827,8 +1825,8 @@ def test_exchange_tick_rate_zeroed_mid_run_pauses_without_credit():
     run(integration._async_awc_exchange_tick(hass, entry, None))
     st = _state(entry)
     assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
-    assert st["filledMl"] == 0     # the zero-rate side got NO phantom credit
-    assert st["drainedMl"] <= 200  # healthy side: honest elapsed only (~0-2 s)
+    assert st["movedMl"].get("fill", 0) == 0     # the zero-rate side got NO phantom credit
+    assert st["movedMl"].get("drain", 0) <= 200  # healthy side: honest elapsed only (~0-2 s)
     run(integration._async_awc_schedule_tick(hass, entry, datetime.now()))
     st = _state(entry)
     assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
@@ -1958,6 +1956,139 @@ def test_ws_calibrate_rejects_implausible_intercept():
         "points": [[5, 10], [10, 100], [60, 3000]]}))
     assert "implausible_calibration" in conn.error_codes
     assert _close(_awc(entry)["pumps"]["drain"]["mlPerS"], 100.0, 1e-6)  # unchanged
+
+
+# --- Stage B: N-source (fill2/fresh2), state migration, salt ledger ------------
+
+def test_legacy_state_blob_migrates_and_resumes():
+    # A pre-Stage-B persisted blob (drainedMl/filledMl/exchangeBaselineGapMl scalars)
+    # must migrate to movedMl/endsAt/exchangeBaselineNetMl — with the SIGN recovered
+    # from whichever side was ahead — and then resume-to-balance to completion.
+    entry = _entry("batch_simultaneous")
+    awc = _awc(entry)
+    st = awc["state"]
+    for key in ("movedMl", "endsAt", "activeSourceRole", "exchangeBaselineNetMl"):
+        st.pop(key, None)  # make it a genuinely OLD-shape blob
+    st.update({
+        "status": "exchanging", "method": "batch_simultaneous", "targetLitres": 2.0,
+        "drainedMl": 2000, "filledMl": 500, "exchangeBaselineGapMl": 1500,
+        "drainEndsAt": "", "fillEndsAt": "",
+    })
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
+    st = _state(entry)
+    assert st["movedMl"] == {"drain": 2000.0, "fill": 500.0}
+    assert st["endsAt"] == {"drain": "", "fill": ""}
+    assert st["exchangeBaselineNetMl"] == 1500.0  # SIGNED: drained ahead ⇒ positive
+    for legacy in ("drainedMl", "filledMl", "drainEndsAt", "fillEndsAt", "exchangeBaselineGapMl"):
+        assert legacy not in st, legacy
+    hass = _hass(entry)
+    config = integration._config_from_entry(entry)
+    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    assert _state(entry)["status"] == "exchanging"
+    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+    _fire_exchange(hass, entry, age_done=("drain", "fill"))
+    assert _state(entry)["status"] == "idle"
+    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-3)
+
+
+def _two_source_entry(fresh2_over=None, policy=None):
+    """drain + fill (fresh) + fill2 (fresh2), alternate policy anchored on 'fill'."""
+    return _entry("batch_sequential", awc_over={
+        "pumps": {
+            "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+            "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 100},
+            "fill2": {"switchEntity": "switch.awc_fill2", "mlPerS": 100,
+                      "reservoirId": "fresh2"},
+        },
+        "reservoirs": {
+            "fresh": {"capacityLitres": 25, "remainingMl": 25000,
+                      "emptyEntity": "binary_sensor.fresh_empty"},
+            "fresh2": {"capacityLitres": 25, "remainingMl": 25000,
+                       "emptyEntity": "binary_sensor.fresh2_empty", **(fresh2_over or {})},
+            "waste": {"capacityLitres": 25, "filledMl": 0,
+                      "fullEntity": "binary_sensor.waste_full"},
+        },
+        "sourcePolicy": policy or {"mode": "alternate", "order": ["fill", "fill2"],
+                                   "lastSourceUsed": "fill"},
+    })
+
+
+_TWO_SOURCE_STATES = {"switch.awc_fill2": "off", "binary_sensor.fresh2_empty": "off"}
+
+
+def test_fill2_end_to_end_alternate_draws_from_second_source():
+    # Alternate policy, last change came from 'fill' → this one draws WHOLLY from
+    # fill2: its pump runs, its reservoir is debited, history/ledger say so, and the
+    # rotation anchor advances. Source 1 is untouched throughout.
+    entry = _two_source_entry()
+    hass = _hass(entry, _TWO_SOURCE_STATES)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    assert _state(entry)["activeSourceRole"] == "fill2"
+    _drive(hass, entry)
+    awc = _awc(entry)
+    assert awc["state"]["status"] == "idle"
+    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill2")
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert _close(awc["reservoirs"]["fresh2"]["remainingMl"], 23000.0, 1.0)  # debited 2 L
+    assert _close(awc["reservoirs"]["fresh"]["remainingMl"], 25000.0, 1e-6)  # untouched
+    assert awc["history"][0]["source"] == "fill2"
+    assert _close(awc["ledger"]["perSource"]["fill2"], 2.0, 1e-6)
+    assert awc["sourcePolicy"]["lastSourceUsed"] == "fill2"
+
+
+def test_alternate_skips_insufficient_source_with_warning():
+    # fresh2's recorded volume can't cover the change → the rotation falls through to
+    # 'fill' and a source-skip warning lands in the activity feed.
+    entry = _two_source_entry(fresh2_over={"remainingMl": 100})
+    hass = _hass(entry, _TWO_SOURCE_STATES)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    assert _state(entry)["activeSourceRole"] == "fill"
+    _drive(hass, entry)
+    awc = _awc(entry)
+    assert awc["state"]["status"] == "idle"
+    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill2")
+    assert awc["history"][0]["source"] == "fill"
+    acts = [a for a in integration._config_from_entry(entry).get("activity", [])
+            if "skipped" in a.get("message", "")]
+    assert len(acts) == 1
+
+
+def test_fill2_run_pauses_on_its_own_empty_float():
+    # The ACTIVE source's float is the one that matters: source 1's float being wet
+    # (on) must not block a fill2 change, and fresh2's float tripping mid-run pauses.
+    entry = _two_source_entry()
+    hass = _hass(entry, {**_TWO_SOURCE_STATES, "binary_sensor.fresh_empty": "on"})
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]  # fresh's float irrelevant
+    assert _state(entry)["activeSourceRole"] == "fill2"
+    hass.states.set("binary_sensor.fresh2_empty", "on")  # the ACTIVE source runs dry
+    _fire_leg(hass, entry)  # drain credited → fill2 leg blocked by fresh2's float
+    st = _state(entry)
+    assert st["status"] == "paused"
+    assert "empty" in st["pausedReason"].lower()
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill2")
+
+
+def test_salt_ledger_accumulates_net_grams():
+    # fresh saltPpt 36 vs tank target 35 (salinity band midpoint): a full 2 L change
+    # adds 2 L × 36 − 2 L × 35 ≈ +2 g of salt to the net-salt ledger.
+    entry = _entry("batch_sequential", awc_over={"reservoirs": {
+        "fresh": {"capacityLitres": 25, "remainingMl": 25000,
+                  "emptyEntity": "binary_sensor.fresh_empty", "saltPpt": 36},
+        "waste": {"capacityLitres": 25, "filledMl": 0,
+                  "fullEntity": "binary_sensor.waste_full"},
+    }})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["sensors"]["salinity"]["min"] = 34
+    cfg["sensors"]["salinity"]["max"] = 36
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(cfg)
+    assert integration._awc_tank_ppt(integration._config_from_entry(entry)) == 35.0
+    hass = _hass(entry)
+    assert _start(hass, entry, 2.0, method="batch_sequential")[0]
+    _drive(hass, entry)
+    assert _state(entry)["status"] == "idle"
+    assert _close(_awc(entry)["ledger"]["netSaltGrams"], 2.0, 0.1)
 
 
 # --- tiny standalone runner --------------------------------------------------

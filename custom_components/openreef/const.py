@@ -248,8 +248,11 @@ AWC_PERIODS = ("day", "week")
 AWC_STATUSES = (
     "idle", "preflight", "draining", "filling", "exchanging", "paused", "fault", "complete",
 )
-AWC_PUMP_ROLES = ("drain", "fill")
-AWC_RESERVOIR_KINDS = ("fresh", "waste")
+# The VALID role/reservoir sets (WS validation, stop-alls). fill2/fresh2 are the
+# opt-in second source (Stage B N-source): a config only gains them when the user
+# adds a fill2 pump — the normaliser never materialises them for a legacy setup.
+AWC_PUMP_ROLES = ("drain", "fill", "fill2")
+AWC_RESERVOIR_KINDS = ("fresh", "fresh2", "waste")
 AWC_PUMP_MAX_ML_PER_S = 2000.0            # sanity ceiling on a calibration value
 AWC_RESERVOIR_MAX_L = 2000.0              # sanity ceiling on a container size
 AWC_TANK_MAX_L = 100000.0                 # sanity ceiling on net display volume
@@ -1293,8 +1296,10 @@ DEFAULT_CORE_CONFIG = {
         "continuousTickSeconds": AWC_TICK_DEFAULT_SECONDS,
         "sumpEnabled": False,           # topology: True = drain from / fill into a sump chamber
         "diagramInPulse": False,        # show the live AWC diagram as a Reef Pulse kiosk block
-        # Two pumps. mlPerS/interceptMl from calibration; exchangeFactor is the two-stage
-        # correction so OUT and IN move matched volumes despite tube-length/head differences.
+        # Two pumps by default. mlPerS/interceptMl from calibration; exchangeFactor is the
+        # two-stage correction so OUT and IN move matched volumes despite tube-length/head
+        # differences. NOT AWC_PUMP_ROLES: fill2 (second source) is strictly opt-in — the
+        # normaliser only carries it when the user's config actually defines it.
         "pumps": {
             role: {
                 "switchEntity": "",
@@ -1304,12 +1309,13 @@ DEFAULT_CORE_CONFIG = {
                 "calibratedAt": "",
                 "tubingInstalledAt": "",
             }
-            for role in AWC_PUMP_ROLES
+            for role in ("drain", "fill")
         },
         # fresh = premixed saltwater IN; waste = old water OUT. remainingMl/filledMl are the
         # dead-reckoned dead-reckoning counters; the float entities arbitrate them.
+        # fresh2 (second source) is opt-in — added by the normaliser alongside a fill2 pump.
         "reservoirs": {
-            "fresh": {"capacityLitres": 25, "remainingMl": 0, "emptyEntity": ""},
+            "fresh": {"capacityLitres": 25, "remainingMl": 0, "emptyEntity": "", "saltPpt": 0},
             "waste": {"capacityLitres": 25, "filledMl": 0, "fullEntity": ""},
         },
         # Layered safety. highLevel = display/sump overfill cutoff; leak = master kill.
@@ -1364,13 +1370,12 @@ DEFAULT_CORE_CONFIG = {
             "lastRun": "",
             "nextRun": "",
             "targetLitres": 0,
-            "drainedMl": 0,                         # progress within the current change
-            "filledMl": 0,
+            "movedMl": {},                          # per-role progress within the current change (ml)
             "legStartedAt": "",                     # current pump-leg start (anomaly timing)
             "legEndsAt": "",                        # next timer fire (leg end / exchange monitor tick)
-            "drainEndsAt": "",                      # simultaneous: drain pump's own stop time
-            "fillEndsAt": "",                       # simultaneous: fill pump's own stop time
-            "exchangeBaselineGapMl": 0,             # |drained-filled| at exchange-leg start (resume baseline)
+            "endsAt": {},                           # simultaneous: each pump's own stop time, keyed by role
+            "activeSourceRole": "",                 # the fill source this change draws wholly from
+            "exchangeBaselineNetMl": 0,             # SIGNED drained−filled at exchange-leg start (resume band)
             "pausedReason": "",
             "atoSuspendedUntil": "",
         },

@@ -850,11 +850,18 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
 
     raw_pumps = awc_cfg.get("pumps") if isinstance(awc_cfg.get("pumps"), dict) else {}
     pumps: dict[str, Any] = {}
-    for role in AWC_PUMP_ROLES:
+    # fill2 (second source pump, Stage B) is strictly OPT-IN: a legacy config must
+    # normalise to exactly drain+fill — the role only exists once the config defines it.
+    pump_roles = ["drain", "fill"]
+    if isinstance(raw_pumps.get("fill2"), dict):
+        pump_roles.append("fill2")
+    default_reservoir = {"drain": "waste", "fill": "fresh", "fill2": "fresh2"}
+    for role in pump_roles:
         raw = raw_pumps.get(role) if isinstance(raw_pumps.get(role), dict) else {}
         # exchangeFactor: a non-positive / junk value means "no correction" (1.0),
         # never a runaway multiplier.
         factor = _awc_num(raw.get("exchangeFactor"), 1.0, 0.0, 10.0)
+        rid = raw.get("reservoirId")
         pumps[role] = {
             "switchEntity": _normalise_entity_id(raw.get("switchEntity")),
             "mlPerS": round(_awc_num(raw.get("mlPerS"), 0, 0, AWC_PUMP_MAX_ML_PER_S), 3),
@@ -870,31 +877,60 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
             # Lifetime wear odometers (persist independently of the capped history).
             "runSeconds": round(_awc_num(raw.get("runSeconds"), 0, 0, 1e9), 1),
             "startCount": int(_awc_num(raw.get("startCount"), 0, 0, 1e9)),
+            # N-source plumbing (Stage B): every pump has a direction and a reservoir.
+            "direction": "out" if role == "drain" else "in",
+            "reservoirId": str(rid) if rid in AWC_RESERVOIR_KINDS else default_reservoir[role],
         }
     awc_cfg["pumps"] = pumps
 
     raw_res = awc_cfg.get("reservoirs") if isinstance(awc_cfg.get("reservoirs"), dict) else {}
-    fresh = raw_res.get("fresh") if isinstance(raw_res.get("fresh"), dict) else {}
-    waste = raw_res.get("waste") if isinstance(raw_res.get("waste"), dict) else {}
-    awc_cfg["reservoirs"] = {
-        "fresh": {
-            "capacityLitres": round(_awc_num(fresh.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
-            "remainingMl": round(_awc_num(fresh.get("remainingMl"), 0, 0, AWC_RESERVOIR_MAX_L * 1000), 1),
-            "emptyEntity": _normalise_entity_id(fresh.get("emptyEntity")),
+
+    def _norm_source_reservoir(raw_src: dict[str, Any]) -> dict[str, Any]:
+        """Normalise a SOURCE (fill-side) reservoir — fresh and fresh2 share one schema,
+        incl. the Stage A drift fields and the Stage B source salinity (0 = unknown)."""
+        return {
+            "capacityLitres": round(_awc_num(raw_src.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
+            "remainingMl": round(_awc_num(raw_src.get("remainingMl"), 0, 0, AWC_RESERVOIR_MAX_L * 1000), 1),
+            "emptyEntity": _normalise_entity_id(raw_src.get("emptyEntity")),
             # Drift detection (Stage A): model-dispensed since the last confirmed full,
             # graded against capacity when the empty float trips / on reset-to-full.
-            "dispensedSinceFullMl": round(_awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9), 1),
-            "driftPct": (round(_awc_num(fresh.get("driftPct"), 0, -1000, 1000), 1)
-                         if isinstance(fresh.get("driftPct"), (int, float)) else None),
-            "driftStatus": _awc_str(fresh.get("driftStatus"), 20),
-            "driftCheckedAt": _awc_str(fresh.get("driftCheckedAt"), 40),
-            "fullConfirmedAt": _awc_str(fresh.get("fullConfirmedAt"), 40),
-        },
+            "dispensedSinceFullMl": round(_awc_num(raw_src.get("dispensedSinceFullMl"), 0, 0, 1e9), 1),
+            "driftPct": (round(_awc_num(raw_src.get("driftPct"), 0, -1000, 1000), 1)
+                         if isinstance(raw_src.get("driftPct"), (int, float)) else None),
+            "driftStatus": _awc_str(raw_src.get("driftStatus"), 20),
+            "driftCheckedAt": _awc_str(raw_src.get("driftCheckedAt"), 40),
+            "fullConfirmedAt": _awc_str(raw_src.get("fullConfirmedAt"), 40),
+            "saltPpt": round(_awc_num(raw_src.get("saltPpt"), 0, 0, 45), 1),
+        }
+
+    fresh = raw_res.get("fresh") if isinstance(raw_res.get("fresh"), dict) else {}
+    waste = raw_res.get("waste") if isinstance(raw_res.get("waste"), dict) else {}
+    reservoirs: dict[str, Any] = {
+        "fresh": _norm_source_reservoir(fresh),
         "waste": {
             "capacityLitres": round(_awc_num(waste.get("capacityLitres"), 25, 0, AWC_RESERVOIR_MAX_L), 2),
             "filledMl": round(_awc_num(waste.get("filledMl"), 0, 0, AWC_RESERVOIR_MAX_L * 1000), 1),
             "fullEntity": _normalise_entity_id(waste.get("fullEntity")),
         },
+    }
+    if "fresh2" in raw_res or "fill2" in pumps:
+        fresh2 = raw_res.get("fresh2") if isinstance(raw_res.get("fresh2"), dict) else {}
+        reservoirs["fresh2"] = _norm_source_reservoir(fresh2)
+    awc_cfg["reservoirs"] = reservoirs
+
+    # Source policy (Stage B): which fill source a change draws WHOLLY from.
+    raw_policy = awc_cfg.get("sourcePolicy") if isinstance(awc_cfg.get("sourcePolicy"), dict) else {}
+    valid_fill = [r for r in ("fill", "fill2") if r in pumps]
+    order = [r for r in (raw_policy.get("order") or []) if r in valid_fill]
+    order += [r for r in valid_fill if r not in order]
+    ratio_raw = raw_policy.get("ratio") if isinstance(raw_policy.get("ratio"), dict) else {}
+    policy_mode = str(raw_policy.get("mode", "single")).lower()
+    awc_cfg["sourcePolicy"] = {
+        "mode": policy_mode if policy_mode in ("single", "primary", "alternate", "ratio") else "single",
+        "order": order,
+        "ratio": {r: round(_awc_num(ratio_raw.get(r), 1.0, 0, 1000), 2) for r in valid_fill},
+        "lastSourceUsed": (str(raw_policy.get("lastSourceUsed"))
+                           if raw_policy.get("lastSourceUsed") in valid_fill else ""),
     }
 
     raw_safety = awc_cfg.get("safety") if isinstance(awc_cfg.get("safety"), dict) else {}
@@ -988,6 +1024,26 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
     safe_state_method = state_method if state_method in AWC_LIVE_METHODS else ""
     if not safe_state_method and status in ("draining", "filling", "exchanging", "paused"):
         safe_state_method = "batch_sequential"
+    # Per-role progress/stop-time migration (Stage B). An EMPTY movedMl/endsAt dict is
+    # treated as absent: the defaults deep-merge `{}` into every config, so a legacy
+    # blob arrives here with BOTH the empty new-shape dicts and its old scalar fields —
+    # the scalars are the authoritative seed exactly once, on that upgrade pass.
+    raw_moved = raw_state.get("movedMl") if isinstance(raw_state.get("movedMl"), dict) else None
+    if not raw_moved:
+        raw_moved = {"drain": raw_state.get("drainedMl"), "fill": raw_state.get("filledMl")}
+    raw_ends = raw_state.get("endsAt") if isinstance(raw_state.get("endsAt"), dict) else None
+    if not raw_ends:
+        raw_ends = {"drain": raw_state.get("drainEndsAt"), "fill": raw_state.get("fillEndsAt")}
+    # exchangeBaselineNetMl is SIGNED (drained − filled). One-shot upgrade edge: the
+    # legacy exchangeBaselineGapMl stored |drained − filled|, so recover the sign from
+    # whichever side was ahead. The default-merged net of 0 must not shadow a genuine
+    # legacy gap — post-migration states never carry the gap key, so gap>0 ⇒ legacy.
+    legacy_gap = _awc_num(raw_state.get("exchangeBaselineGapMl"), 0, 0, 1e9)
+    net_raw = raw_state.get("exchangeBaselineNetMl")
+    baseline_net = round(_awc_num(net_raw, 0, -1e9, 1e9), 1)
+    if baseline_net == 0 and legacy_gap > 0:
+        drained_ahead = _awc_num(raw_moved.get("drain"), 0, 0, 1e9) >= _awc_num(raw_moved.get("fill"), 0, 0, 1e9)
+        baseline_net = round(legacy_gap if drained_ahead else -legacy_gap, 1)
     awc_cfg["state"] = {
         "status": status if status in AWC_STATUSES else "idle",
         "fault": _awc_str(raw_state.get("fault"), 200),
@@ -997,13 +1053,13 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         "lastRun": _awc_str(raw_state.get("lastRun"), 40),
         "nextRun": _awc_str(raw_state.get("nextRun"), 40),
         "targetLitres": round(_awc_num(raw_state.get("targetLitres"), 0, 0, AWC_TANK_MAX_L), 3),
-        "drainedMl": round(_awc_num(raw_state.get("drainedMl"), 0, 0, 1e9), 1),
-        "filledMl": round(_awc_num(raw_state.get("filledMl"), 0, 0, 1e9), 1),
+        "movedMl": {r: round(_awc_num(raw_moved.get(r), 0, 0, 1e9), 1) for r in pumps},
         "legStartedAt": _awc_str(raw_state.get("legStartedAt"), 40),
         "legEndsAt": _awc_str(raw_state.get("legEndsAt"), 40),
-        "drainEndsAt": _awc_str(raw_state.get("drainEndsAt"), 40),
-        "fillEndsAt": _awc_str(raw_state.get("fillEndsAt"), 40),
-        "exchangeBaselineGapMl": round(_awc_num(raw_state.get("exchangeBaselineGapMl"), 0, 0, 1e9), 1),
+        "endsAt": {r: _awc_str(raw_ends.get(r), 40) for r in pumps},
+        "activeSourceRole": (str(raw_state.get("activeSourceRole"))
+                             if raw_state.get("activeSourceRole") in valid_fill else ""),
+        "exchangeBaselineNetMl": baseline_net,
         "pausedReason": _awc_str(raw_state.get("pausedReason"), 200),
         "atoSuspendedUntil": _awc_str(raw_state.get("atoSuspendedUntil"), 40),
         "anomalyWarned": bool(raw_state.get("anomalyWarned", False)),
@@ -1031,6 +1087,7 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
                 "method": h_method if h_method in AWC_METHODS else "",
                 "partial": bool(item.get("partial", False)),
                 "notes": _awc_str(item.get("notes"), 200),
+                "source": _awc_str(item.get("source"), 10),
             })
     awc_cfg["history"] = history
     awc_cfg["todayLitres"] = round(_awc_num(awc_cfg.get("todayLitres"), 0, 0, 1e6), 3)
@@ -1043,16 +1100,23 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
     # upgrade, seed from the summed history so the displayed net is continuous.
     raw_ledger = awc_cfg.get("ledger")
     if isinstance(raw_ledger, dict):
+        per_raw = raw_ledger.get("perSource") if isinstance(raw_ledger.get("perSource"), dict) else {}
         awc_cfg["ledger"] = {
             "cumulativeDrainedL": round(_awc_num(raw_ledger.get("cumulativeDrainedL"), 0, 0, 1e9), 3),
             "cumulativeFilledL": round(_awc_num(raw_ledger.get("cumulativeFilledL"), 0, 0, 1e9), 3),
             "resetAt": _awc_str(raw_ledger.get("resetAt"), 40),
+            # Per-source delivered litres (drives the 'ratio' source policy) and the
+            # approximate net salt the changes have added (Stage B drift indicator).
+            "perSource": {r: round(_awc_num(per_raw.get(r), 0, 0, 1e9), 3) for r in valid_fill},
+            "netSaltGrams": round(_awc_num(raw_ledger.get("netSaltGrams"), 0, -1e9, 1e9), 1),
         }
     else:
         awc_cfg["ledger"] = {
             "cumulativeDrainedL": round(sum(h["drainedL"] for h in history), 3),
             "cumulativeFilledL": round(sum(h["filledL"] for h in history), 3),
             "resetAt": "",
+            "perSource": {r: 0.0 for r in valid_fill},
+            "netSaltGrams": 0.0,
         }
 
 
@@ -5424,6 +5488,60 @@ def _awc_cfg(config: dict[str, Any]) -> dict[str, Any]:
     return awc if isinstance(awc, dict) else {}
 
 
+# --- N-source state accessors (Stage B) -------------------------------------------
+# A change draws WHOLLY from one selected fill source, so the state machine stays
+# two-actor per change: "drain" + the active source role ("fill" or "fill2"). These
+# helpers key the per-role progress/stop-time dicts so the orchestration reads the
+# same regardless of which source is active.
+
+def _awc_fill_role(state: dict[str, Any]) -> str:
+    """The fill role the CURRENT change draws from ('fill' when idle/legacy)."""
+    return state.get("activeSourceRole") or "fill"
+
+
+def _awc_moved(state: dict[str, Any], role: str) -> float:
+    mm = state.get("movedMl")
+    return _awc_num(mm.get(role) if isinstance(mm, dict) else None, 0, 0, 1e9)
+
+
+def _awc_set_moved(state: dict[str, Any], role: str, ml: float) -> None:
+    state.setdefault("movedMl", {})[role] = round(ml, 1)
+
+
+def _awc_ends(state: dict[str, Any], role: str) -> str:
+    ea = state.get("endsAt")
+    return ea.get(role, "") if isinstance(ea, dict) else ""
+
+
+def _awc_set_ends(state: dict[str, Any], role: str, value: str) -> None:
+    state.setdefault("endsAt", {})[role] = value
+
+
+def _awc_all_pump_roles(config: dict[str, Any]) -> list[str]:
+    """Every pump role this config can drive — the stop-everything set."""
+    return ["drain", *awc_engine.fill_roles(_awc_cfg(config))]
+
+
+def _awc_tank_ppt(config: dict[str, Any]) -> float:
+    """The tank's target salinity in ppt for the net-salt ledger: the midpoint of the
+    salinity sensor's alert band (sensors.salinity min/max — the closest thing the
+    config has to a salinity target). SG-magnitude values convert to ppt; 0.0 when
+    the band is unset/unparseable — the engine treats that as 'unknown'."""
+    sensors = config.get("sensors") if isinstance(config.get("sensors"), dict) else {}
+    sal = sensors.get("salinity") if isinstance(sensors.get("salinity"), dict) else {}
+    values = []
+    for key in ("min", "max"):
+        try:
+            value = float(sal.get(key))
+        except (TypeError, ValueError):
+            return 0.0
+        if salinity_value_looks_like_sg(value):
+            value = salinity_sg_to_ppt(value)
+        values.append(value)
+    mid = (values[0] + values[1]) / 2.0
+    return round(mid, 2) if mid > 0 else 0.0
+
+
 def _awc_sim_enabled(config: dict[str, Any]) -> bool:
     """Demo mode: virtual pumps, injectable hazards, zero real actuation."""
     sim = _awc_cfg(config).get("simulation")
@@ -5515,7 +5633,11 @@ def _awc_binary_unknown(hass: HomeAssistant, entity_id: str | None) -> bool:
     return state is None or state.state in UNAVAILABLE_STATES
 
 
-def _awc_live_state(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
+def _awc_live_state(
+    hass: HomeAssistant, config: dict[str, Any], fill_role: str = "fill"
+) -> dict[str, Any]:
+    """Live safety snapshot. ``fill_role`` selects whose SOURCE reservoir feeds the
+    ``freshEmpty`` signal — in-run callers pass the change's active source role."""
     awc = _awc_cfg(config)
     if _awc_sim_enabled(config):
         # Demo mode: hazards come from the sim panel, not real sensors. Feed mode
@@ -5535,7 +5657,8 @@ def _awc_live_state(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, An
         }
     safety = awc.get("safety", {}) if isinstance(awc.get("safety"), dict) else {}
     reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
-    fresh = reservoirs.get("fresh", {}) if isinstance(reservoirs.get("fresh"), dict) else {}
+    source_id = awc_engine.pump_reservoir_id(awc, fill_role or "fill")
+    fresh = reservoirs.get(source_id, {}) if isinstance(reservoirs.get(source_id), dict) else {}
     waste = reservoirs.get("waste", {}) if isinstance(reservoirs.get("waste"), dict) else {}
     mode = config.get("mode", {})
     return {
@@ -5727,27 +5850,30 @@ async def _async_awc_advisory_notifications(
             "after correcting salinity.")
 
 
-def _awc_debit_fresh(awc: dict[str, Any], ml: float) -> None:
-    """Debit the fresh reservoir's dead-reckoned level AND bump the drift odometer
-    (dispensedSinceFullMl) — the single choke point for every fill-side debit, so
-    the drift check always grades a complete model figure against reality."""
+def _awc_debit_source(awc: dict[str, Any], role: str, ml: float) -> None:
+    """Debit the given fill role's SOURCE reservoir dead-reckoned level AND bump its
+    drift odometer (dispensedSinceFullMl) — the single choke point for every fill-side
+    debit, so the drift check always grades a complete model figure against reality.
+    The reservoir is resolved via the pump's reservoirId (fill→fresh, fill2→fresh2)."""
     if ml <= 0:
         return
     reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
-    fresh = reservoirs.get("fresh", {})
-    if not isinstance(fresh, dict):
+    source = reservoirs.get(awc_engine.pump_reservoir_id(awc, role))
+    if not isinstance(source, dict):
         return
-    fresh["remainingMl"] = max(0.0, fresh.get("remainingMl", 0) - ml)
-    fresh["dispensedSinceFullMl"] = _awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9) + ml
+    source["remainingMl"] = max(0.0, source.get("remainingMl", 0) - ml)
+    source["dispensedSinceFullMl"] = _awc_num(source.get("dispensedSinceFullMl"), 0, 0, 1e9) + ml
 
 
-def _awc_grade_fresh_drift(config: dict[str, Any]) -> dict[str, Any] | None:
+def _awc_grade_fresh_drift(
+    config: dict[str, Any], reservoir_id: str = "fresh"
+) -> dict[str, Any] | None:
     """Grade fill-pump calibration drift (Stage A, the Trust-Moat seed): the model's
     dispensed-since-full vs the reservoir's known capacity, at the moment reality
     checks in (empty float trip / refill-from-empty). Stamps the verdict onto the
-    fresh reservoir and latches via driftCheckedAt (once per fill cycle; reset-to-full
+    source reservoir and latches via driftCheckedAt (once per fill cycle; reset-to-full
     re-arms). Returns the verdict, or None when there is nothing to grade."""
-    fresh = _awc_cfg(config).get("reservoirs", {}).get("fresh", {})
+    fresh = _awc_cfg(config).get("reservoirs", {}).get(reservoir_id, {})
     if not isinstance(fresh, dict) or fresh.get("driftCheckedAt"):
         return None
     if not fresh.get("fullConfirmedAt"):
@@ -5772,39 +5898,46 @@ def _awc_grade_fresh_drift(config: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def _async_awc_notify_drift(
-    hass: HomeAssistant, config: dict[str, Any], verdict: dict[str, Any]
+    hass: HomeAssistant, config: dict[str, Any], verdict: dict[str, Any],
+    reservoir_id: str = "fresh",
 ) -> None:
     """Surface a recalibrate-worthy drift verdict: activity + one notification."""
     if not verdict.get("recalibrate"):
         return
-    fresh = _awc_cfg(config).get("reservoirs", {}).get("fresh", {})
+    fresh = _awc_cfg(config).get("reservoirs", {}).get(reservoir_id, {})
     dispensed_l = _awc_num(fresh.get("dispensedSinceFullMl"), 0, 0, 1e9) / 1000.0
     cap_l = _awc_num(fresh.get("capacityLitres"), 0, 0, 1e9)
     pct = verdict.get("driftPct") or 0
     direction = "less" if pct > 0 else "more"
-    msg = (f"The fill-pump model claims {dispensed_l:.1f} L dispensed but the {cap_l:.0f} L "
-           f"fresh reservoir just ran empty ({pct:+.0f}%) — the pump is moving {direction} "
-           "water than its calibration says. Recalibrate the fill pump.")
+    res_name = "fresh" if reservoir_id == "fresh" else f"'{reservoir_id}'"
+    pump_name = "fill" if reservoir_id == "fresh" else "fill2"
+    msg = (f"The {pump_name}-pump model claims {dispensed_l:.1f} L dispensed but the {cap_l:.0f} L "
+           f"{res_name} reservoir just ran empty ({pct:+.0f}%) — the pump is moving {direction} "
+           f"water than its calibration says. Recalibrate the {pump_name} pump.")
     _append_activity(config, msg, "warning")
     await _async_awc_notify(
         hass, config, "driftDetected", "openreef_awc_drift",
         "Pump calibration drift detected", msg)
 
 
-async def _async_awc_check_drift_on_empty(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
-    """Minutely drift hook: the fresh empty float tripping is the reality reference.
-    Cheap unlocked pre-checks; grading + save happen fetch-fresh under the lock."""
-    fresh = _awc_cfg(_config_from_entry(entry)).get("reservoirs", {}).get("fresh", {})
-    if (not fresh.get("emptyEntity") or fresh.get("driftCheckedAt")
+async def _async_awc_check_drift_on_empty(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, reservoir_id: str = "fresh"
+) -> None:
+    """Minutely drift hook: the source reservoir's empty float tripping is the reality
+    reference. Cheap unlocked pre-checks; grading + save happen fetch-fresh under the
+    lock."""
+    fresh = _awc_cfg(_config_from_entry(entry)).get("reservoirs", {}).get(reservoir_id, {})
+    if (not isinstance(fresh, dict)
+            or not fresh.get("emptyEntity") or fresh.get("driftCheckedAt")
             or not fresh.get("fullConfirmedAt")
             or not _awc_binary_on(hass, fresh.get("emptyEntity"))):
         return
     async with _awc_lock(hass):
         config = _config_from_entry(entry)
-        verdict = _awc_grade_fresh_drift(config)
+        verdict = _awc_grade_fresh_drift(config, reservoir_id)
         if verdict is None:
             return
-        await _async_awc_notify_drift(hass, config, verdict)
+        await _async_awc_notify_drift(hass, config, verdict, reservoir_id)
         await _async_save_config(hass, entry, config)
 
 
@@ -5834,7 +5967,7 @@ async def _async_awc_begin_leg(
     delegated to the exchange path (the sole owner of per-pump stop times) so it can never
     be driven by the single-leg timer."""
     pumps = leg["pumps"]
-    if "drain" in pumps and "fill" in pumps:
+    if "drain" in pumps and any(p != "drain" for p in pumps):
         return await _async_awc_begin_exchange(hass, config, now, context)
     acfg = _awc_cfg(config)
     state = acfg["state"]
@@ -5872,12 +6005,7 @@ async def _async_awc_begin_leg(
         state["legEndsAt"] = ""
         state["pausedReason"] = ""
         return False, state["fault"]
-    if "drain" in pumps and "fill" in pumps:
-        state["status"] = "exchanging"
-    elif "drain" in pumps:
-        state["status"] = "draining"
-    else:
-        state["status"] = "filling"
+    state["status"] = "draining" if "drain" in pumps else "filling"
     for role in pumps:
         _awc_bump_odometer(acfg, role, starts=1)
     state["legStartedAt"] = now.isoformat()
@@ -5896,12 +6024,13 @@ async def _async_awc_begin_exchange(
     monitor tick re-arms at the soonest of (now + tick) and each pump's stop time."""
     acfg = _awc_cfg(config)
     state = acfg["state"]
+    fill_role = _awc_fill_role(state)
     target_ml = state.get("targetLitres", 0) * 1000.0
     pumps = acfg.get("pumps", {})
     drain = pumps.get("drain", {}) if isinstance(pumps.get("drain"), dict) else {}
-    fill = pumps.get("fill", {}) if isinstance(pumps.get("fill"), dict) else {}
-    drain_remaining_l = max(0.0, target_ml - state.get("drainedMl", 0)) / 1000.0
-    fill_remaining_l = max(0.0, target_ml - state.get("filledMl", 0)) / 1000.0
+    fill = pumps.get(fill_role, {}) if isinstance(pumps.get(fill_role), dict) else {}
+    drain_remaining_l = max(0.0, target_ml - _awc_moved(state, "drain")) / 1000.0
+    fill_remaining_l = max(0.0, target_ml - _awc_moved(state, fill_role)) / 1000.0
     drain_rt = awc_engine.runtime_for_volume_s(drain_remaining_l, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0), drain.get("spinUpMl", 0.0))
     fill_rt = awc_engine.runtime_for_volume_s(fill_remaining_l, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0), fill.get("spinUpMl", 0.0))
 
@@ -5916,8 +6045,7 @@ async def _async_awc_begin_exchange(
         state["faultSince"] = now.isoformat()
         state["legStartedAt"] = ""
         state["legEndsAt"] = ""
-        state["drainEndsAt"] = ""
-        state["fillEndsAt"] = ""
+        state["endsAt"] = {}
         return False, state["fault"]
 
     # A CALIBRATED side whose remaining sliver rounds to a non-positive runtime (the
@@ -5932,7 +6060,7 @@ async def _async_awc_begin_exchange(
     if drain_remaining_l > 1e-6:
         roles_on.append("drain")
     if fill_remaining_l > 1e-6:
-        roles_on.append("fill")
+        roles_on.append(fill_role)
     try:
         for role in roles_on:
             await _async_awc_set_pump(hass, config, role, True, context)
@@ -5943,26 +6071,27 @@ async def _async_awc_begin_exchange(
         state["faultSince"] = now.isoformat()
         state["legStartedAt"] = ""
         state["legEndsAt"] = ""
-        state["drainEndsAt"] = ""
-        state["fillEndsAt"] = ""
+        state["endsAt"] = {}
         state["pausedReason"] = ""
         return False, state["fault"]
 
     for role in roles_on:
         _awc_bump_odometer(acfg, role, starts=1)
     drain_end = now + timedelta(seconds=drain_rt) if "drain" in roles_on else now
-    fill_end = now + timedelta(seconds=fill_rt) if "fill" in roles_on else now
+    fill_end = now + timedelta(seconds=fill_rt) if fill_role in roles_on else now
     state["status"] = "exchanging"
     state["legStartedAt"] = now.isoformat()
-    state["drainEndsAt"] = drain_end.isoformat()
-    state["fillEndsAt"] = fill_end.isoformat()
-    # Baseline the imbalance cap to the gap that exists right now, so a resume-to-balance
-    # leg (which starts with a large pre-existing gap it's correcting) isn't false-aborted.
-    state["exchangeBaselineGapMl"] = abs(state.get("drainedMl", 0) - state.get("filledMl", 0))
+    _awc_set_ends(state, "drain", drain_end.isoformat())
+    _awc_set_ends(state, fill_role, fill_end.isoformat())
+    # Baseline the imbalance band to the SIGNED net that exists right now, so a
+    # resume-to-balance leg (which starts with a large pre-existing gap it's correcting)
+    # isn't false-aborted — and can't reverse THROUGH zero and overfill unchecked.
+    state["exchangeBaselineNetMl"] = round(
+        _awc_moved(state, "drain") - _awc_moved(state, fill_role), 1)
     pending = [now + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS)]
     if "drain" in roles_on:
         pending.append(drain_end)
-    if "fill" in roles_on:
+    if fill_role in roles_on:
         pending.append(fill_end)
     state["legEndsAt"] = min(pending).isoformat()
     state["pausedReason"] = ""
@@ -6011,20 +6140,36 @@ async def _async_awc_start_locked(
                         "message": "AWC supports sequential or simultaneous changes (continuous is projection-only)"}]
     target = round(float(target_litres or 0), 3)
 
+    # Select THE fill source for this change (each change draws wholly from one
+    # source): the policy picks it; every guard below is judged against it.
+    pick = awc_engine.select_fill_source(_awc_cfg_eff(config), target)
+    if pick is not None:
+        fill_role = pick["role"]
+    else:
+        policy = acfg.get("sourcePolicy") if isinstance(acfg.get("sourcePolicy"), dict) else {}
+        policy_order = policy.get("order") or []
+        fill_role = policy_order[0] if policy_order else "fill"
+
     # Local time is only needed for the quiet-hours guard; compute it lazily.
     now_min = 0
     if acfg.get("guards", {}).get("quietHoursEnabled"):
         local_now = dt_util.now()
         now_min = local_now.hour * 60 + local_now.minute
-    live = _awc_live_state(hass, config)
-    reasons = awc_engine.start_guard_reasons(acfg, live, now_min, manual)
+    live = _awc_live_state(hass, config, fill_role=fill_role)
+    reasons = awc_engine.start_guard_reasons(acfg, live, now_min, manual, fill_role=fill_role)
     if _awc_sim_enabled(config):
         # Demo mode: virtual pumps need no real switch entities; every OTHER guard
         # (calibration, reservoirs, hazards, caps) stays honest — that's the demo.
         reasons = [r for r in reasons if r.get("code") != "no_pump_entity"]
     if target <= 0:
         reasons.append({"code": "no_volume", "severity": "block", "message": "Enter a volume to change"})
-    reasons.extend(awc_engine.reservoir_preflight_reasons(acfg, target))
+    reasons.extend(awc_engine.reservoir_preflight_reasons(acfg, target, source_role=fill_role))
+    if (pick is None and target > 0
+            and not any(r.get("code") == "fresh_insufficient" for r in reasons)):
+        # No source can cover the change and the per-source preflight didn't already
+        # say so (e.g. the fallback role's reservoir alone would have sufficed).
+        reasons.append({"code": "fresh_insufficient", "severity": "block",
+                        "message": "No fill source has enough recorded volume for this change"})
     if awc_engine.exceeds_single_change_cap(_awc_cfg_eff(config), target):
         pct = acfg.get("safety", {}).get("maxSingleChangePercent", 25)
         reasons.append({"code": "max_single_change", "severity": "block",
@@ -6041,7 +6186,13 @@ async def _async_awc_start_locked(
 
     now = datetime.now(timezone.utc)
     threshold_ml = _awc_num(acfg.get("ato", {}).get("microChangeThresholdMl"), 0, 0, 1e9)
-    micro = threshold_ml > 0 and target * 1000.0 <= threshold_ml + 1e-6
+    # Micro-change additionally requires the SELECTED source to be salt-matched to the
+    # tank: skipping the ATO/dosing suspends is only safe when the water going in is
+    # the same salinity as the water coming out (unknown salinities count as matched).
+    micro = (threshold_ml > 0 and target * 1000.0 <= threshold_ml + 1e-6
+             and awc_engine.source_salt_matched(
+                 acfg.get("reservoirs", {}).get(awc_engine.pump_reservoir_id(acfg, fill_role)),
+                 _awc_tank_ppt(config)))
     state["microChange"] = micro
     if not micro:
         if acfg.get("ato", {}).get("suspendDuringChange", True):
@@ -6052,19 +6203,23 @@ async def _async_awc_start_locked(
     # suspends are skipped so the hourly cadence doesn't hold them around the clock.
     state["method"] = method
     state["targetLitres"] = target
-    state["drainedMl"] = 0
-    state["filledMl"] = 0
+    state["activeSourceRole"] = fill_role
+    state["movedMl"] = {}
+    state["endsAt"] = {}
+    state["exchangeBaselineNetMl"] = 0
     state["startedAt"] = now.isoformat()
     state["fault"] = ""
     state["faultSince"] = ""
     state["pausedReason"] = ""
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
-    state["drainEndsAt"] = ""
-    state["fillEndsAt"] = ""
-    state["exchangeBaselineGapMl"] = 0
     state["anomalyWarned"] = False
     state["blockedSlotKey"] = ""  # the slot (if any) is being served now
+    source_policy = acfg.get("sourcePolicy")
+    if isinstance(source_policy, dict):
+        source_policy["lastSourceUsed"] = fill_role  # the alternate rotation's anchor
+    for warning in (pick.get("warnings") or []) if pick else []:
+        _append_activity(config, f"Water change source: {warning}", "warning")
 
     target_ml = target * 1000.0
     if method == "batch_simultaneous":
@@ -6073,6 +6228,8 @@ async def _async_awc_start_locked(
         leg = awc_engine.plan_leg(method, 0, 0, target_ml, target_ml)
         if leg is None:
             return True, []
+        # The engine plans in generic role labels — map "fill" to the ACTIVE source.
+        leg = {**leg, "pumps": [fill_role if p == "fill" else p for p in leg["pumps"]]}
         begun, reason = await _async_awc_begin_leg(hass, config, method, leg, now, context)
     if not begun:
         _append_activity(config, reason, "control")
@@ -6087,7 +6244,7 @@ async def _async_awc_pause(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     reason: str, context: Any,
 ) -> None:
-    await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
+    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
     awc = _awc_cfg(config)
     # Credit the elapsed portion of an in-flight sequential leg before parking (R9):
     # resume replans from drained/filled, so an uncredited half-leg would be replayed
@@ -6099,9 +6256,9 @@ async def _async_awc_pause(
     state["pausedReason"] = reason
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
-    state["drainEndsAt"] = ""
-    state["fillEndsAt"] = ""
-    state["exchangeBaselineGapMl"] = 0
+    state["endsAt"] = {}
+    state["exchangeBaselineNetMl"] = 0
+    # movedMl and activeSourceRole deliberately survive the pause — resume needs them.
     _append_activity(config, f"Water change paused: {reason}", "warning")
     await _async_awc_notify(
         hass, config, "pausedFault", "openreef_awc_paused", "Water change paused", reason,
@@ -6113,7 +6270,7 @@ async def _async_awc_abort(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     reason: str, latch: bool, master_kill: bool, context: Any,
 ) -> None:
-    await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
+    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
     if master_kill:
         await _async_awc_kill_equipment_profile(hass, config, "return_pump", context)
     if latch and _awc_cfg(config).get("ato", {}).get("suspendDuringChange", True):
@@ -6129,10 +6286,15 @@ async def _async_awc_abort(
     # totals (R6): a Stop at 90% of a leg otherwise vanishes that near-whole-leg
     # volume from the history, ledger and reservoir models.
     _awc_credit_interrupted_leg(awc, now)
-    drained_l = state.get("drainedMl", 0) / 1000.0
-    filled_l = state.get("filledMl", 0) / 1000.0
+    fill_role = _awc_fill_role(state)  # read BEFORE the zeroing below clears it
+    drained_l = _awc_moved(state, "drain") / 1000.0
+    filled_l = _awc_moved(state, fill_role) / 1000.0
     if drained_l > 0 or filled_l > 0:
         _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), True, reason)
+        awc["history"][0]["source"] = fill_role
+        per_source = awc["ledger"].setdefault("perSource", {})
+        per_source[fill_role] = round(
+            _awc_num(per_source.get(fill_role), 0, 0, 1e9) + filled_l, 3)
     if latch:
         state["status"] = "fault"
         state["fault"] = reason
@@ -6147,11 +6309,10 @@ async def _async_awc_abort(
         state["lastRun"] = now.isoformat()
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
-    state["drainEndsAt"] = ""
-    state["fillEndsAt"] = ""
-    state["exchangeBaselineGapMl"] = 0
-    state["drainedMl"] = 0
-    state["filledMl"] = 0
+    state["endsAt"] = {}
+    state["exchangeBaselineNetMl"] = 0
+    state["movedMl"] = {}
+    state["activeSourceRole"] = ""
     state["targetLitres"] = 0
     state["microChange"] = False  # fault status overrides the flag in both predicates
     if not latch:
@@ -6197,13 +6358,28 @@ def _awc_record_history(
 async def _async_awc_finalize(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
 ) -> None:
-    await _async_awc_stop_pumps(hass, config, ("drain", "fill"), context)
+    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
     awc = _awc_cfg(config)
     state = awc["state"]
     now = datetime.now(timezone.utc)
-    drained_l = state.get("drainedMl", 0) / 1000.0
-    filled_l = state.get("filledMl", 0) / 1000.0
+    fill_role = _awc_fill_role(state)  # read BEFORE the zeroing below clears it
+    drained_l = _awc_moved(state, "drain") / 1000.0
+    filled_l = _awc_moved(state, fill_role) / 1000.0
     _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), False, "")
+    awc["history"][0]["source"] = fill_role
+    ledger = awc["ledger"]
+    per_source = ledger.setdefault("perSource", {})
+    per_source[fill_role] = round(_awc_num(per_source.get(fill_role), 0, 0, 1e9) + filled_l, 3)
+    # Net-salt ledger (Stage B): approximate grams of salt this change added — salt in
+    # with the fill minus salt out with the drain. Only accumulates when BOTH the tank
+    # target and the source's saltPpt are known; an honest 'unknown' beats a wrong number.
+    source_res = awc.get("reservoirs", {}).get(awc_engine.pump_reservoir_id(awc, fill_role), {})
+    salt_delta = awc_engine.net_salt_delta_g(
+        drained_l, filled_l, _awc_tank_ppt(config),
+        source_res.get("saltPpt") if isinstance(source_res, dict) else 0)
+    if salt_delta is not None:
+        ledger["netSaltGrams"] = round(
+            _awc_num(ledger.get("netSaltGrams"), 0, -1e9, 1e9) + salt_delta, 1)
     awc["todayLitres"] = round(awc.get("todayLitres", 0) + filled_l, 3)
     awc["weekLitres"] = round(awc.get("weekLitres", 0) + filled_l, 3)
     awc["monthLitres"] = round(awc.get("monthLitres", 0) + filled_l, 3)
@@ -6223,11 +6399,10 @@ async def _async_awc_finalize(
     state["lastRun"] = now.isoformat()
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
-    state["drainEndsAt"] = ""
-    state["fillEndsAt"] = ""
-    state["exchangeBaselineGapMl"] = 0
-    state["drainedMl"] = 0
-    state["filledMl"] = 0
+    state["endsAt"] = {}
+    state["exchangeBaselineNetMl"] = 0
+    state["movedMl"] = {}
+    state["activeSourceRole"] = ""
     state["targetLitres"] = 0
     state["method"] = ""
     state["pausedReason"] = ""
@@ -6261,14 +6436,17 @@ async def _async_awc_leg_complete_locked(
     if state.get("status") not in _AWC_RUNNING_STATES:
         return
     method = state.get("method") or awc.get("schedule", {}).get("method", _AWC_SAFE_METHOD)
+    fill_role = _awc_fill_role(state)
     target_ml = state.get("targetLitres", 0) * 1000.0
-    drained = state.get("drainedMl", 0)
-    filled = state.get("filledMl", 0)
+    drained = _awc_moved(state, "drain")
+    filled = _awc_moved(state, fill_role)
 
     leg = awc_engine.plan_leg(method, drained, filled, target_ml, target_ml)
     if leg is None:
         await _async_awc_finalize(hass, entry, config, context)
         return
+    # The engine plans in generic role labels — map "fill" to the ACTIVE source.
+    leg = {**leg, "pumps": [fill_role if p == "fill" else p for p in leg["pumps"]]}
     pumps = leg["pumps"]
     await _async_awc_stop_pumps(hass, config, pumps, context)
 
@@ -6308,27 +6486,30 @@ async def _async_awc_leg_complete_locked(
         _awc_bump_odometer(awc, role, seconds=awc_engine.runtime_for_volume_s(
             slice_ml / 1000.0, p.get("mlPerS"), p.get("exchangeFactor", 1.0), p.get("spinUpMl", 0.0)))
     if "drain" in pumps:
-        state["drainedMl"] = drained + slice_ml
+        _awc_set_moved(state, "drain", drained + slice_ml)
         waste = reservoirs.get("waste", {})
         cap_ml = waste.get("capacityLitres", 0) * 1000.0
         waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + slice_ml) if cap_ml else waste.get("filledMl", 0) + slice_ml
-    if "fill" in pumps:
-        state["filledMl"] = filled + slice_ml
-        _awc_debit_fresh(awc, slice_ml)
+    if fill_role in pumps:
+        _awc_set_moved(state, fill_role, filled + slice_ml)
+        _awc_debit_source(awc, fill_role, slice_ml)
     # The slice is credited — clear the leg stamps NOW so the abort/pause paths below
     # (which dead-reckon interrupted legs from these stamps, R6/R9) can never credit
     # this same leg a second time. begin_leg re-stamps for the next leg.
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
 
-    next_leg = awc_engine.plan_leg(method, state["drainedMl"], state["filledMl"], target_ml, target_ml)
+    next_leg = awc_engine.plan_leg(
+        method, _awc_moved(state, "drain"), _awc_moved(state, fill_role), target_ml, target_ml)
     if next_leg is None:
         await _async_awc_finalize(hass, entry, config, context)
         return
+    next_leg = {**next_leg,
+                "pumps": [fill_role if p == "fill" else p for p in next_leg["pumps"]]}
 
     needs_drain = "drain" in next_leg["pumps"]
-    needs_fill = "fill" in next_leg["pumps"]
-    live = _awc_live_state(hass, config)
+    needs_fill = fill_role in next_leg["pumps"]
+    live = _awc_live_state(hass, config, fill_role=fill_role)
     verdict = awc_engine.in_run_safety(awc, live, needs_drain, needs_fill)
     if verdict["action"] == "fault":
         await _async_awc_abort(hass, entry, config, verdict["reason"], True, verdict.get("masterKill", False), context)
@@ -6366,16 +6547,17 @@ async def _async_awc_exchange_tick_locked(
     if state.get("status") != "exchanging":
         return
     now = datetime.now(timezone.utc)
+    fill_role = _awc_fill_role(state)
     target_ml = state.get("targetLitres", 0) * 1000.0
     pumps = awc.get("pumps", {})
     drain = pumps.get("drain", {}) if isinstance(pumps.get("drain"), dict) else {}
-    fill = pumps.get("fill", {}) if isinstance(pumps.get("fill"), dict) else {}
+    fill = pumps.get(fill_role, {}) if isinstance(pumps.get(fill_role), dict) else {}
 
     # Mid-run rate-zeroing (a raw settings write racing the run — the calibrate WS is
     # busy-blocked): dead-reckoning a zero rate reads as 'full target moved' and would
     # phantom-complete the change. Pause WITHOUT crediting this tick (R26).
-    drain_unfinished = target_ml - state.get("drainedMl", 0) > 1e-6
-    fill_unfinished = target_ml - state.get("filledMl", 0) > 1e-6
+    drain_unfinished = target_ml - _awc_moved(state, "drain") > 1e-6
+    fill_unfinished = target_ml - _awc_moved(state, fill_role) > 1e-6
     if (drain_unfinished and _awc_num(drain.get("mlPerS"), 0, 0, 1e9) <= 0) or (
             fill_unfinished and _awc_num(fill.get("mlPerS"), 0, 0, 1e9) <= 0):
         # Credit the HEALTHY side's progress up to now first (the helper skips
@@ -6388,8 +6570,8 @@ async def _async_awc_exchange_tick_locked(
         )
         return
 
-    drain_ends = _parse_datetime(state.get("drainEndsAt"))
-    fill_ends = _parse_datetime(state.get("fillEndsAt"))
+    drain_ends = _parse_datetime(_awc_ends(state, "drain"))
+    fill_ends = _parse_datetime(_awc_ends(state, fill_role))
     drain_rem_s = (drain_ends - now).total_seconds() if drain_ends else 0.0
     fill_rem_s = (fill_ends - now).total_seconds() if fill_ends else 0.0
 
@@ -6400,8 +6582,8 @@ async def _async_awc_exchange_tick_locked(
 
     # Incremental reservoir dead-reckoning (delta since the last tick).
     reservoirs = awc.get("reservoirs", {})
-    d_drain = max(0.0, drained_ml - state.get("drainedMl", 0))
-    d_fill = max(0.0, filled_ml - state.get("filledMl", 0))
+    d_drain = max(0.0, drained_ml - _awc_moved(state, "drain"))
+    d_fill = max(0.0, filled_ml - _awc_moved(state, fill_role))
     if d_drain > 0:
         waste = reservoirs.get("waste", {})
         cap_ml = waste.get("capacityLitres", 0) * 1000.0
@@ -6409,11 +6591,11 @@ async def _async_awc_exchange_tick_locked(
         _awc_bump_odometer(awc, "drain", seconds=awc_engine.runtime_for_volume_s(
             d_drain / 1000.0, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0)))
     if d_fill > 0:
-        _awc_debit_fresh(awc, d_fill)
-        _awc_bump_odometer(awc, "fill", seconds=awc_engine.runtime_for_volume_s(
+        _awc_debit_source(awc, fill_role, d_fill)
+        _awc_bump_odometer(awc, fill_role, seconds=awc_engine.runtime_for_volume_s(
             d_fill / 1000.0, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0)))
-    state["drainedMl"] = drained_ml
-    state["filledMl"] = filled_ml
+    _awc_set_moved(state, "drain", drained_ml)
+    _awc_set_moved(state, fill_role, filled_ml)
 
     # Best-effort per-side stops (R11): a raising turn_off (ESP unreachable) must not
     # abandon the tick half-done — the accounting save and timer re-arm below still run
@@ -6421,10 +6603,10 @@ async def _async_awc_exchange_tick_locked(
     if drain_done:
         await _async_awc_stop_pumps(hass, config, ("drain",), context)
     if fill_done:
-        await _async_awc_stop_pumps(hass, config, ("fill",), context)
+        await _async_awc_stop_pumps(hass, config, (fill_role,), context)
 
     cap = awc.get("safety", {}).get("maxInstantaneousImbalanceLitres", AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L)
-    baseline = state.get("exchangeBaselineGapMl", 0)
+    baseline = state.get("exchangeBaselineNetMl", 0)
     if awc_engine.exchange_imbalance_exceeds(drained_ml, filled_ml, cap, baseline):
         await _async_awc_abort(
             hass, entry, config,
@@ -6434,7 +6616,7 @@ async def _async_awc_exchange_tick_locked(
         )
         return
 
-    live = _awc_live_state(hass, config)
+    live = _awc_live_state(hass, config, fill_role=fill_role)
     verdict = awc_engine.in_run_safety(awc, live, not drain_done, not fill_done)
     if verdict["action"] == "fault":
         await _async_awc_abort(hass, entry, config, verdict["reason"], True, verdict.get("masterKill", False), context)
@@ -6521,7 +6703,7 @@ async def _async_awc_sequential_checkpoint_locked(
     if ends is None or now >= ends - timedelta(milliseconds=500):
         await _async_awc_leg_complete_locked(hass, entry, config, context)
         return
-    live = _awc_live_state(hass, config)
+    live = _awc_live_state(hass, config, fill_role=_awc_fill_role(state))
     verdict = awc_engine.in_run_safety(awc, live, status == "draining", status == "filling")
     if verdict["action"] == "fault":
         await _async_awc_abort(hass, entry, config, verdict["reason"], True,
@@ -6611,7 +6793,7 @@ def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
     stop time (beyond it lies firmware-watchdog territory). Simultaneous legs don't need
     this — their tick already persists per-pump progress every couple of seconds."""
     state = awc.get("state", {})
-    role = {"draining": "drain", "filling": "fill"}.get(state.get("status", ""))
+    role = {"draining": "drain", "filling": _awc_fill_role(state)}.get(state.get("status", ""))
     started = _parse_datetime(state.get("legStartedAt"))
     ends = _parse_datetime(state.get("legEndsAt"))
     if role is None or started is None or ends is None or ends <= started:
@@ -6621,14 +6803,13 @@ def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
     moved_ml = awc_engine.volume_for_runtime_l(
         ran_s, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0), pump.get("spinUpMl", 0.0)
     ) * 1000.0
-    key = "drainedMl" if role == "drain" else "filledMl"
     target_ml = state.get("targetLitres", 0) * 1000.0
-    moved_ml = max(0.0, min(moved_ml, target_ml - state.get(key, 0)))
+    moved_ml = max(0.0, min(moved_ml, target_ml - _awc_moved(state, role)))
     if moved_ml <= 0:
         state["legStartedAt"] = ""
         state["legEndsAt"] = ""
         return
-    state[key] = state.get(key, 0) + moved_ml
+    _awc_set_moved(state, role, _awc_moved(state, role) + moved_ml)
     _awc_bump_odometer(awc, role, seconds=ran_s)
     reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
     if role == "drain":
@@ -6636,7 +6817,7 @@ def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
         cap_ml = waste.get("capacityLitres", 0) * 1000.0
         waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + moved_ml) if cap_ml else waste.get("filledMl", 0) + moved_ml
     else:
-        _awc_debit_fresh(awc, moved_ml)
+        _awc_debit_source(awc, role, moved_ml)
     state["legStartedAt"] = ""
     state["legEndsAt"] = ""
 
@@ -6658,22 +6839,21 @@ def _awc_credit_interrupted_exchange(awc: dict[str, Any], now: datetime) -> None
     target_ml = state.get("targetLitres", 0) * 1000.0
     reservoirs = awc.get("reservoirs", {}) if isinstance(awc.get("reservoirs"), dict) else {}
     pumps = awc.get("pumps", {}) if isinstance(awc.get("pumps"), dict) else {}
-    for role, ends_key, moved_key in (("drain", "drainEndsAt", "drainedMl"),
-                                      ("fill", "fillEndsAt", "filledMl")):
-        ends = _parse_datetime(state.get(ends_key))
+    for role in ("drain", _awc_fill_role(state)):
+        ends = _parse_datetime(_awc_ends(state, role))
         if ends is None:
             continue
-        state[ends_key] = ""
+        _awc_set_ends(state, role, "")
         pump = pumps.get(role, {}) if isinstance(pumps.get(role), dict) else {}
         if _awc_num(pump.get("mlPerS"), 0, 0, 1e9) <= 0:
             continue
         rem_s = max(0.0, (ends - now).total_seconds())
         moved_ml, _done = awc_engine.exchange_side_progress(
             rem_s, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0), target_ml)
-        delta = moved_ml - state.get(moved_key, 0)
+        delta = moved_ml - _awc_moved(state, role)
         if delta <= 0:
             continue
-        state[moved_key] = moved_ml
+        _awc_set_moved(state, role, moved_ml)
         _awc_bump_odometer(awc, role, seconds=awc_engine.runtime_for_volume_s(
             delta / 1000.0, pump.get("mlPerS"), pump.get("exchangeFactor", 1.0)))
         if role == "drain":
@@ -6681,7 +6861,7 @@ def _awc_credit_interrupted_exchange(awc: dict[str, Any], now: datetime) -> None
             cap_ml = waste.get("capacityLitres", 0) * 1000.0
             waste["filledMl"] = min(cap_ml, waste.get("filledMl", 0) + delta) if cap_ml else waste.get("filledMl", 0) + delta
         else:
-            _awc_debit_fresh(awc, delta)
+            _awc_debit_source(awc, role, delta)
 
 
 async def _async_awc_relaunch(
@@ -6715,6 +6895,7 @@ async def _async_awc_relaunch_locked(
     if resume_only and state.get("status") != "paused":
         return False
     method = state.get("method") or awc.get("schedule", {}).get("method", _AWC_SAFE_METHOD)
+    fill_role = _awc_fill_role(state)
     if method != "batch_simultaneous":
         # Credit the elapsed portion of an interrupted sequential leg BEFORE planning, so
         # the resumed leg targets only the genuinely-unmoved remainder (a pause path has
@@ -6726,8 +6907,8 @@ async def _async_awc_relaunch_locked(
         # credit that run-on before replanning (R10). Inert for a paused resume.
         _awc_credit_interrupted_exchange(awc, datetime.now(timezone.utc))
     target_ml = state.get("targetLitres", 0) * 1000.0
-    drained = state.get("drainedMl", 0)
-    filled = state.get("filledMl", 0)
+    drained = _awc_moved(state, "drain")
+    filled = _awc_moved(state, fill_role)
     eps = 1e-6
     leg = None
     if method == "batch_simultaneous":
@@ -6741,10 +6922,12 @@ async def _async_awc_relaunch_locked(
         if leg is None:
             await _async_awc_finalize(hass, entry, config, context)
             return True
+        # The engine plans in generic role labels — map "fill" to the ACTIVE source.
+        leg = {**leg, "pumps": [fill_role if p == "fill" else p for p in leg["pumps"]]}
         needs_drain = "drain" in leg["pumps"]
-        needs_fill = "fill" in leg["pumps"]
+        needs_fill = fill_role in leg["pumps"]
 
-    live = _awc_live_state(hass, config)
+    live = _awc_live_state(hass, config, fill_role=fill_role)
     verdict = awc_engine.in_run_safety(awc, live, needs_drain, needs_fill)
     if verdict["action"] == "fault":
         await _async_awc_abort(hass, entry, config, verdict["reason"], True, verdict.get("masterKill", False), context)
@@ -6763,7 +6946,7 @@ async def _async_awc_relaunch_locked(
     # benign pause into a latched fault via the begin-path calibration guards (R26).
     if state.get("status") == "paused":
         pumps_cfg = awc.get("pumps", {}) if isinstance(awc.get("pumps"), dict) else {}
-        needed = [r for r, need in (("drain", needs_drain), ("fill", needs_fill)) if need]
+        needed = [r for r, need in (("drain", needs_drain), (fill_role, needs_fill)) if need]
         if any(_awc_num((pumps_cfg.get(r) or {}).get("mlPerS"), 0, 0, 1e9) <= 0 for r in needed):
             reason = "A pump is not calibrated — recalibrate, then resume"
             if state.get("pausedReason") != reason:
@@ -6775,7 +6958,7 @@ async def _async_awc_relaunch_locked(
     # After an HA-only restart the ESP may still be running the OLD leg's pump (nothing
     # stopped it), and the re-planned leg may drive a DIFFERENT pump — stop everything
     # first so begin re-energises exactly the pumps the new plan calls for.
-    await _async_awc_stop_pumps(hass, config, AWC_PUMP_ROLES, context)
+    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
     if method == "batch_simultaneous":
         begun, reason = await _async_awc_begin_exchange(hass, config, now, context)
     else:
@@ -6832,8 +7015,12 @@ async def _async_awc_schedule_tick(
     state = acfg.get("state", {})
 
     # Fill-pump drift check (Stage A): grade the model against reality the moment
-    # the fresh empty float trips — latched once per fill cycle.
-    await _async_awc_check_drift_on_empty(hass, entry)
+    # a source reservoir's empty float trips — latched once per fill cycle, and
+    # evaluated for every source reservoir the config actually has (Stage B).
+    tick_reservoirs = acfg.get("reservoirs", {}) if isinstance(acfg.get("reservoirs"), dict) else {}
+    for rid in ("fresh", "fresh2"):
+        if isinstance(tick_reservoirs.get(rid), dict):
+            await _async_awc_check_drift_on_empty(hass, entry, rid)
     # Advisory notification tier (Stage A): reservoir-low / recalibration-due /
     # net-drift, each once per cooldown.
     await _async_awc_advisory_notifications(hass, config)
@@ -8299,8 +8486,8 @@ async def websocket_awc_acknowledge(
         # Abort-latched faults already recorded (and zeroed) at abort time, so this
         # only fires for begin-failure faults, whose credited volume otherwise
         # vanished from history/ledger while the reservoir models kept the debit.
-        drained_l = state.get("drainedMl", 0) / 1000.0
-        filled_l = state.get("filledMl", 0) / 1000.0
+        drained_l = _awc_moved(state, "drain") / 1000.0
+        filled_l = _awc_moved(state, _awc_fill_role(state)) / 1000.0
         if drained_l > 0 or filled_l > 0:
             _awc_record_history(
                 _awc_cfg(config), datetime.now(timezone.utc), drained_l, filled_l,
@@ -8309,9 +8496,9 @@ async def websocket_awc_acknowledge(
             )
         state.update({
             "status": "idle", "fault": "", "faultSince": "", "atoSuspendedUntil": "",
-            "drainedMl": 0, "filledMl": 0, "targetLitres": 0,
-            "legStartedAt": "", "legEndsAt": "", "drainEndsAt": "", "fillEndsAt": "",
-            "exchangeBaselineGapMl": 0, "method": "", "pausedReason": "",
+            "movedMl": {}, "activeSourceRole": "", "targetLitres": 0,
+            "legStartedAt": "", "legEndsAt": "", "endsAt": {},
+            "exchangeBaselineNetMl": 0, "method": "", "pausedReason": "",
             "microChange": False,
         })
         _append_activity(config, "Water change fault acknowledged and cleared", "control")
@@ -8341,7 +8528,8 @@ async def websocket_awc_calibrate(
         return
     role = msg["role"]
     if role not in AWC_PUMP_ROLES:
-        connection.send_error(msg["id"], "invalid_role", "Pump role must be 'drain' or 'fill'")
+        connection.send_error(msg["id"], "invalid_role",
+                              "Pump role must be 'drain', 'fill' or 'fill2'")
         return
     points = [(p[0], p[1]) for p in msg.get("points") or []]
     if points:
@@ -8416,26 +8604,32 @@ async def websocket_awc_reset_reservoir(
         return
     kind = msg["reservoir"]
     if kind not in AWC_RESERVOIR_KINDS:
-        connection.send_error(msg["id"], "invalid_reservoir", "Reservoir must be 'fresh' or 'waste'")
+        connection.send_error(msg["id"], "invalid_reservoir",
+                              "Reservoir must be 'fresh', 'fresh2' or 'waste'")
         return
     async with _awc_lock(hass):
         config = _config_from_entry(entry)  # fetched INSIDE the lock (R1)
         reservoirs = _awc_cfg(config).get("reservoirs", {})
-        if kind == "fresh":
-            fresh = reservoirs.get("fresh", {})
+        if kind in ("fresh", "fresh2"):
+            fresh = reservoirs.get(kind)
+            if not isinstance(fresh, dict):
+                connection.send_error(msg["id"], "invalid_reservoir",
+                                      f"Reservoir '{kind}' is not configured")
+                return
             # Bookend drift check: refilling FROM EMPTY (float tripped) is the other
             # moment reality checks in — grade the finished fill cycle before zeroing.
             if _awc_binary_on(hass, fresh.get("emptyEntity")):
-                verdict = _awc_grade_fresh_drift(config)
+                verdict = _awc_grade_fresh_drift(config, kind)
                 if verdict is not None:
-                    await _async_awc_notify_drift(hass, config, verdict)
+                    await _async_awc_notify_drift(hass, config, verdict, kind)
             fresh["remainingMl"] = fresh.get("capacityLitres", 0) * 1000.0
             fresh["dispensedSinceFullMl"] = 0
             fresh["driftCheckedAt"] = ""  # new fill cycle — re-arm the check
             # The confirmed-full anchor the drift grade requires: from here the
             # odometer genuinely counts from a full reservoir.
             fresh["fullConfirmedAt"] = datetime.now(timezone.utc).isoformat()
-            _append_activity(config, "Fresh saltwater reservoir marked full", "control")
+            name = "Fresh saltwater" if kind == "fresh" else f"Source '{kind}'"
+            _append_activity(config, f"{name} reservoir marked full", "control")
         else:
             reservoirs.get("waste", {})["filledMl"] = 0
             _append_activity(config, "Waste reservoir marked empty", "control")
@@ -8588,7 +8782,8 @@ async def websocket_awc_calibration_run(
         return
     role = msg["role"]
     if role not in AWC_PUMP_ROLES:
-        connection.send_error(msg["id"], "invalid_role", "Pump role must be 'drain' or 'fill'")
+        connection.send_error(msg["id"], "invalid_role",
+                              "Pump role must be 'drain', 'fill' or 'fill2'")
         return
     seconds = float(msg["seconds"])
     async with _awc_lock(hass):
@@ -8779,7 +8974,8 @@ async def websocket_awc_tubing_replaced(
         return
     role = msg["role"]
     if role not in AWC_PUMP_ROLES:
-        connection.send_error(msg["id"], "invalid_role", "Pump role must be 'drain' or 'fill'")
+        connection.send_error(msg["id"], "invalid_role",
+                              "Pump role must be 'drain', 'fill' or 'fill2'")
         return
     config = _config_from_entry(entry)
     pump = _awc_cfg(config).setdefault("pumps", {}).setdefault(role, {})
@@ -8804,9 +9000,20 @@ async def websocket_awc_summary(
     config = _config_from_entry(entry)
     acfg = _awc_cfg(config)
     summary = awc_engine.summary(_awc_cfg_eff(config), dt_util.now())
+    state = acfg.get("state", {}) if isinstance(acfg.get("state"), dict) else {}
+    fill_role = _awc_fill_role(state)
+    # Legacy aliases in the RESPONSE COPY only (never persisted): the panel reads the
+    # pre-B4 scalar names — they mirror the drain + active-source entries of movedMl/endsAt.
+    state_out = {
+        **state,
+        "drainedMl": _awc_moved(state, "drain"),
+        "filledMl": _awc_moved(state, fill_role),
+        "drainEndsAt": _awc_ends(state, "drain"),
+        "fillEndsAt": _awc_ends(state, fill_role),
+    }
     connection.send_result(msg["id"], {
         "summary": summary,
-        "state": acfg.get("state", {}),
+        "state": state_out,
         "schedule": acfg.get("schedule", {}),
         "live": _awc_live_state(hass, config),
         "atoSuspended": _awc_ato_suspended(config),
