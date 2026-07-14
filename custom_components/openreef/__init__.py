@@ -79,6 +79,8 @@ from .const import (
     DEFAULT_TANK_PROFILE,
     CORE_SCHEMA_VERSION,
     DOMAIN,
+    DOSING_BRUSHED_BINDING_ROLES,
+    DOSING_LIVEFOOD_SHELF_LIFE_DAYS,
     DOSING_PARAMETERS,
     ISSUE_ARMED_UNAVAILABLE,
     ISSUE_LEGACY_LABS_CONFIG,
@@ -686,7 +688,8 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
         raw_driver = raw.get("driver") if isinstance(raw.get("driver"), dict) else {}
         raw_entities = raw_driver.get("entities") if isinstance(raw_driver.get("entities"), dict) else {}
         driver_type = raw_driver.get("type")
-        entities = {role: _normalise_entity_id(raw_entities.get(role)) for role in DOSING_BINDING_ROLES}
+        _all_roles = tuple(dict.fromkeys(DOSING_BINDING_ROLES + DOSING_BRUSHED_BINDING_ROLES))
+        entities = {role: _normalise_entity_id(raw_entities.get(role)) for role in _all_roles}
 
         raw_schedule = raw.get("schedule") if isinstance(raw.get("schedule"), dict) else {}
         raw_night = raw_schedule.get("night") if isinstance(raw_schedule.get("night"), dict) else {}
@@ -727,6 +730,9 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
             "chemical": raw.get("chemical") if raw.get("chemical") in DOSING_CHANNEL_CHEMICALS else "other",
             "enabled": bool(raw.get("enabled")),
             "createdAt": _awc_str(raw.get("createdAt"), 40),
+            # Post-dose fresh-chaser seconds (brushed live-food heads): firmware runs
+            # the rinse; HA debits the AWC fresh reservoir for it. 0 = no chaser.
+            "chaserSeconds": _awc_num(raw.get("chaserSeconds"), 0, 0, 120),
             "driver": {
                 "type": driver_type if driver_type in DOSING_DRIVER_TYPES else DOSING_DRIVER_TYPES[0],
                 "version": int(_awc_num(raw_driver.get("version"), 1, 1, 99)),
@@ -767,9 +773,19 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                 "lowThresholdMl": _awc_num(raw_reservoir.get("lowThresholdMl"), 500, 0, DOSING_RESERVOIR_MAX_ML),
                 "refilledAt": _awc_str(raw_reservoir.get("refilledAt"), 40),
                 "primedAt": _awc_str(raw_reservoir.get("primedAt"), 40),
+                # Live-food freshness: when the culture was mixed/refreshed, and how
+                # long it keeps (0 = never expires; livefood defaults to 1 day).
+                "mixedAt": _awc_str(raw_reservoir.get("mixedAt"), 40),
+                "shelfLifeDays": _awc_num(
+                    raw_reservoir.get("shelfLifeDays"),
+                    DOSING_LIVEFOOD_SHELF_LIFE_DAYS if raw.get("chemical") == "livefood" else 0,
+                    0, 60),
             },
             "calibration": {
                 "stepsPerMl": _awc_num(raw_cal.get("stepsPerMl"), 0, 0, 1e6),
+                # Brushed heads calibrate in flow terms, not steps.
+                "mlPerS": _awc_num(raw_cal.get("mlPerS"), 0, 0, 200),
+                "spinUpMl": _awc_num(raw_cal.get("spinUpMl"), 0, -50, 50),
                 "measuredMl": _awc_num(raw_cal.get("measuredMl"), 0, 0, 1000),
                 "calibratedAt": _awc_str(raw_cal.get("calibratedAt"), 40),
                 "syncedToDevice": bool(raw_cal.get("syncedToDevice")),
@@ -2352,7 +2368,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         raw_notify = raw_notify if isinstance(raw_notify, dict) else {}
         dosing["notifications"] = {
             key: bool(raw_notify.get(key, True))
-            for key in ("missedDose", "reservoirLow", "tubeLife", "calibrationDue", "syncIssues")
+            for key in ("missedDose", "reservoirLow", "tubeLife", "calibrationDue", "syncIssues", "staleFood")
         }
 
     lighting_cfg = config.setdefault("lightingSchedule", {})
@@ -9297,19 +9313,40 @@ def _dosing_desired_writes(
     """Every firmware number this channel should hold, keyed by binding role."""
     compiled = dosing_engine.compile_schedule(channel, _dosing_lighting_off_window(config, now_local), now_local)
     writes = dict(compiled["writes"])
+    if dosing_engine.is_brushed(channel):
+        # Brushed heads run on flow-rate numbers, not stepper counts; the chaser
+        # duration rides the same sync so the firmware always holds the setting.
+        writes.pop("stepsPerMlNumber", None)
+        ml_per_s = channel.get("calibration", {}).get("mlPerS") or 0
+        if ml_per_s > 0:
+            writes["flowMlPerSNumber"] = float(ml_per_s)
+            writes["spinUpMlNumber"] = float(channel.get("calibration", {}).get("spinUpMl") or 0)
+        writes["chaserSecondsNumber"] = float(channel.get("chaserSeconds") or 0)
+        return writes
     steps_per_ml = channel.get("calibration", {}).get("stepsPerMl") or 0
     if steps_per_ml > 0:
         writes["stepsPerMlNumber"] = float(steps_per_ml)
     return writes
 
 
-def _dosing_desired_switches(channel: dict[str, Any]) -> dict[str, bool]:
+def _dosing_desired_switches(channel: dict[str, Any], now: datetime | None = None) -> dict[str, bool]:
     """Desired firmware switch states. The enable switch only goes on when HA can
-    stand behind the schedule: calibrated, and (for kalk) the missing-pH state has
-    been explicitly acknowledged. haSuspendSwitch is NOT here — it belongs to the
-    AWC hooks and the panic lockout, never to settings sync."""
+    stand behind the schedule: calibrated, (for kalk) the missing-pH state
+    explicitly acknowledged, and (for live food) the culture still FRESH — the
+    firmware can't see freshness, so HA owns the signal and the device holds the
+    posture; the 60 s sync re-asserts it (the pH-mirror philosophy). haSuspendSwitch
+    is NOT here — it belongs to the AWC hooks and the panic lockout, never to
+    settings sync."""
     guards = channel.get("guards", {}) if isinstance(channel.get("guards"), dict) else {}
-    calibrated = (channel.get("calibration", {}).get("stepsPerMl") or 0) > 0
+    if dosing_engine.is_brushed(channel):
+        calibrated = (channel.get("calibration", {}).get("mlPerS") or 0) > 0
+    else:
+        calibrated = (channel.get("calibration", {}).get("stepsPerMl") or 0) > 0
+    fresh_ok = True
+    if channel.get("chemical") == "livefood":
+        reservoir = channel.get("reservoir", {}) if isinstance(channel.get("reservoir"), dict) else {}
+        fresh_ok = dosing_engine.freshness_state(
+            reservoir, now or datetime.now(timezone.utc))["status"] != "stale"
     ph_ok = bool(guards.get("phEntity")) or bool(guards.get("phMissingAcknowledged")) or channel.get("chemical") != "kalk"
     schedule = channel.get("schedule", {}) if isinstance(channel.get("schedule"), dict) else {}
     schedule_on = bool(schedule.get("enabled"))
@@ -9317,7 +9354,7 @@ def _dosing_desired_switches(channel: dict[str, Any]) -> dict[str, bool]:
     return {
         # mlPerDay 0 is a safety edit: the enable switch must go OFF with it, or
         # the firmware keeps executing its previous schedule (R2).
-        "enabledSwitch": bool(channel.get("enabled") and schedule_on and calibrated and ph_ok and has_volume),
+        "enabledSwitch": bool(channel.get("enabled") and schedule_on and calibrated and ph_ok and has_volume and fresh_ok),
         "phGuardSwitch": bool(guards.get("phEntity")),
     }
 
@@ -9632,6 +9669,30 @@ async def _async_dosing_notify_once(
     await _async_send_mode_notification(hass, config, f"openreef_dosing_{key}", title, message)
 
 
+async def _async_awc_credit_chaser_fill(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, chaser_ml: float
+) -> None:
+    """Debit the AWC fresh reservoir for a firmware-run post-dose chaser rinse (the
+    live-food head pulls its rinse from the AWC fresh line) and count it into the
+    cumulative fill ledger — water entered the tank. Locked fetch-fresh: this is
+    called from the dosing tick, which must never clobber AWC state (R1)."""
+    if chaser_ml <= 0:
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        awc = _awc_cfg(config)
+        if not awc:
+            return
+        _awc_debit_source(awc, "fill", chaser_ml)
+        ledger = awc.setdefault("ledger", {})
+        ledger["cumulativeFilledL"] = round(
+            _awc_num(ledger.get("cumulativeFilledL"), 0, 0, 1e9) + chaser_ml / 1000.0, 3)
+        _append_activity(
+            config, f"Live-food chaser rinse: {chaser_ml:.0f} ml from the fresh reservoir",
+            "control")
+        await _async_save_config(hass, entry, config)
+
+
 async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
     """The 60 s watcher. Accounting deltas accumulate in hass.data and flush to the
     config blob hourly or on a transition — kalk doses ~144x/day and every blob save
@@ -9744,6 +9805,21 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     per_dose = plan.get("perDoseMl") or 0
                     if per_dose > 0:
                         rt["pendingDoses"] = rt.get("pendingDoses", 0) + max(1, round(delta / per_dose))
+                    # Post-dose fresh chaser (brushed live-food heads): the firmware
+                    # ran a rinse from the AWC fresh line after each dose — debit the
+                    # AWC models for it, unless the firmware says it skipped (the AWC
+                    # owned the fresh pump at the time).
+                    chaser_s = _awc_num(channel.get("chaserSeconds"), 0, 0, 120)
+                    if chaser_s > 0 and dosing_engine.is_brushed(channel):
+                        skipped_ent = entities.get("chaserSkippedSensor")
+                        skipped_state = hass.states.get(skipped_ent) if skipped_ent else None
+                        skipped = (skipped_state is not None
+                                   and str(skipped_state.state).lower() == "on")
+                        flow = _awc_num(channel.get("calibration", {}).get("mlPerS"), 0, 0, 200)
+                        doses = max(1, round(delta / per_dose)) if per_dose > 0 else 1
+                        if not skipped and flow > 0:
+                            await _async_awc_credit_chaser_fill(
+                                hass, entry, chaser_s * flow * doses)
 
         # --- respread staleness (R17): a schedule edit after an accepted respread
         # invalidates the catch-up override — the safety edit wins immediately.
@@ -9781,6 +9857,44 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 if until is not None and not lockout_active and state.get("suspendedUntil"):
                     state["suspendedUntil"] = ""
                     transition = True
+
+        # --- live-food freshness posture (Stage C): the firmware can't see
+        # freshness, so HA owns the signal and the device holds the posture — the
+        # enable switch is asserted OFF every tick while the culture is stale
+        # (mirror of the suspend re-assertion above); after a refresh the sync's
+        # desired-switches path turns it back on.
+        if channel.get("chemical") == "livefood":
+            fresh = dosing_engine.freshness_state(
+                channel.get("reservoir", {}) if isinstance(channel.get("reservoir"), dict) else {},
+                now_utc)
+            was_stale = bool(rt.get("staleFood"))
+            is_stale = fresh["status"] == "stale"
+            rt["staleFood"] = is_stale
+            if is_stale:
+                enable_ent = entities.get("enabledSwitch")
+                if enable_ent:
+                    enable_state = hass.states.get(enable_ent)
+                    if (enable_state is not None
+                            and str(enable_state.state).lower() == "on"):
+                        await hass.services.async_call(
+                            "switch", "turn_off", {ATTR_ENTITY_ID: enable_ent}, blocking=True
+                        )
+                if not was_stale:
+                    _dosing_record_event(
+                        channel, "stale",
+                        "Live food past its shelf life — dosing disabled until refreshed")
+                    transition = True
+                if _dosing_notify_enabled(config, "staleFood"):
+                    await _async_dosing_notify_once(
+                        hass, config, runtime, f"stale_{cid}", 12 * 3600,
+                        "Live food is stale",
+                        f"{channel.get('name') or cid}: the culture is past its shelf "
+                        "life — dosing is disabled until you refresh the reservoir "
+                        "and tap 'Refreshed'.")
+            elif was_stale:
+                # Fresh again (mark_refreshed landed): re-assert the desired ON state
+                # promptly rather than waiting for drift repair.
+                _async_kick_dosing_sync(hass, entry)
 
         # --- missed-dose watcher (baselined, availability-gated, 2-tick debounce) ----
         # The baseline anchors "expected" to the moment the current plan took effect,
@@ -10196,6 +10310,36 @@ async def websocket_dosing_reset_reservoir(
     _dosing_record_event(channel, "refill", "Reservoir refilled — ledger reset to full")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config, reprimeRecommended=True)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/dosing_mark_refreshed",
+    vol.Required("channel_id"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_dosing_mark_refreshed(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """'Refreshed' — stamp the live-food culture as newly mixed. The freshness clock
+    restarts; the sync re-asserts the firmware enable switch if staleness had it
+    held off."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    channel = _dosing_channel_for_msg(connection, msg, config)
+    if channel is None:
+        return
+    channel.setdefault("reservoir", {})["mixedAt"] = datetime.now(timezone.utc).isoformat()
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+    runtime.setdefault("channels", {}).setdefault(msg["channel_id"], {})["staleFood"] = False
+    runtime.setdefault("notified", {}).pop(f"stale_{msg['channel_id']}", None)
+    _dosing_record_event(channel, "refresh", "Culture refreshed — freshness clock restarted")
+    config = await _async_save_config(hass, entry, config)
+    _async_kick_dosing_sync(hass, entry)
+    _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -11994,6 +12138,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_dose_now)
     websocket_api.async_register_command(hass, websocket_dosing_prime)
     websocket_api.async_register_command(hass, websocket_dosing_reset_reservoir)
+    websocket_api.async_register_command(hass, websocket_dosing_mark_refreshed)
     websocket_api.async_register_command(hass, websocket_dosing_reset_tube)
     websocket_api.async_register_command(hass, websocket_dosing_respread_missed)
     websocket_api.async_register_command(hass, websocket_dosing_acknowledge)

@@ -160,7 +160,8 @@ def test_normaliser_clamps_and_defaults():
     assert ch["reservoir"]["remainingMl"] <= ch["reservoir"]["volumeMl"]
     assert ch["wear"]["tubeLifeHours"] == 1000.0
     assert ch["sync"]["state"] == "unsynced"
-    assert set(ch["driver"]["entities"]) == set(integration.DOSING_BINDING_ROLES)
+    assert set(ch["driver"]["entities"]) == set(
+        integration.DOSING_BINDING_ROLES + integration.DOSING_BRUSHED_BINDING_ROLES)
 
 
 def test_normaliser_caps_channel_count_and_drops_junk():
@@ -402,7 +403,7 @@ def test_normaliser_notifications_families_default_on():
     notifications = entry.options[CONF_SETTINGS]["dosing"]["notifications"]
     assert notifications == {
         "missedDose": True, "reservoirLow": True, "tubeLife": True,
-        "calibrationDue": True, "syncIssues": True,
+        "calibrationDue": True, "syncIssues": True, "staleFood": True,
     }
 
 
@@ -709,6 +710,81 @@ def test_ws_prime_is_bounded_and_stamps_primed_at():
     presses = _calls(hass, "button", "press")
     assert len(presses) == 6, "30 s cap ⇒ at most 6 five-second presses"
     assert _saved_channel(entry)["reservoir"]["primedAt"]
+
+
+# --- Stage C: live-food freshness enforcement + chaser accounting ---------------
+
+def _livefood(**over):
+    base = dict(
+        chemical="livefood",
+        driver={"type": "openreef_esphome_brushed",
+                "entities": {**ENTITIES, "chaserSkippedSensor": "binary_sensor.phyto_chaser_skipped"}},
+        calibration={"mlPerS": 2.0},
+        schedule={"enabled": True, "mlPerDay": 40, "mode": "doses", "dosesPerDay": 10,
+                  "windowStart": "00:00", "windowEnd": "00:00"},
+    )
+    base.update(over)
+    return _channel(**base)
+
+
+def test_stale_livefood_forces_enable_off_and_notifies_once():
+    # FAIL-CLOSED: no mixedAt stamp = stale. HA owns the freshness signal — the tick
+    # asserts the firmware enable switch OFF and says so once per cooldown.
+    ch = _livefood(reservoir={"shelfLifeDays": 1, "mixedAt": ""})
+    entry = _entry(channels={"phyto": ch})
+    hass = _hass(entry, states={ENTITIES["enabledSwitch"]: "on",
+                                "binary_sensor.phyto_chaser_skipped": "off"})
+    run(integration._async_dosing_tick(hass, entry))
+    offs = [c for c in _calls(hass, "switch", "turn_off")
+            if ENTITIES["enabledSwitch"] in c.data.values()]
+    assert offs, "stale culture must force the firmware enable OFF"
+
+    def _stale_notes():
+        return [c for c in hass.services.calls if c.domain == "persistent_notification"
+                and c.data.get("notification_id") == "openreef_dosing_stale_phyto"]
+    assert len(_stale_notes()) == 1
+    run(integration._async_dosing_tick(hass, entry))
+    assert len(_stale_notes()) == 1  # notify-once cooldown holds
+    saved = _saved_channel(entry, "phyto")
+    assert integration._dosing_desired_switches(saved)["enabledSwitch"] is False
+
+
+def test_mark_refreshed_restarts_clock_and_reenables():
+    ch = _livefood(reservoir={"shelfLifeDays": 1, "mixedAt": ""})
+    entry = _entry(channels={"phyto": ch})
+    hass = _hass(entry, states={"binary_sensor.phyto_chaser_skipped": "off"})
+    run(integration._async_dosing_tick(hass, entry))  # latches stale
+    conn = FakeConnection()
+    run(integration.websocket_dosing_mark_refreshed(hass, conn, {"id": 1, "channel_id": "phyto"}))
+    assert not conn.errors, conn.error_codes
+    saved = _saved_channel(entry, "phyto")
+    assert saved["reservoir"]["mixedAt"]
+    assert integration._dosing_desired_switches(saved)["enabledSwitch"] is True
+
+
+def test_chaser_debits_awc_fresh_reservoir_unless_skipped():
+    # A landed dose on a brushed channel with a 5 s chaser at 2 ml/s debits 10 ml
+    # from the AWC fresh reservoir and counts it into the fill ledger; the
+    # firmware's chaser-skipped flag suppresses the debit.
+    ch = _livefood(chaserSeconds=5, reservoir={"shelfLifeDays": 0})  # no expiry
+    entry = _entry(channels={"phyto": ch})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg.setdefault("automaticWaterChange", {})["enabled"] = True
+    cfg["automaticWaterChange"].setdefault("reservoirs", {})["fresh"] = {
+        "capacityLitres": 25, "remainingMl": 25000}
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(cfg)
+    hass = _hass(entry, states={"binary_sensor.phyto_chaser_skipped": "off"})
+    run(integration._async_dosing_tick(hass, entry))   # baseline at 0
+    hass.states.set("sensor.kalk_dosed_today", "4.0")  # one 4 ml dose landed
+    run(integration._async_dosing_tick(hass, entry))
+    awc = entry.options[CONF_SETTINGS]["automaticWaterChange"]
+    assert abs(awc["reservoirs"]["fresh"]["remainingMl"] - 24990) < 0.6
+    assert abs(awc["ledger"]["cumulativeFilledL"] - 0.01) < 1e-6
+    hass.states.set("binary_sensor.phyto_chaser_skipped", "on")
+    hass.states.set("sensor.kalk_dosed_today", "8.0")
+    run(integration._async_dosing_tick(hass, entry))
+    awc = entry.options[CONF_SETTINGS]["automaticWaterChange"]
+    assert abs(awc["reservoirs"]["fresh"]["remainingMl"] - 24990) < 0.6  # unchanged
 
 
 def _main() -> int:
