@@ -10157,7 +10157,10 @@ async def websocket_dosing_calibrate_start(
     if not await _async_dosing_press(hass, channel, "calibrateButton"):
         connection.send_error(msg["id"], "not_bound", "Calibrate button entity is not bound or unavailable")
         return
-    _dosing_record_event(channel, "calibrate_run", "100-revolution calibration run started")
+    _dosing_record_event(
+        channel, "calibrate_run",
+        "30 s calibration burst started" if dosing_engine.is_brushed(channel)
+        else "100-revolution calibration run started")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -10183,13 +10186,34 @@ async def websocket_dosing_calibrate(
     channel = _dosing_channel_for_msg(connection, msg, config)
     if channel is None:
         return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cal = channel.setdefault("calibration", {})
+    history = cal.setdefault("history", [])
+    if dosing_engine.is_brushed(channel):
+        # Brushed heads calibrate in flow terms from the fixed 30 s burst.
+        ml_per_s = dosing_engine.brushed_calibration_from_run(msg["measured_ml"])
+        if ml_per_s <= 0:
+            connection.send_error(msg["id"], "invalid_measurement",
+                                  "Measured volume must be positive")
+            return
+        derived = {"mlPerS": ml_per_s, "measuredMl": round(float(msg["measured_ml"]), 1)}
+        history.insert(0, {"mlPerS": ml_per_s, "measuredMl": derived["measuredMl"],
+                           "calibratedAt": now_iso})
+        del history[DOSING_CAL_HISTORY_MAX:]
+        cal["mlPerS"] = ml_per_s
+        cal["measuredMl"] = derived["measuredMl"]
+        cal["calibratedAt"] = now_iso
+        cal["syncedToDevice"] = False
+        _dosing_record_event(channel, "calibrated",
+                             f"{ml_per_s:g} ml/s from {derived['measuredMl']:g} ml in 30 s")
+        config = await _async_save_config(hass, entry, config)
+        _async_kick_dosing_sync(hass, entry)
+        _awc_send(connection, msg, hass, config, calibration=derived)
+        return
     derived = dosing_engine.calibration_from_measured(msg["measured_ml"])
     if derived is None:
         connection.send_error(msg["id"], "invalid_measurement", "Measured volume must be 1–1000 ml")
         return
-    now_iso = datetime.now(timezone.utc).isoformat()
-    cal = channel.setdefault("calibration", {})
-    history = cal.setdefault("history", [])
     history.insert(0, {"stepsPerMl": derived["stepsPerMl"], "measuredMl": derived["measuredMl"], "calibratedAt": now_iso})
     del history[DOSING_CAL_HISTORY_MAX:]
     cal["stepsPerMl"] = derived["stepsPerMl"]

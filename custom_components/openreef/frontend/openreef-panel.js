@@ -1517,6 +1517,11 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "add-doser-channel") this._addDoserChannel();
       if (action === "add-doser-kalk") this._addDoserChannel("Kalkwasser", "kalk");
+      if (action === "add-doser-livefood") this._addDoserChannel("Live food", "livefood", "openreef_esphome_brushed");
+      if (action === "doser-mark-refreshed") this._doserCall(
+        { type: "openreef/dosing_mark_refreshed", channel_id: id },
+        "Freshness clock restarted — dosing re-enables on the next sync.",
+      );
       if (action === "remove-doser-channel") this._removeDoserChannel(id);
       if (action === "doser-autobind") this._doserAutoBind(id);
       if (action === "doser-prime") this._doserCall({ type: "openreef/dosing_prime", channel_id: id, seconds: 10 }, "Priming ~10 s.");
@@ -8785,7 +8790,42 @@ class OpenReefPanel extends HTMLElement {
     return Math.min(10, cap);
   }
 
-  _addDoserChannel(presetLabel, presetChem) {
+  _doserFreshness(channel) {
+    // Client-side mirror of the engine's freshness_state — display only; the
+    // backend tick owns enforcement.
+    const res = channel.reservoir || {};
+    const shelfDays = Number(res.shelfLifeDays) || 0;
+    if (shelfDays <= 0) return { status: "fresh", hoursLeft: null };
+    const mixed = Date.parse(res.mixedAt || "");
+    if (!Number.isFinite(mixed)) return { status: "stale", hoursLeft: 0 };
+    const leftH = shelfDays * 24 - (Date.now() - mixed) / 3600000;
+    if (leftH <= 0) return { status: "stale", hoursLeft: 0 };
+    return { status: leftH <= shelfDays * 24 * 0.25 ? "aging" : "fresh", hoursLeft: leftH };
+  }
+
+  _doserFreshnessBlock(eid, channel) {
+    const res = channel.reservoir || {};
+    const fresh = this._doserFreshness(channel);
+    const line = fresh.status === "stale"
+      ? `<strong>⛔ Stale — dosing is held off.</strong> Refresh the culture, then tap Refreshed.`
+      : fresh.status === "aging"
+        ? `⚠ Aging — about ${this._format(fresh.hoursLeft, 0)} h left.`
+        : fresh.hoursLeft == null
+          ? `Freshness tracking off (shelf life 0).`
+          : `✅ Fresh — about ${this._format(fresh.hoursLeft, 0)} h left.`;
+    return `
+        <div class="awc-section-title"><p class="eyebrow">Freshness (live food)</p></div>
+        <small>${line}</small>
+        <div class="mini-grid">
+          <label>Shelf life (days)<input type="number" min="0" max="60" step="0.5" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="shelfLifeDays" value="${res.shelfLifeDays ?? 1}"><small>0 = never expires. Phyto/pods/baby brine keep about a day.</small></label>
+          <label>Fresh chaser (s)<input type="number" min="0" max="120" step="1" data-scope="dosing-channel" data-id="${eid}" data-field="chaserSeconds" value="${channel.chaserSeconds ?? 0}"><small>Post-dose rinse from the AWC fresh line — keeps the food line clear. 0 = off.</small></label>
+        </div>
+        <div class="button-row">
+          <button class="secondary" data-action="doser-mark-refreshed" data-id="${eid}">Refreshed today</button>
+        </div>`;
+  }
+
+  _addDoserChannel(presetLabel, presetChem, presetDriver) {
     const nameEl = this.shadowRoot.querySelector("#or-add-doser-name");
     const chemEl = this.shadowRoot.querySelector("#or-add-doser-chem");
     const label = presetLabel || (nameEl && nameEl.value.trim()) || "";
@@ -8813,10 +8853,11 @@ class OpenReefPanel extends HTMLElement {
             night: { enabled: true, percent: 65, useLightingSchedule: true } }
         : { enabled: false, mlPerDay: 0, mode: "doses", dosesPerDay: 8 },
       guards: {},
-      reservoir: {},
+      reservoir: chemical === "livefood" ? { shelfLifeDays: 1 } : {},
       calibration: {},
-      driver: { type: "openreef_esphome_stepper", entities: {} },
+      driver: { type: presetDriver || "openreef_esphome_stepper", entities: {} },
     };
+    if (chemical === "livefood") channels[id].chaserSeconds = 5;
     this._doserMessage = "";
     this._setDirty(true);
     this._recordActivity(`Added dosing channel: ${label}`);
@@ -9280,6 +9321,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="button-row">
           <button class="secondary" data-action="add-doser-channel">Add channel</button>
           <button class="secondary" data-action="add-doser-kalk">+ Kalkwasser doser</button>
+          <button class="secondary" data-action="add-doser-livefood">+ Live food doser</button>
         </div>
         ${ids.map((id) => this._doserChannelSettingsCard(id)).join("")}
       </section>
@@ -9317,9 +9359,14 @@ class OpenReefPanel extends HTMLElement {
       : (kalkish && !guards.phEntity
         ? `<small class="awc-hint">Running without a pH failsafe (acknowledged).</small>` : "");
 
-    const calStatus = (Number(cal.stepsPerMl) || 0) > 0
-      ? `Calibrated: ${this._format(cal.stepsPerMl, 1)} steps/ml (${this._format((cal.measuredMl || 0) / 100, 3)} ml/rev)${cal.calibratedAt ? ` · ${this._escape(this._formatActivityTime(cal.calibratedAt))}` : ""}`
-      : "Not calibrated yet — scheduled dosing is blocked until calibration is stored.";
+    const brushed = (channel.driver?.type === "openreef_esphome_brushed");
+    const calStatus = brushed
+      ? ((Number(cal.mlPerS) || 0) > 0
+        ? `Calibrated: ${this._format(cal.mlPerS, 2)} ml/s (30 s burst)${cal.calibratedAt ? ` · ${this._escape(this._formatActivityTime(cal.calibratedAt))}` : ""}`
+        : "Not calibrated yet — run the 30 s burst into a measuring jug and enter the ml.")
+      : ((Number(cal.stepsPerMl) || 0) > 0
+        ? `Calibrated: ${this._format(cal.stepsPerMl, 1)} steps/ml (${this._format((cal.measuredMl || 0) / 100, 3)} ml/rev)${cal.calibratedAt ? ` · ${this._escape(this._formatActivityTime(cal.calibratedAt))}` : ""}`
+        : "Not calibrated yet — scheduled dosing is blocked until calibration is stored.");
     const history = (cal.history || []).slice(0, 3).map((h) => `
       <div class="manual-history-row">
         <span>${this._escape(h.calibratedAt ? this._formatActivityTime(h.calibratedAt) : "—")}</span>
@@ -9412,11 +9459,12 @@ class OpenReefPanel extends HTMLElement {
           <button class="secondary" data-action="doser-reset-reservoir" data-id="${eid}">Refilled — reset ledger</button>
           <button class="secondary" data-action="doser-prime" data-id="${eid}">Re-prime 10 s</button>
         </div>
+        ${channel.chemical === "livefood" ? this._doserFreshnessBlock(eid, channel) : ""}
 
         <div class="awc-section-title"><p class="eyebrow">Calibration</p></div>
         <small>${calStatus}</small>
         <div class="button-row">
-          <button class="secondary" data-action="doser-cal-run" data-id="${eid}">Run 100 revolutions</button>
+          <button class="secondary" data-action="doser-cal-run" data-id="${eid}">${brushed ? "Run 30 s burst" : "Run 100 revolutions"}</button>
           <input type="number" min="1" max="1000" step="0.1" placeholder="Measured (ml)" data-doser-cal="${eid}" class="dose-ml-input">
           <button class="secondary" data-action="doser-cal-save" data-id="${eid}">Save calibration</button>
           ${(Number(cal.stepsPerMl) || 0) > 0 ? `<button class="secondary" data-action="doser-verify-dose" data-id="${eid}">Verify with ${this._doserVerifyDoseMl(channel)} ml dose</button>` : ""}
