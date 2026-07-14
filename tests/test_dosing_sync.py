@@ -787,6 +787,19 @@ def test_chaser_debits_awc_fresh_reservoir_unless_skipped():
     assert abs(awc["reservoirs"]["fresh"]["remainingMl"] - 24990) < 0.6  # unchanged
 
 
+def test_manual_dose_blocked_on_stale_food():
+    # The firmware enable switch is already off — but the HA-side manual gate must
+    # SAY why, not fail opaquely at the device.
+    ch = _livefood(reservoir={"shelfLifeDays": 1, "mixedAt": ""})
+    entry = _entry(channels={"phyto": ch})
+    hass = _hass(entry, states={"binary_sensor.phyto_chaser_skipped": "off"})
+    conn = FakeConnection()
+    run(integration.websocket_dosing_dose_now(hass, conn, {"id": 1, "channel_id": "phyto", "ml": 2}))
+    payload = conn.results[0].payload
+    assert payload["started"] is False
+    assert any(r["code"] == "stale_food" for r in payload["reasons"])
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

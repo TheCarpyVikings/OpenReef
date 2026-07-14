@@ -712,6 +712,7 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
             if isinstance(item, dict):
                 history.append({
                     "stepsPerMl": _awc_num(item.get("stepsPerMl"), 0, 0, 1e6),
+                    "mlPerS": _awc_num(item.get("mlPerS"), 0, 0, 200),
                     "measuredMl": _awc_num(item.get("measuredMl"), 0, 0, 1000),
                     "calibratedAt": _awc_str(item.get("calibratedAt"), 40),
                 })
@@ -10257,7 +10258,9 @@ async def websocket_dosing_dose_now(
     live["awcActive"] = _dosing_awc_suspended(config)
     live["now"] = datetime.now(timezone.utc)
     reasons = [
-        r for r in dosing_engine.guard_reasons(channel, live, now_local.hour * 60 + now_local.minute, manual=True)
+        r for r in dosing_engine.guard_reasons(
+            channel, live, now_local.hour * 60 + now_local.minute, manual=True,
+            now=datetime.now(timezone.utc))
         if r["severity"] == "block" and r["code"] != "disabled"
     ]
     if reasons:
