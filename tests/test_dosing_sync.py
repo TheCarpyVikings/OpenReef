@@ -800,6 +800,92 @@ def test_manual_dose_blocked_on_stale_food():
     assert any(r["code"] == "stale_food" for r in payload["reasons"])
 
 
+# --- Stage E: 2-part spacing orchestration --------------------------------------
+
+def test_dose_now_spacing_gate_blocks_and_queues():
+    from datetime import datetime, timezone, timedelta
+    ca = _channel(chemical="ca", schedule={"enabled": True, "mlPerDay": 100, "mode": "doses",
+                                           "dosesPerDay": 10})
+    entry = _entry(channels={"kalk": _channel(), "ca": ca})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["dosing"]["spacing"] = {"enabled": True, "matrix": {"alk|ca": 30}, "queued": None}
+    cfg["dosing"]["channels"]["ca"]["state"]["lastDoseAt"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(cfg)
+    hass = _hass(entry, states={ENTITIES["enabledSwitch"]: "on"})
+    conn = FakeConnection()
+    run(integration.websocket_dosing_dose_now(hass, conn, {"id": 1, "channel_id": "kalk", "ml": 2}))
+    payload = conn.results[0].payload
+    assert payload["started"] is False
+    assert any(r["code"] == "spacing" for r in payload["reasons"])
+    conn2 = FakeConnection()
+    run(integration.websocket_dosing_dose_now(
+        hass, conn2, {"id": 2, "channel_id": "kalk", "ml": 2, "queue": True}))
+    p2 = conn2.results[0].payload
+    assert p2["queued"] is True and p2["started"] is False
+    saved = entry.options[CONF_SETTINGS]["dosing"]["spacing"]["queued"]
+    assert saved and saved["channelId"] == "kalk" and saved["ml"] == 2.0
+    # nothing actuated while blocked
+    assert not [c for c in _calls(hass, "button", "press")
+                if ENTITIES["manualDoseButton"] in c.data.values()]
+
+
+def test_spacing_queue_fires_when_clear_and_drops_when_blocked():
+    from datetime import datetime, timezone, timedelta
+    entry = _entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["dosing"]["spacing"] = {"enabled": True, "matrix": {"alk|ca": 30}, "queued": {
+        "channelId": "kalk", "ml": 2.0,
+        "requestedAt": datetime.now(timezone.utc).isoformat(),
+        "notBefore": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()}}
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(cfg)
+    hass = _hass(entry, states={ENTITIES["enabledSwitch"]: "on"})
+    run(integration._async_dosing_tick(hass, entry))
+    assert entry.options[CONF_SETTINGS]["dosing"]["spacing"]["queued"] is None
+    assert [c for c in _calls(hass, "button", "press")
+            if ENTITIES["manualDoseButton"] in c.data.values()],         "queued dose must actuate the bounded manual-dose path"
+    # blocked at FIRE time (channel went uncalibrated while queued) → dropped
+    entry2 = _entry(channels={"kalk": _channel(calibration={"stepsPerMl": 0})})
+    cfg2 = entry2.options[CONF_SETTINGS]
+    cfg2["dosing"]["spacing"] = {"enabled": True, "matrix": {}, "queued": {
+        "channelId": "kalk", "ml": 2.0, "requestedAt": "",
+        "notBefore": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()}}
+    entry2.options[CONF_SETTINGS] = integration._normalise_core_config(cfg2)
+    hass2 = _hass(entry2)
+    run(integration._async_dosing_tick(hass2, entry2))
+    assert entry2.options[CONF_SETTINGS]["dosing"]["spacing"]["queued"] is None
+    assert not [c for c in _calls(hass2, "button", "press")
+                if ENTITIES["manualDoseButton"] in c.data.values()]
+
+
+def test_min_gap_and_phase_offset_writes():
+    from datetime import datetime
+    ca = _channel(chemical="ca", schedule={"enabled": True, "mlPerDay": 100, "mode": "doses",
+                                           "dosesPerDay": 10, "windowStart": "08:00",
+                                           "windowEnd": "12:00"})
+    entry = _entry(channels={"kalk": _channel(), "ca": ca})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["dosing"]["spacing"] = {"enabled": True, "matrix": {"alk|ca": 30}, "queued": None}
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(cfg)
+    config = entry.options[CONF_SETTINGS]
+    now_local = datetime(2026, 7, 17, 9, 0)
+    kalk_writes = integration._dosing_desired_writes(config["dosing"]["channels"]["kalk"], config, now_local)
+    ca_writes = integration._dosing_desired_writes(config["dosing"]["channels"]["ca"], config, now_local)
+    assert kalk_writes["minGapNumber"] == 30.0
+    assert ca_writes["minGapNumber"] == 30.0
+    # ca (sorts after alk) staggers +30 min at the WRITE layer; config untouched
+    assert ca_writes["windowStartNumber"] == 8 * 60 + 30
+    assert ca_writes["windowEndNumber"] == 12 * 60 + 30
+    assert config["dosing"]["channels"]["ca"]["schedule"]["windowStart"] == "08:00"
+    # disabling spacing zeroes the firmware gap
+    cfg2 = entry.options[CONF_SETTINGS]
+    cfg2["dosing"]["spacing"]["enabled"] = False
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(cfg2)
+    config2 = entry.options[CONF_SETTINGS]
+    assert integration._dosing_desired_writes(
+        config2["dosing"]["channels"]["kalk"], config2, now_local)["minGapNumber"] == 0.0
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

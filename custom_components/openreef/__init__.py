@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import math
 import re
@@ -74,7 +75,14 @@ from .const import (
     AWC_TICK_DEFAULT_SECONDS,
     AWC_TICK_MAX_SECONDS,
     AWC_TICK_MIN_SECONDS,
+    CONF_GUARDIAN_KEYS,
     CONF_SETTINGS,
+    GUARDIAN_MAX_AUDIO_B64,
+    GUARDIAN_MAX_TOKENS,
+    GUARDIAN_MAX_TOOL_ROUNDS,
+    GUARDIAN_MODEL,
+    GUARDIAN_STT_MODEL,
+    GUARDIAN_TTS_MODEL,
     DEFAULT_CORE_CONFIG,
     DEFAULT_TANK_PROFILE,
     CORE_SCHEMA_VERSION,
@@ -819,6 +827,7 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
             },
             "state": {
                 "lastSensorMl": _awc_num(raw_state.get("lastSensorMl"), 0, 0, 1e6),
+                "lastDoseAt": _awc_str(raw_state.get("lastDoseAt"), 40),
                 "lastSensorAt": _awc_str(raw_state.get("lastSensorAt"), 40),
                 "missedMl": _awc_num(raw_state.get("missedMl"), 0, 0, 1e6),
                 "missedSince": _awc_str(raw_state.get("missedSince"), 40),
@@ -1720,6 +1729,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     )
     v_summary = config.get("visionSummary")
     config["visionSummary"] = v_summary if isinstance(v_summary, dict) else {}
+
+    config["guardian"] = guardian_engine.sanitize_guardian_cfg(config.get("guardian"))
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -9341,6 +9352,24 @@ def _dosing_desired_writes(
     """Every firmware number this channel should hold, keyed by binding role."""
     compiled = dosing_engine.compile_schedule(channel, _dosing_lighting_off_window(config, now_local), now_local)
     writes = dict(compiled["writes"])
+    spacing = (config.get("dosing") or {}).get("spacing", {})
+    # Compile-time stagger (Stage E): shift a windowed doses-mode schedule by its
+    # group's cumulative offset so conflicting groups interleave (alk :00 /
+    # ca :30). Write-layer only — the configured window is untouched in config.
+    group = dosing_engine.spacing_group(channel.get("chemical"))
+    if (spacing.get("enabled") and group
+            and str(channel.get("schedule", {}).get("mode")) == "doses"
+            and "windowStartNumber" in writes and "windowEndNumber" in writes
+            and writes["windowStartNumber"] != writes["windowEndNumber"]):
+        groups_present = sorted({
+            dosing_engine.spacing_group(ch.get("chemical"))
+            for ch in _dosing_channels(config).values()
+            if ch.get("enabled") and dosing_engine.spacing_group(ch.get("chemical"))
+        })
+        offset = dosing_engine.phase_offsets(spacing, groups_present).get(group, 0.0)
+        if offset:
+            writes["windowStartNumber"] = float((writes["windowStartNumber"] + offset) % 1440)
+            writes["windowEndNumber"] = float((writes["windowEndNumber"] + offset) % 1440)
     if dosing_engine.is_brushed(channel):
         # Brushed heads run on flow-rate numbers, not stepper counts; the chaser
         # duration rides the same sync so the firmware always holds the setting.
@@ -9354,6 +9383,10 @@ def _dosing_desired_writes(
     steps_per_ml = channel.get("calibration", {}).get("stepsPerMl") or 0
     if steps_per_ml > 0:
         writes["stepsPerMlNumber"] = float(steps_per_ml)
+    # Contract rev 3: the firmware's per-channel spacing guard input. Always
+    # written (0 = off) so disabling spacing clears the device-held gap.
+    writes["minGapNumber"] = float(round(
+        dosing_engine.channel_min_gap_minutes(spacing, channel.get("chemical")), 1))
     return writes
 
 
@@ -9697,6 +9730,47 @@ async def _async_dosing_notify_once(
     await _async_send_mode_notification(hass, config, f"openreef_dosing_{key}", title, message)
 
 
+def _dosing_group_last_dose(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
+    """When each spacing group last dosed (max lastDoseAt over its channels) —
+    the HA-side input to spacing_verdict. Runtime stamps win over persisted state
+    (state only flushes hourly/on transition; spacing must not run an hour stale)."""
+    runtime_channels = hass.data.get(DOMAIN, {}).get(DOSING_RUNTIME, {}).get("channels", {})
+    out: dict[str, Any] = {}
+    for cid, channel in _dosing_channels(config).items():
+        group = dosing_engine.spacing_group(channel.get("chemical"))
+        if not group:
+            continue
+        candidates = [
+            _parse_datetime((runtime_channels.get(cid) or {}).get("lastDoseAt")),
+            _parse_datetime((channel.get("state") or {}).get("lastDoseAt")),
+        ]
+        last = max((c for c in candidates if c is not None), default=None)
+        if last is not None and (out.get(group) is None or last > out[group]):
+            out[group] = last
+        out.setdefault(group, None)
+    return out
+
+
+async def _async_dosing_fire_bounded_dose(
+    hass: HomeAssistant, channel: dict[str, Any], ml: float, cid: str | None = None,
+) -> bool:
+    """Actuate one bounded manual dose (write the volume, press the guarded
+    firmware button) and optimistically stamp lastDoseAt so spacing sees it
+    before the next sensor tick. Returns False when the button isn't bound."""
+    ent = channel.get("driver", {}).get("entities", {}).get("manualDoseMlNumber")
+    if ent:
+        await hass.services.async_call(
+            "number", "set_value", {ATTR_ENTITY_ID: ent, "value": ml}, blocking=True)
+    if not await _async_dosing_press(hass, channel, "manualDoseButton"):
+        return False
+    stamp = datetime.now(timezone.utc).isoformat()
+    channel.setdefault("state", {})["lastDoseAt"] = stamp
+    if cid:
+        hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {}).setdefault(
+            "channels", {}).setdefault(cid, {})["lastDoseAt"] = stamp
+    return True
+
+
 async def _async_awc_credit_chaser_fill(
     hass: HomeAssistant, entry: OpenReefConfigEntry, chaser_ml: float
 ) -> None:
@@ -9721,6 +9795,64 @@ async def _async_awc_credit_chaser_fill(
         await _async_save_config(hass, entry, config)
 
 
+async def _async_dosing_fire_queued(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, queued_peek: dict[str, Any]
+) -> None:
+    """Fire (or re-schedule, or drop) the queued spacing-deferred dose. Peeked from
+    the tick's snapshot; every mutation happens on a FRESH fetch + save so the
+    tick's graft-save never carries (or clobbers) spacing state."""
+    not_before = _parse_datetime(queued_peek.get("notBefore"))
+    if not_before is not None and not_before > datetime.now(timezone.utc):
+        return
+    config = _config_from_entry(entry)
+    spacing = config.get("dosing", {}).get("spacing", {})
+    queued = spacing.get("queued")
+    if not queued:
+        return
+    cid = str(queued.get("channelId") or "")
+    channel = _dosing_channels(config).get(cid)
+    if channel is None:
+        spacing["queued"] = None
+        await _async_save_config(hass, entry, config)
+        return
+    verdict = dosing_engine.spacing_verdict(
+        spacing, channel.get("chemical"), _dosing_group_last_dose(hass, config),
+        datetime.now(timezone.utc))
+    if not verdict["ok"]:
+        # Another group dosed meanwhile — push the slot forward, never spin.
+        spacing["queued"] = {**queued, "notBefore": (
+            datetime.now(timezone.utc) + timedelta(minutes=verdict["waitMinutes"])
+        ).isoformat()}
+        await _async_save_config(hass, entry, config)
+        return
+    # The ordinary manual gates re-apply at FIRE time (fail-closed: a channel that
+    # went stale/uncalibrated/suspended while queued must not dose).
+    now_local = dt_util.now()
+    live = _dosing_live_state(hass, channel)
+    live["awcActive"] = _dosing_awc_suspended(config)
+    live["now"] = datetime.now(timezone.utc)
+    blocked = [
+        r for r in dosing_engine.guard_reasons(
+            channel, live, now_local.hour * 60 + now_local.minute, manual=True,
+            now=datetime.now(timezone.utc))
+        if r["severity"] == "block" and r["code"] != "disabled"
+    ]
+    if blocked:
+        spacing["queued"] = None
+        _dosing_record_event(
+            channel, "spacing_queue", f"Queued dose dropped — {blocked[0]['code']}")
+        await _async_save_config(hass, entry, config)
+        return
+    ml = _awc_num(queued.get("ml"), 0, 0, DOSING_MAX_PER_DOSE_ML)
+    fired = ml > 0 and await _async_dosing_fire_bounded_dose(hass, channel, ml, cid=cid)
+    spacing["queued"] = None
+    _dosing_record_event(
+        channel, "spacing_queue",
+        f"Queued {ml:g} ml dose fired — spacing gap clear" if fired
+        else "Queued dose dropped — manual-dose button not bound")
+    await _async_save_config(hass, entry, config)
+
+
 async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
     """The 60 s watcher. Accounting deltas accumulate in hass.data and flush to the
     config blob hourly or on a transition — kalk doses ~144x/day and every blob save
@@ -9740,6 +9872,11 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     transition = False
 
     _dosing_publish_mirror(hass, _dosing_mirror_source(config))  # heartbeat
+
+    # Spacing queue (Stage E): fire the single deferred dose once its gap clears.
+    queued_peek = (config.get("dosing", {}).get("spacing") or {}).get("queued")
+    if queued_peek:
+        await _async_dosing_fire_queued(hass, entry, queued_peek)
 
     for cid, channel in channels.items():
         rt = channel_rt.setdefault(cid, {})
@@ -9817,6 +9954,8 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     delta = max(0.0, new_ml - prev)
                 rt["lastSensorMl"] = new_ml
                 if delta > 0:
+                    rt["lastDoseAt"] = now_utc.isoformat()
+                    state["lastDoseAt"] = now_utc.isoformat()
                     rt["pendingReservoirMl"] = rt.get("pendingReservoirMl", 0.0) + delta
                     speed = 400.0
                     speed_ent = entities.get("doseSpeedNumber")
@@ -10258,6 +10397,7 @@ async def websocket_dosing_calibrate(
     vol.Required("type"): "openreef/dosing_dose_now",
     vol.Required("channel_id"): cv.string,
     vol.Required("ml"): vol.Coerce(float),
+    vol.Optional("queue"): bool,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -10293,10 +10433,35 @@ async def websocket_dosing_dose_now(
     if reasons:
         _awc_send(connection, msg, hass, config, started=False, reasons=reasons)
         return
-    ent = channel.get("driver", {}).get("entities", {}).get("manualDoseMlNumber")
-    if ent:
-        await hass.services.async_call("number", "set_value", {ATTR_ENTITY_ID: ent, "value": ml}, blocking=True)
-    if not await _async_dosing_press(hass, channel, "manualDoseButton"):
+    spacing = config.get("dosing", {}).get("spacing", {})
+    verdict = dosing_engine.spacing_verdict(
+        spacing, channel.get("chemical"), _dosing_group_last_dose(hass, config),
+        datetime.now(timezone.utc))
+    if not verdict["ok"]:
+        if msg.get("queue"):
+            # Single-slot deferred dose: the 60 s tick fires it once the gap
+            # clears (persisted — survives a restart). A newer queue request
+            # replaces the old slot; one pending catch-up is the honest maximum.
+            not_before = datetime.now(timezone.utc) + timedelta(minutes=verdict["waitMinutes"])
+            config["dosing"]["spacing"]["queued"] = {
+                "channelId": msg["channel_id"], "ml": ml,
+                "requestedAt": datetime.now(timezone.utc).isoformat(),
+                "notBefore": not_before.isoformat(),
+            }
+            _dosing_record_event(
+                channel, "spacing_queue",
+                f"{ml:g} ml queued — {verdict['conflict']} dosed too recently "
+                f"(fires in ~{verdict['waitMinutes']:.0f} min)")
+            config = await _async_save_config(hass, entry, config)
+            _awc_send(connection, msg, hass, config, started=False, queued=True,
+                      notBefore=not_before.isoformat())
+            return
+        _awc_send(connection, msg, hass, config, started=False, reasons=[{
+            "code": "spacing", "severity": "block",
+            "message": (f"{verdict['conflict']} dosed too recently — wait "
+                        f"~{verdict['waitMinutes']:.0f} min (or queue it)")}])
+        return
+    if not await _async_dosing_fire_bounded_dose(hass, channel, ml, cid=msg["channel_id"]):
         connection.send_error(msg["id"], "not_bound", "Manual-dose button entity is not bound or unavailable")
         return
     _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose requested")
@@ -12139,6 +12304,417 @@ async def websocket_vision_summary(
     )
 
 
+# --- Guardian (Lagertha live avatar) ----------------------------------------
+# Stage A: read-only brain. Chained voice loop = OpenAI STT -> Claude tool loop
+# -> OpenAI TTS. All pure prompt/tool/formatting logic lives in guardian.py;
+# this section owns only what needs I/O: key storage, HA state gathering and
+# the network calls. The anthropic/aiohttp imports are lazy so the
+# dependency-free CI (tests/_ha_stubs) never loads them.
+
+
+def _guardian_keys(entry: ConfigEntry | None) -> dict[str, str]:
+    if entry is None:
+        return {}
+    keys = entry.options.get(CONF_GUARDIAN_KEYS)
+    return keys if isinstance(keys, dict) else {}
+
+
+def _guardian_snapshot(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the read-ring context (plain dicts) that guardian.run_tool
+    answers from. Gathering lives here (HA access); formatting and caps live
+    in the pure engine."""
+    sensors_rows: list[dict[str, Any]] = []
+    sensors = config.get("sensors")
+    for sensor_id, sensor in (sensors.items() if isinstance(sensors, dict) else []):
+        if not isinstance(sensor, dict) or not sensor.get("enabled"):
+            continue
+        entity_id = _normalise_entity_id(sensor.get("entity_id"))
+        value: Any = None
+        available = False
+        if entity_id:
+            state = hass.states.get(entity_id)
+            if state is not None and state.state not in UNAVAILABLE_STATES:
+                available = True
+                try:
+                    value = round(float(state.state), 3)
+                except (TypeError, ValueError):
+                    value = state.state
+        sensors_rows.append(
+            {
+                "id": sensor_id,
+                "label": sensor.get("label"),
+                "value": value,
+                "unit": sensor.get("unit"),
+                "min": sensor.get("min"),
+                "max": sensor.get("max"),
+                "available": available,
+            }
+        )
+    tank = config.get("tank") if isinstance(config.get("tank"), dict) else {}
+    alerts = config.get("alerts") if isinstance(config.get("alerts"), dict) else {}
+    return {
+        "tank": {
+            "name": tank.get("name"),
+            "profile": tank.get("profile"),
+            "volumeLitres": _awc_effective_tank_l(config),
+        },
+        "sensors": sensors_rows,
+        "manualReadings": config.get("manualReadings"),
+        "dosing": config.get("dosing"),
+        "awc": config.get("automaticWaterChange"),
+        "awcTankLitres": _awc_effective_tank_l(config),
+        "maintenanceDue": _maintenance_due_items(config),
+        "icpReports": config.get("icpReports"),
+        "visionSummary": config.get("visionSummary"),
+        "alertHistory": alerts.get("history"),
+    }
+
+
+def _guardian_anthropic_client(api_key: str):
+    """Lazy SDK import behind a seam tests monkeypatch with a fake client."""
+    from anthropic import AsyncAnthropic  # noqa: PLC0415 - CI must not import this
+
+    return AsyncAnthropic(api_key=api_key)
+
+
+def _guardian_http(hass: HomeAssistant):
+    """Shared aiohttp session behind a seam tests monkeypatch."""
+    from homeassistant.helpers.aiohttp_client import (  # noqa: PLC0415
+        async_get_clientsession,
+    )
+
+    return async_get_clientsession(hass)
+
+
+async def _async_guardian_reply(
+    hass: HomeAssistant, config: dict[str, Any], keys: dict[str, str], history: Any
+) -> str:
+    """One Guardian turn: Claude + read-ring tools until it stops calling them."""
+    guardian_cfg = (
+        config.get("guardian") if isinstance(config.get("guardian"), dict) else {}
+    )
+    messages: list[dict[str, Any]] = list(guardian_engine.fold_history(history))
+    if not messages:
+        raise HomeAssistantError("Nothing to reply to")
+    client = _guardian_anthropic_client(keys.get("anthropic", ""))
+    snapshot = _guardian_snapshot(hass, config)
+    # System + tools are byte-stable across a session; the cache breakpoint
+    # means every turn after the first reads the prefix at ~0.1x price.
+    system = [
+        {
+            "type": "text",
+            "text": guardian_engine.persona_prompt(config),
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    tools = guardian_engine.build_tools()
+    response = None
+    for _round in range(GUARDIAN_MAX_TOOL_ROUNDS):
+        response = await client.messages.create(
+            model=GUARDIAN_MODEL,
+            max_tokens=GUARDIAN_MAX_TOKENS,
+            system=system,
+            tools=tools,
+            messages=messages,
+            output_config={"effort": guardian_cfg.get("effort", "low")},
+        )
+        if response.stop_reason == "refusal":
+            return "I'd rather not answer that one, keeper."
+        if response.stop_reason != "tool_use":
+            break
+        # Echo the assistant content verbatim (incl. thinking blocks — the
+        # API requires them back unchanged when continuing on the same model).
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = [
+            {
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": guardian_engine.tool_result_json(
+                    block.name, block.input, snapshot
+                ),
+            }
+            for block in response.content
+            if getattr(block, "type", None) == "tool_use"
+        ]
+        messages.append({"role": "user", "content": tool_results})
+    text = "".join(
+        block.text
+        for block in (response.content if response is not None else [])
+        if getattr(block, "type", None) == "text"
+    ).strip()
+    return text or "I heard you, keeper, but I have nothing useful to add."
+
+
+async def _async_guardian_transcribe(
+    hass: HomeAssistant, api_key: str, audio: bytes, mime: str
+) -> str:
+    """One PTT utterance -> text via OpenAI transcription."""
+    import aiohttp  # noqa: PLC0415 - lazy so the dependency-free CI never loads it
+
+    ext = "webm"
+    if isinstance(mime, str) and "/" in mime:
+        ext = mime.split("/", 1)[1].split(";", 1)[0][:8] or "webm"
+    form = aiohttp.FormData()
+    form.add_field(
+        "file", audio, filename=f"utterance.{ext}", content_type=mime or "audio/webm"
+    )
+    form.add_field("model", GUARDIAN_STT_MODEL)
+    session = _guardian_http(hass)
+    async with session.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        data=form,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=aiohttp.ClientTimeout(total=60),
+    ) as resp:
+        if resp.status != 200:
+            raise HomeAssistantError(f"Transcription failed (HTTP {resp.status})")
+        data = await resp.json()
+    text = data.get("text") if isinstance(data, dict) else None
+    return text.strip() if isinstance(text, str) else ""
+
+
+async def _async_guardian_tts(
+    hass: HomeAssistant,
+    api_key: str,
+    guardian_cfg: dict[str, Any],
+    text: str,
+    fmt: str,
+) -> tuple[str, str]:
+    """Reply text -> base64 audio. mp3 for direct <audio> playback; pcm
+    (24 kHz s16le) when the Simli face needs raw samples for lip-sync."""
+    import aiohttp  # noqa: PLC0415
+
+    response_format = "pcm" if fmt == "pcm" else "mp3"
+    session = _guardian_http(hass)
+    async with session.post(
+        "https://api.openai.com/v1/audio/speech",
+        json={
+            "model": GUARDIAN_TTS_MODEL,
+            "voice": guardian_cfg.get("voice", "shimmer"),
+            "input": text[:4096],
+            "response_format": response_format,
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=aiohttp.ClientTimeout(total=60),
+    ) as resp:
+        if resp.status != 200:
+            raise HomeAssistantError(f"Speech synthesis failed (HTTP {resp.status})")
+        audio = await resp.read()
+    return base64.b64encode(audio).decode("ascii"), response_format
+
+
+async def _async_guardian_validate_keys(
+    hass: HomeAssistant, keys: dict[str, str], changed: set[str]
+) -> dict[str, str]:
+    """Best-effort live check of newly provided keys so a typo surfaces at
+    save time, not on the first conversation. Returns {key_name: problem}."""
+    problems: dict[str, str] = {}
+    if "anthropic" in changed and keys.get("anthropic"):
+        try:
+            client = _guardian_anthropic_client(keys["anthropic"])
+            await client.models.retrieve(GUARDIAN_MODEL)
+        except ImportError:
+            problems["anthropic"] = "anthropic package not installed yet — restart Home Assistant"
+        except Exception as exc:  # noqa: BLE001 - report, never raise, at save time
+            problems["anthropic"] = f"Key check failed: {type(exc).__name__}"
+    if "openai" in changed and keys.get("openai"):
+        try:
+            import aiohttp  # noqa: PLC0415
+
+            session = _guardian_http(hass)
+            async with session.get(
+                f"https://api.openai.com/v1/models/{GUARDIAN_TTS_MODEL}",
+                headers={"Authorization": f"Bearer {keys['openai']}"},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status == 401:
+                    problems["openai"] = "OpenAI rejected the key (401)"
+                elif resp.status != 200:
+                    problems["openai"] = f"Key check failed (HTTP {resp.status})"
+        except Exception as exc:  # noqa: BLE001
+            problems["openai"] = f"Key check failed: {type(exc).__name__}"
+    return problems
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/guardian_status"})
+@websocket_api.async_response
+async def websocket_guardian_status(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Key status (masked) + guardian settings for the panel tab."""
+    entry = _first_entry(hass)
+    config = _config_from_entry(entry)
+    connection.send_result(
+        msg["id"],
+        {
+            "keys": guardian_engine.keys_status(_guardian_keys(entry)),
+            "settings": config.get("guardian", {}),
+            "model": GUARDIAN_MODEL,
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/guardian_set_keys",
+        vol.Optional("anthropic"): str,
+        vol.Optional("openai"): str,
+        vol.Optional("simli"): str,
+        vol.Optional("simli_face_id"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_guardian_set_keys(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Store BYO API keys. Missing field = unchanged, empty string = clear.
+    Keys live outside CONF_SETTINGS so config export can never leak them."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    updates = {name: msg[name] for name in ("anthropic", "openai", "simli") if name in msg}
+    if "simli_face_id" in msg:
+        updates["simliFaceId"] = msg["simli_face_id"]
+    merged = guardian_engine.clean_keys(_guardian_keys(entry), updates)
+    problems = await _async_guardian_validate_keys(hass, merged, set(updates))
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_GUARDIAN_KEYS: merged}
+    )
+    connection.send_result(
+        msg["id"],
+        {"keys": guardian_engine.keys_status(merged), "problems": problems},
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/guardian_chat",
+        vol.Required("history"): list,
+    }
+)
+@websocket_api.async_response
+async def websocket_guardian_chat(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Text turn: history (incl. the new user message) -> Lagertha's reply."""
+    entry = _first_entry(hass)
+    config = _config_from_entry(entry)
+    keys = _guardian_keys(entry)
+    if not guardian_engine.keys_status(keys)["anthropic"]["set"]:
+        connection.send_error(
+            msg["id"], "guardian_keys", "Add an Anthropic API key in the Guardian tab first"
+        )
+        return
+    try:
+        reply = await _async_guardian_reply(hass, config, keys, msg["history"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "guardian_error", str(err))
+        return
+    except Exception as err:  # noqa: BLE001 - network/SDK errors must not kill the WS
+        connection.send_error(
+            msg["id"], "guardian_error", f"Guardian brain error: {type(err).__name__}"
+        )
+        return
+    connection.send_result(msg["id"], {"reply": reply})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "openreef/guardian_voice",
+        vol.Required("audio"): str,
+        vol.Optional("mime"): str,
+        vol.Optional("history"): list,
+        vol.Optional("tts", default="mp3"): vol.In(guardian_engine.TTS_FORMATS),
+    }
+)
+@websocket_api.async_response
+async def websocket_guardian_voice(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Voice turn: base64 PTT audio -> transcript -> reply -> spoken audio."""
+    entry = _first_entry(hass)
+    config = _config_from_entry(entry)
+    keys = _guardian_keys(entry)
+    status = guardian_engine.keys_status(keys)
+    if not status["ready"]:
+        connection.send_error(
+            msg["id"],
+            "guardian_keys",
+            "Add your Anthropic and OpenAI API keys in the Guardian tab first",
+        )
+        return
+    if len(msg["audio"]) > GUARDIAN_MAX_AUDIO_B64:
+        connection.send_error(msg["id"], "audio_too_large", "Utterance too long")
+        return
+    try:
+        audio = base64.b64decode(msg["audio"], validate=True)
+    except (ValueError, TypeError):
+        connection.send_error(msg["id"], "bad_audio", "Audio payload is not valid base64")
+        return
+    try:
+        transcript = await _async_guardian_transcribe(
+            hass, keys["openai"], audio, msg.get("mime", "audio/webm")
+        )
+        if not transcript:
+            connection.send_result(
+                msg["id"],
+                {"transcript": "", "reply": "", "audio": None, "audioFormat": None},
+            )
+            return
+        history = list(msg.get("history") or [])
+        history.append({"role": "user", "content": transcript})
+        reply = await _async_guardian_reply(hass, config, keys, history)
+        audio_out = None
+        out_fmt = None
+        if msg["tts"] != "none":
+            guardian_cfg = (
+                config.get("guardian") if isinstance(config.get("guardian"), dict) else {}
+            )
+            audio_out, out_fmt = await _async_guardian_tts(
+                hass, keys["openai"], guardian_cfg, reply, msg["tts"]
+            )
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "guardian_error", str(err))
+        return
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(
+            msg["id"], "guardian_error", f"Guardian voice error: {type(err).__name__}"
+        )
+        return
+    connection.send_result(
+        msg["id"],
+        {
+            "transcript": transcript,
+            "reply": reply,
+            "audio": audio_out,
+            "audioFormat": out_fmt,
+        },
+    )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/guardian_simli_session"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_guardian_simli_session(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Hand the browser the Simli credentials it needs to open the WebRTC
+    face. Admin-only and only on demand — guardian_status never carries key
+    material. Voice-only mode (no Simli key) is a supported degradation."""
+    keys = _guardian_keys(_first_entry(hass))
+    status = guardian_engine.keys_status(keys)
+    if not status["faceReady"]:
+        connection.send_error(
+            msg["id"], "guardian_keys", "Simli key and face ID are not both set"
+        )
+        return
+    connection.send_result(
+        msg["id"], {"apiKey": keys.get("simli", ""), "faceId": keys.get("simliFaceId", "")}
+    )
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up OpenReef services and websocket commands."""
     websocket_api.async_register_command(hass, websocket_get_config)
@@ -12202,6 +12778,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_dry_run)
     websocket_api.async_register_command(hass, websocket_dosing_ramp_checkpoint)
     websocket_api.async_register_command(hass, websocket_dosing_delete_channel)
+    websocket_api.async_register_command(hass, websocket_guardian_status)
+    websocket_api.async_register_command(hass, websocket_guardian_set_keys)
+    websocket_api.async_register_command(hass, websocket_guardian_chat)
+    websocket_api.async_register_command(hass, websocket_guardian_voice)
+    websocket_api.async_register_command(hass, websocket_guardian_simli_session)
 
     hass.services.async_register(
         DOMAIN,
