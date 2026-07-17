@@ -9132,20 +9132,13 @@ async def websocket_awc_summary(
     summary = awc_engine.summary(_awc_cfg_eff(config), dt_util.now())
     state = acfg.get("state", {}) if isinstance(acfg.get("state"), dict) else {}
     fill_role = _awc_fill_role(state)
-    # Legacy aliases in the RESPONSE COPY only (never persisted): the panel reads the
-    # pre-B4 scalar names — they mirror the drain + active-source entries of movedMl/endsAt.
-    state_out = {
-        **state,
-        "drainedMl": _awc_moved(state, "drain"),
-        "filledMl": _awc_moved(state, fill_role),
-        "drainEndsAt": _awc_ends(state, "drain"),
-        "fillEndsAt": _awc_ends(state, fill_role),
-    }
+    # 0.6.0: the pre-B4 scalar aliases (drainedMl/filledMl/drainEndsAt/fillEndsAt)
+    # are gone — consumers read the per-role movedMl/endsAt maps + activeSourceRole.
     connection.send_result(msg["id"], {
         "summary": summary,
-        "state": state_out,
+        "state": state,
         "schedule": acfg.get("schedule", {}),
-        "live": _awc_live_state(hass, config, fill_role=_awc_fill_role(acfg.get("state", {}))),
+        "live": _awc_live_state(hass, config, fill_role=fill_role),
         "atoSuspended": _awc_ato_suspended(config),
         "simulation": acfg.get("simulation", {"enabled": False}),
         "simPumps": (hass.data.get(DOMAIN, {}).get(AWC_RUNTIME, {}).get("simPumps", {})

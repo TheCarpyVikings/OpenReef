@@ -673,6 +673,12 @@ def test_ws_summary_returns_metrics():
     assert "summary" in payload and "reservoirs" in payload["summary"]
     assert "live" in payload and "state" in payload
     assert payload["summary"]["reservoirs"]["fresh"]["percent"] == 100.0
+    # 0.6.0: the pre-B4 scalar aliases are gone from the response; consumers
+    # read the per-role maps (movedMl/endsAt) + activeSourceRole instead.
+    for legacy in ("drainedMl", "filledMl", "drainEndsAt", "fillEndsAt"):
+        assert legacy not in payload["state"]
+    assert isinstance(payload["state"]["movedMl"], dict)
+    assert "activeSourceRole" in payload["state"]
 
 
 def test_ws_reset_reservoir():

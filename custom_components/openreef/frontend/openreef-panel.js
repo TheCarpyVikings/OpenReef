@@ -10383,8 +10383,11 @@ class OpenReefPanel extends HTMLElement {
     const freshPct = Math.max(0, Math.min(100, Number(res.fresh?.percent) || 0));
     const wastePct = Math.max(0, Math.min(100, Number(res.waste?.percent) || 0));
     const target = Number(state.targetLitres) || 0;
-    const drainedL = (Number(state.drainedMl) || 0) / 1000;
-    const filledL = (Number(state.filledMl) || 0) / 1000;
+    // 0.6.0: read the per-role movement map directly (the pre-B4 scalar
+    // aliases are gone from the summary response).
+    const movedMap = state.movedMl || {};
+    const drainedL = (Number(movedMap.drain) || 0) / 1000;
+    const filledL = (Number(movedMap[state.activeSourceRole || "fill"]) || 0) / 1000;
     const running = ["draining", "filling", "exchanging"].includes(status);
     const leak = !!live.leak, high = !!live.highLevel, freshEmpty = !!live.freshEmpty, wasteFull = !!live.wasteFull;
 
@@ -10636,8 +10639,9 @@ class OpenReefPanel extends HTMLElement {
     }
     if (["draining", "filling", "exchanging"].includes(status)) {
       const target = Number(state.targetLitres) || 0;
-      let filled = (Number(state.filledMl) || 0) / 1000;
-      let drained = (Number(state.drainedMl) || 0) / 1000;
+      const movedMap = state.movedMl || {};
+      let filled = (Number(movedMap[state.activeSourceRole || "fill"]) || 0) / 1000;
+      let drained = (Number(movedMap.drain) || 0) / 1000;
       let pct;
       if (status === "exchanging") {
         // Simultaneous: both counters are dead-reckoned live every tick.

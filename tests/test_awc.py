@@ -766,5 +766,48 @@ def _main() -> int:
     return 1 if failed else 0
 
 
+
+def test_g_honesty_numbers_at_micro_change_cadence():
+    """The brainstorm's §G quantified claims, pinned against the shipped engine
+    at the hourly regime (24 x 40 ml/day) the arc was built for."""
+    # 24 discrete slots from the interval primitive (equal start/end = full day).
+    slots = awc.slot_minutes_for_day(
+        {"mode": "interval", "windowStart": "00:00", "windowEnd": "00:00",
+         "everyMinutes": 60})
+    assert len(slots) == 24 and slots[0] == 0 and slots[-1] == 23 * 60
+
+    # 0.96 L/day divides to exactly 40 ml per change across those slots.
+    sched = {"enabled": True, "method": "batch", "amount": 0.96,
+             "amountUnit": "litres", "period": "day", "mode": "interval",
+             "windowStart": "00:00", "windowEnd": "00:00", "everyMinutes": 60}
+    assert abs(awc.per_change_litres(sched, 200.0) - 0.040) < 1e-9
+
+    # Spin-up applied at RUNTIME: a 2.6 ml offset on a 40 ml dose is the 6.5 %
+    # error §G calls load-bearing — the engine inverts the fit so the dose stays
+    # volume-accurate, and the round-trip through the accounting inverse agrees.
+    t = awc.runtime_for_volume_s(0.040, 10.0, 1.0, 2.6)
+    assert abs(t - 3.74) < 1e-9
+    assert abs(awc.volume_for_runtime_l(t, 10.0, 1.0, 2.6) - 0.040) < 1e-9
+    naive_ml = awc.volume_for_runtime_l(awc.runtime_for_volume_s(0.040, 10.0), 10.0, 1.0, 2.6) * 1000
+    assert abs((naive_ml - 40.0) / 40.0 - 0.065) < 1e-3  # unapplied offset = 6.5 % over
+
+    # Net-imbalance honesty beyond the capped history: at 24/day the 100-event
+    # window fills in ~4.2 days, so the verdict MUST come from the persistent
+    # ledger totals, not the window. History says balanced; the ledger knows the
+    # ATO has been backfilling a 2.4 L cumulative deficit.
+    cfg = {
+        "tankVolumeLitres": 200.0,
+        "schedule": sched,
+        "reservoirs": {"fresh": {"capacityLitres": 25, "remainingMl": 20000},
+                       "waste": {"capacityLitres": 25, "filledMl": 0}},
+        "pumps": {},
+        "ledger": {"cumulativeDrainedL": 50.4, "cumulativeFilledL": 48.0,
+                   "perSource": {"fill": 48.0}, "netSaltGrams": 0.0},
+        "history": [{"drainedL": 0.04, "filledL": 0.04} for _ in range(3)],
+    }
+    ni = awc.summary(cfg, datetime(2026, 7, 18, 12, 0))["netImbalance"]
+    assert abs(ni["netL"] + 2.4) < 1e-6
+    assert abs(ni["suggestedTrimL"] - 2.4) < 1e-6
+
 if __name__ == "__main__":
     raise SystemExit(_main())

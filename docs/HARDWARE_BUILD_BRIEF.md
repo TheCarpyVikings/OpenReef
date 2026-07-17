@@ -101,4 +101,14 @@ The OpenReef panel auto-binds a doser by scanning HA for **frozen entity-id suff
 
 ## 10. What's coming next in software (so you don't design against a moving target)
 
-Release train (staged): **0.5.2** = deep AWC concurrency hardening (in progress now — no hardware impact). Then the v2 arc: interval schedules + micro-change ATO skip + drift detection (0.5.3) → N-source engine for the two alternating fresh sources (0.5.4) → **brushed dosing driver + live-food channel (0.5.5)** → **Stage D: the merged single-S3 reference YAML you'll actually flash (0.5.6)** → 2-part spacing (0.5.7) → 0.6.0. **Practical consequence: everything you need to flash exists now.** Release numbering shifted +1 mid-arc: N-source shipped as v0.5.5, live-food/brushed as v0.5.6, and Stage D (the merged `reefnode-s3-reference.yaml` + `reefnode-s3-design.md`) as v0.5.7. Flash the merged node, wire to its §1 pin budget, and follow `reefnode-s3-design.md` §5 for bring-up (expect kalk auto-bind 25/25 (contract rev 3, v0.5.8) and live-food 22/22).
+**The software arc is COMPLETE (0.6.0)** — nothing left to design against.
+Shipped train: hardening (0.5.1–0.5.2) → interval schedules + micro-change ATO
+skip + drift (0.5.3) → N-source alternation (0.5.5, numbering shifted +1
+mid-arc) → brushed driver + live food (0.5.6) → the merged single-S3 reference
+node you'll flash (0.5.7) → 2-part spacing (0.5.8) → stabilization + legacy-alias
+removal (0.6.0). Flash `reefnode-s3-reference.yaml`, wire to its §1 pin budget,
+follow `reefnode-s3-design.md` §5 for bring-up (expect kalk auto-bind 25/25,
+contract rev 3, and live-food 22/22) — then run the acceptance soak:
+**`OPENREEF_DOSING_SMOKE_TEST.md` §12** (48 h, everything on, hourly
+micro-changes; its ledger-honesty and ATO-availability checks are the arc's
+exit criteria).

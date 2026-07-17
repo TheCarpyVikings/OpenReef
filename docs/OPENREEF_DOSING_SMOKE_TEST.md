@@ -112,3 +112,51 @@ above still applies, plus:
       `disabled`; "Refreshed today" re-enables on the next sync.
 - [ ] Full bring-up order: `reefnode-s3-design.md` §5.
 
+## 12. 48-Hour Full-Arc Soak (Stage F — one node, everything on)
+
+The arc's exit test: hourly micro-changes + source alternation + kalk + live
+food + 2-part spacing running TOGETHER on the merged reefnode for two days.
+Run it after §11 passes, water plumbed, reservoirs sized for ≥ 2 L of changes.
+
+**Setup (once):**
+
+- [ ] AWC schedule: interval mode, every 60 min, full-day window, 0.96 L/day
+      (= 40 ml per change), simultaneous method, salt-matched fresh source(s).
+- [ ] `microChangeThresholdMl` = 260; ATO configured; alternation policy ON if
+      fresh2 is fitted.
+- [ ] Kalk channel: continuous schedule inside its window; live food: doses
+      mode with a chaser; spacing ENABLED with Alk ↔ Ca = 30 min.
+- [ ] Note the starting ledger (`net imbalance` card), reservoir levels, and
+      each channel's `dosed today`.
+
+**T+1 h — first cycle:**
+
+- [ ] Exactly one ~40 ml change ran; the ATO was NEVER suspended for it
+      (micro-change path) and the panel's status card interpolated live.
+- [ ] No `spacing` skips on the skip sensor — the compile-time stagger keeps
+      scheduled kalk clear of any Ca head; a manual Ca dose inside the gap is
+      refused with the wait time and the queue offer.
+
+**T+24 h — cadence honesty (§G numbers):**
+
+- [ ] ~24 changes logged (±1 at the seams); daily volume within 5 % of 0.96 L.
+- [ ] ATO availability stayed ≳ 98 % (no suspend on salt-matched micro
+      changes); zero missed-dose false alarms on any channel.
+- [ ] Live food went STALE at its shelf life: HA forced the enable switch OFF,
+      skip sensor reads `disabled`, panel shows the stale lockout. Mark
+      refreshed → dosing resumes on the next sync.
+
+**T+48 h — ledger vs history:**
+
+- [ ] The history window now holds < 2 days of events, but the net-imbalance
+      card still reads from the PERSISTENT ledger (compare against your noted
+      start — the delta must equal cumulative drain − fill, not the window
+      sum). This is the §G hard gate for hourly cadence.
+- [ ] Reservoir `days remaining` projections match actual consumption within
+      10 %; tube/wear odometers advanced ~48 h of run-seconds equivalents.
+- [ ] Pull HA's network cable for one mid-hour cycle: the node still runs its
+      schedule + guard chain (dose fires or skips locally, watchdogs armed);
+      on reconnect HA reconciles `dosed today` without double-count and the
+      ledgers catch up.
+- [ ] Zero unexplained skip reasons, zero fault latches, zero watchdog trips
+      across the full 48 h — anything else is a stop-ship finding.
