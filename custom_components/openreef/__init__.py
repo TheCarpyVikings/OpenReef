@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import math
 import re
@@ -75,14 +74,7 @@ from .const import (
     AWC_TICK_DEFAULT_SECONDS,
     AWC_TICK_MAX_SECONDS,
     AWC_TICK_MIN_SECONDS,
-    CONF_GUARDIAN_KEYS,
     CONF_SETTINGS,
-    GUARDIAN_MAX_AUDIO_B64,
-    GUARDIAN_MAX_TOKENS,
-    GUARDIAN_MAX_TOOL_ROUNDS,
-    GUARDIAN_MODEL,
-    GUARDIAN_STT_MODEL,
-    GUARDIAN_TTS_MODEL,
     DEFAULT_CORE_CONFIG,
     DEFAULT_TANK_PROFILE,
     CORE_SCHEMA_VERSION,
@@ -151,7 +143,6 @@ from .const import (
 )
 from . import awc as awc_engine
 from . import dosing as dosing_engine
-from . import guardian as guardian_engine
 from . import icp
 from . import spawning
 from . import vision
@@ -1730,7 +1721,6 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     v_summary = config.get("visionSummary")
     config["visionSummary"] = v_summary if isinstance(v_summary, dict) else {}
 
-    config["guardian"] = guardian_engine.sanitize_guardian_cfg(config.get("guardian"))
 
     mode_previews = config.get("modePreviews", {})
     if isinstance(mode_previews, dict):
@@ -8748,6 +8738,10 @@ def _sanitize_imported_config(incoming: dict[str, Any], current: dict[str, Any])
             sim["enabled"] = False
             sim["snapshot"] = None  # a foreign snapshot must never restore here
     dosing = incoming.get("dosing")
+    if isinstance(dosing, dict) and isinstance(dosing.get("spacing"), dict):
+        # A queued spacing-deferred dose is live state, not a setting — restoring
+        # one from a days-old backup must never fire it into today's tank.
+        dosing["spacing"]["queued"] = None
     if isinstance(dosing, dict) and isinstance(dosing.get("channels"), dict):
         for channel in dosing["channels"].values():
             if not isinstance(channel, dict):
@@ -12304,417 +12298,6 @@ async def websocket_vision_summary(
     )
 
 
-# --- Guardian (Lagertha live avatar) ----------------------------------------
-# Stage A: read-only brain. Chained voice loop = OpenAI STT -> Claude tool loop
-# -> OpenAI TTS. All pure prompt/tool/formatting logic lives in guardian.py;
-# this section owns only what needs I/O: key storage, HA state gathering and
-# the network calls. The anthropic/aiohttp imports are lazy so the
-# dependency-free CI (tests/_ha_stubs) never loads them.
-
-
-def _guardian_keys(entry: ConfigEntry | None) -> dict[str, str]:
-    if entry is None:
-        return {}
-    keys = entry.options.get(CONF_GUARDIAN_KEYS)
-    return keys if isinstance(keys, dict) else {}
-
-
-def _guardian_snapshot(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
-    """Assemble the read-ring context (plain dicts) that guardian.run_tool
-    answers from. Gathering lives here (HA access); formatting and caps live
-    in the pure engine."""
-    sensors_rows: list[dict[str, Any]] = []
-    sensors = config.get("sensors")
-    for sensor_id, sensor in (sensors.items() if isinstance(sensors, dict) else []):
-        if not isinstance(sensor, dict) or not sensor.get("enabled"):
-            continue
-        entity_id = _normalise_entity_id(sensor.get("entity_id"))
-        value: Any = None
-        available = False
-        if entity_id:
-            state = hass.states.get(entity_id)
-            if state is not None and state.state not in UNAVAILABLE_STATES:
-                available = True
-                try:
-                    value = round(float(state.state), 3)
-                except (TypeError, ValueError):
-                    value = state.state
-        sensors_rows.append(
-            {
-                "id": sensor_id,
-                "label": sensor.get("label"),
-                "value": value,
-                "unit": sensor.get("unit"),
-                "min": sensor.get("min"),
-                "max": sensor.get("max"),
-                "available": available,
-            }
-        )
-    tank = config.get("tank") if isinstance(config.get("tank"), dict) else {}
-    alerts = config.get("alerts") if isinstance(config.get("alerts"), dict) else {}
-    return {
-        "tank": {
-            "name": tank.get("name"),
-            "profile": tank.get("profile"),
-            "volumeLitres": _awc_effective_tank_l(config),
-        },
-        "sensors": sensors_rows,
-        "manualReadings": config.get("manualReadings"),
-        "dosing": config.get("dosing"),
-        "awc": config.get("automaticWaterChange"),
-        "awcTankLitres": _awc_effective_tank_l(config),
-        "maintenanceDue": _maintenance_due_items(config),
-        "icpReports": config.get("icpReports"),
-        "visionSummary": config.get("visionSummary"),
-        "alertHistory": alerts.get("history"),
-    }
-
-
-def _guardian_anthropic_client(api_key: str):
-    """Lazy SDK import behind a seam tests monkeypatch with a fake client."""
-    from anthropic import AsyncAnthropic  # noqa: PLC0415 - CI must not import this
-
-    return AsyncAnthropic(api_key=api_key)
-
-
-def _guardian_http(hass: HomeAssistant):
-    """Shared aiohttp session behind a seam tests monkeypatch."""
-    from homeassistant.helpers.aiohttp_client import (  # noqa: PLC0415
-        async_get_clientsession,
-    )
-
-    return async_get_clientsession(hass)
-
-
-async def _async_guardian_reply(
-    hass: HomeAssistant, config: dict[str, Any], keys: dict[str, str], history: Any
-) -> str:
-    """One Guardian turn: Claude + read-ring tools until it stops calling them."""
-    guardian_cfg = (
-        config.get("guardian") if isinstance(config.get("guardian"), dict) else {}
-    )
-    messages: list[dict[str, Any]] = list(guardian_engine.fold_history(history))
-    if not messages:
-        raise HomeAssistantError("Nothing to reply to")
-    client = _guardian_anthropic_client(keys.get("anthropic", ""))
-    snapshot = _guardian_snapshot(hass, config)
-    # System + tools are byte-stable across a session; the cache breakpoint
-    # means every turn after the first reads the prefix at ~0.1x price.
-    system = [
-        {
-            "type": "text",
-            "text": guardian_engine.persona_prompt(config),
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
-    tools = guardian_engine.build_tools()
-    response = None
-    for _round in range(GUARDIAN_MAX_TOOL_ROUNDS):
-        response = await client.messages.create(
-            model=GUARDIAN_MODEL,
-            max_tokens=GUARDIAN_MAX_TOKENS,
-            system=system,
-            tools=tools,
-            messages=messages,
-            output_config={"effort": guardian_cfg.get("effort", "low")},
-        )
-        if response.stop_reason == "refusal":
-            return "I'd rather not answer that one, keeper."
-        if response.stop_reason != "tool_use":
-            break
-        # Echo the assistant content verbatim (incl. thinking blocks — the
-        # API requires them back unchanged when continuing on the same model).
-        messages.append({"role": "assistant", "content": response.content})
-        tool_results = [
-            {
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": guardian_engine.tool_result_json(
-                    block.name, block.input, snapshot
-                ),
-            }
-            for block in response.content
-            if getattr(block, "type", None) == "tool_use"
-        ]
-        messages.append({"role": "user", "content": tool_results})
-    text = "".join(
-        block.text
-        for block in (response.content if response is not None else [])
-        if getattr(block, "type", None) == "text"
-    ).strip()
-    return text or "I heard you, keeper, but I have nothing useful to add."
-
-
-async def _async_guardian_transcribe(
-    hass: HomeAssistant, api_key: str, audio: bytes, mime: str
-) -> str:
-    """One PTT utterance -> text via OpenAI transcription."""
-    import aiohttp  # noqa: PLC0415 - lazy so the dependency-free CI never loads it
-
-    ext = "webm"
-    if isinstance(mime, str) and "/" in mime:
-        ext = mime.split("/", 1)[1].split(";", 1)[0][:8] or "webm"
-    form = aiohttp.FormData()
-    form.add_field(
-        "file", audio, filename=f"utterance.{ext}", content_type=mime or "audio/webm"
-    )
-    form.add_field("model", GUARDIAN_STT_MODEL)
-    session = _guardian_http(hass)
-    async with session.post(
-        "https://api.openai.com/v1/audio/transcriptions",
-        data=form,
-        headers={"Authorization": f"Bearer {api_key}"},
-        timeout=aiohttp.ClientTimeout(total=60),
-    ) as resp:
-        if resp.status != 200:
-            raise HomeAssistantError(f"Transcription failed (HTTP {resp.status})")
-        data = await resp.json()
-    text = data.get("text") if isinstance(data, dict) else None
-    return text.strip() if isinstance(text, str) else ""
-
-
-async def _async_guardian_tts(
-    hass: HomeAssistant,
-    api_key: str,
-    guardian_cfg: dict[str, Any],
-    text: str,
-    fmt: str,
-) -> tuple[str, str]:
-    """Reply text -> base64 audio. mp3 for direct <audio> playback; pcm
-    (24 kHz s16le) when the Simli face needs raw samples for lip-sync."""
-    import aiohttp  # noqa: PLC0415
-
-    response_format = "pcm" if fmt == "pcm" else "mp3"
-    session = _guardian_http(hass)
-    async with session.post(
-        "https://api.openai.com/v1/audio/speech",
-        json={
-            "model": GUARDIAN_TTS_MODEL,
-            "voice": guardian_cfg.get("voice", "shimmer"),
-            "input": text[:4096],
-            "response_format": response_format,
-        },
-        headers={"Authorization": f"Bearer {api_key}"},
-        timeout=aiohttp.ClientTimeout(total=60),
-    ) as resp:
-        if resp.status != 200:
-            raise HomeAssistantError(f"Speech synthesis failed (HTTP {resp.status})")
-        audio = await resp.read()
-    return base64.b64encode(audio).decode("ascii"), response_format
-
-
-async def _async_guardian_validate_keys(
-    hass: HomeAssistant, keys: dict[str, str], changed: set[str]
-) -> dict[str, str]:
-    """Best-effort live check of newly provided keys so a typo surfaces at
-    save time, not on the first conversation. Returns {key_name: problem}."""
-    problems: dict[str, str] = {}
-    if "anthropic" in changed and keys.get("anthropic"):
-        try:
-            client = _guardian_anthropic_client(keys["anthropic"])
-            await client.models.retrieve(GUARDIAN_MODEL)
-        except ImportError:
-            problems["anthropic"] = "anthropic package not installed yet — restart Home Assistant"
-        except Exception as exc:  # noqa: BLE001 - report, never raise, at save time
-            problems["anthropic"] = f"Key check failed: {type(exc).__name__}"
-    if "openai" in changed and keys.get("openai"):
-        try:
-            import aiohttp  # noqa: PLC0415
-
-            session = _guardian_http(hass)
-            async with session.get(
-                f"https://api.openai.com/v1/models/{GUARDIAN_TTS_MODEL}",
-                headers={"Authorization": f"Bearer {keys['openai']}"},
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                if resp.status == 401:
-                    problems["openai"] = "OpenAI rejected the key (401)"
-                elif resp.status != 200:
-                    problems["openai"] = f"Key check failed (HTTP {resp.status})"
-        except Exception as exc:  # noqa: BLE001
-            problems["openai"] = f"Key check failed: {type(exc).__name__}"
-    return problems
-
-
-@websocket_api.websocket_command({vol.Required("type"): "openreef/guardian_status"})
-@websocket_api.async_response
-async def websocket_guardian_status(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Key status (masked) + guardian settings for the panel tab."""
-    entry = _first_entry(hass)
-    config = _config_from_entry(entry)
-    connection.send_result(
-        msg["id"],
-        {
-            "keys": guardian_engine.keys_status(_guardian_keys(entry)),
-            "settings": config.get("guardian", {}),
-            "model": GUARDIAN_MODEL,
-        },
-    )
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "openreef/guardian_set_keys",
-        vol.Optional("anthropic"): str,
-        vol.Optional("openai"): str,
-        vol.Optional("simli"): str,
-        vol.Optional("simli_face_id"): str,
-    }
-)
-@websocket_api.require_admin
-@websocket_api.async_response
-async def websocket_guardian_set_keys(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Store BYO API keys. Missing field = unchanged, empty string = clear.
-    Keys live outside CONF_SETTINGS so config export can never leak them."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    updates = {name: msg[name] for name in ("anthropic", "openai", "simli") if name in msg}
-    if "simli_face_id" in msg:
-        updates["simliFaceId"] = msg["simli_face_id"]
-    merged = guardian_engine.clean_keys(_guardian_keys(entry), updates)
-    problems = await _async_guardian_validate_keys(hass, merged, set(updates))
-    hass.config_entries.async_update_entry(
-        entry, options={**entry.options, CONF_GUARDIAN_KEYS: merged}
-    )
-    connection.send_result(
-        msg["id"],
-        {"keys": guardian_engine.keys_status(merged), "problems": problems},
-    )
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "openreef/guardian_chat",
-        vol.Required("history"): list,
-    }
-)
-@websocket_api.async_response
-async def websocket_guardian_chat(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Text turn: history (incl. the new user message) -> Lagertha's reply."""
-    entry = _first_entry(hass)
-    config = _config_from_entry(entry)
-    keys = _guardian_keys(entry)
-    if not guardian_engine.keys_status(keys)["anthropic"]["set"]:
-        connection.send_error(
-            msg["id"], "guardian_keys", "Add an Anthropic API key in the Guardian tab first"
-        )
-        return
-    try:
-        reply = await _async_guardian_reply(hass, config, keys, msg["history"])
-    except HomeAssistantError as err:
-        connection.send_error(msg["id"], "guardian_error", str(err))
-        return
-    except Exception as err:  # noqa: BLE001 - network/SDK errors must not kill the WS
-        connection.send_error(
-            msg["id"], "guardian_error", f"Guardian brain error: {type(err).__name__}"
-        )
-        return
-    connection.send_result(msg["id"], {"reply": reply})
-
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "openreef/guardian_voice",
-        vol.Required("audio"): str,
-        vol.Optional("mime"): str,
-        vol.Optional("history"): list,
-        vol.Optional("tts", default="mp3"): vol.In(guardian_engine.TTS_FORMATS),
-    }
-)
-@websocket_api.async_response
-async def websocket_guardian_voice(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Voice turn: base64 PTT audio -> transcript -> reply -> spoken audio."""
-    entry = _first_entry(hass)
-    config = _config_from_entry(entry)
-    keys = _guardian_keys(entry)
-    status = guardian_engine.keys_status(keys)
-    if not status["ready"]:
-        connection.send_error(
-            msg["id"],
-            "guardian_keys",
-            "Add your Anthropic and OpenAI API keys in the Guardian tab first",
-        )
-        return
-    if len(msg["audio"]) > GUARDIAN_MAX_AUDIO_B64:
-        connection.send_error(msg["id"], "audio_too_large", "Utterance too long")
-        return
-    try:
-        audio = base64.b64decode(msg["audio"], validate=True)
-    except (ValueError, TypeError):
-        connection.send_error(msg["id"], "bad_audio", "Audio payload is not valid base64")
-        return
-    try:
-        transcript = await _async_guardian_transcribe(
-            hass, keys["openai"], audio, msg.get("mime", "audio/webm")
-        )
-        if not transcript:
-            connection.send_result(
-                msg["id"],
-                {"transcript": "", "reply": "", "audio": None, "audioFormat": None},
-            )
-            return
-        history = list(msg.get("history") or [])
-        history.append({"role": "user", "content": transcript})
-        reply = await _async_guardian_reply(hass, config, keys, history)
-        audio_out = None
-        out_fmt = None
-        if msg["tts"] != "none":
-            guardian_cfg = (
-                config.get("guardian") if isinstance(config.get("guardian"), dict) else {}
-            )
-            audio_out, out_fmt = await _async_guardian_tts(
-                hass, keys["openai"], guardian_cfg, reply, msg["tts"]
-            )
-    except HomeAssistantError as err:
-        connection.send_error(msg["id"], "guardian_error", str(err))
-        return
-    except Exception as err:  # noqa: BLE001
-        connection.send_error(
-            msg["id"], "guardian_error", f"Guardian voice error: {type(err).__name__}"
-        )
-        return
-    connection.send_result(
-        msg["id"],
-        {
-            "transcript": transcript,
-            "reply": reply,
-            "audio": audio_out,
-            "audioFormat": out_fmt,
-        },
-    )
-
-
-@websocket_api.websocket_command({vol.Required("type"): "openreef/guardian_simli_session"})
-@websocket_api.require_admin
-@websocket_api.async_response
-async def websocket_guardian_simli_session(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Hand the browser the Simli credentials it needs to open the WebRTC
-    face. Admin-only and only on demand — guardian_status never carries key
-    material. Voice-only mode (no Simli key) is a supported degradation."""
-    keys = _guardian_keys(_first_entry(hass))
-    status = guardian_engine.keys_status(keys)
-    if not status["faceReady"]:
-        connection.send_error(
-            msg["id"], "guardian_keys", "Simli key and face ID are not both set"
-        )
-        return
-    connection.send_result(
-        msg["id"], {"apiKey": keys.get("simli", ""), "faceId": keys.get("simliFaceId", "")}
-    )
-
-
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up OpenReef services and websocket commands."""
     websocket_api.async_register_command(hass, websocket_get_config)
@@ -12778,11 +12361,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_dry_run)
     websocket_api.async_register_command(hass, websocket_dosing_ramp_checkpoint)
     websocket_api.async_register_command(hass, websocket_dosing_delete_channel)
-    websocket_api.async_register_command(hass, websocket_guardian_status)
-    websocket_api.async_register_command(hass, websocket_guardian_set_keys)
-    websocket_api.async_register_command(hass, websocket_guardian_chat)
-    websocket_api.async_register_command(hass, websocket_guardian_voice)
-    websocket_api.async_register_command(hass, websocket_guardian_simli_session)
 
     hass.services.async_register(
         DOMAIN,

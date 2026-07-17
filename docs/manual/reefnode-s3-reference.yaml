@@ -158,6 +158,16 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
+  # 2-part spacing (Stage E): epoch seconds of each group's last dose ON THIS
+  # NODE. kalk stamps the alk slot; a future Ca head stamps ca and checks alk.
+  - id: group_alk_last_ts
+    type: long
+    restore_value: false
+    initial_value: '0'
+  - id: group_ca_last_ts
+    type: long
+    restore_value: false
+    initial_value: '0'
   # Live-food channel (brushed; time-based motion instead of steps)
   - id: lf_dosed_today_ml
     type: float
@@ -263,6 +273,16 @@ script:
               } else if ((id(dosed_today_ml) + dose_ml) >
                          id(kalk_max_daily_ml).state) {
                 reason = "daily_cap";
+              } else if (id(kalk_min_gap_min).state > 0.0f &&
+                         id(group_ca_last_ts) > 0) {
+                // Step 8 (Stage E): 2-part spacing — refuse while another group
+                // dosed on this node inside the gap. Per-node by design.
+                auto now2 = id(reef_time).now();
+                if (now2.is_valid() &&
+                    (now2.timestamp - id(group_ca_last_ts)) <
+                        (long)(id(kalk_min_gap_min).state * 60.0f)) {
+                  reason = "spacing";
+                }
               }
             }
           }
@@ -292,6 +312,7 @@ script:
           auto now = id(reef_time).now();
           char buf[16];
           if (now.is_valid()) {
+            id(group_alk_last_ts) = now.timestamp;   // 2-part spacing epoch (alk)
             snprintf(buf, sizeof(buf), "ok %02d:%02d", now.hour, now.minute);
           } else {
             snprintf(buf, sizeof(buf), "ok");
@@ -759,6 +780,18 @@ number:
     initial_value: 480
     mode: box
   - platform: template
+    name: "Kalk Min Gap (min)"
+    id: kalk_min_gap_min
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "min"
+    min_value: 0
+    max_value: 1440
+    step: 1
+    initial_value: 0          # 0 = spacing off; OpenReef writes the group's worst
+    mode: box                 # obligation from the spacing matrix (rev 3)
+  - platform: template
     name: "Kalk Manual Dose (ml)"
     id: kalk_manual_dose_ml
     entity_category: config
@@ -1178,7 +1211,7 @@ interval:
 #   Fresh2-empty float  -> binary_sensor.openreef_awc_fresh2_reservoir_empty
 #   Waste-full float    -> binary_sensor.openreef_awc_waste_reservoir_full
 #
-# Dosing → kalk channel → Auto-bind: expect 24 of 24.
+# Dosing → kalk channel → Auto-bind: expect 25 of 25 (contract rev 3).
 # Dosing → live-food channel → Auto-bind: expect 22 of 22.
 #
 # Toggle directly in HA when a firmware latch trips (not surfaced in the panel):

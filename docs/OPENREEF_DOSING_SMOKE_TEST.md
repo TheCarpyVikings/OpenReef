@@ -100,7 +100,7 @@ above still applies, plus:
 - [ ] `Reefnode Master Enable` turns ON a few seconds after boot; a leak trip
       (or the hardware coil float) drops it, kills every pump, and stays
       latched until `Reefnode Clear Lock`.
-- [ ] Kalk auto-bind reports **24 of 24**; live-food auto-bind **22 of 22**
+- [ ] Kalk auto-bind reports **25 of 25** (rev 3); live-food auto-bind **22 of 22**
       (driver-aware — the live-food channel uses the brushed suffix table in
       `docs/manual/reefnode-s3-design.md` §3).
 - [ ] Live-food `Calibrate 30s` runs exactly 30 s; the panel derives ml/s.

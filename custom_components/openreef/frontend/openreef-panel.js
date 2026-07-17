@@ -2020,6 +2020,17 @@ class OpenReefPanel extends HTMLElement {
           }
         }
       }
+      if (scope === "dosing-spacing") {
+        const dosingCfg = this._config.dosing = this._config.dosing || {};
+        dosingCfg.spacing = dosingCfg.spacing || {};
+        dosingCfg.spacing[field] = value;
+      }
+      if (scope === "dosing-spacing-matrix") {
+        const dosingCfg = this._config.dosing = this._config.dosing || {};
+        dosingCfg.spacing = dosingCfg.spacing || {};
+        dosingCfg.spacing.matrix = dosingCfg.spacing.matrix || {};
+        dosingCfg.spacing.matrix[id] = Math.max(0, Number(value) || 0);
+      }
       if (scope === "dosing-notifications") {
         const dosingCfg = this._config.dosing = this._config.dosing || {};
         dosingCfg.notifications = dosingCfg.notifications || {};
@@ -2044,7 +2055,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -8683,6 +8694,8 @@ class OpenReefPanel extends HTMLElement {
       nightStartNumber: "number._kalk_night_start_min",
       nightEndNumber: "number._kalk_night_end_min",
       manualDoseMlNumber: "number._kalk_manual_dose_ml",
+      // Contract rev 3 (Stage E): the firmware-held 2-part spacing gap.
+      minGapNumber: "number._kalk_min_gap_min",
       enabledSwitch: "switch._kalk_dosing_enabled",
       haSuspendSwitch: "switch._kalk_ha_suspend",
       phGuardSwitch: "switch._kalk_ph_guard_enabled",
@@ -8799,10 +8812,26 @@ class OpenReefPanel extends HTMLElement {
       this._render();
       return;
     }
-    await this._doserCall(
-      { type: "openreef/dosing_dose_now", channel_id: id, ml },
-      `${ml} ml dose requested — the firmware's guard chain has the final say.`,
-    );
+    try {
+      const result = await this._callWS({ type: "openreef/dosing_dose_now", channel_id: id, ml });
+      if (!this._configDirty) this._config = result.config || this._config;
+      const spacing = (result.reasons || []).find((r) => r.code === "spacing");
+      if (spacing && window.confirm(
+          `${spacing.message}\n\nQueue this dose to fire automatically once the gap clears?`)) {
+        const queued = await this._callWS(
+          { type: "openreef/dosing_dose_now", channel_id: id, ml, queue: true });
+        if (!this._configDirty) this._config = queued.config || this._config;
+        this._doserMessage = "Dose queued — it fires automatically once the spacing gap clears.";
+      } else if (result.started === false && (result.reasons || []).length) {
+        this._doserMessage = "Blocked: " + result.reasons.map((r) => r.message).join("; ");
+      } else {
+        this._doserMessage = `${ml} ml dose requested — the firmware's guard chain has the final say.`;
+      }
+    } catch (err) {
+      this._doserMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._doserLoadSummary?.();
+    this._render();
   }
 
   async _doserCalibrateSave(id) {
@@ -9359,6 +9388,7 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${ids.map((id) => this._doserChannelSettingsCard(id)).join("")}
       </section>
+      ${this._doserSpacingSection()}
       ${this._doserNotificationsSection()}`;
   }
 
@@ -9556,6 +9586,29 @@ class OpenReefPanel extends HTMLElement {
         <summary><small>Entity overrides (${bound}/${roles.length})</small></summary>
         <div class="mini-grid">${overrides}</div>
       </details>`;
+  }
+
+  _doserSpacingSection() {
+    const spacing = this._config?.dosing?.spacing || {};
+    const matrix = spacing.matrix || {};
+    const row = (key, label) => `
+      <label>${label}<input type="number" min="0" max="1440" step="5"
+        data-scope="dosing-spacing-matrix" data-id="${key}" value="${matrix[key] ?? 0}"><small>minutes apart (0 = no rule)</small></label>`;
+    const queued = spacing.queued;
+    return `
+      <section class="mapping-section awc-settings-block">
+        <div class="awc-section-title"><p class="eyebrow">2-part spacing</p></div>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-spacing" data-field="enabled" ${spacing.enabled ? "checked" : ""}>
+          <span><strong>Keep alkalinity and calcium apart</strong><small>Dosing them into the same water minutes apart causes localized precipitation. Scheduled doses are auto-staggered (alk :00 / ca :30); the firmware refuses doses inside the gap; blocked manual doses can queue. Kalk counts as alkalinity.</small></span>
+        </label>
+        ${spacing.enabled ? `<div class="mini-grid">
+          ${row("alk|ca", "Alk ↔ Ca")}
+          ${row("alk|mg", "Alk ↔ Mg")}
+          ${row("ca|mg", "Ca ↔ Mg")}
+        </div>` : ""}
+        ${queued ? `<small class="awc-hint">⏳ Queued: ${this._format(queued.ml, 1)} ml on '${this._escape(queued.channelId)}' — fires after ${this._escape(this._formatActivityTime(queued.notBefore))}.</small>` : ""}
+      </section>`;
   }
 
   _doserNotificationsSection() {

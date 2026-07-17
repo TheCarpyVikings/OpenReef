@@ -363,6 +363,20 @@ number:
     initial_value: 480        # 08:00 (wraps midnight — handled wrap-aware)
     mode: box
   - platform: template
+    name: "Kalk Min Gap (min)"
+    id: kalk_min_gap_min
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "min"
+    min_value: 0
+    max_value: 1440
+    step: 1
+    initial_value: 0     # contract rev 3 (Stage E): the 2-part spacing gap OpenReef
+    mode: box            # writes. Enforced on multi-head nodes (reefnode guard
+                         # step 8); on this single-head classic node it is held
+                         # for the contract and inert.
+  - platform: template
     name: "Kalk Manual Dose (ml)"
     id: kalk_manual_dose_ml
     entity_category: config
@@ -737,6 +751,7 @@ interval:
 | `nightStartNumber` | `number.<p>_kalk_night_start_min` | `kalk_night_start_min` |
 | `nightEndNumber` | `number.<p>_kalk_night_end_min` | `kalk_night_end_min` |
 | `manualDoseMlNumber` | `number.<p>_kalk_manual_dose_ml` | `kalk_manual_dose_ml` |
+| `minGapNumber` | `number.<p>_kalk_min_gap_min` |
 | `enabledSwitch` | `switch.<p>_kalk_dosing_enabled` | `kalk_enabled` |
 | `haSuspendSwitch` | `switch.<p>_kalk_ha_suspend` | `kalk_ha_suspend` |
 | `phGuardSwitch` | `switch.<p>_kalk_ph_guard_enabled` | `kalk_ph_guard` |

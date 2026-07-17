@@ -886,6 +886,15 @@ def test_min_gap_and_phase_offset_writes():
         config2["dosing"]["channels"]["kalk"], config2, now_local)["minGapNumber"] == 0.0
 
 
+def test_import_sanitize_drops_queued_spacing_dose():
+    # A restored backup must never fire a days-old deferred dose.
+    incoming = {"dosing": {"spacing": {"enabled": True, "matrix": {"alk|ca": 30},
+                                       "queued": {"channelId": "kalk", "ml": 2.0,
+                                                  "requestedAt": "", "notBefore": ""}}}}
+    integration._sanitize_imported_config(incoming, {})
+    assert incoming["dosing"]["spacing"]["queued"] is None
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

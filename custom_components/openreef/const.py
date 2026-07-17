@@ -334,6 +334,7 @@ DOSING_BINDING_ROLES = (
     "doseSpeedNumber", "runCurrentNumber", "phStopNumber", "phResumeNumber",
     "stepsPerMlNumber", "windowStartNumber", "windowEndNumber",
     "nightStartNumber", "nightEndNumber", "manualDoseMlNumber",
+    "minGapNumber",   # contract rev 3 (Stage E): the firmware-held 2-part spacing gap
     "enabledSwitch", "haSuspendSwitch", "phGuardSwitch",
     "primeButton", "doseNowButton", "manualDoseButton", "calibrateButton",
     "dosedTodaySensor", "reservoirLowSensor", "lastSkipSensor",

@@ -77,7 +77,8 @@ panel's brushed suffix map. **Never rename these entities.**
 
 Frozen skip-reason vocabulary (shared with kalk, minus `ph_guard` — brushed
 heads carry no probe): `disabled · ha_suspend · reservoir_low · not_calibrated ·
-out_of_window · daily_cap · ok HH:MM`.
+out_of_window · daily_cap · ok HH:MM` — kalk (and future 2-part heads) add
+`spacing` (Stage E, guard step 8).
 
 **AWC pumps and safety sensors stay explicit-bind** (picked manually in the
 panel) — keep the reference names anyway; the YAML's footer lists them.
@@ -115,7 +116,7 @@ panel) — keep the reference names anyway; the YAML's footer lists them.
    confirm debounce (no chatter).
 3. **Pumps into jugs, water, still unplumbed**: AWC panel explicit-bind (drain,
    fill, fill2 if fitted) → per-pump timed calibration runs from the panel
-   ceremony. Kalk: auto-bind (expect **24 of 24**) → prime → `Calibrate
+   ceremony. Kalk: auto-bind (expect **25 of 25**, contract rev 3) → prime → `Calibrate
    100 rev` → measure → verify 10 ml ± 5 %. Live food: auto-bind (expect
    **22 of 22**) → prime → `Calibrate 30s` → measure → verify a 5 ml dose.
 4. **Guard proofs** (per `OPENREEF_DOSING_SMOKE_TEST.md` §7–10): every guard
