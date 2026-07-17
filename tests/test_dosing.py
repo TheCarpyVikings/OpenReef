@@ -519,6 +519,46 @@ def test_is_brushed_driver_detection():
     assert dosing.is_brushed(ch) is True
 
 
+# --- Stage E: 2-part chemical spacing ------------------------------------------
+
+def test_spacing_groups_and_gap_lookup():
+    assert dosing.spacing_group("kalk") == "alk"   # kalk IS alkalinity chemistry
+    assert dosing.spacing_group("alk") == "alk"
+    assert dosing.spacing_group("ca") == "ca"
+    assert dosing.spacing_group("livefood") == ""  # ungrouped: never spaced
+    spacing = {"enabled": True, "matrix": {"alk|ca": 30, "alk|mg": 15}}
+    assert dosing.spacing_gap_minutes(spacing, "alk", "ca") == 30
+    assert dosing.spacing_gap_minutes(spacing, "ca", "alk") == 30  # order-free
+    assert dosing.spacing_gap_minutes(spacing, "ca", "mg") == 0   # no row = no gap
+    assert dosing.spacing_gap_minutes({"enabled": False, "matrix": {"alk|ca": 30}}, "alk", "ca") == 0
+    # the firmware number is the channel's WORST obligation
+    assert dosing.channel_min_gap_minutes(spacing, "kalk") == 30
+    assert dosing.channel_min_gap_minutes(spacing, "mg") == 15
+    assert dosing.channel_min_gap_minutes(spacing, "livefood") == 0
+
+
+def test_spacing_verdict_wait_math():
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    spacing = {"enabled": True, "matrix": {"alk|ca": 30}}
+    last = {"ca": now - timedelta(minutes=10)}
+    verdict = dosing.spacing_verdict(spacing, "kalk", last, now)
+    assert verdict["ok"] is False and abs(verdict["waitMinutes"] - 20.0) < 0.1
+    assert verdict["conflict"] == "ca"
+    assert dosing.spacing_verdict(spacing, "kalk", {"ca": now - timedelta(minutes=31)}, now)["ok"] is True
+    assert dosing.spacing_verdict(spacing, "kalk", {"alk": now}, now)["ok"] is True   # own group
+    assert dosing.spacing_verdict(spacing, "livefood", last, now)["ok"] is True       # ungrouped
+    assert dosing.spacing_verdict(spacing, "kalk", {"ca": None}, now)["ok"] is True   # unknown passes
+
+
+def test_spacing_phase_offsets_are_cumulative():
+    spacing = {"enabled": True, "matrix": {"alk|ca": 30, "ca|mg": 20}}
+    offsets = dosing.phase_offsets(spacing, ["ca", "alk", "mg"])
+    assert offsets == {"alk": 0.0, "ca": 30.0, "mg": 50.0}   # alk :00 / ca :30 / mg :50
+    assert dosing.phase_offsets(spacing, ["alk"]) == {"alk": 0.0}
+    assert dosing.phase_offsets({"enabled": False, "matrix": {"alk|ca": 30}}, ["alk", "ca"]) == {"alk": 0.0, "ca": 0.0}
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

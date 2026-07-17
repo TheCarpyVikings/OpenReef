@@ -143,6 +143,7 @@ from .const import (
 )
 from . import awc as awc_engine
 from . import dosing as dosing_engine
+from . import guardian as guardian_engine
 from . import icp
 from . import spawning
 from . import vision
@@ -2370,6 +2371,32 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         dosing["notifications"] = {
             key: bool(raw_notify.get(key, True))
             for key in ("missedDose", "reservoirLow", "tubeLife", "calibrationDue", "syncIssues", "staleFood")
+        }
+        # 2-part chemical spacing (Stage E): the pair matrix is minutes required
+        # between groups (alk|ca etc.); a single queued deferred dose survives
+        # restarts. Keys are canonicalised alphabetically.
+        raw_spacing = dosing.get("spacing") if isinstance(dosing.get("spacing"), dict) else {}
+        raw_matrix = raw_spacing.get("matrix") if isinstance(raw_spacing.get("matrix"), dict) else {}
+        matrix: dict[str, float] = {}
+        for key, value in raw_matrix.items():
+            parts = sorted(p.strip() for p in str(key).split("|"))
+            if len(parts) == 2 and parts[0] != parts[1] and all(p in ("alk", "ca", "mg") for p in parts):
+                matrix["|".join(parts)] = round(_awc_num(value, 0, 0, 1440), 1)
+        raw_queued = raw_spacing.get("queued") if isinstance(raw_spacing.get("queued"), dict) else None
+        queued = None
+        if raw_queued and raw_queued.get("channelId"):
+            queued = {
+                "channelId": str(raw_queued.get("channelId"))[:64],
+                "ml": round(_awc_num(raw_queued.get("ml"), 0, 0, DOSING_MAX_PER_DOSE_ML), 2),
+                "requestedAt": _awc_str(raw_queued.get("requestedAt"), 40),
+                "notBefore": _awc_str(raw_queued.get("notBefore"), 40),
+            }
+            if queued["ml"] <= 0:
+                queued = None
+        dosing["spacing"] = {
+            "enabled": bool(raw_spacing.get("enabled", False)),
+            "matrix": matrix,
+            "queued": queued,
         }
 
     lighting_cfg = config.setdefault("lightingSchedule", {})

@@ -522,6 +522,97 @@ def reservoir_state(reservoir: dict[str, Any], ml_per_day: float, now: datetime)
 # --------------------------------------------------------------------------- #
 # Calibration, wear, integrity
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# 2-part chemical spacing (Stage E) — alkalinity and calcium must never dose
+# into the same water volume minutes apart (localized precipitation). Groups:
+# kalk IS alkalinity chemistry, so it shares the alk group.
+# --------------------------------------------------------------------------- #
+_SPACING_GROUPS = {"alk": "alk", "kalk": "alk", "ca": "ca", "mg": "mg"}
+
+
+def spacing_group(chemical: str) -> str:
+    """The spacing group a chemical belongs to ('' = ungrouped: trace, live food
+    and 'other' never participate in spacing)."""
+    return _SPACING_GROUPS.get(str(chemical or ""), "")
+
+
+def spacing_pair_key(group_a: str, group_b: str) -> str:
+    """Canonical matrix key — alphabetical, so 'ca|alk' and 'alk|ca' are one row."""
+    return "|".join(sorted((group_a, group_b)))
+
+
+def spacing_gap_minutes(spacing: dict[str, Any] | None, group_a: str, group_b: str) -> float:
+    """Required minutes between doses of two groups (0 = no constraint)."""
+    spacing = spacing or {}
+    if not spacing.get("enabled") or not group_a or not group_b or group_a == group_b:
+        return 0.0
+    matrix = spacing.get("matrix") if isinstance(spacing.get("matrix"), dict) else {}
+    return max(0.0, _f(matrix.get(spacing_pair_key(group_a, group_b))))
+
+
+def channel_min_gap_minutes(spacing: dict[str, Any] | None, chemical: str) -> float:
+    """The FIRMWARE number for a channel: the largest gap its group owes any other
+    group. The firmware guard is per-node ('minutes since any OTHER group dosed on
+    this node'), so the max is the safe single value to hold there."""
+    group = spacing_group(chemical)
+    spacing = spacing or {}
+    if not group or not spacing.get("enabled"):
+        return 0.0
+    matrix = spacing.get("matrix") if isinstance(spacing.get("matrix"), dict) else {}
+    gaps = [max(0.0, _f(v)) for k, v in matrix.items()
+            if group in str(k).split("|") and len(str(k).split("|")) == 2
+            and str(k).split("|")[0] != str(k).split("|")[1]]
+    return max(gaps, default=0.0)
+
+
+def spacing_verdict(
+    spacing: dict[str, Any] | None, chemical: str,
+    group_last_dose: dict[str, datetime | None] | None, now: datetime,
+) -> dict[str, Any]:
+    """HA-side manual-dose gate: may this channel dose NOW given when each group
+    last dosed? Returns {ok, waitMinutes, conflict}. Unknown last-dose times pass
+    (advisory HA layer — the per-node firmware guard is the enforcement)."""
+    group = spacing_group(chemical)
+    if not group or not (spacing or {}).get("enabled"):
+        return {"ok": True, "waitMinutes": 0.0, "conflict": ""}
+    worst_wait = 0.0
+    conflict = ""
+    for other, last in (group_last_dose or {}).items():
+        if other == group or last is None:
+            continue
+        gap = spacing_gap_minutes(spacing, group, other)
+        if gap <= 0:
+            continue
+        try:
+            elapsed = (now - last).total_seconds() / 60.0
+        except TypeError:
+            continue
+        wait = gap - elapsed
+        if wait > worst_wait:
+            worst_wait = wait
+            conflict = other
+    return {"ok": worst_wait <= 0, "waitMinutes": round(max(0.0, worst_wait), 1),
+            "conflict": conflict}
+
+
+def phase_offsets(spacing: dict[str, Any] | None, groups_present: Iterable[str]) -> dict[str, float]:
+    """Compile-time stagger so scheduled doses naturally interleave (alk :00 /
+    ca :30 for a 30-min gap): groups in alphabetical order, each offset by the
+    cumulative gap owed to its predecessor. The firmware guard remains the
+    enforcement; this just keeps it from ever needing to trip."""
+    spacing = spacing or {}
+    ordered = sorted({g for g in groups_present if g})
+    offsets: dict[str, float] = {}
+    cursor = 0.0
+    previous = ""
+    for group in ordered:
+        if previous:
+            cursor += spacing_gap_minutes(spacing, previous, group)
+        offsets[group] = cursor
+        previous = group
+    return offsets
+
+
 def brushed_calibration_from_run(measured_ml: float, run_seconds: float = 30.0) -> float:
     """Brushed-head calibration: the firmware runs the pump for a FIXED timed burst
     (default 30 s — rhymes with the stepper's exact 100 revolutions), the keeper
