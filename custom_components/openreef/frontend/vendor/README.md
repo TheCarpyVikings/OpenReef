@@ -23,3 +23,22 @@ done
 
 If these files are absent, the importer still works for CSV; PDF import shows a clear
 "PDF support isn't installed — paste the text or import a CSV" message.
+
+## simli-client (`simli-client.mjs`)
+
+[simli-client](https://github.com/simliai/simli-client) **v2.0.0** (MIT) bundled as a
+single ESM file with its `livekit-client` dependency inlined (esbuild
+`--bundle --format=esm --minify` over the package's `dist/index.js`). Exports the
+class as `default.SimliClient` (CJS interop). Used by the Guardian tab for
+Lagertha's live WebRTC face; **lazy-loaded** only when a user with a Simli key
+clicks "Start live face". If the file is absent or Simli is not configured, the
+Guardian degrades to voice-only mode with the static avatar art.
+
+To update:
+
+```bash
+npm install simli-client@<version> esbuild
+npx esbuild node_modules/simli-client/dist/index.js \
+  --bundle --format=esm --minify \
+  --outfile=custom_components/openreef/frontend/vendor/simli-client.mjs
+```

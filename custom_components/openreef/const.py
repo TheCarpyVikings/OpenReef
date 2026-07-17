@@ -12,6 +12,17 @@ CONF_SETTINGS = "settings"
 CORE_SCHEMA_VERSION = 47
 INTEGRATION_VERSION = "0.5.8"
 
+# Guardian (Lagertha live avatar) — API keys live in the config entry options
+# under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
+# panel's settings export/import can never leak secrets.
+CONF_GUARDIAN_KEYS = "guardian_keys"
+GUARDIAN_MODEL = "claude-sonnet-5"
+GUARDIAN_MAX_TOKENS = 1024
+GUARDIAN_MAX_TOOL_ROUNDS = 6
+GUARDIAN_STT_MODEL = "gpt-4o-transcribe"
+GUARDIAN_TTS_MODEL = "gpt-4o-mini-tts"
+GUARDIAN_MAX_AUDIO_B64 = 8_000_000  # ~6 MB of audio; PTT utterances are far smaller
+
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
 CAPTURES_DIR_NAME = "openreef_captures"
@@ -1408,6 +1419,14 @@ DEFAULT_CORE_CONFIG = {
         "range": "all",
         "group": "core",
         "symbol": "Ca",
+    },
+    # Guardian (Lagertha live avatar) — behaviour settings only; API keys are
+    # stored under CONF_GUARDIAN_KEYS in the entry options, never in here.
+    "guardian": {
+        "enabled": True,
+        "tone": "cheeky",
+        "effort": "low",
+        "voice": "shimmer",
     },
 }
 

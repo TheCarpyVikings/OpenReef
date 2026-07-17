@@ -42,6 +42,17 @@ class OpenReefPanel extends HTMLElement {
     this._visionAt = 0;
     this._visionLoading = false;
     this._visionError = "";
+    // Guardian (Lagertha live avatar): transcript is panel-owned (the backend
+    // is stateless); videoEl/audioEl are PERSISTENT detached nodes so the
+    // Simli WebRTC streams survive full-innerHTML re-renders — they get
+    // re-mounted into #guardian-face-slot after every render.
+    this._guardian = {
+      status: null, loading: false, error: "", message: "",
+      transcript: [], busy: false,
+      recording: false, recorder: null, chunks: [], stream: null,
+      face: null, videoEl: null, audioEl: null,
+      speaking: false, keysOpen: false,
+    };
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
@@ -1071,6 +1082,7 @@ class OpenReefPanel extends HTMLElement {
         this._stopTimelapse();
         this._stopFeedPlayer();
         this._feedPlayer.sessionId = "";
+        if (id !== "guardian") this._guardianLeave();
         this._activeTab = id;
         this._setupOpen = false;
         this._equipmentDetail = null;
@@ -1091,6 +1103,20 @@ class OpenReefPanel extends HTMLElement {
           this._saveHealthSections();
         }
         this._pendingScroll = target.dataset.scroll || (sectionToOpen ? `or-section-${sectionToOpen}` : "");
+        this._render();
+      }
+      if (action === "guardian-save-keys") this._guardianSaveKeys();
+      if (action === "guardian-keys-toggle") {
+        this._guardian.keysOpen = !this._guardian.keysOpen;
+        this._render();
+      }
+      if (action === "guardian-send") this._guardianSendText();
+      if (action === "guardian-ptt") this._guardianToggleRecord();
+      if (action === "guardian-face-start") this._guardianStartFace();
+      if (action === "guardian-face-stop") { this._guardianStopFace(); this._render(); }
+      if (action === "guardian-clear") {
+        this._guardian.transcript = [];
+        this._guardian.error = "";
         this._render();
       }
       if (action === "onboarding-start") { this._activeTab = "mission"; this._startOnboarding(); }
@@ -6221,6 +6247,415 @@ class OpenReefPanel extends HTMLElement {
         if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
       });
     }
+    if (this._activeTab === "guardian") {
+      requestAnimationFrame(() => this._guardianAfterRender());
+    }
+  }
+
+  // --- Guardian (Lagertha live avatar) ------------------------------------
+  // Stage A: BYO keys (Anthropic + OpenAI, Simli optional), push-to-talk
+  // voice loop and text chat against openreef/guardian_* websocket commands.
+  // Voice-only mode (static Lagertha art + mp3 playback) is the graceful
+  // fallback when Simli isn't configured; with a Simli key the vendored
+  // WebRTC client streams the live face and lip-syncs raw PCM.
+
+  async _guardianLoadStatus(force = false) {
+    const g = this._guardian;
+    if (g.loading || (g.status && !force)) return;
+    g.loading = true;
+    try {
+      g.status = await this._callWS({ type: "openreef/guardian_status" });
+      g.error = "";
+    } catch (err) {
+      g.error = "Guardian backend unavailable — is the integration up to date?";
+    }
+    g.loading = false;
+    this._render();
+  }
+
+  _guardianLeave() {
+    // On-demand by design: leaving the tab ends the (per-minute billed)
+    // Simli session and any live recording. The transcript survives.
+    this._guardianStopFace();
+    const g = this._guardian;
+    if (g.recorder && g.recording) {
+      try { g.recorder.stop(); } catch { /* already stopped */ }
+    }
+    g.recording = false;
+  }
+
+  _guardianTab() {
+    // Fenced: one exception in this single web component blanks the whole panel.
+    try {
+      const g = this._guardian;
+      if (!g.status && !g.loading) this._guardianLoadStatus();
+      const keys = g.status?.keys || null;
+      const ready = !!keys?.ready;
+      const faceReady = !!keys?.faceReady;
+      const faceActive = !!g.face?.active;
+      const faceConnecting = !!g.face?.connecting;
+      const showKeys = g.keysOpen || (keys && !ready);
+
+      let statusPill = `<div class="pill">Loading…</div>`;
+      if (g.error) statusPill = `<div class="pill warning">${this._escape(g.error)}</div>`;
+      else if (keys && !ready) statusPill = `<div class="pill warning">Needs API keys</div>`;
+      else if (faceActive) statusPill = `<div class="pill ok">Live face connected</div>`;
+      else if (ready) statusPill = `<div class="pill ok">Ready${faceReady ? "" : " — voice only"}</div>`;
+
+      const art = `${this._avatarBase()}${g.speaking ? "point.png" : "idle.png"}`;
+      const transcript = g.transcript.map((turn) => `
+        <div class="guardian-turn ${turn.role === "user" ? "guardian-user" : "guardian-lagertha"}">
+          <span class="guardian-who">${turn.role === "user" ? "You" : "Lagertha"}</span>
+          <p>${this._escape(turn.content)}</p>
+        </div>
+      `).join("");
+
+      const keyRow = (label, name, info) => `
+        <label class="guardian-key">
+          <span>${label} ${info?.set ? `<em class="guardian-hint">set ····${this._escape(info.hint || "")}</em>` : ""}</span>
+          <input type="password" id="guardian-key-${name}" placeholder="${info?.set ? "Leave blank to keep" : "Paste key"}" autocomplete="off">
+        </label>
+      `;
+      const problems = g.status?.problems || g.keyProblems || {};
+      const problemText = Object.entries(problems)
+        .map(([name, text]) => `<p class="guardian-problem">${this._escape(name)}: ${this._escape(text)}</p>`)
+        .join("");
+
+      return `
+        <style>
+          .guardian-stage { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+          .guardian-face { width: 260px; min-width: 220px; }
+          .guardian-face img { width: 100%; border-radius: 14px; display: block; }
+          .guardian-face video { width: 100%; border-radius: 14px; display: block; background: #06131c; }
+          .guardian-chat { flex: 1; min-width: 280px; }
+          .guardian-log { max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }
+          .guardian-turn { border-radius: 12px; padding: 8px 12px; max-width: 92%; }
+          .guardian-turn p { margin: 2px 0 0; white-space: pre-wrap; }
+          .guardian-who { font-size: 11px; opacity: 0.65; text-transform: uppercase; letter-spacing: 0.06em; }
+          .guardian-user { align-self: flex-end; background: rgba(72, 149, 194, 0.18); }
+          .guardian-lagertha { align-self: flex-start; background: rgba(122, 194, 122, 0.14); }
+          .guardian-input-row { display: flex; gap: 8px; margin-top: 10px; }
+          .guardian-input-row input { flex: 1; }
+          .guardian-ptt.recording { background: #b3452e; color: #fff; animation: guardianPulse 1.2s infinite; }
+          @keyframes guardianPulse { 50% { filter: brightness(1.25); } }
+          .guardian-key { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+          .guardian-hint { font-style: normal; opacity: 0.65; font-size: 12px; }
+          .guardian-problem { color: #d98b6a; font-size: 13px; margin: 4px 0 0; }
+          .guardian-busy { opacity: 0.7; font-style: italic; }
+        </style>
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>Lagertha — Reef Guardian</h2>
+              <p>Ask her anything about the tank. She reads the controller; she can't touch it (yet).</p>
+            </div>
+            ${statusPill}
+          </div>
+          <div class="guardian-stage">
+            <div class="guardian-face">
+              ${faceActive || faceConnecting
+                ? `<div id="guardian-face-slot">${faceConnecting ? `<p class="guardian-busy">Summoning the shield-maiden…</p>` : ""}</div>`
+                : `<img src="${art}" alt="Lagertha">`}
+              <div class="button-row">
+                ${faceActive
+                  ? `<button class="secondary" data-action="guardian-face-stop">End live face</button>`
+                  : faceReady && !faceConnecting
+                    ? `<button class="secondary" data-action="guardian-face-start">Start live face</button>`
+                    : ""}
+              </div>
+              ${g.face?.error ? `<p class="guardian-problem">${this._escape(g.face.error)}</p>` : ""}
+            </div>
+            <div class="guardian-chat">
+              <div class="guardian-log" id="guardian-log">
+                ${transcript || `<p class="guardian-busy">No conversation yet. Hold court with the mic, or type below.</p>`}
+                ${g.busy ? `<p class="guardian-busy">Lagertha is thinking…</p>` : ""}
+              </div>
+              <div class="guardian-input-row">
+                <button class="secondary guardian-ptt ${g.recording ? "recording" : ""}" data-action="guardian-ptt" ${!ready || g.busy ? "disabled" : ""}>
+                  ${g.recording ? "■ Stop & send" : "🎙 Speak"}
+                </button>
+                <input type="text" id="guardian-input" placeholder="Ask Lagertha…" ${!ready || g.busy ? "disabled" : ""}>
+                <button class="primary" data-action="guardian-send" ${!ready || g.busy ? "disabled" : ""}>Send</button>
+                <button class="secondary" data-action="guardian-clear" ${g.transcript.length ? "" : "disabled"}>Clear</button>
+              </div>
+              ${g.message ? `<p class="guardian-busy">${this._escape(g.message)}</p>` : ""}
+            </div>
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>Setup</h2>
+              <p>Bring your own keys — they stay in Home Assistant and are never included in config exports.</p>
+            </div>
+            <button class="secondary" data-action="guardian-keys-toggle">${showKeys ? "Hide" : "API keys"}</button>
+          </div>
+          ${showKeys ? `
+            <p>Two keys make her talk; the Simli pair gives her a face. <strong>Anthropic</strong> (console.anthropic.com) is the brain, <strong>OpenAI</strong> (platform.openai.com) is ears + voice, <strong>Simli</strong> (simli.com, optional) is the live face.</p>
+            ${keyRow("Anthropic API key (required)", "anthropic", keys?.anthropic)}
+            ${keyRow("OpenAI API key (required)", "openai", keys?.openai)}
+            ${keyRow("Simli API key (optional)", "simli", keys?.simli)}
+            <label class="guardian-key">
+              <span>Simli face ID ${keys?.simliFaceId ? `<em class="guardian-hint">${this._escape(keys.simliFaceId)}</em>` : ""}</span>
+              <input type="text" id="guardian-key-face" placeholder="${keys?.simliFaceId ? "Leave blank to keep" : "e.g. your Lagertha face ID"}" autocomplete="off">
+            </label>
+            ${problemText}
+            <div class="button-row">
+              <button class="primary" data-action="guardian-save-keys" ${g.busy ? "disabled" : ""}>Save keys</button>
+            </div>
+          ` : ""}
+        </section>
+      `;
+    } catch (err) {
+      return `<section class="card"><h2>Lagertha</h2><p>Guardian view failed: ${this._escape(err?.message || String(err))}</p></section>`;
+    }
+  }
+
+  _guardianAfterRender() {
+    const g = this._guardian;
+    // Re-mount the persistent WebRTC media nodes after the innerHTML rewrite.
+    const slot = this.shadowRoot.getElementById("guardian-face-slot");
+    if (slot && g.videoEl && (g.face?.active || g.face?.connecting)) {
+      if (!slot.contains(g.videoEl)) {
+        slot.appendChild(g.videoEl);
+        slot.appendChild(g.audioEl);
+      }
+    }
+    const log = this.shadowRoot.getElementById("guardian-log");
+    if (log) log.scrollTop = log.scrollHeight;
+    const input = this.shadowRoot.getElementById("guardian-input");
+    if (input && !input.dataset.guardianBound) {
+      input.dataset.guardianBound = "1";
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") this._guardianSendText();
+      });
+    }
+  }
+
+  async _guardianSaveKeys() {
+    const read = (id) => {
+      const el = this.shadowRoot.getElementById(id);
+      return el && el.value.trim() ? el.value.trim() : null;
+    };
+    const payload = { type: "openreef/guardian_set_keys" };
+    const anthropic = read("guardian-key-anthropic");
+    const openai = read("guardian-key-openai");
+    const simli = read("guardian-key-simli");
+    const face = read("guardian-key-face");
+    if (anthropic) payload.anthropic = anthropic;
+    if (openai) payload.openai = openai;
+    if (simli) payload.simli = simli;
+    if (face) payload.simli_face_id = face;
+    if (Object.keys(payload).length === 1) {
+      this._guardian.message = "Nothing to save — paste at least one key first.";
+      this._render();
+      return;
+    }
+    this._guardian.busy = true;
+    this._render();
+    try {
+      const result = await this._callWS(payload);
+      this._guardian.status = { ...(this._guardian.status || {}), keys: result.keys, problems: result.problems };
+      this._guardian.message = Object.keys(result.problems || {}).length
+        ? "Saved, but a key check failed — see below."
+        : "Keys saved. Lagertha is listening.";
+    } catch (err) {
+      this._guardian.message = `Saving failed: ${err?.message || err}`;
+    }
+    this._guardian.busy = false;
+    this._render();
+  }
+
+  async _guardianSendText() {
+    const g = this._guardian;
+    if (g.busy) return;
+    const input = this.shadowRoot.getElementById("guardian-input");
+    const text = input ? input.value.trim() : "";
+    if (!text) return;
+    input.value = "";
+    g.transcript.push({ role: "user", content: text });
+    g.busy = true;
+    g.message = "";
+    this._render();
+    try {
+      const result = await this._callWS({
+        type: "openreef/guardian_chat",
+        history: g.transcript.slice(-24),
+      });
+      g.transcript.push({ role: "assistant", content: result.reply });
+    } catch (err) {
+      g.message = err?.message || "Lagertha couldn't answer that.";
+    }
+    g.busy = false;
+    this._render();
+  }
+
+  async _guardianToggleRecord() {
+    const g = this._guardian;
+    if (g.recording && g.recorder) {
+      g.recorder.stop();
+      return;
+    }
+    if (g.busy) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      g.message = "Microphone needs a secure (https) connection to Home Assistant.";
+      this._render();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus" : "";
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      g.chunks = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) g.chunks.push(event.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        g.stream = null;
+        g.recording = false;
+        const blob = new Blob(g.chunks, { type: recorder.mimeType || "audio/webm" });
+        g.chunks = [];
+        this._guardianSendVoice(blob);
+      };
+      g.recorder = recorder;
+      g.stream = stream;
+      g.recording = true;
+      g.message = "";
+      recorder.start();
+      this._render();
+    } catch (err) {
+      g.message = "Microphone access was refused.";
+      this._render();
+    }
+  }
+
+  async _guardianSendVoice(blob) {
+    const g = this._guardian;
+    if (!blob || blob.size < 200) { this._render(); return; }
+    g.busy = true;
+    this._render();
+    try {
+      const buffer = await blob.arrayBuffer();
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      }
+      const result = await this._callWS({
+        type: "openreef/guardian_voice",
+        audio: btoa(binary),
+        mime: blob.type || "audio/webm",
+        history: g.transcript.slice(-24),
+        tts: g.face?.active ? "pcm" : "mp3",
+      });
+      if (!result.transcript) {
+        g.message = "I couldn't make out any words there, keeper.";
+      } else {
+        g.transcript.push({ role: "user", content: result.transcript });
+        g.transcript.push({ role: "assistant", content: result.reply });
+        if (result.audio && result.audioFormat === "pcm" && g.face?.active) {
+          this._guardianLipSync(result.audio);
+        } else if (result.audio && result.audioFormat === "mp3") {
+          this._guardianPlayMp3(result.audio);
+        }
+      }
+    } catch (err) {
+      g.message = err?.message || "The voice loop failed.";
+    }
+    g.busy = false;
+    this._render();
+  }
+
+  _guardianPlayMp3(b64) {
+    const g = this._guardian;
+    try {
+      const audio = new Audio(`data:audio/mpeg;base64,${b64}`);
+      g.speaking = true;
+      audio.onended = () => { g.speaking = false; this._render(); };
+      audio.onerror = () => { g.speaking = false; this._render(); };
+      audio.play().catch(() => { g.speaking = false; this._render(); });
+      this._render();
+    } catch { g.speaking = false; }
+  }
+
+  _guardianLipSync(b64) {
+    // OpenAI TTS pcm is 24 kHz s16le mono; Simli wants 16 kHz. Downsample by
+    // averaging (same approach as the original Lagertha build) then feed the
+    // WebRTC client, which owns playback + lip movement.
+    const g = this._guardian;
+    const client = g.face?.client;
+    if (!client) return;
+    try {
+      const raw = atob(b64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+      const input = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2));
+      const ratio = 24000 / 16000;
+      const output = new Int16Array(Math.round(input.length / ratio));
+      let offset = 0;
+      for (let i = 0; i < output.length; i += 1) {
+        const next = Math.round((i + 1) * ratio);
+        let sum = 0; let count = 0;
+        for (let j = offset; j < next && j < input.length; j += 1) { sum += input[j]; count += 1; }
+        output[i] = count ? sum / count : 0;
+        offset = next;
+      }
+      client.sendAudioData(new Uint8Array(output.buffer));
+    } catch { /* lip-sync is best-effort; the text reply already landed */ }
+  }
+
+  async _guardianStartFace() {
+    const g = this._guardian;
+    if (g.face?.active || g.face?.connecting) return;
+    g.face = { connecting: true, active: false, client: null, error: "" };
+    this._render();
+    try {
+      const creds = await this._callWS({ type: "openreef/guardian_simli_session" });
+      const mod = await import("/openreef_static/vendor/simli-client.mjs");
+      const SimliClient = (mod.default && mod.default.SimliClient) || mod.SimliClient;
+      if (!SimliClient) throw new Error("Simli client bundle failed to load");
+      if (!g.videoEl) {
+        g.videoEl = document.createElement("video");
+        g.videoEl.autoplay = true;
+        g.videoEl.playsInline = true;
+        g.videoEl.muted = true;
+        g.audioEl = document.createElement("audio");
+        g.audioEl.autoplay = true;
+      }
+      const client = new SimliClient();
+      client.Initialize({
+        apiKey: creds.apiKey,
+        faceID: creds.faceId,
+        handleSilence: true,
+        maxSessionLength: 3600,
+        maxIdleTime: 600,
+        session_token: "",
+        SimliURL: "",
+        videoRef: g.videoEl,
+        audioRef: g.audioEl,
+        enableConsoleLogs: false,
+        maxRetryAttempts: 3,
+        retryDelay_ms: 2000,
+        videoReceivedTimeout: 15000,
+        enableSFU: true,
+        model: "fasttalk",
+      });
+      await client.start();
+      g.face = { connecting: false, active: true, client, error: "" };
+    } catch (err) {
+      g.face = { connecting: false, active: false, client: null, error: err?.message || "Could not start the live face" };
+    }
+    this._render();
+  }
+
+  _guardianStopFace() {
+    const g = this._guardian;
+    const client = g.face?.client;
+    if (client) { try { client.close(); } catch { /* already closed */ } }
+    if (g.videoEl) { try { g.videoEl.srcObject = null; } catch { /* detached */ } }
+    if (g.audioEl) { try { g.audioEl.srcObject = null; } catch { /* detached */ } }
+    g.face = null;
   }
 
   // --- Avatar onboarding tour (Phase 1) -----------------------------------
@@ -8632,6 +9067,10 @@ class OpenReefPanel extends HTMLElement {
     if (this._config?.vision?.enabled) {
       tabs.splice(tabs.length - 1, 0, ["vision", "Vision"]);
     }
+    // Guardian (Lagertha): on by default, opt-out via guardian.enabled.
+    if (this._config?.guardian?.enabled !== false) {
+      tabs.splice(tabs.length - 1, 0, ["guardian", "Lagertha"]);
+    }
     // If a gated tab was disabled while active, the content falls back to
     // Mission — highlight Mission so the nav doesn't show no active tab.
     const activeId = ((this._activeTab === "vision" && !this._config?.vision?.enabled)
@@ -8665,6 +9104,9 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "vision") {
       // Falls back to Mission if vision was disabled while this tab was active.
       return this._config?.vision?.enabled ? this._visionTab() : this._mission();
+    }
+    if (this._activeTab === "guardian") {
+      return this._config?.guardian?.enabled !== false ? this._guardianTab() : this._mission();
     }
     if (this._activeTab === "settings") return this._settings();
     return this._mission();
