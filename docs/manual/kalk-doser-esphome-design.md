@@ -86,6 +86,15 @@ Free after the merge: GPIO32/33 (full I/O — the §2 fallbacks), GPIO34/35/36/3
 
 ## 5. The ESPHome node
 
+> **Two build paths (Stage D):** for the **single-ESP32-S3 node** flash
+> [`reefnode-s3-reference.yaml`](reefnode-s3-reference.yaml) — it carries this
+> exact channel re-pinned (UART 11/12, ENN 13, INDEX 14, reservoir float 10) and
+> is machine-checked against the §6 table so the copies cannot drift. The
+> fragment below remains the authority for the **classic-ESP32 two-node** path
+> (pins 22/21/23/13/4). The guard chain, entity names and fail-safe stances are
+> identical in both.
+
+
 Merge notes: this is a **fragment** — the `esphome:`, `esp32:`, `api:`, `ota:`, `wifi:`, `logger:` blocks come from the existing AWC node; do not duplicate them. All list blocks below (`globals`, `script`, `switch`, `binary_sensor`, `sensor`, `number`, `button`) **append** to the AWC node's existing lists (`awc_locked`, `trip_lock`, the pump switches, …). `uart:`, `time:`, `stepper:`, `text_sensor:`, `external_components:` and `interval:` are new top-level blocks on the 2-pump node.
 
 ```yaml

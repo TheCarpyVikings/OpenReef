@@ -26,11 +26,13 @@ import _ha_stubs  # noqa: E402
 _ha_stubs.install()
 
 sys.path.insert(0, os.path.join(_ROOT, "custom_components"))
-from openreef.const import DOSING_BINDING_ROLES  # noqa: E402
+from openreef.const import DOSING_BINDING_ROLES, DOSING_BRUSHED_BINDING_ROLES  # noqa: E402
 
 _PANEL = os.path.join(_ROOT, "custom_components", "openreef", "frontend", "openreef-panel.js")
 _DOC = os.path.join(_ROOT, "docs", "manual", "kalk-doser-esphome-design.md")
 _REF_YAML = os.path.join(_ROOT, "docs", "manual", "awc-esphome-reference.yaml")
+_S3_DOC = os.path.join(_ROOT, "docs", "manual", "reefnode-s3-design.md")
+_S3_YAML = os.path.join(_ROOT, "docs", "manual", "reefnode-s3-reference.yaml")
 
 # Domains that exist in Home Assistant for ESPHome-created entities. There is
 # deliberately no "text_sensor" here: ESPHome text sensors register as sensor.
@@ -44,10 +46,21 @@ def _panel_suffix_map() -> dict[str, str]:
     return dict(re.findall(r"(\w+):\s*\"([a-z_]+\.[a-z0-9_]+)\"", block.group(1)))
 
 
-def _doc_table_rows() -> dict[str, str]:
-    src = open(_DOC, encoding="utf-8").read()
+def _doc_table_rows(path: str = _DOC) -> dict[str, str]:
+    src = open(path, encoding="utf-8").read()
     rows = re.findall(r"\|\s*`(\w+)`\s*\|\s*`([a-z_]+)\.<p>(_[a-z0-9_]+)`\s*\|", src)
     return {role: f"{domain}.{suffix}" for role, domain, suffix in rows}
+
+
+def _panel_brushed_suffix_map() -> dict[str, str]:
+    src = open(_PANEL, encoding="utf-8").read()
+    block = re.search(r"DOSER_BRUSHED_BINDING_SUFFIXES\(\)\s*\{\s*return\s*\{(.*?)\};", src, re.S)
+    assert block, "DOSER_BRUSHED_BINDING_SUFFIXES not found in the panel"
+    return dict(re.findall(r"(\w+):\s*\"([a-z_]+\.[a-z0-9_]+)\"", block.group(1)))
+
+
+def _esphome_slug(name: str) -> str:
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", name.lower())).strip("_")
 
 
 def test_panel_suffixes_cover_every_backend_role():
@@ -83,6 +96,58 @@ def test_reference_yaml_keeps_the_friendly_name_contract():
     assert re.search(r"^\s*friendly_name:\s*\S+", src, re.M), (
         "awc-esphome-reference.yaml lost its friendly_name — part of the frozen contract (rev 2)"
     )
+
+
+# --- Live-food (brushed) contract — frozen at Stage D --------------------------
+
+def test_brushed_panel_suffixes_cover_every_backend_role():
+    panel = _panel_brushed_suffix_map()
+    assert set(panel) == set(DOSING_BRUSHED_BINDING_ROLES), (
+        f"brushed panel-vs-const drift: only-panel={set(panel) - set(DOSING_BRUSHED_BINDING_ROLES)}, "
+        f"only-const={set(DOSING_BRUSHED_BINDING_ROLES) - set(panel)}"
+    )
+
+
+def test_brushed_panel_suffix_domains_are_real_ha_domains():
+    for role, pattern in _panel_brushed_suffix_map().items():
+        domain = pattern.split(".", 1)[0]
+        assert domain in _REAL_DOMAINS, (
+            f"{role}: '{domain}.' is not a real HA domain — the rev-1 text_sensor bug class"
+        )
+
+
+def test_brushed_doc_table_matches_the_panel_exactly():
+    panel = _panel_brushed_suffix_map()
+    doc = _doc_table_rows(_S3_DOC)
+    assert set(doc) == set(panel), (
+        f"brushed doc-vs-panel drift: only-doc={set(doc) - set(panel)}, only-panel={set(panel) - set(doc)}"
+    )
+    mismatches = {role: (doc[role], panel[role]) for role in doc if doc[role] != panel[role]}
+    assert not mismatches, f"brushed suffix mismatches (doc, panel): {mismatches}"
+
+
+def test_reefnode_yaml_keeps_the_friendly_name_contract():
+    src = open(_S3_YAML, encoding="utf-8").read()
+    assert re.search(r"^\s*friendly_name:\s*\S+", src, re.M), (
+        "reefnode-s3-reference.yaml lost its friendly_name — part of the frozen contract (rev 2)"
+    )
+
+
+def test_reefnode_yaml_carries_every_frozen_entity():
+    # The merged node duplicates the kalk fragment's entities — this pins the copy
+    # to BOTH frozen tables so the two YAML sources can never drift apart. ESPHome
+    # derives entity-id suffixes by slugifying `name:`, so we slugify every name
+    # in the merged YAML and demand full coverage of both contract tables.
+    src = open(_S3_YAML, encoding="utf-8").read()
+    yaml_slugs = {_esphome_slug(n) for n in re.findall(r'^\s*name:\s*"([^"]+)"', src, re.M)}
+    for table_name, rows in (("kalk", _doc_table_rows(_DOC)),
+                             ("live-food", _doc_table_rows(_S3_DOC))):
+        for role, pattern in rows.items():
+            suffix = pattern.split(".", 1)[1].lstrip("_")
+            assert suffix in yaml_slugs, (
+                f"reefnode YAML is missing the frozen {table_name} entity for {role}: "
+                f"expected a name slugifying to '{suffix}'"
+            )
 
 
 def _main() -> int:

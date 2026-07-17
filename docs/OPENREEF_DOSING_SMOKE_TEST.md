@@ -91,3 +91,24 @@ For each, attempt "Dose now" (or wait for a scheduled dose) and confirm (a) no l
 - Settings → System → Logs, filter "openreef", and capture the lines around the failure.
 - The channel card footer's sync state ("failed"/"offline") plus the Last Skip Reason sensor usually identify the layer at fault (HA-side vs firmware-side).
 - Rollback pin: HACS → OpenReef → Redownload → pick the previous version. Dosing config is preserved — it lives in the OpenReef config entry, not the firmware.
+
+## 11. Merged Reefnode (single ESP32-S3) Additions — Stage D
+
+Running the merged node (`docs/manual/reefnode-s3-reference.yaml`)? Everything
+above still applies, plus:
+
+- [ ] `Reefnode Master Enable` turns ON a few seconds after boot; a leak trip
+      (or the hardware coil float) drops it, kills every pump, and stays
+      latched until `Reefnode Clear Lock`.
+- [ ] Kalk auto-bind reports **24 of 24**; live-food auto-bind **22 of 22**
+      (driver-aware — the live-food channel uses the brushed suffix table in
+      `docs/manual/reefnode-s3-design.md` §3).
+- [ ] Live-food `Calibrate 30s` runs exactly 30 s; the panel derives ml/s.
+- [ ] A live-food dose with `Live Food Chaser (s)` > 0 runs the AWC fresh pump
+      afterwards — and SKIPS (with `Live Food Chaser Skipped` = on, no ledger
+      debit) when a water change owns that pump.
+- [ ] Mark the culture stale (clear `mixedAt` shelf-life expiry) → within a
+      minute HA forces `Live Food Dosing Enabled` OFF and the skip sensor reads
+      `disabled`; "Refreshed today" re-enables on the next sync.
+- [ ] Full bring-up order: `reefnode-s3-design.md` §5.
+

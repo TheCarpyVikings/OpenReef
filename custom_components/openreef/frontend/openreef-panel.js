@@ -8698,6 +8698,40 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
+  static get DOSER_BRUSHED_BINDING_SUFFIXES() {
+    return {
+      doseVolumeNumber: "number._live_food_dose_volume_ml",
+      doseIntervalNumber: "number._live_food_dose_interval_min",
+      nightIntervalNumber: "number._live_food_night_interval_min",
+      maxDailyNumber: "number._live_food_max_daily_ml",
+      windowStartNumber: "number._live_food_window_start_min",
+      windowEndNumber: "number._live_food_window_end_min",
+      nightStartNumber: "number._live_food_night_start_min",
+      nightEndNumber: "number._live_food_night_end_min",
+      manualDoseMlNumber: "number._live_food_manual_dose_ml",
+      flowMlPerSNumber: "number._live_food_flow_ml_s",
+      spinUpMlNumber: "number._live_food_spin_up_ml",
+      chaserSecondsNumber: "number._live_food_chaser_s",
+      enabledSwitch: "switch._live_food_dosing_enabled",
+      haSuspendSwitch: "switch._live_food_ha_suspend",
+      primeButton: "button._live_food_prime_test_run_5s",
+      doseNowButton: "button._live_food_dose_now_one_dose",
+      manualDoseButton: "button._live_food_manual_dose",
+      calibrateButton: "button._live_food_calibrate_30s",
+      dosedTodaySensor: "sensor._live_food_dosed_today_ml",
+      reservoirLowSensor: "binary_sensor._live_food_reservoir_low",
+      // text_sensor registers under sensor. (contract rev 2 rule)
+      lastSkipSensor: "sensor._live_food_last_skip_reason",
+      chaserSkippedSensor: "binary_sensor._live_food_chaser_skipped",
+    };
+  }
+
+  static doserSuffixesFor(channel) {
+    return channel?.driver?.type === "openreef_esphome_brushed"
+      ? OpenReefPanel.DOSER_BRUSHED_BINDING_SUFFIXES
+      : OpenReefPanel.DOSER_BINDING_SUFFIXES;
+  }
+
   _doserChannels() {
     const channels = this._config?.dosing?.channels;
     return channels && typeof channels === "object" ? channels : {};
@@ -8708,7 +8742,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _doserChemicalLabel(chem) {
-    return ({ alk: "Alk", ca: "Ca", mg: "Mg", kalk: "Kalk", trace: "Trace", other: "Other" })[chem] || "Other";
+    return ({ alk: "Alk", ca: "Ca", mg: "Mg", kalk: "Kalk", trace: "Trace", livefood: "Live food", other: "Other" })[chem] || "Other";
   }
 
   async _doserLoadSummary() {
@@ -8888,7 +8922,7 @@ class OpenReefPanel extends HTMLElement {
     if (!channel) return;
     const states = (this._hass && this._hass.states) || {};
     const keys = Object.keys(states);
-    const suffixes = OpenReefPanel.DOSER_BINDING_SUFFIXES;
+    const suffixes = OpenReefPanel.doserSuffixesFor(channel);
     const driver = channel.driver = channel.driver || {};
     const entities = driver.entities = driver.entities || {};
     let bound = 0;
@@ -9495,7 +9529,7 @@ class OpenReefPanel extends HTMLElement {
 
   _doserEntityBindings(id, entities) {
     const eid = this._escape(id);
-    const suffixes = OpenReefPanel.DOSER_BINDING_SUFFIXES;
+    const suffixes = OpenReefPanel.doserSuffixesFor(this._doserChannels()[id]);
     const roles = Object.keys(suffixes);
     const bound = roles.filter((role) => entities[role]).length;
     const states = (this._hass && this._hass.states) || {};
