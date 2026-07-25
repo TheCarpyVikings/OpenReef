@@ -15,13 +15,11 @@ export default function Buddy({ section, tone, hasApex, score, konami }: Props) 
   // Real pose art lives in public/avatar/ (copied from the HA panel); falls
   // back to the emoji placeholders if a file is ever missing.
   const [artOk, setArtOk] = useState(true);
-  if (dismissed) {
-    return (
-      <button className="buddy-restore" onClick={() => setDismissed(false)} aria-label="Bring back the reef guide">
-        🪸
-      </button>
-    );
-  }
+  // On phones the full bubble covers the controls it is talking about (sliders,
+  // the signup button), so start collapsed to an avatar chip and expand on tap.
+  const [collapsed, setCollapsed] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 720
+  );
 
   let { pose, text } = buddyLine(section, tone, hasApex);
   if (konami) {
@@ -44,22 +42,38 @@ export default function Buddy({ section, tone, hasApex, score, konami }: Props) 
     }
   }
 
+  const face = artOk ? (
+    <img src={`/avatar/${pose}.png`} alt="" className="buddy-art" onError={() => setArtOk(false)} />
+  ) : (
+    POSE_EMOJI[pose]
+  );
+
+  if (dismissed || collapsed) {
+    return (
+      <button
+        className="buddy-chip"
+        onClick={() => {
+          setDismissed(false);
+          setCollapsed(false);
+        }}
+        aria-label="Show the reef guide"
+      >
+        {face}
+      </button>
+    );
+  }
+
   return (
     <aside className="buddy" aria-live="polite">
       <div className="buddy-avatar" data-pose={pose}>
-        {artOk ? (
-          <img
-            src={`/avatar/${pose}.png`}
-            alt=""
-            className="buddy-art"
-            onError={() => setArtOk(false)}
-          />
-        ) : (
-          POSE_EMOJI[pose]
-        )}
+        {face}
       </div>
       <p className="buddy-text">{text}</p>
-      <button className="buddy-dismiss" onClick={() => setDismissed(true)} aria-label="Dismiss the reef guide">
+      <button
+        className="buddy-dismiss"
+        onClick={() => (window.innerWidth <= 720 ? setCollapsed(true) : setDismissed(true))}
+        aria-label="Hide the reef guide"
+      >
         ×
       </button>
     </aside>

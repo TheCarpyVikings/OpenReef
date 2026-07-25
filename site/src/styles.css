@@ -848,18 +848,31 @@ th.col-star {
   cursor: pointer;
 }
 
-.buddy-restore {
+/* Collapsed guide: small avatar chip that stays out of the way of controls. */
+.buddy-chip {
   position: fixed;
   bottom: 1.2rem;
   left: 1.2rem;
   z-index: 40;
-  font-size: 1.4rem;
+  font-size: 1.5rem;
+  line-height: 1;
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: 999px;
-  width: 3rem;
-  height: 3rem;
+  width: 3.5rem;
+  height: 3.5rem;
+  padding: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.buddy-chip .buddy-art {
+  width: 100%;
+  height: 100%;
 }
 
 /* ------------------------------- gauges/tickers ------------------------------ */
@@ -955,6 +968,52 @@ th.col-star {
 
   .buddy {
     max-width: calc(100vw - 2.4rem);
+  }
+
+  /* The CTA section is a flex row; a static footer would sit BESIDE the card,
+     so stack it and give it full width. */
+  .sec {
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .footer {
+    width: 100%;
+    /* keep the last line clear of the fixed guide chip */
+    padding-bottom: 3.5rem;
+  }
+
+  /* Smaller and slightly translucent so it obscures as little as possible
+     while scrolling; full opacity as soon as it is touched. */
+  .buddy-chip {
+    width: 3rem;
+    height: 3rem;
+    bottom: 0.9rem;
+    left: 0.9rem;
+    opacity: 0.82;
+  }
+
+  .buddy-chip:active,
+  .buddy-chip:focus-visible {
+    opacity: 1;
+  }
+
+  /* Comfortable thumbs: the sliders are the main interaction on this site. */
+  .slider-row input[type="range"] {
+    height: 30px;
+  }
+
+  .table-wrap {
+    position: relative;
+  }
+
+  /* The starred column sits off-screen on a phone — say so. */
+  .table-wrap::before {
+    content: "Swipe the table sideways to compare →";
+    display: block;
+    font-size: 0.78rem;
+    color: var(--teal);
+    margin-bottom: 0.5rem;
   }
 
   .footer {
