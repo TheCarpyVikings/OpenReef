@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>404 — bare-bottom tank | OpenReef</title>
+    <meta name="robots" content="noindex" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(180deg, #0a2c44 0%, #050d18 55%, #02060e 100%);
+        color: #e8f1f8;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        text-align: center;
+        padding: 2rem;
+      }
+      .tank {
+        max-width: 30rem;
+        border: 2px solid rgba(127, 216, 255, 0.25);
+        border-top: none;
+        border-radius: 0 0 18px 18px;
+        padding: 3.5rem 2.5rem 2.5rem;
+        position: relative;
+        background: rgba(8, 18, 32, 0.5);
+      }
+      .tank::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -2px;
+        right: -2px;
+        height: 10px;
+        background: rgba(53, 224, 194, 0.25);
+        border-radius: 2px;
+      }
+      h1 { font-size: 3rem; margin: 0 0 0.5rem; letter-spacing: -0.02em; }
+      p { color: #9db4c8; line-height: 1.6; margin: 0.4rem 0; }
+      .fish { font-size: 2.2rem; opacity: 0.85; }
+      a {
+        display: inline-block;
+        margin-top: 1.4rem;
+        padding: 0.7rem 1.5rem;
+        border-radius: 12px;
+        background: #35e0c2;
+        color: #04302a;
+        font-weight: 700;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="tank">
+      <div class="fish">🐠💨</div>
+      <h1>404</h1>
+      <p><strong>Bare-bottom tank.</strong> Nothing lives here.</p>
+      <p>The page you're after got siphoned out during a water change. Classic.</p>
+      <a href="/">Back to the reef</a>
+    </main>
+  </body>
+</html>
