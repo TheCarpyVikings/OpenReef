@@ -1,0 +1,156 @@
+/* Deep-dive article pages: static, fast, readable. No 3D — the dive is home. */
+
+.dd {
+  position: relative;
+  z-index: 10;
+  padding: 6.5rem 5vw 3rem;
+}
+
+.dd article {
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+.dd h1 {
+  font-size: clamp(2rem, 5vw, 3rem);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.8rem;
+}
+
+.dd-lede {
+  font-size: 1.15rem;
+  color: var(--ink-dim);
+  margin: 0 0 1.4rem;
+}
+
+.dd h2 {
+  font-size: 1.45rem;
+  margin: 2.2rem 0 0.6rem;
+  letter-spacing: -0.01em;
+}
+
+.dd p,
+.dd li {
+  line-height: 1.65;
+}
+
+.dd section ul {
+  padding-left: 1.2rem;
+}
+
+.buddy-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  padding: 0.7rem 1rem;
+  margin: 0 0 1.4rem;
+}
+
+.buddy-inline-face {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  font-size: 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(53, 224, 194, 0.12);
+  border-radius: 10px;
+}
+
+.buddy-inline-face img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.buddy-inline p {
+  margin: 0;
+  font-style: italic;
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.dd-shot {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+  margin: 0 0 1rem;
+}
+
+.dd-shot img {
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid var(--card-border);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+}
+
+.dd-limits {
+  border: 1px solid rgba(255, 193, 77, 0.4);
+  background: rgba(255, 193, 77, 0.06);
+  border-radius: 14px;
+  padding: 0.4rem 1.2rem 0.9rem;
+  margin-top: 2rem;
+}
+
+.dd-limits h2 {
+  margin-top: 0.9rem;
+  color: var(--amber);
+}
+
+.dd-faq {
+  border-bottom: 1px solid rgba(127, 216, 255, 0.12);
+  padding: 0.55rem 0;
+}
+
+.dd-faq summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.dd-faq p {
+  color: var(--ink-dim);
+  margin: 0.5rem 0 0.2rem;
+}
+
+.dd-cta {
+  text-align: center;
+  border: 1px solid rgba(53, 224, 194, 0.35);
+  background: rgba(53, 224, 194, 0.06);
+  border-radius: 16px;
+  padding: 1.6rem 1.4rem 1.8rem;
+  margin-top: 2.4rem;
+}
+
+.dd-cta h2 {
+  margin-top: 0;
+}
+
+.dd-cta .btn {
+  margin: 0.4rem 0.4rem 0;
+}
+
+.dd-footer {
+  text-align: center;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+  margin-top: 2.6rem;
+}
+
+@media (max-width: 720px) {
+  .dd {
+    padding-top: 5.2rem;
+  }
+
+  /* Brand logo already links home; the text back-link just crowds the nav. */
+  .dd-back {
+    display: none;
+  }
+}

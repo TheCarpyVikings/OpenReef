@@ -435,6 +435,11 @@ function Feature({ f, onZoom }: { f: FeatureCard; onZoom: (f: FeatureCard) => vo
       )}
       <h3>{f.title}</h3>
       <p>{f.body}</p>
+      {f.href && (
+        <a className="feature-more" href={f.href}>
+          Deep dive →
+        </a>
+      )}
     </article>
   );
 }

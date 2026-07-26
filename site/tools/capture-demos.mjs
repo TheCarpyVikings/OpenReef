@@ -62,7 +62,9 @@ try {
   const page = await browser.newPage();
   await page.setViewport({ width: W, height: H, deviceScaleFactor: 2 });
 
-  // Log the frontend in before it boots.
+  // Log the frontend in before it boots, and mark the panel as "already
+  // toured" — a fresh profile otherwise auto-starts the guided tour and the
+  // buddy toast, which then photobomb every screenshot.
   await page.evaluateOnNewDocument(
     (haUrl, token) => {
       try {
@@ -78,6 +80,8 @@ try {
             refresh_token: "",
           })
         );
+        localStorage.setItem("openreef:onboarding:v1:done", "1");
+        localStorage.setItem("openreef:buddy", "off");
       } catch {
         /* ignore */
       }
@@ -95,6 +99,16 @@ try {
     process.exit(1);
   });
   await sleep(2500);
+
+  // Belt and braces: if the tour or buddy toast still appeared (e.g. the
+  // panel changes its storage keys), dismiss them through the shadow DOM.
+  for (const sel of ['pierce/[data-action="onboarding-skip"]', 'pierce/[data-action="buddy-dismiss"]']) {
+    const btn = await page.$(sel);
+    if (btn) {
+      await btn.click().catch(() => {});
+      await sleep(600);
+    }
+  }
 
   for (const { id, file } of TABS) {
     const btn = await page.$(`pierce/[data-action="tab"][data-id="${id}"]`);

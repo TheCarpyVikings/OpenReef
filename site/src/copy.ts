@@ -117,6 +117,7 @@ export interface FeatureCard {
   title: string;
   body: string;
   img?: string;
+  href?: string; // deep-dive page, when one exists
 }
 
 // img paths match the output of site/tools/capture-demos.mjs — cards hide their
@@ -150,11 +151,13 @@ export const FEATURES: FeatureCard[] = [
     title: "Spawning & water changes",
     body: "The coral spawning scheduler and the automatic water change engine — volume-first, with layered safety.",
     img: "/demos/awc.png",
+    href: "/features/coral-spawning/",
   },
   {
     title: "Dosing advisor",
     body: "Alk, calcium and magnesium consumption worked out from your history, with projections and suggested dose changes. Advisory only, always.",
     img: "/demos/dosing.png",
+    href: "/features/dosing-advisor/",
   },
   {
     title: "ICP import",
