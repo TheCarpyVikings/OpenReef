@@ -1,6 +1,8 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { EffectComposer, Bloom, Vignette, SMAA } from "@react-three/postprocessing";
 import { CHANNELS, clamp, depthAt, lerp, mulberry32, reef, sunElevation } from "../reef";
 
 /* ---------------------------------- helpers --------------------------------- */
@@ -34,6 +36,42 @@ function makeGlowTexture(): THREE.Texture {
   ctx.fillRect(0, 0, 128, 128);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Tileable caustics web, drawn with wrap-around duplication so the repeat
+// wrapping shows no seams when projected by the spotlights.
+function makeCausticsTexture(): THREE.Texture {
+  const S = 256;
+  const c = document.createElement("canvas");
+  c.width = S;
+  c.height = S;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, S, S);
+  const rng = mulberry32(2026);
+  ctx.strokeStyle = "rgba(255,255,255,0.55)";
+  ctx.shadowColor = "rgba(255,255,255,0.9)";
+  ctx.shadowBlur = 5;
+  for (let i = 0; i < 46; i++) {
+    const x = rng() * S;
+    const y = rng() * S;
+    const r = 14 + rng() * 34;
+    const a0 = rng() * Math.PI * 2;
+    const a1 = a0 + 2 + rng() * 3.5;
+    ctx.lineWidth = 1 + rng() * 2.2;
+    for (const dx of [-S, 0, S]) {
+      for (const dy of [-S, 0, S]) {
+        ctx.beginPath();
+        ctx.ellipse(x + dx, y + dy, r, r * (0.55 + rng() * 0.4), rng() * Math.PI, a0, a1);
+        ctx.stroke();
+      }
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(3, 3);
   return tex;
 }
 
@@ -133,17 +171,62 @@ function SunLight() {
   );
 }
 
+/* --------------------------------- caustics ---------------------------------- */
+
+// Two wide projector spotlights that follow the camera down, painting animated
+// light webs over whatever the visitor is looking at. Nothing casts shadows, so
+// the depth pass is nearly free.
+function Caustics() {
+  const a = useRef<THREE.SpotLight>(null!);
+  const b = useRef<THREE.SpotLight>(null!);
+  const texA = useMemo(makeCausticsTexture, []);
+  const texB = useMemo(makeCausticsTexture, []);
+  useLayoutEffect(() => {
+    a.current.map = texA;
+    b.current.map = texB;
+  }, [texA, texB]);
+  useFrame((s) => {
+    const t = s.clock.elapsedTime;
+    const y = s.camera.position.y;
+    const day = clamp(sunElevation(reef.sun), 0, 1);
+    const under = clamp(-y / 6, 0, 1); // fade in below the surface
+    for (const [ref, tex, dx, sp] of [
+      [a, texA, -3, 0.014],
+      [b, texB, 3, -0.02],
+    ] as const) {
+      const L = ref.current;
+      L.position.set(dx + Math.sin(t * 0.05 + dx) * 2, y + 10, -2);
+      L.target.position.set(dx * 0.4, y - 6, -3);
+      L.target.updateMatrixWorld();
+      L.intensity = 60 * day * under;
+      tex.offset.x = t * sp;
+      tex.offset.y = t * sp * 0.6;
+    }
+  });
+  return (
+    <>
+      <spotLight ref={a} angle={1.0} penumbra={0.6} distance={40} color="#8fd8ff" castShadow shadow-mapSize={[64, 64]} />
+      <spotLight ref={b} angle={1.0} penumbra={0.6} distance={40} color="#aee6ff" castShadow shadow-mapSize={[64, 64]} />
+    </>
+  );
+}
+
 /* ---------------------------------- water ----------------------------------- */
 
 const WATER_VERT = /* glsl */ `
 uniform float uTime;
 varying vec3 vPos;
+varying float vCrest;
 void main() {
   vec3 p = position;
-  float w = sin(p.x * 0.25 + uTime * 0.9) * 0.18
-          + sin(p.y * 0.35 - uTime * 0.7) * 0.14
-          + sin((p.x + p.y) * 0.12 + uTime * 0.5) * 0.22;
+  float w = sin(p.x * 0.25 + uTime * 0.9) * 0.16
+          + sin(p.y * 0.35 - uTime * 0.7) * 0.13
+          + sin((p.x + p.y) * 0.12 + uTime * 0.5) * 0.20
+          + sin(p.x * 0.9 - uTime * 1.4) * 0.05
+          + sin(p.y * 1.3 + uTime * 1.1) * 0.04
+          + sin((p.x - p.y) * 0.55 + uTime * 1.8) * 0.045;
   p.z += w;
+  vCrest = w;
   vec4 world = modelMatrix * vec4(p, 1.0);
   vPos = world.xyz;
   gl_Position = projectionMatrix * viewMatrix * world;
@@ -152,21 +235,29 @@ void main() {
 
 const WATER_FRAG = /* glsl */ `
 uniform float uSunEl;
+uniform float uTime;
 uniform vec3 uSunColor;
 varying vec3 vPos;
+varying float vCrest;
 void main() {
   vec3 n = normalize(cross(dFdx(vPos), dFdy(vPos)));
   vec3 viewDir = normalize(cameraPosition - vPos);
   if (dot(n, viewDir) < 0.0) n = -n;
   float fres = pow(1.0 - abs(dot(n, viewDir)), 2.0);
   float day = clamp(uSunEl, 0.06, 1.0);
-  vec3 deep = vec3(0.02, 0.13, 0.22) * day;
-  vec3 shallow = vec3(0.10, 0.45, 0.55) * day;
+  vec3 deep = vec3(0.015, 0.12, 0.21) * day;
+  vec3 shallow = vec3(0.09, 0.44, 0.54) * day;
   vec3 col = mix(deep, shallow, fres);
+  // distance haze toward the horizon so the plane edge never reads as an edge
+  float dist = length(vPos.xz - cameraPosition.xz);
+  col = mix(col, deep * 0.7, smoothstep(35.0, 110.0, dist));
   vec3 sunDir = normalize(vec3(0.3, 1.0, 0.4));
-  float spec = pow(max(dot(reflect(-sunDir, n), -viewDir), 0.0), 60.0);
-  col += uSunColor * spec * day * 0.9;
-  gl_FragColor = vec4(col, 0.88);
+  float spec = pow(max(dot(reflect(-sunDir, n), -viewDir), 0.0), 90.0);
+  col += uSunColor * spec * day * 1.4;
+  // sparkle on wave crests
+  float sparkle = smoothstep(0.37, 0.56, vCrest) * day;
+  col += uSunColor * sparkle * 0.1;
+  gl_FragColor = vec4(col, 0.9);
 }
 `;
 
@@ -328,8 +419,10 @@ function Fish() {
     });
   }, [total]);
   const geo = useMemo(() => {
-    const g = new THREE.ConeGeometry(0.075, 0.3, 5);
+    // laterally flattened cone reads as a fish silhouette rather than a dart
+    const g = new THREE.ConeGeometry(0.085, 0.32, 6);
     g.rotateX(Math.PI / 2);
+    g.scale(0.45, 1.15, 1);
     return g;
   }, []);
   useLayoutEffect(() => {
@@ -380,25 +473,91 @@ interface Inst {
 const CORAL_PALETTE = ["#ff7a59", "#c792ff", "#35e0c2", "#ffc14d", "#ff5aa5", "#7fd8ff"];
 const ROCK_COLORS = ["#3a4456", "#2f3947", "#46506a"];
 
-function buildBranches(
+function paintVertexColors(geo: THREE.BufferGeometry, fn: (v: THREE.Vector3) => THREE.Color) {
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+  const colors = new Float32Array(pos.count * 3);
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const c = fn(v);
+    colors[i * 3] = c.r;
+    colors[i * 3 + 1] = c.g;
+    colors[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+}
+
+// Craggy rock: displace a unit icosphere radially by hashed noise. Displacing
+// along the radial direction (not vertex normals) keeps duplicated vertices of
+// the non-indexed geometry welded, so the faceted surface never cracks.
+function craggyRock(seed: number): THREE.BufferGeometry {
+  const g = new THREE.IcosahedronGeometry(1, 2);
+  const pos = g.getAttribute("position") as THREE.BufferAttribute;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const h = Math.sin(v.x * 12.9898 + v.y * 78.233 + v.z * 37.719 + seed) * 43758.5453;
+    const n = h - Math.floor(h);
+    v.multiplyScalar(0.82 + n * 0.38);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+// Curved, tapered branch built as a tube along a jittered curve, with a
+// base-to-tip colour gradient and a polyp-tip sphere on the final segments.
+function buildBranchTubes(
   origin: THREE.Vector3,
   dir: THREE.Vector3,
   len: number,
   depth: number,
-  color: THREE.Color,
+  base: THREE.Color,
+  tip: THREE.Color,
   rng: () => number,
-  out: Inst[]
+  out: THREE.BufferGeometry[]
 ) {
-  const end = origin.clone().addScaledVector(dir, len);
-  const mid = origin.clone().addScaledVector(dir, len / 2);
-  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-  out.push({
-    pos: mid,
-    quat,
-    scale: new THREE.Vector3(0.55 + depth * 0.28, len, 0.55 + depth * 0.28),
-    color,
-  });
-  if (depth <= 0) return;
+  const jitter = () =>
+    new THREE.Vector3((rng() - 0.5) * 0.3, (rng() - 0.5) * 0.12, (rng() - 0.5) * 0.3);
+  const mid = origin.clone().addScaledVector(dir, len * 0.5).addScaledVector(jitter(), len);
+  const end = origin.clone().addScaledVector(dir, len).addScaledVector(jitter(), len * 0.5);
+  const curve = new THREE.CatmullRomCurve3([origin.clone(), mid, end]);
+  const r0 = 0.024 + depth * 0.017;
+  const TUB = 7;
+  const RAD = 6;
+  const tube = new THREE.TubeGeometry(curve, TUB, r0, RAD, false);
+  // taper the tube towards its end + paint the gradient per ring
+  {
+    const pos = tube.getAttribute("position") as THREE.BufferAttribute;
+    const colors = new Float32Array(pos.count * 3);
+    const v = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    const c = new THREE.Color();
+    for (let ring = 0; ring <= TUB; ring++) {
+      const t = ring / TUB;
+      curve.getPoint(t, center);
+      const taper = lerp(1, 0.55, t);
+      c.copy(base).lerp(tip, Math.pow(t, 1.5) * (depth === 0 ? 1 : 0.45));
+      for (let j = 0; j <= RAD; j++) {
+        const i = ring * (RAD + 1) + j;
+        v.fromBufferAttribute(pos, i);
+        v.sub(center).multiplyScalar(taper).add(center);
+        pos.setXYZ(i, v.x, v.y, v.z);
+        colors[i * 3] = c.r;
+        colors[i * 3 + 1] = c.g;
+        colors[i * 3 + 2] = c.b;
+      }
+    }
+    tube.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  }
+  out.push(tube);
+  if (depth <= 0) {
+    const cap = new THREE.SphereGeometry(r0 * 0.75, 6, 5);
+    cap.translate(end.x, end.y, end.z);
+    paintVertexColors(cap, () => tip);
+    out.push(cap);
+    return;
+  }
   const kids = 2 + Math.floor(rng() * 2);
   for (let i = 0; i < kids; i++) {
     const axis = new THREE.Vector3(rng() - 0.5, 0.25, rng() - 0.5).normalize();
@@ -408,16 +567,18 @@ function buildBranches(
       .normalize();
     if (child.y < 0.15) child.y = 0.15 + rng() * 0.3;
     child.normalize();
-    buildBranches(end, child, len * (0.62 + rng() * 0.16), depth - 1, color, rng, out);
+    buildBranchTubes(end, child, len * (0.62 + rng() * 0.16), depth - 1, base, tip, rng, out);
   }
 }
 
-function useReefInstances() {
+function useReefGeometries() {
   return useMemo(() => {
     const rng = mulberry32(1337);
-    const rocks: Inst[] = [];
-    const branches: Inst[] = [];
+    const rockVariants = [craggyRock(1), craggyRock(7), craggyRock(42)];
+    const rockParts: THREE.BufferGeometry[] = [];
+    const branchParts: THREE.BufferGeometry[] = [];
     const plates: Inst[] = [];
+    const mat4 = new THREE.Matrix4();
 
     // Colony sites the camera passes on the way down: [x, y, z, rockScale]
     const sites: Array<[number, number, number, number]> = [
@@ -436,25 +597,31 @@ function useReefInstances() {
     for (const [x, y, z, s] of sites) {
       const rockCount = 2 + Math.floor(rng() * 2);
       for (let i = 0; i < rockCount; i++) {
-        rocks.push({
-          pos: new THREE.Vector3(x + (rng() - 0.5) * 1.6, y - 0.2 + (rng() - 0.5) * 0.4, z + (rng() - 0.5) * 1.6),
-          quat: new THREE.Quaternion().setFromEuler(
+        const g = rockVariants[Math.floor(rng() * rockVariants.length)].clone();
+        const base = new THREE.Color(ROCK_COLORS[Math.floor(rng() * ROCK_COLORS.length)]);
+        // grounded shading: darker toward the underside of each rock
+        paintVertexColors(g, (v) => base.clone().multiplyScalar(0.62 + ((v.y + 1.2) / 2.4) * 0.5));
+        mat4.compose(
+          new THREE.Vector3(x + (rng() - 0.5) * 1.6, y - 0.2 + (rng() - 0.5) * 0.4, z + (rng() - 0.5) * 1.6),
+          new THREE.Quaternion().setFromEuler(
             new THREE.Euler(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI)
           ),
-          scale: new THREE.Vector3(
+          new THREE.Vector3(
             s * (0.5 + rng() * 0.6),
             s * (0.35 + rng() * 0.5),
             s * (0.5 + rng() * 0.6)
-          ),
-          color: new THREE.Color(ROCK_COLORS[Math.floor(rng() * ROCK_COLORS.length)]),
-        });
+          )
+        );
+        g.applyMatrix4(mat4);
+        rockParts.push(g);
       }
       const colonies = 1 + Math.floor(rng() * 2);
       for (let i = 0; i < colonies; i++) {
-        const color = new THREE.Color(CORAL_PALETTE[Math.floor(rng() * CORAL_PALETTE.length)]);
+        const base = new THREE.Color(CORAL_PALETTE[Math.floor(rng() * CORAL_PALETTE.length)]).multiplyScalar(0.85);
+        const tipC = base.clone().lerp(new THREE.Color("#ffffff"), 0.55);
         const origin = new THREE.Vector3(x + (rng() - 0.5) * 1.2, y + 0.3, z + (rng() - 0.5) * 1.2);
         const dir = new THREE.Vector3((rng() - 0.5) * 0.5, 1, (rng() - 0.5) * 0.5).normalize();
-        buildBranches(origin, dir, 0.5 + rng() * 0.35, 2, color, rng, branches);
+        buildBranchTubes(origin, dir, 0.5 + rng() * 0.35, 2, base, tipC, rng, branchParts);
       }
       if (rng() > 0.45) {
         plates.push({
@@ -467,7 +634,9 @@ function useReefInstances() {
         });
       }
     }
-    return { rocks, branches, plates };
+    const rocksGeo = mergeGeometries(rockParts);
+    const branchesGeo = mergeGeometries(branchParts);
+    return { rocksGeo, branchesGeo, plates };
   }, []);
 }
 
@@ -502,14 +671,16 @@ function InstancedSet({
 }
 
 function Reefscape() {
-  const { rocks, branches, plates } = useReefInstances();
-  const rockGeo = useMemo(() => new THREE.IcosahedronGeometry(1, 1), []);
-  const branchGeo = useMemo(() => new THREE.CylinderGeometry(0.035, 0.075, 1, 5), []);
+  const { rocksGeo, branchesGeo, plates } = useReefGeometries();
   const plateGeo = useMemo(() => new THREE.CylinderGeometry(0.75, 0.68, 0.09, 9), []);
   return (
     <group>
-      <InstancedSet items={rocks} geo={rockGeo} />
-      <InstancedSet items={branches} geo={branchGeo} roughness={0.55} />
+      <mesh geometry={rocksGeo}>
+        <meshStandardMaterial vertexColors flatShading roughness={0.95} />
+      </mesh>
+      <mesh geometry={branchesGeo}>
+        <meshStandardMaterial vertexColors roughness={0.45} />
+      </mesh>
       <InstancedSet items={plates} geo={plateGeo} roughness={0.6} />
       {/* reef floor */}
       <mesh rotation-x={-Math.PI / 2} position={[0, -42.2, -2]}>
@@ -544,7 +715,7 @@ function HealthRing() {
     grp.current.rotation.y = Math.cos(s.clock.elapsedTime * 0.28) * 0.22;
     scoreColor(col, reef.score);
     mat.current.emissive.copy(col);
-    mat.current.emissiveIntensity = 1.6;
+    mat.current.emissiveIntensity = 0.95;
     spriteMat.current.color.copy(col);
     light.current.color.copy(col);
   });
@@ -561,7 +732,7 @@ function HealthRing() {
           ref={spriteMat}
           map={glow}
           transparent
-          opacity={0.35}
+          opacity={0.18}
           depthWrite={false}
           blending={THREE.AdditiveBlending}
         />
@@ -877,10 +1048,12 @@ function CtaGlow() {
 /* ---------------------------------- export ----------------------------------- */
 
 export default function Scene() {
+  const fancy = !reef.lowPower;
   return (
     <div className="canvas-wrap" aria-hidden="true">
       <Canvas
         dpr={[1, 1.75]}
+        shadows={fancy}
         camera={{ fov: 55, position: [0, 4, 7], near: 0.1, far: 140 }}
         gl={{ antialias: true, powerPreference: "high-performance" }}
       >
@@ -888,6 +1061,7 @@ export default function Scene() {
         <SunLight />
         <Water />
         <GodRays />
+        {fancy && <Caustics />}
         <Snow />
         <Fish />
         <Reefscape />
@@ -898,6 +1072,13 @@ export default function Scene() {
         <KitExploded />
         <Throne />
         <CtaGlow />
+        {fancy && (
+          <EffectComposer multisampling={0}>
+            <Bloom mipmapBlur intensity={0.4} luminanceThreshold={0.82} luminanceSmoothing={0.2} />
+            <Vignette offset={0.22} darkness={0.62} />
+            <SMAA />
+          </EffectComposer>
+        )}
       </Canvas>
     </div>
   );
