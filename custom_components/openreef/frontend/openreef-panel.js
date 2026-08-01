@@ -89,6 +89,9 @@ class OpenReefPanel extends HTMLElement {
     // the inputs on render so a background hass update re-render doesn't wipe
     // half-typed values the moment the field loses focus.
     this._maintenanceDrafts = {};
+    // Maintenance trend-chart view state (window length + volume unit). View-only,
+    // never persisted — the charts are derived entirely from logged completions.
+    this._maintChart = { weeks: 12, unit: "pct" };
     this._manualEntryDefaults = {};
     this._onboarding = null;
     this._onboardingChecked = false;
@@ -1353,6 +1356,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "snooze-task") this._snoozeTask(id, Number(target.dataset.days) || 3);
       if (action === "resume-task") this._resumeTask(id);
       if (action === "toggle-task-history") { this._maintenanceHistoryOpen[id] = !this._maintenanceHistoryOpen[id]; this._render(); }
+      if (action === "maint-chart-range") { this._maintChart.weeks = Number(target.dataset.weeks) || 12; this._render(); }
+      if (action === "maint-chart-unit") { this._maintChart.unit = target.dataset.unit === "L" ? "L" : "pct"; this._render(); }
       if (action === "delete-completion") this._deleteCompletion(id, target.dataset.entry);
       if (action === "add-maintenance-task") { const input = this.shadowRoot.getElementById("or-add-task-name"); this._addMaintenanceTask((input?.value || "").trim()); }
       if (action === "remove-maintenance-task") this._removeMaintenanceTask(id);
@@ -15643,6 +15648,7 @@ class OpenReefPanel extends HTMLElement {
           ${this._missionSummaryCard("Overdue", String(overdue), overdue ? "past their window" : "none overdue", overdue ? "critical" : "ok", "maintenance")}
         </div>
         ${this._maintenanceUpcomingSection()}
+        ${this._maintenanceTrendsSection()}
         ${enabledTasks.length
           ? `<div class="grid four">${enabledTasks.map(([id]) => this._maintenanceTaskCard(id)).join("")}</div>`
           : this._emptyState("No tasks tracked yet", "Turn on the chores you do in Settings → Maintenance — or add your own.", "settings", "Set up tasks")}
@@ -15670,6 +15676,266 @@ class OpenReefPanel extends HTMLElement {
         <div class="section-head"><div><p class="eyebrow">Coming up</p><h3>Due this week</h3></div></div>
         <div class="manual-history">${rows}</div>
       </section>`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Maintenance trends — all derived from logged completions, no extra storage.
+  // ---------------------------------------------------------------------------
+
+  // Tasks that log a volume AND actually have at least one logged number. A task
+  // with the toggle on but nothing recorded yet shouldn't summon an empty chart.
+  _maintenanceVolumeTasks() {
+    return this._maintenanceTaskList()
+      .filter(([id]) => this._maintenanceTask(id).enabled && this._maintenanceTask(id).logsVolume)
+      .filter(([id]) => this._maintenanceCompletions(id).some((entry) => !entry?.skipped && typeof entry?.volume === "number"));
+  }
+
+  // Weekly water-change totals across every volume-logging task, oldest week first.
+  // Every Mon–Sun week in the window is present even when empty, so a run of blank
+  // weeks reads as "no water changes" rather than silently collapsing the axis.
+  _maintenanceWaterChangeWeeks(weeks) {
+    const tankVol = this._maintenanceTankVolumeLitres();
+    const thisWeek = this._weekKey(Date.now());
+    const buckets = new Map();
+    for (let i = weeks - 1; i >= 0; i -= 1) {
+      const start = new Date(thisWeek);
+      start.setDate(start.getDate() - i * 7);
+      buckets.set(start.getTime(), { key: start.getTime(), litres: 0, pct: 0, count: 0 });
+    }
+    for (const [id] of this._maintenanceVolumeTasks()) {
+      for (const entry of this._maintenanceCompletions(id)) {
+        if (entry?.skipped) continue;
+        const key = this._weekKey(entry?.timestamp);
+        const bucket = key === null ? null : buckets.get(key);
+        if (!bucket) continue;
+        const { litres, pct } = this._maintenanceVolumeParts(entry, tankVol);
+        if (litres === null && pct === null) continue;
+        bucket.count += 1;
+        if (litres !== null) bucket.litres += litres;
+        if (pct !== null) bucket.pct += pct;
+      }
+    }
+    return [...buckets.values()];
+  }
+
+  // Round an axis maximum up to a friendly value so the bars still fill the plot
+  // (a coarse ladder would leave a 26 L week sitting at half height on a 50 L axis).
+  _maintenanceNiceMax(value) {
+    if (!(value > 0)) return 1;
+    const power = Math.pow(10, Math.floor(Math.log10(value)));
+    const scaled = value / power;
+    const step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((candidate) => scaled <= candidate) || 10;
+    return step * power;
+  }
+
+  // A volume with its unit attached — "17.5 L" or "33.7%".
+  _maintenanceVolLabel(value, unit) {
+    return unit === "L" ? `${this._maintenanceVolNum(value)} L` : `${this._maintenanceVolNum(value)}%`;
+  }
+
+  // "04/08" — short day/month tag for a week-start, used along the x axis.
+  _maintenanceWeekShortLabel(weekStartMs) {
+    return new Date(weekStartMs).toLocaleDateString([], { day: "2-digit", month: "2-digit" });
+  }
+
+  // The same volume expressed in the *other* unit, or "" when tank volume is unknown.
+  _maintenanceAltVolume(value, unit, tankVol) {
+    if (!(tankVol > 0) || !(value > 0)) return "";
+    return unit === "L"
+      ? `${this._maintenanceVolNum((value / tankVol) * 100)}% of tank`
+      : `${this._maintenanceVolNum((value / 100) * tankVol)} L`;
+  }
+
+  // Weekly water-change bar chart. Plain SVG in the same house style as the sensor
+  // trend chart; bars carry <title> so hovering a week gives the exact figure.
+  _maintenanceWeekBarChart(bars, unit, avg) {
+    if (!bars.length) return `<div class="empty-chart">No logged volumes yet.</div>`;
+    const width = 720;
+    const height = 250;
+    const padL = 46;
+    const padR = 14;
+    const padT = 16;
+    const padB = 38;
+    const plotW = width - padL - padR;
+    const plotH = height - padT - padB;
+    const max = this._maintenanceNiceMax(Math.max(0, avg, ...bars.map((bar) => bar.value)) * 1.05);
+    const slot = plotW / bars.length;
+    const barW = Math.max(4, Math.min(46, slot * 0.6));
+    const yFor = (value) => padT + plotH - (value / max) * plotH;
+    // Fewer x labels on a phone-width panel — the viewBox scales the text down with it.
+    const maxLabels = (globalThis.innerWidth || 1000) < 700 ? 6 : 12;
+    const labelEvery = Math.max(1, Math.ceil(bars.length / maxLabels));
+
+    const grid = [0, max / 2, max].map((tick) => `
+          <line class="maint-grid" x1="${padL}" y1="${yFor(tick).toFixed(1)}" x2="${width - padR}" y2="${yFor(tick).toFixed(1)}" />
+          <text class="maint-axis" x="${padL - 8}" y="${(yFor(tick) + 4).toFixed(1)}" text-anchor="end">${this._escape(this._maintenanceVolNum(tick))}</text>`).join("");
+
+    const rects = bars.map((bar, index) => {
+      const x = padL + slot * index + (slot - barW) / 2;
+      const height2 = bar.value > 0 ? Math.max(2, plotH - (yFor(bar.value) - padT)) : 3;
+      const y = padT + plotH - height2;
+      const title = bar.value > 0
+        ? `${bar.full}: ${this._maintenanceVolLabel(bar.value, unit)} across ${bar.count} change${bar.count === 1 ? "" : "s"}`
+        : `${bar.full}: no water change logged`;
+      return `<rect class="maint-bar${bar.value > 0 ? "" : " empty"}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${height2.toFixed(1)}" rx="3"><title>${this._escape(title)}</title></rect>`;
+    }).join("");
+
+    // Anchor the x labels on the newest bar so "this week" is always labelled.
+    const labels = bars.map((bar, index) => ((bars.length - 1 - index) % labelEvery === 0
+      ? `<text class="maint-axis" x="${(padL + slot * index + slot / 2).toFixed(1)}" y="${height - padB + 20}" text-anchor="middle">${this._escape(bar.label)}</text>`
+      : "")).join("");
+
+    const avgLine = avg > 0 ? `
+          <line class="maint-avg" x1="${padL}" y1="${yFor(avg).toFixed(1)}" x2="${width - padR}" y2="${yFor(avg).toFixed(1)}" />
+          <text class="maint-axis maint-avg-label" x="${width - padR}" y="${Math.max(padT + 10, yFor(avg) - 6).toFixed(1)}" text-anchor="end">avg ${this._escape(this._maintenanceVolLabel(avg, unit))}</text>` : "";
+
+    return `
+      <div class="chart-wrap">
+        <svg class="maint-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Water changed per week over ${bars.length} weeks, ${unit === "L" ? "in litres" : "as a percentage of tank volume"}">
+          ${grid}
+          ${rects}
+          ${avgLine}
+          ${labels}
+        </svg>
+      </div>`;
+  }
+
+  _maintenanceWaterChangeCard() {
+    const tankVol = this._maintenanceTankVolumeLitres();
+    const unit = tankVol > 0 ? (this._maintChart.unit === "L" ? "L" : "pct") : "L";
+    const weeks = this._maintChart.weeks;
+    const buckets = this._maintenanceWaterChangeWeeks(weeks);
+    const bars = buckets.map((bucket) => ({
+      label: this._maintenanceWeekShortLabel(bucket.key),
+      full: this._weekRangeLabel(bucket.key),
+      value: unit === "L" ? bucket.litres : bucket.pct,
+      count: bucket.count,
+    }));
+    const values = bars.map((bar) => bar.value);
+    const total = values.reduce((sum, value) => sum + value, 0);
+    const avg = total / bars.length;
+    const recentCount = Math.min(4, bars.length);
+    const last4 = values.slice(-recentCount).reduce((sum, value) => sum + value, 0);
+    const biggest = Math.max(0, ...values);
+    const blankWeeks = values.filter((value) => value <= 0).length;
+    const changes = bars.reduce((sum, bar) => sum + bar.count, 0);
+    const ranges = [[8, "8 weeks"], [12, "12 weeks"], [26, "6 months"], [52, "1 year"]];
+    const tile = (label, value, note) => `<div class="metric-card"><span class="hint">${this._escape(label)}</span><strong>${this._escape(value)}</strong><small>${this._escape(note)}</small></div>`;
+
+    return `
+      <section class="setting-card subtle-card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Trends</p>
+            <h3>Water changed per week</h3>
+            <p class="muted">${this._escape(changes ? `${changes} logged change${changes === 1 ? "" : "s"} in this window${tankVol > 0 ? ` · tank ${this._maintenanceVolNum(tankVol)} L` : " · set a tank volume in Settings to see percentages"}` : "Nothing logged in this window — mark a water change done with a volume to start the chart.")}</p>
+          </div>
+        </div>
+        <div class="maint-chart-nav">
+          ${ranges.map(([value, label]) => `<button class="${weeks === value ? "active" : ""}" data-action="maint-chart-range" data-weeks="${value}">${this._escape(label)}</button>`).join("")}
+          ${tankVol > 0 ? `
+            <span class="maint-chart-sep"></span>
+            <button class="${unit === "pct" ? "active" : ""}" data-action="maint-chart-unit" data-unit="pct">%</button>
+            <button class="${unit === "L" ? "active" : ""}" data-action="maint-chart-unit" data-unit="L">litres</button>
+          ` : ""}
+        </div>
+        ${this._maintenanceWeekBarChart(bars, unit, avg)}
+        <div class="grid four compact">
+          ${tile("Weekly average", this._maintenanceVolLabel(avg, unit), this._maintenanceAltVolume(avg, unit, tankVol) || `over ${bars.length} weeks`)}
+          ${tile(recentCount === 4 ? "Last 4 weeks" : `Last ${recentCount} week${recentCount === 1 ? "" : "s"}`, this._maintenanceVolLabel(last4, unit), this._maintenanceAltVolume(last4, unit, tankVol) || "total changed")}
+          ${tile("Biggest week", this._maintenanceVolLabel(biggest, unit), this._maintenanceAltVolume(biggest, unit, tankVol) || "single week peak")}
+          ${tile("Weeks with none", String(blankWeeks), blankWeeks ? `of ${bars.length} weeks had no change` : "changed every week")}
+        </div>
+      </section>`;
+  }
+
+  // Gaps (in days) between consecutive non-skipped completions, oldest first.
+  // Skips are history but never reset the cadence, so they're excluded here too.
+  _maintenanceIntervals(id, limit = 16) {
+    const times = this._maintenanceCompletions(id)
+      .filter((entry) => !entry?.skipped)
+      .map((entry) => this._maintenanceCompletionTime(entry))
+      .filter((time) => time > 0)
+      .sort((a, b) => a - b);
+    const gaps = [];
+    for (let i = 1; i < times.length; i += 1) {
+      gaps.push({ time: times[i], days: (times[i] - times[i - 1]) / 86400000 });
+    }
+    return gaps.slice(-limit);
+  }
+
+  // Mini bar chart of actual gap-between-completions vs the task's target cadence.
+  // Bars are coloured on the same thresholds the due-state uses, so the chart and
+  // the task pill always tell the same story.
+  _maintenanceIntervalChart(id, gaps, task) {
+    const width = 300;
+    const height = 84;
+    const padT = 8;
+    const padB = 14;
+    const plotH = height - padT - padB;
+    const max = this._maintenanceNiceMax(Math.max(task.cadenceDays, ...gaps.map((gap) => gap.days)) * 1.1);
+    const slot = width / gaps.length;
+    const barW = Math.max(4, Math.min(26, slot * 0.62));
+    const yFor = (value) => padT + plotH - (value / max) * plotH;
+    const targetY = yFor(task.cadenceDays);
+    const bars = gaps.map((gap, index) => {
+      const status = gap.days > task.criticalAfterDays ? "critical" : gap.days > task.cadenceDays ? "warning" : "ok";
+      const x = width * (index / gaps.length) + (slot - barW) / 2;
+      const barH = Math.max(2, plotH - (yFor(gap.days) - padT));
+      const label = `${this._formatActivityTime(new Date(gap.time).toISOString())}: ${this._format(gap.days, 1)} days after the previous one`;
+      return `<rect class="maint-gap ${status}" x="${x.toFixed(1)}" y="${(padT + plotH - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="2"><title>${this._escape(label)}</title></rect>`;
+    }).join("");
+    return `
+      <svg class="maint-mini-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this._escape(task.label)} interval history against a ${task.cadenceDays}-day target">
+        <line class="maint-grid" x1="0" y1="${(padT + plotH).toFixed(1)}" x2="${width}" y2="${(padT + plotH).toFixed(1)}" />
+        ${bars}
+        <line class="maint-target" x1="0" y1="${targetY.toFixed(1)}" x2="${width}" y2="${targetY.toFixed(1)}" />
+      </svg>`;
+  }
+
+  // Per-task "how close do I actually run to the schedule" cards. Needs two logged
+  // completions to have a single gap to draw, so new tasks are skipped silently.
+  _maintenanceCadenceCard() {
+    const cards = this._maintenanceTaskList()
+      .filter(([id]) => this._maintenanceTask(id).enabled)
+      .map(([id]) => ({ id, task: this._maintenanceTask(id), gaps: this._maintenanceIntervals(id) }))
+      .filter(({ gaps }) => gaps.length >= 1)
+      .map(({ id, task, gaps }) => {
+        const avg = gaps.reduce((sum, gap) => sum + gap.days, 0) / gaps.length;
+        const drift = avg - task.cadenceDays;
+        const status = avg > task.criticalAfterDays ? "critical" : avg > task.cadenceDays ? "warning" : "ok";
+        const driftLabel = Math.abs(drift) < 0.5
+          ? "on schedule"
+          : `${this._format(Math.abs(drift), 1)} day${Math.abs(drift) >= 1.95 ? "s" : ""} ${drift > 0 ? "late" : "early"} on average`;
+        return `
+          <article class="metric-card maint-cadence-card">
+            <div class="maint-cadence-head">
+              <strong>${this._escape(task.label)}</strong>
+              <span class="pill ${status}">${this._escape(`${this._format(avg, 1)} d avg`)}</span>
+            </div>
+            ${this._maintenanceIntervalChart(id, gaps, task)}
+            <small>${this._escape(`Target every ${task.cadenceDays} day${task.cadenceDays === 1 ? "" : "s"} · ${gaps.length} interval${gaps.length === 1 ? "" : "s"} · ${driftLabel}`)}</small>
+          </article>`;
+      });
+    if (!cards.length) return "";
+    return `
+      <section class="setting-card subtle-card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Trends</p>
+            <h3>How close you run to schedule</h3>
+            <p class="muted">Each bar is the gap between two completions; the dashed line is the task's target cadence.</p>
+          </div>
+        </div>
+        <div class="grid four compact">${cards.join("")}</div>
+      </section>`;
+  }
+
+  _maintenanceTrendsSection() {
+    const waterChange = this._maintenanceVolumeTasks().length ? this._maintenanceWaterChangeCard() : "";
+    const cadence = this._maintenanceCadenceCard();
+    if (!waterChange && !cadence) return "";
+    return `${waterChange}${cadence}`;
   }
 
   // Monday-start week key: local-midnight ms of the Monday whose week contains
@@ -18237,6 +18503,27 @@ class OpenReefPanel extends HTMLElement {
         .maintenance-week-group + .maintenance-week-group { margin-top: 6px; }
         .maintenance-week-head { margin: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
         .maintenance-week-total { color: #d6e2f0; letter-spacing: .02em; white-space: nowrap; }
+        .maint-chart-nav { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .maint-chart-nav button { border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #dcecff; min-height: 36px; padding: 8px 12px; }
+        .maint-chart-nav button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
+        .maint-chart-sep { width: 1px; align-self: stretch; background: #24364a; margin: 2px 4px; }
+        .maint-chart { display: block; width: 100%; height: auto; }
+        .maint-grid { stroke: #24364a; stroke-width: 1; }
+        .maint-axis { fill: #8da2ba; font-size: 11px; font-weight: 700; }
+        .maint-bar { fill: var(--openreef-accent); opacity: .9; }
+        .maint-bar.empty { fill: #33475e; opacity: .8; }
+        .maint-avg { stroke: #f0b429; stroke-width: 1.5; stroke-dasharray: 6 5; }
+        /* Halo keeps the average readable where the line crosses a tall bar. */
+        .maint-avg-label { fill: #f0b429; paint-order: stroke; stroke: #0b1724; stroke-width: 3px; stroke-linejoin: round; }
+        .maint-cadence-card { min-height: 0; gap: 8px; }
+        .maint-cadence-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+        .maint-cadence-head strong { color: #e5edf5; font-size: 15px; overflow-wrap: anywhere; }
+        .maint-mini-chart { display: block; width: 100%; height: auto; }
+        .maint-gap.ok { fill: #34d399; }
+        .maint-gap.warning { fill: #fbbf24; }
+        .maint-gap.critical { fill: #f87171; }
+        .maint-target { stroke: #8da2ba; stroke-width: 1.5; stroke-dasharray: 5 4; }
+        @media (max-width: 640px) { .maint-axis { font-size: 15px; } }
         .manual-history-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; border: 1px solid #24364a; border-radius: 8px; padding: 10px; background: rgba(11, 23, 36, .72); }
         .manual-history-row div { display: grid; gap: 4px; min-width: 0; }
         .manual-history-row strong, .manual-history-row small { overflow-wrap: anywhere; }
