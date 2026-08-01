@@ -212,6 +212,121 @@ def test_reminder_no_push_without_target():
     assert not any(c.domain == "notify" for c in hass.services.calls)
 
 
+# --- V2.1: automatic water changes logged from AWC --------------------------
+# AWC runs write a completion tagged source="awc" so the chore, the reminders and
+# the water-change chart all count the water the controller actually moved. Manual
+# entries carry NO source — that absence is what the panel renders differently.
+
+log_awc = integration._maintenance_log_awc_change
+AWC_SOURCE = integration.const.MAINTENANCE_SOURCE_AWC
+
+
+def _awc_cfg_for_log(log_enabled=True, tasks=None, completions=None):
+    return {
+        "maintenance": {
+            "seeded": True,
+            "enabled": True,
+            "logAwcChanges": log_enabled,
+            "tasks": tasks if tasks is not None else {"water_change": _interval(label="Water change")},
+            "completions": completions or {},
+        }
+    }
+
+
+def test_awc_change_logs_tagged_completion():
+    cfg = _awc_cfg_for_log()
+    log_awc(cfg, NOW, 12.5, False, "")
+    entry = cfg["maintenance"]["completions"]["water_change"][0]
+    assert entry["volume"] == 12.5
+    assert entry["volumeUnit"] == "L"
+    assert entry["source"] == AWC_SOURCE
+    assert entry["timestamp"] == NOW.isoformat()
+
+
+def test_awc_same_day_runs_merge_into_one_entry():
+    cfg = _awc_cfg_for_log()
+    log_awc(cfg, NOW, 1.0, False, "")
+    log_awc(cfg, NOW + timedelta(hours=3), 2.5, False, "")
+    entries = cfg["maintenance"]["completions"]["water_change"]
+    assert len(entries) == 1, "a continuous schedule must not spam one row per slice"
+    assert entries[0]["volume"] == 3.5
+    assert entries[0]["timestamp"] == (NOW + timedelta(hours=3)).isoformat()
+
+
+def test_awc_next_day_starts_a_new_entry():
+    cfg = _awc_cfg_for_log()
+    log_awc(cfg, NOW, 1.0, False, "")
+    log_awc(cfg, NOW + timedelta(days=1), 2.0, False, "")
+    entries = cfg["maintenance"]["completions"]["water_change"]
+    assert len(entries) == 2
+    assert [e["volume"] for e in entries] == [2.0, 1.0]  # newest first
+
+
+def test_awc_never_merges_into_a_manual_entry():
+    cfg = _awc_cfg_for_log(completions={"water_change": [
+        {"id": "manual", "timestamp": NOW.isoformat(), "volume": 20.0, "volumeUnit": "L", "notes": ""},
+    ]})
+    log_awc(cfg, NOW + timedelta(hours=1), 5.0, False, "")
+    entries = cfg["maintenance"]["completions"]["water_change"]
+    assert len(entries) == 2
+    assert entries[1]["volume"] == 20.0 and "source" not in entries[1]  # hand-logged untouched
+    assert entries[0]["source"] == AWC_SOURCE
+
+
+def test_awc_partial_change_is_logged_with_reason():
+    cfg = _awc_cfg_for_log()
+    log_awc(cfg, NOW, 3.0, True, "leak sensor")
+    entry = cfg["maintenance"]["completions"]["water_change"][0]
+    assert entry["volume"] == 3.0          # the water moved, so it counts
+    assert "leak sensor" in entry["notes"]
+
+
+def test_awc_logging_can_be_turned_off():
+    cfg = _awc_cfg_for_log(log_enabled=False)
+    log_awc(cfg, NOW, 12.5, False, "")
+    assert cfg["maintenance"]["completions"] == {}
+
+
+def test_awc_zero_volume_and_missing_task_are_noops():
+    cfg = _awc_cfg_for_log()
+    log_awc(cfg, NOW, 0.0, False, "")
+    assert cfg["maintenance"]["completions"] == {}
+    no_task = _awc_cfg_for_log(tasks={})
+    log_awc(no_task, NOW, 5.0, False, "")
+    assert no_task["maintenance"]["completions"] == {}
+
+
+def test_awc_falls_back_to_another_volume_logging_task():
+    cfg = _awc_cfg_for_log(tasks={"my_wc": {**_interval(label="Big change"), "logsVolume": True}})
+    log_awc(cfg, NOW, 8.0, False, "")
+    assert cfg["maintenance"]["completions"]["my_wc"][0]["volume"] == 8.0
+
+
+def test_awc_entries_respect_the_per_task_cap():
+    cap = integration.const.MAINTENANCE_COMPLETIONS_MAX
+    cfg = _awc_cfg_for_log()
+    for day in range(cap + 5):
+        log_awc(cfg, NOW + timedelta(days=day), 1.0, False, "")
+    assert len(cfg["maintenance"]["completions"]["water_change"]) == cap
+
+
+def test_awc_history_hook_logs_a_completion():
+    """The single hook: anything recorded in AWC history is logged for maintenance."""
+    cfg = _awc_cfg_for_log()
+    awc = {}
+    integration._awc_record_history(awc, NOW, 10.0, 9.8, "batch_sequential", False, "", config=cfg)
+    entry = cfg["maintenance"]["completions"]["water_change"][0]
+    assert entry["volume"] == 9.8       # the FILL volume is the water changed
+    assert entry["source"] == AWC_SOURCE
+    assert awc["history"][0]["filledL"] == 9.8  # AWC's own history still recorded
+
+
+def test_awc_history_hook_without_config_stays_awc_only():
+    awc = {}
+    integration._awc_record_history(awc, NOW, 10.0, 9.8, "batch_sequential", False, "")
+    assert awc["history"][0]["filledL"] == 9.8  # no config passed -> nothing to log against
+
+
 # --- tiny standalone runner -------------------------------------------------
 
 def _main() -> int:

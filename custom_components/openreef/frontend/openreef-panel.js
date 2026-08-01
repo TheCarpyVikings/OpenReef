@@ -15690,9 +15690,16 @@ class OpenReefPanel extends HTMLElement {
       .filter(([id]) => this._maintenanceCompletions(id).some((entry) => !entry?.skipped && typeof entry?.volume === "number"));
   }
 
-  // Weekly water-change totals across every volume-logging task, oldest week first.
-  // Every Mon–Sun week in the window is present even when empty, so a run of blank
-  // weeks reads as "no water changes" rather than silently collapsing the axis.
+  // True for a completion OpenReef logged itself from an automatic water change.
+  // Hand-logged entries carry no source — that absence is the distinction.
+  _maintenanceIsAuto(entry) {
+    return entry?.source === "awc";
+  }
+
+  // Weekly water-change totals across every volume-logging task, oldest week first,
+  // split automatic (AWC) vs hand-logged. Every Mon–Sun week in the window is present
+  // even when empty, so a run of blank weeks reads as "no water changes" rather than
+  // silently collapsing the axis.
   _maintenanceWaterChangeWeeks(weeks) {
     const tankVol = this._maintenanceTankVolumeLitres();
     const thisWeek = this._weekKey(Date.now());
@@ -15700,7 +15707,10 @@ class OpenReefPanel extends HTMLElement {
     for (let i = weeks - 1; i >= 0; i -= 1) {
       const start = new Date(thisWeek);
       start.setDate(start.getDate() - i * 7);
-      buckets.set(start.getTime(), { key: start.getTime(), litres: 0, pct: 0, count: 0 });
+      buckets.set(start.getTime(), {
+        key: start.getTime(), litres: 0, pct: 0, count: 0,
+        autoLitres: 0, autoPct: 0, autoCount: 0,
+      });
     }
     for (const [id] of this._maintenanceVolumeTasks()) {
       for (const entry of this._maintenanceCompletions(id)) {
@@ -15710,9 +15720,17 @@ class OpenReefPanel extends HTMLElement {
         if (!bucket) continue;
         const { litres, pct } = this._maintenanceVolumeParts(entry, tankVol);
         if (litres === null && pct === null) continue;
+        const auto = this._maintenanceIsAuto(entry);
         bucket.count += 1;
-        if (litres !== null) bucket.litres += litres;
-        if (pct !== null) bucket.pct += pct;
+        if (auto) bucket.autoCount += 1;
+        if (litres !== null) {
+          bucket.litres += litres;
+          if (auto) bucket.autoLitres += litres;
+        }
+        if (pct !== null) {
+          bucket.pct += pct;
+          if (auto) bucket.autoPct += pct;
+        }
       }
     }
     return [...buckets.values()];
@@ -15747,12 +15765,16 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // Weekly water-change bar chart. Plain SVG in the same house style as the sensor
-  // trend chart; bars carry <title> so hovering a week gives the exact figure.
+  // trend chart; each bar stacks the automatic (AWC) share under the hand-logged one,
+  // and carries a <title> so hovering a week gives the exact split.
   _maintenanceWeekBarChart(bars, unit, avg) {
     if (!bars.length) return `<div class="empty-chart">No logged volumes yet.</div>`;
-    const width = 720;
+    // A phone-width panel gets a squarer viewBox — the 720-wide one scales down to a
+    // letterbox strip with unreadable axis text on a 390px screen.
+    const compact = (globalThis.innerWidth || 1000) < 700;
+    const width = compact ? 420 : 720;
     const height = 250;
-    const padL = 46;
+    const padL = compact ? 40 : 46;
     const padR = 14;
     const padT = 16;
     const padB = 38;
@@ -15762,9 +15784,7 @@ class OpenReefPanel extends HTMLElement {
     const slot = plotW / bars.length;
     const barW = Math.max(4, Math.min(46, slot * 0.6));
     const yFor = (value) => padT + plotH - (value / max) * plotH;
-    // Fewer x labels on a phone-width panel — the viewBox scales the text down with it.
-    const maxLabels = (globalThis.innerWidth || 1000) < 700 ? 6 : 12;
-    const labelEvery = Math.max(1, Math.ceil(bars.length / maxLabels));
+    const labelEvery = Math.max(1, Math.ceil(bars.length / (compact ? 5 : 12)));
 
     const grid = [0, max / 2, max].map((tick) => `
           <line class="maint-grid" x1="${padL}" y1="${yFor(tick).toFixed(1)}" x2="${width - padR}" y2="${yFor(tick).toFixed(1)}" />
@@ -15772,12 +15792,25 @@ class OpenReefPanel extends HTMLElement {
 
     const rects = bars.map((bar, index) => {
       const x = padL + slot * index + (slot - barW) / 2;
-      const height2 = bar.value > 0 ? Math.max(2, plotH - (yFor(bar.value) - padT)) : 3;
-      const y = padT + plotH - height2;
-      const title = bar.value > 0
-        ? `${bar.full}: ${this._maintenanceVolLabel(bar.value, unit)} across ${bar.count} change${bar.count === 1 ? "" : "s"}`
-        : `${bar.full}: no water change logged`;
-      return `<rect class="maint-bar${bar.value > 0 ? "" : " empty"}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${height2.toFixed(1)}" rx="3"><title>${this._escape(title)}</title></rect>`;
+      if (bar.value <= 0) {
+        return `<rect class="maint-bar empty" x="${x.toFixed(1)}" y="${(padT + plotH - 3).toFixed(1)}" width="${barW.toFixed(1)}" height="3" rx="1.5"><title>${this._escape(`${bar.full}: no water change logged`)}</title></rect>`;
+      }
+      const manual = Math.max(0, bar.value - bar.autoValue);
+      const parts = [`${this._maintenanceVolLabel(bar.value, unit)} across ${bar.count} change${bar.count === 1 ? "" : "s"}`];
+      if (bar.autoValue > 0) parts.push(`${this._maintenanceVolLabel(bar.autoValue, unit)} automatic`);
+      if (manual > 0 && bar.autoValue > 0) parts.push(`${this._maintenanceVolLabel(manual, unit)} by hand`);
+      const title = `${bar.full}: ${parts.join(" · ")}`;
+      // Stack from the baseline: automatic underneath, hand-logged on top, with a
+      // hairline gap so the two sources stay countable even on a thin bar.
+      let cursor = padT + plotH;
+      return [["auto", bar.autoValue], ["manual", manual]]
+        .filter(([, value]) => value > 0)
+        .map(([kind, value], part, all) => {
+          const segH = Math.max(2, (value / max) * plotH);
+          const y = cursor - segH;
+          cursor = y - (all.length > 1 ? 1 : 0);
+          return `<rect class="maint-bar ${kind}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${segH.toFixed(1)}" rx="${all.length > 1 ? 2 : 3}"><title>${this._escape(title)}</title></rect>`;
+        }).join("");
     }).join("");
 
     // Anchor the x labels on the newest bar so "this week" is always labelled.
@@ -15809,7 +15842,9 @@ class OpenReefPanel extends HTMLElement {
       label: this._maintenanceWeekShortLabel(bucket.key),
       full: this._weekRangeLabel(bucket.key),
       value: unit === "L" ? bucket.litres : bucket.pct,
+      autoValue: unit === "L" ? bucket.autoLitres : bucket.autoPct,
       count: bucket.count,
+      autoCount: bucket.autoCount,
     }));
     const values = bars.map((bar) => bar.value);
     const total = values.reduce((sum, value) => sum + value, 0);
@@ -15819,8 +15854,19 @@ class OpenReefPanel extends HTMLElement {
     const biggest = Math.max(0, ...values);
     const blankWeeks = values.filter((value) => value <= 0).length;
     const changes = bars.reduce((sum, bar) => sum + bar.count, 0);
+    const autoTotal = bars.reduce((sum, bar) => sum + bar.autoValue, 0);
+    const autoChanges = bars.reduce((sum, bar) => sum + bar.autoCount, 0);
+    const autoShare = total > 0 ? (autoTotal / total) * 100 : 0;
     const ranges = [[8, "8 weeks"], [12, "12 weeks"], [26, "6 months"], [52, "1 year"]];
     const tile = (label, value, note) => `<div class="metric-card"><span class="hint">${this._escape(label)}</span><strong>${this._escape(value)}</strong><small>${this._escape(note)}</small></div>`;
+    // The legend only earns its space once both sources are actually in the window.
+    // It carries the SHARE of water changed — the bars already carry the volumes, and
+    // a second "%" figure in the chart's own unit would read as a share anyway.
+    const legend = autoChanges && autoChanges < changes ? `
+        <div class="maint-legend">
+          <span><i class="maint-swatch auto"></i>Automatic · ${this._escape(this._maintenanceVolNum(autoShare))}% of the water changed</span>
+          <span><i class="maint-swatch manual"></i>Logged by hand · ${this._escape(this._maintenanceVolNum(Math.max(0, 100 - autoShare)))}%</span>
+        </div>` : "";
 
     return `
       <section class="setting-card subtle-card">
@@ -15840,11 +15886,13 @@ class OpenReefPanel extends HTMLElement {
           ` : ""}
         </div>
         ${this._maintenanceWeekBarChart(bars, unit, avg)}
+        ${legend}
         <div class="grid four compact">
           ${tile("Weekly average", this._maintenanceVolLabel(avg, unit), this._maintenanceAltVolume(avg, unit, tankVol) || `over ${bars.length} weeks`)}
           ${tile(recentCount === 4 ? "Last 4 weeks" : `Last ${recentCount} week${recentCount === 1 ? "" : "s"}`, this._maintenanceVolLabel(last4, unit), this._maintenanceAltVolume(last4, unit, tankVol) || "total changed")}
           ${tile("Biggest week", this._maintenanceVolLabel(biggest, unit), this._maintenanceAltVolume(biggest, unit, tankVol) || "single week peak")}
           ${tile("Weeks with none", String(blankWeeks), blankWeeks ? `of ${bars.length} weeks had no change` : "changed every week")}
+          ${autoChanges ? tile("Run by AWC", `${autoChanges} of ${changes}`, `changes OpenReef ran for you`) : ""}
         </div>
       </section>`;
   }
@@ -16038,7 +16086,7 @@ class OpenReefPanel extends HTMLElement {
         return `
               <div class="manual-history-row">
                 <div>
-                  <strong>${this._escape(this._formatActivityTime(entry.timestamp))}${this._escape(vol)}</strong>${entry.skipped ? ` <span class="pill warning">skipped</span>` : ""}
+                  <strong>${this._escape(this._formatActivityTime(entry.timestamp))}${this._escape(vol)}</strong>${entry.skipped ? ` <span class="pill warning">skipped</span>` : ""}${this._maintenanceIsAuto(entry) ? ` <span class="pill auto">auto</span>` : ""}
                   ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
                 </div>
                 <button class="danger-text compact-button" data-action="delete-completion" data-id="${this._escape(id)}" data-entry="${this._escape(entry.id)}">Delete</button>
@@ -16144,6 +16192,13 @@ class OpenReefPanel extends HTMLElement {
           <span>
             <strong>Track maintenance tasks</strong>
             <small>Enabled tasks show on the Maintenance tab; overdue ones surface in Attention and gently nudge Reef Health.</small>
+          </span>
+        </label>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="maintenance" data-field="logAwcChanges" ${config.logAwcChanges === false ? "" : "checked"}>
+          <span>
+            <strong>Log automatic water changes</strong>
+            <small>Every completed AWC run is recorded against your water-change task — tagged <em>auto</em> in the history and shown as its own colour in the weekly chart. Runs on the same day are merged into one entry. Turn this off to chart only the changes you log by hand.</small>
           </span>
         </label>
         <div class="setting-card subtle-card">
@@ -18512,6 +18567,13 @@ class OpenReefPanel extends HTMLElement {
         .maint-axis { fill: #8da2ba; font-size: 11px; font-weight: 700; }
         .maint-bar { fill: var(--openreef-accent); opacity: .9; }
         .maint-bar.empty { fill: #33475e; opacity: .8; }
+        /* Automatic (AWC) volume sits under the hand-logged share in its own hue. */
+        .maint-bar.auto { fill: #a78bfa; }
+        .maint-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; color: #9fb2c7; font-size: 12px; font-weight: 700; }
+        .maint-legend span { display: inline-flex; align-items: center; gap: 7px; }
+        .maint-swatch { width: 11px; height: 11px; border-radius: 3px; background: var(--openreef-accent); }
+        .maint-swatch.auto { background: #a78bfa; }
+        .pill.auto { background: rgba(167, 139, 250, .18); color: #c4b5fd; }
         .maint-avg { stroke: #f0b429; stroke-width: 1.5; stroke-dasharray: 6 5; }
         /* Halo keeps the average readable where the line crosses a tall bar. */
         .maint-avg-label { fill: #f0b429; paint-order: stroke; stroke: #0b1724; stroke-width: 3px; stroke-linejoin: round; }

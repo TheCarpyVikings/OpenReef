@@ -10,7 +10,7 @@ import re
 import uuid
 from collections.abc import Iterable
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -94,8 +94,10 @@ from .const import (
     ISSUE_LEGACY_LABS_CONFIG,
     ISSUE_MISSING_ENTITIES,
     INTEGRATION_VERSION,
+    MAINTENANCE_AWC_TASK_ID,
     MAINTENANCE_COMPLETIONS_MAX,
     MAINTENANCE_REMINDER_DEFAULT_TIME,
+    MAINTENANCE_SOURCE_AWC,
     MAINTENANCE_TASK_CADENCE_MAX,
     MAINTENANCE_TASK_CADENCE_MIN,
     MAINTENANCE_TASK_CRITICAL_MAX,
@@ -2146,6 +2148,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         config["maintenance"] = deepcopy(DEFAULT_CORE_CONFIG["maintenance"])
         maintenance = config["maintenance"]
     maintenance["enabled"] = bool(maintenance.get("enabled", True))
+    # Automatic water changes are logged against the water-change task so the chore,
+    # the reminders and the trend chart all count the water AWC actually moved.
+    maintenance["logAwcChanges"] = bool(maintenance.get("logAwcChanges", True))
     raw_tasks = maintenance.get("tasks")
     raw_tasks = raw_tasks if isinstance(raw_tasks, dict) else {}
     # Seed the curated defaults exactly once; after that the user owns the list
@@ -2227,6 +2232,10 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             }
             if item.get("skipped"):
                 safe_entry["skipped"] = True
+            # Only automatic entries carry a source; a hand-logged completion has none,
+            # which is what lets the panel tell the two apart in history and the chart.
+            if item.get("source") == MAINTENANCE_SOURCE_AWC:
+                safe_entry["source"] = MAINTENANCE_SOURCE_AWC
             volume = item.get("volume")
             if isinstance(volume, (int, float)) and not isinstance(volume, bool):
                 safe_entry["volume"] = round(float(volume), 2)
@@ -6370,7 +6379,8 @@ async def _async_awc_abort(
     drained_l = _awc_moved(state, "drain") / 1000.0
     filled_l = _awc_moved(state, fill_role) / 1000.0
     if drained_l > 0 or filled_l > 0:
-        _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), True, reason)
+        _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), True, reason,
+                            config=config)
         awc["history"][0]["source"] = fill_role
         per_source = awc["ledger"].setdefault("perSource", {})
         per_source[fill_role] = round(
@@ -6415,9 +6425,82 @@ async def _async_awc_abort(
     await _async_save_config(hass, entry, config)
 
 
+def _maintenance_entry_local_day(entry: dict[str, Any]) -> date | None:
+    parsed = _parse_datetime(entry.get("timestamp"))
+    return dt_util.as_local(parsed).date() if parsed is not None else None
+
+
+def _maintenance_log_awc_change(
+    config: dict[str, Any], now: datetime, litres: float, partial: bool, reason: str,
+) -> None:
+    """Log an automatic water change against the Maintenance water-change task.
+
+    Tagged ``source="awc"`` — hand-logged completions carry no source, which is how the
+    panel tells them apart. Runs on the same LOCAL day merge into one entry: a continuous
+    schedule fires many times a day, and one row per slice would bury the manual history
+    under MAINTENANCE_COMPLETIONS_MAX. Partial (aborted/faulted) changes are logged too —
+    the water really did move — with the reason in the note.
+    """
+    if litres <= 0:
+        return
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict) or maintenance.get("logAwcChanges") is False:
+        return
+    tasks = maintenance.get("tasks")
+    if not isinstance(tasks, dict):
+        return
+    # The curated water-change task, or whichever task the user set to log volume.
+    task_id = MAINTENANCE_AWC_TASK_ID if MAINTENANCE_AWC_TASK_ID in tasks else next(
+        (
+            candidate
+            for candidate, task in tasks.items()
+            if isinstance(task, dict) and task.get("logsVolume")
+        ),
+        "",
+    )
+    if not task_id:
+        return
+    completions = maintenance.setdefault("completions", {})
+    if not isinstance(completions, dict):
+        completions = {}
+        maintenance["completions"] = completions
+    entries = completions.setdefault(task_id, [])
+    if not isinstance(entries, list):
+        entries = []
+        completions[task_id] = entries
+
+    timestamp = now.isoformat()
+    note = "Automatic water change" + (f" — partial: {reason}" if partial and reason else "")
+    newest = entries[0] if entries and isinstance(entries[0], dict) else None
+    if (
+        newest is not None
+        and newest.get("source") == MAINTENANCE_SOURCE_AWC
+        and newest.get("volumeUnit") == "L"
+        and not newest.get("skipped")
+        and _maintenance_entry_local_day(newest) == dt_util.as_local(now).date()
+    ):
+        prior = newest.get("volume")
+        prior_l = float(prior) if isinstance(prior, (int, float)) and not isinstance(prior, bool) else 0.0
+        newest["volume"] = round(prior_l + litres, 2)
+        newest["timestamp"] = timestamp
+        newest["notes"] = ("Automatic water changes today"
+                           + (f" — last one partial: {reason}" if partial and reason else ""))[:500]
+        return
+
+    entries.insert(0, {
+        "id": f"{task_id}:awc:{timestamp}",
+        "timestamp": timestamp,
+        "notes": note[:500],
+        "volume": round(litres, 2),
+        "volumeUnit": "L",
+        "source": MAINTENANCE_SOURCE_AWC,
+    })
+    del entries[MAINTENANCE_COMPLETIONS_MAX:]
+
+
 def _awc_record_history(
     awc: dict[str, Any], now: datetime, drained_l: float, filled_l: float,
-    method: str, partial: bool, notes: str,
+    method: str, partial: bool, notes: str, config: dict[str, Any] | None = None,
 ) -> None:
     history = awc.setdefault("history", [])
     if not isinstance(history, list):
@@ -6440,6 +6523,10 @@ def _awc_record_history(
         awc["ledger"] = ledger
     ledger["cumulativeDrainedL"] = round(_awc_num(ledger.get("cumulativeDrainedL"), 0, 0, 1e9) + max(0.0, drained_l), 3)
     ledger["cumulativeFilledL"] = round(_awc_num(ledger.get("cumulativeFilledL"), 0, 0, 1e9) + max(0.0, filled_l), 3)
+    # Same hook for every path that records a change (finalize, abort-with-volume,
+    # fault-ack), so the maintenance log can't drift from the AWC history.
+    if config is not None:
+        _maintenance_log_awc_change(config, now, max(0.0, filled_l), partial, notes)
 
 
 async def _async_awc_finalize(
@@ -6452,7 +6539,8 @@ async def _async_awc_finalize(
     fill_role = _awc_fill_role(state)  # read BEFORE the zeroing below clears it
     drained_l = _awc_moved(state, "drain") / 1000.0
     filled_l = _awc_moved(state, fill_role) / 1000.0
-    _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), False, "")
+    _awc_record_history(awc, now, drained_l, filled_l, state.get("method", ""), False, "",
+                        config=config)
     awc["history"][0]["source"] = fill_role
     ledger = awc["ledger"]
     per_source = ledger.setdefault("perSource", {})
@@ -8582,6 +8670,7 @@ async def websocket_awc_acknowledge(
                 ack_awc, datetime.now(timezone.utc), drained_l, filled_l,
                 state.get("method", ""), True,
                 f"Fault acknowledged: {state.get('fault', '')}",
+                config=config,
             )
             ack_awc["history"][0]["source"] = ack_fill_role
             ack_per = ack_awc["ledger"].setdefault("perSource", {})

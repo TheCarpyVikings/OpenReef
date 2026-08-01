@@ -376,15 +376,16 @@ def test_maintenance_custom_task_survives_and_clamps():
 
 
 def test_maintenance_completions_restricted_and_truncated():
+    cap = integration.const.MAINTENANCE_COMPLETIONS_MAX
     cfg = {"maintenance": {"seeded": True,
         "tasks": {"wc": {"label": "WC", "enabled": True}},
         "completions": {
-            "wc": [{"timestamp": f"2026-01-{(i % 28) + 1:02d}T00:00:00Z", "notes": "x"} for i in range(80)],
+            "wc": [{"timestamp": f"2026-01-{(i % 28) + 1:02d}T00:00:00Z", "notes": "x"} for i in range(cap + 30)],
             "ghost": [{"timestamp": "2026-01-01T00:00:00Z"}],
         }}}
     completions = normalise(cfg)["maintenance"]["completions"]
     assert "ghost" not in completions        # completions for unknown tasks dropped
-    assert len(completions["wc"]) == 50      # capped at MAINTENANCE_COMPLETIONS_MAX
+    assert len(completions["wc"]) == cap      # capped at MAINTENANCE_COMPLETIONS_MAX
 
 
 def test_maintenance_garbage_block_coerced():
@@ -450,6 +451,27 @@ def test_maintenance_completion_volume_and_skip():
     assert entries[0]["volume"] == 20.5 and entries[0]["volumeUnit"] == "L"
     assert entries[1]["skipped"] is True
     assert "volume" not in entries[2]
+
+
+def test_maintenance_completion_source_kept_only_for_awc():
+    """The auto/manual distinction the panel renders is this one field surviving."""
+    cfg = {"maintenance": {"seeded": True,
+        "tasks": {"wc": {"label": "WC", "enabled": True}},
+        "completions": {"wc": [
+            {"timestamp": "2026-01-01T00:00:00Z", "volume": 5, "volumeUnit": "L", "source": "awc"},
+            {"timestamp": "2026-01-02T00:00:00Z", "volume": 5, "volumeUnit": "L"},
+            {"timestamp": "2026-01-03T00:00:00Z", "source": "made-up"},   # unknown -> dropped
+        ]}}}
+    entries = normalise(cfg)["maintenance"]["completions"]["wc"]
+    assert entries[0]["source"] == "awc"
+    assert "source" not in entries[1]      # hand-logged entries carry no source
+    assert "source" not in entries[2]
+
+
+def test_maintenance_log_awc_changes_defaults_on_and_coerces():
+    assert normalise({})["maintenance"]["logAwcChanges"] is True
+    cfg = {"maintenance": {"seeded": True, "tasks": {}, "logAwcChanges": False}}
+    assert normalise(cfg)["maintenance"]["logAwcChanges"] is False
 
 
 def test_maintenance_water_change_logs_volume_default():

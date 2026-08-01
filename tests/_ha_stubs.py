@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import datetime, timezone
 
 
 class _Universal:
@@ -89,6 +90,20 @@ def install() -> None:
             # submodule (whose __getattr__ then yields the universal callable),
             # not the parent's universal-callable __getattr__ result.
             setattr(sys.modules[parent_name], child, module)
+
+    # Date helpers get REAL implementations: code that buckets by local calendar day
+    # (e.g. merging same-day automatic water changes) is meaningless against the
+    # universal stand-in, whose .date() compares equal to everything.
+    dt_module = sys.modules["homeassistant.util.dt"]
+    dt_module.UTC = timezone.utc
+    dt_module.utcnow = lambda: datetime.now(timezone.utc)
+    dt_module.now = lambda time_zone=None: datetime.now(time_zone or datetime.now().astimezone().tzinfo)
+    dt_module.as_local = lambda value: (
+        value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    ).astimezone(datetime.now().astimezone().tzinfo)
+    dt_module.as_utc = lambda value: (
+        value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    ).astimezone(timezone.utc)
 
     # A couple of names are used as real exception classes elsewhere; provide them
     # so any future test that exercises those paths doesn't get a non-exception.

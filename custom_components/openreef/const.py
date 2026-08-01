@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 47
-INTEGRATION_VERSION = "0.6.1"
+CORE_SCHEMA_VERSION = 48
+INTEGRATION_VERSION = "0.6.2"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -225,7 +225,14 @@ MAINTENANCE_TASK_DEFAULTS = {
 MAINTENANCE_TASK_CADENCE_MIN = 1
 MAINTENANCE_TASK_CADENCE_MAX = 365
 MAINTENANCE_TASK_CRITICAL_MAX = 730
-MAINTENANCE_COMPLETIONS_MAX = 50   # kept per task
+MAINTENANCE_COMPLETIONS_MAX = 200  # kept per task (AWC auto-logs one entry per day)
+
+# Automatic water changes are logged against this task, tagged with this source so the
+# panel can separate them from hand-logged ones. Same-day automatic runs merge into one
+# entry — a continuous schedule fires many times a day and would otherwise evict the
+# manual history under the cap above.
+MAINTENANCE_AWC_TASK_ID = "water_change"
+MAINTENANCE_SOURCE_AWC = "awc"
 
 # Maintenance Tasks V2 — HA-native reminders. A single daily tick (at this local
 # time) re-evaluates due/overdue tasks and fires an in-HA persistent notification
@@ -1215,6 +1222,7 @@ DEFAULT_CORE_CONFIG = {
     "maintenance": {
         "enabled": True,
         "seeded": False,
+        "logAwcChanges": True,
         "tasks": {},
         "completions": {},
         "reminders": {
