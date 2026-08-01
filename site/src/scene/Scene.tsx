@@ -691,6 +691,71 @@ function Reefscape() {
   );
 }
 
+/* ------------------------------ hero corals ---------------------------------- */
+
+// Real photogrammetry scans of NMNH type specimens (Smithsonian Open Access,
+// CC0), optimised to web weight by tools/optimize-corals.mjs. The scans are
+// bleached museum skeletons, so each gets a subtle live-tissue tint.
+const HERO_CORALS: Array<{
+  file: string;
+  pos: [number, number, number]; // ground point the specimen sits on
+  size: number;
+  rotY: number;
+  tint: string;
+}> = [
+  { file: "digitifera.glb", pos: [3.4, -11.3, -3.0], size: 1.4, rotY: 0.6, tint: "#b79bd6" },
+  { file: "staghorn.glb", pos: [1.5, -21.0, -0.5], size: 1.8, rotY: 2.1, tint: "#d9b98f" },
+  { file: "secale.glb", pos: [4.5, -27.9, -3.8], size: 1.5, rotY: 4.2, tint: "#c98fae" },
+  { file: "prolifera.glb", pos: [-4.0, -33.9, -3.2], size: 1.4, rotY: 1.2, tint: "#9ec4bd" },
+  { file: "palmata.glb", pos: [-3.4, -42.25, -0.6], size: 2.1, rotY: 5.1, tint: "#c9a06a" },
+  { file: "dome.glb", pos: [5.6, -42.3, -3.2], size: 1.8, rotY: 0.0, tint: "#a9c48f" },
+];
+
+function HeroCorals() {
+  const group = useRef<THREE.Group>(null!);
+  useLayoutEffect(() => {
+    if (reef.lowPower) return;
+    let alive = true;
+    (async () => {
+      const [{ GLTFLoader }, { MeshoptDecoder }] = await Promise.all([
+        import("three/examples/jsm/loaders/GLTFLoader.js"),
+        import("meshoptimizer"),
+      ]);
+      const loader = new GLTFLoader();
+      loader.setMeshoptDecoder(MeshoptDecoder);
+      for (const spec of HERO_CORALS) {
+        loader.load(`/corals/${spec.file}`, (gltf) => {
+          if (!alive || !group.current) return;
+          const obj = gltf.scene;
+          const box = new THREE.Box3().setFromObject(obj);
+          const dims = box.getSize(new THREE.Vector3());
+          obj.scale.setScalar(spec.size / Math.max(dims.x, dims.y, dims.z));
+          obj.rotation.y = spec.rotY;
+          obj.updateMatrixWorld(true);
+          const placed = new THREE.Box3().setFromObject(obj);
+          const center = placed.getCenter(new THREE.Vector3());
+          obj.position.set(spec.pos[0] - center.x, spec.pos[1] - placed.min.y, spec.pos[2] - center.z);
+          const tint = new THREE.Color(spec.tint);
+          obj.traverse((child) => {
+            const mesh = child as THREE.Mesh;
+            if (mesh.isMesh) {
+              const mat = mesh.material as THREE.MeshStandardMaterial;
+              mat.color.multiply(tint);
+              mat.roughness = 0.85;
+              mat.metalness = 0;
+            }
+          });
+          group.current.add(obj);
+        });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return <group ref={group} />;
+}
+
 /* ------------------------------- health ring --------------------------------- */
 
 const RING_GREEN = new THREE.Color("#35e0c2");
@@ -1065,6 +1130,7 @@ export default function Scene() {
         <Snow />
         <Fish />
         <Reefscape />
+        <HeroCorals />
         <HealthRing />
         <LightRail />
         <Spawn />

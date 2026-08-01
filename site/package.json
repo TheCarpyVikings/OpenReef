@@ -12,16 +12,22 @@
   "dependencies": {
     "@react-three/fiber": "^9.1.2",
     "@react-three/postprocessing": "^3.0.4",
+    "meshoptimizer": "^1.2.0",
     "postprocessing": "^6.39.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "three": "^0.177.0"
   },
   "devDependencies": {
+    "@gltf-transform/cli": "^4.4.2",
+    "@gltf-transform/core": "^4.4.2",
+    "@gltf-transform/extensions": "^4.4.2",
+    "@gltf-transform/functions": "^4.4.2",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "@types/three": "^0.177.0",
     "@vitejs/plugin-react": "^4.4.1",
+    "draco3dgltf": "^1.5.7",
     "puppeteer-core": "^25.3.0",
     "typescript": "~5.8.3",
     "vite": "^6.3.5"

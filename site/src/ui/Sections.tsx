@@ -681,6 +681,11 @@ export function Cta() {
           No corals were harmed in the making of this website. One Apex had its feelings hurt, but
           it's fine — we gave it a throne.
         </p>
+        <p className="footer-joke">
+          The hero corals in the dive are real: CC0 photogrammetry scans of National Museum of
+          Natural History type specimens, via{" "}
+          <a href="https://3d.si.edu/corals">Smithsonian Open Access</a>.
+        </p>
       </footer>
     </section>
   );
