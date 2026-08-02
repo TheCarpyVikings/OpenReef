@@ -1,0 +1,134 @@
+{
+  "_comment": [
+    "Shared due/overdue contract for the TWO implementations of the maintenance",
+    "schedule: _maintenance_task_state in custom_components/openreef/__init__.py",
+    "(drives the HA-native reminders, runs with the panel closed) and",
+    "_maintenanceDueState in the panel (drives the pills, Attention list and Reef",
+    "Health dent). They are separate code in separate languages and MUST agree —",
+    "tests/test_maintenance.py and tests/test_panel_maintenance.mjs both read this",
+    "file, so drifting either one fails a suite.",
+    "",
+    "expect is what NAGS you: 'critical' (overdue), 'warning' (due) or 'none'.",
+    "The backend expresses 'none' by leaving the task out of its due list, the",
+    "panel by returning ok/unknown/snoozed — same contract, different shape.",
+    "",
+    "Both suites pin TZ=UTC so the fixed-day cases have one calendar to agree on."
+  ],
+  "now": "2026-06-04T09:00:00+00:00",
+  "cases": [
+    {
+      "name": "interval: done inside the cadence",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [{ "timestamp": "2026-06-01T09:00:00+00:00" }],
+      "expect": "none"
+    },
+    {
+      "name": "interval: exactly at the cadence is not yet due",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [{ "timestamp": "2026-05-28T09:00:00+00:00" }],
+      "expect": "none"
+    },
+    {
+      "name": "interval: past the cadence is due",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [{ "timestamp": "2026-05-27T09:00:00+00:00" }],
+      "expect": "warning"
+    },
+    {
+      "name": "interval: past the critical window is overdue",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [{ "timestamp": "2026-05-15T09:00:00+00:00" }],
+      "expect": "critical"
+    },
+    {
+      "name": "interval: never logged is due, not overdue",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [],
+      "expect": "warning"
+    },
+    {
+      "name": "interval: a skip is history but never resets the cadence",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [
+        { "timestamp": "2026-06-03T09:00:00+00:00", "skipped": true },
+        { "timestamp": "2026-05-15T09:00:00+00:00" }
+      ],
+      "expect": "critical"
+    },
+    {
+      "name": "interval: an automatic water change counts as done",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [
+        { "timestamp": "2026-06-03T09:00:00+00:00", "volume": 3.5, "volumeUnit": "L", "source": "awc" }
+      ],
+      "expect": "none"
+    },
+    {
+      "name": "interval: a disabled task never nags",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14, "enabled": false },
+      "completions": [],
+      "expect": "none"
+    },
+    {
+      "name": "interval: tracking off globally silences an overdue task",
+      "maintenanceEnabled": false,
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14 },
+      "completions": [{ "timestamp": "2026-05-01T09:00:00+00:00" }],
+      "expect": "none"
+    },
+    {
+      "name": "interval: an active snooze suppresses an overdue task",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14, "snoozedUntil": "2026-06-06T09:00:00+00:00" },
+      "completions": [{ "timestamp": "2026-05-01T09:00:00+00:00" }],
+      "expect": "none"
+    },
+    {
+      "name": "interval: an expired snooze stops suppressing",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14, "snoozedUntil": "2026-06-03T09:00:00+00:00" },
+      "completions": [{ "timestamp": "2026-05-01T09:00:00+00:00" }],
+      "expect": "critical"
+    },
+    {
+      "name": "fixed weekly (Thursday): done today",
+      "task": { "scheduleMode": "fixed", "scheduleDays": [3] },
+      "completions": [{ "timestamp": "2026-06-04T08:00:00+00:00" }],
+      "expect": "none"
+    },
+    {
+      "name": "fixed weekly (Thursday): last week's is the most recent, today's is due",
+      "task": { "scheduleMode": "fixed", "scheduleDays": [3] },
+      "completions": [{ "timestamp": "2026-05-28T08:00:00+00:00" }],
+      "expect": "warning"
+    },
+    {
+      "name": "fixed weekly (Thursday): two occurrences missed is overdue",
+      "task": { "scheduleMode": "fixed", "scheduleDays": [3] },
+      "completions": [{ "timestamp": "2026-05-21T08:00:00+00:00" }],
+      "expect": "critical"
+    },
+    {
+      "name": "fixed weekly (Thursday): never logged is overdue",
+      "task": { "scheduleMode": "fixed", "scheduleDays": [3] },
+      "completions": [],
+      "expect": "critical"
+    },
+    {
+      "name": "fixed monthly (1st): done on the 1st",
+      "task": { "scheduleMode": "fixed", "scheduleMonthDays": [1] },
+      "completions": [{ "timestamp": "2026-06-01T10:00:00+00:00" }],
+      "expect": "none"
+    },
+    {
+      "name": "fixed monthly (1st): missed this month and last is overdue",
+      "task": { "scheduleMode": "fixed", "scheduleMonthDays": [1] },
+      "completions": [{ "timestamp": "2026-04-01T10:00:00+00:00" }],
+      "expect": "critical"
+    },
+    {
+      "name": "fixed: no days picked can't nag",
+      "task": { "scheduleMode": "fixed", "scheduleDays": [], "scheduleMonthDays": [] },
+      "completions": [],
+      "expect": "none"
+    }
+  ]
+}

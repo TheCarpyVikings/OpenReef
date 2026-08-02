@@ -11,6 +11,7 @@ Run standalone:  python3 tests/test_maintenance.py
 from __future__ import annotations
 
 import copy
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -452,6 +453,35 @@ def test_save_stamps_the_completion_history():
     hass = FakeHass(entries=[entry])
     run(record(hass, _call({"task_id": "water_change"})))
     assert _saved(entry)["completionsSyncedAt"], "every save must re-stamp the snapshot"
+
+
+# --- the shared due contract (lockstep with the panel) -----------------------
+# _maintenance_task_state here and _maintenanceDueState in the panel are separate
+# implementations of ONE schedule: this one fires the reminders with the panel
+# closed, the panel's drives the pills, Attention list and Reef Health dent. Both
+# read this fixture — tests/test_panel_maintenance.mjs runs the same cases — so
+# drifting either implementation fails a suite instead of silently disagreeing.
+
+with open(os.path.join(_HERE, "fixtures", "maintenance_due_cases.json"), encoding="utf-8") as handle:
+    DUE_CASES = json.load(handle)
+
+
+def test_due_contract_matches_the_shared_fixture():
+    now = datetime.fromisoformat(DUE_CASES["now"])
+    mismatches = []
+    for case in DUE_CASES["cases"]:
+        task = {
+            "label": "Subject", "enabled": True, "cadenceDays": 7,
+            "criticalAfterDays": 14, "scheduleMode": "interval", "notify": True,
+            **case["task"],
+        }
+        cfg = _cfg({"subject": task}, {"subject": case.get("completions", [])},
+                   enabled=case.get("maintenanceEnabled", True))
+        items = due(cfg, now)
+        actual = items[0]["severity"] if items else "none"
+        if actual != case["expect"]:
+            mismatches.append(f"{case['name']}: backend says {actual}, contract says {case['expect']}")
+    assert not mismatches, "backend drifted from the shared due contract:\n  " + "\n  ".join(mismatches)
 
 
 # --- tiny standalone runner -------------------------------------------------

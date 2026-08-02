@@ -1,9 +1,13 @@
 name: tests
 
 # Fast, dependency-free checks for the OpenReef custom integration. The Python
-# tests stub Home Assistant + voluptuous (see tests/_ha_stubs.py), so they run
-# without installing HA. The panel is a no-build vanilla web component, so a
-# syntax check is the cheapest guard against shipping a broken 10k-line file.
+# tests stub Home Assistant + voluptuous (see tests/_ha_stubs.py) and the panel
+# tests stub the browser (see tests/_panel_harness.mjs), so nothing needs to be
+# installed — no HA, no jsdom, no test runner.
+#
+# Suites are DISCOVERED, never listed: enumerating them one step at a time is how
+# five suites (guardian, icp, mode timers, salinity, trust moat) silently sat out
+# of CI. Anything matching tests/test_*.py or tests/test_*.mjs runs here.
 
 on:
   push:
@@ -20,6 +24,8 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    env:
+      TZ: UTC   # the fixed-day schedule cases are calendar-local on both sides
     steps:
       - uses: actions/checkout@v4
 
@@ -27,47 +33,32 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Backend compiles
-        run: python3 -m py_compile custom_components/openreef/__init__.py custom_components/openreef/const.py custom_components/openreef/spawning.py custom_components/openreef/vision.py custom_components/openreef/awc.py custom_components/openreef/dosing.py custom_components/openreef/icp.py
-
-      - name: Config migration tests
-        run: python3 tests/test_config_migration.py
-
-      - name: Vision engine tests (Frigate event folding, zone dedupe, alerts)
-        run: python3 tests/test_vision.py
-
-      - name: Coral spawning engine tests (astronomy, compiler, presets)
-        run: python3 tests/test_spawning.py
-
-      - name: Timelapse retention ladder tests
-        run: python3 tests/test_timelapse_retention.py
-
-      - name: Safety tests (armed gate, interlocks, mode-apply, ATO window)
-        run: python3 tests/test_safety.py
-
-      - name: Alert-evaluation tests
-        run: python3 tests/test_alerts.py
-
-      - name: Capture targeting + gating tests
-        run: python3 tests/test_capture.py
-
-      - name: Maintenance service tests
-        run: python3 tests/test_maintenance.py
-
-      - name: AWC engine tests (pure maths)
-        run: python3 tests/test_awc.py
-
-      - name: AWC safety tests (state machine, two-tier safety, ATO suspend)
-        run: python3 tests/test_awc_safety.py
-
-      - name: Dosing engine tests (schedule compile, guards, ledgers)
-        run: python3 tests/test_dosing.py
-
-      - name: Dosing orchestration tests (sync write-verify, tick, WS surface)
-        run: python3 tests/test_dosing_sync.py
-
-      - name: Entity-binding contract (panel vs const vs design doc)
-        run: python3 tests/test_entity_contract.py
+        run: python3 -m py_compile custom_components/openreef/*.py
 
       - name: Panel JS syntax
         run: node --check custom_components/openreef/frontend/openreef-panel.js
+
+      - name: Python suites
+        run: |
+          status=0
+          for suite in tests/test_*.py; do
+            echo "::group::$suite"
+            python3 "$suite" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Panel suites
+        run: |
+          status=0
+          for suite in tests/test_*.mjs; do
+            echo "::group::$suite"
+            node "$suite" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
