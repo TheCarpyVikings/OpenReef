@@ -67,14 +67,17 @@ test("test_advice_is_locked_until_the_advisory_only_promise_is_acknowledged", as
 });
 
 test("test_no_exact_millilitres_without_a_real_tank_volume", async () => {
-  // mL/unit is meaningless without a volume, so the advisor drops back to
-  // qualitative trend guidance rather than guessing a number.
+  // mL/unit is meaningless without a volume — and the user is told THAT, rather
+  // than the advisor quietly degrading to "maintenance-style, tune from trends"
+  // as though exact advice had never been available for this product.
   const { potency, state } = await safetyFor(dosingConfig({ system: { tankVolumeLitres: 0 }, tank: { volumeLitres: 0 } }));
   assertEqual(potency.value, 0, "no volume must not yield a potency");
-  assertEqual(potency.exactMaintenance, false);
-  assertEqual(potency.exactCorrection, false);
+  assertEqual(potency.source, "awaiting-volume");
+  assert(potency.label.includes("net tank water volume"), `the label must name the missing fact: "${potency.label}"`);
   assertEqual(state.canExactMaintenance, false, "no exact dose change without a volume");
   assertEqual(state.canExactCorrection, false, "no exact correction without a volume");
+  assertEqual(state.locks, ["Enter real net tank water volume."],
+    "one missing fact, one lock — the preset's strength is known, so don't ask for it");
 });
 
 test("test_maintenance_advice_is_locked_until_the_current_dose_is_known", async () => {

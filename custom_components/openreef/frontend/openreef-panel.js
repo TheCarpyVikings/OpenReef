@@ -4476,7 +4476,20 @@ class OpenReefPanel extends HTMLElement {
     if ((product.requiresCustomStrength || product.classId === "custom_verified_strength") && productDose > 0 && productVolume > 0 && productRaise > 0 && tankVolume <= 0) {
       return {
         value: 0,
-        source: "calculator",
+        source: "awaiting-volume",
+        exactMaintenance: true,
+        exactCorrection: exactCorrectionAllowed,
+        label: `${product.label}: enter net tank water volume before exact mL advice appears`,
+      };
+    }
+    // A preset product whose strength OpenReef already knows is missing exactly one
+    // fact: the volume. Say that, so it locks with a reason the user can act on
+    // instead of quietly degrading to "maintenance-style, tune from trends" as
+    // though exact advice were never on the table.
+    if (exact && tankVolume <= 0) {
+      return {
+        value: 0,
+        source: "awaiting-volume",
         exactMaintenance: true,
         exactCorrection: exactCorrectionAllowed,
         label: `${product.label}: enter net tank water volume before exact mL advice appears`,
@@ -4542,6 +4555,8 @@ class OpenReefPanel extends HTMLElement {
         : `${product.label} is not a ${sensor.label || sensorId} dosing product.`);
     }
     if (!system.safetyAcknowledged) locks.push("Acknowledge that OpenReef is advisory only and never doses for you.");
+    // "awaiting-volume" is deliberately absent: the strength is known there, only the
+    // volume is missing, and the volume lock below says so on its own.
     if (potencyInfo.value <= 0 && ["preset", "calculator", "manual"].includes(potencyInfo.source)) locks.push("Complete product strength details.");
     if ((potencyInfo.exactMaintenance || potencyInfo.exactCorrection) && tankVolume <= 0) locks.push("Enter real net tank water volume.");
     if (potencyInfo.exactMaintenance && currentDose <= 0) locks.push("Enter the current daily dose before exact maintenance changes appear.");
