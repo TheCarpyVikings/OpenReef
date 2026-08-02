@@ -10,6 +10,7 @@ Run standalone:  python3 tests/test_maintenance.py
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -325,6 +326,132 @@ def test_awc_history_hook_without_config_stays_awc_only():
     awc = {}
     integration._awc_record_history(awc, NOW, 10.0, 9.8, "batch_sequential", False, "")
     assert awc["history"][0]["filledL"] == 9.8  # no config passed -> nothing to log against
+
+
+# --- V2.2: stale-panel save must not drop completions -----------------------
+# The panel posts the WHOLE config. Anything logged since its snapshot (an AWC run, a
+# completion from an automation) has to survive that save — while a deliberate delete
+# of an entry the panel COULD see still sticks. The completionsSyncedAt stamp is the
+# anchor that tells those two apart.
+
+merge = integration._merge_recent_completions
+
+
+def _stored(entries, synced=None):
+    block = {"maintenance": {"tasks": {"water_change": _interval()}, "completions": {"water_change": entries}}}
+    if synced is not None:
+        block["maintenance"]["completionsSyncedAt"] = synced
+    return block
+
+
+def _payload(entries, synced):
+    return {"maintenance": {
+        "tasks": {"water_change": _interval()},
+        "completions": {"water_change": entries},
+        "completionsSyncedAt": synced,
+    }}
+
+
+def _awc_entry(entry_id, when, volume=2.0):
+    return {"id": entry_id, "timestamp": when.isoformat(), "volume": volume,
+            "volumeUnit": "L", "notes": "", "source": AWC_SOURCE}
+
+
+def _manual_entry(entry_id, when, volume=10.0):
+    return {"id": entry_id, "timestamp": when.isoformat(), "volume": volume,
+            "volumeUnit": "L", "notes": ""}
+
+
+SNAPSHOT = NOW                       # when the stale panel was last handed the truth
+BEFORE = NOW - timedelta(hours=6)    # entry it saw
+AFTER = NOW + timedelta(hours=2)     # entry logged after its snapshot
+
+
+def test_merge_restores_awc_entry_logged_after_the_snapshot():
+    stored = _stored([_awc_entry("awc-new", AFTER), _manual_entry("old", BEFORE)])
+    payload = _payload([_manual_entry("old", BEFORE)], SNAPSHOT.isoformat())
+    merge(stored, payload)
+    entries = payload["maintenance"]["completions"]["water_change"]
+    assert [e["id"] for e in entries] == ["awc-new", "old"]  # restored, newest first
+
+
+def test_merge_restores_service_logged_entry_too():
+    """record_task_completion writes manual entries from automations — same risk."""
+    stored = _stored([_manual_entry("from-automation", AFTER)])
+    payload = _payload([], SNAPSHOT.isoformat())
+    merge(stored, payload)
+    assert [e["id"] for e in payload["maintenance"]["completions"]["water_change"]] == ["from-automation"]
+
+
+def test_merge_respects_a_deliberate_delete():
+    stored = _stored([_awc_entry("awc-seen", BEFORE), _manual_entry("kept", BEFORE)])
+    payload = _payload([_manual_entry("kept", BEFORE)], SNAPSHOT.isoformat())
+    merge(stored, payload)
+    ids = [e["id"] for e in payload["maintenance"]["completions"]["water_change"]]
+    assert ids == ["kept"], "an entry the panel could see must stay deleted"
+
+
+def test_merge_takes_the_grown_same_day_awc_entry():
+    """Same-day AWC runs merge in place; the backend owns that entry's volume."""
+    stored = _stored([_awc_entry("awc-1", AFTER, volume=6.0)])
+    payload = _payload([_awc_entry("awc-1", BEFORE, volume=2.0)], SNAPSHOT.isoformat())
+    merge(stored, payload)
+    entry = payload["maintenance"]["completions"]["water_change"][0]
+    assert entry["volume"] == 6.0 and entry["timestamp"] == AFTER.isoformat()
+
+
+def test_merge_leaves_manual_entries_the_client_still_has_alone():
+    stored = _stored([_manual_entry("m1", BEFORE, volume=10.0)])
+    payload = _payload([{**_manual_entry("m1", BEFORE, volume=10.0), "notes": "edited"}], SNAPSHOT.isoformat())
+    merge(stored, payload)
+    assert payload["maintenance"]["completions"]["water_change"][0]["notes"] == "edited"
+
+
+def test_merge_without_a_stamp_restores_nothing():
+    """Old client / import: fail in the direction that can't resurrect deletes."""
+    stored = _stored([_awc_entry("awc-new", AFTER)])
+    payload = _payload([], "")
+    merge(stored, payload)
+    assert payload["maintenance"]["completions"]["water_change"] == []
+
+
+def test_merge_handles_missing_blocks_without_raising():
+    merge(None, {})
+    merge({"maintenance": {}}, {"maintenance": {}})
+    payload = {"maintenance": {"completionsSyncedAt": SNAPSHOT.isoformat()}}
+    merge(_stored([_awc_entry("awc-new", AFTER)]), payload)
+    assert payload["maintenance"]["completions"]["water_change"][0]["id"] == "awc-new"
+
+
+def test_stale_panel_save_keeps_the_awc_entry_end_to_end():
+    """The whole point, through the real save handler: AWC logs a change while the
+    panel sits on unsaved edits (so it won't refresh), then the panel saves."""
+    from _fake_ha import FakeConnection
+
+    entry = _entry()
+    hass = FakeHass(entries=[entry])
+    run(record(hass, _call({"task_id": "water_change", "volume": 5, "volume_unit": "L"})))
+    stale = copy.deepcopy(entry.options[CONF_SETTINGS])   # what the panel is holding
+
+    awc_now = datetime.now(timezone.utc) + timedelta(seconds=1)
+    live = entry.options[CONF_SETTINGS]
+    integration._maintenance_log_awc_change(live, awc_now, 3.5, False, "")
+    run(integration._async_save_config(hass, entry, live))
+    assert len(_saved(entry)["completions"]["water_change"]) == 2
+
+    stale["maintenance"]["tasks"]["water_change"]["cadenceDays"] = 10  # the pending edit
+    run(integration.websocket_save_config(hass, FakeConnection(), {"id": 1, "config": stale}))
+    entries = _saved(entry)["completions"]["water_change"]
+    assert len(entries) == 2, "the automatic change must survive a stale panel save"
+    assert entries[0]["source"] == AWC_SOURCE
+    assert _saved(entry)["tasks"]["water_change"]["cadenceDays"] == 10  # edit still applied
+
+
+def test_save_stamps_the_completion_history():
+    entry = _entry()
+    hass = FakeHass(entries=[entry])
+    run(record(hass, _call({"task_id": "water_change"})))
+    assert _saved(entry)["completionsSyncedAt"], "every save must re-stamp the snapshot"
 
 
 # --- tiny standalone runner -------------------------------------------------

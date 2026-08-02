@@ -2151,6 +2151,13 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     # Automatic water changes are logged against the water-change task so the chore,
     # the reminders and the trend chart all count the water AWC actually moved.
     maintenance["logAwcChanges"] = bool(maintenance.get("logAwcChanges", True))
+    # "This snapshot of the completion history was current at". Re-stamped on every
+    # save and round-tripped by the panel; _merge_recent_completions uses the stamp a
+    # client sends back to tell "logged after your snapshot" from "you deleted it".
+    synced_at = maintenance.get("completionsSyncedAt")
+    maintenance["completionsSyncedAt"] = (
+        synced_at if isinstance(synced_at, str) and _parse_datetime(synced_at) is not None else ""
+    )
     raw_tasks = maintenance.get("tasks")
     raw_tasks = raw_tasks if isinstance(raw_tasks, dict) else {}
     # Seed the curated defaults exactly once; after that the user owns the list
@@ -4947,6 +4954,10 @@ async def _async_save_config(
         != _awc_schedule_fingerprint(config)
     )
     normalised = _normalise_core_config(config)
+    # Every save re-stamps the completion history: whatever a client is handed from
+    # here on is current as of now, which is the anchor _merge_recent_completions uses
+    # when that client eventually posts the whole config back.
+    normalised["maintenance"]["completionsSyncedAt"] = datetime.now(timezone.utc).isoformat()
     if schedule_rearmed:
         _awc_cfg(normalised).setdefault("state", {})["scheduleArmedAt"] = (
             datetime.now(timezone.utc).isoformat()
@@ -6423,6 +6434,80 @@ async def _async_awc_abort(
         "Water change fault" if latch else "Water change aborted", reason,
     )
     await _async_save_config(hass, entry, config)
+
+
+def _merge_recent_completions(stored: Any, incoming: dict[str, Any]) -> None:
+    """Protect completions the client's snapshot predates, in place on ``incoming``.
+
+    A panel save posts the WHOLE config, so a stale snapshot would silently drop any
+    completion written since it was fetched — an automatic water change, or one logged
+    by the ``record_task_completion`` service from an automation. Both are invisible to
+    a panel sitting on unsaved edits, which is exactly when it refuses to refresh.
+
+    A blunt union would resurrect deliberate deletes, so the rule is anchored on the
+    ``completionsSyncedAt`` stamp the client was handed and sends back:
+
+    * absent from the payload and NEWER than that stamp -> logged after the snapshot,
+      restore it (a delete can only target an entry the client could see);
+    * present, and the stored copy is a NEWER automatic entry -> the backend owns those
+      (same-day runs merge in place), so take the stored volume/timestamp;
+    * anything else -> the client's payload wins, so deletes and edits stick.
+
+    Without a usable stamp (an old client, or an import) nothing is restored — the
+    pre-0.6.3 behaviour, which is the safe direction to fail in.
+    """
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    stored_maintenance = stored.get("maintenance")
+    incoming_maintenance = incoming.get("maintenance")
+    if not isinstance(stored_maintenance, dict) or not isinstance(incoming_maintenance, dict):
+        return
+    stored_completions = stored_maintenance.get("completions")
+    if not isinstance(stored_completions, dict):
+        return
+    synced = _parse_datetime(incoming_maintenance.get("completionsSyncedAt"))
+    incoming_completions = incoming_maintenance.get("completions")
+    if not isinstance(incoming_completions, dict):
+        incoming_completions = {}
+        incoming_maintenance["completions"] = incoming_completions
+
+    for task_id, stored_entries in stored_completions.items():
+        if not isinstance(stored_entries, list):
+            continue
+        entries = incoming_completions.get(task_id)
+        if not isinstance(entries, list):
+            entries = []
+            incoming_completions[task_id] = entries
+        index_by_id = {
+            entry.get("id"): position
+            for position, entry in enumerate(entries)
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        restored = False
+        for stored_entry in stored_entries:
+            if not isinstance(stored_entry, dict):
+                continue
+            stamp = _parse_datetime(stored_entry.get("timestamp"))
+            if stamp is None:
+                continue
+            position = index_by_id.get(stored_entry.get("id"))
+            if position is not None:
+                if stored_entry.get("source") != MAINTENANCE_SOURCE_AWC:
+                    continue
+                client_stamp = _parse_datetime(entries[position].get("timestamp"))
+                if client_stamp is None or stamp > client_stamp:
+                    entries[position] = deepcopy(stored_entry)
+                    restored = True
+                continue
+            if synced is not None and stamp > synced:
+                entries.append(deepcopy(stored_entry))
+                restored = True
+        if restored:
+            entries.sort(
+                key=lambda entry: _parse_datetime(entry.get("timestamp") if isinstance(entry, dict) else None)
+                or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
 
 
 def _maintenance_entry_local_day(entry: dict[str, Any]) -> date | None:
@@ -8122,6 +8207,9 @@ async def websocket_save_config(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
 
+    # A panel posts the whole config, so anything logged since it last refreshed —
+    # an automatic water change, a completion from an automation — would be dropped.
+    _merge_recent_completions(entry.options.get(CONF_SETTINGS), msg["config"])
     config = await _async_save_config(hass, entry, msg["config"])
     connection.send_result(
         msg["id"],

@@ -15696,6 +15696,19 @@ class OpenReefPanel extends HTMLElement {
     return entry?.source === "awc";
   }
 
+  // Litres this task already has on the board today from automatic changes, so
+  // ticking one off by hand can't quietly double-count the same water.
+  _maintenanceAutoLoggedToday(id) {
+    const today = new Date().toDateString();
+    return this._maintenanceCompletions(id)
+      .filter((entry) => this._maintenanceIsAuto(entry) && !entry?.skipped)
+      .filter((entry) => new Date(entry.timestamp).toDateString() === today)
+      .reduce((sum, entry) => {
+        const { litres } = this._maintenanceVolumeParts(entry, this._maintenanceTankVolumeLitres());
+        return sum + (litres || 0);
+      }, 0);
+  }
+
   // Weekly water-change totals across every volume-logging task, oldest week first,
   // split automatic (AWC) vs hand-logged. Every Mon–Sun week in the window is present
   // even when empty, so a run of blank weeks reads as "no water changes" rather than
@@ -16138,6 +16151,7 @@ class OpenReefPanel extends HTMLElement {
     const draft = this._maintenanceDrafts[id] || {};
     const due = state.status === "warning" || state.status === "critical";
     const snoozed = state.snoozed === true;
+    const autoToday = task.logsVolume ? this._maintenanceAutoLoggedToday(id) : 0;
     const scheduleLine = task.scheduleMode === "fixed"
       ? `Every ${this._escape(this._maintenanceScheduleLabel(task))}`
       : `Every ${this._escape(task.cadenceDays)} day${task.cadenceDays === 1 ? "" : "s"}`;
@@ -16157,6 +16171,7 @@ class OpenReefPanel extends HTMLElement {
           ${task.logsVolume ? `
             <label>Volume logged<input id="or-vol-${this._escape(id)}" data-maint-draft="volume" data-id="${this._escape(id)}" type="number" min="0" step="1" placeholder="optional" value="${this._escape(draft.volume || "")}"></label>
             <label>Unit<select id="or-volunit-${this._escape(id)}" data-maint-draft="unit" data-id="${this._escape(id)}"><option value="pct" ${draft.unit === "L" ? "" : "selected"}>%</option><option value="L" ${draft.unit === "L" ? "selected" : ""}>litres</option></select></label>
+            ${autoToday > 0 ? `<small class="hint maintenance-auto-note">OpenReef already logged ${this._escape(this._maintenanceVolNum(autoToday))} L automatically today — only add what you changed by hand.</small>` : ""}
           ` : ""}
         </div>
         <div class="button-row">
@@ -18554,6 +18569,7 @@ class OpenReefPanel extends HTMLElement {
         .manual-test-card p { color: #9fb2c7; }
         .manual-history { display: grid; gap: 8px; border-top: 1px solid #24364a; padding-top: 10px; }
         .maintenance-when { grid-column: 1 / -1; }
+        .maintenance-auto-note { grid-column: 1 / -1; color: #c4b5fd; }
         .maintenance-week-group { display: grid; gap: 8px; }
         .maintenance-week-group + .maintenance-week-group { margin-top: 6px; }
         .maintenance-week-head { margin: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
