@@ -1,3 +1,8 @@
+// Completion rows rendered per task. The store keeps MAINTENANCE_COMPLETIONS_MAX
+// (const.py) — far more — and the charts read every one of them; this is a DOM
+// weight limit, and the list says so when it bites.
+const MAINTENANCE_HISTORY_ROWS = 100;
+
 class OpenReefPanel extends HTMLElement {
   constructor() {
     super();
@@ -58,7 +63,7 @@ class OpenReefPanel extends HTMLElement {
     this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
     this._icpFileInput = null;
     this._icpFileInputTimer = null;
-    this._lightingWindow = { data: null, loading: false };
+    this._lightingWindow = { data: null, loading: false, at: 0 };
     this._healthTrends = { checkedAt: "", items: {}, error: "" };
     this._consumption = { checkedAt: "", items: {}, error: "" };
     this._doserSummary = null;
@@ -2612,7 +2617,11 @@ class OpenReefPanel extends HTMLElement {
     }
     const value = this._number(sensor.entity_id);
     if (value === null) return "unknown";
-    if (value < Number(sensor.min) || value > Number(sensor.max)) return "critical";
+    // Lockstep with the backend's _sensor_alert_items: a light-gated sensor's LOW
+    // readings are expected while the lights are off, so they neither alert nor warn.
+    const suppressLow = this._sensorLowSuppressed(sensor);
+    if (value > Number(sensor.max)) return "critical";
+    if (value < Number(sensor.min)) return suppressLow ? "ok" : "critical";
     const bufferPercent = Math.max(0, Math.min(Number(sensor.warningBuffer ?? 10), 50)) / 100;
     const buffer = (Number(sensor.max) - Number(sensor.min)) * bufferPercent;
     const hysteresisPercent = Math.max(0, Math.min(Number(this._config?.alerts?.hysteresisPercent ?? 2), 20)) / 100;
@@ -2620,10 +2629,32 @@ class OpenReefPanel extends HTMLElement {
     const lowerWarning = Number(sensor.min) + buffer;
     const upperWarning = Number(sensor.max) - buffer;
     const previousState = this._config?.alerts?.lastStates?.[sensorId];
-    const stickyWarning = ["warning", "critical"].includes(previousState)
-      && (value < lowerWarning + hysteresis || value > upperWarning - hysteresis);
-    if (value < lowerWarning || value > upperWarning || stickyWarning) return "warning";
+    const wasAlerting = ["warning", "critical"].includes(previousState);
+    const lowWarn = !suppressLow
+      && (value < lowerWarning || (wasAlerting && value < lowerWarning + hysteresis));
+    const highWarn = value > upperWarning || (wasAlerting && value > upperWarning - hysteresis);
+    if (lowWarn || highWarn) return "warning";
     return "ok";
+  }
+
+  // Mirror of the backend's _sensor_low_suppressed. The authoritative lights-on state
+  // is the backend's (it owns the solar maths), so this reads the fetched window
+  // rather than recomputing it — a third implementation of sunrise is not the answer.
+  // Unknown window => NOT suppressed: never hide a real low reading on a guess.
+  _sensorLowSuppressed(sensor) {
+    if (!sensor?.lightGated) return false;
+    if ((this._config?.lightingSchedule?.mode || "off") === "off") return false;
+    this._ensureLightingWindowFresh();
+    const win = this._lightingWindow.data;
+    return !!(win && win.configured && win.lightsOnNow === false);
+  }
+
+  // The window only turns over at sunrise/sunset, so a lazy 10-minute refresh is
+  // plenty — and it costs nothing at all unless a sensor is actually light-gated.
+  _ensureLightingWindowFresh() {
+    if (this._lightingWindow.loading) return;
+    if (this._lightingWindow.data && Date.now() - (this._lightingWindow.at || 0) < 600000) return;
+    setTimeout(() => this._loadLightingWindow(true), 0);
   }
 
   _sensorStatusLabel(status) {
@@ -15099,8 +15130,10 @@ class OpenReefPanel extends HTMLElement {
     try {
       const res = await this._callWS({ type: "openreef/lighting_window" });
       this._lightingWindow.data = res?.lighting || { configured: false };
+      this._lightingWindow.at = Date.now();
     } catch (err) {
       this._lightingWindow.data = { configured: false };
+      this._lightingWindow.at = Date.now();
     } finally {
       this._lightingWindow.loading = false;
       this._render();
@@ -16075,8 +16108,14 @@ class OpenReefPanel extends HTMLElement {
   // Render a task's history grouped under Mon–Sun week headers (newest week first).
   // Each water-change entry shows both litres and % changed; each week header shows
   // the week's total litres and % next to the date range.
+  //
+  // The list is capped for DOM weight, not for data — the store keeps far more (and
+  // the charts read all of it), so when the cap bites, say so rather than letting the
+  // history look like it simply stops.
   _renderCompletionWeeks(id, completions) {
-    const groups = this._groupCompletionsByWeek(completions.slice(0, 50));
+    const shown = completions.slice(0, MAINTENANCE_HISTORY_ROWS);
+    const hidden = completions.length - shown.length;
+    const groups = this._groupCompletionsByWeek(shown);
     const tankVol = this._maintenanceTankVolumeLitres();
     const thisWeek = this._weekKey(Date.now());
     const prevWeek = new Date(thisWeek);
@@ -16117,7 +16156,9 @@ class OpenReefPanel extends HTMLElement {
               </p>
               ${rows}
             </div>`;
-    }).join("");
+    }).join("") + (hidden > 0
+      ? `<p class="muted maintenance-history-more">Showing the newest ${MAINTENANCE_HISTORY_ROWS} of ${completions.length}. Older entries are still counted in the charts.</p>`
+      : "");
   }
 
   // Resolve the completion time for a task from its "Completed" field.

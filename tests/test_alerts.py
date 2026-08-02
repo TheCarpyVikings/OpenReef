@@ -10,6 +10,7 @@ Or with pytest:  pytest tests/
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -249,6 +250,49 @@ def test_gated_sensor_resolves_during_day_when_recovered():
     hass = FakeHass(states={"sensor.par": "200"})  # back in range (50-350)
     transitions = sync(hass, cfg, now_local=DAY)
     assert any(t["state"] == "resolved" for t in transitions)
+
+
+# --- the shared threshold contract (lockstep with the panel) ----------------
+# _sensor_alert_items (here) fires the notifications; _sensorStatus (panel) paints
+# the pills and the Attention list. Drift means a green tile behind a critical push,
+# or a red tile with silence behind it — which is exactly what light-gating was
+# doing before 0.6.4. Both read this fixture; tests/test_panel_alerts.mjs runs the
+# same cases, so drifting either implementation fails a suite.
+
+with open(os.path.join(_HERE, "fixtures", "sensor_alert_cases.json"), encoding="utf-8") as handle:
+    ALERT_CONTRACT = json.load(handle)
+
+# Lights on 08:00-20:00, so these two instants put a gated sensor either side of it.
+CONTRACT_SCHEDULE = {"mode": "simple", "onTime": "08:00", "offTime": "20:00"}
+CONTRACT_DAY = datetime(2026, 1, 15, 14, 0)
+CONTRACT_NIGHT = datetime(2026, 1, 15, 2, 0)
+
+
+def test_threshold_contract_matches_the_shared_fixture():
+    mismatches = []
+    for case in ALERT_CONTRACT["cases"]:
+        sensor = {
+            **ALERT_CONTRACT["sensorDefaults"],
+            "entity_id": "sensor.subject",
+            "label": "Subject",
+            "kind": "numeric",
+            "unit": "",
+            **case.get("sensor", {}),
+        }
+        alerts = {"hysteresisPercent": ALERT_CONTRACT["hysteresisPercent"]}
+        if case.get("previousState"):
+            alerts["lastStates"] = {"subject": case["previousState"]}
+        cfg = {"sensors": {"subject": sensor}, "alerts": alerts}
+        lights_on = case.get("lightsOn")
+        if lights_on is not None:
+            cfg["lightingSchedule"] = CONTRACT_SCHEDULE
+        now_local = CONTRACT_DAY if lights_on else CONTRACT_NIGHT
+        hass = FakeHass(states={"sensor.subject": str(case["value"])})
+        severities = _sev(items(hass, cfg, now_local=now_local))
+        actual = severities.get("subject", "none")
+        if actual != case["expect"]:
+            mismatches.append(f"{case['name']}: backend says {actual}, contract says {case['expect']}")
+    assert not mismatches, "backend drifted from the shared threshold contract:\n  " + "\n  ".join(mismatches)
 
 
 def _main() -> int:

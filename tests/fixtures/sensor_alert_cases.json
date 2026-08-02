@@ -1,0 +1,116 @@
+{
+  "_comment": [
+    "Shared threshold contract for the TWO implementations of sensor alerting:",
+    "_sensor_alert_items in custom_components/openreef/__init__.py (fires the HA",
+    "notifications) and _sensorStatus in the panel (paints the pills and the",
+    "Attention list). Same rule, two languages — tests/test_alerts.py and",
+    "tests/test_panel_alerts.mjs both read this file, so drifting either one fails.",
+    "",
+    "Drift here is worse than a cosmetic mismatch: it means the panel shows green",
+    "while a critical notification fires, or shows red while nothing is sent.",
+    "",
+    "expect is what the user is told: 'critical', 'warning' or 'none'.",
+    "lightsOn is null for sensors that aren't light-gated; each suite sets its own",
+    "world up (the backend from the lighting schedule + a local time, the panel from",
+    "the fetched lighting window) so both are answering about the same night."
+  ],
+  "sensorDefaults": { "min": 7.8, "max": 8.4, "warningBuffer": 10, "enabled": true, "alertsEnabled": true },
+  "hysteresisPercent": 2,
+  "cases": [
+    {
+      "name": "mid-range is quiet",
+      "value": 8.1,
+      "expect": "none"
+    },
+    {
+      "name": "above the maximum is critical",
+      "value": 8.6,
+      "expect": "critical"
+    },
+    {
+      "name": "below the minimum is critical",
+      "value": 7.6,
+      "expect": "critical"
+    },
+    {
+      "name": "inside the low warning band",
+      "value": 7.83,
+      "expect": "warning"
+    },
+    {
+      "name": "inside the high warning band",
+      "value": 8.37,
+      "expect": "warning"
+    },
+    {
+      "name": "just outside the band with no history is quiet",
+      "value": 8.335,
+      "expect": "none"
+    },
+    {
+      "name": "hysteresis keeps an alerting sensor warning until it clears properly",
+      "value": 8.335,
+      "previousState": "warning",
+      "expect": "warning"
+    },
+    {
+      "name": "hysteresis does not invent a warning for a sensor that was ok",
+      "value": 8.335,
+      "previousState": "ok",
+      "expect": "none"
+    },
+    {
+      "name": "a sensor with alerts switched off never speaks",
+      "value": 9.9,
+      "sensor": { "alertsEnabled": false },
+      "expect": "none"
+    },
+    {
+      "name": "a disabled sensor never speaks",
+      "value": 9.9,
+      "sensor": { "enabled": false },
+      "expect": "none"
+    },
+    {
+      "name": "no warning band when the buffer is zero",
+      "value": 7.81,
+      "sensor": { "warningBuffer": 0 },
+      "expect": "none"
+    },
+    {
+      "name": "light-gated: a low reading in the dark is expected, not an alarm",
+      "value": 0,
+      "sensor": { "lightGated": true, "min": 100, "max": 400 },
+      "lightsOn": false,
+      "expect": "none"
+    },
+    {
+      "name": "light-gated: the low warning band is suppressed in the dark too",
+      "value": 110,
+      "sensor": { "lightGated": true, "min": 100, "max": 400 },
+      "lightsOn": false,
+      "expect": "none"
+    },
+    {
+      "name": "light-gated: the same low reading in daylight IS critical",
+      "value": 0,
+      "sensor": { "lightGated": true, "min": 100, "max": 400 },
+      "lightsOn": true,
+      "expect": "critical"
+    },
+    {
+      "name": "light-gated: suppression is low-only, a high reading still alerts in the dark",
+      "value": 900,
+      "sensor": { "lightGated": true, "min": 100, "max": 400 },
+      "lightsOn": false,
+      "expect": "critical"
+    },
+    {
+      "name": "light-gated: the high warning band still fires in the dark",
+      "value": 380,
+      "sensor": { "lightGated": true, "min": 100, "max": 400 },
+      "lightsOn": false,
+      "expect": "warning"
+    }
+  ]
+}

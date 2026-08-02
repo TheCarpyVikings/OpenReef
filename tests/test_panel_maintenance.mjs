@@ -218,4 +218,24 @@ test("test_chart_markup_stays_well_formed_with_data", async () => {
   }
 });
 
+test("test_history_says_so_when_the_row_cap_bites", async () => {
+  const restore = freezeTime(AT);
+  try {
+    const many = Array.from({ length: 143 }, (_, index) => ({
+      id: `e${index}`, timestamp: iso(index), volume: 1, volumeUnit: "L",
+    }));
+    const panel = await makePanel(chartConfig(many));
+    const html = panel._renderCompletionWeeks("water_change", many);
+    assert(html.includes("Showing the newest 100 of 143"),
+      "a truncated history must say it is truncated, not just stop");
+    assertEqual((html.match(/manual-history-row/g) || []).length, 100, "the cap is a DOM limit, not a data limit");
+
+    const few = many.slice(0, 12);
+    const short = panel._renderCompletionWeeks("water_change", few);
+    assert(!short.includes("Showing the newest"), "no truncation note when nothing is truncated");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();
