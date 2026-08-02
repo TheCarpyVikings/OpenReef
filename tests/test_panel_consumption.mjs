@@ -712,4 +712,46 @@ test("test_unreadable_points_are_dropped_rather_than_fitted", async () => {
   }
 });
 
+test("test_a_blank_reading_is_rejected_rather_than_imported_as_zero", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // Number("") is 0 and passes isFinite, so an empty cell used to import as a real
+    // reading of 0 dKH — and a phantom zero is the single most dangerous value to fit
+    // a consumption slope through: it manufactures a confident crash out of nothing
+    // and the advisor answers it with a dose increase. Rejected at the door now.
+    const panel = await makePanel(cfg());
+    const csv = [
+      "parameter,date,value,unit",
+      "alkalinity,2026-05-27,8.4,dKH",
+      "alkalinity,2026-06-01,8.3,dKH",
+      "alkalinity,2026-06-06,8.25,dKH",
+      "alkalinity,2026-06-10,,dKH",
+    ].join("\n");
+    const parsed = panel._parseManualCsv(csv);
+    const rows = parsed.entries || parsed.rows || [];
+    assertEqual(rows.length, 3, "the blank row must not be imported");
+    assertEqual(rows.map((row) => row.value), [8.4, 8.3, 8.25], "and the real readings must survive intact");
+    assert(parsed.errors.some((error) => /empty/i.test(error)),
+      `the user must be told which row was dropped and why: ${JSON.stringify(parsed.errors)}`);
+
+    // "abc" was already rejected; a blank must be rejected the same way, not silently.
+    assert((panel._parseManualCsv("parameter,date,value\nalkalinity,2026-06-10,abc").errors || []).length,
+      "a non-numeric value is still rejected");
+
+    // Second line of defence: whatever reaches the trend maths, only real numbers
+    // join the fit. Number(null)/Number(false)/Number("") are all 0; parseFloat is not.
+    const days = panel._trendDays([
+      { time: Date.parse("2026-06-01T09:00:00Z"), value: 8.3 },
+      { time: Date.parse("2026-06-02T09:00:00Z"), value: "" },
+      { time: Date.parse("2026-06-03T09:00:00Z"), value: null },
+      { time: Date.parse("2026-06-04T09:00:00Z"), value: false },
+      { time: Date.parse("2026-06-05T09:00:00Z"), value: "8.1" },
+    ]);
+    assertEqual(days.map((day) => day.avg), [8.3, 8.1],
+      "blank, null and false are missing readings, not readings of zero");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

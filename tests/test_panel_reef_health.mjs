@@ -530,12 +530,30 @@ test("test_the_score_admits_what_it_has_not_measured", async () => {
   // Nothing configured at all. OpenReef has measured precisely nothing, so it
   // must at least say so rather than presenting a clean sheet.
   const { health } = await atClock(() => scoreFor({}, {}));
-  assert(health.score < 100, `a tank with no sensors must not read a perfect 100: got ${health.score}`);
+  // Before 0.6.6 this scored 99/A/ok: doubt is booked to "confidence", weighted ~5%,
+  // so total blindness could only ever move the headline a handful of points. A score
+  // that cannot say "I don't know" is worse than no score, so an unmeasured tank is
+  // now capped and un-graded rather than quietly awarded an A.
+  assertEqual(health.score, 50, "an unmeasured tank is capped, not scored on vibes");
+  assertEqual(health.grade, "—", "no letter for a tank nobody has measured");
+  assertEqual(health.status, "unknown", "and it is not a verdict, so not ok/warning/critical either");
+  assertEqual(health.topReason, "OpenReef cannot see this tank yet", "the headline reason must name the gap");
+  assert(/map|enable/i.test(health.nextAction), `the next action must be actionable: "${health.nextAction}"`);
   assertEqual(health.losses.map((loss) => [loss.category, loss.label]), [["confidence", "No enabled sensors"]],
     "the one thing wrong is that OpenReef cannot see anything");
   assertEqual(health.categories.confidence.score, 70, "the confidence category carries the whole doubt");
-  assertEqual(health.topReason, "No enabled sensors", "the headline reason must name the gap");
   assert(health.detail.includes("0/0 sensors mapped"), `the detail line must be honest: "${health.detail}"`);
+
+  // A tank with sensors enabled but nothing reporting is just as blind.
+  const blind = await atClock(() => scoreFor(
+    { sensors: { temp: { label: "Temp", enabled: true, alertsEnabled: true, entity_id: "" } } }, {}));
+  assertEqual(blind.health.status, "unknown", "enabled but unmapped is still unmeasured");
+  assertEqual(blind.health.grade, "—");
+
+  // ...and the moment ONE sensor reports, normal grading resumes.
+  const seeing = await atClock(() => scoreFor(tank(), CALM));
+  assert(seeing.health.status !== "unknown", "a reporting tank gets a real verdict again");
+  assert(/^[A-E]$/.test(seeing.health.grade), `a measured tank gets a letter: "${seeing.health.grade}"`);
 
   // Reef Health also leans on trends it only has after a check runs. Whether
   // that has happened is part of the answer, so an absent or unparseable
@@ -578,8 +596,12 @@ test("test_the_score_never_leaks_nan_or_undefined_however_broken_the_config_is",
       });
       assert(Number.isInteger(health.score) && health.score >= 0 && health.score <= 100,
         `${name}: score must be a whole number in 0-100, got ${health.score}`);
-      assert(["A", "B", "C", "D", "E"].includes(health.grade), `${name}: bad grade ${health.grade}`);
-      assert(["ok", "warning", "critical"].includes(health.status), `${name}: bad status ${health.status}`);
+      // "—" is a legitimate grade: it is what an unmeasured tank gets instead of a
+      // letter it has not earned. Anything else must be a real letter.
+      assert(["A", "B", "C", "D", "E", "—"].includes(health.grade), `${name}: bad grade ${health.grade}`);
+      // "unknown" joins the set: an unmeasured tank is not ok/warning/critical, it is
+      // a tank OpenReef has no opinion about yet.
+      assert(["ok", "warning", "critical", "unknown"].includes(health.status), `${name}: bad status ${health.status}`);
       for (const [id, item] of Object.entries(health.categories)) {
         assert(Number.isInteger(item.score) && item.score >= 0 && item.score <= 100,
           `${name}: category ${id} scored ${item.score}`);

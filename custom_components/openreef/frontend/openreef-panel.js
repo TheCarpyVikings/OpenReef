@@ -3582,6 +3582,9 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _healthStatus(score, caps = []) {
+    // "unknown" is not a middling verdict on the tank — it means the score is not a
+    // verdict at all, so it outranks the numeric bands rather than colouring red.
+    if (caps.some((cap) => cap.status === "unknown")) return "unknown";
     if (caps.some((cap) => cap.status === "critical") || score < 70) return "critical";
     if (caps.length || score < 90) return "warning";
     return "ok";
@@ -3652,10 +3655,15 @@ class OpenReefPanel extends HTMLElement {
   _trendDays(points) {
     const buckets = new Map();
     points.forEach((point) => {
-      if (!Number.isFinite(point?.time) || !Number.isFinite(Number(point?.value))) return;
+      // parseFloat, not Number: Number("")/Number(null)/Number(false) are all 0, so a
+      // blank or missing reading would join the fit as a real zero. The HA history and
+      // statistics parsers already read values this way; this is the same rule for
+      // whatever else reaches the trend maths.
+      const value = Number.parseFloat(point?.value);
+      if (!Number.isFinite(point?.time) || !Number.isFinite(value)) return;
       const key = new Date(point.time).toISOString().slice(0, 10);
       if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key).push(Number(point.value));
+      buckets.get(key).push(value);
     });
     return [...buckets.entries()]
       .map(([day, values]) => {
@@ -5421,6 +5429,22 @@ class OpenReefPanel extends HTMLElement {
     const warnings = sensorAlerts.filter((alert) => alert.status === "warning");
     const unknowns = sensorAlerts.filter((alert) => alert.status === "unknown");
 
+    // A tank OpenReef cannot see must not be graded as though it were healthy. Doubt is
+    // booked to "confidence", which every profile weights at ~5%, so even total
+    // blindness could only move the headline a few points: an empty install scored
+    // 99/A, and six enabled sensors with every mapping broken still scored 95/A. A
+    // number people are asked to trust has to be able to say "I don't know", so this
+    // is a cap in the same family as the leak and heater ceilings rather than a loss.
+    const readingSensors = sensors.filter(([id, sensor]) =>
+      sensor.entity_id && !["unknown", "disabled"].includes(this._sensorStatus(sensor, id))).length;
+    if (!readingSensors) {
+      addCap(50, "OpenReef cannot see this tank yet",
+        noSensors
+          ? "Enable the sensors you own and map them, then Reef Health can grade this tank."
+          : "No enabled sensor is reporting a reading. Check the mappings in Settings → Sensors.",
+        "unknown");
+    }
+
     if (noSensors) addLoss("confidence", 30, "No enabled sensors", "Enable the sensors you actually own.");
     unmappedSensors.forEach(([, sensor]) => {
       addLoss("confidence", 12, `${sensor.label || "Sensor"} is enabled but unmapped`, "Disabled sensors are ignored; enabled sensors should be mapped.");
@@ -5576,7 +5600,10 @@ class OpenReefPanel extends HTMLElement {
           : contextCount
             ? "No action needed. Context notes are there for troubleshooting and do not affect the score by themselves."
             : "Keep monitoring and refresh health after the next meaningful tank change.");
-    const grade = this._healthGrade(score);
+    // An unmeasured tank gets no letter at all — "—" is honest where "A" is a lie and
+    // "E" would read as a verdict on a reef nobody has looked at yet.
+    const unmeasured = caps.some((cap) => cap.status === "unknown");
+    const grade = unmeasured ? "—" : this._healthGrade(score);
     const status = this._healthStatus(score, caps);
     const gradeDetail = [
       `${grade} grade`,
@@ -13324,7 +13351,20 @@ class OpenReefPanel extends HTMLElement {
     const mappedEnergy = this._energyTotalMappings().filter(([, energyKey]) => this._config.energy[energyKey]).length;
     const noEnabledSensors = !sensors.length;
     const health = this._reefHealthScore(sensors, equipment, sensorAlerts, interlocks);
-    const status = sensorSummary.criticalCount || armedUnavailable.length ? "Action needed" : sensorSummary.warningCount || sensorSummary.contextCount || missing.length || noEnabledSensors || interlocks.length ? "Watch closely" : "All systems nominal";
+    // The headline, the counter and the list are ONE answer, so they are derived from
+    // the list itself. They used to be computed in parallel from the raw inputs, and
+    // drifted: a display wavemaker left off is a critical ROW, but was in none of the
+    // counted buckets — so Mission Control read "All systems nominal · all clear"
+    // directly above a red "Display wavemaker still off". Context warnings drifted the
+    // other way, rendering as rows nobody counted.
+    const issueRows = this._missionIssues(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks);
+    // "info" rows (disarmed controls, no equipment mapped yet) are shown but not
+    // counted — they are setup notes, not things wrong with the reef. Maintenance is
+    // already in the rows, so it must not be added again on top.
+    const issueCritical = issueRows.filter((row) => row.severity === "critical").length;
+    const attentionCount = issueRows.filter((row) => row.severity === "critical" || row.severity === "warning").length;
+    const attentionStatus = issueCritical ? "critical" : "warning";
+    const status = issueCritical ? "Action needed" : attentionCount ? "Watch closely" : "All systems nominal";
     const cards = this._missionCards();
     const trust = this._trustCheckData();
     const dosing = this._dosingEnabled() ? this._dosingMissionState() : null;
@@ -13338,10 +13378,6 @@ class OpenReefPanel extends HTMLElement {
       cards.cameras ? this._missionCameraCard() : "",
       cards.maintenance ? this._missionMaintenanceCard() : "",
     ].join("");
-    const maintenanceDueCount = this._maintenanceConfig().enabled ? this._maintenanceDueCount() : 0;
-    const maintenanceOverdueCount = this._maintenanceConfig().enabled ? this._maintenanceOverdueCount() : 0;
-    const attentionCount = sensorSummary.criticalCount + sensorSummary.warningCount + missing.length + armedUnavailable.length + interlocks.length + maintenanceDueCount;
-    const attentionStatus = sensorSummary.criticalCount || armedUnavailable.length || maintenanceOverdueCount ? "critical" : "warning";
     const activityItems = (Array.isArray(this._config.activity) ? this._config.activity : []).slice(0, 12);
     const activityBody = activityItems.length ? `
       <div class="activity-list">
@@ -13387,7 +13423,7 @@ class OpenReefPanel extends HTMLElement {
           attentionCount
             ? `<span class="pill ${attentionStatus}">${attentionCount} to check</span>`
             : `<span class="pill ok">all clear</span>`,
-          this._missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks),
+          this._missionIssuesHtml(issueRows),
           attentionCount > 0, "attention")}
         ${this._missionSection("mission-activity", "Log", "Activity",
           activityItems.length ? `<span class="pill unknown">${activityItems.length} recent</span>` : `<span class="pill ok">quiet</span>`,
@@ -13649,7 +13685,10 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
-  _missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks = []) {
+  // The Attention rows as DATA. The hero headline, the "N to check" counter and the
+  // rendered list all read this one array — they used to be derived in parallel from
+  // the raw inputs and disagreed with each other (see _mission).
+  _missionIssues(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks = []) {
     const issues = [];
     const unmappedSensors = sensors.filter(([, sensor]) => !sensor.entity_id);
     const disarmedMapped = equipment.filter(([, item]) => item.switch_entity_id && !item.armed);
@@ -13709,13 +13748,22 @@ class OpenReefPanel extends HTMLElement {
       issues.push(["info", "No equipment mapped yet", "Add pumps, heaters, skimmers, lights, or other switch-controlled devices when you are ready.", "settings"]);
     }
 
+    return issues.map(([severity, title, detail, tab]) => ({ severity, title, detail, tab }));
+  }
+
+  _missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks = []) {
+    return this._missionIssuesHtml(
+      this._missionIssues(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks));
+  }
+
+  _missionIssuesHtml(issues) {
     if (!issues.length) {
       return this._emptyState("Nothing needs attention", "Mapped sensors are in range and armed equipment is available.", "live", "View live stats");
     }
 
     return `
       <div class="issue-list">
-        ${issues.map(([severity, title, detail, tab]) => `
+        ${issues.map(({ severity, title, detail, tab }) => `
           <button class="issue-item ${severity}" data-action="tab" data-id="${this._escape(tab)}">
             <span class="pill ${severity === "info" ? "unknown" : severity}">${this._escape(severity)}</span>
             <strong>${this._escape(title)}</strong>
@@ -14745,7 +14793,16 @@ class OpenReefPanel extends HTMLElement {
         errors.push(`Row ${rowIndex + start + 1}: unknown parameter.`);
         return;
       }
-      let value = Number(String(raw.value || "").replace(",", "."));
+      // A blank cell must be REJECTED, not read as zero. Number("") is 0 and passes
+      // isFinite, so an empty column used to import as a real reading of 0 — and a
+      // phantom 0 dKH is the most dangerous number you can fit a consumption slope
+      // through: it manufactures a confident crash and a dose-increase suggestion.
+      const rawValue = String(raw.value ?? "").trim().replace(",", ".");
+      if (!rawValue) {
+        errors.push(`Row ${rowIndex + start + 1}: value is empty.`);
+        return;
+      }
+      let value = Number(rawValue);
       if (!Number.isFinite(value)) {
         errors.push(`Row ${rowIndex + start + 1}: value must be numeric.`);
         return;

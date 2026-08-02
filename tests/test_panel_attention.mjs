@@ -508,18 +508,18 @@ test("test_a_context_sensor_never_escalates_the_tank_to_critical", async () => {
     assertEqual(card(html, "Sensors").detail, "0 critical · 0 warning · 1 context warning",
       "context is tallied separately from the warnings that drive the score");
 
-    // KNOWN ASYMMETRY, pinned deliberately so a change to it is a visible diff rather
-    // than a silent one: context alerts are NOT added to the "to check" counter, but
-    // they DO render as a row. Collapsed (the default when the count is zero) the user
-    // just sees "all clear"; expanded, the pill and the list disagree by one. Whether
-    // that is right is a product call — this locks what the screen does today.
-    assertEqual(attention(html).text, "all clear", "context alone does not put anything on the to-check list");
-    assertEqual(attention(html).rows.length, 0, "and the section stays collapsed, so no row is shown either");
+    // The asymmetry this used to pin (an amber row nobody counted, so the pill read
+    // "all clear" above it) was resolved in 0.6.6 the way the rest of the screen
+    // already leaned: the Sensors card goes amber for context, so the counter counts
+    // it too. One thing on screen, one thing counted — never a row without a number.
+    assertEqual(attention(html).text, "1 to check", "a context row is a row, so it is counted");
+    assertEqual(attention(html).rows.length, 1, "and the section opens to show it");
+    assertEqual(attention(html).rows[0].severity, "warning", "amber, never red — it is still context");
 
     panel._healthSections = { "mission-attention": true };
     const expanded = attention(panel._mission());
-    assertEqual(expanded.count, 0, "expanding does not change the counter");
-    assertEqual(expanded.rows.length, 1, "but the context row IS there once expanded");
+    assertEqual(expanded.count, 1, "expanding does not change the counter");
+    assertEqual(expanded.rows.length, 1, "and the context row is the one being counted");
     assertEqual(expanded.rows[0].severity, "warning");
   } finally {
     restore();
@@ -790,6 +790,37 @@ test("test_user_supplied_labels_are_escaped_before_they_reach_the_list", async (
     assert(!html.includes('onerror="'), "a label must never be able to add an attribute");
     assert(html.includes("&lt;img") && html.includes("&amp;") && html.includes("&quot;"),
       "the label should still be shown, escaped");
+  } finally {
+    restore();
+  }
+});
+
+test("test_the_headline_and_the_counter_are_read_off_the_same_list", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // The hero, the "N to check" pill and the rows used to be computed in parallel
+    // from the raw inputs, and drifted: a display wavemaker left off is a critical
+    // ROW but was in none of the counted buckets, so Mission Control read "All
+    // systems nominal · all clear" directly above a red "Display wavemaker still
+    // off". One list, one count, one headline.
+    const config = greenTank({ mode: { active: "running" } });
+    config.equipment.gyre = { label: "Gyre XF330", armed: true, switch_entity_id: "switch.gyre", type: "display_wavemaker" };
+    const panel = await mission(config, { ...GREEN_STATES, "switch.gyre": { state: "off" } });
+
+    const html = panel._mission();
+    assertClean(html, "mission");
+    const shown = attention(html);
+    assertEqual(shown.rows.length, 1, "one stopped gyre is one row");
+    assertEqual(shown.rows[0].severity, "critical");
+    assertEqual(shown.text, "1 to check", "the pill must count the row the user can see");
+    assertEqual(shown.tone, "critical", "and be painted the colour of the worst thing in it");
+    assertEqual(hero(html).headline, "Action needed",
+      "the headline cannot say nominal while a critical row sits under it");
+
+    // The same wiring in the other direction: a genuinely quiet tank still reads quiet.
+    const calm = (await mission(greenTank())) ._mission();
+    assertEqual(attention(calm).text, "all clear");
+    assertEqual(hero(calm).headline, "All systems nominal");
   } finally {
     restore();
   }
