@@ -23,7 +23,11 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
-export const PANEL_PATH = path.join(ROOT, "custom_components", "openreef", "frontend", "openreef-panel.js");
+// OPENREEF_PANEL_PATH points the harness at a COPY of the panel. That is how a suite
+// is checked for teeth: mutate the copy, re-run, confirm the suite fails — without
+// touching the working tree, so several suites can be verified at once.
+export const PANEL_PATH = process.env.OPENREEF_PANEL_PATH
+  || path.join(ROOT, "custom_components", "openreef", "frontend", "openreef-panel.js");
 
 let cachedClass = null;
 
