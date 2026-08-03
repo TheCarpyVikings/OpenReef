@@ -114,6 +114,12 @@ class OpenReefPanel extends HTMLElement {
     this._pulseSparks = {};
     this._pulseSparksAt = 0;
     this._pulseSparksLoading = false;
+    this._pulseFocus = null;
+    this._pulseFocusTrend = { key: "", range: "", points: null, loading: false };
+    this._pulseWakeLock = null;
+    this._pulseWakeVisHandler = null;
+    this._pulseDimWakeUntil = 0;
+    this._pulseDimPointerHandler = null;
     this._liveStatsMode = this._loadLiveStatsMode();
     this._liveSparks = {};
     this._liveSparksAt = 0;
@@ -173,7 +179,10 @@ class OpenReefPanel extends HTMLElement {
     }
     if (!this._pulseKeyHandler) {
       this._pulseKeyHandler = (ev) => {
-        if (ev.key === "Escape" && this._pulseActive) this._closePulse();
+        if (ev.key !== "Escape" || !this._pulseActive) return;
+        // Esc peels one layer at a time: detail card first, then Pulse itself.
+        if (this._pulseFocus) this._closePulseFocus();
+        else this._closePulse();
       };
       window.addEventListener("keydown", this._pulseKeyHandler);
     }
@@ -1243,6 +1252,9 @@ class OpenReefPanel extends HTMLElement {
       if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._cameraFullscreenFallback = false; this._render(); }
       if (action === "open-pulse") this._openPulse(true);
       if (action === "close-pulse") this._closePulse();
+      if (action === "pulse-focus") this._openPulseFocus(id);
+      if (action === "pulse-unfocus") this._closePulseFocus();
+      if (action === "pulse-focus-range") this._setPulseFocusRange(id);
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
@@ -12200,6 +12212,8 @@ class OpenReefPanel extends HTMLElement {
     this._overlayQuip = this._pickOverlayQuip();
     this._pulseActive = true;
     this._pulseTick = 0;
+    this._pulseFocus = null;
+    this._pulseFocusTrend = { key: "", range: "", points: null, loading: false };
     this._render(); // the pulse render branch starts the stream + timer
     if (fromGesture) {
       const root = this.shadowRoot.querySelector(".pulse-root");
@@ -12217,6 +12231,7 @@ class OpenReefPanel extends HTMLElement {
     }
     this._pulseEnteredFs = false;
     this._pulseActive = false;
+    this._pulseFocus = null;
     this._render();
   }
 
@@ -12236,6 +12251,17 @@ class OpenReefPanel extends HTMLElement {
     } else {
       this._loadPulseSparklines();
     }
+    this._acquirePulseWakeLock();
+    if (!this._pulseDimPointerHandler) {
+      // Any touch/click while dimmed wakes the display back up for a while.
+      this._pulseDimPointerHandler = () => {
+        if (!this._pulseActive || !this._pulseNightDimActive(new Date())) return;
+        this._pulseDimWakeUntil = Date.now() + 60000;
+        this._applyPulseNightDim();
+      };
+      this.shadowRoot.addEventListener("pointerdown", this._pulseDimPointerHandler);
+    }
+    this._applyPulseNightDim();
     if (!this._pulseTimer) {
       this._pulseTimer = window.setInterval(() => {
         this._pulseTick += 1;
@@ -12247,6 +12273,10 @@ class OpenReefPanel extends HTMLElement {
         if (this._pulseTick % 30 === 0 && this._pulseBackdrop() === "wall") {
           this._loadPulseSparklines(true);
         }
+        this._applyPulseNightDim();
+        // Burn-in guard: drift the whole HUD by a pixel or two every ~5 min so a
+        // 24/7 wall tablet never etches static chrome into its panel.
+        if (this._pulseTick % 30 === 0) this._applyPulseBurnShift();
         this._updatePulse();
       }, 10000);
     }
@@ -12258,6 +12288,94 @@ class OpenReefPanel extends HTMLElement {
       window.clearInterval(this._pulseTimer);
       this._pulseTimer = null;
     }
+    this._releasePulseWakeLock();
+    if (this._pulseDimPointerHandler) {
+      this.shadowRoot.removeEventListener("pointerdown", this._pulseDimPointerHandler);
+      this._pulseDimPointerHandler = null;
+    }
+    this._pulseDimWakeUntil = 0;
+  }
+
+  // --- Reef Pulse: screen wake lock ---------------------------------------
+  // Keeps a tank-side tablet awake while Pulse is up. The Screen Wake Lock API
+  // needs a secure context (HTTPS / Nabu Casa); where it's missing we degrade
+  // silently — the settings card tells the user why.
+
+  async _acquirePulseWakeLock() {
+    if (this._pulseCfg().keepAwake === false) return;
+    if (!this._pulseActive || this._pulseWakeLock) return;
+    if (typeof navigator === "undefined" || !navigator.wakeLock?.request) return;
+    try {
+      this._pulseWakeLock = await navigator.wakeLock.request("screen");
+      this._pulseWakeLock.addEventListener("release", () => { this._pulseWakeLock = null; });
+    } catch {
+      this._pulseWakeLock = null; // denied (low battery, hidden tab) — not fatal
+    }
+    if (!this._pulseWakeVisHandler) {
+      // The OS drops the lock whenever the tab hides; take it back on return.
+      this._pulseWakeVisHandler = () => {
+        if (document.visibilityState === "visible" && this._pulseActive) this._acquirePulseWakeLock();
+      };
+      document.addEventListener("visibilitychange", this._pulseWakeVisHandler);
+    }
+  }
+
+  _releasePulseWakeLock() {
+    if (this._pulseWakeLock) {
+      this._pulseWakeLock.release().catch(() => {});
+      this._pulseWakeLock = null;
+    }
+    if (this._pulseWakeVisHandler) {
+      document.removeEventListener("visibilitychange", this._pulseWakeVisHandler);
+      this._pulseWakeVisHandler = null;
+    }
+  }
+
+  // --- Reef Pulse: night dimming ------------------------------------------
+
+  // Parse "HH:MM" to minutes-since-midnight; null when malformed.
+  _pulseParseTime(text) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(text || "").trim());
+    if (!m) return null;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h > 23 || min > 59) return null;
+    return h * 60 + min;
+  }
+
+  // Is the night-dim window active at `now`? Windows may cross midnight
+  // (22:00 → 07:00). A from == to window is treated as never (not always) on —
+  // dimming the tank wall 24/7 is far more likely a typo than an intent.
+  _pulseNightDimActive(now) {
+    const cfg = this._pulseCfg();
+    if (cfg.nightDim !== true) return false;
+    const from = this._pulseParseTime(cfg.nightDimFrom ?? "22:00");
+    const to = this._pulseParseTime(cfg.nightDimTo ?? "07:00");
+    if (from === null || to === null || from === to) return false;
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    return from < to ? (minutes >= from && minutes < to) : (minutes >= from || minutes < to);
+  }
+
+  _applyPulseNightDim() {
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    if (!root) return;
+    // A warning/critical reef never dims — the glow is the point of the alarm.
+    const calm = this._pulseAlertState().status === "ok";
+    const dim = calm && this._pulseNightDimActive(new Date()) && Date.now() >= this._pulseDimWakeUntil;
+    root.classList.toggle("pulse-dimmed", dim);
+  }
+
+  // --- Reef Pulse: OLED burn-in guard -------------------------------------
+  // A slow orbit of sub-3px offsets, applied to the HUD layers via CSS vars.
+  // Imperceptible in person; enough to keep static text moving over hours.
+
+  _applyPulseBurnShift() {
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    if (!root) return;
+    const step = Math.floor(this._pulseTick / 30) % 8;
+    const x = [0, 1, 2, 1, 0, -1, -2, -1][step];
+    const y = [0, 1, 0, -1, -2, -1, 0, 1][step];
+    root.style.setProperty("--pulse-shift", `${x}px, ${y}px`);
   }
 
   // Kiosk auto-start: ?pulse=1 forces Pulse, ?pulse=0 forces it off, otherwise
@@ -12293,7 +12411,7 @@ class OpenReefPanel extends HTMLElement {
     const score = Math.max(0, Math.min(100, Number(health.score) || 0));
     const offset = (C * (1 - score / 100)).toFixed(1);
     return `
-      <div class="pulse-ring ${this._escape(health.status)}" data-pulse-ring>
+      <div class="pulse-ring ${this._escape(health.status)}" data-pulse-ring data-action="pulse-focus" data-id="health" role="button" tabindex="0" title="Tap for detail">
         <svg viewBox="0 0 120 120" aria-hidden="true">
           <circle class="pulse-ring-track" cx="60" cy="60" r="52" stroke-dasharray="${C}" />
           <circle class="pulse-ring-arc" cx="60" cy="60" r="52" stroke-dasharray="${C}" stroke-dashoffset="${offset}" data-pulse-ring-arc />
@@ -12361,7 +12479,7 @@ class OpenReefPanel extends HTMLElement {
     const unit = this._sensorDisplayUnit(id, sensor);
     const sparks = this._pulseCfg().showSparklines !== false;
     return `
-      <article class="pulse-tile">
+      <article class="pulse-tile pulse-tap" data-action="pulse-focus" data-id="sensor:${this._escape(id)}" role="button" tabindex="0" title="Tap for detail">
         <div class="pulse-tile-head">
           <small>${this._escape(sensor.label)}</small>
           <span class="pill ${badge.status}" data-pulse-badge="${this._escape(id)}">${this._escape(badge.label)}</span>
@@ -12377,7 +12495,7 @@ class OpenReefPanel extends HTMLElement {
     const categories = this._healthCategoryChoices().map(([cid]) => health.categories[cid]).filter(Boolean);
     if (!categories.length) return "";
     return `
-      <article class="pulse-block" data-pulse-categories>
+      <article class="pulse-block pulse-tap" data-pulse-categories data-action="pulse-focus" data-id="health" role="button" tabindex="0" title="Tap for detail">
         <small class="pulse-block-title">Health breakdown</small>
         ${categories.map((cat) => `
           <div class="pulse-cat">
@@ -12394,7 +12512,7 @@ class OpenReefPanel extends HTMLElement {
     const rows = Object.entries(this._config.equipment || {}).filter(([, item]) => item.switch_entity_id).slice(0, 10);
     if (!rows.length) return "";
     return `
-      <article class="pulse-block" data-pulse-equipment>
+      <article class="pulse-block pulse-tap" data-pulse-equipment data-action="pulse-focus" data-id="equipment" role="button" tabindex="0" title="Tap for detail">
         <small class="pulse-block-title">Equipment</small>
         <div class="pulse-equip-list">
           ${rows.map(([id, item]) => {
@@ -12425,7 +12543,7 @@ class OpenReefPanel extends HTMLElement {
       return `${this._formatEnergyWh(this._config.energy[pair[1]])} · ${this._formatMoney(cost)}`;
     };
     return `
-      <article class="pulse-block" data-pulse-today>
+      <article class="pulse-block pulse-tap" data-pulse-today data-action="pulse-focus" data-id="today" role="button" tabindex="0" title="Tap for detail">
         <small class="pulse-block-title">Today</small>
         <div class="pulse-today-row"><small>Next task</small><strong>${this._escape(nextLabel)}${nextWhen ? ` · ${this._escape(nextWhen)}` : ""}</strong></div>
         <div class="pulse-today-row"><small>Energy today</small><strong>${this._escape(energyLine(daily))}</strong></div>
@@ -12519,7 +12637,7 @@ class OpenReefPanel extends HTMLElement {
           ${chips.length ? `
             <div class="pulse-chips">
               ${chips.map((chip) => `
-                <span class="pulse-chip ${chip.key === "reefHealth" ? "is-health" : ""}">
+                <span class="pulse-chip pulse-tap ${chip.key === "reefHealth" ? "is-health" : ""}" data-action="pulse-focus" data-id="${chip.key === "reefHealth" ? "health" : `sensor:${this._escape(chip.key)}`}" role="button" tabindex="0" title="Tap for detail">
                   <small>${this._escape(chip.label)}</small>
                   <strong data-overlay-stat="${this._escape(chip.key)}">${this._escape(chip.value)}${chip.unit ? ` ${this._escape(chip.unit)}` : ""}</strong>
                 </span>
@@ -12534,6 +12652,7 @@ class OpenReefPanel extends HTMLElement {
             ${this._avatarMarkup(this._overlayPose())}
           </div>
         ` : ""}
+        <div class="pulse-focus-host" data-pulse-focus-host></div>
         <button class="pulse-close" data-action="close-pulse" title="Exit Reef Pulse (Esc)">✕</button>
       </div>
     `;
@@ -12617,6 +12736,290 @@ class OpenReefPanel extends HTMLElement {
       const today = root.querySelector("[data-pulse-today]");
       if (today) today.outerHTML = this._pulseTodayMarkup();
     }
+    this._refreshPulseFocus();
+  }
+
+  // --- Reef Pulse: tap-to-expand detail cards ------------------------------
+  // Tapping any tile/chip/block opens a larger read-only card over Pulse — no
+  // trip back to the main panel, no controls, Esc or the scrim closes it. The
+  // card is injected into a dedicated host (never a full re-render) so a live
+  // camera backdrop keeps streaming underneath.
+
+  _openPulseFocus(key) {
+    if (!key || !this._pulseActive) return;
+    this._pulseFocus = key;
+    if (key.startsWith("sensor:")) {
+      const range = this._pulseCfg().graphRange === "7d" ? "7d" : "24h";
+      this._pulseFocusTrend = { key, range, points: null, loading: false };
+      this._loadPulseFocusTrend();
+    }
+    this._renderPulseFocus();
+  }
+
+  _closePulseFocus() {
+    this._pulseFocus = null;
+    this._pulseFocusTrend = { key: "", range: "", points: null, loading: false };
+    this._renderPulseFocus();
+  }
+
+  _setPulseFocusRange(range) {
+    if (!this._pulseFocus || !this._pulseFocus.startsWith("sensor:")) return;
+    const valid = ["24h", "7d", "30d"].includes(range) ? range : "24h";
+    if (this._pulseFocusTrend.range === valid && this._pulseFocusTrend.points) return;
+    this._pulseFocusTrend = { key: this._pulseFocus, range: valid, points: null, loading: false };
+    this._renderPulseFocus();
+    this._loadPulseFocusTrend();
+  }
+
+  async _loadPulseFocusTrend() {
+    const focus = this._pulseFocus;
+    const trend = this._pulseFocusTrend;
+    if (!focus || !focus.startsWith("sensor:") || trend.loading) return;
+    const sensor = (this._config.sensors || {})[focus.slice(7)];
+    if (!sensor || !sensor.entity_id) return;
+    trend.loading = true;
+    this._renderPulseFocus();
+    try {
+      const points = await this._fetchTrendPoints(sensor.entity_id, trend.range);
+      // Only land the result if the user hasn't tapped elsewhere meanwhile.
+      if (this._pulseFocus === focus && this._pulseFocusTrend === trend) trend.points = points;
+    } catch {
+      if (this._pulseFocusTrend === trend) trend.points = [];
+    } finally {
+      trend.loading = false;
+      if (this._pulseFocus === focus) this._renderPulseFocus();
+    }
+  }
+
+  _renderPulseFocus() {
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    const host = root && root.querySelector("[data-pulse-focus-host]");
+    if (!host) return;
+    host.innerHTML = this._pulseFocus ? this._pulseFocusMarkup() : "";
+    root.classList.toggle("pulse-has-focus", Boolean(this._pulseFocus));
+    this._pulseFocusRenderedAt = Date.now();
+  }
+
+  // Re-render the open card on the runtime tick so live values stay live —
+  // throttled, because hass pushes updates far faster than a wall display needs
+  // and a mid-tap innerHTML swap would eat the tap.
+  _refreshPulseFocus() {
+    if (!this._pulseFocus) return;
+    if (Date.now() - (this._pulseFocusRenderedAt || 0) < 5000) return;
+    this._renderPulseFocus();
+  }
+
+  _pulseFocusMarkup() {
+    const key = this._pulseFocus;
+    let body = "";
+    if (key === "health") body = this._pulseFocusHealthMarkup();
+    else if (key === "equipment") body = this._pulseFocusEquipmentMarkup();
+    else if (key === "today") body = this._pulseFocusTodayMarkup();
+    else if (key && key.startsWith("sensor:")) body = this._pulseFocusSensorMarkup(key.slice(7));
+    if (!body) return "";
+    return `
+      <div class="pulse-focus">
+        <div class="pulse-focus-scrim" data-action="pulse-unfocus"></div>
+        <article class="pulse-focus-card">
+          <button class="pulse-focus-close" data-action="pulse-unfocus" title="Close (Esc)">✕</button>
+          ${body}
+        </article>
+      </div>
+    `;
+  }
+
+  _pulseFocusSensorMarkup(id) {
+    const sensor = (this._config.sensors || {})[id];
+    if (!sensor) return "";
+    const badge = this._liveStatBadge(id, sensor);
+    const value = this._sensorDisplayValue(id, sensor);
+    const unit = this._sensorDisplayUnit(id, sensor);
+    // Binary safety sensors (leak, float…) have no numeric history to chart —
+    // the card shows the state and what it means, nothing pretending to trend.
+    if (this._sensorKind(sensor, id) === "binary") {
+      return `
+        <header class="pulse-focus-head">
+          <div>
+            <small>${this._escape(sensor.label)}</small>
+            <strong data-overlay-stat="${this._escape(id)}">${this._escape(value)}</strong>
+          </div>
+          <span class="pill ${badge.status}">${this._escape(badge.label)}</span>
+        </header>
+        <p class="pulse-focus-note">${this._escape(this._sensorStatusDetail(sensor, id))}</p>
+      `;
+    }
+    const digits = this._sensorDigits(id);
+    const trend = this._pulseFocusTrend;
+    const points = Array.isArray(trend.points) ? trend.points : null;
+    const values = points ? points.map((p) => p.value).filter((v) => Number.isFinite(v)) : [];
+    const stat = (v) => this._format(v, digits);
+    const rangeLabels = [["24h", "24 h"], ["7d", "7 days"], ["30d", "30 days"]];
+    let chart;
+    if (!sensor.entity_id) chart = `<p class="pulse-focus-note">No history — this reading isn't mapped to an entity.</p>`;
+    else if (trend.loading && !points) chart = `<p class="pulse-focus-note">Loading history…</p>`;
+    else if (!values.length) chart = `<p class="pulse-focus-note">No recorded history for this range yet.</p>`;
+    else chart = this._pulseFocusChartSvg(points, sensor);
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>${this._escape(sensor.label)}</small>
+          <strong data-overlay-stat="${this._escape(id)}">${this._escape(value)}${unit ? ` ${this._escape(unit)}` : ""}</strong>
+        </div>
+        <span class="pill ${badge.status}">${this._escape(badge.label)}</span>
+      </header>
+      ${this._pulseRangeBarMarkup(id, sensor)}
+      <div class="pulse-focus-chart">${chart}</div>
+      ${values.length ? `
+        <div class="pulse-focus-stats">
+          <span><small>Low</small><strong>${stat(Math.min(...values))}</strong></span>
+          <span><small>Average</small><strong>${stat(values.reduce((a, b) => a + b, 0) / values.length)}</strong></span>
+          <span><small>High</small><strong>${stat(Math.max(...values))}</strong></span>
+          ${Number.isFinite(Number(sensor.min)) && Number.isFinite(Number(sensor.max)) ? `<span><small>Target</small><strong>${stat(Number(sensor.min))}–${stat(Number(sensor.max))}</strong></span>` : ""}
+        </div>
+      ` : ""}
+      ${sensor.entity_id ? `
+        <div class="pulse-focus-ranges">
+          ${rangeLabels.map(([r, label]) => `<button class="${trend.range === r ? "active" : ""}" data-action="pulse-focus-range" data-id="${r}">${label}</button>`).join("")}
+        </div>
+      ` : ""}
+    `;
+  }
+
+  // A proper chart for the focus card: line + soft area, with the sensor's
+  // target band drawn behind it so drift out of range is visible at a glance.
+  _pulseFocusChartSvg(points, sensor) {
+    const W = 600, H = 200, PAD = 6;
+    const t0 = points[0].time;
+    const t1 = points[points.length - 1].time;
+    const values = points.map((p) => p.value);
+    const tMin = Number(sensor.min);
+    const tMax = Number(sensor.max);
+    const hasBand = Number.isFinite(tMin) && Number.isFinite(tMax) && tMax > tMin;
+    let lo = Math.min(...values, hasBand ? tMin : Infinity);
+    let hi = Math.max(...values, hasBand ? tMax : -Infinity);
+    if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+    const span = hi - lo;
+    lo -= span * 0.06;
+    hi += span * 0.06;
+    const dt = t1 - t0 || 1;
+    const x = (t) => PAD + (t - t0) / dt * (W - PAD * 2);
+    const y = (v) => H - PAD - (v - lo) / (hi - lo) * (H - PAD * 2);
+    const coords = points.map((p) => `${x(p.time).toFixed(1)},${y(p.value).toFixed(1)}`);
+    const area = `${PAD},${H - PAD} ${coords.join(" ")} ${(W - PAD).toFixed(1)},${H - PAD}`;
+    const fmt = (t) => new Date(t).toLocaleString([], dt > 36 * 3600 * 1000
+      ? { weekday: "short", day: "numeric" }
+      : { hour: "2-digit", minute: "2-digit" });
+    return `
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="pulse-focus-svg">
+        ${hasBand ? `<rect x="${PAD}" y="${y(tMax).toFixed(1)}" width="${W - PAD * 2}" height="${Math.max(0, y(tMin) - y(tMax)).toFixed(1)}" class="band" />` : ""}
+        <polygon points="${area}" />
+        <polyline points="${coords.join(" ")}" vector-effect="non-scaling-stroke" />
+      </svg>
+      <div class="pulse-focus-axis"><small>${this._escape(fmt(t0))}</small><small>${this._escape(fmt(t1))}</small></div>
+    `;
+  }
+
+  _pulseFocusHealthMarkup() {
+    const health = this._reefHealthScore();
+    const categories = this._healthCategoryChoices().map(([cid]) => health.categories[cid]).filter(Boolean);
+    const losses = (health.losses || []).slice(0, 6);
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Reef Health</small>
+          <strong>${this._escape(health.score)} · ${this._escape(health.grade || "—")}</strong>
+        </div>
+        <span class="pill ${health.status === "ok" ? "ok" : health.status}">${this._escape(health.topReason || "")}</span>
+      </header>
+      ${categories.map((cat) => `
+        <div class="pulse-cat">
+          <small>${this._escape(cat.label)}</small>
+          <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "ok" : cat.score >= 70 ? "warning" : "critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+          <strong>${this._escape(cat.score)}</strong>
+        </div>
+      `).join("")}
+      ${losses.length ? `
+        <div class="pulse-focus-list">
+          ${losses.map((loss) => `
+            <div class="pulse-focus-row">
+              <span class="pulse-focus-dot ${this._escape(loss.status)}"></span>
+              <div><strong>${this._escape(loss.label)}</strong>${loss.detail ? `<small>${this._escape(loss.detail)}</small>` : ""}</div>
+              <em>−${this._escape(loss.points)}</em>
+            </div>
+          `).join("")}
+        </div>
+      ` : `<p class="pulse-focus-note">No score deductions right now — every scoring check is clean.</p>`}
+      <p class="pulse-focus-note">${this._escape(health.nextAction || "")}</p>
+    `;
+  }
+
+  _pulseFocusEquipmentMarkup() {
+    const rows = Object.entries(this._config.equipment || {}).filter(([, item]) => item.switch_entity_id);
+    if (!rows.length) return "";
+    let totalW = 0;
+    const body = rows.map(([id, item]) => {
+      const state = this._stateValue(item.switch_entity_id);
+      const dot = state === "on" ? "on" : state === "off" ? "off" : "gone";
+      const label = dot === "on" ? "Running" : dot === "off" ? "Off" : "Unavailable";
+      const watts = item.power_entity_id ? this._number(item.power_entity_id) : null;
+      if (Number.isFinite(watts)) totalW += watts;
+      return `
+        <div class="pulse-focus-row">
+          <span class="pulse-focus-dot ${dot === "on" ? "ok" : dot === "off" ? "unknown" : "critical"}"></span>
+          <div><strong>${this._escape(item.label || id)}</strong><small>${label}</small></div>
+          <em>${Number.isFinite(watts) ? `${this._format(watts, 1)} W` : ""}</em>
+        </div>
+      `;
+    }).join("");
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Equipment</small>
+          <strong>${rows.length} tracked${totalW ? ` · ${this._format(totalW, 0)} W now` : ""}</strong>
+        </div>
+      </header>
+      <div class="pulse-focus-list">${body}</div>
+      <p class="pulse-focus-note">Read-only — switching gear stays in Mission Control.</p>
+    `;
+  }
+
+  _pulseFocusTodayMarkup() {
+    const upcoming = this._maintenanceUpcoming(14);
+    const totals = this._energyTotalMappings();
+    const energyRows = totals.map(([label, energyField, costField]) => {
+      const entity = (this._config.energy || {})[energyField];
+      if (!entity) return "";
+      const cost = this._energyCost(entity, this._number((this._config.energy || {})[costField]));
+      return `
+        <div class="pulse-focus-row">
+          <span class="pulse-focus-dot unknown"></span>
+          <div><strong>${this._escape(label)}</strong><small>Energy</small></div>
+          <em>${this._escape(this._formatEnergyWh(entity))} · ${this._escape(this._formatMoney(cost))}</em>
+        </div>
+      `;
+    }).filter(Boolean).join("");
+    const taskRows = upcoming.slice(0, 8).map((entry) => {
+      const dueNow = entry.state.status === "warning" || entry.state.status === "critical";
+      const days = Math.max(0, Math.round((entry.nextMs - Date.now()) / 86400000));
+      const when = dueNow ? (entry.state.status === "critical" ? "overdue" : "due now") : days <= 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
+      return `
+        <div class="pulse-focus-row">
+          <span class="pulse-focus-dot ${entry.state.status === "critical" ? "critical" : entry.state.status === "warning" ? "warning" : "ok"}"></span>
+          <div><strong>${this._escape(entry.task.label)}</strong><small>${this._escape(entry.state.label || "")}</small></div>
+          <em>${this._escape(when)}</em>
+        </div>
+      `;
+    }).join("");
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Next two weeks</small>
+          <strong>${upcoming.length ? `${upcoming.length} task${upcoming.length === 1 ? "" : "s"} coming up` : "All caught up"}</strong>
+        </div>
+      </header>
+      ${taskRows ? `<div class="pulse-focus-list">${taskRows}</div>` : `<p class="pulse-focus-note">Nothing due in the next 14 days.</p>`}
+      ${energyRows ? `<div class="pulse-focus-list">${energyRows}</div>` : ""}
+    `;
   }
 
   _cameras() {
@@ -16634,7 +17037,31 @@ class OpenReefPanel extends HTMLElement {
               <small>Opens straight into Pulse after loading — for a dedicated wall tablet. Add ?pulse=0 to the URL to get back to the normal panel, or press Esc / ✕.</small>
             </span>
           </label>
-          <p class="muted">No camera mapped or online? Pulse still works as a full-screen data wall.</p>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="pulse" data-field="keepAwake" ${cfg.keepAwake === false ? "" : "checked"}>
+            <span>
+              <strong>Keep screen awake</strong>
+              <small>Stops the tablet sleeping while Pulse is open. Needs HTTPS (Nabu Casa or a local certificate) — over plain HTTP the browser refuses and the tablet's own display timeout applies.</small>
+            </span>
+          </label>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="pulse" data-field="nightDim" ${cfg.nightDim === true ? "checked" : ""}>
+            <span>
+              <strong>Auto-dim at night</strong>
+              <small>Dims the Pulse screen during lights-out so it doesn't glow over the tank. Tap the screen to wake it briefly.</small>
+            </span>
+          </label>
+          ${cfg.nightDim === true ? `
+            <div class="mini-grid">
+              <label>Dim from
+                <input type="time" data-scope="pulse" data-field="nightDimFrom" value="${this._escape(cfg.nightDimFrom || "22:00")}">
+              </label>
+              <label>Until
+                <input type="time" data-scope="pulse" data-field="nightDimTo" value="${this._escape(cfg.nightDimTo || "07:00")}">
+              </label>
+            </div>
+          ` : ""}
+          <p class="muted">No camera mapped or online? Pulse still works as a full-screen data wall. Tap any tile, chip or panel on the Pulse screen for a bigger detail card.</p>
         `}
       `,
       forceOpen,
@@ -19102,6 +19529,55 @@ class OpenReefPanel extends HTMLElement {
         .pulse-today-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
         .pulse-today-row small { font-size: 11px; font-weight: 800; color: #9fc7e0; }
         .pulse-today-row strong { font-size: 13px; font-weight: 800; color: #fff; text-align: right; }
+        /* Tap affordance: anything openable lifts slightly under the pointer. */
+        .pulse-tap { cursor: pointer; -webkit-tap-highlight-color: transparent; transition: border-color .2s ease, transform .12s ease; }
+        .pulse-tap:hover, .pulse-tap:focus-visible { border-color: rgba(255, 255, 255, .38); }
+        .pulse-tap:active { transform: scale(.985); }
+        .pulse-ring[data-action] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+        /* Burn-in guard: the HUD layers drift by a couple of px on a slow orbit. */
+        .pulse-head, .pulse-foot, .pulse-wall, .pulse-buddy { transition: transform 3s ease; transform: translate(var(--pulse-shift, 0px, 0px)); }
+        /* Night dim: whole screen fades down; alerts and taps bring it back. */
+        .pulse-root { transition: filter 2s ease; }
+        .pulse-root.pulse-dimmed { filter: brightness(.32); }
+        /* Tap-to-expand detail card */
+        .pulse-focus-host { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+        .pulse-focus { position: absolute; inset: 0; pointer-events: auto; display: grid; place-items: center; padding: 26px; }
+        .pulse-focus-scrim { position: absolute; inset: 0; background: rgba(2, 6, 10, .58); backdrop-filter: blur(5px); }
+        .pulse-focus-card { position: relative; width: min(700px, 94vw); max-height: min(82vh, 780px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; border: 1px solid rgba(255, 255, 255, .18); border-radius: 18px; padding: 22px 24px; display: grid; gap: 14px; align-content: start; background: rgba(6, 14, 22, .93); backdrop-filter: blur(14px); box-shadow: 0 26px 90px rgba(0, 0, 0, .6); animation: pulse-focus-in .22s ease; }
+        .pulse-focus-card::-webkit-scrollbar { display: none; }
+        @keyframes pulse-focus-in { from { opacity: 0; transform: translateY(12px) scale(.97); } }
+        .pulse-focus-close { position: absolute; top: 14px; right: 14px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .25); background: rgba(4, 10, 16, .55); color: #e5edf5; font-size: 15px; cursor: pointer; }
+        .pulse-focus-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-right: 40px; }
+        .pulse-focus-head > div { display: grid; gap: 2px; min-width: 0; }
+        .pulse-focus-head small { font-size: 12px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
+        .pulse-focus-head strong { font-size: clamp(26px, 4vw, 40px); font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; line-height: 1.1; }
+        .pulse-focus-head .pill { flex: 0 0 auto; max-width: 45%; white-space: normal; text-align: center; }
+        .pulse-focus-chart { display: grid; gap: 4px; }
+        .pulse-focus-svg { width: 100%; height: 200px; display: block; border-radius: 10px; background: rgba(255, 255, 255, .04); }
+        .pulse-focus-svg polyline { fill: none; stroke: var(--openreef-accent); stroke-width: 2.5; }
+        .pulse-focus-svg polygon { fill: var(--openreef-accent-soft); }
+        .pulse-focus-svg rect.band { fill: rgba(34, 197, 94, .09); }
+        .pulse-focus-axis { display: flex; justify-content: space-between; }
+        .pulse-focus-axis small { font-size: 11px; font-weight: 700; color: #8da2ba; font-variant-numeric: tabular-nums; }
+        .pulse-focus-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+        .pulse-focus-stats span { display: grid; gap: 2px; border: 1px solid rgba(255, 255, 255, .12); border-radius: 10px; padding: 8px 12px; }
+        .pulse-focus-stats small { font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
+        .pulse-focus-stats strong { font-size: 16px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
+        .pulse-focus-ranges { display: flex; gap: 8px; }
+        .pulse-focus-ranges button { border: 1px solid rgba(255, 255, 255, .2); border-radius: 999px; padding: 7px 16px; background: rgba(4, 10, 16, .55); color: #cfe7f5; font-weight: 800; font-size: 12px; cursor: pointer; }
+        .pulse-focus-ranges button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; }
+        .pulse-focus-list { display: grid; gap: 9px; }
+        .pulse-focus-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
+        .pulse-focus-row > div { display: grid; gap: 1px; min-width: 0; }
+        .pulse-focus-row strong { font-size: 13px; font-weight: 800; color: #e9f4fb; }
+        .pulse-focus-row small { font-size: 11px; font-weight: 700; color: #8da2ba; }
+        .pulse-focus-row em { font-style: normal; font-size: 12px; font-weight: 800; color: #cfe7f5; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .pulse-focus-dot { width: 10px; height: 10px; border-radius: 50%; background: #64748b; }
+        .pulse-focus-dot.ok { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); }
+        .pulse-focus-dot.warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
+        .pulse-focus-dot.critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
+        .pulse-focus-note { color: #9fc7e0; font-size: 13px; font-weight: 600; line-height: 1.45; }
+        .pulse-has-focus .pulse-buddy { display: none; }
         .pulse-root.pulse-alert-warning::after, .pulse-root.pulse-alert-critical::after { content: ""; position: absolute; inset: 0; pointer-events: none; animation: pulse-edge 1.8s ease-in-out infinite; }
         .pulse-root.pulse-alert-warning::after { box-shadow: inset 0 0 90px rgba(245, 158, 11, .4); }
         .pulse-root.pulse-alert-critical::after { box-shadow: inset 0 0 110px rgba(239, 68, 68, .5); }
@@ -19116,6 +19592,9 @@ class OpenReefPanel extends HTMLElement {
           .pulse-hero .pulse-ring { width: clamp(110px, 18vh, 160px); }
           .pulse-tiles { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
           .pulse-blocks { grid-template-columns: 1fr; gap: 10px; }
+          .pulse-focus { padding: 12px; }
+          .pulse-focus-card { padding: 16px; max-height: 88vh; }
+          .pulse-focus-svg { height: 150px; }
         }
         .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #04080d; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
         .cam-feed-large { width: 100%; height: 100%; object-fit: contain; display: block; background: #04080d; }
