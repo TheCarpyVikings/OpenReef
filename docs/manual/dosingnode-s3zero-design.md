@@ -122,7 +122,10 @@ First compile happens at the bench, not in CI (the repo cannot compile ESPHome):
    change `status_led_pin` to GPIO48 (clone variant) and nothing else.
 5. Bench gates §2, then power-path checks: buck output, 3V3→VIO, fused rail.
 6. Auto-bind: kalk **25/25**, live-food **22/22**; explicit-bind drain + fill.
-   Calibrations: kalk 100-rev ceremony; brushed heads 30 s burst into a jug.
+   Calibrations, one ceremony per channel type: kalk = the 100-rev ceremony;
+   live food = its `Calibrate 30s` button (burst into a jug, panel derives
+   ml/s); AWC drain/fill = the Water Change panel's own timed calibration run
+   (`awc_calibration_run`) — they do NOT use the 30 s dosing button.
 7. Watchdog proof: force a >180 s drain command with the tube in a bucket — the
    node must trip, latch, and refuse pumps until Clear Lock.
 8. Then `OPENREEF_DOSING_SMOKE_TEST.md` §11b (the Node 1 variant), and §12 with
