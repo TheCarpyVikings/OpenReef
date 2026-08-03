@@ -753,4 +753,35 @@ test("test_the_live_snapshot_wins_over_the_stored_config_state", async () => {
   assertEqual(JSON.stringify(panel._awcLiveState({})), "{}", "no state anywhere is an empty object, not a throw");
 });
 
+test("test_settings_demand_the_flood_acknowledgement_and_honour_it", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // Pumps-only nodes ship without a leak sensor (MULTINODE_PIVOT_BRIEF), so the
+    // panel must turn that absence into informed consent — never silence. Three
+    // states, three renders: unacknowledged shows the banner with the ack button;
+    // acknowledged collapses to a one-line reminder; a bound sensor shows neither.
+    const panel = await awcPanel({});
+    const unacked = panel._awcSetupBody({ safety: {} });
+    assert(unacked.includes("No flood failsafe"),
+      "no leak sensor + no ack must show the warning banner");
+    assert(unacked.includes('data-action="awc-ack-flood"'),
+      "the banner must carry the one-click acknowledgement");
+    assert(/blocked until/i.test(unacked),
+      "the banner must say water changes are blocked, not merely advise");
+
+    const acked = panel._awcSetupBody({ safety: { floodMissingAcknowledged: true } });
+    assert(!acked.includes("No flood failsafe"), "acknowledged must not keep nagging");
+    assert(!acked.includes('data-action="awc-ack-flood"'));
+    assert(/without a leak sensor \(acknowledged\)/i.test(acked),
+      "the acknowledged state stays visible as a quiet reminder, not invisible");
+
+    const bound = panel._awcSetupBody({ safety: { leakEntity: "binary_sensor.leak" } });
+    assert(!bound.includes("No flood failsafe") && !bound.includes("awc-ack-flood")
+      && !/without a leak sensor/i.test(bound),
+      "a bound leak sensor needs no consent machinery at all");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

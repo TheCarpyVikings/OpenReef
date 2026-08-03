@@ -1515,6 +1515,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "awc-abort") this._awcAction("openreef/awc_abort");
       if (action === "awc-resume") this._awcAction("openreef/awc_resume");
       if (action === "awc-ack") this._awcAction("openreef/awc_acknowledge");
+      if (action === "awc-ack-flood") this._awcAction("openreef/awc_acknowledge_flood");
       if (action === "awc-reset") this._awcResetReservoir(id);
       if (action === "awc-calibrate") this._awcCalibrate(id);
       if (action === "awc-reset-ledger") this._awcAction("openreef/awc_reset_ledger");
@@ -11003,6 +11004,12 @@ class OpenReefPanel extends HTMLElement {
             <label>Display high-level cutoff ${this._awcEntitySelect("awc-safety", "", "highLevelEntity", safety.highLevelEntity || "", "binary_sensor")}</label>
             <label>Leak sensor ${this._awcEntitySelect("awc-safety", "", "leakEntity", safety.leakEntity || "", "binary_sensor")}</label>
           </div>
+          ${!safety.leakEntity && !safety.floodMissingAcknowledged ? `
+          <div class="notice warning-notice">
+            <small><strong>No flood failsafe.</strong> Without a leak sensor, nothing outside the firmware can stop a stuck pump — reservoir sizing and dose lines ending in air are the only protection. Pick a leak sensor above (it can live on another node), or acknowledge to run without one. Water changes stay blocked until you do one or the other.</small>
+            <div class="button-row"><button class="secondary" data-action="awc-ack-flood">I understand — run without a leak sensor</button></div>
+          </div>` : (!safety.leakEntity
+            ? `<small class="awc-hint">Running without a leak sensor (acknowledged). Binding one later re-arms the hardware failsafe automatically.</small>` : "")}
           <div class="mini-grid">
             <label>Max single change (% tank)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="maxSingleChangePercent" value="${safety.maxSingleChangePercent ?? 25}"></label>
             <label>Drift warn (%)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="driftWarnPercent" value="${safety.driftWarnPercent ?? 10}"></label>

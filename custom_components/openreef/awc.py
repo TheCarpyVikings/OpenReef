@@ -828,6 +828,15 @@ def start_guard_reasons(
     if state.get("status") == "paused":
         out.append({"code": "paused", "severity": "block",
                     "message": "A water change is paused; resume or stop it before starting another"})
+    # No leak sensor bound = no hardware flood failsafe at all — that is a posture the
+    # user must take knowingly (the kalk no-pH pattern), not a silent default. A "block"
+    # that manual runs do NOT bypass: this is a safety posture, not a convenience guard.
+    # One click in Settings → Water Change → Safety clears it for good.
+    safety = cfg.get("safety", {}) if isinstance(cfg.get("safety"), dict) else {}
+    if not safety.get("leakEntity") and not safety.get("floodMissingAcknowledged"):
+        out.append({"code": "flood_unacknowledged", "severity": "block",
+                    "message": "No leak sensor is bound. Bind one, or acknowledge running "
+                               "without a flood failsafe in Settings → Water Change → Safety"})
     if _live(live, "leak"):
         out.append({"code": "leak", "severity": "fault", "message": "Leak detected"})
     if _live(live, "highLevel"):

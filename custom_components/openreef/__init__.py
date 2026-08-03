@@ -970,6 +970,10 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
     awc_cfg["safety"] = {
         "highLevelEntity": _normalise_entity_id(raw_safety.get("highLevelEntity")),
         "leakEntity": _normalise_entity_id(raw_safety.get("leakEntity")),
+        # Running with NO leak sensor bound is informed consent, not a default
+        # (pumps-only nodes ship without one — MULTINODE_PIVOT_BRIEF). The engine
+        # blocks starts until this is true or a leak entity is bound.
+        "floodMissingAcknowledged": bool(raw_safety.get("floodMissingAcknowledged", False)),
         "maxRuntimeSeconds": int(_awc_num(raw_safety.get("maxRuntimeSeconds"), 0, 0, AWC_RUNTIME_CEILING_SECONDS)),
         "maxRuntimeMargin": round(_awc_num(raw_safety.get("maxRuntimeMargin"), AWC_DEFAULT_RUNTIME_MARGIN, 1.0, 10.0), 2),
         "anomalyWarnMult": warn_mult,
@@ -6256,9 +6260,12 @@ async def _async_awc_start_locked(
     live = _awc_live_state(hass, config, fill_role=fill_role)
     reasons = awc_engine.start_guard_reasons(acfg, live, now_min, manual, fill_role=fill_role)
     if _awc_sim_enabled(config):
-        # Demo mode: virtual pumps need no real switch entities; every OTHER guard
-        # (calibration, reservoirs, hazards, caps) stays honest — that's the demo.
-        reasons = [r for r in reasons if r.get("code") != "no_pump_entity"]
+        # Demo mode: virtual pumps need no real switch entities, and a virtual change
+        # can't flood a floor, so the no-leak-sensor acknowledgement isn't demanded
+        # either; every OTHER guard (calibration, reservoirs, hazards, caps) stays
+        # honest — that's the demo.
+        reasons = [r for r in reasons
+                   if r.get("code") not in ("no_pump_entity", "flood_unacknowledged")]
     if target <= 0:
         reasons.append({"code": "no_volume", "severity": "block", "message": "Enter a volume to change"})
     reasons.extend(awc_engine.reservoir_preflight_reasons(acfg, target, source_role=fill_role))
@@ -8714,6 +8721,39 @@ async def websocket_awc_resume(
         return
     resumed = await _async_awc_try_resume(hass, entry, connection.context(msg))
     _awc_send(connection, msg, hass, _config_from_entry(entry), resumed=resumed)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/awc_acknowledge_flood"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_awc_acknowledge_flood(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Acknowledge running the AWC with no leak sensor bound (the kalk no-pH pattern:
+    informed consent recorded once, then the flood_unacknowledged start guard clears).
+    Pumps-only nodes ship without flood hardware by design — see MULTINODE_PIVOT_BRIEF."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)  # fetched INSIDE the lock (R1)
+        awc = _awc_cfg(config)
+        safety = awc.setdefault("safety", {})
+        if safety.get("leakEntity"):
+            connection.send_error(
+                msg["id"], "not_applicable",
+                "A leak sensor is bound — there is nothing to acknowledge")
+            return
+        safety["floodMissingAcknowledged"] = True
+        _append_activity(
+            config,
+            "Acknowledged: AWC runs with no leak sensor bound — reservoir sizing and "
+            "lines-in-air are the flood protection",
+            "warning",
+        )
+        config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/awc_acknowledge"})
@@ -12926,6 +12966,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_awc_abort)
     websocket_api.async_register_command(hass, websocket_awc_resume)
     websocket_api.async_register_command(hass, websocket_awc_acknowledge)
+    websocket_api.async_register_command(hass, websocket_awc_acknowledge_flood)
     websocket_api.async_register_command(hass, websocket_awc_calibrate)
     websocket_api.async_register_command(hass, websocket_awc_reset_reservoir)
     websocket_api.async_register_command(hass, websocket_awc_reset_ledger)

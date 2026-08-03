@@ -2097,6 +2097,62 @@ def test_salt_ledger_accumulates_net_grams():
     assert _close(_awc(entry)["ledger"]["netSaltGrams"], 2.0, 0.1)
 
 
+# --- flood-failsafe acknowledgement (0.6.7: pumps-only nodes have no leak float) --
+# No leak sensor bound = no hardware flood failsafe. The engine blocks every start
+# (manual included) until the user either binds one or acknowledges the posture —
+# the kalk no-pH pattern, applied to the AWC.
+
+def _no_leak_over():
+    # The default fixture binds binary_sensor.leak; these tests remove it.
+    return {"safety": {"highLevelEntity": "binary_sensor.high",
+                       "maxRuntimeSeconds": 600, "maxSingleChangePercent": 25}}
+
+
+def test_flood_ack_defaults_false_and_coerces():
+    safety = integration._normalise_core_config({})["automaticWaterChange"]["safety"]
+    assert safety["floodMissingAcknowledged"] is False, "consent is never the default"
+    cfg = {"automaticWaterChange": {"safety": {"floodMissingAcknowledged": "yes"}}}
+    normalised = integration._normalise_core_config(cfg)["automaticWaterChange"]["safety"]
+    assert normalised["floodMissingAcknowledged"] is True
+
+
+def test_start_refused_without_leak_sensor_until_acknowledged():
+    entry = _entry(awc_over=_no_leak_over())
+    hass = _hass(entry)
+    _start(hass, entry, 2.0, manual=True)
+    assert _state(entry)["status"] == "idle", "no leak sensor + no ack must refuse even a manual start"
+
+    _awc(entry)["safety"]["floodMissingAcknowledged"] = True
+    _start(hass, entry, 2.0, manual=True)
+    assert _state(entry)["status"] in integration._AWC_RUNNING_STATES, (
+        "the acknowledged posture runs exactly as before the guard existed")
+
+
+def test_ws_acknowledge_flood_round_trip():
+    entry = _entry(awc_over=_no_leak_over())
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_awc_acknowledge_flood(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.error_codes
+    assert _awc(entry)["safety"]["floodMissingAcknowledged"] is True
+    activity = entry.options[CONF_SETTINGS].get("activity", [])
+    assert any("no leak sensor" in item.get("message", "").lower() for item in activity), (
+        "the acknowledgement must leave an audit trail in the activity log")
+    # And it actually unblocks the feature end to end.
+    _start(hass, entry, 2.0, manual=True)
+    assert _state(entry)["status"] in integration._AWC_RUNNING_STATES
+
+
+def test_ws_acknowledge_flood_refused_when_a_leak_sensor_is_bound():
+    entry = _entry()  # default fixture binds binary_sensor.leak
+    hass = _hass(entry)
+    conn = FakeConnection()
+    run(integration.websocket_awc_acknowledge_flood(hass, conn, {"id": 1}))
+    assert conn.error_codes == ["not_applicable"], (
+        "with a leak sensor bound there is nothing to consent to — refuse, don't store")
+    assert _awc(entry)["safety"]["floodMissingAcknowledged"] is False
+
+
 # --- tiny standalone runner --------------------------------------------------
 
 def _main() -> int:

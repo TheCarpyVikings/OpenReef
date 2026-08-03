@@ -560,9 +560,29 @@ def _cfg_ready():
                    "quietHoursEnabled": True, "quietStart": "01:00", "quietEnd": "05:00"},
         "reservoirs": {"fresh": {"capacityLitres": 25, "remainingMl": 25000},
                        "waste": {"capacityLitres": 25, "filledMl": 0}},
-        "safety": {"maxSingleChangePercent": 25},
+        "safety": {"maxSingleChangePercent": 25, "floodMissingAcknowledged": True},
         "state": {"fault": ""},
     }
+
+
+def test_start_guard_demands_flood_acknowledgement_without_a_leak_sensor():
+    # No leak sensor bound = no hardware flood failsafe at all. That posture must be
+    # taken knowingly (the kalk no-pH pattern), so an unacknowledged config blocks —
+    # and manual runs do NOT bypass it: it is a safety posture, not a convenience guard.
+    cfg = _cfg_ready()
+    cfg["safety"] = {"maxSingleChangePercent": 25}
+    at = awc.parse_hhmm("02:00")
+    by = {r["code"]: r for r in awc.start_guard_reasons(cfg, {}, at)}
+    assert by["flood_unacknowledged"]["severity"] == "block", "block, never fault — nothing is broken"
+    assert "acknowledge" in by["flood_unacknowledged"]["message"].lower()
+    manual = {r["code"] for r in awc.start_guard_reasons(cfg, {}, at, manual=True)}
+    assert "flood_unacknowledged" in manual, "manual must not bypass a missing failsafe"
+
+    # Either resolution clears it: acknowledge, or bind a leak sensor.
+    cfg["safety"]["floodMissingAcknowledged"] = True
+    assert not {r["code"] for r in awc.start_guard_reasons(cfg, {}, at)} & {"flood_unacknowledged"}
+    cfg["safety"] = {"maxSingleChangePercent": 25, "leakEntity": "binary_sensor.leak"}
+    assert not {r["code"] for r in awc.start_guard_reasons(cfg, {}, at)} & {"flood_unacknowledged"}
 
 
 def test_start_guards_clear_when_ready_in_window():
