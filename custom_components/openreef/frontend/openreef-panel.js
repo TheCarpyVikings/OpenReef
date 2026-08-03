@@ -12406,16 +12406,27 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
+  // "elite" is a visual tier, not a scoring one: a clean ≥95 earns the ring an
+  // iridescent shimmer on top of the calm state. Never on warning/critical.
+  _pulseRingClass(health) {
+    const score = Math.max(0, Math.min(100, Number(health.score) || 0));
+    return `pulse-ring ${health.status}${health.status === "ok" && score >= 95 ? " elite" : ""}`;
+  }
+
   _pulseRingMarkup(health) {
     const C = 326.7; // 2πr for r=52
     const score = Math.max(0, Math.min(100, Number(health.score) || 0));
     const offset = (C * (1 - score / 100)).toFixed(1);
     return `
-      <div class="pulse-ring ${this._escape(health.status)}" data-pulse-ring data-action="pulse-focus" data-id="health" role="button" tabindex="0" title="Tap for detail">
-        <svg viewBox="0 0 120 120" aria-hidden="true">
-          <circle class="pulse-ring-track" cx="60" cy="60" r="52" stroke-dasharray="${C}" />
-          <circle class="pulse-ring-arc" cx="60" cy="60" r="52" stroke-dasharray="${C}" stroke-dashoffset="${offset}" data-pulse-ring-arc />
-        </svg>
+      <div class="${this._escape(this._pulseRingClass(health))}" data-pulse-ring data-action="pulse-focus" data-id="health" role="button" tabindex="0" title="Tap for detail">
+        <div class="pulse-ring-halo" aria-hidden="true"></div>
+        <div class="pulse-ring-tilt" aria-hidden="true">
+          <svg viewBox="0 0 120 120">
+            <circle class="pulse-ring-track" cx="60" cy="60" r="52" stroke-dasharray="${C}" />
+            <circle class="pulse-ring-arc" cx="60" cy="60" r="52" stroke-dasharray="${C}" stroke-dashoffset="${offset}" data-pulse-ring-arc />
+            <circle class="pulse-ring-comet" cx="60" cy="60" r="52" stroke-dasharray="14 ${(C - 14).toFixed(1)}" />
+          </svg>
+        </div>
         <div class="pulse-ring-text">
           <strong data-pulse-ring-score>${this._escape(score)}</strong>
           <small data-pulse-ring-grade>${this._escape(health.grade || "")} · reef health</small>
@@ -12663,18 +12674,27 @@ class OpenReefPanel extends HTMLElement {
     const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
     if (!root) return;
     const sensors = this._config.sensors || {};
+    // Set text and, when a reading actually moved, give it a small bump so the
+    // wall visibly reacts to fresh data instead of updating imperceptibly.
+    const setStat = (el, text) => {
+      if (el.textContent === text) return;
+      el.textContent = text;
+      el.classList.remove("stat-bump");
+      void el.offsetWidth; // restart the animation
+      el.classList.add("stat-bump");
+    };
     root.querySelectorAll("[data-overlay-stat]").forEach((el) => {
       const key = el.getAttribute("data-overlay-stat");
       if (key === "reefHealth") {
         const h = this._reefHealthScore();
-        el.textContent = `${h.score ?? "--"}${h.grade ? ` ${h.grade}` : ""}`;
+        setStat(el, `${h.score ?? "--"}${h.grade ? ` ${h.grade}` : ""}`);
         return;
       }
       const sensor = sensors[key];
       if (!sensor) return;
       const value = this._sensorDisplayValue(key, sensor);
       const unit = this._sensorDisplayUnit(key, sensor);
-      el.textContent = `${value}${unit ? ` ${unit}` : ""}`;
+      setStat(el, `${value}${unit ? ` ${unit}` : ""}`);
     });
     const clock = root.querySelector("[data-pulse-clock]");
     if (clock) clock.textContent = this._pulseClock();
@@ -12687,10 +12707,10 @@ class OpenReefPanel extends HTMLElement {
       const arc = ring.querySelector("[data-pulse-ring-arc]");
       if (arc) arc.setAttribute("stroke-dashoffset", (326.7 * (1 - score / 100)).toFixed(1));
       const scoreEl = ring.querySelector("[data-pulse-ring-score]");
-      if (scoreEl) scoreEl.textContent = String(score);
+      if (scoreEl) setStat(scoreEl, String(score));
       const gradeEl = ring.querySelector("[data-pulse-ring-grade]");
       if (gradeEl) gradeEl.textContent = `${health.grade || ""} · reef health`;
-      ring.className = `pulse-ring ${health.status}`;
+      ring.className = this._pulseRingClass(health);
     }
     const alert = this._pulseAlertState();
     root.classList.toggle("pulse-alert-warning", alert.status === "warning");
@@ -19447,7 +19467,18 @@ class OpenReefPanel extends HTMLElement {
         /* Reef Pulse — full-screen presentation / kiosk mode */
         .pulse-root { position: fixed; inset: 0; z-index: 9000; background: #04080d; overflow: hidden; color: #f4fbff; }
         .pulse-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #04080d; }
-        .pulse-datawall { position: absolute; inset: 0; background: radial-gradient(circle at 22% 8%, var(--openreef-accent-soft), transparent 42%), radial-gradient(circle at 80% 88%, rgba(34, 197, 94, .12), transparent 46%), #060e17; }
+        .pulse-datawall { position: absolute; inset: 0; overflow: hidden; background: radial-gradient(circle at 22% 8%, var(--openreef-accent-soft), transparent 42%), radial-gradient(circle at 80% 88%, rgba(34, 197, 94, .12), transparent 46%), #060e17; }
+        /* Ambient drift: two soft light pools wander like water-borne caustics,
+           so the wall reads as alive even between data updates. */
+        .pulse-datawall::before, .pulse-datawall::after { content: ""; position: absolute; inset: -25%; pointer-events: none; will-change: transform; }
+        .pulse-datawall::before { background: radial-gradient(circle at 30% 35%, rgba(56, 189, 248, .08), transparent 40%); animation: pulse-drift-a 37s ease-in-out infinite alternate; }
+        .pulse-datawall::after { background: radial-gradient(circle at 70% 65%, rgba(34, 197, 94, .07), transparent 38%); animation: pulse-drift-b 47s ease-in-out infinite alternate; }
+        @keyframes pulse-drift-a { from { transform: translate(-4%, -3%) scale(1); } to { transform: translate(5%, 4%) scale(1.15); } }
+        @keyframes pulse-drift-b { from { transform: translate(4%, 2%) scale(1.1); } to { transform: translate(-5%, -4%) scale(.95); } }
+        /* A reading that actually changed announces itself for a beat. */
+        .stat-bump { animation: pulse-stat-bump .7s ease; }
+        @keyframes pulse-stat-bump { 30% { transform: scale(1.07); text-shadow: 0 0 14px rgba(125, 211, 252, .8); } }
+        @media (prefers-reduced-motion: reduce) { .pulse-datawall::before, .pulse-datawall::after, .stat-bump { animation: none !important; } }
         .pulse-shade { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(4, 8, 13, .66), transparent 26%), linear-gradient(0deg, rgba(4, 8, 13, .78), transparent 36%); }
         .pulse-head { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 26px 30px 0; }
         .pulse-title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; min-width: 0; }
@@ -19457,12 +19488,44 @@ class OpenReefPanel extends HTMLElement {
         .pulse-head-right { display: flex; align-items: flex-start; gap: 14px; }
         .pulse-alert-chip { align-self: center; border-radius: 999px; padding: 8px 16px; font-weight: 800; background: rgba(127, 29, 29, .82); color: #fecaca; box-shadow: 0 4px 18px rgba(0, 0, 0, .4); animation: pulse-edge 1.6s ease-in-out infinite; }
         .pulse-alert-warning .pulse-alert-chip { background: rgba(113, 63, 18, .85); color: #fde68a; }
-        .pulse-ring { position: relative; width: clamp(96px, 11vw, 150px); aspect-ratio: 1; animation: pulse-breathe 5.5s ease-in-out infinite; }
-        .pulse-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+        /* The health ring: layered glow + orbit + 3D tilt, keyed off one status
+           colour var so ok/warning/critical restyle every layer at once. The
+           mood escalates with the verdict: calm drift when green, brisk amber
+           sweep when warning, urgent red throb when critical — and a dead-still
+           grey ring when the score isn't a verdict at all. */
+        .pulse-ring { position: relative; width: clamp(96px, 11vw, 150px); aspect-ratio: 1; animation: pulse-breathe 5.5s ease-in-out infinite; perspective: 420px; --ring-c: 34, 197, 94; }
+        .pulse-ring.warning { --ring-c: 245, 158, 11; }
+        .pulse-ring.critical { --ring-c: 239, 68, 68; }
+        .pulse-ring.unknown { --ring-c: 100, 116, 139; }
+        .pulse-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
         .pulse-ring-track { fill: none; stroke: rgba(255, 255, 255, .15); stroke-width: 9; }
-        .pulse-ring-arc { fill: none; stroke: #22c55e; stroke-width: 9; stroke-linecap: round; transition: stroke-dashoffset .8s ease; filter: drop-shadow(0 0 7px rgba(34, 197, 94, .55)); }
-        .pulse-ring.warning .pulse-ring-arc { stroke: #f59e0b; filter: drop-shadow(0 0 7px rgba(245, 158, 11, .55)); }
-        .pulse-ring.critical .pulse-ring-arc { stroke: #ef4444; filter: drop-shadow(0 0 7px rgba(239, 68, 68, .6)); }
+        .pulse-ring-arc { fill: none; stroke: rgb(var(--ring-c)); stroke-width: 9; stroke-linecap: round; transition: stroke-dashoffset .8s ease, stroke .8s ease; filter: drop-shadow(0 0 7px rgba(var(--ring-c), .55)); }
+        .pulse-ring.critical .pulse-ring-arc { animation: pulse-throb 1.3s ease-in-out infinite; }
+        /* Glassy depth: an off-centre highlight + inner tint that reads as a lens. */
+        .pulse-ring::before { content: ""; position: absolute; inset: 11%; border-radius: 50%; pointer-events: none; background: radial-gradient(circle at 36% 30%, rgba(255, 255, 255, .09), transparent 52%), radial-gradient(circle at 52% 66%, rgba(var(--ring-c), .12), transparent 72%); }
+        /* Rotating aurora behind the ring, masked to a halo band. */
+        .pulse-ring-halo { position: absolute; inset: -12%; border-radius: 50%; pointer-events: none; background: conic-gradient(from 0deg, transparent 0deg, transparent 200deg, rgba(var(--ring-c), .55) 300deg, rgba(var(--ring-c), .15) 340deg, transparent 360deg); filter: blur(9px); -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 68%, #000 88%, transparent 96%); mask: radial-gradient(closest-side, transparent 56%, #000 68%, #000 88%, transparent 96%); animation: pulse-orbit 9s linear infinite; }
+        .pulse-ring.warning .pulse-ring-halo { animation-duration: 5s; }
+        .pulse-ring.critical .pulse-ring-halo { animation-duration: 2.6s; }
+        /* ≥95 and calm: the aurora slowly cycles hue — the tank is showing off. */
+        .pulse-ring.elite .pulse-ring-halo { animation: pulse-orbit 9s linear infinite, pulse-hue 16s linear infinite; }
+        /* The tilt layer gives the whole dial a slow gyroscopic wobble. */
+        .pulse-ring-tilt { position: absolute; inset: 0; animation: pulse-tilt 12s ease-in-out infinite; will-change: transform; }
+        /* A bright comet orbiting the dial — the "alive" signal, paced by mood. */
+        .pulse-ring-comet { fill: none; stroke: rgba(var(--ring-c), .95); stroke-width: 9; stroke-linecap: round; mix-blend-mode: screen; filter: blur(1.5px) drop-shadow(0 0 9px rgba(var(--ring-c), .9)) brightness(1.35); transform-box: fill-box; transform-origin: center; animation: pulse-orbit 8s linear infinite; }
+        .pulse-ring.warning .pulse-ring-comet { animation-duration: 4s; }
+        .pulse-ring.critical .pulse-ring-comet { animation-duration: 1.8s; }
+        /* Unknown = unmeasured: no comet, no aurora, no wobble. A grey ring that
+           performs would be a lie about a tank nobody is measuring. */
+        .pulse-ring.unknown .pulse-ring-comet, .pulse-ring.unknown .pulse-ring-halo { display: none; }
+        .pulse-ring.unknown, .pulse-ring.unknown .pulse-ring-tilt { animation: none; }
+        @keyframes pulse-orbit { to { transform: rotate(360deg); } }
+        @keyframes pulse-tilt { 0%, 100% { transform: rotateX(9deg) rotateY(-7deg); } 25% { transform: rotateX(13deg) rotateY(5deg); } 50% { transform: rotateX(5deg) rotateY(8deg); } 75% { transform: rotateX(11deg) rotateY(-4deg); } }
+        @keyframes pulse-throb { 0%, 100% { filter: drop-shadow(0 0 6px rgba(var(--ring-c), .5)); } 50% { filter: drop-shadow(0 0 18px rgba(var(--ring-c), .95)); } }
+        @keyframes pulse-hue { to { filter: blur(9px) hue-rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) {
+          .pulse-ring, .pulse-ring-tilt, .pulse-ring-halo, .pulse-ring-comet, .pulse-ring-arc { animation: none !important; }
+        }
         .pulse-ring-text { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 2px; }
         .pulse-ring-text strong { font-size: clamp(26px, 3.2vw, 40px); font-weight: 800; color: #fff; line-height: 1; text-shadow: 0 2px 10px rgba(0, 0, 0, .5); }
         .pulse-ring-text small { font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: #9fc7e0; }

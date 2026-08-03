@@ -69,6 +69,18 @@ test("night dim with a malformed time falls back to not dimming", async () => {
   assertEqual(panel._pulseNightDimActive(new Date("2026-06-04T03:00:00")), false);
 });
 
+// --- health ring animation tiers ------------------------------------------
+
+test("ring animation tier: elite only for a calm >=95, never for warning or unmeasured", async () => {
+  const panel = prep(await makePanel({}));
+  assertEqual(panel._pulseRingClass({ status: "ok", score: 96 }), "pulse-ring ok elite");
+  assertEqual(panel._pulseRingClass({ status: "ok", score: 94 }), "pulse-ring ok");
+  // A capped-but-high score must not shimmer: the cap is the story.
+  assertEqual(panel._pulseRingClass({ status: "warning", score: 97 }), "pulse-ring warning");
+  assertEqual(panel._pulseRingClass({ status: "critical", score: 40 }), "pulse-ring critical");
+  assertEqual(panel._pulseRingClass({ status: "unknown", score: 100 }), "pulse-ring unknown");
+});
+
 // --- tap-to-expand focus cards --------------------------------------------
 
 test("focus markup is empty for no focus and for unknown keys", async () => {
