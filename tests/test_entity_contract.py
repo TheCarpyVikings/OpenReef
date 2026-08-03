@@ -33,6 +33,7 @@ _DOC = os.path.join(_ROOT, "docs", "manual", "kalk-doser-esphome-design.md")
 _REF_YAML = os.path.join(_ROOT, "docs", "manual", "awc-esphome-reference.yaml")
 _S3_DOC = os.path.join(_ROOT, "docs", "manual", "reefnode-s3-design.md")
 _S3_YAML = os.path.join(_ROOT, "docs", "manual", "reefnode-s3-reference.yaml")
+_DOSINGNODE_YAML = os.path.join(_ROOT, "docs", "manual", "dosingnode-s3zero-reference.yaml")
 
 # Domains that exist in Home Assistant for ESPHome-created entities. There is
 # deliberately no "text_sensor" here: ESPHome text sensors register as sensor.
@@ -148,6 +149,63 @@ def test_reefnode_yaml_carries_every_frozen_entity():
                 f"reefnode YAML is missing the frozen {table_name} entity for {role}: "
                 f"expected a name slugifying to '{suffix}'"
             )
+
+
+# --- Dosing node (multi-node Node 1) — held to the same contract ----------------
+# The pivot's first node carries the same two frozen channels; PUMPS ONLY, with the
+# reservoir-low floats stubbed clear. Stub or not, the NAMES must survive — the
+# auto-bind counts (25/25 + 22/22) depend on them.
+
+def test_dosingnode_yaml_keeps_the_friendly_name_contract():
+    src = open(_DOSINGNODE_YAML, encoding="utf-8").read()
+    assert re.search(r"^\s*friendly_name:\s*\S+", src, re.M), (
+        "dosingnode-s3zero-reference.yaml lost its friendly_name — part of the frozen contract"
+    )
+
+
+def test_dosingnode_yaml_carries_every_frozen_entity():
+    src = open(_DOSINGNODE_YAML, encoding="utf-8").read()
+    yaml_slugs = {_esphome_slug(n) for n in re.findall(r'^\s*name:\s*"([^"]+)"', src, re.M)}
+    for table_name, rows in (("kalk", _doc_table_rows(_DOC)),
+                             ("live-food", _doc_table_rows(_S3_DOC))):
+        for role, pattern in rows.items():
+            suffix = pattern.split(".", 1)[1].lstrip("_")
+            assert suffix in yaml_slugs, (
+                f"dosingnode YAML is missing the frozen {table_name} entity for {role}: "
+                f"expected a name slugifying to '{suffix}'"
+            )
+
+
+def test_dosingnode_reservoir_floats_are_stubbed_not_removed():
+    # The accepted trade (MULTINODE_PIVOT_BRIEF §4): no floats fitted, so the two
+    # reservoir-low sensors are template stubs reading permanently clear — but they
+    # must EXIST under their frozen names, or auto-bind drops to 24/25 + 21/22 and
+    # the guard chains lose their reservoir_low step's input.
+    src = open(_DOSINGNODE_YAML, encoding="utf-8").read()
+    for name in ("Kalk Reservoir Low", "Live Food Reservoir Low"):
+        block = re.search(
+            r'- platform: (\w+)\n\s*name: "' + re.escape(name) + r'"[^-]*?lambda: \'return false;\'',
+            src,
+        )
+        assert block, f"'{name}' must be a template stub reading clear on the pumps-only node"
+        assert block.group(1) == "template", f"'{name}' must be a template sensor (no GPIO float exists)"
+
+
+def test_dosingnode_yaml_has_no_relay_and_no_hardware_sensors():
+    # PUMPS ONLY is a locked decision: no master relay, no leak/display-high/tank
+    # floats. Any of these reappearing means someone merged reefnode blocks back in.
+    src = open(_DOSINGNODE_YAML, encoding="utf-8").read()
+    for forbidden in ("master_enable", "id: leak", "id: display_high",
+                      "id: fresh_empty", "id: fresh2_empty", "id: waste_full",
+                      "id: fresh2_pump"):
+        assert forbidden not in src, (
+            f"dosingnode YAML must not carry '{forbidden}' — Node 1 is pumps-only "
+            "(MULTINODE_PIVOT_BRIEF §2, locked)"
+        )
+    # And the logger must be on native USB — UART0's pins drive the TMC2209.
+    assert "hardware_uart: USB_CDC" in src, (
+        "dosingnode logger must run on native USB (GP43/44 belong to the TMC2209)"
+    )
 
 
 def _main() -> int:

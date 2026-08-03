@@ -14,46 +14,42 @@ OpenReef is a Home Assistant custom integration ("the intelligence layer for ree
 - **Dosing channels:** multi-pump dosing dashboard + settings; first driver type is the **kalk stepper**. Daily-total-first schedules compiled into firmware numbers with write-then-verify sync; missed-dose detection (ask-first, kalk defaults to skip); reservoir ledger with days-until-empty; calibration with drift history; tube-life tracking; pH failsafe (pause-above/resume-below hysteresis); panic lockout with a firmware dead-man; advisor→pump one-tap apply; night weighting.
 - **v0.5.1 (today)** was a hardening release: 24 verified bug fixes. Relevant to you: the **entity contract is now rev 2 and machine-checked in CI** (see §5 — this constrains what you may name things).
 
-**Nothing physical exists yet.** No pumps built, no boards flashed. The reference docs are the wiring authority.
+**Bench state (2026-08-03): Node 1 is physically under construction.** Pump pigtails + waterproof connectors soldered (drain + fill), flyback diodes fitted, D4184 modules headered, the S3 Zero being headered. No wire is pin-committed yet — the dosingnode pin map is what gets plugged.
 
 ## 3. Locked hardware decisions (grilled and decided — do not re-litigate)
+
+**Topology (pivoted 2026-08-03, `MULTINODE_PIVOT_BRIEF.md` — LOCKED): distributed multi-node.** Each equipment group gets its own ESP32, syncing through HA. **Node 1 = a self-contained 4-channel dosing station, PUMPS ONLY — no physical sensors of any kind on it.** Tank telemetry and tank-side safety sensors (pH, temp, leak, display-high, tank floats) live on future nodes. The single-node reefnode remains a valid alternative topology, not the default.
 
 | Decision | Value |
 |---|---|
 | Tank | 52 L display, ~35 ppt; all water sources salt-matched |
-| Node | **One ESP32-S3** hosts everything (AWC + kalk + live food) |
-| AWC pumps | 3× **Kamoer KPHM100-HB (brushed, 12 V)** — drain + 2 fresh sources, driven by low-side MOSFETs. ⚠️ The KPHM100 is a *platform*: the **HB brushed** variant is the MOSFET drop-in. Brushless = 5-wire ESC, stepper = needs a driver — neither works as a MOSFET load. |
-| Kalk doser | **Kamoer KPHM100-STB10 (stepper)** + BigTreeTech **TMC2209 V1.3** over UART (address 0x00, R_SENSE 0.11 Ω, StealthChop + interpolation), ~0.27 ml/rev nominal (calibration is authoritative) |
-| Live food | Its own small **brushed** pump = a future dosing channel (phyto/pods/baby brine only — adult Artemia clog/chop the head); ml-doses, never litre-scale fills; reservoir freshness lockout |
+| Topology | **Multi-node**; Node 1 = dosing station (AWC drain + fill, kalk, live food), board **ESP32-S3 Zero (clone)** |
+| AWC pumps | Kamoer **KPHM100 brushed 12 V** — drain + fill (source 2 dropped from Node 1; a future node can host it), driven by **D4184 dual-MOSFET trigger modules**. ⚠️ The KPHM100 is a *platform*: the **brushed** variant is the MOSFET drop-in. Brushless = 5-wire ESC, stepper = needs a driver — neither works as a MOSFET load. |
+| Kalk doser | **Kamoer KPHM100-STB10 (stepper)** + BigTreeTech **TMC2209 V1.3** over UART (address 0x00, R_SENSE 0.11 Ω, StealthChop + interpolation), ~0.27 ml/rev nominal (calibration is authoritative) — unchanged by the pivot |
+| Live food | Its own small **brushed** pump on Node 1 (phyto/pods/baby brine only — adult Artemia clog/chop the head); ml-doses, never litre-scale fills; reservoir freshness lockout |
 | Cadence | Hourly ~40 ml micro-changes (simultaneous method), 20 L reservoirs |
-| Electrical defense-in-depth | Master **fail-OFF relay** (energize-to-run) with a **hardware leak-float wired into the coil circuit**; per-channel AO3400A/IRLB8721 MOSFETs; SS34 flyback diodes across each motor; 150 Ω gate / 10 kΩ pull-down per gate; 12 V motor rail fused; ESP32 3.3 V logic |
+| Electrical, Node 1 | **D4184 modules** carry their own gate circuitry (bench gate: TRIG must sit LOW when floating — add 10 kΩ to GND if not, `dosingnode-s3zero-design.md` §2); **1N5819** leaded Schottky flybacks across each brushed motor's tabs (functional equivalent of the spec'd SS34); one fused 12 V motor rail; 12 V→5 V buck feeds the Zero; Zero 3V3 → TMC VIO. **No master relay, no leak float, no tank floats on this node** — residual risk stated plainly in the design doc. |
+| Electrical, discrete/single-node builds | The original spec stands: master **fail-OFF relay** (energize-to-run) with a **hardware leak-float wired into the coil circuit**; per-channel AO3400A/IRLB8721 MOSFETs; SS34 flybacks; 150 Ω gate / 10 kΩ pull-down per gate; fused 12 V rail; 3.3 V logic |
 | Kalk chemistry safety | Dose above waterline with a siphon break; pH guard is the primary chemical safety; never dose cloudy slurry (draw from the clear zone, intake an inch off the bottom) |
 
-## 4. Pin map — planned FINAL for the single ESP32-S3 node
+## 4. Pin maps — one authority per node
 
-**Stage D has landed (2026-07-15, v0.5.7):** the merged flashable node is `docs/manual/reefnode-s3-reference.yaml` and the formal pin/contract doc is `docs/manual/reefnode-s3-design.md` — those two files are now the build authority (the table below matches them; if the build ever deviates, update the design doc so copper and docs never disagree). The kalk doc's classic-ESP32 map (TX 22/RX 21/EN 23) remains only for the old two-node path. S3 rules already honoured: avoids GPIO0/3/45/46 (strapping), 19/20 (USB-JTAG), 26–32 (flash), 33–37 (octal PSRAM), 43/44 (UART0).
+**Node 1 (the dosing station being built): `docs/manual/dosingnode-s3zero-design.md` + `dosingnode-s3zero-reference.yaml` are the build authority.** If the build ever deviates, update the design doc the same day — copper and docs never disagree.
 
 | Signal | GPIO | Dir | Notes |
 |---|---|---|---|
-| `drain_pump` MOSFET | 4 | out | |
-| `fresh_pump` (source 1) MOSFET | 5 | out | |
-| `fresh2_pump` (source 2) MOSFET | 6 | out | |
-| `master_enable` relay driver | 7 | out | energize-to-run (fail-OFF) |
-| `livefood_pump` MOSFET | 8 | out | |
-| `livefood_reservoir_low` float | 9 | in, pull-up | |
-| `kalk_reservoir_low` float | 10 | in, pull-up | |
-| TMC2209 UART TX | 11 | out | 500 kBd |
-| TMC2209 UART RX | 12 | in | |
-| TMC2209 ENN | 13 | out | low = driver enabled |
-| TMC2209 INDEX | 14 | in | |
-| `leak` sensor | 15 | in, pull-down | plus the HARDWARE float in the relay coil |
-| `display_high` cutoff | 16 | in, pull-down | |
-| `fresh_empty` float | 17 | in, pull-up | |
-| `fresh2_empty` float | 18 | in, pull-up | |
-| `waste_full` float | 21 | in, pull-up | |
-| spares | 1, 2, 38–42, 47, 48 | — | |
+| `drain_pump` gate | 1 | out | D4184 TRIG |
+| `fresh_pump` (fill) gate | 2 | out | D4184 TRIG |
+| `livefood_pump` gate | 4 | out | D4184 TRIG (GP3 skipped — strapping) |
+| TMC2209 ENN | 5 | out | low = enabled |
+| TMC2209 INDEX | 6 | in | |
+| TMC2209 UART TX | 43 | out | 500 kBd — UART0 default pin |
+| TMC2209 UART RX | 44 | in | |
+| spares | 3 (avoid), 7–13 | — | GP21 (or 48 on some clones): onboard WS2812 |
 
-Open call to make at the bench: route the kalk stepper's **motor** rail through the master power-cut relay (recommended yes; keep TMC2209 logic on the always-on rail).
+Two consequences to never rediscover: (1) UART0's pins drive the TMC2209, so the **logger runs on native USB** (`hardware_uart: USB_CDC` under arduino) — first flash needs BOOT held while connecting USB-C; (2) the **S3 ROM prints boot output on GP43 at every reset** regardless of logger config — harmless to the CRC-guarded TMC2209 UART, documented so it is never chased as a fault.
+
+**Single-node alternative (the reefnode): `docs/manual/reefnode-s3-design.md` §1 is its pin authority** (pumps 4/5/6, relay 7, livefood 8, TMC 11–14, floats 9/10, sensors 15–18/21 — avoids strapping 0/3/45/46, USB-JTAG 19/20, flash 26–32, octal-PSRAM 33–37, UART0 43/44). Its recorded hardware call stands: the kalk stepper's **motor** rail runs through the master power-cut relay; TMC2209 logic stays on the always-on rail. The kalk doc's classic-ESP32 map (TX 22/RX 21/EN 23) remains only for the old two-node path.
 
 ## 5. The entity contract — the one thing you must NOT improvise
 

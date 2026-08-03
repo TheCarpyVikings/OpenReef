@@ -112,11 +112,49 @@ above still applies, plus:
       `disabled`; "Refreshed today" re-enables on the next sync.
 - [ ] Full bring-up order: `reefnode-s3-design.md` §5.
 
+## 11b. Dosing Node (S3 Zero, multi-node Node 1) Variant
+
+Running Node 1 (`docs/manual/dosingnode-s3zero-reference.yaml` — pumps only, no
+physical sensors, no master relay)? §1–§10 apply unchanged, §11's relay and
+float lines do NOT. Instead:
+
+- [ ] Bench gates first: `dosingnode-s3zero-design.md` §2 — D4184 TRIG floats
+      LOW (pump does not run with TRIG disconnected; 10 kΩ to GND added if it
+      did), and the GP43 ROM boot chatter is understood as harmless.
+- [ ] Boot log arrives over native USB (USB_CDC); no `Master Enable` entity
+      exists and none is expected.
+- [ ] Kalk auto-bind reports **25 of 25** (rev 3); live-food auto-bind
+      **22 of 22** — the stubbed reservoir-low floats keep the counts whole.
+- [ ] `Kalk Reservoir Low` and `Live Food Reservoir Low` both read **off**
+      (clear) permanently — they are template stubs; the software reservoir
+      ledger is the empty-guard on this node. A `reservoir_low` skip reason on
+      this node is therefore impossible and would be a firmware defect.
+- [ ] Explicit-bind drain + fill only; leave source 2, leak, display-high and
+      the tank floats UNBOUND (they live on future nodes). The AWC runs
+      without them — take the flood-failsafe acknowledgement in AWC settings
+      when the panel asks (0.6.7+).
+- [ ] Watchdog trip still latches: force a >180 s drain into a bucket — pumps
+      killed, node latched, `Clear Lock` ("OpenReef Dosing Clear Lock")
+      re-arms. This is a SOFTWARE latch; there is no relay behind it.
+- [ ] Live-food chaser still works (the fresh pump it borrows is on this node,
+      GP2) and still skips when a water change owns that pump.
+
 ## 12. 48-Hour Full-Arc Soak (Stage F — one node, everything on)
 
 The arc's exit test: hourly micro-changes + source alternation + kalk + live
-food + 2-part spacing running TOGETHER on the merged reefnode for two days.
-Run it after §11 passes, water plumbed, reservoirs sized for ≥ 2 L of changes.
+food + 2-part spacing running TOGETHER on one node for two days. Run it after
+§11 (reefnode) or §11b (dosing node) passes, water plumbed, reservoirs sized
+for ≥ 2 L of changes.
+
+**Unattended-run posture, per topology:** the reefnode's master fail-OFF relay
++ hardware coil float are what make an unattended soak safe against a shorted
+driver — do not run §12 on that topology before the relay is fitted. Node 1
+has no relay by design: its soak posture is sized reservoirs (never plumb more
+water than the tank can absorb), dose lines ending in air above the waterline,
+the fused 12 V rail, and the flood-failsafe acknowledgement taken knowingly.
+On Node 1 the 2-part spacing checks below are one-sided (no Ca head exists to
+stamp its group), and source alternation lines apply only if a second source
+is fitted — which on Node 1 it is not.
 
 **Setup (once):**
 

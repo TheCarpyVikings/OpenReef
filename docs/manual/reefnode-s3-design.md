@@ -1,5 +1,14 @@
 # Reefnode — the single-ESP32-S3 consolidation (Stage D)
 
+> **TOPOLOGY NOTE (2026-08-03, `MULTINODE_PIVOT_BRIEF.md`):** the physical build
+> pivoted to **multi-node** — the current build authority is
+> [`dosingnode-s3zero-design.md`](dosingnode-s3zero-design.md) +
+> [`dosingnode-s3zero-reference.yaml`](dosingnode-s3zero-reference.yaml)
+> (Node 1, pumps only). This document remains the authority for the
+> **alternative single-node topology** — everything below stays correct for
+> anyone building one S3 that hosts everything, and §3's live-food contract
+> table remains THE frozen authority both topologies point at.
+
 **Build authority for the single-node path.** The flashable reference is
 [`reefnode-s3-reference.yaml`](reefnode-s3-reference.yaml); this doc records the
 final pin budget, the frozen live-food auto-bind contract, the resolved hardware
