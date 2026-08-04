@@ -79,6 +79,7 @@ class OpenReefBetaFab extends HTMLElement {
     this._code = "";
     this._loaded = false;
     this._bound = false;
+    this._focusId = "";
     this._onKeyDown = this._onKeyDown.bind(this);
   }
 
@@ -126,6 +127,35 @@ class OpenReefBetaFab extends HTMLElement {
     // Idempotent by design — the panel re-appends this node on every render.
     if (!this.shadowRoot.firstChild) this._render();
     document.addEventListener("keydown", this._onKeyDown);
+    this._restoreFocus();
+  }
+
+  /*
+   * Safety net for the panel re-rendering underneath us.
+   *
+   * A full panel render wipes its shadow root, which detaches this element and
+   * blurs whatever was focused inside it; re-appending restores the DOM but not
+   * the caret. The panel's _isEditingFormControl now looks through shadow roots
+   * and won't re-render mid-keystroke, but it can't cover every path — a config
+   * refresh or an explicit render still gets through. Losing your place every
+   * few seconds turns writing a bug report into a fight, so put it back.
+   */
+  _restoreFocus() {
+    if (!this._open || !this._focusId) return;
+    const field = this.shadowRoot.getElementById(this._focusId);
+    if (!field || field === this.shadowRoot.activeElement) return;
+    const start = field.selectionStart;
+    const end = field.selectionEnd;
+    field.focus();
+    // focus() drops the caret at the end of a text field — restore where it was,
+    // or someone editing mid-sentence gets thrown to the end of it.
+    if (typeof start === "number" && typeof field.setSelectionRange === "function") {
+      try {
+        field.setSelectionRange(start, end);
+      } catch {
+        /* not a control that supports selection ranges */
+      }
+    }
   }
 
   disconnectedCallback() {
@@ -196,6 +226,7 @@ class OpenReefBetaFab extends HTMLElement {
   _close() {
     this._open = false;
     this._showsPayload = false;
+    this._focusId = "";
     this._render();
   }
 
@@ -655,6 +686,13 @@ class OpenReefBetaFab extends HTMLElement {
     this.shadowRoot.addEventListener("change", (event) => {
       const target = event.target.closest("[data-orb='toggle']");
       if (target) this._setSetting(target.dataset.id, target.checked);
+    });
+
+    // Remember which field is being edited so _restoreFocus can put the caret
+    // back after the panel detaches and re-appends us.
+    this.shadowRoot.addEventListener("focusin", (event) => {
+      const id = event.target?.id;
+      if (id) this._focusId = id;
     });
   }
 

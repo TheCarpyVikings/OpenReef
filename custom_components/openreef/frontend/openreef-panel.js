@@ -149,7 +149,12 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _isEditingFormControl() {
-    const active = this.shadowRoot.activeElement;
+    // Descend through nested shadow roots. shadowRoot.activeElement only ever
+    // reports the HOST of a focused child component, never the control inside
+    // it — so a one-level check reads "not typing" while someone is typing,
+    // and the re-render it green-lights detaches that component and blurs them.
+    let active = this.shadowRoot.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
     return Boolean(active?.matches?.("input, textarea, select"));
   }
 

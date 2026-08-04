@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { assert, assertEqual, runTests, test } from "./_panel_harness.mjs";
+import { assert, assertEqual, makePanel, runTests, test } from "./_panel_harness.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BETA_PATH = path.join(
@@ -297,6 +297,77 @@ test("upgrading is a no-op when the panel set nothing", async () => {
   const fab = await makeFab({ _state: ENROLLED });
   fab.connectedCallback();  // must not throw
   assert(fab._visible() === true, "a normally-constructed element still works");
+});
+
+/* --- typing without being interrupted -------------------------------------
+ * Home Assistant pushes state constantly, and every push re-renders the panel
+ * unless _isEditingFormControl vetoes it. That veto only ever saw the panel's
+ * OWN controls: shadowRoot.activeElement reports the HOST of a focused child
+ * component, never the control inside it. So while someone typed into the beta
+ * modal the panel read "not typing", re-rendered, detached this element and
+ * blurred them — every couple of seconds. Shipped in 0.7.1. */
+
+test("panel sees a control focused inside a nested shadow root", async () => {
+  const panel = await makePanel({});
+  const textarea = { matches: (selector) => selector.includes("textarea") };
+  const fab = { shadowRoot: { activeElement: textarea }, matches: () => false };
+  panel.shadowRoot = { activeElement: fab };
+  assert(panel._isEditingFormControl() === true, "must look through the nested shadow root");
+});
+
+test("panel still ignores a focused non-control", async () => {
+  const panel = await makePanel({});
+  const div = { matches: () => false };
+  panel.shadowRoot = { activeElement: { shadowRoot: { activeElement: div }, matches: () => false } };
+  assert(panel._isEditingFormControl() === false, "a focused div is not editing");
+});
+
+test("panel handles nothing focused at all", async () => {
+  const panel = await makePanel({});
+  panel.shadowRoot = { activeElement: null };
+  assert(panel._isEditingFormControl() === false, "null activeElement must not throw");
+});
+
+test("focus and caret are restored after a detach", async () => {
+  let focused = false;
+  let range = null;
+  const field = {
+    selectionStart: 7, selectionEnd: 7,
+    focus() { focused = true; },
+    setSelectionRange(start, end) { range = [start, end]; },
+  };
+  const shadowRoot = {
+    innerHTML: "<style></style>", activeElement: null,
+    addEventListener() {}, getElementById: (id) => (id === "orb-body" ? field : null),
+    get firstChild() { return this.innerHTML ? {} : null; },
+  };
+  const fab = await makeFab({ _state: ENROLLED, _open: true, _focusId: "orb-body", shadowRoot });
+
+  fab._restoreFocus();
+  assert(focused, "focus was not restored");
+  assertEqual(range, [7, 7], "caret was not put back where it was");
+});
+
+test("focus is not restored when the modal is closed", async () => {
+  let focused = false;
+  const shadowRoot = {
+    innerHTML: "", addEventListener() {},
+    getElementById: () => ({ focus() { focused = true; }, selectionStart: 0, selectionEnd: 0 }),
+    get firstChild() { return this.innerHTML ? {} : null; },
+  };
+  const fab = await makeFab({ _state: ENROLLED, _open: false, _focusId: "orb-body", shadowRoot });
+  fab._restoreFocus();
+  assert(!focused, "must not steal focus while the modal is shut");
+});
+
+test("restoring focus tolerates a field that has gone", async () => {
+  const shadowRoot = {
+    innerHTML: "", addEventListener() {}, activeElement: null,
+    getElementById: () => null,
+    get firstChild() { return this.innerHTML ? {} : null; },
+  };
+  const fab = await makeFab({ _state: ENROLLED, _open: true, _focusId: "orb-body", shadowRoot });
+  fab._restoreFocus();  // must not throw
 });
 
 /* --- binding ------------------------------------------------------------- */
