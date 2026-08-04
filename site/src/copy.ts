@@ -148,10 +148,16 @@ export const FEATURES: FeatureCard[] = [
     img: "/demos/maintenance.png",
   },
   {
-    title: "Spawning & water changes",
-    body: "The coral spawning scheduler and the automatic water change engine — volume-first, with layered safety.",
-    img: "/demos/awc.png",
+    title: "Coral spawning",
+    body: "The lunar-calendar scheduler: pick a reef, and OpenReef compiles dusk ramps, moonlight and pump slick-mode into a programme your controller runs.",
+    img: "/demos/spawning.png",
     href: "/features/coral-spawning/",
+  },
+  {
+    title: "Automatic water changes",
+    body: "Volume-first AWC on pumps you choose — batch or trickle, drift detection, honest dilution maths, layered safety.",
+    img: "/demos/awc.png",
+    href: "/features/automatic-water-change/",
   },
   {
     title: "Dosing advisor",
@@ -163,11 +169,13 @@ export const FEATURES: FeatureCard[] = [
     title: "ICP import",
     body: "Drop in a Triton CSV or an ATI PDF. OpenReef normalises it, flags what's off, and folds it into your trends.",
     img: "/demos/icp.png",
+    href: "/features/icp-import/",
   },
   {
     title: "Camera intelligence",
     body: "Event capture, timelapses, shareable overlays and feed-watch — a cheap USB camera doing expensive-camera things.",
     img: "/demos/cameras.png",
+    href: "/features/camera-intelligence/",
   },
 ];
 

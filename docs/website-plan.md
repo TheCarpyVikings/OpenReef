@@ -109,9 +109,17 @@ still readable), full SEO meta + crawlable HTML for every claim. Email form post
   comparison table (cheeky + Apex-owner only — it must never ambush a first-time
   reader, the image is rude); UK prices verified against All Things Aquatic /
   Charterhouse Aquatics (see below).
+- DONE 2026-07-26 — **Realism pass v1** (Track 1, rendering-only): bloom/vignette/
+  SMAA post-processing, camera-following projector-spotlight caustics, curved
+  tapered gradient coral tubes + craggy displaced rocks (each merged to a single
+  draw call with baked vertex colours), multi-octave water with distance haze.
+  All gated off for low-power devices. **Track 2 (asset realism) still open**:
+  replace hero corals with real scanned models (Smithsonian Open Access has CC0
+  coral photogrammetry) or user's Blender art; needs curation + decimation to
+  web weight (gltf-transform pipeline) — the one graphics item needing external
+  input.
 - REMAINING (blocked on user assets): real 30-day trend JSON from the actual tank
-  powering the sandbox ("This is not demo data. This is my tank, last month."),
-  Blender coral upgrade, mobile QA pass.
+  powering the sandbox ("This is not demo data. This is my tank, last month.").
 
 **Verified UK prices (July 2026)** — the site's only hard money claims, keep sourced:
 Apex A3 Pro system £999.99 · Trident £774.99 · Trident NP £739.95 · Trident reagents
@@ -119,6 +127,23 @@ Apex A3 Pro system £999.99 · Trident £774.99 · Trident NP £739.95 · Triden
 UK £324.95 · ATK £269.95. Ticker total lands ≈£2,942 vs OpenReef £0.00.
 - RULE: all feature screenshots must come from the current HA integration, never
   the old v1 Next.js app.
+
+**Phase 2.5 (deep-dive pages)** — started 2026-07-26. Site is now a Vite
+multi-page build: each feature deep dive is its own static HTML entry (no 3D
+payload, FAQ + FAQPage JSON-LD, canonical/OG meta, honest-limits section, buddy
+one-liner), linked from the features grid via "Deep dive →". Shipped:
+`/features/coral-spawning/`, `/features/dosing-advisor/`,
+`/features/automatic-water-change/`, `/features/icp-import/`,
+`/features/camera-intelligence/` (2026-08-04 — the combined
+"Spawning & water changes" card was split into two cards so every deep dive
+has its own card + screenshot; spawning.png finally in use). robots.txt +
+sitemap.xml live. Backlog (add via `src/pages/*` + an HTML entry in
+vite.config.ts, then sitemap): maintenance, equipment safety model.
+NOTE: cameras.png was captured with the camera offline (black live view,
+"0/1 mapped") — re-run `pnpm capture` with the camera up when convenient. NOTE 2026-07-26: first screenshot capture
+was photobombed by the guided tour — harness now pre-sets
+`openreef:onboarding:v1:done` + `openreef:buddy=off` and click-skips as
+fallback; re-run `pnpm capture` for clean shots.
 
 **Phase 3 (the manual):** rewrite the manual as indexable HTML pages in this repo,
 served under the site (SSG). Announce to the email list. This is the SEO engine;
