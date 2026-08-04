@@ -32,7 +32,7 @@ export default async function TestersPage() {
     supabase.from("beta_feedback").select("tester_id"),
     supabase
       .from("beta_signups")
-      .select("id, email, source, note, created_at, tester_id")
+      .select("id, email, source, note, tank, has_apex, ha_experience, created_at, tester_id")
       .is("tester_id", null)
       .order("created_at", { ascending: false })
       .limit(50),
@@ -300,7 +300,23 @@ export default async function TestersPage() {
             <tbody>
               {(signups.data ?? []).map((signup) => (
                 <tr key={signup.id}>
-                  <td>{signup.email}</td>
+                  <td>
+                    {signup.email}
+                    {/* The screening answers, right where the invite decision
+                        happens. has_apex leads because beating Fusion for Apex
+                        owners is the whole differentiation bet. */}
+                    <div className="who" style={{ fontSize: 12, marginTop: 3 }}>
+                      {signup.has_apex === true ? (
+                        <span className="badge tone-new" style={{ marginRight: 4 }}>
+                          Apex
+                        </span>
+                      ) : null}
+                      {signup.ha_experience ? `HA: ${signup.ha_experience}` : null}
+                      {signup.tank ? (
+                        <div style={{ marginTop: 2 }}>{signup.tank}</div>
+                      ) : null}
+                    </div>
+                  </td>
                   <td>
                     {/* What they ticked on the site. Someone who asked for a beta
                         seat is a candidate; someone who only wants the manual is

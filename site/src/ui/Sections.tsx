@@ -601,6 +601,12 @@ const mailtoFallback = (email: string, interests: string) =>
 export function Cta() {
   const [email, setEmail] = useState("");
   const [wants, setWants] = useState({ manual: true, beta: true, kits: false });
+  // Screening — asked only when a beta seat is requested, so a manual-only
+  // signup stays a one-field form. These are what let beta invitations be
+  // deliberate instead of first-come-first-served.
+  const [tank, setTank] = useState("");
+  const [hasApex, setHasApex] = useState(false);
+  const [haExperience, setHaExperience] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "done" | "failed">("idle");
   const interests = Object.entries(wants)
     .filter(([, v]) => v)
@@ -614,7 +620,18 @@ export function Cta() {
       const response = await fetch(FORM_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, source: "site", note: interests }),
+        body: JSON.stringify({
+          email,
+          source: "site",
+          note: interests,
+          ...(wants.beta
+            ? {
+                tank: tank.trim() || undefined,
+                hasApex,
+                haExperience: haExperience || undefined,
+              }
+            : {}),
+        }),
       });
       // fetch only rejects on network failure — a 500 resolves happily, and
       // telling someone they're on a list they never reached is worse than
@@ -671,6 +688,40 @@ export function Cta() {
                 Kit waitlist
               </label>
             </div>
+            {wants.beta && (
+              <div className="cta-screening">
+                <p className="cta-screening-lead">
+                  Thirty seconds about your setup — beta seats go to tanks we can
+                  actually support well:
+                </p>
+                <input
+                  type="text"
+                  value={tank}
+                  onChange={(e) => setTank(e.target.value)}
+                  placeholder="Your tank — e.g. 450L mixed reef, 3 years"
+                  maxLength={200}
+                  aria-label="Your tank (size, type, age)"
+                />
+                <select
+                  value={haExperience}
+                  onChange={(e) => setHaExperience(e.target.value)}
+                  aria-label="Home Assistant experience"
+                >
+                  <option value="">Home Assistant experience…</option>
+                  <option value="new">New to it — happy to learn</option>
+                  <option value="comfortable">Comfortable — I run it already</option>
+                  <option value="advanced">Advanced — ESPHome, YAML, the lot</option>
+                </select>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={hasApex}
+                    onChange={(e) => setHasApex(e.target.checked)}
+                  />
+                  I run a Neptune Apex / Trident
+                </label>
+              </div>
+            )}
             <button className="btn btn-primary" type="submit" disabled={status === "sending"}>
               {status === "sending" ? "Signing you up…" : "Count me in"}
             </button>

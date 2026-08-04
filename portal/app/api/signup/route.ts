@@ -54,12 +54,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid_email" }, { status: 400, headers: CORS });
   }
 
+  // Screening extras — present only when the site form's "beta seat" box was
+  // ticked. Anything malformed is dropped rather than rejected: losing a
+  // screening answer is fine, losing the signup over it is not.
+  const haExperience = clip(body.haExperience, 16);
   const supabase = serviceClient();
   const { error } = await supabase.from("beta_signups").upsert(
     {
       email,
       source: clip(body.source, 64) || "site",
       note: clip(body.note, 2000) || null,
+      tank: clip(body.tank, 200) || null,
+      has_apex: typeof body.hasApex === "boolean" ? body.hasApex : null,
+      ha_experience: ["new", "comfortable", "advanced"].includes(haExperience)
+        ? haExperience
+        : null,
     },
     { onConflict: "email", ignoreDuplicates: true },
   );
