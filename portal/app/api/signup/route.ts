@@ -15,17 +15,36 @@ export const dynamic = "force-dynamic";
  * Unlike the other routes this IS browser-called, hence the CORS headers.
  */
 
-const CORS = {
-  "Access-Control-Allow-Origin": process.env.SITE_ORIGIN ?? "https://openreef.co.uk",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+/*
+ * SITE_ORIGIN is a comma-separated allowlist, because the marketing site is
+ * reachable on both the apex and www — and a visitor who happens to land on
+ * www would otherwise get a silent CORS failure on submit, which looks exactly
+ * like the form being broken.
+ *
+ * The matching origin is echoed back rather than a wildcard, so the allowlist
+ * stays meaningful. `Vary: Origin` is not optional here: without it a CDN can
+ * cache one origin's response and serve it to another.
+ */
+function corsHeaders(request: Request): Record<string, string> {
+  const allowed = (process.env.SITE_ORIGIN ?? "https://openreef.co.uk")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const origin = request.headers.get("origin") ?? "";
+  return {
+    "Access-Control-Allow-Origin": allowed.includes(origin) ? origin : allowed[0],
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  };
+}
 
-export function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: CORS });
+export function OPTIONS(request: Request) {
+  return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
 }
 
 export async function POST(request: Request) {
+  const CORS = corsHeaders(request);
   const body = await readJson(request);
   const email = clip(body.email, 320).toLowerCase();
 

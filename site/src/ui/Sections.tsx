@@ -586,34 +586,42 @@ export function Compare({ tone, hasApex }: { tone: Tone; hasApex: boolean | null
 
 /* ------------------------------------ CTA ------------------------------------- */
 
-const FORM_ENDPOINT = ""; // wire to Buttondown/Formspree/Tally before launch
+// The beta portal's waiting list. Signups land in Testers → Waiting list, where
+// a beta seat is one click. Same system as the feedback inbox, so interest and
+// roster are never two places that disagree.
+const FORM_ENDPOINT = "https://beta.openreef.co.uk/api/signup";
+
+// Fallback when the portal is unreachable. A lead lost to a network blip is a
+// lead lost forever, so we always offer a way through rather than an apology.
+const mailtoFallback = (email: string, interests: string) =>
+  `mailto:thecarpyvikings@gmail.com?subject=${encodeURIComponent(
+    "OpenReef: manual + beta signup"
+  )}&body=${encodeURIComponent(`Email: ${email}\nInterested in: ${interests}`)}`;
 
 export function Cta() {
   const [email, setEmail] = useState("");
   const [wants, setWants] = useState({ manual: true, beta: true, kits: false });
-  const [done, setDone] = useState(false);
+  const [status, setStatus] = useState<"idle" | "sending" | "done" | "failed">("idle");
+  const interests = Object.entries(wants)
+    .filter(([, v]) => v)
+    .map(([k]) => k)
+    .join(", ");
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const interests = Object.entries(wants)
-      .filter(([, v]) => v)
-      .map(([k]) => k)
-      .join(", ");
-    if (FORM_ENDPOINT) {
-      try {
-        await fetch(FORM_ENDPOINT, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, interests }),
-        });
-        setDone(true);
-      } catch {
-        setDone(false);
-      }
-    } else {
-      window.location.href = `mailto:thecarpyvikings@gmail.com?subject=${encodeURIComponent(
-        "OpenReef: manual + beta signup"
-      )}&body=${encodeURIComponent(`Email: ${email}\nInterested in: ${interests}`)}`;
-      setDone(true);
+    setStatus("sending");
+    try {
+      const response = await fetch(FORM_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, source: "site", note: interests }),
+      });
+      // fetch only rejects on network failure — a 500 resolves happily, and
+      // telling someone they're on a list they never reached is worse than
+      // telling them it broke.
+      setStatus(response.ok ? "done" : "failed");
+    } catch {
+      setStatus("failed");
     }
   };
   return (
@@ -625,7 +633,7 @@ export function Cta() {
           inbox the day it ships. Beta seats go to people who like finding bugs almost as much as
           finding pods.
         </p>
-        {done ? (
+        {status === "done" ? (
           <p className="callout">Cheers — you're on the list. Go feed your fish. 🐟</p>
         ) : (
           <form onSubmit={submit} className="cta-form">
@@ -663,9 +671,16 @@ export function Cta() {
                 Kit waitlist
               </label>
             </div>
-            <button className="btn btn-primary" type="submit">
-              Count me in
+            <button className="btn btn-primary" type="submit" disabled={status === "sending"}>
+              {status === "sending" ? "Signing you up…" : "Count me in"}
             </button>
+            {status === "failed" && (
+              <p className="callout" role="alert">
+                That didn't go through — our end, not yours. Try again, or{" "}
+                <a href={mailtoFallback(email, interests)}>email it over</a> and you'll
+                be added by hand.
+              </p>
+            )}
           </form>
         )}
         <p className="fine-print">

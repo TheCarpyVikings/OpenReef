@@ -31,7 +31,7 @@ export default async function TestersPage() {
     supabase.from("beta_feedback").select("tester_id"),
     supabase
       .from("beta_signups")
-      .select("id, email, source, created_at, tester_id")
+      .select("id, email, source, note, created_at, tester_id")
       .is("tester_id", null)
       .order("created_at", { ascending: false })
       .limit(50),
@@ -205,6 +205,24 @@ export default async function TestersPage() {
               {(signups.data ?? []).map((signup) => (
                 <tr key={signup.id}>
                   <td>{signup.email}</td>
+                  <td>
+                    {/* What they ticked on the site. Someone who asked for a beta
+                        seat is a candidate; someone who only wants the manual is
+                        not, and inviting them is a favour neither of you wanted. */}
+                    {(signup.note ?? "")
+                      .split(",")
+                      .map((part: string) => part.trim())
+                      .filter(Boolean)
+                      .map((interest: string) => (
+                        <span
+                          key={interest}
+                          className={`badge ${interest === "beta" ? "tone-new" : "tone-seen"}`}
+                          style={{ marginRight: 4 }}
+                        >
+                          {interest}
+                        </span>
+                      ))}
+                  </td>
                   <td className="who">{signup.source}</td>
                   <td className="when">{ago(signup.created_at)}</td>
                   <td>
