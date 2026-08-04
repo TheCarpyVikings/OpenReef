@@ -1,0 +1,14 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env*.local
+# The root .gitignore has a blanket `.env*`, which would swallow this one.
+# It holds placeholders only, and README.md tells you to copy it — so it has
+# to actually be in the repo.
+!.env.example
+*.tsbuildinfo
+next-env.d.ts
+.vercel
+.DS_Store

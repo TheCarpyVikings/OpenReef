@@ -152,6 +152,7 @@ from .const import (
     salinity_value_looks_like_sg,
 )
 from . import awc as awc_engine
+from . import beta as beta_feedback  # BETA-FEEDBACK: remove after beta (see docs/beta-feedback.md)
 from . import dosing as dosing_engine
 from . import guardian as guardian_engine
 from . import icp
@@ -12998,6 +12999,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_guardian_chat)
     websocket_api.async_register_command(hass, websocket_guardian_voice)
     websocket_api.async_register_command(hass, websocket_guardian_simli_session)
+    beta_feedback.async_register_ws(hass)  # BETA-FEEDBACK: remove after beta
 
     hass.services.async_register(
         DOMAIN,
@@ -13102,6 +13104,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
         _async_kick_dosing_sync(hass, entry)
     await _async_finalize_orphaned_feed_sessions(hass, entry)
     await _async_setup_vision(hass, entry, normalised)
+    await beta_feedback.async_start(hass, entry)  # BETA-FEEDBACK: remove after beta
     return True
 
 
@@ -13123,6 +13126,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_awc_timer(hass)
     _clear_awc_scheduler(hass)
     _clear_dosing(hass)
+    beta_feedback.async_stop(hass)  # BETA-FEEDBACK: remove after beta
     _store = hass.data.setdefault(DOMAIN, {})
     _awc_restore = _store.pop(AWC_ATO_RESTORE_UNSUB, None)
     if _awc_restore is not None:

@@ -6283,6 +6283,7 @@ class OpenReefPanel extends HTMLElement {
       // refresh), re-attach the live stream — the old <video> node is gone.
       this.shadowRoot.innerHTML = `${this._styles()}${this._pulseScreen()}`;
       this._startPulseRuntime();
+      this._mountBetaFab();  // BETA-FEEDBACK: remove after beta
       return;
     }
 
@@ -6341,6 +6342,28 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "guardian") {
       requestAnimationFrame(() => this._guardianAfterRender());
     }
+    this._mountBetaFab();  // BETA-FEEDBACK: remove after beta
+  }
+
+  // BETA-FEEDBACK: whole method is beta scaffolding — delete it, the two calls
+  // tagged BETA-FEEDBACK, and frontend/openreef-beta.js to remove the feature.
+  //
+  // The element is created ONCE and re-appended after each innerHTML rewrite:
+  // re-attaching the same node preserves its shadow DOM and JS state, so an
+  // open modal and a half-typed message survive a background hass update. It
+  // is position:fixed, so it never participates in the page's layout.
+  //
+  // If openreef-beta.js is gone, the import rejects, <openreef-beta-fab> stays
+  // an undefined element (no box, no content) and nothing else notices.
+  _mountBetaFab() {
+    if (!this._betaFab) {
+      this._betaFab = document.createElement("openreef-beta-fab");
+      import("/openreef_static/openreef-beta.js").catch(() => {});
+    }
+    this._betaFab.context = { tab: this._activeTab, version: this._integrationVersion };
+    this._betaFab.support = () => this._supportSummaryText();
+    this._betaFab.hass = this._hass;
+    this.shadowRoot.appendChild(this._betaFab);
   }
 
   // --- Guardian (Lagertha live avatar) ------------------------------------
