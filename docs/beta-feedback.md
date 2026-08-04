@@ -4,7 +4,10 @@ A floating button in every corner of the OpenReef panel that turns a tester's
 half-formed "hey, this looks wrong" into a triageable report with the
 diagnostics already attached — and tells them when it gets acted on.
 
-Shipped in **0.7.0**.
+Shipped in **0.7.0**; working from **0.7.2** (0.7.0's button never rendered,
+0.7.1's blurred you mid-sentence — both were in the seam between the element
+and the panel, and both were invisible to tests that exercised the element on
+its own).
 
 > **This is scaffolding.** Every design decision below optimises for being
 > removed cleanly when the beta ends. See [Removal](#removal) — it is four
@@ -202,6 +205,13 @@ grep -rn "BETA-FEEDBACK" custom_components/     # delete every line it finds
 That grep currently returns six lines in `__init__.py` and
 `openreef-panel.js`, plus `_mountBetaFab()`.
 
+**One change is deliberately NOT tagged and should stay:** `_isEditingFormControl()`
+in the panel now walks down through nested shadow roots to find the genuinely
+focused node, instead of stopping at a child component's host. Beta feedback is
+what exposed it, but it is a generic correctness fix — any future panel component
+with its own text fields needs it, and without it the panel redraws while someone
+is typing into one.
+
 Then either archive or drop the `portal/` directory and the Supabase project.
 
 **Why there is nothing else to unwind:**
@@ -223,7 +233,7 @@ Then either archive or drop the `portal/` directory and the Supabase project.
 
 ## Tests
 
-`tests/test_beta.py` (29) and `tests/test_panel_beta.mjs` (18), both picked up
+`tests/test_beta.py` (29) and `tests/test_panel_beta.mjs` (28), both picked up
 by CI's discovery loop. They pin the things that would be genuinely bad to get
 wrong: redaction catches an HA long-lived token; consent toggles empty the
 field rather than hiding it; `unsafe` cannot be filed as minor; a closed item
