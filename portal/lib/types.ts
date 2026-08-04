@@ -3,7 +3,7 @@
  *  custom_components/openreef/beta.py — three copies of the same list, because
  *  they live in three languages and the database is the one that enforces it. */
 
-export const KINDS = ["bug", "feature", "idea", "question", "praise", "unsafe"] as const;
+export const KINDS = ["bug", "feature", "idea", "question", "praise", "unsafe", "pulse", "nps"] as const;
 export const SEVERITIES = ["low", "normal", "high", "blocker"] as const;
 export const STATUSES = [
   "new",
@@ -31,6 +31,9 @@ export const KIND_META: Record<Kind, { emoji: string; label: string }> = {
   question: { emoji: "❓", label: "Question" },
   praise: { emoji: "🩵", label: "Nice thing" },
   unsafe: { emoji: "⚠️", label: "Unsafe" },
+  // Prompted micro-feedback — one-tap answers, so the body IS the whole story.
+  pulse: { emoji: "💓", label: "Pulse" },
+  nps: { emoji: "📈", label: "NPS" },
 };
 
 export const STATUS_META: Record<Status, { label: string; tone: string }> = {

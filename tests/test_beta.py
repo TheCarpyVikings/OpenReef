@@ -277,6 +277,77 @@ def test_sync_reports_activation():
     assert activation["sensorsEnabled"] == 1 and activation["sensorsMapped"] == 0
 
 
+# --- prompted micro-feedback ------------------------------------------------
+# due_prompt is pure and clock-injected; these cases ARE the cadence policy.
+
+
+def _at(days_ago, now=None):
+    from datetime import datetime, timedelta, timezone
+    base = now or datetime(2026, 8, 4, 12, 0, 0, tzinfo=timezone.utc)
+    return (base - timedelta(days=days_ago)).isoformat(timespec="seconds")
+
+
+def _prompt_now():
+    from datetime import datetime, timezone
+    return datetime(2026, 8, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_no_prompt_when_not_enrolled_or_brand_new():
+    assert beta.due_prompt(beta._blank(), _prompt_now()) == ""
+    fresh = _enrolled_state(enrolledAt=_at(2))
+    assert beta.due_prompt(fresh, _prompt_now()) == "", "first week must stay quiet"
+
+
+def test_pulse_after_a_quiet_week():
+    state = _enrolled_state(enrolledAt=_at(10))
+    assert beta.due_prompt(state, _prompt_now()) == "pulse"
+
+
+def test_recent_feedback_of_any_kind_suppresses_the_pulse():
+    state = _enrolled_state(
+        enrolledAt=_at(10),
+        items=[{"ref": "OR-1", "kind": "praise", "status": "new", "body": "b", "createdAt": _at(3)}],
+    )
+    assert beta.due_prompt(state, _prompt_now()) == ""
+    # ...but week-old feedback doesn't.
+    state["items"][0]["createdAt"] = _at(9)
+    assert beta.due_prompt(state, _prompt_now()) == "pulse"
+
+
+def test_pulse_repeats_fortnightly_at_most():
+    state = _enrolled_state(enrolledAt=_at(40), lastPulseAt=_at(5), lastNpsAt=_at(9))
+    assert beta.due_prompt(state, _prompt_now()) == ""
+    state["lastPulseAt"] = _at(15)
+    assert beta.due_prompt(state, _prompt_now()) == "pulse"
+
+
+def test_nps_fires_once_at_day_30_and_outranks_the_pulse():
+    state = _enrolled_state(enrolledAt=_at(31))
+    assert beta.due_prompt(state, _prompt_now()) == "nps"
+    state["lastNpsAt"] = _at(1)
+    # Answered -> never again; falls through to normal pulse rules.
+    assert beta.due_prompt(state, _prompt_now()) == "pulse"
+
+
+def test_answering_a_prompt_stamps_its_clock():
+    hass, entry = _hass_with(_enrolled_state(enrolledAt=_at(10)))
+    connection = FakeConnection()
+    poster = _Poster((True, {"ref": "OR-0090"}, ""))
+    original, beta._post = beta._post, poster
+    try:
+        run(beta.websocket_beta_submit(hass, connection, {"id": 1, "kind": "pulse", "body": "Going well"}))
+    finally:
+        beta._post = original
+    state = beta._state(entry)
+    assert state["lastPulseAt"], "pulse answer must stamp lastPulseAt"
+    assert beta.due_prompt(state, _prompt_now()) == "", "a just-answered pulse must not re-prompt"
+
+
+def test_public_state_exposes_the_due_prompt():
+    state = _enrolled_state(enrolledAt=_at(10))
+    assert beta.public_state(state)["duePrompt"] == "pulse"
+
+
 # --- sync folding -----------------------------------------------------------
 
 

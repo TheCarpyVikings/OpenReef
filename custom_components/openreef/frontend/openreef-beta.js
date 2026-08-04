@@ -79,6 +79,7 @@ class OpenReefBetaFab extends HTMLElement {
     this._code = "";
     this._acceptTerms = false;
     this._justEnrolled = false;
+    this._promptDone = false;
     this._loaded = false;
     this._bound = false;
     this._focusId = "";
@@ -228,6 +229,7 @@ class OpenReefBetaFab extends HTMLElement {
   _close() {
     this._open = false;
     this._showsPayload = false;
+    this._promptDone = false;
     this._focusId = "";
     this._render();
   }
@@ -366,19 +368,25 @@ class OpenReefBetaFab extends HTMLElement {
   /** Cheap path for hass churn: only the badge can change. */
   _renderFab() {
     const badge = this.shadowRoot.querySelector(".orb-badge");
+    if (!badge) return;
     const unread = this._state?.unread || 0;
-    if (badge) badge.textContent = unread > 9 ? "9+" : String(unread);
-    if (badge) badge.hidden = !unread;
+    const prompt = !unread && this._state?.duePrompt;
+    badge.textContent = unread ? (unread > 9 ? "9+" : String(unread)) : "?";
+    badge.classList.toggle("is-prompt", Boolean(prompt));
+    badge.hidden = !unread && !prompt;
   }
 
   _fab() {
     const unread = this._state?.unread || 0;
+    // A due prompt gets a soft "?" — same slot as the unread dot, calmer
+    // colour, and unread always wins (a reply from Reece outranks a nag).
+    const prompt = !unread && this._state?.duePrompt;
     return `
       <button class="orb-fab" type="button" data-orb="open"
               aria-label="Ask Reece — send beta feedback">
         <span class="orb-fab-icon" aria-hidden="true">💬</span>
         <span class="orb-fab-label">Ask Reece</span>
-        <span class="orb-badge" ${unread ? "" : "hidden"}>${unread > 9 ? "9+" : unread}</span>
+        <span class="orb-badge ${prompt ? "is-prompt" : ""}" ${unread || prompt ? "" : "hidden"}>${unread ? (unread > 9 ? "9+" : unread) : "?"}</span>
       </button>
     `;
   }
@@ -501,6 +509,7 @@ class OpenReefBetaFab extends HTMLElement {
     const showSeverity = this._draft.kind === "bug";
     return `
       ${welcome}
+      ${this._promptCard()}
       ${this._state?.queued ? `<p class="orb-warn">${this._state.queued} message${this._state.queued === 1 ? "" : "s"} waiting to send — they'll go automatically.</p>` : ""}
       ${this._error ? `<p class="orb-error">${this._esc(this._error)}</p>` : ""}
 
@@ -564,6 +573,66 @@ class OpenReefBetaFab extends HTMLElement {
       case "praise": return "What's working well? Knowing what to protect is as useful as knowing what to fix.";
       default: return "Half-formed thoughts welcome.";
     }
+  }
+
+  /*
+   * Prompted micro-feedback. The backend decides WHEN (due_prompt — a week of
+   * silence for a pulse, day 30 once-ever for NPS); the panel only decides
+   * HOW: one tap, no typing, no support summary attached — it's a vibe check,
+   * not a diagnostic, and keeping it feather-light is what makes people
+   * actually answer instead of learning to dismiss.
+   */
+  _promptCard() {
+    const due = this._state?.duePrompt;
+    if (!due || this._justEnrolled) return "";
+    if (this._promptDone) {
+      return `<div class="orb-prompt"><p class="orb-prompt-thanks">Noted — thank you 🩵</p></div>`;
+    }
+    if (due === "nps") {
+      return `
+        <div class="orb-prompt">
+          <p class="orb-prompt-q">One-off question: how likely are you to recommend
+          OpenReef to a fellow reefer? <span class="orb-optional">0 = not a chance, 10 = already have</span></p>
+          <div class="orb-chips">
+            ${Array.from({ length: 11 }, (_, n) => `
+              <button type="button" class="orb-chip small" data-orb="prompt-nps" data-id="${n}">${n}</button>
+            `).join("")}
+          </div>
+        </div>`;
+    }
+    return `
+      <div class="orb-prompt">
+        <p class="orb-prompt-q">Quick one — how's OpenReef treating you?</p>
+        <div class="orb-chips">
+          <button type="button" class="orb-chip" data-orb="prompt-pulse" data-id="Going well">👍 Going well</button>
+          <button type="button" class="orb-chip" data-orb="prompt-pulse" data-id="It's OK">😐 It's OK</button>
+          <button type="button" class="orb-chip" data-orb="prompt-pulse" data-id="Struggling">👎 Struggling</button>
+        </div>
+        <p class="orb-fine">One tap, that's it. "Struggling" gets a follow-up from Reece, not a survey.</p>
+      </div>`;
+  }
+
+  async _submitPrompt(kind, body) {
+    if (this._busy) return;
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._ws({
+        type: "openreef/beta_submit",
+        kind,
+        body,
+        tab: this._context.tab || "",
+        userAgent: navigator.userAgent || "",
+        support: "",
+      });
+      if (result?.state) this._state = result.state;
+      this._promptDone = true;
+    } catch {
+      // A failed vibe check is not worth an error banner; the prompt simply
+      // stays for next time.
+    }
+    this._busy = false;
+    this._render();
   }
 
   _payloadPreview() {
@@ -719,6 +788,8 @@ class OpenReefBetaFab extends HTMLElement {
       if (action === "sev") { this._captureDraft(); this._draft.severity = id; this._render(); return; }
       if (action === "payload") { this._captureDraft(); this._showsPayload = !this._showsPayload; this._render(); return; }
       if (action === "again") { this._sentRef = ""; this._error = ""; this._render(); return; }
+      if (action === "prompt-pulse") { this._captureDraft(); this._submitPrompt("pulse", id); return; }
+      if (action === "prompt-nps") { this._captureDraft(); this._submitPrompt("nps", `NPS ${id}`); return; }
       if (action === "welcome-dismiss") { this._captureDraft(); this._justEnrolled = false; this._render(); return; }
       if (action === "enrol") return this._enrol();
       if (action === "submit") return this._submit();
@@ -873,6 +944,13 @@ class OpenReefBetaFab extends HTMLElement {
         .orb-warn { background: #2f2614; border: 1px solid #a16207; color: #fde68a; }
         .orb-warn.danger { background: #2b171c; border-color: #ef4444; color: #fecaca; }
 
+        .orb-badge.is-prompt { background: #0e7490; }
+        .orb-prompt {
+          margin: 4px 0 14px; padding: 13px; border-radius: 9px;
+          border: 1px solid #0e7490; background: #0c2530;
+        }
+        .orb-prompt-q { margin: 0 0 10px; font-size: 13.5px; line-height: 1.5; color: #bae6fd; }
+        .orb-prompt-thanks { margin: 0; font-size: 13.5px; color: #bae6fd; }
         .orb-link { color: var(--orb-accent); text-decoration: underline; text-underline-offset: 2px; }
         .orb-disclose {
           display: block; margin-top: 16px; background: none; border: 0; padding: 0;

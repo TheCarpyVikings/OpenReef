@@ -83,7 +83,13 @@ QUEUE_MAX = 20
 ITEMS_MAX = 50
 ANNOUNCEMENTS_MAX = 10
 
-KINDS = ("bug", "feature", "idea", "question", "praise", "unsafe")
+#: Prompted micro-feedback cadence. A pulse is offered after a week of silence
+#: (and at most fortnightly); the NPS question fires once ever, a month in.
+PULSE_QUIET_DAYS = 7
+PULSE_REPEAT_DAYS = 14
+NPS_AFTER_DAYS = 30
+
+KINDS = ("bug", "feature", "idea", "question", "praise", "unsafe", "pulse", "nps")
 SEVERITIES = ("low", "normal", "high", "blocker")
 STATUSES = ("new", "triaged", "planned", "in_progress", "actioned", "wontfix", "duplicate")
 
@@ -150,6 +156,9 @@ def _blank() -> dict[str, Any]:
         "token": "",
         "installId": "",
         "testerName": "",
+        "enrolledAt": "",
+        "lastPulseAt": "",
+        "lastNpsAt": "",
         "shareSupport": True,
         "shareLogs": True,
         "items": [],
@@ -405,6 +414,59 @@ def activation_snapshot(settings: Any) -> dict[str, Any]:
     return blank
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    """ISO timestamp -> aware datetime, or None. Tolerates trailing Z."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def due_prompt(state: dict[str, Any], now: datetime) -> str:
+    """Which micro-feedback prompt (if any) the panel should offer.
+
+    Pure and clock-injected, because "when do we nag" is exactly the kind of
+    logic that silently rots: the cases live in tests, not in observation.
+
+    Precedence: the once-ever NPS outranks a pulse — it is rarer and more
+    valuable, and a tester who answers it has by definition just been heard,
+    so the pulse's silence clock restarts anyway.
+
+    Deliberately gentle: no prompt in the first week, never more than one
+    pulse a fortnight, and recent feedback of ANY kind suppresses it — the
+    research failure this avoids is survey fatigue teaching people to dismiss
+    you, which is worse than not asking.
+    """
+    if not state.get("enabled") or not state.get("token"):
+        return ""
+    enrolled = _parse_iso(state.get("enrolledAt"))
+    if enrolled is None:
+        return ""
+    age = now - enrolled
+    if age >= timedelta(days=NPS_AFTER_DAYS) and not state.get("lastNpsAt"):
+        return "nps"
+    if age < timedelta(days=PULSE_QUIET_DAYS):
+        return ""
+    last_pulse = _parse_iso(state.get("lastPulseAt"))
+    if last_pulse is not None and now - last_pulse < timedelta(days=PULSE_REPEAT_DAYS):
+        return ""
+    newest = max(
+        (
+            item.get("createdAt") or ""
+            for item in state.get("items") or []
+            if isinstance(item, dict)
+        ),
+        default="",
+    )
+    newest_at = _parse_iso(newest)
+    if newest_at is not None and now - newest_at < timedelta(days=PULSE_QUIET_DAYS):
+        return ""
+    return "pulse"
+
+
 def merge_sync(state: dict[str, Any], data: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Fold a portal sync response into local state.
 
@@ -501,6 +563,7 @@ def public_state(state: dict[str, Any]) -> dict[str, Any]:
         "lastError": state.get("lastError") or "",
         "unread": sum(1 for item in items if item.get("unread"))
         + sum(1 for note in notes if note.get("unread")),
+        "duePrompt": due_prompt(state, datetime.now(timezone.utc)),
         "version": _openreef_version(),
     }
 
@@ -554,6 +617,10 @@ async def _async_sync(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]
     try:
         endpoint = state.get("endpoint") or DEFAULT_ENDPOINT
         token = state.get("token") or ""
+        if not state.get("enrolledAt"):
+            # Enrolled before prompts existed: start their clock now rather
+            # than guessing — a late first prompt beats a wrong instant one.
+            state["enrolledAt"] = _now()
 
         # Flush first: a tester who wrote feedback offline should see it land
         # before we tell them anything about what Reece has been doing.
@@ -694,6 +761,7 @@ async def websocket_beta_enrol(
             "installId": install_id,
             "token": _clip(data.get("token"), 200),
             "testerName": _clip(data.get("testerName"), 120),
+            "enrolledAt": _now(),
             "lastError": "",
         }
     )
@@ -791,6 +859,10 @@ async def websocket_beta_submit(
         state.get("token") or "",
     )
     if ok:
+        if payload["kind"] == "pulse":
+            state["lastPulseAt"] = _now()
+        elif payload["kind"] == "nps":
+            state["lastNpsAt"] = _now()
         ref = _clip(data.get("ref"), 32)
         state["items"] = [
             {

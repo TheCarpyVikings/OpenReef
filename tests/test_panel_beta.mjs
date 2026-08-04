@@ -129,8 +129,9 @@ test("visible once enrolled", async () => {
 
 test("badge is hidden at zero and shown when unread", async () => {
   // Matched against the badge's own attribute — the FAB icon carries
-  // aria-hidden, so a bare includes("hidden") passes no matter what.
-  const badgeHidden = /class="orb-badge"\s+hidden/;
+  // aria-hidden, so a bare includes("hidden") passes no matter what. The class
+  // list may carry the is-prompt modifier, hence [^"]*.
+  const badgeHidden = /class="orb-badge[^"]*"\s+hidden/;
 
   const quiet = await makeFab({ _state: { ...ENROLLED, unread: 0 } });
   assert(badgeHidden.test(quiet._fab()), "zero unread should hide the badge");
@@ -427,6 +428,49 @@ test("a fresh enrolment shows the welcome beat with the /welcome link", async ()
   // And it's a one-time beat, not permanent chrome.
   const later = await makeFab({ _state: ENROLLED, _justEnrolled: false });
   assert(!later._sendView().includes("/welcome"), "welcome must disappear once dismissed");
+});
+
+/* --- prompted micro-feedback ---------------------------------------------
+ * The backend decides WHEN (due_prompt); the panel only decides HOW — one
+ * tap, no typing. These pin that the card renders per prompt kind, vanishes
+ * when nothing is due, and that the FAB signals a due prompt without
+ * impersonating an unread reply. */
+
+test("a due pulse renders the three one-tap answers", async () => {
+  const fab = await makeFab({ _state: { ...ENROLLED, duePrompt: "pulse" } });
+  const markup = fab._sendView();
+  assert(markup.includes("Going well"), "pulse answers missing");
+  assert(markup.includes('data-orb="prompt-pulse"'), "pulse action missing");
+  assert(!markup.includes('data-orb="prompt-nps"'), "must not show NPS at the same time");
+});
+
+test("a due NPS renders the 0-10 row", async () => {
+  const fab = await makeFab({ _state: { ...ENROLLED, duePrompt: "nps" } });
+  const markup = fab._sendView();
+  assert(markup.includes('data-orb="prompt-nps" data-id="0"'), "0 missing");
+  assert(markup.includes('data-orb="prompt-nps" data-id="10"'), "10 missing");
+});
+
+test("no due prompt means no card", async () => {
+  const fab = await makeFab({ _state: { ...ENROLLED, duePrompt: "" } });
+  assert(!fab._sendView().includes("orb-prompt"), "card must not render unprompted");
+});
+
+test("an answered prompt shows thanks instead of re-asking", async () => {
+  const fab = await makeFab({ _state: { ...ENROLLED, duePrompt: "pulse" }, _promptDone: true });
+  const markup = fab._sendView();
+  assert(markup.includes("thank you"), "thanks beat missing");
+  assert(!markup.includes('data-orb="prompt-pulse"'), "must not re-ask after answering");
+});
+
+test("the FAB shows ? for a due prompt, but unread replies win", async () => {
+  const prompted = await makeFab({ _state: { ...ENROLLED, unread: 0, duePrompt: "pulse" } });
+  const markup = prompted._fab();
+  assert(markup.includes(">?<"), "due prompt should show ?");
+  assert(markup.includes("is-prompt"), "prompt badge should use the calmer style");
+
+  const both = await makeFab({ _state: { ...ENROLLED, unread: 2, duePrompt: "pulse" } });
+  assert(both._fab().includes(">2<"), "an unread reply outranks the prompt");
 });
 
 test("agreement links follow a custom endpoint", async () => {
