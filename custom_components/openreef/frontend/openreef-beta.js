@@ -103,7 +103,26 @@ class OpenReefBetaFab extends HTMLElement {
     this._support = typeof fn === "function" ? fn : null;
   }
 
+  /*
+   * The panel creates this element and sets hass/context/support IMMEDIATELY,
+   * while the dynamic import that defines it is still in flight. At that
+   * moment the element is undefined, so each assignment lands as an own data
+   * property on the instance — and an own data property permanently shadows
+   * the prototype accessor once the element upgrades. Without this, `set hass`
+   * never fires, _load() is never called, and the button never appears.
+   *
+   * Re-applying each one through delete-then-reassign routes it back through
+   * the setter. This is the standard custom-element "lazy properties" fix.
+   */
+  _upgradeProperty(name) {
+    if (!Object.prototype.hasOwnProperty.call(this, name)) return;
+    const value = this[name];
+    delete this[name];
+    this[name] = value;
+  }
+
   connectedCallback() {
+    for (const name of ["context", "support", "hass"]) this._upgradeProperty(name);
     // Idempotent by design — the panel re-appends this node on every render.
     if (!this.shadowRoot.firstChild) this._render();
     document.addEventListener("keydown", this._onKeyDown);

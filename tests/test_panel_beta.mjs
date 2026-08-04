@@ -238,6 +238,67 @@ test("a panel that cannot build a summary still allows a report", async () => {
   assertEqual(fab._supportText(), "", "a throwing summary must degrade to empty");
 });
 
+/* --- custom element upgrade ----------------------------------------------
+ * The panel createElement()s this and sets hass/context/support synchronously,
+ * while the dynamic import that DEFINES it is still in flight. Properties set
+ * on a not-yet-upgraded element land as own data properties, which shadow the
+ * prototype accessors forever once it upgrades — so the setters never fire and
+ * the button never appears. This shipped broken in 0.7.0; these are the tests
+ * that would have caught it.
+ *
+ * Note these deliberately do NOT use makeFab's plain assignment: that goes
+ * through the setters and so cannot reproduce the defect. */
+
+function shadowProperty(target, name, value) {
+  Object.defineProperty(target, name, {
+    value, writable: true, configurable: true, enumerable: true,
+  });
+}
+
+test("pre-upgrade properties are re-applied through their setters", async () => {
+  const fab = await makeFab({ _hass: null, _loaded: false, _state: null });
+  const hass = { user: { is_admin: true }, callWS: async () => ENROLLED };
+
+  shadowProperty(fab, "hass", hass);
+  assert(fab._hass === null, "precondition: the shadowed setter must not have run");
+
+  fab.connectedCallback();
+  assert(fab._hass === hass, "connectedCallback must route hass back through its setter");
+});
+
+test("context and support survive the upgrade too", async () => {
+  const fab = await makeFab({ _hass: null, _loaded: false, _state: null });
+  shadowProperty(fab, "context", { tab: "dosing", version: "0.7.0" });
+  shadowProperty(fab, "support", () => "summary text");
+  shadowProperty(fab, "hass", { user: { is_admin: true }, callWS: async () => ENROLLED });
+
+  fab.connectedCallback();
+  assertEqual(fab._context.tab, "dosing", "context lost across upgrade");
+  assertEqual(fab._supportText(), "summary text", "support callback lost across upgrade");
+});
+
+test("context and support are upgraded before hass", async () => {
+  // hass is what kicks off the status load and first render, so if it were
+  // re-applied first the very first paint would have no support callback.
+  const fab = await makeFab({ _hass: null, _loaded: false, _state: null });
+  let supportAtLoadTime = "unset";
+  shadowProperty(fab, "support", () => "summary text");
+  shadowProperty(fab, "hass", {
+    user: { is_admin: true },
+    callWS: async () => { supportAtLoadTime = fab._supportText(); return ENROLLED; },
+  });
+
+  fab.connectedCallback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEqual(supportAtLoadTime, "summary text", "hass was applied before support");
+});
+
+test("upgrading is a no-op when the panel set nothing", async () => {
+  const fab = await makeFab({ _state: ENROLLED });
+  fab.connectedCallback();  // must not throw
+  assert(fab._visible() === true, "a normally-constructed element still works");
+});
+
 /* --- binding ------------------------------------------------------------- */
 
 test("listeners bind exactly once across re-renders", async () => {
