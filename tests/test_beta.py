@@ -496,6 +496,33 @@ def test_enrol_stores_the_token_and_starts_quiet_on_failure():
     assert state["token"] == "tok" and state["testerName"] == "Ada" and state["enabled"] is True
 
 
+def test_enrol_carries_acceptance():
+    """The portal refuses enrolment without agreementAccepted, so the WS layer
+    must pass the tester's tick through — and must not invent one."""
+    hass, _entry = _hass_with()
+    connection = FakeConnection()
+    poster = _Poster((True, {"token": "t", "testerName": "A"}, ""))
+    original, beta._post = beta._post, poster
+    try:
+        run(beta.websocket_beta_enrol(hass, connection, {"id": 1, "code": "reef-ok", "accept": True}))
+    finally:
+        beta._post = original
+    assert poster.calls[0]["payload"]["agreementAccepted"] is True
+
+    # No accept in the message -> explicitly False, never absent: the server
+    # treats anything but True as a refusal, and we want that visible in the
+    # payload rather than left to a missing-key default.
+    connection = FakeConnection()
+    poster = _Poster((False, {}, "agreement_required"))
+    original, beta._post = beta._post, poster
+    try:
+        run(beta.websocket_beta_enrol(hass, connection, {"id": 2, "code": "reef-ok"}))
+    finally:
+        beta._post = original
+    assert poster.calls[0]["payload"]["agreementAccepted"] is False
+    assert connection.error_codes == ["enrol_failed"]
+
+
 def test_sync_is_a_noop_when_not_enrolled():
     hass, entry = _hass_with()
     poster = _Poster()

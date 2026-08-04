@@ -77,6 +77,7 @@ class OpenReefBetaFab extends HTMLElement {
     this._error = "";
     this._sentRef = "";
     this._code = "";
+    this._acceptTerms = false;
     this._loaded = false;
     this._bound = false;
     this._focusId = "";
@@ -240,7 +241,11 @@ class OpenReefBetaFab extends HTMLElement {
     this._error = "";
     this._render();
     try {
-      this._state = await this._ws({ type: "openreef/beta_enrol", code });
+      this._state = await this._ws({
+        type: "openreef/beta_enrol",
+        code,
+        accept: this._acceptTerms,
+      });
       this._view = "send";
     } catch (err) {
       this._error = this._friendly(err, "That code didn't work. Check it and try again.");
@@ -303,8 +308,16 @@ class OpenReefBetaFab extends HTMLElement {
   _friendly(err, fallback) {
     const message = err?.message || err?.error || "";
     if (/not_enrolled/.test(message)) return "Enter your invite code first.";
+    if (/agreement_required/.test(message)) return "Tick the agreement box first — the links above are the short version of what you're agreeing to.";
     if (/invalid_code|enrol_failed/.test(message)) return "That code didn't work. Check it and try again.";
     return message && message.length < 160 ? message : fallback;
+  }
+
+  /** Portal page URL — follows a custom endpoint if one was set at enrolment,
+   *  so the agreement links never point at a portal this install doesn't use. */
+  _portalUrl(pagePath) {
+    const base = (this._state?.endpoint || "https://beta.openreef.co.uk").replace(/\/+$/, "");
+    return `${this._esc(base)}${pagePath}`;
   }
 
   _supportText() {
@@ -424,14 +437,29 @@ class OpenReefBetaFab extends HTMLElement {
       <label class="orb-label" for="orb-code">Invite code</label>
       <input class="orb-input" id="orb-code" type="text" placeholder="e.g. REEF-7K2Q"
              autocomplete="off" spellcheck="false" value="${this._esc(this._code)}">
+
+      <label class="orb-toggle" style="margin-top:14px">
+        <input type="checkbox" data-orb="accept-terms" ${this._acceptTerms ? "checked" : ""}>
+        <span>
+          <strong>I've read the <a class="orb-link" href="${this._portalUrl("/agreement")}" target="_blank" rel="noopener">beta agreement</a>
+          and <a class="orb-link" href="${this._portalUrl("/privacy")}" target="_blank" rel="noopener">privacy notice</a></strong>
+          <em>Two short pages, written to be read. The one-line version: it's unfinished
+          software, your tank stays your responsibility, and you can see and stop
+          everything it sends.</em>
+        </span>
+      </label>
+
       <div class="orb-actions">
-        <button class="orb-primary" type="button" data-orb="enrol" ${this._busy ? "disabled" : ""}>
+        <button class="orb-primary" type="button" data-orb="enrol"
+                ${this._busy || !this._acceptTerms ? "disabled" : ""}>
           ${this._busy ? "Checking…" : "Join the beta"}
         </button>
       </div>
       <p class="orb-fine">
-        Nothing leaves this machine until you press send on a message — and you
-        choose what rides along with it under <strong>Sharing</strong>.
+        Once enrolled, your install checks in every 30 minutes with setup counts and
+        its Trust Check status — so if you get stuck, Reece notices without you having
+        to say so. Everything else only leaves when you press send, and the
+        <strong>Sharing</strong> tab controls what rides along.
       </p>
     `;
   }
@@ -684,6 +712,16 @@ class OpenReefBetaFab extends HTMLElement {
     });
 
     this.shadowRoot.addEventListener("change", (event) => {
+      const accept = event.target.closest("[data-orb='accept-terms']");
+      if (accept) {
+        // Capture the typed code BEFORE re-rendering, or ticking the box would
+        // wipe a code the tester just pasted — the exact papercut the focus
+        // work exists to prevent.
+        this._code = this.shadowRoot.getElementById("orb-code")?.value ?? this._code;
+        this._acceptTerms = accept.checked;
+        this._render();
+        return;
+      }
       const target = event.target.closest("[data-orb='toggle']");
       if (target) this._setSetting(target.dataset.id, target.checked);
     });
@@ -818,6 +856,7 @@ class OpenReefBetaFab extends HTMLElement {
         .orb-warn { background: #2f2614; border: 1px solid #a16207; color: #fde68a; }
         .orb-warn.danger { background: #2b171c; border-color: #ef4444; color: #fecaca; }
 
+        .orb-link { color: var(--orb-accent); text-decoration: underline; text-underline-offset: 2px; }
         .orb-disclose {
           display: block; margin-top: 16px; background: none; border: 0; padding: 0;
           color: #8da2ba; font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px;

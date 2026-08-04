@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { clip, hashToken, jsonError, newToken, readJson } from "@/lib/api";
 import { serviceClient } from "@/lib/supabase";
+import { AGREEMENT_VERSION } from "@/lib/terms";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +25,14 @@ export async function POST(request: Request) {
   const installId = clip(body.installId, 64);
 
   if (!code) return jsonError("invalid_code", 400);
+
+  // The panel shows the agreement + privacy links with a checkbox and refuses
+  // to enrol unticked; this is the server saying the same thing, so a hand-
+  // rolled request (or a pre-0.7.4 client re-enrolling after a reinstall)
+  // cannot join without accepting. The server stamps ITS current version —
+  // trusting a client-supplied version string would let an old client record
+  // acceptance of wording it never showed.
+  if (body.agreementAccepted !== true) return jsonError("agreement_required", 403);
 
   const supabase = serviceClient();
   const { data: tester, error } = await supabase
@@ -50,6 +59,8 @@ export async function POST(request: Request) {
       ha_version: clip(body.haVersion, 64) || null,
       enrolled_at: new Date().toISOString(),
       last_seen_at: new Date().toISOString(),
+      agreement_version: AGREEMENT_VERSION,
+      agreement_accepted_at: new Date().toISOString(),
     })
     .eq("id", tester.id);
 

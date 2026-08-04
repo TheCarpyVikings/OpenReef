@@ -98,6 +98,11 @@ export type Tester = {
   // Null means "not reported yet" — deliberately distinct from 0, because
   // "no sensors mapped" and "hasn't told us" mean very different things when
   // you're deciding whether to check on someone.
+  // Which agreement wording they accepted at enrolment (migration 0003).
+  // Null = enrolled before acceptance existed, or not enrolled yet.
+  agreement_version: string | null;
+  agreement_accepted_at: string | null;
+
   setup_complete: boolean | null;
   trust_status: "ok" | "warning" | "critical" | "unknown" | null;
   trust_checked_at: string | null;

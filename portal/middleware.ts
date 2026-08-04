@@ -13,7 +13,9 @@ import { NextResponse, type NextRequest } from "next/server";
  * requireOwner() sits at the point of use where it cannot be routed around.
  */
 
-const PUBLIC_PREFIXES = ["/login", "/auth", "/api"];
+// /agreement and /privacy are public by design: testers accept them at
+// enrolment, so they must be readable without an account.
+const PUBLIC_PREFIXES = ["/login", "/auth", "/api", "/agreement", "/privacy"];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

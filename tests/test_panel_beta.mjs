@@ -395,4 +395,38 @@ test("a rejected code stays in the box", async () => {
   assert(fab._enrolView().includes('value="REEF-TYPO"'), "the typed code should survive a rejection");
 });
 
+/* --- agreement acceptance -------------------------------------------------
+ * The portal refuses enrolment without acceptance; the panel's job is to make
+ * that impossible to hit by accident: links to both documents, and a join
+ * button that stays dead until the box is ticked. */
+
+test("enrol view links to the agreement and privacy notice", async () => {
+  const fab = await makeFab({ _state: { ...ENROLLED, enrolled: false }, _acceptTerms: false });
+  const markup = fab._enrolView();
+  assert(markup.includes("https://beta.openreef.co.uk/agreement"), "agreement link missing");
+  assert(markup.includes("https://beta.openreef.co.uk/privacy"), "privacy link missing");
+});
+
+test("join stays disabled until the agreement box is ticked", async () => {
+  const unticked = await makeFab({ _state: { ...ENROLLED, enrolled: false }, _acceptTerms: false });
+  const before = unticked._enrolView();
+  const joinButton = before.slice(before.indexOf('data-orb="enrol"') - 200, before.indexOf('data-orb="enrol"') + 60);
+  assert(joinButton.includes("disabled"), "join must be disabled before acceptance");
+
+  const ticked = await makeFab({ _state: { ...ENROLLED, enrolled: false }, _acceptTerms: true, _busy: false });
+  const after = ticked._enrolView();
+  const joinAfter = after.slice(after.indexOf('data-orb="enrol"') - 200, after.indexOf('data-orb="enrol"') + 60);
+  assert(!joinAfter.includes("disabled"), "join must enable once accepted");
+});
+
+test("agreement links follow a custom endpoint", async () => {
+  const fab = await makeFab({
+    _state: { ...ENROLLED, enrolled: false, endpoint: "http://localhost:3000/" },
+  });
+  assert(
+    fab._portalUrl("/agreement") === "http://localhost:3000/agreement",
+    "custom endpoint should be used, trailing slash stripped",
+  );
+});
+
 await runTests();

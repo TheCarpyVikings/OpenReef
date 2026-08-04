@@ -646,6 +646,7 @@ async def websocket_beta_status(
         vol.Required("type"): "openreef/beta_enrol",
         vol.Required("code"): str,
         vol.Optional("endpoint"): str,
+        vol.Optional("accept"): bool,
     }
 )
 @websocket_api.require_admin
@@ -675,6 +676,10 @@ async def websocket_beta_enrol(
             "installId": install_id,
             "openreefVersion": _openreef_version(),
             "haVersion": _ha_version(),
+            # The panel only sends accept=True after the tester ticks the box
+            # next to the agreement/privacy links. The portal refuses to enrol
+            # without it and stamps which version was accepted.
+            "agreementAccepted": bool(msg.get("accept")),
         },
         "",
     )

@@ -5,6 +5,12 @@ const config: NextConfig = {
   // the Home Assistant *backend* (aiohttp, server to server), never by a
   // browser, so there is no preflight to satisfy. Auth is the bearer token.
   poweredByHeader: false,
+  // /agreement and /privacy read content/*.md with fs at request time; make
+  // sure the tracer bundles those files into the serverless output.
+  outputFileTracingIncludes: {
+    "/agreement": ["./content/**"],
+    "/privacy": ["./content/**"],
+  },
 };
 
 export default config;

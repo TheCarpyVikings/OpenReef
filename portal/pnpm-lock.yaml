@@ -14,6 +14,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.58.0
         version: 2.112.0
+      marked:
+        specifier: ^18.0.9
+        version: 18.0.9
       next:
         specifier: 16.0.8
         version: 16.0.8(react-dom@19.2.1(react@19.2.1))(react@19.2.1)
@@ -325,6 +328,11 @@ packages:
     resolution: {integrity: sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA==}
     engines: {node: '>=20.0.0'}
 
+  marked@18.0.9:
+    resolution: {integrity: sha512-/Sa4qiiHZxf0/FQdBBowr9q4r10krCwMvpK48FUBdXdUXScDxiQGR9zCPrFgRVR5LU3iySOiIjy09ZQvADir1w==}
+    engines: {node: '>= 20'}
+    hasBin: true
+
   nanoid@3.3.17:
     resolution: {integrity: sha512-xQLf0A3HOMlgHq0n247/LRuAOYmB7dXJ/DvAxGvsSBij45XtBSmQycu+F8ODbHwns/XyFZagyL1+J0Offw1E0g==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
@@ -606,6 +614,8 @@ snapshots:
     optional: true
 
   iceberg-js@0.8.1: {}
+
+  marked@18.0.9: {}
 
   nanoid@3.3.17: {}
 
