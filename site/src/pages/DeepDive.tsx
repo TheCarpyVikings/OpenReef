@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GITHUB_URL } from "../copy";
+import { FEATURES, GITHUB_URL } from "../copy";
 
 export interface DeepDiveContent {
   slug: string;
@@ -38,6 +38,8 @@ export default function DeepDive({ c }: { c: DeepDiveContent }) {
           <a className="dd-back" href="/">
             ← The dive
           </a>
+          <a href="/features/">Deep dives</a>
+          <a href="/demo/">Live demo</a>
           <a href={GITHUB_URL}>GitHub</a>
           <a className="btn btn-primary btn-small" href="/#cta">
             Join the beta
@@ -100,6 +102,18 @@ export default function DeepDive({ c }: { c: DeepDiveContent }) {
                 <p>{f.a}</p>
               </details>
             ))}
+          </section>
+
+          <section className="dd-siblings">
+            <h2>More deep dives</h2>
+            <nav>
+              {FEATURES.filter((f) => f.href && f.href !== `/features/${c.slug}/`).map((f) => (
+                <a key={f.href} href={f.href}>
+                  {f.title} →
+                </a>
+              ))}
+              <a href="/demo/">Or just play with the live demo →</a>
+            </nav>
           </section>
 
           <section className="dd-cta">

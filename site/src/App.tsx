@@ -157,6 +157,7 @@ export default function App() {
           </a>
           <div className="topnav-links">
             <a href="/demo/">Live demo</a>
+            <a href="/features/">Deep dives</a>
             <a href={GITHUB_URL}>GitHub</a>
             <a className="btn btn-primary btn-small" href="#cta">
               Join the beta

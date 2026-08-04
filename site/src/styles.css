@@ -1075,3 +1075,38 @@ th.col-star {
     margin-top: 3rem;
   }
 }
+
+/* --- deep-dive discovery ------------------------------------------------- */
+
+.features-all {
+  text-align: center;
+  margin: 1.4rem 0 0;
+  font-size: 0.95rem;
+}
+
+.features-all a {
+  color: var(--teal);
+  text-decoration: none;
+}
+
+.features-all a:hover {
+  text-decoration: underline;
+}
+
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.3rem 1.1rem;
+  font-size: 0.82rem;
+  margin-bottom: 0.5rem;
+}
+
+.footer-links a {
+  color: var(--ink-dim);
+  text-decoration: none;
+}
+
+.footer-links a:hover {
+  color: var(--teal);
+}

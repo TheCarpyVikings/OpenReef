@@ -144,6 +144,87 @@
   margin-top: 2.6rem;
 }
 
+/* --- sibling deep-dive links on every deep-dive page --------------------- */
+
+.dd-siblings {
+  margin-top: 2.4rem;
+}
+
+.dd-siblings nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.dd-siblings a {
+  display: inline-block;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  background: rgba(5, 13, 24, 0.45);
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.dd-siblings a:hover {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+/* --- /features/ hub ------------------------------------------------------ */
+
+.dd-hub article {
+  max-width: 980px;
+}
+
+.hub-demo-callout {
+  display: block;
+  margin: 1.4rem 0 1.8rem;
+  padding: 0.95rem 1.2rem;
+  border: 1px solid rgba(0, 180, 216, 0.4);
+  border-radius: 12px;
+  background: rgba(0, 180, 216, 0.08);
+  color: var(--ink);
+  text-decoration: none;
+  line-height: 1.45;
+}
+
+.hub-demo-callout strong {
+  color: var(--teal);
+  margin-right: 0.4rem;
+}
+
+.hub-demo-callout:hover {
+  border-color: var(--teal);
+}
+
+.hub-grid {
+  margin-top: 0.6rem;
+}
+
+.hub-card {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.hub-card img {
+  width: 100%;
+  border-radius: 9px;
+  border: 1px solid var(--card-border);
+  margin-bottom: 0.7rem;
+}
+
+.hub-card:hover {
+  border-color: var(--teal);
+}
+
+.hub-card .feature-more {
+  display: inline-block;
+  margin-top: 0.5rem;
+}
+
 @media (max-width: 720px) {
   .dd {
     padding-top: 5.2rem;

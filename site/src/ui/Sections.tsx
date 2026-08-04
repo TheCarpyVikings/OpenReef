@@ -462,6 +462,10 @@ export function Features() {
             <Feature key={f.title} f={f} onZoom={setZoom} />
           ))}
         </div>
+        <p className="features-all">
+          <a href="/features/">Read all the deep dives →</a> or{" "}
+          <a href="/demo/">poke the live demo →</a>
+        </p>
       </div>
       {zoom && (
         <div
@@ -742,6 +746,14 @@ export function Cta() {
         </p>
       </div>
       <footer className="footer">
+        <p className="footer-links">
+          <a href="/demo/">Live demo</a>
+          {FEATURES.filter((f) => f.href).map((f) => (
+            <a key={f.href} href={f.href}>
+              {f.title}
+            </a>
+          ))}
+        </p>
         <p>
           Built in the open by one reefer and a soldering iron. © 2026 OpenReef.{" "}
           <a href={GITHUB_URL}>GitHub</a>
