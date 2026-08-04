@@ -1,32 +1,47 @@
-<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#123}</style>
+<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#123;color:#cde;font:12px monospace}</style>
 <script type="importmap">{"imports":{"three":"https://esm.sh/three@0.177.0","three/addons/":"https://esm.sh/three@0.177.0/examples/jsm/"}}</script>
 </head><body>
+<!--
+  Coral scan inspector. Copy into dist/ (builds wipe it) and run against
+  `pnpm preview`:  /debug.html?m=staghorn&c=0,0,-1.9;0,0,-2.2;-0.5,0,-1.9&sink=0.3
+  Renders one column per rotation candidate [rx,ry,rz], grounded on a grid
+  exactly the way Scene.tsx grounds it (min.y at ground minus sink).
+-->
 <script type="module">
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "https://esm.sh/meshoptimizer@0.24.0";
-const name = new URLSearchParams(location.search).get("m") || "staghorn";
+const q = new URLSearchParams(location.search);
+const name = q.get("m") || "staghorn";
+const sink = Number(q.get("sink") || 0.25);
+const cands = (q.get("c") || "0,0,0").split(";").map(s => s.split(",").map(Number));
+const W = 460, H = 860;
 const renderer = new THREE.WebGLRenderer({antialias:true});
-renderer.setSize(900, 880); document.body.appendChild(renderer.domElement);
-const scene = new THREE.Scene(); scene.background = new THREE.Color("#16324a");
-const cam = new THREE.PerspectiveCamera(45, 900/880, 0.01, 100);
-scene.add(new THREE.HemisphereLight("#cfe8ff", "#243244", 1.1));
-const sun = new THREE.DirectionalLight("#fff", 2.2); sun.position.set(3,6,4); scene.add(sun);
-scene.add(new THREE.AxesHelper(1.2)); // x red, y green, z blue
-scene.add(new THREE.GridHelper(4, 8, "#5aa", "#357"));
+renderer.setSize(W * cands.length, H);
+renderer.setScissorTest(true);
+document.body.appendChild(renderer.domElement);
 const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder);
-loader.load("/corals/"+name+".glb", (g) => {
-  const obj = g.scene;
-  const box = new THREE.Box3().setFromObject(obj);
-  const dims = box.getSize(new THREE.Vector3());
-  const s = 2/Math.max(dims.x,dims.y,dims.z); obj.scale.setScalar(s);
-  const b2 = new THREE.Box3().setFromObject(obj);
-  const c = b2.getCenter(new THREE.Vector3());
-  obj.position.set(-c.x, -b2.min.y, -c.z);
-  scene.add(obj);
-  document.title = name+" dims "+dims.toArray().map(v=>v.toFixed(2)).join(" x ");
-  cam.position.set(2.6, 1.8, 2.6); cam.lookAt(0, 0.7, 0);
-  renderer.render(scene, cam);
+loader.load("/corals/" + name + ".glb", (g) => {
+  cands.forEach((rot, i) => {
+    const scene = new THREE.Scene(); scene.background = new THREE.Color("#16324a");
+    scene.add(new THREE.HemisphereLight("#cfe8ff", "#243244", 1.1));
+    const sun = new THREE.DirectionalLight("#fff", 2.2); sun.position.set(3,6,4); scene.add(sun);
+    scene.add(new THREE.GridHelper(4, 8, "#7cc", "#357"));
+    const obj = g.scene.clone(true);
+    const box = new THREE.Box3().setFromObject(obj);
+    const dims = box.getSize(new THREE.Vector3());
+    obj.scale.setScalar(1.8 / Math.max(dims.x, dims.y, dims.z));
+    obj.rotation.set(rot[0], rot[1], rot[2]);
+    obj.updateMatrixWorld(true);
+    const b2 = new THREE.Box3().setFromObject(obj);
+    const c = b2.getCenter(new THREE.Vector3());
+    obj.position.set(-c.x, -sink - b2.min.y, -c.z);
+    scene.add(obj);
+    const cam = new THREE.PerspectiveCamera(45, W/H, 0.01, 100);
+    cam.position.set(2.4, 1.5, 2.4); cam.lookAt(0, 0.6, 0);
+    renderer.setViewport(i*W, 0, W, H); renderer.setScissor(i*W, 0, W, H);
+    renderer.render(scene, cam);
+  });
   window.done = true;
 });
 </script></body></html>

@@ -753,20 +753,25 @@ function Reefscape() {
 // rot is [x, y, z] — with the default XYZ euler order the Z flip uprights the
 // specimen first, then Y turns it to face the camera path. sink buries the
 // broken base (and any museum mounting board) inside the rock it sits on.
+// rot uprights the specimen (verified per model in tools/coral-viewer.html —
+// candidates rendered side by side on a ground grid); yaw then spins it about
+// the WORLD vertical to face the camera path, applied after rot so it can
+// never un-upright the model. sink buries the broken base / museum board.
 const HERO_CORALS: Array<{
   file: string;
   pos: [number, number, number]; // x/z anchor; y is the raycast fallback
   size: number;
   rot: [number, number, number];
+  yaw: number;
   sink: number;
   tint: string;
 }> = [
-  { file: "valenciennesi.glb", pos: [4.6, -12.4, -4.6], size: 1.6, rot: [0, 0.8, 0], sink: 0.16, tint: "#b3d0a6" },
-  { file: "staghorn.glb", pos: [1.5, -21.0, -0.5], size: 1.8, rot: [0, 2.1, -1.1], sink: 0.3, tint: "#d9b98f" },
-  { file: "secale.glb", pos: [4.5, -27.9, -3.8], size: 1.6, rot: [0, 4.2, -Math.PI / 2], sink: 0.32, tint: "#c98fae" },
-  { file: "prolifera.glb", pos: [-4.0, -33.9, -3.2], size: 1.5, rot: [0, 1.2, Math.PI], sink: 0.28, tint: "#9ec4bd" },
-  { file: "palmata.glb", pos: [-3.4, -42.2, -0.6], size: 2.1, rot: [0, 5.1, -Math.PI / 2], sink: 0.4, tint: "#c9a06a" },
-  { file: "dome.glb", pos: [5.6, -42.2, -3.2], size: 1.8, rot: [0, 0, 0], sink: 0.12, tint: "#a9c48f" },
+  { file: "valenciennesi.glb", pos: [4.6, -12.4, -4.6], size: 1.6, rot: [Math.PI, 0, 0], yaw: 0.4, sink: 0.24, tint: "#b3d0a6" },
+  { file: "staghorn.glb", pos: [1.5, -21.0, -0.5], size: 1.8, rot: [-0.6, 0, -2.0], yaw: 0, sink: 0.4, tint: "#d9b98f" },
+  { file: "secale.glb", pos: [4.5, -27.9, -3.8], size: 1.6, rot: [-Math.PI / 2, 0, 0], yaw: 0, sink: 0.5, tint: "#c98fae" },
+  { file: "prolifera.glb", pos: [-4.0, -33.9, -3.2], size: 1.5, rot: [0, 1.2, Math.PI], yaw: 0, sink: 0.28, tint: "#9ec4bd" },
+  { file: "palmata.glb", pos: [-3.4, -42.2, -0.6], size: 2.1, rot: [-Math.PI / 2, 0, 0], yaw: 0.9, sink: 0.5, tint: "#c9a06a" },
+  { file: "dome.glb", pos: [5.6, -42.2, -3.2], size: 1.8, rot: [0, 0, 0], yaw: 0, sink: 0.12, tint: "#a9c48f" },
 ];
 
 function HeroCorals() {
@@ -792,6 +797,7 @@ function HeroCorals() {
           const dims = box.getSize(new THREE.Vector3());
           obj.scale.setScalar(spec.size / Math.max(dims.x, dims.y, dims.z));
           obj.rotation.set(spec.rot[0], spec.rot[1], spec.rot[2]);
+          if (spec.yaw) obj.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), spec.yaw);
           obj.updateMatrixWorld(true);
           // find the real surface under the anchor instead of trusting a guess
           const targets = [scene.getObjectByName("reefRocks"), scene.getObjectByName("reefFloor")]
