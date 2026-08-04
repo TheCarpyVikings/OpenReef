@@ -17,6 +17,7 @@ export default defineConfig({
         "automatic-water-change": `${root}features/automatic-water-change/index.html`,
         "icp-import": `${root}features/icp-import/index.html`,
         "camera-intelligence": `${root}features/camera-intelligence/index.html`,
+        demo: `${root}demo/index.html`,
       },
     },
   },

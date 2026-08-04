@@ -1,0 +1,6034 @@
+{
+ "generatedAt": "2026-08-04T17:17:37Z",
+ "source": "seeded",
+ "ws": {
+  "openreef/get_config": {
+   "configured": true,
+   "version": "0.7.6",
+   "entry_id": "demo_entry",
+   "config": {
+    "schemaVersion": 50,
+    "tank": {
+     "name": "The Showroom Reef",
+     "owner": "OpenReef",
+     "profile": "mixed_reef",
+     "volumeLitres": 250.0
+    },
+    "display": {
+     "themeColor": "#00b4d8",
+     "setupComplete": true,
+     "missionCards": {
+      "live": true,
+      "controls": true,
+      "energy": true
+     }
+    },
+    "sensors": {
+     "temp": {
+      "entity_id": "sensor.showroom_tank_temp",
+      "label": "Display Tank Temperature",
+      "enabled": true,
+      "group": "tank",
+      "kind": "numeric",
+      "unit": "\u00b0C",
+      "min": 24.5,
+      "max": 27.5,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "ph": {
+      "entity_id": "sensor.showroom_ph",
+      "label": "pH Level",
+      "enabled": true,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "",
+      "min": 7.8,
+      "max": 8.4,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "salinity": {
+      "entity_id": "sensor.showroom_salinity",
+      "label": "Salinity",
+      "enabled": true,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppt",
+      "min": 32,
+      "max": 36,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "sump_temp": {
+      "entity_id": "sensor.showroom_sump_temp",
+      "label": "Sump Temperature",
+      "enabled": true,
+      "group": "sump",
+      "kind": "numeric",
+      "unit": "\u00b0C",
+      "min": 24.5,
+      "max": 27.5,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "alkalinity": {
+      "entity_id": "",
+      "label": "Alkalinity",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "dKH",
+      "min": 7.0,
+      "max": 11.0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "orp": {
+      "entity_id": "sensor.showroom_orp",
+      "label": "ORP",
+      "enabled": true,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "mV",
+      "min": 250,
+      "max": 450,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "calcium": {
+      "entity_id": "",
+      "label": "Calcium",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 380,
+      "max": 460,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "magnesium": {
+      "entity_id": "",
+      "label": "Magnesium",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 1250,
+      "max": 1450,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "nitrate": {
+      "entity_id": "",
+      "label": "Nitrate",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 0.5,
+      "max": 20,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "phosphate": {
+      "entity_id": "",
+      "label": "Phosphate",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 0.02,
+      "max": 0.12,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "dissolved_oxygen": {
+      "entity_id": "",
+      "label": "Dissolved Oxygen",
+      "enabled": false,
+      "group": "water",
+      "kind": "numeric",
+      "unit": "mg/L",
+      "min": 5,
+      "max": 9,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "flow": {
+      "entity_id": "",
+      "label": "Flow Rate",
+      "enabled": false,
+      "group": "flow",
+      "kind": "numeric",
+      "unit": "L/h",
+      "min": 1,
+      "max": 10000,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "par": {
+      "entity_id": "",
+      "label": "PAR",
+      "enabled": false,
+      "group": "lighting",
+      "kind": "numeric",
+      "unit": "umol/m2/s",
+      "min": 50,
+      "max": 350,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": true
+     },
+     "leak": {
+      "entity_id": "binary_sensor.showroom_leak",
+      "label": "Leak Detector",
+      "enabled": true,
+      "group": "safety",
+      "kind": "binary",
+      "unit": "",
+      "min": 0,
+      "max": 0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "high_water": {
+      "entity_id": "",
+      "label": "High Water Level",
+      "enabled": false,
+      "group": "water",
+      "kind": "binary",
+      "unit": "",
+      "min": 0,
+      "max": 0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "low_water": {
+      "entity_id": "",
+      "label": "Low Water Level",
+      "enabled": false,
+      "group": "water",
+      "kind": "binary",
+      "unit": "",
+      "min": 0,
+      "max": 0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "room_temp": {
+      "entity_id": "",
+      "label": "Room Temp",
+      "enabled": false,
+      "group": "room",
+      "kind": "numeric",
+      "unit": "\u00b0C",
+      "min": 16,
+      "max": 28,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "co2": {
+      "entity_id": "",
+      "label": "CO2 Level",
+      "enabled": false,
+      "group": "room",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 350,
+      "max": 1200,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "humidity": {
+      "entity_id": "",
+      "label": "Humidity",
+      "enabled": false,
+      "group": "room",
+      "kind": "numeric",
+      "unit": "%",
+      "min": 30,
+      "max": 70,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     }
+    },
+    "equipment": {
+     "return_pump": {
+      "type": "return_pump",
+      "label": "Return pump",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_return",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "heater": {
+      "type": "heater",
+      "label": "Heater",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_heater",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "skimmer": {
+      "type": "skimmer",
+      "label": "Skimmer",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_skimmer",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "ato": {
+      "type": "ato",
+      "label": "ATO",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_ato",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "wavemaker": {
+      "type": "display_wavemaker",
+      "label": "Wavemaker",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_wave",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": true,
+      "allowAutoRestart": false,
+      "wavemakerNotifications": true,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "frag_light": {
+      "type": "lighting",
+      "label": "Frag light",
+      "armed": false,
+      "switch_entity_id": "switch.showroom_frag",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     }
+    },
+    "cameras": {},
+    "capture": {
+     "enabled": false,
+     "cameraIds": [],
+     "durationSeconds": 12,
+     "lookbackSeconds": 0,
+     "retention": 10,
+     "cooldownSeconds": 20,
+     "triggers": {
+      "criticalAlerts": true,
+      "warningAlerts": false,
+      "modeChanges": false,
+      "skimmerAutoOff": true,
+      "atoWindows": false,
+      "feedMode": false
+     }
+    },
+    "captures": [],
+    "timelapse": {
+     "enabled": false,
+     "cameraId": "",
+     "cadenceMinutes": 30,
+     "windowStart": "08:00",
+     "windowEnd": "22:00",
+     "retention": {
+      "detailDays": 14,
+      "dailyUntilDays": 90,
+      "weeklyUntilDays": 365,
+      "monthlyUntilDays": 0
+     }
+    },
+    "overlay": {
+     "enabled": false,
+     "stats": [
+      "temp",
+      "ph",
+      "alkalinity"
+     ],
+     "showReefHealth": true,
+     "showTankName": true,
+     "showAvatar": true,
+     "showQuip": true,
+     "position": "bottom-left"
+    },
+    "feedWatch": {
+     "enabled": false,
+     "cameraId": "",
+     "cadenceSeconds": 10,
+     "retentionSessions": 25
+    },
+    "feedSessions": [],
+    "vision": {
+     "enabled": false,
+     "topicPrefix": "frigate",
+     "cameraName": "",
+     "species": [],
+     "zones": [],
+     "surfaceZone": "surface",
+     "alerts": {
+      "missingFishHours": 0,
+      "surfaceDistress": false
+     },
+     "feedReport": {
+      "enabled": false,
+      "windowSeconds": 180
+     }
+    },
+    "visionReports": [],
+    "visionSummary": {},
+    "energy": {
+     "tariff": 0.28,
+     "currency": "GBP",
+     "daily_energy_entity_id": "",
+     "weekly_energy_entity_id": "",
+     "monthly_energy_entity_id": "",
+     "daily_cost_entity_id": "",
+     "weekly_cost_entity_id": "",
+     "monthly_cost_entity_id": ""
+    },
+    "mode": {
+     "active": "running",
+     "startedAt": "",
+     "expiresAt": "",
+     "autoReturn": false,
+     "returnPlan": {},
+     "equipmentTimers": {},
+     "maxOffTimers": {}
+    },
+    "modePreviews": {
+     "feed": {},
+     "maintenance": {}
+    },
+    "modeEquipmentTimers": {
+     "feed": {},
+     "maintenance": {}
+    },
+    "modeTimers": {
+     "feed": {
+      "durationMinutes": 10,
+      "autoReturn": false
+     },
+     "maintenance": {
+      "durationMinutes": 60,
+      "autoReturn": false
+     }
+    },
+    "customModes": [],
+    "modeSettings": {
+     "feed": {
+      "label": "Feed",
+      "description": "Temporarily changes selected armed equipment after confirmation."
+     },
+     "maintenance": {
+      "label": "Maintenance",
+      "description": "Applies a hands-in-tank equipment plan after confirmation."
+     }
+    },
+    "modeSchedule": {
+     "enabled": false,
+     "items": [],
+     "lastRuns": {}
+    },
+    "alerts": {
+     "persistentNotifications": false,
+     "notifyCriticalOnly": true,
+     "hysteresisPercent": 2.0,
+     "wavemakerReminders": true,
+     "wavemakerReminderMinutes": 10,
+     "modeVerifyEnabled": true,
+     "modeVerifyDelaySeconds": 8,
+     "modeStuckNotify": true,
+     "modeNotifyTarget": "",
+     "muteUntil": {},
+     "history": [
+      {
+       "timestamp": "2026-08-04T02:53:37Z",
+       "sensor_id": "ph",
+       "label": "pH Level",
+       "state": "ok",
+       "title": "pH back in range",
+       "message": "pH recovered to 8.12 after the evening CO2 dip."
+      },
+      {
+       "timestamp": "2026-08-04T00:29:37Z",
+       "sensor_id": "ph",
+       "label": "pH Level",
+       "state": "warning",
+       "title": "pH low warning",
+       "message": "pH read 7.94, inside the warning buffer below minimum 7.8."
+      },
+      {
+       "timestamp": "2026-08-01T14:53:37Z",
+       "sensor_id": "temp",
+       "label": "Display Tank Temperature",
+       "state": "ok",
+       "title": "Temperature back in range",
+       "message": "Tank temperature recovered to 26.4 \u00b0C after heater outlet was cut."
+      },
+      {
+       "timestamp": "2026-08-01T14:24:49Z",
+       "sensor_id": "temp",
+       "label": "Display Tank Temperature",
+       "state": "critical",
+       "title": "Temperature critical",
+       "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C). Heater outlet cut by interlock; notification sent."
+      }
+     ],
+     "lastStates": {
+      "temp": "resolved",
+      "ph": "resolved",
+      "salinity": "resolved",
+      "sump_temp": "resolved",
+      "orp": "resolved",
+      "leak": "resolved"
+     }
+    },
+    "watchdog": {
+     "enabled": true,
+     "heartbeatEnabled": true,
+     "heartbeatEveryHours": 24,
+     "missedAfterHours": 30,
+     "notifyTarget": "",
+     "lastCheck": "",
+     "lastHeartbeat": "2026-08-04T15:17:37Z",
+     "lastNotificationTest": "",
+     "lastMissedAlert": ""
+    },
+    "sensorHealth": {
+     "enabled": true,
+     "staleAfterMinutes": 180,
+     "flatlineHours": 12,
+     "jumpWindowMinutes": 30,
+     "jumpPercent": 25.0,
+     "temperatureMismatchC": 1.5,
+     "lastValues": {
+      "temp": {
+       "value": 25.9,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "ph": {
+       "value": 8.16,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "salinity": {
+       "value": 35.1,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "sump_temp": {
+       "value": 25.7,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "orp": {
+       "value": 382.0,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      }
+     },
+     "lastJumps": {}
+    },
+    "alertEscalation": {
+     "enabled": false,
+     "criticalOnly": true,
+     "repeatMinutes": 30,
+     "notifyTarget": "",
+     "acknowledgeRequired": true,
+     "sirenEntityId": "",
+     "lightEntityId": "",
+     "acknowledged": {},
+     "lastEscalated": {},
+     "outputsActive": false
+    },
+    "trustCheck": {
+     "enabled": true,
+     "lastRun": "2026-08-04T17:17:37.379002+00:00",
+     "lastStatus": "warning",
+     "lastBackupReview": ""
+    },
+    "edgeFailsafes": {
+     "enabled": false,
+     "heater": false,
+     "ato": false,
+     "returnPump": false,
+     "lastReviewed": "",
+     "notes": ""
+    },
+    "reefReplay": {
+     "enabled": true,
+     "incidentWindowMinutes": 20,
+     "retention": 25
+    },
+    "interlocks": {
+     "heaterRequiresTankTemp": true,
+     "atoMaxRuntimeEnabled": false,
+     "atoMaxRuntimeSeconds": 300,
+     "atoDutyCycleEnabled": false,
+     "atoDutyCycleOnSeconds": 120,
+     "atoDutyCycleIntervalMinutes": 60,
+     "atoDutyCycleAnchorTime": "00:00",
+     "returnPumpSkimmerWarning": true,
+     "skimmerAutoOffWhenReturnPumpOff": false,
+     "atoReturnPumpWarning": true,
+     "atoBlockWhenReturnPumpOff": false
+    },
+    "activity": [
+     {
+      "timestamp": "2026-08-04T17:17:37.371615+00:00",
+      "message": "ICP report imported: Triton (13 elements)",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-04T16:36:37Z",
+      "message": "Reef health recalculated: 87 (B+) \u2014 alkalinity trending down",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-03T09:52:00Z",
+      "message": "Automatic water change completed: 25.0 L drained, 25.0 L filled (batch sequential)",
+      "type": "success"
+     },
+     {
+      "timestamp": "2026-08-03T09:44:00Z",
+      "message": "ATO suspended for 15 min after water change (stabilisation holdoff)",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-02T18:03:00Z",
+      "message": "Feed mode: skimmer paused 10 min, wavemaker to 30 %",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-01T14:53:37Z",
+      "message": "Heater outlet cut: temperature exceeded 27.5 \u00b0C with heater ON (interlock)",
+      "type": "warning"
+     },
+     {
+      "timestamp": "2026-07-30T11:20:00Z",
+      "message": "ICP report imported (Triton) \u2014 drift check passed on Ca/Mg, alk kit reads 0.3 dKH high",
+      "type": "info"
+     }
+    ],
+    "modes": [],
+    "manualReadings": {
+     "alkalinity": [
+      {
+       "id": "demo:alk:0",
+       "timestamp": "2026-07-05T19:03:00Z",
+       "value": 8.66,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:1",
+       "timestamp": "2026-07-06T19:32:00Z",
+       "value": 8.63,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:2",
+       "timestamp": "2026-07-07T19:23:00Z",
+       "value": 8.56,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:3",
+       "timestamp": "2026-07-08T19:08:00Z",
+       "value": 8.53,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:4",
+       "timestamp": "2026-07-09T19:51:00Z",
+       "value": 8.48,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:5",
+       "timestamp": "2026-07-10T19:11:00Z",
+       "value": 8.49,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:6",
+       "timestamp": "2026-07-11T19:28:00Z",
+       "value": 8.54,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:7",
+       "timestamp": "2026-07-12T19:02:00Z",
+       "value": 8.48,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:8",
+       "timestamp": "2026-07-13T19:28:00Z",
+       "value": 8.45,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:9",
+       "timestamp": "2026-07-14T19:04:00Z",
+       "value": 8.36,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:10",
+       "timestamp": "2026-07-15T19:30:00Z",
+       "value": 8.36,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:11",
+       "timestamp": "2026-07-16T19:17:00Z",
+       "value": 8.35,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:12",
+       "timestamp": "2026-07-17T19:31:00Z",
+       "value": 8.36,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:13",
+       "timestamp": "2026-07-18T19:54:00Z",
+       "value": 8.33,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:14",
+       "timestamp": "2026-07-19T19:39:00Z",
+       "value": 8.26,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:15",
+       "timestamp": "2026-07-20T19:05:00Z",
+       "value": 8.35,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:16",
+       "timestamp": "2026-07-21T19:42:00Z",
+       "value": 8.29,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:17",
+       "timestamp": "2026-07-22T19:23:00Z",
+       "value": 8.31,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:18",
+       "timestamp": "2026-07-23T19:09:00Z",
+       "value": 8.25,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:19",
+       "timestamp": "2026-07-24T19:42:00Z",
+       "value": 8.21,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:20",
+       "timestamp": "2026-07-25T19:11:00Z",
+       "value": 8.2,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:21",
+       "timestamp": "2026-07-26T19:20:00Z",
+       "value": 8.15,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:22",
+       "timestamp": "2026-07-27T19:44:00Z",
+       "value": 8.12,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:23",
+       "timestamp": "2026-07-28T19:36:00Z",
+       "value": 8.13,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:24",
+       "timestamp": "2026-07-29T19:27:00Z",
+       "value": 8.14,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:25",
+       "timestamp": "2026-07-30T19:12:00Z",
+       "value": 8.11,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:26",
+       "timestamp": "2026-07-31T19:41:00Z",
+       "value": 8.02,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:27",
+       "timestamp": "2026-08-01T19:30:00Z",
+       "value": 8.09,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:28",
+       "timestamp": "2026-08-02T19:10:00Z",
+       "value": 8.03,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:29",
+       "timestamp": "2026-08-03T19:48:00Z",
+       "value": 8.05,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:alkalinity",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 8.1,
+       "unit": "dKH",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "calcium": [
+      {
+       "id": "demo:ca:0",
+       "timestamp": "2026-07-05T19:08:00Z",
+       "value": 426.08,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:1",
+       "timestamp": "2026-07-07T19:13:00Z",
+       "value": 427.92,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:2",
+       "timestamp": "2026-07-09T19:35:00Z",
+       "value": 425.11,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:3",
+       "timestamp": "2026-07-11T19:04:00Z",
+       "value": 425.82,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:4",
+       "timestamp": "2026-07-13T19:47:00Z",
+       "value": 424.82,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:5",
+       "timestamp": "2026-07-15T19:13:00Z",
+       "value": 424.94,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:6",
+       "timestamp": "2026-07-17T19:53:00Z",
+       "value": 420.7,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:7",
+       "timestamp": "2026-07-19T19:52:00Z",
+       "value": 424.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:8",
+       "timestamp": "2026-07-21T19:38:00Z",
+       "value": 421.45,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:9",
+       "timestamp": "2026-07-23T19:51:00Z",
+       "value": 422.91,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:10",
+       "timestamp": "2026-07-25T19:33:00Z",
+       "value": 421.75,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:11",
+       "timestamp": "2026-07-27T19:54:00Z",
+       "value": 419.59,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:12",
+       "timestamp": "2026-07-29T19:24:00Z",
+       "value": 418.64,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:13",
+       "timestamp": "2026-07-31T19:42:00Z",
+       "value": 416.91,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:14",
+       "timestamp": "2026-08-02T19:42:00Z",
+       "value": 414.07,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:calcium",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 419.0,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "magnesium": [
+      {
+       "id": "demo:mg:0",
+       "timestamp": "2026-07-05T19:09:00Z",
+       "value": 1362.62,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:1",
+       "timestamp": "2026-07-08T19:39:00Z",
+       "value": 1350.18,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:2",
+       "timestamp": "2026-07-11T19:23:00Z",
+       "value": 1361.44,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:3",
+       "timestamp": "2026-07-14T19:25:00Z",
+       "value": 1348.69,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:4",
+       "timestamp": "2026-07-17T19:33:00Z",
+       "value": 1342.69,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:5",
+       "timestamp": "2026-07-20T19:06:00Z",
+       "value": 1354.27,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:6",
+       "timestamp": "2026-07-23T19:39:00Z",
+       "value": 1348.83,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:7",
+       "timestamp": "2026-07-26T19:54:00Z",
+       "value": 1340.51,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:8",
+       "timestamp": "2026-07-29T19:09:00Z",
+       "value": 1342.74,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:9",
+       "timestamp": "2026-08-01T19:02:00Z",
+       "value": 1334.31,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:magnesium",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 1342.0,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "nitrate": [
+      {
+       "id": "demo:no3:0",
+       "timestamp": "2026-07-07T19:09:00Z",
+       "value": 3.5,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:1",
+       "timestamp": "2026-07-11T19:09:00Z",
+       "value": 5.47,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:2",
+       "timestamp": "2026-07-14T19:47:00Z",
+       "value": 5.34,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:3",
+       "timestamp": "2026-07-18T19:20:00Z",
+       "value": 7.79,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:4",
+       "timestamp": "2026-07-21T19:23:00Z",
+       "value": 8.24,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:5",
+       "timestamp": "2026-07-25T19:53:00Z",
+       "value": 8.6,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:6",
+       "timestamp": "2026-07-28T19:48:00Z",
+       "value": 9.42,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:7",
+       "timestamp": "2026-08-01T19:16:00Z",
+       "value": 11.44,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:nitrate",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 9.8,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "phosphate": [
+      {
+       "id": "demo:po4:0",
+       "timestamp": "2026-07-07T19:05:00Z",
+       "value": 0.02,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:1",
+       "timestamp": "2026-07-11T19:54:00Z",
+       "value": 0.04,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:2",
+       "timestamp": "2026-07-14T19:14:00Z",
+       "value": 0.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:3",
+       "timestamp": "2026-07-18T19:20:00Z",
+       "value": 0.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:4",
+       "timestamp": "2026-07-21T19:23:00Z",
+       "value": 0.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:5",
+       "timestamp": "2026-07-25T19:10:00Z",
+       "value": 0.06,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:6",
+       "timestamp": "2026-07-28T19:16:00Z",
+       "value": 0.07,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:7",
+       "timestamp": "2026-08-01T19:14:00Z",
+       "value": 0.07,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:phosphate",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 0.06,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "salinity": [
+      {
+       "id": "demo:icp:triton:1:salinity",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 35.0,
+       "unit": "ppt",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ]
+    },
+    "manualTests": {
+     "enabled": true,
+     "schedules": {
+      "alkalinity": {
+       "enabled": false,
+       "cadenceDays": 4,
+       "criticalAfterDays": 8,
+       "preferredSource": ""
+      },
+      "calcium": {
+       "enabled": false,
+       "cadenceDays": 14,
+       "criticalAfterDays": 28,
+       "preferredSource": ""
+      },
+      "magnesium": {
+       "enabled": false,
+       "cadenceDays": 21,
+       "criticalAfterDays": 42,
+       "preferredSource": ""
+      },
+      "nitrate": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      },
+      "phosphate": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      },
+      "salinity": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      },
+      "ph": {
+       "enabled": false,
+       "cadenceDays": 21,
+       "criticalAfterDays": 42,
+       "preferredSource": ""
+      },
+      "temp": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      }
+     }
+    },
+    "maintenance": {
+     "enabled": true,
+     "seeded": true,
+     "logAwcChanges": true,
+     "tasks": {
+      "water_change": {
+       "label": "Water change",
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "enabled": true,
+       "notes": "",
+       "builtin": true,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": true
+      },
+      "filter_sock": {
+       "label": "Swap filter socks",
+       "cadenceDays": 5,
+       "criticalAfterDays": 10,
+       "enabled": true,
+       "notes": "",
+       "builtin": false,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": false
+      },
+      "skimmer_clean": {
+       "label": "Clean skimmer cup",
+       "cadenceDays": 14,
+       "criticalAfterDays": 28,
+       "enabled": true,
+       "notes": "",
+       "builtin": false,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": false
+      },
+      "glass_clean": {
+       "label": "Clean glass",
+       "cadenceDays": 3,
+       "criticalAfterDays": 6,
+       "enabled": true,
+       "notes": "",
+       "builtin": false,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": false
+      }
+     },
+     "completions": {
+      "water_change": [
+       {
+        "id": "demo:wc:1",
+        "timestamp": "2026-08-03T09:47:00Z",
+        "notes": "",
+        "source": "awc",
+        "volume": 25.0,
+        "volumeUnit": "L"
+       },
+       {
+        "id": "demo:wc:2",
+        "timestamp": "2026-07-27T09:11:00Z",
+        "notes": "",
+        "source": "awc",
+        "volume": 25.0,
+        "volumeUnit": "L"
+       },
+       {
+        "id": "demo:wc:3",
+        "timestamp": "2026-07-20T10:45:00Z",
+        "notes": "manual bucket day",
+        "volume": 30.0,
+        "volumeUnit": "L"
+       }
+      ],
+      "filter_sock": [
+       {
+        "id": "demo:fs:1",
+        "timestamp": "2026-08-01T19:19:00Z",
+        "notes": ""
+       }
+      ],
+      "skimmer_clean": [
+       {
+        "id": "demo:sk:1",
+        "timestamp": "2026-07-20T19:16:00Z",
+        "notes": ""
+       }
+      ],
+      "glass_clean": [
+       {
+        "id": "demo:gc:1",
+        "timestamp": "2026-08-02T19:23:00Z",
+        "notes": ""
+       }
+      ]
+     },
+     "reminders": {
+      "enabled": true,
+      "time": "09:00",
+      "notifyTarget": "",
+      "persistent": true
+     },
+     "completionsSyncedAt": "2026-08-04T17:17:37.373877+00:00"
+    },
+    "pulse": {
+     "enabled": true,
+     "showHealthRing": true,
+     "showStats": true,
+     "showTicker": true,
+     "showMode": true,
+     "showBuddy": true,
+     "showClock": true,
+     "kioskAutoStart": false,
+     "cameraId": "",
+     "backdrop": "auto",
+     "graphRange": "24h",
+     "showSparklines": true,
+     "showCategories": true,
+     "showEquipment": true,
+     "showToday": true
+    },
+    "dosing": {
+     "enabled": true,
+     "system": {
+      "primaryProduct": "tropic_marin_all_for_reef",
+      "secondaryProduct": "",
+      "customProductClass": "custom_verified_strength",
+      "secondaryDelivery": "",
+      "freshTestRequired": true,
+      "safetyAcknowledged": true,
+      "customProductName": "",
+      "customNotes": "",
+      "tankVolumeLitres": 0.0,
+      "kalkDailyDoseMl": 0.0,
+      "kalkConcentrationTspPerGallon": 0.0,
+      "kalkEvaporationLimitMlPerDay": 0.0,
+      "kalkMaxPh": 8.45,
+      "kalkMaxPhRise": 0.2
+     },
+     "parameters": {
+      "alkalinity": {
+       "productPreset": "custom",
+       "doserMlPerDay": 0.0,
+       "potencyPerMl": 0.0,
+       "target": 0.0,
+       "tankVolumeLitres": 0.0,
+       "productDoseMl": 0.0,
+       "productVolumeLitres": 0.0,
+       "productRaise": 0.0
+      },
+      "calcium": {
+       "productPreset": "custom",
+       "doserMlPerDay": 0.0,
+       "potencyPerMl": 0.0,
+       "target": 0.0,
+       "tankVolumeLitres": 0.0,
+       "productDoseMl": 0.0,
+       "productVolumeLitres": 0.0,
+       "productRaise": 0.0
+      },
+      "magnesium": {
+       "productPreset": "custom",
+       "doserMlPerDay": 0.0,
+       "potencyPerMl": 0.0,
+       "target": 0.0,
+       "tankVolumeLitres": 0.0,
+       "productDoseMl": 0.0,
+       "productVolumeLitres": 0.0,
+       "productRaise": 0.0
+      }
+     },
+     "channels": {},
+     "notifications": {
+      "missedDose": true,
+      "reservoirLow": true,
+      "tubeLife": true,
+      "calibrationDue": true,
+      "syncIssues": true,
+      "staleFood": true
+     },
+     "spacing": {
+      "enabled": false,
+      "matrix": {},
+      "queued": null
+     }
+    },
+    "lightingSchedule": {
+     "mode": "off",
+     "onTime": "08:00",
+     "offTime": "20:00",
+     "reefPreset": "gbr_central",
+     "offsetHours": 0.0,
+     "rampGraceMinutes": 30
+    },
+    "spawningProgram": {
+     "enabled": false,
+     "reefPreset": "gbr_central",
+     "offsetMonths": 0,
+     "solarNoonHour": 13.0,
+     "tempUnit": "C",
+     "tempProbe": "Tmp",
+     "acknowledgedAdvisory": false
+    },
+    "automaticWaterChange": {
+     "enabled": true,
+     "tankVolumeLitres": 0.0,
+     "continuousTickSeconds": 60,
+     "sumpEnabled": false,
+     "diagramInPulse": false,
+     "pumps": {
+      "drain": {
+       "switchEntity": "switch.showroom_awc_drain",
+       "mlPerS": 55.0,
+       "interceptMl": 0.0,
+       "spinUpMl": 0.0,
+       "primeMl": 0.0,
+       "exchangeFactor": 1.0,
+       "calibratedAt": "",
+       "tubingInstalledAt": "",
+       "runSeconds": 0.0,
+       "startCount": 0,
+       "direction": "out",
+       "reservoirId": "waste"
+      },
+      "fill": {
+       "switchEntity": "switch.showroom_awc_fill",
+       "mlPerS": 52.5,
+       "interceptMl": 0.0,
+       "spinUpMl": 0.0,
+       "primeMl": 0.0,
+       "exchangeFactor": 1.0,
+       "calibratedAt": "",
+       "tubingInstalledAt": "",
+       "runSeconds": 0.0,
+       "startCount": 0,
+       "direction": "in",
+       "reservoirId": "fresh"
+      }
+     },
+     "reservoirs": {
+      "fresh": {
+       "capacityLitres": 60.0,
+       "remainingMl": 34000.0,
+       "emptyEntity": "binary_sensor.showroom_fresh_empty",
+       "dispensedSinceFullMl": 0.0,
+       "driftPct": null,
+       "driftStatus": "",
+       "driftCheckedAt": "",
+       "fullConfirmedAt": "",
+       "saltPpt": 0.0
+      },
+      "waste": {
+       "capacityLitres": 60.0,
+       "filledMl": 25500.0,
+       "fullEntity": "binary_sensor.showroom_waste_full"
+      }
+     },
+     "safety": {
+      "highLevelEntity": "binary_sensor.showroom_high",
+      "leakEntity": "binary_sensor.showroom_leak",
+      "floodMissingAcknowledged": false,
+      "maxRuntimeSeconds": 0,
+      "maxRuntimeMargin": 1.5,
+      "anomalyWarnMult": 2.0,
+      "anomalyAbortMult": 3.0,
+      "maxSingleChangePercent": 25.0,
+      "driftWarnPercent": 10.0,
+      "netImbalanceWarnLitres": 2.0,
+      "autoTrimImbalance": false,
+      "maxInstantaneousImbalanceLitres": 0.5
+     },
+     "ato": {
+      "suspendDuringChange": true,
+      "stabilizationHoldoffMinutes": 15,
+      "microChangeThresholdMl": 0
+     },
+     "guards": {
+      "quietHoursEnabled": true,
+      "quietStart": "22:00",
+      "quietEnd": "08:00",
+      "blockDuringFeed": true,
+      "blockOnReturnPumpIssue": true
+     },
+     "schedule": {
+      "enabled": true,
+      "method": "batch_sequential",
+      "mode": "times",
+      "everyMinutes": 60,
+      "amountUnit": "litres",
+      "amount": 50.0,
+      "period": "week",
+      "times": [
+       "09:00"
+      ],
+      "days": [
+       "Mon",
+       "Thu"
+      ],
+      "windowStart": "01:00",
+      "windowEnd": "05:00"
+     },
+     "state": {
+      "status": "idle",
+      "fault": "",
+      "faultSince": "",
+      "method": "",
+      "startedAt": "",
+      "lastRun": "2026-08-03T09:50:00Z",
+      "nextRun": "2026-08-06T09:00:00Z",
+      "targetLitres": 0.0,
+      "movedMl": {
+       "drain": 0.0,
+       "fill": 0.0
+      },
+      "legStartedAt": "",
+      "legEndsAt": "",
+      "endsAt": {
+       "drain": "",
+       "fill": ""
+      },
+      "activeSourceRole": "",
+      "exchangeBaselineNetMl": 0.0,
+      "pausedReason": "",
+      "atoSuspendedUntil": "",
+      "anomalyWarned": false,
+      "scheduleArmedAt": "",
+      "blockedSlotKey": "",
+      "microChange": false,
+      "calRunRole": "",
+      "calRunEndsAt": ""
+     },
+     "history": [
+      {
+       "completedAt": "2026-08-03T09:27:00Z",
+       "drainedL": 25.0,
+       "filledL": 24.9,
+       "method": "batch_sequential",
+       "partial": false,
+       "notes": "",
+       "source": "sched"
+      },
+      {
+       "completedAt": "2026-07-31T09:43:00Z",
+       "drainedL": 25.0,
+       "filledL": 25.1,
+       "method": "batch_sequential",
+       "partial": false,
+       "notes": "",
+       "source": "sched"
+      },
+      {
+       "completedAt": "2026-07-27T09:43:00Z",
+       "drainedL": 25.0,
+       "filledL": 24.8,
+       "method": "batch_sequential",
+       "partial": false,
+       "notes": "",
+       "source": "sched"
+      }
+     ],
+     "todayLitres": 0.0,
+     "weekLitres": 0.0,
+     "monthLitres": 0.0,
+     "sourcePolicy": {
+      "mode": "single",
+      "order": [
+       "fill"
+      ],
+      "ratio": {
+       "fill": 1.0
+      },
+      "lastSourceUsed": ""
+     },
+     "notifications": {
+      "pausedFault": true,
+      "reservoirLow": true,
+      "calibrationDue": true,
+      "netDrift": true,
+      "driftDetected": true
+     },
+     "simulation": {
+      "enabled": false,
+      "hazards": {
+       "leak": false,
+       "highLevel": false,
+       "freshEmpty": false,
+       "wasteFull": false,
+       "returnPumpIssue": false
+      },
+      "snapshot": null
+     },
+     "ledger": {
+      "cumulativeDrainedL": 75.0,
+      "cumulativeFilledL": 74.8,
+      "resetAt": "",
+      "perSource": {
+       "fill": 0.0
+      },
+      "netSaltGrams": 0.0
+     }
+    },
+    "icpReports": [
+     {
+      "id": "demo:icp:triton:1",
+      "lab": "Triton",
+      "adapter": "triton_csv",
+      "method": "ICP-OES",
+      "sampleType": "tank",
+      "sampleDate": "2026-07-23T10:35:00Z",
+      "importedAt": "",
+      "testId": "TR-260722",
+      "tank": "",
+      "notes": "",
+      "source": {
+       "fileName": "showroom-triton.csv",
+       "portalUrl": ""
+      },
+      "elements": [
+       {
+        "symbol": "Ca",
+        "name": "Calcium",
+        "category": "major",
+        "rawValue": 419.0,
+        "rawUnit": "mg/L",
+        "value": 419.0,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "Mg",
+        "name": "Magnesium",
+        "category": "major",
+        "rawValue": 1342.0,
+        "rawUnit": "mg/L",
+        "value": 1342.0,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "KH",
+        "name": "Alkalinity",
+        "category": "physical",
+        "rawValue": 8.1,
+        "rawUnit": "dKH",
+        "value": 8.1,
+        "unit": "dKH",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "NO3",
+        "name": "Nitrate",
+        "category": "nutrient",
+        "rawValue": 9.8,
+        "rawUnit": "mg/L",
+        "value": 9.8,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "PO4",
+        "name": "Phosphate",
+        "category": "nutrient",
+        "rawValue": 0.06,
+        "rawUnit": "mg/L",
+        "value": 0.06,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "K",
+        "name": "Potassium",
+        "category": "major",
+        "rawValue": 402.0,
+        "rawUnit": "mg/L",
+        "value": 402.0,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "Sr",
+        "name": "Strontium",
+        "category": "minor",
+        "rawValue": 7.9,
+        "rawUnit": "mg/L",
+        "value": 7.9,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "B",
+        "name": "Boron",
+        "category": "minor",
+        "rawValue": 4.6,
+        "rawUnit": "mg/L",
+        "value": 4.6,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "I",
+        "name": "Iodine",
+        "category": "trace",
+        "rawValue": 0.041,
+        "rawUnit": "mg/L",
+        "value": 41.0,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "low"
+       },
+       {
+        "symbol": "Si",
+        "name": "Silicon",
+        "category": "nutrient",
+        "rawValue": 0.09,
+        "rawUnit": "mg/L",
+        "value": 90.0,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "Cu",
+        "name": "Copper",
+        "category": "heavy_metal",
+        "rawValue": null,
+        "rawUnit": "\u00b5g/L",
+        "value": null,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "unknown"
+       },
+       {
+        "symbol": "Zn",
+        "name": "Zinc",
+        "category": "trace",
+        "rawValue": 2.1,
+        "rawUnit": "\u00b5g/L",
+        "value": 2.1,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "none",
+        "status": "unknown"
+       },
+       {
+        "symbol": "Sal",
+        "name": "Salinity",
+        "category": "physical",
+        "rawValue": 35.0,
+        "rawUnit": "ppt",
+        "value": 35.0,
+        "unit": "ppt",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       }
+      ]
+     }
+    ],
+    "icpTemplates": [],
+    "icpDashboard": {
+     "includedLabs": [],
+     "range": "all",
+     "group": "core",
+     "symbol": "Ca"
+    },
+    "guardian": {
+     "enabled": true,
+     "tone": "cheeky",
+     "effort": "low",
+     "voice": "shimmer"
+    }
+   },
+   "settings": {
+    "schemaVersion": 50,
+    "tank": {
+     "name": "The Showroom Reef",
+     "owner": "OpenReef",
+     "profile": "mixed_reef",
+     "volumeLitres": 250.0
+    },
+    "display": {
+     "themeColor": "#00b4d8",
+     "setupComplete": true,
+     "missionCards": {
+      "live": true,
+      "controls": true,
+      "energy": true
+     }
+    },
+    "sensors": {
+     "temp": {
+      "entity_id": "sensor.showroom_tank_temp",
+      "label": "Display Tank Temperature",
+      "enabled": true,
+      "group": "tank",
+      "kind": "numeric",
+      "unit": "\u00b0C",
+      "min": 24.5,
+      "max": 27.5,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "ph": {
+      "entity_id": "sensor.showroom_ph",
+      "label": "pH Level",
+      "enabled": true,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "",
+      "min": 7.8,
+      "max": 8.4,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "salinity": {
+      "entity_id": "sensor.showroom_salinity",
+      "label": "Salinity",
+      "enabled": true,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppt",
+      "min": 32,
+      "max": 36,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "sump_temp": {
+      "entity_id": "sensor.showroom_sump_temp",
+      "label": "Sump Temperature",
+      "enabled": true,
+      "group": "sump",
+      "kind": "numeric",
+      "unit": "\u00b0C",
+      "min": 24.5,
+      "max": 27.5,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "alkalinity": {
+      "entity_id": "",
+      "label": "Alkalinity",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "dKH",
+      "min": 7.0,
+      "max": 11.0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "orp": {
+      "entity_id": "sensor.showroom_orp",
+      "label": "ORP",
+      "enabled": true,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "mV",
+      "min": 250,
+      "max": 450,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "calcium": {
+      "entity_id": "",
+      "label": "Calcium",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 380,
+      "max": 460,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "magnesium": {
+      "entity_id": "",
+      "label": "Magnesium",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 1250,
+      "max": 1450,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "nitrate": {
+      "entity_id": "",
+      "label": "Nitrate",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 0.5,
+      "max": 20,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "phosphate": {
+      "entity_id": "",
+      "label": "Phosphate",
+      "enabled": false,
+      "group": "chemistry",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 0.02,
+      "max": 0.12,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "dissolved_oxygen": {
+      "entity_id": "",
+      "label": "Dissolved Oxygen",
+      "enabled": false,
+      "group": "water",
+      "kind": "numeric",
+      "unit": "mg/L",
+      "min": 5,
+      "max": 9,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "flow": {
+      "entity_id": "",
+      "label": "Flow Rate",
+      "enabled": false,
+      "group": "flow",
+      "kind": "numeric",
+      "unit": "L/h",
+      "min": 1,
+      "max": 10000,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "par": {
+      "entity_id": "",
+      "label": "PAR",
+      "enabled": false,
+      "group": "lighting",
+      "kind": "numeric",
+      "unit": "umol/m2/s",
+      "min": 50,
+      "max": 350,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": true
+     },
+     "leak": {
+      "entity_id": "binary_sensor.showroom_leak",
+      "label": "Leak Detector",
+      "enabled": true,
+      "group": "safety",
+      "kind": "binary",
+      "unit": "",
+      "min": 0,
+      "max": 0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "high_water": {
+      "entity_id": "",
+      "label": "High Water Level",
+      "enabled": false,
+      "group": "water",
+      "kind": "binary",
+      "unit": "",
+      "min": 0,
+      "max": 0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "low_water": {
+      "entity_id": "",
+      "label": "Low Water Level",
+      "enabled": false,
+      "group": "water",
+      "kind": "binary",
+      "unit": "",
+      "min": 0,
+      "max": 0,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "room_temp": {
+      "entity_id": "",
+      "label": "Room Temp",
+      "enabled": false,
+      "group": "room",
+      "kind": "numeric",
+      "unit": "\u00b0C",
+      "min": 16,
+      "max": 28,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "co2": {
+      "entity_id": "",
+      "label": "CO2 Level",
+      "enabled": false,
+      "group": "room",
+      "kind": "numeric",
+      "unit": "ppm",
+      "min": 350,
+      "max": 1200,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     },
+     "humidity": {
+      "entity_id": "",
+      "label": "Humidity",
+      "enabled": false,
+      "group": "room",
+      "kind": "numeric",
+      "unit": "%",
+      "min": 30,
+      "max": 70,
+      "alertsEnabled": true,
+      "warningBuffer": 10.0,
+      "lightGated": false
+     }
+    },
+    "equipment": {
+     "return_pump": {
+      "type": "return_pump",
+      "label": "Return pump",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_return",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "heater": {
+      "type": "heater",
+      "label": "Heater",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_heater",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "skimmer": {
+      "type": "skimmer",
+      "label": "Skimmer",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_skimmer",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "ato": {
+      "type": "ato",
+      "label": "ATO",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_ato",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "wavemaker": {
+      "type": "display_wavemaker",
+      "label": "Wavemaker",
+      "armed": true,
+      "switch_entity_id": "switch.showroom_wave",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": true,
+      "allowAutoRestart": false,
+      "wavemakerNotifications": true,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     },
+     "frag_light": {
+      "type": "lighting",
+      "label": "Frag light",
+      "armed": false,
+      "switch_entity_id": "switch.showroom_frag",
+      "power_entity_id": "",
+      "energy_entity_id": "",
+      "cost_entity_id": "",
+      "displayWavemaker": false,
+      "allowAutoRestart": true,
+      "wavemakerNotifications": false,
+      "powerOnDelaySeconds": 0,
+      "maxOffSeconds": 0
+     }
+    },
+    "cameras": {},
+    "capture": {
+     "enabled": false,
+     "cameraIds": [],
+     "durationSeconds": 12,
+     "lookbackSeconds": 0,
+     "retention": 10,
+     "cooldownSeconds": 20,
+     "triggers": {
+      "criticalAlerts": true,
+      "warningAlerts": false,
+      "modeChanges": false,
+      "skimmerAutoOff": true,
+      "atoWindows": false,
+      "feedMode": false
+     }
+    },
+    "captures": [],
+    "timelapse": {
+     "enabled": false,
+     "cameraId": "",
+     "cadenceMinutes": 30,
+     "windowStart": "08:00",
+     "windowEnd": "22:00",
+     "retention": {
+      "detailDays": 14,
+      "dailyUntilDays": 90,
+      "weeklyUntilDays": 365,
+      "monthlyUntilDays": 0
+     }
+    },
+    "overlay": {
+     "enabled": false,
+     "stats": [
+      "temp",
+      "ph",
+      "alkalinity"
+     ],
+     "showReefHealth": true,
+     "showTankName": true,
+     "showAvatar": true,
+     "showQuip": true,
+     "position": "bottom-left"
+    },
+    "feedWatch": {
+     "enabled": false,
+     "cameraId": "",
+     "cadenceSeconds": 10,
+     "retentionSessions": 25
+    },
+    "feedSessions": [],
+    "vision": {
+     "enabled": false,
+     "topicPrefix": "frigate",
+     "cameraName": "",
+     "species": [],
+     "zones": [],
+     "surfaceZone": "surface",
+     "alerts": {
+      "missingFishHours": 0,
+      "surfaceDistress": false
+     },
+     "feedReport": {
+      "enabled": false,
+      "windowSeconds": 180
+     }
+    },
+    "visionReports": [],
+    "visionSummary": {},
+    "energy": {
+     "tariff": 0.28,
+     "currency": "GBP",
+     "daily_energy_entity_id": "",
+     "weekly_energy_entity_id": "",
+     "monthly_energy_entity_id": "",
+     "daily_cost_entity_id": "",
+     "weekly_cost_entity_id": "",
+     "monthly_cost_entity_id": ""
+    },
+    "mode": {
+     "active": "running",
+     "startedAt": "",
+     "expiresAt": "",
+     "autoReturn": false,
+     "returnPlan": {},
+     "equipmentTimers": {},
+     "maxOffTimers": {}
+    },
+    "modePreviews": {
+     "feed": {},
+     "maintenance": {}
+    },
+    "modeEquipmentTimers": {
+     "feed": {},
+     "maintenance": {}
+    },
+    "modeTimers": {
+     "feed": {
+      "durationMinutes": 10,
+      "autoReturn": false
+     },
+     "maintenance": {
+      "durationMinutes": 60,
+      "autoReturn": false
+     }
+    },
+    "customModes": [],
+    "modeSettings": {
+     "feed": {
+      "label": "Feed",
+      "description": "Temporarily changes selected armed equipment after confirmation."
+     },
+     "maintenance": {
+      "label": "Maintenance",
+      "description": "Applies a hands-in-tank equipment plan after confirmation."
+     }
+    },
+    "modeSchedule": {
+     "enabled": false,
+     "items": [],
+     "lastRuns": {}
+    },
+    "alerts": {
+     "persistentNotifications": false,
+     "notifyCriticalOnly": true,
+     "hysteresisPercent": 2.0,
+     "wavemakerReminders": true,
+     "wavemakerReminderMinutes": 10,
+     "modeVerifyEnabled": true,
+     "modeVerifyDelaySeconds": 8,
+     "modeStuckNotify": true,
+     "modeNotifyTarget": "",
+     "muteUntil": {},
+     "history": [
+      {
+       "timestamp": "2026-08-04T02:53:37Z",
+       "sensor_id": "ph",
+       "label": "pH Level",
+       "state": "ok",
+       "title": "pH back in range",
+       "message": "pH recovered to 8.12 after the evening CO2 dip."
+      },
+      {
+       "timestamp": "2026-08-04T00:29:37Z",
+       "sensor_id": "ph",
+       "label": "pH Level",
+       "state": "warning",
+       "title": "pH low warning",
+       "message": "pH read 7.94, inside the warning buffer below minimum 7.8."
+      },
+      {
+       "timestamp": "2026-08-01T14:53:37Z",
+       "sensor_id": "temp",
+       "label": "Display Tank Temperature",
+       "state": "ok",
+       "title": "Temperature back in range",
+       "message": "Tank temperature recovered to 26.4 \u00b0C after heater outlet was cut."
+      },
+      {
+       "timestamp": "2026-08-01T14:24:49Z",
+       "sensor_id": "temp",
+       "label": "Display Tank Temperature",
+       "state": "critical",
+       "title": "Temperature critical",
+       "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C). Heater outlet cut by interlock; notification sent."
+      }
+     ],
+     "lastStates": {
+      "temp": "resolved",
+      "ph": "resolved",
+      "salinity": "resolved",
+      "sump_temp": "resolved",
+      "orp": "resolved",
+      "leak": "resolved"
+     }
+    },
+    "watchdog": {
+     "enabled": true,
+     "heartbeatEnabled": true,
+     "heartbeatEveryHours": 24,
+     "missedAfterHours": 30,
+     "notifyTarget": "",
+     "lastCheck": "",
+     "lastHeartbeat": "2026-08-04T15:17:37Z",
+     "lastNotificationTest": "",
+     "lastMissedAlert": ""
+    },
+    "sensorHealth": {
+     "enabled": true,
+     "staleAfterMinutes": 180,
+     "flatlineHours": 12,
+     "jumpWindowMinutes": 30,
+     "jumpPercent": 25.0,
+     "temperatureMismatchC": 1.5,
+     "lastValues": {
+      "temp": {
+       "value": 25.9,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "ph": {
+       "value": 8.16,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "salinity": {
+       "value": 35.1,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "sump_temp": {
+       "value": 25.7,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      },
+      "orp": {
+       "value": 382.0,
+       "updatedAt": "2026-08-04T17:17:37.379161+00:00"
+      }
+     },
+     "lastJumps": {}
+    },
+    "alertEscalation": {
+     "enabled": false,
+     "criticalOnly": true,
+     "repeatMinutes": 30,
+     "notifyTarget": "",
+     "acknowledgeRequired": true,
+     "sirenEntityId": "",
+     "lightEntityId": "",
+     "acknowledged": {},
+     "lastEscalated": {},
+     "outputsActive": false
+    },
+    "trustCheck": {
+     "enabled": true,
+     "lastRun": "2026-08-04T17:17:37.379002+00:00",
+     "lastStatus": "warning",
+     "lastBackupReview": ""
+    },
+    "edgeFailsafes": {
+     "enabled": false,
+     "heater": false,
+     "ato": false,
+     "returnPump": false,
+     "lastReviewed": "",
+     "notes": ""
+    },
+    "reefReplay": {
+     "enabled": true,
+     "incidentWindowMinutes": 20,
+     "retention": 25
+    },
+    "interlocks": {
+     "heaterRequiresTankTemp": true,
+     "atoMaxRuntimeEnabled": false,
+     "atoMaxRuntimeSeconds": 300,
+     "atoDutyCycleEnabled": false,
+     "atoDutyCycleOnSeconds": 120,
+     "atoDutyCycleIntervalMinutes": 60,
+     "atoDutyCycleAnchorTime": "00:00",
+     "returnPumpSkimmerWarning": true,
+     "skimmerAutoOffWhenReturnPumpOff": false,
+     "atoReturnPumpWarning": true,
+     "atoBlockWhenReturnPumpOff": false
+    },
+    "activity": [
+     {
+      "timestamp": "2026-08-04T17:17:37.371615+00:00",
+      "message": "ICP report imported: Triton (13 elements)",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-04T16:36:37Z",
+      "message": "Reef health recalculated: 87 (B+) \u2014 alkalinity trending down",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-03T09:52:00Z",
+      "message": "Automatic water change completed: 25.0 L drained, 25.0 L filled (batch sequential)",
+      "type": "success"
+     },
+     {
+      "timestamp": "2026-08-03T09:44:00Z",
+      "message": "ATO suspended for 15 min after water change (stabilisation holdoff)",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-02T18:03:00Z",
+      "message": "Feed mode: skimmer paused 10 min, wavemaker to 30 %",
+      "type": "info"
+     },
+     {
+      "timestamp": "2026-08-01T14:53:37Z",
+      "message": "Heater outlet cut: temperature exceeded 27.5 \u00b0C with heater ON (interlock)",
+      "type": "warning"
+     },
+     {
+      "timestamp": "2026-07-30T11:20:00Z",
+      "message": "ICP report imported (Triton) \u2014 drift check passed on Ca/Mg, alk kit reads 0.3 dKH high",
+      "type": "info"
+     }
+    ],
+    "modes": [],
+    "manualReadings": {
+     "alkalinity": [
+      {
+       "id": "demo:alk:0",
+       "timestamp": "2026-07-05T19:03:00Z",
+       "value": 8.66,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:1",
+       "timestamp": "2026-07-06T19:32:00Z",
+       "value": 8.63,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:2",
+       "timestamp": "2026-07-07T19:23:00Z",
+       "value": 8.56,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:3",
+       "timestamp": "2026-07-08T19:08:00Z",
+       "value": 8.53,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:4",
+       "timestamp": "2026-07-09T19:51:00Z",
+       "value": 8.48,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:5",
+       "timestamp": "2026-07-10T19:11:00Z",
+       "value": 8.49,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:6",
+       "timestamp": "2026-07-11T19:28:00Z",
+       "value": 8.54,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:7",
+       "timestamp": "2026-07-12T19:02:00Z",
+       "value": 8.48,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:8",
+       "timestamp": "2026-07-13T19:28:00Z",
+       "value": 8.45,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:9",
+       "timestamp": "2026-07-14T19:04:00Z",
+       "value": 8.36,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:10",
+       "timestamp": "2026-07-15T19:30:00Z",
+       "value": 8.36,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:11",
+       "timestamp": "2026-07-16T19:17:00Z",
+       "value": 8.35,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:12",
+       "timestamp": "2026-07-17T19:31:00Z",
+       "value": 8.36,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:13",
+       "timestamp": "2026-07-18T19:54:00Z",
+       "value": 8.33,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:14",
+       "timestamp": "2026-07-19T19:39:00Z",
+       "value": 8.26,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:15",
+       "timestamp": "2026-07-20T19:05:00Z",
+       "value": 8.35,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:16",
+       "timestamp": "2026-07-21T19:42:00Z",
+       "value": 8.29,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:17",
+       "timestamp": "2026-07-22T19:23:00Z",
+       "value": 8.31,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:18",
+       "timestamp": "2026-07-23T19:09:00Z",
+       "value": 8.25,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:19",
+       "timestamp": "2026-07-24T19:42:00Z",
+       "value": 8.21,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:20",
+       "timestamp": "2026-07-25T19:11:00Z",
+       "value": 8.2,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:21",
+       "timestamp": "2026-07-26T19:20:00Z",
+       "value": 8.15,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:22",
+       "timestamp": "2026-07-27T19:44:00Z",
+       "value": 8.12,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:23",
+       "timestamp": "2026-07-28T19:36:00Z",
+       "value": 8.13,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:24",
+       "timestamp": "2026-07-29T19:27:00Z",
+       "value": 8.14,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:25",
+       "timestamp": "2026-07-30T19:12:00Z",
+       "value": 8.11,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:26",
+       "timestamp": "2026-07-31T19:41:00Z",
+       "value": 8.02,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:27",
+       "timestamp": "2026-08-01T19:30:00Z",
+       "value": 8.09,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:28",
+       "timestamp": "2026-08-02T19:10:00Z",
+       "value": 8.03,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:alk:29",
+       "timestamp": "2026-08-03T19:48:00Z",
+       "value": 8.05,
+       "unit": "dKH",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:alkalinity",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 8.1,
+       "unit": "dKH",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "calcium": [
+      {
+       "id": "demo:ca:0",
+       "timestamp": "2026-07-05T19:08:00Z",
+       "value": 426.08,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:1",
+       "timestamp": "2026-07-07T19:13:00Z",
+       "value": 427.92,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:2",
+       "timestamp": "2026-07-09T19:35:00Z",
+       "value": 425.11,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:3",
+       "timestamp": "2026-07-11T19:04:00Z",
+       "value": 425.82,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:4",
+       "timestamp": "2026-07-13T19:47:00Z",
+       "value": 424.82,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:5",
+       "timestamp": "2026-07-15T19:13:00Z",
+       "value": 424.94,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:6",
+       "timestamp": "2026-07-17T19:53:00Z",
+       "value": 420.7,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:7",
+       "timestamp": "2026-07-19T19:52:00Z",
+       "value": 424.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:8",
+       "timestamp": "2026-07-21T19:38:00Z",
+       "value": 421.45,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:9",
+       "timestamp": "2026-07-23T19:51:00Z",
+       "value": 422.91,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:10",
+       "timestamp": "2026-07-25T19:33:00Z",
+       "value": 421.75,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:11",
+       "timestamp": "2026-07-27T19:54:00Z",
+       "value": 419.59,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:12",
+       "timestamp": "2026-07-29T19:24:00Z",
+       "value": 418.64,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:13",
+       "timestamp": "2026-07-31T19:42:00Z",
+       "value": 416.91,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:ca:14",
+       "timestamp": "2026-08-02T19:42:00Z",
+       "value": 414.07,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:calcium",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 419.0,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "magnesium": [
+      {
+       "id": "demo:mg:0",
+       "timestamp": "2026-07-05T19:09:00Z",
+       "value": 1362.62,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:1",
+       "timestamp": "2026-07-08T19:39:00Z",
+       "value": 1350.18,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:2",
+       "timestamp": "2026-07-11T19:23:00Z",
+       "value": 1361.44,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:3",
+       "timestamp": "2026-07-14T19:25:00Z",
+       "value": 1348.69,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:4",
+       "timestamp": "2026-07-17T19:33:00Z",
+       "value": 1342.69,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:5",
+       "timestamp": "2026-07-20T19:06:00Z",
+       "value": 1354.27,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:6",
+       "timestamp": "2026-07-23T19:39:00Z",
+       "value": 1348.83,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:7",
+       "timestamp": "2026-07-26T19:54:00Z",
+       "value": 1340.51,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:8",
+       "timestamp": "2026-07-29T19:09:00Z",
+       "value": 1342.74,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:mg:9",
+       "timestamp": "2026-08-01T19:02:00Z",
+       "value": 1334.31,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:magnesium",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 1342.0,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "nitrate": [
+      {
+       "id": "demo:no3:0",
+       "timestamp": "2026-07-07T19:09:00Z",
+       "value": 3.5,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:1",
+       "timestamp": "2026-07-11T19:09:00Z",
+       "value": 5.47,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:2",
+       "timestamp": "2026-07-14T19:47:00Z",
+       "value": 5.34,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:3",
+       "timestamp": "2026-07-18T19:20:00Z",
+       "value": 7.79,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:4",
+       "timestamp": "2026-07-21T19:23:00Z",
+       "value": 8.24,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:5",
+       "timestamp": "2026-07-25T19:53:00Z",
+       "value": 8.6,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:6",
+       "timestamp": "2026-07-28T19:48:00Z",
+       "value": 9.42,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:no3:7",
+       "timestamp": "2026-08-01T19:16:00Z",
+       "value": 11.44,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:nitrate",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 9.8,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "phosphate": [
+      {
+       "id": "demo:po4:0",
+       "timestamp": "2026-07-07T19:05:00Z",
+       "value": 0.02,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:1",
+       "timestamp": "2026-07-11T19:54:00Z",
+       "value": 0.04,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:2",
+       "timestamp": "2026-07-14T19:14:00Z",
+       "value": 0.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:3",
+       "timestamp": "2026-07-18T19:20:00Z",
+       "value": 0.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:4",
+       "timestamp": "2026-07-21T19:23:00Z",
+       "value": 0.05,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:5",
+       "timestamp": "2026-07-25T19:10:00Z",
+       "value": 0.06,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:6",
+       "timestamp": "2026-07-28T19:16:00Z",
+       "value": 0.07,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:po4:7",
+       "timestamp": "2026-08-01T19:14:00Z",
+       "value": 0.07,
+       "unit": "ppm",
+       "source": "manual",
+       "notes": ""
+      },
+      {
+       "id": "demo:icp:triton:1:phosphate",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 0.06,
+       "unit": "ppm",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ],
+     "salinity": [
+      {
+       "id": "demo:icp:triton:1:salinity",
+       "timestamp": "2026-07-23T10:35:00Z",
+       "value": 35.0,
+       "unit": "ppt",
+       "source": "ICP:Triton",
+       "notes": "ICP-OES \u00b7 test TR-260722"
+      }
+     ]
+    },
+    "manualTests": {
+     "enabled": true,
+     "schedules": {
+      "alkalinity": {
+       "enabled": false,
+       "cadenceDays": 4,
+       "criticalAfterDays": 8,
+       "preferredSource": ""
+      },
+      "calcium": {
+       "enabled": false,
+       "cadenceDays": 14,
+       "criticalAfterDays": 28,
+       "preferredSource": ""
+      },
+      "magnesium": {
+       "enabled": false,
+       "cadenceDays": 21,
+       "criticalAfterDays": 42,
+       "preferredSource": ""
+      },
+      "nitrate": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      },
+      "phosphate": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      },
+      "salinity": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      },
+      "ph": {
+       "enabled": false,
+       "cadenceDays": 21,
+       "criticalAfterDays": 42,
+       "preferredSource": ""
+      },
+      "temp": {
+       "enabled": false,
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "preferredSource": ""
+      }
+     }
+    },
+    "maintenance": {
+     "enabled": true,
+     "seeded": true,
+     "logAwcChanges": true,
+     "tasks": {
+      "water_change": {
+       "label": "Water change",
+       "cadenceDays": 7,
+       "criticalAfterDays": 14,
+       "enabled": true,
+       "notes": "",
+       "builtin": true,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": true
+      },
+      "filter_sock": {
+       "label": "Swap filter socks",
+       "cadenceDays": 5,
+       "criticalAfterDays": 10,
+       "enabled": true,
+       "notes": "",
+       "builtin": false,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": false
+      },
+      "skimmer_clean": {
+       "label": "Clean skimmer cup",
+       "cadenceDays": 14,
+       "criticalAfterDays": 28,
+       "enabled": true,
+       "notes": "",
+       "builtin": false,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": false
+      },
+      "glass_clean": {
+       "label": "Clean glass",
+       "cadenceDays": 3,
+       "criticalAfterDays": 6,
+       "enabled": true,
+       "notes": "",
+       "builtin": false,
+       "scheduleMode": "interval",
+       "scheduleDays": [],
+       "scheduleMonthDays": [],
+       "notify": true,
+       "snoozedUntil": null,
+       "logsVolume": false
+      }
+     },
+     "completions": {
+      "water_change": [
+       {
+        "id": "demo:wc:1",
+        "timestamp": "2026-08-03T09:47:00Z",
+        "notes": "",
+        "source": "awc",
+        "volume": 25.0,
+        "volumeUnit": "L"
+       },
+       {
+        "id": "demo:wc:2",
+        "timestamp": "2026-07-27T09:11:00Z",
+        "notes": "",
+        "source": "awc",
+        "volume": 25.0,
+        "volumeUnit": "L"
+       },
+       {
+        "id": "demo:wc:3",
+        "timestamp": "2026-07-20T10:45:00Z",
+        "notes": "manual bucket day",
+        "volume": 30.0,
+        "volumeUnit": "L"
+       }
+      ],
+      "filter_sock": [
+       {
+        "id": "demo:fs:1",
+        "timestamp": "2026-08-01T19:19:00Z",
+        "notes": ""
+       }
+      ],
+      "skimmer_clean": [
+       {
+        "id": "demo:sk:1",
+        "timestamp": "2026-07-20T19:16:00Z",
+        "notes": ""
+       }
+      ],
+      "glass_clean": [
+       {
+        "id": "demo:gc:1",
+        "timestamp": "2026-08-02T19:23:00Z",
+        "notes": ""
+       }
+      ]
+     },
+     "reminders": {
+      "enabled": true,
+      "time": "09:00",
+      "notifyTarget": "",
+      "persistent": true
+     },
+     "completionsSyncedAt": "2026-08-04T17:17:37.373877+00:00"
+    },
+    "pulse": {
+     "enabled": true,
+     "showHealthRing": true,
+     "showStats": true,
+     "showTicker": true,
+     "showMode": true,
+     "showBuddy": true,
+     "showClock": true,
+     "kioskAutoStart": false,
+     "cameraId": "",
+     "backdrop": "auto",
+     "graphRange": "24h",
+     "showSparklines": true,
+     "showCategories": true,
+     "showEquipment": true,
+     "showToday": true
+    },
+    "dosing": {
+     "enabled": true,
+     "system": {
+      "primaryProduct": "tropic_marin_all_for_reef",
+      "secondaryProduct": "",
+      "customProductClass": "custom_verified_strength",
+      "secondaryDelivery": "",
+      "freshTestRequired": true,
+      "safetyAcknowledged": true,
+      "customProductName": "",
+      "customNotes": "",
+      "tankVolumeLitres": 0.0,
+      "kalkDailyDoseMl": 0.0,
+      "kalkConcentrationTspPerGallon": 0.0,
+      "kalkEvaporationLimitMlPerDay": 0.0,
+      "kalkMaxPh": 8.45,
+      "kalkMaxPhRise": 0.2
+     },
+     "parameters": {
+      "alkalinity": {
+       "productPreset": "custom",
+       "doserMlPerDay": 0.0,
+       "potencyPerMl": 0.0,
+       "target": 0.0,
+       "tankVolumeLitres": 0.0,
+       "productDoseMl": 0.0,
+       "productVolumeLitres": 0.0,
+       "productRaise": 0.0
+      },
+      "calcium": {
+       "productPreset": "custom",
+       "doserMlPerDay": 0.0,
+       "potencyPerMl": 0.0,
+       "target": 0.0,
+       "tankVolumeLitres": 0.0,
+       "productDoseMl": 0.0,
+       "productVolumeLitres": 0.0,
+       "productRaise": 0.0
+      },
+      "magnesium": {
+       "productPreset": "custom",
+       "doserMlPerDay": 0.0,
+       "potencyPerMl": 0.0,
+       "target": 0.0,
+       "tankVolumeLitres": 0.0,
+       "productDoseMl": 0.0,
+       "productVolumeLitres": 0.0,
+       "productRaise": 0.0
+      }
+     },
+     "channels": {},
+     "notifications": {
+      "missedDose": true,
+      "reservoirLow": true,
+      "tubeLife": true,
+      "calibrationDue": true,
+      "syncIssues": true,
+      "staleFood": true
+     },
+     "spacing": {
+      "enabled": false,
+      "matrix": {},
+      "queued": null
+     }
+    },
+    "lightingSchedule": {
+     "mode": "off",
+     "onTime": "08:00",
+     "offTime": "20:00",
+     "reefPreset": "gbr_central",
+     "offsetHours": 0.0,
+     "rampGraceMinutes": 30
+    },
+    "spawningProgram": {
+     "enabled": false,
+     "reefPreset": "gbr_central",
+     "offsetMonths": 0,
+     "solarNoonHour": 13.0,
+     "tempUnit": "C",
+     "tempProbe": "Tmp",
+     "acknowledgedAdvisory": false
+    },
+    "automaticWaterChange": {
+     "enabled": true,
+     "tankVolumeLitres": 0.0,
+     "continuousTickSeconds": 60,
+     "sumpEnabled": false,
+     "diagramInPulse": false,
+     "pumps": {
+      "drain": {
+       "switchEntity": "switch.showroom_awc_drain",
+       "mlPerS": 55.0,
+       "interceptMl": 0.0,
+       "spinUpMl": 0.0,
+       "primeMl": 0.0,
+       "exchangeFactor": 1.0,
+       "calibratedAt": "",
+       "tubingInstalledAt": "",
+       "runSeconds": 0.0,
+       "startCount": 0,
+       "direction": "out",
+       "reservoirId": "waste"
+      },
+      "fill": {
+       "switchEntity": "switch.showroom_awc_fill",
+       "mlPerS": 52.5,
+       "interceptMl": 0.0,
+       "spinUpMl": 0.0,
+       "primeMl": 0.0,
+       "exchangeFactor": 1.0,
+       "calibratedAt": "",
+       "tubingInstalledAt": "",
+       "runSeconds": 0.0,
+       "startCount": 0,
+       "direction": "in",
+       "reservoirId": "fresh"
+      }
+     },
+     "reservoirs": {
+      "fresh": {
+       "capacityLitres": 60.0,
+       "remainingMl": 34000.0,
+       "emptyEntity": "binary_sensor.showroom_fresh_empty",
+       "dispensedSinceFullMl": 0.0,
+       "driftPct": null,
+       "driftStatus": "",
+       "driftCheckedAt": "",
+       "fullConfirmedAt": "",
+       "saltPpt": 0.0
+      },
+      "waste": {
+       "capacityLitres": 60.0,
+       "filledMl": 25500.0,
+       "fullEntity": "binary_sensor.showroom_waste_full"
+      }
+     },
+     "safety": {
+      "highLevelEntity": "binary_sensor.showroom_high",
+      "leakEntity": "binary_sensor.showroom_leak",
+      "floodMissingAcknowledged": false,
+      "maxRuntimeSeconds": 0,
+      "maxRuntimeMargin": 1.5,
+      "anomalyWarnMult": 2.0,
+      "anomalyAbortMult": 3.0,
+      "maxSingleChangePercent": 25.0,
+      "driftWarnPercent": 10.0,
+      "netImbalanceWarnLitres": 2.0,
+      "autoTrimImbalance": false,
+      "maxInstantaneousImbalanceLitres": 0.5
+     },
+     "ato": {
+      "suspendDuringChange": true,
+      "stabilizationHoldoffMinutes": 15,
+      "microChangeThresholdMl": 0
+     },
+     "guards": {
+      "quietHoursEnabled": true,
+      "quietStart": "22:00",
+      "quietEnd": "08:00",
+      "blockDuringFeed": true,
+      "blockOnReturnPumpIssue": true
+     },
+     "schedule": {
+      "enabled": true,
+      "method": "batch_sequential",
+      "mode": "times",
+      "everyMinutes": 60,
+      "amountUnit": "litres",
+      "amount": 50.0,
+      "period": "week",
+      "times": [
+       "09:00"
+      ],
+      "days": [
+       "Mon",
+       "Thu"
+      ],
+      "windowStart": "01:00",
+      "windowEnd": "05:00"
+     },
+     "state": {
+      "status": "idle",
+      "fault": "",
+      "faultSince": "",
+      "method": "",
+      "startedAt": "",
+      "lastRun": "2026-08-03T09:50:00Z",
+      "nextRun": "2026-08-06T09:00:00Z",
+      "targetLitres": 0.0,
+      "movedMl": {
+       "drain": 0.0,
+       "fill": 0.0
+      },
+      "legStartedAt": "",
+      "legEndsAt": "",
+      "endsAt": {
+       "drain": "",
+       "fill": ""
+      },
+      "activeSourceRole": "",
+      "exchangeBaselineNetMl": 0.0,
+      "pausedReason": "",
+      "atoSuspendedUntil": "",
+      "anomalyWarned": false,
+      "scheduleArmedAt": "",
+      "blockedSlotKey": "",
+      "microChange": false,
+      "calRunRole": "",
+      "calRunEndsAt": ""
+     },
+     "history": [
+      {
+       "completedAt": "2026-08-03T09:27:00Z",
+       "drainedL": 25.0,
+       "filledL": 24.9,
+       "method": "batch_sequential",
+       "partial": false,
+       "notes": "",
+       "source": "sched"
+      },
+      {
+       "completedAt": "2026-07-31T09:43:00Z",
+       "drainedL": 25.0,
+       "filledL": 25.1,
+       "method": "batch_sequential",
+       "partial": false,
+       "notes": "",
+       "source": "sched"
+      },
+      {
+       "completedAt": "2026-07-27T09:43:00Z",
+       "drainedL": 25.0,
+       "filledL": 24.8,
+       "method": "batch_sequential",
+       "partial": false,
+       "notes": "",
+       "source": "sched"
+      }
+     ],
+     "todayLitres": 0.0,
+     "weekLitres": 0.0,
+     "monthLitres": 0.0,
+     "sourcePolicy": {
+      "mode": "single",
+      "order": [
+       "fill"
+      ],
+      "ratio": {
+       "fill": 1.0
+      },
+      "lastSourceUsed": ""
+     },
+     "notifications": {
+      "pausedFault": true,
+      "reservoirLow": true,
+      "calibrationDue": true,
+      "netDrift": true,
+      "driftDetected": true
+     },
+     "simulation": {
+      "enabled": false,
+      "hazards": {
+       "leak": false,
+       "highLevel": false,
+       "freshEmpty": false,
+       "wasteFull": false,
+       "returnPumpIssue": false
+      },
+      "snapshot": null
+     },
+     "ledger": {
+      "cumulativeDrainedL": 75.0,
+      "cumulativeFilledL": 74.8,
+      "resetAt": "",
+      "perSource": {
+       "fill": 0.0
+      },
+      "netSaltGrams": 0.0
+     }
+    },
+    "icpReports": [
+     {
+      "id": "demo:icp:triton:1",
+      "lab": "Triton",
+      "adapter": "triton_csv",
+      "method": "ICP-OES",
+      "sampleType": "tank",
+      "sampleDate": "2026-07-23T10:35:00Z",
+      "importedAt": "",
+      "testId": "TR-260722",
+      "tank": "",
+      "notes": "",
+      "source": {
+       "fileName": "showroom-triton.csv",
+       "portalUrl": ""
+      },
+      "elements": [
+       {
+        "symbol": "Ca",
+        "name": "Calcium",
+        "category": "major",
+        "rawValue": 419.0,
+        "rawUnit": "mg/L",
+        "value": 419.0,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "Mg",
+        "name": "Magnesium",
+        "category": "major",
+        "rawValue": 1342.0,
+        "rawUnit": "mg/L",
+        "value": 1342.0,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "KH",
+        "name": "Alkalinity",
+        "category": "physical",
+        "rawValue": 8.1,
+        "rawUnit": "dKH",
+        "value": 8.1,
+        "unit": "dKH",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "NO3",
+        "name": "Nitrate",
+        "category": "nutrient",
+        "rawValue": 9.8,
+        "rawUnit": "mg/L",
+        "value": 9.8,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "PO4",
+        "name": "Phosphate",
+        "category": "nutrient",
+        "rawValue": 0.06,
+        "rawUnit": "mg/L",
+        "value": 0.06,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "K",
+        "name": "Potassium",
+        "category": "major",
+        "rawValue": 402.0,
+        "rawUnit": "mg/L",
+        "value": 402.0,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "Sr",
+        "name": "Strontium",
+        "category": "minor",
+        "rawValue": 7.9,
+        "rawUnit": "mg/L",
+        "value": 7.9,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "B",
+        "name": "Boron",
+        "category": "minor",
+        "rawValue": 4.6,
+        "rawUnit": "mg/L",
+        "value": 4.6,
+        "unit": "ppm",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "I",
+        "name": "Iodine",
+        "category": "trace",
+        "rawValue": 0.041,
+        "rawUnit": "mg/L",
+        "value": 41.0,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "low"
+       },
+       {
+        "symbol": "Si",
+        "name": "Silicon",
+        "category": "nutrient",
+        "rawValue": 0.09,
+        "rawUnit": "mg/L",
+        "value": 90.0,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       },
+       {
+        "symbol": "Cu",
+        "name": "Copper",
+        "category": "heavy_metal",
+        "rawValue": null,
+        "rawUnit": "\u00b5g/L",
+        "value": null,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "unknown"
+       },
+       {
+        "symbol": "Zn",
+        "name": "Zinc",
+        "category": "trace",
+        "rawValue": 2.1,
+        "rawUnit": "\u00b5g/L",
+        "value": 2.1,
+        "unit": "ppb",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "none",
+        "status": "unknown"
+       },
+       {
+        "symbol": "Sal",
+        "name": "Salinity",
+        "category": "physical",
+        "rawValue": 35.0,
+        "rawUnit": "ppt",
+        "value": 35.0,
+        "unit": "ppt",
+        "bdl": false,
+        "threshold": null,
+        "target": null,
+        "labRange": null,
+        "usedRange": "canonical",
+        "status": "ok"
+       }
+      ]
+     }
+    ],
+    "icpTemplates": [],
+    "icpDashboard": {
+     "includedLabs": [],
+     "range": "all",
+     "group": "core",
+     "symbol": "Ca"
+    },
+    "guardian": {
+     "enabled": true,
+     "tone": "cheeky",
+     "effort": "low",
+     "voice": "shimmer"
+    }
+   },
+   "sensor_meta": {
+    "temp": {
+     "label": "Display Tank Temperature",
+     "enabled": true,
+     "group": "tank",
+     "unit": "\u00b0C",
+     "min": 24.5,
+     "max": 27.5,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "temperature",
+       "temp",
+       "display",
+       "tank"
+      ],
+      "prefer": [
+       "reef",
+       "tank",
+       "display",
+       "aquarium",
+       "water",
+       "saltwater",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [
+       "temperature"
+      ],
+      "units": [
+       "\u00b0C",
+       "\u00b0F",
+       "C",
+       "F"
+      ]
+     }
+    },
+    "ph": {
+     "label": "pH Level",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "",
+     "min": 7.8,
+     "max": 8.4,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "ph"
+      ],
+      "prefer": [
+       "reef",
+       "tank",
+       "aquarium",
+       "water",
+       "saltwater",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "phone",
+       "phase",
+       "room"
+      ],
+      "device_classes": [],
+      "units": []
+     }
+    },
+    "salinity": {
+     "label": "Salinity",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "ppt",
+     "min": 32,
+     "max": 36,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "salinity",
+       "specific gravity",
+       "sg",
+       "conductivity"
+      ],
+      "prefer": [
+       "reef",
+       "tank",
+       "aquarium",
+       "salt",
+       "ppt",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "ppt",
+       "SG",
+       "sg",
+       "mS/cm"
+      ]
+     }
+    },
+    "sump_temp": {
+     "label": "Sump Temperature",
+     "enabled": false,
+     "group": "sump",
+     "unit": "\u00b0C",
+     "min": 24.5,
+     "max": 27.5,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "temperature",
+       "temp",
+       "sump",
+       "rear chamber",
+       "chamber"
+      ],
+      "prefer": [
+       "sump",
+       "rear",
+       "chamber",
+       "filter",
+       "refugium",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air",
+       "display"
+      ],
+      "device_classes": [
+       "temperature"
+      ],
+      "units": [
+       "\u00b0C",
+       "\u00b0F",
+       "C",
+       "F"
+      ]
+     }
+    },
+    "alkalinity": {
+     "label": "Alkalinity",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "dKH",
+     "min": 7.0,
+     "max": 11.0,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "alkalinity",
+       "alk",
+       "kh",
+       "dkh",
+       "trident",
+       "neptune"
+      ],
+      "prefer": [
+       "trident",
+       "apex",
+       "neptune",
+       "reef",
+       "tank",
+       "aquarium"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "dKH",
+       "dkh",
+       "KH"
+      ]
+     }
+    },
+    "orp": {
+     "label": "ORP",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "mV",
+     "min": 250,
+     "max": 450,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "orp",
+       "oxidation",
+       "redox",
+       "apex",
+       "neptune"
+      ],
+      "prefer": [
+       "apex",
+       "neptune",
+       "reef",
+       "tank",
+       "aquarium"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "mV",
+       "mv"
+      ]
+     }
+    },
+    "calcium": {
+     "label": "Calcium",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "ppm",
+     "min": 380,
+     "max": 460,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "calcium",
+       "ca",
+       "trident",
+       "neptune"
+      ],
+      "prefer": [
+       "trident",
+       "apex",
+       "neptune",
+       "reef",
+       "tank",
+       "aquarium"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "ppm",
+       "mg/L",
+       "mg/l"
+      ]
+     }
+    },
+    "magnesium": {
+     "label": "Magnesium",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "ppm",
+     "min": 1250,
+     "max": 1450,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "magnesium",
+       "mg",
+       "trident",
+       "neptune"
+      ],
+      "prefer": [
+       "trident",
+       "apex",
+       "neptune",
+       "reef",
+       "tank",
+       "aquarium"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "ppm",
+       "mg/L",
+       "mg/l"
+      ]
+     }
+    },
+    "nitrate": {
+     "label": "Nitrate",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "ppm",
+     "min": 0.5,
+     "max": 20,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "nitrate",
+       "no3",
+       "trident",
+       "np",
+       "neptune"
+      ],
+      "prefer": [
+       "trident",
+       "apex",
+       "neptune",
+       "reef",
+       "tank",
+       "aquarium"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "ppm",
+       "mg/L",
+       "mg/l"
+      ]
+     }
+    },
+    "phosphate": {
+     "label": "Phosphate",
+     "enabled": false,
+     "group": "chemistry",
+     "unit": "ppm",
+     "min": 0.02,
+     "max": 0.12,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "phosphate",
+       "po4",
+       "trident",
+       "np",
+       "neptune"
+      ],
+      "prefer": [
+       "trident",
+       "apex",
+       "neptune",
+       "reef",
+       "tank",
+       "aquarium"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "ppm",
+       "mg/L",
+       "mg/l"
+      ]
+     }
+    },
+    "dissolved_oxygen": {
+     "label": "Dissolved Oxygen",
+     "enabled": false,
+     "group": "water",
+     "unit": "mg/L",
+     "min": 5,
+     "max": 9,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "dissolved oxygen",
+       "oxygen",
+       "do",
+       "o2"
+      ],
+      "prefer": [
+       "reef",
+       "tank",
+       "aquarium",
+       "water",
+       "saltwater",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "device_classes": [],
+      "units": [
+       "mg/L",
+       "mg/l",
+       "ppm"
+      ]
+     }
+    },
+    "flow": {
+     "label": "Flow Rate",
+     "enabled": false,
+     "group": "flow",
+     "unit": "L/h",
+     "min": 1,
+     "max": 10000,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "flow",
+       "flow rate",
+       "return",
+       "pump",
+       "fmm",
+       "fm"
+      ],
+      "prefer": [
+       "flow",
+       "return",
+       "reef",
+       "tank",
+       "aquarium",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "battery",
+       "signal"
+      ],
+      "device_classes": [],
+      "units": [
+       "L/h",
+       "l/h",
+       "lph",
+       "gph"
+      ]
+     }
+    },
+    "par": {
+     "label": "PAR",
+     "enabled": false,
+     "group": "lighting",
+     "unit": "umol/m2/s",
+     "min": 50,
+     "max": 350,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "par",
+       "photosynthetic",
+       "light",
+       "quantum"
+      ],
+      "prefer": [
+       "par",
+       "reef",
+       "tank",
+       "aquarium",
+       "light"
+      ],
+      "avoid": [
+       "power",
+       "energy",
+       "cost"
+      ],
+      "device_classes": [],
+      "units": [
+       "umol/m2/s",
+       "\u00b5mol/m\u00b2/s",
+       "PAR"
+      ]
+     }
+    },
+    "leak": {
+     "label": "Leak Detector",
+     "enabled": false,
+     "group": "safety",
+     "kind": "binary",
+     "unit": "",
+     "min": 0,
+     "max": 0,
+     "target": {
+      "domains": [
+       "binary_sensor",
+       "sensor"
+      ],
+      "keywords": [
+       "leak",
+       "water leak",
+       "moisture",
+       "flood",
+       "wet"
+      ],
+      "prefer": [
+       "leak",
+       "moisture",
+       "stand",
+       "cabinet",
+       "sump",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "battery",
+       "signal"
+      ],
+      "device_classes": [
+       "moisture",
+       "problem"
+      ],
+      "units": []
+     }
+    },
+    "high_water": {
+     "label": "High Water Level",
+     "enabled": false,
+     "group": "water",
+     "kind": "binary",
+     "unit": "",
+     "min": 0,
+     "max": 0,
+     "target": {
+      "domains": [
+       "binary_sensor",
+       "sensor"
+      ],
+      "keywords": [
+       "high water",
+       "high level",
+       "overflow",
+       "optical",
+       "level"
+      ],
+      "prefer": [
+       "high",
+       "level",
+       "overflow",
+       "sump",
+       "tank",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "battery",
+       "signal"
+      ],
+      "device_classes": [
+       "moisture",
+       "problem"
+      ],
+      "units": []
+     }
+    },
+    "low_water": {
+     "label": "Low Water Level",
+     "enabled": false,
+     "group": "water",
+     "kind": "binary",
+     "unit": "",
+     "min": 0,
+     "max": 0,
+     "target": {
+      "domains": [
+       "binary_sensor",
+       "sensor"
+      ],
+      "keywords": [
+       "low water",
+       "low level",
+       "dry",
+       "optical",
+       "level"
+      ],
+      "prefer": [
+       "low",
+       "level",
+       "dry",
+       "sump",
+       "tank",
+       "apex",
+       "neptune"
+      ],
+      "avoid": [
+       "battery",
+       "signal"
+      ],
+      "device_classes": [
+       "moisture",
+       "problem"
+      ],
+      "units": []
+     }
+    },
+    "room_temp": {
+     "label": "Room Temp",
+     "enabled": false,
+     "group": "room",
+     "unit": "\u00b0C",
+     "min": 16,
+     "max": 28,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "temperature",
+       "temp",
+       "room"
+      ],
+      "prefer": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "avoid": [
+       "reef",
+       "tank",
+       "aquarium",
+       "water",
+       "saltwater"
+      ],
+      "device_classes": [
+       "temperature"
+      ],
+      "units": [
+       "\u00b0C",
+       "\u00b0F",
+       "C",
+       "F"
+      ]
+     }
+    },
+    "co2": {
+     "label": "CO2 Level",
+     "enabled": false,
+     "group": "room",
+     "unit": "ppm",
+     "min": 350,
+     "max": 1200,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "co2",
+       "carbon dioxide"
+      ],
+      "prefer": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "avoid": [
+       "reef",
+       "tank",
+       "aquarium",
+       "water",
+       "saltwater"
+      ],
+      "device_classes": [
+       "carbon_dioxide"
+      ],
+      "units": [
+       "ppm"
+      ]
+     }
+    },
+    "humidity": {
+     "label": "Humidity",
+     "enabled": false,
+     "group": "room",
+     "unit": "%",
+     "min": 30,
+     "max": 70,
+     "target": {
+      "domains": [
+       "sensor"
+      ],
+      "keywords": [
+       "humidity",
+       "humid"
+      ],
+      "prefer": [
+       "room",
+       "ambient",
+       "air"
+      ],
+      "avoid": [
+       "reef",
+       "tank",
+       "aquarium",
+       "water",
+       "saltwater"
+      ],
+      "device_classes": [
+       "humidity"
+      ],
+      "units": [
+       "%"
+      ]
+     }
+    }
+   },
+   "validation": {
+    "entity_count": 12,
+    "missing_entities": [],
+    "locked_controls": [
+     "switch.showroom_frag"
+    ],
+    "armed_unavailable": [],
+    "setup_complete": true
+   },
+   "trust_check": {
+    "status": "warning",
+    "checkedAt": "2026-08-04T17:17:37.379002+00:00",
+    "items": [
+     {
+      "key": "sensors",
+      "label": "Sensor trust",
+      "status": "ok",
+      "detail": "6/6 enabled sensors mapped and reporting within current rules."
+     },
+     {
+      "key": "mappings",
+      "label": "Unsafe mappings",
+      "status": "ok",
+      "detail": "No missing mapped entities or armed unavailable devices found."
+     },
+     {
+      "key": "notifications",
+      "label": "Notification path",
+      "status": "warning",
+      "detail": "No persistent notification or escalation target is configured."
+     },
+     {
+      "key": "heartbeat",
+      "label": "Heartbeat",
+      "status": "ok",
+      "detail": "Last heartbeat 2026-08-04T15:17:37+00:00."
+     },
+     {
+      "key": "cameras",
+      "label": "Camera reachability",
+      "status": "unknown",
+      "detail": "No camera is mapped, so incident clips cannot be proven yet."
+     },
+     {
+      "key": "recorder",
+      "label": "Incident history",
+      "status": "ok",
+      "detail": "OpenReef local alert/capture history store is present."
+     },
+     {
+      "key": "backup",
+      "label": "Backup review",
+      "status": "unknown",
+      "detail": "No backup review has been recorded in OpenReef."
+     },
+     {
+      "key": "edge_failsafes",
+      "label": "Edge failsafes",
+      "status": "warning",
+      "detail": "Life-support equipment is armed, but ESPHome/on-device failsafes are not marked as reviewed."
+     }
+    ]
+   },
+   "heartbeat": {
+    "status": "ok",
+    "lastHeartbeat": "2026-08-04T15:17:37+00:00",
+    "missed": false,
+    "nextDue": "2026-08-05T15:17:37+00:00"
+   },
+   "reef_replay": [
+    {
+     "id": "alert-ph-1785812017",
+     "timestamp": "2026-08-04T02:53:37+00:00",
+     "title": "pH back in range",
+     "severity": "ok",
+     "message": "pH recovered to 8.12 after the evening CO2 dip.",
+     "events": []
+    },
+    {
+     "id": "alert-ph-1785803377",
+     "timestamp": "2026-08-04T00:29:37+00:00",
+     "title": "pH low warning",
+     "severity": "warning",
+     "message": "pH read 7.94, inside the warning buffer below minimum 7.8.",
+     "events": []
+    },
+    {
+     "id": "alert-temp-1785596017",
+     "timestamp": "2026-08-01T14:53:37+00:00",
+     "title": "Temperature back in range",
+     "severity": "ok",
+     "message": "Tank temperature recovered to 26.4 \u00b0C after heater outlet was cut.",
+     "events": [
+      {
+       "timestamp": "2026-08-01T14:53:37Z",
+       "message": "Heater outlet cut: temperature exceeded 27.5 \u00b0C with heater ON (interlock)",
+       "type": "warning",
+       "source": "activity"
+      }
+     ]
+    },
+    {
+     "id": "alert-temp-1785594289",
+     "timestamp": "2026-08-01T14:24:49+00:00",
+     "title": "Temperature critical",
+     "severity": "critical",
+     "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C). Heater outlet cut by interlock; notification sent.",
+     "events": []
+    }
+   ]
+  },
+  "openreef/awc_summary": {
+   "summary": {
+    "reservoirs": {
+     "fresh": {
+      "remainingL": 34.0,
+      "capacityL": 60.0,
+      "percent": 56.7,
+      "changesRemaining": 1.36,
+      "saltPpt": 0.0,
+      "dispensedSinceFullL": 0.0,
+      "driftPct": null,
+      "driftStatus": ""
+     },
+     "waste": {
+      "filledL": 25.5,
+      "capacityL": 60.0,
+      "percent": 42.5,
+      "remainingCapacityL": 34.5
+     }
+    },
+    "sourcePolicy": {
+     "mode": "single",
+     "lastSourceUsed": ""
+    },
+    "scheduleText": "25 L at 09:00 on Mon/Thu, 7.14 L/day, drain then fill",
+    "dailyChangeL": 7.143,
+    "weeklyChangeL": 50.0,
+    "weeklyPercentOfTank": 20.0,
+    "daysOfFreshRemaining": 4.76,
+    "changesRemaining": 1.36,
+    "netImbalance": {
+     "drainedL": 75.0,
+     "filledL": 74.8,
+     "netL": -0.2,
+     "status": "ok",
+     "suggestedTrimL": 0.2,
+     "since": null,
+     "perSource": {
+      "fill": 0.0
+     },
+     "netSaltGrams": 0.0
+    },
+    "projectedRemovalPct30d": 57.6,
+    "pumps": {
+     "drain": {
+      "mlPerS": 55.0,
+      "calibrated": true,
+      "calibrationAgeDays": null,
+      "recalibrationDue": false,
+      "tubingAgeDays": null,
+      "tubingReplaceDue": false,
+      "runHours": 0.0,
+      "startCount": 0
+     },
+     "fill": {
+      "mlPerS": 52.5,
+      "calibrated": true,
+      "calibrationAgeDays": null,
+      "recalibrationDue": false,
+      "tubingAgeDays": null,
+      "tubingReplaceDue": false,
+      "runHours": 0.0,
+      "startCount": 0
+     }
+    }
+   },
+   "state": {
+    "status": "idle",
+    "fault": "",
+    "faultSince": "",
+    "method": "",
+    "startedAt": "",
+    "lastRun": "2026-08-03T09:50:00Z",
+    "nextRun": "2026-08-06T09:00:00Z",
+    "targetLitres": 0.0,
+    "movedMl": {
+     "drain": 0.0,
+     "fill": 0.0
+    },
+    "legStartedAt": "",
+    "legEndsAt": "",
+    "endsAt": {
+     "drain": "",
+     "fill": ""
+    },
+    "activeSourceRole": "",
+    "exchangeBaselineNetMl": 0.0,
+    "pausedReason": "",
+    "atoSuspendedUntil": "",
+    "anomalyWarned": false,
+    "scheduleArmedAt": "",
+    "blockedSlotKey": "",
+    "microChange": false,
+    "calRunRole": "",
+    "calRunEndsAt": ""
+   },
+   "schedule": {
+    "enabled": true,
+    "method": "batch_sequential",
+    "mode": "times",
+    "everyMinutes": 60,
+    "amountUnit": "litres",
+    "amount": 50.0,
+    "period": "week",
+    "times": [
+     "09:00"
+    ],
+    "days": [
+     "Mon",
+     "Thu"
+    ],
+    "windowStart": "01:00",
+    "windowEnd": "05:00"
+   },
+   "live": {
+    "leak": false,
+    "highLevel": false,
+    "freshEmpty": false,
+    "wasteFull": false,
+    "leakUnknown": false,
+    "highLevelUnknown": false,
+    "returnPumpIssue": false,
+    "inFeedMode": false
+   },
+   "atoSuspended": false,
+   "simulation": {
+    "enabled": false,
+    "hazards": {
+     "leak": false,
+     "highLevel": false,
+     "freshEmpty": false,
+     "wasteFull": false,
+     "returnPumpIssue": false
+    },
+    "snapshot": null
+   },
+   "simPumps": {}
+  },
+  "openreef/dosing_summary": {
+   "summary": {},
+   "awcSuspended": false,
+   "bindings": {},
+   "mirrorEntity": "sensor.openreef_kalk_ph_mirror"
+  },
+  "openreef/icp_dashboard": {
+   "settings": {
+    "includedLabs": [],
+    "range": "all",
+    "group": "core",
+    "symbol": "Ca"
+   },
+   "labs": [
+    {
+     "lab": "Triton",
+     "count": 1,
+     "tankCount": 1,
+     "latest": "2026-07-23T10:35:00Z"
+    }
+   ],
+   "groups": [
+    {
+     "id": "core",
+     "label": "Core",
+     "symbols": [
+      "Ca",
+      "Mg",
+      "KH",
+      "NO3",
+      "PO4",
+      "Sal"
+     ]
+    },
+    {
+     "id": "nutrients",
+     "label": "Nutrients",
+     "symbols": [
+      "NO3",
+      "PO4",
+      "Si"
+     ]
+    },
+    {
+     "id": "major_minor",
+     "label": "Major / Minor",
+     "symbols": [
+      "Ca",
+      "Mg",
+      "K",
+      "Sr",
+      "B"
+     ]
+    },
+    {
+     "id": "trace",
+     "label": "Trace",
+     "symbols": [
+      "I",
+      "Zn"
+     ]
+    },
+    {
+     "id": "pollutants",
+     "label": "Pollutants",
+     "symbols": [
+      "Cu"
+     ]
+    },
+    {
+     "id": "organics",
+     "label": "Organics",
+     "symbols": []
+    },
+    {
+     "id": "all",
+     "label": "All",
+     "symbols": [
+      "Ca",
+      "Mg",
+      "KH",
+      "NO3",
+      "PO4",
+      "Sal",
+      "K",
+      "Sr",
+      "B",
+      "Si",
+      "I",
+      "Zn",
+      "Cu"
+     ]
+    }
+   ],
+   "series": {
+    "Ca": {
+     "symbol": "Ca",
+     "name": "Calcium",
+     "category": "major",
+     "unit": "ppm",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 419.0,
+       "unit": "ppm",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "Mg": {
+     "symbol": "Mg",
+     "name": "Magnesium",
+     "category": "major",
+     "unit": "ppm",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 1342.0,
+       "unit": "ppm",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "KH": {
+     "symbol": "KH",
+     "name": "Alkalinity",
+     "category": "physical",
+     "unit": "dKH",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 8.1,
+       "unit": "dKH",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "NO3": {
+     "symbol": "NO3",
+     "name": "Nitrate",
+     "category": "nutrient",
+     "unit": "ppm",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 9.8,
+       "unit": "ppm",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "PO4": {
+     "symbol": "PO4",
+     "name": "Phosphate",
+     "category": "nutrient",
+     "unit": "ppm",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 0.06,
+       "unit": "ppm",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "Sal": {
+     "symbol": "Sal",
+     "name": "Salinity",
+     "category": "physical",
+     "unit": "ppt",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 35.0,
+       "unit": "ppt",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "K": {
+     "symbol": "K",
+     "name": "Potassium",
+     "category": "major",
+     "unit": "ppm",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 402.0,
+       "unit": "ppm",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "Sr": {
+     "symbol": "Sr",
+     "name": "Strontium",
+     "category": "minor",
+     "unit": "ppm",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 7.9,
+       "unit": "ppm",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "B": {
+     "symbol": "B",
+     "name": "Boron",
+     "category": "minor",
+     "unit": "ppm",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 4.6,
+       "unit": "ppm",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "Si": {
+     "symbol": "Si",
+     "name": "Silicon",
+     "category": "nutrient",
+     "unit": "ppb",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 90.0,
+       "unit": "ppb",
+       "bdl": false,
+       "threshold": null,
+       "status": "ok",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "I": {
+     "symbol": "I",
+     "name": "Iodine",
+     "category": "trace",
+     "unit": "ppb",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 41.0,
+       "unit": "ppb",
+       "bdl": false,
+       "threshold": null,
+       "status": "low",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "Zn": {
+     "symbol": "Zn",
+     "name": "Zinc",
+     "category": "trace",
+     "unit": "ppb",
+     "points": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": 2.1,
+       "unit": "ppb",
+       "bdl": false,
+       "threshold": null,
+       "status": "unknown",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "bdlPoints": [],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    },
+    "Cu": {
+     "symbol": "Cu",
+     "name": "Copper",
+     "category": "heavy_metal",
+     "unit": "ppb",
+     "points": [],
+     "bdlPoints": [
+      {
+       "reportId": "demo:icp:triton:1",
+       "date": "2026-07-23T10:35:00Z",
+       "time": 1784802900000,
+       "lab": "Triton",
+       "value": null,
+       "unit": "ppb",
+       "bdl": false,
+       "threshold": null,
+       "status": "unknown",
+       "labName": "",
+       "labResult": "",
+       "labUnit": "",
+       "sampleType": "tank"
+      }
+     ],
+     "reportCount": 1,
+     "labs": [
+      "Triton"
+     ]
+    }
+   },
+   "selectedSeries": {
+    "symbol": "Ca",
+    "name": "Calcium",
+    "category": "major",
+    "unit": "ppm",
+    "points": [
+     {
+      "reportId": "demo:icp:triton:1",
+      "date": "2026-07-23T10:35:00Z",
+      "time": 1784802900000,
+      "lab": "Triton",
+      "value": 419.0,
+      "unit": "ppm",
+      "bdl": false,
+      "threshold": null,
+      "status": "ok",
+      "labName": "",
+      "labResult": "",
+      "labUnit": "",
+      "sampleType": "tank"
+     }
+    ],
+    "bdlPoints": [],
+    "reportCount": 1,
+    "labs": [
+     "Triton"
+    ]
+   },
+   "summary": {
+    "reports": 1,
+    "tankReports": 1,
+    "filteredTankReports": 1,
+    "elements": 13,
+    "points": 12,
+    "latest": "2026-07-23T10:35:00Z"
+   },
+   "analysisCards": [
+    {
+     "kind": "retest",
+     "severity": "info",
+     "title": "Retest prompt",
+     "summary": "Iodine has one odd ICP value without trend support yet.",
+     "detail": "Treat as a recheck cue before making any major correction.",
+     "symbol": "I"
+    }
+   ]
+  },
+  "openreef/lighting_window": {
+   "lighting": {
+    "mode": "off",
+    "configured": false
+   }
+  },
+  "openreef/list_reef_presets": {
+   "presets": [
+    {
+     "id": "gbr_central",
+     "label": "Great Barrier Reef (Central)",
+     "region": "Coral Sea, Australia",
+     "lat": -18.5,
+     "lon": 147.5,
+     "hemisphere": "S",
+     "spawnMonth": "November",
+     "tempRangeC": [
+      23.7,
+      29.0
+     ],
+     "note": "Classic Acropora mass spawning. Austral seasons \u2014 offset +6 to align to a N-hemisphere summer."
+    },
+    {
+     "id": "singapore",
+     "label": "Singapore (Kusu Reef)",
+     "region": "Coral Triangle, equatorial",
+     "lat": 1.3,
+     "lon": 103.85,
+     "hemisphere": "N",
+     "spawnMonth": "April",
+     "tempRangeC": [
+      27.6,
+      29.9
+     ],
+     "note": "Equatorial \u2014 tiny day-length swing (~minutes); temperature + lunar do the work."
+    },
+    {
+     "id": "red_sea_aqaba",
+     "label": "Red Sea (Gulf of Aqaba)",
+     "region": "Northern Red Sea",
+     "lat": 29.5,
+     "lon": 34.9,
+     "hemisphere": "N",
+     "spawnMonth": "July",
+     "tempRangeC": [
+      21.4,
+      27.0
+     ],
+     "note": "Strong seasonal swing (cool ~21\u00b0C winter). Higher-latitude reef."
+    },
+    {
+     "id": "hawaii_oahu",
+     "label": "Hawai\u02bbi (O\u02bbahu)",
+     "region": "Central Pacific",
+     "lat": 21.4,
+     "lon": -157.8,
+     "hemisphere": "N",
+     "spawnMonth": "July",
+     "tempRangeC": [
+      24.2,
+      27.1
+     ],
+     "note": "Montipora-led summer spawning; many local spawners cue to the new moon."
+    },
+    {
+     "id": "caribbean_florida",
+     "label": "Caribbean / Florida Keys",
+     "region": "Tropical W. Atlantic",
+     "lat": 24.7,
+     "lon": -81.0,
+     "hemisphere": "N",
+     "spawnMonth": "August",
+     "tempRangeC": [
+      23.9,
+      30.1
+     ],
+     "note": "Acropora palmata / cervicornis \u2014 restoration-priority Atlantic species."
+    }
+   ]
+  },
+  "openreef/guardian_status": {
+   "keys": {
+    "anthropic": {
+     "set": false,
+     "hint": ""
+    },
+    "openai": {
+     "set": false,
+     "hint": ""
+    },
+    "simli": {
+     "set": false,
+     "hint": ""
+    },
+    "simliFaceId": "",
+    "ready": false,
+    "faceReady": false
+   },
+   "settings": {
+    "enabled": true,
+    "tone": "cheeky",
+    "effort": "low",
+    "voice": "shimmer"
+   },
+   "model": "claude-sonnet-5"
+  },
+  "openreef/generate_spawning_program": {
+   "program": {
+    "preset": {
+     "id": "gbr_central",
+     "label": "Great Barrier Reef (Central)",
+     "region": "Coral Sea, Australia",
+     "lat": -18.5,
+     "lon": 147.5,
+     "hemisphere": "S"
+    },
+    "params": {
+     "year": 2026,
+     "offsetMonths": 0,
+     "solarNoonHour": 13.0,
+     "tempUnit": "C",
+     "tempProbe": "Tmp"
+    },
+    "seasonTable": [
+     {
+      "localMonth": 1,
+      "localMonthName": "Jan",
+      "localDate": "Jan 15",
+      "reefMonth": 1,
+      "reefMonthName": "Jan",
+      "sunrise": "06:26",
+      "sunset": "19:34",
+      "dayLengthHours": 13.12,
+      "tempC": 28.6,
+      "temp": 28.6,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 2,
+      "localMonthName": "Feb",
+      "localDate": "Feb 15",
+      "reefMonth": 2,
+      "reefMonthName": "Feb",
+      "sunrise": "06:39",
+      "sunset": "19:21",
+      "dayLengthHours": 12.71,
+      "tempC": 29.0,
+      "temp": 29.0,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 3,
+      "localMonthName": "Mar",
+      "localDate": "Mar 15",
+      "reefMonth": 3,
+      "reefMonthName": "Mar",
+      "sunrise": "06:53",
+      "sunset": "19:07",
+      "dayLengthHours": 12.23,
+      "tempC": 28.7,
+      "temp": 28.7,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 4,
+      "localMonthName": "Apr",
+      "localDate": "Apr 15",
+      "reefMonth": 4,
+      "reefMonthName": "Apr",
+      "sunrise": "07:09",
+      "sunset": "18:51",
+      "dayLengthHours": 11.69,
+      "tempC": 27.6,
+      "temp": 27.6,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 5,
+      "localMonthName": "May",
+      "localDate": "May 15",
+      "reefMonth": 5,
+      "reefMonthName": "May",
+      "sunrise": "07:22",
+      "sunset": "18:38",
+      "dayLengthHours": 11.26,
+      "tempC": 26.1,
+      "temp": 26.1,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 6,
+      "localMonthName": "Jun",
+      "localDate": "Jun 15",
+      "reefMonth": 6,
+      "reefMonthName": "Jun",
+      "sunrise": "07:29",
+      "sunset": "18:31",
+      "dayLengthHours": 11.02,
+      "tempC": 24.7,
+      "temp": 24.7,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 7,
+      "localMonthName": "Jul",
+      "localDate": "Jul 15",
+      "reefMonth": 7,
+      "reefMonthName": "Jul",
+      "sunrise": "07:27",
+      "sunset": "18:33",
+      "dayLengthHours": 11.11,
+      "tempC": 23.8,
+      "temp": 23.8,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 8,
+      "localMonthName": "Aug",
+      "localDate": "Aug 15",
+      "reefMonth": 8,
+      "reefMonthName": "Aug",
+      "sunrise": "07:16",
+      "sunset": "18:44",
+      "dayLengthHours": 11.47,
+      "tempC": 23.7,
+      "temp": 23.7,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 9,
+      "localMonthName": "Sep",
+      "localDate": "Sep 15",
+      "reefMonth": 9,
+      "reefMonthName": "Sep",
+      "sunrise": "07:01",
+      "sunset": "18:59",
+      "dayLengthHours": 11.97,
+      "tempC": 24.6,
+      "temp": 24.6,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 10,
+      "localMonthName": "Oct",
+      "localDate": "Oct 15",
+      "reefMonth": 10,
+      "reefMonthName": "Oct",
+      "sunrise": "06:45",
+      "sunset": "19:15",
+      "dayLengthHours": 12.49,
+      "tempC": 26.2,
+      "temp": 26.2,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 11,
+      "localMonthName": "Nov",
+      "localDate": "Nov 15",
+      "reefMonth": 11,
+      "reefMonthName": "Nov",
+      "sunrise": "06:31",
+      "sunset": "19:29",
+      "dayLengthHours": 12.97,
+      "tempC": 27.6,
+      "temp": 27.6,
+      "tempUnit": "C"
+     },
+     {
+      "localMonth": 12,
+      "localMonthName": "Dec",
+      "localDate": "Dec 15",
+      "reefMonth": 12,
+      "reefMonthName": "Dec",
+      "sunrise": "06:23",
+      "sunset": "19:37",
+      "dayLengthHours": 13.23,
+      "tempC": 28.2,
+      "temp": 28.2,
+      "tempUnit": "C"
+     }
+    ],
+    "profiles": [
+     {
+      "name": "Sunup",
+      "type": "Profile",
+      "intensityPercent": 25,
+      "rampMinutes": 60,
+      "note": "Gentle dawn ramp up from 0%. Warmer/low-blue start."
+     },
+     {
+      "name": "Midday",
+      "type": "Profile",
+      "intensityPercent": 100,
+      "rampMinutes": 0,
+      "note": "Peak \u2014 match your fixture to ~378\u2013498 \u00b5mol\u00b7m\u207b\u00b2\u00b7s\u207b\u00b9 PAR at coral height."
+     },
+     {
+      "name": "Sunset",
+      "type": "Profile",
+      "intensityPercent": 25,
+      "rampMinutes": 60,
+      "note": "Gentle dusk ramp down to 0%. Sunset is the proximate spawn trigger \u2014 keep it smooth."
+     },
+     {
+      "name": "Moonlight",
+      "type": "Profile",
+      "intensityPercent": 2,
+      "rampMinutes": 0,
+      "note": "Dim blue (~1\u20132%). Real dark nights matter \u2014 light pollution desynchronises spawning."
+     }
+    ],
+    "codeSnippets": {
+     "temperature_heater": {
+      "label": "Heater (\u00b10.2\u00b0C, tracks Season Table RT)",
+      "target": "Heater outlet",
+      "code": "Fallback OFF\nSet OFF\nIf Tmp < RT-0.2 Then ON\nIf Tmp > RT+0.2 Then OFF",
+      "note": "RT is the seasonal reference temperature set by the Season Table."
+     },
+     "temperature_chiller": {
+      "label": "Chiller (\u00b10.2\u00b0C, tracks Season Table RT)",
+      "target": "Chiller outlet",
+      "code": "Fallback OFF\nSet OFF\nIf Tmp > RT+0.2 Then ON\nIf Tmp < RT-0.2 Then OFF",
+      "note": "Mirror of the heater \u2014 keeps the tank inside RT \u00b1 tolerance."
+     },
+     "daylight_3step": {
+      "label": "Daylight \u2014 3 step (sunrise / midday / sunset)",
+      "target": "Light virtual output or Profile selector",
+      "code": "Fallback OFF\nSet OFF\nIf Sun 000/-360 Then Sunup\nIf Sun 360/000 Then Sunset\nIf Sun 180/-180 Then Midday",
+      "note": "Sun NNN/NNN is minutes relative to the Season Table's sunrise/sunset."
+     },
+     "daylight_5step": {
+      "label": "Daylight \u2014 5 step (smoother ramps)",
+      "target": "Light virtual output or Profile selector",
+      "code": "Fallback OFF\nSet OFF\nIf Sun 000/-360 Then Sunup1\nIf Sun 090/-270 Then Sunup2\nIf Sun 180/-180 Then Midday\nIf Sun 270/-090 Then Afternoon\nIf Sun 360/000 Then Sunset",
+      "note": "Add Sunup1/Sunup2/Afternoon Profiles for a gentler dawn/dusk."
+     },
+     "lunar_lsm": {
+      "label": "Lunar \u2014 moonrise\u2192moonset (LSM / vMoon)",
+      "target": "Lunar Simulation Module or vMoon virtual output",
+      "code": "Fallback OFF\nSet OFF\nIf Moon 000/000 Then ON",
+      "note": "Apex derives moon timing from the new-moon dates in the Season Table."
+     },
+     "radion_moonlight": {
+      "label": "Radion moonlight (MXM) \u2014 follow vMoon",
+      "target": "Radion (MXM) Advanced tab",
+      "code": "If Output vMoon = ON Then Moonlight",
+      "note": "Switches the MXM-linked Radion to its Moonlight profile when vMoon is on."
+     }
+    },
+    "newMoonDates": [
+     "2026-01-18",
+     "2026-02-17",
+     "2026-03-19",
+     "2026-04-17",
+     "2026-05-16",
+     "2026-06-15",
+     "2026-07-14",
+     "2026-08-12",
+     "2026-09-11",
+     "2026-10-10",
+     "2026-11-09",
+     "2026-12-09"
+    ],
+    "fullMoonDates": [
+     "2026-01-03",
+     "2026-02-01",
+     "2026-03-03",
+     "2026-04-02",
+     "2026-05-01",
+     "2026-05-31",
+     "2026-06-29",
+     "2026-07-29",
+     "2026-08-28",
+     "2026-09-26",
+     "2026-10-26",
+     "2026-11-24",
+     "2026-12-24"
+    ],
+    "spawnPrediction": {
+     "reefSpawnMonth": 11,
+     "reefSpawnMonthName": "November",
+     "localSpawnMonth": 11,
+     "localSpawnMonthName": "November",
+     "daysAfterFullMoon": [
+      12,
+      15
+     ],
+     "fullMoonUtc": "2026-11-24T14:56:31+00:00",
+     "windowStart": "2026-12-06",
+     "windowEnd": "2026-12-09",
+     "nightsUntilWindowEnd": 127,
+     "nightsUntilWindowStart": 124
+    },
+    "walkthrough": [
+     "Open Apex Local: in Apex Fusion click your Apex name (top-left) \u2192 Network \u2192 copy the IP, then open that IP in a browser and log in.",
+     "Go to the gear icon \u2192 wrench \u2192 sun icon to open the Season Table.",
+     "Enter the 12 monthly rows below: for each month set sunrise, sunset and the reference temperature (RT).",
+     "Enter the New-Moon dates below into the lunar / Season Table new-moon fields.",
+     "Create the four Profiles (Sunup, Midday, Sunset, Moonlight) for your MXM-linked Radions using the intensities below.",
+     "Paste the code snippets into the matching outlets/virtual outputs (heater, daylight, lunar, Radion moonlight).",
+     "\u26a0\ufe0f Re-check the Apex new-moon table every January 1 \u2014 it auto-resets, which silently drifts your lunar timing."
+    ],
+    "tempRangeC": [
+     23.7,
+     29.0
+    ],
+    "sources": [
+     {
+      "label": "Craggs et al. 2017 \u2014 ex-situ mesocosm protocol",
+      "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5743687/"
+     },
+     {
+      "label": "Craggs et al. 2025 \u2014 out-of-season offset profiles",
+      "url": "https://royalsocietypublishing.org/doi/10.1098/rspb.2025.1558"
+     },
+     {
+      "label": "Rich Ross \u2014 Coral Spawning Resources (Apex workflow)",
+      "url": "https://packedhead.net/coral-spawning-resources/"
+     }
+    ],
+    "disclaimer": "Curated reef presets with approximate monthly SST climatology. OpenReef generates the program; your Apex executes it with its own failsafes. Spawning needs sexually mature, same-species colonies, genuine dark nights, and many months of conditioning."
+   }
+  }
+ },
+ "states": {
+  "sensor.showroom_tank_temp": {
+   "state": "25.9",
+   "attributes": {
+    "unit_of_measurement": "\u00b0C",
+    "friendly_name": "Tank temp",
+    "device_class": "temperature"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "sensor.showroom_ph": {
+   "state": "8.16",
+   "attributes": {
+    "unit_of_measurement": "",
+    "friendly_name": "pH"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "sensor.showroom_salinity": {
+   "state": "35.1",
+   "attributes": {
+    "unit_of_measurement": "ppt",
+    "friendly_name": "Salinity"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "sensor.showroom_orp": {
+   "state": "382",
+   "attributes": {
+    "unit_of_measurement": "mV",
+    "friendly_name": "ORP"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "sensor.showroom_sump_temp": {
+   "state": "25.7",
+   "attributes": {
+    "unit_of_measurement": "\u00b0C",
+    "friendly_name": "Sump temp",
+    "device_class": "temperature"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "binary_sensor.showroom_leak": {
+   "state": "off",
+   "attributes": {
+    "friendly_name": "Leak sensor",
+    "device_class": "moisture"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_return": {
+   "state": "on",
+   "attributes": {
+    "friendly_name": "Return pump"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_heater": {
+   "state": "on",
+   "attributes": {
+    "friendly_name": "Heater"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_skimmer": {
+   "state": "on",
+   "attributes": {
+    "friendly_name": "Skimmer"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_ato": {
+   "state": "on",
+   "attributes": {
+    "friendly_name": "ATO"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_wave": {
+   "state": "on",
+   "attributes": {
+    "friendly_name": "Wavemaker"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_frag": {
+   "state": "off",
+   "attributes": {
+    "friendly_name": "Frag light"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_awc_drain": {
+   "state": "off",
+   "attributes": {
+    "friendly_name": "AWC drain pump"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "switch.showroom_awc_fill": {
+   "state": "off",
+   "attributes": {
+    "friendly_name": "AWC fill pump"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "binary_sensor.showroom_fresh_empty": {
+   "state": "off",
+   "attributes": {
+    "friendly_name": "Fresh reservoir empty",
+    "device_class": "problem"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "binary_sensor.showroom_waste_full": {
+   "state": "off",
+   "attributes": {
+    "friendly_name": "Waste reservoir full",
+    "device_class": "problem"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  },
+  "binary_sensor.showroom_high": {
+   "state": "off",
+   "attributes": {
+    "friendly_name": "Display high level",
+    "device_class": "problem"
+   },
+   "last_changed": "2026-08-04T17:15:37Z",
+   "last_updated": "2026-08-04T17:15:37Z"
+  }
+ }
+}

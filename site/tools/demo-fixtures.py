@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""Generate demo-tank fixtures for the marketing site's live demo (/demo/).
+
+Runs the REAL backend WS handlers (websocket_get_config & friends) inside the
+tests/ fake-HA harness against a seeded showroom tank, and dumps their exact
+response payloads as JSON for the browser-side hass shim to replay. No Home
+Assistant install needed, and no hand-authored payload shapes — whatever the
+backend serialises today is what the demo serves.
+
+Timestamps are emitted relative to generation time; the browser shim rebases
+every ISO timestamp by (viewer now − generatedAt) so "yesterday's water change"
+stays yesterday forever.
+
+Regenerate after integration changes:
+    python3 site/tools/demo-fixtures.py
+Output: site/public/demo/fixtures.json
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import random
+import shutil
+import sys
+from datetime import datetime, timedelta, timezone
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
+
+sys.path.insert(0, os.path.join(_ROOT, "tests"))
+import _ha_stubs  # noqa: E402
+
+_ha_stubs.install()
+
+sys.path.insert(0, os.path.join(_ROOT, "custom_components"))
+import openreef as integration  # noqa: E402
+
+from _fake_ha import FakeConnection, FakeEntry, FakeHass, FakeState, run  # noqa: E402
+
+CONF_SETTINGS = integration.CONF_SETTINGS
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+rng = random.Random(52)  # deterministic fixtures → reviewable diffs
+
+
+def iso(dt: datetime) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def days_ago(days: float, hour: int | None = None) -> datetime:
+    dt = NOW - timedelta(days=days)
+    if hour is not None:
+        dt = dt.replace(hour=hour, minute=rng.randrange(0, 55), second=0)
+    return dt
+
+
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _next_weekday_at(days: tuple[str, ...], hour: int) -> datetime:
+    """The next upcoming occurrence of any of ``days`` at ``hour`` local-UTC."""
+    for ahead in range(0, 8):
+        candidate = (NOW + timedelta(days=ahead)).replace(hour=hour, minute=0, second=0)
+        if _WEEKDAYS[candidate.weekday()] in days and candidate > NOW:
+            return candidate
+    return NOW + timedelta(days=1)
+
+
+# --------------------------------------------------------------------------- #
+# Seed: a believable, story-rich 250 L mixed reef.
+# Story beats the demo leans on: alk consumption creeping up (the advisor has
+# something to say), nitrate drifting high (one amber sensor), a skimmer clean
+# slightly overdue, a heater-stuck alert RESOLVED three nights ago (the
+# scripted "2 AM save" opener replays it), yesterday's water change logged.
+# --------------------------------------------------------------------------- #
+
+def _readings(param: str, days: int, start: float, end: float, jitter: float,
+              unit: str, every_days: float = 1.0) -> list[dict]:
+    rows = []
+    n = int(days / every_days)
+    for i in range(n):
+        t = days - i * every_days
+        frac = 1 - t / days
+        value = start + (end - start) * frac + rng.uniform(-jitter, jitter)
+        rows.append({
+            "id": f"demo:{param}:{i}",
+            "timestamp": iso(days_ago(t, hour=19)),
+            "value": round(value, 2),
+            "unit": unit,
+            "source": "manual",
+            "notes": "",
+        })
+    return rows
+
+
+def seed_config() -> dict:
+    sensors = {
+        "temp": "sensor.showroom_tank_temp",
+        "ph": "sensor.showroom_ph",
+        "salinity": "sensor.showroom_salinity",
+        "orp": "sensor.showroom_orp",
+        "sump_temp": "sensor.showroom_sump_temp",
+        "leak": "binary_sensor.showroom_leak",
+    }
+    config = {
+        "tank": {
+            "name": "The Showroom Reef",
+            "owner": "OpenReef",
+            "volumeLitres": 250,
+        },
+        "display": {"setupComplete": True},
+        "watchdog": {"enabled": True, "lastHeartbeat": iso(NOW - timedelta(hours=2))},
+        "sensors": {
+            sid: {"entity_id": eid, "enabled": True} for sid, eid in sensors.items()
+        },
+        "equipment": {
+            "return_pump": {"type": "return_pump", "label": "Return pump",
+                            "armed": True, "switch_entity_id": "switch.showroom_return"},
+            "heater": {"type": "heater", "label": "Heater",
+                       "armed": True, "switch_entity_id": "switch.showroom_heater"},
+            "skimmer": {"type": "skimmer", "label": "Skimmer",
+                        "armed": True, "switch_entity_id": "switch.showroom_skimmer"},
+            "ato": {"type": "ato", "label": "ATO",
+                    "armed": True, "switch_entity_id": "switch.showroom_ato"},
+            "wavemaker": {"type": "display_wavemaker", "label": "Wavemaker",
+                          "armed": True, "switch_entity_id": "switch.showroom_wave"},
+            "frag_light": {"type": "light", "label": "Frag light",
+                           "armed": False, "switch_entity_id": "switch.showroom_frag"},
+        },
+        # The advisor needs a chosen product before it advises; All-For-Reef is
+        # the classic single-solution choice for a demo tank.
+        "dosing": {
+            "system": {
+                "primaryProduct": "tropic_marin_all_for_reef",
+                "sharedDailyDoseMl": 45,
+                "safetyAcknowledged": True,
+            },
+        },
+        "manualReadings": {
+            # Alk consumption creeping up — decline steepens over the month.
+            "alkalinity": _readings("alk", 30, 8.6, 8.0, 0.06, "dKH"),
+            "calcium": _readings("ca", 30, 428, 415, 3, "ppm", every_days=2),
+            "magnesium": _readings("mg", 30, 1360, 1335, 8, "ppm", every_days=3),
+            "nitrate": _readings("no3", 28, 4.0, 12.0, 0.8, "ppm", every_days=3.5),
+            "phosphate": _readings("po4", 28, 0.03, 0.08, 0.008, "ppm", every_days=3.5),
+        },
+        # The "2 AM save" the scripted opener replays: heater stuck three
+        # nights ago, caught, outlet cut, resolved 26 minutes later.
+        "alerts": {
+            "history": [
+                {"timestamp": iso(days_ago(0.6)), "sensor_id": "ph", "label": "pH Level",
+                 "state": "ok", "title": "pH back in range",
+                 "message": "pH recovered to 8.12 after the evening CO2 dip."},
+                {"timestamp": iso(days_ago(0.7)), "sensor_id": "ph", "label": "pH Level",
+                 "state": "warning", "title": "pH low warning",
+                 "message": "pH read 7.94, inside the warning buffer below minimum 7.8."},
+                {"timestamp": iso(days_ago(3.1)), "sensor_id": "temp", "label": "Display Tank Temperature",
+                 "state": "ok", "title": "Temperature back in range",
+                 "message": "Tank temperature recovered to 26.4 °C after heater outlet was cut."},
+                {"timestamp": iso(days_ago(3.12)), "sensor_id": "temp", "label": "Display Tank Temperature",
+                 "state": "critical", "title": "Temperature critical",
+                 "message": "Tank temperature read 27.9 °C (max 27.5 °C). Heater outlet cut by interlock; notification sent."},
+            ],
+        },
+        "activity": [
+            {"timestamp": iso(NOW - timedelta(minutes=41)), "message": "Reef health recalculated: 87 (B+) — alkalinity trending down", "type": "info"},
+            {"timestamp": iso(days_ago(1, hour=9)), "message": "Automatic water change completed: 25.0 L drained, 25.0 L filled (batch sequential)", "type": "success"},
+            {"timestamp": iso(days_ago(1, hour=9)), "message": "ATO suspended for 15 min after water change (stabilisation holdoff)", "type": "info"},
+            {"timestamp": iso(days_ago(2, hour=18)), "message": "Feed mode: skimmer paused 10 min, wavemaker to 30 %", "type": "info"},
+            {"timestamp": iso(days_ago(3.1)), "message": "Heater outlet cut: temperature exceeded 27.5 °C with heater ON (interlock)", "type": "warning"},
+            {"timestamp": iso(days_ago(5, hour=11)), "message": "ICP report imported (Triton) — drift check passed on Ca/Mg, alk kit reads 0.3 dKH high", "type": "info"},
+        ],
+        "maintenance": {
+            "seeded": True,
+            "enabled": True,
+            "tasks": {
+                "water_change": {"label": "Water change", "cadenceDays": 7, "enabled": True},
+                "filter_sock": {"label": "Swap filter socks", "cadenceDays": 5, "enabled": True},
+                "skimmer_clean": {"label": "Clean skimmer cup", "cadenceDays": 14, "enabled": True},
+                "glass_clean": {"label": "Clean glass", "cadenceDays": 3, "enabled": True},
+            },
+            "completions": {
+                "water_change": [
+                    {"id": "demo:wc:1", "timestamp": iso(days_ago(1, hour=9)), "notes": "",
+                     "volume": 25.0, "volumeUnit": "L", "source": "awc"},
+                    {"id": "demo:wc:2", "timestamp": iso(days_ago(8, hour=9)), "notes": "",
+                     "volume": 25.0, "volumeUnit": "L", "source": "awc"},
+                    {"id": "demo:wc:3", "timestamp": iso(days_ago(15, hour=10)), "notes": "manual bucket day",
+                     "volume": 30.0, "volumeUnit": "L"},
+                ],
+                "filter_sock": [
+                    {"id": "demo:fs:1", "timestamp": iso(days_ago(3, hour=19)), "notes": ""},
+                ],
+                # Skimmer clean last done 15 days ago on a 14-day cadence —
+                # one day overdue, so Mission Control has something to nag about.
+                "skimmer_clean": [
+                    {"id": "demo:sk:1", "timestamp": iso(days_ago(15, hour=19)), "notes": ""},
+                ],
+                "glass_clean": [
+                    {"id": "demo:gc:1", "timestamp": iso(days_ago(2, hour=19)), "notes": ""},
+                ],
+            },
+        },
+        "automaticWaterChange": {
+            "enabled": True,
+            "pumps": {
+                "drain": {"switchEntity": "switch.showroom_awc_drain", "mlPerS": 55.0},
+                "fill": {"switchEntity": "switch.showroom_awc_fill", "mlPerS": 52.5},
+            },
+            "reservoirs": {
+                "fresh": {"capacityLitres": 60, "remainingMl": 34000,
+                          "emptyEntity": "binary_sensor.showroom_fresh_empty"},
+                "waste": {"capacityLitres": 60, "filledMl": 25500,
+                          "fullEntity": "binary_sensor.showroom_waste_full"},
+            },
+            "safety": {
+                "highLevelEntity": "binary_sensor.showroom_high",
+                "leakEntity": "binary_sensor.showroom_leak",
+                "maxSingleChangePercent": 25,
+            },
+            "guards": {"quietHoursEnabled": True, "quietStart": "22:00", "quietEnd": "08:00",
+                       "blockDuringFeed": True, "blockOnReturnPumpIssue": True},
+            "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 15},
+            # 50 L/week over Mon+Thu = 25 L per change (10 % of the tank each run).
+            "schedule": {"method": "batch_sequential", "enabled": True,
+                         "days": ["Mon", "Thu"], "times": ["09:00"],
+                         "amount": 50, "amountUnit": "litres", "period": "week"},
+            "state": {"status": "idle",
+                      "lastRun": iso(days_ago(1, hour=9)),
+                      "nextRun": iso(_next_weekday_at(("Mon", "Thu"), 9))},
+            "history": [
+                {"completedAt": iso(days_ago(1, hour=9)), "drainedL": 25.0, "filledL": 24.9,
+                 "method": "batch_sequential", "partial": False, "notes": "", "source": "sched"},
+                {"completedAt": iso(days_ago(4, hour=9)), "drainedL": 25.0, "filledL": 25.1,
+                 "method": "batch_sequential", "partial": False, "notes": "", "source": "sched"},
+                {"completedAt": iso(days_ago(8, hour=9)), "drainedL": 25.0, "filledL": 24.8,
+                 "method": "batch_sequential", "partial": False, "notes": "", "source": "sched"},
+            ],
+        },
+    }
+    return config
+
+
+def seed_states() -> dict:
+    def st(state, attrs):
+        return {"state": state, "attributes": attrs,
+                "last_changed": iso(NOW - timedelta(minutes=2)),
+                "last_updated": iso(NOW - timedelta(minutes=2))}
+
+    return {
+        "sensor.showroom_tank_temp": st("25.9", {"unit_of_measurement": "°C", "friendly_name": "Tank temp", "device_class": "temperature"}),
+        "sensor.showroom_ph": st("8.16", {"unit_of_measurement": "", "friendly_name": "pH"}),
+        "sensor.showroom_salinity": st("35.1", {"unit_of_measurement": "ppt", "friendly_name": "Salinity"}),
+        "sensor.showroom_orp": st("382", {"unit_of_measurement": "mV", "friendly_name": "ORP"}),
+        "sensor.showroom_sump_temp": st("25.7", {"unit_of_measurement": "°C", "friendly_name": "Sump temp", "device_class": "temperature"}),
+        "binary_sensor.showroom_leak": st("off", {"friendly_name": "Leak sensor", "device_class": "moisture"}),
+        "switch.showroom_return": st("on", {"friendly_name": "Return pump"}),
+        "switch.showroom_heater": st("on", {"friendly_name": "Heater"}),
+        "switch.showroom_skimmer": st("on", {"friendly_name": "Skimmer"}),
+        "switch.showroom_ato": st("on", {"friendly_name": "ATO"}),
+        "switch.showroom_wave": st("on", {"friendly_name": "Wavemaker"}),
+        "switch.showroom_frag": st("off", {"friendly_name": "Frag light"}),
+        "switch.showroom_awc_drain": st("off", {"friendly_name": "AWC drain pump"}),
+        "switch.showroom_awc_fill": st("off", {"friendly_name": "AWC fill pump"}),
+        "binary_sensor.showroom_fresh_empty": st("off", {"friendly_name": "Fresh reservoir empty", "device_class": "problem"}),
+        "binary_sensor.showroom_waste_full": st("off", {"friendly_name": "Waste reservoir full", "device_class": "problem"}),
+        "binary_sensor.showroom_high": st("off", {"friendly_name": "Display high level", "device_class": "problem"}),
+    }
+
+
+def _triton_report() -> dict:
+    """A client-parsed Triton-style report, fed through the REAL import handler
+    so normalisation, flags and core fan-out are authentic."""
+    sample = days_ago(12, hour=10)
+    return {
+        "id": "demo:icp:triton:1",
+        "lab": "Triton",
+        "adapter": "triton_csv",
+        "method": "ICP-OES",
+        "sampleType": "tank",
+        "sampleDate": iso(sample),
+        "testId": "TR-260722",
+        "source": {"fileName": "showroom-triton.csv"},
+        "elements": [
+            {"symbol": "Ca", "rawValue": 419, "rawUnit": "mg/L"},
+            {"symbol": "Mg", "rawValue": 1342, "rawUnit": "mg/L"},
+            {"symbol": "KH", "rawValue": 8.1, "rawUnit": "dKH"},
+            {"symbol": "NO3", "rawValue": 9.8, "rawUnit": "mg/L"},
+            {"symbol": "PO4", "rawValue": 0.06, "rawUnit": "mg/L"},
+            {"symbol": "K", "rawValue": 402, "rawUnit": "mg/L"},
+            {"symbol": "Sr", "rawValue": 7.9, "rawUnit": "mg/L"},
+            {"symbol": "B", "rawValue": 4.6, "rawUnit": "mg/L"},
+            {"symbol": "I", "rawValue": 0.041, "rawUnit": "mg/L"},
+            {"symbol": "Si", "rawValue": 0.09, "rawUnit": "mg/L"},
+            {"symbol": "Cu", "rawValue": "<0.5", "rawUnit": "µg/L"},
+            {"symbol": "Zn", "rawValue": 2.1, "rawUnit": "µg/L"},
+            {"symbol": "Sal", "rawValue": 35.0, "rawUnit": "ppt"},
+        ],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Run the real handlers, capture their send_result payloads.
+# --------------------------------------------------------------------------- #
+
+def main() -> int:
+    config = seed_config()
+    states = seed_states()
+    entry = FakeEntry(options={CONF_SETTINGS: config}, entry_id="demo_entry")
+    hass = FakeHass(entries=[entry])
+    for eid, s in states.items():
+        # Fresh last_changed, or the trust check flags every sensor as stale.
+        hass.states.set(eid, FakeState(s["state"], s["attributes"], last_changed=NOW))
+
+    # Feed one ICP report through the REAL import handler so icpReports,
+    # flags and the manualReadings fan-out are exactly what production writes.
+    icp_conn = FakeConnection()
+    run(integration.websocket_import_icp_report(
+        hass, icp_conn, {"id": 1, "type": "openreef/import_icp_report", "report": _triton_report()}))
+    if icp_conn.error_codes:
+        print(f"WARNING: ICP seed import failed: {icp_conn.error_codes}")
+
+    handlers = {
+        "openreef/get_config": integration.websocket_get_config,
+        "openreef/awc_summary": getattr(integration, "websocket_awc_summary", None),
+        "openreef/dosing_summary": getattr(integration, "websocket_dosing_summary", None),
+        "openreef/icp_dashboard": getattr(integration, "websocket_icp_dashboard", None),
+        "openreef/lighting_window": getattr(integration, "websocket_lighting_window", None),
+        "openreef/list_reef_presets": getattr(integration, "websocket_list_reef_presets", None),
+        "openreef/guardian_status": getattr(integration, "websocket_guardian_status", None),
+    }
+
+    ws: dict[str, object] = {}
+    skipped: list[str] = []
+    for cmd, handler in handlers.items():
+        if handler is None:
+            skipped.append(f"{cmd} (no handler)")
+            continue
+        conn = FakeConnection()
+        try:
+            result = handler(hass, conn, {"id": 1, "type": cmd})
+            if asyncio.iscoroutine(result):  # decorated sync handlers send inline
+                run(result)
+            if conn.results:
+                ws[cmd] = conn.results[-1].payload
+            else:
+                skipped.append(f"{cmd} (no result: {conn.error_codes or 'nothing sent'})")
+        except Exception as err:  # noqa: BLE001 — fixture gen, report and move on
+            skipped.append(f"{cmd} ({type(err).__name__}: {err})")
+
+    # Spawning: pre-compile the GBR programme so the demo's "generate" button
+    # returns a real compiled window (the shim replays this for any params).
+    spawn_conn = FakeConnection()
+    try:
+        integration.websocket_generate_spawning_program(
+            hass, spawn_conn,
+            {"id": 1, "type": "openreef/generate_spawning_program",
+             "reefPreset": "gbr_central", "year": NOW.year},
+        )
+        if spawn_conn.results:
+            ws["openreef/generate_spawning_program"] = spawn_conn.results[-1].payload
+    except Exception as err:  # noqa: BLE001
+        skipped.append(f"openreef/generate_spawning_program ({type(err).__name__}: {err})")
+
+    out = {
+        "generatedAt": iso(NOW),
+        "source": "seeded",  # becomes "recorded" when demo-record runs against a real tank
+        "ws": ws,
+        "states": states,
+    }
+    dest = os.path.join(_ROOT, "site", "public", "demo", "fixtures.json")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=1, default=str)
+    size = os.path.getsize(dest)
+    print(f"wrote {dest} ({size/1024:.0f} KB)")
+    print(f"captured: {', '.join(ws) or 'NOTHING'}")
+    for line in skipped:
+        print(f"skipped: {line}")
+
+    # Pin the panel + its avatar art alongside the fixtures, so the demo always
+    # runs the exact frontend this fixture set was generated against.
+    frontend = os.path.join(_ROOT, "custom_components", "openreef", "frontend")
+    panel_dest = os.path.join(_ROOT, "site", "public", "demo", "openreef-panel.js")
+    shutil.copyfile(os.path.join(frontend, "openreef-panel.js"), panel_dest)
+    print(f"copied panel → {panel_dest} ({os.path.getsize(panel_dest)/1024:.0f} KB)")
+    avatar_dest = os.path.join(_ROOT, "site", "public", "openreef_static", "avatar")
+    os.makedirs(avatar_dest, exist_ok=True)
+    copied = 0
+    for name in os.listdir(os.path.join(frontend, "avatar")):
+        if name.endswith(".png"):
+            shutil.copyfile(os.path.join(frontend, "avatar", name), os.path.join(avatar_dest, name))
+            copied += 1
+    print(f"copied {copied} avatar PNGs → {avatar_dest}")
+    return 0 if "openreef/get_config" in ws else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

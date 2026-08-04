@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "capture": "node tools/capture-demos.mjs"
+    "capture": "node tools/capture-demos.mjs",
+    "demo:fixtures": "python3 tools/demo-fixtures.py",
+    "demo:record": "node tools/demo-record.mjs"
   },
   "dependencies": {
     "@react-three/fiber": "^9.1.2",

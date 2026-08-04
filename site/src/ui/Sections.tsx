@@ -31,6 +31,9 @@ export function Hero() {
           <a className="btn btn-primary" href="#dive">
             Dive in ↓
           </a>
+          <a className="btn btn-ghost" href="/demo/">
+            Play with the live demo
+          </a>
           <a className="btn btn-ghost" href="#cta">
             Join the beta
           </a>

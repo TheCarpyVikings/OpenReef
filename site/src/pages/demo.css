@@ -1,0 +1,268 @@
+/* /demo/ — the Showroom Reef. The panel brings its own styles inside its
+ * shadow root; this file only dresses the room it stands in. */
+
+html,
+body {
+  background: #071019;
+}
+
+/* --- banner ------------------------------------------------------------- */
+
+.demo-banner {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  background: rgba(5, 13, 24, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(0, 180, 216, 0.25);
+}
+
+.demo-banner-title {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.demo-banner-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  color: #e8f4f8;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.demo-banner-brand img {
+  width: 26px;
+  height: 26px;
+}
+
+.demo-banner-label {
+  font-size: 0.82rem;
+  color: #9db8c6;
+  line-height: 1.35;
+}
+
+.demo-banner-label strong {
+  color: #7ee0d2;
+}
+
+.demo-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.demo-banner-actions .btn-primary {
+  color: #04302a;
+}
+
+/* --- panel host --------------------------------------------------------- */
+
+.demo-main {
+  min-height: calc(100vh - 54px);
+}
+
+.demo-host {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 10px 12px 60px;
+}
+
+.demo-status {
+  padding: 18vh 24px;
+  text-align: center;
+  color: #9db8c6;
+}
+
+.demo-status a {
+  color: #00b4d8;
+}
+
+/* --- the 2 AM save ------------------------------------------------------ */
+
+.opener {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(2, 6, 12, 0.86);
+  backdrop-filter: blur(6px);
+}
+
+.opener-card {
+  max-width: 470px;
+  width: 100%;
+  text-align: center;
+  color: #dcebf2;
+  background: rgba(7, 18, 30, 0.9);
+  border: 1px solid rgba(0, 180, 216, 0.28);
+  border-radius: 16px;
+  padding: 34px 30px 30px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+
+.opener-clock {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 2rem;
+  letter-spacing: 0.14em;
+  color: #5f7f92;
+  margin: 0 0 14px;
+}
+
+.opener-line {
+  font-size: 1.02rem;
+  line-height: 1.55;
+  margin: 8px 0;
+}
+
+.opener-dim {
+  color: #8aa4b4;
+  font-size: 0.9rem;
+}
+
+.opener-temp {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 4.4rem;
+  font-weight: 700;
+  color: #ffd166;
+  margin: 6px 0 2px;
+  transition: color 0.4s;
+}
+
+.opener-temp.is-critical {
+  color: #ff5d5d;
+  text-shadow: 0 0 26px rgba(255, 93, 93, 0.45);
+  animation: opener-throb 0.7s ease-in-out infinite alternate;
+}
+
+.opener-temp-unit {
+  font-size: 1.6rem;
+  color: #8aa4b4;
+  margin-left: 6px;
+}
+
+@keyframes opener-throb {
+  from { transform: scale(1); }
+  to { transform: scale(1.03); }
+}
+
+.opener-action {
+  display: inline-block;
+  margin: 12px 0 6px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #071019;
+  background: linear-gradient(90deg, #ffd166, #ff8f5d);
+}
+
+.opener-notification {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+  background: rgba(20, 32, 46, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 14px 16px;
+  font-size: 0.95rem;
+}
+
+.opener-notification-app {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8aa4b4;
+}
+
+.opener-skip {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  background: none;
+  border: none;
+  color: #8aa4b4;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.opener-skip:hover {
+  color: #e8f4f8;
+}
+
+.opener-progress {
+  position: absolute;
+  bottom: 26px;
+  display: flex;
+  gap: 7px;
+}
+
+.opener-progress span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.opener-progress span.on {
+  background: #00b4d8;
+}
+
+.opener .btn {
+  margin-top: 16px;
+}
+
+/* --- small screens ------------------------------------------------------ */
+
+@media (max-width: 760px) {
+  .demo-banner {
+    flex-wrap: wrap;
+    padding: 8px 10px;
+  }
+
+  .demo-banner-label {
+    display: none;
+  }
+
+  .demo-banner-actions {
+    margin-left: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .demo-banner-actions .btn {
+    padding: 6px 10px;
+    font-size: 0.78rem;
+  }
+
+  /* Source link is a luxury at phone width */
+  .demo-banner-actions a[href*="github"] {
+    display: none;
+  }
+
+  .demo-host {
+    padding: 6px 4px 40px;
+  }
+
+  .opener-card {
+    padding: 26px 18px 24px;
+  }
+
+  .opener-temp {
+    font-size: 3.2rem;
+  }
+}

@@ -156,6 +156,7 @@ export default function App() {
             <img src="/logo.png" alt="" /> OpenReef
           </a>
           <div className="topnav-links">
+            <a href="/demo/">Live demo</a>
             <a href={GITHUB_URL}>GitHub</a>
             <a className="btn btn-primary btn-small" href="#cta">
               Join the beta
