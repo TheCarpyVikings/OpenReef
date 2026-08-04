@@ -4,6 +4,7 @@ import { createTester, saveTesterNotes, setTesterStatus } from "@/app/actions";
 import { requireOwner } from "@/lib/auth";
 import { ago } from "@/lib/format";
 import { serviceClient } from "@/lib/supabase";
+import { attentionFor, byUrgency, LEVEL_TONE, type Attention } from "@/lib/attention";
 import type { Tester } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -43,12 +44,51 @@ export default async function TestersPage() {
   }
   const rows = (testers.data ?? []) as Tester[];
 
+  // One clock for the whole render, so two rows can never disagree about how
+  // long ago something was.
+  const now = Date.now();
+  const needsAttention = rows
+    .map((tester) => ({ tester, attention: attentionFor(tester, counts.get(tester.id) ?? 0, now) }))
+    .filter((entry): entry is { tester: Tester; attention: Attention } => entry.attention !== null)
+    .sort((a, b) => byUrgency(a.attention, b.attention));
+
   return (
     <Chrome
       active="testers"
       title="Testers"
       lede="Issue a code, send it, they paste it into OpenReef Settings. That's the whole onboarding."
     >
+      {needsAttention.length > 0 ? (
+        <div className="panel" style={{ borderColor: "var(--border-2)" }}>
+          <h2>Needs a nudge</h2>
+          <p style={{ color: "var(--fg-muted)", marginTop: 4, fontSize: 13.5 }}>
+            The install checks in every 30 minutes on its own, so silence here isn&apos;t
+            someone being busy — it&apos;s something being wrong.
+          </p>
+          <ul className="list" style={{ marginTop: 12 }}>
+            {needsAttention.map(({ tester, attention }) => (
+              <li key={tester.id} className="card" style={{ padding: "12px 14px" }}>
+                <div className="card-head" style={{ marginBottom: 4 }}>
+                  <span className={`badge ${LEVEL_TONE[attention.level]}`}>{attention.label}</span>
+                  <strong>{tester.name}</strong>
+                  {tester.email ? <span className="who">{tester.email}</span> : null}
+                  <span className="spacer" />
+                  <span className="when">last check-in {ago(tester.last_seen_at)}</span>
+                </div>
+                <p style={{ margin: 0, fontSize: 13.5, color: "var(--fg-muted)" }}>{attention.why}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : rows.length > 0 ? (
+        <div className="panel">
+          <h2>Everyone&apos;s fine</h2>
+          <p style={{ color: "var(--fg-muted)", marginTop: 4, fontSize: 13.5 }}>
+            Every active tester is checked in, set up, and nothing is flagged.
+          </p>
+        </div>
+      ) : null}
+
       <div className="panel">
         <h2>Invite someone</h2>
         <form action={createTester} className="row" style={{ marginTop: 12, alignItems: "flex-end" }}>
@@ -82,6 +122,8 @@ export default async function TestersPage() {
                   <th>Tester</th>
                   <th>Code</th>
                   <th>Status</th>
+                  <th>Setup</th>
+                  <th>Trust</th>
                   <th>Versions</th>
                   <th>Last seen</th>
                   <th>Feedback</th>
@@ -106,6 +148,55 @@ export default async function TestersPage() {
                       <span className={`badge ${STATUS_TONE[tester.status] ?? "tone-seen"}`}>
                         {tester.status}
                       </span>
+                    </td>
+                    <td>
+                      {tester.setup_complete === null ? (
+                        <span className="who">—</span>
+                      ) : tester.setup_complete ? (
+                        <>
+                          <span className="badge tone-done">done</span>
+                          {typeof tester.equipment_armed === "number" ? (
+                            <div className="who" style={{ fontSize: 12, marginTop: 3 }}>
+                              {tester.equipment_armed} armed
+                            </div>
+                          ) : null}
+                        </>
+                      ) : (
+                        <>
+                          <span className="badge tone-work">unfinished</span>
+                          {typeof tester.sensors_mapped === "number" &&
+                          typeof tester.sensors_enabled === "number" ? (
+                            <div className="who" style={{ fontSize: 12, marginTop: 3 }}>
+                              {tester.sensors_mapped}/{tester.sensors_enabled} probes
+                            </div>
+                          ) : null}
+                        </>
+                      )}
+                    </td>
+                    <td>
+                      {tester.trust_status && tester.trust_status !== "unknown" ? (
+                        <>
+                          <span
+                            className={`badge ${
+                              tester.trust_status === "ok"
+                                ? "tone-done"
+                                : tester.trust_status === "warning"
+                                  ? "tone-work"
+                                  : "tone-danger"
+                            }`}
+                          >
+                            {tester.trust_status}
+                          </span>
+                          {/* Core only recomputes Trust Check when the panel is
+                              opened, so say how old the reading is rather than
+                              implying it's live. */}
+                          <div className="who" style={{ fontSize: 12, marginTop: 3 }}>
+                            {ago(tester.trust_checked_at)}
+                          </div>
+                        </>
+                      ) : (
+                        <span className="who">—</span>
+                      )}
                     </td>
                     <td className="who">
                       {tester.openreef_version ? `OR ${tester.openreef_version}` : "—"}

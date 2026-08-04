@@ -55,6 +55,11 @@ _LOGGER = logging.getLogger(__name__)
 # a clean `git rm`.
 DOMAIN = "openreef"
 OPT_KEY = "beta_feedback"
+#: Core's config blob lives under this options key. We only ever READ it, and
+#: only through total, defensive accessors — see activation_snapshot. Reading
+#: core's *data* keeps the dependency arrow pointing inward; importing core's
+#: *code* would not, and would make this file harder to delete.
+SETTINGS_KEY = "settings"
 
 #: Where a tester's install talks to. Overridable per-install so the portal can
 #: move (or be pointed at localhost during development) without a release.
@@ -335,6 +340,71 @@ def build_submission(
     }
 
 
+def activation_snapshot(settings: Any) -> dict[str, Any]:
+    """Whether this install actually *works*, read from core's persisted config.
+
+    The problem this solves: feedback volume only ever measures testers who are
+    already succeeding. Someone who installed OpenReef, couldn't map their
+    probes and quietly gave up looks identical to someone who is perfectly
+    happy — both send nothing. This rides along on the 30-minute sync, so a
+    tester who never types a word still tells us whether they got there.
+
+    Every read is defensive and every failure degrades to "unknown" rather than
+    raising: this is diagnostics about diagnostics, and it must never be the
+    reason a sync fails.
+
+    Note `trustStatus` is only recomputed when the panel is opened, so it can
+    be stale — `trustCheckedAt` travels with it so the portal can say so
+    instead of quietly implying the reading is fresh.
+    """
+    blank = {
+        "setupComplete": False,
+        "trustStatus": "unknown",
+        "trustCheckedAt": "",
+        "sensorsEnabled": 0,
+        "sensorsMapped": 0,
+        "equipmentMapped": 0,
+        "equipmentArmed": 0,
+    }
+    if not isinstance(settings, dict):
+        return blank
+
+    try:
+        display = settings.get("display")
+        blank["setupComplete"] = bool(
+            display.get("setupComplete") if isinstance(display, dict) else False
+        )
+
+        trust = settings.get("trustCheck")
+        if isinstance(trust, dict):
+            status = trust.get("lastStatus")
+            blank["trustStatus"] = (
+                status if status in ("ok", "warning", "critical", "unknown") else "unknown"
+            )
+            blank["trustCheckedAt"] = _clip(trust.get("lastRun"), 40)
+
+        sensors = settings.get("sensors")
+        for sensor in (sensors.values() if isinstance(sensors, dict) else []):
+            if not isinstance(sensor, dict) or not sensor.get("enabled"):
+                continue
+            blank["sensorsEnabled"] += 1
+            if sensor.get("entity_id"):
+                blank["sensorsMapped"] += 1
+
+        equipment = settings.get("equipment")
+        for item in (equipment.values() if isinstance(equipment, dict) else []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("switch_entity_id"):
+                blank["equipmentMapped"] += 1
+            if item.get("armed"):
+                blank["equipmentArmed"] += 1
+    except Exception:  # noqa: BLE001 - a weird config must not break the sync
+        _LOGGER.debug("beta: activation snapshot failed", exc_info=True)
+
+    return blank
+
+
 def merge_sync(state: dict[str, Any], data: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Fold a portal sync response into local state.
 
@@ -502,7 +572,15 @@ async def _async_sync(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]
             hass,
             endpoint,
             "/api/sync",
-            {"installId": state.get("installId") or "", "since": state.get("lastSyncAt") or ""},
+            {
+                "installId": state.get("installId") or "",
+                "since": state.get("lastSyncAt") or "",
+                # Rides along on a request that already happens. A tester who
+                # never sends feedback still reports whether they got set up.
+                "activation": activation_snapshot(entry.options.get(SETTINGS_KEY)),
+                "openreefVersion": _openreef_version(),
+                "haVersion": _ha_version(),
+            },
             token,
         )
         if not ok:

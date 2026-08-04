@@ -195,6 +195,88 @@ def test_public_state_never_leaks_the_token():
     assert public["testerName"] == "Tester One"
 
 
+# --- activation -------------------------------------------------------------
+# Reads core's persisted config as DATA (never importing its code), so the
+# dependency arrow still points inward. These pin that it stays total: a
+# half-written or hostile config must degrade to "unknown", never raise, or a
+# broken install would also stop reporting that it is broken.
+
+
+def test_activation_reads_a_real_config():
+    snapshot = beta.activation_snapshot(
+        {
+            "display": {"setupComplete": True},
+            "trustCheck": {"lastStatus": "warning", "lastRun": "2026-08-04T10:00:00+00:00"},
+            "sensors": {
+                "temp": {"enabled": True, "entity_id": "sensor.temp"},
+                "ph": {"enabled": True, "entity_id": ""},
+                "orp": {"enabled": False, "entity_id": "sensor.orp"},
+            },
+            "equipment": {
+                "heater": {"switch_entity_id": "switch.heater", "armed": True},
+                "skimmer": {"switch_entity_id": "switch.skimmer", "armed": False},
+                "ato": {"switch_entity_id": "", "armed": False},
+            },
+        }
+    )
+    assert snapshot["setupComplete"] is True
+    assert snapshot["trustStatus"] == "warning"
+    assert snapshot["trustCheckedAt"].startswith("2026-08-04")
+    # Disabled sensors are not counted — an unmapped sensor nobody turned on
+    # is not a stuck setup.
+    assert snapshot["sensorsEnabled"] == 2 and snapshot["sensorsMapped"] == 1
+    assert snapshot["equipmentMapped"] == 2 and snapshot["equipmentArmed"] == 1
+
+
+def test_activation_of_a_fresh_install_is_all_zero():
+    snapshot = beta.activation_snapshot({})
+    assert snapshot["setupComplete"] is False
+    assert snapshot["trustStatus"] == "unknown"
+    assert snapshot["sensorsEnabled"] == 0 and snapshot["equipmentArmed"] == 0
+
+
+def test_activation_survives_a_corrupt_config():
+    for junk in (None, "nonsense", [], 42):
+        snapshot = beta.activation_snapshot(junk)
+        assert snapshot["trustStatus"] == "unknown"
+    # Right shape, wrong types all the way down.
+    snapshot = beta.activation_snapshot(
+        {"display": "no", "trustCheck": [], "sensors": "no", "equipment": 7}
+    )
+    assert snapshot["setupComplete"] is False
+    assert snapshot["sensorsEnabled"] == 0
+
+
+def test_activation_rejects_an_invented_trust_status():
+    snapshot = beta.activation_snapshot({"trustCheck": {"lastStatus": "catastrophic"}})
+    assert snapshot["trustStatus"] == "unknown"
+
+
+def test_sync_reports_activation():
+    """The whole point: an install that never sends feedback still says
+    whether it works."""
+    entry = FakeEntry(
+        options={
+            beta.OPT_KEY: _enrolled_state(),
+            beta.SETTINGS_KEY: {
+                "display": {"setupComplete": False},
+                "sensors": {"temp": {"enabled": True, "entity_id": ""}},
+            },
+        }
+    )
+    hass = FakeHass(entries=[entry])
+    poster = _Poster((True, {"items": []}, ""))
+    original, beta._post = beta._post, poster
+    try:
+        run(beta._async_sync(hass, entry))
+    finally:
+        beta._post = original
+
+    activation = poster.calls[0]["payload"]["activation"]
+    assert activation["setupComplete"] is False
+    assert activation["sensorsEnabled"] == 1 and activation["sensorsMapped"] == 0
+
+
 # --- sync folding -----------------------------------------------------------
 
 

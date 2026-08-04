@@ -1,6 +1,50 @@
 import { NextResponse } from "next/server";
-import { authenticate } from "@/lib/api";
+import { authenticate, clip, readJson } from "@/lib/api";
 import { serviceClient } from "@/lib/supabase";
+
+/** Non-negative integer or null. Anything else the client sends is discarded
+ *  rather than trusted — these feed a dashboard, not a decision. */
+function count(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
+const TRUST = ["ok", "warning", "critical", "unknown"];
+
+/**
+ * Fold the install's activation report into the tester row.
+ *
+ * Absent or malformed fields become null, which the roster reads as "not
+ * reported yet" — deliberately distinct from zero, because "0 sensors mapped"
+ * and "hasn't told us yet" mean completely different things when you are
+ * deciding whether to check on someone.
+ */
+function activationPatch(raw: unknown): Record<string, unknown> {
+  const patch: Record<string, unknown> = { last_seen_at: new Date().toISOString() };
+  if (!raw || typeof raw !== "object") return patch;
+  const a = raw as Record<string, unknown>;
+
+  if (typeof a.setupComplete === "boolean") patch.setup_complete = a.setupComplete;
+  if (typeof a.trustStatus === "string" && TRUST.includes(a.trustStatus)) {
+    patch.trust_status = a.trustStatus;
+  }
+  const checkedAt = clip(a.trustCheckedAt, 40);
+  // Guard the timestamp: a malformed string would fail the whole update and
+  // silently cost us the last_seen_at refresh too.
+  if (checkedAt && !Number.isNaN(Date.parse(checkedAt))) patch.trust_checked_at = checkedAt;
+
+  for (const [from, to] of [
+    ["sensorsEnabled", "sensors_enabled"],
+    ["sensorsMapped", "sensors_mapped"],
+    ["equipmentMapped", "equipment_mapped"],
+    ["equipmentArmed", "equipment_armed"],
+  ] as const) {
+    const value = count(a[from]);
+    if (value !== null) patch[to] = value;
+  }
+  return patch;
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,6 +67,7 @@ export async function POST(request: Request) {
   const auth = await authenticate(request);
   if ("error" in auth) return auth.error;
 
+  const body = await readJson(request);
   const supabase = serviceClient();
 
   const [items, announcements] = await Promise.all([
@@ -42,9 +87,15 @@ export async function POST(request: Request) {
 
   if (items.error) return NextResponse.json({ error: "lookup_failed" }, { status: 500 });
 
+  // Best effort: the tester's own data has already been assembled, and losing
+  // a dashboard refresh is not worth failing their sync over.
   void supabase
     .from("beta_testers")
-    .update({ last_seen_at: new Date().toISOString() })
+    .update({
+      ...activationPatch(body.activation),
+      ...(clip(body.openreefVersion, 64) ? { openreef_version: clip(body.openreefVersion, 64) } : {}),
+      ...(clip(body.haVersion, 64) ? { ha_version: clip(body.haVersion, 64) } : {}),
+    })
     .eq("id", auth.tester.id)
     .then(() => undefined);
 

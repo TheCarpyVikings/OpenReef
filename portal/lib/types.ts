@@ -93,6 +93,18 @@ export type Tester = {
   enrolled_at: string | null;
   last_seen_at: string | null;
   created_at: string;
+
+  // Activation signals, pushed by the install on every sync (migration 0002).
+  // Null means "not reported yet" — deliberately distinct from 0, because
+  // "no sensors mapped" and "hasn't told us" mean very different things when
+  // you're deciding whether to check on someone.
+  setup_complete: boolean | null;
+  trust_status: "ok" | "warning" | "critical" | "unknown" | null;
+  trust_checked_at: string | null;
+  sensors_enabled: number | null;
+  sensors_mapped: number | null;
+  equipment_mapped: number | null;
+  equipment_armed: number | null;
 };
 
 export type Announcement = {
