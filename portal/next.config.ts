@@ -10,6 +10,7 @@ const config: NextConfig = {
   outputFileTracingIncludes: {
     "/agreement": ["./content/**"],
     "/privacy": ["./content/**"],
+    "/welcome": ["./content/**"],
   },
 };
 

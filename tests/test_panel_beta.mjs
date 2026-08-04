@@ -419,6 +419,16 @@ test("join stays disabled until the agreement box is ticked", async () => {
   assert(!joinAfter.includes("disabled"), "join must enable once accepted");
 });
 
+test("a fresh enrolment shows the welcome beat with the /welcome link", async () => {
+  const fab = await makeFab({ _state: ENROLLED, _justEnrolled: true });
+  const markup = fab._sendView();
+  assert(markup.includes("https://beta.openreef.co.uk/welcome"), "welcome link missing");
+  assert(markup.includes('data-orb="welcome-dismiss"'), "dismiss control missing");
+  // And it's a one-time beat, not permanent chrome.
+  const later = await makeFab({ _state: ENROLLED, _justEnrolled: false });
+  assert(!later._sendView().includes("/welcome"), "welcome must disappear once dismissed");
+});
+
 test("agreement links follow a custom endpoint", async () => {
   const fab = await makeFab({
     _state: { ...ENROLLED, enrolled: false, endpoint: "http://localhost:3000/" },

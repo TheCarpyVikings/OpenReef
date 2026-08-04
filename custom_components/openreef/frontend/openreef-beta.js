@@ -78,6 +78,7 @@ class OpenReefBetaFab extends HTMLElement {
     this._sentRef = "";
     this._code = "";
     this._acceptTerms = false;
+    this._justEnrolled = false;
     this._loaded = false;
     this._bound = false;
     this._focusId = "";
@@ -247,6 +248,7 @@ class OpenReefBetaFab extends HTMLElement {
         accept: this._acceptTerms,
       });
       this._view = "send";
+      this._justEnrolled = true;
     } catch (err) {
       this._error = this._friendly(err, "That code didn't work. Check it and try again.");
     }
@@ -276,6 +278,7 @@ class OpenReefBetaFab extends HTMLElement {
       });
       if (result?.state) this._state = result.state;
       this._sentRef = result?.sent ? result.ref || "sent" : "";
+      if (result?.sent) this._justEnrolled = false;  // they've clearly got the hang of it
       if (!result?.sent) {
         this._error = "You're offline (or the portal is). Saved — it'll send itself later.";
       }
@@ -482,9 +485,22 @@ class OpenReefBetaFab extends HTMLElement {
       `;
     }
 
+    // One-time welcome beat after enrolling: the send view is the first thing
+    // a new tester sees, and /welcome is the two-minute "what to do first"
+    // that stops the classic day-one mistakes (arming the heater before
+    // Trust Check is green being the big one).
+    const welcome = this._justEnrolled ? `
+      <div class="orb-warn" style="background:#0f2c3d;border-color:#075985;color:#bae6fd">
+        You're in, ${this._esc(this._state?.testerName || "welcome aboard")}. Two minutes on
+        <a class="orb-link" href="${this._portalUrl("/welcome")}" target="_blank" rel="noopener">what to test first</a>
+        — short version: watch for a week, arm nothing important yet.
+        <button type="button" class="orb-secondary small" data-orb="welcome-dismiss" style="margin-left:8px">Got it</button>
+      </div>` : "";
+
     const kind = KINDS.find((option) => option.value === this._draft.kind) || KINDS[0];
     const showSeverity = this._draft.kind === "bug";
     return `
+      ${welcome}
       ${this._state?.queued ? `<p class="orb-warn">${this._state.queued} message${this._state.queued === 1 ? "" : "s"} waiting to send — they'll go automatically.</p>` : ""}
       ${this._error ? `<p class="orb-error">${this._esc(this._error)}</p>` : ""}
 
@@ -703,6 +719,7 @@ class OpenReefBetaFab extends HTMLElement {
       if (action === "sev") { this._captureDraft(); this._draft.severity = id; this._render(); return; }
       if (action === "payload") { this._captureDraft(); this._showsPayload = !this._showsPayload; this._render(); return; }
       if (action === "again") { this._sentRef = ""; this._error = ""; this._render(); return; }
+      if (action === "welcome-dismiss") { this._captureDraft(); this._justEnrolled = false; this._render(); return; }
       if (action === "enrol") return this._enrol();
       if (action === "submit") return this._submit();
       if (action === "read") return this._markRead(id);

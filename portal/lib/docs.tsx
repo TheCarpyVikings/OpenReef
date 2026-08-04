@@ -16,12 +16,12 @@ import { marked } from "marked";
  * also lists it in outputFileTracingIncludes).
  */
 
-export function readDoc(name: "beta-agreement" | "privacy-notice"): string {
+export function readDoc(name: "beta-agreement" | "privacy-notice" | "welcome"): string {
   const raw = fs.readFileSync(path.join(process.cwd(), "content", `${name}.md`), "utf8");
   return marked.parse(raw, { async: false });
 }
 
-export function DocPage({ name }: { name: "beta-agreement" | "privacy-notice" }) {
+export function DocPage({ name }: { name: "beta-agreement" | "privacy-notice" | "welcome" }) {
   return (
     <div className="shell" style={{ maxWidth: 780 }}>
       <div className="panel doc">

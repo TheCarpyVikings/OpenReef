@@ -15,7 +15,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 // /agreement and /privacy are public by design: testers accept them at
 // enrolment, so they must be readable without an account.
-const PUBLIC_PREFIXES = ["/login", "/auth", "/api", "/agreement", "/privacy"];
+const PUBLIC_PREFIXES = ["/login", "/auth", "/api", "/agreement", "/privacy", "/welcome"];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
