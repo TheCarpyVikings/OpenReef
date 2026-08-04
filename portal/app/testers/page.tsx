@@ -150,7 +150,12 @@ export default async function TestersPage() {
                       </span>
                     </td>
                     <td>
-                      {tester.setup_complete === null ? (
+                      {/* Loose == on purpose: before migration 0002 is applied the
+                          column does not exist, so select("*") omits the key
+                          entirely and this is `undefined`, not `null`. A strict
+                          check would fall through and label every tester
+                          "unfinished" — confidently wrong is worse than "—". */}
+                      {tester.setup_complete == null ? (
                         <span className="who">—</span>
                       ) : tester.setup_complete ? (
                         <>
