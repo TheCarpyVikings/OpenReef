@@ -388,15 +388,42 @@ interface FishSpec {
   speed: number;
   vert: number;
   school: number;
+  scl: number;
 }
 
-const SCHOOL_COLORS = ["#ffb347", "#7fd8ff", "#c792ff"];
+const SCHOOL_COLORS = ["#e8a45c", "#9fd8e8", "#8595cf"];
+
+// Spindle body + tail fan + dorsal fin, with countershading baked into vertex
+// colours (dark back, pale belly). Unit length ≈ 1.3; per-fish size comes from
+// the instance matrix, so the swim-wag amplitude scales with the fish.
+function makeFishGeometry(): THREE.BufferGeometry {
+  const body = new THREE.SphereGeometry(0.5, 10, 8);
+  body.scale(0.3, 0.5, 1.0);
+  const tail = new THREE.CircleGeometry(0.34, 3, Math.PI - 0.55, 1.1);
+  tail.rotateY(-Math.PI / 2);
+  tail.translate(0, 0, -0.42);
+  const dorsal = new THREE.CircleGeometry(0.24, 2, Math.PI / 2 - 0.4, 0.8);
+  dorsal.rotateY(-Math.PI / 2);
+  dorsal.translate(0, 0.14, -0.02);
+  const geo = mergeGeometries([body, tail, dorsal]);
+  const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+  const colors = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const b = clamp(0.95 - pos.getY(i) * 1.3, 0.45, 1.15);
+    colors[i * 3] = b;
+    colors[i * 3 + 1] = b;
+    colors[i * 3 + 2] = b;
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  return geo;
+}
 
 function Fish() {
   const total = reef.lowPower ? 45 : 90;
   const ref = useRef<THREE.InstancedMesh>(null!);
   const dummy = useMemo(() => new THREE.Object3D(), []);
   const ahead = useMemo(() => new THREE.Vector3(), []);
+  const timeU = useMemo(() => ({ value: 0 }), []);
   const specs = useMemo<FishSpec[]>(() => {
     const rng = mulberry32(11);
     const centers = [
@@ -415,16 +442,18 @@ function Fish() {
         speed: 0.25 + rng() * 0.3,
         vert: 0.3 + rng() * 0.6,
         school: s,
+        scl: 0.2 + rng() * 0.14,
       };
     });
   }, [total]);
   const geo = useMemo(() => {
-    // laterally flattened cone reads as a fish silhouette rather than a dart
-    const g = new THREE.ConeGeometry(0.085, 0.32, 6);
-    g.rotateX(Math.PI / 2);
-    g.scale(0.45, 1.15, 1);
+    const g = makeFishGeometry();
+    const rng = mulberry32(23);
+    const phases = new Float32Array(total);
+    for (let i = 0; i < total; i++) phases[i] = rng() * Math.PI * 2;
+    g.setAttribute("aPhase", new THREE.InstancedBufferAttribute(phases, 1));
     return g;
-  }, []);
+  }, [total]);
   useLayoutEffect(() => {
     const c = new THREE.Color();
     for (let i = 0; i < total; i++) {
@@ -435,6 +464,7 @@ function Fish() {
   }, [specs, total]);
   useFrame((s) => {
     const t = s.clock.elapsedTime;
+    timeU.value = t;
     for (let i = 0; i < total; i++) {
       const f = specs[i];
       const a = t * f.speed + f.phase;
@@ -449,14 +479,38 @@ function Fish() {
       );
       dummy.position.set(px, py, pz);
       dummy.lookAt(ahead);
+      dummy.scale.setScalar(f.scl);
       dummy.updateMatrix();
       ref.current.setMatrixAt(i, dummy.matrix);
     }
     ref.current.instanceMatrix.needsUpdate = true;
   });
+  const onBeforeCompile = useMemo(
+    () => (shader: THREE.WebGLProgramParametersWithUniforms) => {
+      shader.uniforms.uTime = timeU;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nattribute float aPhase;\nuniform float uTime;"
+        )
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+          float wag = sin(uTime * 7.0 + aPhase + position.z * 2.2)
+            * 0.14 * smoothstep(0.3, -0.8, position.z);
+          transformed.x += wag;`
+        );
+    },
+    [timeU]
+  );
   return (
     <instancedMesh ref={ref} args={[undefined, undefined, total]} geometry={geo}>
-      <meshStandardMaterial flatShading roughness={0.6} />
+      <meshStandardMaterial
+        vertexColors
+        roughness={0.55}
+        side={THREE.DoubleSide}
+        onBeforeCompile={onBeforeCompile}
+      />
     </instancedMesh>
   );
 }
@@ -675,7 +729,7 @@ function Reefscape() {
   const plateGeo = useMemo(() => new THREE.CylinderGeometry(0.75, 0.68, 0.09, 9), []);
   return (
     <group>
-      <mesh geometry={rocksGeo}>
+      <mesh name="reefRocks" geometry={rocksGeo}>
         <meshStandardMaterial vertexColors flatShading roughness={0.95} />
       </mesh>
       <mesh geometry={branchesGeo}>
@@ -683,7 +737,7 @@ function Reefscape() {
       </mesh>
       <InstancedSet items={plates} geo={plateGeo} roughness={0.6} />
       {/* reef floor */}
-      <mesh rotation-x={-Math.PI / 2} position={[0, -42.2, -2]}>
+      <mesh name="reefFloor" rotation-x={-Math.PI / 2} position={[0, -42.2, -2]}>
         <planeGeometry args={[120, 60]} />
         <meshStandardMaterial color="#101a2c" flatShading roughness={1} />
       </mesh>
@@ -696,23 +750,28 @@ function Reefscape() {
 // Real photogrammetry scans of NMNH type specimens (Smithsonian Open Access,
 // CC0), optimised to web weight by tools/optimize-corals.mjs. The scans are
 // bleached museum skeletons, so each gets a subtle live-tissue tint.
+// rot is [x, y, z] — with the default XYZ euler order the Z flip uprights the
+// specimen first, then Y turns it to face the camera path. sink buries the
+// broken base (and any museum mounting board) inside the rock it sits on.
 const HERO_CORALS: Array<{
   file: string;
-  pos: [number, number, number]; // ground point the specimen sits on
+  pos: [number, number, number]; // x/z anchor; y is the raycast fallback
   size: number;
-  rotY: number;
+  rot: [number, number, number];
+  sink: number;
   tint: string;
 }> = [
-  { file: "digitifera.glb", pos: [3.4, -11.3, -3.0], size: 1.4, rotY: 0.6, tint: "#b79bd6" },
-  { file: "staghorn.glb", pos: [1.5, -21.0, -0.5], size: 1.8, rotY: 2.1, tint: "#d9b98f" },
-  { file: "secale.glb", pos: [4.5, -27.9, -3.8], size: 1.5, rotY: 4.2, tint: "#c98fae" },
-  { file: "prolifera.glb", pos: [-4.0, -33.9, -3.2], size: 1.4, rotY: 1.2, tint: "#9ec4bd" },
-  { file: "palmata.glb", pos: [-3.4, -42.25, -0.6], size: 2.1, rotY: 5.1, tint: "#c9a06a" },
-  { file: "dome.glb", pos: [5.6, -42.3, -3.2], size: 1.8, rotY: 0.0, tint: "#a9c48f" },
+  { file: "valenciennesi.glb", pos: [4.6, -12.4, -4.6], size: 1.6, rot: [0, 0.8, 0], sink: 0.16, tint: "#b3d0a6" },
+  { file: "staghorn.glb", pos: [1.5, -21.0, -0.5], size: 1.8, rot: [0, 2.1, -1.1], sink: 0.3, tint: "#d9b98f" },
+  { file: "secale.glb", pos: [4.5, -27.9, -3.8], size: 1.6, rot: [0, 4.2, -Math.PI / 2], sink: 0.32, tint: "#c98fae" },
+  { file: "prolifera.glb", pos: [-4.0, -33.9, -3.2], size: 1.5, rot: [0, 1.2, Math.PI], sink: 0.28, tint: "#9ec4bd" },
+  { file: "palmata.glb", pos: [-3.4, -42.2, -0.6], size: 2.1, rot: [0, 5.1, -Math.PI / 2], sink: 0.4, tint: "#c9a06a" },
+  { file: "dome.glb", pos: [5.6, -42.2, -3.2], size: 1.8, rot: [0, 0, 0], sink: 0.12, tint: "#a9c48f" },
 ];
 
 function HeroCorals() {
   const group = useRef<THREE.Group>(null!);
+  const { scene } = useThree();
   useLayoutEffect(() => {
     if (reef.lowPower) return;
     let alive = true;
@@ -723,6 +782,8 @@ function HeroCorals() {
       ]);
       const loader = new GLTFLoader();
       loader.setMeshoptDecoder(MeshoptDecoder);
+      const ray = new THREE.Raycaster();
+      const down = new THREE.Vector3(0, -1, 0);
       for (const spec of HERO_CORALS) {
         loader.load(`/corals/${spec.file}`, (gltf) => {
           if (!alive || !group.current) return;
@@ -730,11 +791,21 @@ function HeroCorals() {
           const box = new THREE.Box3().setFromObject(obj);
           const dims = box.getSize(new THREE.Vector3());
           obj.scale.setScalar(spec.size / Math.max(dims.x, dims.y, dims.z));
-          obj.rotation.y = spec.rotY;
+          obj.rotation.set(spec.rot[0], spec.rot[1], spec.rot[2]);
           obj.updateMatrixWorld(true);
+          // find the real surface under the anchor instead of trusting a guess
+          const targets = [scene.getObjectByName("reefRocks"), scene.getObjectByName("reefFloor")]
+            .filter(Boolean) as THREE.Object3D[];
+          ray.set(new THREE.Vector3(spec.pos[0], spec.pos[1] + 8, spec.pos[2]), down);
+          const hit = ray.intersectObjects(targets, false)[0];
+          const groundY = hit ? hit.point.y : spec.pos[1];
           const placed = new THREE.Box3().setFromObject(obj);
           const center = placed.getCenter(new THREE.Vector3());
-          obj.position.set(spec.pos[0] - center.x, spec.pos[1] - placed.min.y, spec.pos[2] - center.z);
+          obj.position.set(
+            spec.pos[0] - center.x,
+            groundY - spec.sink - placed.min.y,
+            spec.pos[2] - center.z
+          );
           const tint = new THREE.Color(spec.tint);
           obj.traverse((child) => {
             const mesh = child as THREE.Mesh;
@@ -752,7 +823,7 @@ function HeroCorals() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [scene]);
   return <group ref={group} />;
 }
 

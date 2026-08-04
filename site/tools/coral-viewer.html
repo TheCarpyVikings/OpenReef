@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#123}</style>
+<script type="importmap">{"imports":{"three":"https://esm.sh/three@0.177.0","three/addons/":"https://esm.sh/three@0.177.0/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "https://esm.sh/meshoptimizer@0.24.0";
+const name = new URLSearchParams(location.search).get("m") || "staghorn";
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(900, 880); document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color("#16324a");
+const cam = new THREE.PerspectiveCamera(45, 900/880, 0.01, 100);
+scene.add(new THREE.HemisphereLight("#cfe8ff", "#243244", 1.1));
+const sun = new THREE.DirectionalLight("#fff", 2.2); sun.position.set(3,6,4); scene.add(sun);
+scene.add(new THREE.AxesHelper(1.2)); // x red, y green, z blue
+scene.add(new THREE.GridHelper(4, 8, "#5aa", "#357"));
+const loader = new GLTFLoader(); loader.setMeshoptDecoder(MeshoptDecoder);
+loader.load("/corals/"+name+".glb", (g) => {
+  const obj = g.scene;
+  const box = new THREE.Box3().setFromObject(obj);
+  const dims = box.getSize(new THREE.Vector3());
+  const s = 2/Math.max(dims.x,dims.y,dims.z); obj.scale.setScalar(s);
+  const b2 = new THREE.Box3().setFromObject(obj);
+  const c = b2.getCenter(new THREE.Vector3());
+  obj.position.set(-c.x, -b2.min.y, -c.z);
+  scene.add(obj);
+  document.title = name+" dims "+dims.toArray().map(v=>v.toFixed(2)).join(" x ");
+  cam.position.set(2.6, 1.8, 2.6); cam.lookAt(0, 0.7, 0);
+  renderer.render(scene, cam);
+  window.done = true;
+});
+</script></body></html>
