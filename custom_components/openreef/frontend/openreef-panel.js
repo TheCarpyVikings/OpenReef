@@ -120,6 +120,11 @@ class OpenReefPanel extends HTMLElement {
     this._pulseWakeVisHandler = null;
     this._pulseDimWakeUntil = 0;
     this._pulseDimPointerHandler = null;
+    this._pulseInsight = { idx: 0 };
+    this._pulseSpawn = { program: null, at: 0, loading: false };
+    this._pulseIcpCards = { cards: null, at: 0, loading: false };
+    this._pulseTl = { frames: [], idx: 0, at: 0, loading: false, front: 0 };
+    this._pulseTrendsKicked = false;
     this._liveStatsMode = this._loadLiveStatsMode();
     this._liveSparks = {};
     this._liveSparksAt = 0;
@@ -209,6 +214,10 @@ class OpenReefPanel extends HTMLElement {
     this._stopTimelapse();
     this._stopFeedPlayer();
     this._stopPulseRuntime();
+    // HA soft-navigation removes the panel without a page unload; a live Simli
+    // face on the detached nodes would keep streaming — and billing — for up
+    // to its 10-minute idle timeout if it isn't closed here.
+    this._guardianStopFace();
     if (this._modeCountdownTimer) {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
@@ -10205,7 +10214,11 @@ class OpenReefPanel extends HTMLElement {
       // a render→reload→render hot loop when the WS call keeps failing.
       this._awcSummaryAt = Date.now();
       this._awcSummaryLoading = false;
-      this._render();
+      // While Pulse is up, a full render tears down the presentation layer
+      // (and used to reset every ring animation on each 1–4 s diagram poll);
+      // patch the live screen in place instead.
+      if (this._pulseActive) this._updatePulse();
+      else this._render();
     }
   }
 
@@ -10602,7 +10615,7 @@ class OpenReefPanel extends HTMLElement {
     }
     const sum = this._awcSummary?.summary || null;
     return `
-      <article class="pulse-block">
+      <article class="pulse-block" data-pulse-awc>
         <small class="pulse-block-title">Water change — ${this._escape(this._awcStatusLabel(state.status || "idle"))}</small>
         ${this._awcDiagramSvg(awc, state, sum)}
       </article>`;
@@ -12234,7 +12247,9 @@ class OpenReefPanel extends HTMLElement {
   _openPulse(fromGesture = false) {
     if (!this._pulseEnabled() || this._pulseActive) return;
     // Pulse owns the single live-video session; close the camera modal if open.
+    // A live (per-minute billed) Simli face must not survive into kiosk mode.
     this._stopCameraWebRTC();
+    this._guardianStopFace();
     this._cameraFocus = null;
     this._recordingFocus = null;
     this._overlayQuip = this._pickOverlayQuip();
@@ -12264,21 +12279,27 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // Which backdrop to show: "camera" only when allowed AND one is online;
-  // anything else (preference, offline, unmapped) lands on the data wall.
+  // "timelapse" when chosen (frames load async over the data wall); anything
+  // else (preference, offline, unmapped) lands on the data wall.
   _pulseBackdrop() {
     const pref = this._pulseCfg().backdrop;
     if (pref === "wall") return "wall";
+    if (pref === "timelapse") return "timelapse";
     const cam = this._pulseCamera();
     return cam ? "camera" : "wall";
   }
 
   _startPulseRuntime() {
-    if (this._pulseBackdrop() === "camera") {
+    const backdrop = this._pulseBackdrop();
+    if (backdrop === "camera") {
       const cam = this._pulseCamera();
       if (cam && cam[1].entity_id) this._startCameraWebRTC(cam[1].entity_id);
+    } else if (backdrop === "timelapse") {
+      this._loadPulseTimelapse();
     } else {
       this._loadPulseSparklines();
     }
+    this._loadPulseInsightData();
     this._acquirePulseWakeLock();
     if (!this._pulseDimPointerHandler) {
       // Any touch/click while dimmed wakes the display back up for a while.
@@ -12301,6 +12322,12 @@ class OpenReefPanel extends HTMLElement {
         if (this._pulseTick % 30 === 0 && this._pulseBackdrop() === "wall") {
           this._loadPulseSparklines(true);
         }
+        // Living backdrop: one frame per tick, crossfaded.
+        if (this._pulseBackdrop() === "timelapse") this._advancePulseTimelapse();
+        // Rotate the insight card every ~40 s; re-check its data gates every
+        // ~15 min (each source has its own long cache, so this is nearly free).
+        if (this._pulseTick % 4 === 0) this._pulseInsight.idx += 1;
+        if (this._pulseTick % 90 === 0) this._loadPulseInsightData();
         this._applyPulseNightDim();
         // Burn-in guard: drift the whole HUD by a pixel or two every ~5 min so a
         // 24/7 wall tablet never etches static chrome into its panel.
@@ -12377,6 +12404,17 @@ class OpenReefPanel extends HTMLElement {
   _pulseNightDimActive(now) {
     const cfg = this._pulseCfg();
     if (cfg.nightDim !== true) return false;
+    // A mapped lux sensor beats the clock (Nest-Hub-style ambient dimming):
+    // the wall follows the actual room light, so it dims with the tank's
+    // photoperiod instead of a fixed schedule. Unavailable sensor -> clock.
+    const luxEntity = (cfg.nightDimLuxEntity || "").trim();
+    if (luxEntity) {
+      const lux = this._number(luxEntity);
+      if (lux !== null) {
+        const threshold = Number(cfg.nightDimLuxThreshold);
+        return lux <= (Number.isFinite(threshold) && threshold > 0 ? threshold : 10);
+      }
+    }
     const from = this._pulseParseTime(cfg.nightDimFrom ?? "22:00");
     const to = this._pulseParseTime(cfg.nightDimTo ?? "07:00");
     if (from === null || to === null || from === to) return false;
@@ -12404,6 +12442,290 @@ class OpenReefPanel extends HTMLElement {
     const x = [0, 1, 2, 1, 0, -1, -2, -1][step];
     const y = [0, 1, 0, -1, -2, -1, 0, 1][step];
     root.style.setProperty("--pulse-shift", `${x}px, ${y}px`);
+  }
+
+  // --- Reef Pulse: tonight's moon ------------------------------------------
+  // Mean-synodic approximation (±0.6 days vs the backend's Meeus engine) —
+  // plenty for a display card. The SPAWN WINDOW dates always come from the
+  // backend's real Meeus maths via generate_spawning_program, never from this.
+
+  _pulseMoonInfo(date = new Date()) {
+    const SYNODIC = 29.530588853;
+    const epoch = Date.UTC(2000, 0, 6, 18, 14); // known new moon, 2000-01-06 18:14 UTC
+    let age = ((date.getTime() - epoch) / 86400000) % SYNODIC;
+    if (age < 0) age += SYNODIC;
+    const illumination = (1 - Math.cos((2 * Math.PI * age) / SYNODIC)) / 2;
+    const names = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"];
+    const phaseName = names[Math.floor(((age / SYNODIC) * 8) + 0.5) % 8];
+    return { ageDays: age, illumination, phaseName };
+  }
+
+  // --- Reef Pulse: insight cards -------------------------------------------
+  // The rotating story card — the wall doesn't just show numbers, it explains
+  // them. One card at a time, ~40 s each, built ONLY from data the panel
+  // already holds or fetches on long cached intervals (never per-tick WS).
+  // Every builder is defensive: a missing subsystem contributes no card.
+
+  _pulseInsightCards() {
+    const cards = [];
+    const push = (key, kicker, title, detail, status = "ok") => {
+      if (title) cards.push({ key, kicker, title, detail: detail || "", status });
+    };
+    const statusRank = { critical: 2, warning: 1 };
+
+    // Reef health: the top deduction, or the clean sheet.
+    try {
+      const health = this._reefHealthScore();
+      const loss = (health.losses || [])[0];
+      if (loss) {
+        push("health-loss", `Reef health · −${loss.points} pts`, loss.label, loss.detail, loss.status);
+      } else if (health.status === "ok") {
+        push("health-clean", "Reef health", "Every scoring check is clean", health.gradeDetail, "ok");
+      }
+    } catch { /* no card */ }
+
+    // Consumption advisor: chemistry projections, worst first.
+    try {
+      if (this._dosingEnabled()) {
+        this._dosingActiveParameters()
+          .map(([id, sensor]) => ({ id, item: this._consumptionItem(id, sensor) }))
+          .filter(({ item }) => item && item.status !== "learning" && item.projectionText)
+          .sort((a, b) => (statusRank[b.item.status] || 0) - (statusRank[a.item.status] || 0))
+          .slice(0, 2)
+          .forEach(({ id, item }) => push(`consumption-${id}`, "Consumption advisor", item.trendText, item.projectionText,
+            item.status === "critical" ? "critical" : item.status === "warning" ? "warning" : "ok"));
+      }
+    } catch { /* no card */ }
+
+    // Manual test kit nags: due or overdue only.
+    try {
+      this._manualTestParameterIds()
+        .map((id) => ({ id, meta: this._manualTestMeta(id), state: this._manualDueState(id) }))
+        .filter(({ state }) => state.status === "warning" || state.status === "critical")
+        .sort((a, b) => (statusRank[b.state.status] || 0) - (statusRank[a.state.status] || 0))
+        .slice(0, 2)
+        .forEach(({ id, meta, state }) => push(`manual-${id}`, "Test kit", `${meta.label || id} test ${state.label}`, state.detail, state.status));
+    } catch { /* no card */ }
+
+    // Maintenance attention (the Today block already covers the next task).
+    try {
+      const due = this._maintenanceUpcoming(7).filter((e) => e.state.status === "warning" || e.state.status === "critical");
+      if (due.length) {
+        const worst = due.some((e) => e.state.status === "critical") ? "critical" : "warning";
+        push("maint-due", "Maintenance", `${due.length} task${due.length === 1 ? "" : "s"} need${due.length === 1 ? "s" : ""} attention`,
+          due.slice(0, 3).map((e) => e.task.label).join(" · "), worst);
+      }
+    } catch { /* no card */ }
+
+    // Water change runway (summary fetched on a 10-min gate while Pulse is up).
+    try {
+      const awc = this._config?.automaticWaterChange;
+      const sum = awc?.enabled ? this._awcSummary?.summary : null;
+      if (sum && sum.scheduleText) {
+        const days = Number(sum.daysOfFreshRemaining);
+        const bits = [];
+        if (Number.isFinite(days)) bits.push(`Fresh water for ~${Math.floor(days)} more day${Math.floor(days) === 1 ? "" : "s"}`);
+        if (Number.isFinite(Number(sum.changesRemaining))) bits.push(`${Math.floor(Number(sum.changesRemaining))} changes left in the reservoir`);
+        push("awc-runway", "Water change", sum.scheduleText, bits.join(" · "), Number.isFinite(days) && days <= 2 ? "warning" : "ok");
+      }
+    } catch { /* no card */ }
+
+    // ICP analysis cards (cached for hours — lab data changes monthly).
+    try {
+      (this._pulseIcpCards.cards || []).slice(0, 2).forEach((card, i) => push(`icp-${i}`, "ICP analysis", card.title, card.summary,
+        card.severity === "critical" ? "critical" : card.severity === "warning" ? "warning" : "ok"));
+    } catch { /* no card */ }
+
+    // Tonight's moon — with the real spawn-window countdown when spawning is on.
+    try {
+      const moon = this._pulseMoonInfo();
+      let detail = "";
+      const pred = this._pulseSpawn.program?.spawnPrediction;
+      if (pred && Number.isFinite(pred.nightsUntilWindowStart)) {
+        const n = pred.nightsUntilWindowStart;
+        detail = n > 0
+          ? `${n} night${n === 1 ? "" : "s"} until the ${this._pulseSpawn.program?.preset?.label || "spawning"} window`
+          : (Number.isFinite(pred.nightsUntilWindowEnd) && pred.nightsUntilWindowEnd >= 0 ? "Spawning window is open now" : "");
+      }
+      push("moon", "Tonight's moon", `${moon.phaseName} · ${Math.round(moon.illumination * 100)}% lit`, detail, "ok");
+    } catch { /* no card */ }
+
+    // Lighting window (cached at panel boot; never fetched from Pulse).
+    try {
+      const win = this._lightingWindow?.data;
+      if (win && win.configured && win.onTime && win.offTime) {
+        push("lighting", "Lighting", `Lights ${win.onTime}–${win.offTime} · ${win.lightsOnNow ? "on now" : "off now"}`,
+          win.reefLabel ? `${win.reefLabel} · ~${win.dayLengthHours} h day` : "", "ok");
+      }
+    } catch { /* no card */ }
+
+    // Camera intelligence — gated on the vision engine actually being enabled.
+    try {
+      if (this._config?.vision?.enabled) {
+        const sum = this._vision?.summary || this._config?.visionSummary || null;
+        const lastSeen = sum?.lastSeen || {};
+        const latest = Object.entries(lastSeen).sort(([, a], [, b]) => (b || 0) - (a || 0))[0];
+        if (sum?.feeding) push("vision-feed", "Camera intelligence", "Feeding under way", "Watching the response now", "ok");
+        else if (latest) push("vision-seen", "Camera intelligence", `${this._visionSpeciesLabel(latest[0])} seen ${this._visionAge(latest[1])}`,
+          Number.isFinite(Number(sum?.fishCount)) ? `Fish counted: ${sum.fishCount}` : "", "ok");
+      }
+    } catch { /* no card */ }
+
+    // Trust check: the wall proves it is supervised, not just pretty.
+    try {
+      const trust = this._trustCheckData();
+      const items = Array.isArray(trust.items) ? trust.items : [];
+      if (items.length) {
+        const passing = items.filter((i) => i.status === "ok").length;
+        if (trust.status === "ok") {
+          push("trust", "Trust check", "All trust checks passing", `${passing}/${items.length} · watchdog, alerts and sensors verified`, "ok");
+        } else {
+          const worst = items.find((i) => i.status === "critical") || items.find((i) => i.status === "warning");
+          if (worst) push("trust", "Trust check", worst.label, worst.detail, trust.status);
+        }
+      }
+    } catch { /* no card */ }
+
+    // Quiet-reef streak from the alert log.
+    try {
+      const history = Array.isArray(this._config?.alerts?.history) ? this._config.alerts.history : [];
+      const lastCritical = history.find((h) => h && h.state === "critical");
+      if (lastCritical) {
+        const days = Math.floor((Date.now() - Date.parse(lastCritical.timestamp || "")) / 86400000);
+        if (Number.isFinite(days) && days >= 1) {
+          push("streak", "Quiet reef", `${days} day${days === 1 ? "" : "s"} since the last critical alert`, lastCritical.label || "", "ok");
+        }
+      } else if (history.length >= 5) {
+        push("streak", "Quiet reef", "No critical alerts in the log", `${history.length} events recorded, none critical`, "ok");
+      }
+    } catch { /* no card */ }
+
+    return cards;
+  }
+
+  _pulseInsightCurrent() {
+    const cards = this._pulseInsightCards();
+    if (!cards.length) return null;
+    return cards[((this._pulseInsight.idx % cards.length) + cards.length) % cards.length];
+  }
+
+  _pulseInsightKey() {
+    return this._pulseInsightCurrent()?.key || "";
+  }
+
+  _pulseInsightMarkup(compact = false) {
+    const card = this._pulseInsightCurrent();
+    if (!card) return "";
+    return `
+      <article class="pulse-block pulse-insight ${compact ? "compact" : ""}" data-pulse-insight data-insight-key="${this._escape(card.key)}">
+        <div class="pulse-insight-head">
+          <small class="pulse-block-title">${this._escape(card.kicker)}</small>
+          <span class="pulse-insight-dot ${this._escape(card.status)}"></span>
+        </div>
+        <strong>${this._escape(card.title)}</strong>
+        ${card.detail ? `<small class="pulse-insight-detail">${this._escape(card.detail)}</small>` : ""}
+      </article>
+    `;
+  }
+
+  // Long-interval fetches feeding the cards. Each source has its own cache gate
+  // so a 24/7 kiosk re-checks rarely; every failure just means no card.
+  async _loadPulseInsightData() {
+    if (this._pulseCfg().showInsights === false) return;
+    // Consumption projections: reuse the shared trend refresher once if the
+    // panel booted straight into kiosk mode and never populated it.
+    if (!this._consumption?.checkedAt && !this._pulseTrendsKicked) {
+      this._pulseTrendsKicked = true;
+      try {
+        await this._refreshHealthTrends();
+        if (this._pulseActive) this._updatePulse();
+      } catch { /* advisory only */ }
+    }
+    const awc = this._config?.automaticWaterChange;
+    if (awc?.enabled && !this._awcSummaryLoading && Date.now() - (this._awcSummaryAt || 0) > 10 * 60 * 1000) {
+      this._awcLoadSummary();
+    }
+    if (this._config?.spawningProgram?.enabled && !this._pulseSpawn.loading && Date.now() - this._pulseSpawn.at > 24 * 3600 * 1000) {
+      this._pulseSpawn.loading = true;
+      try {
+        // No args: the backend falls back to the saved spawning preset/offsets.
+        const res = await this._callWS({ type: "openreef/generate_spawning_program" });
+        this._pulseSpawn.program = res?.program || null;
+      } catch { /* keep whatever we had */ } finally {
+        this._pulseSpawn.at = Date.now();
+        this._pulseSpawn.loading = false;
+        if (this._pulseActive) this._updatePulse();
+      }
+    }
+    const reports = Array.isArray(this._config?.icpReports) ? this._config.icpReports : [];
+    if (reports.length && !this._pulseIcpCards.loading && Date.now() - this._pulseIcpCards.at > 6 * 3600 * 1000) {
+      this._pulseIcpCards.loading = true;
+      try {
+        // Direct WS call: _loadIcpDashboard() ends in a full _render(), which
+        // would tear down the Pulse layer — Pulse keeps its own cache instead.
+        const payload = await this._callWS({ type: "openreef/icp_dashboard", settings: this._icpDashboardConfig() });
+        this._pulseIcpCards.cards = Array.isArray(payload?.analysisCards) ? payload.analysisCards : [];
+      } catch { /* keep whatever we had */ } finally {
+        this._pulseIcpCards.at = Date.now();
+        this._pulseIcpCards.loading = false;
+        if (this._pulseActive) this._updatePulse();
+      }
+    }
+  }
+
+  // --- Reef Pulse: timelapse living backdrop -------------------------------
+  // The tank's own history as ambient wallpaper: growth mode crossfades one
+  // frame per day (months of coral growth on a slow loop); day mode replays
+  // the most recent frames. Frames are same-origin JPEGs from the shipped
+  // timelapse store — no new serving infrastructure.
+
+  async _loadPulseTimelapse(force = false) {
+    const st = this._pulseTl;
+    if (st.loading) return;
+    if (!force && st.frames.length && Date.now() - st.at < 3 * 3600 * 1000) return;
+    st.loading = true;
+    try {
+      const tl = this._config?.timelapse || {};
+      const payload = { type: "openreef/list_timelapse_frames" };
+      if (tl.cameraId) payload.camera_id = tl.cameraId;
+      const result = await this._callWS(payload);
+      const frames = Array.isArray(result.frames) ? result.frames : [];
+      st.frames = this._pulseCfg().timelapseStyle === "day"
+        ? frames.slice(-120)
+        : this._timelapseDailyFrames(frames, Number(result.windowMidMinutes) || 0);
+      st.idx = 0;
+      st.at = Date.now();
+    } catch {
+      st.frames = [];
+    } finally {
+      st.loading = false;
+      if (this._pulseActive) this._advancePulseTimelapse(true);
+    }
+  }
+
+  _advancePulseTimelapse(first = false) {
+    const st = this._pulseTl;
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    if (!root || !st.frames.length) return;
+    if (!first) st.idx = (st.idx + 1) % st.frames.length;
+    const frame = st.frames[st.idx];
+    const layers = [root.querySelector("[data-pulse-tl-a]"), root.querySelector("[data-pulse-tl-b]")];
+    if (!layers[0] || !layers[1]) return;
+    // Two stacked layers: load into the hidden one, crossfade on load so the
+    // wall never shows a half-decoded JPEG.
+    const backIdx = 1 - st.front;
+    const back = layers[backIdx];
+    back.onload = () => {
+      back.classList.add("show");
+      layers[st.front].classList.remove("show");
+      st.front = backIdx;
+      back.onload = null;
+    };
+    back.src = this._captureUrl(frame.file);
+    const stamp = root.querySelector("[data-pulse-tl-stamp]");
+    if (stamp && frame.ts) {
+      stamp.textContent = new Date(frame.ts).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+    }
   }
 
   // Kiosk auto-start: ?pulse=1 forces Pulse, ?pulse=0 forces it off, otherwise
@@ -12594,6 +12916,7 @@ class OpenReefPanel extends HTMLElement {
   _pulseWallMarkup(cfg, health) {
     const tiles = this._pulseTileSensors();
     const blocks = [
+      cfg.showInsights !== false ? this._pulseInsightMarkup() : "",
       this._pulseAwcMarkup(),
       cfg.showCategories !== false ? this._pulseCategoryBarsMarkup(health) : "",
       cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
@@ -12645,8 +12968,10 @@ class OpenReefPanel extends HTMLElement {
   _pulseScreen() {
     const cfg = this._pulseCfg();
     const tank = this._config.tank || {};
-    const wall = this._pulseBackdrop() === "wall";
-    const cam = wall ? null : this._pulseCamera();
+    const backdrop = this._pulseBackdrop();
+    const wall = backdrop === "wall";
+    const timelapse = backdrop === "timelapse";
+    const cam = wall || timelapse ? null : this._pulseCamera();
     const entityId = cam ? cam[1].entity_id : "";
     const snap = entityId ? this._cameraSnapshotUrl(entityId) : "";
     const health = this._reefHealthScore();
@@ -12654,10 +12979,15 @@ class OpenReefPanel extends HTMLElement {
     const chips = !wall && cfg.showStats !== false ? this._overlayStatList() : [];
     const quip = this._overlayQuipText();
     return `
-      <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""}" data-pulse-root>
+      <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""} ${cfg.sizePreset === "far" ? "pulse-far" : ""}" data-pulse-root>
         ${entityId ? `
           <video class="pulse-video" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video>
           <img class="pulse-video" data-camera-fallback alt="" style="display:none">
+        ` : timelapse ? `
+          <div class="pulse-datawall"></div>
+          <img class="pulse-video pulse-tl" data-pulse-tl-a alt="">
+          <img class="pulse-video pulse-tl" data-pulse-tl-b alt="">
+          <span class="pulse-tl-stamp" data-pulse-tl-stamp></span>
         ` : `<div class="pulse-datawall"></div>`}
         <div class="pulse-shade ${wall ? "wall" : ""}"></div>
         <header class="pulse-head">
@@ -12673,6 +13003,7 @@ class OpenReefPanel extends HTMLElement {
         </header>
         ${wall ? this._pulseWallMarkup(cfg, health) : ""}
         <div class="pulse-foot">
+          ${!wall && cfg.showInsights !== false ? this._pulseInsightMarkup(true) : ""}
           ${chips.length ? `
             <div class="pulse-chips">
               ${chips.map((chip) => `
@@ -12783,6 +13114,20 @@ class OpenReefPanel extends HTMLElement {
       if (equip) equip.outerHTML = this._pulseEquipmentMarkup();
       const today = root.querySelector("[data-pulse-today]");
       if (today) today.outerHTML = this._pulseTodayMarkup();
+    }
+    // Insight card (both wall and camera layouts): swap only when the card
+    // actually changed so the entry animation runs once per rotation.
+    const insight = root.querySelector("[data-pulse-insight]");
+    if (insight && insight.getAttribute("data-insight-key") !== this._pulseInsightKey()) {
+      const markup = this._pulseInsightMarkup(insight.classList.contains("compact"));
+      if (markup) insight.outerHTML = markup;
+    }
+    // AWC diagram: patched here now instead of via full re-renders from
+    // _awcLoadSummary (which used to reset every animation on each poll).
+    const awcBlock = root.querySelector("[data-pulse-awc]");
+    if (awcBlock) {
+      const markup = this._pulseAwcMarkup();
+      if (markup) awcBlock.outerHTML = markup;
     }
     this._refreshPulseFocus();
   }
@@ -17031,6 +17376,7 @@ class OpenReefPanel extends HTMLElement {
       ["showMode", "Current mode", "Running / Feed / Maintenance pill in the header."],
       ["showBuddy", "Reef Buddy", "Corner avatar with rotating calm-only quips."],
       ["showClock", "Clock", "Live clock next to the tank name."],
+      ["showInsights", "Insight cards", "A rotating story card — consumption projections, test nags, tonight's moon, trust checks. The wall explains itself."],
       ["showSparklines", "Sparkline graphs", "Mini history graphs on the data-wall tiles."],
       ["showCategories", "Health breakdown", "Six category bars on the data wall — the why behind the ring."],
       ["showEquipment", "Equipment dots", "Read-only running/off/unavailable chips on the data wall."],
@@ -17052,9 +17398,24 @@ class OpenReefPanel extends HTMLElement {
           <div class="mini-grid">
             <label>Backdrop
               <select data-scope="pulse" data-field="backdrop">
-                <option value="auto" ${cfg.backdrop !== "camera" && cfg.backdrop !== "wall" ? "selected" : ""}>Auto — camera when online, else data wall</option>
+                <option value="auto" ${!["camera", "wall", "timelapse"].includes(cfg.backdrop) ? "selected" : ""}>Auto — camera when online, else data wall</option>
                 <option value="camera" ${cfg.backdrop === "camera" ? "selected" : ""}>Camera</option>
                 <option value="wall" ${cfg.backdrop === "wall" ? "selected" : ""}>Data wall</option>
+                <option value="timelapse" ${cfg.backdrop === "timelapse" ? "selected" : ""}>Timelapse — your reef's history as wallpaper</option>
+              </select>
+            </label>
+            ${cfg.backdrop === "timelapse" ? `
+              <label>Timelapse style
+                <select data-scope="pulse" data-field="timelapseStyle">
+                  <option value="growth" ${cfg.timelapseStyle !== "day" ? "selected" : ""}>Growth — one frame per day, months of coral growth</option>
+                  <option value="day" ${cfg.timelapseStyle === "day" ? "selected" : ""}>Day replay — the most recent frames</option>
+                </select>
+              </label>
+            ` : ""}
+            <label>Viewing distance
+              <select data-scope="pulse" data-field="sizePreset">
+                <option value="normal" ${cfg.sizePreset !== "far" ? "selected" : ""}>Arm's length — standard sizing</option>
+                <option value="far" ${cfg.sizePreset === "far" ? "selected" : ""}>Across the room — bigger numbers, readable from the couch</option>
               </select>
             </label>
             <label>Camera
@@ -17107,8 +17468,24 @@ class OpenReefPanel extends HTMLElement {
               <label>Until
                 <input type="time" data-scope="pulse" data-field="nightDimTo" value="${this._escape(cfg.nightDimTo || "07:00")}">
               </label>
+              <label>Room light sensor (optional)
+                <input type="text" data-scope="pulse" data-field="nightDimLuxEntity" placeholder="sensor.fish_room_illuminance" value="${this._escape(cfg.nightDimLuxEntity || "")}">
+              </label>
+              <label>Dim below (lux)
+                <input type="number" min="1" step="1" data-scope="pulse" data-field="nightDimLuxThreshold" value="${this._escape(String(cfg.nightDimLuxThreshold || 10))}">
+              </label>
             </div>
+            <p class="muted">With a lux sensor mapped, the wall follows the actual room light — it dims with your reef's photoperiod instead of the clock. The clock window is the fallback when the sensor is unavailable.</p>
           ` : ""}
+          <details class="pulse-wall-guide">
+            <summary><strong>Wall tablet setup</strong> — get a tablet running Pulse 24/7</summary>
+            <div class="stack">
+              <p class="muted"><strong>Any tablet:</strong> bookmark this panel with <code>?pulse=1</code> on the URL (or enable kiosk auto-start above) and keep the tablet plugged in.</p>
+              <p class="muted"><strong>iPad:</strong> Keep-screen-awake needs HTTPS (Nabu Casa or a local certificate) and Safari 16.4+. Belt and braces: Settings → Display &amp; Brightness → Auto-Lock → Never. If you add the panel to the Home Screen as a web app, iOS 18.4+ is needed for wake lock there. Guided Access can silently defeat wake-lock — prefer Auto-Lock Never.</p>
+              <p class="muted"><strong>Android / Fire tablet:</strong> use Fully Kiosk Browser — its motion-detection screen wake pairs perfectly with Pulse's night dim, and the Home Assistant Fully Kiosk integration lets automations wake the screen when someone walks up.</p>
+              <p class="muted"><strong>Burn-in:</strong> Pulse is safe to leave on 24/7 — the HUD drifts a few pixels on a slow orbit and night dim cuts brightness, the two mitigations displays actually need.</p>
+            </div>
+          </details>
           <p class="muted">No camera mapped or online? Pulse still works as a full-screen data wall. Tap any tile, chip or panel on the Pulse screen for a bigger detail card.</p>
         `}
       `,
@@ -19506,6 +19883,39 @@ class OpenReefPanel extends HTMLElement {
         /* A reading that actually changed announces itself for a beat. */
         .stat-bump { animation: pulse-stat-bump .7s ease; }
         @keyframes pulse-stat-bump { 30% { transform: scale(1.07); text-shadow: 0 0 14px rgba(125, 211, 252, .8); } }
+        /* Insight card: one rotating story at a time; the swap animates once
+           per rotation (the card is only replaced when its key changes). */
+        .pulse-insight { animation: pulse-insight-in .6s ease; }
+        .pulse-insight-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+        .pulse-insight > strong { font-size: 16px; font-weight: 800; color: #fff; line-height: 1.35; }
+        .pulse-insight-detail { font-size: 12px; font-weight: 600; color: #9fc7e0; line-height: 1.4; }
+        .pulse-insight-dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); flex: 0 0 auto; }
+        .pulse-insight-dot.warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
+        .pulse-insight-dot.critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
+        @keyframes pulse-insight-in { from { opacity: 0; transform: translateY(8px); } }
+        /* Camera/timelapse layout: the insight rides as a compact glass strip
+           above the stat chips instead of a wall block. */
+        .pulse-insight.compact { max-width: 560px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 12px; padding: 10px 14px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); display: grid; gap: 3px; }
+        .pulse-insight.compact > strong { font-size: 14px; }
+        /* Timelapse living backdrop: two stacked layers crossfade on load. */
+        .pulse-tl { opacity: 0; transition: opacity 1.8s ease; }
+        .pulse-tl.show { opacity: 1; }
+        .pulse-tl-stamp { position: absolute; right: 26px; top: 96px; z-index: 1; padding: 4px 12px; border-radius: 8px; background: rgba(4, 10, 16, .6); backdrop-filter: blur(8px); color: #cfe7f5; font-weight: 800; font-size: 12px; font-variant-numeric: tabular-nums; }
+        .pulse-tl-stamp:empty { display: none; }
+        /* "Across the room" preset: primary numerals sized for couch distance. */
+        .pulse-far .pulse-tile > strong { font-size: clamp(30px, 3.6vw, 44px); }
+        .pulse-far .pulse-chip strong { font-size: clamp(22px, 2.8vw, 32px); }
+        .pulse-far .pulse-clock { font-size: clamp(26px, 3.4vw, 40px); }
+        .pulse-far .pulse-hero .pulse-ring { width: clamp(180px, 30vh, 310px); }
+        .pulse-far .pulse-hero .pulse-ring-text strong { font-size: clamp(46px, 7.5vh, 80px); }
+        .pulse-far .pulse-insight > strong { font-size: 19px; }
+        .pulse-far .pulse-insight-detail { font-size: 14px; }
+        .pulse-far .pulse-today-row strong, .pulse-far .pulse-cat strong { font-size: 15px; }
+        /* Settings: the wall-tablet setup accordion. */
+        .pulse-wall-guide { border: 1px solid #24364a; border-radius: 8px; padding: 12px 14px; background: #0b1724; }
+        .pulse-wall-guide summary { cursor: pointer; color: #dcecff; }
+        .pulse-wall-guide[open] summary { margin-bottom: 10px; }
+        .pulse-wall-guide .stack { display: grid; gap: 8px; }
         @media (prefers-reduced-motion: reduce) { .pulse-datawall::before, .pulse-datawall::after, .stat-bump { animation: none !important; } }
         .pulse-shade { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(4, 8, 13, .66), transparent 26%), linear-gradient(0deg, rgba(4, 8, 13, .78), transparent 36%); }
         .pulse-head { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 26px 30px 0; }

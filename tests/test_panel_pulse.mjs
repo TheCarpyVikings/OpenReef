@@ -20,8 +20,16 @@ function prep(panel, states = {}, patch = {}) {
   panel._sensorMeta = {};
   panel._validation = null;
   panel._lightingWindow = { data: null, loading: false, at: 0 };
+  panel._healthTrends = { checkedAt: "", items: {}, error: "" };
   panel._pulseFocus = null;
   panel._pulseFocusTrend = { key: "", range: "", points: null, loading: false };
+  panel._pulseInsight = { idx: 0 };
+  panel._pulseSpawn = { program: null, at: 0, loading: false };
+  panel._pulseIcpCards = { cards: null, at: 0, loading: false };
+  panel._consumption = null;
+  panel._vision = null;
+  panel._trustCheck = null;
+  panel._awcSummary = null;
   return Object.assign(panel, patch);
 }
 
@@ -163,6 +171,146 @@ test("equipment focus card lists switch-mapped gear and totals real watts only",
   assert(!html.includes("No Switch"), "unmapped gear excluded");
   assert(html.includes("Running") && html.includes("Off"), "state labels shown");
   assert(html.includes("2 tracked · 23 W now"), "wattage total sums only finite readings");
+});
+
+// --- night dim: lux sensor beats the clock ---------------------------------
+
+test("lux sensor decides dimming when mapped; clock is the fallback", async () => {
+  const cfg = { nightDim: true, nightDimFrom: "22:00", nightDimTo: "07:00", nightDimLuxEntity: "sensor.room_lux", nightDimLuxThreshold: 10 };
+  const midday = new Date("2026-06-04T12:00:00");
+  const midnight = new Date("2026-06-04T00:30:00");
+  // Dark room at midday -> dims even outside the clock window.
+  const dark = prep(await makePanel({ pulse: cfg }), { "sensor.room_lux": num(4, "lx") });
+  assertEqual(dark._pulseNightDimActive(midday), true, "dark room dims regardless of clock");
+  // Bright room at midnight -> the lux sensor overrides the clock window.
+  const bright = prep(await makePanel({ pulse: cfg }), { "sensor.room_lux": num(120, "lx") });
+  assertEqual(bright._pulseNightDimActive(midnight), false, "lit room stays awake inside the window");
+  // Sensor unavailable -> honest fallback to the clock window.
+  const gone = prep(await makePanel({ pulse: cfg }), { "sensor.room_lux": { state: "unavailable", attributes: {} } });
+  assertEqual(gone._pulseNightDimActive(midnight), true, "clock window applies when the sensor is gone");
+  assertEqual(gone._pulseNightDimActive(midday), false);
+});
+
+// --- tonight's moon --------------------------------------------------------
+
+test("moon math: new at the epoch, full a half-cycle later, matches a real full moon", async () => {
+  const panel = prep(await makePanel({}));
+  const epoch = new Date(Date.UTC(2000, 0, 6, 18, 14));
+  const atEpoch = panel._pulseMoonInfo(epoch);
+  assertEqual(atEpoch.phaseName, "New moon");
+  assert(atEpoch.illumination < 0.01, "dark at the epoch");
+  const half = new Date(epoch.getTime() + 14.765 * 86400000);
+  const atHalf = panel._pulseMoonInfo(half);
+  assertEqual(atHalf.phaseName, "Full moon");
+  assert(atHalf.illumination > 0.99, "fully lit at the half-cycle");
+  // Real-world spot check: 13 Jan 2025 was a full moon.
+  const spot = panel._pulseMoonInfo(new Date(Date.UTC(2025, 0, 13, 22, 0)));
+  assert(spot.illumination > 0.94, `13 Jan 2025 should read nearly full, got ${spot.illumination.toFixed(3)}`);
+});
+
+// --- insight cards ---------------------------------------------------------
+
+test("insight cards: moon always present, subsystem cards only when their data exists", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const panel = prep(await makePanel({ sensors: {}, equipment: {}, alerts: {} }));
+    const keys = panel._pulseInsightCards().map((c) => c.key);
+    assert(keys.includes("moon"), "moon card is always available");
+    assert(!keys.some((k) => k.startsWith("consumption-")), "no consumption cards without advisor data");
+    assert(!keys.some((k) => k.startsWith("icp-")), "no ICP cards without a fetched dashboard");
+    assert(!keys.includes("lighting"), "no lighting card without a configured window");
+    assert(!keys.includes("vision-seen"), "no vision card when the engine is off");
+  } finally {
+    restore();
+  }
+});
+
+test("insight cards: consumption projections surface worst-first and skip learning", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const sensors = {
+      alkalinity: { label: "Alkalinity", entity_id: "sensor.alk", min: 7, max: 11, enabled: true },
+      calcium: { label: "Calcium", entity_id: "sensor.ca", min: 380, max: 460, enabled: true },
+    };
+    const panel = prep(await makePanel({ sensors, dosing: { enabled: true } }), {}, {
+      _dosingEnabled: () => true,
+      _dosingActiveParameters: () => Object.entries(sensors),
+      _consumption: {
+        checkedAt: "2026-06-04T08:00:00Z",
+        items: {
+          alkalinity: { status: "warning", trendText: "Falling ~0.12 dKH/day", projectionText: "Reaches your low limit in about 9 days" },
+          calcium: { status: "learning", trendText: "Learning", projectionText: "" },
+        },
+        error: "",
+      },
+    });
+    const cards = panel._pulseInsightCards();
+    const consumption = cards.filter((c) => c.key.startsWith("consumption-"));
+    assertEqual(consumption.length, 1, "learning parameter contributes no card");
+    assertEqual(consumption[0].title, "Falling ~0.12 dKH/day");
+    assertEqual(consumption[0].status, "warning");
+  } finally {
+    restore();
+  }
+});
+
+test("insight cards: quiet-reef streak counts days since the last critical alert", async () => {
+  const restore = freezeTime("2026-06-10T09:00:00Z");
+  try {
+    const withCritical = prep(await makePanel({
+      alerts: { history: [
+        { timestamp: "2026-06-09T12:00:00Z", state: "warning", label: "pH near limit" },
+        { timestamp: "2026-06-05T09:00:00Z", state: "critical", label: "Tank temp high" },
+      ] },
+    }));
+    const streak = withCritical._pulseInsightCards().find((c) => c.key === "streak");
+    assert(streak, "streak card present");
+    assert(streak.title.includes("5 days since the last critical alert"), streak.title);
+    const clean = prep(await makePanel({
+      alerts: { history: Array.from({ length: 6 }, (_, i) => ({ timestamp: `2026-06-0${i + 1}T09:00:00Z`, state: "warning", label: "w" })) },
+    }));
+    const cleanCard = clean._pulseInsightCards().find((c) => c.key === "streak");
+    assertEqual(cleanCard.title, "No critical alerts in the log");
+  } finally {
+    restore();
+  }
+});
+
+test("insight cards: spawn countdown rides the moon card when the program is cached", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const panel = prep(await makePanel({}), {}, {
+      _pulseSpawn: { at: Date.now(), loading: false, program: {
+        preset: { label: "Great Barrier Reef" },
+        spawnPrediction: { nightsUntilWindowStart: 23, nightsUntilWindowEnd: 27 },
+      } },
+    });
+    const moon = panel._pulseInsightCards().find((c) => c.key === "moon");
+    assert(moon.detail.includes("23 nights until the Great Barrier Reef window"), moon.detail);
+  } finally {
+    restore();
+  }
+});
+
+test("insight rotation cycles cards and the markup carries the current key", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const panel = prep(await makePanel({
+      alerts: { history: [{ timestamp: "2026-06-01T09:00:00Z", state: "critical", label: "Old scare" }] },
+    }));
+    const cards = panel._pulseInsightCards();
+    assert(cards.length >= 2, "need at least two cards to rotate");
+    panel._pulseInsight.idx = 0;
+    const first = panel._pulseInsightKey();
+    panel._pulseInsight.idx = 1;
+    const second = panel._pulseInsightKey();
+    assert(first !== second, "advancing the index changes the card");
+    panel._pulseInsight.idx = cards.length;
+    assertEqual(panel._pulseInsightKey(), first, "rotation wraps modulo the deck");
+    assert(panel._pulseInsightMarkup().includes(`data-insight-key="${first}"`), "markup stamps the key for swap detection");
+  } finally {
+    restore();
+  }
 });
 
 test("today focus card with nothing configured stays honest, not empty", async () => {
