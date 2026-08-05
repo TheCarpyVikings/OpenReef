@@ -356,6 +356,57 @@ test("insight cards: spawn countdown rides the moon card when the program is cac
   }
 });
 
+test("insight deck: opens on the tapped card, arrows wrap, swipe direction maps to step", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const panel = prep(await makePanel({
+      alerts: { history: [{ timestamp: "2026-06-01T09:00:00Z", state: "critical", label: "Old scare" }] },
+    }), {}, { _pulseActive: true });
+    const deck = panel._pulseInsightCards();
+    assert(deck.length >= 2, "need a deck to page through");
+    // Ambient rotator is showing card 1; tapping must open the deck there.
+    panel._pulseInsight.idx = 1;
+    panel._openPulseFocus("insights");
+    assertEqual(panel._pulseFocus, "insights");
+    assertEqual(panel._pulseFocusInsightIdx, 1, "deck opens on the tapped card");
+    // Next wraps forward past the end; prev wraps back.
+    panel._pulseFocusInsightIdx = deck.length - 1;
+    panel._pulseFocusInsightNav(1);
+    assertEqual(panel._pulseFocusInsightIdx, 0, "next wraps to the first card");
+    panel._pulseFocusInsightNav(-1);
+    assertEqual(panel._pulseFocusInsightIdx, deck.length - 1, "prev wraps to the last card");
+    const html = panel._pulseFocusInsightsMarkup();
+    assert(html.includes("data-pulse-insight-deck"), "deck is swipe-targetable");
+    assert((html.match(/pulse-insight-dots/g) || []).length === 1 && html.includes(`1/${deck.length}`) === false, "pager present");
+    assert(html.includes(`${deck.length}/${deck.length}`), "position indicator shows current page");
+  } finally {
+    restore();
+  }
+});
+
+test("insight deck markup shows the expanded `more` lines the strip hides", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const panel = prep(await makePanel({}), {}, {
+      _pulseActive: true,
+      _pulseSpawn: { at: Date.now(), loading: false, program: {
+        preset: { label: "Great Barrier Reef" },
+        spawnPrediction: { nightsUntilWindowStart: 23, nightsUntilWindowEnd: 27, fullMoonUtc: "2026-06-29T12:00:00Z", windowStart: "2026-07-02", windowEnd: "2026-07-05" },
+      } },
+    });
+    const moon = panel._pulseInsightCards().find((c) => c.key === "moon");
+    assert(moon.more.some((l) => l.includes("Full moon: 2026-06-29")), "full moon date in more lines");
+    assert(moon.more.some((l) => l.includes("2026-07-02 → 2026-07-05")), "window range in more lines");
+    const deck = panel._pulseInsightCards();
+    panel._pulseFocus = "insights";
+    panel._pulseFocusInsightIdx = deck.findIndex((c) => c.key === "moon");
+    const html = panel._pulseFocusInsightsMarkup();
+    assert(html.includes("Full moon: 2026-06-29"), "expanded view renders the more lines");
+  } finally {
+    restore();
+  }
+});
+
 test("insight rotation cycles cards and the markup carries the current key", async () => {
   const restore = freezeTime("2026-06-04T09:00:00Z");
   try {

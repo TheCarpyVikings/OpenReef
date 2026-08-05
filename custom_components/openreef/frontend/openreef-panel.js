@@ -121,6 +121,12 @@ class OpenReefPanel extends HTMLElement {
     this._pulseDimWakeUntil = 0;
     this._pulseDimPointerHandler = null;
     this._pulseInsight = { idx: 0 };
+    this._pulseFocusInsightIdx = 0;
+    this._pulseFocusSlideDir = "";
+    this._pulseFocusLastHtml = "";
+    this._pulseSwipeStart = null;
+    this._pulseSwipeDownHandler = null;
+    this._pulseSwipeUpHandler = null;
     this._pulseSpawn = { program: null, at: 0, loading: false };
     this._pulseIcpCards = { cards: null, at: 0, loading: false };
     this._pulseTl = { frames: [], idx: 0, at: 0, loading: false, front: 0 };
@@ -1271,6 +1277,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
       if (action === "pulse-share") this._sharePulseCard();
       if (action === "pulse-face") this._applyPulseFace(id);
+      if (action === "pulse-insight-nav") this._pulseFocusInsightNav(id === "prev" ? -1 : 1);
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
@@ -12407,6 +12414,26 @@ class OpenReefPanel extends HTMLElement {
       };
       this.shadowRoot.addEventListener("pointerdown", this._pulseDimPointerHandler);
     }
+    if (!this._pulseSwipeDownHandler) {
+      // Horizontal swipe on the expanded insight deck steps between cards.
+      this._pulseSwipeDownHandler = (ev) => {
+        if (ev.target?.closest?.("[data-pulse-insight-deck]")) {
+          this._pulseSwipeStart = { x: ev.clientX, y: ev.clientY };
+        }
+      };
+      this._pulseSwipeUpHandler = (ev) => {
+        const start = this._pulseSwipeStart;
+        this._pulseSwipeStart = null;
+        if (!start || this._pulseFocus !== "insights") return;
+        const dx = ev.clientX - start.x;
+        const dy = ev.clientY - start.y;
+        if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+          this._pulseFocusInsightNav(dx < 0 ? 1 : -1);
+        }
+      };
+      this.shadowRoot.addEventListener("pointerdown", this._pulseSwipeDownHandler);
+      this.shadowRoot.addEventListener("pointerup", this._pulseSwipeUpHandler);
+    }
     this._applyPulseNightDim();
     if (!this._pulseTimer) {
       this._pulseTimer = window.setInterval(() => {
@@ -12445,6 +12472,13 @@ class OpenReefPanel extends HTMLElement {
       this.shadowRoot.removeEventListener("pointerdown", this._pulseDimPointerHandler);
       this._pulseDimPointerHandler = null;
     }
+    if (this._pulseSwipeDownHandler) {
+      this.shadowRoot.removeEventListener("pointerdown", this._pulseSwipeDownHandler);
+      this.shadowRoot.removeEventListener("pointerup", this._pulseSwipeUpHandler);
+      this._pulseSwipeDownHandler = null;
+      this._pulseSwipeUpHandler = null;
+    }
+    this._pulseSwipeStart = null;
     this._pulseDimWakeUntil = 0;
   }
 
@@ -12565,8 +12599,9 @@ class OpenReefPanel extends HTMLElement {
 
   _pulseInsightCards() {
     const cards = [];
-    const push = (key, kicker, title, detail, status = "ok") => {
-      if (title) cards.push({ key, kicker, title, detail: detail || "", status });
+    // `more` lines only appear in the expanded (tap-to-open) deck view.
+    const push = (key, kicker, title, detail, status = "ok", more = []) => {
+      if (title) cards.push({ key, kicker, title, detail: detail || "", status, more: (more || []).filter(Boolean) });
     };
     const statusRank = { critical: 2, warning: 1 };
 
@@ -12575,7 +12610,7 @@ class OpenReefPanel extends HTMLElement {
       const health = this._reefHealthScore();
       const loss = (health.losses || [])[0];
       if (loss) {
-        push("health-loss", `Reef health · −${loss.points} pts`, loss.label, loss.detail, loss.status);
+        push("health-loss", `Reef health · −${loss.points} pts`, loss.label, loss.detail, loss.status, [health.nextAction]);
       } else if (health.status === "ok") {
         push("health-clean", "Reef health", "Every scoring check is clean", health.gradeDetail, "ok");
       }
@@ -12590,7 +12625,8 @@ class OpenReefPanel extends HTMLElement {
           .sort((a, b) => (statusRank[b.item.status] || 0) - (statusRank[a.item.status] || 0))
           .slice(0, 2)
           .forEach(({ id, item }) => push(`consumption-${id}`, "Consumption advisor", item.trendText, item.projectionText,
-            item.status === "critical" ? "critical" : item.status === "warning" ? "warning" : "ok"));
+            item.status === "critical" ? "critical" : item.status === "warning" ? "warning" : "ok",
+            [item.maintenanceText || item.doseText, item.correctionText]));
       }
     } catch { /* no card */ }
 
@@ -12601,7 +12637,13 @@ class OpenReefPanel extends HTMLElement {
         .filter(({ state }) => state.status === "warning" || state.status === "critical")
         .sort((a, b) => (statusRank[b.state.status] || 0) - (statusRank[a.state.status] || 0))
         .slice(0, 2)
-        .forEach(({ id, meta, state }) => push(`manual-${id}`, "Test kit", `${meta.label || id} test ${state.label}`, state.detail, state.status));
+        .forEach(({ id, meta, state }) => {
+          const latest = state.latest;
+          const last = latest && Number.isFinite(Number(latest.value))
+            ? `Last result: ${this._format(Number(latest.value), this._sensorDigits(id))}${latest.unit || meta.unit ? ` ${latest.unit || meta.unit}` : ""} · ${this._formatActivityTime(latest.timestamp)}`
+            : "";
+          push(`manual-${id}`, "Test kit", `${meta.label || id} test ${state.label}`, state.detail, state.status, [last]);
+        });
     } catch { /* no card */ }
 
     // Maintenance attention (the Today block already covers the next task).
@@ -12623,14 +12665,18 @@ class OpenReefPanel extends HTMLElement {
         const bits = [];
         if (Number.isFinite(days)) bits.push(`Fresh water for ~${Math.floor(days)} more day${Math.floor(days) === 1 ? "" : "s"}`);
         if (Number.isFinite(Number(sum.changesRemaining))) bits.push(`${Math.floor(Number(sum.changesRemaining))} changes left in the reservoir`);
-        push("awc-runway", "Water change", sum.scheduleText, bits.join(" · "), Number.isFinite(days) && days <= 2 ? "warning" : "ok");
+        const removal = Number(sum.projectedRemovalPct30d);
+        push("awc-runway", "Water change", sum.scheduleText, bits.join(" · "),
+          Number.isFinite(days) && days <= 2 ? "warning" : "ok",
+          [Number.isFinite(removal) ? `~${Math.round(removal)}% of the old water replaced over 30 days` : ""]);
       }
     } catch { /* no card */ }
 
     // ICP analysis cards (cached for hours — lab data changes monthly).
     try {
       (this._pulseIcpCards.cards || []).slice(0, 2).forEach((card, i) => push(`icp-${i}`, "ICP analysis", card.title, card.summary,
-        card.severity === "critical" ? "critical" : card.severity === "warning" ? "warning" : "ok"));
+        card.severity === "critical" ? "critical" : card.severity === "warning" ? "warning" : "ok",
+        [card.detail]));
     } catch { /* no card */ }
 
     // Tonight's moon — with the real spawn-window countdown when spawning is on.
@@ -12644,7 +12690,11 @@ class OpenReefPanel extends HTMLElement {
           ? `${n} night${n === 1 ? "" : "s"} until the ${this._pulseSpawn.program?.preset?.label || "spawning"} window`
           : (Number.isFinite(pred.nightsUntilWindowEnd) && pred.nightsUntilWindowEnd >= 0 ? "Spawning window is open now" : "");
       }
-      push("moon", "Tonight's moon", `${moon.phaseName} · ${Math.round(moon.illumination * 100)}% lit`, detail, "ok");
+      const moonMore = pred ? [
+        pred.fullMoonUtc ? `Full moon: ${String(pred.fullMoonUtc).slice(0, 10)}` : "",
+        pred.windowStart && pred.windowEnd ? `Spawn window: ${pred.windowStart} → ${pred.windowEnd}` : "",
+      ] : [];
+      push("moon", "Tonight's moon", `${moon.phaseName} · ${Math.round(moon.illumination * 100)}% lit`, detail, "ok", moonMore);
     } catch { /* no card */ }
 
     // Lighting window (cached at panel boot; never fetched from Pulse).
@@ -12714,7 +12764,7 @@ class OpenReefPanel extends HTMLElement {
     const card = this._pulseInsightCurrent();
     if (!card) return "";
     return `
-      <article class="pulse-block pulse-insight ${compact ? "compact" : ""}" data-pulse-insight data-insight-key="${this._escape(card.key)}">
+      <article class="pulse-block pulse-insight pulse-tap ${compact ? "compact" : ""}" data-pulse-insight data-insight-key="${this._escape(card.key)}" data-action="pulse-focus" data-id="insights" role="button" tabindex="0" title="Tap for all insights">
         <div class="pulse-insight-head">
           <small class="pulse-block-title">${this._escape(card.kicker)}</small>
           <span class="pulse-insight-dot ${this._escape(card.status)}"></span>
@@ -13244,6 +13294,24 @@ class OpenReefPanel extends HTMLElement {
       this._pulseFocusTrend = { key, range, points: null, loading: false };
       this._loadPulseFocusTrend();
     }
+    if (key === "insights") {
+      // Open the deck on the card the user actually tapped.
+      const deck = this._pulseInsightCards();
+      const currentKey = this._pulseInsightKey();
+      const at = deck.findIndex((card) => card.key === currentKey);
+      this._pulseFocusInsightIdx = at >= 0 ? at : 0;
+      this._pulseFocusSlideDir = "";
+    }
+    this._renderPulseFocus();
+  }
+
+  // Step through the expanded insight deck (swipe or arrow taps), wrapping.
+  _pulseFocusInsightNav(step) {
+    const deck = this._pulseInsightCards();
+    if (this._pulseFocus !== "insights" || deck.length < 2) return;
+    const len = deck.length;
+    this._pulseFocusInsightIdx = (((this._pulseFocusInsightIdx + step) % len) + len) % len;
+    this._pulseFocusSlideDir = step > 0 ? "left" : "right";
     this._renderPulseFocus();
   }
 
@@ -13286,7 +13354,13 @@ class OpenReefPanel extends HTMLElement {
     const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
     const host = root && root.querySelector("[data-pulse-focus-host]");
     if (!host) return;
-    host.innerHTML = this._pulseFocus ? this._pulseFocusMarkup() : "";
+    const html = this._pulseFocus ? this._pulseFocusMarkup() : "";
+    // Skip identical re-renders: the periodic refresh used to replace the DOM
+    // with the same markup, replaying the card's entry animation every cycle.
+    if (html !== this._pulseFocusLastHtml) {
+      host.innerHTML = html;
+      this._pulseFocusLastHtml = html;
+    }
     root.classList.toggle("pulse-has-focus", Boolean(this._pulseFocus));
     this._pulseFocusRenderedAt = Date.now();
   }
@@ -13306,16 +13380,51 @@ class OpenReefPanel extends HTMLElement {
     if (key === "health") body = this._pulseFocusHealthMarkup();
     else if (key === "equipment") body = this._pulseFocusEquipmentMarkup();
     else if (key === "today") body = this._pulseFocusTodayMarkup();
+    else if (key === "insights") body = this._pulseFocusInsightsMarkup();
     else if (key && key.startsWith("sensor:")) body = this._pulseFocusSensorMarkup(key.slice(7));
     if (!body) return "";
     return `
       <div class="pulse-focus">
         <div class="pulse-focus-scrim" data-action="pulse-unfocus"></div>
-        <article class="pulse-focus-card">
+        <article class="pulse-focus-card ${key === "insights" ? "insights" : ""}">
           <button class="pulse-focus-close" data-action="pulse-unfocus" title="Close (Esc)">✕</button>
           ${body}
         </article>
       </div>
+    `;
+  }
+
+  // The expanded insight deck: every story at once, one per page — swipe or
+  // arrows to move, dots for position. Opens on the card that was tapped.
+  _pulseFocusInsightsMarkup() {
+    const deck = this._pulseInsightCards();
+    if (!deck.length) return "";
+    const len = deck.length;
+    const idx = (((this._pulseFocusInsightIdx || 0) % len) + len) % len;
+    const card = deck[idx];
+    const slide = this._pulseFocusSlideDir ? `slide-${this._pulseFocusSlideDir}` : "";
+    return `
+      <div class="pulse-insight-page ${slide}" data-pulse-insight-deck>
+        <header class="pulse-focus-head">
+          <div>
+            <small>${this._escape(card.kicker)}</small>
+            <strong class="pulse-insight-page-title">${this._escape(card.title)}</strong>
+          </div>
+          <span class="pulse-insight-dot big ${this._escape(card.status)}"></span>
+        </header>
+        ${card.detail ? `<p class="pulse-focus-note">${this._escape(card.detail)}</p>` : ""}
+        ${(card.more || []).map((line) => `<p class="pulse-focus-note dim">${this._escape(line)}</p>`).join("")}
+      </div>
+      ${len > 1 ? `
+        <div class="pulse-insight-pager">
+          <button data-action="pulse-insight-nav" data-id="prev" title="Previous insight">‹</button>
+          <div class="pulse-insight-dots">
+            ${deck.map((c, i) => `<span class="${i === idx ? "on" : ""} ${this._escape(c.status)}"></span>`).join("")}
+          </div>
+          <button data-action="pulse-insight-nav" data-id="next" title="Next insight">›</button>
+        </div>
+        <p class="pulse-focus-note dim center">Swipe or use the arrows · ${idx + 1}/${len}</p>
+      ` : ""}
     `;
   }
 
@@ -20021,8 +20130,10 @@ class OpenReefPanel extends HTMLElement {
         .pulse-far .pulse-insight > strong { font-size: 19px; }
         .pulse-far .pulse-insight-detail { font-size: 14px; }
         .pulse-far .pulse-today-row strong, .pulse-far .pulse-cat strong { font-size: 15px; }
-        /* Share button rides in the same corner column as close. */
-        .pulse-share { top: 74px; font-size: 19px; }
+        /* Share button rides in the same corner column as close. Double-class
+           selector: .pulse-close's own top:22px is declared later in this
+           sheet and would win the tie, stacking share invisibly under ✕. */
+        .pulse-close.pulse-share { top: 74px; font-size: 19px; }
         /* Settings: face preset buttons. */
         .pulse-faces { display: grid; gap: 8px; }
         .pulse-face-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
@@ -20196,6 +20307,27 @@ class OpenReefPanel extends HTMLElement {
         .pulse-focus-dot.warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
         .pulse-focus-dot.critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
         .pulse-focus-note { color: #9fc7e0; font-size: 13px; font-weight: 600; line-height: 1.45; }
+        .pulse-focus-note.dim { color: #8da2ba; font-weight: 500; }
+        .pulse-focus-note.center { text-align: center; font-size: 11px; }
+        /* Expanded insight deck: swipeable pages with a dot pager. */
+        .pulse-focus-card.insights { touch-action: pan-y; }
+        .pulse-insight-page { display: grid; gap: 10px; min-height: 130px; align-content: start; }
+        .pulse-insight-page.slide-left { animation: pulse-slide-left .28s ease; }
+        .pulse-insight-page.slide-right { animation: pulse-slide-right .28s ease; }
+        @keyframes pulse-slide-left { from { opacity: 0; transform: translateX(36px); } }
+        @keyframes pulse-slide-right { from { opacity: 0; transform: translateX(-36px); } }
+        .pulse-focus-head strong.pulse-insight-page-title { font-size: clamp(20px, 3vw, 28px); line-height: 1.25; }
+        .pulse-insight-dot.big { width: 14px; height: 14px; }
+        .pulse-insight-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .pulse-insight-pager button { width: 44px; height: 44px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .22); background: rgba(4, 10, 16, .55); color: #e5edf5; font-size: 22px; line-height: 1; cursor: pointer; flex: 0 0 auto; }
+        .pulse-insight-pager button:hover { border-color: rgba(255, 255, 255, .45); }
+        .pulse-insight-dots { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; }
+        .pulse-insight-dots span { width: 8px; height: 8px; border-radius: 50%; background: rgba(255, 255, 255, .22); transition: background .2s ease, transform .2s ease; }
+        .pulse-insight-dots span.on { background: var(--openreef-accent); transform: scale(1.35); }
+        .pulse-insight-dots span.warning { background: rgba(245, 158, 11, .5); }
+        .pulse-insight-dots span.critical { background: rgba(239, 68, 68, .55); }
+        .pulse-insight-dots span.warning.on { background: #f59e0b; }
+        .pulse-insight-dots span.critical.on { background: #ef4444; }
         .pulse-has-focus .pulse-buddy { display: none; }
         .pulse-root.pulse-alert-warning::after, .pulse-root.pulse-alert-critical::after { content: ""; position: absolute; inset: 0; pointer-events: none; animation: pulse-edge 1.8s ease-in-out infinite; }
         .pulse-root.pulse-alert-warning::after { box-shadow: inset 0 0 90px rgba(245, 158, 11, .4); }
