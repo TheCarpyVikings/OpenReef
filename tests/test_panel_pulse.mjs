@@ -89,6 +89,69 @@ test("ring animation tier: elite only for a calm >=95, never for warning or unme
   assertEqual(panel._pulseRingClass({ status: "unknown", score: 100 }), "pulse-ring unknown");
 });
 
+// --- share the wall --------------------------------------------------------
+
+test("share model mirrors the wall: ring, up to five tiles with status, insight", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const sensors = {};
+    "abcdefg".split("").forEach((k, i) => {
+      sensors[`s${k}`] = { label: `Sensor ${k}`, entity_id: `sensor.${k}`, unit: "°C", min: 20, max: 30, enabled: true };
+    });
+    const states = Object.fromEntries("abcdefg".split("").map((k) => [`sensor.${k}`, num(25, "°C")]));
+    // One reading outside its range must carry its status into the card.
+    states["sensor.c"] = num(99, "°C");
+    const panel = prep(await makePanel({ tank: { name: "Fluval Evo 52L" }, sensors }), states);
+    const model = panel._pulseShareModel();
+    assertEqual(model.tankName, "Fluval Evo 52L");
+    assertEqual(model.tiles.length, 5, "tiles capped at five — the card has five slots");
+    assert(model.tiles.every((t) => t.label && t.value), "each tile carries label and value");
+    assertEqual(model.tiles[2].status, "critical", "out-of-range reading keeps its status colour");
+    assert(Number.isFinite(model.score) && model.score >= 0 && model.score <= 100, "score is a real 0-100");
+    assert(model.insight && model.insight.title, "insight strip included by default");
+    assert(model.dateText.length > 0, "card is stamped with when it was taken");
+  } finally {
+    restore();
+  }
+});
+
+test("share model honours the display toggles it inherits from Pulse", async () => {
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const panel = prep(await makePanel({
+      tank: {},
+      pulse: { showInsights: false, showBuddy: false, showMode: false },
+    }));
+    const model = panel._pulseShareModel();
+    assertEqual(model.insight, null, "insights off -> no strip on the card");
+    assertEqual(model.showBuddy, false, "buddy off -> no avatar on the card");
+    assertEqual(model.modeLabel, "", "mode off -> no mode in the stamp");
+    assertEqual(model.tankName, "OpenReef", "unnamed tank still gets a title");
+  } finally {
+    restore();
+  }
+});
+
+test("share card status colours are the wall's palette, unknown falls back to grey", async () => {
+  const panel = prep(await makePanel({}));
+  assertEqual(panel._pulseShareStatusColor("ok"), "#22c55e");
+  assertEqual(panel._pulseShareStatusColor("warning"), "#f59e0b");
+  assertEqual(panel._pulseShareStatusColor("critical"), "#ef4444");
+  assertEqual(panel._pulseShareStatusColor("unknown"), "#64748b");
+  assertEqual(panel._pulseShareStatusColor(undefined), "#64748b");
+});
+
+test("card text is ellipsized to its box so a long label can never bleed out", async () => {
+  const panel = prep(await makePanel({}));
+  // Stand-in for a canvas context: one unit of width per character.
+  const ctx = { measureText: (t) => ({ width: String(t).length }) };
+  assertEqual(panel._fitText(ctx, "short", 40), "short", "text that fits is untouched");
+  const clipped = panel._fitText(ctx, "an extremely long sensor label that will not fit", 12);
+  assert(clipped.endsWith("…"), "long text gets an ellipsis");
+  assert(clipped.length <= 12, `clipped text must fit the box, got ${clipped.length}`);
+  assertEqual(panel._fitText(ctx, null, 10), "", "null renders as empty, not 'null'");
+});
+
 // --- named faces -----------------------------------------------------------
 
 // Lockstep with _normalise_core_config's pulse section: a face writing a field

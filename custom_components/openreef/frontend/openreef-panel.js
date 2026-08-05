@@ -11715,6 +11715,11 @@ class OpenReefPanel extends HTMLElement {
     const ctx = canvas.getContext("2d");
     ctx.drawImage(source, 0, 0, w, h);
     await this._drawTankCard(ctx, w, h);
+    await this._shareCanvas(canvas);
+  }
+
+  // Encode + hand off: OS share sheet where available, download otherwise.
+  async _shareCanvas(canvas) {
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
     if (!blob) throw new Error("encode failed");
     const tankName = (this._config.tank && this._config.tank.name) || "My Reef";
@@ -11736,47 +11741,245 @@ class OpenReefPanel extends HTMLElement {
     this._downloadBlob(blob, filename);
   }
 
-  // Share the Reef Pulse view itself — the "share my wall" moment. Source is
-  // whatever the backdrop is showing: live camera frame, the current timelapse
-  // frame, or (data wall) a synthetic gradient matching the wall backdrop, so
-  // the share never fails just because there's no photo.
+  // --- Reef Pulse: share the wall -----------------------------------------
+  // "Share my wall" repaints the Pulse view as a designed card rather than
+  // screenshotting the DOM (no rasteriser exists in a shadow root, and the
+  // camera-modal tank card is the wrong artwork — it left a data-wall Pulse
+  // as a near-empty gradient). Model is separated from painter so the data
+  // selection is testable without a canvas.
+
+  _pulseShareStatusColor(status) {
+    return { ok: "#22c55e", warning: "#f59e0b", critical: "#ef4444" }[status] || "#64748b";
+  }
+
+  _pulseShareModel() {
+    const cfg = this._pulseCfg();
+    const health = this._reefHealthScore();
+    const tank = this._config.tank || {};
+    const tiles = this._pulseTileSensors().slice(0, 5).map(([id, sensor]) => ({
+      label: sensor.label || id,
+      value: this._sensorDisplayValue(id, sensor),
+      unit: this._sensorDisplayUnit(id, sensor),
+      status: this._liveStatBadge(id, sensor).status,
+    }));
+    const insight = cfg.showInsights === false ? null : this._pulseInsightCurrent();
+    return {
+      tankName: tank.name || "OpenReef",
+      dateText: new Date().toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }),
+      modeLabel: cfg.showMode === false ? "" : this._activeModeLabel(),
+      score: Math.max(0, Math.min(100, Number(health.score) || 0)),
+      grade: health.grade || "",
+      status: health.status || "unknown",
+      topReason: health.topReason || "",
+      tiles,
+      insight: insight ? { kicker: insight.kicker, title: insight.title, detail: insight.detail, status: insight.status } : null,
+      showBuddy: cfg.showBuddy !== false,
+      pose: this._overlayPose(),
+    };
+  }
+
+  // Truncate to fit a width, with an ellipsis — long labels must never bleed
+  // out of their tile on a shared image.
+  _fitText(ctx, text, maxWidth) {
+    const value = String(text ?? "");
+    if (ctx.measureText(value).width <= maxWidth) return value;
+    let out = value;
+    while (out.length > 1 && ctx.measureText(`${out}…`).width > maxWidth) out = out.slice(0, -1);
+    return `${out}…`;
+  }
+
+  async _drawPulseCard(ctx, w, h, model) {
+    const scale = w / 1600;
+    const pad = Math.round(56 * scale);
+    const font = (px, weight = "700") =>
+      `${weight} ${Math.round(px * scale)}px -apple-system, "Segoe UI", Roboto, sans-serif`;
+    const accent = this._pulseShareStatusColor(model.status);
+    ctx.textBaseline = "top";
+
+    // Header: tank name + timestamp left, wordmark right.
+    ctx.font = font(46, "800");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(this._fitText(ctx, model.tankName, w * 0.5), pad, pad);
+    ctx.font = font(22, "600");
+    ctx.fillStyle = "#9fc7e0";
+    ctx.fillText([model.dateText, model.modeLabel].filter(Boolean).join(" · "), pad, pad + Math.round(58 * scale));
+    ctx.font = font(26, "800");
+    ctx.fillStyle = "rgba(255, 255, 255, .85)";
+    const mark = "OpenReef";
+    ctx.fillText(mark, w - pad - ctx.measureText(mark).width, pad);
+
+    // Health ring — the wall's centrepiece, glow and all.
+    // Geometry note: the ring sits in the band between the header and the
+    // tiles row, and the reason line hangs below it — keep r/cy in step with
+    // the tile/insight heights below or the reason lands on the tiles.
+    const cx = w / 2;
+    const cy = Math.round(h * 0.335);
+    const r = Math.round(Math.min(w, h) * 0.165);
+    const lw = Math.round(r * 0.19);
+    ctx.save();
+    ctx.lineWidth = lw;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(255, 255, 255, .15)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    if (model.score > 0) {
+      ctx.strokeStyle = accent;
+      ctx.shadowColor = accent;
+      ctx.shadowBlur = Math.round(26 * scale);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * model.score) / 100);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = font(Math.round(r * 0.82), "800");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(String(model.score), cx, cy - Math.round(r * 0.06));
+    ctx.font = font(20, "800");
+    ctx.fillStyle = "#9fc7e0";
+    ctx.fillText(`${model.grade ? `${model.grade} · ` : ""}REEF HEALTH`, cx, cy + Math.round(r * 0.44));
+    if (model.topReason) {
+      ctx.font = font(24, "700");
+      ctx.fillStyle = "#cfe7f5";
+      ctx.fillText(this._fitText(ctx, model.topReason, w - pad * 2), cx, cy + r + Math.round(34 * scale));
+    }
+    ctx.restore();
+
+    // Sensor tiles row.
+    const insightH = model.insight ? Math.round(150 * scale) : 0;
+    const tileH = Math.round(146 * scale);
+    const tileY = h - pad - insightH - (insightH ? Math.round(20 * scale) : 0) - tileH;
+    const count = model.tiles.length;
+    if (count) {
+      const gap = Math.round(18 * scale);
+      const tileW = (w - pad * 2 - gap * (count - 1)) / count;
+      model.tiles.forEach((tile, i) => {
+        const x = pad + i * (tileW + gap);
+        this._roundRect(ctx, x, tileY, tileW, tileH, Math.round(18 * scale));
+        ctx.fillStyle = "rgba(4, 10, 16, .62)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 255, 255, .14)";
+        ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+        ctx.stroke();
+        const inner = Math.round(20 * scale);
+        const dotR = Math.round(8 * scale);
+        ctx.font = font(19, "800");
+        ctx.fillStyle = "#9fc7e0";
+        ctx.textBaseline = "top";
+        ctx.fillText(this._fitText(ctx, String(tile.label).toUpperCase(), tileW - inner * 2 - dotR * 3), x + inner, tileY + inner);
+        ctx.beginPath();
+        ctx.arc(x + tileW - inner - dotR, tileY + inner + Math.round(8 * scale), dotR, 0, Math.PI * 2);
+        ctx.fillStyle = this._pulseShareStatusColor(tile.status);
+        ctx.fill();
+        ctx.font = font(46, "800");
+        ctx.fillStyle = "#ffffff";
+        const text = `${tile.value}${tile.unit ? ` ${tile.unit}` : ""}`;
+        ctx.fillText(this._fitText(ctx, text, tileW - inner * 2), x + inner, tileY + Math.round(60 * scale));
+      });
+    }
+
+    // Insight strip — the line that makes the wall look like it's thinking.
+    if (model.insight) {
+      const y = h - pad - insightH;
+      this._roundRect(ctx, pad, y, w - pad * 2, insightH, Math.round(18 * scale));
+      ctx.fillStyle = "rgba(4, 10, 16, .62)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, .14)";
+      ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+      ctx.stroke();
+      const inner = Math.round(24 * scale);
+      const maxW = w - pad * 2 - inner * 2 - Math.round(30 * scale);
+      ctx.textBaseline = "top";
+      ctx.font = font(19, "800");
+      ctx.fillStyle = "#9fc7e0";
+      ctx.fillText(this._fitText(ctx, String(model.insight.kicker).toUpperCase(), maxW), pad + inner, y + inner);
+      ctx.font = font(31, "800");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(this._fitText(ctx, model.insight.title, maxW), pad + inner, y + inner + Math.round(30 * scale));
+      if (model.insight.detail) {
+        ctx.font = font(23, "600");
+        ctx.fillStyle = "#9fc7e0";
+        ctx.fillText(this._fitText(ctx, model.insight.detail, maxW), pad + inner, y + inner + Math.round(74 * scale));
+      }
+      ctx.beginPath();
+      ctx.arc(w - pad - inner, y + inner + Math.round(8 * scale), Math.round(9 * scale), 0, Math.PI * 2);
+      ctx.fillStyle = this._pulseShareStatusColor(model.insight.status);
+      ctx.fill();
+    }
+
+    // Reef Buddy last, top-right under the wordmark: it's the only part that
+    // needs a network fetch, and a slow or blocked avatar must never cost the
+    // user the readings — the race means a stalled load just omits the art.
+    if (model.showBuddy) {
+      const size = Math.round(170 * scale);
+      const avatar = await Promise.race([
+        this._loadImage(`${this._avatarBase()}${model.pose}.png`).catch(() => null),
+        new Promise((resolve) => window.setTimeout(() => resolve(null), 1500)),
+      ]);
+      if (avatar) ctx.drawImage(avatar, w - pad - size, pad + Math.round(46 * scale), size, size);
+    }
+  }
+
+  // Share the Reef Pulse view itself — the "share my wall" moment. The
+  // backdrop is whatever Pulse is showing (live camera frame, current
+  // timelapse frame, or the data-wall gradient), with the wall repainted on
+  // top, so the shared image looks like the wall in the room.
   async _sharePulseCard() {
     const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
     if (!root) return;
-    let source = null;
-    let w = 0;
-    let h = 0;
+    const W = 1600;
+    const H = 900;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
     const video = root.querySelector("video[data-camera-video]");
     const fallback = root.querySelector("img[data-camera-fallback]");
     const tlFrame = [root.querySelector("[data-pulse-tl-a]"), root.querySelector("[data-pulse-tl-b]")]
       .find((el) => el && el.classList.contains("show") && el.naturalWidth);
+    let source = null;
+    let sw = 0;
+    let sh = 0;
     if (video && video.videoWidth && video.readyState >= 2) {
-      source = video; w = video.videoWidth; h = video.videoHeight;
+      source = video; sw = video.videoWidth; sh = video.videoHeight;
     } else if (fallback && fallback.naturalWidth && fallback.style.display !== "none") {
-      source = fallback; w = fallback.naturalWidth; h = fallback.naturalHeight;
+      source = fallback; sw = fallback.naturalWidth; sh = fallback.naturalHeight;
     } else if (tlFrame) {
-      source = tlFrame; w = tlFrame.naturalWidth; h = tlFrame.naturalHeight;
+      source = tlFrame; sw = tlFrame.naturalWidth; sh = tlFrame.naturalHeight;
+    }
+    // Data-wall gradient, matching .pulse-datawall.
+    ctx.fillStyle = "#060e17";
+    ctx.fillRect(0, 0, W, H);
+    if (source) {
+      // Cover-fit: fill the frame, crop the overflow, never letterbox.
+      const cover = Math.max(W / sw, H / sh);
+      const dw = sw * cover;
+      const dh = sh * cover;
+      ctx.drawImage(source, (W - dw) / 2, (H - dh) / 2, dw, dh);
+      // Scrim so the wall stays readable over a bright reef.
+      const shade = ctx.createLinearGradient(0, 0, 0, H);
+      shade.addColorStop(0, "rgba(4, 8, 13, .72)");
+      shade.addColorStop(0.45, "rgba(4, 8, 13, .42)");
+      shade.addColorStop(1, "rgba(4, 8, 13, .82)");
+      ctx.fillStyle = shade;
+      ctx.fillRect(0, 0, W, H);
     } else {
-      w = 1600; h = 900;
-      const wallCanvas = document.createElement("canvas");
-      wallCanvas.width = w;
-      wallCanvas.height = h;
-      const wallCtx = wallCanvas.getContext("2d");
-      wallCtx.fillStyle = "#060e17";
-      wallCtx.fillRect(0, 0, w, h);
       const glow = (x, y, r, color) => {
-        const grad = wallCtx.createRadialGradient(x, y, 0, x, y, r);
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
         grad.addColorStop(0, color);
         grad.addColorStop(1, "rgba(0, 0, 0, 0)");
-        wallCtx.fillStyle = grad;
-        wallCtx.fillRect(0, 0, w, h);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
       };
-      glow(w * 0.22, h * 0.08, w * 0.45, "rgba(0, 180, 216, 0.16)");
-      glow(w * 0.8, h * 0.88, w * 0.48, "rgba(34, 197, 94, 0.12)");
-      source = wallCanvas;
+      glow(W * 0.22, H * 0.08, W * 0.5, "rgba(0, 180, 216, .18)");
+      glow(W * 0.8, H * 0.9, W * 0.5, "rgba(34, 197, 94, .14)");
     }
     try {
-      await this._composeAndShareCard(source, w, h);
+      await this._drawPulseCard(ctx, W, H, this._pulseShareModel());
+      await this._shareCanvas(canvas);
     } catch { /* encode/share failed — nothing sensible to fall back to */ }
   }
 
