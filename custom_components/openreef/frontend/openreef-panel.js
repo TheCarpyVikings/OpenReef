@@ -1269,6 +1269,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "pulse-focus") this._openPulseFocus(id);
       if (action === "pulse-unfocus") this._closePulseFocus();
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
+      if (action === "pulse-share") this._sharePulseCard();
+      if (action === "pulse-face") this._applyPulseFace(id);
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
@@ -11691,34 +11693,84 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
     try {
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(source, 0, 0, w, h);
-      await this._drawTankCard(ctx, w, h);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
-      if (!blob) throw new Error("encode failed");
-      const tankName = (this._config.tank && this._config.tank.name) || "My Reef";
-      const safe = String(tankName).replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "") || "reef";
-      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-      const filename = `${safe}_tankcard_${stamp}.jpg`;
-      const quip = this._overlayQuipText();
-      const shareText = quip ? `${tankName} — ${quip}` : `${tankName} · built with OpenReef`;
-      const file = new File([blob], filename, { type: "image/jpeg" });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try {
-          await navigator.share({ files: [file], title: tankName, text: shareText });
-        } catch (err) {
-          // AbortError = user cancelled the share sheet; anything else -> save instead.
-          if (err && err.name !== "AbortError") this._downloadBlob(blob, filename);
-        }
-        return;
-      }
-      this._downloadBlob(blob, filename);
+      await this._composeAndShareCard(source, w, h);
     } catch {
       openStill();
     }
+  }
+
+  // Shared tail of every share path: draw the source, bake the stats card on
+  // top, then the OS share sheet (or a download where share isn't available).
+  async _composeAndShareCard(source, w, h) {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(source, 0, 0, w, h);
+    await this._drawTankCard(ctx, w, h);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+    if (!blob) throw new Error("encode failed");
+    const tankName = (this._config.tank && this._config.tank.name) || "My Reef";
+    const safe = String(tankName).replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "") || "reef";
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const filename = `${safe}_tankcard_${stamp}.jpg`;
+    const quip = this._overlayQuipText();
+    const shareText = quip ? `${tankName} — ${quip}` : `${tankName} · built with OpenReef`;
+    const file = new File([blob], filename, { type: "image/jpeg" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: tankName, text: shareText });
+      } catch (err) {
+        // AbortError = user cancelled the share sheet; anything else -> save instead.
+        if (err && err.name !== "AbortError") this._downloadBlob(blob, filename);
+      }
+      return;
+    }
+    this._downloadBlob(blob, filename);
+  }
+
+  // Share the Reef Pulse view itself — the "share my wall" moment. Source is
+  // whatever the backdrop is showing: live camera frame, the current timelapse
+  // frame, or (data wall) a synthetic gradient matching the wall backdrop, so
+  // the share never fails just because there's no photo.
+  async _sharePulseCard() {
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    if (!root) return;
+    let source = null;
+    let w = 0;
+    let h = 0;
+    const video = root.querySelector("video[data-camera-video]");
+    const fallback = root.querySelector("img[data-camera-fallback]");
+    const tlFrame = [root.querySelector("[data-pulse-tl-a]"), root.querySelector("[data-pulse-tl-b]")]
+      .find((el) => el && el.classList.contains("show") && el.naturalWidth);
+    if (video && video.videoWidth && video.readyState >= 2) {
+      source = video; w = video.videoWidth; h = video.videoHeight;
+    } else if (fallback && fallback.naturalWidth && fallback.style.display !== "none") {
+      source = fallback; w = fallback.naturalWidth; h = fallback.naturalHeight;
+    } else if (tlFrame) {
+      source = tlFrame; w = tlFrame.naturalWidth; h = tlFrame.naturalHeight;
+    } else {
+      w = 1600; h = 900;
+      const wallCanvas = document.createElement("canvas");
+      wallCanvas.width = w;
+      wallCanvas.height = h;
+      const wallCtx = wallCanvas.getContext("2d");
+      wallCtx.fillStyle = "#060e17";
+      wallCtx.fillRect(0, 0, w, h);
+      const glow = (x, y, r, color) => {
+        const grad = wallCtx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0, color);
+        grad.addColorStop(1, "rgba(0, 0, 0, 0)");
+        wallCtx.fillStyle = grad;
+        wallCtx.fillRect(0, 0, w, h);
+      };
+      glow(w * 0.22, h * 0.08, w * 0.45, "rgba(0, 180, 216, 0.16)");
+      glow(w * 0.8, h * 0.88, w * 0.48, "rgba(34, 197, 94, 0.12)");
+      source = wallCanvas;
+    }
+    try {
+      await this._composeAndShareCard(source, w, h);
+    } catch { /* encode/share failed — nothing sensible to fall back to */ }
   }
 
   async _drawTankCard(ctx, w, h) {
@@ -12232,6 +12284,51 @@ class OpenReefPanel extends HTMLElement {
 
   _pulseEnabled() {
     return this._pulseCfg().enabled !== false;
+  }
+
+  // Named faces: one-tap starting points for the wall, like watch faces. Each
+  // patch touches ONLY fields _normalise_core_config already validates (kept
+  // in lockstep by tests/test_panel_pulse.mjs) and deliberately leaves the
+  // user-level prefs alone: kioskAutoStart, keepAwake, nightDim*, cameraId,
+  // graphRange, sizePreset, showShare.
+  _pulseFaces() {
+    return {
+      datawall: {
+        label: "Data Wall",
+        hint: "Everything on — the full mission-control wall.",
+        patch: {
+          backdrop: "wall", showHealthRing: true, showStats: true, showSparklines: true,
+          showCategories: true, showEquipment: true, showToday: true, showInsights: true,
+          showTicker: true, showMode: true, showClock: true, showBuddy: true,
+        },
+      },
+      photoframe: {
+        label: "Photo Frame",
+        hint: "The reef is the show — live camera, clock, ring and one insight.",
+        patch: {
+          backdrop: "auto", showHealthRing: true, showStats: false, showSparklines: false,
+          showCategories: false, showEquipment: false, showToday: false, showInsights: true,
+          showTicker: false, showMode: false, showClock: true, showBuddy: false,
+        },
+      },
+      minimal: {
+        label: "Minimal Night",
+        hint: "Ring and clock only — a calm glance display for a lounge.",
+        patch: {
+          backdrop: "wall", showHealthRing: true, showStats: false, showSparklines: false,
+          showCategories: false, showEquipment: false, showToday: false, showInsights: false,
+          showTicker: false, showMode: false, showClock: true, showBuddy: false,
+        },
+      },
+    };
+  }
+
+  _applyPulseFace(id) {
+    const face = this._pulseFaces()[id];
+    if (!face) return;
+    this._config.pulse = { ...this._pulseCfg(), ...face.patch };
+    this._setDirty(true);
+    this._render();
   }
 
   // Resolve the camera Pulse should use: the configured one if it's online,
@@ -13023,6 +13120,7 @@ class OpenReefPanel extends HTMLElement {
           </div>
         ` : ""}
         <div class="pulse-focus-host" data-pulse-focus-host></div>
+        ${cfg.showShare !== false ? `<button class="pulse-close pulse-share" data-action="pulse-share" title="Share this view">⇪</button>` : ""}
         <button class="pulse-close" data-action="close-pulse" title="Exit Reef Pulse (Esc)">✕</button>
       </div>
     `;
@@ -17377,6 +17475,7 @@ class OpenReefPanel extends HTMLElement {
       ["showBuddy", "Reef Buddy", "Corner avatar with rotating calm-only quips."],
       ["showClock", "Clock", "Live clock next to the tank name."],
       ["showInsights", "Insight cards", "A rotating story card — consumption projections, test nags, tonight's moon, trust checks. The wall explains itself."],
+      ["showShare", "Share button", "One-tap share of the live Pulse view — your wall, stats baked on, straight to the share sheet."],
       ["showSparklines", "Sparkline graphs", "Mini history graphs on the data-wall tiles."],
       ["showCategories", "Health breakdown", "Six category bars on the data wall — the why behind the ring."],
       ["showEquipment", "Equipment dots", "Read-only running/off/unavailable chips on the data wall."],
@@ -17395,6 +17494,17 @@ class OpenReefPanel extends HTMLElement {
           </span>
         </label>
         ${cfg.enabled === false ? "" : `
+          <div class="pulse-faces">
+            <small class="muted">Faces — one-tap starting points. Every toggle below stays adjustable afterwards; remember to Save.</small>
+            <div class="pulse-face-row">
+              ${Object.entries(this._pulseFaces()).map(([id, face]) => `
+                <button class="secondary pulse-face-btn" data-action="pulse-face" data-id="${this._escape(id)}">
+                  <strong>${this._escape(face.label)}</strong>
+                  <small>${this._escape(face.hint)}</small>
+                </button>
+              `).join("")}
+            </div>
+          </div>
           <div class="mini-grid">
             <label>Backdrop
               <select data-scope="pulse" data-field="backdrop">
@@ -19911,6 +20021,14 @@ class OpenReefPanel extends HTMLElement {
         .pulse-far .pulse-insight > strong { font-size: 19px; }
         .pulse-far .pulse-insight-detail { font-size: 14px; }
         .pulse-far .pulse-today-row strong, .pulse-far .pulse-cat strong { font-size: 15px; }
+        /* Share button rides in the same corner column as close. */
+        .pulse-share { top: 74px; font-size: 19px; }
+        /* Settings: face preset buttons. */
+        .pulse-faces { display: grid; gap: 8px; }
+        .pulse-face-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+        .pulse-face-btn { display: grid; gap: 3px; text-align: left; padding: 12px 14px; }
+        .pulse-face-btn strong { font-size: 14px; }
+        .pulse-face-btn small { color: #8da2ba; font-weight: 600; line-height: 1.35; white-space: normal; }
         /* Settings: the wall-tablet setup accordion. */
         .pulse-wall-guide { border: 1px solid #24364a; border-radius: 8px; padding: 12px 14px; background: #0b1724; }
         .pulse-wall-guide summary { cursor: pointer; color: #dcecff; }

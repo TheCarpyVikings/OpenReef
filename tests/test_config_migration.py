@@ -554,6 +554,7 @@ def test_pulse_timelapse_backdrop_survives_save():
 def test_pulse_kiosk_fields_normalised():
     pulse = normalise({})["pulse"]
     assert pulse["showInsights"] is True
+    assert pulse["showShare"] is True
     assert pulse["keepAwake"] is True
     assert pulse["nightDim"] is False         # dimming must be opt-in
     assert pulse["nightDimFrom"] == "22:00"

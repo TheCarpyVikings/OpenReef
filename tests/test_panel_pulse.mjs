@@ -89,6 +89,70 @@ test("ring animation tier: elite only for a calm >=95, never for warning or unme
   assertEqual(panel._pulseRingClass({ status: "unknown", score: 100 }), "pulse-ring unknown");
 });
 
+// --- named faces -----------------------------------------------------------
+
+// Lockstep with _normalise_core_config's pulse section: a face writing a field
+// the backend doesn't validate would be silently dropped or ride unvalidated.
+const NORMALISED_PULSE_FIELDS = new Set([
+  "enabled", "showHealthRing", "showStats", "showTicker", "showMode", "showBuddy",
+  "showClock", "kioskAutoStart", "showSparklines", "showCategories", "showEquipment",
+  "showToday", "showInsights", "showShare", "keepAwake", "nightDim", "cameraId",
+  "backdrop", "graphRange", "timelapseStyle", "sizePreset",
+  "nightDimFrom", "nightDimTo", "nightDimLuxEntity", "nightDimLuxThreshold",
+]);
+// Faces are layout presets, not preference resets — these stay untouched.
+const USER_PREFS_FACES_MUST_NOT_TOUCH = [
+  "kioskAutoStart", "keepAwake", "nightDim", "nightDimFrom", "nightDimTo",
+  "nightDimLuxEntity", "nightDimLuxThreshold", "cameraId", "graphRange",
+  "sizePreset", "showShare", "enabled",
+];
+
+test("faces only write backend-validated fields and never touch user prefs", async () => {
+  const panel = prep(await makePanel({}));
+  const faces = panel._pulseFaces();
+  assertEqual(Object.keys(faces).sort(), ["datawall", "minimal", "photoframe"]);
+  for (const [id, face] of Object.entries(faces)) {
+    for (const key of Object.keys(face.patch)) {
+      assert(NORMALISED_PULSE_FIELDS.has(key), `${id} writes unvalidated field ${key}`);
+      assert(!USER_PREFS_FACES_MUST_NOT_TOUCH.includes(key), `${id} must not touch user pref ${key}`);
+    }
+    assert(["auto", "camera", "wall", "timelapse"].includes(face.patch.backdrop), `${id} backdrop must be whitelisted`);
+  }
+});
+
+test("faces express their intent: full wall, quiet photo frame, minimal night", async () => {
+  const panel = prep(await makePanel({}));
+  const faces = panel._pulseFaces();
+  assert(Object.values(faces.datawall.patch).filter((v) => v === true).length >= 10, "data wall turns everything on");
+  assertEqual(faces.photoframe.patch.showStats, false);
+  assertEqual(faces.photoframe.patch.showHealthRing, true, "photo frame keeps the ring");
+  assertEqual(faces.photoframe.patch.showInsights, true, "photo frame keeps one ambient story");
+  assertEqual(faces.minimal.patch.showInsights, false, "minimal is genuinely minimal");
+  assertEqual(faces.minimal.patch.showClock, true, "minimal keeps the clock");
+});
+
+test("applying a face patches config, marks dirty, and preserves user prefs", async () => {
+  let dirty = null;
+  let rendered = 0;
+  const panel = prep(await makePanel({
+    pulse: { kioskAutoStart: true, nightDim: true, sizePreset: "far", showStats: true, backdrop: "camera" },
+  }), {}, {
+    _setDirty: (v) => { dirty = v; },
+    _render: () => { rendered += 1; },
+  });
+  panel._applyPulseFace("minimal");
+  const pulse = panel._config.pulse;
+  assertEqual(pulse.showStats, false, "face applied");
+  assertEqual(pulse.backdrop, "wall");
+  assertEqual(pulse.kioskAutoStart, true, "kiosk autostart preserved");
+  assertEqual(pulse.nightDim, true, "night dim preserved");
+  assertEqual(pulse.sizePreset, "far", "viewing distance preserved");
+  assertEqual(dirty, true, "settings marked dirty for the Save flow");
+  assertEqual(rendered, 1);
+  panel._applyPulseFace("nonsense");
+  assertEqual(rendered, 1, "unknown face is a no-op");
+});
+
 // --- tap-to-expand focus cards --------------------------------------------
 
 test("focus markup is empty for no focus and for unknown keys", async () => {

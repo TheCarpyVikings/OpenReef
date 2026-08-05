@@ -2293,6 +2293,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         "showEquipment",
         "showToday",
         "showInsights",
+        "showShare",
         "keepAwake",
         "nightDim",
     ):
