@@ -540,6 +540,39 @@ def test_pulse_enums_validated():
     assert pulse["showToday"] is False
 
 
+def test_pulse_timelapse_backdrop_survives_save():
+    # Regression: 0.7.7 shipped the Timelapse backdrop in the panel while this
+    # whitelist still said auto/camera/wall — every save silently reverted the
+    # user's choice to "auto".
+    pulse = normalise({"pulse": {"backdrop": "timelapse", "timelapseStyle": "day"}})["pulse"]
+    assert pulse["backdrop"] == "timelapse"
+    assert pulse["timelapseStyle"] == "day"
+    pulse = normalise({"pulse": {"timelapseStyle": "reverse"}})["pulse"]
+    assert pulse["timelapseStyle"] == "growth"  # unknown -> default
+
+
+def test_pulse_kiosk_fields_normalised():
+    pulse = normalise({})["pulse"]
+    assert pulse["showInsights"] is True
+    assert pulse["keepAwake"] is True
+    assert pulse["nightDim"] is False         # dimming must be opt-in
+    assert pulse["nightDimFrom"] == "22:00"
+    assert pulse["nightDimTo"] == "07:00"
+    assert pulse["nightDimLuxEntity"] == ""
+    assert pulse["nightDimLuxThreshold"] == 10
+    assert pulse["sizePreset"] == "normal"
+    garbage = normalise({"pulse": {
+        "nightDimFrom": "late", "nightDimTo": "7pm",
+        "nightDimLuxEntity": 42, "nightDimLuxThreshold": -5,
+        "sizePreset": "huge",
+    }})["pulse"]
+    assert garbage["nightDimFrom"] == "22:00"  # malformed time -> default
+    assert garbage["nightDimTo"] == "07:00"
+    assert garbage["nightDimLuxEntity"] == ""
+    assert garbage["nightDimLuxThreshold"] == 10.0
+    assert garbage["sizePreset"] == "normal"
+
+
 def test_vision_defaults_added_to_older_config():
     """A v45 tester config gains the vision block, disabled, on upgrade."""
     config = normalise({"tank": {"name": "Ragnar"}})

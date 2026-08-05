@@ -2292,14 +2292,29 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         "showCategories",
         "showEquipment",
         "showToday",
+        "showInsights",
+        "keepAwake",
+        "nightDim",
     ):
         pulse[field] = bool(pulse.get(field, pulse_defaults[field]))
     camera_id = pulse.get("cameraId")
     cameras_block = config.get("cameras")
     known_cameras = cameras_block if isinstance(cameras_block, dict) else {}
     pulse["cameraId"] = camera_id if isinstance(camera_id, str) and camera_id in known_cameras else ""
-    pulse["backdrop"] = pulse.get("backdrop") if pulse.get("backdrop") in ("auto", "camera", "wall") else "auto"
+    pulse["backdrop"] = pulse.get("backdrop") if pulse.get("backdrop") in ("auto", "camera", "wall", "timelapse") else "auto"
     pulse["graphRange"] = pulse.get("graphRange") if pulse.get("graphRange") in ("24h", "7d") else "24h"
+    pulse["timelapseStyle"] = pulse.get("timelapseStyle") if pulse.get("timelapseStyle") in ("growth", "day") else "growth"
+    pulse["sizePreset"] = pulse.get("sizePreset") if pulse.get("sizePreset") in ("normal", "far") else "normal"
+    for field, default in (("nightDimFrom", "22:00"), ("nightDimTo", "07:00")):
+        value = pulse.get(field)
+        pulse[field] = value if isinstance(value, str) and re.fullmatch(r"\d{1,2}:\d{2}", value) else default
+    lux_entity = pulse.get("nightDimLuxEntity")
+    pulse["nightDimLuxEntity"] = lux_entity.strip() if isinstance(lux_entity, str) else ""
+    try:
+        threshold = float(pulse.get("nightDimLuxThreshold", 10))
+    except (TypeError, ValueError):
+        threshold = 10.0
+    pulse["nightDimLuxThreshold"] = threshold if threshold > 0 else 10.0
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):

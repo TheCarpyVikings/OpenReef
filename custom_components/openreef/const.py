@@ -10,7 +10,7 @@ PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
 CORE_SCHEMA_VERSION = 50
-INTEGRATION_VERSION = "0.7.7"
+INTEGRATION_VERSION = "0.7.8"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1251,6 +1251,15 @@ DEFAULT_CORE_CONFIG = {
         "showCategories": True,
         "showEquipment": True,
         "showToday": True,
+        "showInsights": True,
+        "keepAwake": True,
+        "nightDim": False,
+        "nightDimFrom": "22:00",
+        "nightDimTo": "07:00",
+        "nightDimLuxEntity": "",
+        "nightDimLuxThreshold": 10,
+        "timelapseStyle": "growth",
+        "sizePreset": "normal",
     },
     "dosing": {
         "enabled": True,
