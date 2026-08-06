@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 50
-INTEGRATION_VERSION = "0.7.11"
+CORE_SCHEMA_VERSION = 51
+INTEGRATION_VERSION = "0.7.12"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1232,9 +1232,11 @@ DEFAULT_CORE_CONFIG = {
             "persistent": True,
         },
     },
-    # Reef Pulse — full-screen presentation / kiosk mode. Display-only (no control
-    # actions); every block is user-toggleable. cameraId "" = auto (first online).
-    # backdrop: auto = camera when one is online, else the data wall; camera/wall force it.
+    # Reef Pulse — full-screen presentation / kiosk mode. Display-first (the only
+    # control surface is the tank-diagram backdrop's armed-equipment toggle, gated
+    # by diagram.allowControls); every block is user-toggleable. cameraId "" = auto
+    # (first online). backdrop: auto = camera when one is online, else the data
+    # wall; camera/wall/timelapse/diagram force it.
     "pulse": {
         "enabled": True,
         "showHealthRing": True,
@@ -1261,6 +1263,16 @@ DEFAULT_CORE_CONFIG = {
         "nightDimLuxThreshold": 10,
         "timelapseStyle": "growth",
         "sizePreset": "normal",
+    },
+    # Living tank diagram — an interactive schematic of the user's actual system
+    # (sump plumbing or all-in-one back chambers), shown as a Reef Pulse backdrop.
+    # layout maps diagram node ids to slot ids (unknown slots fall back to the
+    # scene defaults panel-side); allowControls gates tap-to-toggle from the wall
+    # (armed equipment + admin only — the same safety funnel as Mission Control).
+    "diagram": {
+        "systemType": "sump",  # sump | aio (all-in-one, no sump)
+        "allowControls": True,
+        "layout": {},
     },
     "dosing": {
         "enabled": True,

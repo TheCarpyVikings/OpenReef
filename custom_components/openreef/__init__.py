@@ -2302,7 +2302,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     cameras_block = config.get("cameras")
     known_cameras = cameras_block if isinstance(cameras_block, dict) else {}
     pulse["cameraId"] = camera_id if isinstance(camera_id, str) and camera_id in known_cameras else ""
-    pulse["backdrop"] = pulse.get("backdrop") if pulse.get("backdrop") in ("auto", "camera", "wall", "timelapse") else "auto"
+    pulse["backdrop"] = pulse.get("backdrop") if pulse.get("backdrop") in ("auto", "camera", "wall", "timelapse", "diagram") else "auto"
     pulse["graphRange"] = pulse.get("graphRange") if pulse.get("graphRange") in ("24h", "7d") else "24h"
     pulse["timelapseStyle"] = pulse.get("timelapseStyle") if pulse.get("timelapseStyle") in ("growth", "day") else "growth"
     pulse["sizePreset"] = pulse.get("sizePreset") if pulse.get("sizePreset") in ("normal", "far") else "normal"
@@ -2316,6 +2316,27 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         threshold = 10.0
     pulse["nightDimLuxThreshold"] = threshold if threshold > 0 else 10.0
+
+    # Living tank diagram — the backend keeps the block well-formed; slot ids are
+    # resolved (and unknown ones dropped back to scene defaults) by the panel.
+    diagram = config.setdefault("diagram", {})
+    if not isinstance(diagram, dict):
+        config["diagram"] = deepcopy(DEFAULT_CORE_CONFIG["diagram"])
+        diagram = config["diagram"]
+    diagram["systemType"] = diagram.get("systemType") if diagram.get("systemType") in ("sump", "aio") else "sump"
+    diagram["allowControls"] = bool(diagram.get("allowControls", True))
+    raw_layout = diagram.get("layout")
+    diagram_layout: dict = {}
+    if isinstance(raw_layout, dict):
+        for slot_key, slot_value in list(raw_layout.items())[:40]:
+            if (
+                isinstance(slot_key, str)
+                and isinstance(slot_value, str)
+                and re.fullmatch(r"[A-Za-z0-9:_-]{1,64}", slot_key)
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", slot_value)
+            ):
+                diagram_layout[slot_key] = slot_value
+    diagram["layout"] = diagram_layout
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):

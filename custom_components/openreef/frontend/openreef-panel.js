@@ -131,6 +131,10 @@ class OpenReefPanel extends HTMLElement {
     this._pulseIcpCards = { cards: null, at: 0, loading: false };
     this._pulseTl = { frames: [], idx: 0, at: 0, loading: false, front: 0 };
     this._pulseTrendsKicked = false;
+    this._diagramArranging = false;
+    this._diagramDrag = null;
+    this._diagramMotion = null;
+    this._pulseDiagArm = null;
     this._liveStatsMode = this._loadLiveStatsMode();
     this._liveSparks = {};
     this._liveSparksAt = 0;
@@ -1278,6 +1282,12 @@ class OpenReefPanel extends HTMLElement {
       if (action === "pulse-share") this._sharePulseCard();
       if (action === "pulse-face") this._applyPulseFace(id);
       if (action === "pulse-insight-nav") this._pulseFocusInsightNav(id === "prev" ? -1 : 1);
+      if (action === "diagram-toggle") this._pulseDiagramToggle(id);
+      if (action === "diagram-arrange") {
+        this._diagramArranging = !this._diagramArranging;
+        this._pulseFocus = null;
+        this._render();
+      }
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
@@ -1959,6 +1969,10 @@ class OpenReefPanel extends HTMLElement {
         // New range needs fresh history next time the wall opens.
         if (field === "graphRange") { this._pulseSparks = {}; this._pulseSparksAt = 0; }
       }
+      if (scope === "diagram") {
+        this._config.diagram = this._config.diagram || {};
+        this._config.diagram[field] = value;
+      }
       if (scope === "maintenance-task") {
         this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
         this._config.maintenance.tasks = this._config.maintenance.tasks || {};
@@ -2127,7 +2141,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -6306,6 +6320,10 @@ class OpenReefPanel extends HTMLElement {
       // refresh), re-attach the live stream — the old <video> node is gone.
       this.shadowRoot.innerHTML = `${this._styles()}${this._pulseScreen()}`;
       this._startPulseRuntime();
+      // A full re-render rebuilds the focus host empty; restore any open detail
+      // card (the last-html dedupe would otherwise skip the re-injection).
+      this._pulseFocusLastHtml = "";
+      this._renderPulseFocus();
       this._mountBetaFab();  // BETA-FEEDBACK: remove after beta
       return;
     }
@@ -12484,8 +12502,12 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // --- Reef Pulse: full-screen presentation / kiosk mode -------------------
-  // Display-only by design: no control actions exist on this screen, so a wall
-  // tablet can show it permanently without any arming/safety surface.
+  // Display-first by design: the data/camera/timelapse backdrops expose no
+  // control actions, so a wall tablet can show them permanently without any
+  // arming/safety surface. The one deliberate exception is the living tank
+  // diagram backdrop, whose detail cards may offer a two-step toggle for ARMED
+  // equipment only — through the same toggle_equipment safety funnel as
+  // Mission Control, and switchable off entirely via diagram.allowControls.
 
   _pulseCfg() {
     const raw = this._config?.pulse;
@@ -12528,6 +12550,15 @@ class OpenReefPanel extends HTMLElement {
           backdrop: "wall", showHealthRing: true, showStats: false, showSparklines: false,
           showCategories: false, showEquipment: false, showToday: false, showInsights: false,
           showTicker: false, showMode: false, showClock: true, showBuddy: false,
+        },
+      },
+      diagram: {
+        label: "Living Diagram",
+        hint: "Your tank as a live schematic — water flow, gear and all.",
+        patch: {
+          backdrop: "diagram", showHealthRing: false, showStats: false, showSparklines: false,
+          showCategories: false, showEquipment: false, showToday: false, showInsights: true,
+          showTicker: false, showMode: true, showClock: true, showBuddy: false,
         },
       },
     };
@@ -12582,6 +12613,8 @@ class OpenReefPanel extends HTMLElement {
     this._pulseEnteredFs = false;
     this._pulseActive = false;
     this._pulseFocus = null;
+    this._diagramArranging = false;
+    this._pulseDiagArm = null;
     this._render();
   }
 
@@ -12592,6 +12625,7 @@ class OpenReefPanel extends HTMLElement {
     const pref = this._pulseCfg().backdrop;
     if (pref === "wall") return "wall";
     if (pref === "timelapse") return "timelapse";
+    if (pref === "diagram") return "diagram";
     const cam = this._pulseCamera();
     return cam ? "camera" : "wall";
   }
@@ -12603,6 +12637,8 @@ class OpenReefPanel extends HTMLElement {
       if (cam && cam[1].entity_id) this._startCameraWebRTC(cam[1].entity_id);
     } else if (backdrop === "timelapse") {
       this._loadPulseTimelapse();
+    } else if (backdrop === "diagram") {
+      this._startPulseDiagramMotion();
     } else {
       this._loadPulseSparklines();
     }
@@ -12666,6 +12702,7 @@ class OpenReefPanel extends HTMLElement {
 
   _stopPulseRuntime() {
     this._stopCameraWebRTC();
+    this._stopPulseDiagramMotion();
     if (this._pulseTimer) {
       window.clearInterval(this._pulseTimer);
       this._pulseTimer = null;
@@ -13321,7 +13358,8 @@ class OpenReefPanel extends HTMLElement {
     const backdrop = this._pulseBackdrop();
     const wall = backdrop === "wall";
     const timelapse = backdrop === "timelapse";
-    const cam = wall || timelapse ? null : this._pulseCamera();
+    const diagram = backdrop === "diagram";
+    const cam = wall || timelapse || diagram ? null : this._pulseCamera();
     const entityId = cam ? cam[1].entity_id : "";
     const snap = entityId ? this._cameraSnapshotUrl(entityId) : "";
     const health = this._reefHealthScore();
@@ -13338,6 +13376,9 @@ class OpenReefPanel extends HTMLElement {
           <img class="pulse-video pulse-tl" data-pulse-tl-a alt="">
           <img class="pulse-video pulse-tl" data-pulse-tl-b alt="">
           <span class="pulse-tl-stamp" data-pulse-tl-stamp></span>
+        ` : diagram ? `
+          <div class="pulse-datawall"></div>
+          ${this._pulseDiagramMarkup()}
         ` : `<div class="pulse-datawall"></div>`}
         <div class="pulse-shade ${wall ? "wall" : ""}"></div>
         <header class="pulse-head">
@@ -13373,7 +13414,9 @@ class OpenReefPanel extends HTMLElement {
           </div>
         ` : ""}
         <div class="pulse-focus-host" data-pulse-focus-host></div>
+        ${diagram && this._diagramArranging ? `<div class="pulse-diag-note">Arrange mode — drag a glowing item to a new spot, then tap ✓</div>` : ""}
         ${cfg.showShare !== false ? `<button class="pulse-close pulse-share" data-action="pulse-share" title="Share this view">⇪</button>` : ""}
+        ${diagram ? `<button class="pulse-close pulse-arrange ${this._diagramArranging ? "active" : ""}" data-action="diagram-arrange" title="${this._diagramArranging ? "Done arranging" : "Arrange equipment"}">${this._diagramArranging ? "✓" : "✎"}</button>` : ""}
         <button class="pulse-close" data-action="close-pulse" title="Exit Reef Pulse (Esc)">✕</button>
       </div>
     `;
@@ -13480,7 +13523,862 @@ class OpenReefPanel extends HTMLElement {
       const markup = this._pulseAwcMarkup();
       if (markup) awcBlock.outerHTML = markup;
     }
+    // Living tank diagram: class toggles only — an innerHTML swap would restart
+    // every flow animation on each hass push.
+    const diagSvg = root.querySelector("[data-pulse-diagram-svg]");
+    if (diagSvg) this._updatePulseDiagram(diagSvg);
     this._refreshPulseFocus();
+  }
+
+  // --- Reef Pulse: living tank diagram --------------------------------------
+  // A schematic of the user's actual system — sump plumbing or all-in-one back
+  // chambers — rendered from the equipment mapping and animated from live
+  // entity states. The water loop (display → overflow → sump → return) runs
+  // only while the mapped return pump reads "on"; wavemakers drive only the
+  // in-display circulation, so stopping one never stops the loop. Tap a node
+  // for a detail card; arrange mode (✎) drags gear between valid slots.
+
+  _diagramCfg() {
+    const raw = this._config?.diagram;
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  _diagramSystemType() {
+    return this._diagramCfg().systemType === "aio" ? "aio" : "sump";
+  }
+
+  _diagramLayout() {
+    const layout = this._diagramCfg().layout;
+    return layout && typeof layout === "object" ? layout : {};
+  }
+
+  // Resolve the equipment mapping into diagram nodes. Only switch-mapped gear
+  // renders — the diagram animates states, and unmapped gear has none.
+  _diagramNodes() {
+    const nodes = { wavemakers: [], heater: null, skimmer: null, ret: null, ato: null, light: null, doser: null };
+    for (const [id, item] of Object.entries(this._config.equipment || {})) {
+      if (!item || !item.switch_entity_id) continue;
+      const profile = this._equipmentProfile(id, item);
+      if ((profile === "display_wavemaker" || profile === "flow_pump") && nodes.wavemakers.length < 3) nodes.wavemakers.push([id, item]);
+      else if (profile === "return_pump" && !nodes.ret) nodes.ret = [id, item];
+      else if (profile === "heater" && !nodes.heater) nodes.heater = [id, item];
+      else if (profile === "skimmer" && !nodes.skimmer) nodes.skimmer = [id, item];
+      else if (profile === "ato" && !nodes.ato) nodes.ato = [id, item];
+      else if (profile === "lighting" && !nodes.light) nodes.light = [id, item];
+    }
+    if (this._config.dosing?.enabled !== false) {
+      const channels = this._doserChannelIds().map((id) => [id, this._doserChannels()[id]]).filter(([, ch]) => ch);
+      if (channels.length) nodes.doser = channels.slice(0, 6);
+    }
+    return nodes;
+  }
+
+  _diagramNodeState(item) {
+    const state = this._stateValue(item?.switch_entity_id);
+    return state === "on" ? "on" : state === "off" ? "off" : "gone";
+  }
+
+  // Slot registry per system type. rect is the arrange-mode drop zone; x/y/dir
+  // anchor the art. Slot ids are what config.diagram.layout stores.
+  _diagramSlots(systemType) {
+    if (systemType === "aio") {
+      return {
+        glassL: { kinds: ["wm"], x: 362, y: 400, dir: 1, rect: [332, 366, 110, 68] },
+        glassC: { kinds: ["wm"], x: 720, y: 300, dir: 1, rect: [690, 266, 110, 68] },
+        ch2: { kinds: ["heater"], x: 1188, y: 430, rect: [1174, 416, 42, 92] },
+        display: { kinds: ["heater"], x: 420, y: 500, rect: [406, 486, 42, 92] },
+      };
+    }
+    return {
+      glassL: { kinds: ["wm"], x: 232, y: 305, dir: 1, rect: [202, 271, 110, 68] },
+      glassC: { kinds: ["wm"], x: 660, y: 235, dir: 1, rect: [630, 201, 110, 68] },
+      glassR: { kinds: ["wm"], x: 1085, y: 315, dir: -1, rect: [995, 281, 110, 68] },
+      sumpReturn: { kinds: ["heater"], x: 462, y: 790, rect: [448, 776, 42, 92] },
+      sumpSkimmer: { kinds: ["heater"], x: 908, y: 760, rect: [894, 746, 42, 92] },
+      weir: { kinds: ["heater"], x: 1179, y: 290, rect: [1165, 276, 42, 92] },
+      rightShelf: { kinds: ["doser"], x: 1300, y: 620, rect: [1296, 590, 200, 214] },
+      leftShelf: { kinds: ["doser"], x: 40, y: 620, rect: [36, 590, 200, 214] },
+    };
+  }
+
+  // Turn the stored layout into concrete slot picks: unknown or wrong-kind slot
+  // ids fall back to defaults, and no two nodes land on the same slot.
+  _diagramResolvedLayout(systemType, nodes) {
+    const slots = this._diagramSlots(systemType);
+    const layout = this._diagramLayout();
+    const used = new Set();
+    const pick = (want, kind, defaults) => {
+      const valid = want && slots[want] && slots[want].kinds.includes(kind) && !used.has(want) ? want : null;
+      const chosen = valid || defaults.find((sid) => slots[sid] && !used.has(sid)) || defaults[0];
+      used.add(chosen);
+      return chosen;
+    };
+    const out = {};
+    const wmDefaults = systemType === "aio" ? ["glassL", "glassC"] : ["glassL", "glassR", "glassC"];
+    for (const [id] of nodes.wavemakers) out[`wm:${id}`] = pick(layout[`wm:${id}`], "wm", wmDefaults);
+    if (nodes.heater) out.heater = pick(layout.heater, "heater", systemType === "aio" ? ["ch2", "display"] : ["sumpReturn", "sumpSkimmer", "weir"]);
+    if (nodes.doser && systemType !== "aio") out.doser = pick(layout.doser, "doser", ["rightShelf", "leftShelf"]);
+    return out;
+  }
+
+  // Rounded orthogonal path through points — the pipe/tube spine.
+  _diagPath(pts, r = 16) {
+    let d = `M ${pts[0][0]} ${pts[0][1]}`;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const [x0, y0] = pts[i - 1];
+      const [x1, y1] = pts[i];
+      const [x2, y2] = pts[i + 1];
+      const v1 = [Math.sign(x1 - x0), Math.sign(y1 - y0)];
+      const v2 = [Math.sign(x2 - x1), Math.sign(y2 - y1)];
+      const len1 = Math.abs(x1 - x0) + Math.abs(y1 - y0);
+      const len2 = Math.abs(x2 - x1) + Math.abs(y2 - y1);
+      const rr = Math.min(r, len1 / 2, len2 / 2);
+      d += ` L ${x1 - v1[0] * rr} ${y1 - v1[1] * rr} Q ${x1} ${y1} ${x1 + v2[0] * rr} ${y1 + v2[1] * rr}`;
+    }
+    const [xl, yl] = pts[pts.length - 1];
+    return `${d} L ${xl} ${yl}`;
+  }
+
+  // A pipe: glassy casing + still water + marching flow (gated by dg-loop-off).
+  _diagPipeMarkup(pts, w = 14) {
+    const d = this._diagPath(pts);
+    return `
+      <path d="${d}" class="dg-pipe-case" stroke-width="${w}" fill="none"></path>
+      <path d="${d}" class="dg-pipe-water" stroke-width="${Math.max(2, w - 6)}" fill="none"></path>
+      <path d="${d}" class="dg-flow" stroke-width="${Math.max(3, w - 9)}" fill="none"></path>`;
+  }
+
+  _diagTubeMarkup(pts) {
+    return `<path d="${this._diagPath(pts, 10)}" class="dg-tube" fill="none"></path>`;
+  }
+
+  _diagChevMarkup(x, y, dir, cls = "dg-chev dg-chev-pulse") {
+    const s = 9;
+    const points = dir === "r" ? `${x},${y - s} ${x + s * 1.3},${y} ${x},${y + s}`
+      : dir === "l" ? `${x},${y - s} ${x - s * 1.3},${y} ${x},${y + s}`
+      : dir === "d" ? `${x - s},${y} ${x},${y + s * 1.3} ${x + s},${y}`
+      : `${x - s},${y} ${x},${y - s * 1.3} ${x + s},${y}`;
+    return `<polygon points="${points}" class="${cls}"></polygon>`;
+  }
+
+  // Powerhead art: magnet mount, body, bladed cage, wake lines while running.
+  _diagWavemakerArt(wx, wy, s) {
+    const cx = wx + 30 * s;
+    const blades = [0.5, 2.594, 4.688].map((th) =>
+      `<line x1="${cx}" y1="${wy}" x2="${(cx + Math.cos(th) * 13).toFixed(1)}" y2="${(wy + Math.sin(th) * 13).toFixed(1)}" class="dg-line"></line>`).join("");
+    const wake = [0, 1, 2].map((i) =>
+      `<path d="M ${cx + (22 + i * 12) * s} ${wy - 8 + i * 8} q ${10 * s} 4 ${20 * s} 0" class="dg-wake dg-onart" fill="none"></path>`).join("");
+    return `
+      <rect x="${wx - (s > 0 ? 16 : -4)}" y="${wy - 12}" width="12" height="24" rx="3" class="dg-metal"></rect>
+      <rect x="${s > 0 ? wx - 4 : wx - 40}" y="${wy - 7}" width="22" height="14" rx="6" class="dg-shell"></rect>
+      <circle cx="${cx}" cy="${wy}" r="17" class="dg-shell"></circle>
+      ${blades}
+      <circle cx="${cx}" cy="${wy}" r="4" class="dg-metal"></circle>
+      ${wake}`;
+  }
+
+  _diagNodeMarkup({ kind, focusId, dragKey = "", state, title, dot = null, hit = null, art }) {
+    return `
+      <g class="dg-node ${kind} ${state}" data-diag-node="${this._escape(focusId)}" data-action="pulse-focus" data-id="${this._escape(focusId)}" ${dragKey ? `data-diag-drag="${this._escape(dragKey)}"` : ""} role="button" tabindex="0">
+        <title>${this._escape(title)}</title>
+        ${hit ? `<rect x="${hit[0]}" y="${hit[1]}" width="${hit[2]}" height="${hit[3]}" rx="12" fill="transparent"></rect>` : ""}
+        ${art}
+        ${dot ? `<circle cx="${dot[0]}" cy="${dot[1]}" r="5.5" class="dg-dot"></circle>` : ""}
+      </g>`;
+  }
+
+  _diagHeaterArt(hx, hy) {
+    return `
+      <circle cx="${hx + 7}" cy="${hy + 34}" r="50" fill="url(#dgHeat)" class="dg-heatglow dg-onart"></circle>
+      <rect x="${hx}" y="${hy}" width="14" height="68" rx="7" class="dg-shell"></rect>
+      <rect x="${hx + 3}" y="${hy + 12}" width="8" height="44" rx="4" class="dg-heatcore"></rect>`;
+  }
+
+  _diagDoserArt(sx, boxY, channels) {
+    const heads = channels.map(([, ch], i) => {
+      const hy = boxY + 26 + i * 38;
+      const name = this._doserChemicalLabel(ch.chemical) || ch.name || `D${i + 1}`;
+      return `
+        <circle cx="${sx + 44}" cy="${hy}" r="13" class="dg-shell" fill="none"></circle>
+        <circle cx="${sx + 44}" cy="${hy}" r="4" class="dg-metal"></circle>
+        <text x="${sx + 74}" y="${hy + 4}" class="dg-lbl dg-lbl-sm">${this._escape(String(name).slice(0, 8).toUpperCase())}</text>`;
+    }).join("");
+    return `
+      <rect x="${sx}" y="800" width="190" height="8" rx="3" class="dg-metal" opacity=".5"></rect>
+      <rect x="${sx + 10}" y="${boxY}" width="160" height="${800 - boxY}" rx="12" class="dg-box"></rect>
+      ${heads}`;
+  }
+
+  _pulseDiagramMarkup() {
+    return `<div class="pulse-diagram" data-pulse-diagram>${this._pulseDiagramSvg()}</div>`;
+  }
+
+  _pulseDiagramSvg() {
+    const systemType = this._diagramSystemType();
+    const nodes = this._diagramNodes();
+    const layout = this._diagramResolvedLayout(systemType, nodes);
+    const arranging = this._diagramArranging;
+    const loopOn = nodes.ret ? this._diagramNodeState(nodes.ret[1]) === "on" : false;
+    const scene = systemType === "aio"
+      ? this._diagramAioScene(nodes, layout, arranging)
+      : this._diagramSumpScene(nodes, layout, arranging);
+    return `
+      <svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet"
+           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""}"
+           data-pulse-diagram-svg data-water="${scene.water}"
+           role="img" aria-label="Living diagram — ${systemType === "aio" ? "all-in-one tank" : "sump system"}">
+        <style>
+          @keyframes dg-march { to { stroke-dashoffset: -52; } }
+          @keyframes dg-chev { 0%, 100% { opacity: .15; } 50% { opacity: .85; } }
+          @keyframes dg-drift { from { transform: translateX(0); } to { transform: translateX(190px); } }
+          @keyframes dg-rise { 0% { transform: translateY(0); opacity: 0; } 12% { opacity: .75; } 86% { opacity: .6; } 100% { transform: translateY(-92px); opacity: 0; } }
+          @keyframes dg-heat { 0%, 100% { opacity: .45; } 50% { opacity: .95; } }
+          @keyframes dg-slots { to { stroke-dashoffset: -120; } }
+          .dg-lbl { font-size: 15px; font-weight: 700; letter-spacing: .22em; fill: #62788a; text-transform: uppercase; text-anchor: middle; }
+          .dg-lbl-sm { font-size: 12px; letter-spacing: .14em; text-anchor: start; }
+          .dg-glass { fill: none; stroke: rgba(127, 184, 216, .55); stroke-width: 5; stroke-linejoin: round; }
+          .dg-glass-thin { fill: none; stroke: rgba(127, 184, 216, .45); stroke-width: 3; }
+          .dg-line { stroke: rgba(127, 184, 216, .55); stroke-width: 2.5; }
+          .dg-metal { fill: rgba(127, 184, 216, .55); }
+          .dg-shell { fill: #14304a; stroke: rgba(127, 184, 216, .55); stroke-width: 2.5; }
+          .dg-box { fill: #0e2338; stroke: rgba(127, 184, 216, .5); stroke-width: 2.5; }
+          .dg-frame { fill: #0d1d2e; stroke: rgba(127, 184, 216, .25); stroke-width: 2; }
+          .dg-pipe-case { stroke: rgba(127, 184, 216, .3); stroke-linecap: round; }
+          .dg-pipe-water { stroke: rgba(90, 200, 190, .12); stroke-linecap: round; }
+          .dg-flow { stroke: var(--openreef-accent, #4fd8c3); stroke-linecap: round; opacity: .85; stroke-dasharray: 10 16; animation: dg-march 1.05s linear infinite; transition: opacity .8s ease; }
+          .dg-tube { stroke: rgba(190, 220, 235, .32); stroke-width: 4; stroke-linecap: round; }
+          .dg-chev { fill: var(--openreef-accent, #4fd8c3); opacity: .7; transition: opacity .8s ease; }
+          .dg-chev-pulse { animation: dg-chev 1.6s ease-in-out infinite; }
+          .dg-chev-drift { animation: dg-drift 3.2s linear infinite; }
+          .dg-jet { opacity: .75; transition: opacity .8s ease; }
+          .dg-jet path { stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2.5; opacity: .5; }
+          svg.dg-loop-off .dg-loop .dg-flow, .dg-loop-off .dg-loop .dg-flow { opacity: .07; animation-play-state: paused; }
+          svg.dg-loop-off .dg-loop .dg-chev, .dg-loop-off .dg-loop .dg-chev { opacity: 0; }
+          svg.dg-loop-off .dg-jet, .dg-loop-off .dg-jet { opacity: 0; }
+          .dg-node { cursor: pointer; }
+          .dg-dot { fill: #64748b; transition: fill .3s ease; }
+          .dg-node.on .dg-dot { fill: #22c55e; }
+          .dg-node.off .dg-dot { fill: #f59e0b; }
+          .dg-node.gone .dg-dot { fill: #ef4444; }
+          .dg-onart { transition: opacity .6s ease; }
+          .dg-node.off .dg-onart, .dg-node.gone .dg-onart { opacity: 0 !important; }
+          .dg-wake { stroke: rgba(94, 210, 195, .4); stroke-width: 2; }
+          .dg-bubble { fill: #bfe8e0; opacity: 0; transform-box: fill-box; animation: dg-rise 2.4s linear infinite; }
+          .dg-node.off .dg-bubble, .dg-node.gone .dg-bubble { animation-play-state: paused; opacity: 0; }
+          .dg-foam { fill: rgba(215, 230, 238, .5); }
+          .dg-heatglow { animation: dg-heat 2.6s ease-in-out infinite; }
+          .dg-heatcore { fill: #e8a952; opacity: .55; }
+          .dg-rays { fill: url(#dgLight); }
+          .dg-kelp { fill: #4c8c5c; opacity: .6; }
+          .dg-sock { fill: #dfe8ee; opacity: .85; }
+          .dg-part { fill: #9fd8ce; }
+          .dg-fish { fill: #31536b; opacity: .8; }
+          .dg-slot { fill: rgba(94, 210, 195, .06); stroke: rgba(94, 210, 195, .45); stroke-width: 2; stroke-dasharray: 6 7; opacity: 0; pointer-events: none; transition: opacity .25s ease; }
+          svg.dg-editing .dg-slot, .dg-editing .dg-slot { opacity: 1; }
+          .dg-slot.near { fill: rgba(94, 210, 195, .2); stroke: var(--openreef-accent, #4fd8c3); }
+          svg.dg-editing [data-diag-drag], .dg-editing [data-diag-drag] { cursor: grab; }
+          svg.dg-editing [data-diag-drag] .dg-halo, .dg-editing [data-diag-drag] .dg-halo { opacity: .6; animation: dg-slots 6s linear infinite; }
+          .dg-halo { fill: none; stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2; stroke-dasharray: 6 6; opacity: 0; transition: opacity .25s ease; }
+          .dg-lifted { opacity: .92; }
+          @media (prefers-reduced-motion: reduce) {
+            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow { animation: none !important; }
+          }
+        </style>
+        <defs>
+          <linearGradient id="dgWater" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#1a4a6a" stop-opacity=".95"></stop>
+            <stop offset=".25" stop-color="#14405e" stop-opacity=".95"></stop>
+            <stop offset="1" stop-color="#0b2234" stop-opacity=".98"></stop>
+          </linearGradient>
+          <linearGradient id="dgSump" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#153a55" stop-opacity=".95"></stop>
+            <stop offset="1" stop-color="#0b2234" stop-opacity=".98"></stop>
+          </linearGradient>
+          <linearGradient id="dgSand" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#c8b48a" stop-opacity=".8"></stop>
+            <stop offset="1" stop-color="#8f7d5c" stop-opacity=".8"></stop>
+          </linearGradient>
+          <radialGradient id="dgHeat">
+            <stop offset="0" stop-color="#e8a952" stop-opacity=".5"></stop>
+            <stop offset="1" stop-color="#e8a952" stop-opacity="0"></stop>
+          </radialGradient>
+          <linearGradient id="dgLight" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#dff3ff" stop-opacity=".4"></stop>
+            <stop offset="1" stop-color="#dff3ff" stop-opacity="0"></stop>
+          </linearGradient>
+          ${scene.defs || ""}
+        </defs>
+        ${scene.body}
+      </svg>`;
+  }
+
+  // Rock silhouette sitting on the sand — pure scene flavour.
+  _diagRockMarkup(x, y, w) {
+    return `<path fill="#122c40" opacity=".9" d="M ${x} ${y} q ${w * .06} -70 ${w * .14} -64 q ${w * .05} -46 ${w * .12} -38 q ${w * .06} -30 ${w * .11} -6 q ${w * .09} -20 ${w * .15} 6 q ${w * .08} -40 ${w * .14} -20 q ${w * .1} -16 ${w * .14} 24 q ${w * .1} 40 ${w * .2} 98 Z"></path>`;
+  }
+
+  _diagKelpMarkup(x, y, h) {
+    return `<path class="dg-kelp" d="M ${x} ${y} q -14 ${-h * .3} 2 ${-h * .55} q 14 ${-h * .25} 4 ${-h} q 10 ${h * .3} 20 ${h * .5} q 8 ${h * .3} -6 ${h * .55} q -10 ${h * .2} -20 ${h * .5} Z"></path>`;
+  }
+
+  _diagSlotsMarkup(systemType, nodes) {
+    const slots = this._diagramSlots(systemType);
+    const kinds = new Set();
+    if (nodes.wavemakers.length) kinds.add("wm");
+    if (nodes.heater) kinds.add("heater");
+    if (nodes.doser && systemType !== "aio") kinds.add("doser");
+    return Object.entries(slots)
+      .filter(([, slot]) => slot.kinds.some((k) => kinds.has(k)))
+      .map(([sid, slot]) => `<rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="14" class="dg-slot" data-diag-slot="${sid}" data-diag-kinds="${slot.kinds.join(",")}"></rect>`)
+      .join("");
+  }
+
+  // ------------------------- sump system scene -----------------------------
+  // Loop reads clockwise: surface skims left→right into the weir, drains to the
+  // sock, crosses the sump right→left (sock → skimmer → refugium → bubble trap
+  // → return), and the riser climbs the left side back over the rim.
+  _diagramSumpScene(nodes, layout, arranging) {
+    const slots = this._diagramSlots("sump");
+    const esc = (v) => this._escape(v);
+    const doserRight = layout.doser !== "leftShelf";
+    const parts = [];
+
+    // display tank water, sand, rock, weir column
+    parts.push(`
+      <rect x="173" y="160" width="1054" height="337" fill="url(#dgWater)"></rect>
+      <rect x="173" y="462" width="1054" height="35" fill="url(#dgSand)"></rect>
+      ${this._diagRockMarkup(330, 465, 620)}
+      <rect x="1148" y="164" width="76" height="332" fill="#0e2c42" opacity=".92"></rect>
+      <line x1="1148" y1="148" x2="1148" y2="497" class="dg-glass-thin"></line>`);
+    let comb = "";
+    for (let x = 1150; x < 1226; x += 9) comb += `<line x1="${x}" y1="148" x2="${x}" y2="170" class="dg-line"></line>`;
+    parts.push(comb);
+    parts.push(`
+      <rect x="170" y="110" width="1060" height="390" class="dg-glass"></rect>
+      <line x1="174" y1="160" x2="1148" y2="160" stroke="rgba(215,230,238,.5)" stroke-width="2"></line>
+      <rect x="170" y="500" width="1060" height="26" class="dg-frame"></rect>
+      <path d="M 178 526 L 178 934 M 1222 526 L 1222 934" stroke="rgba(127,184,216,.25)" stroke-width="8" fill="none"></path>
+      <line x1="60" y1="940" x2="1540" y2="940" stroke="rgba(127,184,216,.14)" stroke-width="2"></line>`);
+
+    // sump: chamber water (return chamber sits lower — evaporation), glass, baffles
+    parts.push(`
+      <rect x="283" y="736" width="222" height="161" fill="url(#dgSump)"></rect>
+      <rect x="508" y="700" width="609" height="197" fill="url(#dgSump)"></rect>
+      <rect x="280" y="640" width="840" height="260" class="dg-glass"></rect>
+      <line x1="949" y1="700" x2="949" y2="897" class="dg-glass-thin"></line>
+      <line x1="769" y1="664" x2="769" y2="860" class="dg-glass-thin"></line>
+      <line x1="566" y1="664" x2="566" y2="897" class="dg-glass-thin"></line>
+      <line x1="536" y1="700" x2="536" y2="897" class="dg-glass-thin"></line>
+      <line x1="508" y1="664" x2="508" y2="860" class="dg-glass-thin"></line>
+      <text x="1032" y="962" class="dg-lbl">sock</text>
+      <text x="858" y="962" class="dg-lbl">skimmer</text>
+      <text x="662" y="962" class="dg-lbl">refugium</text>
+      <text x="396" y="962" class="dg-lbl">return</text>`);
+
+    // the loop: surface drift, drain, riser, jet, baffle transfers
+    let drift = "";
+    for (let i = 0; i < 5; i++) {
+      drift += `<g style="animation-delay:${(-i * 0.65).toFixed(2)}s" class="dg-chev-drift"><polygon points="${210 + i * 190},153 ${219 + i * 190},160 ${210 + i * 190},167" class="dg-chev"></polygon></g>`;
+    }
+    parts.push(`
+      <g class="dg-loop">
+        <g clip-path="url(#dgSurf)">${drift}</g>
+        ${this._diagPipeMarkup([[1186, 498], [1186, 588], [1000, 588], [1000, 666]], 16)}
+        ${this._diagPipeMarkup([[370, 800], [370, 600], [132, 600], [132, 92], [206, 92], [206, 140]], 14)}
+        <g class="dg-jet">
+          <path d="M 206 148 L 246 190 M 206 152 L 220 200 M 206 150 L 262 172" fill="none"></path>
+        </g>
+        ${this._diagChevMarkup(949, 688, "l")}
+        ${this._diagChevMarkup(769, 872, "l")}
+        ${this._diagChevMarkup(566, 688, "l")}
+        ${this._diagChevMarkup(522, 872, "l")}
+        ${this._diagChevMarkup(1000, 700, "d")}
+      </g>`);
+
+    // filter sock (static plumbing furniture)
+    parts.push(`
+      <path d="M 972 668 h 56 l -6 66 q -22 14 -44 0 Z" class="dg-sock"></path>
+      <rect x="964" y="660" width="72" height="10" rx="4" class="dg-metal" opacity=".5"></rect>`);
+
+    // return pump — the loop driver
+    if (nodes.ret) {
+      const [id, item] = nodes.ret;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-return", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — the loop stops when this stops`,
+        dot: [416, 794], hit: [320, 784, 104, 86],
+        art: `
+          <rect x="336" y="800" width="70" height="56" rx="10" class="dg-shell"></rect>
+          <circle cx="371" cy="828" r="16" fill="none" class="dg-shell"></circle>
+          <circle cx="371" cy="828" r="5" class="dg-metal"></circle>
+          <rect x="324" y="788" width="96" height="78" rx="12" class="dg-halo"></rect>`,
+      }));
+    } else {
+      parts.push(`
+        <rect x="336" y="800" width="70" height="56" rx="10" class="dg-shell" opacity=".45"></rect>
+        <circle cx="371" cy="828" r="16" fill="none" class="dg-shell" opacity=".45"></circle>`);
+    }
+
+    // skimmer with bubble column
+    if (nodes.skimmer) {
+      const [id, item] = nodes.skimmer;
+      let bubbles = "";
+      for (let i = 0; i < 6; i++) {
+        bubbles += `<circle cx="${834 + (i % 3) * 15}" cy="${800 - (i % 2) * 8}" r="${2.6 + (i % 3)}" class="dg-bubble" style="animation-delay:${(-i * 0.42).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-skimmer", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — protein skimmer`,
+        dot: [890, 626], hit: [806, 616, 88, 246],
+        art: `
+          <rect x="812" y="812" width="74" height="44" rx="8" class="dg-shell"></rect>
+          <rect x="822" y="690" width="54" height="126" rx="10" class="dg-shell"></rect>
+          <rect x="832" y="654" width="34" height="40" class="dg-shell"></rect>
+          <rect x="820" y="622" width="58" height="36" rx="8" class="dg-box"></rect>
+          <ellipse cx="849" cy="640" rx="20" ry="7" class="dg-foam dg-onart"></ellipse>
+          ${bubbles}`,
+      }));
+    }
+
+    // refugium kelp — scene flavour for the third chamber
+    parts.push(this._diagKelpMarkup(636, 892, 120) + this._diagKelpMarkup(676, 892, 96) + this._diagKelpMarkup(704, 892, 130));
+
+    // heater — slotted
+    if (nodes.heater) {
+      const [id, item] = nodes.heater;
+      const slot = slots[layout.heater] || slots.sumpReturn;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-heater", focusId: `equip:${id}`, dragKey: "heater", state: this._diagramNodeState(item),
+        title: `${item.label || id} — heater`,
+        dot: [slot.x + 26, slot.y - 4], hit: [slot.x - 16, slot.y - 12, 48, 92],
+        art: `${this._diagHeaterArt(slot.x, slot.y)}<rect x="${slot.x - 12}" y="${slot.y - 8}" width="40" height="84" rx="10" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // wavemakers — slotted, display circulation only
+    for (const [id, item] of nodes.wavemakers) {
+      const slot = slots[layout[`wm:${id}`]] || slots.glassL;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-wm", focusId: `equip:${id}`, dragKey: `wm:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — in-tank flow only; the loop keeps running without it`,
+        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [slot.x - 30, slot.y - 32, 110, 64],
+        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${slot.x - 26}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // display light — rays over the water when on
+    if (nodes.light) {
+      const [id, item] = nodes.light;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-light", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — display lighting`,
+        dot: [886, 76], hit: [500, 60, 400, 40],
+        art: `
+          <polygon points="520,92 880,92 960,160 440,160" class="dg-rays dg-onart"></polygon>
+          <rect x="500" y="68" width="400" height="22" rx="10" class="dg-box"></rect>`,
+      }));
+    }
+
+    // dosing station — slotted shelf, tubes into the sock chamber
+    if (nodes.doser) {
+      const sx = doserRight ? 1300 : 40;
+      const boxY = 800 - (46 + nodes.doser.length * 38);
+      const tubeY = Math.min(760, boxY + 34);
+      const tube = doserRight
+        ? this._diagTubeMarkup([[sx + 12, tubeY], [1180, tubeY], [1180, 610], [1070, 610], [1070, 664]])
+        : this._diagTubeMarkup([[sx + 178, tubeY], [226, tubeY], [226, 610], [318, 610], [318, 690]]);
+      parts.push(tube);
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-doser", focusId: "doser-station", dragKey: "doser",
+        state: nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off",
+        title: `Dosing pumps — ${nodes.doser.length} channel${nodes.doser.length === 1 ? "" : "s"}`,
+        dot: [sx + 160, boxY + 12], hit: [sx, boxY - 8, 190, 816 - boxY],
+        art: `${this._diagDoserArt(sx, boxY, nodes.doser)}<rect x="${sx + 4}" y="${boxY - 4}" width="182" height="${812 - boxY}" rx="12" class="dg-halo"></rect>`,
+      }));
+      parts.push(`<text x="${sx + 95}" y="962" class="dg-lbl">dosing</text>`);
+    }
+
+    // ATO reservoir — sits on whichever side the doser left free
+    if (nodes.ato) {
+      const [id, item] = nodes.ato;
+      const ax = doserRight ? 48 : 1398;
+      const tube = doserRight
+        ? this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 628], [322, 628], [322, 690]])
+        : this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 616], [1188, 616], [1188, 700]]);
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-ato", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — auto top-off reservoir`,
+        dot: [ax + 82, 712], hit: [ax - 6, 694, 104, 248],
+        art: `
+          <rect x="${ax}" y="700" width="92" height="236" rx="8" fill="rgba(20,64,94,.5)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
+          <rect x="${ax + 4}" y="790" width="84" height="142" fill="url(#dgSump)"></rect>`,
+      }));
+      parts.push(tube);
+      parts.push(`<text x="${ax + 46}" y="962" class="dg-lbl">ato</text>`);
+    }
+
+    if (arranging) parts.push(this._diagSlotsMarkup("sump", nodes));
+
+    return {
+      water: "184,176,948,270",
+      defs: `<clipPath id="dgSurf"><rect x="190" y="146" width="900" height="30"></rect></clipPath>`,
+      body: parts.join(""),
+    };
+  }
+
+  // ----------------------- all-in-one (no sump) scene ----------------------
+  // The back wall hides three chambers: media (weir comb feeds it), heater/ATO,
+  // and the return pump, which pipes over the top back into the display.
+  _diagramAioScene(nodes, layout, arranging) {
+    const slots = this._diagramSlots("aio");
+    const parts = [];
+
+    parts.push(`
+      <rect x="303" y="240" width="994" height="417" fill="url(#dgWater)"></rect>
+      <rect x="303" y="616" width="757" height="40" fill="url(#dgSand)"></rect>
+      ${this._diagRockMarkup(430, 620, 520)}
+      <rect x="1060" y="242" width="237" height="414" fill="#0e2c42" opacity=".92"></rect>
+      <line x1="1060" y1="224" x2="1060" y2="656" class="dg-glass-thin"></line>
+      <line x1="1139" y1="248" x2="1139" y2="630" class="dg-glass-thin"></line>
+      <line x1="1215" y1="230" x2="1215" y2="656" class="dg-glass-thin"></line>`);
+    let comb = "";
+    for (let x = 1062; x < 1110; x += 9) comb += `<line x1="${x}" y1="224" x2="${x}" y2="248" class="dg-line"></line>`;
+    parts.push(comb);
+    parts.push(`
+      <rect x="300" y="190" width="1000" height="470" class="dg-glass"></rect>
+      <line x1="304" y1="240" x2="1060" y2="240" stroke="rgba(215,230,238,.5)" stroke-width="2"></line>
+      <rect x="300" y="660" width="1000" height="26" class="dg-frame"></rect>
+      <rect x="316" y="686" width="968" height="244" rx="6" fill="#0d1a2a" stroke="rgba(127,184,216,.18)" stroke-width="2"></rect>
+      <line x1="800" y1="700" x2="800" y2="916" stroke="rgba(127,184,216,.12)" stroke-width="2"></line>
+      <line x1="160" y1="940" x2="1540" y2="940" stroke="rgba(127,184,216,.14)" stroke-width="2"></line>
+      <text x="1100" y="712" class="dg-lbl dg-lbl-sm" text-anchor="middle">media</text>
+      <text x="1177" y="712" class="dg-lbl dg-lbl-sm" text-anchor="middle">ato</text>
+      <text x="1253" y="712" class="dg-lbl dg-lbl-sm" text-anchor="middle">return</text>`);
+
+    // the loop: surface drift into the comb, chamber cascade, return over the top
+    let drift = "";
+    for (let i = 0; i < 4; i++) {
+      drift += `<g style="animation-delay:${(-i * 0.7).toFixed(2)}s" class="dg-chev-drift"><polygon points="${340 + i * 190},233 ${349 + i * 190},240 ${340 + i * 190},247" class="dg-chev"></polygon></g>`;
+    }
+    parts.push(`
+      <g class="dg-loop">
+        <g clip-path="url(#dgSurfA)">${drift}</g>
+        ${this._diagChevMarkup(1101, 300, "d")}
+        ${this._diagChevMarkup(1101, 440, "d")}
+        ${this._diagChevMarkup(1139, 636, "r")}
+        ${this._diagChevMarkup(1177, 440, "u")}
+        ${this._diagChevMarkup(1215, 282, "r")}
+        ${this._diagChevMarkup(1253, 380, "d")}
+        ${this._diagPipeMarkup([[1253, 560], [1253, 216], [1020, 216], [1020, 258]], 13)}
+        <g class="dg-jet">
+          <path d="M 1020 264 L 956 306 M 1020 266 L 992 320 M 1020 262 L 938 284" fill="none"></path>
+        </g>
+      </g>`);
+
+    // media basket in chamber 1 (static furniture, sock on top)
+    parts.push(`
+      <rect x="1072" y="330" width="56" height="90" rx="6" class="dg-shell"></rect>
+      <line x1="1072" y1="360" x2="1128" y2="360" class="dg-line" opacity=".6"></line>
+      <line x1="1072" y1="390" x2="1128" y2="390" class="dg-line" opacity=".6"></line>
+      <path d="M 1074 332 h 52 l -5 22 h -42 Z" class="dg-sock"></path>`);
+
+    // return pump in chamber 3
+    if (nodes.ret) {
+      const [id, item] = nodes.ret;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-return", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — the loop stops when this stops`,
+        dot: [1284, 556], hit: [1222, 548, 72, 64],
+        art: `
+          <rect x="1229" y="560" width="48" height="44" rx="8" class="dg-shell"></rect>
+          <circle cx="1253" cy="582" r="11" fill="none" class="dg-shell"></circle>
+          <rect x="1225" y="552" width="60" height="58" rx="10" class="dg-halo"></rect>`,
+      }));
+    } else {
+      parts.push(`<rect x="1229" y="560" width="48" height="44" rx="8" class="dg-shell" opacity=".45"></rect>`);
+    }
+
+    // nano skimmer in chamber 2, if one is mapped
+    if (nodes.skimmer) {
+      const [id, item] = nodes.skimmer;
+      let bubbles = "";
+      for (let i = 0; i < 4; i++) {
+        bubbles += `<circle cx="${1154 + (i % 2) * 10}" cy="${540 - (i % 2) * 8}" r="${2.4 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-skimmer", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — protein skimmer`,
+        dot: [1174, 320], hit: [1142, 316, 42, 250],
+        art: `
+          <rect x="1148" y="380" width="30" height="180" rx="8" class="dg-shell"></rect>
+          <rect x="1146" y="330" width="34" height="42" rx="8" class="dg-box"></rect>
+          ${bubbles}`,
+      }));
+    }
+
+    // heater — slotted (back chamber 2 or in the display)
+    if (nodes.heater) {
+      const [id, item] = nodes.heater;
+      const slot = slots[layout.heater] || slots.ch2;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-heater", focusId: `equip:${id}`, dragKey: "heater", state: this._diagramNodeState(item),
+        title: `${item.label || id} — heater`,
+        dot: [slot.x + 26, slot.y - 4], hit: [slot.x - 16, slot.y - 12, 48, 92],
+        art: `${this._diagHeaterArt(slot.x, slot.y)}<rect x="${slot.x - 12}" y="${slot.y - 8}" width="40" height="84" rx="10" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // wavemakers
+    for (const [id, item] of nodes.wavemakers.slice(0, 2)) {
+      const slot = slots[layout[`wm:${id}`]] || slots.glassL;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-wm", focusId: `equip:${id}`, dragKey: `wm:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — in-tank flow only; the loop keeps running without it`,
+        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [slot.x - 30, slot.y - 32, 110, 64],
+        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${slot.x - 26}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // display light
+    if (nodes.light) {
+      const [id, item] = nodes.light;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-light", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — display lighting`,
+        dot: [986, 156], hit: [600, 140, 400, 40],
+        art: `
+          <polygon points="620,172 980,172 1050,240 550,240" class="dg-rays dg-onart"></polygon>
+          <rect x="600" y="148" width="400" height="22" rx="10" class="dg-box"></rect>`,
+      }));
+    }
+
+    // doser on a right-hand shelf, tubes over the rim into chamber 1
+    if (nodes.doser) {
+      const sx = 1360;
+      const top = 668 - (46 + nodes.doser.length * 38);
+      const tubeY = top + 34;
+      parts.push(this._diagTubeMarkup([[sx + 12, tubeY], [1310, tubeY], [1310, 166], [1101, 166], [1101, 250]]));
+      const heads = nodes.doser.map(([, ch], i) => {
+        const hy = top + 26 + i * 38;
+        const name = this._doserChemicalLabel(ch.chemical) || ch.name || `D${i + 1}`;
+        return `
+          <circle cx="${sx + 44}" cy="${hy}" r="13" class="dg-shell" fill="none"></circle>
+          <circle cx="${sx + 44}" cy="${hy}" r="4" class="dg-metal"></circle>
+          <text x="${sx + 74}" y="${hy + 4}" class="dg-lbl dg-lbl-sm">${this._escape(String(name).slice(0, 8).toUpperCase())}</text>`;
+      }).join("");
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-doser", focusId: "doser-station",
+        state: nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off",
+        title: `Dosing pumps — ${nodes.doser.length} channel${nodes.doser.length === 1 ? "" : "s"}`,
+        dot: [sx + 160, top + 12], hit: [sx, top - 8, 190, 690 - top],
+        art: `
+          <rect x="${sx}" y="668" width="190" height="8" rx="3" class="dg-metal" opacity=".5"></rect>
+          <rect x="${sx + 10}" y="${top}" width="160" height="${668 - top}" rx="12" class="dg-box"></rect>
+          ${heads}`,
+      }));
+    }
+
+    // ATO reservoir bottom-right, short tube into chamber 2
+    if (nodes.ato) {
+      const [id, item] = nodes.ato;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-ato", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — auto top-off reservoir`,
+        dot: [1426, 726], hit: [1346, 710, 96, 232],
+        art: `
+          <rect x="1352" y="716" width="84" height="220" rx="8" fill="rgba(20,64,94,.5)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
+          <rect x="1356" y="796" width="76" height="136" fill="url(#dgSump)"></rect>`,
+      }));
+      parts.push(this._diagTubeMarkup([[1394, 798], [1394, 156], [1177, 156], [1177, 262]]));
+      parts.push(`<text x="1394" y="962" class="dg-lbl">ato</text>`);
+    }
+
+    if (arranging) parts.push(this._diagSlotsMarkup("aio", nodes));
+
+    return {
+      water: "312,254,736,340",
+      defs: `<clipPath id="dgSurfA"><rect x="320" y="226" width="720" height="30"></rect></clipPath>`,
+      body: parts.join(""),
+    };
+  }
+
+  // Patch live states onto the rendered diagram — class toggles only, so the
+  // flow animations never restart mid-cycle.
+  _updatePulseDiagram(svg) {
+    const nodes = this._diagramNodes();
+    const loopOn = nodes.ret ? this._diagramNodeState(nodes.ret[1]) === "on" : false;
+    svg.classList.toggle("dg-loop-off", !loopOn);
+    svg.querySelectorAll("[data-diag-node]").forEach((g) => {
+      const key = g.getAttribute("data-diag-node") || "";
+      let state = "gone";
+      if (key === "doser-station") {
+        state = nodes.doser && nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off";
+      } else if (key.startsWith("equip:")) {
+        const item = (this._config.equipment || {})[key.slice(6)];
+        state = item ? this._diagramNodeState(item) : "gone";
+      }
+      g.classList.toggle("on", state === "on");
+      g.classList.toggle("off", state === "off");
+      g.classList.toggle("gone", state === "gone");
+    });
+  }
+
+  // In-display circulation: a particle gyre plus two fish, spun by whichever
+  // wavemakers are actually running (and a little by the return jet). Purely
+  // decorative — honours prefers-reduced-motion by not starting at all.
+  _startPulseDiagramMotion() {
+    this._stopPulseDiagramMotion();
+    const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+    if (!svg) return;
+    this._wireDiagramDrag(svg);
+    if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const water = (svg.getAttribute("data-water") || "").split(",").map(Number);
+    if (water.length !== 4 || water.some((n) => !Number.isFinite(n))) return;
+    const [wx, wy, ww, wh] = water;
+    const nodes = this._diagramNodes();
+    const wmEntities = nodes.wavemakers.map(([, item]) => item.switch_entity_id).filter(Boolean);
+    const retEntity = nodes.ret ? nodes.ret[1].switch_entity_id : "";
+    const NS = "http://www.w3.org/2000/svg";
+    const layer = document.createElementNS(NS, "g");
+    svg.appendChild(layer);
+    const parts = [];
+    for (let i = 0; i < 34; i++) {
+      const el = document.createElementNS(NS, "circle");
+      el.setAttribute("r", (1.6 + Math.random() * 1.6).toFixed(1));
+      el.setAttribute("class", "dg-part");
+      el.setAttribute("opacity", (0.2 + Math.random() * 0.3).toFixed(2));
+      layer.appendChild(el);
+      parts.push({ cx: wx + Math.random() * ww, cy: wy + Math.random() * wh, rx: 30 + Math.random() * 110, ry: 12 + Math.random() * 42, ph: Math.random() * Math.PI * 2, v: 0, el });
+    }
+    const fish = [];
+    for (let i = 0; i < 2; i++) {
+      const el = document.createElementNS(NS, "path");
+      el.setAttribute("d", "M0,0 q10,-8 22,0 q-12,8 -22,0 l-8,6 l2,-6 l-2,-6 Z");
+      el.setAttribute("class", "dg-fish");
+      layer.appendChild(el);
+      fish.push({ t: Math.random() * 6.28, speed: 0.0014 + i * 0.0008, ry: Math.max(30, wh * 0.18 + i * 30), el });
+    }
+    const motion = { raf: 0, last: 0 };
+    const tick = (ts) => {
+      motion.raf = requestAnimationFrame(tick);
+      if (document.hidden) return;
+      const dt = Math.min(40, ts - (motion.last || ts));
+      motion.last = ts;
+      let energy = 0;
+      if (wmEntities.length) {
+        const on = wmEntities.filter((ent) => this._stateValue(ent) === "on").length;
+        energy += (on / wmEntities.length) * 0.9;
+      }
+      if (retEntity && this._stateValue(retEntity) === "on") energy += 0.12;
+      for (const p of parts) {
+        p.v += (energy - p.v) * 0.015; // flow spools up and settles, never snaps
+        p.ph += p.v * dt * 0.0011;
+        const x = p.cx + Math.cos(p.ph) * p.rx;
+        const y = p.cy + Math.sin(p.ph) * p.ry;
+        if (x > wx && x < wx + ww && y > wy && y < wy + wh) {
+          p.el.setAttribute("cx", x.toFixed(1));
+          p.el.setAttribute("cy", y.toFixed(1));
+          p.el.style.display = "";
+        } else {
+          p.el.style.display = "none";
+        }
+      }
+      const fe = Math.max(0.1, energy);
+      for (const f of fish) {
+        f.t += f.speed * dt * (0.4 + fe);
+        const x = wx + ww / 2 + Math.cos(f.t) * (ww / 2 - 70);
+        const y = wy + wh / 2 + Math.sin(f.t * 1.7) * f.ry;
+        const flip = Math.sin(f.t) > 0 ? -1 : 1;
+        f.el.setAttribute("transform", `translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${flip * 1.35} 1.35)`);
+      }
+    };
+    motion.raf = requestAnimationFrame(tick);
+    this._diagramMotion = motion;
+  }
+
+  _stopPulseDiagramMotion() {
+    if (this._diagramMotion) {
+      cancelAnimationFrame(this._diagramMotion.raf);
+      this._diagramMotion = null;
+    }
+    this._diagramDrag = null;
+  }
+
+  // Arrange mode: drag a slotted node, snap to the nearest valid drop zone,
+  // persist the layout silently and re-render so tubes re-route.
+  _wireDiagramDrag(svg) {
+    const toSvg = (e) => {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      return pt.matrixTransform(svg.getScreenCTM().inverse());
+    };
+    svg.addEventListener("pointerdown", (e) => {
+      if (!this._diagramArranging) return;
+      const g = e.target.closest("[data-diag-drag]");
+      if (!g) return;
+      const p = toSvg(e);
+      this._diagramDrag = { g, key: g.getAttribute("data-diag-drag"), x0: p.x, y0: p.y, slot: null };
+      g.classList.add("dg-lifted");
+      try { svg.setPointerCapture(e.pointerId); } catch { /* older Safari */ }
+      e.preventDefault();
+    });
+    svg.addEventListener("pointermove", (e) => {
+      const drag = this._diagramDrag;
+      if (!drag) return;
+      const p = toSvg(e);
+      drag.g.setAttribute("transform", `translate(${(p.x - drag.x0).toFixed(1)} ${(p.y - drag.y0).toFixed(1)})`);
+      const kind = drag.key === "heater" ? "heater" : drag.key === "doser" ? "doser" : "wm";
+      let best = null;
+      let bestD = Infinity;
+      svg.querySelectorAll("[data-diag-slot]").forEach((slotEl) => {
+        const okKind = (slotEl.getAttribute("data-diag-kinds") || "").split(",").includes(kind);
+        const x = Number(slotEl.getAttribute("x")) + Number(slotEl.getAttribute("width")) / 2;
+        const y = Number(slotEl.getAttribute("y")) + Number(slotEl.getAttribute("height")) / 2;
+        const d = Math.hypot(x - p.x, y - p.y);
+        slotEl.classList.toggle("near", okKind && d < 130);
+        if (okKind && d < bestD) { bestD = d; best = slotEl; }
+      });
+      drag.slot = best && bestD < 150 ? best.getAttribute("data-diag-slot") : null;
+    });
+    const drop = () => {
+      const drag = this._diagramDrag;
+      if (!drag) return;
+      this._diagramDrag = null;
+      drag.g.classList.remove("dg-lifted");
+      drag.g.removeAttribute("transform");
+      if (!drag.slot) return;
+      const diagram = this._config.diagram = this._config.diagram || {};
+      const layout = diagram.layout = diagram.layout || {};
+      const vacated = layout[drag.key] || null;
+      for (const [k, v] of Object.entries(layout)) {
+        if (v === drag.slot && k !== drag.key) {
+          if (vacated) layout[k] = vacated;
+          else delete layout[k];
+        }
+      }
+      layout[drag.key] = drag.slot;
+      this._persistConfigSilently();
+      this._render();
+    };
+    svg.addEventListener("pointerup", drop);
+    svg.addEventListener("pointercancel", drop);
+  }
+
+  // Two-step confirm for toggling gear from the wall — same funnel as Mission
+  // Control (openreef/toggle_equipment: admin + armed + safety checks), with an
+  // extra deliberate second tap because a wall tablet invites stray touches.
+  _pulseDiagramToggle(id) {
+    const item = (this._config.equipment || {})[id];
+    if (!item || this._diagramCfg().allowControls === false || item.armed !== true) return;
+    const armed = this._pulseDiagArm && this._pulseDiagArm.id === id && Date.now() - this._pulseDiagArm.at < 8000;
+    if (!armed) {
+      this._pulseDiagArm = { id, at: Date.now() };
+      this._renderPulseFocus();
+      return;
+    }
+    this._pulseDiagArm = null;
+    this._toggleEquipment(id);
   }
 
   // --- Reef Pulse: tap-to-expand detail cards ------------------------------
@@ -13491,6 +14389,9 @@ class OpenReefPanel extends HTMLElement {
 
   _openPulseFocus(key) {
     if (!key || !this._pulseActive) return;
+    // Mid-arrange taps are drags, not detail requests.
+    if (this._diagramArranging) return;
+    this._pulseDiagArm = null;
     this._pulseFocus = key;
     if (key.startsWith("sensor:")) {
       const range = this._pulseCfg().graphRange === "7d" ? "7d" : "24h";
@@ -13584,6 +14485,8 @@ class OpenReefPanel extends HTMLElement {
     else if (key === "equipment") body = this._pulseFocusEquipmentMarkup();
     else if (key === "today") body = this._pulseFocusTodayMarkup();
     else if (key === "insights") body = this._pulseFocusInsightsMarkup();
+    else if (key === "doser-station") body = this._pulseFocusDoserMarkup();
+    else if (key && key.startsWith("equip:")) body = this._pulseFocusEquipItemMarkup(key.slice(6));
     else if (key && key.startsWith("sensor:")) body = this._pulseFocusSensorMarkup(key.slice(7));
     if (!body) return "";
     return `
@@ -13753,6 +14656,88 @@ class OpenReefPanel extends HTMLElement {
         </div>
       ` : `<p class="pulse-focus-note">No score deductions right now — every scoring check is clean.</p>`}
       <p class="pulse-focus-note">${this._escape(health.nextAction || "")}</p>
+    `;
+  }
+
+  // Detail card for one diagram node. Read-only unless the diagram allows
+  // controls AND the equipment is armed — then a two-step tap runs through the
+  // same toggle_equipment safety funnel Mission Control uses.
+  _pulseFocusEquipItemMarkup(id) {
+    const item = (this._config.equipment || {})[id];
+    if (!item) return "";
+    const state = this._stateValue(item.switch_entity_id);
+    const dot = state === "on" ? "on" : state === "off" ? "off" : "gone";
+    const stateLabel = dot === "on" ? "Running" : dot === "off" ? "Off" : "Unavailable";
+    const pill = dot === "on" ? "ok" : dot === "off" ? "unknown" : "critical";
+    const watts = item.power_entity_id ? this._number(item.power_entity_id) : null;
+    const profile = this._equipmentProfile(id, item);
+    const rows = [
+      ["Type", this._equipmentType(id, item)],
+      ["State", stateLabel],
+      Number.isFinite(watts) ? ["Power now", `${this._format(watts, 1)} W`] : null,
+      ["Entity", item.switch_entity_id || "—"],
+    ].filter(Boolean).map(([k, v]) => `
+      <div class="pulse-focus-row">
+        <span class="pulse-focus-dot ${k === "State" ? pill : "unknown"}"></span>
+        <div><strong>${this._escape(k)}</strong></div>
+        <em>${this._escape(String(v))}</em>
+      </div>`).join("");
+    const controlsAllowed = this._diagramCfg().allowControls !== false;
+    const canControl = controlsAllowed && item.armed === true && item.switch_entity_id && dot !== "gone";
+    const confirming = this._pulseDiagArm && this._pulseDiagArm.id === id && Date.now() - this._pulseDiagArm.at < 8000;
+    const verb = dot === "on" ? "Turn off" : "Turn on";
+    const loopNote = profile === "return_pump" && dot === "on"
+      ? `<p class="pulse-focus-note">Stopping the return halts all flow between tank and sump — the diagram will show the loop stop.</p>` : "";
+    const wmNote = profile === "display_wavemaker" ? `<p class="pulse-focus-note dim">In-tank circulation only — the return loop keeps running without it.</p>` : "";
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>${this._escape(this._equipmentType(id, item))}</small>
+          <strong>${this._escape(item.label || id)}</strong>
+        </div>
+        <span class="pill ${pill}">${this._escape(stateLabel)}</span>
+      </header>
+      <div class="pulse-focus-list">${rows}</div>
+      ${loopNote}${wmNote}
+      ${canControl ? `
+        <div class="pulse-diag-actions">
+          <button class="pulse-diag-btn ${confirming ? "warn" : dot === "on" ? "" : "go"}" data-action="diagram-toggle" data-id="${this._escape(id)}">
+            ${confirming ? "Tap again to confirm" : `${verb} — safety-checked`}
+          </button>
+        </div>
+        <p class="pulse-focus-note dim">Runs through OpenReef's arming and safety checks, exactly like Mission Control.</p>
+      ` : `
+        <p class="pulse-focus-note dim">${!controlsAllowed
+          ? "Controls are off for this wall — enable them in Settings → Tank diagram."
+          : item.armed !== true
+            ? "Not armed — arm this equipment in Settings → Equipment to control it from the wall."
+            : "Read-only — this entity is unavailable right now."}</p>
+      `}
+    `;
+  }
+
+  // Detail card for the dosing station node: every channel at a glance.
+  _pulseFocusDoserMarkup() {
+    const channels = this._doserChannelIds().map((id) => [id, this._doserChannels()[id]]).filter(([, ch]) => ch);
+    if (!channels.length) return "";
+    const rows = channels.map(([id, ch]) => {
+      const on = ch.enabled !== false;
+      return `
+        <div class="pulse-focus-row">
+          <span class="pulse-focus-dot ${on ? "ok" : "unknown"}"></span>
+          <div><strong>${this._escape(ch.name || id)}</strong><small>${this._escape(this._doserChemicalLabel(ch.chemical))}</small></div>
+          <em>${on ? "Scheduled" : "Paused"}</em>
+        </div>`;
+    }).join("");
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Dosing pumps</small>
+          <strong>${channels.length} channel${channels.length === 1 ? "" : "s"}</strong>
+        </div>
+      </header>
+      <div class="pulse-focus-list">${rows}</div>
+      <p class="pulse-focus-note dim">Dosing changes stay in the Dosing tab — schedules, calibration and guards live there.</p>
     `;
   }
 
@@ -16528,6 +17513,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._feedWatchSettings()}
         ${this._visionSettings()}
         ${this._pulseSettings()}
+        ${this._diagramSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._lightingScheduleSettings()}
@@ -17796,7 +18782,7 @@ class OpenReefPanel extends HTMLElement {
     return this._settingsPanel(
       "pulse",
       "Reef Pulse",
-      "Full-screen presentation mode — a live wall display for a tank-side tablet or showing off. Display-only: no equipment can be controlled from the Pulse screen.",
+      "Full-screen presentation mode — a live wall display for a tank-side tablet or showing off. Display-first: only the Tank diagram backdrop can control gear, and only armed gear, behind a two-step confirm.",
       `
         <label class="toggle-card">
           <input type="checkbox" data-scope="pulse" data-field="enabled" ${cfg.enabled === false ? "" : "checked"}>
@@ -17820,10 +18806,11 @@ class OpenReefPanel extends HTMLElement {
           <div class="mini-grid">
             <label>Backdrop
               <select data-scope="pulse" data-field="backdrop">
-                <option value="auto" ${!["camera", "wall", "timelapse"].includes(cfg.backdrop) ? "selected" : ""}>Auto — camera when online, else data wall</option>
+                <option value="auto" ${!["camera", "wall", "timelapse", "diagram"].includes(cfg.backdrop) ? "selected" : ""}>Auto — camera when online, else data wall</option>
                 <option value="camera" ${cfg.backdrop === "camera" ? "selected" : ""}>Camera</option>
                 <option value="wall" ${cfg.backdrop === "wall" ? "selected" : ""}>Data wall</option>
                 <option value="timelapse" ${cfg.backdrop === "timelapse" ? "selected" : ""}>Timelapse — your reef's history as wallpaper</option>
+                <option value="diagram" ${cfg.backdrop === "diagram" ? "selected" : ""}>Tank diagram — your system as a living schematic</option>
               </select>
             </label>
             ${cfg.backdrop === "timelapse" ? `
@@ -17910,6 +18897,47 @@ class OpenReefPanel extends HTMLElement {
           </details>
           <p class="muted">No camera mapped or online? Pulse still works as a full-screen data wall. Tap any tile, chip or panel on the Pulse screen for a bigger detail card.</p>
         `}
+      `,
+      forceOpen,
+    );
+  }
+
+  _diagramSettings(forceOpen = false) {
+    const cfg = this._diagramCfg();
+    const nodes = this._diagramNodes();
+    const mapped = [
+      nodes.ret ? "return pump" : "",
+      nodes.wavemakers.length ? `${nodes.wavemakers.length} wavemaker${nodes.wavemakers.length === 1 ? "" : "s"}` : "",
+      nodes.heater ? "heater" : "",
+      nodes.skimmer ? "skimmer" : "",
+      nodes.ato ? "ATO" : "",
+      nodes.light ? "lighting" : "",
+      nodes.doser ? `${nodes.doser.length} dosing channel${nodes.doser.length === 1 ? "" : "s"}` : "",
+    ].filter(Boolean);
+    return this._settingsPanel(
+      "diagram",
+      "Tank diagram",
+      "A living schematic of your actual system for the Reef Pulse wall — flow animates with your pumps, gear is tappable.",
+      `
+        <div class="mini-grid">
+          <label>System type
+            <select data-scope="diagram" data-field="systemType">
+              <option value="sump" ${cfg.systemType !== "aio" ? "selected" : ""}>Sump — display drains to a sump below</option>
+              <option value="aio" ${cfg.systemType === "aio" ? "selected" : ""}>All-in-one — back-chamber filtration, no sump</option>
+            </select>
+          </label>
+        </div>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="diagram" data-field="allowControls" ${cfg.allowControls === false ? "" : "checked"}>
+          <span>
+            <strong>Allow controls from the wall</strong>
+            <small>Tapping gear on the diagram offers a two-step toggle for ARMED equipment only, through the same safety checks as Mission Control. Off = the diagram is look-but-don't-touch.</small>
+          </span>
+        </label>
+        <p class="muted">${mapped.length
+          ? `On your diagram right now: ${this._escape(mapped.join(", "))}. It draws whatever is switch-mapped in Equipment (plus your dosing channels) — map more gear and it appears.`
+          : "Nothing to draw yet — map your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears on the diagram automatically."}</p>
+        <p class="muted">To see it: set the Reef Pulse backdrop to <strong>Tank diagram</strong> (or tap the Living Diagram face), then Present. The ✎ button on the Pulse screen enters arrange mode — drag wavemakers, the heater or the dosing station between highlighted spots; pipework re-routes itself.</p>
       `,
       forceOpen,
     );
@@ -20337,6 +21365,17 @@ class OpenReefPanel extends HTMLElement {
            selector: .pulse-close's own top:22px is declared later in this
            sheet and would win the tie, stacking share invisibly under ✕. */
         .pulse-close.pulse-share { top: 74px; font-size: 19px; }
+        /* Living tank diagram backdrop: the schematic fills the space between
+           the Pulse header and footer; letterboxing keeps its aspect. */
+        .pulse-diagram { position: absolute; inset: 84px 18px 96px; display: flex; align-items: center; justify-content: center; }
+        .pulse-diagram svg { width: 100%; height: 100%; touch-action: none; }
+        .pulse-close.pulse-arrange { top: 126px; font-size: 16px; }
+        .pulse-close.pulse-arrange.active { opacity: 1; border-color: rgba(245, 158, 11, .7); color: #fde68a; }
+        .pulse-diag-note { position: absolute; top: 92px; left: 50%; transform: translateX(-50%); z-index: 2; padding: 7px 16px; border-radius: 999px; background: rgba(4, 10, 16, .65); backdrop-filter: blur(8px); color: #fde68a; font-weight: 800; font-size: 12px; white-space: nowrap; }
+        .pulse-diag-actions { display: flex; gap: 10px; }
+        .pulse-diag-btn { flex: 1; border: 1px solid var(--openreef-accent-border, rgba(255, 255, 255, .25)); border-radius: 12px; padding: 13px 18px; background: rgba(4, 10, 16, .55); color: #e5edf5; font-weight: 800; font-size: 14px; cursor: pointer; transition: border-color .2s ease; }
+        .pulse-diag-btn.go { border-color: var(--openreef-accent); color: var(--openreef-accent); }
+        .pulse-diag-btn.warn { border-color: rgba(245, 158, 11, .7); color: #fde68a; }
         /* Settings: face preset buttons. */
         .pulse-faces { display: grid; gap: 8px; }
         .pulse-face-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }

@@ -623,6 +623,44 @@ def test_vision_garbage_clamped():
     assert config["visionReports"] == [{"ok": True}, {"ok": 2}]  # dicts only
 
 
+# --- living tank diagram block ---
+
+def test_diagram_defaults_injected():
+    config = normalise({})
+    assert config["diagram"] == {"systemType": "sump", "allowControls": True, "layout": {}}
+
+
+def test_diagram_garbage_coerced():
+    """Corrupted diagram values normalise to safe defaults instead of crashing."""
+    config = normalise({"diagram": "corrupt"})
+    assert config["diagram"]["systemType"] == "sump"
+    config = normalise({"diagram": {"systemType": "hob", "allowControls": 0, "layout": []}})
+    diagram = config["diagram"]
+    assert diagram["systemType"] == "sump"            # unknown type -> default
+    assert diagram["allowControls"] is False          # truthiness coerced to bool
+    assert diagram["layout"] == {}                    # non-dict -> empty
+
+
+def test_diagram_layout_filtered_to_safe_slugs():
+    config = normalise({"diagram": {"systemType": "aio", "layout": {
+        "wm:wave_l": "glassC",                        # good
+        "heater": "weir",                             # good
+        "<script>": "glassL",                         # bad key out
+        "doser": "right shelf",                       # space in value -> out
+        "x" * 80: "glassL",                           # oversized key -> out
+        42: "glassL",                                 # non-string key -> out
+    }}})
+    layout = config["diagram"]["layout"]
+    assert layout == {"wm:wave_l": "glassC", "heater": "weir"}
+    assert config["diagram"]["systemType"] == "aio"
+
+
+def test_pulse_backdrop_accepts_diagram():
+    config = normalise({"pulse": {"backdrop": "diagram"}})
+    assert config["pulse"]["backdrop"] == "diagram"
+    config = normalise({"pulse": {"backdrop": "hologram"}})
+    assert config["pulse"]["backdrop"] == "auto"
+
 
 # --- tiny standalone runner (so this works without pytest installed) ---
 

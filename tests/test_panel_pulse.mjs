@@ -173,13 +173,13 @@ const USER_PREFS_FACES_MUST_NOT_TOUCH = [
 test("faces only write backend-validated fields and never touch user prefs", async () => {
   const panel = prep(await makePanel({}));
   const faces = panel._pulseFaces();
-  assertEqual(Object.keys(faces).sort(), ["datawall", "minimal", "photoframe"]);
+  assertEqual(Object.keys(faces).sort(), ["datawall", "diagram", "minimal", "photoframe"]);
   for (const [id, face] of Object.entries(faces)) {
     for (const key of Object.keys(face.patch)) {
       assert(NORMALISED_PULSE_FIELDS.has(key), `${id} writes unvalidated field ${key}`);
       assert(!USER_PREFS_FACES_MUST_NOT_TOUCH.includes(key), `${id} must not touch user pref ${key}`);
     }
-    assert(["auto", "camera", "wall", "timelapse"].includes(face.patch.backdrop), `${id} backdrop must be whitelisted`);
+    assert(["auto", "camera", "wall", "timelapse", "diagram"].includes(face.patch.backdrop), `${id} backdrop must be whitelisted`);
   }
 });
 
