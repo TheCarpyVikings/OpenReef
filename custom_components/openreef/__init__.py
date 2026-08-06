@@ -2325,6 +2325,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         diagram = config["diagram"]
     diagram["systemType"] = diagram.get("systemType") if diagram.get("systemType") in ("sump", "aio") else "sump"
     diagram["allowControls"] = bool(diagram.get("allowControls", True))
+    diagram["showAlerts"] = bool(diagram.get("showAlerts", True))
+    diagram["showReadings"] = bool(diagram.get("showReadings", True))
     raw_layout = diagram.get("layout")
     diagram_layout: dict = {}
     if isinstance(raw_layout, dict):

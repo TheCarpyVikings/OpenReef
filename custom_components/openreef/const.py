@@ -9,8 +9,8 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 51
-INTEGRATION_VERSION = "0.7.14"
+CORE_SCHEMA_VERSION = 52
+INTEGRATION_VERSION = "0.7.15"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1273,6 +1273,10 @@ DEFAULT_CORE_CONFIG = {
         "systemType": "sump",  # sump | aio (all-in-one, no sump)
         "allowControls": True,
         "layout": {},
+        # Spatial alerts: warning/critical sensors light up at the physical
+        # spot on the schematic. Readings: live probe values anchored in-scene.
+        "showAlerts": True,
+        "showReadings": True,
     },
     "dosing": {
         "enabled": True,

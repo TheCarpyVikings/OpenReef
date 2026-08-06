@@ -627,7 +627,10 @@ def test_vision_garbage_clamped():
 
 def test_diagram_defaults_injected():
     config = normalise({})
-    assert config["diagram"] == {"systemType": "sump", "allowControls": True, "layout": {}}
+    assert config["diagram"] == {
+        "systemType": "sump", "allowControls": True, "layout": {},
+        "showAlerts": True, "showReadings": True,
+    }
 
 
 def test_diagram_garbage_coerced():

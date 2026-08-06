@@ -215,6 +215,7 @@ test("state patching toggles classes in place — flow animations never restart"
   });
   const svg = {
     classList: { toggle: (cls, on) => classes.set(`svg:${cls}`, on) },
+    querySelector: () => null,
     querySelectorAll: () => [fakeNode("equip:ret"), fakeNode("equip:wave_l"), fakeNode("doser-station")],
   };
   panel._hass = { states: { ...ALL_ON, "switch.ret": sw("off") } };
@@ -291,6 +292,67 @@ test("awc focus card: Stop only while water moves; faults name themselves", asyn
   const leak = prep(await makePanel(cfg3), ALL_ON, patch3);
   leak._pulseFocus = "awc-station";
   assert(leak._pulseFocusMarkup().includes("Leak detected"), "fault carries into the pill");
+});
+
+// --- spatial alerts ---------------------------------------------------------
+
+const num = (state, unit = "") => ({ state: String(state), attributes: { unit_of_measurement: unit } });
+
+function alertRig(sensors, states) {
+  const cfg = structuredClone(RIG);
+  cfg.sensors = sensors;
+  return prepAsync(cfg, states);
+}
+async function prepAsync(cfg, states) {
+  const panel = prep(await makePanel(cfg), { ...ALL_ON, ...states });
+  panel._sensorMeta = {};
+  panel._validation = null;
+  panel._lightingWindow = { data: null, loading: false, at: 0 };
+  return panel;
+}
+
+test("alerts mark only warning/critical sensors, at their physical anchor", async () => {
+  const panel = await alertRig({
+    temp: { label: "Tank Temp", entity_id: "sensor.t", group: "tank", unit: "°C", min: 24, max: 26, enabled: true },
+    leak: { label: "Leak", entity_id: "binary_sensor.leak", group: "safety", kind: "binary", enabled: true },
+  }, {
+    "sensor.t": num(25.1, "°C"), // in range -> no marker
+    "binary_sensor.leak": { state: "on", attributes: { device_class: "moisture" } }, // tripped
+  });
+  const alerts = panel._diagramAlerts("sump");
+  assertEqual(alerts.length, 1, "healthy sensors never get a marker");
+  assertEqual(alerts[0].id, "leak");
+  assertEqual([alerts[0].x, alerts[0].y], [700, 926], "leak pulses at the cabinet base");
+  const svg = panel._pulseDiagramSvg();
+  assert(svg.includes("dg-alert critical"), "marker rendered");
+  assert(svg.includes('data-diag-alert-key="leak:critical"'), "layer keyed by the alert set");
+});
+
+test("alerts sort worst-first, cap at three, and stack shared anchors", async () => {
+  const chem = (id, label) => [id, { label, entity_id: `sensor.${id}`, group: "chemistry", min: 100, max: 200, enabled: true }];
+  const panel = await alertRig(Object.fromEntries([
+    chem("alkalinity", "Alk"), chem("calcium", "Ca"), chem("magnesium", "Mg"),
+    ["leak", { label: "Leak", entity_id: "binary_sensor.leak", group: "safety", kind: "binary", enabled: true }],
+  ]), {
+    "sensor.alkalinity": num(999), "sensor.calcium": num(999), "sensor.magnesium": num(999),
+    "binary_sensor.leak": { state: "on", attributes: { device_class: "moisture" } },
+  });
+  const alerts = panel._diagramAlerts("sump");
+  assertEqual(alerts.length, 3, "capped at three");
+  const ys = alerts.filter((a) => a.x === 420).map((a) => a.y);
+  assertEqual(new Set(ys).size, ys.length, "shared chemistry anchor stacks instead of overlapping");
+});
+
+test("room-air readings and the showAlerts gate keep markers off the tank", async () => {
+  const roomy = await alertRig({
+    room_temp: { label: "Fish Room", entity_id: "sensor.room", group: "room", min: 18, max: 24, enabled: true },
+  }, { "sensor.room": num(99) });
+  assertEqual(roomy._diagramAlerts("sump").length, 0, "room air has no home on the tank");
+  const gatedCfg = structuredClone(RIG);
+  gatedCfg.diagram.showAlerts = false;
+  gatedCfg.sensors = { leak: { label: "Leak", entity_id: "binary_sensor.leak", group: "safety", kind: "binary", enabled: true } };
+  const gated = await prepAsync(gatedCfg, { "binary_sensor.leak": { state: "on", attributes: { device_class: "moisture" } } });
+  assertEqual(gated._diagramAlerts("sump").length, 0, "toggle off means no markers at all");
 });
 
 // --- the Diagram tab --------------------------------------------------------

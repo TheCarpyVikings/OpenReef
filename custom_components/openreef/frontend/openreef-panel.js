@@ -1297,6 +1297,9 @@ class OpenReefPanel extends HTMLElement {
         } else if (!this._diagramArranging && id === "awc-station") {
           this._activeTab = "awc";
           this._render();
+        } else if (!this._diagramArranging && id && id.startsWith("sensor:")) {
+          this._activeTab = "live";
+          this._render();
         }
       }
       if (action === "pulse-unfocus") this._closePulseFocus();
@@ -13842,6 +13845,18 @@ class OpenReefPanel extends HTMLElement {
           .dg-part { fill: #9fd8ce; }
           .dg-fish { fill: #31536b; opacity: .8; }
           @keyframes dg-spin { to { transform: rotate(360deg); } }
+          @keyframes dg-alertpulse { 0%, 100% { transform: scale(.65); opacity: .9; } 50% { transform: scale(1.3); opacity: .2; } }
+          .dg-alert-ring { fill: none; stroke-width: 3; transform-box: fill-box; transform-origin: center; animation: dg-alertpulse 1.7s ease-in-out infinite; }
+          .dg-alert.critical .dg-alert-ring { animation-duration: .95s; }
+          .dg-alert.warning .dg-alert-ring, .dg-alert.warning .dg-alert-line { stroke: #f59e0b; }
+          .dg-alert.warning .dg-alert-core { fill: #f59e0b; }
+          .dg-alert.critical .dg-alert-ring, .dg-alert.critical .dg-alert-line { stroke: #ef4444; }
+          .dg-alert.critical .dg-alert-core { fill: #ef4444; }
+          .dg-alert-line { stroke-width: 1.5; opacity: .6; }
+          .dg-alert-pill { fill: rgba(4, 10, 16, .82); stroke-width: 1.5; }
+          .dg-alert.warning .dg-alert-pill { stroke: rgba(245, 158, 11, .6); }
+          .dg-alert.critical .dg-alert-pill { stroke: rgba(239, 68, 68, .65); }
+          .dg-alert-text { font-size: 13.5px; font-weight: 700; fill: #f4fbff; letter-spacing: .03em; }
           .dg-awc-fill .dg-flow, .dg-awc-drain .dg-flow { opacity: 0; animation-play-state: paused; transition: opacity .6s ease; }
           svg.dg-awc-filling .dg-awc-fill .dg-flow, .dg-awc-filling .dg-awc-fill .dg-flow { opacity: .85; animation-play-state: running; }
           svg.dg-awc-draining .dg-awc-drain .dg-flow, .dg-awc-draining .dg-awc-drain .dg-flow { opacity: .85; animation-play-state: running; }
@@ -13856,7 +13871,7 @@ class OpenReefPanel extends HTMLElement {
           .dg-halo { fill: none; stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2; stroke-dasharray: 6 6; opacity: 0; transition: opacity .25s ease; }
           .dg-lifted { opacity: .92; }
           @media (prefers-reduced-motion: reduce) {
-            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow { animation: none !important; }
+            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring { animation: none !important; }
           }
         </style>
         <defs>
@@ -13893,6 +13908,86 @@ class OpenReefPanel extends HTMLElement {
         </defs>
         ${scene.body}
       </svg>`;
+  }
+
+  // ---- Spatial alerts: problems light up where they physically are -------
+  // Warning/critical sensors get a pulsing marker at the spot on the schematic
+  // where that reading lives — leak at the cabinet base, temp at the display
+  // water, chemistry at the probe cluster in the sump. Worst first, capped at
+  // three so the wall points rather than shouts.
+
+  _diagramAlertAnchors(systemType) {
+    if (systemType === "aio") {
+      return {
+        leak: [800, 916], temp: [900, 330], sump_temp: [1177, 500],
+        flow: [1140, 216], par: [800, 158], high_water: [1253, 300], low_water: [1253, 300],
+        dissolved_oxygen: [640, 300],
+        "group:chemistry": [470, 540], "group:safety": [800, 916],
+        "group:water": [1253, 300], "group:flow": [1140, 216],
+        "group:lighting": [800, 158], "group:tank": [900, 330], "group:sump": [1177, 500],
+      };
+    }
+    return {
+      leak: [700, 926], temp: [980, 280], sump_temp: [666, 730],
+      flow: [132, 380], par: [700, 78], high_water: [1186, 220], low_water: [1186, 220],
+      dissolved_oxygen: [620, 240],
+      "group:chemistry": [420, 730], "group:safety": [700, 926],
+      "group:water": [1186, 220], "group:flow": [132, 380],
+      "group:lighting": [700, 78], "group:tank": [980, 280], "group:sump": [666, 730],
+    };
+  }
+
+  _diagramAlerts(systemType) {
+    if (this._diagramCfg().showAlerts === false) return [];
+    const anchors = this._diagramAlertAnchors(systemType);
+    const out = [];
+    for (const [id, sensor] of Object.entries(this._config.sensors || {})) {
+      if (!sensor || sensor.enabled === false || !sensor.entity_id) continue;
+      const badge = this._liveStatBadge(id, sensor);
+      if (badge.status !== "warning" && badge.status !== "critical") continue;
+      const anchor = anchors[id] || anchors[`group:${sensor.group}`];
+      if (!anchor) continue; // room-air readings have no home on the tank
+      const value = this._sensorDisplayValue(id, sensor);
+      const unit = this._sensorDisplayUnit(id, sensor);
+      out.push({
+        id, status: badge.status, label: sensor.label || id,
+        value: unit ? `${value} ${unit}` : String(value),
+        x: anchor[0], y: anchor[1],
+      });
+    }
+    out.sort((a, b) => (a.status === b.status ? 0 : a.status === "critical" ? -1 : 1));
+    const seen = new Map();
+    for (const alert of out) {
+      const key = `${alert.x},${alert.y}`;
+      const n = seen.get(key) || 0;
+      seen.set(key, n + 1);
+      alert.y += n * 54; // stack alerts sharing an anchor instead of overlapping
+    }
+    return out.slice(0, 3);
+  }
+
+  _diagAlertsKey(alerts) {
+    return alerts.map((a) => `${a.id}:${a.status}`).join("|");
+  }
+
+  _diagAlertsMarkup(systemType) {
+    const alerts = this._diagramAlerts(systemType);
+    const body = alerts.map((a) => {
+      const text = `${a.label} · ${a.value}`;
+      const w = Math.round(24 + text.length * 7.4);
+      const left = a.x > 800; // pill grows toward the middle of the scene
+      const rx = left ? a.x - 30 - w : a.x + 30;
+      return `
+        <g class="dg-alert ${a.status}" data-action="pulse-focus" data-id="sensor:${this._escape(a.id)}" role="button" tabindex="0" style="cursor:pointer;">
+          <title>${this._escape(text)}</title>
+          <circle cx="${a.x}" cy="${a.y}" r="17" class="dg-alert-ring"></circle>
+          <circle cx="${a.x}" cy="${a.y}" r="6" class="dg-alert-core"></circle>
+          <line x1="${left ? a.x - 24 : a.x + 24}" y1="${a.y}" x2="${left ? rx + w : rx}" y2="${a.y}" class="dg-alert-line"></line>
+          <rect x="${rx}" y="${a.y - 17}" width="${w}" height="34" rx="10" class="dg-alert-pill"></rect>
+          <text x="${rx + 12}" y="${a.y + 5}" class="dg-alert-text">${this._escape(text)}</text>
+        </g>`;
+    }).join("");
+    return `<g data-diag-alerts data-diag-alert-key="${this._escape(this._diagAlertsKey(alerts))}">${body}</g>`;
   }
 
   // ---- AWC on the wall: reservoirs, pumps and change-in-progress flow ----
@@ -14190,6 +14285,7 @@ class OpenReefPanel extends HTMLElement {
     }
 
     parts.push(this._diagAwcSumpMarkup());
+    parts.push(this._diagAlertsMarkup("sump"));
 
     if (arranging) parts.push(this._diagSlotsMarkup("sump", nodes));
 
@@ -14368,6 +14464,7 @@ class OpenReefPanel extends HTMLElement {
     }
 
     parts.push(this._diagAwcAioMarkup());
+    parts.push(this._diagAlertsMarkup("aio"));
 
     if (arranging) parts.push(this._diagSlotsMarkup("aio", nodes));
 
@@ -14419,6 +14516,16 @@ class OpenReefPanel extends HTMLElement {
         badge.style.display = awcLive[badge.getAttribute("data-diag-awc-badge")] ? "" : "none";
       });
       this._diagAwcKickSummary();
+    }
+    // Spatial alerts: swap the marker layer only when the alert SET changes,
+    // so the pulse animation isn't restarted by every value tick.
+    const alertLayer = svg.querySelector("[data-diag-alerts]");
+    if (alertLayer) {
+      const systemType = this._diagramSystemType();
+      const key = this._diagAlertsKey(this._diagramAlerts(systemType));
+      if (alertLayer.getAttribute("data-diag-alert-key") !== key) {
+        alertLayer.outerHTML = this._diagAlertsMarkup(systemType);
+      }
     }
   }
 
@@ -19176,6 +19283,13 @@ class OpenReefPanel extends HTMLElement {
           <span>
             <strong>Allow controls from the wall</strong>
             <small>Tapping gear on the diagram offers a two-step toggle for ARMED equipment only, through the same safety checks as Mission Control. Off = the diagram is look-but-don't-touch.</small>
+          </span>
+        </label>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="diagram" data-field="showAlerts" ${cfg.showAlerts === false ? "" : "checked"}>
+          <span>
+            <strong>Alerts light up where they are</strong>
+            <small>A warning or critical reading pulses at its physical spot — leak at the cabinet base, temperature at the display, chemistry at the probe cluster. Worst first, capped at three.</small>
           </span>
         </label>
         <p class="muted">${mapped.length
