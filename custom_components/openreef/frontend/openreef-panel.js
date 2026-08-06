@@ -13638,12 +13638,14 @@ class OpenReefPanel extends HTMLElement {
         glassL: { kinds: ["wm"], x: 362, y: 400, dir: 1, rect: [332, 366, 110, 68] },
         glassC: { kinds: ["wm"], x: 720, y: 300, dir: 1, rect: [690, 266, 110, 68] },
         ch2: { kinds: ["heater"], x: 1188, y: 430, rect: [1174, 416, 42, 92] },
-        ch3: { kinds: ["heater"], x: 1232, y: 462, rect: [1218, 450, 42, 92] },
+        ch3: { kinds: ["heater"], x: 1222, y: 462, rect: [1208, 450, 42, 92] },
         display: { kinds: ["heater"], x: 420, y: 500, rect: [406, 486, 42, 92] },
         atoMid: { kinds: ["ato"], rect: [1144, 250, 64, 130] },
         atoEnd: { kinds: ["ato"], rect: [1220, 250, 64, 130] },
         airDisplay: { kinds: ["air"], rect: [310, 556, 84, 66] },
         airCh3: { kinds: ["air"], rect: [1218, 588, 64, 66] },
+        doseMedia: { kinds: ["doser"], rect: [1088, 176, 60, 60] },
+        doseReturn: { kinds: ["doser"], rect: [1224, 176, 60, 60] },
       };
     }
     return {
@@ -13676,7 +13678,7 @@ class OpenReefPanel extends HTMLElement {
     const wmDefaults = systemType === "aio" ? ["glassL", "glassC"] : ["glassL", "glassR", "glassC"];
     for (const [id] of nodes.wavemakers) out[`wm:${id}`] = pick(layout[`wm:${id}`], "wm", wmDefaults);
     if (nodes.heater) out.heater = pick(layout.heater, "heater", systemType === "aio" ? ["ch2", "ch3", "display"] : ["sumpReturn", "sumpSkimmer", "weir"]);
-    if (nodes.doser && systemType !== "aio") out.doser = pick(layout.doser, "doser", ["rightShelf", "leftShelf"]);
+    if (nodes.doser) out.doser = pick(layout.doser, "doser", systemType === "aio" ? ["doseMedia", "doseReturn"] : ["rightShelf", "leftShelf"]);
     if (nodes.ato && systemType === "aio") out.ato = pick(layout.ato, "ato", ["atoMid", "atoEnd"]);
     if (nodes.air) out.air = pick(layout.air, "air", systemType === "aio" ? ["airDisplay", "airCh3"] : ["airReturn", "airDisplay"]);
     return out;
@@ -13888,8 +13890,9 @@ class OpenReefPanel extends HTMLElement {
           .dg-alert.critical .dg-alert-pill { stroke: rgba(239, 68, 68, .65); }
           .dg-alert-text { font-size: 13.5px; font-weight: 700; fill: #f4fbff; letter-spacing: .03em; }
           .dg-chip-bg { fill: rgba(4, 10, 16, .62); stroke: rgba(127, 184, 216, .35); stroke-width: 1.5; transition: stroke .4s ease; }
+          @keyframes dg-chippulse { 0%, 100% { stroke-width: 1.5; } 50% { stroke-width: 3.5; } }
           .dg-chip.warning .dg-chip-bg { stroke: rgba(245, 158, 11, .7); }
-          .dg-chip.critical .dg-chip-bg { stroke: rgba(239, 68, 68, .75); }
+          .dg-chip.critical .dg-chip-bg { stroke: rgba(239, 68, 68, .85); animation: dg-chippulse 1.2s ease-in-out infinite; }
           .dg-chip-label { font-size: 11px; font-weight: 700; letter-spacing: .09em; fill: #9fc7e0; }
           .dg-chip-value { font-size: 15px; font-weight: 800; fill: #f4fbff; font-variant-numeric: tabular-nums; }
           @keyframes dg-drip { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: .9; } 90% { transform: translateY(44px); opacity: .7; } 100% { transform: translateY(48px); opacity: 0; } }
@@ -13914,7 +13917,7 @@ class OpenReefPanel extends HTMLElement {
           .dg-halo { fill: none; stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2; stroke-dasharray: 6 6; opacity: 0; transition: opacity .25s ease; }
           .dg-lifted { opacity: .92; }
           @media (prefers-reduced-motion: reduce) {
-            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring { animation: none !important; }
+            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg { animation: none !important; }
           }
         </style>
         <defs>
@@ -13995,9 +13998,13 @@ class OpenReefPanel extends HTMLElement {
   _diagramAlerts(systemType) {
     if (this._diagramCfg().showAlerts === false) return [];
     const anchors = this._diagramAlertAnchors(systemType);
+    // A sensor already on a reading chip announces itself there (the chip
+    // tints and pulses) — a second marker on top would just be clutter.
+    const chipIds = new Set(this._diagramReadings().map((r) => r.id));
     const out = [];
     for (const [id, sensor] of Object.entries(this._config.sensors || {})) {
       if (!sensor || sensor.enabled === false || !sensor.entity_id) continue;
+      if (chipIds.has(id)) continue;
       const badge = this._liveStatBadge(id, sensor);
       if (badge.status !== "warning" && badge.status !== "critical") continue;
       const anchor = anchors[id] || anchors[`group:${sensor.group}`];
@@ -14182,7 +14189,7 @@ class OpenReefPanel extends HTMLElement {
         ${multi ? this._diagAwcCanister({ x: 480, y: 720, w: 90, h: 190, kind: "fresh2", label: "" }) : ""}
         <text x="${multi ? 475 : 425}" y="926" class="dg-lbl dg-lbl-sm" text-anchor="middle">fresh${multi ? " ×2" : ""}</text>
         ${this._diagAwcCanister({ x: 1446, y: 716, w: 84, h: 220, kind: "waste", label: "waste" })}
-        <g class="dg-awc-fill">${this._diagPipeMarkup([[425, 716], [425, 698], [1322, 698], [1322, 176], [1120, 176], [1120, 250]], 9)}${multi ? this._diagPipeMarkup([[525, 716], [525, 698]], 9) : ""}${this._diagAwcPump(500, 698)}</g>
+        <g class="dg-awc-fill">${this._diagPipeMarkup([[425, 716], [425, 698], [1322, 698], [1322, 184], [1120, 184], [1120, 250]], 9)}${multi ? this._diagPipeMarkup([[525, 716], [525, 698]], 9) : ""}${this._diagAwcPump(500, 698)}</g>
         <g class="dg-awc-drain">${this._diagPipeMarkup([[1268, 646], [1268, 706], [1488, 706], [1488, 714]], 9)}${this._diagAwcPump(1330, 706)}</g>
         <circle cx="1516" cy="724" r="5.5" class="dg-dot"></circle>
       </g>`;
@@ -14202,7 +14209,7 @@ class OpenReefPanel extends HTMLElement {
     const kinds = new Set();
     if (nodes.wavemakers.length) kinds.add("wm");
     if (nodes.heater) kinds.add("heater");
-    if (nodes.doser && systemType !== "aio") kinds.add("doser");
+    if (nodes.doser) kinds.add("doser");
     if (nodes.ato && systemType === "aio") kinds.add("ato");
     if (nodes.air) kinds.add("air");
     return Object.entries(slots)
@@ -14524,10 +14531,7 @@ class OpenReefPanel extends HTMLElement {
       <rect x="300" y="660" width="1000" height="26" class="dg-frame"></rect>
       <rect x="316" y="686" width="968" height="244" rx="6" fill="#0d1a2a" stroke="rgba(127,184,216,.18)" stroke-width="2"></rect>
       <line x1="800" y1="700" x2="800" y2="916" stroke="rgba(127,184,216,.12)" stroke-width="2"></line>
-      <line x1="160" y1="940" x2="1540" y2="940" stroke="rgba(127,184,216,.14)" stroke-width="2"></line>
-      <text x="1100" y="712" class="dg-lbl dg-lbl-sm" text-anchor="middle">media</text>
-      <text x="1177" y="712" class="dg-lbl dg-lbl-sm" text-anchor="middle">ato</text>
-      <text x="1253" y="712" class="dg-lbl dg-lbl-sm" text-anchor="middle">return</text>`);
+      <line x1="160" y1="940" x2="1540" y2="940" stroke="rgba(127,184,216,.14)" stroke-width="2"></line>`);
 
     // the loop: surface drift into the comb, chamber cascade, return over the top
     let drift = "";
@@ -14543,18 +14547,19 @@ class OpenReefPanel extends HTMLElement {
         ${this._diagChevMarkup(1177, 440, "u")}
         ${this._diagChevMarkup(1215, 282, "r")}
         ${this._diagChevMarkup(1253, 380, "d")}
-        ${this._diagPipeMarkup([[1253, 560], [1253, 216], [1020, 216], [1020, 258]], 13)}
+        ${this._diagPipeMarkup([[1253, 560], [1253, 170], [1020, 170], [1020, 258]], 13)}
         <g class="dg-jet">
           <path d="M 1020 264 L 956 306 M 1020 266 L 992 320 M 1020 262 L 938 284" fill="none"></path>
         </g>
       </g>`);
 
-    // media basket in chamber 1 (static furniture, sock on top)
+    // media basket fills chamber 1, floss riding high so the overflow feeds it
     parts.push(`
-      <rect x="1072" y="330" width="56" height="90" rx="6" class="dg-shell"></rect>
-      <line x1="1072" y1="360" x2="1128" y2="360" class="dg-line" opacity=".6"></line>
-      <line x1="1072" y1="390" x2="1128" y2="390" class="dg-line" opacity=".6"></line>
-      <path d="M 1074 332 h 52 l -5 22 h -42 Z" class="dg-sock"></path>`);
+      <rect x="1070" y="258" width="62" height="172" rx="6" class="dg-shell"></rect>
+      <line x1="1070" y1="322" x2="1132" y2="322" class="dg-line" opacity=".6"></line>
+      <line x1="1070" y1="362" x2="1132" y2="362" class="dg-line" opacity=".6"></line>
+      <line x1="1070" y1="400" x2="1132" y2="400" class="dg-line" opacity=".6"></line>
+      <path d="M 1072 260 h 58 l -5 26 h -48 Z" class="dg-sock"></path>`);
 
     // return pump in chamber 3
     if (nodes.ret) {
@@ -14572,20 +14577,23 @@ class OpenReefPanel extends HTMLElement {
       parts.push(`<rect x="1229" y="560" width="48" height="44" rx="8" class="dg-shell" opacity=".45"></rect>`);
     }
 
-    // nano skimmer in chamber 2, if one is mapped
+    // nano skimmer in chamber 2 — the collection cup rides above the waterline,
+    // where a real cup lives
     if (nodes.skimmer) {
       const [id, item] = nodes.skimmer;
       let bubbles = "";
       for (let i = 0; i < 4; i++) {
-        bubbles += `<circle cx="${1154 + (i % 2) * 10}" cy="${540 - (i % 2) * 8}" r="${2.4 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+        bubbles += `<circle cx="${1156 + (i % 2) * 10}" cy="${540 - (i % 2) * 8}" r="${2.4 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
       }
       parts.push(this._diagNodeMarkup({
         kind: "dg-skimmer", focusId: `equip:${id}`, state: this._diagramNodeState(item),
         title: `${item.label || id} — protein skimmer`,
-        dot: [1174, 320], hit: [1142, 316, 42, 250],
+        dot: [1184, 206], hit: [1142, 194, 44, 370],
         art: `
-          <rect x="1148" y="380" width="30" height="180" rx="8" class="dg-shell"></rect>
-          <rect x="1146" y="330" width="34" height="42" rx="8" class="dg-box"></rect>
+          <rect x="1148" y="270" width="30" height="290" rx="8" class="dg-shell"></rect>
+          <rect x="1156" y="236" width="14" height="38" class="dg-shell"></rect>
+          <rect x="1146" y="198" width="34" height="40" rx="8" class="dg-box"></rect>
+          <ellipse cx="1163" cy="208" rx="12" ry="4" class="dg-foam dg-onart"></ellipse>
           ${bubbles}`,
       }));
     }
@@ -14626,12 +14634,16 @@ class OpenReefPanel extends HTMLElement {
       }));
     }
 
-    // doser on a right-hand shelf, tubes over the rim into chamber 1
+    // doser on a right-hand shelf. The tube exits the TOP of the station and
+    // runs over the tank rim in its own lane, so it never crosses the ATO run.
+    // The drop point is a slot: media chamber, or the high-flow return chamber
+    // (where kalk wants to be) — drag the station's drip between them.
     if (nodes.doser) {
       const sx = 1360;
       const top = 668 - (46 + nodes.doser.length * 38);
-      const tubeY = top + 34;
-      parts.push(this._diagTubeMarkup([[sx + 12, tubeY], [1310, tubeY], [1310, 166], [1101, 166], [1101, 250]]));
+      const doseReturn = layout.doser === "doseReturn";
+      const dropX = doseReturn ? 1240 : 1101;
+      parts.push(this._diagTubeMarkup([[1400, top], [1400, 132], [dropX, 132], [dropX, 250]]));
       const heads = nodes.doser.map(([, ch], i) => {
         const hy = top + 26 + i * 38;
         const name = this._doserChemicalLabel(ch.chemical) || ch.name || `D${i + 1}`;
@@ -14641,14 +14653,15 @@ class OpenReefPanel extends HTMLElement {
           <text x="${sx + 74}" y="${hy + 4}" class="dg-lbl dg-lbl-sm">${this._escape(String(name).slice(0, 8).toUpperCase())}</text>`;
       }).join("");
       parts.push(this._diagNodeMarkup({
-        kind: "dg-doser", focusId: "doser-station",
+        kind: "dg-doser", focusId: "doser-station", dragKey: "doser",
         state: nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off",
-        title: `Dosing pumps — ${nodes.doser.length} channel${nodes.doser.length === 1 ? "" : "s"}`,
+        title: `Dosing pumps — ${nodes.doser.length} channel${nodes.doser.length === 1 ? "" : "s"}, dripping into the ${doseReturn ? "high-flow return" : "media"} chamber`,
         dot: [sx + 160, top + 12], hit: [sx, top - 8, 190, 690 - top],
         art: `
           <rect x="${sx}" y="668" width="190" height="8" rx="3" class="dg-metal" opacity=".5"></rect>
           <rect x="${sx + 10}" y="${top}" width="160" height="${668 - top}" rx="12" class="dg-box"></rect>
-          ${heads}`,
+          ${heads}
+          <rect x="${sx + 4}" y="${top - 4}" width="182" height="${680 - top}" rx="12" class="dg-halo"></rect>`,
       }));
     }
 
@@ -14669,8 +14682,8 @@ class OpenReefPanel extends HTMLElement {
           <rect x="1348" y="712" width="92" height="228" rx="10" class="dg-halo"></rect>`,
       }));
       parts.push(`<g class="dg-ato-run">${this._diagTubeMarkup(fillEnd
-        ? [[1394, 714], [1394, 700], [1336, 700], [1336, 246], [1306, 246]]
-        : [[1394, 714], [1394, 700], [1336, 700], [1336, 148], [1177, 148], [1177, 262]], true)}</g>`);
+        ? [[1394, 714], [1394, 700], [1336, 700], [1336, 148], [1272, 148], [1272, 248]]
+        : [[1394, 714], [1394, 700], [1336, 700], [1336, 148], [1196, 148], [1196, 262]], true)}</g>`);
       parts.push(`<text x="1394" y="962" class="dg-lbl">ato</text>`);
     }
 
@@ -14736,12 +14749,13 @@ class OpenReefPanel extends HTMLElement {
       }));
     }
 
-    // dose drips where the tube crests into chamber 1
+    // dose drips at whichever chamber the tube crests into
     if (nodes.doser) {
+      const dripX = layout.doser === "doseReturn" ? 1240 : 1101;
       parts.push(`
         <g class="dg-dose">
-          <circle cx="1101" cy="256" r="3.4"></circle>
-          <circle cx="1101" cy="256" r="3" style="animation-delay:.5s"></circle>
+          <circle cx="${dripX}" cy="256" r="3.4"></circle>
+          <circle cx="${dripX}" cy="256" r="3" style="animation-delay:.5s"></circle>
         </g>`);
     }
 

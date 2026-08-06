@@ -110,7 +110,9 @@ test("sump scene shows sump chambers; AiO shows back chambers instead", async ()
   cfg.diagram.systemType = "aio";
   const aio = prep(await makePanel(cfg), ALL_ON);
   const aioSvg = aio._pulseDiagramSvg();
-  assert(aioSvg.includes(">media<") && !aioSvg.includes(">refugium<"), "AiO draws back chambers, not a sump");
+  assert(!aioSvg.includes(">refugium<") && !aioSvg.includes(">sock<"), "AiO draws back chambers, not a sump");
+  // Chamber labels were retired in 0.7.20 — the gear says what each section is.
+  assert(!aioSvg.includes(">media<"), "no static chamber captions");
   assert(aioSvg.includes("all-in-one"), "aria label says what it is");
 });
 
@@ -337,10 +339,44 @@ test("alerts sort worst-first, cap at three, and stack shared anchors", async ()
     "sensor.alkalinity": num(999), "sensor.calcium": num(999), "sensor.magnesium": num(999),
     "binary_sensor.leak": { state: "on", attributes: { device_class: "moisture" } },
   });
+  // Pure marker behaviour: chips off, so chip dedupe doesn't absorb these.
+  panel._config.diagram.showReadings = false;
   const alerts = panel._diagramAlerts("sump");
   assertEqual(alerts.length, 3, "capped at three");
   const ys = alerts.filter((a) => a.x === 420).map((a) => a.y);
   assertEqual(new Set(ys).size, ys.length, "shared chemistry anchor stacks instead of overlapping");
+});
+
+test("a sensor already on a chip pulses there — no duplicate marker on top", async () => {
+  const sensors = {
+    ph: { label: "pH Level", entity_id: "sensor.ph", group: "chemistry", min: 7.9, max: 8.4, enabled: true },
+    leak: { label: "Leak", entity_id: "binary_sensor.leak", group: "safety", kind: "binary", enabled: true },
+  };
+  const states = {
+    "sensor.ph": num(7.2),
+    "binary_sensor.leak": { state: "on", attributes: { device_class: "moisture" } },
+  };
+  const chipped = await alertRig(sensors, states);
+  const ids = chipped._diagramAlerts("sump").map((a) => a.id);
+  assert(!ids.includes("ph"), "chip'd pH raises no marker — the chip tints instead");
+  assert(ids.includes("leak"), "leak still gets its spatial marker");
+  const noChips = await alertRig(sensors, states);
+  noChips._config.diagram.showReadings = false;
+  assert(noChips._diagramAlerts("sump").map((a) => a.id).includes("ph"), "chips off -> the marker returns");
+});
+
+test("AiO doser drop is a slot: media chamber default, high-flow return by choice", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.systemType = "aio";
+  const def = prep(await makePanel(cfg), ALL_ON);
+  assertEqual(def._diagramResolvedLayout("aio", def._diagramNodes()).doser, "doseMedia");
+  assert(def._pulseDiagramSvg().includes("dripping into the media chamber"), "default described");
+  cfg.diagram.layout = { doser: "doseReturn" };
+  const highFlow = prep(await makePanel(cfg), ALL_ON);
+  assertEqual(highFlow._diagramResolvedLayout("aio", highFlow._diagramNodes()).doser, "doseReturn");
+  assert(highFlow._pulseDiagramSvg().includes("dripping into the high-flow return chamber"), "kalk-friendly drop described");
+  const sump = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  assertEqual(sump._diagramResolvedLayout("sump", sump._diagramNodes()).doser, "rightShelf", "sump keeps its shelf slots");
 });
 
 test("room-air readings and the showAlerts gate keep markers off the tank", async () => {
