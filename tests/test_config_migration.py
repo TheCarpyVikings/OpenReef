@@ -634,6 +634,8 @@ def test_diagram_defaults_injected():
 
 
 def test_diagram_scape_whitelisted():
+    config = normalise({"diagram": {"scape": "arch"}})
+    assert config["diagram"]["scape"] == "arch"
     config = normalise({"diagram": {"scape": "twinpeaks"}})
     assert config["diagram"]["scape"] == "twinpeaks"
     config = normalise({"diagram": {"scape": "atlantis"}})

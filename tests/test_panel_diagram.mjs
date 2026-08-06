@@ -758,14 +758,30 @@ test("scapes move the rock and the slots, but placements survive the switch", as
   const twinSlots = twinPanel._diagramCoralSlots("sump");
   assert(islandSlots.spsPeak.x !== twinSlots.spsPeak.x, "same id, different rock");
   assertEqual(twinPanel._diagramCoralLayout("sump", twinPanel._diagramCorals())["coral:s"], "spsPeak", "stored slot survives the scape change");
-  const slope = structuredClone(cfg);
-  slope.diagram.scape = "slope";
-  const slopePanel = prep(await makePanel(slope), ALL_ON);
-  assert(slopePanel._pulseDiagramSvg().length > 1000, "slope scene renders");
-  assert(prep(await makePanel(twin), ALL_ON)._pulseDiagramSvg().length > 1000, "twin peaks scene renders");
+  for (const scape of ["slope", "arch", "pillars", "peninsula", "valley", "twinpeaks"]) {
+    const sc = structuredClone(cfg);
+    sc.diagram.scape = scape;
+    const p = prep(await makePanel(sc), ALL_ON);
+    for (const sys of ["sump", "aio"]) {
+      const slots = p._diagramCoralSlots(sys);
+      assertEqual(Object.keys(slots).length, 12, `${scape}/${sys} keeps the full slot set`);
+    }
+    p._config.diagram.systemType = "aio";
+    assert(p._pulseDiagramSvg().length > 1000, `${scape} AiO scene renders`);
+    p._config.diagram.systemType = "sump";
+    assert(p._pulseDiagramSvg().length > 1000, `${scape} sump scene renders`);
+  }
   const junk = structuredClone(cfg);
   junk.diagram.scape = "atlantis";
   assertEqual(prep(await makePanel(junk), ALL_ON)._diagramScape(), "island", "unknown scape falls back");
+});
+
+test("the arch keeps its cave", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.scape = "arch";
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const svg = panel._pulseDiagramSvg();
+  assert(svg.includes('fill="#081522"'), "the cave shadow is drawn at one end of the arch");
 });
 
 test("colour spacing: same-coloured colonies spread across the rock", async () => {

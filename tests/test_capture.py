@@ -116,6 +116,81 @@ def test_camera_io_guard_blocks_overlap_and_releases():
     mark_camera_io_finished(hass, "camera.x")
 
 
+# --- coral photo upload (Reef Layer) ----------------------------------------
+# The upload handler shares the captures store. Its guards are the point:
+# unknown corals, non-base64, and non-JPEG/PNG payloads must all bounce, and a
+# good upload must write the file AND pin the URL onto the persisted coral.
+
+def test_coral_photo_upload_saves_and_pins_url():
+    import base64 as _b64
+    import tempfile
+    from _fake_ha import FakeConnection, run
+
+    cfg = integration._normalise_core_config(
+        {"livestock": {"corals": {"torchy": {"name": "Torchy", "species": "torch"}}}}
+    )
+    tmp = tempfile.mkdtemp(prefix="openreef_coral_")
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry], config_dir=tmp)
+
+    async def _noop_register(_hass):
+        return None
+
+    original = integration._async_register_captures_path
+    integration._async_register_captures_path = _noop_register
+    try:
+        jpeg = b"\xff\xd8\xff\xe0" + b"reefbytes" * 8
+        image = "data:image/jpeg;base64," + _b64.b64encode(jpeg).decode()
+        conn = FakeConnection()
+        run(integration.websocket_coral_photo_upload(
+            hass, conn, {"id": 1, "type": "openreef/coral_photo_upload", "coralId": "torchy", "image": image}
+        ))
+        assert not conn.errors, conn.errors
+        url = conn.results[0].payload["url"]
+        assert url.startswith(f"{integration.CAPTURES_STATIC_URL}/corals/torchy.jpg?v=")
+        saved = os.path.join(tmp, integration.CAPTURES_DIR_NAME, "corals", "torchy.jpg")
+        with open(saved, "rb") as fh:
+            assert fh.read() == jpeg
+        persisted = conn.results[0].payload["config"]["livestock"]["corals"]["torchy"]["photoUrl"]
+        assert persisted == url, "URL must survive the normaliser round-trip"
+    finally:
+        integration._async_register_captures_path = original
+
+
+def test_coral_photo_upload_rejects_junk():
+    import base64 as _b64
+    import tempfile
+    from _fake_ha import FakeConnection, run
+
+    cfg = integration._normalise_core_config(
+        {"livestock": {"corals": {"torchy": {"species": "torch"}}}}
+    )
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry], config_dir=tempfile.mkdtemp(prefix="openreef_coral_"))
+
+    async def _noop_register(_hass):
+        return None
+
+    original = integration._async_register_captures_path
+    integration._async_register_captures_path = _noop_register
+    try:
+        gif = "data:image/gif;base64," + _b64.b64encode(b"GIF89a....").decode()
+        cases = [
+            ({"coralId": "ghost", "image": "data:image/jpeg;base64,AAAA"}, "unknown_coral"),
+            ({"coralId": "torchy", "image": "data:image/jpeg;base64,@@not-base64@@"}, "bad_image"),
+            ({"coralId": "torchy", "image": gif}, "bad_image"),
+        ]
+        for extra, code in cases:
+            conn = FakeConnection()
+            run(integration.websocket_coral_photo_upload(
+                hass, conn, {"id": 1, "type": "openreef/coral_photo_upload", **extra}
+            ))
+            assert conn.error_codes == [code], f"{extra} -> {conn.error_codes}"
+            assert not conn.results
+    finally:
+        integration._async_register_captures_path = original
+
+
 # --- tiny standalone runner -------------------------------------------------
 
 def _main() -> int:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import logging
 import math
 import re
@@ -8344,6 +8345,69 @@ async def websocket_update_config_alias(
 
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): "openreef/coral_photo_upload",
+        vol.Required("coralId"): str,
+        vol.Required("image"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_coral_photo_upload(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Save a coral photo into the captures store and pin it to the coral.
+
+    The panel downscales client-side (canvas, ≤1280px JPEG) before sending a
+    data-URL, so the payload stays well under websocket limits. The coral id is
+    trusted only after it round-trips the normalised registry — which enforces
+    the [A-Za-z0-9_-] slug shape, making it path-safe by construction.
+    """
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    coral_id = msg["coralId"]
+    corals = (config.get("livestock") or {}).get("corals") or {}
+    if coral_id not in corals:
+        connection.send_error(msg["id"], "unknown_coral", "No such coral in the registry")
+        return
+    raw = msg["image"]
+    if raw.startswith("data:"):
+        _, _, raw = raw.partition(",")
+    try:
+        blob = base64.b64decode(raw, validate=True)
+    except (ValueError, binascii.Error):
+        connection.send_error(msg["id"], "bad_image", "Image is not valid base64")
+        return
+    if len(blob) > 3_000_000:
+        connection.send_error(msg["id"], "too_large", "Photo is over 3 MB even after resizing")
+        return
+    if blob.startswith(b"\xff\xd8\xff"):
+        ext = "jpg"
+    elif blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        ext = "png"
+    else:
+        connection.send_error(msg["id"], "bad_image", "Only JPEG or PNG photos are supported")
+        return
+    await _async_register_captures_path(hass)
+    corals_dir = _captures_dir(hass) / "corals"
+    filename = f"{coral_id}.{ext}"
+
+    def _write() -> None:
+        corals_dir.mkdir(parents=True, exist_ok=True)
+        (corals_dir / filename).write_bytes(blob)
+
+    await hass.async_add_executor_job(_write)
+    # Stable filename per coral; the ?v= stamp busts the browser cache on replace.
+    url = f"{CAPTURES_STATIC_URL}/corals/{filename}?v={int(datetime.now(timezone.utc).timestamp())}"
+    corals[coral_id]["photoUrl"] = url
+    saved = await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"success": True, "url": url, "config": saved})
+
+
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): "openreef/search_entities",
         vol.Required("target"): dict,
         vol.Optional("limit", default=SEARCH_LIMIT): vol.All(
@@ -13011,6 +13075,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_get_config)
     websocket_api.async_register_command(hass, websocket_save_config)
     websocket_api.async_register_command(hass, websocket_update_config_alias)
+    websocket_api.async_register_command(hass, websocket_coral_photo_upload)
     websocket_api.async_register_command(hass, websocket_search_entities)
     websocket_api.async_register_command(hass, websocket_validate_config)
     websocket_api.async_register_command(hass, websocket_validate_mappings_alias)

@@ -1308,9 +1308,15 @@ class OpenReefPanel extends HTMLElement {
       if (action === "close-coral") { this._coralFocus = null; this._render(); }
       if (action === "coral-add") {
         const name = (this.shadowRoot.getElementById("or-coral-name")?.value || "").trim();
-        const species = this.shadowRoot.getElementById("or-coral-species")?.value || "zoa";
-        const colour = this.shadowRoot.getElementById("or-coral-colour")?.value || "purple";
-        this._addCoral(name, species, colour);
+        this._coralPickName = "";
+        this._addCoral(name, this._coralPickSpecies || "zoa", this._coralPickColour || "purple");
+      }
+      if (action === "coral-pick-species" || action === "coral-pick-colour") {
+        // Re-rendering would wipe a half-typed name — stash it first.
+        this._coralPickName = this.shadowRoot.getElementById("or-coral-name")?.value ?? this._coralPickName;
+        if (action === "coral-pick-species") this._coralPickSpecies = id;
+        else this._coralPickColour = id;
+        this._render();
       }
       if (action === "coral-remove") this._removeCoral(id);
       if (action === "coral-starter") this._addStarterReef();
@@ -1709,6 +1715,12 @@ class OpenReefPanel extends HTMLElement {
           coral.notes = String(target.value || "").slice(0, 500);
           this._setDirty(true);
         }
+        return;
+      }
+      if (target.dataset.coralUpload != null) {
+        const file = target.files && target.files[0];
+        if (file) this._uploadCoralPhoto(target.dataset.coralUpload, file);
+        target.value = "";
         return;
       }
       if (target.dataset.coralPhoto != null) {
@@ -13774,20 +13786,31 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _coralZone(species) {
-    if (["staghorn", "plate", "table", "birdsnest"].includes(species)) return "sps";
-    if (["torch", "hammer", "bubble", "duncan", "brain", "anemone"].includes(species)) return "lps";
+    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora"].includes(species)) return "sps";
+    if (["torch", "hammer", "frogspawn", "bubble", "duncan", "candycane", "goniopora", "chalice", "brain", "anemone"].includes(species)) return "lps";
     if (species === "gorgonian") return "fan";
     return "soft";
+  }
+
+  _coralSpeciesList() {
+    return ["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora",
+      "torch", "hammer", "frogspawn", "bubble", "duncan", "candycane",
+      "goniopora", "chalice", "brain", "anemone",
+      "zoa", "mushroom", "ricordea", "xenia", "gsp", "kenyatree",
+      "toadstool", "acan", "clam", "gorgonian"];
   }
 
   _coralSpeciesLabel(species) {
     return {
       staghorn: "Staghorn acropora", plate: "Plating montipora", table: "Table acropora",
-      birdsnest: "Birdsnest coral", torch: "Torch coral", hammer: "Hammer coral",
-      bubble: "Bubble coral", duncan: "Duncan coral", brain: "Brain coral",
+      birdsnest: "Birdsnest coral", digitata: "Montipora digitata", stylophora: "Stylophora",
+      torch: "Torch coral", hammer: "Hammer coral", frogspawn: "Frogspawn",
+      bubble: "Bubble coral", duncan: "Duncan coral", candycane: "Candy cane coral",
+      goniopora: "Goniopora", chalice: "Chalice coral", brain: "Brain coral",
       anemone: "Bubble-tip anemone", zoa: "Zoanthid colony", mushroom: "Mushroom corals",
-      xenia: "Pulsing xenia", toadstool: "Toadstool leather", acan: "Acan colony",
-      gorgonian: "Gorgonian fan",
+      ricordea: "Ricordea", xenia: "Pulsing xenia", gsp: "Green star polyps",
+      kenyatree: "Kenya tree", toadstool: "Toadstool leather", acan: "Acan colony",
+      clam: "Maxima clam", gorgonian: "Gorgonian fan",
     }[species] || "Coral";
   }
 
@@ -13795,18 +13818,39 @@ class OpenReefPanel extends HTMLElement {
   // survives switching — only the rock and the coordinates change.
   _diagramScape() {
     const s = this._diagramCfg().scape;
-    return s === "twinpeaks" || s === "slope" ? s : "island";
+    return ["twinpeaks", "slope", "arch", "pillars", "peninsula", "valley"].includes(s) ? s : "island";
   }
 
   _diagScapeRock(systemType) {
     const scape = this._diagramScape();
+    const rock = (d) => `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="${d}"></path>`;
     if (systemType === "aio") {
       if (scape === "twinpeaks") return this._diagRockMarkup(430, 620, 330) + this._diagRockMarkup(830, 620, 170, 0.62);
-      if (scape === "slope") return `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="M 430 620 L 430 500 Q 480 458 540 466 Q 620 478 690 510 Q 780 550 860 585 Q 910 605 950 620 Z"></path>`;
+      if (scape === "slope") return rock("M 430 620 L 430 500 Q 480 458 540 466 Q 620 478 690 510 Q 780 550 860 585 Q 910 605 950 620 Z");
+      if (scape === "arch") return rock("M 480 620 L 492 470 Q 496 455 520 452 Q 544 455 548 470 L 560 620 Z")
+        + rock("M 760 620 L 772 470 Q 776 455 810 452 Q 844 455 848 470 L 872 620 Z")
+        + rock("M 470 470 Q 520 430 664 424 Q 810 430 860 470 L 848 492 Q 810 458 664 452 Q 520 458 482 492 Z")
+        + `<ellipse cx="815" cy="592" rx="32" ry="26" fill="#081522" opacity=".95"></ellipse>`;
+      if (scape === "pillars") return rock("M 480 620 L 490 480 Q 494 464 516 462 Q 538 464 542 480 L 552 620 Z")
+        + rock("M 660 620 L 668 520 Q 672 506 692 504 Q 712 506 716 520 L 724 620 Z")
+        + rock("M 840 620 L 848 550 Q 852 538 870 536 Q 888 538 892 550 L 900 620 Z");
+      if (scape === "peninsula") return rock("M 303 620 L 303 520 Q 360 490 440 488 Q 570 492 650 520 Q 700 545 715 580 Q 725 600 730 620 Z");
+      if (scape === "valley") return rock("M 303 620 L 303 470 Q 350 450 420 470 Q 480 500 500 560 Q 510 590 512 620 Z")
+        + rock("M 1058 620 L 1058 500 Q 1010 482 950 500 Q 890 525 870 570 Q 862 596 860 620 Z");
       return this._diagRockMarkup(430, 620, 520);
     }
     if (scape === "twinpeaks") return this._diagRockMarkup(330, 465, 380) + this._diagRockMarkup(790, 465, 160, 0.62);
-    if (scape === "slope") return `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="M 330 465 L 330 352 Q 375 315 440 322 Q 520 332 590 360 Q 690 398 790 428 Q 870 448 950 465 Z"></path>`;
+    if (scape === "slope") return rock("M 330 465 L 330 352 Q 375 315 440 322 Q 520 332 590 360 Q 690 398 790 428 Q 870 448 950 465 Z");
+    if (scape === "arch") return rock("M 420 465 L 430 335 Q 434 320 458 318 Q 482 320 486 335 L 496 465 Z")
+      + rock("M 690 465 L 700 335 Q 704 320 738 318 Q 772 320 776 335 L 800 465 Z")
+      + rock("M 410 335 Q 455 295 600 290 Q 745 295 790 335 L 778 356 Q 745 322 600 318 Q 455 322 422 356 Z")
+      + `<ellipse cx="742" cy="438" rx="30" ry="24" fill="#081522" opacity=".95"></ellipse>`;
+    if (scape === "pillars") return rock("M 400 465 L 410 330 Q 414 315 436 313 Q 458 315 462 330 L 472 465 Z")
+      + rock("M 580 465 L 588 372 Q 592 358 612 356 Q 632 358 636 372 L 644 465 Z")
+      + rock("M 760 465 L 768 400 Q 772 388 790 386 Q 808 388 812 400 L 820 465 Z");
+    if (scape === "peninsula") return rock("M 175 465 L 175 350 Q 230 322 310 320 Q 440 324 520 352 Q 570 377 585 412 Q 595 435 600 465 Z");
+    if (scape === "valley") return rock("M 175 465 L 175 330 Q 220 312 285 330 Q 340 355 360 405 Q 370 435 372 465 Z")
+      + rock("M 1148 465 L 1148 335 Q 1100 318 1040 335 Q 985 360 968 405 Q 960 435 958 465 Z");
     return this._diagRockMarkup(330, 465, 620);
   }
 
@@ -13862,6 +13906,30 @@ class OpenReefPanel extends HTMLElement {
         softL: [700, 600], softR: [915, 608], softSand: [985, 648],
         fanBack: [455, 545], flexA: [795, 565], flexB: [855, 595],
       });
+      if (scape === "arch") return mk({
+        spsPeak: [664, 428], spsL: [540, 440], spsR: [790, 440],
+        lpsL: [610, 430], lpsMid: [730, 432], lpsR: [890, 566],
+        softL: [446, 600], softR: [908, 606], softSand: [664, 640],
+        fanBack: [450, 560], flexA: [525, 585], flexB: [745, 592],
+      });
+      if (scape === "pillars") return mk({
+        spsPeak: [516, 466], spsL: [692, 508], spsR: [870, 540],
+        lpsL: [470, 540], lpsMid: [640, 570], lpsR: [912, 580],
+        softL: [450, 610], softR: [930, 610], softSand: [600, 645],
+        fanBack: [770, 612], flexA: [560, 590], flexB: [800, 606],
+      });
+      if (scape === "peninsula") return mk({
+        spsPeak: [440, 492], spsL: [360, 498], spsR: [540, 500],
+        lpsL: [330, 560], lpsMid: [600, 528], lpsR: [665, 560],
+        softL: [390, 590], softR: [700, 606], softSand: [780, 648],
+        fanBack: [500, 545], flexA: [470, 580], flexB: [620, 585],
+      });
+      if (scape === "valley") return mk({
+        spsPeak: [375, 462], spsL: [1000, 492], spsR: [935, 502],
+        lpsL: [445, 502], lpsMid: [890, 560], lpsR: [330, 530],
+        softL: [480, 588], softR: [872, 592], softSand: [686, 648],
+        fanBack: [520, 604], flexA: [410, 545], flexB: [950, 560],
+      });
       return mk({
         spsPeak: [773, 500], spsL: [565, 522], spsR: [846, 526],
         lpsL: [492, 598], lpsMid: [660, 524], lpsR: [900, 574],
@@ -13880,6 +13948,30 @@ class OpenReefPanel extends HTMLElement {
       lpsL: [425, 382], lpsMid: [510, 395], lpsR: [610, 398],
       softL: [590, 445], softR: [800, 435], softSand: [870, 455],
       fanBack: [352, 395], flexA: [665, 415], flexB: [720, 440],
+    });
+    if (scape === "arch") return mk({
+      spsPeak: [600, 294], spsL: [475, 306], spsR: [725, 306],
+      lpsL: [540, 300], lpsMid: [662, 300], lpsR: [825, 420],
+      softL: [385, 450], softR: [835, 452], softSand: [600, 455],
+      fanBack: [388, 415], flexA: [462, 430], flexB: [668, 438],
+    });
+    if (scape === "pillars") return mk({
+      spsPeak: [436, 317], spsL: [612, 360], spsR: [790, 390],
+      lpsL: [385, 390], lpsMid: [560, 420], lpsR: [838, 432],
+      softL: [370, 458], softR: [858, 456], softSand: [520, 458],
+      fanBack: [690, 458], flexA: [482, 440], flexB: [722, 450],
+    });
+    if (scape === "peninsula") return mk({
+      spsPeak: [310, 324], spsL: [230, 330], spsR: [410, 332],
+      lpsL: [200, 395], lpsMid: [470, 360], lpsR: [535, 395],
+      softL: [260, 420], softR: [570, 440], softSand: [680, 458],
+      fanBack: [370, 380], flexA: [340, 415], flexB: [505, 425],
+    });
+    if (scape === "valley") return mk({
+      spsPeak: [250, 322], spsL: [1090, 328], spsR: [300, 336],
+      lpsL: [200, 390], lpsMid: [1010, 372], lpsR: [330, 400],
+      softL: [350, 440], softR: [985, 445], softSand: [665, 458],
+      fanBack: [420, 450], flexA: [280, 405], flexB: [1050, 400],
     });
     return mk({
       spsPeak: [739, 344], spsL: [491, 362], spsR: [800, 372],
@@ -14156,6 +14248,153 @@ class OpenReefPanel extends HTMLElement {
         <path d="M ${x - 26} ${y - 20} Q ${x - 30} ${y - 34} ${x - 12} ${y - 34} Q ${x} ${y - 40} ${x + 12} ${y - 34} Q ${x + 30} ${y - 34} ${x + 26} ${y - 20} Q ${x} ${y - 28} ${x - 26} ${y - 20} Z" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.6" opacity=".95"></path>
         ${dot(-16, -33, 1.5, 0)}${dot(0, -38, 1.5, 1)}${dot(15, -33, 1.5, 2)}${dot(-6, -35, 1.3, 3)}${dot(8, -36, 1.3, 4)}`;
     }
+    if (species === "digitata") {
+      return `
+        <circle cx="${x}" cy="${y - 30}" r="40" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke-linecap="round" fill="none">
+          <path d="M ${x - 24} ${y} L ${x - 27} ${y - 32}" stroke="${pal.mid}" stroke-width="7"></path>
+          <path d="M ${x - 12} ${y} L ${x - 12} ${y - 48}" stroke="${pal.deep}" stroke-width="7"></path>
+          <path d="M ${x} ${y} L ${x + 2} ${y - 38}" stroke="${pal.mid}" stroke-width="7"></path>
+          <path d="M ${x + 13} ${y} L ${x + 14} ${y - 52}" stroke="${pal.deep}" stroke-width="7"></path>
+          <path d="M ${x + 25} ${y} L ${x + 27} ${y - 28}" stroke="${pal.mid}" stroke-width="7"></path>
+        </g>
+        <g fill="${pal.bright}">
+          <circle cx="${x - 27}" cy="${y - 33}" r="3.4"></circle><circle cx="${x - 12}" cy="${y - 49}" r="3.4"></circle>
+          <circle cx="${x + 2}" cy="${y - 39}" r="3.4"></circle><circle cx="${x + 14}" cy="${y - 53}" r="3.4"></circle>
+          <circle cx="${x + 27}" cy="${y - 29}" r="3.4"></circle>
+        </g>
+        ${dot(-12, -49, 1.6, 0)}${dot(14, -53, 1.6, 1)}${dot(2, -39, 1.5, 2)}`;
+    }
+    if (species === "stylophora") {
+      return `
+        <circle cx="${x}" cy="${y - 22}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y - 2}" rx="15" ry="6" fill="${pal.deep}"></ellipse>
+        <g stroke="${pal.deep}" stroke-width="8" stroke-linecap="round" fill="none">
+          <path d="M ${x} ${y - 6} L ${x - 26} ${y - 26}"></path>
+          <path d="M ${x} ${y - 6} L ${x - 10} ${y - 38}"></path>
+          <path d="M ${x} ${y - 6} L ${x + 8} ${y - 40}"></path>
+          <path d="M ${x} ${y - 6} L ${x + 24} ${y - 24}"></path>
+          <path d="M ${x} ${y - 4} L ${x - 30} ${y - 10}"></path>
+          <path d="M ${x} ${y - 4} L ${x + 30} ${y - 8}"></path>
+        </g>
+        <g fill="${pal.bright}">
+          <circle cx="${x - 26}" cy="${y - 27}" r="3.6"></circle><circle cx="${x - 10}" cy="${y - 39}" r="3.6"></circle>
+          <circle cx="${x + 8}" cy="${y - 41}" r="3.6"></circle><circle cx="${x + 24}" cy="${y - 25}" r="3.6"></circle>
+          <circle cx="${x - 31}" cy="${y - 11}" r="3.2"></circle><circle cx="${x + 31}" cy="${y - 9}" r="3.2"></circle>
+        </g>
+        ${dot(-10, -40, 1.6, 0)}${dot(8, -42, 1.6, 1)}`;
+    }
+    if (species === "frogspawn") {
+      const head = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 1.8).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="2.6" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${hx} ${hy} q -9 -13 -13 -19"></path><path d="M ${hx} ${hy} q -4 -16 -5 -22"></path>
+            <path d="M ${hx} ${hy} q 1 -17 1 -23"></path><path d="M ${hx} ${hy} q 6 -14 8 -20"></path>
+            <path d="M ${hx} ${hy} q 11 -9 14 -14"></path>
+          </g>
+          ${dot(hx - x - 14, hy - y - 20, 2.2, k)}${dot(hx - x - 10, hy - y - 17, 1.7, k + 3)}
+          ${dot(hx - x - 5, hy - y - 23, 2.2, k + 1)}${dot(hx - x - 2, hy - y - 20, 1.7, k + 4)}
+          ${dot(hx - x + 1, hy - y - 24, 2.2, k + 2)}${dot(hx - x + 9, hy - y - 21, 2, k + 5)}
+          ${dot(hx - x + 15, hy - y - 15, 2, k + 6)}
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 30}" r="40" fill="${pal.bright}" opacity=".12"></circle>
+        <g stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 12} ${y} L ${x - 13} ${y - 20}"></path>
+          <path d="M ${x + 12} ${y} L ${x + 13} ${y - 18}"></path>
+        </g>
+        ${head(x - 13, y - 20, 0)}${head(x + 13, y - 18, 2)}`;
+    }
+    if (species === "candycane") {
+      const head = (hx, hy, k) => `
+        <circle cx="${hx}" cy="${hy - 6}" r="7.5" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="2"></circle>
+        <circle class="dg-cpolyp" cx="${hx}" cy="${hy - 6}" r="2.4" fill="${pal.dot}" style="animation-delay:${(d0 - k * 0.8).toFixed(2)}s"></circle>`;
+      return `
+        <circle cx="${x}" cy="${y - 24}" r="34" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.deep}" stroke-width="5" stroke-linecap="round" fill="none">
+          <path d="M ${x - 21} ${y} L ${x - 24} ${y - 20}"></path>
+          <path d="M ${x - 7} ${y} L ${x - 8} ${y - 27}"></path>
+          <path d="M ${x + 7} ${y} L ${x + 8} ${y - 25}"></path>
+          <path d="M ${x + 21} ${y} L ${x + 24} ${y - 16}"></path>
+        </g>
+        ${head(x - 24, y - 20, 0)}${head(x - 8, y - 27, 1)}${head(x + 8, y - 25, 2)}${head(x + 24, y - 16, 3)}`;
+    }
+    if (species === "goniopora") {
+      const flower = (dx, dy, k) => `
+        <line x1="${x + dx * 0.6}" y1="${y + dy * 0.6}" x2="${x + dx}" y2="${y + dy}" stroke="${pal.bright}" stroke-width="1.6"></line>
+        ${dot(dx, dy, 2.4, k)}`;
+      return `
+        <circle cx="${x}" cy="${y - 18}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        <path d="M ${x - 24} ${y} a 24 18 0 0 1 48 0 Z" fill="${pal.deep}"></path>
+        <path d="M ${x - 24} ${y} a 24 18 0 0 1 48 0 Z" fill="none" stroke="${pal.mid}" stroke-width="2" opacity=".7"></path>
+        ${flower(-22, -18, 0)}${flower(-13, -25, 1)}${flower(-4, -28, 2)}${flower(6, -27, 3)}${flower(15, -23, 4)}${flower(23, -16, 5)}${flower(-8, -20, 6)}${flower(9, -19, 7)}`;
+    }
+    if (species === "chalice") {
+      return `
+        <circle cx="${x}" cy="${y - 12}" r="34" fill="${pal.bright}" opacity=".08"></circle>
+        <ellipse cx="${x - 6}" cy="${y - 6}" rx="30" ry="8" transform="rotate(-8 ${x - 6} ${y - 6})" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x - 6}" cy="${y - 7}" rx="30" ry="8" transform="rotate(-8 ${x - 6} ${y - 7})" fill="none" stroke="${pal.bright}" stroke-width="2" opacity=".8"></ellipse>
+        <path d="M ${x - 30} ${y - 6} q 14 -7 30 -3" stroke="${pal.bright}" stroke-width="1.6" fill="none" opacity=".55"></path>
+        <ellipse cx="${x + 13}" cy="${y - 16}" rx="18" ry="5" transform="rotate(-6 ${x + 13} ${y - 16})" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x + 13}" cy="${y - 17}" rx="18" ry="5" transform="rotate(-6 ${x + 13} ${y - 17})" fill="none" stroke="${pal.bright}" stroke-width="1.6" opacity=".7"></ellipse>
+        ${dot(-18, -8, 1.5, 0)}${dot(2, -6, 1.5, 1)}${dot(14, -18, 1.4, 2)}`;
+    }
+    if (species === "gsp") {
+      const star = (dx, dy, k) => `
+        <g stroke="${pal.bright}" stroke-width="1.4" stroke-linecap="round" opacity=".9">
+          <line x1="${x + dx - 4}" y1="${y + dy}" x2="${x + dx + 4}" y2="${y + dy}"></line>
+          <line x1="${x + dx}" y1="${y + dy - 4}" x2="${x + dx}" y2="${y + dy + 4}"></line>
+          <line x1="${x + dx - 3}" y1="${y + dy - 3}" x2="${x + dx + 3}" y2="${y + dy + 3}"></line>
+          <line x1="${x + dx - 3}" y1="${y + dy + 3}" x2="${x + dx + 3}" y2="${y + dy - 3}"></line>
+        </g>
+        ${dot(dx, dy, 1.3, k)}`;
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y}" rx="28" ry="8" fill="${pal.deep}"></ellipse>
+        ${star(-18, -2, 0)}${star(-7, -5, 1)}${star(5, -4, 2)}${star(16, -1, 3)}${star(-1, 2, 4)}${star(10, 3, 5)}`;
+    }
+    if (species === "kenyatree") {
+      return `
+        <circle cx="${x}" cy="${y - 26}" r="34" fill="${pal.bright}" opacity=".08"></circle>
+        <g class="dg-cswayS" style="animation-delay:${d0.toFixed(2)}s">
+          <path d="M ${x} ${y} L ${x} ${y - 22}" stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none"></path>
+          <g stroke="${pal.deep}" stroke-width="4" stroke-linecap="round" fill="none">
+            <path d="M ${x} ${y - 14} Q ${x - 14} ${y - 26} ${x - 18} ${y - 36}"></path>
+            <path d="M ${x} ${y - 18} Q ${x + 2} ${y - 30} ${x + 2} ${y - 40}"></path>
+            <path d="M ${x} ${y - 16} Q ${x + 14} ${y - 26} ${x + 18} ${y - 34}"></path>
+          </g>
+          <g stroke="${pal.mid}" stroke-width="2" stroke-linecap="round" fill="none">
+            <path d="M ${x - 18} ${y - 36} l -5 -6"></path><path d="M ${x - 18} ${y - 36} l 0 -8"></path><path d="M ${x - 18} ${y - 36} l 5 -6"></path>
+            <path d="M ${x + 2} ${y - 40} l -5 -6"></path><path d="M ${x + 2} ${y - 40} l 0 -8"></path><path d="M ${x + 2} ${y - 40} l 5 -6"></path>
+            <path d="M ${x + 18} ${y - 34} l -4 -6"></path><path d="M ${x + 18} ${y - 34} l 1 -8"></path><path d="M ${x + 18} ${y - 34} l 5 -5"></path>
+          </g>
+        </g>`;
+    }
+    if (species === "ricordea") {
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="28" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x - 12}" cy="${y - 3}" rx="13" ry="5.5" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x + 8}" cy="${y}" rx="10" ry="4.5" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x + 23}" cy="${y - 5}" rx="7" ry="3.5" fill="${pal.mid}" opacity=".9"></ellipse>
+        <g fill="${pal.bright}" opacity=".85">
+          <circle cx="${x - 18}" cy="${y - 4}" r="1.1"></circle><circle cx="${x - 12}" cy="${y - 5}" r="1.1"></circle>
+          <circle cx="${x - 6}" cy="${y - 3}" r="1.1"></circle><circle cx="${x - 15}" cy="${y - 1}" r="1.1"></circle>
+          <circle cx="${x + 5}" cy="${y - 1}" r="1"></circle><circle cx="${x + 10}" cy="${y - 2}" r="1"></circle>
+          <circle cx="${x + 21}" cy="${y - 6}" r="1"></circle><circle cx="${x + 25}" cy="${y - 4}" r="1"></circle>
+        </g>
+        ${dot(-12, -3, 1.4, 0)}${dot(8, 0, 1.3, 1)}`;
+    }
+    if (species === "clam") {
+      return `
+        <circle cx="${x}" cy="${y - 8}" r="30" fill="${pal.bright}" opacity=".12"></circle>
+        <path d="M ${x - 20} ${y} Q ${x - 22} ${y - 12} ${x - 12} ${y - 13} L ${x + 12} ${y - 13} Q ${x + 22} ${y - 12} ${x + 20} ${y} Z" fill="#8fa3b8" opacity=".85"></path>
+        <g stroke="#dfe8ee" stroke-width="1.4" opacity=".5">
+          <line x1="${x - 8}" y1="${y - 13}" x2="${x - 10}" y2="${y}"></line>
+          <line x1="${x + 6}" y1="${y - 13}" x2="${x + 8}" y2="${y}"></line>
+        </g>
+        <path d="M ${x - 16} ${y - 13} q 4 -8 8 0 q 4 -8 8 0 q 4 -8 8 0 q 4 -8 8 0" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="2" stroke-linejoin="round"></path>
+        ${dot(-11, -17, 1.6, 0)}${dot(-3, -18, 1.6, 1)}${dot(5, -17, 1.6, 2)}${dot(12, -16, 1.4, 3)}`;
+    }
     // zoa mat (default)
     return `
       <circle cx="${x}" cy="${y - 8}" r="34" fill="${pal.bright}" opacity=".1"></circle>
@@ -14338,7 +14577,12 @@ class OpenReefPanel extends HTMLElement {
           <label class="coral-notes-label">Notes
             <textarea class="coral-notes" data-coral-notes="${this._escape(cid)}" rows="3" maxlength="500" placeholder="Frag from Dave · moved off the sand 12 Aug · loves the extra flow…">${this._escape(c.notes || "")}</textarea>
           </label>
-          <label class="coral-notes-label">Photo URL <small class="muted">(a Media Source path like /local/corals/torch.jpg, or any https link)</small>
+          <label class="coral-upload secondary compact-button">📷 ${c.photoUrl ? "Replace photo" : "Upload a photo"}
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/heic" data-coral-upload="${this._escape(cid)}" hidden>
+          </label>
+          ${this._coralUploadState === "uploading" ? `<p class="muted">Uploading…</p>`
+            : this._coralUploadState ? `<p class="muted">⚠ ${this._escape(this._coralUploadState)}</p>` : ""}
+          <label class="coral-notes-label">…or a photo URL <small class="muted">(a path like /local/corals/torch.jpg, or any https link)</small>
             <input data-coral-photo="${this._escape(cid)}" value="${this._escape(c.photoUrl || "")}" placeholder="/local/corals/my-torch.jpg" maxlength="300">
           </label>
           <div class="actions">
@@ -14354,10 +14598,20 @@ class OpenReefPanel extends HTMLElement {
   // arrange mode like any other node.
   _coralRegistryMarkup() {
     const corals = this._diagramCorals();
-    const speciesOpts = ["staghorn", "plate", "table", "birdsnest", "torch", "hammer", "bubble", "duncan", "brain", "anemone", "zoa", "mushroom", "xenia", "toadstool", "acan", "gorgonian"]
-      .map((s) => `<option value="${s}" ${s === "zoa" ? "selected" : ""}>${this._escape(this._coralSpeciesLabel(s))}</option>`).join("");
-    const colourOpts = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"]
-      .map((c) => `<option value="${c}" ${c === "purple" ? "selected" : ""}>${c[0].toUpperCase()}${c.slice(1)}</option>`).join("");
+    const pick = this._coralPickSpecies || "zoa";
+    const pickCol = this._coralPickColour || "purple";
+    const palPick = this._coralPalette(pickCol);
+    // The picker IS the art kit: every tile renders the species' real glyph
+    // in the currently selected colour, so what you pick is what the rock gets.
+    const tiles = this._coralSpeciesList().map((s) => `
+      <button type="button" class="coral-tile ${s === pick ? "selected" : ""}" data-action="coral-pick-species" data-id="${s}" title="${this._escape(this._coralSpeciesLabel(s))}">
+        <svg viewBox="-52 -100 104 108" aria-hidden="true">${this._diagCoralArt(s, 0, 0, palPick, 0)}</svg>
+        <small>${this._escape(this._coralSpeciesLabel(s))}</small>
+      </button>`).join("");
+    const swatches = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].map((col) => {
+      const p = this._coralPalette(col);
+      return `<button type="button" class="coral-swatch ${col === pickCol ? "selected" : ""}" style="background:${p.bright};color:${p.bright}" data-action="coral-pick-colour" data-id="${col}" title="${col}"></button>`;
+    }).join("");
     const rows = corals.map(([id, c]) => {
       const pal = this._coralPalette(c.colour);
       const age = this._coralAgeText(c.addedAt);
@@ -14379,16 +14633,41 @@ class OpenReefPanel extends HTMLElement {
             <h4>Your corals, drawn on the rockwork</h4>
           </div>
         </div>
+        <div class="coral-species-grid">${tiles}</div>
+        <div class="coral-swatches">${swatches}</div>
         <div class="quick-add coral-add">
-          <input id="or-coral-name" placeholder="Name it (e.g. Golden torch)">
-          <select id="or-coral-species">${speciesOpts}</select>
-          <select id="or-coral-colour">${colourOpts}</select>
-          <button class="secondary compact-button" data-action="coral-add">Add coral</button>
+          <input id="or-coral-name" placeholder="Name it (e.g. Golden torch)" value="${this._escape(this._coralPickName || "")}">
+          <button class="secondary compact-button" data-action="coral-add">Add ${this._escape(this._coralSpeciesLabel(pick).toLowerCase())}</button>
         </div>
         ${rows || `
           <p class="muted">Nothing registered yet — the rock stays bare until you stock it. Add a coral above and it appears on the diagram: SPS take the crest, LPS the mid-rock, zoas and mushrooms the base, gorgonians the back. Drag it between spots in ✎ Arrange.</p>
           <button class="secondary compact-button" data-action="coral-starter">🌱 Start me with a reef — six corals, yours to rename or remove</button>`}
       </section>`;
+  }
+
+  // Photo upload: downscale on the client (≤1280px JPEG via canvas) so the
+  // websocket payload stays tiny, then the backend stores it in the captures
+  // media dir and pins the URL to the coral. No new serving infrastructure.
+  async _uploadCoralPhoto(cid, file) {
+    try {
+      this._coralUploadState = "uploading";
+      this._render();
+      const bmp = await createImageBitmap(file);
+      const scale = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bmp.width * scale));
+      canvas.height = Math.max(1, Math.round(bmp.height * scale));
+      canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      const res = await this._callWS({ type: "openreef/coral_photo_upload", coralId: cid, image: dataUrl });
+      if (res?.url && this._config.livestock?.corals?.[cid]) {
+        this._config.livestock.corals[cid].photoUrl = res.url;
+      }
+      this._coralUploadState = "";
+    } catch (err) {
+      this._coralUploadState = err?.message || "Upload failed — try a smaller photo";
+    }
+    this._render();
   }
 
   _pulseFocusCoralMarkup(cid) {
@@ -20433,9 +20712,13 @@ class OpenReefPanel extends HTMLElement {
           </label>
           <label>Aquascape
             <select data-scope="diagram" data-field="scape">
-              <option value="island" ${cfg.scape !== "twinpeaks" && cfg.scape !== "slope" ? "selected" : ""}>Island — one mound, open sand both sides</option>
+              <option value="island" ${!["twinpeaks", "slope", "arch", "pillars", "peninsula", "valley"].includes(cfg.scape) ? "selected" : ""}>Island — one mound, open sand both sides</option>
               <option value="twinpeaks" ${cfg.scape === "twinpeaks" ? "selected" : ""}>Twin peaks — two mounds, a sand channel between</option>
               <option value="slope" ${cfg.scape === "slope" ? "selected" : ""}>Slope — reef crest high on the left, easing to sand</option>
+              <option value="arch" ${cfg.scape === "arch" ? "selected" : ""}>Arch — a span on two pillars, with a cave at one end</option>
+              <option value="pillars" ${cfg.scape === "pillars" ? "selected" : ""}>Pillars — three bommies, maximum open water (NSA)</option>
+              <option value="peninsula" ${cfg.scape === "peninsula" ? "selected" : ""}>Peninsula — rock running from the wall into open sand</option>
+              <option value="valley" ${cfg.scape === "valley" ? "selected" : ""}>Valley — high sides, a sand channel down the middle</option>
             </select>
           </label>
         </div>
@@ -22339,6 +22622,15 @@ class OpenReefPanel extends HTMLElement {
         .coral-photo { display: block; max-width: 100%; max-height: 260px; border-radius: 12px; margin-bottom: 12px; object-fit: cover; }
         .coral-notes-label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; font-size: .9rem; }
         .coral-notes { resize: vertical; min-height: 64px; }
+        .coral-upload { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 10px; }
+        .coral-species-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+        .coral-tile { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 10px; background: transparent; cursor: pointer; color: inherit; }
+        .coral-tile svg { width: 62px; height: 58px; display: block; }
+        .coral-tile small { font-size: 10.5px; line-height: 1.15; text-align: center; color: var(--openreef-muted, #9fc7e0); }
+        .coral-tile.selected { border-color: var(--openreef-accent, #4fd8c3); box-shadow: 0 0 0 1px var(--openreef-accent, #4fd8c3) inset; }
+        .coral-swatches { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+        .coral-swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+        .coral-swatch.selected { border-color: #f4fbff; box-shadow: 0 0 8px 1px currentColor; }
         .button-row.end { justify-content: flex-end; }
         .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button, .mode-button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }

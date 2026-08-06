@@ -16,14 +16,16 @@ CORE_SCHEMA_VERSION = 54
 # pick its fluorescence palette. The panel owns the art; the backend only
 # keeps entries well-formed.
 CORAL_SPECIES = (
-    "staghorn", "plate", "table", "birdsnest",
-    "torch", "hammer", "bubble", "duncan", "brain", "anemone",
-    "zoa", "mushroom", "xenia", "toadstool", "acan",
+    "staghorn", "plate", "table", "birdsnest", "digitata", "stylophora",
+    "torch", "hammer", "frogspawn", "bubble", "duncan", "candycane",
+    "goniopora", "chalice", "brain", "anemone",
+    "zoa", "mushroom", "ricordea", "xenia", "gsp", "kenyatree",
+    "toadstool", "acan", "clam",
     "gorgonian",
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
-CORAL_SCAPES = ("island", "twinpeaks", "slope")
-INTEGRATION_VERSION = "0.7.28"
+CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
+INTEGRATION_VERSION = "0.7.29"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
