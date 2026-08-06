@@ -665,6 +665,49 @@ def test_pulse_backdrop_accepts_diagram():
     assert config["pulse"]["backdrop"] == "auto"
 
 
+# --- Reef Layer livestock block ---
+
+def test_livestock_defaults_injected():
+    config = normalise({})
+    assert config["livestock"] == {"corals": {}}
+
+
+def test_livestock_entries_kept_and_coerced():
+    """Good corals survive intact; unknown species/colours coerce to defaults."""
+    config = normalise({"livestock": {"corals": {
+        "torchy": {"name": "Golden torch", "species": "torch", "colour": "gold", "addedAt": "2026-07-06"},
+        "mystery": {"name": "X" * 90, "species": "kraken", "colour": "octarine", "addedAt": 12345},
+    }}})
+    corals = config["livestock"]["corals"]
+    assert corals["torchy"] == {
+        "name": "Golden torch", "species": "torch", "colour": "gold", "addedAt": "2026-07-06",
+    }
+    assert corals["mystery"]["species"] == "zoa"          # unknown species -> default
+    assert corals["mystery"]["colour"] == "purple"        # unknown colour -> default
+    assert len(corals["mystery"]["name"]) == 48           # name truncated
+    assert corals["mystery"]["addedAt"] == "12345"        # stringified, bounded
+
+
+def test_livestock_garbage_dropped():
+    """Corrupt shapes and hostile ids never crash and never survive."""
+    config = normalise({"livestock": "corrupt"})
+    assert config["livestock"] == {"corals": {}}
+    config = normalise({"livestock": {"corals": {
+        "<script>": {"species": "zoa"},                   # bad id out
+        "ok": "not-a-dict",                               # non-dict entry out
+        "fine": {"species": "brain", "colour": "red"},
+    }}})
+    corals = config["livestock"]["corals"]
+    assert set(corals) == {"fine"}
+    assert corals["fine"]["species"] == "brain"
+
+
+def test_livestock_capped_at_sixteen():
+    raw = {f"c{i}": {"species": "zoa"} for i in range(30)}
+    config = normalise({"livestock": {"corals": raw}})
+    assert len(config["livestock"]["corals"]) == 16
+
+
 # --- tiny standalone runner (so this works without pytest installed) ---
 
 def _main() -> int:

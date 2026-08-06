@@ -598,6 +598,82 @@ test("live patching flips dg-scrub with the pumps", async () => {
   assertEqual(classes.get("dg-scrub"), false, "air off clears the fog");
 });
 
+// --- Reef Layer: corals on the rockwork (0.7.25) ---------------------------
+
+test("bare rock until corals are registered; registered corals render by zone", async () => {
+  const bare = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  assert(!bare._pulseDiagramSvg().includes('class="dg-coral"'), "no corals invented");
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: {
+    stag: { name: "Green Slimer", species: "staghorn", colour: "green", addedAt: "2026-06-01" },
+    torchy: { name: "Golden torch", species: "torch", colour: "gold", addedAt: "2026-07-01" },
+  } };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const svg = panel._pulseDiagramSvg();
+  assertEqual((svg.match(/class="dg-coral"/g) || []).length, 2, "both corals drawn");
+  const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
+  assertEqual(layout["coral:stag"], "spsPeak", "SPS takes the crest");
+  assertEqual(layout["coral:torchy"], "lpsL", "LPS takes mid-rock");
+});
+
+test("coral placement honours stored slots, rejects wrong zones, never stacks", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: {
+    a: { species: "zoa", colour: "orange" },
+    b: { species: "zoa", colour: "pink" },
+  } };
+  cfg.diagram.layout = { "coral:a": "softR", "coral:b": "spsPeak" };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
+  assertEqual(layout["coral:a"], "softR", "stored slot honoured");
+  assertEqual(layout["coral:b"], "softL", "wrong-zone slot falls back to the zone default");
+  assert(layout["coral:a"] !== layout["coral:b"], "no stacking");
+});
+
+test("a full rock queues corals instead of stacking them", async () => {
+  const corals = {};
+  for (let i = 0; i < 12; i++) corals[`c${i}`] = { species: "zoa", colour: "purple" };
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
+  const placed = Object.values(layout).filter(Boolean);
+  assertEqual(new Set(placed).size, placed.length, "every placed coral has its own spot");
+  assertEqual(placed.length, 10, "ten slots filled; the rest wait rather than stack");
+  assertEqual((panel._pulseDiagramSvg().match(/class="dg-coral"/g) || []).length, 10);
+});
+
+test("tapping a coral opens its card; the card knows its story", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: { t: { name: "Golden torch", species: "torch", colour: "gold", addedAt: "2026-07-06" } } };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  panel._coralFocus = "t";
+  const html = panel._coralModalMarkup();
+  assert(html.includes("Golden torch") && html.includes("Torch coral"), "name + species in the tab modal");
+  assert(html.includes("in your tank"), "age line present");
+  assert(panel._pulseFocusCoralMarkup("t").includes("Golden torch"), "wall card renders too");
+});
+
+test("arrange mode offers coral drop zones only for zones in use", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: { z: { species: "zoa", colour: "pink" } } };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  panel._diagramArranging = true;
+  const svg = panel._pulseDiagramSvg();
+  assert(svg.includes('data-diag-slot="softL"'), "soft zone slots offered");
+  assert(!svg.includes('data-diag-slot="spsPeak"'), "no SPS slots for a zoa-only reef");
+});
+
+test("removing a coral clears its slot from the layout", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: { z: { species: "zoa", colour: "pink" } } };
+  cfg.diagram.layout = { "coral:z": "softR" };
+  const panel = prep(await makePanel(cfg), ALL_ON, { _setDirty: () => {}, _render: () => {} });
+  panel._removeCoral("z");
+  assert(!panel._config.livestock.corals.z, "registry entry gone");
+  assert(!panel._config.diagram.layout["coral:z"], "layout slot vacated");
+});
+
 test("chip labels break at a word, never mid-word", async () => {
   const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON);
   assertEqual(panel._diagChipLabel("Tank Temperature"), "TANK");

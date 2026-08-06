@@ -9,8 +9,15 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 52
-INTEGRATION_VERSION = "0.7.24"
+CORE_SCHEMA_VERSION = 53
+
+# Reef Layer vocabulary — species decide which rock zone a coral may occupy
+# (SPS crest / LPS mid-rock / softies low / gorgonian at the back), colours
+# pick its fluorescence palette. The panel owns the art; the backend only
+# keeps entries well-formed.
+CORAL_SPECIES = ("staghorn", "plate", "torch", "zoa", "brain", "gorgonian", "mushroom", "anemone")
+CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
+INTEGRATION_VERSION = "0.7.25"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1277,6 +1284,13 @@ DEFAULT_CORE_CONFIG = {
         # spot on the schematic. Readings: live probe values anchored in-scene.
         "showAlerts": True,
         "showReadings": True,
+    },
+    # Reef Layer — the user's registered corals, drawn as stylised colonies on
+    # the diagram rockwork. Honesty rule: empty registry = bare rock. Placement
+    # slots live in diagram.layout under coral:<id> keys like every other
+    # draggable node; species gates which zone slots are valid.
+    "livestock": {
+        "corals": {},
     },
     "dosing": {
         "enabled": True,

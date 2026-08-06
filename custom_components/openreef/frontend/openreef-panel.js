@@ -1300,8 +1300,19 @@ class OpenReefPanel extends HTMLElement {
         } else if (!this._diagramArranging && id && id.startsWith("sensor:")) {
           // Full trend modal, right over the diagram — chart, ranges, stats.
           this._loadTrend(id.slice(7));
+        } else if (!this._diagramArranging && id && id.startsWith("coral:")) {
+          this._coralFocus = id.slice(6);
+          this._render();
         }
       }
+      if (action === "close-coral") { this._coralFocus = null; this._render(); }
+      if (action === "coral-add") {
+        const name = (this.shadowRoot.getElementById("or-coral-name")?.value || "").trim();
+        const species = this.shadowRoot.getElementById("or-coral-species")?.value || "zoa";
+        const colour = this.shadowRoot.getElementById("or-coral-colour")?.value || "purple";
+        this._addCoral(name, species, colour);
+      }
+      if (action === "coral-remove") this._removeCoral(id);
       if (action === "pulse-unfocus") this._closePulseFocus();
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
       if (action === "pulse-share") this._sharePulseCard();
@@ -1311,6 +1322,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "diagram-arrange") {
         this._diagramArranging = !this._diagramArranging;
         this._pulseFocus = null;
+        this._coralFocus = null;
         this._render();
       }
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
@@ -13710,8 +13722,8 @@ class OpenReefPanel extends HTMLElement {
   _diagScrubCloudMarkup(x0, y0, w, h, noz) {
     const fr = (i, s) => { const v = Math.sin(i * 127.1 + s * 311.7) * 43758.5453; return v - Math.floor(v); };
     let out = "";
-    for (let i = 0; i < 24; i++) {
-      const dist = Math.pow(fr(i, 1), 1.4);
+    for (let i = 0; i < 44; i++) {
+      const dist = Math.pow(fr(i, 1), 1.15);
       const x = noz === "r" ? x0 + w - 24 - dist * (w - 48) : x0 + 24 + dist * (w - 48);
       const y = y0 + 30 + fr(i, 2) * (h - 60);
       const r = (1.4 + fr(i, 3) * 1.6).toFixed(1);
@@ -13720,6 +13732,361 @@ class OpenReefPanel extends HTMLElement {
       out += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r}" style="animation-duration:${dur}s;animation-delay:${delay}s"></circle>`;
     }
     return `<g class="dg-scrubcloud">${out}</g>`;
+  }
+
+  // --- Reef Layer: the user's registered corals, drawn on the rockwork -----
+  // Honesty rule, same as equipment: an empty registry means bare rock. Each
+  // coral is a stylised colony in the scene's own vector language; species
+  // gates which rock zone it may occupy, colour picks its fluorescence.
+
+  _diagramCorals() {
+    const raw = this._config?.livestock?.corals;
+    if (!raw || typeof raw !== "object") return [];
+    return Object.entries(raw).slice(0, 16).map(([id, c]) => [id, c && typeof c === "object" ? c : {}]);
+  }
+
+  _coralZone(species) {
+    if (species === "staghorn" || species === "plate") return "sps";
+    if (species === "torch" || species === "brain" || species === "anemone") return "lps";
+    if (species === "gorgonian") return "fan";
+    return "soft";
+  }
+
+  _coralSpeciesLabel(species) {
+    return {
+      staghorn: "Staghorn acropora", plate: "Plating montipora", torch: "Torch coral",
+      zoa: "Zoanthid colony", brain: "Brain coral", gorgonian: "Gorgonian fan",
+      mushroom: "Mushroom corals", anemone: "Bubble-tip anemone",
+    }[species] || "Coral";
+  }
+
+  _coralPalette(colour) {
+    return {
+      purple: { deep: "#7b5fb8", mid: "#9d7fe2", bright: "#c084fc", dot: "#e2d2ff" },
+      pink: { deep: "#b84a7c", mid: "#d86a9c", bright: "#ff8bc0", dot: "#ffd9ec" },
+      green: { deep: "#2f8a5c", mid: "#4fbf7a", bright: "#7ef29a", dot: "#d8ffe6" },
+      teal: { deep: "#2a7a74", mid: "#3fbfae", bright: "#4fd8c3", dot: "#d6fff7" },
+      orange: { deep: "#c96f30", mid: "#e88a44", bright: "#ffa05c", dot: "#ffd9b8" },
+      red: { deep: "#8a3646", mid: "#b04658", bright: "#ff6b81", dot: "#ffd0d8" },
+      gold: { deep: "#9a7f3e", mid: "#c8a04a", bright: "#e8c06a", dot: "#fff0c8" },
+      blue: { deep: "#3b5fae", mid: "#5a7fd0", bright: "#7ea8ff", dot: "#dce8ff" },
+    }[colour] || { deep: "#7b5fb8", mid: "#9d7fe2", bright: "#c084fc", dot: "#e2d2ff" };
+  }
+
+  // Typed slots along the rock silhouette: SPS crest, LPS mid-rock, softies
+  // low and on the sand, one gorgonian stand at the back. Coordinates trace
+  // the actual _diagRockMarkup ridge for each scene.
+  _diagramCoralSlots(systemType) {
+    if (systemType === "aio") {
+      return {
+        spsPeak: { kinds: ["sps"], x: 773, y: 500, rect: [733, 420, 80, 84] },
+        spsL: { kinds: ["sps"], x: 565, y: 522, rect: [525, 442, 80, 84] },
+        spsR: { kinds: ["sps"], x: 846, y: 526, rect: [806, 446, 80, 84] },
+        lpsL: { kinds: ["lps"], x: 492, y: 598, rect: [452, 526, 80, 76] },
+        lpsMid: { kinds: ["lps"], x: 660, y: 524, rect: [620, 452, 80, 76] },
+        lpsR: { kinds: ["lps"], x: 900, y: 574, rect: [860, 502, 80, 76] },
+        softL: { kinds: ["soft"], x: 438, y: 614, rect: [402, 566, 72, 54] },
+        softR: { kinds: ["soft"], x: 935, y: 612, rect: [899, 564, 72, 54] },
+        softSand: { kinds: ["soft"], x: 386, y: 648, rect: [350, 600, 72, 54] },
+        fanBack: { kinds: ["fan"], x: 826, y: 518, rect: [790, 402, 72, 120] },
+      };
+    }
+    return {
+      spsPeak: { kinds: ["sps"], x: 739, y: 344, rect: [699, 264, 80, 84] },
+      spsL: { kinds: ["sps"], x: 491, y: 362, rect: [451, 282, 80, 84] },
+      spsR: { kinds: ["sps"], x: 800, y: 372, rect: [760, 292, 80, 84] },
+      lpsL: { kinds: ["lps"], x: 417, y: 400, rect: [377, 328, 80, 76] },
+      lpsMid: { kinds: ["lps"], x: 652, y: 364, rect: [612, 292, 80, 76] },
+      lpsR: { kinds: ["lps"], x: 890, y: 410, rect: [850, 338, 80, 76] },
+      softL: { kinds: ["soft"], x: 355, y: 452, rect: [319, 404, 72, 54] },
+      softR: { kinds: ["soft"], x: 935, y: 452, rect: [899, 404, 72, 54] },
+      softSand: { kinds: ["soft"], x: 285, y: 458, rect: [249, 410, 72, 54] },
+      fanBack: { kinds: ["fan"], x: 600, y: 354, rect: [564, 238, 72, 120] },
+    };
+  }
+
+  // Zone-honouring placement with the same guarantees as equipment: stored
+  // slot wins when valid, zone defaults next, any free rock as overflow, and
+  // when the rock is genuinely full the coral waits (null) rather than stacks.
+  _diagramCoralLayout(systemType, corals) {
+    const slots = this._diagramCoralSlots(systemType);
+    const layout = this._diagramLayout();
+    const all = Object.keys(slots);
+    const used = new Set();
+    const out = {};
+    for (const [id, c] of corals) {
+      const zone = this._coralZone(c.species);
+      const want = layout[`coral:${id}`];
+      const valid = want && slots[want] && slots[want].kinds.includes(zone) && !used.has(want) ? want : null;
+      const chosen = valid
+        || all.find((sid) => slots[sid].kinds.includes(zone) && !used.has(sid))
+        || all.find((sid) => !used.has(sid))
+        || null;
+      if (chosen) used.add(chosen);
+      out[`coral:${id}`] = chosen;
+    }
+    return out;
+  }
+
+  _diagCoralArt(species, x, y, pal, seed) {
+    const d0 = -((seed * 0.7) % 3.4);
+    const dot = (dx, dy, r, k) =>
+      `<circle class="dg-cpolyp" cx="${x + dx}" cy="${y + dy}" r="${r}" fill="${pal.dot}" style="animation-delay:${(d0 - k * 0.6).toFixed(2)}s"></circle>`;
+    if (species === "staghorn") {
+      return `
+        <circle cx="${x}" cy="${y - 42}" r="46" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke-linecap="round" fill="none">
+          <path d="M ${x} ${y} L ${x} ${y - 64}" stroke="${pal.deep}" stroke-width="8"></path>
+          <path d="M ${x} ${y - 22} L ${x - 40} ${y - 76}" stroke="${pal.deep}" stroke-width="6"></path>
+          <path d="M ${x} ${y - 28} L ${x + 40} ${y - 80}" stroke="${pal.deep}" stroke-width="6"></path>
+          <path d="M ${x - 20} ${y - 49} L ${x - 42} ${y - 52}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x + 20} ${y - 54} L ${x + 44} ${y - 58}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x} ${y - 48} L ${x - 14} ${y - 86}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x} ${y - 50} L ${x + 15} ${y - 88}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x - 37} ${y - 70} L ${x - 48} ${y - 88}" stroke="${pal.bright}" stroke-width="3.4"></path>
+          <path d="M ${x + 37} ${y - 74} L ${x + 50} ${y - 90}" stroke="${pal.bright}" stroke-width="3.4"></path>
+        </g>
+        ${dot(0, -66, 2.4, 0)}${dot(-41, -78, 2.2, 1)}${dot(41, -82, 2.2, 2)}${dot(-48, -90, 2, 3)}${dot(51, -92, 2, 4)}`;
+    }
+    if (species === "plate") {
+      return `
+        <circle cx="${x}" cy="${y - 18}" r="40" fill="${pal.bright}" opacity=".08"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="46" ry="12" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 7}" rx="46" ry="10" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 8}" rx="46" ry="10" fill="none" stroke="${pal.bright}" stroke-width="2.2" opacity=".85"></ellipse>
+        <ellipse cx="${x + 20}" cy="${y - 26}" rx="28" ry="7" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x + 20}" cy="${y - 27}" rx="28" ry="7" fill="none" stroke="${pal.bright}" stroke-width="1.8" opacity=".8"></ellipse>
+        ${dot(-38, -10, 1.8, 0)}${dot(30, -6, 1.8, 1)}${dot(4, -28, 1.6, 2)}`;
+    }
+    if (species === "torch") {
+      const head = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 2.2).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${hx} ${hy} q -10 -18 -16 -24"></path>
+            <path d="M ${hx} ${hy} q -3 -21 -6 -29"></path>
+            <path d="M ${hx} ${hy} q 5 -19 2 -29"></path>
+            <path d="M ${hx} ${hy} q 11 -14 16 -21"></path>
+          </g>
+          ${dot(hx - x - 17, hy - y - 25, 2.6, k)}${dot(hx - x - 6, hy - y - 30, 2.6, k + 1)}${dot(hx - x + 3, hy - y - 30, 2.6, k + 2)}${dot(hx - x + 17, hy - y - 22, 2.6, k + 3)}
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 36}" r="44" fill="${pal.bright}" opacity=".12"></circle>
+        <g stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 22} ${y} L ${x - 22} ${y - 24}"></path>
+          <path d="M ${x} ${y} L ${x} ${y - 30}"></path>
+          <path d="M ${x + 22} ${y} L ${x + 22} ${y - 22}"></path>
+        </g>
+        ${head(x - 22, y - 24, 0)}${head(x, y - 30, 2)}${head(x + 22, y - 22, 4)}`;
+    }
+    if (species === "brain") {
+      return `
+        <path d="M ${x - 38} ${y} a 38 28 0 0 1 76 0 Z" fill="${pal.deep}"></path>
+        <path d="M ${x - 38} ${y} a 38 28 0 0 1 76 0 Z" fill="none" stroke="${pal.mid}" stroke-width="2" opacity=".8"></path>
+        <path d="M ${x - 32} ${y - 4} q 10 -8 20 0 t 20 0 t 20 0" stroke="${pal.bright}" stroke-width="2" fill="none" opacity=".7"></path>
+        <path d="M ${x - 28} ${y - 13} q 9 -7 18 0 t 18 0" stroke="${pal.bright}" stroke-width="2" fill="none" opacity=".6"></path>
+        <path d="M ${x - 20} ${y - 21} q 8 -6 16 0" stroke="${pal.bright}" stroke-width="1.8" fill="none" opacity=".5"></path>`;
+    }
+    if (species === "gorgonian") {
+      return `
+        <g class="dg-cswayS" style="animation-delay:${d0.toFixed(2)}s">
+          <g stroke-linecap="round" fill="none">
+            <path d="M ${x} ${y} L ${x} ${y - 92}" stroke="${pal.deep}" stroke-width="4.6"></path>
+            <path d="M ${x} ${y - 20} Q ${x - 26} ${y - 46} ${x - 32} ${y - 78}" stroke="${pal.mid}" stroke-width="3"></path>
+            <path d="M ${x} ${y - 34} Q ${x + 28} ${y - 58} ${x + 34} ${y - 86}" stroke="${pal.mid}" stroke-width="3"></path>
+            <path d="M ${x} ${y - 52} Q ${x - 18} ${y - 72} ${x - 20} ${y - 92}" stroke="${pal.mid}" stroke-width="2.4"></path>
+            <path d="M ${x} ${y - 62} Q ${x + 16} ${y - 80} ${x + 18} ${y - 98}" stroke="${pal.mid}" stroke-width="2.4"></path>
+            <path d="M ${x - 32} ${y - 78} L ${x - 38} ${y - 92}" stroke="${pal.bright}" stroke-width="2"></path>
+            <path d="M ${x + 34} ${y - 86} L ${x + 40} ${y - 98}" stroke="${pal.bright}" stroke-width="2"></path>
+          </g>
+        </g>`;
+    }
+    if (species === "mushroom") {
+      return `
+        <ellipse cx="${x - 12}" cy="${y - 4}" rx="13" ry="5.5" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x - 12}" cy="${y - 5}" rx="13" ry="5" fill="none" stroke="${pal.bright}" stroke-width="1.4" opacity=".5"></ellipse>
+        <ellipse cx="${x + 8}" cy="${y}" rx="10" ry="4.5" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x + 8}" cy="${y - 1}" rx="10" ry="4" fill="none" stroke="${pal.bright}" stroke-width="1.2" opacity=".45"></ellipse>
+        <ellipse cx="${x + 24}" cy="${y - 6}" rx="8" ry="4" fill="${pal.mid}" opacity=".9"></ellipse>
+        ${dot(-12, -5, 1.4, 0)}${dot(8, -1, 1.3, 1)}`;
+    }
+    if (species === "anemone") {
+      return `
+        <circle cx="${x}" cy="${y - 24}" r="38" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="16" ry="9" fill="${pal.deep}"></ellipse>
+        <g class="dg-csway" style="animation-delay:${d0.toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${x - 12} ${y - 8} q -12 -16 -16 -26"></path>
+            <path d="M ${x - 7} ${y - 10} q -6 -20 -8 -28"></path>
+            <path d="M ${x - 2} ${y - 11} q -1 -22 0 -30"></path>
+            <path d="M ${x + 3} ${y - 11} q 4 -21 6 -29"></path>
+            <path d="M ${x + 8} ${y - 10} q 9 -18 12 -26"></path>
+            <path d="M ${x + 13} ${y - 8} q 13 -14 18 -22"></path>
+          </g>
+          ${dot(-28, -34, 2.2, 0)}${dot(-9, -39, 2.2, 1)}${dot(9, -40, 2.2, 2)}${dot(31, -30, 2.2, 3)}
+        </g>`;
+    }
+    // zoa mat (default)
+    return `
+      <circle cx="${x}" cy="${y - 8}" r="34" fill="${pal.bright}" opacity=".1"></circle>
+      <g fill="${pal.deep}" stroke="${pal.bright}" stroke-width="1.8">
+        <circle cx="${x - 18}" cy="${y - 2}" r="7"></circle>
+        <circle cx="${x - 4}" cy="${y - 9}" r="6.4"></circle>
+        <circle cx="${x + 10}" cy="${y - 1}" r="7.2"></circle>
+        <circle cx="${x - 10}" cy="${y + 7}" r="6"></circle>
+        <circle cx="${x + 6}" cy="${y + 8}" r="6.6"></circle>
+        <circle cx="${x + 21}" cy="${y + 4}" r="5.8"></circle>
+        <circle cx="${x - 25}" cy="${y + 7}" r="5.4"></circle>
+      </g>
+      ${dot(-18, -2, 1.8, 0)}${dot(-4, -9, 1.6, 1)}${dot(10, -1, 1.8, 2)}${dot(6, 8, 1.6, 3)}`;
+  }
+
+  _diagCoralsMarkup(systemType) {
+    const corals = this._diagramCorals();
+    if (!corals.length) return "";
+    const slots = this._diagramCoralSlots(systemType);
+    const layout = this._diagramCoralLayout(systemType, corals);
+    const parts = [];
+    let seed = 0;
+    for (const [id, c] of corals) {
+      const sid = layout[`coral:${id}`];
+      if (!sid) continue;
+      const slot = slots[sid];
+      const pal = this._coralPalette(c.colour);
+      const label = c.name || this._coralSpeciesLabel(c.species);
+      parts.push(`
+        <g class="dg-coral" data-diag-coral="${this._escape(id)}" data-action="pulse-focus" data-id="coral:${this._escape(id)}" data-diag-drag="coral:${this._escape(id)}" role="button" tabindex="0">
+          <title>${this._escape(label)} — ${this._escape(this._coralSpeciesLabel(c.species))}</title>
+          <rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="12" fill="transparent"></rect>
+          ${this._diagCoralArt(c.species, slot.x, slot.y, pal, seed)}
+          <rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="12" class="dg-halo"></rect>
+        </g>`);
+      seed += 1;
+    }
+    return parts.join("");
+  }
+
+  _coralAgeText(addedAt) {
+    const t = Date.parse(addedAt || "");
+    if (!Number.isFinite(t)) return "";
+    const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+    if (days < 1) return "added today";
+    if (days < 31) return `${days} day${days === 1 ? "" : "s"} in your tank`;
+    const months = Math.floor(days / 30.4);
+    if (months < 24) return `${months} month${months === 1 ? "" : "s"} in your tank`;
+    return `${Math.floor(months / 12)} years in your tank`;
+  }
+
+  _coralZoneText(species) {
+    return {
+      sps: "Lives high on the rock, in the light and flow.",
+      lps: "Mid-rock, where the flow is gentler.",
+      soft: "Low rock and sand — the easy-going neighbourhood.",
+      fan: "Stands at the back, swaying in the current.",
+    }[this._coralZone(species)];
+  }
+
+  _addCoral(name, species, colour) {
+    const live = this._config.livestock = this._config.livestock || {};
+    const corals = live.corals = live.corals || {};
+    if (Object.keys(corals).length >= 16) return;
+    const base = this._slug(name || species || "coral") || "coral";
+    let cid = base;
+    let n = 2;
+    while (corals[cid]) { cid = `${base}_${n}`; n += 1; }
+    corals[cid] = { name: name || "", species, colour, addedAt: new Date().toISOString().slice(0, 10) };
+    this._setDirty(true);
+    this._render();
+  }
+
+  _removeCoral(cid) {
+    if (this._config.livestock?.corals) delete this._config.livestock.corals[cid];
+    const layout = this._config.diagram?.layout;
+    if (layout) delete layout[`coral:${cid}`];
+    if (this._coralFocus === cid) this._coralFocus = null;
+    this._setDirty(true);
+    this._render();
+  }
+
+  // Tab-side coral card — the wall (Pulse) uses _pulseFocusCoralMarkup instead.
+  _coralModalMarkup() {
+    const cid = this._coralFocus;
+    const c = cid ? (this._config.livestock?.corals || {})[cid] : null;
+    if (!c) return "";
+    const age = this._coralAgeText(c.addedAt);
+    return `
+      <div class="modal">
+        <section class="wizard">
+          <button class="close" data-action="close-coral">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Reef layer · ${this._escape(this._coralSpeciesLabel(c.species))}</p>
+              <h2>${this._escape(c.name || this._coralSpeciesLabel(c.species))}</h2>
+              <p class="muted">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}. ${this._escape(this._coralZoneText(c.species))}</p>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="secondary compact-button" data-action="diagram-arrange">✎ Move it on the rock</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Manage corals</button>
+          </div>
+        </section>
+      </div>`;
+  }
+
+  // Settings-side registry: name it, pick species and colour, and it appears
+  // on the rockwork. Species decides the zone; drag it between valid spots in
+  // arrange mode like any other node.
+  _coralRegistryMarkup() {
+    const corals = this._diagramCorals();
+    const speciesOpts = ["staghorn", "plate", "torch", "zoa", "brain", "gorgonian", "mushroom", "anemone"]
+      .map((s) => `<option value="${s}" ${s === "zoa" ? "selected" : ""}>${this._escape(this._coralSpeciesLabel(s))}</option>`).join("");
+    const colourOpts = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"]
+      .map((c) => `<option value="${c}" ${c === "purple" ? "selected" : ""}>${c[0].toUpperCase()}${c.slice(1)}</option>`).join("");
+    const rows = corals.map(([id, c]) => {
+      const pal = this._coralPalette(c.colour);
+      const age = this._coralAgeText(c.addedAt);
+      return `
+        <div class="coral-row">
+          <span class="coral-dot" style="background:${pal.bright}"></span>
+          <span class="coral-row-main">
+            <strong>${this._escape(c.name || this._coralSpeciesLabel(c.species))}</strong>
+            <small class="muted">${this._escape(this._coralSpeciesLabel(c.species))} · ${this._escape(c.colour || "")}${age ? ` · ${this._escape(age)}` : ""}</small>
+          </span>
+          <button class="secondary compact-button" data-action="coral-remove" data-id="${this._escape(id)}">Remove</button>
+        </div>`;
+    }).join("");
+    return `
+      <section class="mapping-section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Reef layer</p>
+            <h4>Your corals, drawn on the rockwork</h4>
+          </div>
+        </div>
+        <div class="quick-add coral-add">
+          <input id="or-coral-name" placeholder="Name it (e.g. Golden torch)">
+          <select id="or-coral-species">${speciesOpts}</select>
+          <select id="or-coral-colour">${colourOpts}</select>
+          <button class="secondary compact-button" data-action="coral-add">Add coral</button>
+        </div>
+        ${rows || `<p class="muted">Nothing registered yet — the rock stays bare until you stock it. Add a coral above and it appears on the diagram: SPS take the crest, LPS the mid-rock, zoas and mushrooms the base, gorgonians the back. Drag it between spots in ✎ Arrange.</p>`}
+      </section>`;
+  }
+
+  _pulseFocusCoralMarkup(cid) {
+    const c = (this._config.livestock?.corals || {})[cid];
+    if (!c) return "";
+    const pal = this._coralPalette(c.colour);
+    const age = this._coralAgeText(c.addedAt);
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Reef layer · ${this._escape(this._coralSpeciesLabel(c.species))}</small>
+          <strong>${this._escape(c.name || this._coralSpeciesLabel(c.species))}</strong>
+        </div>
+        <span class="pulse-insight-dot big" style="background:${pal.bright}"></span>
+      </header>
+      <p class="pulse-focus-note">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}</p>
+      <p class="pulse-focus-note">${this._escape(this._coralZoneText(c.species))}</p>`;
   }
 
   // Rounded orthogonal path through points — the pipe/tube spine.
@@ -13844,6 +14211,7 @@ class OpenReefPanel extends HTMLElement {
         ` : `
           <p class="muted">Nothing mapped yet — add your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears here automatically.</p>
         `}
+        ${this._coralModalMarkup()}
       </section>
     `;
   }
@@ -13907,11 +14275,11 @@ class OpenReefPanel extends HTMLElement {
           .dg-wake { stroke: rgba(94, 210, 195, .4); stroke-width: 2; }
           .dg-bubble { fill: #bfe8e0; opacity: 0; transform-box: fill-box; animation: dg-rise 2.4s linear infinite; }
           .dg-node.off .dg-bubble, .dg-node.gone .dg-bubble { animation-play-state: paused; opacity: 0; }
-          @keyframes dg-mistL { 0% { transform: translate(0, 0); opacity: 0; } 16% { opacity: .95; } 100% { transform: translate(-72px, -16px); opacity: 0; } }
-          @keyframes dg-mistR { 0% { transform: translate(0, 0); opacity: 0; } 16% { opacity: .95; } 100% { transform: translate(72px, -16px); opacity: 0; } }
+          @keyframes dg-mistL { 0% { transform: translate(0, 0); opacity: 0; } 8% { opacity: .95; } 70% { transform: translate(-86px, 54px); opacity: .8; } 100% { transform: translate(-116px, 44px); opacity: 0; } }
+          @keyframes dg-mistR { 0% { transform: translate(0, 0); opacity: 0; } 8% { opacity: .95; } 70% { transform: translate(86px, 54px); opacity: .8; } 100% { transform: translate(116px, 44px); opacity: 0; } }
           @keyframes dg-microrise { 0% { transform: translateY(24px); opacity: 0; } 16% { opacity: .9; } 80% { opacity: .6; } 100% { transform: translateY(-92px); opacity: 0; } }
-          .dg-scrubjet.dg-jetL circle { animation: dg-mistL 1.7s linear infinite paused; }
-          .dg-scrubjet.dg-jetR circle { animation: dg-mistR 1.7s linear infinite paused; }
+          .dg-scrubjet.dg-jetL circle { animation: dg-mistL .85s linear infinite paused; }
+          .dg-scrubjet.dg-jetR circle { animation: dg-mistR .85s linear infinite paused; }
           .dg-scrubcloud circle { animation: dg-microrise 3.2s linear infinite paused; }
           .dg-scrubjet circle, .dg-scrubcloud circle { fill: #e6f7ff; transform-box: fill-box; }
           .dg-scrubjet, .dg-scrubcloud { opacity: 0; transition: opacity .9s ease; }
@@ -13967,8 +14335,15 @@ class OpenReefPanel extends HTMLElement {
           svg.dg-editing [data-diag-drag] .dg-halo, .dg-editing [data-diag-drag] .dg-halo { opacity: .6; animation: dg-slots 6s linear infinite; }
           .dg-halo { fill: none; stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2; stroke-dasharray: 6 6; opacity: 0; transition: opacity .25s ease; }
           .dg-lifted { opacity: .92; }
+          .dg-coral { cursor: pointer; }
+          @keyframes dg-csway { 0%, 100% { transform: rotate(-2.6deg); } 50% { transform: rotate(2.6deg); } }
+          @keyframes dg-cswayS { 0%, 100% { transform: rotate(-1.3deg); } 50% { transform: rotate(1.3deg); } }
+          @keyframes dg-cpolyp { 0%, 100% { opacity: .35; } 50% { opacity: .95; } }
+          .dg-csway { animation: dg-csway 7s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+          .dg-cswayS { animation: dg-cswayS 9s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+          .dg-cpolyp { animation: dg-cpolyp 3.4s ease-in-out infinite; }
           @media (prefers-reduced-motion: reduce) {
-            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg, .dg-scrubjet circle, .dg-scrubcloud circle { animation: none !important; }
+            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg, .dg-scrubjet circle, .dg-scrubcloud circle, .dg-csway, .dg-cswayS, .dg-cpolyp { animation: none !important; }
           }
         </style>
         <defs>
@@ -14265,8 +14640,12 @@ class OpenReefPanel extends HTMLElement {
     if (nodes.doser) kinds.add("doser");
     if (nodes.ato && systemType === "aio") kinds.add("ato");
     if (nodes.air) kinds.add("air");
+    const coralZones = new Set(this._diagramCorals().map(([, c]) => this._coralZone(c.species)));
+    const coralSlots = Object.entries(this._diagramCoralSlots(systemType))
+      .filter(([, slot]) => slot.kinds.some((k) => coralZones.has(k)));
     return Object.entries(slots)
       .filter(([, slot]) => slot.kinds.some((k) => kinds.has(k)))
+      .concat(coralSlots)
       .map(([sid, slot]) => `<rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="14" class="dg-slot" data-diag-slot="${sid}" data-diag-kinds="${slot.kinds.join(",")}"></rect>`)
       .join("");
   }
@@ -14288,6 +14667,7 @@ class OpenReefPanel extends HTMLElement {
       ${this._diagRockMarkup(330, 465, 620)}
       <rect x="1148" y="164" width="76" height="332" fill="#0e2c42" opacity=".92"></rect>
       <line x1="1148" y1="148" x2="1148" y2="497" class="dg-glass-thin"></line>`);
+    parts.push(this._diagCoralsMarkup("sump"));
     let comb = "";
     for (let x = 1150; x < 1226; x += 9) comb += `<line x1="${x}" y1="148" x2="${x}" y2="170" class="dg-line"></line>`;
     parts.push(comb);
@@ -14340,14 +14720,14 @@ class OpenReefPanel extends HTMLElement {
     // ride the riser — mist off the nozzle, fine fog through the display
     parts.push(`
       <g class="dg-scrubjet dg-jetR">
-        <circle cx="212" cy="156" r="3.2"></circle>
-        <circle cx="226" cy="170" r="2.4" style="animation-delay:-.3s"></circle>
-        <circle cx="240" cy="182" r="3.4" style="animation-delay:-.6s"></circle>
-        <circle cx="218" cy="146" r="2.2" style="animation-delay:-.9s"></circle>
-        <circle cx="232" cy="158" r="2.8" style="animation-delay:-1.2s"></circle>
-        <circle cx="248" cy="172" r="2.4" style="animation-delay:-1.5s"></circle>
-        <circle cx="222" cy="178" r="2.6" style="animation-delay:-.45s"></circle>
-        <circle cx="236" cy="150" r="2.2" style="animation-delay:-1.05s"></circle>
+        <circle cx="208" cy="152" r="3"></circle>
+        <circle cx="211" cy="156" r="2.4" style="animation-delay:-.11s"></circle>
+        <circle cx="207" cy="148" r="2.2" style="animation-delay:-.21s"></circle>
+        <circle cx="212" cy="153" r="2.8" style="animation-delay:-.32s"></circle>
+        <circle cx="209" cy="159" r="2.4" style="animation-delay:-.43s"></circle>
+        <circle cx="213" cy="149" r="2.6" style="animation-delay:-.53s"></circle>
+        <circle cx="210" cy="155" r="2.2" style="animation-delay:-.64s"></circle>
+        <circle cx="212" cy="158" r="2.8" style="animation-delay:-.74s"></circle>
       </g>
       ${this._diagScrubCloudMarkup(180, 166, 960, 296, "l")}`);
 
@@ -14590,6 +14970,7 @@ class OpenReefPanel extends HTMLElement {
       <line x1="1060" y1="224" x2="1060" y2="656" class="dg-glass-thin"></line>
       <line x1="1139" y1="248" x2="1139" y2="630" class="dg-glass-thin"></line>
       <line x1="1215" y1="230" x2="1215" y2="656" class="dg-glass-thin"></line>`);
+    parts.push(this._diagCoralsMarkup("aio"));
     let comb = "";
     // Teeth stop at 1092 so the doser/AWC drop tubes land in clear water
     // instead of threading the comb.
@@ -14627,14 +15008,14 @@ class OpenReefPanel extends HTMLElement {
     // through the pump — a mist off the nozzle, and a fine fog in the water
     parts.push(`
       <g class="dg-scrubjet dg-jetL">
-        <circle cx="1014" cy="270" r="3.2"></circle>
-        <circle cx="1000" cy="284" r="2.4" style="animation-delay:-.3s"></circle>
-        <circle cx="986" cy="296" r="3.4" style="animation-delay:-.6s"></circle>
-        <circle cx="1008" cy="260" r="2.2" style="animation-delay:-.9s"></circle>
-        <circle cx="994" cy="272" r="2.8" style="animation-delay:-1.2s"></circle>
-        <circle cx="978" cy="286" r="2.4" style="animation-delay:-1.5s"></circle>
-        <circle cx="1004" cy="292" r="2.6" style="animation-delay:-.45s"></circle>
-        <circle cx="990" cy="264" r="2.2" style="animation-delay:-1.05s"></circle>
+        <circle cx="1018" cy="262" r="3"></circle>
+        <circle cx="1015" cy="266" r="2.4" style="animation-delay:-.11s"></circle>
+        <circle cx="1019" cy="258" r="2.2" style="animation-delay:-.21s"></circle>
+        <circle cx="1014" cy="263" r="2.8" style="animation-delay:-.32s"></circle>
+        <circle cx="1017" cy="269" r="2.4" style="animation-delay:-.43s"></circle>
+        <circle cx="1013" cy="259" r="2.6" style="animation-delay:-.53s"></circle>
+        <circle cx="1016" cy="265" r="2.2" style="animation-delay:-.64s"></circle>
+        <circle cx="1014" cy="268" r="2.8" style="animation-delay:-.74s"></circle>
       </g>
       ${this._diagScrubCloudMarkup(312, 254, 736, 340, "r")}`);
 
@@ -15055,7 +15436,10 @@ class OpenReefPanel extends HTMLElement {
       const p = toSvg(e);
       drag.g.setAttribute("transform", `translate(${(p.x - drag.x0).toFixed(1)} ${(p.y - drag.y0).toFixed(1)})`);
       const kind = drag.key === "heater" ? "heater" : drag.key === "doser" ? "doser"
-        : drag.key === "ato" ? "ato" : drag.key === "air" ? "air" : "wm";
+        : drag.key === "ato" ? "ato" : drag.key === "air" ? "air"
+        : drag.key.startsWith("coral:")
+          ? this._coralZone(((this._config.livestock?.corals || {})[drag.key.slice(6)] || {}).species)
+          : "wm";
       let best = null;
       let bestD = Infinity;
       svg.querySelectorAll("[data-diag-slot]").forEach((slotEl) => {
@@ -15216,6 +15600,7 @@ class OpenReefPanel extends HTMLElement {
     else if (key === "awc-station") body = this._pulseFocusAwcMarkup();
     else if (key && key.startsWith("equip:")) body = this._pulseFocusEquipItemMarkup(key.slice(6));
     else if (key && key.startsWith("sensor:")) body = this._pulseFocusSensorMarkup(key.slice(7));
+    else if (key && key.startsWith("coral:")) body = this._pulseFocusCoralMarkup(key.slice(6));
     if (!body) return "";
     return `
       <div class="pulse-focus">
@@ -19722,6 +20107,7 @@ class OpenReefPanel extends HTMLElement {
             <small>A small column of live values (temp, pH, salinity, alk…) floats in the display — up to four, tinted when out of range, tappable for history.</small>
           </span>
         </label>
+        ${this._coralRegistryMarkup()}
         <p class="muted">${mapped.length
           ? `On your diagram right now: ${this._escape(mapped.join(", "))}. It draws whatever is switch-mapped in Equipment (plus your dosing channels) — map more gear and it appears.`
           : "Nothing to draw yet — map your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears on the diagram automatically."}</p>
@@ -21591,6 +21977,10 @@ class OpenReefPanel extends HTMLElement {
         .eyebrow, .muted, .hint, small, .topbar p, .section-head p, .row span { color: #8da2ba; }
         .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
         .actions, .button-row, .quick-add, .wizard-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .coral-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-top: 10px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 12px; }
+        .coral-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+        .coral-row-main strong { font-size: .95rem; }
+        .coral-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; box-shadow: 0 0 10px 1px currentColor; }
         .button-row.end { justify-content: flex-end; }
         .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button, .mode-button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }

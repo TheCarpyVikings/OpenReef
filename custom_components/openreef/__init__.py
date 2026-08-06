@@ -47,6 +47,8 @@ from .const import (
     CAPTURE_MIN_DURATION,
     CAPTURES_DIR_NAME,
     CAPTURES_STATIC_URL,
+    CORAL_COLOURS,
+    CORAL_SPECIES,
     AWC_AMOUNT_UNITS,
     AWC_DEFAULT_DRIFT_WARN_PCT,
     AWC_DEFAULT_HOLDOFF_MINUTES,
@@ -2339,6 +2341,31 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             ):
                 diagram_layout[slot_key] = slot_value
     diagram["layout"] = diagram_layout
+
+    # Reef Layer livestock — registered corals drawn on the diagram rockwork.
+    # Unknown species/colours coerce to safe defaults rather than crash the
+    # scene; the panel resolves slot placement (diagram.layout coral:<id>).
+    livestock = config.setdefault("livestock", {})
+    if not isinstance(livestock, dict):
+        config["livestock"] = deepcopy(DEFAULT_CORE_CONFIG["livestock"])
+        livestock = config["livestock"]
+    raw_corals = livestock.get("corals")
+    corals: dict = {}
+    if isinstance(raw_corals, dict):
+        for coral_id, entry in list(raw_corals.items())[:16]:
+            if not (
+                isinstance(coral_id, str)
+                and isinstance(entry, dict)
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", coral_id)
+            ):
+                continue
+            corals[coral_id] = {
+                "name": str(entry.get("name") or "")[:48],
+                "species": entry.get("species") if entry.get("species") in CORAL_SPECIES else "zoa",
+                "colour": entry.get("colour") if entry.get("colour") in CORAL_COLOURS else "purple",
+                "addedAt": str(entry.get("addedAt") or "")[:32],
+            }
+    livestock["corals"] = corals
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):
