@@ -48,6 +48,7 @@ from .const import (
     CAPTURES_DIR_NAME,
     CAPTURES_STATIC_URL,
     CORAL_COLOURS,
+    CORAL_SCAPES,
     CORAL_SPECIES,
     AWC_AMOUNT_UNITS,
     AWC_DEFAULT_DRIFT_WARN_PCT,
@@ -2326,6 +2327,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         config["diagram"] = deepcopy(DEFAULT_CORE_CONFIG["diagram"])
         diagram = config["diagram"]
     diagram["systemType"] = diagram.get("systemType") if diagram.get("systemType") in ("sump", "aio") else "sump"
+    diagram["scape"] = diagram.get("scape") if diagram.get("scape") in CORAL_SCAPES else "island"
     diagram["allowControls"] = bool(diagram.get("allowControls", True))
     diagram["showAlerts"] = bool(diagram.get("showAlerts", True))
     diagram["showReadings"] = bool(diagram.get("showReadings", True))
@@ -2359,11 +2361,16 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", coral_id)
             ):
                 continue
+            photo = str(entry.get("photoUrl") or "")[:300]
+            if photo and not (photo.startswith("/") or photo.startswith("http://") or photo.startswith("https://")):
+                photo = ""
             corals[coral_id] = {
                 "name": str(entry.get("name") or "")[:48],
                 "species": entry.get("species") if entry.get("species") in CORAL_SPECIES else "zoa",
                 "colour": entry.get("colour") if entry.get("colour") in CORAL_COLOURS else "purple",
                 "addedAt": str(entry.get("addedAt") or "")[:32],
+                "notes": str(entry.get("notes") or "")[:500],
+                "photoUrl": photo,
             }
     livestock["corals"] = corals
 

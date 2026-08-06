@@ -9,15 +9,21 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 53
+CORE_SCHEMA_VERSION = 54
 
 # Reef Layer vocabulary — species decide which rock zone a coral may occupy
 # (SPS crest / LPS mid-rock / softies low / gorgonian at the back), colours
 # pick its fluorescence palette. The panel owns the art; the backend only
 # keeps entries well-formed.
-CORAL_SPECIES = ("staghorn", "plate", "torch", "zoa", "brain", "gorgonian", "mushroom", "anemone")
+CORAL_SPECIES = (
+    "staghorn", "plate", "table", "birdsnest",
+    "torch", "hammer", "bubble", "duncan", "brain", "anemone",
+    "zoa", "mushroom", "xenia", "toadstool", "acan",
+    "gorgonian",
+)
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
-INTEGRATION_VERSION = "0.7.27"
+CORAL_SCAPES = ("island", "twinpeaks", "slope")
+INTEGRATION_VERSION = "0.7.28"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1280,6 +1286,9 @@ DEFAULT_CORE_CONFIG = {
         "systemType": "sump",  # sump | aio (all-in-one, no sump)
         "allowControls": True,
         "layout": {},
+        # Rockwork preset: island (one mound) | twinpeaks | slope. Coral slot
+        # ids are identical across scapes, so placements survive switching.
+        "scape": "island",
         # Spatial alerts: warning/critical sensors light up at the physical
         # spot on the schematic. Readings: live probe values anchored in-scene.
         "showAlerts": True,

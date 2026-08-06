@@ -1703,6 +1703,24 @@ class OpenReefPanel extends HTMLElement {
         }
         return;
       }
+      if (target.dataset.coralNotes != null) {
+        const coral = this._config.livestock?.corals?.[target.dataset.coralNotes];
+        if (coral) {
+          coral.notes = String(target.value || "").slice(0, 500);
+          this._setDirty(true);
+        }
+        return;
+      }
+      if (target.dataset.coralPhoto != null) {
+        const coral = this._config.livestock?.corals?.[target.dataset.coralPhoto];
+        if (coral) {
+          const url = String(target.value || "").trim().slice(0, 300);
+          coral.photoUrl = !url || url.startsWith("/") || url.startsWith("http://") || url.startsWith("https://") ? url : "";
+          this._setDirty(true);
+          if (event.type === "change") this._render();
+        }
+        return;
+      }
 
       if (target.dataset.manualField === "parameter") {
         const unitInput = this.shadowRoot.querySelector('[data-manual-field="unit"]');
@@ -13756,18 +13774,40 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _coralZone(species) {
-    if (species === "staghorn" || species === "plate") return "sps";
-    if (species === "torch" || species === "brain" || species === "anemone") return "lps";
+    if (["staghorn", "plate", "table", "birdsnest"].includes(species)) return "sps";
+    if (["torch", "hammer", "bubble", "duncan", "brain", "anemone"].includes(species)) return "lps";
     if (species === "gorgonian") return "fan";
     return "soft";
   }
 
   _coralSpeciesLabel(species) {
     return {
-      staghorn: "Staghorn acropora", plate: "Plating montipora", torch: "Torch coral",
-      zoa: "Zoanthid colony", brain: "Brain coral", gorgonian: "Gorgonian fan",
-      mushroom: "Mushroom corals", anemone: "Bubble-tip anemone",
+      staghorn: "Staghorn acropora", plate: "Plating montipora", table: "Table acropora",
+      birdsnest: "Birdsnest coral", torch: "Torch coral", hammer: "Hammer coral",
+      bubble: "Bubble coral", duncan: "Duncan coral", brain: "Brain coral",
+      anemone: "Bubble-tip anemone", zoa: "Zoanthid colony", mushroom: "Mushroom corals",
+      xenia: "Pulsing xenia", toadstool: "Toadstool leather", acan: "Acan colony",
+      gorgonian: "Gorgonian fan",
     }[species] || "Coral";
+  }
+
+  // Rockwork preset. Same coral-slot ids across scapes, so a stored layout
+  // survives switching — only the rock and the coordinates change.
+  _diagramScape() {
+    const s = this._diagramCfg().scape;
+    return s === "twinpeaks" || s === "slope" ? s : "island";
+  }
+
+  _diagScapeRock(systemType) {
+    const scape = this._diagramScape();
+    if (systemType === "aio") {
+      if (scape === "twinpeaks") return this._diagRockMarkup(430, 620, 330) + this._diagRockMarkup(830, 620, 170, 0.62);
+      if (scape === "slope") return `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="M 430 620 L 430 500 Q 480 458 540 466 Q 620 478 690 510 Q 780 550 860 585 Q 910 605 950 620 Z"></path>`;
+      return this._diagRockMarkup(430, 620, 520);
+    }
+    if (scape === "twinpeaks") return this._diagRockMarkup(330, 465, 380) + this._diagRockMarkup(790, 465, 160, 0.62);
+    if (scape === "slope") return `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="M 330 465 L 330 352 Q 375 315 440 322 Q 520 332 590 360 Q 690 398 790 428 Q 870 448 950 465 Z"></path>`;
+    return this._diagRockMarkup(330, 465, 620);
   }
 
   _coralPalette(colour) {
@@ -13784,55 +13824,101 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // Typed slots along the rock silhouette: SPS crest, LPS mid-rock, softies
-  // low and on the sand, one gorgonian stand at the back. Coordinates trace
-  // the actual _diagRockMarkup ridge for each scene.
+  // low and on the sand, one gorgonian stand, and two flex terraces that take
+  // either LPS or softies. Coordinates trace each scape's actual ridge; slot
+  // ids are IDENTICAL across scapes so stored placements survive switching.
   _diagramCoralSlots(systemType) {
-    if (systemType === "aio") {
-      return {
-        spsPeak: { kinds: ["sps"], x: 773, y: 500, rect: [733, 420, 80, 84] },
-        spsL: { kinds: ["sps"], x: 565, y: 522, rect: [525, 442, 80, 84] },
-        spsR: { kinds: ["sps"], x: 846, y: 526, rect: [806, 446, 80, 84] },
-        lpsL: { kinds: ["lps"], x: 492, y: 598, rect: [452, 526, 80, 76] },
-        lpsMid: { kinds: ["lps"], x: 660, y: 524, rect: [620, 452, 80, 76] },
-        lpsR: { kinds: ["lps"], x: 900, y: 574, rect: [860, 502, 80, 76] },
-        softL: { kinds: ["soft"], x: 438, y: 614, rect: [402, 566, 72, 54] },
-        softR: { kinds: ["soft"], x: 935, y: 612, rect: [899, 564, 72, 54] },
-        softSand: { kinds: ["soft"], x: 386, y: 648, rect: [350, 600, 72, 54] },
-        fanBack: { kinds: ["fan"], x: 826, y: 518, rect: [790, 402, 72, 120] },
+    const scape = this._diagramScape();
+    const mk = (table) => {
+      const kinds = {
+        spsPeak: ["sps"], spsL: ["sps"], spsR: ["sps"],
+        lpsL: ["lps"], lpsMid: ["lps"], lpsR: ["lps"],
+        softL: ["soft"], softR: ["soft"], softSand: ["soft"],
+        fanBack: ["fan"], flexA: ["lps", "soft"], flexB: ["lps", "soft"],
       };
-    }
-    return {
-      spsPeak: { kinds: ["sps"], x: 739, y: 344, rect: [699, 264, 80, 84] },
-      spsL: { kinds: ["sps"], x: 491, y: 362, rect: [451, 282, 80, 84] },
-      spsR: { kinds: ["sps"], x: 800, y: 372, rect: [760, 292, 80, 84] },
-      lpsL: { kinds: ["lps"], x: 417, y: 400, rect: [377, 328, 80, 76] },
-      lpsMid: { kinds: ["lps"], x: 652, y: 364, rect: [612, 292, 80, 76] },
-      lpsR: { kinds: ["lps"], x: 890, y: 410, rect: [850, 338, 80, 76] },
-      softL: { kinds: ["soft"], x: 355, y: 452, rect: [319, 404, 72, 54] },
-      softR: { kinds: ["soft"], x: 935, y: 452, rect: [899, 404, 72, 54] },
-      softSand: { kinds: ["soft"], x: 285, y: 458, rect: [249, 410, 72, 54] },
-      fanBack: { kinds: ["fan"], x: 600, y: 354, rect: [564, 238, 72, 120] },
+      const size = {
+        spsPeak: [80, 84], spsL: [80, 84], spsR: [80, 84],
+        lpsL: [80, 76], lpsMid: [80, 76], lpsR: [80, 76],
+        softL: [72, 54], softR: [72, 54], softSand: [72, 54],
+        fanBack: [72, 120], flexA: [72, 66], flexB: [72, 66],
+      };
+      const out = {};
+      for (const [sid, [sx, sy]] of Object.entries(table)) {
+        const [w, h] = size[sid];
+        out[sid] = { kinds: kinds[sid], x: sx, y: sy, rect: [sx - w / 2, sy - h + 10, w, h] };
+      }
+      return out;
     };
+    if (systemType === "aio") {
+      if (scape === "twinpeaks") return mk({
+        spsPeak: [648, 500], spsL: [552, 514], spsR: [942, 546],
+        lpsL: [490, 560], lpsMid: [700, 530], lpsR: [975, 588],
+        softL: [445, 600], softR: [1015, 612], softSand: [790, 640],
+        fanBack: [602, 520], flexA: [605, 556], flexB: [900, 582],
+      });
+      if (scape === "slope") return mk({
+        spsPeak: [505, 466], spsL: [585, 478], spsR: [665, 498],
+        lpsL: [525, 530], lpsMid: [615, 545], lpsR: [725, 545],
+        softL: [700, 600], softR: [915, 608], softSand: [985, 648],
+        fanBack: [455, 545], flexA: [795, 565], flexB: [855, 595],
+      });
+      return mk({
+        spsPeak: [773, 500], spsL: [565, 522], spsR: [846, 526],
+        lpsL: [492, 598], lpsMid: [660, 524], lpsR: [900, 574],
+        softL: [438, 614], softR: [935, 612], softSand: [386, 648],
+        fanBack: [826, 518], flexA: [615, 548], flexB: [715, 540],
+      });
+    }
+    if (scape === "twinpeaks") return mk({
+      spsPeak: [581, 345], spsL: [471, 359], spsR: [634, 369],
+      lpsL: [395, 410], lpsMid: [528, 367], lpsR: [890, 395],
+      softL: [350, 450], softR: [960, 450], softSand: [745, 455],
+      fanBack: [429, 372], flexA: [680, 395], flexB: [935, 428],
+    });
+    if (scape === "slope") return mk({
+      spsPeak: [400, 322], spsL: [470, 328], spsR: [545, 348],
+      lpsL: [425, 382], lpsMid: [510, 395], lpsR: [610, 398],
+      softL: [590, 445], softR: [800, 435], softSand: [870, 455],
+      fanBack: [352, 395], flexA: [665, 415], flexB: [720, 440],
+    });
+    return mk({
+      spsPeak: [739, 344], spsL: [491, 362], spsR: [800, 372],
+      lpsL: [417, 400], lpsMid: [652, 364], lpsR: [890, 410],
+      softL: [355, 452], softR: [935, 452], softSand: [285, 458],
+      fanBack: [600, 354], flexA: [559, 390], flexB: [700, 385],
+    });
   }
 
   // Zone-honouring placement with the same guarantees as equipment: stored
-  // slot wins when valid, zone defaults next, any free rock as overflow, and
+  // slot wins when valid, zone slots next, any free rock as overflow, and
   // when the rock is genuinely full the coral waits (null) rather than stacks.
+  // Auto-placement also applies the colour-spacing rule: among free zone
+  // slots, prefer one with no same-coloured neighbour within reach — two
+  // pink colonies end up across the rock, not side by side.
   _diagramCoralLayout(systemType, corals) {
     const slots = this._diagramCoralSlots(systemType);
     const layout = this._diagramLayout();
     const all = Object.keys(slots);
     const used = new Set();
+    const colourAt = {};
     const out = {};
     for (const [id, c] of corals) {
       const zone = this._coralZone(c.species);
       const want = layout[`coral:${id}`];
-      const valid = want && slots[want] && slots[want].kinds.includes(zone) && !used.has(want) ? want : null;
-      const chosen = valid
-        || all.find((sid) => slots[sid].kinds.includes(zone) && !used.has(sid))
-        || all.find((sid) => !used.has(sid))
-        || null;
-      if (chosen) used.add(chosen);
+      let chosen = want && slots[want] && slots[want].kinds.includes(zone) && !used.has(want) ? want : null;
+      if (!chosen) {
+        const zoneFree = all.filter((sid) => slots[sid].kinds.includes(zone) && !used.has(sid));
+        if (zoneFree.length) {
+          const clashes = (sid) => Object.entries(colourAt).reduce((n, [oid, col]) =>
+            n + (col === c.colour && Math.hypot(slots[oid].x - slots[sid].x, slots[oid].y - slots[sid].y) < 170 ? 1 : 0), 0);
+          chosen = zoneFree.map((sid) => [clashes(sid), sid]).sort((a, b) => a[0] - b[0])[0][1];
+        }
+      }
+      if (!chosen) chosen = all.find((sid) => !used.has(sid)) || null;
+      if (chosen) {
+        used.add(chosen);
+        colourAt[chosen] = c.colour;
+      }
       out[`coral:${id}`] = chosen;
     }
     return out;
@@ -13934,6 +14020,141 @@ class OpenReefPanel extends HTMLElement {
           </g>
           ${dot(-28, -34, 2.2, 0)}${dot(-9, -39, 2.2, 1)}${dot(9, -40, 2.2, 2)}${dot(31, -30, 2.2, 3)}
         </g>`;
+    }
+    if (species === "table") {
+      return `
+        <circle cx="${x}" cy="${y - 38}" r="44" fill="${pal.bright}" opacity=".1"></circle>
+        <path d="M ${x} ${y} L ${x} ${y - 30}" stroke="${pal.deep}" stroke-width="7" stroke-linecap="round" fill="none"></path>
+        <ellipse cx="${x}" cy="${y - 34}" rx="40" ry="6" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 35}" rx="40" ry="6" fill="none" stroke="${pal.bright}" stroke-width="2" opacity=".8"></ellipse>
+        <g stroke="${pal.bright}" stroke-width="2.5" stroke-linecap="round">
+          <line x1="${x - 30}" y1="${y - 38}" x2="${x - 30}" y2="${y - 48}"></line>
+          <line x1="${x - 15}" y1="${y - 40}" x2="${x - 15}" y2="${y - 52}"></line>
+          <line x1="${x}" y1="${y - 41}" x2="${x}" y2="${y - 53}"></line>
+          <line x1="${x + 15}" y1="${y - 40}" x2="${x + 15}" y2="${y - 51}"></line>
+          <line x1="${x + 30}" y1="${y - 38}" x2="${x + 30}" y2="${y - 47}"></line>
+        </g>
+        ${dot(-30, -50, 1.8, 0)}${dot(0, -55, 1.8, 1)}${dot(30, -49, 1.8, 2)}${dot(-15, -54, 1.6, 3)}`;
+    }
+    if (species === "birdsnest") {
+      return `
+        <circle cx="${x}" cy="${y - 34}" r="40" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.mid}" stroke-width="2.6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 4} ${y} Q ${x - 20} ${y - 24} ${x - 30} ${y - 46}"></path>
+          <path d="M ${x - 2} ${y} Q ${x - 2} ${y - 30} ${x - 12} ${y - 58}"></path>
+          <path d="M ${x + 2} ${y} Q ${x + 12} ${y - 26} ${x + 26} ${y - 48}"></path>
+          <path d="M ${x + 4} ${y} Q ${x + 4} ${y - 34} ${x + 12} ${y - 60}"></path>
+        </g>
+        <g stroke="${pal.bright}" stroke-width="2" stroke-linecap="round" fill="none">
+          <path d="M ${x - 22} ${y - 30} L ${x - 2} ${y - 44}"></path>
+          <path d="M ${x + 16} ${y - 32} L ${x - 6} ${y - 50}"></path>
+          <path d="M ${x - 28} ${y - 44} L ${x - 34} ${y - 56}"></path>
+          <path d="M ${x + 24} ${y - 46} L ${x + 32} ${y - 56}"></path>
+        </g>
+        ${dot(-34, -58, 1.8, 0)}${dot(-12, -60, 1.8, 1)}${dot(12, -62, 1.8, 2)}${dot(32, -58, 1.8, 3)}`;
+    }
+    if (species === "hammer") {
+      const head = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 2).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${hx} ${hy} q -8 -14 -12 -20"></path><path d="M ${hx} ${hy} q -2 -17 -3 -24"></path>
+            <path d="M ${hx} ${hy} q 5 -15 7 -22"></path><path d="M ${hx} ${hy} q 10 -10 13 -16"></path>
+          </g>
+          <g stroke="${pal.dot}" stroke-width="3.6" stroke-linecap="round">
+            <line x1="${hx - 16}" y1="${hy - 21}" x2="${hx - 8}" y2="${hy - 23}"></line>
+            <line x1="${hx - 6}" y1="${hy - 25}" x2="${hx + 1}" y2="${hy - 26}"></line>
+            <line x1="${hx + 4}" y1="${hy - 23}" x2="${hx + 11}" y2="${hy - 22}"></line>
+            <line x1="${hx + 10}" y1="${hy - 17}" x2="${hx + 17}" y2="${hy - 14}"></line>
+          </g>
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 30}" r="40" fill="${pal.bright}" opacity=".12"></circle>
+        <g stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 14} ${y} L ${x - 14} ${y - 22}"></path>
+          <path d="M ${x + 14} ${y} L ${x + 14} ${y - 20}"></path>
+        </g>
+        ${head(x - 14, y - 22, 0)}${head(x + 14, y - 20, 2)}`;
+    }
+    if (species === "bubble") {
+      return `
+        <circle cx="${x}" cy="${y - 16}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y - 3}" rx="22" ry="8" fill="${pal.deep}"></ellipse>
+        <g fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.8" opacity=".92">
+          <circle cx="${x - 14}" cy="${y - 14}" r="9"></circle>
+          <circle cx="${x + 1}" cy="${y - 18}" r="10"></circle>
+          <circle cx="${x + 15}" cy="${y - 13}" r="9"></circle>
+          <circle cx="${x - 6}" cy="${y - 8}" r="8"></circle>
+          <circle cx="${x + 8}" cy="${y - 7}" r="8"></circle>
+        </g>
+        ${dot(-16, -18, 1.8, 0)}${dot(-1, -22, 1.8, 1)}${dot(13, -17, 1.8, 2)}`;
+    }
+    if (species === "duncan") {
+      const crown = (hx, hy, k) => `
+        <g class="dg-cswayS" style="animation-delay:${(d0 - k * 1.6).toFixed(2)}s">
+          <ellipse cx="${hx}" cy="${hy}" rx="11" ry="4.5" fill="${pal.mid}"></ellipse>
+          <g stroke="${pal.bright}" stroke-width="1.6" stroke-linecap="round">
+            <line x1="${hx - 10}" y1="${hy - 1}" x2="${hx - 14}" y2="${hy - 6}"></line>
+            <line x1="${hx - 4}" y1="${hy - 3}" x2="${hx - 6}" y2="${hy - 9}"></line>
+            <line x1="${hx + 3}" y1="${hy - 3}" x2="${hx + 4}" y2="${hy - 9}"></line>
+            <line x1="${hx + 9}" y1="${hy - 1}" x2="${hx + 13}" y2="${hy - 7}"></line>
+          </g>
+          <ellipse cx="${hx}" cy="${hy}" rx="4.5" ry="2" fill="${pal.dot}" class="dg-cpolyp" style="animation-delay:${(d0 - k).toFixed(2)}s"></ellipse>
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 22}" r="34" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.deep}" stroke-width="5" stroke-linecap="round" fill="none">
+          <path d="M ${x - 16} ${y} L ${x - 16} ${y - 18}"></path>
+          <path d="M ${x} ${y} L ${x} ${y - 26}"></path>
+          <path d="M ${x + 16} ${y} L ${x + 16} ${y - 14}"></path>
+        </g>
+        ${crown(x - 16, y - 18, 0)}${crown(x, y - 26, 1)}${crown(x + 16, y - 14, 2)}`;
+    }
+    if (species === "acan") {
+      return `
+        <circle cx="${x}" cy="${y - 4}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        <g fill="${pal.deep}" stroke="${pal.mid}" stroke-width="2">
+          <circle cx="${x - 18}" cy="${y - 4}" r="8.5"></circle>
+          <circle cx="${x - 2}" cy="${y - 7}" r="9"></circle>
+          <circle cx="${x + 14}" cy="${y - 3}" r="8.5"></circle>
+          <circle cx="${x - 10}" cy="${y + 4}" r="7.5"></circle>
+          <circle cx="${x + 6}" cy="${y + 5}" r="7.5"></circle>
+        </g>
+        <g fill="${pal.bright}">
+          <circle cx="${x - 18}" cy="${y - 4}" r="3"></circle>
+          <circle cx="${x - 2}" cy="${y - 7}" r="3.2"></circle>
+          <circle cx="${x + 14}" cy="${y - 3}" r="3"></circle>
+          <circle cx="${x - 10}" cy="${y + 4}" r="2.6"></circle>
+          <circle cx="${x + 6}" cy="${y + 5}" r="2.6"></circle>
+        </g>
+        ${dot(-2, -7, 1.4, 0)}${dot(14, -3, 1.3, 1)}${dot(-18, -4, 1.3, 2)}`;
+    }
+    if (species === "xenia") {
+      const hand = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 1.1).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="2" stroke-linecap="round" fill="none" opacity=".9">
+            <line x1="${hx}" y1="${hy}" x2="${hx - 9}" y2="${hy - 9}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx - 4}" y2="${hy - 12}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx + 1}" y2="${hy - 13}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx + 6}" y2="${hy - 11}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx + 10}" y2="${hy - 7}"></line>
+          </g>
+          ${dot(hx - x - 9, hy - y - 10, 1.6, k)}${dot(hx - x + 1, hy - y - 14, 1.6, k + 1)}${dot(hx - x + 10, hy - y - 8, 1.6, k + 2)}
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 18}" r="32" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.deep}" stroke-width="4" stroke-linecap="round" fill="none">
+          <path d="M ${x - 13} ${y} L ${x - 13} ${y - 16}"></path>
+          <path d="M ${x} ${y} L ${x} ${y - 22}"></path>
+          <path d="M ${x + 13} ${y} L ${x + 13} ${y - 13}"></path>
+        </g>
+        ${hand(x - 13, y - 16, 0)}${hand(x, y - 22, 2)}${hand(x + 13, y - 13, 4)}`;
+    }
+    if (species === "toadstool") {
+      return `
+        <circle cx="${x}" cy="${y - 26}" r="36" fill="${pal.bright}" opacity=".08"></circle>
+        <path d="M ${x - 8} ${y} L ${x - 6} ${y - 20} L ${x + 6} ${y - 20} L ${x + 8} ${y} Z" fill="${pal.deep}"></path>
+        <path d="M ${x - 26} ${y - 20} Q ${x - 30} ${y - 34} ${x - 12} ${y - 34} Q ${x} ${y - 40} ${x + 12} ${y - 34} Q ${x + 30} ${y - 34} ${x + 26} ${y - 20} Q ${x} ${y - 28} ${x - 26} ${y - 20} Z" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.6" opacity=".95"></path>
+        ${dot(-16, -33, 1.5, 0)}${dot(0, -38, 1.5, 1)}${dot(15, -33, 1.5, 2)}${dot(-6, -35, 1.3, 3)}${dot(8, -36, 1.3, 4)}`;
     }
     // zoa mat (default)
     return `
@@ -14096,6 +14317,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // Tab-side coral card — the wall (Pulse) uses _pulseFocusCoralMarkup instead.
+  // Notes and a photo link are edited right here; both persist with the coral.
   _coralModalMarkup() {
     const cid = this._coralFocus;
     const c = cid ? (this._config.livestock?.corals || {})[cid] : null;
@@ -14112,6 +14334,13 @@ class OpenReefPanel extends HTMLElement {
               <p class="muted">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}. ${this._escape(this._coralZoneText(c.species))}</p>
             </div>
           </div>
+          ${c.photoUrl ? `<img class="coral-photo" src="${this._escape(c.photoUrl)}" alt="${this._escape(c.name || "coral photo")}">` : ""}
+          <label class="coral-notes-label">Notes
+            <textarea class="coral-notes" data-coral-notes="${this._escape(cid)}" rows="3" maxlength="500" placeholder="Frag from Dave · moved off the sand 12 Aug · loves the extra flow…">${this._escape(c.notes || "")}</textarea>
+          </label>
+          <label class="coral-notes-label">Photo URL <small class="muted">(a Media Source path like /local/corals/torch.jpg, or any https link)</small>
+            <input data-coral-photo="${this._escape(cid)}" value="${this._escape(c.photoUrl || "")}" placeholder="/local/corals/my-torch.jpg" maxlength="300">
+          </label>
           <div class="actions">
             <button class="secondary compact-button" data-action="diagram-arrange">✎ Move it on the rock</button>
             <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Manage corals</button>
@@ -14125,7 +14354,7 @@ class OpenReefPanel extends HTMLElement {
   // arrange mode like any other node.
   _coralRegistryMarkup() {
     const corals = this._diagramCorals();
-    const speciesOpts = ["staghorn", "plate", "torch", "zoa", "brain", "gorgonian", "mushroom", "anemone"]
+    const speciesOpts = ["staghorn", "plate", "table", "birdsnest", "torch", "hammer", "bubble", "duncan", "brain", "anemone", "zoa", "mushroom", "xenia", "toadstool", "acan", "gorgonian"]
       .map((s) => `<option value="${s}" ${s === "zoa" ? "selected" : ""}>${this._escape(this._coralSpeciesLabel(s))}</option>`).join("");
     const colourOpts = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"]
       .map((c) => `<option value="${c}" ${c === "purple" ? "selected" : ""}>${c[0].toUpperCase()}${c.slice(1)}</option>`).join("");
@@ -14176,7 +14405,8 @@ class OpenReefPanel extends HTMLElement {
         <span class="pulse-insight-dot big" style="background:${pal.bright}"></span>
       </header>
       <p class="pulse-focus-note">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}</p>
-      <p class="pulse-focus-note">${this._escape(this._coralZoneText(c.species))}</p>`;
+      <p class="pulse-focus-note">${this._escape(this._coralZoneText(c.species))}</p>
+      ${c.notes ? `<p class="pulse-focus-note">${this._escape(String(c.notes).slice(0, 200))}</p>` : ""}`;
   }
 
   // Rounded orthogonal path through points — the pipe/tube spine.
@@ -14726,8 +14956,8 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // Rock silhouette sitting on the sand — pure scene flavour.
-  _diagRockMarkup(x, y, w) {
-    return `<path fill="#122c40" opacity=".9" d="M ${x} ${y} q ${w * .06} -70 ${w * .14} -64 q ${w * .05} -46 ${w * .12} -38 q ${w * .06} -30 ${w * .11} -6 q ${w * .09} -20 ${w * .15} 6 q ${w * .08} -40 ${w * .14} -20 q ${w * .1} -16 ${w * .14} 24 q ${w * .1} 40 ${w * .2} 98 Z"></path>`;
+  _diagRockMarkup(x, y, w, k = 1) {
+    return `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="M ${x} ${y} q ${w * .06} ${-70 * k} ${w * .14} ${-64 * k} q ${w * .05} ${-46 * k} ${w * .12} ${-38 * k} q ${w * .06} ${-30 * k} ${w * .11} ${-6 * k} q ${w * .09} ${-20 * k} ${w * .15} ${6 * k} q ${w * .08} ${-40 * k} ${w * .14} ${-20 * k} q ${w * .1} ${-16 * k} ${w * .14} ${24 * k} q ${w * .1} ${40 * k} ${w * .2} ${98 * k} Z"></path>`;
   }
 
   _diagKelpMarkup(x, y, h) {
@@ -14766,7 +14996,7 @@ class OpenReefPanel extends HTMLElement {
     parts.push(`
       <rect x="173" y="160" width="1054" height="337" fill="url(#dgWater)"></rect>
       <rect x="173" y="462" width="1054" height="35" fill="url(#dgSand)"></rect>
-      ${this._diagRockMarkup(330, 465, 620)}
+      ${this._diagScapeRock("sump")}
       <rect x="1148" y="164" width="76" height="332" fill="#0e2c42" opacity=".92"></rect>
       <line x1="1148" y1="148" x2="1148" y2="497" class="dg-glass-thin"></line>`);
     parts.push(this._diagCoralsMarkup("sump"));
@@ -15070,7 +15300,7 @@ class OpenReefPanel extends HTMLElement {
     parts.push(`
       <rect x="303" y="240" width="994" height="417" fill="url(#dgWater)"></rect>
       <rect x="303" y="616" width="757" height="40" fill="url(#dgSand)"></rect>
-      ${this._diagRockMarkup(430, 620, 520)}
+      ${this._diagScapeRock("aio")}
       <rect x="1060" y="242" width="237" height="414" fill="#0e2c42" opacity=".92"></rect>
       <line x1="1060" y1="224" x2="1060" y2="656" class="dg-glass-thin"></line>
       <line x1="1139" y1="248" x2="1139" y2="630" class="dg-glass-thin"></line>
@@ -20201,6 +20431,13 @@ class OpenReefPanel extends HTMLElement {
               <option value="aio" ${cfg.systemType === "aio" ? "selected" : ""}>All-in-one — back-chamber filtration, no sump</option>
             </select>
           </label>
+          <label>Aquascape
+            <select data-scope="diagram" data-field="scape">
+              <option value="island" ${cfg.scape !== "twinpeaks" && cfg.scape !== "slope" ? "selected" : ""}>Island — one mound, open sand both sides</option>
+              <option value="twinpeaks" ${cfg.scape === "twinpeaks" ? "selected" : ""}>Twin peaks — two mounds, a sand channel between</option>
+              <option value="slope" ${cfg.scape === "slope" ? "selected" : ""}>Slope — reef crest high on the left, easing to sand</option>
+            </select>
+          </label>
         </div>
         <label class="toggle-card">
           <input type="checkbox" data-scope="diagram" data-field="allowControls" ${cfg.allowControls === false ? "" : "checked"}>
@@ -22099,6 +22336,9 @@ class OpenReefPanel extends HTMLElement {
         .coral-name { background: transparent; border: 1px solid transparent; border-radius: 8px; color: inherit; font-weight: 600; font-size: .95rem; padding: 2px 6px; margin-left: -7px; max-width: 100%; }
         .coral-name:hover, .coral-name:focus { border-color: var(--openreef-border, rgba(127, 184, 216, .35)); outline: none; }
         .coral-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; box-shadow: 0 0 10px 1px currentColor; }
+        .coral-photo { display: block; max-width: 100%; max-height: 260px; border-radius: 12px; margin-bottom: 12px; object-fit: cover; }
+        .coral-notes-label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; font-size: .9rem; }
+        .coral-notes { resize: vertical; min-height: 64px; }
         .button-row.end { justify-content: flex-end; }
         .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button, .mode-button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }

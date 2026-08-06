@@ -629,8 +629,15 @@ def test_diagram_defaults_injected():
     config = normalise({})
     assert config["diagram"] == {
         "systemType": "sump", "allowControls": True, "layout": {},
-        "showAlerts": True, "showReadings": True,
+        "scape": "island", "showAlerts": True, "showReadings": True,
     }
+
+
+def test_diagram_scape_whitelisted():
+    config = normalise({"diagram": {"scape": "twinpeaks"}})
+    assert config["diagram"]["scape"] == "twinpeaks"
+    config = normalise({"diagram": {"scape": "atlantis"}})
+    assert config["diagram"]["scape"] == "island"
 
 
 def test_diagram_garbage_coerced():
@@ -681,11 +688,29 @@ def test_livestock_entries_kept_and_coerced():
     corals = config["livestock"]["corals"]
     assert corals["torchy"] == {
         "name": "Golden torch", "species": "torch", "colour": "gold", "addedAt": "2026-07-06",
+        "notes": "", "photoUrl": "",
     }
     assert corals["mystery"]["species"] == "zoa"          # unknown species -> default
     assert corals["mystery"]["colour"] == "purple"        # unknown colour -> default
     assert len(corals["mystery"]["name"]) == 48           # name truncated
     assert corals["mystery"]["addedAt"] == "12345"        # stringified, bounded
+
+
+def test_livestock_new_species_and_notes_photo():
+    """Slice-3 species pass the whitelist; notes truncate; photo URLs must be
+    a local path or http(s) — javascript: and friends are stripped."""
+    config = normalise({"livestock": {"corals": {
+        "ham": {"species": "hammer", "colour": "green", "notes": "N" * 900, "photoUrl": "/local/corals/ham.jpg"},
+        "xen": {"species": "xenia", "photoUrl": "https://example.org/x.jpg"},
+        "bad": {"species": "toadstool", "photoUrl": "javascript:alert(1)"},
+    }}})
+    corals = config["livestock"]["corals"]
+    assert corals["ham"]["species"] == "hammer"
+    assert len(corals["ham"]["notes"]) == 500
+    assert corals["ham"]["photoUrl"] == "/local/corals/ham.jpg"
+    assert corals["xen"]["species"] == "xenia"
+    assert corals["xen"]["photoUrl"] == "https://example.org/x.jpg"
+    assert corals["bad"]["photoUrl"] == ""
 
 
 def test_livestock_garbage_dropped():

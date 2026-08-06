@@ -632,15 +632,15 @@ test("coral placement honours stored slots, rejects wrong zones, never stacks", 
 
 test("a full rock queues corals instead of stacking them", async () => {
   const corals = {};
-  for (let i = 0; i < 12; i++) corals[`c${i}`] = { species: "zoa", colour: "purple" };
+  for (let i = 0; i < 14; i++) corals[`c${i}`] = { species: "zoa", colour: "purple" };
   const cfg = structuredClone(RIG);
   cfg.livestock = { corals };
   const panel = prep(await makePanel(cfg), ALL_ON);
   const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
   const placed = Object.values(layout).filter(Boolean);
   assertEqual(new Set(placed).size, placed.length, "every placed coral has its own spot");
-  assertEqual(placed.length, 10, "ten slots filled; the rest wait rather than stack");
-  assertEqual((panel._pulseDiagramSvg().match(/class="dg-coral"/g) || []).length, 10);
+  assertEqual(placed.length, 12, "twelve slots filled; the rest wait rather than stack");
+  assertEqual((panel._pulseDiagramSvg().match(/class="dg-coral/g) || []).length, 12);
 });
 
 test("tapping a coral opens its card; the card knows its story", async () => {
@@ -725,6 +725,77 @@ test("the starter reef is six real, removable registry entries", async () => {
   assert(Object.values(corals).every((c) => c.name && c.species && c.colour && c.addedAt), "fully-formed entries");
   panel._removeCoral(Object.keys(corals)[0]);
   assertEqual(Object.keys(panel._config.livestock.corals).length, 5, "and they remove like any other");
+});
+
+// --- Reef Layer slice 3: species, scapes, colour spacing (0.7.28) -----------
+
+test("the new species know their zones and all sixteen render", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: {
+    ham: { species: "hammer", colour: "green" },   // lps
+    tab: { species: "table", colour: "purple" },   // sps
+    xen: { species: "xenia", colour: "pink" },     // soft
+    bird: { species: "birdsnest", colour: "teal" },// sps
+  } };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
+  const slots = panel._diagramCoralSlots("sump");
+  assert(slots[layout["coral:ham"]].kinds.includes("lps"), "hammer lives mid-rock");
+  assert(slots[layout["coral:tab"]].kinds.includes("sps"), "table acro takes the crest");
+  assert(slots[layout["coral:xen"]].kinds.includes("soft"), "xenia stays low");
+  assertEqual((panel._pulseDiagramSvg().match(/class="dg-coral/g) || []).length, 4, "all four drawn");
+});
+
+test("scapes move the rock and the slots, but placements survive the switch", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: { s: { species: "staghorn", colour: "green" } } };
+  cfg.diagram.layout = { "coral:s": "spsPeak" };
+  const island = prep(await makePanel(cfg), ALL_ON);
+  const islandSlots = island._diagramCoralSlots("sump");
+  const twin = structuredClone(cfg);
+  twin.diagram.scape = "twinpeaks";
+  const twinPanel = prep(await makePanel(twin), ALL_ON);
+  const twinSlots = twinPanel._diagramCoralSlots("sump");
+  assert(islandSlots.spsPeak.x !== twinSlots.spsPeak.x, "same id, different rock");
+  assertEqual(twinPanel._diagramCoralLayout("sump", twinPanel._diagramCorals())["coral:s"], "spsPeak", "stored slot survives the scape change");
+  const slope = structuredClone(cfg);
+  slope.diagram.scape = "slope";
+  const slopePanel = prep(await makePanel(slope), ALL_ON);
+  assert(slopePanel._pulseDiagramSvg().length > 1000, "slope scene renders");
+  assert(prep(await makePanel(twin), ALL_ON)._pulseDiagramSvg().length > 1000, "twin peaks scene renders");
+  const junk = structuredClone(cfg);
+  junk.diagram.scape = "atlantis";
+  assertEqual(prep(await makePanel(junk), ALL_ON)._diagramScape(), "island", "unknown scape falls back");
+});
+
+test("colour spacing: same-coloured colonies spread across the rock", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: {
+    a: { species: "zoa", colour: "pink" },
+    b: { species: "zoa", colour: "pink" },
+    c: { species: "zoa", colour: "pink" },
+  } };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
+  const slots = panel._diagramCoralSlots("sump");
+  const spots = ["a", "b", "c"].map((k) => slots[layout[`coral:${k}`]]);
+  for (let i = 0; i < spots.length; i++) {
+    for (let j = i + 1; j < spots.length; j++) {
+      assert(Math.hypot(spots[i].x - spots[j].x, spots[i].y - spots[j].y) >= 170,
+        "no two pink colonies within neighbour range while free slots remain");
+    }
+  }
+});
+
+test("notes and photo ride the coral card; the wall shows notes read-only", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: { t: { name: "Torchy", species: "torch", colour: "gold", notes: "Frag from Dave", photoUrl: "/local/t.jpg" } } };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  panel._coralFocus = "t";
+  const modal = panel._coralModalMarkup();
+  assert(modal.includes("Frag from Dave") && modal.includes('src="/local/t.jpg"'), "notes + photo in the tab modal");
+  assert(modal.includes("data-coral-notes"), "notes editable in place");
+  assert(panel._pulseFocusCoralMarkup("t").includes("Frag from Dave"), "wall card carries the notes");
 });
 
 test("removing a coral clears its slot from the layout", async () => {
