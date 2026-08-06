@@ -13590,16 +13590,25 @@ class OpenReefPanel extends HTMLElement {
   // Resolve the equipment mapping into diagram nodes. Only switch-mapped gear
   // renders — the diagram animates states, and unmapped gear has none.
   _diagramNodes() {
-    const nodes = { wavemakers: [], heater: null, skimmer: null, ret: null, ato: null, light: null, doser: null };
+    const nodes = {
+      wavemakers: [], heater: null, skimmer: null, ret: null, ato: null, light: null, doser: null,
+      chiller: null, uv: null, reactor: null, air: null, fugelight: null,
+    };
     for (const [id, item] of Object.entries(this._config.equipment || {})) {
       if (!item || !item.switch_entity_id) continue;
       const profile = this._equipmentProfile(id, item);
+      const label = String(item.label || id).toLowerCase();
       if ((profile === "display_wavemaker" || profile === "flow_pump") && nodes.wavemakers.length < 3) nodes.wavemakers.push([id, item]);
       else if (profile === "return_pump" && !nodes.ret) nodes.ret = [id, item];
+      else if (profile === "heater" && /chill/.test(label) && !nodes.chiller) nodes.chiller = [id, item];
       else if (profile === "heater" && !nodes.heater) nodes.heater = [id, item];
       else if (profile === "skimmer" && !nodes.skimmer) nodes.skimmer = [id, item];
       else if (profile === "ato" && !nodes.ato) nodes.ato = [id, item];
+      else if (profile === "lighting" && /fuge|refugium|chaeto/.test(label) && !nodes.fugelight) nodes.fugelight = [id, item];
       else if (profile === "lighting" && !nodes.light) nodes.light = [id, item];
+      else if (profile === "air_pump" && !nodes.air) nodes.air = [id, item];
+      else if (profile === "filtration" && /\buv\b|steril/.test(label) && !nodes.uv) nodes.uv = [id, item];
+      else if (profile === "filtration" && !nodes.reactor) nodes.reactor = [id, item];
     }
     if (this._config.dosing?.enabled !== false) {
       const channels = this._doserChannelIds().map((id) => [id, this._doserChannels()[id]]).filter(([, ch]) => ch);
@@ -13683,8 +13692,10 @@ class OpenReefPanel extends HTMLElement {
       <path d="${d}" class="dg-flow" stroke-width="${Math.max(3, w - 9)}" fill="none"></path>`;
   }
 
-  _diagTubeMarkup(pts) {
-    return `<path d="${this._diagPath(pts, 10)}" class="dg-tube" fill="none"></path>`;
+  _diagTubeMarkup(pts, withFlow = false) {
+    const d = this._diagPath(pts, 10);
+    return `<path d="${d}" class="dg-tube" fill="none"></path>`
+      + (withFlow ? `<path d="${d}" class="dg-flow" stroke-width="3" fill="none"></path>` : "");
   }
 
   _diagChevMarkup(x, y, dir, cls = "dg-chev dg-chev-pulse") {
@@ -13793,9 +13804,11 @@ class OpenReefPanel extends HTMLElement {
     const awcState = this._diagAwcEnabled() ? this._awcLiveState(this._config.automaticWaterChange) : {};
     const awcDraining = awcState.status === "draining" || awcState.status === "exchanging";
     const awcFilling = awcState.status === "filling" || awcState.status === "exchanging";
+    const atoOn = nodes.ato ? this._diagramNodeState(nodes.ato[1]) === "on" : false;
+    const fugeOn = nodes.fugelight ? this._diagramNodeState(nodes.fugelight[1]) === "on" : false;
     return `
       <svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet"
-           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""}"
+           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""} ${atoOn ? "dg-ato-on" : ""} ${fugeOn ? "dg-fuge-on" : ""}"
            data-pulse-diagram-svg data-water="${scene.water}"
            role="img" aria-label="Living diagram — ${systemType === "aio" ? "all-in-one tank" : "sump system"}">
         <style>
@@ -13862,6 +13875,14 @@ class OpenReefPanel extends HTMLElement {
           .dg-chip.critical .dg-chip-bg { stroke: rgba(239, 68, 68, .75); }
           .dg-chip-label { font-size: 11px; font-weight: 700; letter-spacing: .09em; fill: #9fc7e0; }
           .dg-chip-value { font-size: 15px; font-weight: 800; fill: #f4fbff; font-variant-numeric: tabular-nums; }
+          @keyframes dg-drip { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: .9; } 90% { transform: translateY(44px); opacity: .7; } 100% { transform: translateY(48px); opacity: 0; } }
+          .dg-dose circle { fill: var(--openreef-accent, #4fd8c3); opacity: 0; transform-box: fill-box; }
+          svg.dg-dosing .dg-dose circle, .dg-dosing .dg-dose circle { animation: dg-drip 1s ease-in infinite; }
+          .dg-ato-run .dg-flow { opacity: 0; animation-play-state: paused; transition: opacity .6s ease; }
+          svg.dg-ato-on .dg-ato-run .dg-flow, .dg-ato-on .dg-ato-run .dg-flow { opacity: .85; animation-play-state: running; }
+          .dg-c4rise { opacity: 0; transition: opacity 6s ease; }
+          svg.dg-loop-off .dg-c4rise, .dg-loop-off .dg-c4rise { opacity: 1; }
+          svg.dg-fuge-on .dg-kelp, .dg-fuge-on .dg-kelp { opacity: .95; }
           .dg-awc-fill .dg-flow, .dg-awc-drain .dg-flow { opacity: 0; animation-play-state: paused; transition: opacity .6s ease; }
           svg.dg-awc-filling .dg-awc-fill .dg-flow, .dg-awc-filling .dg-awc-fill .dg-flow { opacity: .85; animation-play-state: running; }
           svg.dg-awc-draining .dg-awc-drain .dg-flow, .dg-awc-draining .dg-awc-drain .dg-flow { opacity: .85; animation-play-state: running; }
@@ -13908,6 +13929,18 @@ class OpenReefPanel extends HTMLElement {
           <linearGradient id="dgWaste" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stop-color="#8d6e63" stop-opacity=".85"></stop>
             <stop offset="1" stop-color="#4e342e" stop-opacity=".9"></stop>
+          </linearGradient>
+          <radialGradient id="dgCool">
+            <stop offset="0" stop-color="#7dd3fc" stop-opacity=".4"></stop>
+            <stop offset="1" stop-color="#7dd3fc" stop-opacity="0"></stop>
+          </radialGradient>
+          <radialGradient id="dgViolet">
+            <stop offset="0" stop-color="#c084fc" stop-opacity=".45"></stop>
+            <stop offset="1" stop-color="#c084fc" stop-opacity="0"></stop>
+          </radialGradient>
+          <linearGradient id="dgFugeGlow" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#e879f9" stop-opacity=".38"></stop>
+            <stop offset="1" stop-color="#e879f9" stop-opacity="0"></stop>
           </linearGradient>
           ${scene.defs || ""}
         </defs>
@@ -14176,9 +14209,12 @@ class OpenReefPanel extends HTMLElement {
       <path d="M 178 526 L 178 934 M 1222 526 L 1222 934" stroke="rgba(127,184,216,.25)" stroke-width="8" fill="none"></path>
       <line x1="60" y1="940" x2="1540" y2="940" stroke="rgba(127,184,216,.14)" stroke-width="2"></line>`);
 
-    // sump: chamber water (return chamber sits lower — evaporation), glass, baffles
+    // sump: chamber water (return chamber sits lower — evaporation), glass, baffles.
+    // The dg-c4rise cap fades in while the loop is stopped: the display drains
+    // down to the weir and the return chamber visibly comes up.
     parts.push(`
       <rect x="283" y="736" width="222" height="161" fill="url(#dgSump)"></rect>
+      <rect x="283" y="700" width="222" height="36" fill="url(#dgSump)" class="dg-c4rise"></rect>
       <rect x="508" y="700" width="609" height="197" fill="url(#dgSump)"></rect>
       <rect x="280" y="640" width="840" height="260" class="dg-glass"></rect>
       <line x1="949" y1="700" x2="949" y2="897" class="dg-glass-thin"></line>
@@ -14318,9 +14354,9 @@ class OpenReefPanel extends HTMLElement {
     if (nodes.ato) {
       const [id, item] = nodes.ato;
       const ax = doserRight ? 48 : 1398;
-      const tube = doserRight
-        ? this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 628], [322, 628], [322, 690]])
-        : this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 616], [1188, 616], [1188, 700]]);
+      const tube = `<g class="dg-ato-run">${doserRight
+        ? this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 628], [322, 628], [322, 690]], true)
+        : this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 616], [1188, 616], [1188, 700]], true)}</g>`;
       parts.push(this._diagNodeMarkup({
         kind: "dg-ato", focusId: `equip:${id}`, state: this._diagramNodeState(item),
         title: `${item.label || id} — auto top-off reservoir`,
@@ -14331,6 +14367,90 @@ class OpenReefPanel extends HTMLElement {
       }));
       parts.push(tube);
       parts.push(`<text x="${ax + 46}" y="962" class="dg-lbl">ato</text>`);
+    }
+
+    // chiller inline on the return run under the stand
+    if (nodes.chiller) {
+      const [id, item] = nodes.chiller;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-chiller", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — chiller, inline on the return`,
+        dot: [296, 584], hit: [236, 572, 74, 56],
+        art: `
+          <circle cx="272" cy="600" r="44" fill="url(#dgCool)" class="dg-onart"></circle>
+          <rect x="240" y="578" width="64" height="44" rx="8" class="dg-shell"></rect>
+          <line x1="248" y1="592" x2="296" y2="592" class="dg-line" opacity=".6"></line>
+          <line x1="248" y1="606" x2="296" y2="606" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+
+    // UV steriliser inline on the riser
+    if (nodes.uv) {
+      const [id, item] = nodes.uv;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-uv", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — UV steriliser, inline on the return`,
+        dot: [150, 306], hit: [108, 296, 52, 116],
+        art: `
+          <circle cx="132" cy="352" r="52" fill="url(#dgViolet)" class="dg-onart"></circle>
+          <rect x="112" y="300" width="40" height="108" rx="14" class="dg-shell"></rect>
+          <rect x="122" y="312" width="20" height="84" rx="8" fill="rgba(192,132,252,.35)" class="dg-onart"></rect>`,
+      }));
+    }
+
+    // media reactor in the refugium chamber's spare lane
+    if (nodes.reactor) {
+      const [id, item] = nodes.reactor;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-reactor", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — media reactor`,
+        dot: [634, 712], hit: [574, 700, 66, 136],
+        art: `
+          <rect x="580" y="706" width="52" height="124" rx="10" class="dg-shell"></rect>
+          <line x1="586" y1="744" x2="626" y2="744" class="dg-line" opacity=".6"></line>
+          <line x1="586" y1="788" x2="626" y2="788" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+
+    // air stone bubbling in the return chamber
+    if (nodes.air) {
+      const [id, item] = nodes.air;
+      let bubbles = "";
+      for (let i = 0; i < 5; i++) {
+        bubbles += `<circle cx="${300 + (i % 3) * 8}" cy="${868 - (i % 2) * 10}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-air", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — air stone`,
+        dot: [330, 872], hit: [284, 820, 62, 76],
+        art: `
+          <rect x="292" y="876" width="32" height="10" rx="5" class="dg-shell"></rect>
+          ${bubbles}`,
+      }));
+    }
+
+    // refugium light over the kelp — reverse-cycle glow
+    if (nodes.fugelight) {
+      const [id, item] = nodes.fugelight;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-fugelight", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — refugium light`,
+        dot: [742, 610], hit: [612, 598, 140, 34],
+        art: `
+          <polygon points="628,626 732,626 762,700 598,700" fill="url(#dgFugeGlow)" class="dg-onart"></polygon>
+          <rect x="620" y="606" width="120" height="18" rx="9" class="dg-box"></rect>`,
+      }));
+    }
+
+    // dose drips at the tube's drop point — animated only while a dose runs
+    if (nodes.doser) {
+      const dropX = doserRight ? 1070 : 318;
+      const dropY = doserRight ? 616 : 616;
+      parts.push(`
+        <g class="dg-dose">
+          <circle cx="${dropX}" cy="${dropY}" r="3.4"></circle>
+          <circle cx="${dropX}" cy="${dropY}" r="3" style="animation-delay:.5s"></circle>
+        </g>`);
     }
 
     parts.push(this._diagAwcSumpMarkup());
@@ -14509,8 +14629,75 @@ class OpenReefPanel extends HTMLElement {
           <rect x="1352" y="716" width="84" height="220" rx="8" fill="rgba(20,64,94,.5)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
           <rect x="1356" y="796" width="76" height="136" fill="url(#dgSump)"></rect>`,
       }));
-      parts.push(this._diagTubeMarkup([[1394, 798], [1394, 156], [1177, 156], [1177, 262]]));
+      parts.push(`<g class="dg-ato-run">${this._diagTubeMarkup([[1394, 798], [1394, 156], [1177, 156], [1177, 262]], true)}</g>`);
       parts.push(`<text x="1394" y="962" class="dg-lbl">ato</text>`);
+    }
+
+    // chiller and UV steriliser inline on the over-the-top return run
+    if (nodes.chiller) {
+      const [id, item] = nodes.chiller;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-chiller", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — chiller, inline on the return`,
+        dot: [1096, 200], hit: [1036, 190, 74, 56],
+        art: `
+          <circle cx="1070" cy="216" r="42" fill="url(#dgCool)" class="dg-onart"></circle>
+          <rect x="1040" y="196" width="60" height="40" rx="8" class="dg-shell"></rect>
+          <line x1="1048" y1="209" x2="1092" y2="209" class="dg-line" opacity=".6"></line>
+          <line x1="1048" y1="222" x2="1092" y2="222" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+    if (nodes.uv) {
+      const [id, item] = nodes.uv;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-uv", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — UV steriliser, inline on the return`,
+        dot: [1176, 198], hit: [1116, 190, 68, 56],
+        art: `
+          <circle cx="1148" cy="216" r="42" fill="url(#dgViolet)" class="dg-onart"></circle>
+          <rect x="1120" y="196" width="56" height="40" rx="14" class="dg-shell"></rect>
+          <rect x="1130" y="204" width="36" height="24" rx="8" fill="rgba(192,132,252,.35)" class="dg-onart"></rect>`,
+      }));
+    }
+
+    // media reactor in the cabinet cut-away
+    if (nodes.reactor) {
+      const [id, item] = nodes.reactor;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-reactor", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — media reactor`,
+        dot: [668, 726], hit: [604, 714, 66, 146],
+        art: `
+          <rect x="610" y="720" width="52" height="132" rx="10" class="dg-shell"></rect>
+          <line x1="616" y1="762" x2="656" y2="762" class="dg-line" opacity=".6"></line>
+          <line x1="616" y1="808" x2="656" y2="808" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+
+    // air stone in the display
+    if (nodes.air) {
+      const [id, item] = nodes.air;
+      let bubbles = "";
+      for (let i = 0; i < 5; i++) {
+        bubbles += `<circle cx="${336 + (i % 3) * 8}" cy="${590 - (i % 2) * 12}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-air", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — air stone`,
+        dot: [366, 596], hit: [318, 540, 64, 76],
+        art: `
+          <rect x="328" y="600" width="32" height="10" rx="5" class="dg-shell"></rect>
+          ${bubbles}`,
+      }));
+    }
+
+    // dose drips where the tube crests into chamber 1
+    if (nodes.doser) {
+      parts.push(`
+        <g class="dg-dose">
+          <circle cx="1101" cy="256" r="3.4"></circle>
+          <circle cx="1101" cy="256" r="3" style="animation-delay:.5s"></circle>
+        </g>`);
     }
 
     parts.push(this._diagAwcAioMarkup());
@@ -14568,6 +14755,24 @@ class OpenReefPanel extends HTMLElement {
       });
       this._diagAwcKickSummary();
     }
+    // ATO trickle and refugium glow follow their switches.
+    svg.classList.toggle("dg-ato-on", nodes.ato ? this._diagramNodeState(nodes.ato[1]) === "on" : false);
+    svg.classList.toggle("dg-fuge-on", nodes.fugelight ? this._diagramNodeState(nodes.fugelight[1]) === "on" : false);
+    // Dose drips: a channel's dosed-today counter ticking UP means a real dose
+    // just ran — burst the drip animation for a few seconds.
+    this._diagramDoseWatch = this._diagramDoseWatch || {};
+    let dosed = false;
+    for (const [cid, ch] of Object.entries(this._doserChannels())) {
+      const entity = ch?.driver?.entities?.dosedTodaySensor;
+      if (!entity) continue;
+      const val = this._number(entity);
+      if (val === null) continue;
+      const prev = this._diagramDoseWatch[cid];
+      this._diagramDoseWatch[cid] = val;
+      if (Number.isFinite(prev) && val > prev) dosed = true;
+    }
+    if (dosed) this._diagramDoseUntil = Date.now() + 4500;
+    svg.classList.toggle("dg-dosing", Date.now() < (this._diagramDoseUntil || 0));
     // Probe chips: retint and update values in place.
     svg.querySelectorAll("[data-diag-chip-group]").forEach((g) => {
       const id = g.getAttribute("data-diag-chip-group");

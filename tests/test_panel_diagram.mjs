@@ -387,6 +387,67 @@ test("showReadings off means no chips at all", async () => {
   assertEqual(panel._diagramReadings().length, 0);
 });
 
+// --- living details ---------------------------------------------------------
+
+test("label inference: chiller, UV, reactor, air stone and fuge light get their own art", async () => {
+  const cfg = structuredClone(RIG);
+  Object.assign(cfg.equipment, {
+    chilly: { label: "Hailea Chiller", type: "heater", switch_entity_id: "switch.chill" },
+    uv: { label: "UV Steriliser", type: "filtration", switch_entity_id: "switch.uv" },
+    gfo: { label: "GFO Reactor", type: "filtration", switch_entity_id: "switch.gfo" },
+    bubbler: { label: "Air Pump", type: "air_pump", switch_entity_id: "switch.air" },
+    fuge: { label: "Refugium Light", type: "lighting", switch_entity_id: "switch.fuge" },
+  });
+  const states = { ...ALL_ON, "switch.chill": sw("on"), "switch.uv": sw("on"), "switch.gfo": sw("on"), "switch.air": sw("on"), "switch.fuge": sw("on") };
+  const panel = prep(await makePanel(cfg), states);
+  const nodes = panel._diagramNodes();
+  assertEqual(nodes.chiller[0], "chilly", "chiller split off the heater profile by label");
+  assertEqual(nodes.heater[0], "heat", "the real heater keeps its slot");
+  assertEqual(nodes.uv[0], "uv");
+  assertEqual(nodes.reactor[0], "gfo");
+  assertEqual(nodes.air[0], "bubbler");
+  assertEqual(nodes.fugelight[0], "fuge", "fuge light split off lighting by label");
+  assertEqual(nodes.light[0], "light", "display light unaffected");
+  const svg = panel._pulseDiagramSvg();
+  for (const kind of ["dg-chiller", "dg-uv", "dg-reactor", "dg-air", "dg-fugelight"]) {
+    assert(svg.includes(kind), `${kind} drawn`);
+  }
+  assert(rootClass(svg).includes("dg-fuge-on"), "fuge glow baked from its switch");
+});
+
+test("ATO trickle class follows the ATO switch", async () => {
+  const on = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  assert(rootClass(on._pulseDiagramSvg()).includes("dg-ato-on"), "topping-off shows the trickle");
+  const off = prep(await makePanel(structuredClone(RIG)), { ...ALL_ON, "switch.ato": sw("off") });
+  assert(!rootClass(off._pulseDiagramSvg()).includes("dg-ato-on"), "idle ATO keeps the tube still");
+});
+
+test("a dose is only a dose when the counter goes UP", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.dosing.channels.ch1.driver = { type: "openreef_esphome_stepper", entities: { dosedTodaySensor: "sensor.alk_today" } };
+  const classes = new Map();
+  const fakeSvg = {
+    classList: { toggle: (cls, val) => classes.set(cls, val) },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const panel = prep(await makePanel(cfg), { ...ALL_ON, "sensor.alk_today": num(12) });
+  panel._updatePulseDiagram(fakeSvg);
+  assertEqual(classes.get("dg-dosing"), false, "first sighting seeds the watch, no drip");
+  panel._hass = { states: { ...ALL_ON, "sensor.alk_today": num(12) } };
+  panel._updatePulseDiagram(fakeSvg);
+  assertEqual(classes.get("dg-dosing"), false, "same value, still no drip");
+  panel._hass = { states: { ...ALL_ON, "sensor.alk_today": num(16) } };
+  panel._updatePulseDiagram(fakeSvg);
+  assertEqual(classes.get("dg-dosing"), true, "counter up -> drip burst");
+});
+
+test("the return chamber visibly rises while the loop is stopped", async () => {
+  const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  const svg = panel._pulseDiagramSvg();
+  assert(svg.includes("dg-c4rise"), "level-rise cap present in the sump scene");
+});
+
 // --- the Diagram tab --------------------------------------------------------
 
 test("diagram is a first-class tab that routes its own content", async () => {
