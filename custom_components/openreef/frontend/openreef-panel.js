@@ -155,6 +155,11 @@ class OpenReefPanel extends HTMLElement {
         // Modal open: patch the live overlay stat values without re-rendering
         // (a full render would restart the WebRTC video).
         this._updateCameraOverlay();
+      } else if (this._activeTab === "diagram") {
+        // Diagram tab: patch node states in place — a full render would
+        // restart every flow animation on each hass push.
+        const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+        if (svg) this._updatePulseDiagram(svg);
       }
       return;
     }
@@ -175,6 +180,9 @@ class OpenReefPanel extends HTMLElement {
 
   _shouldRenderForHassUpdate() {
     if (this._pulseActive) return false;
+    // The diagram tab patches in place (see set hass) — a render would restart
+    // its flow animations on every state push.
+    if (this._activeTab === "diagram") return false;
     if (this._setupOpen || this._trend || this._activeTab === "settings") return false;
     if (this._onboarding && this._onboarding.active) return false;
     // Don't recreate camera <img> elements on hass updates — it would restart the
@@ -1276,7 +1284,18 @@ class OpenReefPanel extends HTMLElement {
       if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._cameraFullscreenFallback = false; this._render(); }
       if (action === "open-pulse") this._openPulse(true);
       if (action === "close-pulse") this._closePulse();
-      if (action === "pulse-focus") this._openPulseFocus(id);
+      if (action === "pulse-focus") {
+        if (this._pulseActive) this._openPulseFocus(id);
+        // Diagram tab: the same nodes route to the panel's own surfaces —
+        // equipment detail modal with full controls, or the Dosing tab.
+        else if (!this._diagramArranging && id && id.startsWith("equip:")) {
+          this._equipmentDetail = id.slice(6);
+          this._render();
+        } else if (!this._diagramArranging && id === "doser-station" && this._dosingEnabled()) {
+          this._activeTab = "dosing";
+          this._render();
+        }
+      }
       if (action === "pulse-unfocus") this._closePulseFocus();
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
       if (action === "pulse-share") this._sharePulseCard();
@@ -6383,6 +6402,10 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "guardian") {
       requestAnimationFrame(() => this._guardianAfterRender());
     }
+    // Diagram tab: (re)start the particle/fish motion and drag wiring against
+    // the freshly rendered svg; leaving the tab stops the rAF loop.
+    if (this._activeTab === "diagram") this._startPulseDiagramMotion();
+    else this._stopPulseDiagramMotion();
     this._mountBetaFab();  // BETA-FEEDBACK: remove after beta
   }
 
@@ -9199,6 +9222,7 @@ class OpenReefPanel extends HTMLElement {
   _tabs() {
     const tabs = [
       ["mission", "Mission Control"],
+      ["diagram", "Diagram"],
       ["live", "Live Stats"],
       ["manual", "Manual Tests"],
       ["icp", "ICP"],
@@ -9243,6 +9267,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _activeContent() {
+    if (this._activeTab === "diagram") return this._diagramTab();
     if (this._activeTab === "live") return this._liveStats();
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
@@ -13711,6 +13736,38 @@ class OpenReefPanel extends HTMLElement {
 
   _pulseDiagramMarkup() {
     return `<div class="pulse-diagram" data-pulse-diagram>${this._pulseDiagramSvg()}</div>`;
+  }
+
+  // The Diagram tab: the same living schematic as the Pulse backdrop, living
+  // in the panel. Taps open the standard equipment detail modal (full controls
+  // there); Present hands the same scene to a wall tablet via Reef Pulse.
+  _diagramTab() {
+    const systemType = this._diagramSystemType();
+    const nodes = this._diagramNodes();
+    const anything = nodes.ret || nodes.wavemakers.length || nodes.heater || nodes.skimmer
+      || nodes.ato || nodes.light || nodes.doser;
+    return `
+      <section class="stack">
+        <div class="section-head">
+          <div>
+            <h2>Living diagram</h2>
+            <p>Your ${systemType === "aio" ? "all-in-one" : "sump"} system, drawn from your equipment mapping — the flow follows your pumps, live.</p>
+          </div>
+          <div class="settings-toolbar">
+            <button class="secondary compact-button" data-action="diagram-arrange">${this._diagramArranging ? "✓ Done arranging" : "✎ Arrange"}</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Configure</button>
+            ${this._pulseEnabled() ? `<button class="secondary compact-button" data-action="open-pulse">✨ Present</button>` : ""}
+          </div>
+        </div>
+        ${this._diagramArranging ? `<div class="notice info-notice"><strong>Arrange mode.</strong> Drag a glowing item to a highlighted spot — pipework re-routes and the layout saves itself.</div>` : ""}
+        <section class="panel diagram-stage">${this._pulseDiagramSvg()}</section>
+        ${anything ? `
+          <p class="muted">Tap any piece of equipment for details${this._diagramCfg().allowControls === false ? "" : " and controls"}. Water only moves while your return pump is actually running — wavemakers stir the display without it.</p>
+        ` : `
+          <p class="muted">Nothing mapped yet — add your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears here automatically.</p>
+        `}
+      </section>
+    `;
   }
 
   _pulseDiagramSvg() {
@@ -21368,6 +21425,9 @@ class OpenReefPanel extends HTMLElement {
         /* Living tank diagram backdrop: the schematic fills the space between
            the Pulse header and footer; letterboxing keeps its aspect. */
         .pulse-diagram { position: absolute; inset: 84px 18px 96px; display: flex; align-items: center; justify-content: center; }
+        /* Diagram tab: same scene in a framed stage inside the panel. */
+        .panel.diagram-stage { background: #060e17; border: 1px solid #24364a; border-radius: 14px; padding: 8px; aspect-ratio: 16 / 10; max-height: 74vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .panel.diagram-stage svg { width: 100%; height: 100%; touch-action: none; }
         .pulse-diagram svg { width: 100%; height: 100%; touch-action: none; }
         .pulse-close.pulse-arrange { top: 126px; font-size: 16px; }
         .pulse-close.pulse-arrange.active { opacity: 1; border-color: rgba(245, 158, 11, .7); color: #fde68a; }

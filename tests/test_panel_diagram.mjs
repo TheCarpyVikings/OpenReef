@@ -225,6 +225,28 @@ test("state patching toggles classes in place — flow animations never restart"
   assertEqual(classes.get("doser-station:on"), true);
 });
 
+// --- the Diagram tab --------------------------------------------------------
+
+test("diagram is a first-class tab that routes its own content", async () => {
+  const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON, { _activeTab: "diagram" });
+  assert(panel._tabs().includes('data-id="diagram"'), "tab button present");
+  const content = panel._activeContent();
+  assert(content.includes("data-pulse-diagram-svg"), "tab renders the living schematic");
+  assert(content.includes('data-action="diagram-arrange"'), "arrange control offered in the tab");
+  assert(content.includes('data-action="open-pulse"'), "present hand-off to Reef Pulse offered");
+});
+
+test("diagram tab shows the empty-state nudge when nothing is mapped", async () => {
+  const panel = prep(await makePanel({ equipment: {}, dosing: { enabled: true, channels: {} }, diagram: {} }), {}, { _activeTab: "diagram" });
+  const content = panel._activeContent();
+  assert(content.includes("Nothing mapped yet"), "empty state explains where gear comes from");
+});
+
+test("hass updates on the diagram tab patch in place, never re-render", async () => {
+  const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON, { _activeTab: "diagram", _pulseActive: false });
+  assertEqual(panel._shouldRenderForHassUpdate(), false, "diagram tab suppresses the render path");
+});
+
 // --- backdrop plumbing -----------------------------------------------------
 
 test("pulse backdrop resolves 'diagram' and the screen mounts the schematic", async () => {
