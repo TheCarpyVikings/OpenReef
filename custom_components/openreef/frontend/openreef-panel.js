@@ -13640,7 +13640,7 @@ class OpenReefPanel extends HTMLElement {
         glassL: { kinds: ["wm"], x: 322, y: 400, dir: 1, rect: [292, 366, 110, 68] },
         glassL2: { kinds: ["wm"], x: 322, y: 520, dir: 1, rect: [292, 486, 110, 68] },
         glassC: { kinds: ["wm"], x: 720, y: 300, dir: 1, rect: [690, 266, 110, 68] },
-        glassC2: { kinds: ["wm"], x: 620, y: 336, dir: 1, rect: [590, 302, 110, 68] },
+        glassC2: { kinds: ["wm"], x: 700, y: 380, dir: 1, rect: [670, 346, 110, 68] },
         glassR: { kinds: ["wm"], x: 1042, y: 452, dir: -1, rect: [962, 418, 110, 68] },
         glassR2: { kinds: ["wm"], x: 1042, y: 560, dir: -1, rect: [962, 526, 110, 68] },
         ch2: { kinds: ["heater"], x: 1188, y: 430, rect: [1174, 416, 42, 92] },
@@ -13710,11 +13710,11 @@ class OpenReefPanel extends HTMLElement {
   _diagScrubCloudMarkup(x0, y0, w, h, noz) {
     const fr = (i, s) => { const v = Math.sin(i * 127.1 + s * 311.7) * 43758.5453; return v - Math.floor(v); };
     let out = "";
-    for (let i = 0; i < 18; i++) {
+    for (let i = 0; i < 24; i++) {
       const dist = Math.pow(fr(i, 1), 1.4);
       const x = noz === "r" ? x0 + w - 24 - dist * (w - 48) : x0 + 24 + dist * (w - 48);
       const y = y0 + 30 + fr(i, 2) * (h - 60);
-      const r = (0.9 + fr(i, 3) * 1.4).toFixed(1);
+      const r = (1.4 + fr(i, 3) * 1.6).toFixed(1);
       const dur = (2.6 + fr(i, 4) * 2.2).toFixed(2);
       const delay = (-fr(i, 5) * 4).toFixed(2);
       out += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r}" style="animation-duration:${dur}s;animation-delay:${delay}s"></circle>`;
@@ -13907,13 +13907,13 @@ class OpenReefPanel extends HTMLElement {
           .dg-wake { stroke: rgba(94, 210, 195, .4); stroke-width: 2; }
           .dg-bubble { fill: #bfe8e0; opacity: 0; transform-box: fill-box; animation: dg-rise 2.4s linear infinite; }
           .dg-node.off .dg-bubble, .dg-node.gone .dg-bubble { animation-play-state: paused; opacity: 0; }
-          @keyframes dg-mistL { 0% { transform: translate(0, 0); opacity: 0; } 18% { opacity: .85; } 100% { transform: translate(-44px, -12px); opacity: 0; } }
-          @keyframes dg-mistR { 0% { transform: translate(0, 0); opacity: 0; } 18% { opacity: .85; } 100% { transform: translate(44px, -12px); opacity: 0; } }
-          @keyframes dg-microrise { 0% { transform: translateY(24px); opacity: 0; } 16% { opacity: .75; } 80% { opacity: .5; } 100% { transform: translateY(-92px); opacity: 0; } }
-          .dg-scrubjet.dg-jetL circle { animation: dg-mistL 1.5s linear infinite paused; }
-          .dg-scrubjet.dg-jetR circle { animation: dg-mistR 1.5s linear infinite paused; }
+          @keyframes dg-mistL { 0% { transform: translate(0, 0); opacity: 0; } 16% { opacity: .95; } 100% { transform: translate(-72px, -16px); opacity: 0; } }
+          @keyframes dg-mistR { 0% { transform: translate(0, 0); opacity: 0; } 16% { opacity: .95; } 100% { transform: translate(72px, -16px); opacity: 0; } }
+          @keyframes dg-microrise { 0% { transform: translateY(24px); opacity: 0; } 16% { opacity: .9; } 80% { opacity: .6; } 100% { transform: translateY(-92px); opacity: 0; } }
+          .dg-scrubjet.dg-jetL circle { animation: dg-mistL 1.7s linear infinite paused; }
+          .dg-scrubjet.dg-jetR circle { animation: dg-mistR 1.7s linear infinite paused; }
           .dg-scrubcloud circle { animation: dg-microrise 3.2s linear infinite paused; }
-          .dg-scrubjet circle, .dg-scrubcloud circle { fill: #d6f0fa; transform-box: fill-box; }
+          .dg-scrubjet circle, .dg-scrubcloud circle { fill: #e6f7ff; transform-box: fill-box; }
           .dg-scrubjet, .dg-scrubcloud { opacity: 0; transition: opacity .9s ease; }
           svg.dg-scrub .dg-scrubjet, .dg-scrub .dg-scrubjet,
           svg.dg-scrub .dg-scrubcloud, .dg-scrub .dg-scrubcloud { opacity: 1; }
@@ -14144,7 +14144,9 @@ class OpenReefPanel extends HTMLElement {
   _diagReadingsMarkup(systemType) {
     const readings = this._diagramReadings();
     if (!readings.length) return `<g data-diag-readings></g>`;
-    const [x0, y0] = systemType === "aio" ? [820, 252] : [830, 190];
+    // AiO chips live in the open water upper-left: the top-right corner
+    // belongs to the return nozzle, its jet and the scrub mist.
+    const [x0, y0] = systemType === "aio" ? [460, 252] : [830, 190];
     const body = readings.map((r, i) => {
       const y = y0 + i * 42;
       return `
@@ -14338,12 +14340,14 @@ class OpenReefPanel extends HTMLElement {
     // ride the riser — mist off the nozzle, fine fog through the display
     parts.push(`
       <g class="dg-scrubjet dg-jetR">
-        <circle cx="212" cy="156" r="2"></circle>
-        <circle cx="224" cy="168" r="1.5" style="animation-delay:-.35s"></circle>
-        <circle cx="236" cy="178" r="2.2" style="animation-delay:-.7s"></circle>
-        <circle cx="218" cy="148" r="1.3" style="animation-delay:-1.05s"></circle>
-        <circle cx="230" cy="160" r="1.7" style="animation-delay:-1.4s"></circle>
-        <circle cx="244" cy="170" r="1.4" style="animation-delay:-1.75s"></circle>
+        <circle cx="212" cy="156" r="3.2"></circle>
+        <circle cx="226" cy="170" r="2.4" style="animation-delay:-.3s"></circle>
+        <circle cx="240" cy="182" r="3.4" style="animation-delay:-.6s"></circle>
+        <circle cx="218" cy="146" r="2.2" style="animation-delay:-.9s"></circle>
+        <circle cx="232" cy="158" r="2.8" style="animation-delay:-1.2s"></circle>
+        <circle cx="248" cy="172" r="2.4" style="animation-delay:-1.5s"></circle>
+        <circle cx="222" cy="178" r="2.6" style="animation-delay:-.45s"></circle>
+        <circle cx="236" cy="150" r="2.2" style="animation-delay:-1.05s"></circle>
       </g>
       ${this._diagScrubCloudMarkup(180, 166, 960, 296, "l")}`);
 
@@ -14623,12 +14627,14 @@ class OpenReefPanel extends HTMLElement {
     // through the pump — a mist off the nozzle, and a fine fog in the water
     parts.push(`
       <g class="dg-scrubjet dg-jetL">
-        <circle cx="1014" cy="270" r="2"></circle>
-        <circle cx="1002" cy="282" r="1.5" style="animation-delay:-.35s"></circle>
-        <circle cx="990" cy="292" r="2.2" style="animation-delay:-.7s"></circle>
-        <circle cx="1008" cy="262" r="1.3" style="animation-delay:-1.05s"></circle>
-        <circle cx="996" cy="274" r="1.7" style="animation-delay:-1.4s"></circle>
-        <circle cx="982" cy="284" r="1.4" style="animation-delay:-1.75s"></circle>
+        <circle cx="1014" cy="270" r="3.2"></circle>
+        <circle cx="1000" cy="284" r="2.4" style="animation-delay:-.3s"></circle>
+        <circle cx="986" cy="296" r="3.4" style="animation-delay:-.6s"></circle>
+        <circle cx="1008" cy="260" r="2.2" style="animation-delay:-.9s"></circle>
+        <circle cx="994" cy="272" r="2.8" style="animation-delay:-1.2s"></circle>
+        <circle cx="978" cy="286" r="2.4" style="animation-delay:-1.5s"></circle>
+        <circle cx="1004" cy="292" r="2.6" style="animation-delay:-.45s"></circle>
+        <circle cx="990" cy="264" r="2.2" style="animation-delay:-1.05s"></circle>
       </g>
       ${this._diagScrubCloudMarkup(312, 254, 736, 340, "r")}`);
 
