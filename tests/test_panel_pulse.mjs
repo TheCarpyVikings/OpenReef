@@ -81,12 +81,25 @@ test("night dim with a malformed time falls back to not dimming", async () => {
 
 test("ring animation tier: elite only for a calm >=95, never for warning or unmeasured", async () => {
   const panel = prep(await makePanel({}));
-  assertEqual(panel._pulseRingClass({ status: "ok", score: 96 }), "pulse-ring ok elite");
-  assertEqual(panel._pulseRingClass({ status: "ok", score: 94 }), "pulse-ring ok");
+  assertEqual(panel._pulseRingClass({ status: "ok", score: 96 }), "pulse-ring is-ok is-elite");
+  assertEqual(panel._pulseRingClass({ status: "ok", score: 94 }), "pulse-ring is-ok");
   // A capped-but-high score must not shimmer: the cap is the story.
-  assertEqual(panel._pulseRingClass({ status: "warning", score: 97 }), "pulse-ring warning");
-  assertEqual(panel._pulseRingClass({ status: "critical", score: 40 }), "pulse-ring critical");
-  assertEqual(panel._pulseRingClass({ status: "unknown", score: 100 }), "pulse-ring unknown");
+  assertEqual(panel._pulseRingClass({ status: "warning", score: 97 }), "pulse-ring is-warning");
+  assertEqual(panel._pulseRingClass({ status: "critical", score: 40 }), "pulse-ring is-critical");
+  assertEqual(panel._pulseRingClass({ status: "unknown", score: 100 }), "pulse-ring is-unknown");
+});
+
+test("the ring itself never carries a bare status class", async () => {
+  // Regression: a bare `warning` on the ring matched the global .warning
+  // BUTTON rule, painting an orange rounded rectangle behind the gauge.
+  const panel = prep(await makePanel({}));
+  for (const status of ["ok", "warning", "critical", "unknown"]) {
+    const cls = panel._pulseRingClass({ status, score: 80 });
+    assert(!/(?<!-)\b(?:warning|critical|ok|unknown|elite)\b/.test(cls), `ring leaked a bare status class: ${cls}`);
+  }
+  const markup = panel._pulseRingMarkup({ status: "warning", score: 80, grade: "B" });
+  assert(markup.includes("is-warning"), "ring markup carries the prefixed class");
+  assert(!/class="pulse-ring warning/.test(markup), "ring markup leaked a bare class");
 });
 
 // --- status classes on Pulse's small shapes --------------------------------
@@ -122,6 +135,15 @@ test("dots and markers never emit a bare warning/critical class", async () => {
     panel._pulseFocus = "insights";
     const deck = panel._pulseFocusInsightsMarkup();
     if (deck) assert(!/<span class="(?:on )?(?:warning|critical|ok|unknown)"/.test(deck), "pager dots leaked a bare status class");
+
+    // Event ticker: a `warning` activity entry used to get the same orange box.
+    panel._config.activity = [
+      { timestamp: "2026-06-04T08:00:00Z", message: "Skimmer paused", type: "warning" },
+      { timestamp: "2026-06-04T07:00:00Z", message: "Feed mode ended", type: "info" },
+    ];
+    const ticker = panel._pulseTickerMarkup();
+    assert(ticker.includes("is-warning"), "ticker carries the prefixed status class");
+    assert(!bare.test(ticker), `ticker leaked a bare status class: ${ticker}`);
   } finally {
     restore();
   }
