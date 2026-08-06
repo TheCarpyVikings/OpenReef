@@ -527,6 +527,77 @@ test("air stone slots per scene: sump return/display, AiO display/beside-the-ret
   assertEqual(junk._diagramResolvedLayout("aio", junk._diagramNodes()).air, "airDisplay", "wrong-scene slot falls back");
 });
 
+// --- wavemaker sides & bubble scrubbing (0.7.23) ----------------------------
+
+test("wavemakers slot to either wall or the middle, two heights per side", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.layout = { "wm:wave_l": "glassL", "wm:wave_r": "glassL2" };
+  const both = prep(await makePanel(cfg), ALL_ON);
+  const layout = both._diagramResolvedLayout("sump", both._diagramNodes());
+  assertEqual(layout["wm:wave_l"], "glassL");
+  assertEqual(layout["wm:wave_r"], "glassL2", "same wall, second height");
+  const aioCfg = structuredClone(RIG);
+  aioCfg.diagram.systemType = "aio";
+  aioCfg.diagram.layout = { "wm:wave_l": "glassR" };
+  const aio = prep(await makePanel(aioCfg), ALL_ON);
+  assertEqual(aio._diagramResolvedLayout("aio", aio._diagramNodes())["wm:wave_l"], "glassR", "AiO right wall exists now");
+  assert(aio._pulseDiagramSvg().length > 1000, "scene renders a left-facing unit");
+});
+
+test("an AiO tank draws up to three wavemakers", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.systemType = "aio";
+  cfg.equipment.wave_c = { label: "Wave Mid", type: "display_wavemaker", switch_entity_id: "switch.wc" };
+  const panel = prep(await makePanel(cfg), { ...ALL_ON, "switch.wc": sw("on") });
+  const svg = panel._pulseDiagramSvg();
+  assertEqual((svg.match(/dg-node dg-wm/g) || []).length, 3, "all three drawn");
+});
+
+test("bubble scrubbing needs the stone beside the return AND both pumps running", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.systemType = "aio";
+  cfg.diagram.layout = { air: "airCh3" };
+  cfg.equipment.bubbler = { label: "Air Pump", type: "air_pump", switch_entity_id: "switch.air" };
+  const on = prep(await makePanel(cfg), { ...ALL_ON, "switch.air": sw("on") });
+  assert(rootClass(on._pulseDiagramSvg()).includes("dg-scrub"), "scrubbing rig fogs the display");
+  const retOff = prep(await makePanel(structuredClone(cfg)), { ...ALL_ON, "switch.air": sw("on"), "switch.ret": sw("off") });
+  assert(!rootClass(retOff._pulseDiagramSvg()).includes("dg-scrub"), "no return, no bubbles in the display");
+  const airOff = prep(await makePanel(structuredClone(cfg)), { ...ALL_ON, "switch.air": sw("off") });
+  assert(!rootClass(airOff._pulseDiagramSvg()).includes("dg-scrub"), "air pump off, water stays clear");
+  const moved = structuredClone(cfg);
+  moved.diagram.layout = { air: "airDisplay" };
+  const display = prep(await makePanel(moved), { ...ALL_ON, "switch.air": sw("on") });
+  assert(!rootClass(display._pulseDiagramSvg()).includes("dg-scrub"), "a display air stone does not fog via the return");
+});
+
+test("sump scrubbing: the default return-chamber stone fogs while both run", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.equipment.bubbler = { label: "Air Pump", type: "air_pump", switch_entity_id: "switch.air" };
+  const panel = prep(await makePanel(cfg), { ...ALL_ON, "switch.air": sw("on") });
+  const svg = panel._pulseDiagramSvg();
+  assert(rootClass(svg).includes("dg-scrub"));
+  assert(svg.includes("dg-scrubcloud") && svg.includes("dg-scrubjet"), "mist and cloud layers present");
+});
+
+test("live patching flips dg-scrub with the pumps", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.systemType = "aio";
+  cfg.diagram.layout = { air: "airCh3" };
+  cfg.equipment.bubbler = { label: "Air Pump", type: "air_pump", switch_entity_id: "switch.air" };
+  const classes = new Map();
+  const fakeSvg = {
+    classList: { toggle: (cls, val) => classes.set(cls, val) },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const panel = prep(await makePanel(cfg), { ...ALL_ON, "switch.air": sw("on") });
+  panel._updatePulseDiagram(fakeSvg);
+  assertEqual(classes.get("dg-scrub"), true, "scrub follows live state");
+  panel._hass = { states: { ...ALL_ON, "switch.air": sw("off") } };
+  panel._updatePulseDiagram(fakeSvg);
+  assertEqual(classes.get("dg-scrub"), false, "air off clears the fog");
+});
+
 test("chip labels break at a word, never mid-word", async () => {
   const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON);
   assertEqual(panel._diagChipLabel("Tank Temperature"), "TANK");

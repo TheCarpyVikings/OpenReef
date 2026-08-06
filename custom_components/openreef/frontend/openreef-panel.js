@@ -13637,8 +13637,12 @@ class OpenReefPanel extends HTMLElement {
   _diagramSlots(systemType) {
     if (systemType === "aio") {
       return {
-        glassL: { kinds: ["wm"], x: 362, y: 400, dir: 1, rect: [332, 366, 110, 68] },
+        glassL: { kinds: ["wm"], x: 322, y: 400, dir: 1, rect: [292, 366, 110, 68] },
+        glassL2: { kinds: ["wm"], x: 322, y: 520, dir: 1, rect: [292, 486, 110, 68] },
         glassC: { kinds: ["wm"], x: 720, y: 300, dir: 1, rect: [690, 266, 110, 68] },
+        glassC2: { kinds: ["wm"], x: 620, y: 336, dir: 1, rect: [590, 302, 110, 68] },
+        glassR: { kinds: ["wm"], x: 1042, y: 452, dir: -1, rect: [962, 418, 110, 68] },
+        glassR2: { kinds: ["wm"], x: 1042, y: 560, dir: -1, rect: [962, 526, 110, 68] },
         ch2: { kinds: ["heater"], x: 1188, y: 430, rect: [1174, 416, 42, 92] },
         ch3: { kinds: ["heater"], x: 1222, y: 462, rect: [1208, 450, 42, 92] },
         display: { kinds: ["heater"], x: 420, y: 500, rect: [406, 486, 42, 92] },
@@ -13651,9 +13655,12 @@ class OpenReefPanel extends HTMLElement {
       };
     }
     return {
-      glassL: { kinds: ["wm"], x: 232, y: 305, dir: 1, rect: [202, 271, 110, 68] },
+      glassL: { kinds: ["wm"], x: 192, y: 305, dir: 1, rect: [162, 271, 110, 68] },
+      glassL2: { kinds: ["wm"], x: 192, y: 395, dir: 1, rect: [162, 361, 110, 62] },
       glassC: { kinds: ["wm"], x: 660, y: 235, dir: 1, rect: [630, 201, 110, 68] },
-      glassR: { kinds: ["wm"], x: 1085, y: 315, dir: -1, rect: [995, 281, 110, 68] },
+      glassC2: { kinds: ["wm"], x: 520, y: 280, dir: 1, rect: [490, 246, 110, 68] },
+      glassR: { kinds: ["wm"], x: 1130, y: 315, dir: -1, rect: [1050, 281, 110, 68] },
+      glassR2: { kinds: ["wm"], x: 1130, y: 430, dir: -1, rect: [1050, 396, 110, 66] },
       sumpReturn: { kinds: ["heater"], x: 462, y: 790, rect: [448, 776, 42, 92] },
       sumpSkimmer: { kinds: ["heater"], x: 908, y: 760, rect: [894, 746, 42, 92] },
       weir: { kinds: ["heater"], x: 1179, y: 290, rect: [1165, 276, 42, 92] },
@@ -13677,13 +13684,42 @@ class OpenReefPanel extends HTMLElement {
       return chosen;
     };
     const out = {};
-    const wmDefaults = systemType === "aio" ? ["glassL", "glassC"] : ["glassL", "glassR", "glassC"];
+    const wmDefaults = systemType === "aio"
+      ? ["glassL", "glassC", "glassR", "glassL2", "glassR2", "glassC2"]
+      : ["glassL", "glassR", "glassC", "glassL2", "glassR2", "glassC2"];
     for (const [id] of nodes.wavemakers) out[`wm:${id}`] = pick(layout[`wm:${id}`], "wm", wmDefaults);
     if (nodes.heater) out.heater = pick(layout.heater, "heater", systemType === "aio" ? ["ch2", "ch3", "display"] : ["sumpReturn", "sumpSkimmer", "weir"]);
     if (nodes.doser) out.doser = pick(layout.doser, "doser", systemType === "aio" ? ["doseMedia", "doseReturn"] : ["rightShelf", "leftShelf"]);
     if (nodes.ato && systemType === "aio") out.ato = pick(layout.ato, "ato", ["atoMid", "atoEnd"]);
     if (nodes.air) out.air = pick(layout.air, "air", systemType === "aio" ? ["airDisplay", "airCh3"] : ["airReturn", "airDisplay"]);
     return out;
+  }
+
+  // Bubble scrubbing: an air stone parked beside the return pump while both
+  // the air pump and the loop are actually running — micro-bubbles ride the
+  // return into the display. Any other arrangement keeps the water clear.
+  _diagramScrubOn(systemType, nodes, layout) {
+    if (!nodes.air || !nodes.ret) return false;
+    const beside = systemType === "aio" ? layout.air === "airCh3" : layout.air === "airReturn";
+    return beside && this._diagramNodeState(nodes.air[1]) === "on"
+      && this._diagramNodeState(nodes.ret[1]) === "on";
+  }
+
+  // The scrub cloud: tiny bubbles seeded deterministically through the display
+  // water, denser toward the nozzle end, animated only under dg-scrub.
+  _diagScrubCloudMarkup(x0, y0, w, h, noz) {
+    const fr = (i, s) => { const v = Math.sin(i * 127.1 + s * 311.7) * 43758.5453; return v - Math.floor(v); };
+    let out = "";
+    for (let i = 0; i < 18; i++) {
+      const dist = Math.pow(fr(i, 1), 1.4);
+      const x = noz === "r" ? x0 + w - 24 - dist * (w - 48) : x0 + 24 + dist * (w - 48);
+      const y = y0 + 30 + fr(i, 2) * (h - 60);
+      const r = (0.9 + fr(i, 3) * 1.4).toFixed(1);
+      const dur = (2.6 + fr(i, 4) * 2.2).toFixed(2);
+      const delay = (-fr(i, 5) * 4).toFixed(2);
+      out += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r}" style="animation-duration:${dur}s;animation-delay:${delay}s"></circle>`;
+    }
+    return `<g class="dg-scrubcloud">${out}</g>`;
   }
 
   // Rounded orthogonal path through points — the pipe/tube spine.
@@ -13827,9 +13863,10 @@ class OpenReefPanel extends HTMLElement {
     const awcFilling = awcState.status === "filling" || awcState.status === "exchanging";
     const atoOn = nodes.ato ? this._diagramNodeState(nodes.ato[1]) === "on" : false;
     const fugeOn = nodes.fugelight ? this._diagramNodeState(nodes.fugelight[1]) === "on" : false;
+    const scrubOn = this._diagramScrubOn(systemType, nodes, layout);
     return `
       <svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet"
-           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""} ${atoOn ? "dg-ato-on" : ""} ${fugeOn ? "dg-fuge-on" : ""}"
+           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""} ${atoOn ? "dg-ato-on" : ""} ${fugeOn ? "dg-fuge-on" : ""} ${scrubOn ? "dg-scrub" : ""}"
            data-pulse-diagram-svg data-water="${scene.water}"
            role="img" aria-label="Living diagram — ${systemType === "aio" ? "all-in-one tank" : "sump system"}">
         <style>
@@ -13870,6 +13907,18 @@ class OpenReefPanel extends HTMLElement {
           .dg-wake { stroke: rgba(94, 210, 195, .4); stroke-width: 2; }
           .dg-bubble { fill: #bfe8e0; opacity: 0; transform-box: fill-box; animation: dg-rise 2.4s linear infinite; }
           .dg-node.off .dg-bubble, .dg-node.gone .dg-bubble { animation-play-state: paused; opacity: 0; }
+          @keyframes dg-mistL { 0% { transform: translate(0, 0); opacity: 0; } 18% { opacity: .85; } 100% { transform: translate(-44px, -12px); opacity: 0; } }
+          @keyframes dg-mistR { 0% { transform: translate(0, 0); opacity: 0; } 18% { opacity: .85; } 100% { transform: translate(44px, -12px); opacity: 0; } }
+          @keyframes dg-microrise { 0% { transform: translateY(24px); opacity: 0; } 16% { opacity: .75; } 80% { opacity: .5; } 100% { transform: translateY(-92px); opacity: 0; } }
+          .dg-scrubjet.dg-jetL circle { animation: dg-mistL 1.5s linear infinite paused; }
+          .dg-scrubjet.dg-jetR circle { animation: dg-mistR 1.5s linear infinite paused; }
+          .dg-scrubcloud circle { animation: dg-microrise 3.2s linear infinite paused; }
+          .dg-scrubjet circle, .dg-scrubcloud circle { fill: #d6f0fa; transform-box: fill-box; }
+          .dg-scrubjet, .dg-scrubcloud { opacity: 0; transition: opacity .9s ease; }
+          svg.dg-scrub .dg-scrubjet, .dg-scrub .dg-scrubjet,
+          svg.dg-scrub .dg-scrubcloud, .dg-scrub .dg-scrubcloud { opacity: 1; }
+          svg.dg-scrub .dg-scrubjet circle, .dg-scrub .dg-scrubjet circle,
+          svg.dg-scrub .dg-scrubcloud circle, .dg-scrub .dg-scrubcloud circle { animation-play-state: running; }
           .dg-foam { fill: rgba(215, 230, 238, .5); }
           .dg-heatglow { animation: dg-heat 2.6s ease-in-out infinite; }
           .dg-heatcore { fill: #e8a952; opacity: .55; }
@@ -13919,7 +13968,7 @@ class OpenReefPanel extends HTMLElement {
           .dg-halo { fill: none; stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2; stroke-dasharray: 6 6; opacity: 0; transition: opacity .25s ease; }
           .dg-lifted { opacity: .92; }
           @media (prefers-reduced-motion: reduce) {
-            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg { animation: none !important; }
+            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg, .dg-scrubjet circle, .dg-scrubcloud circle { animation: none !important; }
           }
         </style>
         <defs>
@@ -14285,6 +14334,19 @@ class OpenReefPanel extends HTMLElement {
         ${this._diagChevMarkup(1000, 700, "d")}
       </g>`);
 
+    // bubble scrubbing: air stone in the return chamber means micro-bubbles
+    // ride the riser — mist off the nozzle, fine fog through the display
+    parts.push(`
+      <g class="dg-scrubjet dg-jetR">
+        <circle cx="212" cy="156" r="2"></circle>
+        <circle cx="224" cy="168" r="1.5" style="animation-delay:-.35s"></circle>
+        <circle cx="236" cy="178" r="2.2" style="animation-delay:-.7s"></circle>
+        <circle cx="218" cy="148" r="1.3" style="animation-delay:-1.05s"></circle>
+        <circle cx="230" cy="160" r="1.7" style="animation-delay:-1.4s"></circle>
+        <circle cx="244" cy="170" r="1.4" style="animation-delay:-1.75s"></circle>
+      </g>
+      ${this._diagScrubCloudMarkup(180, 166, 960, 296, "l")}`);
+
     // filter sock (static plumbing furniture)
     parts.push(`
       <path d="M 972 668 h 56 l -6 66 q -22 14 -44 0 Z" class="dg-sock"></path>
@@ -14348,11 +14410,13 @@ class OpenReefPanel extends HTMLElement {
     // wavemakers — slotted, display circulation only
     for (const [id, item] of nodes.wavemakers) {
       const slot = slots[layout[`wm:${id}`]] || slots.glassL;
+      const hx = slot.dir < 0 ? slot.x - 80 : slot.x - 30;
+      const gx = slot.dir < 0 ? slot.x - 74 : slot.x - 26;
       parts.push(this._diagNodeMarkup({
         kind: "dg-wm", focusId: `equip:${id}`, dragKey: `wm:${id}`, state: this._diagramNodeState(item),
         title: `${item.label || id} — in-tank flow only; the loop keeps running without it`,
-        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [slot.x - 30, slot.y - 32, 110, 64],
-        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${slot.x - 26}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
+        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [hx, slot.y - 32, 110, 64],
+        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${gx}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
       }));
     }
 
@@ -14555,6 +14619,19 @@ class OpenReefPanel extends HTMLElement {
         </g>
       </g>`);
 
+    // bubble scrubbing: air stone beside the return sends micro-bubbles
+    // through the pump — a mist off the nozzle, and a fine fog in the water
+    parts.push(`
+      <g class="dg-scrubjet dg-jetL">
+        <circle cx="1014" cy="270" r="2"></circle>
+        <circle cx="1002" cy="282" r="1.5" style="animation-delay:-.35s"></circle>
+        <circle cx="990" cy="292" r="2.2" style="animation-delay:-.7s"></circle>
+        <circle cx="1008" cy="262" r="1.3" style="animation-delay:-1.05s"></circle>
+        <circle cx="996" cy="274" r="1.7" style="animation-delay:-1.4s"></circle>
+        <circle cx="982" cy="284" r="1.4" style="animation-delay:-1.75s"></circle>
+      </g>
+      ${this._diagScrubCloudMarkup(312, 254, 736, 340, "r")}`);
+
     // media basket fills chamber 1, floss riding high so the overflow feeds it
     parts.push(`
       <rect x="1070" y="258" width="62" height="172" rx="6" class="dg-shell"></rect>
@@ -14613,13 +14690,15 @@ class OpenReefPanel extends HTMLElement {
     }
 
     // wavemakers
-    for (const [id, item] of nodes.wavemakers.slice(0, 2)) {
+    for (const [id, item] of nodes.wavemakers.slice(0, 3)) {
       const slot = slots[layout[`wm:${id}`]] || slots.glassL;
+      const hx = slot.dir < 0 ? slot.x - 80 : slot.x - 30;
+      const gx = slot.dir < 0 ? slot.x - 74 : slot.x - 26;
       parts.push(this._diagNodeMarkup({
         kind: "dg-wm", focusId: `equip:${id}`, dragKey: `wm:${id}`, state: this._diagramNodeState(item),
         title: `${item.label || id} — in-tank flow only; the loop keeps running without it`,
-        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [slot.x - 30, slot.y - 32, 110, 64],
-        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${slot.x - 26}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
+        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [hx, slot.y - 32, 110, 64],
+        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${gx}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
       }));
     }
 
@@ -14778,8 +14857,10 @@ class OpenReefPanel extends HTMLElement {
   // flow animations never restart mid-cycle.
   _updatePulseDiagram(svg) {
     const nodes = this._diagramNodes();
+    const systemType = this._diagramSystemType();
     const loopOn = nodes.ret ? this._diagramNodeState(nodes.ret[1]) === "on" : false;
     svg.classList.toggle("dg-loop-off", !loopOn);
+    svg.classList.toggle("dg-scrub", this._diagramScrubOn(systemType, nodes, this._diagramResolvedLayout(systemType, nodes)));
     const awcLive = this._awcSummary?.live || {};
     svg.querySelectorAll("[data-diag-node]").forEach((g) => {
       const key = g.getAttribute("data-diag-node") || "";
@@ -14853,7 +14934,6 @@ class OpenReefPanel extends HTMLElement {
     // so the pulse animation isn't restarted by every value tick.
     const alertLayer = svg.querySelector("[data-diag-alerts]");
     if (alertLayer) {
-      const systemType = this._diagramSystemType();
       const key = this._diagAlertsKey(this._diagramAlerts(systemType));
       if (alertLayer.getAttribute("data-diag-alert-key") !== key) {
         alertLayer.outerHTML = this._diagAlertsMarkup(systemType);
