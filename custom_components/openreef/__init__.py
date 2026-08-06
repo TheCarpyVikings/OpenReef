@@ -4972,11 +4972,14 @@ async def _async_refresh_issues(
             DOMAIN,
             ISSUE_MISSING_ENTITIES,
             breaks_in_ha_version=None,
-            data={"count": len(validation["missing_entities"])},
             is_fixable=False,
             issue_domain=DOMAIN,
             severity=ir.IssueSeverity.WARNING,
             translation_key=ISSUE_MISSING_ENTITIES,
+            # Placeholders must ride translation_placeholders (as strings) —
+            # `data` never reaches the frontend formatter, and the repair then
+            # renders a raw formatjs MISSING_VALUE error instead of the message.
+            translation_placeholders={"count": str(len(validation["missing_entities"]))},
         )
     else:
         ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ENTITIES)
@@ -4987,11 +4990,11 @@ async def _async_refresh_issues(
             DOMAIN,
             ISSUE_ARMED_UNAVAILABLE,
             breaks_in_ha_version=None,
-            data={"count": len(validation["armed_unavailable"])},
             is_fixable=False,
             issue_domain=DOMAIN,
             severity=ir.IssueSeverity.WARNING,
             translation_key=ISSUE_ARMED_UNAVAILABLE,
+            translation_placeholders={"count": str(len(validation["armed_unavailable"]))},
         )
     else:
         ir.async_delete_issue(hass, DOMAIN, ISSUE_ARMED_UNAVAILABLE)

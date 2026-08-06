@@ -321,6 +321,8 @@ class _IssueRecorder:
 
     def async_create_issue(self, hass, domain, issue_id, **kwargs):
         self.created.append(issue_id)
+        self.kwargs = getattr(self, "kwargs", {})
+        self.kwargs[issue_id] = kwargs
 
     def async_delete_issue(self, hass, domain, issue_id):
         self.deleted.append(issue_id)
@@ -388,6 +390,27 @@ def test_issue_refresh_immediate_when_ha_running():
     try:
         run(integration._async_refresh_issues(hass, entry))
         assert integration.ISSUE_MISSING_ENTITIES in recorder.created
+    finally:
+        integration.ir = original_ir
+
+
+def test_issue_translations_receive_their_count_placeholder():
+    """The repair strings interpolate {count}; the value must arrive via
+    translation_placeholders AS A STRING or the HA frontend renders a raw
+    formatjs MISSING_VALUE error instead of the message (seen on a real wall)."""
+    entry = _issues_entry()
+    hass = FakeHass(entries=[entry], is_running=True)
+    recorder = _IssueRecorder()
+    original_ir = integration.ir
+    integration.ir = recorder
+    try:
+        run(integration._async_refresh_issues(hass, entry))
+        for issue_id in (integration.ISSUE_MISSING_ENTITIES, integration.ISSUE_ARMED_UNAVAILABLE):
+            kwargs = recorder.kwargs[issue_id]
+            placeholders = kwargs.get("translation_placeholders")
+            assert placeholders and "count" in placeholders, f"{issue_id} must pass count"
+            assert isinstance(placeholders["count"], str), "HA requires string placeholder values"
+            assert int(placeholders["count"]) >= 1
     finally:
         integration.ir = original_ir
 
