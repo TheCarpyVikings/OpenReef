@@ -1298,8 +1298,8 @@ class OpenReefPanel extends HTMLElement {
           this._activeTab = "awc";
           this._render();
         } else if (!this._diagramArranging && id && id.startsWith("sensor:")) {
-          this._activeTab = "live";
-          this._render();
+          // Full trend modal, right over the diagram — chart, ranges, stats.
+          this._loadTrend(id.slice(7));
         }
       }
       if (action === "pulse-unfocus") this._closePulseFocus();
@@ -13638,7 +13638,12 @@ class OpenReefPanel extends HTMLElement {
         glassL: { kinds: ["wm"], x: 362, y: 400, dir: 1, rect: [332, 366, 110, 68] },
         glassC: { kinds: ["wm"], x: 720, y: 300, dir: 1, rect: [690, 266, 110, 68] },
         ch2: { kinds: ["heater"], x: 1188, y: 430, rect: [1174, 416, 42, 92] },
+        ch3: { kinds: ["heater"], x: 1232, y: 462, rect: [1218, 450, 42, 92] },
         display: { kinds: ["heater"], x: 420, y: 500, rect: [406, 486, 42, 92] },
+        atoMid: { kinds: ["ato"], rect: [1144, 250, 64, 130] },
+        atoEnd: { kinds: ["ato"], rect: [1220, 250, 64, 130] },
+        airDisplay: { kinds: ["air"], rect: [310, 556, 84, 66] },
+        airCh3: { kinds: ["air"], rect: [1218, 588, 64, 66] },
       };
     }
     return {
@@ -13650,6 +13655,8 @@ class OpenReefPanel extends HTMLElement {
       weir: { kinds: ["heater"], x: 1179, y: 290, rect: [1165, 276, 42, 92] },
       rightShelf: { kinds: ["doser"], x: 1300, y: 620, rect: [1296, 590, 200, 214] },
       leftShelf: { kinds: ["doser"], x: 40, y: 620, rect: [36, 590, 200, 214] },
+      airReturn: { kinds: ["air"], rect: [282, 826, 66, 74] },
+      airDisplay: { kinds: ["air"], rect: [218, 424, 84, 54] },
     };
   }
 
@@ -13668,8 +13675,10 @@ class OpenReefPanel extends HTMLElement {
     const out = {};
     const wmDefaults = systemType === "aio" ? ["glassL", "glassC"] : ["glassL", "glassR", "glassC"];
     for (const [id] of nodes.wavemakers) out[`wm:${id}`] = pick(layout[`wm:${id}`], "wm", wmDefaults);
-    if (nodes.heater) out.heater = pick(layout.heater, "heater", systemType === "aio" ? ["ch2", "display"] : ["sumpReturn", "sumpSkimmer", "weir"]);
+    if (nodes.heater) out.heater = pick(layout.heater, "heater", systemType === "aio" ? ["ch2", "ch3", "display"] : ["sumpReturn", "sumpSkimmer", "weir"]);
     if (nodes.doser && systemType !== "aio") out.doser = pick(layout.doser, "doser", ["rightShelf", "leftShelf"]);
+    if (nodes.ato && systemType === "aio") out.ato = pick(layout.ato, "ato", ["atoMid", "atoEnd"]);
+    if (nodes.air) out.air = pick(layout.air, "air", systemType === "aio" ? ["airDisplay", "airCh3"] : ["airReturn", "airDisplay"]);
     return out;
   }
 
@@ -14047,6 +14056,16 @@ class OpenReefPanel extends HTMLElement {
       "magnesium", "nitrate", "phosphate", "dissolved_oxygen"];
   }
 
+  // Chip labels break at a word, never mid-word: "Tank Temperature" reads
+  // "TANK", not "TANK TEMPE".
+  _diagChipLabel(label) {
+    const text = String(label || "").toUpperCase();
+    if (text.length <= 12) return text;
+    const cut = text.slice(0, 12);
+    const space = cut.lastIndexOf(" ");
+    return space > 2 ? cut.slice(0, space) : cut;
+  }
+
   _diagramReadings() {
     if (this._diagramCfg().showReadings === false) return [];
     const sensors = this._config.sensors || {};
@@ -14073,7 +14092,7 @@ class OpenReefPanel extends HTMLElement {
       return `
         <g class="dg-chip ${r.status}" data-diag-chip-group="${this._escape(r.id)}" data-action="pulse-focus" data-id="sensor:${this._escape(r.id)}" role="button" tabindex="0" style="cursor:pointer;">
           <rect x="${x0}" y="${y}" width="192" height="34" rx="10" class="dg-chip-bg"></rect>
-          <text x="${x0 + 12}" y="${y + 22}" class="dg-chip-label">${this._escape(String(r.label).slice(0, 10).toUpperCase())}</text>
+          <text x="${x0 + 12}" y="${y + 22}" class="dg-chip-label">${this._escape(this._diagChipLabel(r.label))}</text>
           <text x="${x0 + 180}" y="${y + 22}" text-anchor="end" class="dg-chip-value" data-diag-chip="${this._escape(r.id)}">${this._escape(r.value)}</text>
         </g>`;
     }).join("");
@@ -14184,6 +14203,8 @@ class OpenReefPanel extends HTMLElement {
     if (nodes.wavemakers.length) kinds.add("wm");
     if (nodes.heater) kinds.add("heater");
     if (nodes.doser && systemType !== "aio") kinds.add("doser");
+    if (nodes.ato && systemType === "aio") kinds.add("ato");
+    if (nodes.air) kinds.add("air");
     return Object.entries(slots)
       .filter(([, slot]) => slot.kinds.some((k) => kinds.has(k)))
       .map(([sid, slot]) => `<rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="14" class="dg-slot" data-diag-slot="${sid}" data-diag-kinds="${slot.kinds.join(",")}"></rect>`)
@@ -14420,20 +14441,23 @@ class OpenReefPanel extends HTMLElement {
       }));
     }
 
-    // air stone bubbling in the return chamber
+    // air stone — return chamber by default, or up in the display (drag it)
     if (nodes.air) {
       const [id, item] = nodes.air;
+      const inDisplay = layout.air === "airDisplay";
+      const [ax2, ay2] = inDisplay ? [244, 448] : [292, 876];
       let bubbles = "";
       for (let i = 0; i < 5; i++) {
-        bubbles += `<circle cx="${300 + (i % 3) * 8}" cy="${868 - (i % 2) * 10}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+        bubbles += `<circle cx="${ax2 + 8 + (i % 3) * 8}" cy="${ay2 - 8 - (i % 2) * 10}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
       }
       parts.push(this._diagNodeMarkup({
-        kind: "dg-air", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        kind: "dg-air", focusId: `equip:${id}`, dragKey: "air", state: this._diagramNodeState(item),
         title: `${item.label || id} — air stone`,
-        dot: [330, 872], hit: [284, 820, 62, 76],
+        dot: [ax2 + 38, ay2 - 4], hit: [ax2 - 8, ay2 - 56, 62, 76],
         art: `
-          <rect x="292" y="876" width="32" height="10" rx="5" class="dg-shell"></rect>
-          ${bubbles}`,
+          <rect x="${ax2}" y="${ay2}" width="32" height="10" rx="5" class="dg-shell"></rect>
+          ${bubbles}
+          <rect x="${ax2 - 6}" y="${ay2 - 52}" width="50" height="68" rx="10" class="dg-halo"></rect>`,
       }));
     }
 
@@ -14490,7 +14514,9 @@ class OpenReefPanel extends HTMLElement {
       <line x1="1139" y1="248" x2="1139" y2="630" class="dg-glass-thin"></line>
       <line x1="1215" y1="230" x2="1215" y2="656" class="dg-glass-thin"></line>`);
     let comb = "";
-    for (let x = 1062; x < 1110; x += 9) comb += `<line x1="${x}" y1="224" x2="${x}" y2="248" class="dg-line"></line>`;
+    // Teeth stop at 1092 so the doser/AWC drop tubes land in clear water
+    // instead of threading the comb.
+    for (let x = 1062; x < 1092; x += 9) comb += `<line x1="${x}" y1="224" x2="${x}" y2="248" class="dg-line"></line>`;
     parts.push(comb);
     parts.push(`
       <rect x="300" y="190" width="1000" height="470" class="dg-glass"></rect>
@@ -14626,18 +14652,25 @@ class OpenReefPanel extends HTMLElement {
       }));
     }
 
-    // ATO reservoir bottom-right, short tube into chamber 2
+    // ATO reservoir bottom-right. The fill point is a slot: middle chamber by
+    // default, last (return) chamber for setups that top off there — drag the
+    // reservoir onto the chamber in arrange mode. The run stays left of the
+    // dosing shelf so tubes never disappear behind the station.
     if (nodes.ato) {
       const [id, item] = nodes.ato;
+      const fillEnd = layout.ato === "atoEnd";
       parts.push(this._diagNodeMarkup({
-        kind: "dg-ato", focusId: `equip:${id}`, state: this._diagramNodeState(item),
-        title: `${item.label || id} — auto top-off reservoir`,
+        kind: "dg-ato", focusId: `equip:${id}`, dragKey: "ato", state: this._diagramNodeState(item),
+        title: `${item.label || id} — auto top-off, filling the ${fillEnd ? "return" : "middle"} chamber`,
         dot: [1426, 726], hit: [1346, 710, 96, 232],
         art: `
           <rect x="1352" y="716" width="84" height="220" rx="8" fill="rgba(20,64,94,.5)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
-          <rect x="1356" y="796" width="76" height="136" fill="url(#dgSump)"></rect>`,
+          <rect x="1356" y="796" width="76" height="136" fill="url(#dgSump)"></rect>
+          <rect x="1348" y="712" width="92" height="228" rx="10" class="dg-halo"></rect>`,
       }));
-      parts.push(`<g class="dg-ato-run">${this._diagTubeMarkup([[1394, 798], [1394, 156], [1177, 156], [1177, 262]], true)}</g>`);
+      parts.push(`<g class="dg-ato-run">${this._diagTubeMarkup(fillEnd
+        ? [[1394, 714], [1394, 700], [1336, 700], [1336, 246], [1306, 246]]
+        : [[1394, 714], [1394, 700], [1336, 700], [1336, 148], [1177, 148], [1177, 262]], true)}</g>`);
       parts.push(`<text x="1394" y="962" class="dg-lbl">ato</text>`);
     }
 
@@ -14682,20 +14715,24 @@ class OpenReefPanel extends HTMLElement {
       }));
     }
 
-    // air stone in the display
+    // air stone — display by default, or beside the return pump for bubble
+    // scrubbing rigs (drag it there in arrange mode)
     if (nodes.air) {
       const [id, item] = nodes.air;
+      const scrubbing = layout.air === "airCh3";
+      const [sx2, sy2] = scrubbing ? [1226, 640] : [328, 600];
       let bubbles = "";
       for (let i = 0; i < 5; i++) {
-        bubbles += `<circle cx="${336 + (i % 3) * 8}" cy="${590 - (i % 2) * 12}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+        bubbles += `<circle cx="${sx2 + 8 + (i % 3) * 8}" cy="${sy2 - 10 - (i % 2) * 12}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
       }
       parts.push(this._diagNodeMarkup({
-        kind: "dg-air", focusId: `equip:${id}`, state: this._diagramNodeState(item),
-        title: `${item.label || id} — air stone`,
-        dot: [366, 596], hit: [318, 540, 64, 76],
+        kind: "dg-air", focusId: `equip:${id}`, dragKey: "air", state: this._diagramNodeState(item),
+        title: `${item.label || id} — air stone${scrubbing ? ", scrubbing beside the return" : ""}`,
+        dot: [sx2 + 38, sy2 - 4], hit: [sx2 - 10, sy2 - 60, 64, 76],
         art: `
-          <rect x="328" y="600" width="32" height="10" rx="5" class="dg-shell"></rect>
-          ${bubbles}`,
+          <rect x="${sx2}" y="${sy2}" width="32" height="10" rx="5" class="dg-shell"></rect>
+          ${bubbles}
+          <rect x="${sx2 - 8}" y="${sy2 - 56}" width="52" height="70" rx="10" class="dg-halo"></rect>`,
       }));
     }
 
@@ -14841,7 +14878,9 @@ class OpenReefPanel extends HTMLElement {
       el.setAttribute("d", "M0,0 q10,-8 22,0 q-12,8 -22,0 l-8,6 l2,-6 l-2,-6 Z");
       el.setAttribute("class", "dg-fish");
       layer.appendChild(el);
-      fish.push({ t: Math.random() * 6.28, speed: 0.0014 + i * 0.0008, ry: Math.max(30, wh * 0.18 + i * 30), el });
+      // Fish cruise; they don't sprint. Roughly a lap every couple of minutes,
+      // slow enough that the eye rests on the water instead of chasing them.
+      fish.push({ t: Math.random() * 6.28, speed: 0.00045 + i * 0.00025, ry: Math.max(30, wh * 0.18 + i * 30), el });
     }
     const motion = { raf: 0, last: 0 };
     const tick = (ts) => {
@@ -14913,7 +14952,8 @@ class OpenReefPanel extends HTMLElement {
       if (!drag) return;
       const p = toSvg(e);
       drag.g.setAttribute("transform", `translate(${(p.x - drag.x0).toFixed(1)} ${(p.y - drag.y0).toFixed(1)})`);
-      const kind = drag.key === "heater" ? "heater" : drag.key === "doser" ? "doser" : "wm";
+      const kind = drag.key === "heater" ? "heater" : drag.key === "doser" ? "doser"
+        : drag.key === "ato" ? "ato" : drag.key === "air" ? "air" : "wm";
       let best = null;
       let bestD = Infinity;
       svg.querySelectorAll("[data-diag-slot]").forEach((slotEl) => {
@@ -19581,7 +19621,7 @@ class OpenReefPanel extends HTMLElement {
         <p class="muted">${mapped.length
           ? `On your diagram right now: ${this._escape(mapped.join(", "))}. It draws whatever is switch-mapped in Equipment (plus your dosing channels) — map more gear and it appears.`
           : "Nothing to draw yet — map your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears on the diagram automatically."}</p>
-        <p class="muted">To see it: set the Reef Pulse backdrop to <strong>Tank diagram</strong> (or tap the Living Diagram face), then Present. The ✎ button on the Pulse screen enters arrange mode — drag wavemakers, the heater or the dosing station between highlighted spots; pipework re-routes itself.</p>
+        <p class="muted">To see it: set the Reef Pulse backdrop to <strong>Tank diagram</strong> (or tap the Living Diagram face), then Present — or just open the Diagram tab. Arrange mode (✎) drags wavemakers, the heater, the dosing station and the air stone between highlighted spots; on all-in-ones you can also drop the ATO reservoir onto the chamber it fills and put the heater in any back chamber. Pipework re-routes itself.</p>
       `,
       forceOpen,
     );

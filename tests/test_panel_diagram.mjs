@@ -448,6 +448,58 @@ test("the return chamber visibly rises while the loop is stopped", async () => {
   assert(svg.includes("dg-c4rise"), "level-rise cap present in the sump scene");
 });
 
+// --- arrange slots for real-world AiO layouts (0.7.18) ----------------------
+
+test("AiO heater can live in any back chamber, including the last one", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.systemType = "aio";
+  cfg.diagram.layout = { heater: "ch3" };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const layout = panel._diagramResolvedLayout("aio", panel._diagramNodes());
+  assertEqual(layout.heater, "ch3", "return-chamber heater honoured");
+  assert(panel._pulseDiagramSvg().length > 1000, "scene renders with the heater in ch3");
+});
+
+test("AiO ATO fill point is a slot: middle chamber default, last chamber by choice", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.systemType = "aio";
+  const def = prep(await makePanel(cfg), ALL_ON);
+  assertEqual(def._diagramResolvedLayout("aio", def._diagramNodes()).ato, "atoMid", "default fills the middle chamber");
+  assert(def._pulseDiagramSvg().includes("filling the middle chamber"), "tooltip says where it fills");
+  cfg.diagram.layout = { ato: "atoEnd" };
+  const end = prep(await makePanel(cfg), ALL_ON);
+  assertEqual(end._diagramResolvedLayout("aio", end._diagramNodes()).ato, "atoEnd");
+  assert(end._pulseDiagramSvg().includes("filling the return chamber"), "re-routed tube described");
+  const sump = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  assert(!("ato" in sump._diagramResolvedLayout("sump", sump._diagramNodes())), "sump ATO is not slotted");
+});
+
+test("air stone slots per scene: sump return/display, AiO display/beside-the-return", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.equipment.bubbler = { label: "Air Pump", type: "air_pump", switch_entity_id: "switch.air" };
+  const states = { ...ALL_ON, "switch.air": sw("on") };
+  const sump = prep(await makePanel(cfg), states);
+  assertEqual(sump._diagramResolvedLayout("sump", sump._diagramNodes()).air, "airReturn", "sump default");
+  const aioCfg = structuredClone(cfg);
+  aioCfg.diagram.systemType = "aio";
+  aioCfg.diagram.layout = { air: "airCh3" };
+  const aio = prep(await makePanel(aioCfg), states);
+  assertEqual(aio._diagramResolvedLayout("aio", aio._diagramNodes()).air, "airCh3");
+  assert(aio._pulseDiagramSvg().includes("scrubbing beside the return"), "bubble-scrubbing placement drawn");
+  aioCfg.diagram.layout = { air: "sumpReturn" }; // wrong-scene slot id
+  const junk = prep(await makePanel(aioCfg), states);
+  assertEqual(junk._diagramResolvedLayout("aio", junk._diagramNodes()).air, "airDisplay", "wrong-scene slot falls back");
+});
+
+test("chip labels break at a word, never mid-word", async () => {
+  const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  assertEqual(panel._diagChipLabel("Tank Temperature"), "TANK");
+  assertEqual(panel._diagChipLabel("pH Level"), "PH LEVEL");
+  assertEqual(panel._diagChipLabel("Alkalinity"), "ALKALINITY");
+  assertEqual(panel._diagChipLabel("Supercalifragilistic"), "SUPERCALIFRA", "single long word hard-cuts");
+  assertEqual(panel._diagChipLabel(""), "");
+});
+
 // --- the Diagram tab --------------------------------------------------------
 
 test("diagram is a first-class tab that routes its own content", async () => {
