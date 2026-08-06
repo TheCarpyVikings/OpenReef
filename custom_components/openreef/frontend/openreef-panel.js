@@ -13288,13 +13288,15 @@ class OpenReefPanel extends HTMLElement {
     return `
       <article class="pulse-block pulse-tap" data-pulse-categories data-action="pulse-focus" data-id="health" role="button" tabindex="0" title="Tap for detail">
         <small class="pulse-block-title">Health breakdown</small>
-        ${categories.map((cat) => `
-          <div class="pulse-cat">
-            <small>${this._escape(cat.label)}</small>
-            <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
-            <strong>${this._escape(cat.score)}</strong>
-          </div>
-        `).join("")}
+        <div class="pulse-cats">
+          ${categories.map((cat) => `
+            <div class="pulse-cat">
+              <small>${this._escape(cat.label)}</small>
+              <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+              <strong>${this._escape(cat.score)}</strong>
+            </div>
+          `).join("")}
+        </div>
       </article>
     `;
   }
@@ -15277,13 +15279,15 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <span class="pill ${health.status === "ok" ? "ok" : health.status}">${this._escape(health.topReason || "")}</span>
       </header>
-      ${categories.map((cat) => `
-        <div class="pulse-cat">
-          <small>${this._escape(cat.label)}</small>
-          <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
-          <strong>${this._escape(cat.score)}</strong>
-        </div>
-      `).join("")}
+      <div class="pulse-cats">
+        ${categories.map((cat) => `
+          <div class="pulse-cat">
+            <small>${this._escape(cat.label)}</small>
+            <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+            <strong>${this._escape(cat.score)}</strong>
+          </div>
+        `).join("")}
+      </div>
       ${losses.length ? `
         <div class="pulse-focus-list">
           ${losses.map((loss) => `
@@ -22186,9 +22190,16 @@ class OpenReefPanel extends HTMLElement {
         .pulse-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: 100%; max-width: 1380px; }
         .pulse-block { display: grid; gap: 9px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 14px; padding: 14px 16px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); align-content: start; }
         .pulse-block-title { font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
+        /* One grid for ALL category rows: each row was its own grid, so a long
+           label ("Chemistry / Parameters") pushed only its own bar right and
+           the tracks never lined up. display:contents lifts each row's cells
+           into the shared grid so every column shares one width.
+           (No backticks in this block — the stylesheet is a template literal.) */
+        .pulse-cats { display: grid; grid-template-columns: minmax(80px, max-content) minmax(0, 1fr) auto; align-items: center; gap: 9px 10px; }
+        .pulse-cats .pulse-cat { display: contents; }
         .pulse-cat { display: grid; grid-template-columns: minmax(80px, auto) 1fr auto; align-items: center; gap: 9px; }
         .pulse-cat small { font-size: 11px; font-weight: 700; color: #cfe7f5; }
-        .pulse-cat strong { font-size: 12px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
+        .pulse-cat strong { font-size: 12px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; text-align: right; }
         .pulse-cat-track { height: 7px; border-radius: 999px; background: rgba(255, 255, 255, .12); overflow: hidden; }
         .pulse-cat-track span { display: block; height: 100%; padding: 0; border: 0; box-sizing: border-box; border-radius: 999px; }
         .pulse-cat-track span.is-ok { background: #22c55e; }
