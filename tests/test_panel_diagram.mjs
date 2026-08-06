@@ -355,6 +355,38 @@ test("room-air readings and the showAlerts gate keep markers off the tank", asyn
   assertEqual(gated._diagramAlerts("sump").length, 0, "toggle off means no markers at all");
 });
 
+// --- probe reading chips ----------------------------------------------------
+
+test("reading chips: probe values only, priority order, capped at four", async () => {
+  const mk = (id, label, group, extra = {}) => [id, { label, entity_id: `sensor.${id}`, group, min: 0, max: 100, enabled: true, ...extra }];
+  const panel = await prepAsync({ ...structuredClone(RIG), sensors: Object.fromEntries([
+    mk("calcium", "Calcium", "chemistry"), mk("temp", "Tank Temp", "tank"),
+    mk("ph", "pH", "chemistry"), mk("salinity", "Salinity", "chemistry"),
+    mk("alkalinity", "Alkalinity", "chemistry"),
+    mk("par", "PAR", "lighting"), mk("room_temp", "Room", "room"),
+    ["leak", { label: "Leak", entity_id: "binary_sensor.l", group: "safety", kind: "binary", enabled: true }],
+  ]) }, {
+    "sensor.calcium": num(50), "sensor.temp": num(25), "sensor.ph": num(8.1),
+    "sensor.salinity": num(35), "sensor.alkalinity": num(9),
+    "sensor.par": num(200), "sensor.room_temp": num(21),
+    "binary_sensor.l": { state: "off", attributes: { device_class: "moisture" } },
+  });
+  const readings = panel._diagramReadings();
+  assertEqual(readings.map((r) => r.id), ["temp", "ph", "salinity", "alkalinity"], "priority order wins; calcium bumped by the cap");
+  const svg = panel._pulseDiagramSvg();
+  assert(svg.includes('data-diag-chip="temp"'), "chip carries its patch hook");
+  assert(!svg.includes('data-diag-chip="par"') && !svg.includes('data-diag-chip="room_temp"'), "PAR and room air stay off the water");
+  assert(!svg.includes('data-diag-chip="leak"'), "binary sensors are not readings");
+});
+
+test("showReadings off means no chips at all", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.diagram.showReadings = false;
+  cfg.sensors = { temp: { label: "Tank Temp", entity_id: "sensor.t", group: "tank", min: 0, max: 100, enabled: true } };
+  const panel = await prepAsync(cfg, { "sensor.t": num(25) });
+  assertEqual(panel._diagramReadings().length, 0);
+});
+
 // --- the Diagram tab --------------------------------------------------------
 
 test("diagram is a first-class tab that routes its own content", async () => {

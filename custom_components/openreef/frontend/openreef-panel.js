@@ -13857,6 +13857,11 @@ class OpenReefPanel extends HTMLElement {
           .dg-alert.warning .dg-alert-pill { stroke: rgba(245, 158, 11, .6); }
           .dg-alert.critical .dg-alert-pill { stroke: rgba(239, 68, 68, .65); }
           .dg-alert-text { font-size: 13.5px; font-weight: 700; fill: #f4fbff; letter-spacing: .03em; }
+          .dg-chip-bg { fill: rgba(4, 10, 16, .62); stroke: rgba(127, 184, 216, .35); stroke-width: 1.5; transition: stroke .4s ease; }
+          .dg-chip.warning .dg-chip-bg { stroke: rgba(245, 158, 11, .7); }
+          .dg-chip.critical .dg-chip-bg { stroke: rgba(239, 68, 68, .75); }
+          .dg-chip-label { font-size: 11px; font-weight: 700; letter-spacing: .09em; fill: #9fc7e0; }
+          .dg-chip-value { font-size: 15px; font-weight: 800; fill: #f4fbff; font-variant-numeric: tabular-nums; }
           .dg-awc-fill .dg-flow, .dg-awc-drain .dg-flow { opacity: 0; animation-play-state: paused; transition: opacity .6s ease; }
           svg.dg-awc-filling .dg-awc-fill .dg-flow, .dg-awc-filling .dg-awc-fill .dg-flow { opacity: .85; animation-play-state: running; }
           svg.dg-awc-draining .dg-awc-drain .dg-flow, .dg-awc-draining .dg-awc-drain .dg-flow { opacity: .85; animation-play-state: running; }
@@ -13988,6 +13993,50 @@ class OpenReefPanel extends HTMLElement {
         </g>`;
     }).join("");
     return `<g data-diag-alerts data-diag-alert-key="${this._escape(this._diagAlertsKey(alerts))}">${body}</g>`;
+  }
+
+  // ---- Probe reading chips: live values anchored in the scene ------------
+  // A compact column of probe readings floats in the display water — the
+  // glanceable numbers (temp, pH, salinity, alk…) without leaving the
+  // schematic. Probe-style readings only: room air, PAR and flow stay off
+  // (they live in the stat chips and the alert layer).
+
+  static get DIAGRAM_READING_PRIORITY() {
+    return ["temp", "ph", "salinity", "alkalinity", "sump_temp", "orp", "calcium",
+      "magnesium", "nitrate", "phosphate", "dissolved_oxygen"];
+  }
+
+  _diagramReadings() {
+    if (this._diagramCfg().showReadings === false) return [];
+    const sensors = this._config.sensors || {};
+    const out = [];
+    for (const id of OpenReefPanel.DIAGRAM_READING_PRIORITY) {
+      const sensor = sensors[id];
+      if (!sensor || sensor.enabled === false || !sensor.entity_id) continue;
+      if (this._sensorKind(sensor, id) === "binary") continue;
+      const badge = this._liveStatBadge(id, sensor);
+      const value = this._sensorDisplayValue(id, sensor);
+      const unit = this._sensorDisplayUnit(id, sensor);
+      out.push({ id, label: sensor.label || id, status: badge.status, value: unit ? `${value} ${unit}` : String(value) });
+      if (out.length === 4) break;
+    }
+    return out;
+  }
+
+  _diagReadingsMarkup(systemType) {
+    const readings = this._diagramReadings();
+    if (!readings.length) return `<g data-diag-readings></g>`;
+    const [x0, y0] = systemType === "aio" ? [820, 252] : [830, 190];
+    const body = readings.map((r, i) => {
+      const y = y0 + i * 42;
+      return `
+        <g class="dg-chip ${r.status}" data-diag-chip-group="${this._escape(r.id)}" data-action="pulse-focus" data-id="sensor:${this._escape(r.id)}" role="button" tabindex="0" style="cursor:pointer;">
+          <rect x="${x0}" y="${y}" width="192" height="34" rx="10" class="dg-chip-bg"></rect>
+          <text x="${x0 + 12}" y="${y + 22}" class="dg-chip-label">${this._escape(String(r.label).slice(0, 10).toUpperCase())}</text>
+          <text x="${x0 + 180}" y="${y + 22}" text-anchor="end" class="dg-chip-value" data-diag-chip="${this._escape(r.id)}">${this._escape(r.value)}</text>
+        </g>`;
+    }).join("");
+    return `<g data-diag-readings>${body}</g>`;
   }
 
   // ---- AWC on the wall: reservoirs, pumps and change-in-progress flow ----
@@ -14285,6 +14334,7 @@ class OpenReefPanel extends HTMLElement {
     }
 
     parts.push(this._diagAwcSumpMarkup());
+    parts.push(this._diagReadingsMarkup("sump"));
     parts.push(this._diagAlertsMarkup("sump"));
 
     if (arranging) parts.push(this._diagSlotsMarkup("sump", nodes));
@@ -14464,6 +14514,7 @@ class OpenReefPanel extends HTMLElement {
     }
 
     parts.push(this._diagAwcAioMarkup());
+    parts.push(this._diagReadingsMarkup("aio"));
     parts.push(this._diagAlertsMarkup("aio"));
 
     if (arranging) parts.push(this._diagSlotsMarkup("aio", nodes));
@@ -14517,6 +14568,21 @@ class OpenReefPanel extends HTMLElement {
       });
       this._diagAwcKickSummary();
     }
+    // Probe chips: retint and update values in place.
+    svg.querySelectorAll("[data-diag-chip-group]").forEach((g) => {
+      const id = g.getAttribute("data-diag-chip-group");
+      const sensor = (this._config.sensors || {})[id];
+      if (!sensor) return;
+      const badge = this._liveStatBadge(id, sensor);
+      g.classList.toggle("warning", badge.status === "warning");
+      g.classList.toggle("critical", badge.status === "critical");
+      const valueEl = g.querySelector("[data-diag-chip]");
+      if (valueEl) {
+        const value = this._sensorDisplayValue(id, sensor);
+        const unit = this._sensorDisplayUnit(id, sensor);
+        valueEl.textContent = unit ? `${value} ${unit}` : String(value);
+      }
+    });
     // Spatial alerts: swap the marker layer only when the alert SET changes,
     // so the pulse animation isn't restarted by every value tick.
     const alertLayer = svg.querySelector("[data-diag-alerts]");
@@ -19290,6 +19356,13 @@ class OpenReefPanel extends HTMLElement {
           <span>
             <strong>Alerts light up where they are</strong>
             <small>A warning or critical reading pulses at its physical spot — leak at the cabinet base, temperature at the display, chemistry at the probe cluster. Worst first, capped at three.</small>
+          </span>
+        </label>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="diagram" data-field="showReadings" ${cfg.showReadings === false ? "" : "checked"}>
+          <span>
+            <strong>Probe readings in the water</strong>
+            <small>A small column of live values (temp, pH, salinity, alk…) floats in the display — up to four, tinted when out of range, tappable for history.</small>
           </span>
         </label>
         <p class="muted">${mapped.length
