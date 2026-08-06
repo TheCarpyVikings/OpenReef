@@ -1294,6 +1294,9 @@ class OpenReefPanel extends HTMLElement {
         } else if (!this._diagramArranging && id === "doser-station" && this._dosingEnabled()) {
           this._activeTab = "dosing";
           this._render();
+        } else if (!this._diagramArranging && id === "awc-station") {
+          this._activeTab = "awc";
+          this._render();
         }
       }
       if (action === "pulse-unfocus") this._closePulseFocus();
@@ -10268,9 +10271,13 @@ class OpenReefPanel extends HTMLElement {
       this._awcSummaryLoading = false;
       // While Pulse is up, a full render tears down the presentation layer
       // (and used to reset every ring animation on each 1–4 s diagram poll);
-      // patch the live screen in place instead.
+      // patch the live screen in place instead. Same story on the Diagram tab.
       if (this._pulseActive) this._updatePulse();
-      else this._render();
+      else if (this._activeTab === "diagram") {
+        const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+        if (svg) this._updatePulseDiagram(svg);
+        else this._render();
+      } else this._render();
     }
   }
 
@@ -13779,9 +13786,13 @@ class OpenReefPanel extends HTMLElement {
     const scene = systemType === "aio"
       ? this._diagramAioScene(nodes, layout, arranging)
       : this._diagramSumpScene(nodes, layout, arranging);
+    this._diagAwcKickSummary();
+    const awcState = this._diagAwcEnabled() ? this._awcLiveState(this._config.automaticWaterChange) : {};
+    const awcDraining = awcState.status === "draining" || awcState.status === "exchanging";
+    const awcFilling = awcState.status === "filling" || awcState.status === "exchanging";
     return `
       <svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet"
-           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""}"
+           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""}"
            data-pulse-diagram-svg data-water="${scene.water}"
            role="img" aria-label="Living diagram — ${systemType === "aio" ? "all-in-one tank" : "sump system"}">
         <style>
@@ -13830,6 +13841,13 @@ class OpenReefPanel extends HTMLElement {
           .dg-sock { fill: #dfe8ee; opacity: .85; }
           .dg-part { fill: #9fd8ce; }
           .dg-fish { fill: #31536b; opacity: .8; }
+          @keyframes dg-spin { to { transform: rotate(360deg); } }
+          .dg-awc-fill .dg-flow, .dg-awc-drain .dg-flow { opacity: 0; animation-play-state: paused; transition: opacity .6s ease; }
+          svg.dg-awc-filling .dg-awc-fill .dg-flow, .dg-awc-filling .dg-awc-fill .dg-flow { opacity: .85; animation-play-state: running; }
+          svg.dg-awc-draining .dg-awc-drain .dg-flow, .dg-awc-draining .dg-awc-drain .dg-flow { opacity: .85; animation-play-state: running; }
+          .dg-pumpx { transform-box: fill-box; transform-origin: center; animation: dg-spin 1.3s linear infinite; animation-play-state: paused; }
+          svg.dg-awc-filling .dg-awc-fill .dg-pumpx, .dg-awc-filling .dg-awc-fill .dg-pumpx,
+          svg.dg-awc-draining .dg-awc-drain .dg-pumpx, .dg-awc-draining .dg-awc-drain .dg-pumpx { animation-play-state: running; }
           .dg-slot { fill: rgba(94, 210, 195, .06); stroke: rgba(94, 210, 195, .45); stroke-width: 2; stroke-dasharray: 6 7; opacity: 0; pointer-events: none; transition: opacity .25s ease; }
           svg.dg-editing .dg-slot, .dg-editing .dg-slot { opacity: 1; }
           .dg-slot.near { fill: rgba(94, 210, 195, .2); stroke: var(--openreef-accent, #4fd8c3); }
@@ -13863,10 +13881,107 @@ class OpenReefPanel extends HTMLElement {
             <stop offset="0" stop-color="#dff3ff" stop-opacity=".4"></stop>
             <stop offset="1" stop-color="#dff3ff" stop-opacity="0"></stop>
           </linearGradient>
+          <linearGradient id="dgFresh" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#42a5f5" stop-opacity=".85"></stop>
+            <stop offset="1" stop-color="#0d47a1" stop-opacity=".9"></stop>
+          </linearGradient>
+          <linearGradient id="dgWaste" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#8d6e63" stop-opacity=".85"></stop>
+            <stop offset="1" stop-color="#4e342e" stop-opacity=".9"></stop>
+          </linearGradient>
           ${scene.defs || ""}
         </defs>
         ${scene.body}
       </svg>`;
+  }
+
+  // ---- AWC on the wall: reservoirs, pumps and change-in-progress flow ----
+  // Drawn only when automatic water change is enabled; levels/badges/status
+  // ride the same summary the AWC tab polls, patched in place.
+
+  _diagAwcEnabled() {
+    return !!this._config?.automaticWaterChange?.enabled;
+  }
+
+  // Keep the AWC summary warm while the diagram is showing its nodes — the
+  // exact refresh gate the AWC tab and the flat Pulse block use (1 s live,
+  // 4 s idle). _awcLoadSummary patches the diagram rather than re-rendering.
+  _diagAwcKickSummary() {
+    if (!this._diagAwcEnabled()) return;
+    const state = this._awcLiveState(this._config.automaticWaterChange);
+    const running = ["draining", "filling", "exchanging"].includes(state.status);
+    const refreshMs = running ? 1000 : 4000;
+    if (!this._awcSummary || Date.now() - (this._awcSummaryAt || 0) > refreshMs) {
+      if (!this._awcSummaryLoading) this._awcLoadSummary();
+    }
+  }
+
+  _diagAwcCanister({ x, y, w, h, kind, label, labelY = 962 }) {
+    const res = this._awcSummary?.summary?.reservoirs || {};
+    const pct = Math.max(0, Math.min(100, Number(res[kind]?.percent) || 0));
+    const innerH = h - 8;
+    const fillH = Math.round(innerH * pct / 100);
+    const grad = kind === "waste" ? "dgWaste" : "dgFresh";
+    const badge = kind === "waste"
+      ? `<g data-diag-awc-badge="wasteFull" style="display:none"><rect x="${x + w / 2 - 26}" y="${y + 6}" width="52" height="17" rx="8" fill="#c62828"></rect><text x="${x + w / 2}" y="${y + 19}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">FULL</text></g>`
+      : kind === "fresh"
+        ? `<g data-diag-awc-badge="freshEmpty" style="display:none"><rect x="${x + w / 2 - 26}" y="${y + 6}" width="52" height="17" rx="8" fill="#c62828"></rect><text x="${x + w / 2}" y="${y + 19}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">EMPTY</text></g>`
+        : "";
+    return `
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="rgba(20,64,94,.35)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
+      <rect x="${x + 4}" y="${y + 4 + innerH - fillH}" width="${w - 8}" height="${fillH}" fill="url(#${grad})"
+            data-diag-awc-level="${kind}" data-dgy="${y + 4}" data-dgh="${innerH}"
+            style="transition: y .6s ease, height .6s ease;"></rect>
+      ${badge}
+      ${label ? `<text x="${x + w / 2}" y="${labelY}" class="dg-lbl" text-anchor="middle">${label}</text>` : ""}`;
+  }
+
+  _diagAwcPump(cx, cy) {
+    return `
+      <circle cx="${cx}" cy="${cy}" r="12" class="dg-shell"></circle>
+      <g class="dg-pumpx"><path d="M ${cx} ${cy - 6} V ${cy + 6} M ${cx - 6} ${cy} H ${cx + 6}" class="dg-line" fill="none"></path></g>`;
+  }
+
+  // Sump scene: fresh saltwater tucked in the cabinet gap left of the sump,
+  // waste in the gap on the right. Drain pulls from the sock chamber over the
+  // top into waste; fill lifts from fresh over the wall into the return
+  // chamber. Both animate only while the summary says water is moving.
+  _diagAwcSumpMarkup() {
+    if (!this._diagAwcEnabled()) return "";
+    const awc = this._config.automaticWaterChange;
+    const multi = !!(awc.pumps?.fill2?.switchEntity || awc.reservoirs?.fresh2);
+    const fresh = multi
+      ? this._diagAwcCanister({ x: 190, y: 704, w: 82, h: 96, kind: "fresh", label: "" })
+        + this._diagAwcCanister({ x: 190, y: 812, w: 82, h: 96, kind: "fresh2", label: "fresh ×2" })
+      : this._diagAwcCanister({ x: 190, y: 704, w: 82, h: 204, kind: "fresh", label: "fresh" });
+    return `
+      <g class="dg-node dg-awc on" data-diag-node="awc-station" data-action="pulse-focus" data-id="awc-station" role="button" tabindex="0">
+        <title>Automatic water change — tap for status</title>
+        ${fresh}
+        ${this._diagAwcCanister({ x: 1128, y: 704, w: 82, h: 204, kind: "waste", label: "waste" })}
+        <g class="dg-awc-fill">${this._diagPipeMarkup([[231, 700], [231, 668], [320, 668], [320, 700]], 9)}${this._diagAwcPump(231, 684)}</g>
+        <g class="dg-awc-drain">${this._diagPipeMarkup([[1096, 760], [1169, 760], [1169, 702]], 9)}${this._diagAwcPump(1169, 732)}</g>
+        <circle cx="1204" cy="712" r="5.5" class="dg-dot"></circle>
+      </g>`;
+  }
+
+  // AiO scene: fresh lives in the cabinet cut-away, waste on the floor to the
+  // right; tubes run over the back like every real AiO install.
+  _diagAwcAioMarkup() {
+    if (!this._diagAwcEnabled()) return "";
+    const awc = this._config.automaticWaterChange;
+    const multi = !!(awc.pumps?.fill2?.switchEntity || awc.reservoirs?.fresh2);
+    return `
+      <g class="dg-node dg-awc on" data-diag-node="awc-station" data-action="pulse-focus" data-id="awc-station" role="button" tabindex="0">
+        <title>Automatic water change — tap for status</title>
+        ${this._diagAwcCanister({ x: 380, y: 720, w: 90, h: 190, kind: "fresh", label: "" })}
+        ${multi ? this._diagAwcCanister({ x: 480, y: 720, w: 90, h: 190, kind: "fresh2", label: "" }) : ""}
+        <text x="${multi ? 475 : 425}" y="926" class="dg-lbl dg-lbl-sm" text-anchor="middle">fresh${multi ? " ×2" : ""}</text>
+        ${this._diagAwcCanister({ x: 1446, y: 716, w: 84, h: 220, kind: "waste", label: "waste" })}
+        <g class="dg-awc-fill">${this._diagPipeMarkup([[425, 716], [425, 698], [1322, 698], [1322, 176], [1120, 176], [1120, 250]], 9)}${multi ? this._diagPipeMarkup([[525, 716], [525, 698]], 9) : ""}${this._diagAwcPump(500, 698)}</g>
+        <g class="dg-awc-drain">${this._diagPipeMarkup([[1268, 646], [1268, 706], [1488, 706], [1488, 714]], 9)}${this._diagAwcPump(1330, 706)}</g>
+        <circle cx="1516" cy="724" r="5.5" class="dg-dot"></circle>
+      </g>`;
   }
 
   // Rock silhouette sitting on the sand — pure scene flavour.
@@ -14074,6 +14189,8 @@ class OpenReefPanel extends HTMLElement {
       parts.push(`<text x="${ax + 46}" y="962" class="dg-lbl">ato</text>`);
     }
 
+    parts.push(this._diagAwcSumpMarkup());
+
     if (arranging) parts.push(this._diagSlotsMarkup("sump", nodes));
 
     return {
@@ -14250,6 +14367,8 @@ class OpenReefPanel extends HTMLElement {
       parts.push(`<text x="1394" y="962" class="dg-lbl">ato</text>`);
     }
 
+    parts.push(this._diagAwcAioMarkup());
+
     if (arranging) parts.push(this._diagSlotsMarkup("aio", nodes));
 
     return {
@@ -14265,11 +14384,14 @@ class OpenReefPanel extends HTMLElement {
     const nodes = this._diagramNodes();
     const loopOn = nodes.ret ? this._diagramNodeState(nodes.ret[1]) === "on" : false;
     svg.classList.toggle("dg-loop-off", !loopOn);
+    const awcLive = this._awcSummary?.live || {};
     svg.querySelectorAll("[data-diag-node]").forEach((g) => {
       const key = g.getAttribute("data-diag-node") || "";
       let state = "gone";
       if (key === "doser-station") {
         state = nodes.doser && nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off";
+      } else if (key === "awc-station") {
+        state = awcLive.leak || awcLive.freshEmpty || awcLive.wasteFull ? "gone" : "on";
       } else if (key.startsWith("equip:")) {
         const item = (this._config.equipment || {})[key.slice(6)];
         state = item ? this._diagramNodeState(item) : "gone";
@@ -14278,6 +14400,26 @@ class OpenReefPanel extends HTMLElement {
       g.classList.toggle("off", state === "off");
       g.classList.toggle("gone", state === "gone");
     });
+    // AWC: change-in-progress flow, reservoir levels and fault badges.
+    if (this._diagAwcEnabled()) {
+      const state = this._awcLiveState(this._config.automaticWaterChange);
+      svg.classList.toggle("dg-awc-draining", state.status === "draining" || state.status === "exchanging");
+      svg.classList.toggle("dg-awc-filling", state.status === "filling" || state.status === "exchanging");
+      const res = this._awcSummary?.summary?.reservoirs || {};
+      svg.querySelectorAll("[data-diag-awc-level]").forEach((rect) => {
+        const kind = rect.getAttribute("data-diag-awc-level");
+        const pct = Math.max(0, Math.min(100, Number(res[kind]?.percent) || 0));
+        const top = Number(rect.getAttribute("data-dgy"));
+        const innerH = Number(rect.getAttribute("data-dgh"));
+        const fillH = Math.round(innerH * pct / 100);
+        rect.setAttribute("y", String(top + innerH - fillH));
+        rect.setAttribute("height", String(fillH));
+      });
+      svg.querySelectorAll("[data-diag-awc-badge]").forEach((badge) => {
+        badge.style.display = awcLive[badge.getAttribute("data-diag-awc-badge")] ? "" : "none";
+      });
+      this._diagAwcKickSummary();
+    }
   }
 
   // In-display circulation: a particle gyre plus two fish, spun by whichever
@@ -14543,6 +14685,7 @@ class OpenReefPanel extends HTMLElement {
     else if (key === "today") body = this._pulseFocusTodayMarkup();
     else if (key === "insights") body = this._pulseFocusInsightsMarkup();
     else if (key === "doser-station") body = this._pulseFocusDoserMarkup();
+    else if (key === "awc-station") body = this._pulseFocusAwcMarkup();
     else if (key && key.startsWith("equip:")) body = this._pulseFocusEquipItemMarkup(key.slice(6));
     else if (key && key.startsWith("sensor:")) body = this._pulseFocusSensorMarkup(key.slice(7));
     if (!body) return "";
@@ -14770,6 +14913,50 @@ class OpenReefPanel extends HTMLElement {
             ? "Not armed — arm this equipment in Settings → Equipment to control it from the wall."
             : "Read-only — this entity is unavailable right now."}</p>
       `}
+    `;
+  }
+
+  // Detail card for the AWC node: status, reservoirs, faults — and Stop when
+  // water is actually moving. Starting a change stays in the Water Change tab.
+  _pulseFocusAwcMarkup() {
+    const awc = this._config?.automaticWaterChange;
+    if (!awc || !awc.enabled) return "";
+    const state = this._awcLiveState(awc);
+    const status = state.status || "idle";
+    const running = ["draining", "filling", "exchanging"].includes(status);
+    const res = this._awcSummary?.summary?.reservoirs || {};
+    const live = this._awcSummary?.live || {};
+    const movedMap = state.movedMl || {};
+    const drainedL = (Number(movedMap.drain) || 0) / 1000;
+    const filledL = (Number(movedMap[state.activeSourceRole || "fill"]) || 0) / 1000;
+    const target = Number(state.targetLitres) || 0;
+    const fault = live.leak ? "Leak detected" : live.wasteFull ? "Waste is full" : live.freshEmpty ? "Fresh is empty" : "";
+    const rows = [
+      ["Fresh saltwater", `${this._format(res.fresh?.remainingL, 1)} L`, "ok"],
+      res.fresh2 ? ["Second source", `${this._format(res.fresh2?.remainingL, 1)} L`, "ok"] : null,
+      ["Waste collected", `${this._format(res.waste?.filledL, 1)} L`, live.wasteFull ? "critical" : "unknown"],
+      running && target > 0 ? ["This change", `${this._format(drainedL, 2)} out · ${this._format(filledL, 2)} of ${this._format(target, 1)} L in`, "ok"] : null,
+    ].filter(Boolean).map(([k, v, dot]) => `
+      <div class="pulse-focus-row">
+        <span class="pulse-focus-dot ${dot}"></span>
+        <div><strong>${this._escape(k)}</strong></div>
+        <em>${this._escape(v)}</em>
+      </div>`).join("");
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Automatic water change</small>
+          <strong>${this._escape(this._awcStatusLabel(status))}</strong>
+        </div>
+        <span class="pill ${fault ? "critical" : running ? "ok" : "unknown"}">${this._escape(fault || (running ? "Water moving" : "Standing by"))}</span>
+      </header>
+      <div class="pulse-focus-list">${rows}</div>
+      ${running ? `
+        <div class="pulse-diag-actions">
+          <button class="pulse-diag-btn warn" data-action="awc-abort">Stop this water change</button>
+        </div>
+      ` : ""}
+      <p class="pulse-focus-note dim">Starting, scheduling and calibration stay in the Water Change tab.</p>
     `;
   }
 

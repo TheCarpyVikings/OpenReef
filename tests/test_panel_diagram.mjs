@@ -225,6 +225,74 @@ test("state patching toggles classes in place — flow animations never restart"
   assertEqual(classes.get("doser-station:on"), true);
 });
 
+// --- AWC on the wall --------------------------------------------------------
+
+// Preps for AWC cases pin the summary and mark it "loading" so the diagram's
+// keep-warm kick can never fire a real websocket call inside a test.
+function awcRig(status = "idle", summaryPatch = {}, live = {}) {
+  const cfg = structuredClone(RIG);
+  cfg.automaticWaterChange = { enabled: true, sumpEnabled: true, pumps: { drain: {}, fill: {} }, reservoirs: { fresh: {}, waste: {} } };
+  return [cfg, {
+    _awcSummaryLoading: true,
+    _awcSummaryAt: Date.now(),
+    _awcSummary: {
+      state: { status, targetLitres: 10, movedMl: { drain: 4200, fill: 2600 } },
+      summary: { reservoirs: { fresh: { percent: 55, remainingL: 11 }, waste: { percent: 30, filledL: 6.2 }, ...summaryPatch } },
+      live,
+    },
+  }];
+}
+
+test("AWC nodes render only when the feature is enabled", async () => {
+  const off = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  assert(!off._pulseDiagramSvg().includes('data-diag-node="awc-station"'), "no AWC gear without the feature");
+  const [cfg, patch] = awcRig();
+  const on = prep(await makePanel(cfg), ALL_ON, patch);
+  const svg = on._pulseDiagramSvg();
+  assert(svg.includes('data-diag-node="awc-station"'), "AWC station present");
+  assert(svg.includes(">fresh<") && svg.includes(">waste<"), "both reservoirs labelled");
+  cfg.automaticWaterChange.reservoirs.fresh2 = {};
+  const multi = prep(await makePanel(cfg), ALL_ON, patch);
+  assert(multi._pulseDiagramSvg().includes("fresh ×2"), "second source shows as fresh ×2");
+});
+
+test("change status drives the drain/fill animation classes", async () => {
+  for (const [status, drain, fill] of [["draining", true, false], ["filling", false, true], ["exchanging", true, true], ["idle", false, false]]) {
+    const [cfg, patch] = awcRig(status);
+    const panel = prep(await makePanel(cfg), ALL_ON, patch);
+    const cls = rootClass(panel._pulseDiagramSvg());
+    assertEqual(cls.includes("dg-awc-draining"), drain, `${status}: drain class`);
+    assertEqual(cls.includes("dg-awc-filling"), fill, `${status}: fill class`);
+  }
+});
+
+test("reservoir levels come from the summary and clamp to 0-100", async () => {
+  const [cfg, patch] = awcRig();
+  const panel = prep(await makePanel(cfg), ALL_ON, patch);
+  // sump fresh canister: h 204 -> inner 196; 55% -> 108 tall
+  assert(/height="108"[^>]*data-diag-awc-level="fresh"/.test(panel._pulseDiagramSvg()), "fresh level scales with percent");
+  const [cfg2, patch2] = awcRig("idle", { fresh: { percent: 250, remainingL: 99 } });
+  const over = prep(await makePanel(cfg2), ALL_ON, patch2);
+  assert(/height="196"[^>]*data-diag-awc-level="fresh"/.test(over._pulseDiagramSvg()), "over-100 clamps to full");
+});
+
+test("awc focus card: Stop only while water moves; faults name themselves", async () => {
+  const [cfg, patch] = awcRig("draining");
+  const running = prep(await makePanel(cfg), ALL_ON, patch);
+  running._pulseFocus = "awc-station";
+  const html = running._pulseFocusMarkup();
+  assert(html.includes('data-action="awc-abort"'), "running change offers Stop");
+  assert(html.includes("4.20 out"), "progress shows drained litres");
+  const [cfg2, patch2] = awcRig("idle");
+  const idle = prep(await makePanel(cfg2), ALL_ON, patch2);
+  idle._pulseFocus = "awc-station";
+  assert(!idle._pulseFocusMarkup().includes('data-action="awc-abort"'), "idle card has no Stop");
+  const [cfg3, patch3] = awcRig("idle", {}, { leak: true });
+  const leak = prep(await makePanel(cfg3), ALL_ON, patch3);
+  leak._pulseFocus = "awc-station";
+  assert(leak._pulseFocusMarkup().includes("Leak detected"), "fault carries into the pill");
+});
+
 // --- the Diagram tab --------------------------------------------------------
 
 test("diagram is a first-class tab that routes its own content", async () => {
