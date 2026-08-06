@@ -89,6 +89,44 @@ test("ring animation tier: elite only for a calm >=95, never for warning or unme
   assertEqual(panel._pulseRingClass({ status: "unknown", score: 100 }), "pulse-ring unknown");
 });
 
+// --- status classes on Pulse's small shapes --------------------------------
+
+test("status classes are prefixed so the global .warning button rule can't inflate a dot", async () => {
+  const panel = prep(await makePanel({}));
+  assertEqual(panel._pulseStatusClass("ok"), "is-ok");
+  assertEqual(panel._pulseStatusClass("warning"), "is-warning");
+  assertEqual(panel._pulseStatusClass("critical"), "is-critical");
+  assertEqual(panel._pulseStatusClass("muted"), "is-unknown");
+  assertEqual(panel._pulseStatusClass(undefined), "is-unknown");
+});
+
+test("dots and markers never emit a bare warning/critical class", async () => {
+  // Regression: the global `.warning` button class (padding + border, declared
+  // after the Pulse block) turned any bare-classed 8px dot into a lozenge.
+  const restore = freezeTime("2026-06-04T09:00:00Z");
+  try {
+    const sensor = { label: "Room Temp", entity_id: "sensor.room", unit: "°C", min: 18, max: 28, enabled: true };
+    const panel = prep(await makePanel({ sensors: { room: sensor } }), { "sensor.room": num(35, "°C") });
+    // The lookbehind is load-bearing: \b treats the hyphen in "is-critical" as
+    // a boundary, so without it the guard flags the very fix it is protecting.
+    const bare = /class="[^"]*(?<!-)\b(?:warning|critical|ok|unknown)\b[^"]*"/;
+
+    const marker = panel._pulseRangeBarMarkup("room", sensor);
+    assert(marker.includes("is-critical"), "marker carries the prefixed status class");
+    assert(!bare.test(marker), `range marker leaked a bare status class: ${marker}`);
+
+    const cats = panel._pulseCategoryBarsMarkup(panel._reefHealthScore());
+    assert(cats.includes("is-"), "category bars carry prefixed classes");
+    assert(!bare.test(cats), "category bars leaked a bare status class");
+
+    panel._pulseFocus = "insights";
+    const deck = panel._pulseFocusInsightsMarkup();
+    if (deck) assert(!/<span class="(?:on )?(?:warning|critical|ok|unknown)"/.test(deck), "pager dots leaked a bare status class");
+  } finally {
+    restore();
+  }
+});
+
 // --- share the wall --------------------------------------------------------
 
 test("share model mirrors the wall: ring, up to five tiles with status, insight", async () => {

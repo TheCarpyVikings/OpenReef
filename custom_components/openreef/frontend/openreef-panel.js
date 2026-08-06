@@ -11805,6 +11805,14 @@ class OpenReefPanel extends HTMLElement {
     return { ok: "#22c55e", warning: "#f59e0b", critical: "#ef4444" }[status] || "#64748b";
   }
 
+  // Status class for Pulse's small shapes (dots, markers, bars). Deliberately
+  // NOT the bare "warning"/"critical" names: the global button class .warning
+  // carries padding + a border and is declared after the Pulse block, so a
+  // bare class inflates a 8px dot into a lozenge. Prefixed = collision-proof.
+  _pulseStatusClass(status) {
+    return ["ok", "warning", "critical"].includes(status) ? `is-${status}` : "is-unknown";
+  }
+
   _pulseShareModel() {
     const cfg = this._pulseCfg();
     const health = this._reefHealthScore();
@@ -13042,7 +13050,7 @@ class OpenReefPanel extends HTMLElement {
       <article class="pulse-block pulse-insight pulse-tap ${compact ? "compact" : ""}" data-pulse-insight data-insight-key="${this._escape(card.key)}" data-action="pulse-focus" data-id="insights" role="button" tabindex="0" title="Tap for all insights">
         <div class="pulse-insight-head">
           <small class="pulse-block-title">${this._escape(card.kicker)}</small>
-          <span class="pulse-insight-dot ${this._escape(card.status)}"></span>
+          <span class="pulse-insight-dot ${this._pulseStatusClass(card.status)}"></span>
         </div>
         <strong>${this._escape(card.title)}</strong>
         ${card.detail ? `<small class="pulse-insight-detail">${this._escape(card.detail)}</small>` : ""}
@@ -13250,7 +13258,7 @@ class OpenReefPanel extends HTMLElement {
     return `
       <div class="pulse-range">
         <small>${this._escape(this._format(min, 1))}</small>
-        <div class="pulse-range-track"><span class="pulse-range-marker ${badge.status}" data-pulse-marker="${this._escape(id)}" style="left:${pct.toFixed(1)}%"></span></div>
+        <div class="pulse-range-track"><span class="pulse-range-marker ${this._pulseStatusClass(badge.status)}" data-pulse-marker="${this._escape(id)}" style="left:${pct.toFixed(1)}%"></span></div>
         <small>${this._escape(this._format(max, 1))}</small>
       </div>
     `;
@@ -13283,7 +13291,7 @@ class OpenReefPanel extends HTMLElement {
         ${categories.map((cat) => `
           <div class="pulse-cat">
             <small>${this._escape(cat.label)}</small>
-            <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "ok" : cat.score >= 70 ? "warning" : "critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+            <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
             <strong>${this._escape(cat.score)}</strong>
           </div>
         `).join("")}
@@ -13533,7 +13541,7 @@ class OpenReefPanel extends HTMLElement {
         if (value === null || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
         const pct = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
         el.style.left = `${pct.toFixed(1)}%`;
-        el.className = `pulse-range-marker ${this._liveStatBadge(key, sensor).status}`;
+        el.className = `pulse-range-marker ${this._pulseStatusClass(this._liveStatBadge(key, sensor).status)}`;
       });
       const reason = root.querySelector("[data-pulse-reason]");
       if (reason) reason.textContent = health.topReason || "";
@@ -15094,7 +15102,7 @@ class OpenReefPanel extends HTMLElement {
             <small>${this._escape(card.kicker)}</small>
             <strong class="pulse-insight-page-title">${this._escape(card.title)}</strong>
           </div>
-          <span class="pulse-insight-dot big ${this._escape(card.status)}"></span>
+          <span class="pulse-insight-dot big ${this._pulseStatusClass(card.status)}"></span>
         </header>
         ${card.detail ? `<p class="pulse-focus-note">${this._escape(card.detail)}</p>` : ""}
         ${(card.more || []).map((line) => `<p class="pulse-focus-note dim">${this._escape(line)}</p>`).join("")}
@@ -15103,7 +15111,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="pulse-insight-pager">
           <button data-action="pulse-insight-nav" data-id="prev" title="Previous insight">‹</button>
           <div class="pulse-insight-dots">
-            ${deck.map((c, i) => `<span class="${i === idx ? "on" : ""} ${this._escape(c.status)}"></span>`).join("")}
+            ${deck.map((c, i) => `<span class="${i === idx ? "on" : ""} ${this._pulseStatusClass(c.status)}"></span>`).join("")}
           </div>
           <button data-action="pulse-insight-nav" data-id="next" title="Next insight">›</button>
         </div>
@@ -15218,7 +15226,7 @@ class OpenReefPanel extends HTMLElement {
       ${categories.map((cat) => `
         <div class="pulse-cat">
           <small>${this._escape(cat.label)}</small>
-          <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "ok" : cat.score >= 70 ? "warning" : "critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+          <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
           <strong>${this._escape(cat.score)}</strong>
         </div>
       `).join("")}
@@ -15226,7 +15234,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="pulse-focus-list">
           ${losses.map((loss) => `
             <div class="pulse-focus-row">
-              <span class="pulse-focus-dot ${this._escape(loss.status)}"></span>
+              <span class="pulse-focus-dot ${this._pulseStatusClass(loss.status)}"></span>
               <div><strong>${this._escape(loss.label)}</strong>${loss.detail ? `<small>${this._escape(loss.detail)}</small>` : ""}</div>
               <em>−${this._escape(loss.points)}</em>
             </div>
@@ -15256,7 +15264,7 @@ class OpenReefPanel extends HTMLElement {
       ["Entity", item.switch_entity_id || "—"],
     ].filter(Boolean).map(([k, v]) => `
       <div class="pulse-focus-row">
-        <span class="pulse-focus-dot ${k === "State" ? pill : "unknown"}"></span>
+        <span class="pulse-focus-dot ${this._pulseStatusClass(k === "State" ? pill : "unknown")}"></span>
         <div><strong>${this._escape(k)}</strong></div>
         <em>${this._escape(String(v))}</em>
       </div>`).join("");
@@ -15316,7 +15324,7 @@ class OpenReefPanel extends HTMLElement {
       running && target > 0 ? ["This change", `${this._format(drainedL, 2)} out · ${this._format(filledL, 2)} of ${this._format(target, 1)} L in`, "ok"] : null,
     ].filter(Boolean).map(([k, v, dot]) => `
       <div class="pulse-focus-row">
-        <span class="pulse-focus-dot ${dot}"></span>
+        <span class="pulse-focus-dot ${this._pulseStatusClass(dot)}"></span>
         <div><strong>${this._escape(k)}</strong></div>
         <em>${this._escape(v)}</em>
       </div>`).join("");
@@ -15346,7 +15354,7 @@ class OpenReefPanel extends HTMLElement {
       const on = ch.enabled !== false;
       return `
         <div class="pulse-focus-row">
-          <span class="pulse-focus-dot ${on ? "ok" : "unknown"}"></span>
+          <span class="pulse-focus-dot ${on ? "is-ok" : "is-unknown"}"></span>
           <div><strong>${this._escape(ch.name || id)}</strong><small>${this._escape(this._doserChemicalLabel(ch.chemical))}</small></div>
           <em>${on ? "Scheduled" : "Paused"}</em>
         </div>`;
@@ -21975,9 +21983,9 @@ class OpenReefPanel extends HTMLElement {
         .pulse-insight-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
         .pulse-insight > strong { font-size: 16px; font-weight: 800; color: #fff; line-height: 1.35; }
         .pulse-insight-detail { font-size: 12px; font-weight: 600; color: #9fc7e0; line-height: 1.4; }
-        .pulse-insight-dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); flex: 0 0 auto; }
-        .pulse-insight-dot.warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
-        .pulse-insight-dot.critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
+        .pulse-insight-dot { width: 10px; height: 10px; padding: 0; border: 0; box-sizing: border-box; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); flex: 0 0 auto; }
+        .pulse-insight-dot.is-warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
+        .pulse-insight-dot.is-critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
         @keyframes pulse-insight-in { from { opacity: 0; transform: translateY(8px); } }
         /* Camera/timelapse layout: the insight rides as a compact glass strip
            above the stat chips instead of a wall block. */
@@ -22117,10 +22125,10 @@ class OpenReefPanel extends HTMLElement {
         .pulse-range { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
         .pulse-range small { font-size: 10px; font-weight: 800; color: #8da2ba; font-variant-numeric: tabular-nums; }
         .pulse-range-track { position: relative; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .14); }
-        .pulse-range-marker { position: absolute; top: 50%; width: 11px; height: 11px; border-radius: 50%; transform: translate(-50%, -50%); background: #22c55e; box-shadow: 0 0 7px rgba(34, 197, 94, .7); transition: left .5s ease; }
-        .pulse-range-marker.warning { background: #f59e0b; box-shadow: 0 0 7px rgba(245, 158, 11, .7); }
-        .pulse-range-marker.critical { background: #ef4444; box-shadow: 0 0 7px rgba(239, 68, 68, .75); }
-        .pulse-range-marker.unknown { background: #64748b; box-shadow: none; }
+        .pulse-range-marker { position: absolute; top: 50%; width: 11px; height: 11px; padding: 0; border: 0; box-sizing: border-box; border-radius: 50%; transform: translate(-50%, -50%); background: #22c55e; box-shadow: 0 0 7px rgba(34, 197, 94, .7); transition: left .5s ease; }
+        .pulse-range-marker.is-warning { background: #f59e0b; box-shadow: 0 0 7px rgba(245, 158, 11, .7); }
+        .pulse-range-marker.is-critical { background: #ef4444; box-shadow: 0 0 7px rgba(239, 68, 68, .75); }
+        .pulse-range-marker.is-unknown { background: #64748b; box-shadow: none; }
         .pulse-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: 100%; max-width: 1380px; }
         .pulse-block { display: grid; gap: 9px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 14px; padding: 14px 16px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); align-content: start; }
         .pulse-block-title { font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
@@ -22128,10 +22136,10 @@ class OpenReefPanel extends HTMLElement {
         .pulse-cat small { font-size: 11px; font-weight: 700; color: #cfe7f5; }
         .pulse-cat strong { font-size: 12px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
         .pulse-cat-track { height: 7px; border-radius: 999px; background: rgba(255, 255, 255, .12); overflow: hidden; }
-        .pulse-cat-track span { display: block; height: 100%; border-radius: 999px; }
-        .pulse-cat-track span.ok { background: #22c55e; }
-        .pulse-cat-track span.warning { background: #f59e0b; }
-        .pulse-cat-track span.critical { background: #ef4444; }
+        .pulse-cat-track span { display: block; height: 100%; padding: 0; border: 0; box-sizing: border-box; border-radius: 999px; }
+        .pulse-cat-track span.is-ok { background: #22c55e; }
+        .pulse-cat-track span.is-warning { background: #f59e0b; }
+        .pulse-cat-track span.is-critical { background: #ef4444; }
         .pulse-equip-list { display: flex; flex-wrap: wrap; gap: 9px; }
         .pulse-equip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #cfe7f5; }
         .pulse-equip i { width: 9px; height: 9px; border-radius: 50%; background: #64748b; }
@@ -22183,10 +22191,10 @@ class OpenReefPanel extends HTMLElement {
         .pulse-focus-row strong { font-size: 13px; font-weight: 800; color: #e9f4fb; }
         .pulse-focus-row small { font-size: 11px; font-weight: 700; color: #8da2ba; }
         .pulse-focus-row em { font-style: normal; font-size: 12px; font-weight: 800; color: #cfe7f5; font-variant-numeric: tabular-nums; white-space: nowrap; }
-        .pulse-focus-dot { width: 10px; height: 10px; border-radius: 50%; background: #64748b; }
-        .pulse-focus-dot.ok { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); }
-        .pulse-focus-dot.warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
-        .pulse-focus-dot.critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
+        .pulse-focus-dot { width: 10px; height: 10px; padding: 0; border: 0; box-sizing: border-box; flex: 0 0 auto; border-radius: 50%; background: #64748b; }
+        .pulse-focus-dot.is-ok { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); }
+        .pulse-focus-dot.is-warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
+        .pulse-focus-dot.is-critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
         .pulse-focus-note { color: #9fc7e0; font-size: 13px; font-weight: 600; line-height: 1.45; }
         .pulse-focus-note.dim { color: #8da2ba; font-weight: 500; }
         .pulse-focus-note.center { text-align: center; font-size: 11px; }
@@ -22203,12 +22211,12 @@ class OpenReefPanel extends HTMLElement {
         .pulse-insight-pager button { width: 44px; height: 44px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .22); background: rgba(4, 10, 16, .55); color: #e5edf5; font-size: 22px; line-height: 1; cursor: pointer; flex: 0 0 auto; }
         .pulse-insight-pager button:hover { border-color: rgba(255, 255, 255, .45); }
         .pulse-insight-dots { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; }
-        .pulse-insight-dots span { width: 8px; height: 8px; border-radius: 50%; background: rgba(255, 255, 255, .22); transition: background .2s ease, transform .2s ease; }
+        .pulse-insight-dots span { width: 8px; height: 8px; padding: 0; border: 0; box-sizing: border-box; flex: 0 0 auto; border-radius: 50%; background: rgba(255, 255, 255, .22); transition: background .2s ease, transform .2s ease; }
         .pulse-insight-dots span.on { background: var(--openreef-accent); transform: scale(1.35); }
-        .pulse-insight-dots span.warning { background: rgba(245, 158, 11, .5); }
-        .pulse-insight-dots span.critical { background: rgba(239, 68, 68, .55); }
-        .pulse-insight-dots span.warning.on { background: #f59e0b; }
-        .pulse-insight-dots span.critical.on { background: #ef4444; }
+        .pulse-insight-dots span.is-warning { background: rgba(245, 158, 11, .5); }
+        .pulse-insight-dots span.is-critical { background: rgba(239, 68, 68, .55); }
+        .pulse-insight-dots span.is-warning.on { background: #f59e0b; }
+        .pulse-insight-dots span.is-critical.on { background: #ef4444; }
         .pulse-has-focus .pulse-buddy { display: none; }
         .pulse-root.pulse-alert-warning::after, .pulse-root.pulse-alert-critical::after { content: ""; position: absolute; inset: 0; pointer-events: none; animation: pulse-edge 1.8s ease-in-out infinite; }
         .pulse-root.pulse-alert-warning::after { box-shadow: inset 0 0 90px rgba(245, 158, 11, .4); }
