@@ -664,6 +664,69 @@ test("arrange mode offers coral drop zones only for zones in use", async () => {
   assert(!svg.includes('data-diag-slot="spsPeak"'), "no SPS slots for a zoa-only reef");
 });
 
+// --- Reef Layer slice 2: moonlight, spawning nights, arrivals (0.7.27) ------
+
+test("moonlight follows the display light — and only a mapped one", async () => {
+  const lightOff = { ...ALL_ON, "switch.light": sw("off") };
+  const off = prep(await makePanel(structuredClone(RIG)), lightOff);
+  assert(rootClass(off._pulseDiagramSvg()).includes("dg-night"), "light off -> moonlight");
+  const on = prep(await makePanel(structuredClone(RIG)), ALL_ON);
+  assert(!rootClass(on._pulseDiagramSvg()).includes("dg-night"), "light on -> full colour");
+  const unmapped = structuredClone(RIG);
+  delete unmapped.equipment.light;
+  const none = prep(await makePanel(unmapped), lightOff);
+  assert(!rootClass(none._pulseDiagramSvg()).includes("dg-night"), "no mapped light -> never guesses night");
+});
+
+test("spawning night needs the window, the corals, and the dark", async () => {
+  const day = 86400000;
+  const inWindow = {
+    program: { spawnPrediction: {
+      windowStart: new Date(Date.now() - day).toISOString().slice(0, 10),
+      windowEnd: new Date(Date.now() + day).toISOString().slice(0, 10),
+    } },
+    at: Date.now(), loading: false,
+  };
+  const cfg = structuredClone(RIG);
+  cfg.spawningProgram = { enabled: true };
+  cfg.livestock = { corals: { z: { species: "zoa", colour: "pink" } } };
+  const lightOff = { ...ALL_ON, "switch.light": sw("off") };
+  const go = prep(await makePanel(cfg), lightOff, { _pulseSpawn: inWindow });
+  assert(rootClass(go._pulseDiagramSvg()).includes("dg-spawn"), "window + corals + dark -> bundles");
+  const lit = prep(await makePanel(structuredClone(cfg)), ALL_ON, { _pulseSpawn: inWindow });
+  assert(!rootClass(lit._pulseDiagramSvg()).includes("dg-spawn"), "lights blazing -> no release");
+  const bare = structuredClone(cfg);
+  bare.livestock = { corals: {} };
+  const empty = prep(await makePanel(bare), lightOff, { _pulseSpawn: inWindow });
+  assert(!rootClass(empty._pulseDiagramSvg()).includes("dg-spawn"), "no corals -> nothing to spawn");
+  const past = structuredClone(inWindow);
+  past.program.spawnPrediction.windowStart = "2026-01-01";
+  past.program.spawnPrediction.windowEnd = "2026-01-04";
+  const stale = prep(await makePanel(structuredClone(cfg)), lightOff, { _pulseSpawn: past });
+  assert(!rootClass(stale._pulseDiagramSvg()).includes("dg-spawn"), "outside the window -> quiet reef");
+});
+
+test("a coral added this week shimmers; an old one doesn't", async () => {
+  const cfg = structuredClone(RIG);
+  cfg.livestock = { corals: {
+    fresh: { species: "zoa", colour: "pink", addedAt: new Date().toISOString().slice(0, 10) },
+    old: { species: "torch", colour: "gold", addedAt: "2026-01-01" },
+  } };
+  const panel = prep(await makePanel(cfg), ALL_ON);
+  const svg = panel._pulseDiagramSvg();
+  assertEqual((svg.match(/dg-coral dg-cnew/g) || []).length, 1, "exactly the newcomer shimmers");
+});
+
+test("the starter reef is six real, removable registry entries", async () => {
+  const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON, { _setDirty: () => {}, _render: () => {} });
+  panel._addStarterReef();
+  const corals = panel._config.livestock.corals;
+  assertEqual(Object.keys(corals).length, 6);
+  assert(Object.values(corals).every((c) => c.name && c.species && c.colour && c.addedAt), "fully-formed entries");
+  panel._removeCoral(Object.keys(corals)[0]);
+  assertEqual(Object.keys(panel._config.livestock.corals).length, 5, "and they remove like any other");
+});
+
 test("removing a coral clears its slot from the layout", async () => {
   const cfg = structuredClone(RIG);
   cfg.livestock = { corals: { z: { species: "zoa", colour: "pink" } } };

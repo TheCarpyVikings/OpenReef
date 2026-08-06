@@ -17,7 +17,7 @@ CORE_SCHEMA_VERSION = 53
 # keeps entries well-formed.
 CORAL_SPECIES = ("staghorn", "plate", "torch", "zoa", "brain", "gorgonian", "mushroom", "anemone")
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
-INTEGRATION_VERSION = "0.7.26"
+INTEGRATION_VERSION = "0.7.27"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the

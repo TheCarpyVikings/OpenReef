@@ -1313,6 +1313,7 @@ class OpenReefPanel extends HTMLElement {
         this._addCoral(name, species, colour);
       }
       if (action === "coral-remove") this._removeCoral(id);
+      if (action === "coral-starter") this._addStarterReef();
       if (action === "pulse-unfocus") this._closePulseFocus();
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
       if (action === "pulse-share") this._sharePulseCard();
@@ -1690,6 +1691,15 @@ class OpenReefPanel extends HTMLElement {
         const idx = Number(target.dataset.icpMap);
         if (this._icp.pending && this._icp.pending.report.elements[idx]) {
           this._icp.pending.report.elements[idx].symbol = target.value;
+        }
+        return;
+      }
+      if (target.dataset.coralName != null) {
+        const coral = this._config.livestock?.corals?.[target.dataset.coralName];
+        if (coral) {
+          coral.name = String(target.value || "").slice(0, 48);
+          this._setDirty(true);
+          if (event.type === "change") this._render();
         }
         return;
       }
@@ -13953,8 +13963,10 @@ class OpenReefPanel extends HTMLElement {
       const slot = slots[sid];
       const pal = this._coralPalette(c.colour);
       const label = c.name || this._coralSpeciesLabel(c.species);
+      const added = Date.parse(c.addedAt || "");
+      const isNew = Number.isFinite(added) && Date.now() - added < 48 * 3600 * 1000 && Date.now() >= added - 86400000;
       parts.push(`
-        <g class="dg-coral" data-diag-coral="${this._escape(id)}" data-action="pulse-focus" data-id="coral:${this._escape(id)}" data-diag-drag="coral:${this._escape(id)}" role="button" tabindex="0">
+        <g class="dg-coral${isNew ? " dg-cnew" : ""}" data-diag-coral="${this._escape(id)}" data-action="pulse-focus" data-id="coral:${this._escape(id)}" data-diag-drag="coral:${this._escape(id)}" role="button" tabindex="0">
           <title>${this._escape(label)} — ${this._escape(this._coralSpeciesLabel(c.species))}</title>
           <rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="12" fill="transparent"></rect>
           ${this._diagCoralArt(c.species, slot.x, slot.y, pal, seed)}
@@ -13963,6 +13975,82 @@ class OpenReefPanel extends HTMLElement {
       seed += 1;
     }
     return parts.join("");
+  }
+
+  // Spawning night: the Coral Spawning engine's predicted window, crossed with
+  // the reef. Bundles only release when there ARE corals, the window is live,
+  // and the display light isn't blazing (spawning happens in the dark).
+  _diagramSpawnNight(nodes) {
+    if (!this._config?.spawningProgram?.enabled) return false;
+    if (!this._diagramCorals().length) return false;
+    const pred = this._pulseSpawn?.program?.spawnPrediction || {};
+    const start = Date.parse(pred.windowStart || "");
+    const end = Date.parse(pred.windowEnd || "");
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+    const now = Date.now();
+    if (now < start || now > end + 86400000) return false;
+    return !nodes.light || this._diagramNodeState(nodes.light[1]) !== "on";
+  }
+
+  // Keep the spawning prediction warm while the diagram is visible — the same
+  // cached program Pulse uses (24 h refresh, backend falls back to the saved
+  // preset). Fire-and-forget: the next patch pass applies dg-spawn.
+  _diagKickSpawnCache() {
+    if (!this._config?.spawningProgram?.enabled || !this._diagramCorals().length) return;
+    this._pulseSpawn = this._pulseSpawn || { program: null, at: 0, loading: false };
+    if (this._pulseSpawn.loading || Date.now() - this._pulseSpawn.at < 24 * 3600 * 1000) return;
+    this._pulseSpawn.loading = true;
+    this._callWS({ type: "openreef/generate_spawning_program" })
+      .then((res) => { this._pulseSpawn.program = res?.program || null; })
+      .catch(() => { /* keep whatever we had */ })
+      .finally(() => {
+        this._pulseSpawn.at = Date.now();
+        this._pulseSpawn.loading = false;
+        const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+        if (svg) this._updatePulseDiagram(svg);
+      });
+  }
+
+  // Bundle release: pink egg-sperm bundles lifting off the reef toward the
+  // surface — deterministic like the scrub cloud, shown only under dg-spawn.
+  _diagSpawnMarkup(x0, w, y0, y1) {
+    const fr = (i, s) => { const v = Math.sin(i * 91.7 + s * 47.9) * 43758.5453; return v - Math.floor(v); };
+    let out = "";
+    for (let i = 0; i < 16; i++) {
+      const x = x0 + 20 + fr(i, 1) * (w - 40);
+      const y = y0 + fr(i, 2) * (y1 - y0);
+      const r = (1.8 + fr(i, 3) * 1.6).toFixed(1);
+      const dur = (5.5 + fr(i, 4) * 3.5).toFixed(2);
+      const delay = (-fr(i, 5) * 9).toFixed(2);
+      out += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r}" style="animation-duration:${dur}s;animation-delay:${delay}s"></circle>`;
+    }
+    return `<g class="dg-spawnlayer">${out}</g>`;
+  }
+
+  // One tap, six curated corals — real registry entries the user can rename,
+  // recolour or remove, so the honesty rule holds.
+  _addStarterReef() {
+    const starters = [
+      ["Green Slimer", "staghorn", "green"],
+      ["Red Cap", "plate", "red"],
+      ["Golden Torch", "torch", "gold"],
+      ["Sunny Zoas", "zoa", "orange"],
+      ["Warpaint Brain", "brain", "teal"],
+      ["Purple Sea Fan", "gorgonian", "purple"],
+    ];
+    const live = this._config.livestock = this._config.livestock || {};
+    const corals = live.corals = live.corals || {};
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [name, species, colour] of starters) {
+      if (Object.keys(corals).length >= 16) break;
+      const base = this._slug(name) || "coral";
+      let cid = base;
+      let n = 2;
+      while (corals[cid]) { cid = `${base}_${n}`; n += 1; }
+      corals[cid] = { name, species, colour, addedAt: today };
+    }
+    this._setDirty(true);
+    this._render();
   }
 
   _coralAgeText(addedAt) {
@@ -14048,7 +14136,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="coral-row">
           <span class="coral-dot" style="background:${pal.bright}"></span>
           <span class="coral-row-main">
-            <strong>${this._escape(c.name || this._coralSpeciesLabel(c.species))}</strong>
+            <input class="coral-name" data-coral-name="${this._escape(id)}" value="${this._escape(c.name || this._coralSpeciesLabel(c.species))}" maxlength="48">
             <small class="muted">${this._escape(this._coralSpeciesLabel(c.species))} · ${this._escape(c.colour || "")}${age ? ` · ${this._escape(age)}` : ""}</small>
           </span>
           <button class="secondary compact-button" data-action="coral-remove" data-id="${this._escape(id)}">Remove</button>
@@ -14068,7 +14156,9 @@ class OpenReefPanel extends HTMLElement {
           <select id="or-coral-colour">${colourOpts}</select>
           <button class="secondary compact-button" data-action="coral-add">Add coral</button>
         </div>
-        ${rows || `<p class="muted">Nothing registered yet — the rock stays bare until you stock it. Add a coral above and it appears on the diagram: SPS take the crest, LPS the mid-rock, zoas and mushrooms the base, gorgonians the back. Drag it between spots in ✎ Arrange.</p>`}
+        ${rows || `
+          <p class="muted">Nothing registered yet — the rock stays bare until you stock it. Add a coral above and it appears on the diagram: SPS take the crest, LPS the mid-rock, zoas and mushrooms the base, gorgonians the back. Drag it between spots in ✎ Arrange.</p>
+          <button class="secondary compact-button" data-action="coral-starter">🌱 Start me with a reef — six corals, yours to rename or remove</button>`}
       </section>`;
   }
 
@@ -14232,9 +14322,11 @@ class OpenReefPanel extends HTMLElement {
     const atoOn = nodes.ato ? this._diagramNodeState(nodes.ato[1]) === "on" : false;
     const fugeOn = nodes.fugelight ? this._diagramNodeState(nodes.fugelight[1]) === "on" : false;
     const scrubOn = this._diagramScrubOn(systemType, nodes, layout);
+    const nightOn = nodes.light ? this._diagramNodeState(nodes.light[1]) === "off" : false;
+    const spawnOn = this._diagramSpawnNight(nodes);
     return `
       <svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet"
-           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""} ${atoOn ? "dg-ato-on" : ""} ${fugeOn ? "dg-fuge-on" : ""} ${scrubOn ? "dg-scrub" : ""}"
+           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""} ${atoOn ? "dg-ato-on" : ""} ${fugeOn ? "dg-fuge-on" : ""} ${scrubOn ? "dg-scrub" : ""} ${nightOn ? "dg-night" : ""} ${spawnOn ? "dg-spawn" : ""}"
            data-pulse-diagram-svg data-water="${scene.water}"
            role="img" aria-label="Living diagram — ${systemType === "aio" ? "all-in-one tank" : "sump system"}">
         <style>
@@ -14335,15 +14427,25 @@ class OpenReefPanel extends HTMLElement {
           svg.dg-editing [data-diag-drag] .dg-halo, .dg-editing [data-diag-drag] .dg-halo { opacity: .6; animation: dg-slots 6s linear infinite; }
           .dg-halo { fill: none; stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2; stroke-dasharray: 6 6; opacity: 0; transition: opacity .25s ease; }
           .dg-lifted { opacity: .92; }
-          .dg-coral { cursor: pointer; }
-          @keyframes dg-csway { 0%, 100% { transform: rotate(-2.6deg); } 50% { transform: rotate(2.6deg); } }
-          @keyframes dg-cswayS { 0%, 100% { transform: rotate(-1.3deg); } 50% { transform: rotate(1.3deg); } }
+          .dg-coral { cursor: pointer; transition: opacity 2.5s ease; }
+          @keyframes dg-csway { 0%, 100% { transform: rotate(calc(var(--dgsw, 1) * -2.6deg)); } 50% { transform: rotate(calc(var(--dgsw, 1) * 2.6deg)); } }
+          @keyframes dg-cswayS { 0%, 100% { transform: rotate(calc(var(--dgsw, 1) * -1.3deg)); } 50% { transform: rotate(calc(var(--dgsw, 1) * 1.3deg)); } }
           @keyframes dg-cpolyp { 0%, 100% { opacity: .35; } 50% { opacity: .95; } }
           .dg-csway { animation: dg-csway 7s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
           .dg-cswayS { animation: dg-cswayS 9s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
           .dg-cpolyp { animation: dg-cpolyp 3.4s ease-in-out infinite; }
+          @keyframes dg-cnew { 0%, 100% { opacity: .74; } 50% { opacity: 1; } }
+          .dg-coral.dg-cnew { animation: dg-cnew 2.4s ease-in-out infinite; }
+          .dg-nightveil { fill: #02080f; opacity: 0; transition: opacity 2.5s ease; pointer-events: none; }
+          svg.dg-night .dg-nightveil, .dg-night .dg-nightveil { opacity: .42; }
+          svg.dg-night .dg-coral, .dg-night .dg-coral { opacity: .6; }
+          @keyframes dg-bundlerise { 0% { transform: translateY(0); opacity: 0; } 12% { opacity: .9; } 78% { opacity: .75; } 100% { transform: translateY(-300px); opacity: 0; } }
+          .dg-spawnlayer circle { fill: #ffb3c8; transform-box: fill-box; animation: dg-bundlerise 7s linear infinite paused; }
+          .dg-spawnlayer { opacity: 0; transition: opacity 2s ease; }
+          svg.dg-spawn .dg-spawnlayer, .dg-spawn .dg-spawnlayer { opacity: 1; }
+          svg.dg-spawn .dg-spawnlayer circle, .dg-spawn .dg-spawnlayer circle { animation-play-state: running; }
           @media (prefers-reduced-motion: reduce) {
-            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg, .dg-scrubjet circle, .dg-scrubcloud circle, .dg-csway, .dg-cswayS, .dg-cpolyp { animation: none !important; }
+            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg, .dg-scrubjet circle, .dg-scrubcloud circle, .dg-csway, .dg-cswayS, .dg-cpolyp, .dg-coral.dg-cnew, .dg-spawnlayer circle { animation: none !important; }
           }
         </style>
         <defs>
@@ -14668,6 +14770,9 @@ class OpenReefPanel extends HTMLElement {
       <rect x="1148" y="164" width="76" height="332" fill="#0e2c42" opacity=".92"></rect>
       <line x1="1148" y1="148" x2="1148" y2="497" class="dg-glass-thin"></line>`);
     parts.push(this._diagCoralsMarkup("sump"));
+    // moonlight veil over the display water; spawning bundles rise off the rock
+    parts.push(`<rect x="173" y="160" width="1054" height="337" class="dg-nightveil"></rect>`);
+    parts.push(this._diagSpawnMarkup(350, 580, 320, 430));
     let comb = "";
     for (let x = 1150; x < 1226; x += 9) comb += `<line x1="${x}" y1="148" x2="${x}" y2="170" class="dg-line"></line>`;
     parts.push(comb);
@@ -14971,6 +15076,9 @@ class OpenReefPanel extends HTMLElement {
       <line x1="1139" y1="248" x2="1139" y2="630" class="dg-glass-thin"></line>
       <line x1="1215" y1="230" x2="1215" y2="656" class="dg-glass-thin"></line>`);
     parts.push(this._diagCoralsMarkup("aio"));
+    // moonlight veil over the display water; spawning bundles rise off the rock
+    parts.push(`<rect x="303" y="240" width="757" height="417" class="dg-nightveil"></rect>`);
+    parts.push(this._diagSpawnMarkup(430, 520, 470, 590));
     let comb = "";
     // Teeth stop at 1092 so the doser/AWC drop tubes land in clear water
     // instead of threading the comb.
@@ -15287,6 +15395,9 @@ class OpenReefPanel extends HTMLElement {
     // ATO trickle and refugium glow follow their switches.
     svg.classList.toggle("dg-ato-on", nodes.ato ? this._diagramNodeState(nodes.ato[1]) === "on" : false);
     svg.classList.toggle("dg-fuge-on", nodes.fugelight ? this._diagramNodeState(nodes.fugelight[1]) === "on" : false);
+    // Moonlight and spawning-night follow the display light and the calendar.
+    svg.classList.toggle("dg-night", nodes.light ? this._diagramNodeState(nodes.light[1]) === "off" : false);
+    svg.classList.toggle("dg-spawn", this._diagramSpawnNight(nodes));
     // Dose drips: a channel's dosed-today counter ticking UP means a real dose
     // just ran — burst the drip animation for a few seconds.
     this._diagramDoseWatch = this._diagramDoseWatch || {};
@@ -15336,6 +15447,7 @@ class OpenReefPanel extends HTMLElement {
     const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
     if (!svg) return;
     this._wireDiagramDrag(svg);
+    this._diagKickSpawnCache();
     if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const water = (svg.getAttribute("data-water") || "").split(",").map(Number);
     if (water.length !== 4 || water.some((n) => !Number.isFinite(n))) return;
@@ -15377,6 +15489,10 @@ class OpenReefPanel extends HTMLElement {
         energy += (on / wmEntities.length) * 0.9;
       }
       if (retEntity && this._stateValue(retEntity) === "on") energy += 0.12;
+      // Coral sway amplitude rides the same live energy the particles use:
+      // pumps off, the reef goes still (a faint drift stays — water is water).
+      const sw = (0.25 + Math.min(1, energy) * 0.85).toFixed(2);
+      if (sw !== motion.sw) { motion.sw = sw; svg.style.setProperty("--dgsw", sw); }
       for (const p of parts) {
         p.v += (energy - p.v) * 0.015; // flow spools up and settles, never snaps
         p.ph += p.v * dt * 0.0011;
@@ -21980,6 +22096,8 @@ class OpenReefPanel extends HTMLElement {
         .coral-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-top: 10px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 12px; }
         .coral-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
         .coral-row-main strong { font-size: .95rem; }
+        .coral-name { background: transparent; border: 1px solid transparent; border-radius: 8px; color: inherit; font-weight: 600; font-size: .95rem; padding: 2px 6px; margin-left: -7px; max-width: 100%; }
+        .coral-name:hover, .coral-name:focus { border-color: var(--openreef-border, rgba(127, 184, 216, .35)); outline: none; }
         .coral-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; box-shadow: 0 0 10px 1px currentColor; }
         .button-row.end { justify-content: flex-end; }
         .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
