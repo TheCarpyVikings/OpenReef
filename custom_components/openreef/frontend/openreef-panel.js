@@ -13786,31 +13786,35 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _coralZone(species) {
-    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora"].includes(species)) return "sps";
-    if (["torch", "hammer", "frogspawn", "bubble", "duncan", "candycane", "goniopora", "chalice", "brain", "anemone"].includes(species)) return "lps";
+    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona"].includes(species)) return "sps";
+    if (["torch", "hammer", "frogspawn", "bubble", "duncan", "candycane", "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone"].includes(species)) return "lps";
     if (species === "gorgonian") return "fan";
     return "soft";
   }
 
   _coralSpeciesList() {
-    return ["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora",
+    return ["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona",
       "torch", "hammer", "frogspawn", "bubble", "duncan", "candycane",
-      "goniopora", "chalice", "brain", "anemone",
+      "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone",
       "zoa", "mushroom", "ricordea", "xenia", "gsp", "kenyatree",
-      "toadstool", "acan", "clam", "gorgonian"];
+      "toadstool", "acan", "trachy", "cynarina", "elegance", "fungia",
+      "scoly", "suncoral", "clam", "gorgonian"];
   }
 
   _coralSpeciesLabel(species) {
     return {
       staghorn: "Staghorn acropora", plate: "Plating montipora", table: "Table acropora",
       birdsnest: "Birdsnest coral", digitata: "Montipora digitata", stylophora: "Stylophora",
-      torch: "Torch coral", hammer: "Hammer coral", frogspawn: "Frogspawn",
-      bubble: "Bubble coral", duncan: "Duncan coral", candycane: "Candy cane coral",
-      goniopora: "Goniopora", chalice: "Chalice coral", brain: "Brain coral",
-      anemone: "Bubble-tip anemone", zoa: "Zoanthid colony", mushroom: "Mushroom corals",
-      ricordea: "Ricordea", xenia: "Pulsing xenia", gsp: "Green star polyps",
-      kenyatree: "Kenya tree", toadstool: "Toadstool leather", acan: "Acan colony",
-      clam: "Maxima clam", gorgonian: "Gorgonian fan",
+      pavona: "Pavona (cactus coral)", torch: "Torch coral", hammer: "Hammer coral",
+      frogspawn: "Frogspawn", bubble: "Bubble coral", duncan: "Duncan coral",
+      candycane: "Candy cane coral", goniopora: "Goniopora", chalice: "Chalice coral",
+      brain: "Brain coral", favia: "Favia colony", lobo: "Lobophyllia",
+      blasto: "Blastomussa", anemone: "Bubble-tip anemone", zoa: "Zoanthid colony",
+      mushroom: "Mushroom corals", ricordea: "Ricordea", xenia: "Pulsing xenia",
+      gsp: "Green star polyps", kenyatree: "Kenya tree", toadstool: "Toadstool leather",
+      acan: "Acan colony", trachy: "Trachyphyllia", cynarina: "Cynarina (button coral)",
+      elegance: "Elegance coral", fungia: "Fungia plate", scoly: "Scolymia",
+      suncoral: "Sun coral", clam: "Maxima clam", gorgonian: "Gorgonian fan",
     }[species] || "Coral";
   }
 
@@ -14394,6 +14398,109 @@ class OpenReefPanel extends HTMLElement {
         </g>
         <path d="M ${x - 16} ${y - 13} q 4 -8 8 0 q 4 -8 8 0 q 4 -8 8 0 q 4 -8 8 0" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="2" stroke-linejoin="round"></path>
         ${dot(-11, -17, 1.6, 0)}${dot(-3, -18, 1.6, 1)}${dot(5, -17, 1.6, 2)}${dot(12, -16, 1.4, 3)}`;
+    }
+    if (species === "pavona") {
+      const plate = (px, h, wHalf) => `
+        <path d="M ${px - wHalf} ${y} L ${px - wHalf - 4} ${y - h + 8} Q ${px} ${y - h - 6} ${px + wHalf + 4} ${y - h + 8} L ${px + wHalf} ${y} Z" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.6" opacity=".95"></path>
+        <path d="M ${px} ${y - 4} L ${px} ${y - h + 4}" stroke="${pal.deep}" stroke-width="1.6" opacity=".7"></path>`;
+      return `
+        <circle cx="${x}" cy="${y - 24}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        ${plate(x - 18, 28, 8)}${plate(x, 40, 9)}${plate(x + 18, 24, 7)}
+        ${dot(-18, -26, 1.6, 0)}${dot(0, -38, 1.6, 1)}${dot(18, -22, 1.5, 2)}`;
+    }
+    if (species === "favia") {
+      const cor = (dx, dy) => `
+        <circle cx="${x + dx}" cy="${y + dy}" r="4.6" fill="${pal.deep}" stroke="${pal.bright}" stroke-width="1.6"></circle>
+        <circle cx="${x + dx}" cy="${y + dy}" r="1.6" fill="${pal.mid}"></circle>`;
+      return `
+        <circle cx="${x}" cy="${y - 8}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        <path d="M ${x - 26} ${y} a 26 17 0 0 1 52 0 Z" fill="${pal.mid}"></path>
+        ${cor(-16, -5)}${cor(-6, -10)}${cor(5, -10)}${cor(15, -5)}${cor(-11, 0)}${cor(0, -2)}${cor(10, 0)}
+        ${dot(-6, -10, 1.3, 0)}${dot(5, -10, 1.3, 1)}${dot(0, -2, 1.2, 2)}`;
+    }
+    if (species === "lobo") {
+      return `
+        <circle cx="${x}" cy="${y - 8}" r="32" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x - 13}" cy="${y - 5}" rx="14" ry="10" fill="${pal.deep}" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x + 6}" cy="${y - 8}" rx="13" ry="11" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x + 18}" cy="${y - 2}" rx="10" ry="8" fill="${pal.deep}" stroke="${pal.bright}" stroke-width="1.8"></ellipse>
+        <path d="M ${x - 20} ${y - 6} q 7 -4 14 0" stroke="${pal.mid}" stroke-width="1.6" fill="none" opacity=".7"></path>
+        <path d="M ${x} ${y - 10} q 6 -4 12 0" stroke="${pal.deep}" stroke-width="1.6" fill="none" opacity=".6"></path>
+        ${dot(-13, -6, 1.6, 0)}${dot(6, -9, 1.6, 1)}${dot(18, -3, 1.4, 2)}`;
+    }
+    if (species === "blasto") {
+      const pol = (dx, dy, k) => `
+        <path d="M ${x + dx} ${y} L ${x + dx} ${y + dy + 5}" stroke="${pal.deep}" stroke-width="3" stroke-linecap="round"></path>
+        <circle cx="${x + dx}" cy="${y + dy}" r="6" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.8"></circle>
+        <circle class="dg-cpolyp" cx="${x + dx}" cy="${y + dy}" r="2" fill="${pal.dot}" style="animation-delay:${(d0 - k * 0.7).toFixed(2)}s"></circle>`;
+      return `
+        <circle cx="${x}" cy="${y - 12}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        ${pol(-18, -12, 0)}${pol(-6, -17, 1)}${pol(6, -15, 2)}${pol(17, -10, 3)}${pol(0, -7, 4)}`;
+    }
+    if (species === "trachy") {
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="32" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 2}" rx="26" ry="10" fill="${pal.deep}"></ellipse>
+        <path d="M ${x - 26} ${y - 2} q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 7 -1" stroke="${pal.bright}" stroke-width="2.6" fill="none" stroke-linejoin="round"></path>
+        <path d="M ${x - 17} ${y + 1} q 8 -6 17 -1 q 9 -5 17 0" stroke="${pal.mid}" stroke-width="2" fill="none" opacity=".8"></path>
+        ${dot(-12, -6, 1.6, 0)}${dot(2, -7, 1.6, 1)}${dot(14, -5, 1.5, 2)}`;
+    }
+    if (species === "cynarina") {
+      return `
+        <circle cx="${x}" cy="${y - 10}" r="30" fill="${pal.bright}" opacity=".14"></circle>
+        <ellipse cx="${x}" cy="${y - 8}" rx="16" ry="12" fill="${pal.mid}" opacity=".9"></ellipse>
+        <ellipse cx="${x}" cy="${y - 8}" rx="16" ry="12" fill="none" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x}" cy="${y - 7}" rx="8" ry="5.5" fill="${pal.deep}"></ellipse>
+        <line x1="${x - 3}" y1="${y - 7}" x2="${x + 3}" y2="${y - 7}" stroke="${pal.bright}" stroke-width="1.6"></line>
+        ${dot(-9, -14, 1.7, 0)}${dot(8, -13, 1.7, 1)}${dot(0, -17, 1.5, 2)}`;
+    }
+    if (species === "elegance") {
+      const tent = (dx, len, bend) => `<path d="M ${x + dx} ${y - 6} q ${bend} ${-len * 0.6} ${bend * 1.6} ${-len}" stroke="${pal.bright}" stroke-width="2.4" stroke-linecap="round" fill="none" opacity=".9"></path>`;
+      return `
+        <circle cx="${x}" cy="${y - 20}" r="38" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="20" ry="8" fill="${pal.deep}"></ellipse>
+        <g class="dg-csway" style="animation-delay:${d0.toFixed(2)}s">
+          ${tent(-16, 20, -5)}${tent(-11, 25, -3)}${tent(-6, 28, -2)}${tent(-1, 29, 0)}${tent(4, 28, 2)}${tent(9, 25, 3)}${tent(14, 20, 5)}${tent(-13, 16, -7)}${tent(11, 16, 7)}
+          ${dot(-24, -25, 2.2, 0)}${dot(-12, -32, 2.2, 1)}${dot(-1, -35, 2.2, 2)}${dot(10, -32, 2.2, 3)}${dot(22, -24, 2.2, 4)}
+        </g>`;
+    }
+    if (species === "fungia") {
+      const septa = [0, 30, 60, 90, 120, 150].map((deg) => {
+        const rad = deg * Math.PI / 180;
+        const dx = Math.cos(rad) * 17;
+        const dy = Math.sin(rad) * 6.5;
+        return `<line x1="${(x - dx).toFixed(1)}" y1="${(y - 4 - dy).toFixed(1)}" x2="${(x + dx).toFixed(1)}" y2="${(y - 4 + dy).toFixed(1)}" stroke="${pal.deep}" stroke-width="1.5" opacity=".8"></line>`;
+      }).join("");
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="28" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="18" ry="7" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="18" ry="7" fill="none" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        ${septa}
+        ${dot(0, -4, 1.8, 0)}`;
+    }
+    if (species === "scoly") {
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="28" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="15" ry="6.5" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="15" ry="6.5" fill="none" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="9.5" ry="4" fill="none" stroke="${pal.mid}" stroke-width="1.8"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="4.5" ry="2" fill="${pal.mid}"></ellipse>
+        ${dot(0, -4, 1.5, 0)}${dot(-11, -5, 1.2, 1)}${dot(11, -3, 1.2, 2)}`;
+    }
+    if (species === "suncoral") {
+      const daisy = (dx, dy, k) => `
+        <path d="M ${x + dx} ${y + dy + 8} L ${x + dx} ${y + dy}" stroke="${pal.deep}" stroke-width="2.6" stroke-linecap="round"></path>
+        <g stroke="${pal.bright}" stroke-width="1.5" stroke-linecap="round">
+          <line x1="${x + dx - 4}" y1="${y + dy - 3}" x2="${x + dx + 4}" y2="${y + dy - 3}"></line>
+          <line x1="${x + dx}" y1="${y + dy - 7}" x2="${x + dx}" y2="${y + dy + 1}"></line>
+          <line x1="${x + dx - 3}" y1="${y + dy - 6}" x2="${x + dx + 3}" y2="${y + dy}"></line>
+          <line x1="${x + dx + 3}" y1="${y + dy - 6}" x2="${x + dx - 3}" y2="${y + dy}"></line>
+        </g>
+        ${dot(dx, dy - 3, 1.6, k)}`;
+      return `
+        <circle cx="${x}" cy="${y - 12}" r="30" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y}" rx="20" ry="6" fill="#1a3850"></ellipse>
+        ${daisy(-14, -12, 0)}${daisy(-4, -17, 1)}${daisy(6, -14, 2)}${daisy(15, -9, 3)}${daisy(0, -8, 4)}`;
     }
     // zoa mat (default)
     return `

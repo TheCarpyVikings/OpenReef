@@ -729,13 +729,15 @@ test("the starter reef is six real, removable registry entries", async () => {
 
 // --- Reef Layer slice 3: species, scapes, colour spacing (0.7.28) -----------
 
-test("the new species know their zones and all sixteen render", async () => {
+test("the new species know their zones and every species has real art", async () => {
   const cfg = structuredClone(RIG);
   cfg.livestock = { corals: {
     ham: { species: "hammer", colour: "green" },   // lps
     tab: { species: "table", colour: "purple" },   // sps
     xen: { species: "xenia", colour: "pink" },     // soft
-    bird: { species: "birdsnest", colour: "teal" },// sps
+    trac: { species: "trachy", colour: "red" },    // soft (sand)
+    fav: { species: "favia", colour: "teal" },     // lps
+    pav: { species: "pavona", colour: "orange" },  // sps
   } };
   const panel = prep(await makePanel(cfg), ALL_ON);
   const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
@@ -743,7 +745,19 @@ test("the new species know their zones and all sixteen render", async () => {
   assert(slots[layout["coral:ham"]].kinds.includes("lps"), "hammer lives mid-rock");
   assert(slots[layout["coral:tab"]].kinds.includes("sps"), "table acro takes the crest");
   assert(slots[layout["coral:xen"]].kinds.includes("soft"), "xenia stays low");
-  assertEqual((panel._pulseDiagramSvg().match(/class="dg-coral/g) || []).length, 4, "all four drawn");
+  assert(slots[layout["coral:trac"]].kinds.includes("soft"), "trachy sits on the sand zone");
+  assert(slots[layout["coral:fav"]].kinds.includes("lps"), "favia holds mid-rock");
+  assert(slots[layout["coral:pav"]].kinds.includes("sps"), "pavona climbs high");
+  assertEqual((panel._pulseDiagramSvg().match(/class="dg-coral/g) || []).length, 6, "all six drawn");
+  // Every listed species must produce substantial art — no species may
+  // silently fall back to the zoa default glyph.
+  const zoaArt = panel._diagCoralArt("zoa", 0, 0, panel._coralPalette("purple"), 0);
+  for (const s of panel._coralSpeciesList()) {
+    const art = panel._diagCoralArt(s, 0, 0, panel._coralPalette("purple"), 0);
+    assert(art.length > 200, `${s} has art`);
+    if (s !== "zoa") assert(art !== zoaArt, `${s} has its OWN art, not the zoa fallback`);
+  }
+  assertEqual(panel._coralSpeciesList().length, 36, "thirty-six species in the kit");
 });
 
 test("scapes move the rock and the slots, but placements survive the switch", async () => {
