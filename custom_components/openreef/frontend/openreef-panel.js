@@ -15631,11 +15631,13 @@ class OpenReefPanel extends HTMLElement {
       parts.push(this._diagNodeMarkup({
         kind: "dg-air", focusId: `equip:${id}`, dragKey: "air", state: this._diagramNodeState(item),
         title: `${item.label || id} — air stone`,
-        dot: [ax2 + 38, ay2 - 4], hit: [ax2 - 8, ay2 - 56, 62, 76],
+        // Hit box hugs the stone: the bubble column above it must never steal
+        // taps from the return pump sitting directly overhead.
+        dot: [ax2 + 38, ay2 - 4], hit: [ax2 - 12, ay2 - 18, 40, 36],
         art: `
           <rect x="${ax2}" y="${ay2}" width="32" height="10" rx="5" class="dg-shell"></rect>
           ${bubbles}
-          <rect x="${ax2 - 6}" y="${ay2 - 52}" width="50" height="68" rx="10" class="dg-halo"></rect>`,
+          <rect x="${ax2 - 6}" y="${ay2 - 24}" width="46" height="40" rx="10" class="dg-halo"></rect>`,
       }));
     }
 
@@ -15933,11 +15935,13 @@ class OpenReefPanel extends HTMLElement {
       parts.push(this._diagNodeMarkup({
         kind: "dg-air", focusId: `equip:${id}`, dragKey: "air", state: this._diagramNodeState(item),
         title: `${item.label || id} — air stone${scrubbing ? ", scrubbing beside the return" : ""}`,
-        dot: [sx2 + 38, sy2 - 4], hit: [sx2 - 10, sy2 - 60, 64, 76],
+        // Hit box hugs the stone: at the scrubbing spot the old tall box sat
+        // right on top of the return pump and swallowed its taps.
+        dot: [sx2 + 38, sy2 - 4], hit: [sx2 - 8, sy2 - 26, 48, 44],
         art: `
           <rect x="${sx2}" y="${sy2}" width="32" height="10" rx="5" class="dg-shell"></rect>
           ${bubbles}
-          <rect x="${sx2 - 8}" y="${sy2 - 56}" width="52" height="70" rx="10" class="dg-halo"></rect>`,
+          <rect x="${sx2 - 6}" y="${sy2 - 24}" width="46" height="40" rx="10" class="dg-halo"></rect>`,
       }));
     }
 

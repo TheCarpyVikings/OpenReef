@@ -838,6 +838,33 @@ test("removing a coral clears its slot from the layout", async () => {
   assert(!panel._config.diagram.layout["coral:z"], "layout slot vacated");
 });
 
+test("the scrubbing air stone never steals taps from the return pump", async () => {
+  const hitOf = (svg, fid) => {
+    const g = svg.split(`data-diag-node="${fid}"`)[1] || "";
+    const m = g.match(/<rect x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="12" fill="transparent">/);
+    return m ? { x: +m[1], y: +m[2], w: +m[3], h: +m[4] } : null;
+  };
+  const intersects = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const aioCfg = structuredClone(RIG);
+  aioCfg.diagram.systemType = "aio";
+  aioCfg.diagram.layout = { air: "airCh3" };
+  aioCfg.equipment.bubbler = { label: "Air Pump", type: "air_pump", switch_entity_id: "switch.air" };
+  const aio = prep(await makePanel(aioCfg), { ...ALL_ON, "switch.air": sw("on") });
+  const aioSvg = aio._pulseDiagramSvg();
+  const aioRet = hitOf(aioSvg, "equip:ret");
+  const aioAir = hitOf(aioSvg, "equip:bubbler");
+  assert(aioRet && aioAir, "both AiO hit boxes found");
+  assert(!intersects(aioRet, aioAir), "AiO: air stone drawn later must not cover the pump's taps");
+  const sumpCfg = structuredClone(RIG);
+  sumpCfg.equipment.bubbler = { label: "Air Pump", type: "air_pump", switch_entity_id: "switch.air" };
+  const sump = prep(await makePanel(sumpCfg), { ...ALL_ON, "switch.air": sw("on") });
+  const sumpSvg = sump._pulseDiagramSvg();
+  const sumpRet = hitOf(sumpSvg, "equip:ret");
+  const sumpAir = hitOf(sumpSvg, "equip:bubbler");
+  assert(sumpRet && sumpAir, "both sump hit boxes found");
+  assert(!intersects(sumpRet, sumpAir), "sump: return-chamber stone must not cover the pump's taps");
+});
+
 test("chip labels break at a word, never mid-word", async () => {
   const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON);
   assertEqual(panel._diagChipLabel("Tank Temperature"), "TANK");
