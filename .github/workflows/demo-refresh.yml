@@ -29,9 +29,6 @@ permissions:
   pull-requests: write
   issues: write
 
-env:
-  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-
 jobs:
   refresh:
     runs-on: ubuntu-latest
@@ -63,11 +60,14 @@ jobs:
         with:
           node-version: "22"
 
+      # Plain global install, no corepack: a packageManager pin in
+      # site/package.json broke the Vercel build (its corepack chokes),
+      # so the pnpm version is pinned here instead.
       - name: Install site dependencies
         if: steps.need.outputs.needed == 'true'
         working-directory: site
         run: |
-          corepack enable
+          npm install -g pnpm@9
           pnpm install --frozen-lockfile
 
       - name: Drift report (for the PR body), then regenerate + re-pin
