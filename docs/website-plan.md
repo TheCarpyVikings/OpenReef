@@ -167,6 +167,22 @@ go stale. Banner honesty: "seeded data, live tide" until a recording replaces it
 served under the site (SSG). Announce to the email list. This is the SEO engine;
 everything before it is the shop window.
 
+**Demo maintenance ladder** (2026-08-07, all three rungs live):
+- Rung 1 — the ritual: after every big arc, seed the showroom with the new
+  feature (site/tools/demo-fixtures.py), run `pnpm demo:refresh` (regen →
+  build → tools/demo-smoke.mjs), write the feature's deep dive. The smoke gate
+  discovers tabs from the live DOM, enters Pulse present mode, checks the
+  opener in a fresh context, and fails on console errors or unanswered WS
+  commands (shim records them on window.__demoUnrouted).
+- Rung 2 — drift alarm: .github/workflows/demo-drift.yml runs
+  site/tools/demo-drift.py on every push touching the panel and keeps exactly
+  one demo-drift issue open while the pinned panel lags; closes it on catch-up.
+- Rung 3 — self-refresh: .github/workflows/demo-refresh.yml (monthly 1st +
+  manual dispatch with force) regenerates in CI (fake-HA harness, no HA
+  needed), runs the smoke gate, and opens a `demo-refresh` PR; failure files a
+  demo-refresh-failed issue instead. NOTE: needs "Allow GitHub Actions to
+  create and approve pull requests" ON in repo Settings → Actions → General.
+
 **Explicitly out of scope until researched:** kit sales/checkout (UKCA/liability for
 mains-switching DIY electronics still unresolved — waitlist only), any claim that
 implies public availability beyond the private beta.

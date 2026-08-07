@@ -1,0 +1,63 @@
+name: demo drift
+
+# Rung 2 of the demo maintenance ladder. Whenever the shipping panel changes,
+# measure how far the marketing site's live demo (site/public/demo/) has fallen
+# behind, and keep exactly ONE open issue in sync with reality: opened or
+# updated while drifted, closed when the demo catches up. A demo-refresh PR
+# merging touches site/public/demo/, which re-triggers this workflow and closes
+# the issue automatically.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "custom_components/openreef/frontend/**"
+      - "site/public/demo/**"
+      - "site/tools/demo-drift.py"
+      - ".github/workflows/demo-drift.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    if: github.repository == 'TheCarpyVikings/OpenReef'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the report counts frontend commits since the pin
+
+      - name: Measure drift
+        id: drift
+        run: |
+          set +e
+          python3 site/tools/demo-drift.py --markdown drift.md
+          echo "drifted=$?" >> "$GITHUB_OUTPUT"
+          cat drift.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update the drift issue
+        if: steps.drift.outputs.drifted == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create demo-drift --color D93F0B \
+            --description "The live demo is behind the shipping panel" --force
+          existing=$(gh issue list --label demo-drift --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file drift.md
+          else
+            gh issue create --title "Demo drift: the showroom is behind the panel" \
+              --label demo-drift --body-file drift.md
+          fi
+
+      - name: Close the drift issue if we caught up
+        if: steps.drift.outputs.drifted == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh issue list --label demo-drift --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "The demo caught up in $GITHUB_SHA — closing."
+          fi
