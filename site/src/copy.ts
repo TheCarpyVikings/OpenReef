@@ -129,6 +129,18 @@ export const FEATURES: FeatureCard[] = [
     img: "/demos/mission-control.png",
   },
   {
+    title: "Living tank diagram",
+    body: "Your actual system, drawn live — flow follows your pumps, alerts light up where the problem is, and your corals grow on the rock.",
+    img: "/demos/diagram.png",
+    href: "/features/tank-diagram/",
+  },
+  {
+    title: "Reef Pulse",
+    body: "Press ✨ Present and the panel becomes the wall: health ring, live tiles, insights — the first reef controller with a built-in present mode.",
+    img: "/demos/pulse.png",
+    href: "/features/reef-pulse/",
+  },
+  {
     title: "Live monitoring",
     body: "Tap any reading for its full trend, from 1 hour to 30 days. Apex probes, Trident results and cheap third-party sensors, side by side.",
     img: "/demos/live-stats.png",

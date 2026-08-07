@@ -9,6 +9,8 @@ export interface DeepDiveContent {
   buddyPose: string;
   img: string;
   imgAlt: string;
+  /** When the feature is playable in /demo/, a third CTA button appears. */
+  demoLabel?: string;
   sections: Array<{ heading: string; paragraphs: string[]; list?: string[]; snippet?: string }>;
   limits: string[];
   faq: Array<{ q: string; a: string }>;
@@ -124,6 +126,11 @@ export default function DeepDive({ c }: { c: DeepDiveContent }) {
             <a className="btn btn-primary" href="/#cta">
               Join the beta
             </a>
+            {c.demoLabel && (
+              <a className="btn btn-ghost" href="/demo/">
+                {c.demoLabel}
+              </a>
+            )}
             <a className="btn btn-ghost" href={GITHUB_URL}>
               Read the source
             </a>

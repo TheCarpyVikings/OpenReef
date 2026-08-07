@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "capture": "node tools/capture-demos.mjs",
     "demo:fixtures": "python3 tools/demo-fixtures.py",
-    "demo:record": "node tools/demo-record.mjs"
+    "demo:record": "node tools/demo-record.mjs",
+    "demo:smoke": "node tools/demo-smoke.mjs",
+    "demo:refresh": "python3 tools/demo-fixtures.py && npm run build && node tools/demo-smoke.mjs"
   },
   "dependencies": {
     "@react-three/fiber": "^9.1.2",

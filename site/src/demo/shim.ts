@@ -201,6 +201,7 @@ export async function createDemoHass(onMutate: () => void): Promise<{ hass: Demo
     "openreef/lighting_window": () => clone(ws["openreef/lighting_window"]),
     "openreef/list_reef_presets": () => clone(ws["openreef/list_reef_presets"]),
     "openreef/guardian_status": () => clone(ws["openreef/guardian_status"]),
+    "openreef/vision_summary": () => clone(ws["openreef/vision_summary"]),
 
     // Quiet, safe empties — tabs that list media simply have none in the demo.
     "openreef/list_timelapse_frames": () => ({ frames: [] }),
@@ -218,9 +219,23 @@ export async function createDemoHass(onMutate: () => void): Promise<{ hass: Demo
     "openreef/guardian_voice": () => demoBlocked("talking to the live avatar"),
     "openreef/guardian_simli_session": () => demoBlocked("the live avatar"),
     "openreef/dosing_dose_now": () => demoBlocked("firing a dosing pump"),
+
+    // Not a hardware limit — an honesty one: nothing in the demo persists, so
+    // an uploaded photo would vanish on reload. The glyph picker works fine.
+    "openreef/coral_photo_upload": () => {
+      throw new Error(
+        "Demo tank: photo uploads need somewhere to live, and nothing here persists — a reload is a fresh tank. On your reef the photo stays on the coral.",
+      );
+    },
     "openreef/dosing_prime": () => demoBlocked("priming a dosing pump"),
     "openreef/dosing_calibrate_start": () => demoBlocked("dosing calibration"),
   };
+
+  // Drift telemetry for tools/demo-smoke.mjs: every openreef/* command the
+  // panel sends that no route answers lands here. During a tabs-only sweep
+  // this list must stay empty — anything in it is a read the panel now needs
+  // and the fixtures don't carry (i.e. the demo has drifted behind the panel).
+  const unrouted: string[] = ((window as any).__demoUnrouted = []);
 
   const hass: DemoHass = {
     states,
@@ -228,6 +243,7 @@ export async function createDemoHass(onMutate: () => void): Promise<{ hass: Demo
       const route = routes[msg.type];
       if (route) return route(msg);
       if (String(msg.type).startsWith("openreef/")) {
+        unrouted.push(String(msg.type));
         return demoBlocked(`"${String(msg.type).replace("openreef/", "").replace(/_/g, " ")}"`);
       }
       return {};

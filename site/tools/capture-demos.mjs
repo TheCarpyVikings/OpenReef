@@ -35,6 +35,7 @@ const [W, H] = (process.env.VIEWPORT || "1280x800").split("x").map(Number);
 // Panel tab id → output file (matches FEATURES img paths in src/copy.ts).
 const ALL_TABS = [
   { id: "mission", file: "mission-control.png" },
+  { id: "diagram", file: "diagram.png" },
   { id: "live", file: "live-stats.png" },
   { id: "controls", file: "controls.png" },
   { id: "maintenance", file: "maintenance.png" },
@@ -120,6 +121,27 @@ try {
     await sleep(3000); // let charts/streams settle
     await page.screenshot({ path: join(outDir, file) });
     console.log(`✓ ${id} → public/demos/${file}`);
+  }
+
+  // Reef Pulse isn't a tab — it's the ✨ Present takeover. Capture it last,
+  // from the mission tab, unless a TABS filter excluded it.
+  if (!wanted || wanted.includes("pulse")) {
+    const home = await page.$('pierce/[data-action="tab"][data-id="mission"]');
+    if (home) {
+      await home.click();
+      await sleep(1500);
+    }
+    const present = await page.$('pierce/[data-action="open-pulse"]');
+    if (!present) {
+      console.warn('- pulse: no "open-pulse" button found (Pulse disabled?) — skipped');
+    } else {
+      await present.click();
+      await sleep(4000); // let the wall settle (sparklines, backdrop)
+      await page.screenshot({ path: join(outDir, "pulse.png") });
+      console.log("✓ pulse → public/demos/pulse.png");
+      const close = await page.$('pierce/[data-action="close-pulse"]');
+      if (close) await close.click().catch(() => {});
+    }
   }
 } finally {
   await browser.close();

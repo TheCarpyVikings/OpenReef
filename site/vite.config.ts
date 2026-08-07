@@ -17,6 +17,8 @@ export default defineConfig({
         "automatic-water-change": `${root}features/automatic-water-change/index.html`,
         "icp-import": `${root}features/icp-import/index.html`,
         "camera-intelligence": `${root}features/camera-intelligence/index.html`,
+        "tank-diagram": `${root}features/tank-diagram/index.html`,
+        "reef-pulse": `${root}features/reef-pulse/index.html`,
         "features-hub": `${root}features/index.html`,
         demo: `${root}demo/index.html`,
       },

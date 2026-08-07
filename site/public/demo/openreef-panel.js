@@ -120,6 +120,21 @@ class OpenReefPanel extends HTMLElement {
     this._pulseWakeVisHandler = null;
     this._pulseDimWakeUntil = 0;
     this._pulseDimPointerHandler = null;
+    this._pulseInsight = { idx: 0 };
+    this._pulseFocusInsightIdx = 0;
+    this._pulseFocusSlideDir = "";
+    this._pulseFocusLastHtml = "";
+    this._pulseSwipeStart = null;
+    this._pulseSwipeDownHandler = null;
+    this._pulseSwipeUpHandler = null;
+    this._pulseSpawn = { program: null, at: 0, loading: false };
+    this._pulseIcpCards = { cards: null, at: 0, loading: false };
+    this._pulseTl = { frames: [], idx: 0, at: 0, loading: false, front: 0 };
+    this._pulseTrendsKicked = false;
+    this._diagramArranging = false;
+    this._diagramDrag = null;
+    this._diagramMotion = null;
+    this._pulseDiagArm = null;
     this._liveStatsMode = this._loadLiveStatsMode();
     this._liveSparks = {};
     this._liveSparksAt = 0;
@@ -140,6 +155,11 @@ class OpenReefPanel extends HTMLElement {
         // Modal open: patch the live overlay stat values without re-rendering
         // (a full render would restart the WebRTC video).
         this._updateCameraOverlay();
+      } else if (this._activeTab === "diagram") {
+        // Diagram tab: patch node states in place — a full render would
+        // restart every flow animation on each hass push.
+        const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+        if (svg) this._updatePulseDiagram(svg);
       }
       return;
     }
@@ -160,6 +180,9 @@ class OpenReefPanel extends HTMLElement {
 
   _shouldRenderForHassUpdate() {
     if (this._pulseActive) return false;
+    // The diagram tab patches in place (see set hass) — a render would restart
+    // its flow animations on every state push.
+    if (this._activeTab === "diagram") return false;
     if (this._setupOpen || this._trend || this._activeTab === "settings") return false;
     if (this._onboarding && this._onboarding.active) return false;
     // Don't recreate camera <img> elements on hass updates — it would restart the
@@ -209,6 +232,10 @@ class OpenReefPanel extends HTMLElement {
     this._stopTimelapse();
     this._stopFeedPlayer();
     this._stopPulseRuntime();
+    // HA soft-navigation removes the panel without a page unload; a live Simli
+    // face on the detached nodes would keep streaming — and billing — for up
+    // to its 10-minute idle timeout if it isn't closed here.
+    this._guardianStopFace();
     if (this._modeCountdownTimer) {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
@@ -1257,9 +1284,54 @@ class OpenReefPanel extends HTMLElement {
       if (action === "close-camera") { this._stopCameraWebRTC(); this._cameraFocus = null; this._cameraFullscreenFallback = false; this._render(); }
       if (action === "open-pulse") this._openPulse(true);
       if (action === "close-pulse") this._closePulse();
-      if (action === "pulse-focus") this._openPulseFocus(id);
+      if (action === "pulse-focus") {
+        if (this._pulseActive) this._openPulseFocus(id);
+        // Diagram tab: the same nodes route to the panel's own surfaces —
+        // equipment detail modal with full controls, or the Dosing tab.
+        else if (!this._diagramArranging && id && id.startsWith("equip:")) {
+          this._equipmentDetail = id.slice(6);
+          this._render();
+        } else if (!this._diagramArranging && id === "doser-station" && this._dosingEnabled()) {
+          this._activeTab = "dosing";
+          this._render();
+        } else if (!this._diagramArranging && id === "awc-station") {
+          this._activeTab = "awc";
+          this._render();
+        } else if (!this._diagramArranging && id && id.startsWith("sensor:")) {
+          // Full trend modal, right over the diagram — chart, ranges, stats.
+          this._loadTrend(id.slice(7));
+        } else if (!this._diagramArranging && id && id.startsWith("coral:")) {
+          this._coralFocus = id.slice(6);
+          this._render();
+        }
+      }
+      if (action === "close-coral") { this._coralFocus = null; this._render(); }
+      if (action === "coral-add") {
+        const name = (this.shadowRoot.getElementById("or-coral-name")?.value || "").trim();
+        this._coralPickName = "";
+        this._addCoral(name, this._coralPickSpecies || "zoa", this._coralPickColour || "purple");
+      }
+      if (action === "coral-pick-species" || action === "coral-pick-colour") {
+        // Re-rendering would wipe a half-typed name — stash it first.
+        this._coralPickName = this.shadowRoot.getElementById("or-coral-name")?.value ?? this._coralPickName;
+        if (action === "coral-pick-species") this._coralPickSpecies = id;
+        else this._coralPickColour = id;
+        this._render();
+      }
+      if (action === "coral-remove") this._removeCoral(id);
+      if (action === "coral-starter") this._addStarterReef();
       if (action === "pulse-unfocus") this._closePulseFocus();
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
+      if (action === "pulse-share") this._sharePulseCard();
+      if (action === "pulse-face") this._applyPulseFace(id);
+      if (action === "pulse-insight-nav") this._pulseFocusInsightNav(id === "prev" ? -1 : 1);
+      if (action === "diagram-toggle") this._pulseDiagramToggle(id);
+      if (action === "diagram-arrange") {
+        this._diagramArranging = !this._diagramArranging;
+        this._pulseFocus = null;
+        this._coralFocus = null;
+        this._render();
+      }
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
@@ -1628,6 +1700,39 @@ class OpenReefPanel extends HTMLElement {
         }
         return;
       }
+      if (target.dataset.coralName != null) {
+        const coral = this._config.livestock?.corals?.[target.dataset.coralName];
+        if (coral) {
+          coral.name = String(target.value || "").slice(0, 48);
+          this._setDirty(true);
+          if (event.type === "change") this._render();
+        }
+        return;
+      }
+      if (target.dataset.coralNotes != null) {
+        const coral = this._config.livestock?.corals?.[target.dataset.coralNotes];
+        if (coral) {
+          coral.notes = String(target.value || "").slice(0, 500);
+          this._setDirty(true);
+        }
+        return;
+      }
+      if (target.dataset.coralUpload != null) {
+        const file = target.files && target.files[0];
+        if (file) this._uploadCoralPhoto(target.dataset.coralUpload, file);
+        target.value = "";
+        return;
+      }
+      if (target.dataset.coralPhoto != null) {
+        const coral = this._config.livestock?.corals?.[target.dataset.coralPhoto];
+        if (coral) {
+          const url = String(target.value || "").trim().slice(0, 300);
+          coral.photoUrl = !url || url.startsWith("/") || url.startsWith("http://") || url.startsWith("https://") ? url : "";
+          this._setDirty(true);
+          if (event.type === "change") this._render();
+        }
+        return;
+      }
 
       if (target.dataset.manualField === "parameter") {
         const unitInput = this.shadowRoot.querySelector('[data-manual-field="unit"]');
@@ -1941,6 +2046,10 @@ class OpenReefPanel extends HTMLElement {
         // New range needs fresh history next time the wall opens.
         if (field === "graphRange") { this._pulseSparks = {}; this._pulseSparksAt = 0; }
       }
+      if (scope === "diagram") {
+        this._config.diagram = this._config.diagram || {};
+        this._config.diagram[field] = value;
+      }
       if (scope === "maintenance-task") {
         this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
         this._config.maintenance.tasks = this._config.maintenance.tasks || {};
@@ -2109,7 +2218,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -6288,6 +6397,10 @@ class OpenReefPanel extends HTMLElement {
       // refresh), re-attach the live stream — the old <video> node is gone.
       this.shadowRoot.innerHTML = `${this._styles()}${this._pulseScreen()}`;
       this._startPulseRuntime();
+      // A full re-render rebuilds the focus host empty; restore any open detail
+      // card (the last-html dedupe would otherwise skip the re-injection).
+      this._pulseFocusLastHtml = "";
+      this._renderPulseFocus();
       this._mountBetaFab();  // BETA-FEEDBACK: remove after beta
       return;
     }
@@ -6347,6 +6460,10 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "guardian") {
       requestAnimationFrame(() => this._guardianAfterRender());
     }
+    // Diagram tab: (re)start the particle/fish motion and drag wiring against
+    // the freshly rendered svg; leaving the tab stops the rAF loop.
+    if (this._activeTab === "diagram") this._startPulseDiagramMotion();
+    else this._stopPulseDiagramMotion();
     this._mountBetaFab();  // BETA-FEEDBACK: remove after beta
   }
 
@@ -9163,6 +9280,7 @@ class OpenReefPanel extends HTMLElement {
   _tabs() {
     const tabs = [
       ["mission", "Mission Control"],
+      ["diagram", "Diagram"],
       ["live", "Live Stats"],
       ["manual", "Manual Tests"],
       ["icp", "ICP"],
@@ -9207,6 +9325,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _activeContent() {
+    if (this._activeTab === "diagram") return this._diagramTab();
     if (this._activeTab === "live") return this._liveStats();
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
@@ -10205,7 +10324,15 @@ class OpenReefPanel extends HTMLElement {
       // a render→reload→render hot loop when the WS call keeps failing.
       this._awcSummaryAt = Date.now();
       this._awcSummaryLoading = false;
-      this._render();
+      // While Pulse is up, a full render tears down the presentation layer
+      // (and used to reset every ring animation on each 1–4 s diagram poll);
+      // patch the live screen in place instead. Same story on the Diagram tab.
+      if (this._pulseActive) this._updatePulse();
+      else if (this._activeTab === "diagram") {
+        const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+        if (svg) this._updatePulseDiagram(svg);
+        else this._render();
+      } else this._render();
     }
   }
 
@@ -10602,7 +10729,7 @@ class OpenReefPanel extends HTMLElement {
     }
     const sum = this._awcSummary?.summary || null;
     return `
-      <article class="pulse-block">
+      <article class="pulse-block" data-pulse-awc>
         <small class="pulse-block-title">Water change — ${this._escape(this._awcStatusLabel(state.status || "idle"))}</small>
         ${this._awcDiagramSvg(awc, state, sum)}
       </article>`;
@@ -11678,34 +11805,295 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
     try {
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(source, 0, 0, w, h);
-      await this._drawTankCard(ctx, w, h);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
-      if (!blob) throw new Error("encode failed");
-      const tankName = (this._config.tank && this._config.tank.name) || "My Reef";
-      const safe = String(tankName).replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "") || "reef";
-      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-      const filename = `${safe}_tankcard_${stamp}.jpg`;
-      const quip = this._overlayQuipText();
-      const shareText = quip ? `${tankName} — ${quip}` : `${tankName} · built with OpenReef`;
-      const file = new File([blob], filename, { type: "image/jpeg" });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try {
-          await navigator.share({ files: [file], title: tankName, text: shareText });
-        } catch (err) {
-          // AbortError = user cancelled the share sheet; anything else -> save instead.
-          if (err && err.name !== "AbortError") this._downloadBlob(blob, filename);
-        }
-        return;
-      }
-      this._downloadBlob(blob, filename);
+      await this._composeAndShareCard(source, w, h);
     } catch {
       openStill();
     }
+  }
+
+  // Shared tail of every share path: draw the source, bake the stats card on
+  // top, then the OS share sheet (or a download where share isn't available).
+  async _composeAndShareCard(source, w, h) {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(source, 0, 0, w, h);
+    await this._drawTankCard(ctx, w, h);
+    await this._shareCanvas(canvas);
+  }
+
+  // Encode + hand off: OS share sheet where available, download otherwise.
+  async _shareCanvas(canvas) {
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+    if (!blob) throw new Error("encode failed");
+    const tankName = (this._config.tank && this._config.tank.name) || "My Reef";
+    const safe = String(tankName).replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "") || "reef";
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const filename = `${safe}_tankcard_${stamp}.jpg`;
+    const quip = this._overlayQuipText();
+    const shareText = quip ? `${tankName} — ${quip}` : `${tankName} · built with OpenReef`;
+    const file = new File([blob], filename, { type: "image/jpeg" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: tankName, text: shareText });
+      } catch (err) {
+        // AbortError = user cancelled the share sheet; anything else -> save instead.
+        if (err && err.name !== "AbortError") this._downloadBlob(blob, filename);
+      }
+      return;
+    }
+    this._downloadBlob(blob, filename);
+  }
+
+  // --- Reef Pulse: share the wall -----------------------------------------
+  // "Share my wall" repaints the Pulse view as a designed card rather than
+  // screenshotting the DOM (no rasteriser exists in a shadow root, and the
+  // camera-modal tank card is the wrong artwork — it left a data-wall Pulse
+  // as a near-empty gradient). Model is separated from painter so the data
+  // selection is testable without a canvas.
+
+  _pulseShareStatusColor(status) {
+    return { ok: "#22c55e", warning: "#f59e0b", critical: "#ef4444" }[status] || "#64748b";
+  }
+
+  // Status class for Pulse's small shapes (dots, markers, bars). Deliberately
+  // NOT the bare "warning"/"critical" names: the global button class .warning
+  // carries padding + a border and is declared after the Pulse block, so a
+  // bare class inflates a 8px dot into a lozenge. Prefixed = collision-proof.
+  _pulseStatusClass(status) {
+    return ["ok", "warning", "critical"].includes(status) ? `is-${status}` : "is-unknown";
+  }
+
+  _pulseShareModel() {
+    const cfg = this._pulseCfg();
+    const health = this._reefHealthScore();
+    const tank = this._config.tank || {};
+    const tiles = this._pulseTileSensors().slice(0, 5).map(([id, sensor]) => ({
+      label: sensor.label || id,
+      value: this._sensorDisplayValue(id, sensor),
+      unit: this._sensorDisplayUnit(id, sensor),
+      status: this._liveStatBadge(id, sensor).status,
+    }));
+    const insight = cfg.showInsights === false ? null : this._pulseInsightCurrent();
+    return {
+      tankName: tank.name || "OpenReef",
+      dateText: new Date().toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }),
+      modeLabel: cfg.showMode === false ? "" : this._activeModeLabel(),
+      score: Math.max(0, Math.min(100, Number(health.score) || 0)),
+      grade: health.grade || "",
+      status: health.status || "unknown",
+      topReason: health.topReason || "",
+      tiles,
+      insight: insight ? { kicker: insight.kicker, title: insight.title, detail: insight.detail, status: insight.status } : null,
+      showBuddy: cfg.showBuddy !== false,
+      pose: this._overlayPose(),
+    };
+  }
+
+  // Truncate to fit a width, with an ellipsis — long labels must never bleed
+  // out of their tile on a shared image.
+  _fitText(ctx, text, maxWidth) {
+    const value = String(text ?? "");
+    if (ctx.measureText(value).width <= maxWidth) return value;
+    let out = value;
+    while (out.length > 1 && ctx.measureText(`${out}…`).width > maxWidth) out = out.slice(0, -1);
+    return `${out}…`;
+  }
+
+  async _drawPulseCard(ctx, w, h, model) {
+    const scale = w / 1600;
+    const pad = Math.round(56 * scale);
+    const font = (px, weight = "700") =>
+      `${weight} ${Math.round(px * scale)}px -apple-system, "Segoe UI", Roboto, sans-serif`;
+    const accent = this._pulseShareStatusColor(model.status);
+    ctx.textBaseline = "top";
+
+    // Header: tank name + timestamp left, wordmark right.
+    ctx.font = font(46, "800");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(this._fitText(ctx, model.tankName, w * 0.5), pad, pad);
+    ctx.font = font(22, "600");
+    ctx.fillStyle = "#9fc7e0";
+    ctx.fillText([model.dateText, model.modeLabel].filter(Boolean).join(" · "), pad, pad + Math.round(58 * scale));
+    ctx.font = font(26, "800");
+    ctx.fillStyle = "rgba(255, 255, 255, .85)";
+    const mark = "OpenReef";
+    ctx.fillText(mark, w - pad - ctx.measureText(mark).width, pad);
+
+    // Health ring — the wall's centrepiece, glow and all.
+    // Geometry note: the ring sits in the band between the header and the
+    // tiles row, and the reason line hangs below it — keep r/cy in step with
+    // the tile/insight heights below or the reason lands on the tiles.
+    const cx = w / 2;
+    const cy = Math.round(h * 0.335);
+    const r = Math.round(Math.min(w, h) * 0.165);
+    const lw = Math.round(r * 0.19);
+    ctx.save();
+    ctx.lineWidth = lw;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(255, 255, 255, .15)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    if (model.score > 0) {
+      ctx.strokeStyle = accent;
+      ctx.shadowColor = accent;
+      ctx.shadowBlur = Math.round(26 * scale);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * model.score) / 100);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = font(Math.round(r * 0.82), "800");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(String(model.score), cx, cy - Math.round(r * 0.06));
+    ctx.font = font(20, "800");
+    ctx.fillStyle = "#9fc7e0";
+    ctx.fillText(`${model.grade ? `${model.grade} · ` : ""}REEF HEALTH`, cx, cy + Math.round(r * 0.44));
+    if (model.topReason) {
+      ctx.font = font(24, "700");
+      ctx.fillStyle = "#cfe7f5";
+      ctx.fillText(this._fitText(ctx, model.topReason, w - pad * 2), cx, cy + r + Math.round(34 * scale));
+    }
+    ctx.restore();
+
+    // Sensor tiles row.
+    const insightH = model.insight ? Math.round(150 * scale) : 0;
+    const tileH = Math.round(146 * scale);
+    const tileY = h - pad - insightH - (insightH ? Math.round(20 * scale) : 0) - tileH;
+    const count = model.tiles.length;
+    if (count) {
+      const gap = Math.round(18 * scale);
+      const tileW = (w - pad * 2 - gap * (count - 1)) / count;
+      model.tiles.forEach((tile, i) => {
+        const x = pad + i * (tileW + gap);
+        this._roundRect(ctx, x, tileY, tileW, tileH, Math.round(18 * scale));
+        ctx.fillStyle = "rgba(4, 10, 16, .62)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 255, 255, .14)";
+        ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+        ctx.stroke();
+        const inner = Math.round(20 * scale);
+        const dotR = Math.round(8 * scale);
+        ctx.font = font(19, "800");
+        ctx.fillStyle = "#9fc7e0";
+        ctx.textBaseline = "top";
+        ctx.fillText(this._fitText(ctx, String(tile.label).toUpperCase(), tileW - inner * 2 - dotR * 3), x + inner, tileY + inner);
+        ctx.beginPath();
+        ctx.arc(x + tileW - inner - dotR, tileY + inner + Math.round(8 * scale), dotR, 0, Math.PI * 2);
+        ctx.fillStyle = this._pulseShareStatusColor(tile.status);
+        ctx.fill();
+        ctx.font = font(46, "800");
+        ctx.fillStyle = "#ffffff";
+        const text = `${tile.value}${tile.unit ? ` ${tile.unit}` : ""}`;
+        ctx.fillText(this._fitText(ctx, text, tileW - inner * 2), x + inner, tileY + Math.round(60 * scale));
+      });
+    }
+
+    // Insight strip — the line that makes the wall look like it's thinking.
+    if (model.insight) {
+      const y = h - pad - insightH;
+      this._roundRect(ctx, pad, y, w - pad * 2, insightH, Math.round(18 * scale));
+      ctx.fillStyle = "rgba(4, 10, 16, .62)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, .14)";
+      ctx.lineWidth = Math.max(1, Math.round(1.5 * scale));
+      ctx.stroke();
+      const inner = Math.round(24 * scale);
+      const maxW = w - pad * 2 - inner * 2 - Math.round(30 * scale);
+      ctx.textBaseline = "top";
+      ctx.font = font(19, "800");
+      ctx.fillStyle = "#9fc7e0";
+      ctx.fillText(this._fitText(ctx, String(model.insight.kicker).toUpperCase(), maxW), pad + inner, y + inner);
+      ctx.font = font(31, "800");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(this._fitText(ctx, model.insight.title, maxW), pad + inner, y + inner + Math.round(30 * scale));
+      if (model.insight.detail) {
+        ctx.font = font(23, "600");
+        ctx.fillStyle = "#9fc7e0";
+        ctx.fillText(this._fitText(ctx, model.insight.detail, maxW), pad + inner, y + inner + Math.round(74 * scale));
+      }
+      ctx.beginPath();
+      ctx.arc(w - pad - inner, y + inner + Math.round(8 * scale), Math.round(9 * scale), 0, Math.PI * 2);
+      ctx.fillStyle = this._pulseShareStatusColor(model.insight.status);
+      ctx.fill();
+    }
+
+    // Reef Buddy last, top-right under the wordmark: it's the only part that
+    // needs a network fetch, and a slow or blocked avatar must never cost the
+    // user the readings — the race means a stalled load just omits the art.
+    if (model.showBuddy) {
+      const size = Math.round(170 * scale);
+      const avatar = await Promise.race([
+        this._loadImage(`${this._avatarBase()}${model.pose}.png`).catch(() => null),
+        new Promise((resolve) => window.setTimeout(() => resolve(null), 1500)),
+      ]);
+      if (avatar) ctx.drawImage(avatar, w - pad - size, pad + Math.round(46 * scale), size, size);
+    }
+  }
+
+  // Share the Reef Pulse view itself — the "share my wall" moment. The
+  // backdrop is whatever Pulse is showing (live camera frame, current
+  // timelapse frame, or the data-wall gradient), with the wall repainted on
+  // top, so the shared image looks like the wall in the room.
+  async _sharePulseCard() {
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    if (!root) return;
+    const W = 1600;
+    const H = 900;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    const video = root.querySelector("video[data-camera-video]");
+    const fallback = root.querySelector("img[data-camera-fallback]");
+    const tlFrame = [root.querySelector("[data-pulse-tl-a]"), root.querySelector("[data-pulse-tl-b]")]
+      .find((el) => el && el.classList.contains("show") && el.naturalWidth);
+    let source = null;
+    let sw = 0;
+    let sh = 0;
+    if (video && video.videoWidth && video.readyState >= 2) {
+      source = video; sw = video.videoWidth; sh = video.videoHeight;
+    } else if (fallback && fallback.naturalWidth && fallback.style.display !== "none") {
+      source = fallback; sw = fallback.naturalWidth; sh = fallback.naturalHeight;
+    } else if (tlFrame) {
+      source = tlFrame; sw = tlFrame.naturalWidth; sh = tlFrame.naturalHeight;
+    }
+    // Data-wall gradient, matching .pulse-datawall.
+    ctx.fillStyle = "#060e17";
+    ctx.fillRect(0, 0, W, H);
+    if (source) {
+      // Cover-fit: fill the frame, crop the overflow, never letterbox.
+      const cover = Math.max(W / sw, H / sh);
+      const dw = sw * cover;
+      const dh = sh * cover;
+      ctx.drawImage(source, (W - dw) / 2, (H - dh) / 2, dw, dh);
+      // Scrim so the wall stays readable over a bright reef.
+      const shade = ctx.createLinearGradient(0, 0, 0, H);
+      shade.addColorStop(0, "rgba(4, 8, 13, .72)");
+      shade.addColorStop(0.45, "rgba(4, 8, 13, .42)");
+      shade.addColorStop(1, "rgba(4, 8, 13, .82)");
+      ctx.fillStyle = shade;
+      ctx.fillRect(0, 0, W, H);
+    } else {
+      const glow = (x, y, r, color) => {
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0, color);
+        grad.addColorStop(1, "rgba(0, 0, 0, 0)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+      };
+      glow(W * 0.22, H * 0.08, W * 0.5, "rgba(0, 180, 216, .18)");
+      glow(W * 0.8, H * 0.9, W * 0.5, "rgba(34, 197, 94, .14)");
+    }
+    try {
+      await this._drawPulseCard(ctx, W, H, this._pulseShareModel());
+      await this._shareCanvas(canvas);
+    } catch { /* encode/share failed — nothing sensible to fall back to */ }
   }
 
   async _drawTankCard(ctx, w, h) {
@@ -12209,8 +12597,12 @@ class OpenReefPanel extends HTMLElement {
   }
 
   // --- Reef Pulse: full-screen presentation / kiosk mode -------------------
-  // Display-only by design: no control actions exist on this screen, so a wall
-  // tablet can show it permanently without any arming/safety surface.
+  // Display-first by design: the data/camera/timelapse backdrops expose no
+  // control actions, so a wall tablet can show them permanently without any
+  // arming/safety surface. The one deliberate exception is the living tank
+  // diagram backdrop, whose detail cards may offer a two-step toggle for ARMED
+  // equipment only — through the same toggle_equipment safety funnel as
+  // Mission Control, and switchable off entirely via diagram.allowControls.
 
   _pulseCfg() {
     const raw = this._config?.pulse;
@@ -12219,6 +12611,60 @@ class OpenReefPanel extends HTMLElement {
 
   _pulseEnabled() {
     return this._pulseCfg().enabled !== false;
+  }
+
+  // Named faces: one-tap starting points for the wall, like watch faces. Each
+  // patch touches ONLY fields _normalise_core_config already validates (kept
+  // in lockstep by tests/test_panel_pulse.mjs) and deliberately leaves the
+  // user-level prefs alone: kioskAutoStart, keepAwake, nightDim*, cameraId,
+  // graphRange, sizePreset, showShare.
+  _pulseFaces() {
+    return {
+      datawall: {
+        label: "Data Wall",
+        hint: "Everything on — the full mission-control wall.",
+        patch: {
+          backdrop: "wall", showHealthRing: true, showStats: true, showSparklines: true,
+          showCategories: true, showEquipment: true, showToday: true, showInsights: true,
+          showTicker: true, showMode: true, showClock: true, showBuddy: true,
+        },
+      },
+      photoframe: {
+        label: "Photo Frame",
+        hint: "The reef is the show — live camera, clock, ring and one insight.",
+        patch: {
+          backdrop: "auto", showHealthRing: true, showStats: false, showSparklines: false,
+          showCategories: false, showEquipment: false, showToday: false, showInsights: true,
+          showTicker: false, showMode: false, showClock: true, showBuddy: false,
+        },
+      },
+      minimal: {
+        label: "Minimal Night",
+        hint: "Ring and clock only — a calm glance display for a lounge.",
+        patch: {
+          backdrop: "wall", showHealthRing: true, showStats: false, showSparklines: false,
+          showCategories: false, showEquipment: false, showToday: false, showInsights: false,
+          showTicker: false, showMode: false, showClock: true, showBuddy: false,
+        },
+      },
+      diagram: {
+        label: "Living Diagram",
+        hint: "Your tank as a live schematic — water flow, gear and all.",
+        patch: {
+          backdrop: "diagram", showHealthRing: false, showStats: false, showSparklines: false,
+          showCategories: false, showEquipment: false, showToday: false, showInsights: true,
+          showTicker: false, showMode: true, showClock: true, showBuddy: false,
+        },
+      },
+    };
+  }
+
+  _applyPulseFace(id) {
+    const face = this._pulseFaces()[id];
+    if (!face) return;
+    this._config.pulse = { ...this._pulseCfg(), ...face.patch };
+    this._setDirty(true);
+    this._render();
   }
 
   // Resolve the camera Pulse should use: the configured one if it's online,
@@ -12234,7 +12680,9 @@ class OpenReefPanel extends HTMLElement {
   _openPulse(fromGesture = false) {
     if (!this._pulseEnabled() || this._pulseActive) return;
     // Pulse owns the single live-video session; close the camera modal if open.
+    // A live (per-minute billed) Simli face must not survive into kiosk mode.
     this._stopCameraWebRTC();
+    this._guardianStopFace();
     this._cameraFocus = null;
     this._recordingFocus = null;
     this._overlayQuip = this._pickOverlayQuip();
@@ -12260,25 +12708,36 @@ class OpenReefPanel extends HTMLElement {
     this._pulseEnteredFs = false;
     this._pulseActive = false;
     this._pulseFocus = null;
+    this._diagramArranging = false;
+    this._pulseDiagArm = null;
     this._render();
   }
 
   // Which backdrop to show: "camera" only when allowed AND one is online;
-  // anything else (preference, offline, unmapped) lands on the data wall.
+  // "timelapse" when chosen (frames load async over the data wall); anything
+  // else (preference, offline, unmapped) lands on the data wall.
   _pulseBackdrop() {
     const pref = this._pulseCfg().backdrop;
     if (pref === "wall") return "wall";
+    if (pref === "timelapse") return "timelapse";
+    if (pref === "diagram") return "diagram";
     const cam = this._pulseCamera();
     return cam ? "camera" : "wall";
   }
 
   _startPulseRuntime() {
-    if (this._pulseBackdrop() === "camera") {
+    const backdrop = this._pulseBackdrop();
+    if (backdrop === "camera") {
       const cam = this._pulseCamera();
       if (cam && cam[1].entity_id) this._startCameraWebRTC(cam[1].entity_id);
+    } else if (backdrop === "timelapse") {
+      this._loadPulseTimelapse();
+    } else if (backdrop === "diagram") {
+      this._startPulseDiagramMotion();
     } else {
       this._loadPulseSparklines();
     }
+    this._loadPulseInsightData();
     this._acquirePulseWakeLock();
     if (!this._pulseDimPointerHandler) {
       // Any touch/click while dimmed wakes the display back up for a while.
@@ -12288,6 +12747,26 @@ class OpenReefPanel extends HTMLElement {
         this._applyPulseNightDim();
       };
       this.shadowRoot.addEventListener("pointerdown", this._pulseDimPointerHandler);
+    }
+    if (!this._pulseSwipeDownHandler) {
+      // Horizontal swipe on the expanded insight deck steps between cards.
+      this._pulseSwipeDownHandler = (ev) => {
+        if (ev.target?.closest?.("[data-pulse-insight-deck]")) {
+          this._pulseSwipeStart = { x: ev.clientX, y: ev.clientY };
+        }
+      };
+      this._pulseSwipeUpHandler = (ev) => {
+        const start = this._pulseSwipeStart;
+        this._pulseSwipeStart = null;
+        if (!start || this._pulseFocus !== "insights") return;
+        const dx = ev.clientX - start.x;
+        const dy = ev.clientY - start.y;
+        if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+          this._pulseFocusInsightNav(dx < 0 ? 1 : -1);
+        }
+      };
+      this.shadowRoot.addEventListener("pointerdown", this._pulseSwipeDownHandler);
+      this.shadowRoot.addEventListener("pointerup", this._pulseSwipeUpHandler);
     }
     this._applyPulseNightDim();
     if (!this._pulseTimer) {
@@ -12301,6 +12780,12 @@ class OpenReefPanel extends HTMLElement {
         if (this._pulseTick % 30 === 0 && this._pulseBackdrop() === "wall") {
           this._loadPulseSparklines(true);
         }
+        // Living backdrop: one frame per tick, crossfaded.
+        if (this._pulseBackdrop() === "timelapse") this._advancePulseTimelapse();
+        // Rotate the insight card every ~40 s; re-check its data gates every
+        // ~15 min (each source has its own long cache, so this is nearly free).
+        if (this._pulseTick % 4 === 0) this._pulseInsight.idx += 1;
+        if (this._pulseTick % 90 === 0) this._loadPulseInsightData();
         this._applyPulseNightDim();
         // Burn-in guard: drift the whole HUD by a pixel or two every ~5 min so a
         // 24/7 wall tablet never etches static chrome into its panel.
@@ -12312,6 +12797,7 @@ class OpenReefPanel extends HTMLElement {
 
   _stopPulseRuntime() {
     this._stopCameraWebRTC();
+    this._stopPulseDiagramMotion();
     if (this._pulseTimer) {
       window.clearInterval(this._pulseTimer);
       this._pulseTimer = null;
@@ -12321,6 +12807,13 @@ class OpenReefPanel extends HTMLElement {
       this.shadowRoot.removeEventListener("pointerdown", this._pulseDimPointerHandler);
       this._pulseDimPointerHandler = null;
     }
+    if (this._pulseSwipeDownHandler) {
+      this.shadowRoot.removeEventListener("pointerdown", this._pulseSwipeDownHandler);
+      this.shadowRoot.removeEventListener("pointerup", this._pulseSwipeUpHandler);
+      this._pulseSwipeDownHandler = null;
+      this._pulseSwipeUpHandler = null;
+    }
+    this._pulseSwipeStart = null;
     this._pulseDimWakeUntil = 0;
   }
 
@@ -12377,6 +12870,17 @@ class OpenReefPanel extends HTMLElement {
   _pulseNightDimActive(now) {
     const cfg = this._pulseCfg();
     if (cfg.nightDim !== true) return false;
+    // A mapped lux sensor beats the clock (Nest-Hub-style ambient dimming):
+    // the wall follows the actual room light, so it dims with the tank's
+    // photoperiod instead of a fixed schedule. Unavailable sensor -> clock.
+    const luxEntity = (cfg.nightDimLuxEntity || "").trim();
+    if (luxEntity) {
+      const lux = this._number(luxEntity);
+      if (lux !== null) {
+        const threshold = Number(cfg.nightDimLuxThreshold);
+        return lux <= (Number.isFinite(threshold) && threshold > 0 ? threshold : 10);
+      }
+    }
     const from = this._pulseParseTime(cfg.nightDimFrom ?? "22:00");
     const to = this._pulseParseTime(cfg.nightDimTo ?? "07:00");
     if (from === null || to === null || from === to) return false;
@@ -12404,6 +12908,306 @@ class OpenReefPanel extends HTMLElement {
     const x = [0, 1, 2, 1, 0, -1, -2, -1][step];
     const y = [0, 1, 0, -1, -2, -1, 0, 1][step];
     root.style.setProperty("--pulse-shift", `${x}px, ${y}px`);
+  }
+
+  // --- Reef Pulse: tonight's moon ------------------------------------------
+  // Mean-synodic approximation (±0.6 days vs the backend's Meeus engine) —
+  // plenty for a display card. The SPAWN WINDOW dates always come from the
+  // backend's real Meeus maths via generate_spawning_program, never from this.
+
+  _pulseMoonInfo(date = new Date()) {
+    const SYNODIC = 29.530588853;
+    const epoch = Date.UTC(2000, 0, 6, 18, 14); // known new moon, 2000-01-06 18:14 UTC
+    let age = ((date.getTime() - epoch) / 86400000) % SYNODIC;
+    if (age < 0) age += SYNODIC;
+    const illumination = (1 - Math.cos((2 * Math.PI * age) / SYNODIC)) / 2;
+    const names = ["New moon", "Waxing crescent", "First quarter", "Waxing gibbous", "Full moon", "Waning gibbous", "Last quarter", "Waning crescent"];
+    const phaseName = names[Math.floor(((age / SYNODIC) * 8) + 0.5) % 8];
+    return { ageDays: age, illumination, phaseName };
+  }
+
+  // --- Reef Pulse: insight cards -------------------------------------------
+  // The rotating story card — the wall doesn't just show numbers, it explains
+  // them. One card at a time, ~40 s each, built ONLY from data the panel
+  // already holds or fetches on long cached intervals (never per-tick WS).
+  // Every builder is defensive: a missing subsystem contributes no card.
+
+  _pulseInsightCards() {
+    const cards = [];
+    // `more` lines only appear in the expanded (tap-to-open) deck view.
+    const push = (key, kicker, title, detail, status = "ok", more = []) => {
+      if (title) cards.push({ key, kicker, title, detail: detail || "", status, more: (more || []).filter(Boolean) });
+    };
+    const statusRank = { critical: 2, warning: 1 };
+
+    // Reef health: the top deduction, or the clean sheet.
+    try {
+      const health = this._reefHealthScore();
+      const loss = (health.losses || [])[0];
+      if (loss) {
+        push("health-loss", `Reef health · −${loss.points} pts`, loss.label, loss.detail, loss.status, [health.nextAction]);
+      } else if (health.status === "ok") {
+        push("health-clean", "Reef health", "Every scoring check is clean", health.gradeDetail, "ok");
+      }
+    } catch { /* no card */ }
+
+    // Consumption advisor: chemistry projections, worst first.
+    try {
+      if (this._dosingEnabled()) {
+        this._dosingActiveParameters()
+          .map(([id, sensor]) => ({ id, item: this._consumptionItem(id, sensor) }))
+          .filter(({ item }) => item && item.status !== "learning" && item.projectionText)
+          .sort((a, b) => (statusRank[b.item.status] || 0) - (statusRank[a.item.status] || 0))
+          .slice(0, 2)
+          .forEach(({ id, item }) => push(`consumption-${id}`, "Consumption advisor", item.trendText, item.projectionText,
+            item.status === "critical" ? "critical" : item.status === "warning" ? "warning" : "ok",
+            [item.maintenanceText || item.doseText, item.correctionText]));
+      }
+    } catch { /* no card */ }
+
+    // Manual test kit nags: due or overdue only.
+    try {
+      this._manualTestParameterIds()
+        .map((id) => ({ id, meta: this._manualTestMeta(id), state: this._manualDueState(id) }))
+        .filter(({ state }) => state.status === "warning" || state.status === "critical")
+        .sort((a, b) => (statusRank[b.state.status] || 0) - (statusRank[a.state.status] || 0))
+        .slice(0, 2)
+        .forEach(({ id, meta, state }) => {
+          const latest = state.latest;
+          const last = latest && Number.isFinite(Number(latest.value))
+            ? `Last result: ${this._format(Number(latest.value), this._sensorDigits(id))}${latest.unit || meta.unit ? ` ${latest.unit || meta.unit}` : ""} · ${this._formatActivityTime(latest.timestamp)}`
+            : "";
+          push(`manual-${id}`, "Test kit", `${meta.label || id} test ${state.label}`, state.detail, state.status, [last]);
+        });
+    } catch { /* no card */ }
+
+    // Maintenance attention (the Today block already covers the next task).
+    try {
+      const due = this._maintenanceUpcoming(7).filter((e) => e.state.status === "warning" || e.state.status === "critical");
+      if (due.length) {
+        const worst = due.some((e) => e.state.status === "critical") ? "critical" : "warning";
+        push("maint-due", "Maintenance", `${due.length} task${due.length === 1 ? "" : "s"} need${due.length === 1 ? "s" : ""} attention`,
+          due.slice(0, 3).map((e) => e.task.label).join(" · "), worst);
+      }
+    } catch { /* no card */ }
+
+    // Water change runway (summary fetched on a 10-min gate while Pulse is up).
+    try {
+      const awc = this._config?.automaticWaterChange;
+      const sum = awc?.enabled ? this._awcSummary?.summary : null;
+      if (sum && sum.scheduleText) {
+        const days = Number(sum.daysOfFreshRemaining);
+        const bits = [];
+        if (Number.isFinite(days)) bits.push(`Fresh water for ~${Math.floor(days)} more day${Math.floor(days) === 1 ? "" : "s"}`);
+        if (Number.isFinite(Number(sum.changesRemaining))) bits.push(`${Math.floor(Number(sum.changesRemaining))} changes left in the reservoir`);
+        const removal = Number(sum.projectedRemovalPct30d);
+        push("awc-runway", "Water change", sum.scheduleText, bits.join(" · "),
+          Number.isFinite(days) && days <= 2 ? "warning" : "ok",
+          [Number.isFinite(removal) ? `~${Math.round(removal)}% of the old water replaced over 30 days` : ""]);
+      }
+    } catch { /* no card */ }
+
+    // ICP analysis cards (cached for hours — lab data changes monthly).
+    try {
+      (this._pulseIcpCards.cards || []).slice(0, 2).forEach((card, i) => push(`icp-${i}`, "ICP analysis", card.title, card.summary,
+        card.severity === "critical" ? "critical" : card.severity === "warning" ? "warning" : "ok",
+        [card.detail]));
+    } catch { /* no card */ }
+
+    // Tonight's moon — with the real spawn-window countdown when spawning is on.
+    try {
+      const moon = this._pulseMoonInfo();
+      let detail = "";
+      const pred = this._pulseSpawn.program?.spawnPrediction;
+      if (pred && Number.isFinite(pred.nightsUntilWindowStart)) {
+        const n = pred.nightsUntilWindowStart;
+        detail = n > 0
+          ? `${n} night${n === 1 ? "" : "s"} until the ${this._pulseSpawn.program?.preset?.label || "spawning"} window`
+          : (Number.isFinite(pred.nightsUntilWindowEnd) && pred.nightsUntilWindowEnd >= 0 ? "Spawning window is open now" : "");
+      }
+      const moonMore = pred ? [
+        pred.fullMoonUtc ? `Full moon: ${String(pred.fullMoonUtc).slice(0, 10)}` : "",
+        pred.windowStart && pred.windowEnd ? `Spawn window: ${pred.windowStart} → ${pred.windowEnd}` : "",
+      ] : [];
+      push("moon", "Tonight's moon", `${moon.phaseName} · ${Math.round(moon.illumination * 100)}% lit`, detail, "ok", moonMore);
+    } catch { /* no card */ }
+
+    // Lighting window (cached at panel boot; never fetched from Pulse).
+    try {
+      const win = this._lightingWindow?.data;
+      if (win && win.configured && win.onTime && win.offTime) {
+        push("lighting", "Lighting", `Lights ${win.onTime}–${win.offTime} · ${win.lightsOnNow ? "on now" : "off now"}`,
+          win.reefLabel ? `${win.reefLabel} · ~${win.dayLengthHours} h day` : "", "ok");
+      }
+    } catch { /* no card */ }
+
+    // Camera intelligence — gated on the vision engine actually being enabled.
+    try {
+      if (this._config?.vision?.enabled) {
+        const sum = this._vision?.summary || this._config?.visionSummary || null;
+        const lastSeen = sum?.lastSeen || {};
+        const latest = Object.entries(lastSeen).sort(([, a], [, b]) => (b || 0) - (a || 0))[0];
+        if (sum?.feeding) push("vision-feed", "Camera intelligence", "Feeding under way", "Watching the response now", "ok");
+        else if (latest) push("vision-seen", "Camera intelligence", `${this._visionSpeciesLabel(latest[0])} seen ${this._visionAge(latest[1])}`,
+          Number.isFinite(Number(sum?.fishCount)) ? `Fish counted: ${sum.fishCount}` : "", "ok");
+      }
+    } catch { /* no card */ }
+
+    // Trust check: the wall proves it is supervised, not just pretty.
+    try {
+      const trust = this._trustCheckData();
+      const items = Array.isArray(trust.items) ? trust.items : [];
+      if (items.length) {
+        const passing = items.filter((i) => i.status === "ok").length;
+        if (trust.status === "ok") {
+          push("trust", "Trust check", "All trust checks passing", `${passing}/${items.length} · watchdog, alerts and sensors verified`, "ok");
+        } else {
+          const worst = items.find((i) => i.status === "critical") || items.find((i) => i.status === "warning");
+          if (worst) push("trust", "Trust check", worst.label, worst.detail, trust.status);
+        }
+      }
+    } catch { /* no card */ }
+
+    // Quiet-reef streak from the alert log.
+    try {
+      const history = Array.isArray(this._config?.alerts?.history) ? this._config.alerts.history : [];
+      const lastCritical = history.find((h) => h && h.state === "critical");
+      if (lastCritical) {
+        const days = Math.floor((Date.now() - Date.parse(lastCritical.timestamp || "")) / 86400000);
+        if (Number.isFinite(days) && days >= 1) {
+          push("streak", "Quiet reef", `${days} day${days === 1 ? "" : "s"} since the last critical alert`, lastCritical.label || "", "ok");
+        }
+      } else if (history.length >= 5) {
+        push("streak", "Quiet reef", "No critical alerts in the log", `${history.length} events recorded, none critical`, "ok");
+      }
+    } catch { /* no card */ }
+
+    return cards;
+  }
+
+  _pulseInsightCurrent() {
+    const cards = this._pulseInsightCards();
+    if (!cards.length) return null;
+    return cards[((this._pulseInsight.idx % cards.length) + cards.length) % cards.length];
+  }
+
+  _pulseInsightKey() {
+    return this._pulseInsightCurrent()?.key || "";
+  }
+
+  _pulseInsightMarkup(compact = false) {
+    const card = this._pulseInsightCurrent();
+    if (!card) return "";
+    return `
+      <article class="pulse-block pulse-insight pulse-tap ${compact ? "compact" : ""}" data-pulse-insight data-insight-key="${this._escape(card.key)}" data-action="pulse-focus" data-id="insights" role="button" tabindex="0" title="Tap for all insights">
+        <div class="pulse-insight-head">
+          <small class="pulse-block-title">${this._escape(card.kicker)}</small>
+          <span class="pulse-insight-dot ${this._pulseStatusClass(card.status)}"></span>
+        </div>
+        <strong>${this._escape(card.title)}</strong>
+        ${card.detail ? `<small class="pulse-insight-detail">${this._escape(card.detail)}</small>` : ""}
+      </article>
+    `;
+  }
+
+  // Long-interval fetches feeding the cards. Each source has its own cache gate
+  // so a 24/7 kiosk re-checks rarely; every failure just means no card.
+  async _loadPulseInsightData() {
+    if (this._pulseCfg().showInsights === false) return;
+    // Consumption projections: reuse the shared trend refresher once if the
+    // panel booted straight into kiosk mode and never populated it.
+    if (!this._consumption?.checkedAt && !this._pulseTrendsKicked) {
+      this._pulseTrendsKicked = true;
+      try {
+        await this._refreshHealthTrends();
+        if (this._pulseActive) this._updatePulse();
+      } catch { /* advisory only */ }
+    }
+    const awc = this._config?.automaticWaterChange;
+    if (awc?.enabled && !this._awcSummaryLoading && Date.now() - (this._awcSummaryAt || 0) > 10 * 60 * 1000) {
+      this._awcLoadSummary();
+    }
+    if (this._config?.spawningProgram?.enabled && !this._pulseSpawn.loading && Date.now() - this._pulseSpawn.at > 24 * 3600 * 1000) {
+      this._pulseSpawn.loading = true;
+      try {
+        // No args: the backend falls back to the saved spawning preset/offsets.
+        const res = await this._callWS({ type: "openreef/generate_spawning_program" });
+        this._pulseSpawn.program = res?.program || null;
+      } catch { /* keep whatever we had */ } finally {
+        this._pulseSpawn.at = Date.now();
+        this._pulseSpawn.loading = false;
+        if (this._pulseActive) this._updatePulse();
+      }
+    }
+    const reports = Array.isArray(this._config?.icpReports) ? this._config.icpReports : [];
+    if (reports.length && !this._pulseIcpCards.loading && Date.now() - this._pulseIcpCards.at > 6 * 3600 * 1000) {
+      this._pulseIcpCards.loading = true;
+      try {
+        // Direct WS call: _loadIcpDashboard() ends in a full _render(), which
+        // would tear down the Pulse layer — Pulse keeps its own cache instead.
+        const payload = await this._callWS({ type: "openreef/icp_dashboard", settings: this._icpDashboardConfig() });
+        this._pulseIcpCards.cards = Array.isArray(payload?.analysisCards) ? payload.analysisCards : [];
+      } catch { /* keep whatever we had */ } finally {
+        this._pulseIcpCards.at = Date.now();
+        this._pulseIcpCards.loading = false;
+        if (this._pulseActive) this._updatePulse();
+      }
+    }
+  }
+
+  // --- Reef Pulse: timelapse living backdrop -------------------------------
+  // The tank's own history as ambient wallpaper: growth mode crossfades one
+  // frame per day (months of coral growth on a slow loop); day mode replays
+  // the most recent frames. Frames are same-origin JPEGs from the shipped
+  // timelapse store — no new serving infrastructure.
+
+  async _loadPulseTimelapse(force = false) {
+    const st = this._pulseTl;
+    if (st.loading) return;
+    if (!force && st.frames.length && Date.now() - st.at < 3 * 3600 * 1000) return;
+    st.loading = true;
+    try {
+      const tl = this._config?.timelapse || {};
+      const payload = { type: "openreef/list_timelapse_frames" };
+      if (tl.cameraId) payload.camera_id = tl.cameraId;
+      const result = await this._callWS(payload);
+      const frames = Array.isArray(result.frames) ? result.frames : [];
+      st.frames = this._pulseCfg().timelapseStyle === "day"
+        ? frames.slice(-120)
+        : this._timelapseDailyFrames(frames, Number(result.windowMidMinutes) || 0);
+      st.idx = 0;
+      st.at = Date.now();
+    } catch {
+      st.frames = [];
+    } finally {
+      st.loading = false;
+      if (this._pulseActive) this._advancePulseTimelapse(true);
+    }
+  }
+
+  _advancePulseTimelapse(first = false) {
+    const st = this._pulseTl;
+    const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
+    if (!root || !st.frames.length) return;
+    if (!first) st.idx = (st.idx + 1) % st.frames.length;
+    const frame = st.frames[st.idx];
+    const layers = [root.querySelector("[data-pulse-tl-a]"), root.querySelector("[data-pulse-tl-b]")];
+    if (!layers[0] || !layers[1]) return;
+    // Two stacked layers: load into the hidden one, crossfade on load so the
+    // wall never shows a half-decoded JPEG.
+    const backIdx = 1 - st.front;
+    const back = layers[backIdx];
+    back.onload = () => {
+      back.classList.add("show");
+      layers[st.front].classList.remove("show");
+      st.front = backIdx;
+      back.onload = null;
+    };
+    back.src = this._captureUrl(frame.file);
+    const stamp = root.querySelector("[data-pulse-tl-stamp]");
+    if (stamp && frame.ts) {
+      stamp.textContent = new Date(frame.ts).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+    }
   }
 
   // Kiosk auto-start: ?pulse=1 forces Pulse, ?pulse=0 forces it off, otherwise
@@ -12438,7 +13242,7 @@ class OpenReefPanel extends HTMLElement {
   // iridescent shimmer on top of the calm state. Never on warning/critical.
   _pulseRingClass(health) {
     const score = Math.max(0, Math.min(100, Number(health.score) || 0));
-    return `pulse-ring ${health.status}${health.status === "ok" && score >= 95 ? " elite" : ""}`;
+    return `pulse-ring ${this._pulseStatusClass(health.status)}${health.status === "ok" && score >= 95 ? " is-elite" : ""}`;
   }
 
   _pulseRingMarkup(health) {
@@ -12467,7 +13271,7 @@ class OpenReefPanel extends HTMLElement {
     const items = (Array.isArray(this._config.activity) ? this._config.activity : []).slice(0, 4);
     if (!items.length) return `<span class="pulse-ticker-item"><small>—</small><strong>Quiet reef, steady readings</strong></span>`;
     return items.map((item, idx) => `
-      <span class="pulse-ticker-item ${idx === 0 ? "latest" : ""} ${this._escape(item.type || "info")}">
+      <span class="pulse-ticker-item ${idx === 0 ? "latest" : ""} ${this._pulseStatusClass(item.type)}">
         <small>${this._escape(this._formatActivityTime(item.timestamp))}</small>
         <strong>${this._escape(item.message)}</strong>
       </span>
@@ -12506,7 +13310,7 @@ class OpenReefPanel extends HTMLElement {
     return `
       <div class="pulse-range">
         <small>${this._escape(this._format(min, 1))}</small>
-        <div class="pulse-range-track"><span class="pulse-range-marker ${badge.status}" data-pulse-marker="${this._escape(id)}" style="left:${pct.toFixed(1)}%"></span></div>
+        <div class="pulse-range-track"><span class="pulse-range-marker ${this._pulseStatusClass(badge.status)}" data-pulse-marker="${this._escape(id)}" style="left:${pct.toFixed(1)}%"></span></div>
         <small>${this._escape(this._format(max, 1))}</small>
       </div>
     `;
@@ -12536,13 +13340,15 @@ class OpenReefPanel extends HTMLElement {
     return `
       <article class="pulse-block pulse-tap" data-pulse-categories data-action="pulse-focus" data-id="health" role="button" tabindex="0" title="Tap for detail">
         <small class="pulse-block-title">Health breakdown</small>
-        ${categories.map((cat) => `
-          <div class="pulse-cat">
-            <small>${this._escape(cat.label)}</small>
-            <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "ok" : cat.score >= 70 ? "warning" : "critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
-            <strong>${this._escape(cat.score)}</strong>
-          </div>
-        `).join("")}
+        <div class="pulse-cats">
+          ${categories.map((cat) => `
+            <div class="pulse-cat">
+              <small>${this._escape(cat.label)}</small>
+              <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+              <strong>${this._escape(cat.score)}</strong>
+            </div>
+          `).join("")}
+        </div>
       </article>
     `;
   }
@@ -12594,6 +13400,7 @@ class OpenReefPanel extends HTMLElement {
   _pulseWallMarkup(cfg, health) {
     const tiles = this._pulseTileSensors();
     const blocks = [
+      cfg.showInsights !== false ? this._pulseInsightMarkup() : "",
       this._pulseAwcMarkup(),
       cfg.showCategories !== false ? this._pulseCategoryBarsMarkup(health) : "",
       cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
@@ -12645,8 +13452,11 @@ class OpenReefPanel extends HTMLElement {
   _pulseScreen() {
     const cfg = this._pulseCfg();
     const tank = this._config.tank || {};
-    const wall = this._pulseBackdrop() === "wall";
-    const cam = wall ? null : this._pulseCamera();
+    const backdrop = this._pulseBackdrop();
+    const wall = backdrop === "wall";
+    const timelapse = backdrop === "timelapse";
+    const diagram = backdrop === "diagram";
+    const cam = wall || timelapse || diagram ? null : this._pulseCamera();
     const entityId = cam ? cam[1].entity_id : "";
     const snap = entityId ? this._cameraSnapshotUrl(entityId) : "";
     const health = this._reefHealthScore();
@@ -12654,10 +13464,18 @@ class OpenReefPanel extends HTMLElement {
     const chips = !wall && cfg.showStats !== false ? this._overlayStatList() : [];
     const quip = this._overlayQuipText();
     return `
-      <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""}" data-pulse-root>
+      <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""} ${cfg.sizePreset === "far" ? "pulse-far" : ""}" data-pulse-root>
         ${entityId ? `
           <video class="pulse-video" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video>
           <img class="pulse-video" data-camera-fallback alt="" style="display:none">
+        ` : timelapse ? `
+          <div class="pulse-datawall"></div>
+          <img class="pulse-video pulse-tl" data-pulse-tl-a alt="">
+          <img class="pulse-video pulse-tl" data-pulse-tl-b alt="">
+          <span class="pulse-tl-stamp" data-pulse-tl-stamp></span>
+        ` : diagram ? `
+          <div class="pulse-datawall"></div>
+          ${this._pulseDiagramMarkup()}
         ` : `<div class="pulse-datawall"></div>`}
         <div class="pulse-shade ${wall ? "wall" : ""}"></div>
         <header class="pulse-head">
@@ -12673,6 +13491,7 @@ class OpenReefPanel extends HTMLElement {
         </header>
         ${wall ? this._pulseWallMarkup(cfg, health) : ""}
         <div class="pulse-foot">
+          ${!wall && cfg.showInsights !== false ? this._pulseInsightMarkup(true) : ""}
           ${chips.length ? `
             <div class="pulse-chips">
               ${chips.map((chip) => `
@@ -12692,6 +13511,9 @@ class OpenReefPanel extends HTMLElement {
           </div>
         ` : ""}
         <div class="pulse-focus-host" data-pulse-focus-host></div>
+        ${diagram && this._diagramArranging ? `<div class="pulse-diag-note">Arrange mode — drag a glowing item to a new spot, then tap ✓</div>` : ""}
+        ${cfg.showShare !== false ? `<button class="pulse-close pulse-share" data-action="pulse-share" title="Share this view">⇪</button>` : ""}
+        ${diagram ? `<button class="pulse-close pulse-arrange ${this._diagramArranging ? "active" : ""}" data-action="diagram-arrange" title="${this._diagramArranging ? "Done arranging" : "Arrange equipment"}">${this._diagramArranging ? "✓" : "✎"}</button>` : ""}
         <button class="pulse-close" data-action="close-pulse" title="Exit Reef Pulse (Esc)">✕</button>
       </div>
     `;
@@ -12773,7 +13595,7 @@ class OpenReefPanel extends HTMLElement {
         if (value === null || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
         const pct = Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
         el.style.left = `${pct.toFixed(1)}%`;
-        el.className = `pulse-range-marker ${this._liveStatBadge(key, sensor).status}`;
+        el.className = `pulse-range-marker ${this._pulseStatusClass(this._liveStatBadge(key, sensor).status)}`;
       });
       const reason = root.querySelector("[data-pulse-reason]");
       if (reason) reason.textContent = health.topReason || "";
@@ -12784,7 +13606,2626 @@ class OpenReefPanel extends HTMLElement {
       const today = root.querySelector("[data-pulse-today]");
       if (today) today.outerHTML = this._pulseTodayMarkup();
     }
+    // Insight card (both wall and camera layouts): swap only when the card
+    // actually changed so the entry animation runs once per rotation.
+    const insight = root.querySelector("[data-pulse-insight]");
+    if (insight && insight.getAttribute("data-insight-key") !== this._pulseInsightKey()) {
+      const markup = this._pulseInsightMarkup(insight.classList.contains("compact"));
+      if (markup) insight.outerHTML = markup;
+    }
+    // AWC diagram: patched here now instead of via full re-renders from
+    // _awcLoadSummary (which used to reset every animation on each poll).
+    const awcBlock = root.querySelector("[data-pulse-awc]");
+    if (awcBlock) {
+      const markup = this._pulseAwcMarkup();
+      if (markup) awcBlock.outerHTML = markup;
+    }
+    // Living tank diagram: class toggles only — an innerHTML swap would restart
+    // every flow animation on each hass push.
+    const diagSvg = root.querySelector("[data-pulse-diagram-svg]");
+    if (diagSvg) this._updatePulseDiagram(diagSvg);
     this._refreshPulseFocus();
+  }
+
+  // --- Reef Pulse: living tank diagram --------------------------------------
+  // A schematic of the user's actual system — sump plumbing or all-in-one back
+  // chambers — rendered from the equipment mapping and animated from live
+  // entity states. The water loop (display → overflow → sump → return) runs
+  // only while the mapped return pump reads "on"; wavemakers drive only the
+  // in-display circulation, so stopping one never stops the loop. Tap a node
+  // for a detail card; arrange mode (✎) drags gear between valid slots.
+
+  _diagramCfg() {
+    const raw = this._config?.diagram;
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  _diagramSystemType() {
+    return this._diagramCfg().systemType === "aio" ? "aio" : "sump";
+  }
+
+  _diagramLayout() {
+    const layout = this._diagramCfg().layout;
+    return layout && typeof layout === "object" ? layout : {};
+  }
+
+  // Resolve the equipment mapping into diagram nodes. Only switch-mapped gear
+  // renders — the diagram animates states, and unmapped gear has none.
+  _diagramNodes() {
+    const nodes = {
+      wavemakers: [], heater: null, skimmer: null, ret: null, ato: null, light: null, doser: null,
+      chiller: null, uv: null, reactor: null, air: null, fugelight: null,
+    };
+    for (const [id, item] of Object.entries(this._config.equipment || {})) {
+      if (!item || !item.switch_entity_id) continue;
+      const profile = this._equipmentProfile(id, item);
+      const label = String(item.label || id).toLowerCase();
+      if ((profile === "display_wavemaker" || profile === "flow_pump") && nodes.wavemakers.length < 3) nodes.wavemakers.push([id, item]);
+      else if (profile === "return_pump" && !nodes.ret) nodes.ret = [id, item];
+      else if (profile === "heater" && /chill/.test(label) && !nodes.chiller) nodes.chiller = [id, item];
+      else if (profile === "heater" && !nodes.heater) nodes.heater = [id, item];
+      else if (profile === "skimmer" && !nodes.skimmer) nodes.skimmer = [id, item];
+      else if (profile === "ato" && !nodes.ato) nodes.ato = [id, item];
+      else if (profile === "lighting" && /fuge|refugium|chaeto/.test(label) && !nodes.fugelight) nodes.fugelight = [id, item];
+      else if (profile === "lighting" && !nodes.light) nodes.light = [id, item];
+      else if (profile === "air_pump" && !nodes.air) nodes.air = [id, item];
+      else if (profile === "filtration" && /\buv\b|steril/.test(label) && !nodes.uv) nodes.uv = [id, item];
+      else if (profile === "filtration" && !nodes.reactor) nodes.reactor = [id, item];
+    }
+    if (this._config.dosing?.enabled !== false) {
+      const channels = this._doserChannelIds().map((id) => [id, this._doserChannels()[id]]).filter(([, ch]) => ch);
+      if (channels.length) nodes.doser = channels.slice(0, 6);
+    }
+    return nodes;
+  }
+
+  _diagramNodeState(item) {
+    const state = this._stateValue(item?.switch_entity_id);
+    return state === "on" ? "on" : state === "off" ? "off" : "gone";
+  }
+
+  // Slot registry per system type. rect is the arrange-mode drop zone; x/y/dir
+  // anchor the art. Slot ids are what config.diagram.layout stores.
+  _diagramSlots(systemType) {
+    if (systemType === "aio") {
+      return {
+        glassL: { kinds: ["wm"], x: 322, y: 400, dir: 1, rect: [292, 366, 110, 68] },
+        glassL2: { kinds: ["wm"], x: 322, y: 520, dir: 1, rect: [292, 486, 110, 68] },
+        glassC: { kinds: ["wm"], x: 720, y: 300, dir: 1, rect: [690, 266, 110, 68] },
+        glassC2: { kinds: ["wm"], x: 700, y: 380, dir: 1, rect: [670, 346, 110, 68] },
+        glassR: { kinds: ["wm"], x: 1042, y: 452, dir: -1, rect: [962, 418, 110, 68] },
+        glassR2: { kinds: ["wm"], x: 1042, y: 560, dir: -1, rect: [962, 526, 110, 68] },
+        ch2: { kinds: ["heater"], x: 1188, y: 430, rect: [1174, 416, 42, 92] },
+        ch3: { kinds: ["heater"], x: 1222, y: 462, rect: [1208, 450, 42, 92] },
+        display: { kinds: ["heater"], x: 420, y: 500, rect: [406, 486, 42, 92] },
+        atoMid: { kinds: ["ato"], rect: [1144, 250, 64, 130] },
+        atoEnd: { kinds: ["ato"], rect: [1220, 250, 64, 130] },
+        airDisplay: { kinds: ["air"], rect: [310, 556, 84, 66] },
+        airCh3: { kinds: ["air"], rect: [1218, 588, 64, 66] },
+        doseMedia: { kinds: ["doser"], rect: [1088, 176, 60, 60] },
+        doseReturn: { kinds: ["doser"], rect: [1224, 176, 60, 60] },
+      };
+    }
+    return {
+      glassL: { kinds: ["wm"], x: 192, y: 305, dir: 1, rect: [162, 271, 110, 68] },
+      glassL2: { kinds: ["wm"], x: 192, y: 395, dir: 1, rect: [162, 361, 110, 62] },
+      glassC: { kinds: ["wm"], x: 660, y: 235, dir: 1, rect: [630, 201, 110, 68] },
+      glassC2: { kinds: ["wm"], x: 520, y: 280, dir: 1, rect: [490, 246, 110, 68] },
+      glassR: { kinds: ["wm"], x: 1130, y: 315, dir: -1, rect: [1050, 281, 110, 68] },
+      glassR2: { kinds: ["wm"], x: 1130, y: 430, dir: -1, rect: [1050, 396, 110, 66] },
+      sumpReturn: { kinds: ["heater"], x: 462, y: 790, rect: [448, 776, 42, 92] },
+      sumpSkimmer: { kinds: ["heater"], x: 908, y: 760, rect: [894, 746, 42, 92] },
+      weir: { kinds: ["heater"], x: 1179, y: 290, rect: [1165, 276, 42, 92] },
+      rightShelf: { kinds: ["doser"], x: 1300, y: 620, rect: [1296, 590, 200, 214] },
+      leftShelf: { kinds: ["doser"], x: 40, y: 620, rect: [36, 590, 200, 214] },
+      airReturn: { kinds: ["air"], rect: [282, 826, 66, 74] },
+      airDisplay: { kinds: ["air"], rect: [218, 424, 84, 54] },
+    };
+  }
+
+  // Turn the stored layout into concrete slot picks: unknown or wrong-kind slot
+  // ids fall back to defaults, and no two nodes land on the same slot.
+  _diagramResolvedLayout(systemType, nodes) {
+    const slots = this._diagramSlots(systemType);
+    const layout = this._diagramLayout();
+    const used = new Set();
+    const pick = (want, kind, defaults) => {
+      const valid = want && slots[want] && slots[want].kinds.includes(kind) && !used.has(want) ? want : null;
+      const chosen = valid || defaults.find((sid) => slots[sid] && !used.has(sid)) || defaults[0];
+      used.add(chosen);
+      return chosen;
+    };
+    const out = {};
+    const wmDefaults = systemType === "aio"
+      ? ["glassL", "glassC", "glassR", "glassL2", "glassR2", "glassC2"]
+      : ["glassL", "glassR", "glassC", "glassL2", "glassR2", "glassC2"];
+    for (const [id] of nodes.wavemakers) out[`wm:${id}`] = pick(layout[`wm:${id}`], "wm", wmDefaults);
+    if (nodes.heater) out.heater = pick(layout.heater, "heater", systemType === "aio" ? ["ch2", "ch3", "display"] : ["sumpReturn", "sumpSkimmer", "weir"]);
+    if (nodes.doser) out.doser = pick(layout.doser, "doser", systemType === "aio" ? ["doseMedia", "doseReturn"] : ["rightShelf", "leftShelf"]);
+    if (nodes.ato && systemType === "aio") out.ato = pick(layout.ato, "ato", ["atoMid", "atoEnd"]);
+    if (nodes.air) out.air = pick(layout.air, "air", systemType === "aio" ? ["airDisplay", "airCh3"] : ["airReturn", "airDisplay"]);
+    return out;
+  }
+
+  // Bubble scrubbing: an air stone parked beside the return pump while both
+  // the air pump and the loop are actually running — micro-bubbles ride the
+  // return into the display. Any other arrangement keeps the water clear.
+  _diagramScrubOn(systemType, nodes, layout) {
+    if (!nodes.air || !nodes.ret) return false;
+    const beside = systemType === "aio" ? layout.air === "airCh3" : layout.air === "airReturn";
+    return beside && this._diagramNodeState(nodes.air[1]) === "on"
+      && this._diagramNodeState(nodes.ret[1]) === "on";
+  }
+
+  // The scrub cloud: tiny bubbles seeded deterministically through the display
+  // water, denser toward the nozzle end, animated only under dg-scrub.
+  _diagScrubCloudMarkup(x0, y0, w, h, noz) {
+    const fr = (i, s) => { const v = Math.sin(i * 127.1 + s * 311.7) * 43758.5453; return v - Math.floor(v); };
+    let out = "";
+    for (let i = 0; i < 44; i++) {
+      const dist = Math.pow(fr(i, 1), 1.15);
+      const x = noz === "r" ? x0 + w - 24 - dist * (w - 48) : x0 + 24 + dist * (w - 48);
+      const y = y0 + 30 + fr(i, 2) * (h - 60);
+      const r = (1.4 + fr(i, 3) * 1.6).toFixed(1);
+      const dur = (2.6 + fr(i, 4) * 2.2).toFixed(2);
+      const delay = (-fr(i, 5) * 4).toFixed(2);
+      out += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r}" style="animation-duration:${dur}s;animation-delay:${delay}s"></circle>`;
+    }
+    return `<g class="dg-scrubcloud">${out}</g>`;
+  }
+
+  // --- Reef Layer: the user's registered corals, drawn on the rockwork -----
+  // Honesty rule, same as equipment: an empty registry means bare rock. Each
+  // coral is a stylised colony in the scene's own vector language; species
+  // gates which rock zone it may occupy, colour picks its fluorescence.
+
+  _diagramCorals() {
+    const raw = this._config?.livestock?.corals;
+    if (!raw || typeof raw !== "object") return [];
+    return Object.entries(raw).slice(0, 16).map(([id, c]) => [id, c && typeof c === "object" ? c : {}]);
+  }
+
+  _coralZone(species) {
+    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona"].includes(species)) return "sps";
+    if (["torch", "hammer", "frogspawn", "bubble", "duncan", "candycane", "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone"].includes(species)) return "lps";
+    if (species === "gorgonian") return "fan";
+    return "soft";
+  }
+
+  _coralSpeciesList() {
+    return ["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona",
+      "torch", "hammer", "frogspawn", "bubble", "duncan", "candycane",
+      "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone",
+      "zoa", "mushroom", "ricordea", "xenia", "gsp", "kenyatree",
+      "toadstool", "acan", "trachy", "cynarina", "elegance", "fungia",
+      "scoly", "suncoral", "clam", "gorgonian"];
+  }
+
+  _coralSpeciesLabel(species) {
+    return {
+      staghorn: "Staghorn acropora", plate: "Plating montipora", table: "Table acropora",
+      birdsnest: "Birdsnest coral", digitata: "Montipora digitata", stylophora: "Stylophora",
+      pavona: "Pavona (cactus coral)", torch: "Torch coral", hammer: "Hammer coral",
+      frogspawn: "Frogspawn", bubble: "Bubble coral", duncan: "Duncan coral",
+      candycane: "Candy cane coral", goniopora: "Goniopora", chalice: "Chalice coral",
+      brain: "Brain coral", favia: "Favia colony", lobo: "Lobophyllia",
+      blasto: "Blastomussa", anemone: "Bubble-tip anemone", zoa: "Zoanthid colony",
+      mushroom: "Mushroom corals", ricordea: "Ricordea", xenia: "Pulsing xenia",
+      gsp: "Green star polyps", kenyatree: "Kenya tree", toadstool: "Toadstool leather",
+      acan: "Acan colony", trachy: "Trachyphyllia", cynarina: "Cynarina (button coral)",
+      elegance: "Elegance coral", fungia: "Fungia plate", scoly: "Scolymia",
+      suncoral: "Sun coral", clam: "Maxima clam", gorgonian: "Gorgonian fan",
+    }[species] || "Coral";
+  }
+
+  // Rockwork preset. Same coral-slot ids across scapes, so a stored layout
+  // survives switching — only the rock and the coordinates change.
+  _diagramScape() {
+    const s = this._diagramCfg().scape;
+    return ["twinpeaks", "slope", "arch", "pillars", "peninsula", "valley"].includes(s) ? s : "island";
+  }
+
+  _diagScapeRock(systemType) {
+    const scape = this._diagramScape();
+    const rock = (d) => `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="${d}"></path>`;
+    if (systemType === "aio") {
+      if (scape === "twinpeaks") return this._diagRockMarkup(430, 620, 330) + this._diagRockMarkup(830, 620, 170, 0.62);
+      if (scape === "slope") return rock("M 430 620 L 430 500 Q 480 458 540 466 Q 620 478 690 510 Q 780 550 860 585 Q 910 605 950 620 Z");
+      if (scape === "arch") return rock("M 480 620 L 492 470 Q 496 455 520 452 Q 544 455 548 470 L 560 620 Z")
+        + rock("M 760 620 L 772 470 Q 776 455 810 452 Q 844 455 848 470 L 872 620 Z")
+        + rock("M 470 470 Q 520 430 664 424 Q 810 430 860 470 L 848 492 Q 810 458 664 452 Q 520 458 482 492 Z")
+        + `<ellipse cx="815" cy="592" rx="32" ry="26" fill="#081522" opacity=".95"></ellipse>`;
+      if (scape === "pillars") return rock("M 480 620 L 490 480 Q 494 464 516 462 Q 538 464 542 480 L 552 620 Z")
+        + rock("M 660 620 L 668 520 Q 672 506 692 504 Q 712 506 716 520 L 724 620 Z")
+        + rock("M 840 620 L 848 550 Q 852 538 870 536 Q 888 538 892 550 L 900 620 Z");
+      if (scape === "peninsula") return rock("M 303 620 L 303 520 Q 360 490 440 488 Q 570 492 650 520 Q 700 545 715 580 Q 725 600 730 620 Z");
+      if (scape === "valley") return rock("M 303 620 L 303 470 Q 350 450 420 470 Q 480 500 500 560 Q 510 590 512 620 Z")
+        + rock("M 1058 620 L 1058 500 Q 1010 482 950 500 Q 890 525 870 570 Q 862 596 860 620 Z");
+      return this._diagRockMarkup(430, 620, 520);
+    }
+    if (scape === "twinpeaks") return this._diagRockMarkup(330, 465, 380) + this._diagRockMarkup(790, 465, 160, 0.62);
+    if (scape === "slope") return rock("M 330 465 L 330 352 Q 375 315 440 322 Q 520 332 590 360 Q 690 398 790 428 Q 870 448 950 465 Z");
+    if (scape === "arch") return rock("M 420 465 L 430 335 Q 434 320 458 318 Q 482 320 486 335 L 496 465 Z")
+      + rock("M 690 465 L 700 335 Q 704 320 738 318 Q 772 320 776 335 L 800 465 Z")
+      + rock("M 410 335 Q 455 295 600 290 Q 745 295 790 335 L 778 356 Q 745 322 600 318 Q 455 322 422 356 Z")
+      + `<ellipse cx="742" cy="438" rx="30" ry="24" fill="#081522" opacity=".95"></ellipse>`;
+    if (scape === "pillars") return rock("M 400 465 L 410 330 Q 414 315 436 313 Q 458 315 462 330 L 472 465 Z")
+      + rock("M 580 465 L 588 372 Q 592 358 612 356 Q 632 358 636 372 L 644 465 Z")
+      + rock("M 760 465 L 768 400 Q 772 388 790 386 Q 808 388 812 400 L 820 465 Z");
+    if (scape === "peninsula") return rock("M 175 465 L 175 350 Q 230 322 310 320 Q 440 324 520 352 Q 570 377 585 412 Q 595 435 600 465 Z");
+    if (scape === "valley") return rock("M 175 465 L 175 330 Q 220 312 285 330 Q 340 355 360 405 Q 370 435 372 465 Z")
+      + rock("M 1148 465 L 1148 335 Q 1100 318 1040 335 Q 985 360 968 405 Q 960 435 958 465 Z");
+    return this._diagRockMarkup(330, 465, 620);
+  }
+
+  _coralPalette(colour) {
+    return {
+      purple: { deep: "#7b5fb8", mid: "#9d7fe2", bright: "#c084fc", dot: "#e2d2ff" },
+      pink: { deep: "#b84a7c", mid: "#d86a9c", bright: "#ff8bc0", dot: "#ffd9ec" },
+      green: { deep: "#2f8a5c", mid: "#4fbf7a", bright: "#7ef29a", dot: "#d8ffe6" },
+      teal: { deep: "#2a7a74", mid: "#3fbfae", bright: "#4fd8c3", dot: "#d6fff7" },
+      orange: { deep: "#c96f30", mid: "#e88a44", bright: "#ffa05c", dot: "#ffd9b8" },
+      red: { deep: "#8a3646", mid: "#b04658", bright: "#ff6b81", dot: "#ffd0d8" },
+      gold: { deep: "#9a7f3e", mid: "#c8a04a", bright: "#e8c06a", dot: "#fff0c8" },
+      blue: { deep: "#3b5fae", mid: "#5a7fd0", bright: "#7ea8ff", dot: "#dce8ff" },
+    }[colour] || { deep: "#7b5fb8", mid: "#9d7fe2", bright: "#c084fc", dot: "#e2d2ff" };
+  }
+
+  // Typed slots along the rock silhouette: SPS crest, LPS mid-rock, softies
+  // low and on the sand, one gorgonian stand, and two flex terraces that take
+  // either LPS or softies. Coordinates trace each scape's actual ridge; slot
+  // ids are IDENTICAL across scapes so stored placements survive switching.
+  _diagramCoralSlots(systemType) {
+    const scape = this._diagramScape();
+    const mk = (table) => {
+      const kinds = {
+        spsPeak: ["sps"], spsL: ["sps"], spsR: ["sps"],
+        lpsL: ["lps"], lpsMid: ["lps"], lpsR: ["lps"],
+        softL: ["soft"], softR: ["soft"], softSand: ["soft"],
+        fanBack: ["fan"], flexA: ["lps", "soft"], flexB: ["lps", "soft"],
+      };
+      const size = {
+        spsPeak: [80, 84], spsL: [80, 84], spsR: [80, 84],
+        lpsL: [80, 76], lpsMid: [80, 76], lpsR: [80, 76],
+        softL: [72, 54], softR: [72, 54], softSand: [72, 54],
+        fanBack: [72, 120], flexA: [72, 66], flexB: [72, 66],
+      };
+      const out = {};
+      for (const [sid, [sx, sy]] of Object.entries(table)) {
+        const [w, h] = size[sid];
+        out[sid] = { kinds: kinds[sid], x: sx, y: sy, rect: [sx - w / 2, sy - h + 10, w, h] };
+      }
+      return out;
+    };
+    if (systemType === "aio") {
+      if (scape === "twinpeaks") return mk({
+        spsPeak: [648, 500], spsL: [552, 514], spsR: [942, 546],
+        lpsL: [490, 560], lpsMid: [700, 530], lpsR: [975, 588],
+        softL: [445, 600], softR: [1015, 612], softSand: [790, 640],
+        fanBack: [602, 520], flexA: [605, 556], flexB: [900, 582],
+      });
+      if (scape === "slope") return mk({
+        spsPeak: [505, 466], spsL: [585, 478], spsR: [665, 498],
+        lpsL: [525, 530], lpsMid: [615, 545], lpsR: [725, 545],
+        softL: [700, 600], softR: [915, 608], softSand: [985, 648],
+        fanBack: [455, 545], flexA: [795, 565], flexB: [855, 595],
+      });
+      if (scape === "arch") return mk({
+        spsPeak: [664, 428], spsL: [540, 440], spsR: [790, 440],
+        lpsL: [610, 430], lpsMid: [730, 432], lpsR: [890, 566],
+        softL: [446, 600], softR: [908, 606], softSand: [664, 640],
+        fanBack: [450, 560], flexA: [525, 585], flexB: [745, 592],
+      });
+      if (scape === "pillars") return mk({
+        spsPeak: [516, 466], spsL: [692, 508], spsR: [870, 540],
+        lpsL: [470, 540], lpsMid: [640, 570], lpsR: [912, 580],
+        softL: [450, 610], softR: [930, 610], softSand: [600, 645],
+        fanBack: [770, 612], flexA: [560, 590], flexB: [800, 606],
+      });
+      if (scape === "peninsula") return mk({
+        spsPeak: [440, 492], spsL: [360, 498], spsR: [540, 500],
+        lpsL: [330, 560], lpsMid: [600, 528], lpsR: [665, 560],
+        softL: [390, 590], softR: [700, 606], softSand: [780, 648],
+        fanBack: [500, 545], flexA: [470, 580], flexB: [620, 585],
+      });
+      if (scape === "valley") return mk({
+        spsPeak: [375, 462], spsL: [1000, 492], spsR: [935, 502],
+        lpsL: [445, 502], lpsMid: [890, 560], lpsR: [330, 530],
+        softL: [480, 588], softR: [872, 592], softSand: [686, 648],
+        fanBack: [520, 604], flexA: [410, 545], flexB: [950, 560],
+      });
+      return mk({
+        spsPeak: [773, 500], spsL: [565, 522], spsR: [846, 526],
+        lpsL: [492, 598], lpsMid: [660, 524], lpsR: [900, 574],
+        softL: [438, 614], softR: [935, 612], softSand: [386, 648],
+        fanBack: [826, 518], flexA: [615, 548], flexB: [715, 540],
+      });
+    }
+    if (scape === "twinpeaks") return mk({
+      spsPeak: [581, 345], spsL: [471, 359], spsR: [634, 369],
+      lpsL: [395, 410], lpsMid: [528, 367], lpsR: [890, 395],
+      softL: [350, 450], softR: [960, 450], softSand: [745, 455],
+      fanBack: [429, 372], flexA: [680, 395], flexB: [935, 428],
+    });
+    if (scape === "slope") return mk({
+      spsPeak: [400, 322], spsL: [470, 328], spsR: [545, 348],
+      lpsL: [425, 382], lpsMid: [510, 395], lpsR: [610, 398],
+      softL: [590, 445], softR: [800, 435], softSand: [870, 455],
+      fanBack: [352, 395], flexA: [665, 415], flexB: [720, 440],
+    });
+    if (scape === "arch") return mk({
+      spsPeak: [600, 294], spsL: [475, 306], spsR: [725, 306],
+      lpsL: [540, 300], lpsMid: [662, 300], lpsR: [825, 420],
+      softL: [385, 450], softR: [835, 452], softSand: [600, 455],
+      fanBack: [388, 415], flexA: [462, 430], flexB: [668, 438],
+    });
+    if (scape === "pillars") return mk({
+      spsPeak: [436, 317], spsL: [612, 360], spsR: [790, 390],
+      lpsL: [385, 390], lpsMid: [560, 420], lpsR: [838, 432],
+      softL: [370, 458], softR: [858, 456], softSand: [520, 458],
+      fanBack: [690, 458], flexA: [482, 440], flexB: [722, 450],
+    });
+    if (scape === "peninsula") return mk({
+      spsPeak: [310, 324], spsL: [230, 330], spsR: [410, 332],
+      lpsL: [200, 395], lpsMid: [470, 360], lpsR: [535, 395],
+      softL: [260, 420], softR: [570, 440], softSand: [680, 458],
+      fanBack: [370, 380], flexA: [340, 415], flexB: [505, 425],
+    });
+    if (scape === "valley") return mk({
+      spsPeak: [250, 322], spsL: [1090, 328], spsR: [300, 336],
+      lpsL: [200, 390], lpsMid: [1010, 372], lpsR: [330, 400],
+      softL: [350, 440], softR: [985, 445], softSand: [665, 458],
+      fanBack: [420, 450], flexA: [280, 405], flexB: [1050, 400],
+    });
+    return mk({
+      spsPeak: [739, 344], spsL: [491, 362], spsR: [800, 372],
+      lpsL: [417, 400], lpsMid: [652, 364], lpsR: [890, 410],
+      softL: [355, 452], softR: [935, 452], softSand: [285, 458],
+      fanBack: [600, 354], flexA: [559, 390], flexB: [700, 385],
+    });
+  }
+
+  // Zone-honouring placement with the same guarantees as equipment: stored
+  // slot wins when valid, zone slots next, any free rock as overflow, and
+  // when the rock is genuinely full the coral waits (null) rather than stacks.
+  // Auto-placement also applies the colour-spacing rule: among free zone
+  // slots, prefer one with no same-coloured neighbour within reach — two
+  // pink colonies end up across the rock, not side by side.
+  _diagramCoralLayout(systemType, corals) {
+    const slots = this._diagramCoralSlots(systemType);
+    const layout = this._diagramLayout();
+    const all = Object.keys(slots);
+    const used = new Set();
+    const colourAt = {};
+    const out = {};
+    for (const [id, c] of corals) {
+      const zone = this._coralZone(c.species);
+      const want = layout[`coral:${id}`];
+      let chosen = want && slots[want] && slots[want].kinds.includes(zone) && !used.has(want) ? want : null;
+      if (!chosen) {
+        const zoneFree = all.filter((sid) => slots[sid].kinds.includes(zone) && !used.has(sid));
+        if (zoneFree.length) {
+          const clashes = (sid) => Object.entries(colourAt).reduce((n, [oid, col]) =>
+            n + (col === c.colour && Math.hypot(slots[oid].x - slots[sid].x, slots[oid].y - slots[sid].y) < 170 ? 1 : 0), 0);
+          chosen = zoneFree.map((sid) => [clashes(sid), sid]).sort((a, b) => a[0] - b[0])[0][1];
+        }
+      }
+      if (!chosen) chosen = all.find((sid) => !used.has(sid)) || null;
+      if (chosen) {
+        used.add(chosen);
+        colourAt[chosen] = c.colour;
+      }
+      out[`coral:${id}`] = chosen;
+    }
+    return out;
+  }
+
+  _diagCoralArt(species, x, y, pal, seed) {
+    const d0 = -((seed * 0.7) % 3.4);
+    const dot = (dx, dy, r, k) =>
+      `<circle class="dg-cpolyp" cx="${x + dx}" cy="${y + dy}" r="${r}" fill="${pal.dot}" style="animation-delay:${(d0 - k * 0.6).toFixed(2)}s"></circle>`;
+    if (species === "staghorn") {
+      return `
+        <circle cx="${x}" cy="${y - 42}" r="46" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke-linecap="round" fill="none">
+          <path d="M ${x} ${y} L ${x} ${y - 64}" stroke="${pal.deep}" stroke-width="8"></path>
+          <path d="M ${x} ${y - 22} L ${x - 40} ${y - 76}" stroke="${pal.deep}" stroke-width="6"></path>
+          <path d="M ${x} ${y - 28} L ${x + 40} ${y - 80}" stroke="${pal.deep}" stroke-width="6"></path>
+          <path d="M ${x - 20} ${y - 49} L ${x - 42} ${y - 52}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x + 20} ${y - 54} L ${x + 44} ${y - 58}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x} ${y - 48} L ${x - 14} ${y - 86}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x} ${y - 50} L ${x + 15} ${y - 88}" stroke="${pal.mid}" stroke-width="4.4"></path>
+          <path d="M ${x - 37} ${y - 70} L ${x - 48} ${y - 88}" stroke="${pal.bright}" stroke-width="3.4"></path>
+          <path d="M ${x + 37} ${y - 74} L ${x + 50} ${y - 90}" stroke="${pal.bright}" stroke-width="3.4"></path>
+        </g>
+        ${dot(0, -66, 2.4, 0)}${dot(-41, -78, 2.2, 1)}${dot(41, -82, 2.2, 2)}${dot(-48, -90, 2, 3)}${dot(51, -92, 2, 4)}`;
+    }
+    if (species === "plate") {
+      return `
+        <circle cx="${x}" cy="${y - 18}" r="40" fill="${pal.bright}" opacity=".08"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="46" ry="12" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 7}" rx="46" ry="10" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 8}" rx="46" ry="10" fill="none" stroke="${pal.bright}" stroke-width="2.2" opacity=".85"></ellipse>
+        <ellipse cx="${x + 20}" cy="${y - 26}" rx="28" ry="7" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x + 20}" cy="${y - 27}" rx="28" ry="7" fill="none" stroke="${pal.bright}" stroke-width="1.8" opacity=".8"></ellipse>
+        ${dot(-38, -10, 1.8, 0)}${dot(30, -6, 1.8, 1)}${dot(4, -28, 1.6, 2)}`;
+    }
+    if (species === "torch") {
+      const head = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 2.2).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${hx} ${hy} q -10 -18 -16 -24"></path>
+            <path d="M ${hx} ${hy} q -3 -21 -6 -29"></path>
+            <path d="M ${hx} ${hy} q 5 -19 2 -29"></path>
+            <path d="M ${hx} ${hy} q 11 -14 16 -21"></path>
+          </g>
+          ${dot(hx - x - 17, hy - y - 25, 2.6, k)}${dot(hx - x - 6, hy - y - 30, 2.6, k + 1)}${dot(hx - x + 3, hy - y - 30, 2.6, k + 2)}${dot(hx - x + 17, hy - y - 22, 2.6, k + 3)}
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 36}" r="44" fill="${pal.bright}" opacity=".12"></circle>
+        <g stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 22} ${y} L ${x - 22} ${y - 24}"></path>
+          <path d="M ${x} ${y} L ${x} ${y - 30}"></path>
+          <path d="M ${x + 22} ${y} L ${x + 22} ${y - 22}"></path>
+        </g>
+        ${head(x - 22, y - 24, 0)}${head(x, y - 30, 2)}${head(x + 22, y - 22, 4)}`;
+    }
+    if (species === "brain") {
+      return `
+        <path d="M ${x - 38} ${y} a 38 28 0 0 1 76 0 Z" fill="${pal.deep}"></path>
+        <path d="M ${x - 38} ${y} a 38 28 0 0 1 76 0 Z" fill="none" stroke="${pal.mid}" stroke-width="2" opacity=".8"></path>
+        <path d="M ${x - 32} ${y - 4} q 10 -8 20 0 t 20 0 t 20 0" stroke="${pal.bright}" stroke-width="2" fill="none" opacity=".7"></path>
+        <path d="M ${x - 28} ${y - 13} q 9 -7 18 0 t 18 0" stroke="${pal.bright}" stroke-width="2" fill="none" opacity=".6"></path>
+        <path d="M ${x - 20} ${y - 21} q 8 -6 16 0" stroke="${pal.bright}" stroke-width="1.8" fill="none" opacity=".5"></path>`;
+    }
+    if (species === "gorgonian") {
+      return `
+        <g class="dg-cswayS" style="animation-delay:${d0.toFixed(2)}s">
+          <g stroke-linecap="round" fill="none">
+            <path d="M ${x} ${y} L ${x} ${y - 92}" stroke="${pal.deep}" stroke-width="4.6"></path>
+            <path d="M ${x} ${y - 20} Q ${x - 26} ${y - 46} ${x - 32} ${y - 78}" stroke="${pal.mid}" stroke-width="3"></path>
+            <path d="M ${x} ${y - 34} Q ${x + 28} ${y - 58} ${x + 34} ${y - 86}" stroke="${pal.mid}" stroke-width="3"></path>
+            <path d="M ${x} ${y - 52} Q ${x - 18} ${y - 72} ${x - 20} ${y - 92}" stroke="${pal.mid}" stroke-width="2.4"></path>
+            <path d="M ${x} ${y - 62} Q ${x + 16} ${y - 80} ${x + 18} ${y - 98}" stroke="${pal.mid}" stroke-width="2.4"></path>
+            <path d="M ${x - 32} ${y - 78} L ${x - 38} ${y - 92}" stroke="${pal.bright}" stroke-width="2"></path>
+            <path d="M ${x + 34} ${y - 86} L ${x + 40} ${y - 98}" stroke="${pal.bright}" stroke-width="2"></path>
+          </g>
+        </g>`;
+    }
+    if (species === "mushroom") {
+      return `
+        <ellipse cx="${x - 12}" cy="${y - 4}" rx="13" ry="5.5" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x - 12}" cy="${y - 5}" rx="13" ry="5" fill="none" stroke="${pal.bright}" stroke-width="1.4" opacity=".5"></ellipse>
+        <ellipse cx="${x + 8}" cy="${y}" rx="10" ry="4.5" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x + 8}" cy="${y - 1}" rx="10" ry="4" fill="none" stroke="${pal.bright}" stroke-width="1.2" opacity=".45"></ellipse>
+        <ellipse cx="${x + 24}" cy="${y - 6}" rx="8" ry="4" fill="${pal.mid}" opacity=".9"></ellipse>
+        ${dot(-12, -5, 1.4, 0)}${dot(8, -1, 1.3, 1)}`;
+    }
+    if (species === "anemone") {
+      return `
+        <circle cx="${x}" cy="${y - 24}" r="38" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="16" ry="9" fill="${pal.deep}"></ellipse>
+        <g class="dg-csway" style="animation-delay:${d0.toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${x - 12} ${y - 8} q -12 -16 -16 -26"></path>
+            <path d="M ${x - 7} ${y - 10} q -6 -20 -8 -28"></path>
+            <path d="M ${x - 2} ${y - 11} q -1 -22 0 -30"></path>
+            <path d="M ${x + 3} ${y - 11} q 4 -21 6 -29"></path>
+            <path d="M ${x + 8} ${y - 10} q 9 -18 12 -26"></path>
+            <path d="M ${x + 13} ${y - 8} q 13 -14 18 -22"></path>
+          </g>
+          ${dot(-28, -34, 2.2, 0)}${dot(-9, -39, 2.2, 1)}${dot(9, -40, 2.2, 2)}${dot(31, -30, 2.2, 3)}
+        </g>`;
+    }
+    if (species === "table") {
+      return `
+        <circle cx="${x}" cy="${y - 38}" r="44" fill="${pal.bright}" opacity=".1"></circle>
+        <path d="M ${x} ${y} L ${x} ${y - 30}" stroke="${pal.deep}" stroke-width="7" stroke-linecap="round" fill="none"></path>
+        <ellipse cx="${x}" cy="${y - 34}" rx="40" ry="6" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 35}" rx="40" ry="6" fill="none" stroke="${pal.bright}" stroke-width="2" opacity=".8"></ellipse>
+        <g stroke="${pal.bright}" stroke-width="2.5" stroke-linecap="round">
+          <line x1="${x - 30}" y1="${y - 38}" x2="${x - 30}" y2="${y - 48}"></line>
+          <line x1="${x - 15}" y1="${y - 40}" x2="${x - 15}" y2="${y - 52}"></line>
+          <line x1="${x}" y1="${y - 41}" x2="${x}" y2="${y - 53}"></line>
+          <line x1="${x + 15}" y1="${y - 40}" x2="${x + 15}" y2="${y - 51}"></line>
+          <line x1="${x + 30}" y1="${y - 38}" x2="${x + 30}" y2="${y - 47}"></line>
+        </g>
+        ${dot(-30, -50, 1.8, 0)}${dot(0, -55, 1.8, 1)}${dot(30, -49, 1.8, 2)}${dot(-15, -54, 1.6, 3)}`;
+    }
+    if (species === "birdsnest") {
+      return `
+        <circle cx="${x}" cy="${y - 34}" r="40" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.mid}" stroke-width="2.6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 4} ${y} Q ${x - 20} ${y - 24} ${x - 30} ${y - 46}"></path>
+          <path d="M ${x - 2} ${y} Q ${x - 2} ${y - 30} ${x - 12} ${y - 58}"></path>
+          <path d="M ${x + 2} ${y} Q ${x + 12} ${y - 26} ${x + 26} ${y - 48}"></path>
+          <path d="M ${x + 4} ${y} Q ${x + 4} ${y - 34} ${x + 12} ${y - 60}"></path>
+        </g>
+        <g stroke="${pal.bright}" stroke-width="2" stroke-linecap="round" fill="none">
+          <path d="M ${x - 22} ${y - 30} L ${x - 2} ${y - 44}"></path>
+          <path d="M ${x + 16} ${y - 32} L ${x - 6} ${y - 50}"></path>
+          <path d="M ${x - 28} ${y - 44} L ${x - 34} ${y - 56}"></path>
+          <path d="M ${x + 24} ${y - 46} L ${x + 32} ${y - 56}"></path>
+        </g>
+        ${dot(-34, -58, 1.8, 0)}${dot(-12, -60, 1.8, 1)}${dot(12, -62, 1.8, 2)}${dot(32, -58, 1.8, 3)}`;
+    }
+    if (species === "hammer") {
+      const head = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 2).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${hx} ${hy} q -8 -14 -12 -20"></path><path d="M ${hx} ${hy} q -2 -17 -3 -24"></path>
+            <path d="M ${hx} ${hy} q 5 -15 7 -22"></path><path d="M ${hx} ${hy} q 10 -10 13 -16"></path>
+          </g>
+          <g stroke="${pal.dot}" stroke-width="3.6" stroke-linecap="round">
+            <line x1="${hx - 16}" y1="${hy - 21}" x2="${hx - 8}" y2="${hy - 23}"></line>
+            <line x1="${hx - 6}" y1="${hy - 25}" x2="${hx + 1}" y2="${hy - 26}"></line>
+            <line x1="${hx + 4}" y1="${hy - 23}" x2="${hx + 11}" y2="${hy - 22}"></line>
+            <line x1="${hx + 10}" y1="${hy - 17}" x2="${hx + 17}" y2="${hy - 14}"></line>
+          </g>
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 30}" r="40" fill="${pal.bright}" opacity=".12"></circle>
+        <g stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 14} ${y} L ${x - 14} ${y - 22}"></path>
+          <path d="M ${x + 14} ${y} L ${x + 14} ${y - 20}"></path>
+        </g>
+        ${head(x - 14, y - 22, 0)}${head(x + 14, y - 20, 2)}`;
+    }
+    if (species === "bubble") {
+      return `
+        <circle cx="${x}" cy="${y - 16}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y - 3}" rx="22" ry="8" fill="${pal.deep}"></ellipse>
+        <g fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.8" opacity=".92">
+          <circle cx="${x - 14}" cy="${y - 14}" r="9"></circle>
+          <circle cx="${x + 1}" cy="${y - 18}" r="10"></circle>
+          <circle cx="${x + 15}" cy="${y - 13}" r="9"></circle>
+          <circle cx="${x - 6}" cy="${y - 8}" r="8"></circle>
+          <circle cx="${x + 8}" cy="${y - 7}" r="8"></circle>
+        </g>
+        ${dot(-16, -18, 1.8, 0)}${dot(-1, -22, 1.8, 1)}${dot(13, -17, 1.8, 2)}`;
+    }
+    if (species === "duncan") {
+      const crown = (hx, hy, k) => `
+        <g class="dg-cswayS" style="animation-delay:${(d0 - k * 1.6).toFixed(2)}s">
+          <ellipse cx="${hx}" cy="${hy}" rx="11" ry="4.5" fill="${pal.mid}"></ellipse>
+          <g stroke="${pal.bright}" stroke-width="1.6" stroke-linecap="round">
+            <line x1="${hx - 10}" y1="${hy - 1}" x2="${hx - 14}" y2="${hy - 6}"></line>
+            <line x1="${hx - 4}" y1="${hy - 3}" x2="${hx - 6}" y2="${hy - 9}"></line>
+            <line x1="${hx + 3}" y1="${hy - 3}" x2="${hx + 4}" y2="${hy - 9}"></line>
+            <line x1="${hx + 9}" y1="${hy - 1}" x2="${hx + 13}" y2="${hy - 7}"></line>
+          </g>
+          <ellipse cx="${hx}" cy="${hy}" rx="4.5" ry="2" fill="${pal.dot}" class="dg-cpolyp" style="animation-delay:${(d0 - k).toFixed(2)}s"></ellipse>
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 22}" r="34" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.deep}" stroke-width="5" stroke-linecap="round" fill="none">
+          <path d="M ${x - 16} ${y} L ${x - 16} ${y - 18}"></path>
+          <path d="M ${x} ${y} L ${x} ${y - 26}"></path>
+          <path d="M ${x + 16} ${y} L ${x + 16} ${y - 14}"></path>
+        </g>
+        ${crown(x - 16, y - 18, 0)}${crown(x, y - 26, 1)}${crown(x + 16, y - 14, 2)}`;
+    }
+    if (species === "acan") {
+      return `
+        <circle cx="${x}" cy="${y - 4}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        <g fill="${pal.deep}" stroke="${pal.mid}" stroke-width="2">
+          <circle cx="${x - 18}" cy="${y - 4}" r="8.5"></circle>
+          <circle cx="${x - 2}" cy="${y - 7}" r="9"></circle>
+          <circle cx="${x + 14}" cy="${y - 3}" r="8.5"></circle>
+          <circle cx="${x - 10}" cy="${y + 4}" r="7.5"></circle>
+          <circle cx="${x + 6}" cy="${y + 5}" r="7.5"></circle>
+        </g>
+        <g fill="${pal.bright}">
+          <circle cx="${x - 18}" cy="${y - 4}" r="3"></circle>
+          <circle cx="${x - 2}" cy="${y - 7}" r="3.2"></circle>
+          <circle cx="${x + 14}" cy="${y - 3}" r="3"></circle>
+          <circle cx="${x - 10}" cy="${y + 4}" r="2.6"></circle>
+          <circle cx="${x + 6}" cy="${y + 5}" r="2.6"></circle>
+        </g>
+        ${dot(-2, -7, 1.4, 0)}${dot(14, -3, 1.3, 1)}${dot(-18, -4, 1.3, 2)}`;
+    }
+    if (species === "xenia") {
+      const hand = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 1.1).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="2" stroke-linecap="round" fill="none" opacity=".9">
+            <line x1="${hx}" y1="${hy}" x2="${hx - 9}" y2="${hy - 9}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx - 4}" y2="${hy - 12}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx + 1}" y2="${hy - 13}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx + 6}" y2="${hy - 11}"></line>
+            <line x1="${hx}" y1="${hy}" x2="${hx + 10}" y2="${hy - 7}"></line>
+          </g>
+          ${dot(hx - x - 9, hy - y - 10, 1.6, k)}${dot(hx - x + 1, hy - y - 14, 1.6, k + 1)}${dot(hx - x + 10, hy - y - 8, 1.6, k + 2)}
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 18}" r="32" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.deep}" stroke-width="4" stroke-linecap="round" fill="none">
+          <path d="M ${x - 13} ${y} L ${x - 13} ${y - 16}"></path>
+          <path d="M ${x} ${y} L ${x} ${y - 22}"></path>
+          <path d="M ${x + 13} ${y} L ${x + 13} ${y - 13}"></path>
+        </g>
+        ${hand(x - 13, y - 16, 0)}${hand(x, y - 22, 2)}${hand(x + 13, y - 13, 4)}`;
+    }
+    if (species === "toadstool") {
+      return `
+        <circle cx="${x}" cy="${y - 26}" r="36" fill="${pal.bright}" opacity=".08"></circle>
+        <path d="M ${x - 8} ${y} L ${x - 6} ${y - 20} L ${x + 6} ${y - 20} L ${x + 8} ${y} Z" fill="${pal.deep}"></path>
+        <path d="M ${x - 26} ${y - 20} Q ${x - 30} ${y - 34} ${x - 12} ${y - 34} Q ${x} ${y - 40} ${x + 12} ${y - 34} Q ${x + 30} ${y - 34} ${x + 26} ${y - 20} Q ${x} ${y - 28} ${x - 26} ${y - 20} Z" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.6" opacity=".95"></path>
+        ${dot(-16, -33, 1.5, 0)}${dot(0, -38, 1.5, 1)}${dot(15, -33, 1.5, 2)}${dot(-6, -35, 1.3, 3)}${dot(8, -36, 1.3, 4)}`;
+    }
+    if (species === "digitata") {
+      return `
+        <circle cx="${x}" cy="${y - 30}" r="40" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke-linecap="round" fill="none">
+          <path d="M ${x - 24} ${y} L ${x - 27} ${y - 32}" stroke="${pal.mid}" stroke-width="7"></path>
+          <path d="M ${x - 12} ${y} L ${x - 12} ${y - 48}" stroke="${pal.deep}" stroke-width="7"></path>
+          <path d="M ${x} ${y} L ${x + 2} ${y - 38}" stroke="${pal.mid}" stroke-width="7"></path>
+          <path d="M ${x + 13} ${y} L ${x + 14} ${y - 52}" stroke="${pal.deep}" stroke-width="7"></path>
+          <path d="M ${x + 25} ${y} L ${x + 27} ${y - 28}" stroke="${pal.mid}" stroke-width="7"></path>
+        </g>
+        <g fill="${pal.bright}">
+          <circle cx="${x - 27}" cy="${y - 33}" r="3.4"></circle><circle cx="${x - 12}" cy="${y - 49}" r="3.4"></circle>
+          <circle cx="${x + 2}" cy="${y - 39}" r="3.4"></circle><circle cx="${x + 14}" cy="${y - 53}" r="3.4"></circle>
+          <circle cx="${x + 27}" cy="${y - 29}" r="3.4"></circle>
+        </g>
+        ${dot(-12, -49, 1.6, 0)}${dot(14, -53, 1.6, 1)}${dot(2, -39, 1.5, 2)}`;
+    }
+    if (species === "stylophora") {
+      return `
+        <circle cx="${x}" cy="${y - 22}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y - 2}" rx="15" ry="6" fill="${pal.deep}"></ellipse>
+        <g stroke="${pal.deep}" stroke-width="8" stroke-linecap="round" fill="none">
+          <path d="M ${x} ${y - 6} L ${x - 26} ${y - 26}"></path>
+          <path d="M ${x} ${y - 6} L ${x - 10} ${y - 38}"></path>
+          <path d="M ${x} ${y - 6} L ${x + 8} ${y - 40}"></path>
+          <path d="M ${x} ${y - 6} L ${x + 24} ${y - 24}"></path>
+          <path d="M ${x} ${y - 4} L ${x - 30} ${y - 10}"></path>
+          <path d="M ${x} ${y - 4} L ${x + 30} ${y - 8}"></path>
+        </g>
+        <g fill="${pal.bright}">
+          <circle cx="${x - 26}" cy="${y - 27}" r="3.6"></circle><circle cx="${x - 10}" cy="${y - 39}" r="3.6"></circle>
+          <circle cx="${x + 8}" cy="${y - 41}" r="3.6"></circle><circle cx="${x + 24}" cy="${y - 25}" r="3.6"></circle>
+          <circle cx="${x - 31}" cy="${y - 11}" r="3.2"></circle><circle cx="${x + 31}" cy="${y - 9}" r="3.2"></circle>
+        </g>
+        ${dot(-10, -40, 1.6, 0)}${dot(8, -42, 1.6, 1)}`;
+    }
+    if (species === "frogspawn") {
+      const head = (hx, hy, k) => `
+        <g class="dg-csway" style="animation-delay:${(d0 - k * 1.8).toFixed(2)}s">
+          <g stroke="${pal.bright}" stroke-width="2.6" stroke-linecap="round" fill="none" opacity=".9">
+            <path d="M ${hx} ${hy} q -9 -13 -13 -19"></path><path d="M ${hx} ${hy} q -4 -16 -5 -22"></path>
+            <path d="M ${hx} ${hy} q 1 -17 1 -23"></path><path d="M ${hx} ${hy} q 6 -14 8 -20"></path>
+            <path d="M ${hx} ${hy} q 11 -9 14 -14"></path>
+          </g>
+          ${dot(hx - x - 14, hy - y - 20, 2.2, k)}${dot(hx - x - 10, hy - y - 17, 1.7, k + 3)}
+          ${dot(hx - x - 5, hy - y - 23, 2.2, k + 1)}${dot(hx - x - 2, hy - y - 20, 1.7, k + 4)}
+          ${dot(hx - x + 1, hy - y - 24, 2.2, k + 2)}${dot(hx - x + 9, hy - y - 21, 2, k + 5)}
+          ${dot(hx - x + 15, hy - y - 15, 2, k + 6)}
+        </g>`;
+      return `
+        <circle cx="${x}" cy="${y - 30}" r="40" fill="${pal.bright}" opacity=".12"></circle>
+        <g stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none">
+          <path d="M ${x - 12} ${y} L ${x - 13} ${y - 20}"></path>
+          <path d="M ${x + 12} ${y} L ${x + 13} ${y - 18}"></path>
+        </g>
+        ${head(x - 13, y - 20, 0)}${head(x + 13, y - 18, 2)}`;
+    }
+    if (species === "candycane") {
+      const head = (hx, hy, k) => `
+        <circle cx="${hx}" cy="${hy - 6}" r="7.5" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="2"></circle>
+        <circle class="dg-cpolyp" cx="${hx}" cy="${hy - 6}" r="2.4" fill="${pal.dot}" style="animation-delay:${(d0 - k * 0.8).toFixed(2)}s"></circle>`;
+      return `
+        <circle cx="${x}" cy="${y - 24}" r="34" fill="${pal.bright}" opacity=".1"></circle>
+        <g stroke="${pal.deep}" stroke-width="5" stroke-linecap="round" fill="none">
+          <path d="M ${x - 21} ${y} L ${x - 24} ${y - 20}"></path>
+          <path d="M ${x - 7} ${y} L ${x - 8} ${y - 27}"></path>
+          <path d="M ${x + 7} ${y} L ${x + 8} ${y - 25}"></path>
+          <path d="M ${x + 21} ${y} L ${x + 24} ${y - 16}"></path>
+        </g>
+        ${head(x - 24, y - 20, 0)}${head(x - 8, y - 27, 1)}${head(x + 8, y - 25, 2)}${head(x + 24, y - 16, 3)}`;
+    }
+    if (species === "goniopora") {
+      const flower = (dx, dy, k) => `
+        <line x1="${x + dx * 0.6}" y1="${y + dy * 0.6}" x2="${x + dx}" y2="${y + dy}" stroke="${pal.bright}" stroke-width="1.6"></line>
+        ${dot(dx, dy, 2.4, k)}`;
+      return `
+        <circle cx="${x}" cy="${y - 18}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        <path d="M ${x - 24} ${y} a 24 18 0 0 1 48 0 Z" fill="${pal.deep}"></path>
+        <path d="M ${x - 24} ${y} a 24 18 0 0 1 48 0 Z" fill="none" stroke="${pal.mid}" stroke-width="2" opacity=".7"></path>
+        ${flower(-22, -18, 0)}${flower(-13, -25, 1)}${flower(-4, -28, 2)}${flower(6, -27, 3)}${flower(15, -23, 4)}${flower(23, -16, 5)}${flower(-8, -20, 6)}${flower(9, -19, 7)}`;
+    }
+    if (species === "chalice") {
+      return `
+        <circle cx="${x}" cy="${y - 12}" r="34" fill="${pal.bright}" opacity=".08"></circle>
+        <ellipse cx="${x - 6}" cy="${y - 6}" rx="30" ry="8" transform="rotate(-8 ${x - 6} ${y - 6})" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x - 6}" cy="${y - 7}" rx="30" ry="8" transform="rotate(-8 ${x - 6} ${y - 7})" fill="none" stroke="${pal.bright}" stroke-width="2" opacity=".8"></ellipse>
+        <path d="M ${x - 30} ${y - 6} q 14 -7 30 -3" stroke="${pal.bright}" stroke-width="1.6" fill="none" opacity=".55"></path>
+        <ellipse cx="${x + 13}" cy="${y - 16}" rx="18" ry="5" transform="rotate(-6 ${x + 13} ${y - 16})" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x + 13}" cy="${y - 17}" rx="18" ry="5" transform="rotate(-6 ${x + 13} ${y - 17})" fill="none" stroke="${pal.bright}" stroke-width="1.6" opacity=".7"></ellipse>
+        ${dot(-18, -8, 1.5, 0)}${dot(2, -6, 1.5, 1)}${dot(14, -18, 1.4, 2)}`;
+    }
+    if (species === "gsp") {
+      const star = (dx, dy, k) => `
+        <g stroke="${pal.bright}" stroke-width="1.4" stroke-linecap="round" opacity=".9">
+          <line x1="${x + dx - 4}" y1="${y + dy}" x2="${x + dx + 4}" y2="${y + dy}"></line>
+          <line x1="${x + dx}" y1="${y + dy - 4}" x2="${x + dx}" y2="${y + dy + 4}"></line>
+          <line x1="${x + dx - 3}" y1="${y + dy - 3}" x2="${x + dx + 3}" y2="${y + dy + 3}"></line>
+          <line x1="${x + dx - 3}" y1="${y + dy + 3}" x2="${x + dx + 3}" y2="${y + dy - 3}"></line>
+        </g>
+        ${dot(dx, dy, 1.3, k)}`;
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y}" rx="28" ry="8" fill="${pal.deep}"></ellipse>
+        ${star(-18, -2, 0)}${star(-7, -5, 1)}${star(5, -4, 2)}${star(16, -1, 3)}${star(-1, 2, 4)}${star(10, 3, 5)}`;
+    }
+    if (species === "kenyatree") {
+      return `
+        <circle cx="${x}" cy="${y - 26}" r="34" fill="${pal.bright}" opacity=".08"></circle>
+        <g class="dg-cswayS" style="animation-delay:${d0.toFixed(2)}s">
+          <path d="M ${x} ${y} L ${x} ${y - 22}" stroke="${pal.deep}" stroke-width="6" stroke-linecap="round" fill="none"></path>
+          <g stroke="${pal.deep}" stroke-width="4" stroke-linecap="round" fill="none">
+            <path d="M ${x} ${y - 14} Q ${x - 14} ${y - 26} ${x - 18} ${y - 36}"></path>
+            <path d="M ${x} ${y - 18} Q ${x + 2} ${y - 30} ${x + 2} ${y - 40}"></path>
+            <path d="M ${x} ${y - 16} Q ${x + 14} ${y - 26} ${x + 18} ${y - 34}"></path>
+          </g>
+          <g stroke="${pal.mid}" stroke-width="2" stroke-linecap="round" fill="none">
+            <path d="M ${x - 18} ${y - 36} l -5 -6"></path><path d="M ${x - 18} ${y - 36} l 0 -8"></path><path d="M ${x - 18} ${y - 36} l 5 -6"></path>
+            <path d="M ${x + 2} ${y - 40} l -5 -6"></path><path d="M ${x + 2} ${y - 40} l 0 -8"></path><path d="M ${x + 2} ${y - 40} l 5 -6"></path>
+            <path d="M ${x + 18} ${y - 34} l -4 -6"></path><path d="M ${x + 18} ${y - 34} l 1 -8"></path><path d="M ${x + 18} ${y - 34} l 5 -5"></path>
+          </g>
+        </g>`;
+    }
+    if (species === "ricordea") {
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="28" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x - 12}" cy="${y - 3}" rx="13" ry="5.5" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x + 8}" cy="${y}" rx="10" ry="4.5" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x + 23}" cy="${y - 5}" rx="7" ry="3.5" fill="${pal.mid}" opacity=".9"></ellipse>
+        <g fill="${pal.bright}" opacity=".85">
+          <circle cx="${x - 18}" cy="${y - 4}" r="1.1"></circle><circle cx="${x - 12}" cy="${y - 5}" r="1.1"></circle>
+          <circle cx="${x - 6}" cy="${y - 3}" r="1.1"></circle><circle cx="${x - 15}" cy="${y - 1}" r="1.1"></circle>
+          <circle cx="${x + 5}" cy="${y - 1}" r="1"></circle><circle cx="${x + 10}" cy="${y - 2}" r="1"></circle>
+          <circle cx="${x + 21}" cy="${y - 6}" r="1"></circle><circle cx="${x + 25}" cy="${y - 4}" r="1"></circle>
+        </g>
+        ${dot(-12, -3, 1.4, 0)}${dot(8, 0, 1.3, 1)}`;
+    }
+    if (species === "clam") {
+      return `
+        <circle cx="${x}" cy="${y - 8}" r="30" fill="${pal.bright}" opacity=".12"></circle>
+        <path d="M ${x - 20} ${y} Q ${x - 22} ${y - 12} ${x - 12} ${y - 13} L ${x + 12} ${y - 13} Q ${x + 22} ${y - 12} ${x + 20} ${y} Z" fill="#8fa3b8" opacity=".85"></path>
+        <g stroke="#dfe8ee" stroke-width="1.4" opacity=".5">
+          <line x1="${x - 8}" y1="${y - 13}" x2="${x - 10}" y2="${y}"></line>
+          <line x1="${x + 6}" y1="${y - 13}" x2="${x + 8}" y2="${y}"></line>
+        </g>
+        <path d="M ${x - 16} ${y - 13} q 4 -8 8 0 q 4 -8 8 0 q 4 -8 8 0 q 4 -8 8 0" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="2" stroke-linejoin="round"></path>
+        ${dot(-11, -17, 1.6, 0)}${dot(-3, -18, 1.6, 1)}${dot(5, -17, 1.6, 2)}${dot(12, -16, 1.4, 3)}`;
+    }
+    if (species === "pavona") {
+      const plate = (px, h, wHalf) => `
+        <path d="M ${px - wHalf} ${y} L ${px - wHalf - 4} ${y - h + 8} Q ${px} ${y - h - 6} ${px + wHalf + 4} ${y - h + 8} L ${px + wHalf} ${y} Z" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.6" opacity=".95"></path>
+        <path d="M ${px} ${y - 4} L ${px} ${y - h + 4}" stroke="${pal.deep}" stroke-width="1.6" opacity=".7"></path>`;
+      return `
+        <circle cx="${x}" cy="${y - 24}" r="36" fill="${pal.bright}" opacity=".1"></circle>
+        ${plate(x - 18, 28, 8)}${plate(x, 40, 9)}${plate(x + 18, 24, 7)}
+        ${dot(-18, -26, 1.6, 0)}${dot(0, -38, 1.6, 1)}${dot(18, -22, 1.5, 2)}`;
+    }
+    if (species === "favia") {
+      const cor = (dx, dy) => `
+        <circle cx="${x + dx}" cy="${y + dy}" r="4.6" fill="${pal.deep}" stroke="${pal.bright}" stroke-width="1.6"></circle>
+        <circle cx="${x + dx}" cy="${y + dy}" r="1.6" fill="${pal.mid}"></circle>`;
+      return `
+        <circle cx="${x}" cy="${y - 8}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        <path d="M ${x - 26} ${y} a 26 17 0 0 1 52 0 Z" fill="${pal.mid}"></path>
+        ${cor(-16, -5)}${cor(-6, -10)}${cor(5, -10)}${cor(15, -5)}${cor(-11, 0)}${cor(0, -2)}${cor(10, 0)}
+        ${dot(-6, -10, 1.3, 0)}${dot(5, -10, 1.3, 1)}${dot(0, -2, 1.2, 2)}`;
+    }
+    if (species === "lobo") {
+      return `
+        <circle cx="${x}" cy="${y - 8}" r="32" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x - 13}" cy="${y - 5}" rx="14" ry="10" fill="${pal.deep}" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x + 6}" cy="${y - 8}" rx="13" ry="11" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x + 18}" cy="${y - 2}" rx="10" ry="8" fill="${pal.deep}" stroke="${pal.bright}" stroke-width="1.8"></ellipse>
+        <path d="M ${x - 20} ${y - 6} q 7 -4 14 0" stroke="${pal.mid}" stroke-width="1.6" fill="none" opacity=".7"></path>
+        <path d="M ${x} ${y - 10} q 6 -4 12 0" stroke="${pal.deep}" stroke-width="1.6" fill="none" opacity=".6"></path>
+        ${dot(-13, -6, 1.6, 0)}${dot(6, -9, 1.6, 1)}${dot(18, -3, 1.4, 2)}`;
+    }
+    if (species === "blasto") {
+      const pol = (dx, dy, k) => `
+        <path d="M ${x + dx} ${y} L ${x + dx} ${y + dy + 5}" stroke="${pal.deep}" stroke-width="3" stroke-linecap="round"></path>
+        <circle cx="${x + dx}" cy="${y + dy}" r="6" fill="${pal.mid}" stroke="${pal.bright}" stroke-width="1.8"></circle>
+        <circle class="dg-cpolyp" cx="${x + dx}" cy="${y + dy}" r="2" fill="${pal.dot}" style="animation-delay:${(d0 - k * 0.7).toFixed(2)}s"></circle>`;
+      return `
+        <circle cx="${x}" cy="${y - 12}" r="30" fill="${pal.bright}" opacity=".1"></circle>
+        ${pol(-18, -12, 0)}${pol(-6, -17, 1)}${pol(6, -15, 2)}${pol(17, -10, 3)}${pol(0, -7, 4)}`;
+    }
+    if (species === "trachy") {
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="32" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 2}" rx="26" ry="10" fill="${pal.deep}"></ellipse>
+        <path d="M ${x - 26} ${y - 2} q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 9 -2 q 4 -9 7 -1" stroke="${pal.bright}" stroke-width="2.6" fill="none" stroke-linejoin="round"></path>
+        <path d="M ${x - 17} ${y + 1} q 8 -6 17 -1 q 9 -5 17 0" stroke="${pal.mid}" stroke-width="2" fill="none" opacity=".8"></path>
+        ${dot(-12, -6, 1.6, 0)}${dot(2, -7, 1.6, 1)}${dot(14, -5, 1.5, 2)}`;
+    }
+    if (species === "cynarina") {
+      return `
+        <circle cx="${x}" cy="${y - 10}" r="30" fill="${pal.bright}" opacity=".14"></circle>
+        <ellipse cx="${x}" cy="${y - 8}" rx="16" ry="12" fill="${pal.mid}" opacity=".9"></ellipse>
+        <ellipse cx="${x}" cy="${y - 8}" rx="16" ry="12" fill="none" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x}" cy="${y - 7}" rx="8" ry="5.5" fill="${pal.deep}"></ellipse>
+        <line x1="${x - 3}" y1="${y - 7}" x2="${x + 3}" y2="${y - 7}" stroke="${pal.bright}" stroke-width="1.6"></line>
+        ${dot(-9, -14, 1.7, 0)}${dot(8, -13, 1.7, 1)}${dot(0, -17, 1.5, 2)}`;
+    }
+    if (species === "elegance") {
+      const tent = (dx, len, bend) => `<path d="M ${x + dx} ${y - 6} q ${bend} ${-len * 0.6} ${bend * 1.6} ${-len}" stroke="${pal.bright}" stroke-width="2.4" stroke-linecap="round" fill="none" opacity=".9"></path>`;
+      return `
+        <circle cx="${x}" cy="${y - 20}" r="38" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="20" ry="8" fill="${pal.deep}"></ellipse>
+        <g class="dg-csway" style="animation-delay:${d0.toFixed(2)}s">
+          ${tent(-16, 20, -5)}${tent(-11, 25, -3)}${tent(-6, 28, -2)}${tent(-1, 29, 0)}${tent(4, 28, 2)}${tent(9, 25, 3)}${tent(14, 20, 5)}${tent(-13, 16, -7)}${tent(11, 16, 7)}
+          ${dot(-24, -25, 2.2, 0)}${dot(-12, -32, 2.2, 1)}${dot(-1, -35, 2.2, 2)}${dot(10, -32, 2.2, 3)}${dot(22, -24, 2.2, 4)}
+        </g>`;
+    }
+    if (species === "fungia") {
+      const septa = [0, 30, 60, 90, 120, 150].map((deg) => {
+        const rad = deg * Math.PI / 180;
+        const dx = Math.cos(rad) * 17;
+        const dy = Math.sin(rad) * 6.5;
+        return `<line x1="${(x - dx).toFixed(1)}" y1="${(y - 4 - dy).toFixed(1)}" x2="${(x + dx).toFixed(1)}" y2="${(y - 4 + dy).toFixed(1)}" stroke="${pal.deep}" stroke-width="1.5" opacity=".8"></line>`;
+      }).join("");
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="28" fill="${pal.bright}" opacity=".1"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="18" ry="7" fill="${pal.mid}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="18" ry="7" fill="none" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        ${septa}
+        ${dot(0, -4, 1.8, 0)}`;
+    }
+    if (species === "scoly") {
+      return `
+        <circle cx="${x}" cy="${y - 6}" r="28" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y - 4}" rx="15" ry="6.5" fill="${pal.deep}"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="15" ry="6.5" fill="none" stroke="${pal.bright}" stroke-width="2"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="9.5" ry="4" fill="none" stroke="${pal.mid}" stroke-width="1.8"></ellipse>
+        <ellipse cx="${x}" cy="${y - 4}" rx="4.5" ry="2" fill="${pal.mid}"></ellipse>
+        ${dot(0, -4, 1.5, 0)}${dot(-11, -5, 1.2, 1)}${dot(11, -3, 1.2, 2)}`;
+    }
+    if (species === "suncoral") {
+      const daisy = (dx, dy, k) => `
+        <path d="M ${x + dx} ${y + dy + 8} L ${x + dx} ${y + dy}" stroke="${pal.deep}" stroke-width="2.6" stroke-linecap="round"></path>
+        <g stroke="${pal.bright}" stroke-width="1.5" stroke-linecap="round">
+          <line x1="${x + dx - 4}" y1="${y + dy - 3}" x2="${x + dx + 4}" y2="${y + dy - 3}"></line>
+          <line x1="${x + dx}" y1="${y + dy - 7}" x2="${x + dx}" y2="${y + dy + 1}"></line>
+          <line x1="${x + dx - 3}" y1="${y + dy - 6}" x2="${x + dx + 3}" y2="${y + dy}"></line>
+          <line x1="${x + dx + 3}" y1="${y + dy - 6}" x2="${x + dx - 3}" y2="${y + dy}"></line>
+        </g>
+        ${dot(dx, dy - 3, 1.6, k)}`;
+      return `
+        <circle cx="${x}" cy="${y - 12}" r="30" fill="${pal.bright}" opacity=".12"></circle>
+        <ellipse cx="${x}" cy="${y}" rx="20" ry="6" fill="#1a3850"></ellipse>
+        ${daisy(-14, -12, 0)}${daisy(-4, -17, 1)}${daisy(6, -14, 2)}${daisy(15, -9, 3)}${daisy(0, -8, 4)}`;
+    }
+    // zoa mat (default)
+    return `
+      <circle cx="${x}" cy="${y - 8}" r="34" fill="${pal.bright}" opacity=".1"></circle>
+      <g fill="${pal.deep}" stroke="${pal.bright}" stroke-width="1.8">
+        <circle cx="${x - 18}" cy="${y - 2}" r="7"></circle>
+        <circle cx="${x - 4}" cy="${y - 9}" r="6.4"></circle>
+        <circle cx="${x + 10}" cy="${y - 1}" r="7.2"></circle>
+        <circle cx="${x - 10}" cy="${y + 7}" r="6"></circle>
+        <circle cx="${x + 6}" cy="${y + 8}" r="6.6"></circle>
+        <circle cx="${x + 21}" cy="${y + 4}" r="5.8"></circle>
+        <circle cx="${x - 25}" cy="${y + 7}" r="5.4"></circle>
+      </g>
+      ${dot(-18, -2, 1.8, 0)}${dot(-4, -9, 1.6, 1)}${dot(10, -1, 1.8, 2)}${dot(6, 8, 1.6, 3)}`;
+  }
+
+  _diagCoralsMarkup(systemType) {
+    const corals = this._diagramCorals();
+    if (!corals.length) return "";
+    const slots = this._diagramCoralSlots(systemType);
+    const layout = this._diagramCoralLayout(systemType, corals);
+    const parts = [];
+    let seed = 0;
+    for (const [id, c] of corals) {
+      const sid = layout[`coral:${id}`];
+      if (!sid) continue;
+      const slot = slots[sid];
+      const pal = this._coralPalette(c.colour);
+      const label = c.name || this._coralSpeciesLabel(c.species);
+      const added = Date.parse(c.addedAt || "");
+      const isNew = Number.isFinite(added) && Date.now() - added < 48 * 3600 * 1000 && Date.now() >= added - 86400000;
+      parts.push(`
+        <g class="dg-coral${isNew ? " dg-cnew" : ""}" data-diag-coral="${this._escape(id)}" data-action="pulse-focus" data-id="coral:${this._escape(id)}" data-diag-drag="coral:${this._escape(id)}" role="button" tabindex="0">
+          <title>${this._escape(label)} — ${this._escape(this._coralSpeciesLabel(c.species))}</title>
+          <rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="12" fill="transparent"></rect>
+          ${this._diagCoralArt(c.species, slot.x, slot.y, pal, seed)}
+          <rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="12" class="dg-halo"></rect>
+        </g>`);
+      seed += 1;
+    }
+    return parts.join("");
+  }
+
+  // Spawning night: the Coral Spawning engine's predicted window, crossed with
+  // the reef. Bundles only release when there ARE corals, the window is live,
+  // and the display light isn't blazing (spawning happens in the dark).
+  _diagramSpawnNight(nodes) {
+    if (!this._config?.spawningProgram?.enabled) return false;
+    if (!this._diagramCorals().length) return false;
+    const pred = this._pulseSpawn?.program?.spawnPrediction || {};
+    const start = Date.parse(pred.windowStart || "");
+    const end = Date.parse(pred.windowEnd || "");
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+    const now = Date.now();
+    if (now < start || now > end + 86400000) return false;
+    return !nodes.light || this._diagramNodeState(nodes.light[1]) !== "on";
+  }
+
+  // Keep the spawning prediction warm while the diagram is visible — the same
+  // cached program Pulse uses (24 h refresh, backend falls back to the saved
+  // preset). Fire-and-forget: the next patch pass applies dg-spawn.
+  _diagKickSpawnCache() {
+    if (!this._config?.spawningProgram?.enabled || !this._diagramCorals().length) return;
+    this._pulseSpawn = this._pulseSpawn || { program: null, at: 0, loading: false };
+    if (this._pulseSpawn.loading || Date.now() - this._pulseSpawn.at < 24 * 3600 * 1000) return;
+    this._pulseSpawn.loading = true;
+    this._callWS({ type: "openreef/generate_spawning_program" })
+      .then((res) => { this._pulseSpawn.program = res?.program || null; })
+      .catch(() => { /* keep whatever we had */ })
+      .finally(() => {
+        this._pulseSpawn.at = Date.now();
+        this._pulseSpawn.loading = false;
+        const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+        if (svg) this._updatePulseDiagram(svg);
+      });
+  }
+
+  // Bundle release: pink egg-sperm bundles lifting off the reef toward the
+  // surface — deterministic like the scrub cloud, shown only under dg-spawn.
+  _diagSpawnMarkup(x0, w, y0, y1) {
+    const fr = (i, s) => { const v = Math.sin(i * 91.7 + s * 47.9) * 43758.5453; return v - Math.floor(v); };
+    let out = "";
+    for (let i = 0; i < 16; i++) {
+      const x = x0 + 20 + fr(i, 1) * (w - 40);
+      const y = y0 + fr(i, 2) * (y1 - y0);
+      const r = (1.8 + fr(i, 3) * 1.6).toFixed(1);
+      const dur = (5.5 + fr(i, 4) * 3.5).toFixed(2);
+      const delay = (-fr(i, 5) * 9).toFixed(2);
+      out += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r}" style="animation-duration:${dur}s;animation-delay:${delay}s"></circle>`;
+    }
+    return `<g class="dg-spawnlayer">${out}</g>`;
+  }
+
+  // One tap, six curated corals — real registry entries the user can rename,
+  // recolour or remove, so the honesty rule holds.
+  _addStarterReef() {
+    const starters = [
+      ["Green Slimer", "staghorn", "green"],
+      ["Red Cap", "plate", "red"],
+      ["Golden Torch", "torch", "gold"],
+      ["Sunny Zoas", "zoa", "orange"],
+      ["Warpaint Brain", "brain", "teal"],
+      ["Purple Sea Fan", "gorgonian", "purple"],
+    ];
+    const live = this._config.livestock = this._config.livestock || {};
+    const corals = live.corals = live.corals || {};
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [name, species, colour] of starters) {
+      if (Object.keys(corals).length >= 16) break;
+      const base = this._slug(name) || "coral";
+      let cid = base;
+      let n = 2;
+      while (corals[cid]) { cid = `${base}_${n}`; n += 1; }
+      corals[cid] = { name, species, colour, addedAt: today };
+    }
+    this._setDirty(true);
+    this._render();
+  }
+
+  _coralAgeText(addedAt) {
+    const t = Date.parse(addedAt || "");
+    if (!Number.isFinite(t)) return "";
+    const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+    if (days < 1) return "added today";
+    if (days < 31) return `${days} day${days === 1 ? "" : "s"} in your tank`;
+    const months = Math.floor(days / 30.4);
+    if (months < 24) return `${months} month${months === 1 ? "" : "s"} in your tank`;
+    return `${Math.floor(months / 12)} years in your tank`;
+  }
+
+  _coralZoneText(species) {
+    return {
+      sps: "Lives high on the rock, in the light and flow.",
+      lps: "Mid-rock, where the flow is gentler.",
+      soft: "Low rock and sand — the easy-going neighbourhood.",
+      fan: "Stands at the back, swaying in the current.",
+    }[this._coralZone(species)];
+  }
+
+  _addCoral(name, species, colour) {
+    const live = this._config.livestock = this._config.livestock || {};
+    const corals = live.corals = live.corals || {};
+    if (Object.keys(corals).length >= 16) return;
+    const base = this._slug(name || species || "coral") || "coral";
+    let cid = base;
+    let n = 2;
+    while (corals[cid]) { cid = `${base}_${n}`; n += 1; }
+    corals[cid] = { name: name || "", species, colour, addedAt: new Date().toISOString().slice(0, 10) };
+    this._setDirty(true);
+    this._render();
+  }
+
+  _removeCoral(cid) {
+    if (this._config.livestock?.corals) delete this._config.livestock.corals[cid];
+    const layout = this._config.diagram?.layout;
+    if (layout) delete layout[`coral:${cid}`];
+    if (this._coralFocus === cid) this._coralFocus = null;
+    this._setDirty(true);
+    this._render();
+  }
+
+  // Tab-side coral card — the wall (Pulse) uses _pulseFocusCoralMarkup instead.
+  // Notes and a photo link are edited right here; both persist with the coral.
+  _coralModalMarkup() {
+    const cid = this._coralFocus;
+    const c = cid ? (this._config.livestock?.corals || {})[cid] : null;
+    if (!c) return "";
+    const age = this._coralAgeText(c.addedAt);
+    return `
+      <div class="modal">
+        <section class="wizard">
+          <button class="close" data-action="close-coral">x</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Reef layer · ${this._escape(this._coralSpeciesLabel(c.species))}</p>
+              <h2>${this._escape(c.name || this._coralSpeciesLabel(c.species))}</h2>
+              <p class="muted">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}. ${this._escape(this._coralZoneText(c.species))}</p>
+            </div>
+          </div>
+          ${c.photoUrl ? `<img class="coral-photo" src="${this._escape(c.photoUrl)}" alt="${this._escape(c.name || "coral photo")}">` : ""}
+          <label class="coral-notes-label">Notes
+            <textarea class="coral-notes" data-coral-notes="${this._escape(cid)}" rows="3" maxlength="500" placeholder="Frag from Dave · moved off the sand 12 Aug · loves the extra flow…">${this._escape(c.notes || "")}</textarea>
+          </label>
+          <label class="coral-upload secondary compact-button">📷 ${c.photoUrl ? "Replace photo" : "Upload a photo"}
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/heic" data-coral-upload="${this._escape(cid)}" hidden>
+          </label>
+          ${this._coralUploadState === "uploading" ? `<p class="muted">Uploading…</p>`
+            : this._coralUploadState ? `<p class="muted">⚠ ${this._escape(this._coralUploadState)}</p>` : ""}
+          <label class="coral-notes-label">…or a photo URL <small class="muted">(a path like /local/corals/torch.jpg, or any https link)</small>
+            <input data-coral-photo="${this._escape(cid)}" value="${this._escape(c.photoUrl || "")}" placeholder="/local/corals/my-torch.jpg" maxlength="300">
+          </label>
+          <div class="actions">
+            <button class="secondary compact-button" data-action="diagram-arrange">✎ Move it on the rock</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Manage corals</button>
+          </div>
+        </section>
+      </div>`;
+  }
+
+  // Settings-side registry: name it, pick species and colour, and it appears
+  // on the rockwork. Species decides the zone; drag it between valid spots in
+  // arrange mode like any other node.
+  _coralRegistryMarkup() {
+    const corals = this._diagramCorals();
+    const pick = this._coralPickSpecies || "zoa";
+    const pickCol = this._coralPickColour || "purple";
+    const palPick = this._coralPalette(pickCol);
+    // The picker IS the art kit: every tile renders the species' real glyph
+    // in the currently selected colour, so what you pick is what the rock gets.
+    const tiles = this._coralSpeciesList().map((s) => `
+      <button type="button" class="coral-tile ${s === pick ? "selected" : ""}" data-action="coral-pick-species" data-id="${s}" title="${this._escape(this._coralSpeciesLabel(s))}">
+        <svg viewBox="-52 -100 104 108" aria-hidden="true">${this._diagCoralArt(s, 0, 0, palPick, 0)}</svg>
+        <small>${this._escape(this._coralSpeciesLabel(s))}</small>
+      </button>`).join("");
+    const swatches = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].map((col) => {
+      const p = this._coralPalette(col);
+      return `<button type="button" class="coral-swatch ${col === pickCol ? "selected" : ""}" style="background:${p.bright};color:${p.bright}" data-action="coral-pick-colour" data-id="${col}" title="${col}"></button>`;
+    }).join("");
+    const rows = corals.map(([id, c]) => {
+      const pal = this._coralPalette(c.colour);
+      const age = this._coralAgeText(c.addedAt);
+      return `
+        <div class="coral-row">
+          <span class="coral-dot" style="background:${pal.bright}"></span>
+          <span class="coral-row-main">
+            <input class="coral-name" data-coral-name="${this._escape(id)}" value="${this._escape(c.name || this._coralSpeciesLabel(c.species))}" maxlength="48">
+            <small class="muted">${this._escape(this._coralSpeciesLabel(c.species))} · ${this._escape(c.colour || "")}${age ? ` · ${this._escape(age)}` : ""}</small>
+          </span>
+          <button class="secondary compact-button" data-action="coral-remove" data-id="${this._escape(id)}">Remove</button>
+        </div>`;
+    }).join("");
+    return `
+      <section class="mapping-section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Reef layer</p>
+            <h4>Your corals, drawn on the rockwork</h4>
+          </div>
+        </div>
+        <div class="coral-species-grid">${tiles}</div>
+        <div class="coral-swatches">${swatches}</div>
+        <div class="quick-add coral-add">
+          <input id="or-coral-name" placeholder="Name it (e.g. Golden torch)" value="${this._escape(this._coralPickName || "")}">
+          <button class="secondary compact-button" data-action="coral-add">Add ${this._escape(this._coralSpeciesLabel(pick).toLowerCase())}</button>
+        </div>
+        ${rows || `
+          <p class="muted">Nothing registered yet — the rock stays bare until you stock it. Add a coral above and it appears on the diagram: SPS take the crest, LPS the mid-rock, zoas and mushrooms the base, gorgonians the back. Drag it between spots in ✎ Arrange.</p>
+          <button class="secondary compact-button" data-action="coral-starter">🌱 Start me with a reef — six corals, yours to rename or remove</button>`}
+      </section>`;
+  }
+
+  // Photo upload: downscale on the client (≤1280px JPEG via canvas) so the
+  // websocket payload stays tiny, then the backend stores it in the captures
+  // media dir and pins the URL to the coral. No new serving infrastructure.
+  async _uploadCoralPhoto(cid, file) {
+    try {
+      this._coralUploadState = "uploading";
+      this._render();
+      const bmp = await createImageBitmap(file);
+      const scale = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bmp.width * scale));
+      canvas.height = Math.max(1, Math.round(bmp.height * scale));
+      canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      const res = await this._callWS({ type: "openreef/coral_photo_upload", coralId: cid, image: dataUrl });
+      if (res?.url && this._config.livestock?.corals?.[cid]) {
+        this._config.livestock.corals[cid].photoUrl = res.url;
+      }
+      this._coralUploadState = "";
+    } catch (err) {
+      this._coralUploadState = err?.message || "Upload failed — try a smaller photo";
+    }
+    this._render();
+  }
+
+  _pulseFocusCoralMarkup(cid) {
+    const c = (this._config.livestock?.corals || {})[cid];
+    if (!c) return "";
+    const pal = this._coralPalette(c.colour);
+    const age = this._coralAgeText(c.addedAt);
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Reef layer · ${this._escape(this._coralSpeciesLabel(c.species))}</small>
+          <strong>${this._escape(c.name || this._coralSpeciesLabel(c.species))}</strong>
+        </div>
+        <span class="pulse-insight-dot big" style="background:${pal.bright}"></span>
+      </header>
+      <p class="pulse-focus-note">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}</p>
+      <p class="pulse-focus-note">${this._escape(this._coralZoneText(c.species))}</p>
+      ${c.notes ? `<p class="pulse-focus-note">${this._escape(String(c.notes).slice(0, 200))}</p>` : ""}`;
+  }
+
+  // Rounded orthogonal path through points — the pipe/tube spine.
+  _diagPath(pts, r = 16) {
+    let d = `M ${pts[0][0]} ${pts[0][1]}`;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const [x0, y0] = pts[i - 1];
+      const [x1, y1] = pts[i];
+      const [x2, y2] = pts[i + 1];
+      const v1 = [Math.sign(x1 - x0), Math.sign(y1 - y0)];
+      const v2 = [Math.sign(x2 - x1), Math.sign(y2 - y1)];
+      const len1 = Math.abs(x1 - x0) + Math.abs(y1 - y0);
+      const len2 = Math.abs(x2 - x1) + Math.abs(y2 - y1);
+      const rr = Math.min(r, len1 / 2, len2 / 2);
+      d += ` L ${x1 - v1[0] * rr} ${y1 - v1[1] * rr} Q ${x1} ${y1} ${x1 + v2[0] * rr} ${y1 + v2[1] * rr}`;
+    }
+    const [xl, yl] = pts[pts.length - 1];
+    return `${d} L ${xl} ${yl}`;
+  }
+
+  // A pipe: glassy casing + still water + marching flow (gated by dg-loop-off).
+  _diagPipeMarkup(pts, w = 14) {
+    const d = this._diagPath(pts);
+    return `
+      <path d="${d}" class="dg-pipe-case" stroke-width="${w}" fill="none"></path>
+      <path d="${d}" class="dg-pipe-water" stroke-width="${Math.max(2, w - 6)}" fill="none"></path>
+      <path d="${d}" class="dg-flow" stroke-width="${Math.max(3, w - 9)}" fill="none"></path>`;
+  }
+
+  _diagTubeMarkup(pts, withFlow = false) {
+    const d = this._diagPath(pts, 10);
+    return `<path d="${d}" class="dg-tube" fill="none"></path>`
+      + (withFlow ? `<path d="${d}" class="dg-flow" stroke-width="3" fill="none"></path>` : "");
+  }
+
+  _diagChevMarkup(x, y, dir, cls = "dg-chev dg-chev-pulse") {
+    const s = 9;
+    const points = dir === "r" ? `${x},${y - s} ${x + s * 1.3},${y} ${x},${y + s}`
+      : dir === "l" ? `${x},${y - s} ${x - s * 1.3},${y} ${x},${y + s}`
+      : dir === "d" ? `${x - s},${y} ${x},${y + s * 1.3} ${x + s},${y}`
+      : `${x - s},${y} ${x},${y - s * 1.3} ${x + s},${y}`;
+    return `<polygon points="${points}" class="${cls}"></polygon>`;
+  }
+
+  // Powerhead art: magnet mount, body, bladed cage, wake lines while running.
+  _diagWavemakerArt(wx, wy, s) {
+    const cx = wx + 30 * s;
+    const blades = [0.5, 2.594, 4.688].map((th) =>
+      `<line x1="${cx}" y1="${wy}" x2="${(cx + Math.cos(th) * 13).toFixed(1)}" y2="${(wy + Math.sin(th) * 13).toFixed(1)}" class="dg-line"></line>`).join("");
+    const wake = [0, 1, 2].map((i) =>
+      `<path d="M ${cx + (22 + i * 12) * s} ${wy - 8 + i * 8} q ${10 * s} 4 ${20 * s} 0" class="dg-wake dg-onart" fill="none"></path>`).join("");
+    return `
+      <rect x="${wx - (s > 0 ? 16 : -4)}" y="${wy - 12}" width="12" height="24" rx="3" class="dg-metal"></rect>
+      <rect x="${s > 0 ? wx - 4 : wx - 40}" y="${wy - 7}" width="22" height="14" rx="6" class="dg-shell"></rect>
+      <circle cx="${cx}" cy="${wy}" r="17" class="dg-shell"></circle>
+      ${blades}
+      <circle cx="${cx}" cy="${wy}" r="4" class="dg-metal"></circle>
+      ${wake}`;
+  }
+
+  _diagNodeMarkup({ kind, focusId, dragKey = "", state, title, dot = null, hit = null, art }) {
+    return `
+      <g class="dg-node ${kind} ${state}" data-diag-node="${this._escape(focusId)}" data-action="pulse-focus" data-id="${this._escape(focusId)}" ${dragKey ? `data-diag-drag="${this._escape(dragKey)}"` : ""} role="button" tabindex="0">
+        <title>${this._escape(title)}</title>
+        ${hit ? `<rect x="${hit[0]}" y="${hit[1]}" width="${hit[2]}" height="${hit[3]}" rx="12" fill="transparent"></rect>` : ""}
+        ${art}
+        ${dot ? `<circle cx="${dot[0]}" cy="${dot[1]}" r="5.5" class="dg-dot"></circle>` : ""}
+      </g>`;
+  }
+
+  _diagHeaterArt(hx, hy) {
+    return `
+      <circle cx="${hx + 7}" cy="${hy + 34}" r="50" fill="url(#dgHeat)" class="dg-heatglow dg-onart"></circle>
+      <rect x="${hx}" y="${hy}" width="14" height="68" rx="7" class="dg-shell"></rect>
+      <rect x="${hx + 3}" y="${hy + 12}" width="8" height="44" rx="4" class="dg-heatcore"></rect>`;
+  }
+
+  _diagDoserArt(sx, boxY, channels) {
+    const heads = channels.map(([, ch], i) => {
+      const hy = boxY + 26 + i * 38;
+      const name = this._doserChemicalLabel(ch.chemical) || ch.name || `D${i + 1}`;
+      return `
+        <circle cx="${sx + 44}" cy="${hy}" r="13" class="dg-shell" fill="none"></circle>
+        <circle cx="${sx + 44}" cy="${hy}" r="4" class="dg-metal"></circle>
+        <text x="${sx + 74}" y="${hy + 4}" class="dg-lbl dg-lbl-sm">${this._escape(String(name).slice(0, 8).toUpperCase())}</text>`;
+    }).join("");
+    return `
+      <rect x="${sx}" y="800" width="190" height="8" rx="3" class="dg-metal" opacity=".5"></rect>
+      <rect x="${sx + 10}" y="${boxY}" width="160" height="${800 - boxY}" rx="12" class="dg-box"></rect>
+      ${heads}`;
+  }
+
+  _pulseDiagramMarkup() {
+    return `<div class="pulse-diagram" data-pulse-diagram>${this._pulseDiagramSvg()}</div>`;
+  }
+
+  // The Diagram tab: the same living schematic as the Pulse backdrop, living
+  // in the panel. Taps open the standard equipment detail modal (full controls
+  // there); Present hands the same scene to a wall tablet via Reef Pulse.
+  _diagramTab() {
+    const systemType = this._diagramSystemType();
+    const nodes = this._diagramNodes();
+    const anything = nodes.ret || nodes.wavemakers.length || nodes.heater || nodes.skimmer
+      || nodes.ato || nodes.light || nodes.doser;
+    return `
+      <section class="stack">
+        <div class="section-head">
+          <div>
+            <h2>Living diagram</h2>
+            <p>Your ${systemType === "aio" ? "all-in-one" : "sump"} system, drawn from your equipment mapping — the flow follows your pumps, live.</p>
+          </div>
+          <div class="settings-toolbar">
+            <button class="secondary compact-button" data-action="diagram-arrange">${this._diagramArranging ? "✓ Done arranging" : "✎ Arrange"}</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Configure</button>
+            ${this._pulseEnabled() ? `<button class="secondary compact-button" data-action="open-pulse">✨ Present</button>` : ""}
+          </div>
+        </div>
+        ${this._diagramArranging ? `<div class="notice info-notice"><strong>Arrange mode.</strong> Drag a glowing item to a highlighted spot — pipework re-routes and the layout saves itself.</div>` : ""}
+        <section class="panel diagram-stage">${this._pulseDiagramSvg()}</section>
+        ${anything ? `
+          <p class="muted">Tap any piece of equipment for details${this._diagramCfg().allowControls === false ? "" : " and controls"}. Water only moves while your return pump is actually running — wavemakers stir the display without it.</p>
+        ` : `
+          <p class="muted">Nothing mapped yet — add your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears here automatically.</p>
+        `}
+        ${this._coralModalMarkup()}
+      </section>
+    `;
+  }
+
+  _pulseDiagramSvg() {
+    const systemType = this._diagramSystemType();
+    const nodes = this._diagramNodes();
+    const layout = this._diagramResolvedLayout(systemType, nodes);
+    const arranging = this._diagramArranging;
+    const loopOn = nodes.ret ? this._diagramNodeState(nodes.ret[1]) === "on" : false;
+    const scene = systemType === "aio"
+      ? this._diagramAioScene(nodes, layout, arranging)
+      : this._diagramSumpScene(nodes, layout, arranging);
+    this._diagAwcKickSummary();
+    const awcState = this._diagAwcEnabled() ? this._awcLiveState(this._config.automaticWaterChange) : {};
+    const awcDraining = awcState.status === "draining" || awcState.status === "exchanging";
+    const awcFilling = awcState.status === "filling" || awcState.status === "exchanging";
+    const atoOn = nodes.ato ? this._diagramNodeState(nodes.ato[1]) === "on" : false;
+    const fugeOn = nodes.fugelight ? this._diagramNodeState(nodes.fugelight[1]) === "on" : false;
+    const scrubOn = this._diagramScrubOn(systemType, nodes, layout);
+    const nightOn = nodes.light ? this._diagramNodeState(nodes.light[1]) === "off" : false;
+    const spawnOn = this._diagramSpawnNight(nodes);
+    return `
+      <svg viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid meet"
+           class="${loopOn ? "" : "dg-loop-off"} ${arranging ? "dg-editing" : ""} ${awcDraining ? "dg-awc-draining" : ""} ${awcFilling ? "dg-awc-filling" : ""} ${atoOn ? "dg-ato-on" : ""} ${fugeOn ? "dg-fuge-on" : ""} ${scrubOn ? "dg-scrub" : ""} ${nightOn ? "dg-night" : ""} ${spawnOn ? "dg-spawn" : ""}"
+           data-pulse-diagram-svg data-water="${scene.water}"
+           role="img" aria-label="Living diagram — ${systemType === "aio" ? "all-in-one tank" : "sump system"}">
+        <style>
+          @keyframes dg-march { to { stroke-dashoffset: -52; } }
+          @keyframes dg-chev { 0%, 100% { opacity: .15; } 50% { opacity: .85; } }
+          @keyframes dg-drift { from { transform: translateX(0); } to { transform: translateX(190px); } }
+          @keyframes dg-rise { 0% { transform: translateY(0); opacity: 0; } 12% { opacity: .75; } 86% { opacity: .6; } 100% { transform: translateY(-92px); opacity: 0; } }
+          @keyframes dg-heat { 0%, 100% { opacity: .45; } 50% { opacity: .95; } }
+          @keyframes dg-slots { to { stroke-dashoffset: -120; } }
+          .dg-lbl { font-size: 15px; font-weight: 700; letter-spacing: .22em; fill: #62788a; text-transform: uppercase; text-anchor: middle; }
+          .dg-lbl-sm { font-size: 12px; letter-spacing: .14em; text-anchor: start; }
+          .dg-glass { fill: none; stroke: rgba(127, 184, 216, .55); stroke-width: 5; stroke-linejoin: round; }
+          .dg-glass-thin { fill: none; stroke: rgba(127, 184, 216, .45); stroke-width: 3; }
+          .dg-line { stroke: rgba(127, 184, 216, .55); stroke-width: 2.5; }
+          .dg-metal { fill: rgba(127, 184, 216, .55); }
+          .dg-shell { fill: #14304a; stroke: rgba(127, 184, 216, .55); stroke-width: 2.5; }
+          .dg-box { fill: #0e2338; stroke: rgba(127, 184, 216, .5); stroke-width: 2.5; }
+          .dg-frame { fill: #0d1d2e; stroke: rgba(127, 184, 216, .25); stroke-width: 2; }
+          .dg-pipe-case { stroke: rgba(127, 184, 216, .3); stroke-linecap: round; }
+          .dg-pipe-water { stroke: rgba(90, 200, 190, .12); stroke-linecap: round; }
+          .dg-flow { stroke: var(--openreef-accent, #4fd8c3); stroke-linecap: round; opacity: .85; stroke-dasharray: 10 16; animation: dg-march 1.05s linear infinite; transition: opacity .8s ease; }
+          .dg-tube { stroke: rgba(190, 220, 235, .32); stroke-width: 4; stroke-linecap: round; }
+          .dg-chev { fill: var(--openreef-accent, #4fd8c3); opacity: .7; transition: opacity .8s ease; }
+          .dg-chev-pulse { animation: dg-chev 1.6s ease-in-out infinite; }
+          .dg-chev-drift { animation: dg-drift 3.2s linear infinite; }
+          .dg-jet { opacity: .75; transition: opacity .8s ease; }
+          .dg-jet path { stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2.5; opacity: .5; }
+          svg.dg-loop-off .dg-loop .dg-flow, .dg-loop-off .dg-loop .dg-flow { opacity: .07; animation-play-state: paused; }
+          svg.dg-loop-off .dg-loop .dg-chev, .dg-loop-off .dg-loop .dg-chev { opacity: 0; }
+          svg.dg-loop-off .dg-jet, .dg-loop-off .dg-jet { opacity: 0; }
+          .dg-node { cursor: pointer; }
+          .dg-dot { fill: #64748b; transition: fill .3s ease; }
+          .dg-node.on .dg-dot { fill: #22c55e; }
+          .dg-node.off .dg-dot { fill: #f59e0b; }
+          .dg-node.gone .dg-dot { fill: #ef4444; }
+          .dg-onart { transition: opacity .6s ease; }
+          .dg-node.off .dg-onart, .dg-node.gone .dg-onart { opacity: 0 !important; }
+          .dg-wake { stroke: rgba(94, 210, 195, .4); stroke-width: 2; }
+          .dg-bubble { fill: #bfe8e0; opacity: 0; transform-box: fill-box; animation: dg-rise 2.4s linear infinite; }
+          .dg-node.off .dg-bubble, .dg-node.gone .dg-bubble { animation-play-state: paused; opacity: 0; }
+          @keyframes dg-mistL { 0% { transform: translate(0, 0); opacity: 0; } 8% { opacity: .95; } 70% { transform: translate(-86px, 54px); opacity: .8; } 100% { transform: translate(-116px, 44px); opacity: 0; } }
+          @keyframes dg-mistR { 0% { transform: translate(0, 0); opacity: 0; } 8% { opacity: .95; } 70% { transform: translate(86px, 54px); opacity: .8; } 100% { transform: translate(116px, 44px); opacity: 0; } }
+          @keyframes dg-microrise { 0% { transform: translateY(24px); opacity: 0; } 16% { opacity: .9; } 80% { opacity: .6; } 100% { transform: translateY(-92px); opacity: 0; } }
+          .dg-scrubjet.dg-jetL circle { animation: dg-mistL .85s linear infinite paused; }
+          .dg-scrubjet.dg-jetR circle { animation: dg-mistR .85s linear infinite paused; }
+          .dg-scrubcloud circle { animation: dg-microrise 3.2s linear infinite paused; }
+          .dg-scrubjet circle, .dg-scrubcloud circle { fill: #e6f7ff; transform-box: fill-box; }
+          .dg-scrubjet, .dg-scrubcloud { opacity: 0; transition: opacity .9s ease; }
+          svg.dg-scrub .dg-scrubjet, .dg-scrub .dg-scrubjet,
+          svg.dg-scrub .dg-scrubcloud, .dg-scrub .dg-scrubcloud { opacity: 1; }
+          svg.dg-scrub .dg-scrubjet circle, .dg-scrub .dg-scrubjet circle,
+          svg.dg-scrub .dg-scrubcloud circle, .dg-scrub .dg-scrubcloud circle { animation-play-state: running; }
+          .dg-foam { fill: rgba(215, 230, 238, .5); }
+          .dg-heatglow { animation: dg-heat 2.6s ease-in-out infinite; }
+          .dg-heatcore { fill: #e8a952; opacity: .55; }
+          .dg-rays { fill: url(#dgLight); }
+          .dg-kelp { fill: #4c8c5c; opacity: .6; }
+          .dg-sock { fill: #dfe8ee; opacity: .85; }
+          .dg-part { fill: #9fd8ce; }
+          .dg-fish { fill: #31536b; opacity: .8; }
+          @keyframes dg-spin { to { transform: rotate(360deg); } }
+          @keyframes dg-alertpulse { 0%, 100% { transform: scale(.65); opacity: .9; } 50% { transform: scale(1.3); opacity: .2; } }
+          .dg-alert-ring { fill: none; stroke-width: 3; transform-box: fill-box; transform-origin: center; animation: dg-alertpulse 1.7s ease-in-out infinite; }
+          .dg-alert.critical .dg-alert-ring { animation-duration: .95s; }
+          .dg-alert.warning .dg-alert-ring, .dg-alert.warning .dg-alert-line { stroke: #f59e0b; }
+          .dg-alert.warning .dg-alert-core { fill: #f59e0b; }
+          .dg-alert.critical .dg-alert-ring, .dg-alert.critical .dg-alert-line { stroke: #ef4444; }
+          .dg-alert.critical .dg-alert-core { fill: #ef4444; }
+          .dg-alert-line { stroke-width: 1.5; opacity: .6; }
+          .dg-alert-pill { fill: rgba(4, 10, 16, .82); stroke-width: 1.5; }
+          .dg-alert.warning .dg-alert-pill { stroke: rgba(245, 158, 11, .6); }
+          .dg-alert.critical .dg-alert-pill { stroke: rgba(239, 68, 68, .65); }
+          .dg-alert-text { font-size: 13.5px; font-weight: 700; fill: #f4fbff; letter-spacing: .03em; }
+          .dg-chip-bg { fill: rgba(4, 10, 16, .62); stroke: rgba(127, 184, 216, .35); stroke-width: 1.5; transition: stroke .4s ease; }
+          @keyframes dg-chippulse { 0%, 100% { stroke-width: 1.5; } 50% { stroke-width: 3.5; } }
+          .dg-chip.warning .dg-chip-bg { stroke: rgba(245, 158, 11, .7); }
+          .dg-chip.critical .dg-chip-bg { stroke: rgba(239, 68, 68, .85); animation: dg-chippulse 1.2s ease-in-out infinite; }
+          .dg-chip-label { font-size: 11px; font-weight: 700; letter-spacing: .09em; fill: #9fc7e0; }
+          .dg-chip-value { font-size: 15px; font-weight: 800; fill: #f4fbff; font-variant-numeric: tabular-nums; }
+          @keyframes dg-drip { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: .9; } 90% { transform: translateY(44px); opacity: .7; } 100% { transform: translateY(48px); opacity: 0; } }
+          .dg-dose circle { fill: var(--openreef-accent, #4fd8c3); opacity: 0; transform-box: fill-box; }
+          svg.dg-dosing .dg-dose circle, .dg-dosing .dg-dose circle { animation: dg-drip 1s ease-in infinite; }
+          .dg-ato-run .dg-flow { opacity: 0; animation-play-state: paused; transition: opacity .6s ease; }
+          svg.dg-ato-on .dg-ato-run .dg-flow, .dg-ato-on .dg-ato-run .dg-flow { opacity: .85; animation-play-state: running; }
+          .dg-c4rise { opacity: 0; transition: opacity 6s ease; }
+          svg.dg-loop-off .dg-c4rise, .dg-loop-off .dg-c4rise { opacity: 1; }
+          svg.dg-fuge-on .dg-kelp, .dg-fuge-on .dg-kelp { opacity: .95; }
+          .dg-awc-fill .dg-flow, .dg-awc-drain .dg-flow { opacity: 0; animation-play-state: paused; transition: opacity .6s ease; }
+          svg.dg-awc-filling .dg-awc-fill .dg-flow, .dg-awc-filling .dg-awc-fill .dg-flow { opacity: .85; animation-play-state: running; }
+          svg.dg-awc-draining .dg-awc-drain .dg-flow, .dg-awc-draining .dg-awc-drain .dg-flow { opacity: .85; animation-play-state: running; }
+          .dg-pumpx { transform-box: fill-box; transform-origin: center; animation: dg-spin 1.3s linear infinite; animation-play-state: paused; }
+          svg.dg-awc-filling .dg-awc-fill .dg-pumpx, .dg-awc-filling .dg-awc-fill .dg-pumpx,
+          svg.dg-awc-draining .dg-awc-drain .dg-pumpx, .dg-awc-draining .dg-awc-drain .dg-pumpx { animation-play-state: running; }
+          .dg-slot { fill: rgba(94, 210, 195, .06); stroke: rgba(94, 210, 195, .45); stroke-width: 2; stroke-dasharray: 6 7; opacity: 0; pointer-events: none; transition: opacity .25s ease; }
+          svg.dg-editing .dg-slot, .dg-editing .dg-slot { opacity: 1; }
+          .dg-slot.near { fill: rgba(94, 210, 195, .2); stroke: var(--openreef-accent, #4fd8c3); }
+          svg.dg-editing [data-diag-drag], .dg-editing [data-diag-drag] { cursor: grab; }
+          svg.dg-editing [data-diag-drag] .dg-halo, .dg-editing [data-diag-drag] .dg-halo { opacity: .6; animation: dg-slots 6s linear infinite; }
+          .dg-halo { fill: none; stroke: var(--openreef-accent, #4fd8c3); stroke-width: 2; stroke-dasharray: 6 6; opacity: 0; transition: opacity .25s ease; }
+          .dg-lifted { opacity: .92; }
+          .dg-coral { cursor: pointer; transition: opacity 2.5s ease; }
+          @keyframes dg-csway { 0%, 100% { transform: rotate(calc(var(--dgsw, 1) * -2.6deg)); } 50% { transform: rotate(calc(var(--dgsw, 1) * 2.6deg)); } }
+          @keyframes dg-cswayS { 0%, 100% { transform: rotate(calc(var(--dgsw, 1) * -1.3deg)); } 50% { transform: rotate(calc(var(--dgsw, 1) * 1.3deg)); } }
+          @keyframes dg-cpolyp { 0%, 100% { opacity: .35; } 50% { opacity: .95; } }
+          .dg-csway { animation: dg-csway 7s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+          .dg-cswayS { animation: dg-cswayS 9s ease-in-out infinite; transform-box: fill-box; transform-origin: 50% 100%; }
+          .dg-cpolyp { animation: dg-cpolyp 3.4s ease-in-out infinite; }
+          @keyframes dg-cnew { 0%, 100% { opacity: .74; } 50% { opacity: 1; } }
+          .dg-coral.dg-cnew { animation: dg-cnew 2.4s ease-in-out infinite; }
+          .dg-nightveil { fill: #02080f; opacity: 0; transition: opacity 2.5s ease; pointer-events: none; }
+          svg.dg-night .dg-nightveil, .dg-night .dg-nightveil { opacity: .42; }
+          svg.dg-night .dg-coral, .dg-night .dg-coral { opacity: .6; }
+          @keyframes dg-bundlerise { 0% { transform: translateY(0); opacity: 0; } 12% { opacity: .9; } 78% { opacity: .75; } 100% { transform: translateY(-300px); opacity: 0; } }
+          .dg-spawnlayer circle { fill: #ffb3c8; transform-box: fill-box; animation: dg-bundlerise 7s linear infinite paused; }
+          .dg-spawnlayer { opacity: 0; transition: opacity 2s ease; }
+          svg.dg-spawn .dg-spawnlayer, .dg-spawn .dg-spawnlayer { opacity: 1; }
+          svg.dg-spawn .dg-spawnlayer circle, .dg-spawn .dg-spawnlayer circle { animation-play-state: running; }
+          @media (prefers-reduced-motion: reduce) {
+            .dg-flow, .dg-chev-pulse, .dg-chev-drift, .dg-bubble, .dg-heatglow, .dg-pumpx, .dg-alert-ring, .dg-chip.critical .dg-chip-bg, .dg-scrubjet circle, .dg-scrubcloud circle, .dg-csway, .dg-cswayS, .dg-cpolyp, .dg-coral.dg-cnew, .dg-spawnlayer circle { animation: none !important; }
+          }
+        </style>
+        <defs>
+          <linearGradient id="dgWater" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#1a4a6a" stop-opacity=".95"></stop>
+            <stop offset=".25" stop-color="#14405e" stop-opacity=".95"></stop>
+            <stop offset="1" stop-color="#0b2234" stop-opacity=".98"></stop>
+          </linearGradient>
+          <linearGradient id="dgSump" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#153a55" stop-opacity=".95"></stop>
+            <stop offset="1" stop-color="#0b2234" stop-opacity=".98"></stop>
+          </linearGradient>
+          <linearGradient id="dgSand" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#c8b48a" stop-opacity=".8"></stop>
+            <stop offset="1" stop-color="#8f7d5c" stop-opacity=".8"></stop>
+          </linearGradient>
+          <radialGradient id="dgHeat">
+            <stop offset="0" stop-color="#e8a952" stop-opacity=".5"></stop>
+            <stop offset="1" stop-color="#e8a952" stop-opacity="0"></stop>
+          </radialGradient>
+          <linearGradient id="dgLight" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#dff3ff" stop-opacity=".4"></stop>
+            <stop offset="1" stop-color="#dff3ff" stop-opacity="0"></stop>
+          </linearGradient>
+          <linearGradient id="dgFresh" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#42a5f5" stop-opacity=".85"></stop>
+            <stop offset="1" stop-color="#0d47a1" stop-opacity=".9"></stop>
+          </linearGradient>
+          <linearGradient id="dgWaste" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#8d6e63" stop-opacity=".85"></stop>
+            <stop offset="1" stop-color="#4e342e" stop-opacity=".9"></stop>
+          </linearGradient>
+          <radialGradient id="dgCool">
+            <stop offset="0" stop-color="#7dd3fc" stop-opacity=".4"></stop>
+            <stop offset="1" stop-color="#7dd3fc" stop-opacity="0"></stop>
+          </radialGradient>
+          <radialGradient id="dgViolet">
+            <stop offset="0" stop-color="#c084fc" stop-opacity=".45"></stop>
+            <stop offset="1" stop-color="#c084fc" stop-opacity="0"></stop>
+          </radialGradient>
+          <linearGradient id="dgFugeGlow" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#e879f9" stop-opacity=".38"></stop>
+            <stop offset="1" stop-color="#e879f9" stop-opacity="0"></stop>
+          </linearGradient>
+          ${scene.defs || ""}
+        </defs>
+        ${scene.body}
+      </svg>`;
+  }
+
+  // ---- Spatial alerts: problems light up where they physically are -------
+  // Warning/critical sensors get a pulsing marker at the spot on the schematic
+  // where that reading lives — leak at the cabinet base, temp at the display
+  // water, chemistry at the probe cluster in the sump. Worst first, capped at
+  // three so the wall points rather than shouts.
+
+  _diagramAlertAnchors(systemType) {
+    if (systemType === "aio") {
+      return {
+        leak: [800, 916], temp: [900, 330], sump_temp: [1177, 500],
+        flow: [1140, 216], par: [800, 158], high_water: [1253, 300], low_water: [1253, 300],
+        dissolved_oxygen: [640, 300],
+        "group:chemistry": [470, 540], "group:safety": [800, 916],
+        "group:water": [1253, 300], "group:flow": [1140, 216],
+        "group:lighting": [800, 158], "group:tank": [900, 330], "group:sump": [1177, 500],
+      };
+    }
+    return {
+      leak: [700, 926], temp: [980, 280], sump_temp: [666, 730],
+      flow: [132, 380], par: [700, 78], high_water: [1186, 220], low_water: [1186, 220],
+      dissolved_oxygen: [620, 240],
+      "group:chemistry": [420, 730], "group:safety": [700, 926],
+      "group:water": [1186, 220], "group:flow": [132, 380],
+      "group:lighting": [700, 78], "group:tank": [980, 280], "group:sump": [666, 730],
+    };
+  }
+
+  _diagramAlerts(systemType) {
+    if (this._diagramCfg().showAlerts === false) return [];
+    const anchors = this._diagramAlertAnchors(systemType);
+    // A sensor already on a reading chip announces itself there (the chip
+    // tints and pulses) — a second marker on top would just be clutter.
+    const chipIds = new Set(this._diagramReadings().map((r) => r.id));
+    const out = [];
+    for (const [id, sensor] of Object.entries(this._config.sensors || {})) {
+      if (!sensor || sensor.enabled === false || !sensor.entity_id) continue;
+      if (chipIds.has(id)) continue;
+      const badge = this._liveStatBadge(id, sensor);
+      if (badge.status !== "warning" && badge.status !== "critical") continue;
+      const anchor = anchors[id] || anchors[`group:${sensor.group}`];
+      if (!anchor) continue; // room-air readings have no home on the tank
+      const value = this._sensorDisplayValue(id, sensor);
+      const unit = this._sensorDisplayUnit(id, sensor);
+      out.push({
+        id, status: badge.status, label: sensor.label || id,
+        value: unit ? `${value} ${unit}` : String(value),
+        x: anchor[0], y: anchor[1],
+      });
+    }
+    out.sort((a, b) => (a.status === b.status ? 0 : a.status === "critical" ? -1 : 1));
+    const seen = new Map();
+    for (const alert of out) {
+      const key = `${alert.x},${alert.y}`;
+      const n = seen.get(key) || 0;
+      seen.set(key, n + 1);
+      alert.y += n * 54; // stack alerts sharing an anchor instead of overlapping
+    }
+    return out.slice(0, 3);
+  }
+
+  _diagAlertsKey(alerts) {
+    return alerts.map((a) => `${a.id}:${a.status}`).join("|");
+  }
+
+  _diagAlertsMarkup(systemType) {
+    const alerts = this._diagramAlerts(systemType);
+    const body = alerts.map((a) => {
+      const text = `${a.label} · ${a.value}`;
+      const w = Math.round(24 + text.length * 7.4);
+      const left = a.x > 800; // pill grows toward the middle of the scene
+      const rx = left ? a.x - 30 - w : a.x + 30;
+      return `
+        <g class="dg-alert ${a.status}" data-action="pulse-focus" data-id="sensor:${this._escape(a.id)}" role="button" tabindex="0" style="cursor:pointer;">
+          <title>${this._escape(text)}</title>
+          <circle cx="${a.x}" cy="${a.y}" r="17" class="dg-alert-ring"></circle>
+          <circle cx="${a.x}" cy="${a.y}" r="6" class="dg-alert-core"></circle>
+          <line x1="${left ? a.x - 24 : a.x + 24}" y1="${a.y}" x2="${left ? rx + w : rx}" y2="${a.y}" class="dg-alert-line"></line>
+          <rect x="${rx}" y="${a.y - 17}" width="${w}" height="34" rx="10" class="dg-alert-pill"></rect>
+          <text x="${rx + 12}" y="${a.y + 5}" class="dg-alert-text">${this._escape(text)}</text>
+        </g>`;
+    }).join("");
+    return `<g data-diag-alerts data-diag-alert-key="${this._escape(this._diagAlertsKey(alerts))}">${body}</g>`;
+  }
+
+  // ---- Probe reading chips: live values anchored in the scene ------------
+  // A compact column of probe readings floats in the display water — the
+  // glanceable numbers (temp, pH, salinity, alk…) without leaving the
+  // schematic. Probe-style readings only: room air, PAR and flow stay off
+  // (they live in the stat chips and the alert layer).
+
+  static get DIAGRAM_READING_PRIORITY() {
+    return ["temp", "ph", "salinity", "alkalinity", "sump_temp", "orp", "calcium",
+      "magnesium", "nitrate", "phosphate", "dissolved_oxygen"];
+  }
+
+  // Chip labels break at a word, never mid-word: "Tank Temperature" reads
+  // "TANK", not "TANK TEMPE".
+  _diagChipLabel(label) {
+    const text = String(label || "").toUpperCase();
+    if (text.length <= 12) return text;
+    const cut = text.slice(0, 12);
+    const space = cut.lastIndexOf(" ");
+    return space > 2 ? cut.slice(0, space) : cut;
+  }
+
+  _diagramReadings() {
+    if (this._diagramCfg().showReadings === false) return [];
+    const sensors = this._config.sensors || {};
+    const out = [];
+    for (const id of OpenReefPanel.DIAGRAM_READING_PRIORITY) {
+      const sensor = sensors[id];
+      if (!sensor || sensor.enabled === false || !sensor.entity_id) continue;
+      if (this._sensorKind(sensor, id) === "binary") continue;
+      const badge = this._liveStatBadge(id, sensor);
+      const value = this._sensorDisplayValue(id, sensor);
+      const unit = this._sensorDisplayUnit(id, sensor);
+      out.push({ id, label: sensor.label || id, status: badge.status, value: unit ? `${value} ${unit}` : String(value) });
+      if (out.length === 4) break;
+    }
+    return out;
+  }
+
+  _diagReadingsMarkup(systemType) {
+    const readings = this._diagramReadings();
+    if (!readings.length) return `<g data-diag-readings></g>`;
+    // AiO chips live in the open water upper-left: the top-right corner
+    // belongs to the return nozzle, its jet and the scrub mist.
+    const [x0, y0] = systemType === "aio" ? [460, 252] : [830, 190];
+    const body = readings.map((r, i) => {
+      const y = y0 + i * 42;
+      return `
+        <g class="dg-chip ${r.status}" data-diag-chip-group="${this._escape(r.id)}" data-action="pulse-focus" data-id="sensor:${this._escape(r.id)}" role="button" tabindex="0" style="cursor:pointer;">
+          <rect x="${x0}" y="${y}" width="192" height="34" rx="10" class="dg-chip-bg"></rect>
+          <text x="${x0 + 12}" y="${y + 22}" class="dg-chip-label">${this._escape(this._diagChipLabel(r.label))}</text>
+          <text x="${x0 + 180}" y="${y + 22}" text-anchor="end" class="dg-chip-value" data-diag-chip="${this._escape(r.id)}">${this._escape(r.value)}</text>
+        </g>`;
+    }).join("");
+    return `<g data-diag-readings>${body}</g>`;
+  }
+
+  // ---- AWC on the wall: reservoirs, pumps and change-in-progress flow ----
+  // Drawn only when automatic water change is enabled; levels/badges/status
+  // ride the same summary the AWC tab polls, patched in place.
+
+  _diagAwcEnabled() {
+    return !!this._config?.automaticWaterChange?.enabled;
+  }
+
+  // Keep the AWC summary warm while the diagram is showing its nodes — the
+  // exact refresh gate the AWC tab and the flat Pulse block use (1 s live,
+  // 4 s idle). _awcLoadSummary patches the diagram rather than re-rendering.
+  _diagAwcKickSummary() {
+    if (!this._diagAwcEnabled()) return;
+    const state = this._awcLiveState(this._config.automaticWaterChange);
+    const running = ["draining", "filling", "exchanging"].includes(state.status);
+    const refreshMs = running ? 1000 : 4000;
+    if (!this._awcSummary || Date.now() - (this._awcSummaryAt || 0) > refreshMs) {
+      if (!this._awcSummaryLoading) this._awcLoadSummary();
+    }
+  }
+
+  _diagAwcCanister({ x, y, w, h, kind, label, labelY = 962 }) {
+    const res = this._awcSummary?.summary?.reservoirs || {};
+    const pct = Math.max(0, Math.min(100, Number(res[kind]?.percent) || 0));
+    const innerH = h - 8;
+    const fillH = Math.round(innerH * pct / 100);
+    const grad = kind === "waste" ? "dgWaste" : "dgFresh";
+    const badge = kind === "waste"
+      ? `<g data-diag-awc-badge="wasteFull" style="display:none"><rect x="${x + w / 2 - 26}" y="${y + 6}" width="52" height="17" rx="8" fill="#c62828"></rect><text x="${x + w / 2}" y="${y + 19}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">FULL</text></g>`
+      : kind === "fresh"
+        ? `<g data-diag-awc-badge="freshEmpty" style="display:none"><rect x="${x + w / 2 - 26}" y="${y + 6}" width="52" height="17" rx="8" fill="#c62828"></rect><text x="${x + w / 2}" y="${y + 19}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">EMPTY</text></g>`
+        : "";
+    return `
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="rgba(20,64,94,.35)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
+      <rect x="${x + 4}" y="${y + 4 + innerH - fillH}" width="${w - 8}" height="${fillH}" fill="url(#${grad})"
+            data-diag-awc-level="${kind}" data-dgy="${y + 4}" data-dgh="${innerH}"
+            style="transition: y .6s ease, height .6s ease;"></rect>
+      ${badge}
+      ${label ? `<text x="${x + w / 2}" y="${labelY}" class="dg-lbl" text-anchor="middle">${label}</text>` : ""}`;
+  }
+
+  _diagAwcPump(cx, cy) {
+    return `
+      <circle cx="${cx}" cy="${cy}" r="12" class="dg-shell"></circle>
+      <g class="dg-pumpx"><path d="M ${cx} ${cy - 6} V ${cy + 6} M ${cx - 6} ${cy} H ${cx + 6}" class="dg-line" fill="none"></path></g>`;
+  }
+
+  // Sump scene: fresh saltwater tucked in the cabinet gap left of the sump,
+  // waste in the gap on the right. Drain pulls from the sock chamber over the
+  // top into waste; fill lifts from fresh over the wall into the return
+  // chamber. Both animate only while the summary says water is moving.
+  _diagAwcSumpMarkup() {
+    if (!this._diagAwcEnabled()) return "";
+    const awc = this._config.automaticWaterChange;
+    const multi = !!(awc.pumps?.fill2?.switchEntity || awc.reservoirs?.fresh2);
+    const fresh = multi
+      ? this._diagAwcCanister({ x: 190, y: 704, w: 82, h: 96, kind: "fresh", label: "" })
+        + this._diagAwcCanister({ x: 190, y: 812, w: 82, h: 96, kind: "fresh2", label: "fresh ×2" })
+      : this._diagAwcCanister({ x: 190, y: 704, w: 82, h: 204, kind: "fresh", label: "fresh" });
+    return `
+      <g class="dg-node dg-awc on" data-diag-node="awc-station" data-action="pulse-focus" data-id="awc-station" role="button" tabindex="0">
+        <title>Automatic water change — tap for status</title>
+        ${fresh}
+        ${this._diagAwcCanister({ x: 1128, y: 704, w: 82, h: 204, kind: "waste", label: "waste" })}
+        <g class="dg-awc-fill">${this._diagPipeMarkup([[231, 700], [231, 668], [320, 668], [320, 700]], 9)}${this._diagAwcPump(231, 684)}</g>
+        <g class="dg-awc-drain">${this._diagPipeMarkup([[1096, 760], [1169, 760], [1169, 702]], 9)}${this._diagAwcPump(1169, 732)}</g>
+        <circle cx="1204" cy="712" r="5.5" class="dg-dot"></circle>
+      </g>`;
+  }
+
+  // AiO scene: fresh lives in the cabinet cut-away, waste on the floor to the
+  // right; tubes run over the back like every real AiO install.
+  _diagAwcAioMarkup() {
+    if (!this._diagAwcEnabled()) return "";
+    const awc = this._config.automaticWaterChange;
+    const multi = !!(awc.pumps?.fill2?.switchEntity || awc.reservoirs?.fresh2);
+    return `
+      <g class="dg-node dg-awc on" data-diag-node="awc-station" data-action="pulse-focus" data-id="awc-station" role="button" tabindex="0">
+        <title>Automatic water change — tap for status</title>
+        ${this._diagAwcCanister({ x: 380, y: 720, w: 90, h: 190, kind: "fresh", label: "" })}
+        ${multi ? this._diagAwcCanister({ x: 480, y: 720, w: 90, h: 190, kind: "fresh2", label: "" }) : ""}
+        <text x="${multi ? 475 : 425}" y="926" class="dg-lbl dg-lbl-sm" text-anchor="middle">fresh${multi ? " ×2" : ""}</text>
+        ${this._diagAwcCanister({ x: 1446, y: 716, w: 84, h: 220, kind: "waste", label: "waste" })}
+        <g class="dg-awc-fill">${this._diagPipeMarkup([[425, 716], [425, 698], [1322, 698], [1322, 184], [1120, 184], [1120, 250]], 9)}${multi ? this._diagPipeMarkup([[525, 716], [525, 698]], 9) : ""}${this._diagAwcPump(500, 698)}</g>
+        <g class="dg-awc-drain">${this._diagPipeMarkup([[1268, 646], [1268, 706], [1488, 706], [1488, 714]], 9)}${this._diagAwcPump(1330, 706)}</g>
+        <circle cx="1516" cy="724" r="5.5" class="dg-dot"></circle>
+      </g>`;
+  }
+
+  // Rock silhouette sitting on the sand — pure scene flavour.
+  _diagRockMarkup(x, y, w, k = 1) {
+    return `<path fill="#16334b" opacity=".95" stroke="rgba(127,184,216,.22)" stroke-width="2.5" d="M ${x} ${y} q ${w * .06} ${-70 * k} ${w * .14} ${-64 * k} q ${w * .05} ${-46 * k} ${w * .12} ${-38 * k} q ${w * .06} ${-30 * k} ${w * .11} ${-6 * k} q ${w * .09} ${-20 * k} ${w * .15} ${6 * k} q ${w * .08} ${-40 * k} ${w * .14} ${-20 * k} q ${w * .1} ${-16 * k} ${w * .14} ${24 * k} q ${w * .1} ${40 * k} ${w * .2} ${98 * k} Z"></path>`;
+  }
+
+  _diagKelpMarkup(x, y, h) {
+    return `<path class="dg-kelp" d="M ${x} ${y} q -14 ${-h * .3} 2 ${-h * .55} q 14 ${-h * .25} 4 ${-h} q 10 ${h * .3} 20 ${h * .5} q 8 ${h * .3} -6 ${h * .55} q -10 ${h * .2} -20 ${h * .5} Z"></path>`;
+  }
+
+  _diagSlotsMarkup(systemType, nodes) {
+    const slots = this._diagramSlots(systemType);
+    const kinds = new Set();
+    if (nodes.wavemakers.length) kinds.add("wm");
+    if (nodes.heater) kinds.add("heater");
+    if (nodes.doser) kinds.add("doser");
+    if (nodes.ato && systemType === "aio") kinds.add("ato");
+    if (nodes.air) kinds.add("air");
+    const coralZones = new Set(this._diagramCorals().map(([, c]) => this._coralZone(c.species)));
+    const coralSlots = Object.entries(this._diagramCoralSlots(systemType))
+      .filter(([, slot]) => slot.kinds.some((k) => coralZones.has(k)));
+    return Object.entries(slots)
+      .filter(([, slot]) => slot.kinds.some((k) => kinds.has(k)))
+      .concat(coralSlots)
+      .map(([sid, slot]) => `<rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="14" class="dg-slot" data-diag-slot="${sid}" data-diag-kinds="${slot.kinds.join(",")}"></rect>`)
+      .join("");
+  }
+
+  // ------------------------- sump system scene -----------------------------
+  // Loop reads clockwise: surface skims left→right into the weir, drains to the
+  // sock, crosses the sump right→left (sock → skimmer → refugium → bubble trap
+  // → return), and the riser climbs the left side back over the rim.
+  _diagramSumpScene(nodes, layout, arranging) {
+    const slots = this._diagramSlots("sump");
+    const esc = (v) => this._escape(v);
+    const doserRight = layout.doser !== "leftShelf";
+    const parts = [];
+
+    // display tank water, sand, rock, weir column
+    parts.push(`
+      <rect x="173" y="160" width="1054" height="337" fill="url(#dgWater)"></rect>
+      <rect x="173" y="462" width="1054" height="35" fill="url(#dgSand)"></rect>
+      ${this._diagScapeRock("sump")}
+      <rect x="1148" y="164" width="76" height="332" fill="#0e2c42" opacity=".92"></rect>
+      <line x1="1148" y1="148" x2="1148" y2="497" class="dg-glass-thin"></line>`);
+    parts.push(this._diagCoralsMarkup("sump"));
+    // moonlight veil over the display water; spawning bundles rise off the rock
+    parts.push(`<rect x="173" y="160" width="1054" height="337" class="dg-nightveil"></rect>`);
+    parts.push(this._diagSpawnMarkup(350, 580, 320, 430));
+    let comb = "";
+    for (let x = 1150; x < 1226; x += 9) comb += `<line x1="${x}" y1="148" x2="${x}" y2="170" class="dg-line"></line>`;
+    parts.push(comb);
+    parts.push(`
+      <rect x="170" y="110" width="1060" height="390" class="dg-glass"></rect>
+      <line x1="174" y1="160" x2="1148" y2="160" stroke="rgba(215,230,238,.5)" stroke-width="2"></line>
+      <rect x="170" y="500" width="1060" height="26" class="dg-frame"></rect>
+      <path d="M 178 526 L 178 934 M 1222 526 L 1222 934" stroke="rgba(127,184,216,.25)" stroke-width="8" fill="none"></path>
+      <line x1="60" y1="940" x2="1540" y2="940" stroke="rgba(127,184,216,.14)" stroke-width="2"></line>`);
+
+    // sump: chamber water (return chamber sits lower — evaporation), glass, baffles.
+    // The dg-c4rise cap fades in while the loop is stopped: the display drains
+    // down to the weir and the return chamber visibly comes up.
+    parts.push(`
+      <rect x="283" y="736" width="222" height="161" fill="url(#dgSump)"></rect>
+      <rect x="283" y="700" width="222" height="36" fill="url(#dgSump)" class="dg-c4rise"></rect>
+      <rect x="508" y="700" width="609" height="197" fill="url(#dgSump)"></rect>
+      <rect x="280" y="640" width="840" height="260" class="dg-glass"></rect>
+      <line x1="949" y1="700" x2="949" y2="897" class="dg-glass-thin"></line>
+      <line x1="769" y1="664" x2="769" y2="860" class="dg-glass-thin"></line>
+      <line x1="566" y1="664" x2="566" y2="897" class="dg-glass-thin"></line>
+      <line x1="536" y1="700" x2="536" y2="897" class="dg-glass-thin"></line>
+      <line x1="508" y1="664" x2="508" y2="860" class="dg-glass-thin"></line>
+      <text x="1032" y="962" class="dg-lbl">sock</text>
+      <text x="858" y="962" class="dg-lbl">skimmer</text>
+      <text x="662" y="962" class="dg-lbl">refugium</text>
+      <text x="396" y="962" class="dg-lbl">return</text>`);
+
+    // the loop: surface drift, drain, riser, jet, baffle transfers
+    let drift = "";
+    for (let i = 0; i < 5; i++) {
+      drift += `<g style="animation-delay:${(-i * 0.65).toFixed(2)}s" class="dg-chev-drift"><polygon points="${210 + i * 190},153 ${219 + i * 190},160 ${210 + i * 190},167" class="dg-chev"></polygon></g>`;
+    }
+    parts.push(`
+      <g class="dg-loop">
+        <g clip-path="url(#dgSurf)">${drift}</g>
+        ${this._diagPipeMarkup([[1186, 498], [1186, 588], [1000, 588], [1000, 666]], 16)}
+        ${this._diagPipeMarkup([[370, 800], [370, 600], [132, 600], [132, 92], [206, 92], [206, 140]], 14)}
+        <g class="dg-jet">
+          <path d="M 206 148 L 246 190 M 206 152 L 220 200 M 206 150 L 262 172" fill="none"></path>
+        </g>
+        ${this._diagChevMarkup(949, 688, "l")}
+        ${this._diagChevMarkup(769, 872, "l")}
+        ${this._diagChevMarkup(566, 688, "l")}
+        ${this._diagChevMarkup(522, 872, "l")}
+        ${this._diagChevMarkup(1000, 700, "d")}
+      </g>`);
+
+    // bubble scrubbing: air stone in the return chamber means micro-bubbles
+    // ride the riser — mist off the nozzle, fine fog through the display
+    parts.push(`
+      <g class="dg-scrubjet dg-jetR">
+        <circle cx="208" cy="152" r="3"></circle>
+        <circle cx="211" cy="156" r="2.4" style="animation-delay:-.11s"></circle>
+        <circle cx="207" cy="148" r="2.2" style="animation-delay:-.21s"></circle>
+        <circle cx="212" cy="153" r="2.8" style="animation-delay:-.32s"></circle>
+        <circle cx="209" cy="159" r="2.4" style="animation-delay:-.43s"></circle>
+        <circle cx="213" cy="149" r="2.6" style="animation-delay:-.53s"></circle>
+        <circle cx="210" cy="155" r="2.2" style="animation-delay:-.64s"></circle>
+        <circle cx="212" cy="158" r="2.8" style="animation-delay:-.74s"></circle>
+      </g>
+      ${this._diagScrubCloudMarkup(180, 166, 960, 296, "l")}`);
+
+    // filter sock (static plumbing furniture)
+    parts.push(`
+      <path d="M 972 668 h 56 l -6 66 q -22 14 -44 0 Z" class="dg-sock"></path>
+      <rect x="964" y="660" width="72" height="10" rx="4" class="dg-metal" opacity=".5"></rect>`);
+
+    // return pump — the loop driver
+    if (nodes.ret) {
+      const [id, item] = nodes.ret;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-return", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — the loop stops when this stops`,
+        dot: [416, 794], hit: [320, 784, 104, 86],
+        art: `
+          <rect x="336" y="800" width="70" height="56" rx="10" class="dg-shell"></rect>
+          <circle cx="371" cy="828" r="16" fill="none" class="dg-shell"></circle>
+          <circle cx="371" cy="828" r="5" class="dg-metal"></circle>
+          <rect x="324" y="788" width="96" height="78" rx="12" class="dg-halo"></rect>`,
+      }));
+    } else {
+      parts.push(`
+        <rect x="336" y="800" width="70" height="56" rx="10" class="dg-shell" opacity=".45"></rect>
+        <circle cx="371" cy="828" r="16" fill="none" class="dg-shell" opacity=".45"></circle>`);
+    }
+
+    // skimmer with bubble column
+    if (nodes.skimmer) {
+      const [id, item] = nodes.skimmer;
+      let bubbles = "";
+      for (let i = 0; i < 6; i++) {
+        bubbles += `<circle cx="${834 + (i % 3) * 15}" cy="${800 - (i % 2) * 8}" r="${2.6 + (i % 3)}" class="dg-bubble" style="animation-delay:${(-i * 0.42).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-skimmer", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — protein skimmer`,
+        dot: [890, 626], hit: [806, 616, 88, 246],
+        art: `
+          <rect x="812" y="812" width="74" height="44" rx="8" class="dg-shell"></rect>
+          <rect x="822" y="690" width="54" height="126" rx="10" class="dg-shell"></rect>
+          <rect x="832" y="654" width="34" height="40" class="dg-shell"></rect>
+          <rect x="820" y="622" width="58" height="36" rx="8" class="dg-box"></rect>
+          <ellipse cx="849" cy="640" rx="20" ry="7" class="dg-foam dg-onart"></ellipse>
+          ${bubbles}`,
+      }));
+    }
+
+    // refugium kelp — scene flavour for the third chamber
+    parts.push(this._diagKelpMarkup(636, 892, 120) + this._diagKelpMarkup(676, 892, 96) + this._diagKelpMarkup(704, 892, 130));
+
+    // heater — slotted
+    if (nodes.heater) {
+      const [id, item] = nodes.heater;
+      const slot = slots[layout.heater] || slots.sumpReturn;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-heater", focusId: `equip:${id}`, dragKey: "heater", state: this._diagramNodeState(item),
+        title: `${item.label || id} — heater`,
+        dot: [slot.x + 26, slot.y - 4], hit: [slot.x - 16, slot.y - 12, 48, 92],
+        art: `${this._diagHeaterArt(slot.x, slot.y)}<rect x="${slot.x - 12}" y="${slot.y - 8}" width="40" height="84" rx="10" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // wavemakers — slotted, display circulation only
+    for (const [id, item] of nodes.wavemakers) {
+      const slot = slots[layout[`wm:${id}`]] || slots.glassL;
+      const hx = slot.dir < 0 ? slot.x - 80 : slot.x - 30;
+      const gx = slot.dir < 0 ? slot.x - 74 : slot.x - 26;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-wm", focusId: `equip:${id}`, dragKey: `wm:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — in-tank flow only; the loop keeps running without it`,
+        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [hx, slot.y - 32, 110, 64],
+        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${gx}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // display light — rays over the water when on
+    if (nodes.light) {
+      const [id, item] = nodes.light;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-light", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — display lighting`,
+        dot: [886, 76], hit: [500, 60, 400, 40],
+        art: `
+          <polygon points="520,92 880,92 960,160 440,160" class="dg-rays dg-onart"></polygon>
+          <rect x="500" y="68" width="400" height="22" rx="10" class="dg-box"></rect>`,
+      }));
+    }
+
+    // dosing station — slotted shelf, tubes into the sock chamber
+    if (nodes.doser) {
+      const sx = doserRight ? 1300 : 40;
+      const boxY = 800 - (46 + nodes.doser.length * 38);
+      const tubeY = Math.min(760, boxY + 34);
+      const tube = doserRight
+        ? this._diagTubeMarkup([[sx + 12, tubeY], [1180, tubeY], [1180, 610], [1070, 610], [1070, 664]])
+        : this._diagTubeMarkup([[sx + 178, tubeY], [226, tubeY], [226, 610], [318, 610], [318, 690]]);
+      parts.push(tube);
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-doser", focusId: "doser-station", dragKey: "doser",
+        state: nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off",
+        title: `Dosing pumps — ${nodes.doser.length} channel${nodes.doser.length === 1 ? "" : "s"}`,
+        dot: [sx + 160, boxY + 12], hit: [sx, boxY - 8, 190, 816 - boxY],
+        art: `${this._diagDoserArt(sx, boxY, nodes.doser)}<rect x="${sx + 4}" y="${boxY - 4}" width="182" height="${812 - boxY}" rx="12" class="dg-halo"></rect>`,
+      }));
+      parts.push(`<text x="${sx + 95}" y="962" class="dg-lbl">dosing</text>`);
+    }
+
+    // ATO reservoir — sits on whichever side the doser left free
+    if (nodes.ato) {
+      const [id, item] = nodes.ato;
+      const ax = doserRight ? 48 : 1398;
+      const tube = `<g class="dg-ato-run">${doserRight
+        ? this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 628], [322, 628], [322, 690]], true)
+        : this._diagTubeMarkup([[ax + 46, 792], [ax + 46, 616], [1188, 616], [1188, 700]], true)}</g>`;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-ato", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — auto top-off reservoir`,
+        dot: [ax + 82, 712], hit: [ax - 6, 694, 104, 248],
+        art: `
+          <rect x="${ax}" y="700" width="92" height="236" rx="8" fill="rgba(20,64,94,.5)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
+          <rect x="${ax + 4}" y="790" width="84" height="142" fill="url(#dgSump)"></rect>`,
+      }));
+      parts.push(tube);
+      parts.push(`<text x="${ax + 46}" y="962" class="dg-lbl">ato</text>`);
+    }
+
+    // chiller inline on the return run under the stand
+    if (nodes.chiller) {
+      const [id, item] = nodes.chiller;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-chiller", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — chiller, inline on the return`,
+        dot: [296, 584], hit: [236, 572, 74, 56],
+        art: `
+          <circle cx="272" cy="600" r="44" fill="url(#dgCool)" class="dg-onart"></circle>
+          <rect x="240" y="578" width="64" height="44" rx="8" class="dg-shell"></rect>
+          <line x1="248" y1="592" x2="296" y2="592" class="dg-line" opacity=".6"></line>
+          <line x1="248" y1="606" x2="296" y2="606" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+
+    // UV steriliser inline on the riser
+    if (nodes.uv) {
+      const [id, item] = nodes.uv;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-uv", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — UV steriliser, inline on the return`,
+        dot: [150, 306], hit: [108, 296, 52, 116],
+        art: `
+          <circle cx="132" cy="352" r="52" fill="url(#dgViolet)" class="dg-onart"></circle>
+          <rect x="112" y="300" width="40" height="108" rx="14" class="dg-shell"></rect>
+          <rect x="122" y="312" width="20" height="84" rx="8" fill="rgba(192,132,252,.35)" class="dg-onart"></rect>`,
+      }));
+    }
+
+    // media reactor in the refugium chamber's spare lane
+    if (nodes.reactor) {
+      const [id, item] = nodes.reactor;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-reactor", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — media reactor`,
+        dot: [634, 712], hit: [574, 700, 66, 136],
+        art: `
+          <rect x="580" y="706" width="52" height="124" rx="10" class="dg-shell"></rect>
+          <line x1="586" y1="744" x2="626" y2="744" class="dg-line" opacity=".6"></line>
+          <line x1="586" y1="788" x2="626" y2="788" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+
+    // air stone — return chamber by default, or up in the display (drag it)
+    if (nodes.air) {
+      const [id, item] = nodes.air;
+      const inDisplay = layout.air === "airDisplay";
+      const [ax2, ay2] = inDisplay ? [244, 448] : [292, 876];
+      let bubbles = "";
+      for (let i = 0; i < 5; i++) {
+        bubbles += `<circle cx="${ax2 + 8 + (i % 3) * 8}" cy="${ay2 - 8 - (i % 2) * 10}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-air", focusId: `equip:${id}`, dragKey: "air", state: this._diagramNodeState(item),
+        title: `${item.label || id} — air stone`,
+        // Hit box hugs the stone: the bubble column above it must never steal
+        // taps from the return pump sitting directly overhead.
+        dot: [ax2 + 38, ay2 - 4], hit: [ax2 - 12, ay2 - 18, 40, 36],
+        art: `
+          <rect x="${ax2}" y="${ay2}" width="32" height="10" rx="5" class="dg-shell"></rect>
+          ${bubbles}
+          <rect x="${ax2 - 6}" y="${ay2 - 24}" width="46" height="40" rx="10" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // refugium light over the kelp — reverse-cycle glow
+    if (nodes.fugelight) {
+      const [id, item] = nodes.fugelight;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-fugelight", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — refugium light`,
+        dot: [742, 610], hit: [612, 598, 140, 34],
+        art: `
+          <polygon points="628,626 732,626 762,700 598,700" fill="url(#dgFugeGlow)" class="dg-onart"></polygon>
+          <rect x="620" y="606" width="120" height="18" rx="9" class="dg-box"></rect>`,
+      }));
+    }
+
+    // dose drips at the tube's drop point — animated only while a dose runs
+    if (nodes.doser) {
+      const dropX = doserRight ? 1070 : 318;
+      const dropY = doserRight ? 616 : 616;
+      parts.push(`
+        <g class="dg-dose">
+          <circle cx="${dropX}" cy="${dropY}" r="3.4"></circle>
+          <circle cx="${dropX}" cy="${dropY}" r="3" style="animation-delay:.5s"></circle>
+        </g>`);
+    }
+
+    parts.push(this._diagAwcSumpMarkup());
+    parts.push(this._diagReadingsMarkup("sump"));
+    parts.push(this._diagAlertsMarkup("sump"));
+
+    if (arranging) parts.push(this._diagSlotsMarkup("sump", nodes));
+
+    return {
+      water: "184,176,948,270",
+      defs: `<clipPath id="dgSurf"><rect x="190" y="146" width="900" height="30"></rect></clipPath>`,
+      body: parts.join(""),
+    };
+  }
+
+  // ----------------------- all-in-one (no sump) scene ----------------------
+  // The back wall hides three chambers: media (weir comb feeds it), heater/ATO,
+  // and the return pump, which pipes over the top back into the display.
+  _diagramAioScene(nodes, layout, arranging) {
+    const slots = this._diagramSlots("aio");
+    const parts = [];
+
+    parts.push(`
+      <rect x="303" y="240" width="994" height="417" fill="url(#dgWater)"></rect>
+      <rect x="303" y="616" width="757" height="40" fill="url(#dgSand)"></rect>
+      ${this._diagScapeRock("aio")}
+      <rect x="1060" y="242" width="237" height="414" fill="#0e2c42" opacity=".92"></rect>
+      <line x1="1060" y1="224" x2="1060" y2="656" class="dg-glass-thin"></line>
+      <line x1="1139" y1="248" x2="1139" y2="630" class="dg-glass-thin"></line>
+      <line x1="1215" y1="230" x2="1215" y2="656" class="dg-glass-thin"></line>`);
+    parts.push(this._diagCoralsMarkup("aio"));
+    // moonlight veil over the display water; spawning bundles rise off the rock
+    parts.push(`<rect x="303" y="240" width="757" height="417" class="dg-nightveil"></rect>`);
+    parts.push(this._diagSpawnMarkup(430, 520, 470, 590));
+    let comb = "";
+    // Teeth stop at 1092 so the doser/AWC drop tubes land in clear water
+    // instead of threading the comb.
+    for (let x = 1062; x < 1092; x += 9) comb += `<line x1="${x}" y1="224" x2="${x}" y2="248" class="dg-line"></line>`;
+    parts.push(comb);
+    parts.push(`
+      <rect x="300" y="190" width="1000" height="470" class="dg-glass"></rect>
+      <line x1="304" y1="240" x2="1060" y2="240" stroke="rgba(215,230,238,.5)" stroke-width="2"></line>
+      <rect x="300" y="660" width="1000" height="26" class="dg-frame"></rect>
+      <rect x="316" y="686" width="968" height="244" rx="6" fill="#0d1a2a" stroke="rgba(127,184,216,.18)" stroke-width="2"></rect>
+      <line x1="800" y1="700" x2="800" y2="916" stroke="rgba(127,184,216,.12)" stroke-width="2"></line>
+      <line x1="160" y1="940" x2="1540" y2="940" stroke="rgba(127,184,216,.14)" stroke-width="2"></line>`);
+
+    // the loop: surface drift into the comb, chamber cascade, return over the top
+    let drift = "";
+    for (let i = 0; i < 4; i++) {
+      drift += `<g style="animation-delay:${(-i * 0.7).toFixed(2)}s" class="dg-chev-drift"><polygon points="${340 + i * 190},233 ${349 + i * 190},240 ${340 + i * 190},247" class="dg-chev"></polygon></g>`;
+    }
+    parts.push(`
+      <g class="dg-loop">
+        <g clip-path="url(#dgSurfA)">${drift}</g>
+        ${this._diagChevMarkup(1101, 300, "d")}
+        ${this._diagChevMarkup(1101, 440, "d")}
+        ${this._diagChevMarkup(1139, 636, "r")}
+        ${this._diagChevMarkup(1177, 440, "u")}
+        ${this._diagChevMarkup(1215, 282, "r")}
+        ${this._diagChevMarkup(1253, 380, "d")}
+        ${this._diagPipeMarkup([[1253, 560], [1253, 170], [1020, 170], [1020, 258]], 13)}
+        <g class="dg-jet">
+          <path d="M 1020 264 L 956 306 M 1020 266 L 992 320 M 1020 262 L 938 284" fill="none"></path>
+        </g>
+      </g>`);
+
+    // bubble scrubbing: air stone beside the return sends micro-bubbles
+    // through the pump — a mist off the nozzle, and a fine fog in the water
+    parts.push(`
+      <g class="dg-scrubjet dg-jetL">
+        <circle cx="1018" cy="262" r="3"></circle>
+        <circle cx="1015" cy="266" r="2.4" style="animation-delay:-.11s"></circle>
+        <circle cx="1019" cy="258" r="2.2" style="animation-delay:-.21s"></circle>
+        <circle cx="1014" cy="263" r="2.8" style="animation-delay:-.32s"></circle>
+        <circle cx="1017" cy="269" r="2.4" style="animation-delay:-.43s"></circle>
+        <circle cx="1013" cy="259" r="2.6" style="animation-delay:-.53s"></circle>
+        <circle cx="1016" cy="265" r="2.2" style="animation-delay:-.64s"></circle>
+        <circle cx="1014" cy="268" r="2.8" style="animation-delay:-.74s"></circle>
+      </g>
+      ${this._diagScrubCloudMarkup(312, 254, 736, 340, "r")}`);
+
+    // media basket fills chamber 1, floss riding high so the overflow feeds it
+    parts.push(`
+      <rect x="1070" y="258" width="62" height="172" rx="6" class="dg-shell"></rect>
+      <line x1="1070" y1="322" x2="1132" y2="322" class="dg-line" opacity=".6"></line>
+      <line x1="1070" y1="362" x2="1132" y2="362" class="dg-line" opacity=".6"></line>
+      <line x1="1070" y1="400" x2="1132" y2="400" class="dg-line" opacity=".6"></line>
+      <path d="M 1072 260 h 58 l -5 26 h -48 Z" class="dg-sock"></path>`);
+
+    // return pump in chamber 3
+    if (nodes.ret) {
+      const [id, item] = nodes.ret;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-return", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — the loop stops when this stops`,
+        dot: [1284, 556], hit: [1222, 548, 72, 64],
+        art: `
+          <rect x="1229" y="560" width="48" height="44" rx="8" class="dg-shell"></rect>
+          <circle cx="1253" cy="582" r="11" fill="none" class="dg-shell"></circle>
+          <rect x="1225" y="552" width="60" height="58" rx="10" class="dg-halo"></rect>`,
+      }));
+    } else {
+      parts.push(`<rect x="1229" y="560" width="48" height="44" rx="8" class="dg-shell" opacity=".45"></rect>`);
+    }
+
+    // nano skimmer in chamber 2 — the collection cup rides above the waterline,
+    // where a real cup lives
+    if (nodes.skimmer) {
+      const [id, item] = nodes.skimmer;
+      let bubbles = "";
+      for (let i = 0; i < 4; i++) {
+        bubbles += `<circle cx="${1156 + (i % 2) * 10}" cy="${540 - (i % 2) * 8}" r="${2.4 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-skimmer", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — protein skimmer`,
+        dot: [1184, 206], hit: [1142, 194, 44, 370],
+        art: `
+          <rect x="1148" y="270" width="30" height="290" rx="8" class="dg-shell"></rect>
+          <rect x="1156" y="236" width="14" height="38" class="dg-shell"></rect>
+          <rect x="1146" y="198" width="34" height="40" rx="8" class="dg-box"></rect>
+          <ellipse cx="1163" cy="208" rx="12" ry="4" class="dg-foam dg-onart"></ellipse>
+          ${bubbles}`,
+      }));
+    }
+
+    // heater — slotted (back chamber 2 or in the display)
+    if (nodes.heater) {
+      const [id, item] = nodes.heater;
+      const slot = slots[layout.heater] || slots.ch2;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-heater", focusId: `equip:${id}`, dragKey: "heater", state: this._diagramNodeState(item),
+        title: `${item.label || id} — heater`,
+        dot: [slot.x + 26, slot.y - 4], hit: [slot.x - 16, slot.y - 12, 48, 92],
+        art: `${this._diagHeaterArt(slot.x, slot.y)}<rect x="${slot.x - 12}" y="${slot.y - 8}" width="40" height="84" rx="10" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // wavemakers
+    for (const [id, item] of nodes.wavemakers.slice(0, 3)) {
+      const slot = slots[layout[`wm:${id}`]] || slots.glassL;
+      const hx = slot.dir < 0 ? slot.x - 80 : slot.x - 30;
+      const gx = slot.dir < 0 ? slot.x - 74 : slot.x - 26;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-wm", focusId: `equip:${id}`, dragKey: `wm:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — in-tank flow only; the loop keeps running without it`,
+        dot: [slot.x + 30 * slot.dir, slot.y - 28], hit: [hx, slot.y - 32, 110, 64],
+        art: `${this._diagWavemakerArt(slot.x, slot.y, slot.dir)}<rect x="${gx}" y="${slot.y - 28}" width="100" height="56" rx="12" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // display light
+    if (nodes.light) {
+      const [id, item] = nodes.light;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-light", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — display lighting`,
+        dot: [986, 156], hit: [600, 140, 400, 40],
+        art: `
+          <polygon points="620,172 980,172 1050,240 550,240" class="dg-rays dg-onart"></polygon>
+          <rect x="600" y="148" width="400" height="22" rx="10" class="dg-box"></rect>`,
+      }));
+    }
+
+    // doser on a right-hand shelf. The tube exits the TOP of the station and
+    // runs over the tank rim in its own lane, so it never crosses the ATO run.
+    // The drop point is a slot: media chamber, or the high-flow return chamber
+    // (where kalk wants to be) — drag the station's drip between them.
+    if (nodes.doser) {
+      const sx = 1360;
+      const top = 668 - (46 + nodes.doser.length * 38);
+      const doseReturn = layout.doser === "doseReturn";
+      const dropX = doseReturn ? 1240 : 1101;
+      parts.push(this._diagTubeMarkup([[1400, top], [1400, 132], [dropX, 132], [dropX, 250]]));
+      const heads = nodes.doser.map(([, ch], i) => {
+        const hy = top + 26 + i * 38;
+        const name = this._doserChemicalLabel(ch.chemical) || ch.name || `D${i + 1}`;
+        return `
+          <circle cx="${sx + 44}" cy="${hy}" r="13" class="dg-shell" fill="none"></circle>
+          <circle cx="${sx + 44}" cy="${hy}" r="4" class="dg-metal"></circle>
+          <text x="${sx + 74}" y="${hy + 4}" class="dg-lbl dg-lbl-sm">${this._escape(String(name).slice(0, 8).toUpperCase())}</text>`;
+      }).join("");
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-doser", focusId: "doser-station", dragKey: "doser",
+        state: nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off",
+        title: `Dosing pumps — ${nodes.doser.length} channel${nodes.doser.length === 1 ? "" : "s"}, dripping into the ${doseReturn ? "high-flow return" : "media"} chamber`,
+        dot: [sx + 160, top + 12], hit: [sx, top - 8, 190, 690 - top],
+        art: `
+          <rect x="${sx}" y="668" width="190" height="8" rx="3" class="dg-metal" opacity=".5"></rect>
+          <rect x="${sx + 10}" y="${top}" width="160" height="${668 - top}" rx="12" class="dg-box"></rect>
+          ${heads}
+          <rect x="${sx + 4}" y="${top - 4}" width="182" height="${680 - top}" rx="12" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // ATO reservoir bottom-right. The fill point is a slot: middle chamber by
+    // default, last (return) chamber for setups that top off there — drag the
+    // reservoir onto the chamber in arrange mode. The run stays left of the
+    // dosing shelf so tubes never disappear behind the station.
+    if (nodes.ato) {
+      const [id, item] = nodes.ato;
+      const fillEnd = layout.ato === "atoEnd";
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-ato", focusId: `equip:${id}`, dragKey: "ato", state: this._diagramNodeState(item),
+        title: `${item.label || id} — auto top-off, filling the ${fillEnd ? "return" : "middle"} chamber`,
+        dot: [1426, 726], hit: [1346, 710, 96, 232],
+        art: `
+          <rect x="1352" y="716" width="84" height="220" rx="8" fill="rgba(20,64,94,.5)" stroke="rgba(127,184,216,.45)" stroke-width="3"></rect>
+          <rect x="1356" y="796" width="76" height="136" fill="url(#dgSump)"></rect>
+          <rect x="1348" y="712" width="92" height="228" rx="10" class="dg-halo"></rect>`,
+      }));
+      parts.push(`<g class="dg-ato-run">${this._diagTubeMarkup(fillEnd
+        ? [[1394, 714], [1394, 700], [1336, 700], [1336, 148], [1272, 148], [1272, 248]]
+        : [[1394, 714], [1394, 700], [1336, 700], [1336, 148], [1196, 148], [1196, 262]], true)}</g>`);
+      parts.push(`<text x="1394" y="962" class="dg-lbl">ato</text>`);
+    }
+
+    // chiller and UV steriliser inline on the over-the-top return run
+    if (nodes.chiller) {
+      const [id, item] = nodes.chiller;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-chiller", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — chiller, inline on the return`,
+        dot: [1096, 200], hit: [1036, 190, 74, 56],
+        art: `
+          <circle cx="1070" cy="216" r="42" fill="url(#dgCool)" class="dg-onart"></circle>
+          <rect x="1040" y="196" width="60" height="40" rx="8" class="dg-shell"></rect>
+          <line x1="1048" y1="209" x2="1092" y2="209" class="dg-line" opacity=".6"></line>
+          <line x1="1048" y1="222" x2="1092" y2="222" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+    if (nodes.uv) {
+      const [id, item] = nodes.uv;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-uv", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — UV steriliser, inline on the return`,
+        dot: [1176, 198], hit: [1116, 190, 68, 56],
+        art: `
+          <circle cx="1148" cy="216" r="42" fill="url(#dgViolet)" class="dg-onart"></circle>
+          <rect x="1120" y="196" width="56" height="40" rx="14" class="dg-shell"></rect>
+          <rect x="1130" y="204" width="36" height="24" rx="8" fill="rgba(192,132,252,.35)" class="dg-onart"></rect>`,
+      }));
+    }
+
+    // media reactor in the cabinet cut-away
+    if (nodes.reactor) {
+      const [id, item] = nodes.reactor;
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-reactor", focusId: `equip:${id}`, state: this._diagramNodeState(item),
+        title: `${item.label || id} — media reactor`,
+        dot: [668, 726], hit: [604, 714, 66, 146],
+        art: `
+          <rect x="610" y="720" width="52" height="132" rx="10" class="dg-shell"></rect>
+          <line x1="616" y1="762" x2="656" y2="762" class="dg-line" opacity=".6"></line>
+          <line x1="616" y1="808" x2="656" y2="808" class="dg-line" opacity=".6"></line>`,
+      }));
+    }
+
+    // air stone — display by default, or beside the return pump for bubble
+    // scrubbing rigs (drag it there in arrange mode)
+    if (nodes.air) {
+      const [id, item] = nodes.air;
+      const scrubbing = layout.air === "airCh3";
+      const [sx2, sy2] = scrubbing ? [1226, 640] : [328, 600];
+      let bubbles = "";
+      for (let i = 0; i < 5; i++) {
+        bubbles += `<circle cx="${sx2 + 8 + (i % 3) * 8}" cy="${sy2 - 10 - (i % 2) * 12}" r="${2 + (i % 2)}" class="dg-bubble" style="animation-delay:${(-i * 0.5).toFixed(2)}s"></circle>`;
+      }
+      parts.push(this._diagNodeMarkup({
+        kind: "dg-air", focusId: `equip:${id}`, dragKey: "air", state: this._diagramNodeState(item),
+        title: `${item.label || id} — air stone${scrubbing ? ", scrubbing beside the return" : ""}`,
+        // Hit box hugs the stone: at the scrubbing spot the old tall box sat
+        // right on top of the return pump and swallowed its taps.
+        dot: [sx2 + 38, sy2 - 4], hit: [sx2 - 8, sy2 - 26, 48, 44],
+        art: `
+          <rect x="${sx2}" y="${sy2}" width="32" height="10" rx="5" class="dg-shell"></rect>
+          ${bubbles}
+          <rect x="${sx2 - 6}" y="${sy2 - 24}" width="46" height="40" rx="10" class="dg-halo"></rect>`,
+      }));
+    }
+
+    // dose drips at whichever chamber the tube crests into
+    if (nodes.doser) {
+      const dripX = layout.doser === "doseReturn" ? 1240 : 1101;
+      parts.push(`
+        <g class="dg-dose">
+          <circle cx="${dripX}" cy="256" r="3.4"></circle>
+          <circle cx="${dripX}" cy="256" r="3" style="animation-delay:.5s"></circle>
+        </g>`);
+    }
+
+    parts.push(this._diagAwcAioMarkup());
+    parts.push(this._diagReadingsMarkup("aio"));
+    parts.push(this._diagAlertsMarkup("aio"));
+
+    if (arranging) parts.push(this._diagSlotsMarkup("aio", nodes));
+
+    return {
+      water: "312,254,736,340",
+      defs: `<clipPath id="dgSurfA"><rect x="320" y="226" width="720" height="30"></rect></clipPath>`,
+      body: parts.join(""),
+    };
+  }
+
+  // Patch live states onto the rendered diagram — class toggles only, so the
+  // flow animations never restart mid-cycle.
+  _updatePulseDiagram(svg) {
+    const nodes = this._diagramNodes();
+    const systemType = this._diagramSystemType();
+    const loopOn = nodes.ret ? this._diagramNodeState(nodes.ret[1]) === "on" : false;
+    svg.classList.toggle("dg-loop-off", !loopOn);
+    svg.classList.toggle("dg-scrub", this._diagramScrubOn(systemType, nodes, this._diagramResolvedLayout(systemType, nodes)));
+    const awcLive = this._awcSummary?.live || {};
+    svg.querySelectorAll("[data-diag-node]").forEach((g) => {
+      const key = g.getAttribute("data-diag-node") || "";
+      let state = "gone";
+      if (key === "doser-station") {
+        state = nodes.doser && nodes.doser.some(([, ch]) => ch.enabled !== false) ? "on" : "off";
+      } else if (key === "awc-station") {
+        state = awcLive.leak || awcLive.freshEmpty || awcLive.wasteFull ? "gone" : "on";
+      } else if (key.startsWith("equip:")) {
+        const item = (this._config.equipment || {})[key.slice(6)];
+        state = item ? this._diagramNodeState(item) : "gone";
+      }
+      g.classList.toggle("on", state === "on");
+      g.classList.toggle("off", state === "off");
+      g.classList.toggle("gone", state === "gone");
+    });
+    // AWC: change-in-progress flow, reservoir levels and fault badges.
+    if (this._diagAwcEnabled()) {
+      const state = this._awcLiveState(this._config.automaticWaterChange);
+      svg.classList.toggle("dg-awc-draining", state.status === "draining" || state.status === "exchanging");
+      svg.classList.toggle("dg-awc-filling", state.status === "filling" || state.status === "exchanging");
+      const res = this._awcSummary?.summary?.reservoirs || {};
+      svg.querySelectorAll("[data-diag-awc-level]").forEach((rect) => {
+        const kind = rect.getAttribute("data-diag-awc-level");
+        const pct = Math.max(0, Math.min(100, Number(res[kind]?.percent) || 0));
+        const top = Number(rect.getAttribute("data-dgy"));
+        const innerH = Number(rect.getAttribute("data-dgh"));
+        const fillH = Math.round(innerH * pct / 100);
+        rect.setAttribute("y", String(top + innerH - fillH));
+        rect.setAttribute("height", String(fillH));
+      });
+      svg.querySelectorAll("[data-diag-awc-badge]").forEach((badge) => {
+        badge.style.display = awcLive[badge.getAttribute("data-diag-awc-badge")] ? "" : "none";
+      });
+      this._diagAwcKickSummary();
+    }
+    // ATO trickle and refugium glow follow their switches.
+    svg.classList.toggle("dg-ato-on", nodes.ato ? this._diagramNodeState(nodes.ato[1]) === "on" : false);
+    svg.classList.toggle("dg-fuge-on", nodes.fugelight ? this._diagramNodeState(nodes.fugelight[1]) === "on" : false);
+    // Moonlight and spawning-night follow the display light and the calendar.
+    svg.classList.toggle("dg-night", nodes.light ? this._diagramNodeState(nodes.light[1]) === "off" : false);
+    svg.classList.toggle("dg-spawn", this._diagramSpawnNight(nodes));
+    // Dose drips: a channel's dosed-today counter ticking UP means a real dose
+    // just ran — burst the drip animation for a few seconds.
+    this._diagramDoseWatch = this._diagramDoseWatch || {};
+    let dosed = false;
+    for (const [cid, ch] of Object.entries(this._doserChannels())) {
+      const entity = ch?.driver?.entities?.dosedTodaySensor;
+      if (!entity) continue;
+      const val = this._number(entity);
+      if (val === null) continue;
+      const prev = this._diagramDoseWatch[cid];
+      this._diagramDoseWatch[cid] = val;
+      if (Number.isFinite(prev) && val > prev) dosed = true;
+    }
+    if (dosed) this._diagramDoseUntil = Date.now() + 4500;
+    svg.classList.toggle("dg-dosing", Date.now() < (this._diagramDoseUntil || 0));
+    // Probe chips: retint and update values in place.
+    svg.querySelectorAll("[data-diag-chip-group]").forEach((g) => {
+      const id = g.getAttribute("data-diag-chip-group");
+      const sensor = (this._config.sensors || {})[id];
+      if (!sensor) return;
+      const badge = this._liveStatBadge(id, sensor);
+      g.classList.toggle("warning", badge.status === "warning");
+      g.classList.toggle("critical", badge.status === "critical");
+      const valueEl = g.querySelector("[data-diag-chip]");
+      if (valueEl) {
+        const value = this._sensorDisplayValue(id, sensor);
+        const unit = this._sensorDisplayUnit(id, sensor);
+        valueEl.textContent = unit ? `${value} ${unit}` : String(value);
+      }
+    });
+    // Spatial alerts: swap the marker layer only when the alert SET changes,
+    // so the pulse animation isn't restarted by every value tick.
+    const alertLayer = svg.querySelector("[data-diag-alerts]");
+    if (alertLayer) {
+      const key = this._diagAlertsKey(this._diagramAlerts(systemType));
+      if (alertLayer.getAttribute("data-diag-alert-key") !== key) {
+        alertLayer.outerHTML = this._diagAlertsMarkup(systemType);
+      }
+    }
+  }
+
+  // In-display circulation: a particle gyre plus two fish, spun by whichever
+  // wavemakers are actually running (and a little by the return jet). Purely
+  // decorative — honours prefers-reduced-motion by not starting at all.
+  _startPulseDiagramMotion() {
+    this._stopPulseDiagramMotion();
+    const svg = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-diagram-svg]");
+    if (!svg) return;
+    this._wireDiagramDrag(svg);
+    this._diagKickSpawnCache();
+    if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const water = (svg.getAttribute("data-water") || "").split(",").map(Number);
+    if (water.length !== 4 || water.some((n) => !Number.isFinite(n))) return;
+    const [wx, wy, ww, wh] = water;
+    const nodes = this._diagramNodes();
+    const wmEntities = nodes.wavemakers.map(([, item]) => item.switch_entity_id).filter(Boolean);
+    const retEntity = nodes.ret ? nodes.ret[1].switch_entity_id : "";
+    const NS = "http://www.w3.org/2000/svg";
+    const layer = document.createElementNS(NS, "g");
+    svg.appendChild(layer);
+    const parts = [];
+    for (let i = 0; i < 34; i++) {
+      const el = document.createElementNS(NS, "circle");
+      el.setAttribute("r", (1.6 + Math.random() * 1.6).toFixed(1));
+      el.setAttribute("class", "dg-part");
+      el.setAttribute("opacity", (0.2 + Math.random() * 0.3).toFixed(2));
+      layer.appendChild(el);
+      parts.push({ cx: wx + Math.random() * ww, cy: wy + Math.random() * wh, rx: 30 + Math.random() * 110, ry: 12 + Math.random() * 42, ph: Math.random() * Math.PI * 2, v: 0, el });
+    }
+    const fish = [];
+    for (let i = 0; i < 2; i++) {
+      const el = document.createElementNS(NS, "path");
+      el.setAttribute("d", "M0,0 q10,-8 22,0 q-12,8 -22,0 l-8,6 l2,-6 l-2,-6 Z");
+      el.setAttribute("class", "dg-fish");
+      layer.appendChild(el);
+      // Fish cruise; they don't sprint. Roughly a lap every couple of minutes,
+      // slow enough that the eye rests on the water instead of chasing them.
+      fish.push({ t: Math.random() * 6.28, speed: 0.00045 + i * 0.00025, ry: Math.max(30, wh * 0.18 + i * 30), el });
+    }
+    const motion = { raf: 0, last: 0 };
+    const tick = (ts) => {
+      motion.raf = requestAnimationFrame(tick);
+      if (document.hidden) return;
+      const dt = Math.min(40, ts - (motion.last || ts));
+      motion.last = ts;
+      let energy = 0;
+      if (wmEntities.length) {
+        const on = wmEntities.filter((ent) => this._stateValue(ent) === "on").length;
+        energy += (on / wmEntities.length) * 0.9;
+      }
+      if (retEntity && this._stateValue(retEntity) === "on") energy += 0.12;
+      // Coral sway amplitude rides the same live energy the particles use:
+      // pumps off, the reef goes still (a faint drift stays — water is water).
+      const sw = (0.25 + Math.min(1, energy) * 0.85).toFixed(2);
+      if (sw !== motion.sw) { motion.sw = sw; svg.style.setProperty("--dgsw", sw); }
+      for (const p of parts) {
+        p.v += (energy - p.v) * 0.015; // flow spools up and settles, never snaps
+        p.ph += p.v * dt * 0.0011;
+        const x = p.cx + Math.cos(p.ph) * p.rx;
+        const y = p.cy + Math.sin(p.ph) * p.ry;
+        if (x > wx && x < wx + ww && y > wy && y < wy + wh) {
+          p.el.setAttribute("cx", x.toFixed(1));
+          p.el.setAttribute("cy", y.toFixed(1));
+          p.el.style.display = "";
+        } else {
+          p.el.style.display = "none";
+        }
+      }
+      const fe = Math.max(0.1, energy);
+      for (const f of fish) {
+        f.t += f.speed * dt * (0.4 + fe);
+        const x = wx + ww / 2 + Math.cos(f.t) * (ww / 2 - 70);
+        const y = wy + wh / 2 + Math.sin(f.t * 1.7) * f.ry;
+        const flip = Math.sin(f.t) > 0 ? -1 : 1;
+        f.el.setAttribute("transform", `translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${flip * 1.35} 1.35)`);
+      }
+    };
+    motion.raf = requestAnimationFrame(tick);
+    this._diagramMotion = motion;
+  }
+
+  _stopPulseDiagramMotion() {
+    if (this._diagramMotion) {
+      cancelAnimationFrame(this._diagramMotion.raf);
+      this._diagramMotion = null;
+    }
+    this._diagramDrag = null;
+  }
+
+  // Arrange mode: drag a slotted node, snap to the nearest valid drop zone,
+  // persist the layout silently and re-render so tubes re-route.
+  _wireDiagramDrag(svg) {
+    const toSvg = (e) => {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      return pt.matrixTransform(svg.getScreenCTM().inverse());
+    };
+    svg.addEventListener("pointerdown", (e) => {
+      if (!this._diagramArranging) return;
+      const g = e.target.closest("[data-diag-drag]");
+      if (!g) return;
+      const p = toSvg(e);
+      this._diagramDrag = { g, key: g.getAttribute("data-diag-drag"), x0: p.x, y0: p.y, slot: null };
+      g.classList.add("dg-lifted");
+      try { svg.setPointerCapture(e.pointerId); } catch { /* older Safari */ }
+      e.preventDefault();
+    });
+    svg.addEventListener("pointermove", (e) => {
+      const drag = this._diagramDrag;
+      if (!drag) return;
+      const p = toSvg(e);
+      drag.g.setAttribute("transform", `translate(${(p.x - drag.x0).toFixed(1)} ${(p.y - drag.y0).toFixed(1)})`);
+      const kind = drag.key === "heater" ? "heater" : drag.key === "doser" ? "doser"
+        : drag.key === "ato" ? "ato" : drag.key === "air" ? "air"
+        : drag.key.startsWith("coral:")
+          ? this._coralZone(((this._config.livestock?.corals || {})[drag.key.slice(6)] || {}).species)
+          : "wm";
+      let best = null;
+      let bestD = Infinity;
+      svg.querySelectorAll("[data-diag-slot]").forEach((slotEl) => {
+        const okKind = (slotEl.getAttribute("data-diag-kinds") || "").split(",").includes(kind);
+        const x = Number(slotEl.getAttribute("x")) + Number(slotEl.getAttribute("width")) / 2;
+        const y = Number(slotEl.getAttribute("y")) + Number(slotEl.getAttribute("height")) / 2;
+        const d = Math.hypot(x - p.x, y - p.y);
+        slotEl.classList.toggle("near", okKind && d < 130);
+        if (okKind && d < bestD) { bestD = d; best = slotEl; }
+      });
+      drag.slot = best && bestD < 150 ? best.getAttribute("data-diag-slot") : null;
+    });
+    const drop = () => {
+      const drag = this._diagramDrag;
+      if (!drag) return;
+      this._diagramDrag = null;
+      drag.g.classList.remove("dg-lifted");
+      drag.g.removeAttribute("transform");
+      if (!drag.slot) return;
+      const diagram = this._config.diagram = this._config.diagram || {};
+      const layout = diagram.layout = diagram.layout || {};
+      const vacated = layout[drag.key] || null;
+      for (const [k, v] of Object.entries(layout)) {
+        if (v === drag.slot && k !== drag.key) {
+          if (vacated) layout[k] = vacated;
+          else delete layout[k];
+        }
+      }
+      layout[drag.key] = drag.slot;
+      this._persistConfigSilently();
+      this._render();
+    };
+    svg.addEventListener("pointerup", drop);
+    svg.addEventListener("pointercancel", drop);
+  }
+
+  // Two-step confirm for toggling gear from the wall — same funnel as Mission
+  // Control (openreef/toggle_equipment: admin + armed + safety checks), with an
+  // extra deliberate second tap because a wall tablet invites stray touches.
+  _pulseDiagramToggle(id) {
+    const item = (this._config.equipment || {})[id];
+    if (!item || this._diagramCfg().allowControls === false || item.armed !== true) return;
+    const armed = this._pulseDiagArm && this._pulseDiagArm.id === id && Date.now() - this._pulseDiagArm.at < 8000;
+    if (!armed) {
+      this._pulseDiagArm = { id, at: Date.now() };
+      this._renderPulseFocus();
+      return;
+    }
+    this._pulseDiagArm = null;
+    this._toggleEquipment(id);
   }
 
   // --- Reef Pulse: tap-to-expand detail cards ------------------------------
@@ -12795,12 +16236,33 @@ class OpenReefPanel extends HTMLElement {
 
   _openPulseFocus(key) {
     if (!key || !this._pulseActive) return;
+    // Mid-arrange taps are drags, not detail requests.
+    if (this._diagramArranging) return;
+    this._pulseDiagArm = null;
     this._pulseFocus = key;
     if (key.startsWith("sensor:")) {
       const range = this._pulseCfg().graphRange === "7d" ? "7d" : "24h";
       this._pulseFocusTrend = { key, range, points: null, loading: false };
       this._loadPulseFocusTrend();
     }
+    if (key === "insights") {
+      // Open the deck on the card the user actually tapped.
+      const deck = this._pulseInsightCards();
+      const currentKey = this._pulseInsightKey();
+      const at = deck.findIndex((card) => card.key === currentKey);
+      this._pulseFocusInsightIdx = at >= 0 ? at : 0;
+      this._pulseFocusSlideDir = "";
+    }
+    this._renderPulseFocus();
+  }
+
+  // Step through the expanded insight deck (swipe or arrow taps), wrapping.
+  _pulseFocusInsightNav(step) {
+    const deck = this._pulseInsightCards();
+    if (this._pulseFocus !== "insights" || deck.length < 2) return;
+    const len = deck.length;
+    this._pulseFocusInsightIdx = (((this._pulseFocusInsightIdx + step) % len) + len) % len;
+    this._pulseFocusSlideDir = step > 0 ? "left" : "right";
     this._renderPulseFocus();
   }
 
@@ -12843,7 +16305,13 @@ class OpenReefPanel extends HTMLElement {
     const root = this.shadowRoot && this.shadowRoot.querySelector("[data-pulse-root]");
     const host = root && root.querySelector("[data-pulse-focus-host]");
     if (!host) return;
-    host.innerHTML = this._pulseFocus ? this._pulseFocusMarkup() : "";
+    const html = this._pulseFocus ? this._pulseFocusMarkup() : "";
+    // Skip identical re-renders: the periodic refresh used to replace the DOM
+    // with the same markup, replaying the card's entry animation every cycle.
+    if (html !== this._pulseFocusLastHtml) {
+      host.innerHTML = html;
+      this._pulseFocusLastHtml = html;
+    }
     root.classList.toggle("pulse-has-focus", Boolean(this._pulseFocus));
     this._pulseFocusRenderedAt = Date.now();
   }
@@ -12863,16 +16331,55 @@ class OpenReefPanel extends HTMLElement {
     if (key === "health") body = this._pulseFocusHealthMarkup();
     else if (key === "equipment") body = this._pulseFocusEquipmentMarkup();
     else if (key === "today") body = this._pulseFocusTodayMarkup();
+    else if (key === "insights") body = this._pulseFocusInsightsMarkup();
+    else if (key === "doser-station") body = this._pulseFocusDoserMarkup();
+    else if (key === "awc-station") body = this._pulseFocusAwcMarkup();
+    else if (key && key.startsWith("equip:")) body = this._pulseFocusEquipItemMarkup(key.slice(6));
     else if (key && key.startsWith("sensor:")) body = this._pulseFocusSensorMarkup(key.slice(7));
+    else if (key && key.startsWith("coral:")) body = this._pulseFocusCoralMarkup(key.slice(6));
     if (!body) return "";
     return `
       <div class="pulse-focus">
         <div class="pulse-focus-scrim" data-action="pulse-unfocus"></div>
-        <article class="pulse-focus-card">
+        <article class="pulse-focus-card ${key === "insights" ? "insights" : ""}">
           <button class="pulse-focus-close" data-action="pulse-unfocus" title="Close (Esc)">✕</button>
           ${body}
         </article>
       </div>
+    `;
+  }
+
+  // The expanded insight deck: every story at once, one per page — swipe or
+  // arrows to move, dots for position. Opens on the card that was tapped.
+  _pulseFocusInsightsMarkup() {
+    const deck = this._pulseInsightCards();
+    if (!deck.length) return "";
+    const len = deck.length;
+    const idx = (((this._pulseFocusInsightIdx || 0) % len) + len) % len;
+    const card = deck[idx];
+    const slide = this._pulseFocusSlideDir ? `slide-${this._pulseFocusSlideDir}` : "";
+    return `
+      <div class="pulse-insight-page ${slide}" data-pulse-insight-deck>
+        <header class="pulse-focus-head">
+          <div>
+            <small>${this._escape(card.kicker)}</small>
+            <strong class="pulse-insight-page-title">${this._escape(card.title)}</strong>
+          </div>
+          <span class="pulse-insight-dot big ${this._pulseStatusClass(card.status)}"></span>
+        </header>
+        ${card.detail ? `<p class="pulse-focus-note">${this._escape(card.detail)}</p>` : ""}
+        ${(card.more || []).map((line) => `<p class="pulse-focus-note dim">${this._escape(line)}</p>`).join("")}
+      </div>
+      ${len > 1 ? `
+        <div class="pulse-insight-pager">
+          <button data-action="pulse-insight-nav" data-id="prev" title="Previous insight">‹</button>
+          <div class="pulse-insight-dots">
+            ${deck.map((c, i) => `<span class="${i === idx ? "on" : ""} ${this._pulseStatusClass(c.status)}"></span>`).join("")}
+          </div>
+          <button data-action="pulse-insight-nav" data-id="next" title="Next insight">›</button>
+        </div>
+        <p class="pulse-focus-note dim center">Swipe or use the arrows · ${idx + 1}/${len}</p>
+      ` : ""}
     `;
   }
 
@@ -12979,18 +16486,20 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <span class="pill ${health.status === "ok" ? "ok" : health.status}">${this._escape(health.topReason || "")}</span>
       </header>
-      ${categories.map((cat) => `
-        <div class="pulse-cat">
-          <small>${this._escape(cat.label)}</small>
-          <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "ok" : cat.score >= 70 ? "warning" : "critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
-          <strong>${this._escape(cat.score)}</strong>
-        </div>
-      `).join("")}
+      <div class="pulse-cats">
+        ${categories.map((cat) => `
+          <div class="pulse-cat">
+            <small>${this._escape(cat.label)}</small>
+            <div class="pulse-cat-track"><span class="${cat.score >= 90 ? "is-ok" : cat.score >= 70 ? "is-warning" : "is-critical"}" style="width:${Math.max(3, Math.min(100, Number(cat.score) || 0))}%"></span></div>
+            <strong>${this._escape(cat.score)}</strong>
+          </div>
+        `).join("")}
+      </div>
       ${losses.length ? `
         <div class="pulse-focus-list">
           ${losses.map((loss) => `
             <div class="pulse-focus-row">
-              <span class="pulse-focus-dot ${this._escape(loss.status)}"></span>
+              <span class="pulse-focus-dot ${this._pulseStatusClass(loss.status)}"></span>
               <div><strong>${this._escape(loss.label)}</strong>${loss.detail ? `<small>${this._escape(loss.detail)}</small>` : ""}</div>
               <em>−${this._escape(loss.points)}</em>
             </div>
@@ -12998,6 +16507,132 @@ class OpenReefPanel extends HTMLElement {
         </div>
       ` : `<p class="pulse-focus-note">No score deductions right now — every scoring check is clean.</p>`}
       <p class="pulse-focus-note">${this._escape(health.nextAction || "")}</p>
+    `;
+  }
+
+  // Detail card for one diagram node. Read-only unless the diagram allows
+  // controls AND the equipment is armed — then a two-step tap runs through the
+  // same toggle_equipment safety funnel Mission Control uses.
+  _pulseFocusEquipItemMarkup(id) {
+    const item = (this._config.equipment || {})[id];
+    if (!item) return "";
+    const state = this._stateValue(item.switch_entity_id);
+    const dot = state === "on" ? "on" : state === "off" ? "off" : "gone";
+    const stateLabel = dot === "on" ? "Running" : dot === "off" ? "Off" : "Unavailable";
+    const pill = dot === "on" ? "ok" : dot === "off" ? "unknown" : "critical";
+    const watts = item.power_entity_id ? this._number(item.power_entity_id) : null;
+    const profile = this._equipmentProfile(id, item);
+    const rows = [
+      ["Type", this._equipmentType(id, item)],
+      ["State", stateLabel],
+      Number.isFinite(watts) ? ["Power now", `${this._format(watts, 1)} W`] : null,
+      ["Entity", item.switch_entity_id || "—"],
+    ].filter(Boolean).map(([k, v]) => `
+      <div class="pulse-focus-row">
+        <span class="pulse-focus-dot ${this._pulseStatusClass(k === "State" ? pill : "unknown")}"></span>
+        <div><strong>${this._escape(k)}</strong></div>
+        <em>${this._escape(String(v))}</em>
+      </div>`).join("");
+    const controlsAllowed = this._diagramCfg().allowControls !== false;
+    const canControl = controlsAllowed && item.armed === true && item.switch_entity_id && dot !== "gone";
+    const confirming = this._pulseDiagArm && this._pulseDiagArm.id === id && Date.now() - this._pulseDiagArm.at < 8000;
+    const verb = dot === "on" ? "Turn off" : "Turn on";
+    const loopNote = profile === "return_pump" && dot === "on"
+      ? `<p class="pulse-focus-note">Stopping the return halts all flow between tank and sump — the diagram will show the loop stop.</p>` : "";
+    const wmNote = profile === "display_wavemaker" ? `<p class="pulse-focus-note dim">In-tank circulation only — the return loop keeps running without it.</p>` : "";
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>${this._escape(this._equipmentType(id, item))}</small>
+          <strong>${this._escape(item.label || id)}</strong>
+        </div>
+        <span class="pill ${pill}">${this._escape(stateLabel)}</span>
+      </header>
+      <div class="pulse-focus-list">${rows}</div>
+      ${loopNote}${wmNote}
+      ${canControl ? `
+        <div class="pulse-diag-actions">
+          <button class="pulse-diag-btn ${confirming ? "warn" : dot === "on" ? "" : "go"}" data-action="diagram-toggle" data-id="${this._escape(id)}">
+            ${confirming ? "Tap again to confirm" : `${verb} — safety-checked`}
+          </button>
+        </div>
+        <p class="pulse-focus-note dim">Runs through OpenReef's arming and safety checks, exactly like Mission Control.</p>
+      ` : `
+        <p class="pulse-focus-note dim">${!controlsAllowed
+          ? "Controls are off for this wall — enable them in Settings → Tank diagram."
+          : item.armed !== true
+            ? "Not armed — arm this equipment in Settings → Equipment to control it from the wall."
+            : "Read-only — this entity is unavailable right now."}</p>
+      `}
+    `;
+  }
+
+  // Detail card for the AWC node: status, reservoirs, faults — and Stop when
+  // water is actually moving. Starting a change stays in the Water Change tab.
+  _pulseFocusAwcMarkup() {
+    const awc = this._config?.automaticWaterChange;
+    if (!awc || !awc.enabled) return "";
+    const state = this._awcLiveState(awc);
+    const status = state.status || "idle";
+    const running = ["draining", "filling", "exchanging"].includes(status);
+    const res = this._awcSummary?.summary?.reservoirs || {};
+    const live = this._awcSummary?.live || {};
+    const movedMap = state.movedMl || {};
+    const drainedL = (Number(movedMap.drain) || 0) / 1000;
+    const filledL = (Number(movedMap[state.activeSourceRole || "fill"]) || 0) / 1000;
+    const target = Number(state.targetLitres) || 0;
+    const fault = live.leak ? "Leak detected" : live.wasteFull ? "Waste is full" : live.freshEmpty ? "Fresh is empty" : "";
+    const rows = [
+      ["Fresh saltwater", `${this._format(res.fresh?.remainingL, 1)} L`, "ok"],
+      res.fresh2 ? ["Second source", `${this._format(res.fresh2?.remainingL, 1)} L`, "ok"] : null,
+      ["Waste collected", `${this._format(res.waste?.filledL, 1)} L`, live.wasteFull ? "critical" : "unknown"],
+      running && target > 0 ? ["This change", `${this._format(drainedL, 2)} out · ${this._format(filledL, 2)} of ${this._format(target, 1)} L in`, "ok"] : null,
+    ].filter(Boolean).map(([k, v, dot]) => `
+      <div class="pulse-focus-row">
+        <span class="pulse-focus-dot ${this._pulseStatusClass(dot)}"></span>
+        <div><strong>${this._escape(k)}</strong></div>
+        <em>${this._escape(v)}</em>
+      </div>`).join("");
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Automatic water change</small>
+          <strong>${this._escape(this._awcStatusLabel(status))}</strong>
+        </div>
+        <span class="pill ${fault ? "critical" : running ? "ok" : "unknown"}">${this._escape(fault || (running ? "Water moving" : "Standing by"))}</span>
+      </header>
+      <div class="pulse-focus-list">${rows}</div>
+      ${running ? `
+        <div class="pulse-diag-actions">
+          <button class="pulse-diag-btn warn" data-action="awc-abort">Stop this water change</button>
+        </div>
+      ` : ""}
+      <p class="pulse-focus-note dim">Starting, scheduling and calibration stay in the Water Change tab.</p>
+    `;
+  }
+
+  // Detail card for the dosing station node: every channel at a glance.
+  _pulseFocusDoserMarkup() {
+    const channels = this._doserChannelIds().map((id) => [id, this._doserChannels()[id]]).filter(([, ch]) => ch);
+    if (!channels.length) return "";
+    const rows = channels.map(([id, ch]) => {
+      const on = ch.enabled !== false;
+      return `
+        <div class="pulse-focus-row">
+          <span class="pulse-focus-dot ${on ? "is-ok" : "is-unknown"}"></span>
+          <div><strong>${this._escape(ch.name || id)}</strong><small>${this._escape(this._doserChemicalLabel(ch.chemical))}</small></div>
+          <em>${on ? "Scheduled" : "Paused"}</em>
+        </div>`;
+    }).join("");
+    return `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Dosing pumps</small>
+          <strong>${channels.length} channel${channels.length === 1 ? "" : "s"}</strong>
+        </div>
+      </header>
+      <div class="pulse-focus-list">${rows}</div>
+      <p class="pulse-focus-note dim">Dosing changes stay in the Dosing tab — schedules, calibration and guards live there.</p>
     `;
   }
 
@@ -13013,7 +16648,7 @@ class OpenReefPanel extends HTMLElement {
       if (Number.isFinite(watts)) totalW += watts;
       return `
         <div class="pulse-focus-row">
-          <span class="pulse-focus-dot ${dot === "on" ? "ok" : dot === "off" ? "unknown" : "critical"}"></span>
+          <span class="pulse-focus-dot ${this._pulseStatusClass(dot === "on" ? "ok" : dot === "off" ? "unknown" : "critical")}"></span>
           <div><strong>${this._escape(item.label || id)}</strong><small>${label}</small></div>
           <em>${Number.isFinite(watts) ? `${this._format(watts, 1)} W` : ""}</em>
         </div>
@@ -13052,7 +16687,7 @@ class OpenReefPanel extends HTMLElement {
       const when = dueNow ? (entry.state.status === "critical" ? "overdue" : "due now") : days <= 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`;
       return `
         <div class="pulse-focus-row">
-          <span class="pulse-focus-dot ${entry.state.status === "critical" ? "critical" : entry.state.status === "warning" ? "warning" : "ok"}"></span>
+          <span class="pulse-focus-dot ${this._pulseStatusClass(entry.state.status === "critical" ? "critical" : entry.state.status === "warning" ? "warning" : "ok")}"></span>
           <div><strong>${this._escape(entry.task.label)}</strong><small>${this._escape(entry.state.label || "")}</small></div>
           <em>${this._escape(when)}</em>
         </div>
@@ -15773,6 +19408,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._feedWatchSettings()}
         ${this._visionSettings()}
         ${this._pulseSettings()}
+        ${this._diagramSettings()}
         ${this._modePreviewSettings()}
         ${this._alertsSettings()}
         ${this._lightingScheduleSettings()}
@@ -17031,6 +20667,8 @@ class OpenReefPanel extends HTMLElement {
       ["showMode", "Current mode", "Running / Feed / Maintenance pill in the header."],
       ["showBuddy", "Reef Buddy", "Corner avatar with rotating calm-only quips."],
       ["showClock", "Clock", "Live clock next to the tank name."],
+      ["showInsights", "Insight cards", "A rotating story card — consumption projections, test nags, tonight's moon, trust checks. The wall explains itself."],
+      ["showShare", "Share button", "One-tap share of the live Pulse view — your wall, stats baked on, straight to the share sheet."],
       ["showSparklines", "Sparkline graphs", "Mini history graphs on the data-wall tiles."],
       ["showCategories", "Health breakdown", "Six category bars on the data wall — the why behind the ring."],
       ["showEquipment", "Equipment dots", "Read-only running/off/unavailable chips on the data wall."],
@@ -17039,7 +20677,7 @@ class OpenReefPanel extends HTMLElement {
     return this._settingsPanel(
       "pulse",
       "Reef Pulse",
-      "Full-screen presentation mode — a live wall display for a tank-side tablet or showing off. Display-only: no equipment can be controlled from the Pulse screen.",
+      "Full-screen presentation mode — a live wall display for a tank-side tablet or showing off. Display-first: only the Tank diagram backdrop can control gear, and only armed gear, behind a two-step confirm.",
       `
         <label class="toggle-card">
           <input type="checkbox" data-scope="pulse" data-field="enabled" ${cfg.enabled === false ? "" : "checked"}>
@@ -17049,12 +20687,39 @@ class OpenReefPanel extends HTMLElement {
           </span>
         </label>
         ${cfg.enabled === false ? "" : `
+          <div class="pulse-faces">
+            <small class="muted">Faces — one-tap starting points. Every toggle below stays adjustable afterwards; remember to Save.</small>
+            <div class="pulse-face-row">
+              ${Object.entries(this._pulseFaces()).map(([id, face]) => `
+                <button class="secondary pulse-face-btn" data-action="pulse-face" data-id="${this._escape(id)}">
+                  <strong>${this._escape(face.label)}</strong>
+                  <small>${this._escape(face.hint)}</small>
+                </button>
+              `).join("")}
+            </div>
+          </div>
           <div class="mini-grid">
             <label>Backdrop
               <select data-scope="pulse" data-field="backdrop">
-                <option value="auto" ${cfg.backdrop !== "camera" && cfg.backdrop !== "wall" ? "selected" : ""}>Auto — camera when online, else data wall</option>
+                <option value="auto" ${!["camera", "wall", "timelapse", "diagram"].includes(cfg.backdrop) ? "selected" : ""}>Auto — camera when online, else data wall</option>
                 <option value="camera" ${cfg.backdrop === "camera" ? "selected" : ""}>Camera</option>
                 <option value="wall" ${cfg.backdrop === "wall" ? "selected" : ""}>Data wall</option>
+                <option value="timelapse" ${cfg.backdrop === "timelapse" ? "selected" : ""}>Timelapse — your reef's history as wallpaper</option>
+                <option value="diagram" ${cfg.backdrop === "diagram" ? "selected" : ""}>Tank diagram — your system as a living schematic</option>
+              </select>
+            </label>
+            ${cfg.backdrop === "timelapse" ? `
+              <label>Timelapse style
+                <select data-scope="pulse" data-field="timelapseStyle">
+                  <option value="growth" ${cfg.timelapseStyle !== "day" ? "selected" : ""}>Growth — one frame per day, months of coral growth</option>
+                  <option value="day" ${cfg.timelapseStyle === "day" ? "selected" : ""}>Day replay — the most recent frames</option>
+                </select>
+              </label>
+            ` : ""}
+            <label>Viewing distance
+              <select data-scope="pulse" data-field="sizePreset">
+                <option value="normal" ${cfg.sizePreset !== "far" ? "selected" : ""}>Arm's length — standard sizing</option>
+                <option value="far" ${cfg.sizePreset === "far" ? "selected" : ""}>Across the room — bigger numbers, readable from the couch</option>
               </select>
             </label>
             <label>Camera
@@ -17107,10 +20772,93 @@ class OpenReefPanel extends HTMLElement {
               <label>Until
                 <input type="time" data-scope="pulse" data-field="nightDimTo" value="${this._escape(cfg.nightDimTo || "07:00")}">
               </label>
+              <label>Room light sensor (optional)
+                <input type="text" data-scope="pulse" data-field="nightDimLuxEntity" placeholder="sensor.fish_room_illuminance" value="${this._escape(cfg.nightDimLuxEntity || "")}">
+              </label>
+              <label>Dim below (lux)
+                <input type="number" min="1" step="1" data-scope="pulse" data-field="nightDimLuxThreshold" value="${this._escape(String(cfg.nightDimLuxThreshold || 10))}">
+              </label>
             </div>
+            <p class="muted">With a lux sensor mapped, the wall follows the actual room light — it dims with your reef's photoperiod instead of the clock. The clock window is the fallback when the sensor is unavailable.</p>
           ` : ""}
+          <details class="pulse-wall-guide">
+            <summary><strong>Wall tablet setup</strong> — get a tablet running Pulse 24/7</summary>
+            <div class="stack">
+              <p class="muted"><strong>Any tablet:</strong> bookmark this panel with <code>?pulse=1</code> on the URL (or enable kiosk auto-start above) and keep the tablet plugged in.</p>
+              <p class="muted"><strong>iPad:</strong> Keep-screen-awake needs HTTPS (Nabu Casa or a local certificate) and Safari 16.4+. Belt and braces: Settings → Display &amp; Brightness → Auto-Lock → Never. If you add the panel to the Home Screen as a web app, iOS 18.4+ is needed for wake lock there. Guided Access can silently defeat wake-lock — prefer Auto-Lock Never.</p>
+              <p class="muted"><strong>Android / Fire tablet:</strong> use Fully Kiosk Browser — its motion-detection screen wake pairs perfectly with Pulse's night dim, and the Home Assistant Fully Kiosk integration lets automations wake the screen when someone walks up.</p>
+              <p class="muted"><strong>Burn-in:</strong> Pulse is safe to leave on 24/7 — the HUD drifts a few pixels on a slow orbit and night dim cuts brightness, the two mitigations displays actually need.</p>
+            </div>
+          </details>
           <p class="muted">No camera mapped or online? Pulse still works as a full-screen data wall. Tap any tile, chip or panel on the Pulse screen for a bigger detail card.</p>
         `}
+      `,
+      forceOpen,
+    );
+  }
+
+  _diagramSettings(forceOpen = false) {
+    const cfg = this._diagramCfg();
+    const nodes = this._diagramNodes();
+    const mapped = [
+      nodes.ret ? "return pump" : "",
+      nodes.wavemakers.length ? `${nodes.wavemakers.length} wavemaker${nodes.wavemakers.length === 1 ? "" : "s"}` : "",
+      nodes.heater ? "heater" : "",
+      nodes.skimmer ? "skimmer" : "",
+      nodes.ato ? "ATO" : "",
+      nodes.light ? "lighting" : "",
+      nodes.doser ? `${nodes.doser.length} dosing channel${nodes.doser.length === 1 ? "" : "s"}` : "",
+    ].filter(Boolean);
+    return this._settingsPanel(
+      "diagram",
+      "Tank diagram",
+      "A living schematic of your actual system for the Reef Pulse wall — flow animates with your pumps, gear is tappable.",
+      `
+        <div class="mini-grid">
+          <label>System type
+            <select data-scope="diagram" data-field="systemType">
+              <option value="sump" ${cfg.systemType !== "aio" ? "selected" : ""}>Sump — display drains to a sump below</option>
+              <option value="aio" ${cfg.systemType === "aio" ? "selected" : ""}>All-in-one — back-chamber filtration, no sump</option>
+            </select>
+          </label>
+          <label>Aquascape
+            <select data-scope="diagram" data-field="scape">
+              <option value="island" ${!["twinpeaks", "slope", "arch", "pillars", "peninsula", "valley"].includes(cfg.scape) ? "selected" : ""}>Island — one mound, open sand both sides</option>
+              <option value="twinpeaks" ${cfg.scape === "twinpeaks" ? "selected" : ""}>Twin peaks — two mounds, a sand channel between</option>
+              <option value="slope" ${cfg.scape === "slope" ? "selected" : ""}>Slope — reef crest high on the left, easing to sand</option>
+              <option value="arch" ${cfg.scape === "arch" ? "selected" : ""}>Arch — a span on two pillars, with a cave at one end</option>
+              <option value="pillars" ${cfg.scape === "pillars" ? "selected" : ""}>Pillars — three bommies, maximum open water (NSA)</option>
+              <option value="peninsula" ${cfg.scape === "peninsula" ? "selected" : ""}>Peninsula — rock running from the wall into open sand</option>
+              <option value="valley" ${cfg.scape === "valley" ? "selected" : ""}>Valley — high sides, a sand channel down the middle</option>
+            </select>
+          </label>
+        </div>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="diagram" data-field="allowControls" ${cfg.allowControls === false ? "" : "checked"}>
+          <span>
+            <strong>Allow controls from the wall</strong>
+            <small>Tapping gear on the diagram offers a two-step toggle for ARMED equipment only, through the same safety checks as Mission Control. Off = the diagram is look-but-don't-touch.</small>
+          </span>
+        </label>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="diagram" data-field="showAlerts" ${cfg.showAlerts === false ? "" : "checked"}>
+          <span>
+            <strong>Alerts light up where they are</strong>
+            <small>A warning or critical reading pulses at its physical spot — leak at the cabinet base, temperature at the display, chemistry at the probe cluster. Worst first, capped at three.</small>
+          </span>
+        </label>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="diagram" data-field="showReadings" ${cfg.showReadings === false ? "" : "checked"}>
+          <span>
+            <strong>Probe readings in the water</strong>
+            <small>A small column of live values (temp, pH, salinity, alk…) floats in the display — up to four, tinted when out of range, tappable for history.</small>
+          </span>
+        </label>
+        ${this._coralRegistryMarkup()}
+        <p class="muted">${mapped.length
+          ? `On your diagram right now: ${this._escape(mapped.join(", "))}. It draws whatever is switch-mapped in Equipment (plus your dosing channels) — map more gear and it appears.`
+          : "Nothing to draw yet — map your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears on the diagram automatically."}</p>
+        <p class="muted">To see it: set the Reef Pulse backdrop to <strong>Tank diagram</strong> (or tap the Living Diagram face), then Present — or just open the Diagram tab. Arrange mode (✎) drags wavemakers, the heater, the dosing station and the air stone between highlighted spots; on all-in-ones you can also drop the ATO reservoir onto the chamber it fills and put the heater in any back chamber. Pipework re-routes itself.</p>
       `,
       forceOpen,
     );
@@ -18976,6 +22724,24 @@ class OpenReefPanel extends HTMLElement {
         .eyebrow, .muted, .hint, small, .topbar p, .section-head p, .row span { color: #8da2ba; }
         .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
         .actions, .button-row, .quick-add, .wizard-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .coral-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-top: 10px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 12px; }
+        .coral-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+        .coral-row-main strong { font-size: .95rem; }
+        .coral-name { background: transparent; border: 1px solid transparent; border-radius: 8px; color: inherit; font-weight: 600; font-size: .95rem; padding: 2px 6px; margin-left: -7px; max-width: 100%; }
+        .coral-name:hover, .coral-name:focus { border-color: var(--openreef-border, rgba(127, 184, 216, .35)); outline: none; }
+        .coral-dot { width: 14px; height: 14px; border-radius: 50%; flex: none; box-shadow: 0 0 10px 1px currentColor; }
+        .coral-photo { display: block; max-width: 100%; max-height: 260px; border-radius: 12px; margin-bottom: 12px; object-fit: cover; }
+        .coral-notes-label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; font-size: .9rem; }
+        .coral-notes { resize: vertical; min-height: 64px; }
+        .coral-upload { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 10px; }
+        .coral-species-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+        .coral-tile { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 10px; background: transparent; cursor: pointer; color: inherit; }
+        .coral-tile svg { width: 62px; height: 58px; display: block; }
+        .coral-tile small { font-size: 10.5px; line-height: 1.15; text-align: center; color: var(--openreef-muted, #9fc7e0); }
+        .coral-tile.selected { border-color: var(--openreef-accent, #4fd8c3); box-shadow: 0 0 0 1px var(--openreef-accent, #4fd8c3) inset; }
+        .coral-swatches { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+        .coral-swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+        .coral-swatch.selected { border-color: #f4fbff; box-shadow: 0 0 8px 1px currentColor; }
         .button-row.end { justify-content: flex-end; }
         .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button, .mode-button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
@@ -19506,6 +23272,63 @@ class OpenReefPanel extends HTMLElement {
         /* A reading that actually changed announces itself for a beat. */
         .stat-bump { animation: pulse-stat-bump .7s ease; }
         @keyframes pulse-stat-bump { 30% { transform: scale(1.07); text-shadow: 0 0 14px rgba(125, 211, 252, .8); } }
+        /* Insight card: one rotating story at a time; the swap animates once
+           per rotation (the card is only replaced when its key changes). */
+        .pulse-insight { animation: pulse-insight-in .6s ease; }
+        .pulse-insight-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+        .pulse-insight > strong { font-size: 16px; font-weight: 800; color: #fff; line-height: 1.35; }
+        .pulse-insight-detail { font-size: 12px; font-weight: 600; color: #9fc7e0; line-height: 1.4; }
+        .pulse-insight-dot { width: 10px; height: 10px; padding: 0; border: 0; box-sizing: border-box; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); flex: 0 0 auto; }
+        .pulse-insight-dot.is-warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
+        .pulse-insight-dot.is-critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
+        @keyframes pulse-insight-in { from { opacity: 0; transform: translateY(8px); } }
+        /* Camera/timelapse layout: the insight rides as a compact glass strip
+           above the stat chips instead of a wall block. */
+        .pulse-insight.compact { max-width: 560px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 12px; padding: 10px 14px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); display: grid; gap: 3px; }
+        .pulse-insight.compact > strong { font-size: 14px; }
+        /* Timelapse living backdrop: two stacked layers crossfade on load. */
+        .pulse-tl { opacity: 0; transition: opacity 1.8s ease; }
+        .pulse-tl.show { opacity: 1; }
+        .pulse-tl-stamp { position: absolute; right: 26px; top: 96px; z-index: 1; padding: 4px 12px; border-radius: 8px; background: rgba(4, 10, 16, .6); backdrop-filter: blur(8px); color: #cfe7f5; font-weight: 800; font-size: 12px; font-variant-numeric: tabular-nums; }
+        .pulse-tl-stamp:empty { display: none; }
+        /* "Across the room" preset: primary numerals sized for couch distance. */
+        .pulse-far .pulse-tile > strong { font-size: clamp(30px, 3.6vw, 44px); }
+        .pulse-far .pulse-chip strong { font-size: clamp(22px, 2.8vw, 32px); }
+        .pulse-far .pulse-clock { font-size: clamp(26px, 3.4vw, 40px); }
+        .pulse-far .pulse-hero .pulse-ring { width: clamp(180px, 30vh, 310px); }
+        .pulse-far .pulse-hero .pulse-ring-text strong { font-size: clamp(46px, 7.5vh, 80px); }
+        .pulse-far .pulse-insight > strong { font-size: 19px; }
+        .pulse-far .pulse-insight-detail { font-size: 14px; }
+        .pulse-far .pulse-today-row strong, .pulse-far .pulse-cat strong { font-size: 15px; }
+        /* Share button rides in the same corner column as close. Double-class
+           selector: .pulse-close's own top:22px is declared later in this
+           sheet and would win the tie, stacking share invisibly under ✕. */
+        .pulse-close.pulse-share { top: 74px; font-size: 19px; }
+        /* Living tank diagram backdrop: the schematic fills the space between
+           the Pulse header and footer; letterboxing keeps its aspect. */
+        .pulse-diagram { position: absolute; inset: 84px 18px 96px; display: flex; align-items: center; justify-content: center; }
+        /* Diagram tab: same scene in a framed stage inside the panel. */
+        .panel.diagram-stage { background: #060e17; border: 1px solid #24364a; border-radius: 14px; padding: 8px; aspect-ratio: 16 / 10; max-height: 74vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .panel.diagram-stage svg { width: 100%; height: 100%; touch-action: none; }
+        .pulse-diagram svg { width: 100%; height: 100%; touch-action: none; }
+        .pulse-close.pulse-arrange { top: 126px; font-size: 16px; }
+        .pulse-close.pulse-arrange.active { opacity: 1; border-color: rgba(245, 158, 11, .7); color: #fde68a; }
+        .pulse-diag-note { position: absolute; top: 92px; left: 50%; transform: translateX(-50%); z-index: 2; padding: 7px 16px; border-radius: 999px; background: rgba(4, 10, 16, .65); backdrop-filter: blur(8px); color: #fde68a; font-weight: 800; font-size: 12px; white-space: nowrap; }
+        .pulse-diag-actions { display: flex; gap: 10px; }
+        .pulse-diag-btn { flex: 1; border: 1px solid var(--openreef-accent-border, rgba(255, 255, 255, .25)); border-radius: 12px; padding: 13px 18px; background: rgba(4, 10, 16, .55); color: #e5edf5; font-weight: 800; font-size: 14px; cursor: pointer; transition: border-color .2s ease; }
+        .pulse-diag-btn.go { border-color: var(--openreef-accent); color: var(--openreef-accent); }
+        .pulse-diag-btn.warn { border-color: rgba(245, 158, 11, .7); color: #fde68a; }
+        /* Settings: face preset buttons. */
+        .pulse-faces { display: grid; gap: 8px; }
+        .pulse-face-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+        .pulse-face-btn { display: grid; gap: 3px; text-align: left; padding: 12px 14px; }
+        .pulse-face-btn strong { font-size: 14px; }
+        .pulse-face-btn small { color: #8da2ba; font-weight: 600; line-height: 1.35; white-space: normal; }
+        /* Settings: the wall-tablet setup accordion. */
+        .pulse-wall-guide { border: 1px solid #24364a; border-radius: 8px; padding: 12px 14px; background: #0b1724; }
+        .pulse-wall-guide summary { cursor: pointer; color: #dcecff; }
+        .pulse-wall-guide[open] summary { margin-bottom: 10px; }
+        .pulse-wall-guide .stack { display: grid; gap: 8px; }
         @media (prefers-reduced-motion: reduce) { .pulse-datawall::before, .pulse-datawall::after, .stat-bump { animation: none !important; } }
         .pulse-shade { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(4, 8, 13, .66), transparent 26%), linear-gradient(0deg, rgba(4, 8, 13, .78), transparent 36%); }
         .pulse-head { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 26px 30px 0; }
@@ -19521,32 +23344,32 @@ class OpenReefPanel extends HTMLElement {
            mood escalates with the verdict: calm drift when green, brisk amber
            sweep when warning, urgent red throb when critical — and a dead-still
            grey ring when the score isn't a verdict at all. */
-        .pulse-ring { position: relative; width: clamp(96px, 11vw, 150px); aspect-ratio: 1; animation: pulse-breathe 5.5s ease-in-out infinite; perspective: 420px; --ring-c: 34, 197, 94; }
-        .pulse-ring.warning { --ring-c: 245, 158, 11; }
-        .pulse-ring.critical { --ring-c: 239, 68, 68; }
-        .pulse-ring.unknown { --ring-c: 100, 116, 139; }
+        .pulse-ring { position: relative; padding: 0; border: 0; background: none; width: clamp(96px, 11vw, 150px); aspect-ratio: 1; animation: pulse-breathe 5.5s ease-in-out infinite; perspective: 420px; --ring-c: 34, 197, 94; }
+        .pulse-ring.is-warning { --ring-c: 245, 158, 11; }
+        .pulse-ring.is-critical { --ring-c: 239, 68, 68; }
+        .pulse-ring.is-unknown { --ring-c: 100, 116, 139; }
         .pulse-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
         .pulse-ring-track { fill: none; stroke: rgba(255, 255, 255, .15); stroke-width: 9; }
         .pulse-ring-arc { fill: none; stroke: rgb(var(--ring-c)); stroke-width: 9; stroke-linecap: round; transition: stroke-dashoffset .8s ease, stroke .8s ease; filter: drop-shadow(0 0 7px rgba(var(--ring-c), .55)); }
-        .pulse-ring.critical .pulse-ring-arc { animation: pulse-throb 1.3s ease-in-out infinite; }
+        .pulse-ring.is-critical .pulse-ring-arc { animation: pulse-throb 1.3s ease-in-out infinite; }
         /* Glassy depth: an off-centre highlight + inner tint that reads as a lens. */
         .pulse-ring::before { content: ""; position: absolute; inset: 11%; border-radius: 50%; pointer-events: none; background: radial-gradient(circle at 36% 30%, rgba(255, 255, 255, .09), transparent 52%), radial-gradient(circle at 52% 66%, rgba(var(--ring-c), .12), transparent 72%); }
         /* Rotating aurora behind the ring, masked to a halo band. */
         .pulse-ring-halo { position: absolute; inset: -12%; border-radius: 50%; pointer-events: none; background: conic-gradient(from 0deg, transparent 0deg, transparent 200deg, rgba(var(--ring-c), .55) 300deg, rgba(var(--ring-c), .15) 340deg, transparent 360deg); filter: blur(9px); -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 68%, #000 88%, transparent 96%); mask: radial-gradient(closest-side, transparent 56%, #000 68%, #000 88%, transparent 96%); animation: pulse-orbit 9s linear infinite; }
-        .pulse-ring.warning .pulse-ring-halo { animation-duration: 5s; }
-        .pulse-ring.critical .pulse-ring-halo { animation-duration: 2.6s; }
+        .pulse-ring.is-warning .pulse-ring-halo { animation-duration: 5s; }
+        .pulse-ring.is-critical .pulse-ring-halo { animation-duration: 2.6s; }
         /* ≥95 and calm: the aurora slowly cycles hue — the tank is showing off. */
-        .pulse-ring.elite .pulse-ring-halo { animation: pulse-orbit 9s linear infinite, pulse-hue 16s linear infinite; }
+        .pulse-ring.is-elite .pulse-ring-halo { animation: pulse-orbit 9s linear infinite, pulse-hue 16s linear infinite; }
         /* The tilt layer gives the whole dial a slow gyroscopic wobble. */
         .pulse-ring-tilt { position: absolute; inset: 0; animation: pulse-tilt 12s ease-in-out infinite; will-change: transform; }
         /* A bright comet orbiting the dial — the "alive" signal, paced by mood. */
         .pulse-ring-comet { fill: none; stroke: rgba(var(--ring-c), .95); stroke-width: 9; stroke-linecap: round; mix-blend-mode: screen; filter: blur(1.5px) drop-shadow(0 0 9px rgba(var(--ring-c), .9)) brightness(1.35); transform-box: fill-box; transform-origin: center; animation: pulse-orbit 8s linear infinite; }
-        .pulse-ring.warning .pulse-ring-comet { animation-duration: 4s; }
-        .pulse-ring.critical .pulse-ring-comet { animation-duration: 1.8s; }
+        .pulse-ring.is-warning .pulse-ring-comet { animation-duration: 4s; }
+        .pulse-ring.is-critical .pulse-ring-comet { animation-duration: 1.8s; }
         /* Unknown = unmeasured: no comet, no aurora, no wobble. A grey ring that
            performs would be a lie about a tank nobody is measuring. */
-        .pulse-ring.unknown .pulse-ring-comet, .pulse-ring.unknown .pulse-ring-halo { display: none; }
-        .pulse-ring.unknown, .pulse-ring.unknown .pulse-ring-tilt { animation: none; }
+        .pulse-ring.is-unknown .pulse-ring-comet, .pulse-ring.is-unknown .pulse-ring-halo { display: none; }
+        .pulse-ring.is-unknown, .pulse-ring.is-unknown .pulse-ring-tilt { animation: none; }
         @keyframes pulse-orbit { to { transform: rotate(360deg); } }
         @keyframes pulse-tilt { 0%, 100% { transform: rotateX(9deg) rotateY(-7deg); } 25% { transform: rotateX(13deg) rotateY(5deg); } 50% { transform: rotateX(5deg) rotateY(8deg); } 75% { transform: rotateX(11deg) rotateY(-4deg); } }
         @keyframes pulse-throb { 0%, 100% { filter: drop-shadow(0 0 6px rgba(var(--ring-c), .5)); } 50% { filter: drop-shadow(0 0 18px rgba(var(--ring-c), .95)); } }
@@ -19568,8 +23391,8 @@ class OpenReefPanel extends HTMLElement {
         .pulse-ticker-item.latest { opacity: 1; }
         .pulse-ticker-item small { color: #9fc7e0; font-weight: 800; font-size: 11px; }
         .pulse-ticker-item strong { color: #e9f4fb; font-weight: 700; font-size: 13px; }
-        .pulse-ticker-item.critical strong { color: #fecaca; }
-        .pulse-ticker-item.warning strong { color: #fde68a; }
+        .pulse-ticker-item.is-critical strong { color: #fecaca; }
+        .pulse-ticker-item.is-warning strong { color: #fde68a; }
         .pulse-buddy { position: absolute; right: 26px; bottom: 120px; display: flex; flex-direction: column; align-items: center; gap: 8px; width: 120px; pointer-events: none; }
         .pulse-buddy .or-avatar-img, .pulse-buddy .or-avatar-ph { width: 104px; height: 104px; object-fit: contain; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, .5)); }
         .pulse-buddy .or-avatar-ph { display: grid; place-items: center; font-size: 52px; }
@@ -19597,21 +23420,28 @@ class OpenReefPanel extends HTMLElement {
         .pulse-range { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
         .pulse-range small { font-size: 10px; font-weight: 800; color: #8da2ba; font-variant-numeric: tabular-nums; }
         .pulse-range-track { position: relative; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .14); }
-        .pulse-range-marker { position: absolute; top: 50%; width: 11px; height: 11px; border-radius: 50%; transform: translate(-50%, -50%); background: #22c55e; box-shadow: 0 0 7px rgba(34, 197, 94, .7); transition: left .5s ease; }
-        .pulse-range-marker.warning { background: #f59e0b; box-shadow: 0 0 7px rgba(245, 158, 11, .7); }
-        .pulse-range-marker.critical { background: #ef4444; box-shadow: 0 0 7px rgba(239, 68, 68, .75); }
-        .pulse-range-marker.unknown { background: #64748b; box-shadow: none; }
+        .pulse-range-marker { position: absolute; top: 50%; width: 11px; height: 11px; padding: 0; border: 0; box-sizing: border-box; border-radius: 50%; transform: translate(-50%, -50%); background: #22c55e; box-shadow: 0 0 7px rgba(34, 197, 94, .7); transition: left .5s ease; }
+        .pulse-range-marker.is-warning { background: #f59e0b; box-shadow: 0 0 7px rgba(245, 158, 11, .7); }
+        .pulse-range-marker.is-critical { background: #ef4444; box-shadow: 0 0 7px rgba(239, 68, 68, .75); }
+        .pulse-range-marker.is-unknown { background: #64748b; box-shadow: none; }
         .pulse-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; width: 100%; max-width: 1380px; }
         .pulse-block { display: grid; gap: 9px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 14px; padding: 14px 16px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); align-content: start; }
         .pulse-block-title { font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
+        /* One grid for ALL category rows: each row was its own grid, so a long
+           label ("Chemistry / Parameters") pushed only its own bar right and
+           the tracks never lined up. display:contents lifts each row's cells
+           into the shared grid so every column shares one width.
+           (No backticks in this block — the stylesheet is a template literal.) */
+        .pulse-cats { display: grid; grid-template-columns: minmax(80px, max-content) minmax(0, 1fr) auto; align-items: center; gap: 9px 10px; }
+        .pulse-cats .pulse-cat { display: contents; }
         .pulse-cat { display: grid; grid-template-columns: minmax(80px, auto) 1fr auto; align-items: center; gap: 9px; }
         .pulse-cat small { font-size: 11px; font-weight: 700; color: #cfe7f5; }
-        .pulse-cat strong { font-size: 12px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
+        .pulse-cat strong { font-size: 12px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; text-align: right; }
         .pulse-cat-track { height: 7px; border-radius: 999px; background: rgba(255, 255, 255, .12); overflow: hidden; }
-        .pulse-cat-track span { display: block; height: 100%; border-radius: 999px; }
-        .pulse-cat-track span.ok { background: #22c55e; }
-        .pulse-cat-track span.warning { background: #f59e0b; }
-        .pulse-cat-track span.critical { background: #ef4444; }
+        .pulse-cat-track span { display: block; height: 100%; padding: 0; border: 0; box-sizing: border-box; border-radius: 999px; }
+        .pulse-cat-track span.is-ok { background: #22c55e; }
+        .pulse-cat-track span.is-warning { background: #f59e0b; }
+        .pulse-cat-track span.is-critical { background: #ef4444; }
         .pulse-equip-list { display: flex; flex-wrap: wrap; gap: 9px; }
         .pulse-equip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #cfe7f5; }
         .pulse-equip i { width: 9px; height: 9px; border-radius: 50%; background: #64748b; }
@@ -19663,11 +23493,32 @@ class OpenReefPanel extends HTMLElement {
         .pulse-focus-row strong { font-size: 13px; font-weight: 800; color: #e9f4fb; }
         .pulse-focus-row small { font-size: 11px; font-weight: 700; color: #8da2ba; }
         .pulse-focus-row em { font-style: normal; font-size: 12px; font-weight: 800; color: #cfe7f5; font-variant-numeric: tabular-nums; white-space: nowrap; }
-        .pulse-focus-dot { width: 10px; height: 10px; border-radius: 50%; background: #64748b; }
-        .pulse-focus-dot.ok { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); }
-        .pulse-focus-dot.warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
-        .pulse-focus-dot.critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
+        .pulse-focus-dot { width: 10px; height: 10px; padding: 0; border: 0; box-sizing: border-box; flex: 0 0 auto; border-radius: 50%; background: #64748b; }
+        .pulse-focus-dot.is-ok { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, .6); }
+        .pulse-focus-dot.is-warning { background: #f59e0b; box-shadow: 0 0 6px rgba(245, 158, 11, .6); }
+        .pulse-focus-dot.is-critical { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, .65); }
         .pulse-focus-note { color: #9fc7e0; font-size: 13px; font-weight: 600; line-height: 1.45; }
+        .pulse-focus-note.dim { color: #8da2ba; font-weight: 500; }
+        .pulse-focus-note.center { text-align: center; font-size: 11px; }
+        /* Expanded insight deck: swipeable pages with a dot pager. */
+        .pulse-focus-card.insights { touch-action: pan-y; }
+        .pulse-insight-page { display: grid; gap: 10px; min-height: 130px; align-content: start; }
+        .pulse-insight-page.slide-left { animation: pulse-slide-left .28s ease; }
+        .pulse-insight-page.slide-right { animation: pulse-slide-right .28s ease; }
+        @keyframes pulse-slide-left { from { opacity: 0; transform: translateX(36px); } }
+        @keyframes pulse-slide-right { from { opacity: 0; transform: translateX(-36px); } }
+        .pulse-focus-head strong.pulse-insight-page-title { font-size: clamp(20px, 3vw, 28px); line-height: 1.25; }
+        .pulse-insight-dot.big { width: 14px; height: 14px; }
+        .pulse-insight-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .pulse-insight-pager button { width: 44px; height: 44px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .22); background: rgba(4, 10, 16, .55); color: #e5edf5; font-size: 22px; line-height: 1; cursor: pointer; flex: 0 0 auto; }
+        .pulse-insight-pager button:hover { border-color: rgba(255, 255, 255, .45); }
+        .pulse-insight-dots { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; }
+        .pulse-insight-dots span { width: 8px; height: 8px; padding: 0; border: 0; box-sizing: border-box; flex: 0 0 auto; border-radius: 50%; background: rgba(255, 255, 255, .22); transition: background .2s ease, transform .2s ease; }
+        .pulse-insight-dots span.on { background: var(--openreef-accent); transform: scale(1.35); }
+        .pulse-insight-dots span.is-warning { background: rgba(245, 158, 11, .5); }
+        .pulse-insight-dots span.is-critical { background: rgba(239, 68, 68, .55); }
+        .pulse-insight-dots span.is-warning.on { background: #f59e0b; }
+        .pulse-insight-dots span.is-critical.on { background: #ef4444; }
         .pulse-has-focus .pulse-buddy { display: none; }
         .pulse-root.pulse-alert-warning::after, .pulse-root.pulse-alert-critical::after { content: ""; position: absolute; inset: 0; pointer-events: none; animation: pulse-edge 1.8s ease-in-out infinite; }
         .pulse-root.pulse-alert-warning::after { box-shadow: inset 0 0 90px rgba(245, 158, 11, .4); }
