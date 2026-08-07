@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-08-07T17:26:07Z",
+ "generatedAt": "2026-08-07T18:12:30Z",
  "source": "seeded",
  "ws": {
   "openreef/get_config": {
@@ -507,7 +507,7 @@
      "muteUntil": {},
      "history": [
       {
-       "timestamp": "2026-08-07T03:02:07Z",
+       "timestamp": "2026-08-07T03:48:30Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "ok",
@@ -515,7 +515,7 @@
        "message": "pH recovered to 8.12 after the evening CO2 dip."
       },
       {
-       "timestamp": "2026-08-07T00:38:07Z",
+       "timestamp": "2026-08-07T01:24:30Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "warning",
@@ -523,20 +523,20 @@
        "message": "pH read 7.94, inside the warning buffer below minimum 7.8."
       },
       {
-       "timestamp": "2026-08-04T15:02:07Z",
+       "timestamp": "2026-08-04T15:48:30Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "ok",
        "title": "Temperature back in range",
-       "message": "Tank temperature recovered to 26.4 \u00b0C after heater outlet was cut."
+       "message": "Tank temperature recovered to 26.4 \u00b0C after the heater outlet was switched off."
       },
       {
-       "timestamp": "2026-08-04T14:33:19Z",
+       "timestamp": "2026-08-04T15:19:42Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "critical",
        "title": "Temperature critical",
-       "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C). Heater outlet cut by interlock; notification sent."
+       "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C) with the heater still ON. Critical alert pushed to phone."
       }
      ],
      "lastStates": {
@@ -555,7 +555,7 @@
      "missedAfterHours": 30,
      "notifyTarget": "",
      "lastCheck": "",
-     "lastHeartbeat": "2026-08-07T15:26:07Z",
+     "lastHeartbeat": "2026-08-07T16:12:30Z",
      "lastNotificationTest": "",
      "lastMissedAlert": ""
     },
@@ -569,23 +569,23 @@
      "lastValues": {
       "temp": {
        "value": 25.9,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "ph": {
        "value": 8.16,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "salinity": {
        "value": 35.1,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "sump_temp": {
        "value": 25.7,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "orp": {
        "value": 382.0,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       }
      },
      "lastJumps": {}
@@ -604,7 +604,7 @@
     },
     "trustCheck": {
      "enabled": true,
-     "lastRun": "2026-08-07T17:26:07.946955+00:00",
+     "lastRun": "2026-08-07T18:12:30.996423+00:00",
      "lastStatus": "warning",
      "lastBackupReview": ""
     },
@@ -636,12 +636,12 @@
     },
     "activity": [
      {
-      "timestamp": "2026-08-07T17:26:07.940455+00:00",
+      "timestamp": "2026-08-07T18:12:30.989263+00:00",
       "message": "ICP report imported: Triton (13 elements)",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-07T16:45:07Z",
+      "timestamp": "2026-08-07T17:31:30Z",
       "message": "Reef health recalculated \u2014 alkalinity trending down over 30 days",
       "type": "info"
      },
@@ -666,8 +666,8 @@
       "type": "info"
      },
      {
-      "timestamp": "2026-08-04T15:02:07Z",
-      "message": "Heater outlet cut: temperature exceeded 27.5 \u00b0C with heater ON (interlock)",
+      "timestamp": "2026-08-04T15:48:30Z",
+      "message": "Heater outlet switched off from phone (armed switch): temperature exceeded 27.5 \u00b0C with heater ON",
       "type": "warning"
      },
      {
@@ -1476,7 +1476,7 @@
       "notifyTarget": "",
       "persistent": true
      },
-     "completionsSyncedAt": "2026-08-07T17:26:07.942431+00:00"
+     "completionsSyncedAt": "2026-08-07T18:12:30.991513+00:00"
     },
     "pulse": {
      "enabled": true,
@@ -1519,7 +1519,7 @@
        "name": "Ragnar's staghorn",
        "species": "staghorn",
        "colour": "purple",
-       "addedAt": "2025-06-23T17:26:07Z",
+       "addedAt": "2025-06-23T18:12:30Z",
        "notes": "First SPS in the tank \u2014 from a 2 cm frag.",
        "photoUrl": ""
       },
@@ -1527,7 +1527,7 @@
        "name": "Pink birdsnest",
        "species": "birdsnest",
        "colour": "pink",
-       "addedAt": "2025-10-11T17:26:07Z",
+       "addedAt": "2025-10-11T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1535,7 +1535,7 @@
        "name": "Forest fire digitata",
        "species": "digitata",
        "colour": "orange",
-       "addedAt": "2025-12-10T17:26:07Z",
+       "addedAt": "2025-12-10T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1543,7 +1543,7 @@
        "name": "Green table acro",
        "species": "table",
        "colour": "green",
-       "addedAt": "2026-02-08T17:26:07Z",
+       "addedAt": "2026-02-08T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1551,7 +1551,7 @@
        "name": "Dragon soul torch",
        "species": "torch",
        "colour": "gold",
-       "addedAt": "2025-11-20T17:26:07Z",
+       "addedAt": "2025-11-20T18:12:30Z",
        "notes": "The expensive one.",
        "photoUrl": ""
       },
@@ -1559,7 +1559,7 @@
        "name": "Hammer garden",
        "species": "hammer",
        "colour": "green",
-       "addedAt": "2025-09-11T17:26:07Z",
+       "addedAt": "2025-09-11T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1567,7 +1567,7 @@
        "name": "Duncan colony",
        "species": "duncan",
        "colour": "teal",
-       "addedAt": "2026-03-10T17:26:07Z",
+       "addedAt": "2026-03-10T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1575,7 +1575,7 @@
        "name": "Warpaint scoly",
        "species": "scoly",
        "colour": "red",
-       "addedAt": "2026-04-09T17:26:07Z",
+       "addedAt": "2026-04-09T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1583,7 +1583,7 @@
        "name": "Utter chaos zoas",
        "species": "zoa",
        "colour": "orange",
-       "addedAt": "2025-08-02T17:26:07Z",
+       "addedAt": "2025-08-02T18:12:30Z",
        "notes": "Started as five polyps.",
        "photoUrl": ""
       },
@@ -1591,7 +1591,7 @@
        "name": "Bounce mushroom",
        "species": "mushroom",
        "colour": "red",
-       "addedAt": "2026-05-09T17:26:07Z",
+       "addedAt": "2026-05-09T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1599,7 +1599,7 @@
        "name": "Pulsing xenia",
        "species": "xenia",
        "colour": "pink",
-       "addedAt": "2025-06-03T17:26:07Z",
+       "addedAt": "2025-06-03T18:12:30Z",
        "notes": "It was free. It is everywhere.",
        "photoUrl": ""
       },
@@ -1607,7 +1607,7 @@
        "name": "Purple sea fan",
        "species": "gorgonian",
        "colour": "purple",
-       "addedAt": "2026-01-19T17:26:07Z",
+       "addedAt": "2026-01-19T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       }
@@ -2623,7 +2623,7 @@
      "muteUntil": {},
      "history": [
       {
-       "timestamp": "2026-08-07T03:02:07Z",
+       "timestamp": "2026-08-07T03:48:30Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "ok",
@@ -2631,7 +2631,7 @@
        "message": "pH recovered to 8.12 after the evening CO2 dip."
       },
       {
-       "timestamp": "2026-08-07T00:38:07Z",
+       "timestamp": "2026-08-07T01:24:30Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "warning",
@@ -2639,20 +2639,20 @@
        "message": "pH read 7.94, inside the warning buffer below minimum 7.8."
       },
       {
-       "timestamp": "2026-08-04T15:02:07Z",
+       "timestamp": "2026-08-04T15:48:30Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "ok",
        "title": "Temperature back in range",
-       "message": "Tank temperature recovered to 26.4 \u00b0C after heater outlet was cut."
+       "message": "Tank temperature recovered to 26.4 \u00b0C after the heater outlet was switched off."
       },
       {
-       "timestamp": "2026-08-04T14:33:19Z",
+       "timestamp": "2026-08-04T15:19:42Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "critical",
        "title": "Temperature critical",
-       "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C). Heater outlet cut by interlock; notification sent."
+       "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C) with the heater still ON. Critical alert pushed to phone."
       }
      ],
      "lastStates": {
@@ -2671,7 +2671,7 @@
      "missedAfterHours": 30,
      "notifyTarget": "",
      "lastCheck": "",
-     "lastHeartbeat": "2026-08-07T15:26:07Z",
+     "lastHeartbeat": "2026-08-07T16:12:30Z",
      "lastNotificationTest": "",
      "lastMissedAlert": ""
     },
@@ -2685,23 +2685,23 @@
      "lastValues": {
       "temp": {
        "value": 25.9,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "ph": {
        "value": 8.16,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "salinity": {
        "value": 35.1,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "sump_temp": {
        "value": 25.7,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       },
       "orp": {
        "value": 382.0,
-       "updatedAt": "2026-08-07T17:26:07.947099+00:00"
+       "updatedAt": "2026-08-07T18:12:30.996575+00:00"
       }
      },
      "lastJumps": {}
@@ -2720,7 +2720,7 @@
     },
     "trustCheck": {
      "enabled": true,
-     "lastRun": "2026-08-07T17:26:07.946955+00:00",
+     "lastRun": "2026-08-07T18:12:30.996423+00:00",
      "lastStatus": "warning",
      "lastBackupReview": ""
     },
@@ -2752,12 +2752,12 @@
     },
     "activity": [
      {
-      "timestamp": "2026-08-07T17:26:07.940455+00:00",
+      "timestamp": "2026-08-07T18:12:30.989263+00:00",
       "message": "ICP report imported: Triton (13 elements)",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-07T16:45:07Z",
+      "timestamp": "2026-08-07T17:31:30Z",
       "message": "Reef health recalculated \u2014 alkalinity trending down over 30 days",
       "type": "info"
      },
@@ -2782,8 +2782,8 @@
       "type": "info"
      },
      {
-      "timestamp": "2026-08-04T15:02:07Z",
-      "message": "Heater outlet cut: temperature exceeded 27.5 \u00b0C with heater ON (interlock)",
+      "timestamp": "2026-08-04T15:48:30Z",
+      "message": "Heater outlet switched off from phone (armed switch): temperature exceeded 27.5 \u00b0C with heater ON",
       "type": "warning"
      },
      {
@@ -3592,7 +3592,7 @@
       "notifyTarget": "",
       "persistent": true
      },
-     "completionsSyncedAt": "2026-08-07T17:26:07.942431+00:00"
+     "completionsSyncedAt": "2026-08-07T18:12:30.991513+00:00"
     },
     "pulse": {
      "enabled": true,
@@ -3635,7 +3635,7 @@
        "name": "Ragnar's staghorn",
        "species": "staghorn",
        "colour": "purple",
-       "addedAt": "2025-06-23T17:26:07Z",
+       "addedAt": "2025-06-23T18:12:30Z",
        "notes": "First SPS in the tank \u2014 from a 2 cm frag.",
        "photoUrl": ""
       },
@@ -3643,7 +3643,7 @@
        "name": "Pink birdsnest",
        "species": "birdsnest",
        "colour": "pink",
-       "addedAt": "2025-10-11T17:26:07Z",
+       "addedAt": "2025-10-11T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3651,7 +3651,7 @@
        "name": "Forest fire digitata",
        "species": "digitata",
        "colour": "orange",
-       "addedAt": "2025-12-10T17:26:07Z",
+       "addedAt": "2025-12-10T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3659,7 +3659,7 @@
        "name": "Green table acro",
        "species": "table",
        "colour": "green",
-       "addedAt": "2026-02-08T17:26:07Z",
+       "addedAt": "2026-02-08T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3667,7 +3667,7 @@
        "name": "Dragon soul torch",
        "species": "torch",
        "colour": "gold",
-       "addedAt": "2025-11-20T17:26:07Z",
+       "addedAt": "2025-11-20T18:12:30Z",
        "notes": "The expensive one.",
        "photoUrl": ""
       },
@@ -3675,7 +3675,7 @@
        "name": "Hammer garden",
        "species": "hammer",
        "colour": "green",
-       "addedAt": "2025-09-11T17:26:07Z",
+       "addedAt": "2025-09-11T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3683,7 +3683,7 @@
        "name": "Duncan colony",
        "species": "duncan",
        "colour": "teal",
-       "addedAt": "2026-03-10T17:26:07Z",
+       "addedAt": "2026-03-10T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3691,7 +3691,7 @@
        "name": "Warpaint scoly",
        "species": "scoly",
        "colour": "red",
-       "addedAt": "2026-04-09T17:26:07Z",
+       "addedAt": "2026-04-09T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3699,7 +3699,7 @@
        "name": "Utter chaos zoas",
        "species": "zoa",
        "colour": "orange",
-       "addedAt": "2025-08-02T17:26:07Z",
+       "addedAt": "2025-08-02T18:12:30Z",
        "notes": "Started as five polyps.",
        "photoUrl": ""
       },
@@ -3707,7 +3707,7 @@
        "name": "Bounce mushroom",
        "species": "mushroom",
        "colour": "red",
-       "addedAt": "2026-05-09T17:26:07Z",
+       "addedAt": "2026-05-09T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3715,7 +3715,7 @@
        "name": "Pulsing xenia",
        "species": "xenia",
        "colour": "pink",
-       "addedAt": "2025-06-03T17:26:07Z",
+       "addedAt": "2025-06-03T18:12:30Z",
        "notes": "It was free. It is everywhere.",
        "photoUrl": ""
       },
@@ -3723,7 +3723,7 @@
        "name": "Purple sea fan",
        "species": "gorgonian",
        "colour": "purple",
-       "addedAt": "2026-01-19T17:26:07Z",
+       "addedAt": "2026-01-19T18:12:30Z",
        "notes": "",
        "photoUrl": ""
       }
@@ -4987,7 +4987,7 @@
    },
    "trust_check": {
     "status": "warning",
-    "checkedAt": "2026-08-07T17:26:07.946955+00:00",
+    "checkedAt": "2026-08-07T18:12:30.996423+00:00",
     "items": [
      {
       "key": "sensors",
@@ -5011,7 +5011,7 @@
       "key": "heartbeat",
       "label": "Heartbeat",
       "status": "ok",
-      "detail": "Last heartbeat 2026-08-07T15:26:07+00:00."
+      "detail": "Last heartbeat 2026-08-07T16:12:30+00:00."
      },
      {
       "key": "cameras",
@@ -5041,48 +5041,48 @@
    },
    "heartbeat": {
     "status": "ok",
-    "lastHeartbeat": "2026-08-07T15:26:07+00:00",
+    "lastHeartbeat": "2026-08-07T16:12:30+00:00",
     "missed": false,
-    "nextDue": "2026-08-08T15:26:07+00:00"
+    "nextDue": "2026-08-08T16:12:30+00:00"
    },
    "reef_replay": [
     {
-     "id": "alert-ph-1786071727",
-     "timestamp": "2026-08-07T03:02:07+00:00",
+     "id": "alert-ph-1786074510",
+     "timestamp": "2026-08-07T03:48:30+00:00",
      "title": "pH back in range",
      "severity": "ok",
      "message": "pH recovered to 8.12 after the evening CO2 dip.",
      "events": []
     },
     {
-     "id": "alert-ph-1786063087",
-     "timestamp": "2026-08-07T00:38:07+00:00",
+     "id": "alert-ph-1786065870",
+     "timestamp": "2026-08-07T01:24:30+00:00",
      "title": "pH low warning",
      "severity": "warning",
      "message": "pH read 7.94, inside the warning buffer below minimum 7.8.",
      "events": []
     },
     {
-     "id": "alert-temp-1785855727",
-     "timestamp": "2026-08-04T15:02:07+00:00",
+     "id": "alert-temp-1785858510",
+     "timestamp": "2026-08-04T15:48:30+00:00",
      "title": "Temperature back in range",
      "severity": "ok",
-     "message": "Tank temperature recovered to 26.4 \u00b0C after heater outlet was cut.",
+     "message": "Tank temperature recovered to 26.4 \u00b0C after the heater outlet was switched off.",
      "events": [
       {
-       "timestamp": "2026-08-04T15:02:07Z",
-       "message": "Heater outlet cut: temperature exceeded 27.5 \u00b0C with heater ON (interlock)",
+       "timestamp": "2026-08-04T15:48:30Z",
+       "message": "Heater outlet switched off from phone (armed switch): temperature exceeded 27.5 \u00b0C with heater ON",
        "type": "warning",
        "source": "activity"
       }
      ]
     },
     {
-     "id": "alert-temp-1785853999",
-     "timestamp": "2026-08-04T14:33:19+00:00",
+     "id": "alert-temp-1785856782",
+     "timestamp": "2026-08-04T15:19:42+00:00",
      "title": "Temperature critical",
      "severity": "critical",
-     "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C). Heater outlet cut by interlock; notification sent.",
+     "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C) with the heater still ON. Critical alert pushed to phone.",
      "events": []
     }
    ]
@@ -6170,8 +6170,8 @@
     "friendly_name": "Tank temp",
     "device_class": "temperature"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "sensor.showroom_ph": {
    "state": "8.16",
@@ -6179,8 +6179,8 @@
     "unit_of_measurement": "",
     "friendly_name": "pH"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "sensor.showroom_salinity": {
    "state": "35.1",
@@ -6188,8 +6188,8 @@
     "unit_of_measurement": "ppt",
     "friendly_name": "Salinity"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "sensor.showroom_orp": {
    "state": "382",
@@ -6197,8 +6197,8 @@
     "unit_of_measurement": "mV",
     "friendly_name": "ORP"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "sensor.showroom_sump_temp": {
    "state": "25.7",
@@ -6207,8 +6207,8 @@
     "friendly_name": "Sump temp",
     "device_class": "temperature"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "binary_sensor.showroom_leak": {
    "state": "off",
@@ -6216,80 +6216,80 @@
     "friendly_name": "Leak sensor",
     "device_class": "moisture"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_return": {
    "state": "on",
    "attributes": {
     "friendly_name": "Return pump"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_heater": {
    "state": "on",
    "attributes": {
     "friendly_name": "Heater"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_skimmer": {
    "state": "on",
    "attributes": {
     "friendly_name": "Skimmer"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_ato": {
    "state": "on",
    "attributes": {
     "friendly_name": "ATO"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_wave": {
    "state": "on",
    "attributes": {
     "friendly_name": "Wavemaker left"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_wave2": {
    "state": "on",
    "attributes": {
     "friendly_name": "Wavemaker right"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_frag": {
    "state": "off",
    "attributes": {
     "friendly_name": "Frag light"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_awc_drain": {
    "state": "off",
    "attributes": {
     "friendly_name": "AWC drain pump"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "switch.showroom_awc_fill": {
    "state": "off",
    "attributes": {
     "friendly_name": "AWC fill pump"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "binary_sensor.showroom_fresh_empty": {
    "state": "off",
@@ -6297,8 +6297,8 @@
     "friendly_name": "Fresh reservoir empty",
     "device_class": "problem"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "binary_sensor.showroom_waste_full": {
    "state": "off",
@@ -6306,8 +6306,8 @@
     "friendly_name": "Waste reservoir full",
     "device_class": "problem"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   },
   "binary_sensor.showroom_high": {
    "state": "off",
@@ -6315,8 +6315,8 @@
     "friendly_name": "Display high level",
     "device_class": "problem"
    },
-   "last_changed": "2026-08-07T17:24:07Z",
-   "last_updated": "2026-08-07T17:24:07Z"
+   "last_changed": "2026-08-07T18:10:30Z",
+   "last_updated": "2026-08-07T18:10:30Z"
   }
  }
 }

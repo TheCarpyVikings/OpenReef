@@ -199,10 +199,10 @@ def seed_config() -> dict:
                  "message": "pH read 7.94, inside the warning buffer below minimum 7.8."},
                 {"timestamp": iso(days_ago(3.1)), "sensor_id": "temp", "label": "Display Tank Temperature",
                  "state": "ok", "title": "Temperature back in range",
-                 "message": "Tank temperature recovered to 26.4 °C after heater outlet was cut."},
+                 "message": "Tank temperature recovered to 26.4 °C after the heater outlet was switched off."},
                 {"timestamp": iso(days_ago(3.12)), "sensor_id": "temp", "label": "Display Tank Temperature",
                  "state": "critical", "title": "Temperature critical",
-                 "message": "Tank temperature read 27.9 °C (max 27.5 °C). Heater outlet cut by interlock; notification sent."},
+                 "message": "Tank temperature read 27.9 °C (max 27.5 °C) with the heater still ON. Critical alert pushed to phone."},
             ],
         },
         "activity": [
@@ -211,7 +211,7 @@ def seed_config() -> dict:
             {"timestamp": iso(days_ago(1, hour=9)), "message": "ATO suspended for 15 min after water change (stabilisation holdoff)", "type": "info"},
             {"timestamp": iso(days_ago(2, hour=18)), "message": "Feed mode: skimmer paused 10 min, wavemaker to 30 %", "type": "info"},
             {"timestamp": iso(days_ago(6, hour=20)), "message": "Reef Layer: Bounce mushroom registered — placed low on the rock", "type": "info"},
-            {"timestamp": iso(days_ago(3.1)), "message": "Heater outlet cut: temperature exceeded 27.5 °C with heater ON (interlock)", "type": "warning"},
+            {"timestamp": iso(days_ago(3.1)), "message": "Heater outlet switched off from phone (armed switch): temperature exceeded 27.5 °C with heater ON", "type": "warning"},
             {"timestamp": iso(days_ago(5, hour=11)), "message": "ICP report imported (Triton) — drift check passed on Ca/Mg, alk kit reads 0.3 dKH high", "type": "info"},
         ],
         "maintenance": {

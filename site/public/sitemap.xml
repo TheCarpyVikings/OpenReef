@@ -46,6 +46,16 @@
     <priority>0.8</priority>
   </url>
   <url>
+    <loc>https://openreef.co.uk/features/maintenance/</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://openreef.co.uk/features/equipment-safety/</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
     <loc>https://openreef.co.uk/demo/</loc>
     <changefreq>weekly</changefreq>
     <priority>0.9</priority>

@@ -149,6 +149,7 @@ export const FEATURES: FeatureCard[] = [
     title: "Equipment control",
     body: "Map an outlet, arm it yourself, and only then can OpenReef touch it. Your livestock is never automated behind your back.",
     img: "/demos/controls.png",
+    href: "/features/equipment-safety/",
   },
   {
     title: "Schedule-aware intelligence",
@@ -158,6 +159,7 @@ export const FEATURES: FeatureCard[] = [
     title: "Energy & maintenance",
     body: "Power monitoring plus HA-native maintenance reminders — fixed-day schedules, skip and snooze included.",
     img: "/demos/maintenance.png",
+    href: "/features/maintenance/",
   },
   {
     title: "Coral spawning",

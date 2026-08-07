@@ -19,6 +19,8 @@ export default defineConfig({
         "camera-intelligence": `${root}features/camera-intelligence/index.html`,
         "tank-diagram": `${root}features/tank-diagram/index.html`,
         "reef-pulse": `${root}features/reef-pulse/index.html`,
+        maintenance: `${root}features/maintenance/index.html`,
+        "equipment-safety": `${root}features/equipment-safety/index.html`,
         "features-hub": `${root}features/index.html`,
         demo: `${root}demo/index.html`,
       },

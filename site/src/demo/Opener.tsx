@@ -55,8 +55,8 @@ export default function Opener({ onDone }: Props) {
           <p className="opener-clock">02:47</p>
           <p>
             Three nights ago on this tank, a heater relay stuck closed at 2 AM. OpenReef saw
-            temperature and heater state disagree, cut the outlet, and sent one calm notification.
-            The alert history below remembers the whole thing.
+            temperature and heater state disagree and pushed one clear alert — one tap on an
+            armed switch cut the heater from bed. The alert history below remembers it all.
           </p>
           <button className="btn btn-primary" onClick={finish}>
             It's your tank now — click anything
@@ -97,9 +97,9 @@ export default function Opener({ onDone }: Props) {
           <p className="opener-line">
             OpenReef reads what temperature and heater state say <em>together</em>.
           </p>
-          <p className="opener-action">⚡ Interlock: heater outlet — CUT</p>
+          <p className="opener-action">🚨 Critical — 27.9 °C and the heater still says ON</p>
           <p className="opener-line opener-dim">
-            An outlet you mapped and armed yourself. It touches nothing else.
+            Not two numbers on two screens. One conclusion, pushed to your phone.
           </p>
         </div>
       )}
@@ -109,7 +109,7 @@ export default function Opener({ onDone }: Props) {
           <div className="opener-notification">
             <span className="opener-notification-app">OpenReef · now</span>
             <strong>🚨 Temperature critical — 27.9 °C</strong>
-            <span>Heater outlet cut. Tank is safe. Sleep — this can wait until morning.</span>
+            <span>Heater reads ON. Its switch is armed — cut it from here, one tap.</span>
           </div>
         </div>
       )}
@@ -118,7 +118,8 @@ export default function Opener({ onDone }: Props) {
         <div className="opener-card">
           <p className="opener-clock">07:30</p>
           <p className="opener-line">
-            You wake to a calm tank at 26.1 °C — and the whole story, kept in the history.
+            You wake to a calm tank at 26.1 °C. One push alert, one tap on an outlet you'd
+            mapped and armed yourself, back to sleep — and the whole story kept in the history.
           </p>
           <p className="opener-line opener-dim">
             This exact save is seeded in this demo's alert history, three nights back. Go find it.
