@@ -35,6 +35,32 @@ See `tools/capture-demos.mjs` for options (tab selection, viewport, Chrome path)
 It logs into the frontend headlessly, clicks each panel tab through the shadow DOM,
 and writes `mission-control.png`, `dosing.png`, `awc.png`, etc.
 
+## Mobile audits
+
+Two separate tools, easy to confuse:
+
+- **`tools/mobile-audit.mjs`** — audits **this site**. Loads it at iPhone SE/15/15 Pro
+  Max, Pixel 8 and iPad mini metrics and reports horizontal overflow, tiny tap targets,
+  how much screen the buddy bubble eats, and per-section screenshots.
+  `node tools/mobile-audit.mjs [url]`
+
+- **`tools/panel-mobile-audit.mjs`** — audits **the HA panel**. `/demo/` mounts the real
+  `openreef-panel.js` against fixtures, which makes it a full-panel layout lab. This
+  sweeps every tab at iPhone 15 Pro Max, iPhone 14/15, iPad Pro 12.9 and desktop, and
+  reports what a screenshot cannot: elements overflowing the viewport, text clipped by a
+  too-narrow grid column, sub-32px tap targets, and how much vertical space the nav eats
+  before the first card appears.
+
+```bash
+python3 tools/demo-fixtures.py   # pin the CURRENT panel into public/demo/
+pnpm build
+pnpm panel:mobile-audit -- --shots /tmp/shots
+```
+
+Exit code 1 means something overflows horizontally — a real bug. Tap targets and page
+heights are printed for judgement, not gated. This is how the 0.7.33 panel mobile pass
+was measured: the nav was 787px tall on a 932px screen, first card 1,129px down.
+
 ## Before launch
 
 - [ ] Wire `FORM_ENDPOINT` in `src/ui/Sections.tsx` to Buttondown/Formspree/Tally

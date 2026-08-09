@@ -33,17 +33,24 @@ if (SHOTS) mkdirSync(SHOTS, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- serve dist/ ---------------------------------------------------------- //
+// detached, so the whole process GROUP can be killed at the end. Killing the
+// npx wrapper alone leaves vite running, squatting the port and making the next
+// local run fail silently against --strictPort.
 const server = spawn("npx", ["vite", "preview", "--port", String(PORT), "--strictPort"], {
   cwd: SITE,
   stdio: "ignore",
+  detached: true,
 });
+const stopServer = () => {
+  try { process.kill(-server.pid); } catch { server.kill(); }
+};
 let up = false;
 for (let i = 0; i < 40 && !up; i++) {
   await sleep(250);
   up = await fetch(`http://localhost:${PORT}/demo/`).then((r) => r.ok).catch(() => false);
 }
 if (!up) {
-  server.kill();
+  stopServer();
   console.error("FAIL: preview server never came up (did you run `vite build`?)");
   process.exit(1);
 }
@@ -166,7 +173,7 @@ try {
   }
 } finally {
   await browser.close();
-  server.kill();
+  stopServer();
 }
 
 if (failures.length) {
