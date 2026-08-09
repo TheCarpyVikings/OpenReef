@@ -13491,17 +13491,19 @@ class OpenReefPanel extends HTMLElement {
         </header>
         ${wall ? this._pulseWallMarkup(cfg, health) : ""}
         <div class="pulse-foot">
-          ${!wall && cfg.showInsights !== false ? this._pulseInsightMarkup(true) : ""}
-          ${chips.length ? `
-            <div class="pulse-chips">
-              ${chips.map((chip) => `
-                <span class="pulse-chip pulse-tap ${chip.key === "reefHealth" ? "is-health" : ""}" data-action="pulse-focus" data-id="${chip.key === "reefHealth" ? "health" : `sensor:${this._escape(chip.key)}`}" role="button" tabindex="0" title="Tap for detail">
-                  <small>${this._escape(chip.label)}</small>
-                  <strong data-overlay-stat="${this._escape(chip.key)}">${this._escape(chip.value)}${chip.unit ? ` ${this._escape(chip.unit)}` : ""}</strong>
-                </span>
-              `).join("")}
-            </div>
-          ` : ""}
+          <div class="pulse-foot-row">
+            ${chips.length ? `
+              <div class="pulse-chips">
+                ${chips.map((chip) => `
+                  <span class="pulse-chip pulse-tap ${chip.key === "reefHealth" ? "is-health" : ""}" data-action="pulse-focus" data-id="${chip.key === "reefHealth" ? "health" : `sensor:${this._escape(chip.key)}`}" role="button" tabindex="0" title="Tap for detail">
+                    <small>${this._escape(chip.label)}</small>
+                    <strong data-overlay-stat="${this._escape(chip.key)}">${this._escape(chip.value)}${chip.unit ? ` ${this._escape(chip.unit)}` : ""}</strong>
+                  </span>
+                `).join("")}
+              </div>
+            ` : ""}
+            ${!wall && cfg.showInsights !== false ? this._pulseInsightMarkup(true) : ""}
+          </div>
           ${cfg.showTicker !== false ? `<div class="pulse-ticker" data-pulse-ticker>${this._pulseTickerMarkup()}</div>` : ""}
         </div>
         ${cfg.showBuddy !== false ? `
@@ -23284,7 +23286,7 @@ class OpenReefPanel extends HTMLElement {
         @keyframes pulse-insight-in { from { opacity: 0; transform: translateY(8px); } }
         /* Camera/timelapse layout: the insight rides as a compact glass strip
            above the stat chips instead of a wall block. */
-        .pulse-insight.compact { max-width: 560px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 12px; padding: 10px 14px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); display: grid; gap: 3px; }
+        .pulse-insight.compact { flex: 1 1 280px; min-width: 240px; max-width: 620px; align-content: center; border: 1px solid rgba(255, 255, 255, .14); border-radius: 12px; padding: 10px 14px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); display: grid; gap: 3px; }
         .pulse-insight.compact > strong { font-size: 14px; }
         /* Timelapse living backdrop: two stacked layers crossfade on load. */
         .pulse-tl { opacity: 0; transition: opacity 1.8s ease; }
@@ -23331,7 +23333,7 @@ class OpenReefPanel extends HTMLElement {
         .pulse-wall-guide .stack { display: grid; gap: 8px; }
         @media (prefers-reduced-motion: reduce) { .pulse-datawall::before, .pulse-datawall::after, .stat-bump { animation: none !important; } }
         .pulse-shade { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(4, 8, 13, .66), transparent 26%), linear-gradient(0deg, rgba(4, 8, 13, .78), transparent 36%); }
-        .pulse-head { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 26px 30px 0; }
+        .pulse-head { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 26px 96px 0 30px; }
         .pulse-title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; min-width: 0; }
         .pulse-title strong { font-size: clamp(26px, 4vw, 46px); font-weight: 800; color: #fff; text-shadow: 0 2px 14px rgba(0, 0, 0, .55); }
         .pulse-clock { font-size: clamp(20px, 2.6vw, 30px); font-weight: 700; color: #cfe7f5; text-shadow: 0 2px 10px rgba(0, 0, 0, .5); font-variant-numeric: tabular-nums; }
@@ -23381,7 +23383,8 @@ class OpenReefPanel extends HTMLElement {
         .pulse-ring-text strong { font-size: clamp(26px, 3.2vw, 40px); font-weight: 800; color: #fff; line-height: 1; text-shadow: 0 2px 10px rgba(0, 0, 0, .5); }
         .pulse-ring-text small { font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: #9fc7e0; }
         .pulse-foot { position: absolute; left: 0; right: 0; bottom: 0; display: grid; gap: 12px; padding: 0 30px 22px; }
-        .pulse-chips { display: flex; gap: 10px; flex-wrap: wrap; }
+        .pulse-foot-row { display: flex; align-items: stretch; gap: 12px; flex-wrap: wrap; }
+        .pulse-chips { display: flex; gap: 10px; flex-wrap: wrap; flex: 0 1 auto; }
         .pulse-chip { display: grid; gap: 2px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 12px; padding: 9px 16px; background: rgba(4, 10, 16, .55); backdrop-filter: blur(10px); }
         .pulse-chip small { font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: #9fc7e0; }
         .pulse-chip strong { font-size: clamp(17px, 2vw, 24px); font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; }
@@ -23526,7 +23529,7 @@ class OpenReefPanel extends HTMLElement {
         @keyframes pulse-edge { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
         @keyframes pulse-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.025); } }
         @media (max-width: 700px) {
-          .pulse-head { padding: 16px 16px 0; }
+          .pulse-head { padding: 16px 62px 0 16px; }
           .pulse-foot { padding: 0 16px 14px; }
           .pulse-buddy { display: none; }
           .pulse-mode { display: none; }
