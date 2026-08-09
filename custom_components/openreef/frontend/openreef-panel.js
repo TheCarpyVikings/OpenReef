@@ -132,6 +132,7 @@ class OpenReefPanel extends HTMLElement {
     this._pulseTl = { frames: [], idx: 0, at: 0, loading: false, front: 0 };
     this._pulseTrendsKicked = false;
     this._diagramArranging = false;
+    this._diagramFull = false;
     this._diagramDrag = null;
     this._diagramMotion = null;
     this._pulseDiagArm = null;
@@ -1332,6 +1333,13 @@ class OpenReefPanel extends HTMLElement {
         this._coralFocus = null;
         this._render();
       }
+      if (action === "diagram-full") {
+        // Arranging inside the rotated portrait view would fight the drag
+        // maths, so full screen is view-only.
+        this._diagramFull = !this._diagramFull;
+        if (this._diagramFull) this._diagramArranging = false;
+        this._render();
+      }
       if (action === "refresh-cameras") { this._stopCameraWebRTC(); this._render(); this._startCameraWebRTCForFocus(); }
       if (action === "snapshot-camera") this._snapshotCamera();
       if (action === "share-card") this._shareTankCard();
@@ -1543,16 +1551,10 @@ class OpenReefPanel extends HTMLElement {
         this._saveSettingsSections();
         this._render();
       }
-      if (action === "expand-settings") {
-        Object.keys(this._settingsSections).forEach((section) => {
-          this._settingsSections[section] = true;
-        });
-        this._saveSettingsSections();
-        this._render();
-      }
-      if (action === "collapse-settings") {
-        Object.keys(this._settingsSections).forEach((section) => {
-          this._settingsSections[section] = false;
+      if (action === "expand-settings" || action === "collapse-settings") {
+        const open = action === "expand-settings";
+        this._allSettingsSectionIds().forEach((section) => {
+          this._settingsSections[section] = open;
         });
         this._saveSettingsSections();
         this._render();
@@ -6464,7 +6466,20 @@ class OpenReefPanel extends HTMLElement {
     // the freshly rendered svg; leaving the tab stops the rAF loop.
     if (this._activeTab === "diagram") this._startPulseDiagramMotion();
     else this._stopPulseDiagramMotion();
+    this._keepActiveTabInView();
     this._mountBetaFab();  // BETA-FEEDBACK: remove after beta
+  }
+
+  // On phones the tab strip is a horizontal rail, and every render rebuilds it
+  // from scratch — which resets scrollLeft to 0 and leaves the tab you just
+  // tapped off-screen to the right. Nudge it back into view, scrolling the rail
+  // itself rather than the page (scrollIntoView would drag the whole panel).
+  _keepActiveTabInView() {
+    const rail = this.shadowRoot && this.shadowRoot.querySelector(".tabs");
+    const active = rail && rail.querySelector("button.active");
+    // Nothing to do on the desktop grid, where there is no overflow to scroll.
+    if (!active || rail.scrollWidth <= rail.clientWidth + 1) return;
+    rail.scrollLeft = Math.max(0, active.offsetLeft - (rail.clientWidth - active.offsetWidth) / 2);
   }
 
   // BETA-FEEDBACK: whole method is beta scaffolding — delete it, the two calls
@@ -14907,13 +14922,20 @@ class OpenReefPanel extends HTMLElement {
             <p>Your ${systemType === "aio" ? "all-in-one" : "sump"} system, drawn from your equipment mapping — the flow follows your pumps, live.</p>
           </div>
           <div class="settings-toolbar">
+            <button class="secondary compact-button" data-action="diagram-full">⤢ Full screen</button>
             <button class="secondary compact-button" data-action="diagram-arrange">${this._diagramArranging ? "✓ Done arranging" : "✎ Arrange"}</button>
             <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Configure</button>
             ${this._pulseEnabled() ? `<button class="secondary compact-button" data-action="open-pulse">✨ Present</button>` : ""}
           </div>
         </div>
         ${this._diagramArranging ? `<div class="notice info-notice"><strong>Arrange mode.</strong> Drag a glowing item to a highlighted spot — pipework re-routes and the layout saves itself.</div>` : ""}
-        <section class="panel diagram-stage">${this._pulseDiagramSvg()}</section>
+        <section class="panel diagram-stage ${this._diagramFull ? "is-full" : ""}">
+          ${this._pulseDiagramSvg()}
+          ${this._diagramFull ? `
+            <button class="diag-full-close" data-action="diagram-full" title="Leave full screen" aria-label="Leave full screen">✕</button>
+            <small class="diag-full-hint">Turned sideways so it fills the screen — rotate your phone to read it upright.</small>
+          ` : ""}
+        </section>
         ${anything ? `
           <p class="muted">Tap any piece of equipment for details${this._diagramCfg().allowControls === false ? "" : " and controls"}. Water only moves while your return pump is actually running — wavemakers stir the display without it.</p>
         ` : `
@@ -19271,10 +19293,37 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _settingsSectionOpen(id) {
+    // A section nobody has touched defaults open on desktop, but CLOSED on a
+    // phone: every section expanded is a 25,000px scroll on a 932px screen,
+    // roughly twenty-eight swipes to reach the bottom. An explicit toggle, or
+    // a deep-link (which writes true before rendering), still wins either way.
+    if (this._settingsSections[id] === undefined) return !this._isPhoneViewport();
     return this._settingsSections[id] !== false;
   }
 
+  // Every settings section Show all / Hide all should reach: the ones with a
+  // stored preference, plus every one that has rendered this session.
+  _allSettingsSectionIds() {
+    return [...new Set([
+      ...Object.keys(this._settingsSections || {}),
+      ...(this._settingsSectionIds || []),
+    ])];
+  }
+
+  // The phone tier, matching the 700px breakpoint the mobile CSS uses.
+  _isPhoneViewport() {
+    return typeof window !== "undefined"
+      && typeof window.matchMedia === "function"
+      && window.matchMedia("(max-width: 700px)").matches;
+  }
+
   _settingsPanel(id, title, description, content, forceOpen = false) {
+    // Remember every section that has actually rendered. Show all / Hide all
+    // used to walk the stored preferences, which only ever held the thirteen
+    // ids with a default — the other eleven were simply invisible to it. That
+    // went unnoticed while they defaulted open; on a phone, where they now
+    // start closed, Show all would have looked like a dead button.
+    (this._settingsSectionIds ||= new Set()).add(id);
     const open = forceOpen || this._settingsSectionOpen(id);
     return `
       <article class="panel settings-section themed-settings-card" id="or-section-${this._escape(id)}">
@@ -22715,7 +22764,10 @@ class OpenReefPanel extends HTMLElement {
         button, input, select { font: inherit; }
         button { cursor: pointer; color: inherit; }
         button:disabled { cursor: not-allowed; opacity: .45; }
-        .page { min-height: 100vh; padding: 24px; background: radial-gradient(circle at 20% 0%, var(--openreef-accent-soft), transparent 28%), #07111a; }
+        /* --or-page-pad is the page gutter, exposed as a variable so the phone
+           nav rail can bleed to the screen edges at whatever the current
+           breakpoint's padding happens to be. */
+        .page { --or-page-pad: 24px; min-height: 100vh; padding: var(--or-page-pad); background: radial-gradient(circle at 20% 0%, var(--openreef-accent-soft), transparent 28%), #07111a; }
         .topbar, .hero, .panel, .stat, .wizard { border: 1px solid #24364a; background: #121f2f; border-radius: 8px; }
         .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 22px; margin-bottom: 18px; }
         h1, h2, h3, h4, p { margin: 0; }
@@ -23312,6 +23364,30 @@ class OpenReefPanel extends HTMLElement {
         /* Diagram tab: same scene in a framed stage inside the panel. */
         .panel.diagram-stage { background: #060e17; border: 1px solid #24364a; border-radius: 14px; padding: 8px; aspect-ratio: 16 / 10; max-height: 74vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
         .panel.diagram-stage svg { width: 100%; height: 100%; touch-action: none; }
+        /* Full screen. A 1.6-wide schematic inside a portrait phone can only
+           ever be a quarter of the screen tall — width is the binding
+           constraint, so no amount of padding trimming helps. Turned on its
+           side it uses the long axis instead and renders about 1.75x larger;
+           rotate the phone and the orientation query hands back the upright
+           view. Triple class so it beats both the base stage rule and the
+           phone tier's full-bleed override further down the sheet, and a
+           z-index on the Pulse root's tier (9000) rather than the modal tier
+           (10): a fixed overlay inside the panel competes with Home Assistant's
+           own chrome, and 9000 is the value already proven to sit above it.
+           One below Pulse, so present mode always wins. */
+        .panel.diagram-stage.is-full { position: fixed; inset: 0; z-index: 8999; margin: 0; padding: 0; border: 0; border-radius: 0; max-height: none; aspect-ratio: auto; background: #060e17; }
+        .panel.diagram-stage.is-full svg { width: 100%; height: 100%; }
+        .diag-full-close { position: absolute; top: calc(10px + env(safe-area-inset-top)); right: calc(10px + env(safe-area-inset-right)); z-index: 2; width: 44px; height: 44px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .28); background: rgba(4, 10, 16, .62); color: #e5edf5; font-size: 18px; }
+        .diag-full-hint { display: none; }
+        @media (orientation: portrait) and (max-width: 700px) {
+          .panel.diagram-stage.is-full svg {
+            position: absolute; top: 50%; left: 50%;
+            width: 100vh; height: 100vw;
+            width: 100dvh; height: 100dvw;
+            transform: translate(-50%, -50%) rotate(90deg);
+          }
+          .diag-full-hint { display: block; position: absolute; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 2; max-width: 84vw; padding: 7px 14px; border-radius: 999px; background: rgba(4, 10, 16, .66); color: #9fc7e0; font-size: 12px; text-align: center; }
+        }
         .pulse-diagram svg { width: 100%; height: 100%; touch-action: none; }
         .pulse-close.pulse-arrange { top: 126px; font-size: 16px; }
         .pulse-close.pulse-arrange.active { opacity: 1; border-color: rgba(245, 158, 11, .7); color: #fde68a; }
@@ -23540,6 +23616,12 @@ class OpenReefPanel extends HTMLElement {
           .pulse-focus { padding: 12px; }
           .pulse-focus-card { padding: 16px; max-height: 88vh; }
           .pulse-focus-svg { height: 150px; }
+          /* The scene is width-limited on a portrait phone (a 1.6-wide
+             schematic in a 0.5-wide box), so every pixel of width is height:
+             the backdrop bleeds to the screen edges instead of sitting in an
+             18px gutter. The Diagram tab's full-screen view is the real answer
+             for detail. */
+          .pulse-diagram { inset: 74px 0 86px; }
         }
         .cam-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #04080d; border-radius: 10px; overflow: hidden; display: grid; place-items: center; }
         .cam-feed-large { width: 100%; height: 100%; object-fit: contain; display: block; background: #04080d; }
@@ -23693,7 +23775,7 @@ class OpenReefPanel extends HTMLElement {
         .spinner { width: 36px; height: 36px; border: 3px solid #203247; border-top-color: var(--openreef-accent); border-radius: 50%; animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @media (max-width: 900px) {
-          .page { padding: 12px; }
+          .page { --or-page-pad: 12px; }
           .topbar, .hero, .section-head, .card-head, .settings-section-head, .mode-confirm-row, .mode-strip { flex-direction: column; align-items: stretch; }
           .equipment-editor-head { grid-template-columns: 1fr; align-items: stretch; }
           .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -23713,7 +23795,7 @@ class OpenReefPanel extends HTMLElement {
           .awc-pump-grid { grid-template-columns: 1fr; }
         }
         @media (max-width: 640px) {
-          .page { padding: 8px; }
+          .page { --or-page-pad: 8px; }
           .modal { padding: 8px; align-items: stretch; overflow: auto; }
           .wizard { width: 100%; max-height: calc(100vh - 16px); padding: 18px; }
           .cam-fullscreen-modal { padding: 0; overflow: hidden; }
@@ -23742,7 +23824,10 @@ class OpenReefPanel extends HTMLElement {
           .or-buddy-avatar { width: 92px; }
           .or-buddy-bubble { max-width: calc(100vw - 24px); }
           .manual-history-row { flex-direction: column; }
-          .manual-batch-row { grid-template-columns: 1fr; }
+          /* .has-unit must be named too: it carries a two-class selector, so
+             the single-class reset below it never won and unit rows kept the
+             desktop three-column grid — squeezing "Salinity" into 50px. */
+          .manual-batch-row, .manual-batch-row.has-unit { grid-template-columns: 1fr; }
           .awc-settings-block .mini-grid, .awc-compact-toggles { grid-template-columns: 1fr; }
           .awc-day-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
@@ -23756,6 +23841,74 @@ class OpenReefPanel extends HTMLElement {
           .manual-notes { grid-column: 1 / -1; }
           .dosing-grid, .health-insight-grid, .health-reason-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
           .health-category-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        }
+        /* ------------------------------------------------------------------ *
+         * Phone/tablet pass. Deliberately LAST in the sheet: the tiers above
+         * are written widest-first, so anything here that needs to beat them
+         * wins on source order rather than on inflated selectors.
+         * ------------------------------------------------------------------ */
+
+        /* The nav was a wall. Fourteen full-width buttons stacked 787px tall on
+           a 932px phone, so not one card was visible until you had scrolled
+           past the entire menu. Below 1024px it becomes a single sticky rail
+           you swipe -- the active tab is always on screen, and navigation stays
+           reachable at the bottom of a long settings page. */
+        @media (max-width: 1024px) {
+          .tabs {
+            display: flex; flex-wrap: nowrap; gap: 8px;
+            overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
+            scroll-snap-type: x proximity;
+            scrollbar-width: none; -ms-overflow-style: none;
+            position: sticky; top: 0; z-index: 6;
+            margin: 0 calc(-1 * var(--or-page-pad, 12px)) 12px;
+            padding: 8px var(--or-page-pad, 12px) 10px;
+            background: linear-gradient(180deg, #07111a 62%, rgba(7, 17, 26, .86));
+            -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+          }
+          .tabs::-webkit-scrollbar { display: none; }
+          .tabs button {
+            flex: 0 0 auto; scroll-snap-align: center;
+            min-height: 40px; padding: 9px 15px;
+            border-radius: 999px; white-space: nowrap; font-size: 14px;
+          }
+        }
+        @media (max-width: 700px) {
+          /* The header ate a third of the first screen. Title stays, but Setup
+             and Check ride inline: the phone tier above turns every button
+             full-width, which stacked them into 120px of chrome. */
+          .topbar { padding: 14px 16px; margin-bottom: 10px; gap: 10px; }
+          .topbar h1 { font-size: 24px; }
+          .topbar .eyebrow { margin-bottom: 2px; font-size: 11px; }
+          .topbar p { font-size: 13px; }
+          .topbar .actions { flex-direction: row; }
+          .topbar .actions button { width: auto; flex: 1 1 0; min-height: 40px; padding: 9px 12px; }
+          /* Compact stat tiles go two-up. The tier above collapses every grid
+             to one column, which turned Mission Control into a 3,800px scroll
+             of half-empty cards. */
+          .grid.four, .grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+          .summary-card { min-height: 96px; padding: 13px; }
+          /* Action rows wrap two-up instead of stacking full width: four
+             stacked buttons turned every card head into 240px of chrome. */
+          .actions, .button-row, .quick-add, .wizard-actions, .settings-toolbar, .control-actions, .alert-actions, .schedule-toolbar { flex-direction: row; flex-wrap: wrap; }
+          .actions button, .button-row button, .quick-add button, .wizard-actions button, .settings-toolbar button, .control-actions button, .alert-actions button, .schedule-toolbar button { width: auto; flex: 1 1 calc(50% - 5px); min-width: 132px; min-height: 44px; }
+          /* The save row nests inside the settings toolbar, so it wrapped into
+             a half-width column and stacked "Saved" above the Save button.
+             Give it its own full-width row instead. */
+          .settings-toolbar .settings-save { flex: 1 1 100%; flex-direction: row; align-items: center; justify-content: flex-end; }
+          .settings-save button { width: auto; flex: 0 1 auto; min-height: 44px; padding: 10px 18px; }
+          /* Settings section headers stay a row: the tier above stretches them
+             into a column, which turns the little Show/Hide pill into a
+             full-width slab that reads like the section's primary action. */
+          .settings-section-head { flex-direction: row; align-items: center; gap: 10px; }
+          .settings-section-head .pill { flex: none; }
+          /* Touch targets. Fingers are ~44px; these rendered at 22-26px. */
+          .inline-btn { min-height: 36px; padding: 7px 12px; }
+          .coral-swatch { width: 36px; height: 36px; }
+          .or-tone { min-height: 34px; padding: 6px 12px; }
+          .or-buddy-close { width: 34px; height: 34px; font-size: 18px; }
+          /* The living diagram is the one thing on the page worth every pixel:
+             let it bleed past the page gutter on phones. */
+          .panel.diagram-stage { margin: 0 calc(-1 * var(--or-page-pad, 8px)); padding: 4px; border-radius: 0; border-left: 0; border-right: 0; max-height: none; }
         }
       </style>
     `;
