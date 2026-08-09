@@ -661,60 +661,63 @@ test("apply re-checks the gate and the mode id rather than trusting the markup",
 
 // --- the fullscreen trap ---------------------------------------------------
 
-test("Pulse's own re-render must not read as the user leaving fullscreen", async () => {
+test("fullscreen is taken on the host, so no render can drop it", async () => {
   const panel = await modePanel();
+  let hostCalls = 0;
+  let innerCalls = 0;
   const realDoc = globalThis.document;
-  let closed = 0;
   globalThis.document = { fullscreenElement: null, addEventListener() {}, removeEventListener() {} };
   try {
-    panel._pulseActive = true;
-    panel._pulseEnteredFs = true;
-    panel._closePulse = () => { closed += 1; };
-    // No .pulse-root to re-request against: the fallback must still not close.
-    panel.shadowRoot = { querySelector: () => null };
-
-    // Fullscreen ended right after one of our DOM swaps — that is us, not Esc.
-    // Applying a mode used to land here and dump the wall back to the panel.
-    panel._pulseFsSwapAt = Date.now();
-    panel._onPulseFullscreenChange();
-    assertEqual(closed, 0, "a self-inflicted fullscreen exit must never close Pulse");
-
-    // A genuine exit, long after any swap, still closes Pulse.
-    panel._pulseEnteredFs = true;
-    panel._pulseFsSwapAt = Date.now() - 10000;
-    panel._onPulseFullscreenChange();
-    assertEqual(closed, 1, "pressing Esc out of fullscreen still leaves present mode");
-
-    // Never entered fullscreen in the first place: nothing to react to.
-    panel._pulseEnteredFs = false;
-    panel._pulseFsSwapAt = 0;
-    panel._onPulseFullscreenChange();
-    assertEqual(closed, 1, "a windowed Pulse ignores fullscreen events entirely");
+    // .pulse-root lives inside the shadow root, and every render replaces the
+    // shadow root's children. Holding fullscreen there meant each render made
+    // the browser exit, which read as Esc and closed Pulse — the bug that threw
+    // desktop Chrome out of present mode on every mode apply while an iPad,
+    // which has no Fullscreen API to enter, was unaffected.
+    panel.shadowRoot = {
+      querySelector: () => ({ requestFullscreen: () => { innerCalls += 1; return Promise.resolve(); } }),
+      querySelectorAll: () => [],
+    };
+    panel.requestFullscreen = () => { hostCalls += 1; return Promise.resolve(); };
+    panel._render = () => {};
+    panel._pulseEnabled = () => true;
+    panel._stopCameraWebRTC = () => {};
+    panel._guardianStopFace = () => {};
+    panel._pickOverlayQuip = () => "";
+    panel._openPulse(true);
+    assertEqual(hostCalls, 1, "the host element must be the one that goes fullscreen");
+    assertEqual(innerCalls, 0, "never .pulse-root — a render would destroy it");
   } finally {
     globalThis.document = realDoc;
   }
 });
 
-test("regaining fullscreen after a swap is best-effort, never fatal", async () => {
+test("leaving fullscreen leaves Pulse, with no timing guesswork in the way", async () => {
   const panel = await modePanel();
   const realDoc = globalThis.document;
   let closed = 0;
-  let requested = 0;
   globalThis.document = { fullscreenElement: null, addEventListener() {}, removeEventListener() {} };
   try {
     panel._pulseActive = true;
     panel._pulseEnteredFs = true;
     panel._closePulse = () => { closed += 1; };
-    panel.shadowRoot = {
-      querySelector: () => ({
-        requestFullscreen: () => { requested += 1; return Promise.reject(new Error("gesture expired")); },
-      }),
-    };
-    panel._pulseFsSwapAt = Date.now();
+
+    // A real exit closes Pulse — and must do so however recently the wall
+    // re-rendered. An earlier fix guessed "that exit was probably ours" from a
+    // two-second window and swallowed genuine Esc presses that landed inside it.
     panel._onPulseFullscreenChange();
-    assertEqual(requested, 1, "it tries to take fullscreen back");
-    assertEqual(closed, 0, "and a refusal leaves Pulse open, just windowed");
-    assertEqual(panel._pulseFsSwapAt, 0, "the swap stamp is consumed, so the next Esc is honoured");
+    assertEqual(closed, 1, "Esc out of fullscreen leaves present mode");
+
+    // Entering fullscreen is not an exit.
+    globalThis.document.fullscreenElement = {};
+    panel._pulseEnteredFs = true;
+    panel._onPulseFullscreenChange();
+    assertEqual(closed, 1, "gaining fullscreen must not close anything");
+
+    // Never entered fullscreen (iOS has no Fullscreen API): nothing to react to.
+    globalThis.document.fullscreenElement = null;
+    panel._pulseEnteredFs = false;
+    panel._onPulseFullscreenChange();
+    assertEqual(closed, 1, "a windowed Pulse ignores fullscreen events entirely");
   } finally {
     globalThis.document = realDoc;
   }

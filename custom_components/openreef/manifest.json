@@ -20,5 +20,5 @@
   "issue_tracker": "https://github.com/TheCarpyVikings/OpenReef/issues",
   "requirements": ["anthropic>=0.116.0"],
   "single_config_entry": true,
-  "version": "0.7.35"
+  "version": "0.7.36"
 }

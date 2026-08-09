@@ -109,7 +109,6 @@ class OpenReefPanel extends HTMLElement {
     this._pulseTick = 0;
     this._pulseChecked = false;
     this._pulseEnteredFs = false;
-    this._pulseFsSwapAt = 0;
     this._pulseKeyHandler = null;
     this._pulseFsHandler = null;
     this._pulseSparks = {};
@@ -226,28 +225,17 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
-  // Fullscreen went away. Browser Esc exits fullscreen directly, and Pulse
-  // treats that as "close Pulse" — but only when the exit was the user's.
+  // Fullscreen went away: the user pressed Esc or left it from browser chrome,
+  // so leave present mode too.
   //
-  // Fullscreen is held by .pulse-root, which lives INSIDE the shadow root, so
-  // any full re-render destroys it and the browser drops fullscreen a moment
-  // later all by itself. Reading that as Esc is what threw a wall tablet back
-  // to the panel every time it toggled a pump or applied a mode. When the exit
-  // followed one of our own DOM swaps, take fullscreen back instead; browsers
-  // only allow that while the tap's gesture is still live, so failing simply
-  // leaves Pulse windowed — never closed.
+  // No "was that us?" guard is needed, because fullscreen is held by the HOST
+  // element (see _openPulse) which no render ever destroys. It used to be held
+  // by .pulse-root inside the shadow root, so every re-render dropped
+  // fullscreen and landed here looking like Esc — and a timing window meant to
+  // tell the two apart swallowed genuine Esc presses that happened to follow a
+  // render. Fixing where fullscreen lives removed the need for either.
   _onPulseFullscreenChange() {
     if (document.fullscreenElement || !this._pulseActive || !this._pulseEnteredFs) return;
-    if (Date.now() - (this._pulseFsSwapAt || 0) < 2000) {
-      this._pulseFsSwapAt = 0;
-      const root = this.shadowRoot && this.shadowRoot.querySelector(".pulse-root");
-      if (root && root.requestFullscreen) {
-        root.requestFullscreen().catch(() => { this._pulseEnteredFs = false; });
-      } else {
-        this._pulseEnteredFs = false;
-      }
-      return;
-    }
     this._pulseEnteredFs = false;
     this._closePulse();
   }
@@ -6479,9 +6467,6 @@ class OpenReefPanel extends HTMLElement {
       // layer; hass updates patch it in place (no re-render while active).
       // If something else does force a render (e.g. a background config
       // refresh), re-attach the live stream — the old <video> node is gone.
-      // Stamp the swap first: it also destroys the node holding fullscreen, and
-      // the fullscreenchange handler needs to tell that apart from a real Esc.
-      this._pulseFsSwapAt = this._pulseEnteredFs ? Date.now() : 0;
       this.shadowRoot.innerHTML = `${this._styles()}${this._pulseScreen()}`;
       this._startPulseRuntime();
       // A full re-render rebuilds the focus host empty; restore any open detail
@@ -12793,9 +12778,16 @@ class OpenReefPanel extends HTMLElement {
     this._pulseFocusTrend = { key: "", range: "", points: null, loading: false };
     this._render(); // the pulse render branch starts the stream + timer
     if (fromGesture) {
-      const root = this.shadowRoot.querySelector(".pulse-root");
-      if (root && root.requestFullscreen) {
-        root.requestFullscreen().then(() => { this._pulseEnteredFs = true; }).catch(() => {});
+      // Fullscreen the HOST element, never .pulse-root. Every render replaces
+      // the shadow root's children, and destroying the element that holds
+      // fullscreen makes the browser exit — which the fullscreenchange handler
+      // then reads as the user pressing Esc, closing Pulse. That is why
+      // applying a mode threw a desktop browser out of present mode while an
+      // iPad was fine: iOS has no Fullscreen API on ordinary elements, so it
+      // never entered fullscreen and never hit the trap. The host survives
+      // every re-render, so the exit simply stops happening.
+      if (this.requestFullscreen) {
+        this.requestFullscreen().then(() => { this._pulseEnteredFs = true; }).catch(() => {});
       }
     }
   }
