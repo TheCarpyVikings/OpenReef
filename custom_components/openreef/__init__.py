@@ -2300,6 +2300,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         "showShare",
         "keepAwake",
         "nightDim",
+        "allowModes",
     ):
         pulse[field] = bool(pulse.get(field, pulse_defaults[field]))
     camera_id = pulse.get("cameraId")

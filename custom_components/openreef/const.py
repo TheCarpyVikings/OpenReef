@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.33"
+INTEGRATION_VERSION = "0.7.34"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1279,6 +1279,10 @@ DEFAULT_CORE_CONFIG = {
         "nightDimLuxThreshold": 10,
         "timelapseStyle": "growth",
         "sizePreset": "normal",
+        # Mode switching from the wall. On by default, matching
+        # diagram.allowControls: the confirm sheet shows exactly which armed
+        # equipment will change before anything happens.
+        "allowModes": True,
     },
     # Living tank diagram — an interactive schematic of the user's actual system
     # (sump plumbing or all-in-one back chambers), shown as a Reef Pulse backdrop.

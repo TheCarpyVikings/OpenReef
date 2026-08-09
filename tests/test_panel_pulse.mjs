@@ -564,4 +564,160 @@ test("today focus card with nothing configured stays honest, not empty", async (
   }
 });
 
+// --- changing mode from the wall -------------------------------------------
+
+const MODE_RIG = {
+  equipment: {
+    ret: { label: "Return Pump", type: "return_pump", switch_entity_id: "switch.ret", armed: true },
+    skim: { label: "Skimmer", type: "skimmer", switch_entity_id: "switch.skim", armed: true },
+    heat: { label: "Heater", type: "heater", switch_entity_id: "switch.heat", armed: false },
+  },
+  modePreviews: { feed: { ret: "off", skim: "off", heat: "off" } },
+  mode: { active: "running", startedAt: "" },
+};
+const MODE_STATES = {
+  "switch.ret": { state: "on", attributes: {} },
+  "switch.skim": { state: "on", attributes: {} },
+  "switch.heat": { state: "on", attributes: {} },
+};
+const modePanel = async (pulse = {}, cfg = {}) => prep(
+  await makePanel({ ...structuredClone(MODE_RIG), ...cfg, pulse: { enabled: true, ...pulse } }),
+  MODE_STATES,
+);
+
+test("the mode chip is a control only when the wall is allowed to change mode", async () => {
+  const on = await modePanel();
+  assertEqual(on._pulseModeAllowed(), true, "allowed by default, like diagram controls");
+  const off = await modePanel({ allowModes: false });
+  assertEqual(off._pulseModeAllowed(), false);
+  // The card itself refuses too — the gate cannot be walked round by deep-linking
+  // straight to the focus key.
+  off._pulseFocus = "modes";
+  assertEqual(off._pulseFocusMarkup(), "", "a disallowed wall renders no mode card at all");
+});
+
+test("the mode list shows every mode, marks the active one, and leads with the way back", async () => {
+  const panel = await modePanel();
+  panel._pulseFocus = "modes";
+  panel._pulseModePick = "";
+  const running = panel._pulseFocusMarkup();
+  assert(running.includes('data-id="feed"'), "Feed is offered");
+  assert(/data-id="running"[^>]*disabled/.test(running), "the active mode is not tappable");
+
+  // Mid-Feed, getting back to Running is the urgent one, so it comes first.
+  panel._config.mode.active = "feed";
+  const inFeed = panel._pulseFocusMarkup();
+  const order = [...inFeed.matchAll(/pulse-mode-row[^>]*data-id="([a-z]+)"/g)].map((m) => m[1]);
+  assertEqual(order[0], "running", "Return to Running leads while a mode is active");
+  assert(inFeed.includes("Return to Running"), "and says so in words");
+});
+
+test("picking a mode shows the real plan before anything can be applied", async () => {
+  const panel = await modePanel();
+  panel._pulseFocus = "modes";
+  panel._pulseModePick = "feed";
+  const html = panel._pulseFocusMarkup();
+  assert(html.includes("Return Pump") && html.includes("Skimmer"), "armed gear is listed");
+  assert(html.includes("turn off"), "and what will happen to it");
+  // The disarmed heater must be shown as skipped, not silently dropped: the
+  // wall has to match what actually happens.
+  assert(html.includes("Heater") && html.includes("locked"), "disarmed gear shows as locked");
+  assert(html.includes('data-action="pulse-mode-apply"'), "apply is offered once the plan is visible");
+  assert(!/pulse-mode-apply[^>]*disabled/.test(html), "two ready actions -> apply is live");
+});
+
+test("a mode with nothing configured cannot be applied", async () => {
+  const panel = await modePanel({}, { modePreviews: {} });
+  panel._pulseFocus = "modes";
+  panel._pulseModePick = "feed";
+  const html = panel._pulseFocusMarkup();
+  assert(/pulse-mode-apply[^>]*disabled/.test(html), "nothing ready -> apply stays disabled");
+  assert(html.includes("No equipment actions are configured"), "and says why");
+});
+
+test("apply re-checks the gate and the mode id rather than trusting the markup", async () => {
+  const applied = [];
+  const panel = await modePanel();
+  panel._pulseActive = true;
+  panel._applyMode = (id) => applied.push(id);
+
+  panel._pulseApplyMode("nonsense-mode");
+  assertEqual(applied.length, 0, "an unknown mode id is refused");
+
+  panel._config.pulse.allowModes = false;
+  panel._pulseApplyMode("feed");
+  assertEqual(applied.length, 0, "a wall that may not change mode is refused");
+
+  panel._config.pulse.allowModes = true;
+  panel._busy = true;
+  panel._pulseApplyMode("feed");
+  assertEqual(applied.length, 0, "no double-fire while one apply is in flight");
+
+  panel._busy = false;
+  panel._pulseApplyMode("feed");
+  assertEqual(applied, ["feed"], "a real request goes through");
+  assertEqual(panel._pulseModePick, "", "and the plan step closes behind it");
+});
+
+// --- the fullscreen trap ---------------------------------------------------
+
+test("Pulse's own re-render must not read as the user leaving fullscreen", async () => {
+  const panel = await modePanel();
+  const realDoc = globalThis.document;
+  let closed = 0;
+  globalThis.document = { fullscreenElement: null, addEventListener() {}, removeEventListener() {} };
+  try {
+    panel._pulseActive = true;
+    panel._pulseEnteredFs = true;
+    panel._closePulse = () => { closed += 1; };
+    // No .pulse-root to re-request against: the fallback must still not close.
+    panel.shadowRoot = { querySelector: () => null };
+
+    // Fullscreen ended right after one of our DOM swaps — that is us, not Esc.
+    // Applying a mode used to land here and dump the wall back to the panel.
+    panel._pulseFsSwapAt = Date.now();
+    panel._onPulseFullscreenChange();
+    assertEqual(closed, 0, "a self-inflicted fullscreen exit must never close Pulse");
+
+    // A genuine exit, long after any swap, still closes Pulse.
+    panel._pulseEnteredFs = true;
+    panel._pulseFsSwapAt = Date.now() - 10000;
+    panel._onPulseFullscreenChange();
+    assertEqual(closed, 1, "pressing Esc out of fullscreen still leaves present mode");
+
+    // Never entered fullscreen in the first place: nothing to react to.
+    panel._pulseEnteredFs = false;
+    panel._pulseFsSwapAt = 0;
+    panel._onPulseFullscreenChange();
+    assertEqual(closed, 1, "a windowed Pulse ignores fullscreen events entirely");
+  } finally {
+    globalThis.document = realDoc;
+  }
+});
+
+test("regaining fullscreen after a swap is best-effort, never fatal", async () => {
+  const panel = await modePanel();
+  const realDoc = globalThis.document;
+  let closed = 0;
+  let requested = 0;
+  globalThis.document = { fullscreenElement: null, addEventListener() {}, removeEventListener() {} };
+  try {
+    panel._pulseActive = true;
+    panel._pulseEnteredFs = true;
+    panel._closePulse = () => { closed += 1; };
+    panel.shadowRoot = {
+      querySelector: () => ({
+        requestFullscreen: () => { requested += 1; return Promise.reject(new Error("gesture expired")); },
+      }),
+    };
+    panel._pulseFsSwapAt = Date.now();
+    panel._onPulseFullscreenChange();
+    assertEqual(requested, 1, "it tries to take fullscreen back");
+    assertEqual(closed, 0, "and a refusal leaves Pulse open, just windowed");
+    assertEqual(panel._pulseFsSwapAt, 0, "the swap stamp is consumed, so the next Esc is honoured");
+  } finally {
+    globalThis.document = realDoc;
+  }
+});
+
 await runTests();

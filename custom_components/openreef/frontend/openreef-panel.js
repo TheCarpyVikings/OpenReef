@@ -109,6 +109,7 @@ class OpenReefPanel extends HTMLElement {
     this._pulseTick = 0;
     this._pulseChecked = false;
     this._pulseEnteredFs = false;
+    this._pulseFsSwapAt = 0;
     this._pulseKeyHandler = null;
     this._pulseFsHandler = null;
     this._pulseSparks = {};
@@ -133,6 +134,7 @@ class OpenReefPanel extends HTMLElement {
     this._pulseTrendsKicked = false;
     this._diagramArranging = false;
     this._diagramFull = false;
+    this._pulseModePick = "";
     this._diagramDrag = null;
     this._diagramMotion = null;
     this._pulseDiagArm = null;
@@ -216,16 +218,35 @@ class OpenReefPanel extends HTMLElement {
       window.addEventListener("keydown", this._pulseKeyHandler);
     }
     if (!this._pulseFsHandler) {
-      // Browser Esc exits fullscreen directly; treat that as closing Pulse too
-      // (when Pulse was the thing that entered fullscreen).
-      this._pulseFsHandler = () => {
-        if (!document.fullscreenElement && this._pulseActive && this._pulseEnteredFs) {
-          this._pulseEnteredFs = false;
-          this._closePulse();
-        }
-      };
+      this._pulseFsHandler = () => this._onPulseFullscreenChange();
       document.addEventListener("fullscreenchange", this._pulseFsHandler);
     }
+  }
+
+  // Fullscreen went away. Browser Esc exits fullscreen directly, and Pulse
+  // treats that as "close Pulse" — but only when the exit was the user's.
+  //
+  // Fullscreen is held by .pulse-root, which lives INSIDE the shadow root, so
+  // any full re-render destroys it and the browser drops fullscreen a moment
+  // later all by itself. Reading that as Esc is what threw a wall tablet back
+  // to the panel every time it toggled a pump or applied a mode. When the exit
+  // followed one of our own DOM swaps, take fullscreen back instead; browsers
+  // only allow that while the tap's gesture is still live, so failing simply
+  // leaves Pulse windowed — never closed.
+  _onPulseFullscreenChange() {
+    if (document.fullscreenElement || !this._pulseActive || !this._pulseEnteredFs) return;
+    if (Date.now() - (this._pulseFsSwapAt || 0) < 2000) {
+      this._pulseFsSwapAt = 0;
+      const root = this.shadowRoot && this.shadowRoot.querySelector(".pulse-root");
+      if (root && root.requestFullscreen) {
+        root.requestFullscreen().catch(() => { this._pulseEnteredFs = false; });
+      } else {
+        this._pulseEnteredFs = false;
+      }
+      return;
+    }
+    this._pulseEnteredFs = false;
+    this._closePulse();
   }
 
   disconnectedCallback() {
@@ -645,7 +666,12 @@ class OpenReefPanel extends HTMLElement {
     this._busy = true;
     this._message = "";
     this._error = "";
-    this._render();
+    // A full render while Reef Pulse is up rebuilds the entire presentation
+    // layer and restarts the camera stream, so the busy pass only repaints the
+    // focus card on the wall. The one in `finally` still runs: the new mode has
+    // to reach the chip, the diagram and the equipment blocks.
+    if (this._pulseActive) this._renderPulseFocus();
+    else this._render();
     try {
       if (this._configDirty) {
         await this._persistConfigSilently();
@@ -1327,6 +1353,13 @@ class OpenReefPanel extends HTMLElement {
       if (action === "pulse-face") this._applyPulseFace(id);
       if (action === "pulse-insight-nav") this._pulseFocusInsightNav(id === "prev" ? -1 : 1);
       if (action === "diagram-toggle") this._pulseDiagramToggle(id);
+      if (action === "pulse-mode-pick") {
+        // Tapping the mode you are already looking at is "back".
+        this._pulseModePick = this._pulseModePick === id ? "" : id;
+        this._error = "";
+        this._renderPulseFocus();
+      }
+      if (action === "pulse-mode-apply") this._pulseApplyMode(id);
       if (action === "diagram-arrange") {
         this._diagramArranging = !this._diagramArranging;
         this._pulseFocus = null;
@@ -6397,6 +6430,9 @@ class OpenReefPanel extends HTMLElement {
       // layer; hass updates patch it in place (no re-render while active).
       // If something else does force a render (e.g. a background config
       // refresh), re-attach the live stream — the old <video> node is gone.
+      // Stamp the swap first: it also destroys the node holding fullscreen, and
+      // the fullscreenchange handler needs to tell that apart from a real Esc.
+      this._pulseFsSwapAt = this._pulseEnteredFs ? Date.now() : 0;
       this.shadowRoot.innerHTML = `${this._styles()}${this._pulseScreen()}`;
       this._startPulseRuntime();
       // A full re-render rebuilds the focus host empty; restore any open detail
@@ -12704,6 +12740,7 @@ class OpenReefPanel extends HTMLElement {
     this._pulseActive = true;
     this._pulseTick = 0;
     this._pulseFocus = null;
+    this._pulseModePick = "";
     this._pulseFocusTrend = { key: "", range: "", points: null, loading: false };
     this._render(); // the pulse render branch starts the stream + timer
     if (fromGesture) {
@@ -12725,6 +12762,7 @@ class OpenReefPanel extends HTMLElement {
     this._pulseFocus = null;
     this._diagramArranging = false;
     this._pulseDiagArm = null;
+    this._pulseModePick = "";
     this._render();
   }
 
@@ -13497,7 +13535,9 @@ class OpenReefPanel extends HTMLElement {
           <div class="pulse-title">
             ${cfg.showClock !== false ? `<span class="pulse-clock" data-pulse-clock>${this._escape(this._pulseClock())}</span>` : ""}
             <strong>${this._escape(tank.name || "OpenReef")}</strong>
-            ${cfg.showMode !== false ? `<span class="pulse-mode" data-pulse-mode>${this._escape(this._activeModeLabel())}</span>` : ""}
+            ${cfg.showMode === false ? "" : this._pulseModeAllowed()
+              ? `<button class="pulse-mode is-tappable" data-pulse-mode data-action="pulse-focus" data-id="modes" title="Tap to change mode">${this._escape(this._activeModeLabel())}</button>`
+              : `<span class="pulse-mode" data-pulse-mode>${this._escape(this._activeModeLabel())}</span>`}
           </div>
           <div class="pulse-head-right">
             <span class="pulse-alert-chip" data-pulse-alert ${alert.status === "ok" ? 'style="display:none"' : ""}>${this._escape(alert.label)}</span>
@@ -16252,6 +16292,16 @@ class OpenReefPanel extends HTMLElement {
     this._toggleEquipment(id);
   }
 
+  // Apply a mode from the wall. Re-checks the gate and the mode id here rather
+  // than trusting the markup: the button is rendered into a live DOM that a
+  // config change could have invalidated between paint and tap.
+  _pulseApplyMode(modeId) {
+    if (!this._pulseActive || !this._pulseModeAllowed() || this._busy) return;
+    if (!this._modeChoices().some(([id]) => id === modeId)) return;
+    this._pulseModePick = "";
+    this._applyMode(modeId);
+  }
+
   // --- Reef Pulse: tap-to-expand detail cards ------------------------------
   // Tapping any tile/chip/block opens a larger read-only card over Pulse — no
   // trip back to the main panel, no controls, Esc or the scrim closes it. The
@@ -16356,6 +16406,7 @@ class OpenReefPanel extends HTMLElement {
     else if (key === "equipment") body = this._pulseFocusEquipmentMarkup();
     else if (key === "today") body = this._pulseFocusTodayMarkup();
     else if (key === "insights") body = this._pulseFocusInsightsMarkup();
+    else if (key === "modes") body = this._pulseFocusModesMarkup();
     else if (key === "doser-station") body = this._pulseFocusDoserMarkup();
     else if (key === "awc-station") body = this._pulseFocusAwcMarkup();
     else if (key && key.startsWith("equip:")) body = this._pulseFocusEquipItemMarkup(key.slice(6));
@@ -16589,6 +16640,106 @@ class OpenReefPanel extends HTMLElement {
             : "Read-only — this entity is unavailable right now."}</p>
       `}
     `;
+  }
+
+  // Can the wall change mode at all? Same shape as diagram.allowControls: on by
+  // default, and switchable off for a tablet somewhere people will poke it.
+  _pulseModeAllowed() {
+    return this._pulseCfg().allowModes !== false;
+  }
+
+  // The wall's mode switch: Feed before you feed, Maintenance before hands go
+  // in, back to Running after — without walking to a laptop.
+  //
+  // Deliberately two steps, and the second one is not a blind "tap again".
+  // Picking a mode shows the exact equipment plan the panel's confirm dialog
+  // would show — which switches change, which are locked, which are missing —
+  // because a wall tablet invites stray touches and Feed can stop the return
+  // pump. Apply only appears once that plan is on screen.
+  _pulseFocusModesMarkup() {
+    if (!this._pulseModeAllowed()) return "";
+    const choices = this._modeChoices();
+    if (!choices.length) return "";
+    const active = this._activeMode();
+    const pick = choices.some(([id]) => id === this._pulseModePick) ? this._pulseModePick : "";
+    const head = `
+      <header class="pulse-focus-head">
+        <div>
+          <small>Mode</small>
+          <strong>${this._escape(this._activeModeLabel())}</strong>
+        </div>
+        <span class="pulse-mode-pill ${this._pulseStatusClass(active === "running" ? "ok" : "warning")}">
+          ${this._escape(active === "running" ? "running" : this._modeTimerExpired() ? "overdue" : "active")}
+        </span>
+      </header>
+      <p class="pulse-focus-note dim">${this._escape(this._modeDurationLabel())}${
+        active === "running" ? "" : ` · ${this._modeTimerSummary(active)}`}</p>
+      ${this._error ? `<p class="pulse-focus-note warn">${this._escape(this._error)}</p>` : ""}`;
+
+    if (!pick) {
+      // Not running? Getting back is the urgent one, so it leads.
+      const ordered = active === "running"
+        ? choices
+        : [...choices.filter(([id]) => id === "running"), ...choices.filter(([id]) => id !== "running")];
+      const rows = ordered.map(([id, label, description]) => {
+        const counts = this._modeActionCounts(id);
+        const isActive = id === active;
+        const lead = id === "running" && !isActive;
+        return `
+          <button class="pulse-mode-row ${isActive ? "is-active" : ""} ${lead ? "is-lead" : ""}"
+                  data-action="pulse-mode-pick" data-id="${this._escape(id)}" ${isActive ? "disabled" : ""}>
+            <span class="pulse-mode-row-main">
+              <strong>${this._escape(lead ? `Return to ${label}` : label)}</strong>
+              <small>${this._escape(description || "")}</small>
+            </span>
+            <span class="pulse-mode-pill ${this._pulseStatusClass(isActive ? "ok" : counts.ready ? "unknown" : "warning")}">
+              ${this._escape(isActive ? "active now" : `${counts.ready} action${counts.ready === 1 ? "" : "s"}`)}
+            </span>
+          </button>`;
+      }).join("");
+      return `${head}
+        <div class="pulse-mode-list">${rows}</div>
+        <p class="pulse-focus-note dim">Only equipment you have explicitly armed can move. You will see the full plan before anything changes.</p>`;
+    }
+
+    const mode = choices.find(([id]) => id === pick);
+    const counts = this._modeActionCounts(pick);
+    const blocked = counts.rows.filter((row) => row.autoRestartBlocked);
+    // Same rule as the panel's confirm dialog: Running may apply a pure restore.
+    const canApply = Boolean(counts.ready || (pick === "running" && counts.rows.length)) && !this._busy;
+    const planRows = counts.rows.length
+      ? counts.rows.map((row) => `
+          <div class="pulse-mode-plan-row">
+            <span class="pulse-focus-dot ${this._pulseStatusClass(
+              row.autoRestartBlocked ? "critical" : row.status === "ready" ? "ok" : "warning")}"></span>
+            <div>
+              <strong>${this._escape(row.label)}</strong>
+              <em>${this._escape(row.detail)}</em>
+              ${row.timerSummary ? `<em>⏱ ${this._escape(row.timerSummary)}</em>` : ""}
+            </div>
+            <span class="pulse-mode-pill ${this._pulseStatusClass(
+              row.autoRestartBlocked ? "critical" : row.status === "ready" ? "ok" : "warning")}">
+              ${this._escape(row.autoRestartBlocked ? "blocked" : row.status === "ready" ? `turn ${row.desiredState}` : row.status)}
+            </span>
+          </div>`).join("")
+      : `<p class="pulse-focus-note dim">No equipment actions are configured for this mode yet — set them up in Settings → Modes.</p>`;
+
+    return `${head}
+      <div class="pulse-mode-plan-head">
+        <strong>${this._escape(mode[1])}</strong>
+        <small>${this._escape(this._modeTimerSummary(pick))}</small>
+      </div>
+      ${blocked.length ? `<p class="pulse-focus-note warn"><strong>Display wavemaker restart is blocked.</strong> Inspect the tank before restarting one by hand — fish can be inside a stopped wavemaker.</p>` : ""}
+      ${this._configDirty ? `<p class="pulse-focus-note dim">Pending Settings changes will be saved first.</p>` : ""}
+      <div class="pulse-mode-plan">${planRows}</div>
+      <div class="pulse-diag-actions">
+        <button class="pulse-diag-btn" data-action="pulse-mode-pick" data-id="${this._escape(pick)}">Back</button>
+        <button class="pulse-diag-btn ${pick === "running" ? "go" : "warn"}"
+                data-action="pulse-mode-apply" data-id="${this._escape(pick)}" ${canApply ? "" : "disabled"}>
+          ${this._busy ? "Applying…" : `Apply ${this._escape(mode[1])}`}
+        </button>
+      </div>
+      <p class="pulse-focus-note dim">Runs through OpenReef's arming and safety checks, exactly like Mission Control.</p>`;
   }
 
   // Detail card for the AWC node: status, reservoirs, faults — and Stop when
@@ -20809,6 +20960,13 @@ class OpenReefPanel extends HTMLElement {
             </span>
           </label>
           <label class="toggle-card">
+            <input type="checkbox" data-scope="pulse" data-field="allowModes" ${cfg.allowModes === false ? "" : "checked"}>
+            <span>
+              <strong>Change mode from the wall</strong>
+              <small>Makes the mode chip tappable: pick Feed, Maintenance or Return to Running and the wall shows the full equipment plan before anything moves. Only armed equipment can change, and the tablet must be signed in as an admin. Turn this off for a tablet somewhere people will poke it. (Needs "Mode chip" above to be on — that chip is the way in.)</small>
+            </span>
+          </label>
+          <label class="toggle-card">
             <input type="checkbox" data-scope="pulse" data-field="nightDim" ${cfg.nightDim === true ? "checked" : ""}>
             <span>
               <strong>Auto-dim at night</strong>
@@ -23414,6 +23572,33 @@ class OpenReefPanel extends HTMLElement {
         .pulse-title strong { font-size: clamp(26px, 4vw, 46px); font-weight: 800; color: #fff; text-shadow: 0 2px 14px rgba(0, 0, 0, .55); }
         .pulse-clock { font-size: clamp(20px, 2.6vw, 30px); font-weight: 700; color: #cfe7f5; text-shadow: 0 2px 10px rgba(0, 0, 0, .5); font-variant-numeric: tabular-nums; }
         .pulse-mode { border: 1px solid rgba(255, 255, 255, .22); border-radius: 999px; padding: 5px 14px; font-size: 13px; font-weight: 800; background: rgba(4, 10, 16, .5); backdrop-filter: blur(8px); color: #bbf7d0; }
+        /* The chip is a button when the wall may change mode. Same pill, plus a
+           chevron so it reads as tappable from across the room. */
+        button.pulse-mode.is-tappable { cursor: pointer; border-color: rgba(255, 255, 255, .38); }
+        button.pulse-mode.is-tappable::after { content: " ⌄"; opacity: .75; }
+        button.pulse-mode.is-tappable:hover { border-color: var(--openreef-accent); }
+        /* Mode switch card. */
+        .pulse-mode-list { display: grid; gap: 8px; margin: 14px 0 6px; }
+        .pulse-mode-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 13px 15px; border: 1px solid rgba(255, 255, 255, .16); border-radius: 12px; background: rgba(4, 10, 16, .45); color: #e5edf5; cursor: pointer; }
+        .pulse-mode-row:hover:not(:disabled) { border-color: var(--openreef-accent); }
+        .pulse-mode-row:disabled { cursor: default; opacity: .72; }
+        .pulse-mode-row.is-active { border-color: rgba(74, 222, 128, .5); background: rgba(22, 101, 52, .22); }
+        .pulse-mode-row.is-lead { border-color: var(--openreef-accent); }
+        .pulse-mode-row-main { display: grid; gap: 3px; flex: 1; min-width: 0; }
+        .pulse-mode-row-main strong { font-size: 16px; }
+        .pulse-mode-row-main small { color: #9fc7e0; font-weight: 600; line-height: 1.35; }
+        .pulse-mode-pill { flex: none; padding: 4px 11px; border-radius: 999px; font-size: 12px; font-weight: 800; text-transform: lowercase; background: rgba(148, 163, 184, .22); color: #cfe7f5; }
+        .pulse-mode-pill.is-ok { background: rgba(34, 197, 94, .22); color: #bbf7d0; }
+        .pulse-mode-pill.is-warning { background: rgba(245, 158, 11, .22); color: #fde68a; }
+        .pulse-mode-pill.is-critical { background: rgba(239, 68, 68, .24); color: #fecaca; }
+        .pulse-mode-plan-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 14px 0 8px; }
+        .pulse-mode-plan-head strong { font-size: 17px; }
+        .pulse-mode-plan-head small { color: #9fc7e0; }
+        .pulse-mode-plan { display: grid; gap: 7px; margin-bottom: 12px; }
+        .pulse-mode-plan-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 10px 12px; border-radius: 10px; background: rgba(4, 10, 16, .4); }
+        .pulse-mode-plan-row strong { display: block; font-size: 14px; }
+        .pulse-mode-plan-row em { display: block; font-style: normal; font-size: 12.5px; color: #9fc7e0; line-height: 1.35; }
+        .pulse-focus-note.warn { color: #fde68a; }
         .pulse-head-right { display: flex; align-items: flex-start; gap: 14px; }
         .pulse-alert-chip { align-self: center; border-radius: 999px; padding: 8px 16px; font-weight: 800; background: rgba(127, 29, 29, .82); color: #fecaca; box-shadow: 0 4px 18px rgba(0, 0, 0, .4); animation: pulse-edge 1.6s ease-in-out infinite; }
         .pulse-alert-warning .pulse-alert-chip { background: rgba(113, 63, 18, .85); color: #fde68a; }
@@ -23608,7 +23793,10 @@ class OpenReefPanel extends HTMLElement {
           .pulse-head { padding: 16px 62px 0 16px; }
           .pulse-foot { padding: 0 16px 14px; }
           .pulse-buddy { display: none; }
+          /* The label alone is decoration and the phone header has no room for
+             it — but when it is the way to change mode it has to stay. */
           .pulse-mode { display: none; }
+          button.pulse-mode.is-tappable { display: inline-flex; padding: 4px 11px; font-size: 11.5px; }
           .pulse-wall { top: 64px; bottom: 70px; left: 14px; right: 14px; gap: 12px; align-content: start; }
           .pulse-hero .pulse-ring { width: clamp(110px, 18vh, 160px); }
           .pulse-tiles { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }

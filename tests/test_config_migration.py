@@ -667,6 +667,21 @@ def test_diagram_layout_filtered_to_safe_slugs():
     assert config["diagram"]["systemType"] == "aio"
 
 
+def test_pulse_allow_modes_survives_a_save():
+    """Changing mode from the wall is opt-OUT, and the choice must persist.
+
+    The panel and this whitelist have to stay in lockstep: a pulse field the
+    normaliser does not know about is dropped on every save, which is exactly
+    how the timelapse backdrop used to revert the moment you pressed Save.
+    """
+    assert normalise({})["pulse"]["allowModes"] is True
+    off = normalise({"pulse": {"allowModes": False}})["pulse"]
+    assert off["allowModes"] is False, "turning wall mode changes off must survive a save"
+    # Re-normalising a stored config must not resurrect the default.
+    assert normalise({"pulse": off})["pulse"]["allowModes"] is False
+    assert normalise({"pulse": {"allowModes": "yes"}})["pulse"]["allowModes"] is True
+
+
 def test_pulse_backdrop_accepts_diagram():
     config = normalise({"pulse": {"backdrop": "diagram"}})
     assert config["pulse"]["backdrop"] == "diagram"
