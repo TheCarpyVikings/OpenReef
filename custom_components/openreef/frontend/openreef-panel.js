@@ -203,10 +203,13 @@ class OpenReefPanel extends HTMLElement {
     this._loadConfig();
     this._subscribeConfigEvents();
     if (!this._modeCountdownTimer) {
+      // Every second: a countdown that jumps in ten-second steps reads as
+      // broken. _refreshAfterAutoReturnIfDue carries its own 15s throttle, so
+      // the extra calls cost a comparison.
       this._modeCountdownTimer = window.setInterval(() => {
         this._refreshAfterAutoReturnIfDue();
         this._updateModeCountdownElements();
-      }, 10000);
+      }, 1000);
     }
     if (!this._pulseKeyHandler) {
       this._pulseKeyHandler = (ev) => {
@@ -3119,18 +3122,59 @@ class OpenReefPanel extends HTMLElement {
     return Number.isFinite(expiresAt.getTime()) ? expiresAt : null;
   }
 
-  _activeModeCountdownText() {
+  // Clock style, because "7m" sitting there for a whole minute does not look
+  // like anything is counting down.
+  _formatCountdown(ms) {
+    const total = Math.max(0, Math.ceil(ms / 1000));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return hours ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+  }
+
+  // One source of truth for "how much longer", so the wall chip, the Pulse mode
+  // card and Mission Control can never tell you three different things.
+  //
+  // hasTimer is the load-bearing bit: the backend only writes mode.expiresAt
+  // when that mode's timer has a non-zero duration, and custom modes default to
+  // zero. No expiry means no auto-return — the mode stays on until someone ends
+  // it — and saying "no timer set" was too easy to read as "it will sort itself
+  // out". Nothing here invents a deadline that the backend will not honour.
+  _modeCountdown() {
     const active = this._activeMode();
-    if (active === "running") return "No timer active";
+    const label = this._activeModeLabel();
+    if (active === "running") return { active, label, running: true, hasTimer: false, autoReturn: false, expired: false, remainingMs: 0, clock: "" };
     const expiresAt = this._activeModeExpiresAt();
-    if (!expiresAt) return "No timer set";
-    const remaining = expiresAt.getTime() - Date.now();
-    const autoReturn = Boolean(this._config?.mode?.autoReturn);
-    return remaining > 0
-      ? `${this._formatDurationMs(remaining)} left${autoReturn ? " - auto-return on" : ""}`
-      : autoReturn
-        ? "Auto-return due"
-        : "Timer expired";
+    if (!expiresAt) return { active, label, running: false, hasTimer: false, autoReturn: false, expired: false, remainingMs: 0, clock: "" };
+    const remainingMs = expiresAt.getTime() - Date.now();
+    return {
+      active,
+      label,
+      running: false,
+      hasTimer: true,
+      autoReturn: Boolean(this._config?.mode?.autoReturn),
+      expired: remainingMs <= 0,
+      remainingMs,
+      clock: remainingMs > 0 ? this._formatCountdown(remainingMs) : "",
+    };
+  }
+
+  _activeModeCountdownText() {
+    const timer = this._modeCountdown();
+    if (timer.running) return "No timer active";
+    if (!timer.hasTimer) return "No timer — stays on until you return to Running";
+    if (timer.expired) return timer.autoReturn ? "Auto-return due" : "Timer expired";
+    return `${timer.clock} left${timer.autoReturn ? " · returns on its own" : " · then it waits for you"}`;
+  }
+
+  // The Pulse header chip: mode name plus the countdown, short enough to read
+  // from across the room.
+  _pulseModeChipText() {
+    const timer = this._modeCountdown();
+    if (timer.running || !timer.hasTimer) return timer.label;
+    if (timer.expired) return `${timer.label} · ${timer.autoReturn ? "returning" : "timer up"}`;
+    return `${timer.label} · ${timer.clock}`;
   }
 
   _modeTimerExpired() {
@@ -3146,10 +3190,15 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _updateModeCountdownElements() {
+    if (!this.shadowRoot) return;
     const text = this._activeModeCountdownText();
     this.shadowRoot.querySelectorAll("[data-mode-countdown]").forEach((element) => {
       element.textContent = text;
     });
+    // Reef Pulse ticks on a 10s loop, far too slow to watch a countdown run, so
+    // the chip rides this timer instead. Absent when Pulse is closed — no-op.
+    const chip = this.shadowRoot.querySelector("[data-pulse-mode]");
+    if (chip) chip.textContent = this._pulseModeChipText();
   }
 
   _refreshAfterAutoReturnIfDue() {
@@ -13536,8 +13585,8 @@ class OpenReefPanel extends HTMLElement {
             ${cfg.showClock !== false ? `<span class="pulse-clock" data-pulse-clock>${this._escape(this._pulseClock())}</span>` : ""}
             <strong>${this._escape(tank.name || "OpenReef")}</strong>
             ${cfg.showMode === false ? "" : this._pulseModeAllowed()
-              ? `<button class="pulse-mode is-tappable" data-pulse-mode data-action="pulse-focus" data-id="modes" title="Tap to change mode">${this._escape(this._activeModeLabel())}</button>`
-              : `<span class="pulse-mode" data-pulse-mode>${this._escape(this._activeModeLabel())}</span>`}
+              ? `<button class="pulse-mode is-tappable" data-pulse-mode data-action="pulse-focus" data-id="modes" title="Tap to change mode">${this._escape(this._pulseModeChipText())}</button>`
+              : `<span class="pulse-mode" data-pulse-mode>${this._escape(this._pulseModeChipText())}</span>`}
           </div>
           <div class="pulse-head-right">
             <span class="pulse-alert-chip" data-pulse-alert ${alert.status === "ok" ? 'style="display:none"' : ""}>${this._escape(alert.label)}</span>
@@ -13606,7 +13655,7 @@ class OpenReefPanel extends HTMLElement {
     const clock = root.querySelector("[data-pulse-clock]");
     if (clock) clock.textContent = this._pulseClock();
     const mode = root.querySelector("[data-pulse-mode]");
-    if (mode) mode.textContent = this._activeModeLabel();
+    if (mode) mode.textContent = this._pulseModeChipText();
     const ring = root.querySelector("[data-pulse-ring]");
     if (ring) {
       const health = this._reefHealthScore();
@@ -16648,6 +16697,39 @@ class OpenReefPanel extends HTMLElement {
     return this._pulseCfg().allowModes !== false;
   }
 
+  // How long is left, on the wall. data-mode-countdown is what the one-second
+  // timer patches, so this stays live without Pulse re-rendering anything.
+  //
+  // When a mode has no timer the honest answer is not a blank countdown: it
+  // stays on until someone ends it, and a wall that implies otherwise is how a
+  // skimmer sits off overnight. Custom modes default to no timer, so this is
+  // the common case, not the edge one.
+  _pulseModeCountdownMarkup() {
+    const timer = this._modeCountdown();
+    const elapsed = this._modeDurationLabel();
+    if (timer.running) {
+      return `<p class="pulse-focus-note dim">Normal monitoring · ${this._escape(elapsed.toLowerCase())}</p>`;
+    }
+    if (!timer.hasTimer) {
+      // A mode can be CONFIGURED with a timer and still be running without one:
+      // expiry is stamped when the mode is applied, so a timer added afterwards
+      // does not retro-fit itself to the run already in progress. Saying "no
+      // timer" flat would contradict the duration shown against the mode below.
+      const configured = this._modeTimerConfig(timer.active);
+      const note = configured.durationMinutes
+        ? `${timer.label} has a ${configured.durationMinutes} minute timer, but this run started without one — so it stays on until you return to Running. The timer applies next time you switch into it.`
+        : `${timer.label} stays on until you return to Running — it will not end by itself. Give it a timer in Settings → Modes.`;
+      return `
+        <p class="pulse-mode-countdown none">No timer on this run</p>
+        <p class="pulse-focus-note warn">${this._escape(note)}</p>
+        <p class="pulse-focus-note dim">Running for ${this._escape(elapsed.toLowerCase())}.</p>`;
+    }
+    return `
+      <p class="pulse-mode-countdown ${timer.expired ? "is-expired" : ""}" data-mode-countdown>${this._escape(this._activeModeCountdownText())}</p>
+      <p class="pulse-focus-note dim">Running for ${this._escape(elapsed.toLowerCase())}.${
+        timer.autoReturn ? "" : " Auto-return is off, so it waits for you when the timer runs out."}</p>`;
+  }
+
   // The wall's mode switch: Feed before you feed, Maintenance before hands go
   // in, back to Running after — without walking to a laptop.
   //
@@ -16672,8 +16754,7 @@ class OpenReefPanel extends HTMLElement {
           ${this._escape(active === "running" ? "running" : this._modeTimerExpired() ? "overdue" : "active")}
         </span>
       </header>
-      <p class="pulse-focus-note dim">${this._escape(this._modeDurationLabel())}${
-        active === "running" ? "" : ` · ${this._modeTimerSummary(active)}`}</p>
+      ${this._pulseModeCountdownMarkup()}
       ${this._error ? `<p class="pulse-focus-note warn">${this._escape(this._error)}</p>` : ""}`;
 
     if (!pick) {
@@ -16685,12 +16766,22 @@ class OpenReefPanel extends HTMLElement {
         const counts = this._modeActionCounts(id);
         const isActive = id === active;
         const lead = id === "running" && !isActive;
+        // How long this mode would run for, said before you pick it — the
+        // question "when does this end?" is easier to answer up front than
+        // after the fact.
+        const timer = this._modeTimerConfig(id);
+        const timerNote = id === "running"
+          ? ""
+          : timer.durationMinutes
+            ? `${timer.durationMinutes} min${timer.autoReturn ? ", returns on its own" : ", then waits for you"}`
+            : "no timer — stays until you end it";
         return `
           <button class="pulse-mode-row ${isActive ? "is-active" : ""} ${lead ? "is-lead" : ""}"
                   data-action="pulse-mode-pick" data-id="${this._escape(id)}" ${isActive ? "disabled" : ""}>
             <span class="pulse-mode-row-main">
               <strong>${this._escape(lead ? `Return to ${label}` : label)}</strong>
               <small>${this._escape(description || "")}</small>
+              ${timerNote ? `<small class="pulse-mode-row-timer ${timer.durationMinutes ? "" : "none"}">⏱ ${this._escape(timerNote)}</small>` : ""}
             </span>
             <span class="pulse-mode-pill ${this._pulseStatusClass(isActive ? "ok" : counts.ready ? "unknown" : "warning")}">
               ${this._escape(isActive ? "active now" : `${counts.ready} action${counts.ready === 1 ? "" : "s"}`)}
@@ -23591,6 +23682,12 @@ class OpenReefPanel extends HTMLElement {
         .pulse-mode-pill.is-ok { background: rgba(34, 197, 94, .22); color: #bbf7d0; }
         .pulse-mode-pill.is-warning { background: rgba(245, 158, 11, .22); color: #fde68a; }
         .pulse-mode-pill.is-critical { background: rgba(239, 68, 68, .24); color: #fecaca; }
+        /* The countdown itself: the number you look for from the sofa. */
+        .pulse-mode-countdown { margin: 10px 0 2px; font-size: 30px; font-weight: 800; color: #e5edf5; font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+        .pulse-mode-countdown.is-expired { color: #fde68a; }
+        .pulse-mode-countdown.none { color: #94a3b8; font-size: 22px; }
+        .pulse-mode-row-timer { color: #cfe7f5; font-weight: 700; }
+        .pulse-mode-row-timer.none { color: #fde68a; }
         .pulse-mode-plan-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 14px 0 8px; }
         .pulse-mode-plan-head strong { font-size: 17px; }
         .pulse-mode-plan-head small { color: #9fc7e0; }

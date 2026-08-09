@@ -720,4 +720,176 @@ test("regaining fullscreen after a swap is best-effort, never fatal", async () =
   }
 });
 
+// --- how long left ---------------------------------------------------------
+
+const NOW = "2026-08-09T12:00:00Z";
+const inMs = (ms) => new Date(Date.parse(NOW) + ms).toISOString();
+
+const timerPanel = async (mode, extra = {}) => prep(
+  await makePanel({
+    ...structuredClone(MODE_RIG),
+    mode: { active: "running", startedAt: "", expiresAt: "", autoReturn: false, ...mode },
+    pulse: { enabled: true },
+    ...extra,
+  }),
+  MODE_STATES,
+);
+
+test("countdowns are clock-shaped, so they look like they are counting", async () => {
+  const panel = prep(await makePanel({}));
+  assertEqual(panel._formatCountdown(7 * 60000 + 32000), "7:32");
+  assertEqual(panel._formatCountdown(62000), "1:02", "seconds are zero-padded");
+  assertEqual(panel._formatCountdown(9000), "0:09", "under a minute still reads as a clock");
+  assertEqual(panel._formatCountdown(3 * 3600000 + 4 * 60000 + 5000), "3:04:05");
+  assertEqual(panel._formatCountdown(-5000), "0:00", "never counts past zero into negatives");
+});
+
+test("the countdown reports the RUN, not the mode's configuration", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // A mode carrying a 20 minute timer, but applied before that timer existed:
+    // the backend only stamps expiresAt at apply time, so this run has none.
+    const panel = await timerPanel(
+      { active: "feed", startedAt: inMs(-900000), expiresAt: "", autoReturn: false },
+      { modeTimers: { feed: { durationMinutes: 20, autoReturn: true } } },
+    );
+    const timer = panel._modeCountdown();
+    assertEqual(timer.hasTimer, false, "no expiry stamped means no timer on this run");
+    assertEqual(timer.autoReturn, false, "and nothing will bring it back on its own");
+    const card = panel._pulseModeCountdownMarkup();
+    assert(card.includes("No timer on this run"), "the wall says which it means");
+    assert(card.includes("20 minute timer"), "and does not contradict the duration shown per mode");
+    assert(card.includes("applies next time"), "explaining why the two differ");
+  } finally {
+    restore();
+  }
+});
+
+test("a mode with no timer at all says so plainly rather than showing nothing", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // Feed carries a built-in 10 minute default, so "no timer at all" needs a
+    // mode configured to zero — which is what every custom mode starts as.
+    const panel = await timerPanel(
+      { active: "feed", startedAt: inMs(-600000) },
+      { modeTimers: { feed: { durationMinutes: 0, autoReturn: false } } },
+    );
+    assertEqual(panel._activeModeCountdownText(), "No timer — stays on until you return to Running");
+    const card = panel._pulseModeCountdownMarkup();
+    assert(card.includes("will not end by itself"), "the wall must not imply it sorts itself out");
+    assert(card.includes("Settings → Modes"), "and says where to give it one");
+  } finally {
+    restore();
+  }
+});
+
+test("a timed run counts down, and says whether anything will act on it", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const auto = await timerPanel({ active: "feed", startedAt: inMs(-150000), expiresAt: inMs(452000), autoReturn: true });
+    const timer = auto._modeCountdown();
+    assertEqual(timer.hasTimer, true);
+    assertEqual(timer.clock, "7:32");
+    assert(auto._activeModeCountdownText().startsWith("7:32 left"), "the number leads");
+    assert(auto._activeModeCountdownText().includes("returns on its own"), "auto-return is stated");
+
+    const manual = await timerPanel({ active: "feed", startedAt: inMs(-150000), expiresAt: inMs(452000), autoReturn: false });
+    assert(manual._activeModeCountdownText().includes("waits for you"),
+      "without auto-return the timer only expires — it must not read as a promise to return");
+  } finally {
+    restore();
+  }
+});
+
+test("an expired run is distinguishable from one still counting", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const due = await timerPanel({ active: "feed", startedAt: inMs(-900000), expiresAt: inMs(-1000), autoReturn: true });
+    assertEqual(due._modeCountdown().expired, true);
+    assertEqual(due._activeModeCountdownText(), "Auto-return due");
+    assertEqual(due._pulseModeChipText(), "Feed · returning");
+
+    const stuck = await timerPanel({ active: "feed", startedAt: inMs(-900000), expiresAt: inMs(-1000), autoReturn: false });
+    assertEqual(stuck._activeModeCountdownText(), "Timer expired");
+    assertEqual(stuck._pulseModeChipText(), "Feed · timer up");
+  } finally {
+    restore();
+  }
+});
+
+test("the wall chip carries the countdown, and Running stays a plain label", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const running = await timerPanel({ active: "running", startedAt: inMs(-60000) });
+    assertEqual(running._pulseModeChipText(), "Running", "no countdown clutter when nothing is timed");
+    const feed = await timerPanel({ active: "feed", startedAt: inMs(-60000), expiresAt: inMs(452000), autoReturn: true });
+    assertEqual(feed._pulseModeChipText(), "Feed · 7:32");
+    const untimed = await timerPanel({ active: "feed", startedAt: inMs(-60000) });
+    assertEqual(untimed._pulseModeChipText(), "Feed", "an untimed run shows no invented clock");
+  } finally {
+    restore();
+  }
+});
+
+test("the one-second timer repaints the chip, so the Pulse tick cannot wipe it", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await timerPanel(
+      { active: "feed", startedAt: inMs(-60000), expiresAt: inMs(452000), autoReturn: true },
+      { energy: {}, maintenance: {}, sensors: {} },
+    );
+    const countdownEl = { textContent: "" };
+    const chipEl = { textContent: "" };
+    panel.shadowRoot = {
+      querySelectorAll: (sel) => (sel === "[data-mode-countdown]" ? [countdownEl] : []),
+      querySelector: (sel) => (sel === "[data-pulse-mode]" ? chipEl : null),
+    };
+    panel._updateModeCountdownElements();
+    assert(countdownEl.textContent.startsWith("7:32 left"), "panel countdowns tick");
+    assertEqual(chipEl.textContent, "Feed · 7:32", "and so does the wall chip");
+    // Pulse's own 10s repaint writes the chip too. If it writes the bare label
+    // the countdown visibly stalls for ten seconds at a time, so drive the real
+    // update path and assert the clock survives it.
+    chipEl.textContent = "";
+    // _updatePulse touches a lot of the wall; anything that is not the chip can
+    // be an inert stand-in.
+    const stub = () => ({
+      textContent: "", offsetWidth: 0, style: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      setAttribute() {}, getAttribute: () => null,
+      querySelector: () => stub(), querySelectorAll: () => [],
+    });
+    const pulseRoot = {
+      ...stub(),
+      querySelector: (sel) => (sel === "[data-pulse-mode]" ? chipEl : stub()),
+      querySelectorAll: () => [],
+    };
+    panel.shadowRoot = {
+      querySelectorAll: () => [],
+      querySelector: (sel) => (sel === "[data-pulse-root]" ? pulseRoot : sel === "[data-pulse-mode]" ? chipEl : stub()),
+    };
+    panel._pulseTick = 1;
+    panel._updatePulse();
+    assertEqual(chipEl.textContent, "Feed · 7:32", "the Pulse repaint must not drop back to the bare label");
+  } finally {
+    restore();
+  }
+});
+
+test("each mode says up front how long it would run for", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await timerPanel({ active: "running" }, {
+      modeTimers: { feed: { durationMinutes: 10, autoReturn: true }, maintenance: { durationMinutes: 0, autoReturn: false } },
+    });
+    panel._pulseFocus = "modes";
+    panel._pulseModePick = "";
+    const html = panel._pulseFocusMarkup();
+    assert(html.includes("10 min, returns on its own"), "a timed mode advertises its timer");
+    assert(html.includes("no timer — stays until you end it"), "and an untimed one is called out");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();
