@@ -241,6 +241,12 @@ test("faces only write backend-validated fields and never touch user prefs", asy
     }
     assert(["auto", "camera", "wall", "timelapse", "diagram"].includes(face.patch.backdrop), `${id} backdrop must be whitelisted`);
   }
+  // Every face must patch the SAME key set. This is what makes the device
+  // override safe: applying a saved face overwrites every field an override
+  // could have changed, so a device's face can never leak into the saved
+  // config through a field one face sets and another forgets.
+  const keySets = Object.values(faces).map((f) => Object.keys(f.patch).sort().join(","));
+  assertEqual(new Set(keySets).size, 1, "all faces must patch an identical field set");
 });
 
 test("faces express their intent: full wall, quiet photo frame, minimal night", async () => {
@@ -252,6 +258,86 @@ test("faces express their intent: full wall, quiet photo frame, minimal night", 
   assertEqual(faces.photoframe.patch.showInsights, true, "photo frame keeps one ambient story");
   assertEqual(faces.minimal.patch.showInsights, false, "minimal is genuinely minimal");
   assertEqual(faces.minimal.patch.showClock, true, "minimal keeps the clock");
+});
+
+// --- per-device face override ---------------------------------------------
+// The override lives in localStorage: per-browser, never synced, never saved.
+// The iPad wears the Living Diagram while the same config gives the phone a
+// Data Wall. The contract has two halves: the WALL reads the merged view, and
+// everything that EDITS config reads the saved view — or one device's override
+// would silently become everyone's saved default.
+
+test("the wall wears the device face; the saved config never learns about it", async () => {
+  const panel = prep(await makePanel({ pulse: { backdrop: "auto", showStats: true, kioskAutoStart: true } }));
+  panel._pulseDeviceFace = "diagram";
+  assertEqual(panel._pulseCfg().backdrop, "diagram", "merged view wears the device face");
+  assertEqual(panel._pulseCfg().kioskAutoStart, true, "user prefs still follow the saved config");
+  assertEqual(panel._pulseSavedCfg().backdrop, "auto", "saved view is untouched");
+  panel._pulseDeviceFace = "";
+  assertEqual(panel._pulseCfg().backdrop, "auto", "follow-saved is a straight pass-through");
+});
+
+test("a stored face that no longer exists degrades to follow-saved, not a crash", async () => {
+  const panel = prep(await makePanel({ pulse: { backdrop: "wall" } }));
+  const fakeStorage = { "openreef:pulseDeviceFace:v1": "retired-face-id" };
+  globalThis.localStorage = { getItem: (k) => fakeStorage[k] ?? null, setItem() {}, removeItem() {} };
+  try {
+    panel._pulseDeviceFace = undefined;
+    assertEqual(panel._pulseDeviceFaceId(), "", "unknown face id must resolve to follow-saved");
+    assertEqual(panel._pulseCfg().backdrop, "wall");
+  } finally {
+    delete globalThis.localStorage;
+  }
+});
+
+test("applying a saved face while an override is active never bakes the override in", async () => {
+  const panel = prep(await makePanel({ pulse: { backdrop: "auto", showTicker: true } }), {}, {
+    _setDirty: () => {},
+    _render: () => {},
+  });
+  panel._pulseDeviceFace = "diagram";
+  panel._applyPulseFace("photoframe");
+  assertEqual(panel._config.pulse.backdrop, "auto", "photo frame writes over SAVED values, not the merged diagram view");
+  assertEqual(panel._config.pulse.showTicker, false, "the face patch itself still lands");
+  assertEqual(panel._pulseCfg().backdrop, "diagram", "this device keeps wearing its own face");
+});
+
+test("setting and clearing the device face round-trips localStorage", async () => {
+  const panel = prep(await makePanel({}), {}, { _render: () => {} });
+  const stored = {};
+  globalThis.localStorage = {
+    getItem: (k) => stored[k] ?? null,
+    setItem: (k, v) => { stored[k] = v; },
+    removeItem: (k) => { delete stored[k]; },
+  };
+  try {
+    panel._setPulseDeviceFace("minimal");
+    assertEqual(stored["openreef:pulseDeviceFace:v1"], "minimal");
+    panel._setPulseDeviceFace("not-a-face");
+    assertEqual(panel._pulseDeviceFaceId(), "", "junk ids clear the override");
+    assertEqual(stored["openreef:pulseDeviceFace:v1"], undefined, "junk also clears storage");
+  } finally {
+    delete globalThis.localStorage;
+  }
+});
+
+test("a wall with only the hero is sparse; any tiles or blocks make it dense", async () => {
+  const panel = prep(await makePanel({ pulse: {} }));
+  panel._pulseTileSensors = () => [];
+  panel._pulseInsightMarkup = () => "";
+  panel._pulseAwcMarkup = () => "";
+  panel._pulseCategoryBarsMarkup = () => "";
+  panel._pulseEquipmentMarkup = () => "";
+  panel._pulseTodayMarkup = () => "";
+  panel._pulseRingMarkup = () => "<div></div>";
+  panel._reefHealthScore = () => ({ score: 100, grade: "A", status: "ok", topReason: "" });
+  const minimal = panel._pulseWallMarkup(
+    { showStats: false, showInsights: false, showCategories: false, showEquipment: false, showToday: false }, { topReason: "" });
+  assert(/pulse-wall sparse/.test(minimal), "hero-only wall must be sparse (it centres on phones)");
+  panel._pulseCategoryBarsMarkup = () => "<article>cats</article>";
+  const dense = panel._pulseWallMarkup(
+    { showStats: false, showInsights: false, showCategories: true, showEquipment: false, showToday: false }, { topReason: "" });
+  assert(!/pulse-wall sparse/.test(dense), "any block returns the wall to top-aligned scrolling");
 });
 
 test("applying a face patches config, marks dirty, and preserves user prefs", async () => {

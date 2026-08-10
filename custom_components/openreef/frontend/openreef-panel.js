@@ -1342,6 +1342,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
       if (action === "pulse-share") this._sharePulseCard();
       if (action === "pulse-face") this._applyPulseFace(id);
+      if (action === "pulse-device-face") this._setPulseDeviceFace(id === "follow" ? "" : id);
       if (action === "pulse-insight-nav") this._pulseFocusInsightNav(id === "prev" ? -1 : 1);
       if (action === "diagram-toggle") this._pulseDiagramToggle(id);
       if (action === "pulse-mode-pick") {
@@ -12689,9 +12690,52 @@ class OpenReefPanel extends HTMLElement {
   // equipment only — through the same toggle_equipment safety funnel as
   // Mission Control, and switchable off entirely via diagram.allowControls.
 
-  _pulseCfg() {
+  // The saved pulse config, exactly as the backend holds it. The settings
+  // editor and _applyPulseFace must read THIS one: they edit the shared
+  // default, and going through the merged view would bake one device's
+  // override into everyone's saved config.
+  _pulseSavedCfg() {
     const raw = this._config?.pulse;
     return raw && typeof raw === "object" ? raw : {};
+  }
+
+  // What the wall actually wears on THIS device: the saved config, with this
+  // device's face override (if any) layered on top. The override lives in
+  // localStorage — per-browser, never synced, never saved — which is exactly
+  // the semantics wanted: the iPad can wear the Living Diagram while the same
+  // config shows the phone a Data Wall. Only face patch fields are overlaid;
+  // user prefs (kiosk, keep-awake, night dim, camera) always follow the saved
+  // config.
+  _pulseCfg() {
+    const saved = this._pulseSavedCfg();
+    const face = this._pulseFaces()[this._pulseDeviceFaceId()];
+    return face ? { ...saved, ...face.patch } : saved;
+  }
+
+  _pulseDeviceFaceId() {
+    if (this._pulseDeviceFace === undefined) {
+      let stored = "";
+      try {
+        stored = window.localStorage?.getItem("openreef:pulseDeviceFace:v1") || "";
+      } catch {
+        stored = "";
+      }
+      // Validate against the live face list: a face renamed or removed in a
+      // later version must degrade to "follow saved", not crash the wall.
+      this._pulseDeviceFace = this._pulseFaces()[stored] ? stored : "";
+    }
+    return this._pulseDeviceFace;
+  }
+
+  _setPulseDeviceFace(id) {
+    this._pulseDeviceFace = this._pulseFaces()[id] ? id : "";
+    try {
+      if (this._pulseDeviceFace) window.localStorage?.setItem("openreef:pulseDeviceFace:v1", this._pulseDeviceFace);
+      else window.localStorage?.removeItem("openreef:pulseDeviceFace:v1");
+    } catch {
+      // No storage (private mode) -> the override still works for this session.
+    }
+    this._render();
   }
 
   _pulseEnabled() {
@@ -12747,7 +12791,7 @@ class OpenReefPanel extends HTMLElement {
   _applyPulseFace(id) {
     const face = this._pulseFaces()[id];
     if (!face) return;
-    this._config.pulse = { ...this._pulseCfg(), ...face.patch };
+    this._config.pulse = { ...this._pulseSavedCfg(), ...face.patch };
     this._setDirty(true);
     this._render();
   }
@@ -13500,8 +13544,9 @@ class OpenReefPanel extends HTMLElement {
       cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
       cfg.showToday !== false ? this._pulseTodayMarkup() : "",
     ].filter(Boolean);
+    const sparse = !(cfg.showStats !== false && tiles.length) && !blocks.length;
     return `
-      <div class="pulse-wall">
+      <div class="pulse-wall ${sparse ? "sparse" : ""}">
         ${cfg.showHealthRing !== false ? `
           <div class="pulse-hero">
             ${this._pulseRingMarkup(health)}
@@ -20943,7 +20988,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _pulseSettings(forceOpen = false) {
-    const cfg = this._pulseCfg();
+    const cfg = this._pulseSavedCfg();
     const cams = this._cameraList();
     const blocks = [
       ["showHealthRing", "Reef Health ring", "Animated score gauge — corner on camera, centrepiece on the data wall."],
@@ -20982,6 +21027,22 @@ class OpenReefPanel extends HTMLElement {
                 </button>
               `).join("")}
             </div>
+          </div>
+          <div class="pulse-faces pulse-device-faces">
+            <small class="muted">On this screen — wear a different face on this device only. Stored on the device itself (not saved to OpenReef), so the wall iPad can run the Living Diagram while your phone opens the Data Wall. Takes effect immediately, no Save needed.</small>
+            <div class="pulse-face-row">
+              <button class="secondary pulse-face-btn ${this._pulseDeviceFaceId() === "" ? "active-face" : ""}" data-action="pulse-device-face" data-id="follow">
+                <strong>Follow saved settings</strong>
+                <small>This device shows whatever is configured above.</small>
+              </button>
+              ${Object.entries(this._pulseFaces()).map(([id, face]) => `
+                <button class="secondary pulse-face-btn ${this._pulseDeviceFaceId() === id ? "active-face" : ""}" data-action="pulse-device-face" data-id="${this._escape(id)}">
+                  <strong>${this._escape(face.label)}</strong>
+                  <small>${this._escape(face.hint)}</small>
+                </button>
+              `).join("")}
+            </div>
+            ${this._pulseDeviceFaceId() ? `<small class="muted">📌 This device is wearing <strong>${this._escape(this._pulseFaces()[this._pulseDeviceFaceId()].label)}</strong> — the toggles below still edit the saved default for every other screen.</small>` : ""}
           </div>
           <div class="mini-grid">
             <label>Backdrop
@@ -23643,6 +23704,8 @@ class OpenReefPanel extends HTMLElement {
         .pulse-face-btn { display: grid; gap: 3px; text-align: left; padding: 12px 14px; }
         .pulse-face-btn strong { font-size: 14px; }
         .pulse-face-btn small { color: #8da2ba; font-weight: 600; line-height: 1.35; white-space: normal; }
+        .pulse-face-btn.active-face { border-color: var(--openreef-accent); box-shadow: 0 0 0 1px var(--openreef-accent) inset; }
+        .pulse-device-faces { margin-top: 4px; }
         /* Settings: the wall-tablet setup accordion. */
         .pulse-wall-guide { border: 1px solid #24364a; border-radius: 8px; padding: 12px 14px; background: #0b1724; }
         .pulse-wall-guide summary { cursor: pointer; color: #dcecff; }
@@ -23753,7 +23816,11 @@ class OpenReefPanel extends HTMLElement {
         .pulse-close:hover, .pulse-close:focus-visible { opacity: 1; }
         /* Reef Pulse data wall (no camera, or Backdrop = Data wall) */
         .pulse-shade.wall { background: linear-gradient(180deg, rgba(4, 8, 13, .4), transparent 24%), linear-gradient(0deg, rgba(4, 8, 13, .5), transparent 26%); }
-        .pulse-wall { position: absolute; top: 96px; bottom: 84px; left: 30px; right: 30px; display: grid; gap: 18px; align-content: center; justify-items: center; overflow-y: auto; scrollbar-width: none; }
+        /* grid-template-columns pins the single track to the wall's own width.
+           Without it the track is sized by content max-content, and the tiles
+           row (five tiles at min 150px) inflated it to ~800px on a 430px
+           phone: the whole wall — ring included — slid off the right edge. */
+        .pulse-wall { position: absolute; top: 96px; bottom: 84px; left: 30px; right: 30px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-content: center; justify-items: center; overflow-y: auto; scrollbar-width: none; }
         .pulse-wall::-webkit-scrollbar { display: none; }
         .pulse-hero { display: grid; justify-items: center; gap: 8px; }
         .pulse-hero .pulse-ring { width: clamp(150px, 24vh, 250px); }
@@ -23886,7 +23953,12 @@ class OpenReefPanel extends HTMLElement {
              it — but when it is the way to change mode it has to stay. */
           .pulse-mode { display: none; }
           button.pulse-mode.is-tappable { display: inline-flex; padding: 4px 11px; font-size: 11.5px; }
-          .pulse-wall { top: 64px; bottom: 70px; left: 14px; right: 14px; gap: 12px; align-content: start; }
+          /* top clears a two-row header: the tappable mode chip wraps under
+             the title at phone widths and the wall must start below it.
+             align-content start suits the scrolling data wall; a sparse face
+             (ring and clock only) centres instead of hugging the title. */
+          .pulse-wall { top: 106px; bottom: 70px; left: 14px; right: 14px; gap: 12px; align-content: start; }
+          .pulse-wall.sparse { align-content: center; }
           .pulse-hero .pulse-ring { width: clamp(110px, 18vh, 160px); }
           .pulse-tiles { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
           .pulse-blocks { grid-template-columns: 1fr; gap: 10px; }
