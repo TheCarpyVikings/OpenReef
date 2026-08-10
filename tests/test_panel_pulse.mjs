@@ -233,7 +233,7 @@ const USER_PREFS_FACES_MUST_NOT_TOUCH = [
 test("faces only write backend-validated fields and never touch user prefs", async () => {
   const panel = prep(await makePanel({}));
   const faces = panel._pulseFaces();
-  assertEqual(Object.keys(faces).sort(), ["datawall", "diagram", "minimal", "photoframe"]);
+  assertEqual(Object.keys(faces).sort(), ["command", "datawall", "diagram", "minimal", "photoframe"]);
   for (const [id, face] of Object.entries(faces)) {
     for (const key of Object.keys(face.patch)) {
       assert(NORMALISED_PULSE_FIELDS.has(key), `${id} writes unvalidated field ${key}`);
@@ -258,6 +258,10 @@ test("faces express their intent: full wall, quiet photo frame, minimal night", 
   assertEqual(faces.photoframe.patch.showInsights, true, "photo frame keeps one ambient story");
   assertEqual(faces.minimal.patch.showInsights, false, "minimal is genuinely minimal");
   assertEqual(faces.minimal.patch.showClock, true, "minimal keeps the clock");
+  assertEqual(faces.command.patch.backdrop, "diagram", "command centre is built on the living diagram");
+  assert(["showStats", "showCategories", "showEquipment", "showToday"].every((k) => faces.command.patch[k] === true),
+    "command centre turns the whole data wall on around the diagram");
+  assertEqual(faces.command.patch.showBuddy, false, "a monitor face stays clean of the buddy");
 });
 
 // --- per-device face override ---------------------------------------------
@@ -319,6 +323,87 @@ test("setting and clearing the device face round-trips localStorage", async () =
   } finally {
     delete globalThis.localStorage;
   }
+});
+
+// --- diagram + data merge (portrait screens) --------------------------------
+
+function stubWallSources(panel) {
+  panel._pulseTileSensors = () => [["temp", { label: "Temp", entity_id: "sensor.t" }]];
+  panel._pulseTileMarkup = (id) => `<article class="pulse-tile">${id}</article>`;
+  panel._pulseAwcMarkup = () => "";
+  panel._pulseCategoryBarsMarkup = () => `<article data-pulse-categories>cats</article>`;
+  panel._pulseEquipmentMarkup = () => `<article data-pulse-equipment>equip</article>`;
+  panel._pulseTodayMarkup = () => `<article data-pulse-today>today</article>`;
+  panel._pulseInsightMarkup = () => `<article data-pulse-insight>insight</article>`;
+  panel._pulseDiagramMarkup = () => `<div class="pulse-diagram">svg</div>`;
+  return panel;
+}
+
+test("the diagram zone honours the show-toggles: bare face empty, command face full", async () => {
+  const panel = stubWallSources(prep(await makePanel({ pulse: {} })));
+  const bare = panel._pulseDiagramZoneMarkup(
+    { showStats: false, showCategories: false, showEquipment: false, showToday: false }, {});
+  assertEqual(bare.merged, false, "all toggles off -> nothing merges, letterbox stays calm");
+  assert(!bare.markup.includes("pulse-diagram-band"), "no empty band scaffolding");
+  assert(bare.markup.includes("pulse-diagram-zone"), "the zone wrapper is always there for the CSS");
+
+  const full = panel._pulseDiagramZoneMarkup(
+    { showStats: true, showCategories: true, showEquipment: true, showToday: true }, {});
+  assertEqual(full.merged, true);
+  assert(full.markup.includes('pulse-diagram-band top'), "tiles band above the tank");
+  assert(full.markup.includes('pulse-diagram-band bottom'), "blocks band below the tank");
+  assert(!full.markup.includes("data-pulse-insight"),
+    "no insight block in the bands — the foot already carries the compact insight");
+});
+
+test("stats alone make a top band; blocks alone make a bottom band", async () => {
+  const panel = stubWallSources(prep(await makePanel({ pulse: {} })));
+  const statsOnly = panel._pulseDiagramZoneMarkup(
+    { showStats: true, showCategories: false, showEquipment: false, showToday: false }, {});
+  assert(statsOnly.merged && statsOnly.markup.includes("band top") && !statsOnly.markup.includes("band bottom"));
+  const blocksOnly = panel._pulseDiagramZoneMarkup(
+    { showStats: false, showCategories: true, showEquipment: false, showToday: false }, {});
+  assert(blocksOnly.merged && blocksOnly.markup.includes("band bottom") && !blocksOnly.markup.includes("band top"));
+});
+
+test("the merge is geometry-scoped CSS: landscape dissolves the zone, portrait builds the column", async () => {
+  const panel = prep(await makePanel({}));
+  const css = panel._styles();
+  assert(/\.pulse-diagram-zone \{ display: contents; \}/.test(css),
+    "landscape default must keep the diagram's absolute full-bleed behaviour");
+  const portrait = /@media \(max-aspect-ratio: 1\/1\) \{([\s\S]*?)\n        \}/.exec(css);
+  assert(portrait, "portrait aspect block missing");
+  assert(/\.pulse-root\.pulse-merged \.pulse-diagram-zone \{[^}]*flex-direction: column/.test(portrait[1]),
+    "portrait merged zone must be a data column");
+  assert(/\.pulse-root\.pulse-merged \.pulse-chips \{ display: none; \}/.test(portrait[1]),
+    "foot chips hide when the tiles band carries the same numbers");
+  assert(/aspect-ratio: 1600 \/ 1000/.test(portrait[1]),
+    "the diagram keeps its scene aspect as a flow item");
+});
+
+test("live updates reach band content, and the merged class rides the root", async () => {
+  const panel = prep(await makePanel({}));
+  assert(String(panel._updatePulse).includes('".pulse-wall, .pulse-diagram-band"'),
+    "the wall patch gate must also match band content or portrait data goes stale");
+  assert(String(panel._pulseScreen).includes('diagramZone && diagramZone.merged ? "pulse-merged"'),
+    "the root class is what scopes the portrait CSS");
+});
+
+test("Present has a front door in the topbar on every tab", async () => {
+  const { PANEL_PATH } = await import("./_panel_harness.mjs");
+  const fs = await import("node:fs");
+  const source = fs.readFileSync(PANEL_PATH, "utf8");
+  const topbar = /<div class="actions">([\s\S]*?)<\/header>/.exec(source);
+  assert(topbar, "topbar actions block missing");
+  assert(topbar[1].includes('data-action="open-pulse"'),
+    "the topbar must open Reef Pulse from any tab — it was buried in Mission Control");
+  assert(topbar[1].includes("_pulseEnabled()"), "hidden when Pulse is disabled");
+  const panel = prep(await makePanel({}));
+  const css = panel._styles();
+  assert(/\.pulse-present-btn \{[^}]*var\(--openreef-accent\)/.test(css),
+    "the front door wears the accent, not another grey secondary");
+  assert(/prefers-reduced-motion: reduce\) \{ \.pulse-present-btn \{ animation: none/.test(css),
+    "the glow must respect reduced motion");
 });
 
 test("a wall with only the hero is sparse; any tiles or blocks make it dense", async () => {

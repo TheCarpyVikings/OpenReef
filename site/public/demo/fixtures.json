@@ -1,10 +1,10 @@
 {
- "generatedAt": "2026-08-09T15:10:24Z",
+ "generatedAt": "2026-08-10T12:25:16Z",
  "source": "seeded",
  "ws": {
   "openreef/get_config": {
    "configured": true,
-   "version": "0.7.33",
+   "version": "0.7.37",
    "entry_id": "demo_entry",
    "config": {
     "schemaVersion": 54,
@@ -507,7 +507,7 @@
      "muteUntil": {},
      "history": [
       {
-       "timestamp": "2026-08-09T00:46:24Z",
+       "timestamp": "2026-08-09T22:01:16Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "ok",
@@ -515,7 +515,7 @@
        "message": "pH recovered to 8.12 after the evening CO2 dip."
       },
       {
-       "timestamp": "2026-08-08T22:22:24Z",
+       "timestamp": "2026-08-09T19:37:16Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "warning",
@@ -523,7 +523,7 @@
        "message": "pH read 7.94, inside the warning buffer below minimum 7.8."
       },
       {
-       "timestamp": "2026-08-06T12:46:24Z",
+       "timestamp": "2026-08-07T10:01:16Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "ok",
@@ -531,7 +531,7 @@
        "message": "Tank temperature recovered to 26.4 \u00b0C after the heater outlet was switched off."
       },
       {
-       "timestamp": "2026-08-06T12:17:36Z",
+       "timestamp": "2026-08-07T09:32:28Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "critical",
@@ -555,7 +555,7 @@
      "missedAfterHours": 30,
      "notifyTarget": "",
      "lastCheck": "",
-     "lastHeartbeat": "2026-08-09T13:10:24Z",
+     "lastHeartbeat": "2026-08-10T10:25:16Z",
      "lastNotificationTest": "",
      "lastMissedAlert": ""
     },
@@ -569,23 +569,23 @@
      "lastValues": {
       "temp": {
        "value": 25.9,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "ph": {
        "value": 8.16,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "salinity": {
        "value": 35.1,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "sump_temp": {
        "value": 25.7,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "orp": {
        "value": 382.0,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       }
      },
      "lastJumps": {}
@@ -604,7 +604,7 @@
     },
     "trustCheck": {
      "enabled": true,
-     "lastRun": "2026-08-09T15:10:24.163284+00:00",
+     "lastRun": "2026-08-10T12:25:16.024739+00:00",
      "lastStatus": "warning",
      "lastBackupReview": ""
     },
@@ -636,42 +636,42 @@
     },
     "activity": [
      {
-      "timestamp": "2026-08-09T15:10:24.156624+00:00",
+      "timestamp": "2026-08-10T12:25:16.018235+00:00",
       "message": "ICP report imported: Triton (13 elements)",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-09T14:29:24Z",
+      "timestamp": "2026-08-10T11:44:16Z",
       "message": "Reef health recalculated \u2014 alkalinity trending down over 30 days",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-08T09:52:00Z",
+      "timestamp": "2026-08-09T09:52:00Z",
       "message": "Automatic water change completed: 25.0 L drained, 25.0 L filled (batch sequential)",
       "type": "success"
      },
      {
-      "timestamp": "2026-08-08T09:44:00Z",
+      "timestamp": "2026-08-09T09:44:00Z",
       "message": "ATO suspended for 15 min after water change (stabilisation holdoff)",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-07T18:03:00Z",
+      "timestamp": "2026-08-08T18:03:00Z",
       "message": "Feed mode: skimmer paused 10 min, wavemaker to 30 %",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-03T20:20:00Z",
+      "timestamp": "2026-08-04T20:20:00Z",
       "message": "Reef Layer: Bounce mushroom registered \u2014 placed low on the rock",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-06T12:46:24Z",
+      "timestamp": "2026-08-07T10:01:16Z",
       "message": "Heater outlet switched off from phone (armed switch): temperature exceeded 27.5 \u00b0C with heater ON",
       "type": "warning"
      },
      {
-      "timestamp": "2026-08-04T11:47:00Z",
+      "timestamp": "2026-08-05T11:47:00Z",
       "message": "ICP report imported (Triton) \u2014 drift check passed on Ca/Mg, alk kit reads 0.3 dKH high",
       "type": "info"
      }
@@ -681,7 +681,7 @@
      "alkalinity": [
       {
        "id": "demo:alk:0",
-       "timestamp": "2026-07-10T19:03:00Z",
+       "timestamp": "2026-07-11T19:03:00Z",
        "value": 8.66,
        "unit": "dKH",
        "source": "manual",
@@ -689,7 +689,7 @@
       },
       {
        "id": "demo:alk:1",
-       "timestamp": "2026-07-11T19:32:00Z",
+       "timestamp": "2026-07-12T19:32:00Z",
        "value": 8.63,
        "unit": "dKH",
        "source": "manual",
@@ -697,7 +697,7 @@
       },
       {
        "id": "demo:alk:2",
-       "timestamp": "2026-07-12T19:23:00Z",
+       "timestamp": "2026-07-13T19:23:00Z",
        "value": 8.56,
        "unit": "dKH",
        "source": "manual",
@@ -705,7 +705,7 @@
       },
       {
        "id": "demo:alk:3",
-       "timestamp": "2026-07-13T19:08:00Z",
+       "timestamp": "2026-07-14T19:08:00Z",
        "value": 8.53,
        "unit": "dKH",
        "source": "manual",
@@ -713,7 +713,7 @@
       },
       {
        "id": "demo:alk:4",
-       "timestamp": "2026-07-14T19:51:00Z",
+       "timestamp": "2026-07-15T19:51:00Z",
        "value": 8.48,
        "unit": "dKH",
        "source": "manual",
@@ -721,7 +721,7 @@
       },
       {
        "id": "demo:alk:5",
-       "timestamp": "2026-07-15T19:11:00Z",
+       "timestamp": "2026-07-16T19:11:00Z",
        "value": 8.49,
        "unit": "dKH",
        "source": "manual",
@@ -729,7 +729,7 @@
       },
       {
        "id": "demo:alk:6",
-       "timestamp": "2026-07-16T19:28:00Z",
+       "timestamp": "2026-07-17T19:28:00Z",
        "value": 8.54,
        "unit": "dKH",
        "source": "manual",
@@ -737,7 +737,7 @@
       },
       {
        "id": "demo:alk:7",
-       "timestamp": "2026-07-17T19:02:00Z",
+       "timestamp": "2026-07-18T19:02:00Z",
        "value": 8.48,
        "unit": "dKH",
        "source": "manual",
@@ -745,7 +745,7 @@
       },
       {
        "id": "demo:alk:8",
-       "timestamp": "2026-07-18T19:28:00Z",
+       "timestamp": "2026-07-19T19:28:00Z",
        "value": 8.45,
        "unit": "dKH",
        "source": "manual",
@@ -753,7 +753,7 @@
       },
       {
        "id": "demo:alk:9",
-       "timestamp": "2026-07-19T19:04:00Z",
+       "timestamp": "2026-07-20T19:04:00Z",
        "value": 8.36,
        "unit": "dKH",
        "source": "manual",
@@ -761,7 +761,7 @@
       },
       {
        "id": "demo:alk:10",
-       "timestamp": "2026-07-20T19:30:00Z",
+       "timestamp": "2026-07-21T19:30:00Z",
        "value": 8.36,
        "unit": "dKH",
        "source": "manual",
@@ -769,7 +769,7 @@
       },
       {
        "id": "demo:alk:11",
-       "timestamp": "2026-07-21T19:17:00Z",
+       "timestamp": "2026-07-22T19:17:00Z",
        "value": 8.35,
        "unit": "dKH",
        "source": "manual",
@@ -777,7 +777,7 @@
       },
       {
        "id": "demo:alk:12",
-       "timestamp": "2026-07-22T19:31:00Z",
+       "timestamp": "2026-07-23T19:31:00Z",
        "value": 8.36,
        "unit": "dKH",
        "source": "manual",
@@ -785,7 +785,7 @@
       },
       {
        "id": "demo:alk:13",
-       "timestamp": "2026-07-23T19:54:00Z",
+       "timestamp": "2026-07-24T19:54:00Z",
        "value": 8.33,
        "unit": "dKH",
        "source": "manual",
@@ -793,7 +793,7 @@
       },
       {
        "id": "demo:alk:14",
-       "timestamp": "2026-07-24T19:39:00Z",
+       "timestamp": "2026-07-25T19:39:00Z",
        "value": 8.26,
        "unit": "dKH",
        "source": "manual",
@@ -801,7 +801,7 @@
       },
       {
        "id": "demo:alk:15",
-       "timestamp": "2026-07-25T19:05:00Z",
+       "timestamp": "2026-07-26T19:05:00Z",
        "value": 8.35,
        "unit": "dKH",
        "source": "manual",
@@ -809,7 +809,7 @@
       },
       {
        "id": "demo:alk:16",
-       "timestamp": "2026-07-26T19:42:00Z",
+       "timestamp": "2026-07-27T19:42:00Z",
        "value": 8.29,
        "unit": "dKH",
        "source": "manual",
@@ -817,7 +817,7 @@
       },
       {
        "id": "demo:alk:17",
-       "timestamp": "2026-07-27T19:23:00Z",
+       "timestamp": "2026-07-28T19:23:00Z",
        "value": 8.31,
        "unit": "dKH",
        "source": "manual",
@@ -825,7 +825,7 @@
       },
       {
        "id": "demo:alk:18",
-       "timestamp": "2026-07-28T19:09:00Z",
+       "timestamp": "2026-07-29T19:09:00Z",
        "value": 8.25,
        "unit": "dKH",
        "source": "manual",
@@ -833,7 +833,7 @@
       },
       {
        "id": "demo:alk:19",
-       "timestamp": "2026-07-29T19:42:00Z",
+       "timestamp": "2026-07-30T19:42:00Z",
        "value": 8.21,
        "unit": "dKH",
        "source": "manual",
@@ -841,7 +841,7 @@
       },
       {
        "id": "demo:alk:20",
-       "timestamp": "2026-07-30T19:11:00Z",
+       "timestamp": "2026-07-31T19:11:00Z",
        "value": 8.2,
        "unit": "dKH",
        "source": "manual",
@@ -849,7 +849,7 @@
       },
       {
        "id": "demo:alk:21",
-       "timestamp": "2026-07-31T19:20:00Z",
+       "timestamp": "2026-08-01T19:20:00Z",
        "value": 8.15,
        "unit": "dKH",
        "source": "manual",
@@ -857,7 +857,7 @@
       },
       {
        "id": "demo:alk:22",
-       "timestamp": "2026-08-01T19:44:00Z",
+       "timestamp": "2026-08-02T19:44:00Z",
        "value": 8.12,
        "unit": "dKH",
        "source": "manual",
@@ -865,7 +865,7 @@
       },
       {
        "id": "demo:alk:23",
-       "timestamp": "2026-08-02T19:36:00Z",
+       "timestamp": "2026-08-03T19:36:00Z",
        "value": 8.13,
        "unit": "dKH",
        "source": "manual",
@@ -873,7 +873,7 @@
       },
       {
        "id": "demo:alk:24",
-       "timestamp": "2026-08-03T19:27:00Z",
+       "timestamp": "2026-08-04T19:27:00Z",
        "value": 8.14,
        "unit": "dKH",
        "source": "manual",
@@ -881,7 +881,7 @@
       },
       {
        "id": "demo:alk:25",
-       "timestamp": "2026-08-04T19:12:00Z",
+       "timestamp": "2026-08-05T19:12:00Z",
        "value": 8.11,
        "unit": "dKH",
        "source": "manual",
@@ -889,7 +889,7 @@
       },
       {
        "id": "demo:alk:26",
-       "timestamp": "2026-08-05T19:41:00Z",
+       "timestamp": "2026-08-06T19:41:00Z",
        "value": 8.02,
        "unit": "dKH",
        "source": "manual",
@@ -897,7 +897,7 @@
       },
       {
        "id": "demo:alk:27",
-       "timestamp": "2026-08-06T19:30:00Z",
+       "timestamp": "2026-08-07T19:30:00Z",
        "value": 8.09,
        "unit": "dKH",
        "source": "manual",
@@ -905,7 +905,7 @@
       },
       {
        "id": "demo:alk:28",
-       "timestamp": "2026-08-07T19:10:00Z",
+       "timestamp": "2026-08-08T19:10:00Z",
        "value": 8.03,
        "unit": "dKH",
        "source": "manual",
@@ -913,7 +913,7 @@
       },
       {
        "id": "demo:alk:29",
-       "timestamp": "2026-08-08T19:48:00Z",
+       "timestamp": "2026-08-09T19:48:00Z",
        "value": 8.05,
        "unit": "dKH",
        "source": "manual",
@@ -921,7 +921,7 @@
       },
       {
        "id": "demo:icp:triton:1:alkalinity",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 8.1,
        "unit": "dKH",
        "source": "ICP:Triton",
@@ -931,7 +931,7 @@
      "calcium": [
       {
        "id": "demo:ca:0",
-       "timestamp": "2026-07-10T19:08:00Z",
+       "timestamp": "2026-07-11T19:08:00Z",
        "value": 426.08,
        "unit": "ppm",
        "source": "manual",
@@ -939,7 +939,7 @@
       },
       {
        "id": "demo:ca:1",
-       "timestamp": "2026-07-12T19:13:00Z",
+       "timestamp": "2026-07-13T19:13:00Z",
        "value": 427.92,
        "unit": "ppm",
        "source": "manual",
@@ -947,7 +947,7 @@
       },
       {
        "id": "demo:ca:2",
-       "timestamp": "2026-07-14T19:35:00Z",
+       "timestamp": "2026-07-15T19:35:00Z",
        "value": 425.11,
        "unit": "ppm",
        "source": "manual",
@@ -955,7 +955,7 @@
       },
       {
        "id": "demo:ca:3",
-       "timestamp": "2026-07-16T19:04:00Z",
+       "timestamp": "2026-07-17T19:04:00Z",
        "value": 425.82,
        "unit": "ppm",
        "source": "manual",
@@ -963,7 +963,7 @@
       },
       {
        "id": "demo:ca:4",
-       "timestamp": "2026-07-18T19:47:00Z",
+       "timestamp": "2026-07-19T19:47:00Z",
        "value": 424.82,
        "unit": "ppm",
        "source": "manual",
@@ -971,7 +971,7 @@
       },
       {
        "id": "demo:ca:5",
-       "timestamp": "2026-07-20T19:13:00Z",
+       "timestamp": "2026-07-21T19:13:00Z",
        "value": 424.94,
        "unit": "ppm",
        "source": "manual",
@@ -979,7 +979,7 @@
       },
       {
        "id": "demo:ca:6",
-       "timestamp": "2026-07-22T19:53:00Z",
+       "timestamp": "2026-07-23T19:53:00Z",
        "value": 420.7,
        "unit": "ppm",
        "source": "manual",
@@ -987,7 +987,7 @@
       },
       {
        "id": "demo:ca:7",
-       "timestamp": "2026-07-24T19:52:00Z",
+       "timestamp": "2026-07-25T19:52:00Z",
        "value": 424.05,
        "unit": "ppm",
        "source": "manual",
@@ -995,7 +995,7 @@
       },
       {
        "id": "demo:ca:8",
-       "timestamp": "2026-07-26T19:38:00Z",
+       "timestamp": "2026-07-27T19:38:00Z",
        "value": 421.45,
        "unit": "ppm",
        "source": "manual",
@@ -1003,7 +1003,7 @@
       },
       {
        "id": "demo:ca:9",
-       "timestamp": "2026-07-28T19:51:00Z",
+       "timestamp": "2026-07-29T19:51:00Z",
        "value": 422.91,
        "unit": "ppm",
        "source": "manual",
@@ -1011,7 +1011,7 @@
       },
       {
        "id": "demo:ca:10",
-       "timestamp": "2026-07-30T19:33:00Z",
+       "timestamp": "2026-07-31T19:33:00Z",
        "value": 421.75,
        "unit": "ppm",
        "source": "manual",
@@ -1019,7 +1019,7 @@
       },
       {
        "id": "demo:ca:11",
-       "timestamp": "2026-08-01T19:54:00Z",
+       "timestamp": "2026-08-02T19:54:00Z",
        "value": 419.59,
        "unit": "ppm",
        "source": "manual",
@@ -1027,7 +1027,7 @@
       },
       {
        "id": "demo:ca:12",
-       "timestamp": "2026-08-03T19:24:00Z",
+       "timestamp": "2026-08-04T19:24:00Z",
        "value": 418.64,
        "unit": "ppm",
        "source": "manual",
@@ -1035,7 +1035,7 @@
       },
       {
        "id": "demo:ca:13",
-       "timestamp": "2026-08-05T19:42:00Z",
+       "timestamp": "2026-08-06T19:42:00Z",
        "value": 416.91,
        "unit": "ppm",
        "source": "manual",
@@ -1043,7 +1043,7 @@
       },
       {
        "id": "demo:ca:14",
-       "timestamp": "2026-08-07T19:42:00Z",
+       "timestamp": "2026-08-08T19:42:00Z",
        "value": 414.07,
        "unit": "ppm",
        "source": "manual",
@@ -1051,7 +1051,7 @@
       },
       {
        "id": "demo:icp:triton:1:calcium",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 419.0,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -1061,7 +1061,7 @@
      "magnesium": [
       {
        "id": "demo:mg:0",
-       "timestamp": "2026-07-10T19:09:00Z",
+       "timestamp": "2026-07-11T19:09:00Z",
        "value": 1362.62,
        "unit": "ppm",
        "source": "manual",
@@ -1069,7 +1069,7 @@
       },
       {
        "id": "demo:mg:1",
-       "timestamp": "2026-07-13T19:39:00Z",
+       "timestamp": "2026-07-14T19:39:00Z",
        "value": 1350.18,
        "unit": "ppm",
        "source": "manual",
@@ -1077,7 +1077,7 @@
       },
       {
        "id": "demo:mg:2",
-       "timestamp": "2026-07-16T19:23:00Z",
+       "timestamp": "2026-07-17T19:23:00Z",
        "value": 1361.44,
        "unit": "ppm",
        "source": "manual",
@@ -1085,7 +1085,7 @@
       },
       {
        "id": "demo:mg:3",
-       "timestamp": "2026-07-19T19:25:00Z",
+       "timestamp": "2026-07-20T19:25:00Z",
        "value": 1348.69,
        "unit": "ppm",
        "source": "manual",
@@ -1093,7 +1093,7 @@
       },
       {
        "id": "demo:mg:4",
-       "timestamp": "2026-07-22T19:33:00Z",
+       "timestamp": "2026-07-23T19:33:00Z",
        "value": 1342.69,
        "unit": "ppm",
        "source": "manual",
@@ -1101,7 +1101,7 @@
       },
       {
        "id": "demo:mg:5",
-       "timestamp": "2026-07-25T19:06:00Z",
+       "timestamp": "2026-07-26T19:06:00Z",
        "value": 1354.27,
        "unit": "ppm",
        "source": "manual",
@@ -1109,7 +1109,7 @@
       },
       {
        "id": "demo:mg:6",
-       "timestamp": "2026-07-28T19:39:00Z",
+       "timestamp": "2026-07-29T19:39:00Z",
        "value": 1348.83,
        "unit": "ppm",
        "source": "manual",
@@ -1117,7 +1117,7 @@
       },
       {
        "id": "demo:mg:7",
-       "timestamp": "2026-07-31T19:54:00Z",
+       "timestamp": "2026-08-01T19:54:00Z",
        "value": 1340.51,
        "unit": "ppm",
        "source": "manual",
@@ -1125,7 +1125,7 @@
       },
       {
        "id": "demo:mg:8",
-       "timestamp": "2026-08-03T19:09:00Z",
+       "timestamp": "2026-08-04T19:09:00Z",
        "value": 1342.74,
        "unit": "ppm",
        "source": "manual",
@@ -1133,7 +1133,7 @@
       },
       {
        "id": "demo:mg:9",
-       "timestamp": "2026-08-06T19:02:00Z",
+       "timestamp": "2026-08-07T19:02:00Z",
        "value": 1334.31,
        "unit": "ppm",
        "source": "manual",
@@ -1141,7 +1141,7 @@
       },
       {
        "id": "demo:icp:triton:1:magnesium",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 1342.0,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -1151,7 +1151,7 @@
      "nitrate": [
       {
        "id": "demo:no3:0",
-       "timestamp": "2026-07-12T19:09:00Z",
+       "timestamp": "2026-07-13T19:09:00Z",
        "value": 3.5,
        "unit": "ppm",
        "source": "manual",
@@ -1159,7 +1159,7 @@
       },
       {
        "id": "demo:no3:1",
-       "timestamp": "2026-07-16T19:09:00Z",
+       "timestamp": "2026-07-17T19:09:00Z",
        "value": 5.47,
        "unit": "ppm",
        "source": "manual",
@@ -1167,7 +1167,7 @@
       },
       {
        "id": "demo:no3:2",
-       "timestamp": "2026-07-19T19:47:00Z",
+       "timestamp": "2026-07-20T19:47:00Z",
        "value": 5.34,
        "unit": "ppm",
        "source": "manual",
@@ -1175,7 +1175,7 @@
       },
       {
        "id": "demo:no3:3",
-       "timestamp": "2026-07-23T19:20:00Z",
+       "timestamp": "2026-07-24T19:20:00Z",
        "value": 7.79,
        "unit": "ppm",
        "source": "manual",
@@ -1183,7 +1183,7 @@
       },
       {
        "id": "demo:no3:4",
-       "timestamp": "2026-07-26T19:23:00Z",
+       "timestamp": "2026-07-27T19:23:00Z",
        "value": 8.24,
        "unit": "ppm",
        "source": "manual",
@@ -1191,7 +1191,7 @@
       },
       {
        "id": "demo:no3:5",
-       "timestamp": "2026-07-30T19:53:00Z",
+       "timestamp": "2026-07-31T19:53:00Z",
        "value": 8.6,
        "unit": "ppm",
        "source": "manual",
@@ -1199,7 +1199,7 @@
       },
       {
        "id": "demo:no3:6",
-       "timestamp": "2026-08-02T19:48:00Z",
+       "timestamp": "2026-08-03T19:48:00Z",
        "value": 9.42,
        "unit": "ppm",
        "source": "manual",
@@ -1207,7 +1207,7 @@
       },
       {
        "id": "demo:no3:7",
-       "timestamp": "2026-08-06T19:16:00Z",
+       "timestamp": "2026-08-07T19:16:00Z",
        "value": 11.44,
        "unit": "ppm",
        "source": "manual",
@@ -1215,7 +1215,7 @@
       },
       {
        "id": "demo:icp:triton:1:nitrate",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 9.8,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -1225,7 +1225,7 @@
      "phosphate": [
       {
        "id": "demo:po4:0",
-       "timestamp": "2026-07-12T19:05:00Z",
+       "timestamp": "2026-07-13T19:05:00Z",
        "value": 0.02,
        "unit": "ppm",
        "source": "manual",
@@ -1233,7 +1233,7 @@
       },
       {
        "id": "demo:po4:1",
-       "timestamp": "2026-07-16T19:54:00Z",
+       "timestamp": "2026-07-17T19:54:00Z",
        "value": 0.04,
        "unit": "ppm",
        "source": "manual",
@@ -1241,7 +1241,7 @@
       },
       {
        "id": "demo:po4:2",
-       "timestamp": "2026-07-19T19:14:00Z",
+       "timestamp": "2026-07-20T19:14:00Z",
        "value": 0.05,
        "unit": "ppm",
        "source": "manual",
@@ -1249,7 +1249,7 @@
       },
       {
        "id": "demo:po4:3",
-       "timestamp": "2026-07-23T19:20:00Z",
+       "timestamp": "2026-07-24T19:20:00Z",
        "value": 0.05,
        "unit": "ppm",
        "source": "manual",
@@ -1257,7 +1257,7 @@
       },
       {
        "id": "demo:po4:4",
-       "timestamp": "2026-07-26T19:23:00Z",
+       "timestamp": "2026-07-27T19:23:00Z",
        "value": 0.05,
        "unit": "ppm",
        "source": "manual",
@@ -1265,7 +1265,7 @@
       },
       {
        "id": "demo:po4:5",
-       "timestamp": "2026-07-30T19:10:00Z",
+       "timestamp": "2026-07-31T19:10:00Z",
        "value": 0.06,
        "unit": "ppm",
        "source": "manual",
@@ -1273,7 +1273,7 @@
       },
       {
        "id": "demo:po4:6",
-       "timestamp": "2026-08-02T19:16:00Z",
+       "timestamp": "2026-08-03T19:16:00Z",
        "value": 0.07,
        "unit": "ppm",
        "source": "manual",
@@ -1281,7 +1281,7 @@
       },
       {
        "id": "demo:po4:7",
-       "timestamp": "2026-08-06T19:14:00Z",
+       "timestamp": "2026-08-07T19:14:00Z",
        "value": 0.07,
        "unit": "ppm",
        "source": "manual",
@@ -1289,7 +1289,7 @@
       },
       {
        "id": "demo:icp:triton:1:phosphate",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 0.06,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -1299,7 +1299,7 @@
      "salinity": [
       {
        "id": "demo:icp:triton:1:salinity",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 35.0,
        "unit": "ppt",
        "source": "ICP:Triton",
@@ -1426,7 +1426,7 @@
       "water_change": [
        {
         "id": "demo:wc:1",
-        "timestamp": "2026-08-08T09:11:00Z",
+        "timestamp": "2026-08-09T09:11:00Z",
         "notes": "",
         "source": "awc",
         "volume": 25.0,
@@ -1434,7 +1434,7 @@
        },
        {
         "id": "demo:wc:2",
-        "timestamp": "2026-08-01T09:45:00Z",
+        "timestamp": "2026-08-02T09:45:00Z",
         "notes": "",
         "source": "awc",
         "volume": 25.0,
@@ -1442,7 +1442,7 @@
        },
        {
         "id": "demo:wc:3",
-        "timestamp": "2026-07-25T10:19:00Z",
+        "timestamp": "2026-07-26T10:19:00Z",
         "notes": "manual bucket day",
         "volume": 30.0,
         "volumeUnit": "L"
@@ -1451,21 +1451,21 @@
       "filter_sock": [
        {
         "id": "demo:fs:1",
-        "timestamp": "2026-08-06T19:16:00Z",
+        "timestamp": "2026-08-07T19:16:00Z",
         "notes": ""
        }
       ],
       "skimmer_clean": [
        {
         "id": "demo:sk:1",
-        "timestamp": "2026-07-25T19:23:00Z",
+        "timestamp": "2026-07-26T19:23:00Z",
         "notes": ""
        }
       ],
       "glass_clean": [
        {
         "id": "demo:gc:1",
-        "timestamp": "2026-08-07T19:50:00Z",
+        "timestamp": "2026-08-08T19:50:00Z",
         "notes": ""
        }
       ]
@@ -1476,7 +1476,7 @@
       "notifyTarget": "",
       "persistent": true
      },
-     "completionsSyncedAt": "2026-08-09T15:10:24.158583+00:00"
+     "completionsSyncedAt": "2026-08-10T12:25:16.020188+00:00"
     },
     "pulse": {
      "enabled": true,
@@ -1503,7 +1503,8 @@
      "nightDimLuxEntity": "",
      "nightDimLuxThreshold": 10.0,
      "timelapseStyle": "growth",
-     "sizePreset": "normal"
+     "sizePreset": "normal",
+     "allowModes": true
     },
     "diagram": {
      "systemType": "sump",
@@ -1519,7 +1520,7 @@
        "name": "Ragnar's staghorn",
        "species": "staghorn",
        "colour": "purple",
-       "addedAt": "2025-06-25T15:10:24Z",
+       "addedAt": "2025-06-26T12:25:16Z",
        "notes": "First SPS in the tank \u2014 from a 2 cm frag.",
        "photoUrl": ""
       },
@@ -1527,7 +1528,7 @@
        "name": "Pink birdsnest",
        "species": "birdsnest",
        "colour": "pink",
-       "addedAt": "2025-10-13T15:10:24Z",
+       "addedAt": "2025-10-14T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1535,7 +1536,7 @@
        "name": "Forest fire digitata",
        "species": "digitata",
        "colour": "orange",
-       "addedAt": "2025-12-12T15:10:24Z",
+       "addedAt": "2025-12-13T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1543,7 +1544,7 @@
        "name": "Green table acro",
        "species": "table",
        "colour": "green",
-       "addedAt": "2026-02-10T15:10:24Z",
+       "addedAt": "2026-02-11T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1551,7 +1552,7 @@
        "name": "Dragon soul torch",
        "species": "torch",
        "colour": "gold",
-       "addedAt": "2025-11-22T15:10:24Z",
+       "addedAt": "2025-11-23T12:25:16Z",
        "notes": "The expensive one.",
        "photoUrl": ""
       },
@@ -1559,7 +1560,7 @@
        "name": "Hammer garden",
        "species": "hammer",
        "colour": "green",
-       "addedAt": "2025-09-13T15:10:24Z",
+       "addedAt": "2025-09-14T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1567,7 +1568,7 @@
        "name": "Duncan colony",
        "species": "duncan",
        "colour": "teal",
-       "addedAt": "2026-03-12T15:10:24Z",
+       "addedAt": "2026-03-13T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1575,7 +1576,7 @@
        "name": "Warpaint scoly",
        "species": "scoly",
        "colour": "red",
-       "addedAt": "2026-04-11T15:10:24Z",
+       "addedAt": "2026-04-12T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1583,7 +1584,7 @@
        "name": "Utter chaos zoas",
        "species": "zoa",
        "colour": "orange",
-       "addedAt": "2025-08-04T15:10:24Z",
+       "addedAt": "2025-08-05T12:25:16Z",
        "notes": "Started as five polyps.",
        "photoUrl": ""
       },
@@ -1591,7 +1592,7 @@
        "name": "Bounce mushroom",
        "species": "mushroom",
        "colour": "red",
-       "addedAt": "2026-05-11T15:10:24Z",
+       "addedAt": "2026-05-12T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -1599,7 +1600,7 @@
        "name": "Pulsing xenia",
        "species": "xenia",
        "colour": "pink",
-       "addedAt": "2025-06-05T15:10:24Z",
+       "addedAt": "2025-06-06T12:25:16Z",
        "notes": "It was free. It is everywhere.",
        "photoUrl": ""
       },
@@ -1607,7 +1608,7 @@
        "name": "Purple sea fan",
        "species": "gorgonian",
        "colour": "purple",
-       "addedAt": "2026-01-21T15:10:24Z",
+       "addedAt": "2026-01-22T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       }
@@ -1799,8 +1800,8 @@
       "faultSince": "",
       "method": "",
       "startedAt": "",
-      "lastRun": "2026-08-08T09:27:00Z",
-      "nextRun": "2026-08-10T09:00:00Z",
+      "lastRun": "2026-08-09T09:27:00Z",
+      "nextRun": "2026-08-13T09:00:00Z",
       "targetLitres": 0.0,
       "movedMl": {
        "drain": 0.0,
@@ -1825,7 +1826,7 @@
      },
      "history": [
       {
-       "completedAt": "2026-08-08T09:43:00Z",
+       "completedAt": "2026-08-09T09:43:00Z",
        "drainedL": 25.0,
        "filledL": 24.9,
        "method": "batch_sequential",
@@ -1834,7 +1835,7 @@
        "source": "sched"
       },
       {
-       "completedAt": "2026-08-05T09:43:00Z",
+       "completedAt": "2026-08-06T09:43:00Z",
        "drainedL": 25.0,
        "filledL": 25.1,
        "method": "batch_sequential",
@@ -1843,7 +1844,7 @@
        "source": "sched"
       },
       {
-       "completedAt": "2026-08-01T09:35:00Z",
+       "completedAt": "2026-08-02T09:35:00Z",
        "drainedL": 25.0,
        "filledL": 24.8,
        "method": "batch_sequential",
@@ -1900,7 +1901,7 @@
       "adapter": "triton_csv",
       "method": "ICP-OES",
       "sampleType": "tank",
-      "sampleDate": "2026-07-28T10:30:00Z",
+      "sampleDate": "2026-07-29T10:30:00Z",
       "importedAt": "",
       "testId": "TR-260722",
       "tank": "",
@@ -2623,7 +2624,7 @@
      "muteUntil": {},
      "history": [
       {
-       "timestamp": "2026-08-09T00:46:24Z",
+       "timestamp": "2026-08-09T22:01:16Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "ok",
@@ -2631,7 +2632,7 @@
        "message": "pH recovered to 8.12 after the evening CO2 dip."
       },
       {
-       "timestamp": "2026-08-08T22:22:24Z",
+       "timestamp": "2026-08-09T19:37:16Z",
        "sensor_id": "ph",
        "label": "pH Level",
        "state": "warning",
@@ -2639,7 +2640,7 @@
        "message": "pH read 7.94, inside the warning buffer below minimum 7.8."
       },
       {
-       "timestamp": "2026-08-06T12:46:24Z",
+       "timestamp": "2026-08-07T10:01:16Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "ok",
@@ -2647,7 +2648,7 @@
        "message": "Tank temperature recovered to 26.4 \u00b0C after the heater outlet was switched off."
       },
       {
-       "timestamp": "2026-08-06T12:17:36Z",
+       "timestamp": "2026-08-07T09:32:28Z",
        "sensor_id": "temp",
        "label": "Display Tank Temperature",
        "state": "critical",
@@ -2671,7 +2672,7 @@
      "missedAfterHours": 30,
      "notifyTarget": "",
      "lastCheck": "",
-     "lastHeartbeat": "2026-08-09T13:10:24Z",
+     "lastHeartbeat": "2026-08-10T10:25:16Z",
      "lastNotificationTest": "",
      "lastMissedAlert": ""
     },
@@ -2685,23 +2686,23 @@
      "lastValues": {
       "temp": {
        "value": 25.9,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "ph": {
        "value": 8.16,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "salinity": {
        "value": 35.1,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "sump_temp": {
        "value": 25.7,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       },
       "orp": {
        "value": 382.0,
-       "updatedAt": "2026-08-09T15:10:24.163434+00:00"
+       "updatedAt": "2026-08-10T12:25:16.024888+00:00"
       }
      },
      "lastJumps": {}
@@ -2720,7 +2721,7 @@
     },
     "trustCheck": {
      "enabled": true,
-     "lastRun": "2026-08-09T15:10:24.163284+00:00",
+     "lastRun": "2026-08-10T12:25:16.024739+00:00",
      "lastStatus": "warning",
      "lastBackupReview": ""
     },
@@ -2752,42 +2753,42 @@
     },
     "activity": [
      {
-      "timestamp": "2026-08-09T15:10:24.156624+00:00",
+      "timestamp": "2026-08-10T12:25:16.018235+00:00",
       "message": "ICP report imported: Triton (13 elements)",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-09T14:29:24Z",
+      "timestamp": "2026-08-10T11:44:16Z",
       "message": "Reef health recalculated \u2014 alkalinity trending down over 30 days",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-08T09:52:00Z",
+      "timestamp": "2026-08-09T09:52:00Z",
       "message": "Automatic water change completed: 25.0 L drained, 25.0 L filled (batch sequential)",
       "type": "success"
      },
      {
-      "timestamp": "2026-08-08T09:44:00Z",
+      "timestamp": "2026-08-09T09:44:00Z",
       "message": "ATO suspended for 15 min after water change (stabilisation holdoff)",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-07T18:03:00Z",
+      "timestamp": "2026-08-08T18:03:00Z",
       "message": "Feed mode: skimmer paused 10 min, wavemaker to 30 %",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-03T20:20:00Z",
+      "timestamp": "2026-08-04T20:20:00Z",
       "message": "Reef Layer: Bounce mushroom registered \u2014 placed low on the rock",
       "type": "info"
      },
      {
-      "timestamp": "2026-08-06T12:46:24Z",
+      "timestamp": "2026-08-07T10:01:16Z",
       "message": "Heater outlet switched off from phone (armed switch): temperature exceeded 27.5 \u00b0C with heater ON",
       "type": "warning"
      },
      {
-      "timestamp": "2026-08-04T11:47:00Z",
+      "timestamp": "2026-08-05T11:47:00Z",
       "message": "ICP report imported (Triton) \u2014 drift check passed on Ca/Mg, alk kit reads 0.3 dKH high",
       "type": "info"
      }
@@ -2797,7 +2798,7 @@
      "alkalinity": [
       {
        "id": "demo:alk:0",
-       "timestamp": "2026-07-10T19:03:00Z",
+       "timestamp": "2026-07-11T19:03:00Z",
        "value": 8.66,
        "unit": "dKH",
        "source": "manual",
@@ -2805,7 +2806,7 @@
       },
       {
        "id": "demo:alk:1",
-       "timestamp": "2026-07-11T19:32:00Z",
+       "timestamp": "2026-07-12T19:32:00Z",
        "value": 8.63,
        "unit": "dKH",
        "source": "manual",
@@ -2813,7 +2814,7 @@
       },
       {
        "id": "demo:alk:2",
-       "timestamp": "2026-07-12T19:23:00Z",
+       "timestamp": "2026-07-13T19:23:00Z",
        "value": 8.56,
        "unit": "dKH",
        "source": "manual",
@@ -2821,7 +2822,7 @@
       },
       {
        "id": "demo:alk:3",
-       "timestamp": "2026-07-13T19:08:00Z",
+       "timestamp": "2026-07-14T19:08:00Z",
        "value": 8.53,
        "unit": "dKH",
        "source": "manual",
@@ -2829,7 +2830,7 @@
       },
       {
        "id": "demo:alk:4",
-       "timestamp": "2026-07-14T19:51:00Z",
+       "timestamp": "2026-07-15T19:51:00Z",
        "value": 8.48,
        "unit": "dKH",
        "source": "manual",
@@ -2837,7 +2838,7 @@
       },
       {
        "id": "demo:alk:5",
-       "timestamp": "2026-07-15T19:11:00Z",
+       "timestamp": "2026-07-16T19:11:00Z",
        "value": 8.49,
        "unit": "dKH",
        "source": "manual",
@@ -2845,7 +2846,7 @@
       },
       {
        "id": "demo:alk:6",
-       "timestamp": "2026-07-16T19:28:00Z",
+       "timestamp": "2026-07-17T19:28:00Z",
        "value": 8.54,
        "unit": "dKH",
        "source": "manual",
@@ -2853,7 +2854,7 @@
       },
       {
        "id": "demo:alk:7",
-       "timestamp": "2026-07-17T19:02:00Z",
+       "timestamp": "2026-07-18T19:02:00Z",
        "value": 8.48,
        "unit": "dKH",
        "source": "manual",
@@ -2861,7 +2862,7 @@
       },
       {
        "id": "demo:alk:8",
-       "timestamp": "2026-07-18T19:28:00Z",
+       "timestamp": "2026-07-19T19:28:00Z",
        "value": 8.45,
        "unit": "dKH",
        "source": "manual",
@@ -2869,7 +2870,7 @@
       },
       {
        "id": "demo:alk:9",
-       "timestamp": "2026-07-19T19:04:00Z",
+       "timestamp": "2026-07-20T19:04:00Z",
        "value": 8.36,
        "unit": "dKH",
        "source": "manual",
@@ -2877,7 +2878,7 @@
       },
       {
        "id": "demo:alk:10",
-       "timestamp": "2026-07-20T19:30:00Z",
+       "timestamp": "2026-07-21T19:30:00Z",
        "value": 8.36,
        "unit": "dKH",
        "source": "manual",
@@ -2885,7 +2886,7 @@
       },
       {
        "id": "demo:alk:11",
-       "timestamp": "2026-07-21T19:17:00Z",
+       "timestamp": "2026-07-22T19:17:00Z",
        "value": 8.35,
        "unit": "dKH",
        "source": "manual",
@@ -2893,7 +2894,7 @@
       },
       {
        "id": "demo:alk:12",
-       "timestamp": "2026-07-22T19:31:00Z",
+       "timestamp": "2026-07-23T19:31:00Z",
        "value": 8.36,
        "unit": "dKH",
        "source": "manual",
@@ -2901,7 +2902,7 @@
       },
       {
        "id": "demo:alk:13",
-       "timestamp": "2026-07-23T19:54:00Z",
+       "timestamp": "2026-07-24T19:54:00Z",
        "value": 8.33,
        "unit": "dKH",
        "source": "manual",
@@ -2909,7 +2910,7 @@
       },
       {
        "id": "demo:alk:14",
-       "timestamp": "2026-07-24T19:39:00Z",
+       "timestamp": "2026-07-25T19:39:00Z",
        "value": 8.26,
        "unit": "dKH",
        "source": "manual",
@@ -2917,7 +2918,7 @@
       },
       {
        "id": "demo:alk:15",
-       "timestamp": "2026-07-25T19:05:00Z",
+       "timestamp": "2026-07-26T19:05:00Z",
        "value": 8.35,
        "unit": "dKH",
        "source": "manual",
@@ -2925,7 +2926,7 @@
       },
       {
        "id": "demo:alk:16",
-       "timestamp": "2026-07-26T19:42:00Z",
+       "timestamp": "2026-07-27T19:42:00Z",
        "value": 8.29,
        "unit": "dKH",
        "source": "manual",
@@ -2933,7 +2934,7 @@
       },
       {
        "id": "demo:alk:17",
-       "timestamp": "2026-07-27T19:23:00Z",
+       "timestamp": "2026-07-28T19:23:00Z",
        "value": 8.31,
        "unit": "dKH",
        "source": "manual",
@@ -2941,7 +2942,7 @@
       },
       {
        "id": "demo:alk:18",
-       "timestamp": "2026-07-28T19:09:00Z",
+       "timestamp": "2026-07-29T19:09:00Z",
        "value": 8.25,
        "unit": "dKH",
        "source": "manual",
@@ -2949,7 +2950,7 @@
       },
       {
        "id": "demo:alk:19",
-       "timestamp": "2026-07-29T19:42:00Z",
+       "timestamp": "2026-07-30T19:42:00Z",
        "value": 8.21,
        "unit": "dKH",
        "source": "manual",
@@ -2957,7 +2958,7 @@
       },
       {
        "id": "demo:alk:20",
-       "timestamp": "2026-07-30T19:11:00Z",
+       "timestamp": "2026-07-31T19:11:00Z",
        "value": 8.2,
        "unit": "dKH",
        "source": "manual",
@@ -2965,7 +2966,7 @@
       },
       {
        "id": "demo:alk:21",
-       "timestamp": "2026-07-31T19:20:00Z",
+       "timestamp": "2026-08-01T19:20:00Z",
        "value": 8.15,
        "unit": "dKH",
        "source": "manual",
@@ -2973,7 +2974,7 @@
       },
       {
        "id": "demo:alk:22",
-       "timestamp": "2026-08-01T19:44:00Z",
+       "timestamp": "2026-08-02T19:44:00Z",
        "value": 8.12,
        "unit": "dKH",
        "source": "manual",
@@ -2981,7 +2982,7 @@
       },
       {
        "id": "demo:alk:23",
-       "timestamp": "2026-08-02T19:36:00Z",
+       "timestamp": "2026-08-03T19:36:00Z",
        "value": 8.13,
        "unit": "dKH",
        "source": "manual",
@@ -2989,7 +2990,7 @@
       },
       {
        "id": "demo:alk:24",
-       "timestamp": "2026-08-03T19:27:00Z",
+       "timestamp": "2026-08-04T19:27:00Z",
        "value": 8.14,
        "unit": "dKH",
        "source": "manual",
@@ -2997,7 +2998,7 @@
       },
       {
        "id": "demo:alk:25",
-       "timestamp": "2026-08-04T19:12:00Z",
+       "timestamp": "2026-08-05T19:12:00Z",
        "value": 8.11,
        "unit": "dKH",
        "source": "manual",
@@ -3005,7 +3006,7 @@
       },
       {
        "id": "demo:alk:26",
-       "timestamp": "2026-08-05T19:41:00Z",
+       "timestamp": "2026-08-06T19:41:00Z",
        "value": 8.02,
        "unit": "dKH",
        "source": "manual",
@@ -3013,7 +3014,7 @@
       },
       {
        "id": "demo:alk:27",
-       "timestamp": "2026-08-06T19:30:00Z",
+       "timestamp": "2026-08-07T19:30:00Z",
        "value": 8.09,
        "unit": "dKH",
        "source": "manual",
@@ -3021,7 +3022,7 @@
       },
       {
        "id": "demo:alk:28",
-       "timestamp": "2026-08-07T19:10:00Z",
+       "timestamp": "2026-08-08T19:10:00Z",
        "value": 8.03,
        "unit": "dKH",
        "source": "manual",
@@ -3029,7 +3030,7 @@
       },
       {
        "id": "demo:alk:29",
-       "timestamp": "2026-08-08T19:48:00Z",
+       "timestamp": "2026-08-09T19:48:00Z",
        "value": 8.05,
        "unit": "dKH",
        "source": "manual",
@@ -3037,7 +3038,7 @@
       },
       {
        "id": "demo:icp:triton:1:alkalinity",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 8.1,
        "unit": "dKH",
        "source": "ICP:Triton",
@@ -3047,7 +3048,7 @@
      "calcium": [
       {
        "id": "demo:ca:0",
-       "timestamp": "2026-07-10T19:08:00Z",
+       "timestamp": "2026-07-11T19:08:00Z",
        "value": 426.08,
        "unit": "ppm",
        "source": "manual",
@@ -3055,7 +3056,7 @@
       },
       {
        "id": "demo:ca:1",
-       "timestamp": "2026-07-12T19:13:00Z",
+       "timestamp": "2026-07-13T19:13:00Z",
        "value": 427.92,
        "unit": "ppm",
        "source": "manual",
@@ -3063,7 +3064,7 @@
       },
       {
        "id": "demo:ca:2",
-       "timestamp": "2026-07-14T19:35:00Z",
+       "timestamp": "2026-07-15T19:35:00Z",
        "value": 425.11,
        "unit": "ppm",
        "source": "manual",
@@ -3071,7 +3072,7 @@
       },
       {
        "id": "demo:ca:3",
-       "timestamp": "2026-07-16T19:04:00Z",
+       "timestamp": "2026-07-17T19:04:00Z",
        "value": 425.82,
        "unit": "ppm",
        "source": "manual",
@@ -3079,7 +3080,7 @@
       },
       {
        "id": "demo:ca:4",
-       "timestamp": "2026-07-18T19:47:00Z",
+       "timestamp": "2026-07-19T19:47:00Z",
        "value": 424.82,
        "unit": "ppm",
        "source": "manual",
@@ -3087,7 +3088,7 @@
       },
       {
        "id": "demo:ca:5",
-       "timestamp": "2026-07-20T19:13:00Z",
+       "timestamp": "2026-07-21T19:13:00Z",
        "value": 424.94,
        "unit": "ppm",
        "source": "manual",
@@ -3095,7 +3096,7 @@
       },
       {
        "id": "demo:ca:6",
-       "timestamp": "2026-07-22T19:53:00Z",
+       "timestamp": "2026-07-23T19:53:00Z",
        "value": 420.7,
        "unit": "ppm",
        "source": "manual",
@@ -3103,7 +3104,7 @@
       },
       {
        "id": "demo:ca:7",
-       "timestamp": "2026-07-24T19:52:00Z",
+       "timestamp": "2026-07-25T19:52:00Z",
        "value": 424.05,
        "unit": "ppm",
        "source": "manual",
@@ -3111,7 +3112,7 @@
       },
       {
        "id": "demo:ca:8",
-       "timestamp": "2026-07-26T19:38:00Z",
+       "timestamp": "2026-07-27T19:38:00Z",
        "value": 421.45,
        "unit": "ppm",
        "source": "manual",
@@ -3119,7 +3120,7 @@
       },
       {
        "id": "demo:ca:9",
-       "timestamp": "2026-07-28T19:51:00Z",
+       "timestamp": "2026-07-29T19:51:00Z",
        "value": 422.91,
        "unit": "ppm",
        "source": "manual",
@@ -3127,7 +3128,7 @@
       },
       {
        "id": "demo:ca:10",
-       "timestamp": "2026-07-30T19:33:00Z",
+       "timestamp": "2026-07-31T19:33:00Z",
        "value": 421.75,
        "unit": "ppm",
        "source": "manual",
@@ -3135,7 +3136,7 @@
       },
       {
        "id": "demo:ca:11",
-       "timestamp": "2026-08-01T19:54:00Z",
+       "timestamp": "2026-08-02T19:54:00Z",
        "value": 419.59,
        "unit": "ppm",
        "source": "manual",
@@ -3143,7 +3144,7 @@
       },
       {
        "id": "demo:ca:12",
-       "timestamp": "2026-08-03T19:24:00Z",
+       "timestamp": "2026-08-04T19:24:00Z",
        "value": 418.64,
        "unit": "ppm",
        "source": "manual",
@@ -3151,7 +3152,7 @@
       },
       {
        "id": "demo:ca:13",
-       "timestamp": "2026-08-05T19:42:00Z",
+       "timestamp": "2026-08-06T19:42:00Z",
        "value": 416.91,
        "unit": "ppm",
        "source": "manual",
@@ -3159,7 +3160,7 @@
       },
       {
        "id": "demo:ca:14",
-       "timestamp": "2026-08-07T19:42:00Z",
+       "timestamp": "2026-08-08T19:42:00Z",
        "value": 414.07,
        "unit": "ppm",
        "source": "manual",
@@ -3167,7 +3168,7 @@
       },
       {
        "id": "demo:icp:triton:1:calcium",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 419.0,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -3177,7 +3178,7 @@
      "magnesium": [
       {
        "id": "demo:mg:0",
-       "timestamp": "2026-07-10T19:09:00Z",
+       "timestamp": "2026-07-11T19:09:00Z",
        "value": 1362.62,
        "unit": "ppm",
        "source": "manual",
@@ -3185,7 +3186,7 @@
       },
       {
        "id": "demo:mg:1",
-       "timestamp": "2026-07-13T19:39:00Z",
+       "timestamp": "2026-07-14T19:39:00Z",
        "value": 1350.18,
        "unit": "ppm",
        "source": "manual",
@@ -3193,7 +3194,7 @@
       },
       {
        "id": "demo:mg:2",
-       "timestamp": "2026-07-16T19:23:00Z",
+       "timestamp": "2026-07-17T19:23:00Z",
        "value": 1361.44,
        "unit": "ppm",
        "source": "manual",
@@ -3201,7 +3202,7 @@
       },
       {
        "id": "demo:mg:3",
-       "timestamp": "2026-07-19T19:25:00Z",
+       "timestamp": "2026-07-20T19:25:00Z",
        "value": 1348.69,
        "unit": "ppm",
        "source": "manual",
@@ -3209,7 +3210,7 @@
       },
       {
        "id": "demo:mg:4",
-       "timestamp": "2026-07-22T19:33:00Z",
+       "timestamp": "2026-07-23T19:33:00Z",
        "value": 1342.69,
        "unit": "ppm",
        "source": "manual",
@@ -3217,7 +3218,7 @@
       },
       {
        "id": "demo:mg:5",
-       "timestamp": "2026-07-25T19:06:00Z",
+       "timestamp": "2026-07-26T19:06:00Z",
        "value": 1354.27,
        "unit": "ppm",
        "source": "manual",
@@ -3225,7 +3226,7 @@
       },
       {
        "id": "demo:mg:6",
-       "timestamp": "2026-07-28T19:39:00Z",
+       "timestamp": "2026-07-29T19:39:00Z",
        "value": 1348.83,
        "unit": "ppm",
        "source": "manual",
@@ -3233,7 +3234,7 @@
       },
       {
        "id": "demo:mg:7",
-       "timestamp": "2026-07-31T19:54:00Z",
+       "timestamp": "2026-08-01T19:54:00Z",
        "value": 1340.51,
        "unit": "ppm",
        "source": "manual",
@@ -3241,7 +3242,7 @@
       },
       {
        "id": "demo:mg:8",
-       "timestamp": "2026-08-03T19:09:00Z",
+       "timestamp": "2026-08-04T19:09:00Z",
        "value": 1342.74,
        "unit": "ppm",
        "source": "manual",
@@ -3249,7 +3250,7 @@
       },
       {
        "id": "demo:mg:9",
-       "timestamp": "2026-08-06T19:02:00Z",
+       "timestamp": "2026-08-07T19:02:00Z",
        "value": 1334.31,
        "unit": "ppm",
        "source": "manual",
@@ -3257,7 +3258,7 @@
       },
       {
        "id": "demo:icp:triton:1:magnesium",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 1342.0,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -3267,7 +3268,7 @@
      "nitrate": [
       {
        "id": "demo:no3:0",
-       "timestamp": "2026-07-12T19:09:00Z",
+       "timestamp": "2026-07-13T19:09:00Z",
        "value": 3.5,
        "unit": "ppm",
        "source": "manual",
@@ -3275,7 +3276,7 @@
       },
       {
        "id": "demo:no3:1",
-       "timestamp": "2026-07-16T19:09:00Z",
+       "timestamp": "2026-07-17T19:09:00Z",
        "value": 5.47,
        "unit": "ppm",
        "source": "manual",
@@ -3283,7 +3284,7 @@
       },
       {
        "id": "demo:no3:2",
-       "timestamp": "2026-07-19T19:47:00Z",
+       "timestamp": "2026-07-20T19:47:00Z",
        "value": 5.34,
        "unit": "ppm",
        "source": "manual",
@@ -3291,7 +3292,7 @@
       },
       {
        "id": "demo:no3:3",
-       "timestamp": "2026-07-23T19:20:00Z",
+       "timestamp": "2026-07-24T19:20:00Z",
        "value": 7.79,
        "unit": "ppm",
        "source": "manual",
@@ -3299,7 +3300,7 @@
       },
       {
        "id": "demo:no3:4",
-       "timestamp": "2026-07-26T19:23:00Z",
+       "timestamp": "2026-07-27T19:23:00Z",
        "value": 8.24,
        "unit": "ppm",
        "source": "manual",
@@ -3307,7 +3308,7 @@
       },
       {
        "id": "demo:no3:5",
-       "timestamp": "2026-07-30T19:53:00Z",
+       "timestamp": "2026-07-31T19:53:00Z",
        "value": 8.6,
        "unit": "ppm",
        "source": "manual",
@@ -3315,7 +3316,7 @@
       },
       {
        "id": "demo:no3:6",
-       "timestamp": "2026-08-02T19:48:00Z",
+       "timestamp": "2026-08-03T19:48:00Z",
        "value": 9.42,
        "unit": "ppm",
        "source": "manual",
@@ -3323,7 +3324,7 @@
       },
       {
        "id": "demo:no3:7",
-       "timestamp": "2026-08-06T19:16:00Z",
+       "timestamp": "2026-08-07T19:16:00Z",
        "value": 11.44,
        "unit": "ppm",
        "source": "manual",
@@ -3331,7 +3332,7 @@
       },
       {
        "id": "demo:icp:triton:1:nitrate",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 9.8,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -3341,7 +3342,7 @@
      "phosphate": [
       {
        "id": "demo:po4:0",
-       "timestamp": "2026-07-12T19:05:00Z",
+       "timestamp": "2026-07-13T19:05:00Z",
        "value": 0.02,
        "unit": "ppm",
        "source": "manual",
@@ -3349,7 +3350,7 @@
       },
       {
        "id": "demo:po4:1",
-       "timestamp": "2026-07-16T19:54:00Z",
+       "timestamp": "2026-07-17T19:54:00Z",
        "value": 0.04,
        "unit": "ppm",
        "source": "manual",
@@ -3357,7 +3358,7 @@
       },
       {
        "id": "demo:po4:2",
-       "timestamp": "2026-07-19T19:14:00Z",
+       "timestamp": "2026-07-20T19:14:00Z",
        "value": 0.05,
        "unit": "ppm",
        "source": "manual",
@@ -3365,7 +3366,7 @@
       },
       {
        "id": "demo:po4:3",
-       "timestamp": "2026-07-23T19:20:00Z",
+       "timestamp": "2026-07-24T19:20:00Z",
        "value": 0.05,
        "unit": "ppm",
        "source": "manual",
@@ -3373,7 +3374,7 @@
       },
       {
        "id": "demo:po4:4",
-       "timestamp": "2026-07-26T19:23:00Z",
+       "timestamp": "2026-07-27T19:23:00Z",
        "value": 0.05,
        "unit": "ppm",
        "source": "manual",
@@ -3381,7 +3382,7 @@
       },
       {
        "id": "demo:po4:5",
-       "timestamp": "2026-07-30T19:10:00Z",
+       "timestamp": "2026-07-31T19:10:00Z",
        "value": 0.06,
        "unit": "ppm",
        "source": "manual",
@@ -3389,7 +3390,7 @@
       },
       {
        "id": "demo:po4:6",
-       "timestamp": "2026-08-02T19:16:00Z",
+       "timestamp": "2026-08-03T19:16:00Z",
        "value": 0.07,
        "unit": "ppm",
        "source": "manual",
@@ -3397,7 +3398,7 @@
       },
       {
        "id": "demo:po4:7",
-       "timestamp": "2026-08-06T19:14:00Z",
+       "timestamp": "2026-08-07T19:14:00Z",
        "value": 0.07,
        "unit": "ppm",
        "source": "manual",
@@ -3405,7 +3406,7 @@
       },
       {
        "id": "demo:icp:triton:1:phosphate",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 0.06,
        "unit": "ppm",
        "source": "ICP:Triton",
@@ -3415,7 +3416,7 @@
      "salinity": [
       {
        "id": "demo:icp:triton:1:salinity",
-       "timestamp": "2026-07-28T10:30:00Z",
+       "timestamp": "2026-07-29T10:30:00Z",
        "value": 35.0,
        "unit": "ppt",
        "source": "ICP:Triton",
@@ -3542,7 +3543,7 @@
       "water_change": [
        {
         "id": "demo:wc:1",
-        "timestamp": "2026-08-08T09:11:00Z",
+        "timestamp": "2026-08-09T09:11:00Z",
         "notes": "",
         "source": "awc",
         "volume": 25.0,
@@ -3550,7 +3551,7 @@
        },
        {
         "id": "demo:wc:2",
-        "timestamp": "2026-08-01T09:45:00Z",
+        "timestamp": "2026-08-02T09:45:00Z",
         "notes": "",
         "source": "awc",
         "volume": 25.0,
@@ -3558,7 +3559,7 @@
        },
        {
         "id": "demo:wc:3",
-        "timestamp": "2026-07-25T10:19:00Z",
+        "timestamp": "2026-07-26T10:19:00Z",
         "notes": "manual bucket day",
         "volume": 30.0,
         "volumeUnit": "L"
@@ -3567,21 +3568,21 @@
       "filter_sock": [
        {
         "id": "demo:fs:1",
-        "timestamp": "2026-08-06T19:16:00Z",
+        "timestamp": "2026-08-07T19:16:00Z",
         "notes": ""
        }
       ],
       "skimmer_clean": [
        {
         "id": "demo:sk:1",
-        "timestamp": "2026-07-25T19:23:00Z",
+        "timestamp": "2026-07-26T19:23:00Z",
         "notes": ""
        }
       ],
       "glass_clean": [
        {
         "id": "demo:gc:1",
-        "timestamp": "2026-08-07T19:50:00Z",
+        "timestamp": "2026-08-08T19:50:00Z",
         "notes": ""
        }
       ]
@@ -3592,7 +3593,7 @@
       "notifyTarget": "",
       "persistent": true
      },
-     "completionsSyncedAt": "2026-08-09T15:10:24.158583+00:00"
+     "completionsSyncedAt": "2026-08-10T12:25:16.020188+00:00"
     },
     "pulse": {
      "enabled": true,
@@ -3619,7 +3620,8 @@
      "nightDimLuxEntity": "",
      "nightDimLuxThreshold": 10.0,
      "timelapseStyle": "growth",
-     "sizePreset": "normal"
+     "sizePreset": "normal",
+     "allowModes": true
     },
     "diagram": {
      "systemType": "sump",
@@ -3635,7 +3637,7 @@
        "name": "Ragnar's staghorn",
        "species": "staghorn",
        "colour": "purple",
-       "addedAt": "2025-06-25T15:10:24Z",
+       "addedAt": "2025-06-26T12:25:16Z",
        "notes": "First SPS in the tank \u2014 from a 2 cm frag.",
        "photoUrl": ""
       },
@@ -3643,7 +3645,7 @@
        "name": "Pink birdsnest",
        "species": "birdsnest",
        "colour": "pink",
-       "addedAt": "2025-10-13T15:10:24Z",
+       "addedAt": "2025-10-14T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3651,7 +3653,7 @@
        "name": "Forest fire digitata",
        "species": "digitata",
        "colour": "orange",
-       "addedAt": "2025-12-12T15:10:24Z",
+       "addedAt": "2025-12-13T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3659,7 +3661,7 @@
        "name": "Green table acro",
        "species": "table",
        "colour": "green",
-       "addedAt": "2026-02-10T15:10:24Z",
+       "addedAt": "2026-02-11T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3667,7 +3669,7 @@
        "name": "Dragon soul torch",
        "species": "torch",
        "colour": "gold",
-       "addedAt": "2025-11-22T15:10:24Z",
+       "addedAt": "2025-11-23T12:25:16Z",
        "notes": "The expensive one.",
        "photoUrl": ""
       },
@@ -3675,7 +3677,7 @@
        "name": "Hammer garden",
        "species": "hammer",
        "colour": "green",
-       "addedAt": "2025-09-13T15:10:24Z",
+       "addedAt": "2025-09-14T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3683,7 +3685,7 @@
        "name": "Duncan colony",
        "species": "duncan",
        "colour": "teal",
-       "addedAt": "2026-03-12T15:10:24Z",
+       "addedAt": "2026-03-13T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3691,7 +3693,7 @@
        "name": "Warpaint scoly",
        "species": "scoly",
        "colour": "red",
-       "addedAt": "2026-04-11T15:10:24Z",
+       "addedAt": "2026-04-12T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3699,7 +3701,7 @@
        "name": "Utter chaos zoas",
        "species": "zoa",
        "colour": "orange",
-       "addedAt": "2025-08-04T15:10:24Z",
+       "addedAt": "2025-08-05T12:25:16Z",
        "notes": "Started as five polyps.",
        "photoUrl": ""
       },
@@ -3707,7 +3709,7 @@
        "name": "Bounce mushroom",
        "species": "mushroom",
        "colour": "red",
-       "addedAt": "2026-05-11T15:10:24Z",
+       "addedAt": "2026-05-12T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       },
@@ -3715,7 +3717,7 @@
        "name": "Pulsing xenia",
        "species": "xenia",
        "colour": "pink",
-       "addedAt": "2025-06-05T15:10:24Z",
+       "addedAt": "2025-06-06T12:25:16Z",
        "notes": "It was free. It is everywhere.",
        "photoUrl": ""
       },
@@ -3723,7 +3725,7 @@
        "name": "Purple sea fan",
        "species": "gorgonian",
        "colour": "purple",
-       "addedAt": "2026-01-21T15:10:24Z",
+       "addedAt": "2026-01-22T12:25:16Z",
        "notes": "",
        "photoUrl": ""
       }
@@ -3915,8 +3917,8 @@
       "faultSince": "",
       "method": "",
       "startedAt": "",
-      "lastRun": "2026-08-08T09:27:00Z",
-      "nextRun": "2026-08-10T09:00:00Z",
+      "lastRun": "2026-08-09T09:27:00Z",
+      "nextRun": "2026-08-13T09:00:00Z",
       "targetLitres": 0.0,
       "movedMl": {
        "drain": 0.0,
@@ -3941,7 +3943,7 @@
      },
      "history": [
       {
-       "completedAt": "2026-08-08T09:43:00Z",
+       "completedAt": "2026-08-09T09:43:00Z",
        "drainedL": 25.0,
        "filledL": 24.9,
        "method": "batch_sequential",
@@ -3950,7 +3952,7 @@
        "source": "sched"
       },
       {
-       "completedAt": "2026-08-05T09:43:00Z",
+       "completedAt": "2026-08-06T09:43:00Z",
        "drainedL": 25.0,
        "filledL": 25.1,
        "method": "batch_sequential",
@@ -3959,7 +3961,7 @@
        "source": "sched"
       },
       {
-       "completedAt": "2026-08-01T09:35:00Z",
+       "completedAt": "2026-08-02T09:35:00Z",
        "drainedL": 25.0,
        "filledL": 24.8,
        "method": "batch_sequential",
@@ -4016,7 +4018,7 @@
       "adapter": "triton_csv",
       "method": "ICP-OES",
       "sampleType": "tank",
-      "sampleDate": "2026-07-28T10:30:00Z",
+      "sampleDate": "2026-07-29T10:30:00Z",
       "importedAt": "",
       "testId": "TR-260722",
       "tank": "",
@@ -4987,7 +4989,7 @@
    },
    "trust_check": {
     "status": "warning",
-    "checkedAt": "2026-08-09T15:10:24.163284+00:00",
+    "checkedAt": "2026-08-10T12:25:16.024739+00:00",
     "items": [
      {
       "key": "sensors",
@@ -5011,7 +5013,7 @@
       "key": "heartbeat",
       "label": "Heartbeat",
       "status": "ok",
-      "detail": "Last heartbeat 2026-08-09T13:10:24+00:00."
+      "detail": "Last heartbeat 2026-08-10T10:25:16+00:00."
      },
      {
       "key": "cameras",
@@ -5041,36 +5043,36 @@
    },
    "heartbeat": {
     "status": "ok",
-    "lastHeartbeat": "2026-08-09T13:10:24+00:00",
+    "lastHeartbeat": "2026-08-10T10:25:16+00:00",
     "missed": false,
-    "nextDue": "2026-08-10T13:10:24+00:00"
+    "nextDue": "2026-08-11T10:25:16+00:00"
    },
    "reef_replay": [
     {
-     "id": "alert-ph-1786236384",
-     "timestamp": "2026-08-09T00:46:24+00:00",
+     "id": "alert-ph-1786312876",
+     "timestamp": "2026-08-09T22:01:16+00:00",
      "title": "pH back in range",
      "severity": "ok",
      "message": "pH recovered to 8.12 after the evening CO2 dip.",
      "events": []
     },
     {
-     "id": "alert-ph-1786227744",
-     "timestamp": "2026-08-08T22:22:24+00:00",
+     "id": "alert-ph-1786304236",
+     "timestamp": "2026-08-09T19:37:16+00:00",
      "title": "pH low warning",
      "severity": "warning",
      "message": "pH read 7.94, inside the warning buffer below minimum 7.8.",
      "events": []
     },
     {
-     "id": "alert-temp-1786020384",
-     "timestamp": "2026-08-06T12:46:24+00:00",
+     "id": "alert-temp-1786096876",
+     "timestamp": "2026-08-07T10:01:16+00:00",
      "title": "Temperature back in range",
      "severity": "ok",
      "message": "Tank temperature recovered to 26.4 \u00b0C after the heater outlet was switched off.",
      "events": [
       {
-       "timestamp": "2026-08-06T12:46:24Z",
+       "timestamp": "2026-08-07T10:01:16Z",
        "message": "Heater outlet switched off from phone (armed switch): temperature exceeded 27.5 \u00b0C with heater ON",
        "type": "warning",
        "source": "activity"
@@ -5078,8 +5080,8 @@
      ]
     },
     {
-     "id": "alert-temp-1786018656",
-     "timestamp": "2026-08-06T12:17:36+00:00",
+     "id": "alert-temp-1786095148",
+     "timestamp": "2026-08-07T09:32:28+00:00",
      "title": "Temperature critical",
      "severity": "critical",
      "message": "Tank temperature read 27.9 \u00b0C (max 27.5 \u00b0C) with the heater still ON. Critical alert pushed to phone.",
@@ -5159,8 +5161,8 @@
     "faultSince": "",
     "method": "",
     "startedAt": "",
-    "lastRun": "2026-08-08T09:27:00Z",
-    "nextRun": "2026-08-10T09:00:00Z",
+    "lastRun": "2026-08-09T09:27:00Z",
+    "nextRun": "2026-08-13T09:00:00Z",
     "targetLitres": 0.0,
     "movedMl": {
      "drain": 0.0,
@@ -5243,7 +5245,7 @@
      "lab": "Triton",
      "count": 1,
      "tankCount": 1,
-     "latest": "2026-07-28T10:30:00Z"
+     "latest": "2026-07-29T10:30:00Z"
     }
    ],
    "groups": [
@@ -5328,8 +5330,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 419.0,
        "unit": "ppm",
@@ -5356,8 +5358,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 1342.0,
        "unit": "ppm",
@@ -5384,8 +5386,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 8.1,
        "unit": "dKH",
@@ -5412,8 +5414,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 9.8,
        "unit": "ppm",
@@ -5440,8 +5442,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 0.06,
        "unit": "ppm",
@@ -5468,8 +5470,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 35.0,
        "unit": "ppt",
@@ -5496,8 +5498,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 402.0,
        "unit": "ppm",
@@ -5524,8 +5526,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 7.9,
        "unit": "ppm",
@@ -5552,8 +5554,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 4.6,
        "unit": "ppm",
@@ -5580,8 +5582,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 90.0,
        "unit": "ppb",
@@ -5608,8 +5610,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 41.0,
        "unit": "ppb",
@@ -5636,8 +5638,8 @@
      "points": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": 2.1,
        "unit": "ppb",
@@ -5665,8 +5667,8 @@
      "bdlPoints": [
       {
        "reportId": "demo:icp:triton:1",
-       "date": "2026-07-28T10:30:00Z",
-       "time": 1785234600000,
+       "date": "2026-07-29T10:30:00Z",
+       "time": 1785321000000,
        "lab": "Triton",
        "value": null,
        "unit": "ppb",
@@ -5693,8 +5695,8 @@
     "points": [
      {
       "reportId": "demo:icp:triton:1",
-      "date": "2026-07-28T10:30:00Z",
-      "time": 1785234600000,
+      "date": "2026-07-29T10:30:00Z",
+      "time": 1785321000000,
       "lab": "Triton",
       "value": 419.0,
       "unit": "ppm",
@@ -5719,7 +5721,7 @@
     "filteredTankReports": 1,
     "elements": 13,
     "points": 12,
-    "latest": "2026-07-28T10:30:00Z"
+    "latest": "2026-07-29T10:30:00Z"
    },
    "analysisCards": [
     {
@@ -6128,8 +6130,8 @@
      "fullMoonUtc": "2026-11-24T14:56:31+00:00",
      "windowStart": "2026-12-06",
      "windowEnd": "2026-12-09",
-     "nightsUntilWindowEnd": 122,
-     "nightsUntilWindowStart": 119
+     "nightsUntilWindowEnd": 121,
+     "nightsUntilWindowStart": 118
     },
     "walkthrough": [
      "Open Apex Local: in Apex Fusion click your Apex name (top-left) \u2192 Network \u2192 copy the IP, then open that IP in a browser and log in.",
@@ -6170,8 +6172,8 @@
     "friendly_name": "Tank temp",
     "device_class": "temperature"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "sensor.showroom_ph": {
    "state": "8.16",
@@ -6179,8 +6181,8 @@
     "unit_of_measurement": "",
     "friendly_name": "pH"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "sensor.showroom_salinity": {
    "state": "35.1",
@@ -6188,8 +6190,8 @@
     "unit_of_measurement": "ppt",
     "friendly_name": "Salinity"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "sensor.showroom_orp": {
    "state": "382",
@@ -6197,8 +6199,8 @@
     "unit_of_measurement": "mV",
     "friendly_name": "ORP"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "sensor.showroom_sump_temp": {
    "state": "25.7",
@@ -6207,8 +6209,8 @@
     "friendly_name": "Sump temp",
     "device_class": "temperature"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "binary_sensor.showroom_leak": {
    "state": "off",
@@ -6216,80 +6218,80 @@
     "friendly_name": "Leak sensor",
     "device_class": "moisture"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_return": {
    "state": "on",
    "attributes": {
     "friendly_name": "Return pump"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_heater": {
    "state": "on",
    "attributes": {
     "friendly_name": "Heater"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_skimmer": {
    "state": "on",
    "attributes": {
     "friendly_name": "Skimmer"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_ato": {
    "state": "on",
    "attributes": {
     "friendly_name": "ATO"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_wave": {
    "state": "on",
    "attributes": {
     "friendly_name": "Wavemaker left"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_wave2": {
    "state": "on",
    "attributes": {
     "friendly_name": "Wavemaker right"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_frag": {
    "state": "off",
    "attributes": {
     "friendly_name": "Frag light"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_awc_drain": {
    "state": "off",
    "attributes": {
     "friendly_name": "AWC drain pump"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "switch.showroom_awc_fill": {
    "state": "off",
    "attributes": {
     "friendly_name": "AWC fill pump"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "binary_sensor.showroom_fresh_empty": {
    "state": "off",
@@ -6297,8 +6299,8 @@
     "friendly_name": "Fresh reservoir empty",
     "device_class": "problem"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "binary_sensor.showroom_waste_full": {
    "state": "off",
@@ -6306,8 +6308,8 @@
     "friendly_name": "Waste reservoir full",
     "device_class": "problem"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   },
   "binary_sensor.showroom_high": {
    "state": "off",
@@ -6315,8 +6317,8 @@
     "friendly_name": "Display high level",
     "device_class": "problem"
    },
-   "last_changed": "2026-08-09T15:08:24Z",
-   "last_updated": "2026-08-09T15:08:24Z"
+   "last_changed": "2026-08-10T12:23:16Z",
+   "last_updated": "2026-08-10T12:23:16Z"
   }
  }
 }

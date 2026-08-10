@@ -6494,6 +6494,7 @@ class OpenReefPanel extends HTMLElement {
             <p>${this._escape(this._config.tank.owner || "Home Assistant native reef controller")}</p>
           </div>
           <div class="actions">
+            ${this._pulseEnabled() ? `<button class="pulse-present-btn" data-action="open-pulse" title="Open Reef Pulse — the full-screen wall display">✨ Present</button>` : ""}
             <button class="secondary" data-action="setup">Setup</button>
             <button class="secondary" data-action="validate">Check</button>
           </div>
@@ -12712,6 +12713,20 @@ class OpenReefPanel extends HTMLElement {
     return face ? { ...saved, ...face.patch } : saved;
   }
 
+  // True when the portrait bands are showing tiles: the only case where the
+  // diagram backdrop needs sparkline history. Keeps the recorder untouched on
+  // every landscape wall (targeted-and-capped rule).
+  _pulseMergedTilesActive() {
+    if (this._pulseCfg().showStats === false) return false;
+    try {
+      return typeof window !== "undefined"
+        && typeof window.matchMedia === "function"
+        && window.matchMedia("(max-aspect-ratio: 1/1)").matches;
+    } catch {
+      return false;
+    }
+  }
+
   _pulseDeviceFaceId() {
     if (this._pulseDeviceFace === undefined) {
       let stored = "";
@@ -12783,6 +12798,15 @@ class OpenReefPanel extends HTMLElement {
           backdrop: "diagram", showHealthRing: false, showStats: false, showSparklines: false,
           showCategories: false, showEquipment: false, showToday: false, showInsights: true,
           showTicker: false, showMode: true, showClock: true, showBuddy: false,
+        },
+      },
+      command: {
+        label: "Command Centre",
+        hint: "The living diagram with the full data wall wrapped around it — made for a portrait monitor.",
+        patch: {
+          backdrop: "diagram", showHealthRing: true, showStats: true, showSparklines: true,
+          showCategories: true, showEquipment: true, showToday: true, showInsights: true,
+          showTicker: true, showMode: true, showClock: true, showBuddy: false,
         },
       },
     };
@@ -12872,6 +12896,7 @@ class OpenReefPanel extends HTMLElement {
       this._loadPulseTimelapse();
     } else if (backdrop === "diagram") {
       this._startPulseDiagramMotion();
+      if (this._pulseMergedTilesActive()) this._loadPulseSparklines();
     } else {
       this._loadPulseSparklines();
     }
@@ -12915,7 +12940,9 @@ class OpenReefPanel extends HTMLElement {
           this._overlayQuip = this._pickOverlayQuip();
         }
         // Refresh sparkline history every ~5 minutes on the data wall.
-        if (this._pulseTick % 30 === 0 && this._pulseBackdrop() === "wall") {
+        if (this._pulseTick % 30 === 0
+          && (this._pulseBackdrop() === "wall"
+            || (this._pulseBackdrop() === "diagram" && this._pulseMergedTilesActive()))) {
           this._loadPulseSparklines(true);
         }
         // Living backdrop: one frame per tick, crossfaded.
@@ -13535,6 +13562,34 @@ class OpenReefPanel extends HTMLElement {
     `;
   }
 
+  // The diagram backdrop on a portrait screen: the scene is 1.6:1, a portrait
+  // monitor is ~0.56:1, so well over half the screen is structurally empty
+  // letterbox. These bands put the data wall in it — tiles above the tank,
+  // blocks below — honouring the same show-toggles the wall uses. On any
+  // landscape screen the bands stay display:none and the diagram behaves
+  // exactly as before; no mode, no setting, just geometry.
+  _pulseDiagramZoneMarkup(cfg, health) {
+    const tiles = this._pulseTileSensors();
+    const top = cfg.showStats !== false && tiles.length
+      ? `<div class="pulse-diagram-band top"><div class="pulse-tiles">${tiles.map(([id, sensor]) => this._pulseTileMarkup(id, sensor)).join("")}</div></div>`
+      : "";
+    // No insight block here: the foot already carries the compact insight card
+    // on the diagram backdrop, and the same story twice reads as a bug.
+    const blocks = [
+      this._pulseAwcMarkup(),
+      cfg.showCategories !== false ? this._pulseCategoryBarsMarkup(health) : "",
+      cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
+      cfg.showToday !== false ? this._pulseTodayMarkup() : "",
+    ].filter(Boolean);
+    const bottom = blocks.length
+      ? `<div class="pulse-diagram-band bottom"><div class="pulse-blocks">${blocks.join("")}</div></div>`
+      : "";
+    return {
+      merged: Boolean(top || bottom),
+      markup: `<div class="pulse-diagram-zone">${top}${this._pulseDiagramMarkup()}${bottom}</div>`,
+    };
+  }
+
   _pulseWallMarkup(cfg, health) {
     const tiles = this._pulseTileSensors();
     const blocks = [
@@ -13602,8 +13657,9 @@ class OpenReefPanel extends HTMLElement {
     const alert = this._pulseAlertState();
     const chips = !wall && cfg.showStats !== false ? this._overlayStatList() : [];
     const quip = this._overlayQuipText();
+    const diagramZone = diagram ? this._pulseDiagramZoneMarkup(cfg, health) : null;
     return `
-      <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""} ${cfg.sizePreset === "far" ? "pulse-far" : ""}" data-pulse-root>
+      <div class="pulse-root ${alert.status !== "ok" ? `pulse-alert-${alert.status}` : ""} ${cfg.sizePreset === "far" ? "pulse-far" : ""} ${diagramZone && diagramZone.merged ? "pulse-merged" : ""}" data-pulse-root>
         ${entityId ? `
           <video class="pulse-video" data-camera-video poster="${this._escape(snap)}" autoplay muted playsinline></video>
           <img class="pulse-video" data-camera-fallback alt="" style="display:none">
@@ -13614,7 +13670,7 @@ class OpenReefPanel extends HTMLElement {
           <span class="pulse-tl-stamp" data-pulse-tl-stamp></span>
         ` : diagram ? `
           <div class="pulse-datawall"></div>
-          ${this._pulseDiagramMarkup()}
+          ${diagramZone.markup}
         ` : `<div class="pulse-datawall"></div>`}
         <div class="pulse-shade ${wall ? "wall" : ""}"></div>
         <header class="pulse-head">
@@ -13718,7 +13774,7 @@ class OpenReefPanel extends HTMLElement {
     const quipEl = root.querySelector("[data-pulse-quip]");
     if (quipEl && this._overlayQuipText()) quipEl.textContent = this._overlayQuipText();
     // Data-wall blocks: badges, range markers, hero reason, and the side blocks.
-    if (root.querySelector(".pulse-wall")) {
+    if (root.querySelector(".pulse-wall, .pulse-diagram-band")) {
       const health = this._reefHealthScore();
       root.querySelectorAll("[data-pulse-badge]").forEach((el) => {
         const key = el.getAttribute("data-pulse-badge");
@@ -23104,6 +23160,13 @@ class OpenReefPanel extends HTMLElement {
         .tabs button.active, .primary, .range-picker button.active, .mode-button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
         .secondary:hover, .tabs button:hover { border-color: var(--openreef-accent); }
         .compact-button { min-height: 30px; padding: 6px 10px; font-size: 12px; }
+        /* Reef Pulse's front door: in the topbar on every tab. Accent-outlined
+           with a soft breathing glow — visibly the standout, not another grey
+           secondary — while staying quieter than the primary Save button. */
+        .pulse-present-btn { border: 1px solid var(--openreef-accent); border-radius: 8px; padding: 11px 16px; color: var(--openreef-accent); background: var(--openreef-accent-soft); font-weight: 800; animation: pulse-present-glow 3.2s ease-in-out infinite; }
+        .pulse-present-btn:hover, .pulse-present-btn:focus-visible { background: var(--openreef-accent); color: #041019; animation: none; }
+        @keyframes pulse-present-glow { 0%, 100% { box-shadow: 0 0 0 0 var(--openreef-accent-soft); } 50% { box-shadow: 0 0 14px 2px var(--openreef-accent-soft); } }
+        @media (prefers-reduced-motion: reduce) { .pulse-present-btn { animation: none; } }
         .warning { background: #47351a; color: #fde68a; border-color: #a16207; }
         .danger-text { color: #fecaca; background: transparent; border-color: #7f1d1d; }
         .notice { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; background: #0f2c3d; border: 1px solid #075985; }
@@ -23663,6 +23726,12 @@ class OpenReefPanel extends HTMLElement {
         /* Living tank diagram backdrop: the schematic fills the space between
            the Pulse header and footer; letterboxing keeps its aspect. */
         .pulse-diagram { position: absolute; inset: 84px 18px 96px; display: flex; align-items: center; justify-content: center; }
+        /* Diagram + data merge. On landscape the zone dissolves (display:
+           contents) so the diagram keeps its absolute full-bleed behaviour,
+           and the data bands simply don't exist. The portrait layout lives in
+           an aspect-ratio media block at the end of the sheet. */
+        .pulse-diagram-zone { display: contents; }
+        .pulse-diagram-band { display: none; }
         /* Diagram tab: same scene in a framed stage inside the panel. */
         .panel.diagram-stage { background: #060e17; border: 1px solid #24364a; border-radius: 14px; padding: 8px; aspect-ratio: 16 / 10; max-height: 74vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
         .panel.diagram-stage svg { width: 100%; height: 100%; touch-action: none; }
@@ -24258,6 +24327,46 @@ class OpenReefPanel extends HTMLElement {
           /* The living diagram is the one thing on the page worth every pixel:
              let it bleed past the page gutter on phones. */
           .panel.diagram-stage { margin: 0 calc(-1 * var(--or-page-pad, 8px)); padding: 4px; border-radius: 0; border-left: 0; border-right: 0; max-height: none; }
+        }
+        /* ------------------------------------------------------------------ *
+         * Diagram + data merge, portrait screens only. The scene is 1.6:1 and
+         * a portrait monitor is ~0.56:1, so over half the screen was empty
+         * letterbox with the readings squeezed into the foot. Geometry decides
+         * — no mode, no setting: the same face is a clean full-bleed diagram
+         * on the wall iPad and a diagram-with-data column on a portrait
+         * monitor. Scoped to .pulse-merged (bands actually have content), so
+         * a bare Living Diagram face keeps its calm empty letterbox.
+         * ------------------------------------------------------------------ */
+        @media (max-aspect-ratio: 1/1) {
+          .pulse-root.pulse-merged .pulse-diagram-zone {
+            display: flex; flex-direction: column; gap: 16px;
+            position: absolute; top: 96px; bottom: 96px; left: 22px; right: 22px;
+            overflow-y: auto; scrollbar-width: none;
+          }
+          .pulse-root.pulse-merged .pulse-diagram-zone::-webkit-scrollbar { display: none; }
+          /* The diagram becomes a normal flow item sized by its own aspect;
+             the margin-auto pair centres the whole column when it fits and
+             degrades to a clean scroll when it doesn't. */
+          .pulse-root.pulse-merged .pulse-diagram { position: relative; inset: auto; width: 100%; aspect-ratio: 1600 / 1000; flex: none; }
+          .pulse-root.pulse-merged .pulse-diagram-band { display: block; flex: none; }
+          .pulse-root.pulse-merged .pulse-diagram-band.top { margin-top: auto; }
+          .pulse-root.pulse-merged .pulse-diagram-band.bottom { margin-bottom: auto; }
+          .pulse-root.pulse-merged .pulse-diagram-band .pulse-tiles,
+          .pulse-root.pulse-merged .pulse-diagram-band .pulse-blocks { margin: 0 auto; }
+          /* The tiles above the tank carry the live numbers; the foot chips
+             would repeat them a few hundred pixels lower. */
+          .pulse-root.pulse-merged .pulse-chips { display: none; }
+        }
+        @media (max-aspect-ratio: 1/1) and (max-width: 700px) {
+          /* A phone wearing Command Centre: the corner ring shrinks to a small
+             gauge and the column starts below the full head — clock row, a
+             wrapping tank name, the mode chip AND the ring all stack up there
+             at 430px, and the tiles were sliding straight underneath them. */
+          .pulse-root.pulse-merged .pulse-head { padding-right: 74px; }
+          .pulse-root.pulse-merged .pulse-head-right .pulse-ring { width: 78px; }
+          .pulse-root.pulse-merged .pulse-head-right .pulse-ring-text strong { font-size: 22px; }
+          .pulse-root.pulse-merged .pulse-head-right .pulse-ring-text small { font-size: 8px; }
+          .pulse-root.pulse-merged .pulse-diagram-zone { top: 178px; bottom: 70px; left: 14px; right: 14px; gap: 12px; }
         }
       </style>
     `;
