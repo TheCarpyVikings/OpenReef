@@ -6522,6 +6522,27 @@ async def _async_awc_abort(
     await _async_save_config(hass, entry, config)
 
 
+def _preserve_runtime_mode(stored: Any, incoming: dict[str, Any]) -> None:
+    """Keep the live ``mode`` block on a settings save, in place on ``incoming``.
+
+    ``mode`` is server-side RUNTIME state — the active mode, its timer, the
+    captured return plan and the per-equipment / max-off timers — written only
+    by apply_mode and the schedulers. But a panel save posts the WHOLE config,
+    so a snapshot fetched before a mode was applied silently reverted all of
+    it. The observed casualty is the return plan: a settings save mid-mode
+    wiped the captured pre-mode states, the next apply recaptured them from
+    the already-switched equipment, and "Return to Running" then faithfully
+    restored the mode's own states — a scrubbing air pump that never turned
+    back off. The client has no business writing any of this; the stored block
+    always wins.
+    """
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    stored_mode = stored.get("mode")
+    if isinstance(stored_mode, dict):
+        incoming["mode"] = deepcopy(stored_mode)
+
+
 def _merge_recent_completions(stored: Any, incoming: dict[str, Any]) -> None:
     """Protect completions the client's snapshot predates, in place on ``incoming``.
 
@@ -8296,6 +8317,7 @@ async def websocket_save_config(
     # A panel posts the whole config, so anything logged since it last refreshed —
     # an automatic water change, a completion from an automation — would be dropped.
     _merge_recent_completions(entry.options.get(CONF_SETTINGS), msg["config"])
+    _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["config"])
     config = await _async_save_config(hass, entry, msg["config"])
     connection.send_result(
         msg["id"],
@@ -8329,6 +8351,7 @@ async def websocket_update_config_alias(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
 
+    _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["settings"])
     config = await _async_save_config(hass, entry, msg["settings"])
     connection.send_result(
         msg["id"],

@@ -448,5 +448,68 @@ def _main() -> int:
     return 1 if failed else 0
 
 
+# --- The mode block is server-owned on save ---------------------------------
+
+def test_preserve_runtime_mode_edges():
+    preserve = integration._preserve_runtime_mode
+    # Nothing stored / junk shapes: the incoming payload is left alone.
+    payload = {"mode": {"active": "feed"}}
+    preserve(None, payload)
+    assert payload["mode"]["active"] == "feed"
+    preserve({"mode": "not-a-dict"}, payload)
+    assert payload["mode"]["active"] == "feed"
+    # A stored block always replaces the client's — including a missing one.
+    empty = {}
+    preserve({"mode": {"active": "feed", "returnPlan": {"air": "off"}}}, empty)
+    assert empty["mode"]["returnPlan"] == {"air": "off"}
+
+
+def test_settings_save_never_clobbers_the_live_mode_or_its_return_plan():
+    """Reece's air pump, end to end. Bubble scrubbing turns the air pump on and
+    the skimmer off; a settings save from a snapshot fetched BEFORE the mode was
+    applied used to wipe the captured return plan; re-applying the mode then
+    recaptured the plan from the already-switched equipment, and Return to
+    Running faithfully restored the mode's own states — air pump never off.
+    The mode block is runtime state: a client save must never write it."""
+    import copy as _copy
+    from _fake_ha import FakeConnection
+
+    cfg = _cfg(
+        {"air": _equip("air_pump", "switch.air"), "sk": _equip("skimmer", "switch.sk")},
+        {"feed": {"air": "on", "sk": "off"}},
+    )
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(states={"switch.air": "off", "switch.sk": "on"}, entries=[entry])
+    install_scheduler(integration)
+
+    # The panel fetched its copy while Running — before any mode was applied.
+    stale = _copy.deepcopy(entry.options[CONF_SETTINGS])
+
+    run(integration._async_apply_mode(hass, entry, "feed", None))
+    assert _mode(entry)["returnPlan"] == {"air": "off", "sk": "on"}, "plan captures pre-mode states"
+
+    # The stale settings save mid-mode: edits stick, the mode block does not.
+    stale["alerts"]["modeVerifyEnabled"] = True  # the user's actual edit
+    conn = FakeConnection()
+    run(integration.websocket_save_config(hass, conn, {"id": 1, "config": stale}))
+    assert not conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["alerts"]["modeVerifyEnabled"] is True, "the edit the user made must save"
+    assert saved["mode"]["active"] == "feed", "the live mode must survive the save"
+    assert saved["mode"]["returnPlan"] == {"air": "off", "sk": "on"}, "the return plan must survive the save"
+
+    # Re-applying the mode must keep the ORIGINAL captures (equipment is now in
+    # its in-mode states; recapturing them was the corruption).
+    run(integration._async_apply_mode(hass, entry, "feed", None))
+    assert _mode(entry)["returnPlan"] == {"air": "off", "sk": "on"}
+
+    # And Return to Running restores the pre-mode truth.
+    hass.services.calls.clear()
+    run(integration._async_apply_mode(hass, entry, "running", None))
+    assert _has_call(hass.services.calls, "turn_off", "switch.air"), "air pump must turn back off"
+    assert _has_call(hass.services.calls, "turn_on", "switch.sk"), "skimmer must turn back on"
+    assert _mode(entry)["returnPlan"] == {}
+
+
 if __name__ == "__main__":
     raise SystemExit(_main())
