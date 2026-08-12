@@ -59,6 +59,7 @@ class OpenReefPanel extends HTMLElement {
       speaking: false, keysOpen: false,
     };
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
+    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "" };
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
     this._icpFileInput = null;
@@ -1671,6 +1672,17 @@ class OpenReefPanel extends HTMLElement {
       if (action === "add-doser-channel") this._addDoserChannel();
       if (action === "add-doser-kalk") this._addDoserChannel("Kalkwasser", "kalk");
       if (action === "add-doser-livefood") this._addDoserChannel("Live food", "livefood", "openreef_esphome_brushed");
+      if (action === "nps-add-food-pump") this._addDoserChannel(target.dataset.label || "Food", "food");
+      if (action === "nps-add-brine-pump") this._addDoserChannel("Live food", "livefood", "openreef_esphome_brushed");
+      if (action === "nps-add-open") { this._nps.addOpen = !this._nps.addOpen; this._render(); }
+      if (action === "nps-add-product") this._npsAddProduct(target.dataset.library);
+      if (action === "nps-product-newbottle") this._npsCall(
+        { type: "openreef/consumable_refill", product_id: id },
+        "New bottle logged — ledger back to full, the expiry clock restarted.",
+      );
+      if (action === "nps-product-logdose") this._npsLogDose(id);
+      if (action === "nps-product-delete") this._npsDeleteProduct(id);
+      if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "doser-mark-refreshed") this._doserCall(
         { type: "openreef/dosing_mark_refreshed", channel_id: id },
         "Freshness clock restarted — dosing re-enables on the next sync.",
@@ -2242,10 +2254,19 @@ class OpenReefPanel extends HTMLElement {
         a.sourcePolicy.ratio = a.sourcePolicy.ratio || {};
         a.sourcePolicy.ratio[id] = Math.max(0, Number(value) || 0);
       }
+      if (scope === "nps") {
+        const npsCfg = this._config.nps = this._config.nps || {};
+        npsCfg[field] = value;
+      }
+      if (scope === "consumable") {
+        const block = this._config.consumables = this._config.consumables || {};
+        const products = block.products = block.products || {};
+        if (products[id]) products[id][field] = value;
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -9364,6 +9385,297 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  // --- Automated NPS system (Stage A: food shelf + food pumps + water link) --
+  // The tab is a command center over the existing engines: bottles live in the
+  // consumables registry (states computed backend-side by nps.py, fetched via
+  // openreef/nps_summary — the maintenance lockstep lesson), food pumps are
+  // ordinary dosing channels, and the water-exchange card edits the one
+  // canonical AWC schedule through the same scope the Water Change settings use.
+
+  async _npsLoadSummary(force = false) {
+    const st = this._nps;
+    if (st.loading) return;
+    if (!force && st.summary && Date.now() - st.at < 30000) return;
+    st.loading = true;
+    try {
+      st.summary = await this._callWS({ type: "openreef/nps_summary" });
+      st.error = "";
+    } catch (err) {
+      st.error = (err && err.message) || "Could not load the food shelf.";
+    } finally {
+      st.at = Date.now();
+      st.loading = false;
+      this._render();
+    }
+  }
+
+  async _npsCall(msg, okMessage) {
+    try {
+      await this._callWS(msg);
+      this._nps.message = okMessage || "";
+      this._nps.error = "";
+    } catch (err) {
+      this._nps.error = (err && err.message) || "That didn't work — try again.";
+    }
+    this._npsLoadSummary(true);
+  }
+
+  _npsLogDose(pid) {
+    const input = this.shadowRoot.querySelector(`[data-nps-log="${pid}"]`);
+    const ml = Number(input && input.value);
+    if (!Number.isFinite(ml) || ml <= 0) {
+      this._nps.error = "Enter how many ml you dosed first.";
+      this._render();
+      return;
+    }
+    if (input) input.value = "";
+    this._npsCall({ type: "openreef/consumable_log_dose", product_id: pid, ml },
+      `Logged ${ml} ml — the runway forecast learns from every dose.`);
+  }
+
+  _npsDeleteProduct(pid) {
+    if (this._nps.confirmDelete !== pid) {
+      this._nps.confirmDelete = pid;
+      this._render();
+      return;
+    }
+    this._nps.confirmDelete = "";
+    this._npsCall({ type: "openreef/consumable_delete", product_id: pid },
+      "Product removed from the shelf.");
+  }
+
+  _npsAddProduct(libraryKey) {
+    const st = this._nps;
+    const library = (st.summary && st.summary.library) || [];
+    const preset = libraryKey === "custom" ? null : library[Number(libraryKey)];
+    const block = this._config.consumables = this._config.consumables || {};
+    const products = block.products = block.products || {};
+    const name = preset ? preset.name : "New product";
+    const base = this._slug(name) || "product";
+    let id = base;
+    let suffix = 2;
+    while (products[id]) { id = `${base}_${suffix}`; suffix += 1; }
+    const now = new Date().toISOString();
+    products[id] = {
+      name,
+      brand: (preset && preset.brand) || "",
+      category: (preset && preset.category) || "other",
+      bottleMl: (preset && preset.bottleMl) || 0,
+      remainingMl: (preset && preset.bottleMl) || 0,
+      lowThresholdMl: 0,
+      openedAt: now,
+      shelfLifeDaysOpened: (preset && preset.shelfLifeDaysOpened) || 0,
+      refrigerated: !!(preset && preset.refrigerated),
+      stirDaily: !!(preset && preset.stirDaily),
+      particleUmMin: (preset && preset.particleUmMin) || 0,
+      particleUmMax: (preset && preset.particleUmMax) || 0,
+      notes: "",
+      createdAt: now,
+      history: [],
+    };
+    st.addOpen = false;
+    this._setDirty(true);
+    this._recordActivity(`Added consumable: ${name}`);
+    this._render();
+  }
+
+  _npsFoodChannelIds() {
+    const channels = this._doserChannels();
+    return Object.keys(channels).sort()
+      .filter((id) => ["food", "livefood"].includes(channels[id] && channels[id].chemical));
+  }
+
+  _npsProductCard(pid, product, state) {
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const eid = esc(pid);
+    const s = state || {};
+    const pct = Number.isFinite(Number(s.percent)) ? Math.max(0, Math.min(100, Number(s.percent))) : null;
+    const expiry = s.expiry || {};
+    const chips = [];
+    if (s.empty) chips.push(`<span class="pill" style="color:var(--error-color,#e5484d)">Empty</span>`);
+    else if (s.low) chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">Low</span>`);
+    if (expiry.status === "expired") chips.push(`<span class="pill" style="color:var(--error-color,#e5484d)">Expired</span>`);
+    else if (expiry.status === "aging") chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">~${esc(expiry.daysLeft)}d left</span>`);
+    if (product.refrigerated) chips.push(`<span class="pill">Fridge</span>`);
+    if (product.stirDaily) chips.push(`<span class="pill">Stir daily</span>`);
+    const runway = s.daysUntilEmpty != null
+      ? `≈${esc(s.daysUntilEmpty)} days of use left${s.usageMlPerDay ? ` (~${esc(s.usageMlPerDay)} ml/day)` : ""}`
+      : "Log doses and the runway forecast switches on.";
+    const bar = pct == null ? "" : `
+      <div style="height:6px;border-radius:4px;background:var(--divider-color,#333);overflow:hidden;margin:6px 0;">
+        <div style="height:100%;width:${pct}%;background:${s.low || s.empty ? "var(--error-color,#e5484d)" : "var(--primary-color,#03a9f4)"};"></div>
+      </div>`;
+    const cats = (this._nps.summary && this._nps.summary.categories) || {};
+    const catOptions = Object.entries(cats)
+      .map(([v, l]) => `<option value="${esc(v)}" ${product.category === v ? "selected" : ""}>${esc(l)}</option>`)
+      .join("");
+    const confirmRow = this._nps.confirmDelete === pid
+      ? `<div class="notice warning-notice"><small>Delete "${esc(product.name)}" and its usage history?</small>
+           <div class="button-row"><button class="secondary compact-button" data-action="nps-product-delete" data-id="${eid}">Delete for good</button></div></div>`
+      : "";
+    return `
+      <article class="panel stack" style="gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <div><strong>${esc(product.name)}</strong>${product.brand ? ` <small>· ${esc(product.brand)}</small>` : ""}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">${chips.join("")}<span class="pill">${esc(s.categoryLabel || "Other")}</span></div>
+        </div>
+        ${bar}
+        <small>${s.bottleMl ? `${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml` : "Set the bottle size (Edit product) to start the ledger"} · ${runway}</small>
+        <div class="button-row">
+          <input type="number" min="0.1" step="0.1" placeholder="ml" style="width:72px;" data-nps-log="${eid}">
+          <button class="secondary compact-button" data-action="nps-product-logdose" data-id="${eid}">Log dose</button>
+          <button class="secondary compact-button" data-action="nps-product-newbottle" data-id="${eid}">New bottle</button>
+          <button class="secondary compact-button" data-action="nps-product-delete" data-id="${eid}">Delete</button>
+        </div>
+        ${confirmRow}
+        <details>
+          <summary style="cursor:pointer;"><small>Edit product</small></summary>
+          <div class="mini-grid" style="margin-top:8px;">
+            <label>Name<input data-scope="consumable" data-id="${eid}" data-field="name" value="${esc(product.name)}"></label>
+            <label>Brand<input data-scope="consumable" data-id="${eid}" data-field="brand" value="${esc(product.brand)}"></label>
+            <label>Category<select data-scope="consumable" data-id="${eid}" data-field="category">${catOptions}</select></label>
+            <label>Bottle size (ml)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="bottleMl" value="${esc(product.bottleMl)}"></label>
+            <label>Remaining (ml)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="remainingMl" value="${esc(product.remainingMl)}"></label>
+            <label>Low alert below (ml)<input type="number" min="0" placeholder="0 = auto 10%" data-scope="consumable" data-id="${eid}" data-field="lowThresholdMl" value="${esc(product.lowThresholdMl)}"></label>
+            <label>Shelf life once opened (days)<input type="number" min="0" placeholder="0 = shelf-stable" data-scope="consumable" data-id="${eid}" data-field="shelfLifeDaysOpened" value="${esc(product.shelfLifeDaysOpened)}"></label>
+            <label><input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="refrigerated" ${product.refrigerated ? "checked" : ""}> Refrigerated</label>
+            <label><input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="stirDaily" ${product.stirDaily ? "checked" : ""}> Needs a daily stir/shake</label>
+            <label>Particle min (µm)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="particleUmMin" value="${esc(product.particleUmMin)}"></label>
+            <label>Particle max (µm)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="particleUmMax" value="${esc(product.particleUmMax)}"></label>
+            <label>Notes<input data-scope="consumable" data-id="${eid}" data-field="notes" value="${esc(product.notes)}"></label>
+          </div>
+          <p class="hint">Edits persist with the Save bar. "Log dose" and "New bottle" write immediately.</p>
+        </details>
+      </article>`;
+  }
+
+  _npsTab() {
+    const st = this._nps;
+    if (st.summary === null && !st.loading) setTimeout(() => this._npsLoadSummary(), 0);
+    if (!this._awcSummary) setTimeout(() => this._awcLoadSummary(), 0);
+    if (this._doserSummary === null && !this._doserSummaryLoading) setTimeout(() => this._doserLoadSummary(), 0);
+
+    const channels = this._doserChannels();
+    const foodIds = this._npsFoodChannelIds();
+    const dsum = (this._doserSummary && this._doserSummary.summary) || {};
+    const products = (this._config && this._config.consumables && this._config.consumables.products) || {};
+    const shelfStates = (st.summary && st.summary.shelf && st.summary.shelf.products) || {};
+    const pids = Object.keys(products).sort((a, b) =>
+      String(products[a].name || "").localeCompare(String(products[b].name || "")));
+
+    const head = `
+      <div class="section-head">
+        <div><h2>Automated NPS System</h2><p>Feeding non-photosynthetic corals is a logistics problem — OpenReef turns it into a schedule. Food pumps, the bottle shelf, and the water exchange in one place.</p></div>
+        <button class="secondary compact-button" data-action="nps-refresh">Refresh</button>
+      </div>`;
+
+    const notices = `
+      ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
+      ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
+
+    // --- Today's feed plan (honest text, Stage A) --------------------------
+    const planLines = foodIds.map((id) => {
+      const ch = channels[id] || {};
+      const entry = dsum[id] || {};
+      const text = (entry.plan && entry.plan.summaryText)
+        || (Number(ch.schedule && ch.schedule.mlPerDay) > 0 ? `${ch.schedule.mlPerDay} ml/day planned` : "No schedule yet — set one in Dosing");
+      return `<li><strong>${this._escape((entry && entry.name) || ch.name || id)}</strong> — ${this._escape(text)}</li>`;
+    });
+    const awcSum = this._awcSummary && this._awcSummary.summary;
+    if (awcSum && awcSum.scheduleText) {
+      planLines.push(`<li><strong>Water exchange</strong> — ${this._escape(awcSum.scheduleText)}</li>`);
+    }
+    const planPanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Today's feed plan</p>
+        ${planLines.length
+          ? `<ul style="margin:0;padding-left:18px;display:grid;gap:4px;">${planLines.join("")}</ul>`
+          : `<p class="hint">No food pumps yet — add one below and its schedule shows up here.</p>`}
+      </article>`;
+
+    // --- Food pumps --------------------------------------------------------
+    const productOptions = (sel) => [`<option value="">— none —</option>`]
+      .concat(pids.map((pid) =>
+        `<option value="${this._escape(pid)}" ${sel === pid ? "selected" : ""}>${this._escape(products[pid].name)}</option>`))
+      .join("");
+    const pumpRows = foodIds.map((id) => {
+      const ch = channels[id] || {};
+      const entry = dsum[id] || {};
+      const res = ch.reservoir || {};
+      const days = entry.reservoir && entry.reservoir.daysUntilEmpty;
+      return `
+        <div class="setting-card subtle-card">
+          <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline;">
+            <strong>${this._escape(ch.name || id)}</strong>
+            <small>${this._escape(this._doserChemicalLabel(ch.chemical))} · ${ch.enabled ? "enabled" : "off"}${days != null ? ` · ~${this._escape(String(days))} days in reservoir` : ""}</small>
+          </div>
+          <div class="mini-grid" style="margin-top:6px;">
+            <label>Draws from bottle<select data-scope="dosing-channel-reservoir" data-id="${this._escape(id)}" data-field="productId">${productOptions(res.productId || "")}</select></label>
+            <label><input type="checkbox" data-scope="dosing-channel-reservoir" data-id="${this._escape(id)}" data-field="productIsBottle" ${res.productIsBottle ? "checked" : ""}> The bottle IS the reservoir (pump doses debit it directly)</label>
+          </div>
+        </div>`;
+    }).join("");
+    const pumpsPanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Food pumps</p>
+        ${pumpRows || `<p class="hint">No food channels yet. Add one — it becomes a normal dosing channel (schedules, calibration and binding live in the Dosing tab).</p>`}
+        <div class="button-row" style="flex-wrap:wrap;">
+          <button class="secondary compact-button" data-action="nps-add-food-pump" data-label="Phyto">+ Phyto pump</button>
+          <button class="secondary compact-button" data-action="nps-add-food-pump" data-label="Zooplankton">+ Zooplankton pump</button>
+          <button class="secondary compact-button" data-action="nps-add-food-pump" data-label="Bacteria">+ Bacteria pump</button>
+          <button class="secondary compact-button" data-action="nps-add-brine-pump">+ Live brine pump</button>
+        </div>
+        <p class="hint">Link a pump to a bottle and refills debit the bottle; tick "bottle IS the reservoir" and every dose debits it live. Schedules, calibration and freshness live on the Dosing tab.</p>
+      </article>`;
+
+    // --- Food shelf (consumables) ------------------------------------------
+    const library = (st.summary && st.summary.library) || [];
+    const addBlock = st.addOpen ? `
+      <div class="setting-card subtle-card">
+        <p class="eyebrow">Add a product</p>
+        <div class="button-row" style="flex-wrap:wrap;">
+          ${library.map((p, i) => `<button class="secondary compact-button" data-action="nps-add-product" data-library="${i}">${this._escape(p.name)}</button>`).join("")}
+          <button class="secondary compact-button" data-action="nps-add-product" data-library="custom">Custom product</button>
+        </div>
+        <p class="hint">Presets carry handling metadata from the NPS research — shelf life, fridge, stirring, particle size. Everything stays editable.</p>
+      </div>` : "";
+    const shelfPanel = `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Food shelf</p>
+          <button class="secondary compact-button" data-action="nps-add-open">${st.addOpen ? "Close" : "+ Add product"}</button>
+        </div>
+        ${addBlock}
+        ${pids.length
+          ? `<div class="grid two">${pids.map((pid) => this._npsProductCard(pid, products[pid], shelfStates[pid])).join("")}</div>`
+          : `<p class="hint">${st.loading ? "Loading the shelf…" : "Track every bottle you dose — phyto, foods, bacteria, 2-part. Add one and log doses; the shelf forecasts how many days are left."}</p>`}
+      </article>`;
+
+    // --- Water exchange (canonical AWC schedule, edit-in-place) ------------
+    const sched = (this._config && this._config.automaticWaterChange && this._config.automaticWaterChange.schedule) || {};
+    const waterPanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Water exchange</p>
+        ${awcSum && awcSum.scheduleText
+          ? `<small>📅 ${this._escape(awcSum.scheduleText)}${Number.isFinite(Number(awcSum.dailyChangeL)) ? ` · ~${this._escape(String(awcSum.dailyChangeL))} L/day` : ""}</small>`
+          : `<p class="hint">Heavy NPS feeding needs matched export — set the Automatic Water Change up first (Water Change tab).</p>`}
+        <div class="mini-grid">
+          <label>Amount<input type="number" min="0" step="0.1" data-scope="awc-schedule" data-field="amount" value="${this._escape(String(sched.amount ?? 0))}"></label>
+          <label>Unit<select data-scope="awc-schedule" data-field="amountUnit">
+            <option value="percent" ${sched.amountUnit !== "litres" ? "selected" : ""}>% of tank</option>
+            <option value="litres" ${sched.amountUnit === "litres" ? "selected" : ""}>litres</option>
+          </select></label>
+          <label>Per<select data-scope="awc-schedule" data-field="period">
+            <option value="day" ${sched.period === "day" ? "selected" : ""}>day</option>
+            <option value="week" ${sched.period !== "day" ? "selected" : ""}>week</option>
+          </select></label>
+        </div>
+        <p class="hint">This edits the same canonical AWC schedule the Water Change tab owns — one source of truth, saved with the Save bar. The nutrient-budget advisor that suggests this number lands in a later stage.</p>
+      </article>`;
+
+    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${shelfPanel}${waterPanel}</section>`;
+  }
+
   _tabs() {
     const tabs = [
       ["mission", "Mission Control"],
@@ -9386,6 +9698,11 @@ class OpenReefPanel extends HTMLElement {
     if (this._dosingEnabled()) {
       tabs.splice(tabs.findIndex(([tabId]) => tabId === "awc") + 1, 0, ["dosing", "Dosing"]);
     }
+    // Automated NPS system — opt-in via Settings; sits beside the feeding
+    // engines it orchestrates (Water Change / Dosing), before Controls.
+    if (this._config?.nps?.enabled) {
+      tabs.splice(tabs.findIndex(([tabId]) => tabId === "controls"), 0, ["nps", "NPS"]);
+    }
     // Vision only exists for installs that opted in (Frigate + MQTT owners):
     // no permanent empty-state tab advertising hardware a tester doesn't have.
     if (this._config?.vision?.enabled) {
@@ -9398,7 +9715,8 @@ class OpenReefPanel extends HTMLElement {
     // If a gated tab was disabled while active, the content falls back to
     // Mission — highlight Mission so the nav doesn't show no active tab.
     const activeId = ((this._activeTab === "vision" && !this._config?.vision?.enabled)
-      || (this._activeTab === "dosing" && !this._dosingEnabled()))
+      || (this._activeTab === "dosing" && !this._dosingEnabled())
+      || (this._activeTab === "nps" && !this._config?.nps?.enabled))
       ? "mission" : this._activeTab;
     return `
       <nav class="tabs">
@@ -9425,6 +9743,10 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "dosing") {
       // Falls back to Mission if dosing was disabled while this tab was active.
       return this._dosingEnabled() ? this._doserTab() : this._mission();
+    }
+    if (this._activeTab === "nps") {
+      // Falls back to Mission if NPS was disabled while this tab was active.
+      return this._config?.nps?.enabled ? this._npsTab() : this._mission();
     }
     if (this._activeTab === "vision") {
       // Falls back to Mission if vision was disabled while this tab was active.
@@ -9522,7 +9844,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _doserChemicalLabel(chem) {
-    return ({ alk: "Alk", ca: "Ca", mg: "Mg", kalk: "Kalk", trace: "Trace", livefood: "Live food", other: "Other" })[chem] || "Other";
+    return ({ alk: "Alk", ca: "Ca", mg: "Mg", kalk: "Kalk", trace: "Trace", livefood: "Live food", food: "Food", other: "Other" })[chem] || "Other";
   }
 
   async _doserLoadSummary() {
@@ -10139,7 +10461,7 @@ class OpenReefPanel extends HTMLElement {
 
   _doserSettingsSections() {
     const ids = this._doserChannelIds();
-    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["other", "Other"]];
+    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["food", "Food"], ["other", "Other"]];
     return `
       <section class="mapping-section awc-settings-block">
         <div class="awc-section-title"><p class="eyebrow">Dosing channels</p></div>
@@ -10173,7 +10495,7 @@ class OpenReefPanel extends HTMLElement {
     const eid = this._escape(id);
     const kalkish = channel.chemical === "kalk";
     const continuous = (s.mode || "continuous") === "continuous";
-    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["other", "Other"]];
+    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["food", "Food"], ["other", "Other"]];
 
     const removeRow = this._doserRemoveConfirm === id
       ? `<div class="notice warning-notice"><small>The pump's enable switch is ON — removing only unlinks OpenReef; the on-device schedule keeps dosing until that switch is turned off.</small>
@@ -19786,6 +20108,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._maintenanceSettings()}
         ${this._dosingSettings()}
         ${this._awcSettings()}
+        ${this._npsSettings()}
         ${this._equipmentSettings()}
         ${this._cameraSettings()}
         ${this._captureSettings()}
@@ -19804,6 +20127,19 @@ class OpenReefPanel extends HTMLElement {
         ${this._backupRestoreSettings()}
       </section>
     `;
+  }
+
+  _npsSettings() {
+    const npsCfg = (this._config && this._config.nps) || {};
+    return this._settingsPanel(
+      "nps",
+      "Automated NPS system",
+      "The command center for feeding non-photosynthetic corals — food pumps, the system-wide bottle shelf, and the water-exchange link.",
+      `
+        <label><input type="checkbox" data-scope="nps" data-field="enabled" ${npsCfg.enabled ? "checked" : ""}> Enable the NPS tab</label>
+        <p class="hint">Stage A ships unlimited food dosing channels, the consumables shelf with days-left forecasts, and canonical water-exchange control. Brine feed-exchanges, feed orchestration and species plans arrive in the next stages.</p>
+      `,
+    );
   }
 
   _backupRestoreSettings() {

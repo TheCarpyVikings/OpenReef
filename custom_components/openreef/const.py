@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.39"
+INTEGRATION_VERSION = "0.7.40"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -318,8 +318,8 @@ AWC_SPINUP_MAX_ML = 1000.0                # config-normalise absolute sanity cla
 # schedules into firmware numbers, verifies every write, watches for missed doses,
 # and keeps the reservoir/integrity/tube-life ledgers. Maths in dosing.py,
 # orchestration in __init__.py, matching the awc.py split.
-DOSING_MAX_CHANNELS = 8
-DOSING_CHANNEL_CHEMICALS = ("alk", "ca", "mg", "kalk", "trace", "livefood", "other")
+DOSING_MAX_CHANNELS = 32
+DOSING_CHANNEL_CHEMICALS = ("alk", "ca", "mg", "kalk", "trace", "livefood", "food", "other")
 DOSING_CHANNEL_MODES = ("continuous", "doses")
 DOSING_DRIVER_TYPES = ("openreef_esphome_stepper", "openreef_esphome_brushed")  # generic HA adapter is v2
 DOSING_SYNC_STATES = ("unsynced", "pending", "verifying", "synced", "failed", "offline", "drift")
@@ -351,6 +351,19 @@ DOSING_VERIFY_UNSUB = "dosing_verify_unsub"
 # stored config always keeps explicit entity ids (renames must not silently
 # unbind — the Kamoer/Jebao lesson).
 DOSING_LIVEFOOD_SHELF_LIFE_DAYS = 1.0     # phyto/pods/baby brine: perishable within a day
+
+# Automated NPS system — the command-center tab that compiles feeding plans onto
+# the existing engines (dosing channels for food pumps, AWC for water motion).
+# Stage A: consumables (bottle inventory) + food-typed channels + the gated tab.
+# Maths in nps.py, orchestration in __init__.py, matching the awc/dosing split.
+NPS_RUNWAY_WINDOW_DAYS = 14               # bottle days-left forecast averages this window
+CONSUMABLES_MAX_PRODUCTS = 64
+CONSUMABLE_HISTORY_MAX = 50               # per-product dose/refill events kept
+CONSUMABLE_BOTTLE_MAX_ML = 50000.0        # matches DOSING_RESERVOIR_MAX_ML
+CONSUMABLE_CATEGORIES = (
+    "phyto", "zooLive", "zooPrepared", "blend", "bacteria",
+    "amino", "trace", "twoPart", "other",
+)
 DOSING_BRUSHED_CAL_RUN_S = 30.0           # brushed calibration: fixed timed burst (vs 100 rev)
 # Brushed (DC head) driver roles: the shared stepper roles minus stepper/pH-specific
 # ones, plus the flow/spin-up calibration numbers, the post-dose fresh-chaser seconds,
@@ -1354,6 +1367,17 @@ DEFAULT_CORE_CONFIG = {
             "calibrationDue": True,
             "syncIssues": True,
         },
+    },
+    # Automated NPS system — gated command-center tab. Stage A carries only the
+    # gate; feed plans/brine exchange/nutrient budget arrive in later stages.
+    "nps": {
+        "enabled": False,
+    },
+    # Consumables — the system-wide bottle tracker (foods, phyto, bacteria,
+    # 2-part, trace...). Products are user-created like dosing channels, so the
+    # default is just empty; the normaliser owns the per-product schema.
+    "consumables": {
+        "products": {},
     },
     # Lighting schedule — drives when light-dependent (lightGated) sensor alerts
     # may fire. mode "off" = no gating (alerts always evaluated, legacy behaviour).

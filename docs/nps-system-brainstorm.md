@@ -1,0 +1,204 @@
+# Automated NPS System — research + design brief
+
+Date: 2026-08-12 · Status: **Stage A SHIPPED (0.7.40, 2026-08-13)** — Stages B–E next · Research: 3 web agents + 3 codebase mappers (full dossiers summarized here)
+
+> **Naming decision (2026-08-13)**: plain **"NPS"** for the tab and marketing ("Automated NPS System" long form). Feast/Ægir branding rejected — searchable beats clever here.
+>
+> **Stage A shipped**: `nps.py` engine + `config["nps"]`/`config["consumables"]` + gated NPS tab; `food` chemical + channel cap 8→32; system-wide consumables shelf (seeded product library, runway forecasts, fail-closed opt-in expiry, manual-dose logging, new-bottle/top-up); pump↔bottle bridge (`reservoir.productId` + `productIsBottle`: dose-flush debits or refill-transfer debits); canonical AWC amount card on the tab. WS: `nps_summary`, `consumable_log_dose`, `consumable_refill`, `consumable_delete`. Tests: `tests/test_nps.py` (20 green).
+
+The headline feature: a dedicated **NPS tab** that turns OpenReef into the first integrated automated feeding system for non-photosynthetic corals — coordinated live-food dosing, feeding-matched water exchange, food inventory, and species-based feeding plans, with safety interlocks throughout.
+
+---
+
+## 1. The claim (verified 2026-08-12)
+
+**"The first integrated, automated NPS feeding system for home aquariums"** is defensible with precise wording. The prior-art survey found:
+
+| Capability | Best existing instance | Integrated with the others? |
+|---|---|---|
+| Scheduled live/liquid food dosing | Pacific Sun PR reactor → Kore doser (phyto only); DIY DOS/Kamoer fridge rigs; Avast "Plank" (freeze-dried only) | No |
+| Matched/automatic water exchange | Neptune DOS AWC, drip AWC | Never food-coupled |
+| Food inventory tracking | GHL days-until-empty (generic mL math); Neptune DDR 20% optical alert | Not food-aware |
+| Species-based feeding plans | **Nothing anywhere** — forum lore and papers only | No |
+
+Hobby literature states flatly that commercial refrigerated NPS feeders "do not exist" — every real-world NPS success is a hand-rolled fridge + doser + timer + heavy manual water changes.
+
+**Wording rules:**
+- ✅ "First **integrated, automated NPS system** for home reefs" — every clause verified absent from the market.
+- ❌ "First automated plankton feeder" — false (Avast Plank, Pacific Sun exist).
+- Nearest competitors to name-check honestly: Pacific Sun PR+Kore (phyto-only supply chain, no coordination); a hand-programmed Neptune stack (AFS+DOS+DDR gets an expert ~70% of the way with zero NPS semantics — this is what the Apex-owning beta tester will benchmark against).
+- Genuinely novel and worth headlining: **feeding-load-matched water exchange** (nobody does this), food-aware inventory, species plans, and the safety orchestration that makes it a *system*.
+
+## 2. Locked decisions (Reece, 2026-08-12)
+
+1. **Livestock scope: everything** — sun corals through Dendronephthya, dedicated mixed NPS tank. Species plans must span easy→"impossible".
+2. **Pump hardware: both** — reefnode ESPHome pumps first-class (calibration, wear, tubing age) AND generic HA switch entities (the deferred `DOSING_DRIVER_TYPES` "generic HA adapter is v2" slot becomes part of this arc).
+3. **Live brine v1: manual hatch → aerated reservoir.** User hatches, rinses, resuspends in tank-matched saltwater; system doses, matches drain, and runs hatch/refresh reminders. Config architected so an auto-hatchery ESPHome node can slot in later.
+4. **Inventory: system-wide consumables engine.** One bottle tracker for ALL products (foods, phyto, bacteria, 2-part, trace); the NPS page surfaces the food shelf, the dosing tab gets bottle runway for free.
+
+## 3. Research digest — what NPS animals actually need
+
+### Difficulty ladder & feeding requirements
+
+| Group | Eats | Cadence | Notes |
+|---|---|---|---|
+| **Tubastraea sun corals** (easiest) | Meaty: mysis, brine, krill, LRS blends | 2–3×/wk min, daily ideal; Tidal Gardens optimum "12–24 small feedings/day" | Nocturnal but **trainable to open in daytime** by consistent scheduled feeding shifted gradually earlier; scent triggers extension |
+| Chili coral | BBS, decapsulated cysts, rotifers, Oyster-Feast | Every other day min, daily preferred | Strictly nocturnal; feed with flow killed, at night |
+| Easier gorgonians (Menella, Swiftia, Diodogorgia) | Micronized Calanus, BBS, copepods — **particle ≤ polyp mouth** | Few×/wk | The recommended starter NPS |
+| Dendrophyllia/Balanophyllia | Same as sun coral, more often + more volume | Daily+ | Balanophyllia very light-sensitive |
+| Rhizotrochus | Whole silversides/shrimp | Per-polyp target feeds | Deepwater — cool-tolerant, chillers relevant |
+| Harder gorgonians (Euplexaura, Guaiagorgia) | Fine zooplankton | Daily | |
+| Flame scallops, sponges, tunicates | Phyto 5–40 µm continuous | Standing density | Decline invisibly; most starve <6 months |
+| Blueberry gorgonian | Live micro-plankton, rotifers, oyster eggs | Near-continuous | "Cut flowers of the hobby" |
+| **Dendronephthya/Scleronephthya** | **Mostly PHYTO** (50–200× more carbon from phyto than zoo; weak nematocysts) — Nannochloropsis/Iso/Tetraselmis + copepod nauplii | **Continuous**: standing density 5,000–50,000 cells/mL (slight green tint), the only proven method | Flow 10–25 cm/s laminar/alternating; most slowly starve over 2–6 months |
+| Feather stars (hardest) | ~400 µm zooplankton | Protocol: 4 feeds/day, each spread over 2 h, 24/7 | Two known long-term successes ever |
+
+### The engineering constraints that shape the design
+
+- **Many small pulses beat 1–2 big feeds** for every group (Dendrophyllia 12–24 micro-feeds/day; crinoid 4×2h windows; carnation continuous). Micro-dose scheduling is the core primitive — and the dosing engine already compiles daily-total → 0.1–10 ml doses at 1–240 min intervals.
+- **The paradox: constant food vs water quality.** NPS keepers run oversized skimmers wet, 100 µm socks, carbon dosing, and **small daily water changes (~1%/day) or continuous drip AWC** — exactly OpenReef's interval-mode micro-change AWC. Nutrient guardrails: NO3 2–20 ppm, PO4 0.01–0.1, **never zero** (starving the bacterioplankton loop kills NPS too).
+- **Baby brine (Artemia) clock**: hatch 18–24 h @ 26–30 °C, ~25 ppt (lower than reef — hence rinse + resuspend in tank-matched saltwater; **never dose raw hatch water**: bacteria, ammonia, shells). Caloric value drops **30–50% between 24 h and 48 h post-hatch** — freshness is a real nutritional deadline, not fussiness. Refrigeration (2–10 °C) + gentle aeration stretches a hatch to 24–48 h. Enrichment (SELCO) is a second ~24 h stage — v2 territory.
+- **Peristaltic pumps don't shred nauplii** (low-shear; centrifugal impellers and strong airlifts are the killers). Community practice: **larger-ID tubing** (≥3/16", one build 6.8 mm) so nauplii pass whole and lines don't clog.
+- **Nothing organic may sit in a line.** Phyto metabolizes and dies in the tube; slurries rot. Proven fixes: reverse the pump after each dose, or the WARF two-pump **dose-then-flush** (200 mL clean chaser) — OpenReef's brushed live-food head already has a `chaserSeconds` fresh-water rinse. Chemical clean cadence scales with dose count (NaOH soak every ~6 wks at 12 doses/day).
+- **Reservoir viability clocks differ per food**: live phyto ~4 wks refrigerated **with daily agitation** (settled phyto dies in days — stirring is mandatory); mixed Reef Nutrition blend ~1 month refrigerated; live BBS 24–48 h; Reef-Roids slurry hours-to-a-day. Per-product expiry must be first-class.
+- **Equipment truce during feeds**: UV kills dosed live plankton (standard practice: UV off a few hours post-dose); ozone likewise (and ORP crashes after feeding, driving ORP-controlled ozone harder — gate on feed events, not ORP); skimmer off 30–60 min or it strips the feed and overflows, then **wet-skim after**; return off / wavemakers low 10–30 min to hold the food "soup" in the display. All documented practice — nobody automates the ensemble.
+- **Failure modes to design against**: slow starvation (#1), nutrient runaway → algae blankets colonies, overnight bacterial melts, wrong flow, wrong temp for deepwater species, **keeper burnout on 24/7 schedules — the strongest argument for this feature existing**.
+
+### Food library facts (seed data)
+
+Reef Nutrition Oyster-Feast 1–200 µm (refrigerate 1–5 °C, 9-mo unopened); Phyto-Feast/Roti-Feast/R.O.E./Arcti-Pods same handling, never freeze; Coral Frenzy 50–300 µm; Reef-Roids ~150–200 µm (mix-fresh, clogs 1.1 mm doser fittings — large-bore only); Fauna Marin Ultra Sea Fan (the gorgonian-specific feed); NYOS GoldPods **shelf-stable** (easiest automation target); live phyto Nanno 1–2 µm / Iso ~5 µm / Tetraselmis ~10 µm; rotifers 150–300 µm; Artemia nauplii ~450 µm; Tisbe/Apocyclops nauplii. Carbon dosing (vinegar/NoPox) + Dr Tim's Waste-Away double as **bacterioplankton generators** — export mechanism that is also food.
+
+## 4. What already exists in the codebase (from the mapping agents)
+
+Almost everything below the orchestration layer:
+
+- **AWC** (`awc.py` + `__init__.py`): volume-primary calibrated pumps, micro-change interval scheduling (15 min cadence floor), N-source fill (`fill2`/`fresh2` + `sourcePolicy` single/primary/alternate/ratio), per-source `saltPpt` with `source_salt_matched` gating (salt-matched micro-changes skip ATO/dosing suspends), net-salt ledger, layered guards, anomaly abort, drift grading. **Limit**: `plan_leg` is strictly symmetric — no "drain X, fill Y" today. Extension point identified: a new pure planner beside `plan_leg` taking per-role targets; the leg executor already handles per-role `movedMl`/`endsAt` maps ("modest surgery").
+- **Dosing** (`dosing.py`): channels are dynamic dicts (cap `DOSING_MAX_CHANNELS = 8` — one constant + one slice to raise), stepper + brushed drivers, daily-total→micro-dose compiler, guard chain, **`channel.reservoir` already is a bottle** (`volumeMl`, `remainingMl`, `lowThresholdMl`, `daysUntilEmpty` runway, `mixedAt + shelfLifeDays` freshness with fail-closed stale gating), **dose-event-driven decrement already end-to-end** (sensor-delta accounting → hourly flush). Spacing engine exempts group-less chemicals — correct default for food. `livefood` chemical exists with 1-day shelf life + chaser rinse that already cross-debits the AWC fresh reservoir (the pattern for cross-ledger accounting).
+- **Consumption Advisor**: product library with strength metadata (no bottle sizes — the gap this feature fills), trend-slope analysis, suggest/apply to pump cards. The analysis pattern to clone for the nutrient budget.
+- **Feature-tab recipe** (per the panel map): `const.py` defaults + normaliser section + `websocket_nps_*` handlers + registration, `nps.py` pure-math module like `spawning.py`, panel tab array entry + route + state slot + field-handler scope + click actions; scheduler re-arm in `_async_save_config`/`async_setup_entry`. Modes: `_async_apply_mode(hass, entry, "feed", ctx)` is the sanctioned programmatic feed-mode entry; feature hooks live in the 7968–8033 block. Maintenance engine hosts custom tasks (hatch reminders free). Feed-watch camera capture already starts on feed mode. Pulse insight cards are one try-block each; diagram states are CSS classes.
+- **Firmware**: dosingnode-s3zero (pumps-only node) + reefnode-s3 references; suffix tables currently allow ~1 brushed food head per node — **manual per-role entity binding already works for any entity set**, so unlimited pumps is a UI/normaliser change now and a suffix-parameterization contract bump later (hardware track).
+
+## 5. The design — "Automated NPS System" tab
+
+**Identity**: opt-in gated tab (`nps.enabled` splice-gate like dosing/vision). Label: **"NPS"** (tab), "Automated NPS System" (feature name, settings header, marketing). The page is a *command center* — the underlying engines (AWC, dosing, modes, maintenance, camera) stay authoritative; NPS compiles plans onto them and reads their state back. No duplicated state, one new `nps.py` pure-math engine, `config["nps"]` block.
+
+### 5.1 Page layout (four zones)
+
+1. **Feed Plan** (hero): today's feeding timeline — every scheduled event across all food pumps + brine exchanges + AWC slots on one 24 h strip, night window shaded, next event countdown. Plain-language honesty line (`schedule_text` tradition): *"14 feed events today: phyto every 90 min (0.8 ml), brine exchange 22:00 (drain 400 ml → dose 400 ml), AWC 2×1.2 L."*
+2. **Food pumps**: unlimited channels, add-a-pump flow with product picker; per-pump card = next dose, bottle runway, freshness state, calibration/tube nags (reused dosing cards, food-filtered).
+3. **Live brine / hatchery**: hatch-age clock with nutritional-prime countdown, "Hatched & loaded" button (stamps `mixedAt`), reservoir level, next brine-exchange event, reminders status.
+4. **Water & nutrients**: the AWC amount control (canonical, edit-in-place), feed-load vs export budget bar, NO3/PO4 trend sparkline with the 2–20 / 0.01–0.1 guardrail band ("never zero" warning included).
+
+### 5.2 Food pumps — unlimited, both hardware classes
+
+- New chemical **`"food"`** in `DOSING_CHANNEL_CHEMICALS` (+ labels + panel selects); `livefood` stays for live/perishable (freshness fail-closed + chaser); `food` gets optional `shelfLifeDays` (0 = shelf-stable) by un-gating the existing freshness engine from livefood-only.
+- Raise `DOSING_MAX_CHANNELS` 8 → 32 (and the slice at `__init__.py:696`). Spacing exemption already correct (`spacing_group("") `).
+- **New driver `"ha_switch_timed"`**: generic HA switch + `mlPerS` calibration (AWC-pump-style timed runs, `runtime_for_volume_s` math) for Kamoer/DIY heads — the promised generic adapter. Reefnode channels keep the full sensor-verified path; ha_switch channels get dead-reckoned decrement (documented honestly on the card: "estimated — no dose sensor").
+- Presets: "Phyto", "Zooplankton blend", "Bacteria", "Live brine" one-tap buttons seeding sensible schedules (phyto = many micro-pulses; blend = fewer larger; brine = exchange-coupled, §5.4).
+
+### 5.3 Consumables engine (system-wide) — `config["consumables"]`
+
+- Product registry: `{id, name, brand, category (phyto|zooLive|zooPrepared|blend|bacteria|amino|trace|twoPart|other), bottleMl, remainingMl, openedAt, shelfLifeDaysOpened, refrigerated, stirDaily, particleUmMin/Max, notes}`.
+- Seeded library from research (§3 food facts) with per-product handling metadata; fully user-editable + "custom product".
+- **Bridge**: `channel.reservoir.productId`. Two modes per channel: *bottle-is-reservoir* (dose decrements bottle directly via the existing pending-flush path) or *refill-from-bottle* ("Refilled 250 ml from Phyto #2" decrements the bottle, resets the reservoir — one WS command, mirrors `dosing_reset_reservoir`).
+- Surfaces: NPS food shelf (bottles with % bars, days-left forecast from average daily use, low/expiry chips); dosing tab reuses the same rows for 2-part/trace; maintenance-style notification on low ("~6 days of phyto left") — reorder nudges.
+- Days-left math reuses `reservoir_state` runway; expiry reuses `freshness_state` (both already generalized).
+
+### 5.4 The brine feed-exchange (the signature mechanic)
+
+"Drain X ml → dose Y ml salinity-matched live brine", as a first-class AWC cycle type:
+
+- New pure planner `feed_exchange_plan(drain_ml, fill_role, fill_ml)` in `awc.py` beside `plan_leg` — asymmetric per-role targets, executed by the existing leg machinery (per-role `movedMl`/`endsAt` already support it). Runs under `_awc_lock`, full `start_guard_reasons` + `in_run_safety`, anomaly verdicts, ledger + `perSource` + `netSaltGrams` accounting (a drain-side twin of the chaser-credit hook).
+- Source = `fresh2`-style reservoir with `saltPpt` set; `source_salt_matched` gate means matched brine exchanges ride the **micro-change path** (no ATO suspend churn at high cadence). The brine reservoir is a `consumables` product too (live BBS, shelf life 1–2 days, fail-closed stale → exchange blocked, reminder fired).
+- **Net-export dial**: `drain = dose × (1 + exportBias)` — drain slightly more than you dose and every feeding *is* a little water change. This is the feeding↔AWC coupling nobody has.
+- Scheduling: NPS-owned slots (e.g. nightly 22:00, or N×/day) compiled onto the AWC scheduler's due-slot machinery; roadmap note for per-slot source pinning (`sourcePolicy` "pinned" mode) which the AWC map identified as the natural insertion point.
+- v2 (hardware track): auto-hatchery ESPHome node (heater + air valve + drain servo) slots in as a new driver on the same config — v1 config shapes chosen to survive that.
+
+### 5.5 AWC amount on the NPS page
+
+Canonical edit-in-place (tank-volume pattern — no forked state): read `awc_summary` (daily/weekly litres, scheduleText, runway), write `schedule.amount` via `awc_set_schedule`. Verified safe: amount-only edits deliberately don't re-arm the scheduler or consume pending slots. The NPS page shows it as *"Water exchange: 8%/week (staying)"* with the nutrient-budget suggestion beside it (§5.7).
+
+### 5.6 Feed-event orchestration (the "system" part)
+
+Per feed event, optional orchestration profile:
+
+1. Enter Feed mode via `_async_apply_mode` (return pump off / wavemakers low per existing mode preview config) — the wall/Pulse mode chip shows it, feed-watch camera capture starts for free.
+2. **Equipment truce**: new `interlocks` keys — skimmer off during + `skimmerResumeMinutes` (then a "wet-skim after feeds" advisory), UV off during + `uvResumeMinutes` (hours-scale for live food), ozone same. Needs a `uv`/`ozone` equipment-profile alias (one-line additions to `_normalise_equipment_profile`). All driven through `_armed_equipment_by_profile` — armed-only, never-raise, same discipline as AWC's kill paths.
+3. Dose (single pump, group, or brine exchange).
+4. Hold 10–30 min (food-soup window), staged resume: wavemakers → return → skimmer (+delay) → UV (+hours).
+5. Exit to Running (restores `returnPlan`).
+
+Micro-doses (phyto drip) skip orchestration entirely — truce is for pulse feeds. Per-event flag in the plan.
+
+### 5.7 Nutrient budget (the intelligence leapfrog)
+
+- Every dose event accrues a **feed-load ledger**: per-product rough N/P/organics densities (per-category defaults, user-tunable — honest "rough model" framing, consistent with AWC's honest-dilution stance).
+- Budget bar: daily feed input vs export capacity (AWC removal % via existing dilution math + skimmer/carbon as unquantified credits).
+- Closed loop with health trends (Consumption Advisor pattern): NO3/PO4 slope → *"Feeding adds ~X/day; nitrate rising 0.4 ppm/day. Suggest AWC 6→9%/week or −15% zooplankton."* One-tap **Apply** writes `schedule.amount` — the same suggest/apply UX as the dosing advisor.
+- Guardrails both directions: NO3 < 2 / PO4 < 0.01 fires *"too clean for NPS — corals and the bacterioplankton loop starve"*; runaway high fires export suggestions. Advisory-only (memory: advisor features never auto-dose).
+
+### 5.8 Species-based feed plans (zero prior art anywhere)
+
+`nps.py` species library (research §3 distilled: per-group foods, particle windows, cadence, day/night, flow notes, difficulty) + **plan compiler** (spawning.py precedent — reef-location → Apex program is the same shape):
+
+- User picks livestock ("2× Tubastraea, 3 gorgonians, 1 Dendronephthya") → compiler unions requirements → proposes: per-pump schedules (which product, ml/day, pulse windows, night bias), brine-exchange cadence, standing-phyto density mode if carnations present, suggested AWC scaling, truce windows.
+- **Particle-size matching**: products carry µm ranges, species carry capture windows — the compiler warns *"Swiftia can't capture mysis-size particles; add a rotifer/Calanus-class food"*. Cheap to build, reads like magic, directly prevents the #1 failure mode (wrong particle = invisible starvation).
+- Difficulty honesty: picking Dendronephthya/crinoids shows the real husbandry banner (survival stats, continuous-feeding requirement) — credibility with exactly the audience that knows how hard this is.
+
+### 5.9 Hatchery & reminders
+
+- Custom `maintenance.tasks` entries (evaluation/snooze/notify/history free): "Start brine hatch" (offset ~24 h before the exchange window), "Harvest + rinse + load reservoir", "Stir/agitate phyto" (daily, unless `stirDaily` product is on a stirrer switch — then it's automated), "Clean food lines" (cadence computed from doses/day per the WARF data: ~6 wks at 12/day), "Replace food-pump tubing" (existing wear odometers).
+- Hatchery card shows hatch age vs the 24 h nutritional-prime window (calories −30–50% by 48 h) — a countdown that makes freshness visceral.
+- v2: enrichment stage (second 24 h SELCO step) as an optional task chain.
+
+### 5.10 Reef Pulse / diagram / personality
+
+- **Insight card** (one try-block): next feed event, bottles low, hatch freshness, budget verdict.
+- **Living diagram**: `dg-nps-feeding` state — a drifting plankton-cloud shimmer in the display during feed events + a food-pump station node with badge (same patch pattern as the AWC station). On the wall, the tank visibly "gets fed".
+- **Feed-watch clips** already capture feed mode; NPS events tag their clips → the feeding journal writes itself.
+- Personality (calm states only, Cheeky/Pro toggle respected): *"14 course tasting menu served today. Your gorgonians tip well."* Never on safety copy.
+
+### 5.11 Safety posture (unchanged philosophy)
+
+All water motion stays behind the AWC guard chain (leak/high-level fail-closed, anomaly 2×/3×, single-change cap, quiet hours). Food dosing stays behind the dosing guard chain (stale-food fail-closed OFF, daily caps, reservoir-empty). New surface is small: truce timers must **always** restore equipment (max-off timers pattern already exists in modes), and stale brine blocks the exchange but never blocks the plain AWC schedule.
+
+## 6. Really cool suggestions (ranked)
+
+**Tier 1 — in the v1 arc, cheap relative to wow:**
+1. **Feed-load-matched AWC + net-export dial** (§5.4/5.7) — the genuinely-first thing; lead marketing with it.
+2. **Species plan compiler with particle-size matching** (§5.8) — no prior art, prevents the #1 killer, demo gold.
+3. **Sun-coral day-training program**: automates the documented technique — anchor the feed event post-lights-out, then auto-shift it earlier by ~10 min/week toward your chosen showtime; progress shown on the card ("week 4 of 8: feeding at 6:40 pm"). Trivial scheduler math, unique feature, *visible* payoff: sun corals open for the evening viewing window.
+4. **Hatchery cockpit with nutritional-prime countdown** (§5.9).
+5. **Equipment truce windows** (UV/ozone/skimmer feed-aware pausing with staged resume) (§5.6).
+
+**Tier 2 — fast follows:**
+6. **Standing-density phyto mode**: target cells/mL (5k–50k carnation band) + bottle cell-density → computed ml/day drip; "slight green tint is correct" coaching. The only proven Dendronephthya method, as a mode.
+7. **Feed-before-export sequencing**: order the daily AWC slot right after the main feed window so uneaten food exports (documented best practice, pure scheduling).
+8. **Polyp Watch** (camera): before/after frames per feed event scored for polyp extension (vision.py) → Polyp Response Index per colony; over weeks: **food A/B ranking** ("your Dendro responds 3× better to live phyto than blend"). Extends feed-watch; the moment it works it's the best reef-camera feature anywhere.
+9. **Line-hygiene tracker**: dose-count-driven clean reminders + one-tap "flush now" (chaser burst) + NaOH clean log.
+10. **Stirrer/fridge automation**: bind a magnetic-stirrer switch per product (`stirDaily` → scheduled agitation), optional fridge temp sensor with "food fridge warm" alert.
+
+**Tier 3 — the moat compounds:**
+11. **Bacterioplankton loop tracking**: carbon-dosing channel tagged as export-that-is-also-food in the budget.
+12. **Trust Moat tie-in**: every automated feed logged + camera-verified = a provable care history for livestock sales/insurance ("this Dendro received 4,380 documented feedings").
+13. **Feeding analytics**: heatmap of feeds vs polyp extension vs nutrient trend — the dataset nobody has ever had, publishable.
+14. **Auto-hatchery hardware** (hardware track): ESPHome hatch node closing the last manual loop.
+15. **Community plan sharing**: export/import species feed plans — the Rich-Ross-guide model, for feeding.
+
+## 7. Staged build plan
+
+- **Stage A — foundation**: `config["nps"]` + normaliser + `nps.py` + gated tab skeleton; `food` chemical + channel cap raise + presets; consumables engine + product library + bottle runway; AWC amount card (read/write canonical). *Ships visible value alone.*
+- **Stage B — brine exchange**: `feed_exchange_plan` asymmetric planner + executor wiring + ledger/salt accounting; brine reservoir freshness; hatchery card + maintenance reminders; net-export dial.
+- **Stage C — orchestration**: feed-event truce (interlock keys + uv/ozone profiles + staged resume), feed-mode coupling, `ha_switch_timed` driver.
+- **Stage D — intelligence**: feed-load ledger + budget bar + trend-coupled suggestions; species library + plan compiler + particle matching; sun-coral trainer.
+- **Stage E — presence**: Pulse insight card, diagram plankton cloud + station node, feed-clip tagging, personality copy, docs/manual page.
+- **Hardware track (parallel)**: firmware suffix parameterization for multi-food-head nodes; auto-hatchery node design.
+
+Tests per harness: `tests/test_nps.py` (fake-HA WS + engine + guard chains) and `tests/test_panel_nps.mjs`; the brine-exchange planner gets the `test_awc_safety.py` treatment. Lockstep rule applies to any due-evaluation shown in the panel.
+
+## 8. Open questions for Reece
+
+1. Tab naming: "NPS" vs "Feeding" vs a branded name? (Everything above assumes "NPS".)
+2. Channel cap: 32 acceptable, or truly uncapped?
+3. Nutrient-budget suggestions: advisory-with-Apply only (assumed, consistent with the advisor), or ever auto-adjust AWC within a user-set band?
+4. v1 hardware reality check: how many physical food heads on your bench today? (Shapes how hard Stage C's generic driver needs to push vs manual binding.)

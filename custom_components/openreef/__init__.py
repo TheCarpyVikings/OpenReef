@@ -160,9 +160,14 @@ from . import beta as beta_feedback  # BETA-FEEDBACK: remove after beta (see doc
 from . import dosing as dosing_engine
 from . import guardian as guardian_engine
 from . import icp
+from . import nps as nps_engine
 from . import spawning
 from . import vision
 from .const import (
+    CONSUMABLE_BOTTLE_MAX_ML,
+    CONSUMABLE_CATEGORIES,
+    CONSUMABLE_HISTORY_MAX,
+    CONSUMABLES_MAX_PRODUCTS,
     DOSING_BINDING_ROLES,
     DOSING_CAL_HISTORY_MAX,
     DOSING_CHANNEL_CHEMICALS,
@@ -797,6 +802,12 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                     raw_reservoir.get("shelfLifeDays"),
                     DOSING_LIVEFOOD_SHELF_LIFE_DAYS if raw.get("chemical") == "livefood" else 0,
                     0, 60),
+                # Consumables bridge: which tracked bottle this reservoir draws
+                # from, and whether the bottle IS the reservoir (pump doses then
+                # debit the bottle ledger directly; otherwise 'Refilled' debits
+                # the bottle by the transferred volume).
+                "productId": _awc_str(raw_reservoir.get("productId"), 64),
+                "productIsBottle": bool(raw_reservoir.get("productIsBottle")),
             },
             "calibration": {
                 "stepsPerMl": _awc_num(raw_cal.get("stepsPerMl"), 0, 0, 1e6),
@@ -860,6 +871,61 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
             ][:DOSING_EVENTS_MAX],
         }
     dosing["channels"] = channels
+
+
+def _normalise_nps_config(config: dict[str, Any]) -> None:
+    """Clamp/validate the Automated NPS system gate and the system-wide
+    consumables (bottle) registry in place. Products are user-created like
+    dosing channels, so this owns the per-product schema; the maths live in
+    nps.py."""
+    nps_cfg = config.get("nps")
+    nps_cfg = nps_cfg if isinstance(nps_cfg, dict) else {}
+    config["nps"] = {"enabled": bool(nps_cfg.get("enabled", False))}
+
+    raw_block = config.get("consumables")
+    raw_block = raw_block if isinstance(raw_block, dict) else {}
+    raw_products = raw_block.get("products")
+    raw_products = raw_products if isinstance(raw_products, dict) else {}
+    products: dict[str, Any] = {}
+    for pid, raw in list(raw_products.items())[:CONSUMABLES_MAX_PRODUCTS]:
+        if not isinstance(raw, dict):
+            continue
+        pid = str(pid)[:64]
+        if not pid:
+            continue
+        bottle_ml = _awc_num(raw.get("bottleMl"), 0, 0, CONSUMABLE_BOTTLE_MAX_ML)
+        history = [
+            {
+                "at": _awc_str(item.get("at"), 40),
+                "ml": round(_awc_num(item.get("ml"), 0, 0, CONSUMABLE_BOTTLE_MAX_ML), 2),
+                "kind": item.get("kind")
+                if item.get("kind") in ("dose", "pump", "transfer", "refill") else "dose",
+            }
+            for item in (raw.get("history") if isinstance(raw.get("history"), list) else [])
+            if isinstance(item, dict)
+        ][-CONSUMABLE_HISTORY_MAX:]
+        products[pid] = {
+            "name": _awc_str(raw.get("name"), 120) or "Product",
+            "brand": _awc_str(raw.get("brand"), 120),
+            "category": raw.get("category")
+            if raw.get("category") in CONSUMABLE_CATEGORIES else "other",
+            "bottleMl": bottle_ml,
+            "remainingMl": _awc_num(
+                raw.get("remainingMl"), 0, 0, bottle_ml or CONSUMABLE_BOTTLE_MAX_ML),
+            "lowThresholdMl": _awc_num(raw.get("lowThresholdMl"), 0, 0, CONSUMABLE_BOTTLE_MAX_ML),
+            # Opened-bottle expiry clock (0 = shelf-stable, never expires).
+            "openedAt": _awc_str(raw.get("openedAt"), 40),
+            "shelfLifeDaysOpened": _awc_num(raw.get("shelfLifeDaysOpened"), 0, 0, 3650),
+            "refrigerated": bool(raw.get("refrigerated")),
+            "stirDaily": bool(raw.get("stirDaily")),
+            # Particle window for the Stage D species/particle-size matcher.
+            "particleUmMin": _awc_num(raw.get("particleUmMin"), 0, 0, 100000),
+            "particleUmMax": _awc_num(raw.get("particleUmMax"), 0, 0, 100000),
+            "notes": _awc_str(raw.get("notes"), 400),
+            "createdAt": _awc_str(raw.get("createdAt"), 40),
+            "history": history,
+        }
+    config["consumables"] = {"products": products}
 
 
 def _normalise_awc_config(config: dict[str, Any]) -> None:
@@ -2505,6 +2571,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             "matrix": matrix,
             "queued": queued,
         }
+
+    _normalise_nps_config(config)
 
     lighting_cfg = config.setdefault("lightingSchedule", {})
     if not isinstance(lighting_cfg, dict):
@@ -10593,7 +10661,16 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
             reservoir = channel.setdefault("reservoir", {})
             wear = channel.setdefault("wear", {})
             if rt.get("pendingReservoirMl"):
-                reservoir["remainingMl"] = max(0.0, (reservoir.get("remainingMl") or 0.0) - rt.pop("pendingReservoirMl"))
+                pending_ml = rt.pop("pendingReservoirMl")
+                reservoir["remainingMl"] = max(0.0, (reservoir.get("remainingMl") or 0.0) - pending_ml)
+                # Consumables bridge: when the bottle IS the reservoir, pump
+                # doses debit the tracked bottle too (its runway forecast
+                # feeds on this history).
+                product_id = str(reservoir.get("productId") or "")
+                if product_id and reservoir.get("productIsBottle"):
+                    product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
+                    if isinstance(product, dict):
+                        _consumable_debit(product, pending_ml, "pump")
             if rt.get("pendingRunSeconds"):
                 wear["runSeconds"] = (wear.get("runSeconds") or 0.0) + rt.pop("pendingRunSeconds")
             if rt.get("pendingDoses"):
@@ -10901,8 +10978,18 @@ async def websocket_dosing_reset_reservoir(
     if channel is None:
         return
     reservoir = channel.setdefault("reservoir", {})
+    before_ml = max(0.0, float(reservoir.get("remainingMl") or 0.0))
     reservoir["remainingMl"] = reservoir.get("volumeMl") or 0
     reservoir["refilledAt"] = datetime.now(timezone.utc).isoformat()
+    # Consumables bridge: refilling the pump reservoir from a tracked bottle
+    # debits the bottle by the transferred volume (unless the bottle IS the
+    # reservoir — pump doses already debit it directly there).
+    product_id = str(reservoir.get("productId") or "")
+    if product_id and not reservoir.get("productIsBottle"):
+        product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
+        if isinstance(product, dict):
+            added_ml = max(0.0, float(reservoir.get("volumeMl") or 0.0) - before_ml)
+            _consumable_debit(product, added_ml, "transfer")
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
     (runtime.get("channels", {}).get(msg["channel_id"]) or {}).pop("pendingReservoirMl", None)
     _dosing_record_event(channel, "refill", "Reservoir refilled — ledger reset to full")
@@ -10937,6 +11024,161 @@ async def websocket_dosing_mark_refreshed(
     _dosing_record_event(channel, "refresh", "Culture refreshed — freshness clock restarted")
     config = await _async_save_config(hass, entry, config)
     _async_kick_dosing_sync(hass, entry)
+    _awc_send(connection, msg, hass, config)
+
+
+# --- Consumables (NPS food shelf) WebSocket API ---------------------------------------------
+
+def _consumable_debit(product: dict[str, Any], ml: float, kind: str) -> None:
+    """The single choke point for bottle ledger movement (the _awc_debit_source
+    pattern): decrement remainingMl and append the usage history the runway
+    forecast reads. Never raises — a bad bottle must not break a dose flush."""
+    try:
+        ml = max(0.0, float(ml or 0))
+    except (TypeError, ValueError):
+        return
+    if ml <= 0:
+        return
+    remaining = max(0.0, float(product.get("remainingMl") or 0.0))
+    product["remainingMl"] = round(max(0.0, remaining - ml), 2)
+    history = product.setdefault("history", [])
+    if isinstance(history, list):
+        history.append({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "ml": round(ml, 2),
+            "kind": kind,
+        })
+        del history[:-CONSUMABLE_HISTORY_MAX]
+
+
+def _consumable_for_msg(
+    connection: websocket_api.ActiveConnection, msg: dict[str, Any], config: dict[str, Any]
+) -> dict[str, Any] | None:
+    products = config.setdefault("consumables", {}).setdefault("products", {})
+    product = products.get(msg.get("product_id"))
+    if not isinstance(product, dict):
+        connection.send_error(msg["id"], "unknown_product", "No such consumable product")
+        return None
+    return product
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/consumable_log_dose",
+    vol.Required("product_id"): cv.string,
+    vol.Required("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_consumable_log_dose(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Manual-dose logging — the food shelf is useful with zero pumps: tap
+    'dosed 5 ml' and the bottle ledger plus the usage history (which powers the
+    days-left runway) both update."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    product = _consumable_for_msg(connection, msg, config)
+    if product is None:
+        return
+    _consumable_debit(product, float(msg["ml"]), "dose")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/consumable_refill",
+    vol.Required("product_id"): cv.string,
+    vol.Optional("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_consumable_refill(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """'New bottle' (no ml: ledger back to full, the opened-expiry clock
+    restarts) or a partial top-up (ml: add volume without touching the opened
+    clock — same bottle, more in it)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    product = _consumable_for_msg(connection, msg, config)
+    if product is None:
+        return
+    bottle_ml = max(0.0, float(product.get("bottleMl") or 0.0))
+    top_up = msg.get("ml")
+    if top_up:
+        remaining = max(0.0, float(product.get("remainingMl") or 0.0))
+        cap = bottle_ml or CONSUMABLE_BOTTLE_MAX_ML
+        added = min(float(top_up), max(0.0, cap - remaining))
+        product["remainingMl"] = round(remaining + added, 2)
+    else:
+        added = bottle_ml
+        product["remainingMl"] = bottle_ml
+        product["openedAt"] = datetime.now(timezone.utc).isoformat()
+    history = product.setdefault("history", [])
+    if isinstance(history, list):
+        history.append({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "ml": round(max(0.0, added), 2),
+            "kind": "refill",
+        })
+        del history[:-CONSUMABLE_HISTORY_MAX]
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_summary"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_summary(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The food-shelf snapshot the NPS tab polls: per-bottle states (runway,
+    low, expiry) are computed backend-side by nps.py so the panel never
+    re-implements the maths (the maintenance lockstep lesson). Also carries the
+    seeded product library the add-product picker offers."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    products = (config.get("consumables") or {}).get("products") or {}
+    connection.send_result(msg["id"], {
+        "enabled": bool((config.get("nps") or {}).get("enabled")),
+        "shelf": nps_engine.shelf_summary(products, datetime.now(timezone.utc)),
+        "library": [dict(item) for item in nps_engine.PRODUCT_LIBRARY],
+        "categories": {key: nps_engine.category_label(key) for key in CONSUMABLE_CATEGORIES},
+    })
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/consumable_delete",
+    vol.Required("product_id"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_consumable_delete(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Remove a product from the shelf. Any dosing-channel reservoir pointing at
+    it keeps its own ledger — the productId link just dangles harmlessly until
+    re-pointed (the delete-channel precedent)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    products = config.setdefault("consumables", {}).setdefault("products", {})
+    if msg.get("product_id") not in products:
+        connection.send_error(msg["id"], "unknown_product", "No such consumable product")
+        return
+    products.pop(msg["product_id"], None)
+    config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
 
@@ -13151,6 +13393,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_reset_reservoir)
     websocket_api.async_register_command(hass, websocket_dosing_mark_refreshed)
     websocket_api.async_register_command(hass, websocket_dosing_reset_tube)
+    websocket_api.async_register_command(hass, websocket_nps_summary)
+    websocket_api.async_register_command(hass, websocket_consumable_log_dose)
+    websocket_api.async_register_command(hass, websocket_consumable_refill)
+    websocket_api.async_register_command(hass, websocket_consumable_delete)
     websocket_api.async_register_command(hass, websocket_dosing_respread_missed)
     websocket_api.async_register_command(hass, websocket_dosing_acknowledge)
     websocket_api.async_register_command(hass, websocket_dosing_sync_now)

@@ -47,7 +47,8 @@ NIGHT_PERCENT_MAX = 90.0          # keep a residual day rate so the day interval
 
 _CHEMICAL_LABELS = {
     "alk": "Alkalinity", "ca": "Calcium", "mg": "Magnesium",
-    "kalk": "Kalkwasser", "trace": "Trace", "other": "Other",
+    "kalk": "Kalkwasser", "trace": "Trace", "livefood": "Live food",
+    "food": "Food", "other": "Other",
 }
 
 
@@ -392,15 +393,18 @@ def guard_reasons(
     if max_daily > 0 and dosed >= max_daily:
         block("daily_cap_reached", f"Daily cap reached ({dosed:.1f} of {max_daily:.0f} ml).")
 
-    if channel.get("chemical") == "livefood" and now is not None:
+    if channel.get("chemical") in ("livefood", "food") and now is not None:
+        # food channels default shelfLifeDays 0 (shelf-stable ⇒ freshness_state
+        # says fresh); a user-set shelf life opts into the same fail-closed rule.
         fresh = freshness_state(_cfg(channel, "reservoir"), now)
+        what = "live-food culture" if channel.get("chemical") == "livefood" else "food reservoir"
         if fresh["status"] == "stale":
             block("stale_food",
-                  "The live-food culture is past its shelf life — refresh the "
+                  f"The {what} is past its shelf life — refresh the "
                   "reservoir and tap 'Refreshed', or nothing doses.")
         elif fresh["status"] == "aging":
             warn("food_aging",
-                 f"Live food is nearing its shelf life (~{fresh['hoursLeft']:.0f} h left).")
+                 f"Food is nearing its shelf life (~{fresh['hoursLeft']:.0f} h left).")
 
     if live.get("reservoirLow") is None and str(_cfg(channel, "driver").get("entities", {}).get("reservoirLowSensor") or "") == "":
         # advisory only: ledger-empty without a float is never a hard stop
