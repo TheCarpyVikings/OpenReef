@@ -342,14 +342,19 @@ test("the water-change demo drains, refills, and moves the reservoir levels", as
   } finally { restore(); }
 });
 
-test("overflow bottles become a ghost container, and the manifold hugs its pumps", async () => {
+test("EVERY bottle renders in the row — no ghost, no cap, ever", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
     panel._render = () => {};
-    panel._npsToggleDemo();   // demo shelf: 5 row bottles → 3 shown + ghost "+2"
+    panel._npsToggleDemo();   // demo shelf: 5 row bottles (6 minus the brine)
     const svg = panel._npsDiagramSvg();
-    assert(svg.includes(">+2<"), "ghost overflow container missing");
+    const bottleClips = (svg.match(/id="npsB\d+"/g) || []).length;
+    assert(bottleClips === 5, `expected all 5 row bottles, saw ${bottleClips}`);
+    for (const name of ["GoldPods", "Live phy", "Oyster-F", "Reef-Roi", "Roti-Fea"]) {
+      assert(svg.includes(`>${name}<`), `bottle missing from the row: ${name}`);
+    }
+    assert(!svg.includes(">+"), "a ghost/overflow placeholder crept back in");
     assert(!svg.includes("more on the shelf"), "old loose text still present");
     // At rest nothing is dosing — no line may flow (class only appears on
     // animated overlays; the <style> block defines it without using it).

@@ -9976,11 +9976,22 @@ class OpenReefPanel extends HTMLElement {
       const da = shelfStates[a]?.daysUntilEmpty, db = shelfStates[b]?.daysUntilEmpty;
       return (da == null ? 9e9 : da) - (db == null ? 9e9 : db);
     });
-    // Row of 4 slots: when there are more bottles than fit, the last slot
-    // becomes a ghost "+N" container (live-test ask) instead of loose text.
-    const maxRow = pids.length > 4 ? 3 : 4;
-    const shown = pids.slice(0, maxRow);
-    const extra = pids.length - shown.length;
+    // EVERY bottle renders — no cap, no placeholder. The viewBox widens to fit
+    // and the SVG scales down to the container; the layout math below computes
+    // itself from the count.
+    const shown = pids;
+    const slot = 52, bottleW = 40, rowX = 14;
+    const bottlesEnd = shown.length ? rowX + (shown.length - 1) * slot + bottleW : rowX;
+    const freshX = bottlesEnd + 12;
+    const wasteX = freshX + 48 + 12;
+    const brineX = wasteX + 36 + 24;
+    const totalW = Math.max(420, brineX + 62 + 14);
+    const tankW = 120;
+    const tankX = Math.round((totalW - tankW) / 2);
+    const feedInX = tankX + 24;      // feed manifold enters the tank here
+    const freshInX = tankX + 72;     // fresh premix enters here
+    const drainOutX = tankX + 96;    // the drain leaves here
+    const freshCX = freshX + 24, wasteCX = wasteX + 18, brineCX = brineX + 31;
     // AWC reservoir levels — the fresh premix feeds the chaser flush and the
     // water changes; the waste box takes the matched drain. Real data in live
     // mode, staged in demo.
@@ -10014,7 +10025,7 @@ class OpenReefPanel extends HTMLElement {
       const p = products[pid] || {};
       const s = shelfStates[pid] || {};
       const pct = Math.max(0, Math.min(100, Number(s.percent) || 0));
-      const x = 14 + i * 52;
+      const x = rowX + i * slot;
       const fillH = 62 * pct / 100, fillY = 240 - fillH;
       const stroke = s.empty || s.low ? "#e5484d"
         : (s.expiry || {}).status === "expired" || (s.expiry || {}).status === "aging" ? "#f5a524" : "#455a64";
@@ -10023,50 +10034,42 @@ class OpenReefPanel extends HTMLElement {
       return `
         <g><title>${esc(p.name)} — ${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml${s.daysUntilEmpty != null ? ` · ~${esc(s.daysUntilEmpty)} days left` : ""}</title>
           ${pumped ? `<path d="M ${x + 20} 178 V 140" fill="none" stroke="#37474f" stroke-width="5" stroke-linecap="round"></path>` : ""}
-          <rect x="${x}" y="178" width="40" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${stroke}" stroke-width="2"></rect>
-          <clipPath id="npsB${i}"><rect x="${x}" y="178" width="40" height="62" rx="5"/></clipPath>
-          <g clip-path="url(#npsB${i})"><rect x="${x}" y="${fillY}" width="40" height="${fillH}" fill="${catColor[p.category] || catColor.other}" opacity="0.75" style="transition:y .4s ease,height .4s ease;"></rect></g>
+          <rect x="${x}" y="178" width="${bottleW}" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${stroke}" stroke-width="2"></rect>
+          <clipPath id="npsB${i}"><rect x="${x}" y="178" width="${bottleW}" height="62" rx="5"/></clipPath>
+          <g clip-path="url(#npsB${i})"><rect x="${x}" y="${fillY}" width="${bottleW}" height="${fillH}" fill="${catColor[p.category] || catColor.other}" opacity="0.75" style="transition:y .4s ease,height .4s ease;"></rect></g>
           <text x="${x + 20}" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">${esc(short)}</text>
         </g>`;
     }).join("");
 
-    // Feed manifold: it spans exactly the PUMPED bottle stubs and the riser —
-    // never dangling past hand-fed bottles into empty space (live-test catch).
+    // Feed manifold: spans the pumped bottle stubs and runs to the tank's feed
+    // inlet — connected at both ends, dangling at neither.
     const pumpedXs = shown
-      .map((pid, i) => (linkedIds.includes(pid) ? 14 + i * 52 + 20 : null))
+      .map((pid, i) => (linkedIds.includes(pid) ? rowX + i * slot + 20 : null))
       .filter((x) => x !== null);
-    const manifoldPath = pumpedXs.length
-      ? `M ${Math.min(...pumpedXs)} 140 H ${Math.max(168, ...pumpedXs)} M 168 140 V 106`
+    const manifoldSpan = pumpedXs.length ? [...pumpedXs, feedInX] : [];
+    const manifoldPath = manifoldSpan.length
+      ? `M ${Math.min(...manifoldSpan)} 140 H ${Math.max(...manifoldSpan)} M ${feedInX} 140 V 106`
       : "";
     const manifold = manifoldPath
       ? `<path d="${manifoldPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
          ${rowPumpActive ? `<path d="${manifoldPath}" fill="none" stroke="#26c6da" stroke-width="3" class="awc-flow"></path>` : ""}`
       : "";
-    const ghostBottle = extra > 0 ? (() => {
-      const gx = 14 + shown.length * 52;
-      return `
-        <g data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps" style="cursor:pointer;">
-          <title>${extra} more bottle${extra === 1 ? "" : "s"} on the shelf — tap to manage</title>
-          <rect x="${gx}" y="178" width="40" height="62" rx="5" fill="rgba(255,255,255,0.02)" stroke="#455a64" stroke-width="2" stroke-dasharray="5 4"></rect>
-          <text x="${gx + 20}" y="214" text-anchor="middle" font-size="14" font-weight="700" fill="#78909c">+${extra}</text>
-          <text x="${gx + 20}" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">more</text>
-        </g>`;
-    })() : "";
     // Fresh premix: its own station, piped into the tank. Animates during the
     // chaser flush (and carries the level the AWC reports).
     const freshFillH = 62 * freshPct / 100, freshFillY = 240 - freshFillH;
+    const freshPath = `M ${freshCX} 178 V 122 H ${freshInX} V 106`;
     const freshStation = `
       <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>AWC fresh reservoir — tank-salinity premix; feeds the chaser flush and water changes</title>
-        <path d="M 246 178 V 106" fill="none" stroke="#37474f" stroke-width="6" stroke-linecap="round"></path>
-        ${chaserActive || awcDemo.filling ? `<path d="M 246 178 V 106" fill="none" stroke="#42a5f5" stroke-width="3" class="awc-flow"></path>` : ""}
-        <rect x="222" y="178" width="48" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
-        <clipPath id="npsFresh"><rect x="222" y="178" width="48" height="62" rx="5"/></clipPath>
-        <g clip-path="url(#npsFresh)"><rect x="222" y="${freshFillY}" width="48" height="${freshFillH}" fill="url(#npsFreshG)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
-        <text x="246" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">fresh</text>
+        <path d="${freshPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        ${chaserActive || awcDemo.filling ? `<path d="${freshPath}" fill="none" stroke="#42a5f5" stroke-width="3" class="awc-flow"></path>` : ""}
+        <rect x="${freshX}" y="178" width="48" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
+        <clipPath id="npsFresh"><rect x="${freshX}" y="178" width="48" height="62" rx="5"/></clipPath>
+        <g clip-path="url(#npsFresh)"><rect x="${freshX}" y="${freshFillY}" width="48" height="${freshFillH}" fill="url(#npsFreshG)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
+        <text x="${freshCX}" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">fresh</text>
       </g>`;
     const pumpDots = shown.map((pid, i) => {
       if (!linkedIds.includes(pid)) return "";
-      const x = 14 + i * 52 + 20;
+      const x = rowX + i * slot + 20;
       const cid = foodIds.find((id) => channels[id]?.reservoir?.productId === pid);
       const active = cid ? channelActive(cid) : false;
       return `<g><title>${esc(channels[cid]?.name || cid)}</title>
@@ -10082,31 +10085,33 @@ class OpenReefPanel extends HTMLElement {
     const brineFillH = 62 * brinePct / 100, brineFillY = 240 - brineFillH;
     const brineLabel = brineProduct ? String(brineProduct.name || "brine").slice(0, 8) : "brine";
     const brineActive = fx.enabled && fx.channelId ? channelActive(String(fx.channelId)) : false;
+    const brinePath = `M ${brineCX} 178 V 96 H ${tankX + tankW + 2}`;
+    const drainPath = `M ${drainOutX} 106 V 156 H ${wasteCX} V 178`;
     const brine = fx.enabled ? `
       <g><title>${esc(brineProduct ? brineProduct.name : "Live brine reservoir")} — ${esc(brineStatus || "no hatch loaded")}${brineProduct ? ` · ${esc(brineShelf.remainingMl)} of ${esc(brineShelf.bottleMl)} ml` : ""}</title>
-        <path d="M 375 178 V 96 H 272" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
-        ${brineActive ? `<path d="M 375 178 V 96 H 272" fill="none" stroke="#ef6c00" stroke-width="3" class="awc-flow"></path>` : ""}
-        <g><circle cx="375" cy="146" r="10" fill="${brineActive ? "#1b5e20" : "#2a2a2a"}" stroke="${brineActive ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
-          <g class="${brineActive ? "awc-spin" : ""}"><path d="M 375 141 L 375 151 M 370 146 L 380 146" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g></g>
-        <rect x="344" y="178" width="62" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${freshColor[brineStatus] || "#455a64"}" stroke-width="2"></rect>
-        <clipPath id="npsBrine"><rect x="344" y="178" width="62" height="62" rx="5"/></clipPath>
-        ${brineProduct ? `<g clip-path="url(#npsBrine)"><rect x="344" y="${brineFillY}" width="62" height="${brineFillH}" fill="${catColor[brineProduct.category] || catColor.other}" opacity="0.7" style="transition:y .4s ease,height .4s ease;"></rect></g>` : ""}
-        <text x="375" y="214" text-anchor="middle" font-size="16">🦐</text>
-        <text x="375" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">${esc(brineLabel)}</text>
+        <path d="${brinePath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        ${brineActive ? `<path d="${brinePath}" fill="none" stroke="#ef6c00" stroke-width="3" class="awc-flow"></path>` : ""}
+        <g><circle cx="${brineCX}" cy="146" r="10" fill="${brineActive ? "#1b5e20" : "#2a2a2a"}" stroke="${brineActive ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
+          <g class="${brineActive ? "awc-spin" : ""}"><path d="M ${brineCX} 141 L ${brineCX} 151 M ${brineCX - 5} 146 L ${brineCX + 5} 146" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g></g>
+        <rect x="${brineX}" y="178" width="62" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${freshColor[brineStatus] || "#455a64"}" stroke-width="2"></rect>
+        <clipPath id="npsBrine"><rect x="${brineX}" y="178" width="62" height="62" rx="5"/></clipPath>
+        ${brineProduct ? `<g clip-path="url(#npsBrine)"><rect x="${brineX}" y="${brineFillY}" width="62" height="${brineFillH}" fill="${catColor[brineProduct.category] || catColor.other}" opacity="0.7" style="transition:y .4s ease,height .4s ease;"></rect></g>` : ""}
+        <text x="${brineCX}" y="214" text-anchor="middle" font-size="16">🦐</text>
+        <text x="${brineCX}" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">${esc(brineLabel)}</text>
       </g>
       <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>Matched drain to waste — the Water Change tab owns the reservoirs</title>
-        <path d="M 264 106 V 156 H 300 V 178" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
-        ${drainActive || awcDemo.draining ? `<path d="M 264 106 V 156 H 300 V 178" fill="none" stroke="#a1887f" stroke-width="3" class="awc-flow"></path>` : ""}
-        <rect x="282" y="178" width="36" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
-        <clipPath id="npsWaste"><rect x="282" y="178" width="36" height="62" rx="5"/></clipPath>
-        <g clip-path="url(#npsWaste)"><rect x="282" y="${240 - 62 * wastePct / 100}" width="36" height="${62 * wastePct / 100}" fill="url(#npsWasteG)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
-        <text x="300" y="214" text-anchor="middle" font-size="11" fill="#d7ccc8">≋</text>
-        <text x="300" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">waste</text>
-        ${owedMl > 0 || drainActive || awcDemo.draining || awcDemo.filling ? `<g><rect x="260" y="118" width="80" height="16" rx="8" fill="${drainActive || awcDemo.draining || awcDemo.filling ? "#1b5e20" : "#37474f"}"></rect><text x="300" y="130" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${drainActive ? "draining" : awcDemo.draining ? "water change" : awcDemo.filling ? "refilling" : `owes ${owedMl} ml`}</text></g>` : ""}
+        <path d="${drainPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        ${drainActive || awcDemo.draining ? `<path d="${drainPath}" fill="none" stroke="#a1887f" stroke-width="3" class="awc-flow"></path>` : ""}
+        <rect x="${wasteX}" y="178" width="36" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
+        <clipPath id="npsWaste"><rect x="${wasteX}" y="178" width="36" height="62" rx="5"/></clipPath>
+        <g clip-path="url(#npsWaste)"><rect x="${wasteX}" y="${240 - 62 * wastePct / 100}" width="36" height="${62 * wastePct / 100}" fill="url(#npsWasteG)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
+        <text x="${wasteCX}" y="214" text-anchor="middle" font-size="11" fill="#d7ccc8">≋</text>
+        <text x="${wasteCX}" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">waste</text>
+        ${owedMl > 0 || drainActive || awcDemo.draining || awcDemo.filling ? `<g><rect x="${wasteCX - 40}" y="118" width="80" height="16" rx="8" fill="${drainActive || awcDemo.draining || awcDemo.filling ? "#1b5e20" : "#37474f"}"></rect><text x="${wasteCX}" y="130" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${drainActive ? "draining" : awcDemo.draining ? "water change" : awcDemo.filling ? "refilling" : `owes ${owedMl} ml`}</text></g>` : ""}
       </g>` : "";
 
     return `
-      <svg viewBox="0 0 420 270" style="width:100%;max-width:560px;display:block;margin:0 auto;" role="img" aria-label="NPS feeding station diagram">
+      <svg viewBox="0 0 ${totalW} 262" style="width:100%;max-width:${Math.max(560, Math.round(totalW * 1.35))}px;display:block;margin:0 auto;" role="img" aria-label="NPS feeding station diagram">
         <style>
           @keyframes awc-flow { to { stroke-dashoffset: -28; } }
           @keyframes awc-spin { to { transform: rotate(360deg); } }
@@ -10117,25 +10122,24 @@ class OpenReefPanel extends HTMLElement {
           <linearGradient id="npsTank" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26c6da"/><stop offset="1" stop-color="#00838f"/></linearGradient>
           <linearGradient id="npsFreshG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#42a5f5"/><stop offset="1" stop-color="#0d47a1"/></linearGradient>
           <linearGradient id="npsWasteG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8d6e63"/><stop offset="1" stop-color="#4e342e"/></linearGradient>
-          <clipPath id="npsTankClip"><rect x="150" y="22" width="120" height="84" rx="8"/></clipPath>
+          <clipPath id="npsTankClip"><rect x="${tankX}" y="22" width="${tankW}" height="84" rx="8"/></clipPath>
         </defs>
         ${manifold}
         ${freshStation}
         ${brine}
         <g><title>Display tank</title>
-          <rect x="150" y="22" width="120" height="84" rx="8" fill="rgba(38,198,218,0.08)" stroke="#4dd0e1" stroke-width="2"></rect>
+          <rect x="${tankX}" y="22" width="${tankW}" height="84" rx="8" fill="rgba(38,198,218,0.08)" stroke="#4dd0e1" stroke-width="2"></rect>
           <g clip-path="url(#npsTankClip)">
-            <rect x="150" y="44" width="120" height="62" fill="url(#npsTank)" opacity="0.5"></rect>
-            <ellipse cx="180" cy="102" rx="12" ry="7" fill="#ef6c00" opacity="0.55"></ellipse>
-            <ellipse cx="214" cy="104" rx="9" ry="6" fill="#ad1457" opacity="0.5"></ellipse>
-            <ellipse cx="244" cy="101" rx="10" ry="7" fill="#6a1b9a" opacity="0.45"></ellipse>
+            <rect x="${tankX}" y="44" width="${tankW}" height="62" fill="url(#npsTank)" opacity="0.5"></rect>
+            <ellipse cx="${tankX + 30}" cy="102" rx="12" ry="7" fill="#ef6c00" opacity="0.55"></ellipse>
+            <ellipse cx="${tankX + 64}" cy="104" rx="9" ry="6" fill="#ad1457" opacity="0.5"></ellipse>
+            <ellipse cx="${tankX + 94}" cy="101" rx="10" ry="7" fill="#6a1b9a" opacity="0.45"></ellipse>
           </g>
-          <text x="210" y="16" text-anchor="middle" font-size="11" fill="#90a4ae">Display tank</text>
+          <text x="${tankX + tankW / 2}" y="16" text-anchor="middle" font-size="11" fill="#90a4ae">Display tank</text>
         </g>
         ${pumpDots}
         ${bottles}
-        ${ghostBottle}
-        ${!shown.length && !fxProductId ? `<text x="90" y="210" font-size="11" fill="#90a4ae">Add bottles and they appear here</text>` : ""}
+        ${!shown.length && !fxProductId ? `<text x="${Math.round(totalW / 2) - 120}" y="210" font-size="11" fill="#90a4ae">Add bottles and they appear here</text>` : ""}
       </svg>`;
   }
 
