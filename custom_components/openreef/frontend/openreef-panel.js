@@ -9781,9 +9781,15 @@ class OpenReefPanel extends HTMLElement {
     const drainActive = !!fx.drainActive;
     const esc = (v) => this._escape(v == null ? "" : String(v));
 
+    // The exchange channel's linked bottle IS the brine reservoir — drawing it
+    // in the bottle row too would show one physical container twice (live-test
+    // catch). It leaves the row and becomes the brine box, fill level and all.
+    const fxChannel = fx.enabled ? channels[String(fx.channelId || "")] : null;
+    const fxProductId = fxChannel ? String((fxChannel.reservoir || {}).productId || "") : "";
+
     // Bottles: linked-to-pump first, then lowest runway; cap 5 on screen.
     const linkedIds = foodIds.map((id) => channels[id]?.reservoir?.productId).filter(Boolean);
-    const pids = Object.keys(products).sort((a, b) => {
+    const pids = Object.keys(products).filter((pid) => pid !== fxProductId).sort((a, b) => {
       const la = linkedIds.includes(a) ? 0 : 1, lb = linkedIds.includes(b) ? 0 : 1;
       if (la !== lb) return la - lb;
       const da = shelfStates[a]?.daysUntilEmpty, db = shelfStates[b]?.daysUntilEmpty;
@@ -9840,13 +9846,29 @@ class OpenReefPanel extends HTMLElement {
         <g class="${active ? "awc-spin" : ""}"><path d="M ${x} 154 L ${x} 164 M ${x - 5} 159 L ${x + 5} 159" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g></g>`;
     }).join("");
 
-    // Brine reservoir + matched drain (feed-exchange).
+    // Brine reservoir + matched drain (feed-exchange). When the channel is
+    // linked to a shelf bottle, this box IS that bottle — same fill, same name.
+    const brineProduct = fxProductId ? products[fxProductId] : null;
+    const brineShelf = fxProductId ? (shelfStates[fxProductId] || {}) : {};
+    const brinePct = Math.max(0, Math.min(100, Number(brineShelf.percent) || 0));
+    const brineFillH = 62 * brinePct / 100, brineFillY = 240 - brineFillH;
+    const brineLabel = brineProduct ? String(brineProduct.name || "brine").slice(0, 8) : "brine";
+    const brineActive = fxChannel ? (() => {
+      const chState = fxChannel.state || {};
+      if (chState.haRunEndsAt) return true;
+      const last = Date.parse(chState.lastDoseAt || "");
+      return Number.isFinite(last) && Date.now() - last < 90000;
+    })() : false;
     const brine = fx.enabled ? `
-      <g><title>Live brine reservoir — ${esc(brineStatus || "no hatch loaded")}</title>
+      <g><title>${esc(brineProduct ? brineProduct.name : "Live brine reservoir")} — ${esc(brineStatus || "no hatch loaded")}${brineProduct ? ` · ${esc(brineShelf.remainingMl)} of ${esc(brineShelf.bottleMl)} ml` : ""}</title>
         <path d="M 375 178 V 96 H 272" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        <g><circle cx="375" cy="146" r="10" fill="${brineActive ? "#1b5e20" : "#2a2a2a"}" stroke="${brineActive ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
+          <g class="${brineActive ? "awc-spin" : ""}"><path d="M 375 141 L 375 151 M 370 146 L 380 146" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g></g>
         <rect x="344" y="178" width="62" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${freshColor[brineStatus] || "#455a64"}" stroke-width="2"></rect>
+        <clipPath id="npsBrine"><rect x="344" y="178" width="62" height="62" rx="5"/></clipPath>
+        ${brineProduct ? `<g clip-path="url(#npsBrine)"><rect x="344" y="${brineFillY}" width="62" height="${brineFillH}" fill="${catColor[brineProduct.category] || catColor.other}" opacity="0.7" style="transition:y .4s ease,height .4s ease;"></rect></g>` : ""}
         <text x="375" y="214" text-anchor="middle" font-size="16">🦐</text>
-        <text x="375" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">brine</text>
+        <text x="375" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">${esc(brineLabel)}</text>
       </g>
       <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>Matched drain to waste — the Water Change tab owns the reservoirs</title>
         <path d="M 240 106 V 150 H 300 V 178" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
@@ -9858,7 +9880,7 @@ class OpenReefPanel extends HTMLElement {
       </g>` : "";
 
     return `
-      <svg viewBox="0 0 420 258" style="width:100%;max-width:560px;display:block;margin:0 auto;" role="img" aria-label="NPS feeding station diagram">
+      <svg viewBox="0 0 420 270" style="width:100%;max-width:560px;display:block;margin:0 auto;" role="img" aria-label="NPS feeding station diagram">
         <style>
           @keyframes awc-flow { to { stroke-dashoffset: -28; } }
           @keyframes awc-spin { to { transform: rotate(360deg); } }
@@ -9883,8 +9905,8 @@ class OpenReefPanel extends HTMLElement {
         </g>
         ${pumpDots}
         ${bottles}
-        ${extra > 0 ? `<text x="14" y="170" font-size="9" fill="#90a4ae">+${extra} more on the shelf</text>` : ""}
-        ${!shown.length ? `<text x="90" y="210" font-size="11" fill="#90a4ae">Add bottles and they appear here</text>` : ""}
+        ${extra > 0 ? `<text x="14" y="264" font-size="9" fill="#90a4ae">+${extra} more on the shelf</text>` : ""}
+        ${!shown.length && !fxProductId ? `<text x="90" y="210" font-size="11" fill="#90a4ae">Add bottles and they appear here</text>` : ""}
       </svg>`;
   }
 

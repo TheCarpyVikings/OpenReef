@@ -32,6 +32,9 @@ function baseConfig(overrides = {}) {
         phyto: { name: "Phyto", brand: "AlgaeBarn", category: "phyto",
                  bottleMl: 1000, remainingMl: 500, lowThresholdMl: 0,
                  shelfLifeDaysOpened: 0, history: [] },
+        pods: { name: "GoldPods", brand: "NYOS", category: "zooPrepared",
+                bottleMl: 250, remainingMl: 100, lowThresholdMl: 0,
+                shelfLifeDaysOpened: 0, history: [] },
       },
     },
     dosing: {
@@ -66,8 +69,11 @@ function summaryFixture() {
         phyto: { bottleMl: 1000, remainingMl: 500, percent: 50, usageMlPerDay: null,
                  daysUntilEmpty: null, low: false, empty: false,
                  expiry: { status: "fresh", daysLeft: null }, categoryLabel: "Phytoplankton" },
+        pods: { bottleMl: 250, remainingMl: 100, percent: 40, usageMlPerDay: null,
+                daysUntilEmpty: null, low: false, empty: false,
+                expiry: { status: "fresh", daysLeft: null }, categoryLabel: "Zooplankton (prepared)" },
       },
-      lowCount: 0, expiredCount: 0, count: 1,
+      lowCount: 0, expiredCount: 0, count: 2,
     },
     library: [], categories: { phyto: "Phytoplankton", other: "Other" },
     feedExchange: {
@@ -151,15 +157,20 @@ test("the settings section carries every moved form", async () => {
   } finally { restore(); }
 });
 
-test("the diagram shows the bottle at its real fill and the owed-drain badge", async () => {
+test("the diagram shows real fills, the owed badge, and never draws a bottle twice", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
     const svg = panel._npsDiagramSvg();
     assert(svg.includes("owes 430 ml"), "owed badge missing or wrong");
     assert(svg.includes("🦐"), "brine reservoir missing");
-    // 50% of a 62-high bottle = 31 units of fill.
-    assert(/height="31"/.test(svg), "bottle fill height does not match the 50% shelf state");
+    // The unlinked bottle renders in the row: 40% of 62 = 24.8 units of fill.
+    assert(/height="24.8"/.test(svg), "bottle fill height does not match the 40% shelf state");
+    // The exchange-linked bottle leaves the row and BECOMES the brine box
+    // (one physical container, drawn once — the live-test catch):
+    assert(/height="31"/.test(svg), "brine box does not carry its bottle's 50% fill");
+    const phytoLabels = (svg.match(/>Phyto</g) || []).length;
+    assert(phytoLabels === 1, `the linked bottle is drawn ${phytoLabels} times — must be exactly once`);
     noPlaceholders(svg, "diagram");
   } finally { restore(); }
 });
