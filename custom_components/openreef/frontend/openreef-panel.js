@@ -415,6 +415,8 @@ class OpenReefPanel extends HTMLElement {
       this._configEventRefreshTimer = null;
       if (!this._canRefreshFromConfigEvent()) return;
       this._refreshConfigSilently();
+      // An external save invalidates the backend-compiled NPS summaries too.
+      if (this._activeTab === "nps") this._npsLoadSummary(true);
     }, 250);
   }
 
@@ -488,6 +490,10 @@ class OpenReefPanel extends HTMLElement {
       this._reefReplay = Array.isArray(result.reef_replay) ? result.reef_replay : this._reefReplay;
       this._configDirty = false;
       this._message = "Saved";
+      // NPS summaries (species plan, shelf, budget) are compiled backend-side
+      // from config — a save invalidates them, so recompile without the
+      // save-then-refresh dance.
+      if (this._activeTab === "nps") this._npsLoadSummary(true);
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not save OpenReef";
     } finally {
@@ -1687,6 +1693,10 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-hatch-loaded") this._npsHatchLoaded();
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
       if (action === "nps-apply-species") this._npsApplySpecies(id, Number(target.dataset.doses), target.dataset.night === "1");
+      if (action === "nps-setup-hide") {
+        try { window.localStorage?.setItem("openreef:nps-setup-hidden", "1"); } catch { /* no storage */ }
+        this._render();
+      }
       if (action === "doser-mark-refreshed") this._doserCall(
         { type: "openreef/dosing_mark_refreshed", channel_id: id },
         "Freshness clock restarted — dosing re-enables on the next sync.",
@@ -9554,6 +9564,271 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
+  // Channel colour palette for the timeline/diagram — stable by sorted index.
+  _npsChannelColor(index) {
+    const palette = ["#26c6da", "#ab47bc", "#ffa726", "#66bb6a", "#ec407a", "#7e57c2"];
+    return palette[index % palette.length];
+  }
+
+  _npsSetupSteps() {
+    const products = this._config?.consumables?.products || {};
+    const channels = this._doserChannels();
+    const foodIds = this._npsFoodChannelIds();
+    const hasProduct = Object.keys(products).length > 0;
+    const hasPump = foodIds.length > 0;
+    const calibrated = foodIds.some((id) =>
+      ((channels[id]?.calibration?.mlPerS || 0) > 0) || ((channels[id]?.calibration?.stepsPerMl || 0) > 0));
+    const linked = foodIds.some((id) => channels[id]?.reservoir?.productId);
+    const awcOn = !!this._config?.automaticWaterChange?.enabled;
+    return [
+      { done: hasProduct, label: "Put your first bottle on the food shelf", hint: "Phyto, a blend, bacteria — the presets carry the handling facts." },
+      { done: hasPump, label: "Add a food pump (skip if you hand-feed)", hint: "Reefnode head, brushed head, or any HA switch — the generic driver takes all comers." },
+      { done: calibrated, label: "Calibrate the pump's flow", hint: "A 30 s run into a measuring cup, on the pump card below." },
+      { done: linked, label: "Link the pump to its bottle", hint: "Doses then debit the bottle, and the days-left runway starts learning." },
+      { done: awcOn, label: "Turn on the water exchange", hint: "Heavy feeding needs matched export — the card at the bottom edits it." },
+    ];
+  }
+
+  _npsSetupCard() {
+    let hidden = false;
+    try { hidden = window.localStorage?.getItem("openreef:nps-setup-hidden") === "1"; } catch { /* no storage */ }
+    const steps = this._npsSetupSteps();
+    if (hidden || steps.every((s) => s.done)) return "";
+    const doneCount = steps.filter((s) => s.done).length;
+    return `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Getting set up · ${doneCount} of ${steps.length}</p>
+          <button class="secondary compact-button" data-action="nps-setup-hide">Hide this</button>
+        </div>
+        ${steps.map((s) => `
+          <small style="${s.done ? "opacity:.55;" : ""}">${s.done ? "✅" : "⬜"} <strong>${this._escape(s.label)}</strong>${s.done ? "" : ` — ${this._escape(s.hint)}`}</small>`).join("")}
+        <p class="hint">Hand-feeders are first-class citizens: the shelf, journal and budget all work with zero pumps — log doses by hand and the forecasts still learn.</p>
+      </article>`;
+  }
+
+  // --- The feeding-station diagram (v0, the AWC live-view idiom) -----------
+  // Bottles with live fill, pumps into the tank, the brine reservoir with its
+  // freshness state, and the matched drain to waste. Deliberately modest: the
+  // layout is fixed; eyes-on iteration shapes it from here.
+  _npsDiagramSvg() {
+    const st = this._nps;
+    const products = this._config?.consumables?.products || {};
+    const shelfStates = st.summary?.shelf?.products || {};
+    const channels = this._doserChannels();
+    const foodIds = this._npsFoodChannelIds();
+    const fx = st.summary?.feedExchange || {};
+    const fxState = fx.state || {};
+    const owedMl = Math.round(Number(fxState.owedMl) || 0);
+    const drainActive = !!fx.drainActive;
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+
+    // Bottles: linked-to-pump first, then lowest runway; cap 5 on screen.
+    const linkedIds = foodIds.map((id) => channels[id]?.reservoir?.productId).filter(Boolean);
+    const pids = Object.keys(products).sort((a, b) => {
+      const la = linkedIds.includes(a) ? 0 : 1, lb = linkedIds.includes(b) ? 0 : 1;
+      if (la !== lb) return la - lb;
+      const da = shelfStates[a]?.daysUntilEmpty, db = shelfStates[b]?.daysUntilEmpty;
+      return (da == null ? 9e9 : da) - (db == null ? 9e9 : db);
+    });
+    const shown = pids.slice(0, 5);
+    const extra = pids.length - shown.length;
+    const catColor = { phyto: "#2e7d32", zooLive: "#ef6c00", zooPrepared: "#ad1457",
+      blend: "#6a1b9a", bacteria: "#00695c", amino: "#f9a825", trace: "#546e7a",
+      twoPart: "#1565c0", other: "#616161" };
+    const freshColor = { fresh: "#66bb6a", aging: "#f5a524", stale: "#e5484d" };
+    const brineStatus = (fx.freshness || {}).status || "";
+    const anyPumpActive = foodIds.some((id) => {
+      const chState = channels[id]?.state || {};
+      if (chState.haRunEndsAt) return true;
+      const last = Date.parse(chState.lastDoseAt || "");
+      return Number.isFinite(last) && Date.now() - last < 90000;
+    });
+
+    const bottles = shown.map((pid, i) => {
+      const p = products[pid] || {};
+      const s = shelfStates[pid] || {};
+      const pct = Math.max(0, Math.min(100, Number(s.percent) || 0));
+      const x = 14 + i * 52;
+      const fillH = 62 * pct / 100, fillY = 240 - fillH;
+      const stroke = s.empty || s.low ? "#e5484d"
+        : (s.expiry || {}).status === "expired" || (s.expiry || {}).status === "aging" ? "#f5a524" : "#455a64";
+      const pumped = linkedIds.includes(pid);
+      const short = String(p.name || pid).slice(0, 8);
+      return `
+        <g><title>${esc(p.name)} — ${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml${s.daysUntilEmpty != null ? ` · ~${esc(s.daysUntilEmpty)} days left` : ""}</title>
+          ${pumped ? `<path d="M ${x + 20} 178 V 140" fill="none" stroke="#37474f" stroke-width="5" stroke-linecap="round"></path>` : ""}
+          <rect x="${x}" y="178" width="40" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${stroke}" stroke-width="2"></rect>
+          <clipPath id="npsB${i}"><rect x="${x}" y="178" width="40" height="62" rx="5"/></clipPath>
+          <g clip-path="url(#npsB${i})"><rect x="${x}" y="${fillY}" width="40" height="${fillH}" fill="${catColor[p.category] || catColor.other}" opacity="0.75" style="transition:y .4s ease,height .4s ease;"></rect></g>
+          <text x="${x + 20}" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">${esc(short)}</text>
+        </g>`;
+    }).join("");
+
+    // Feed manifold: bottle pipes join at y=140 and rise into the tank.
+    const manifold = shown.length
+      ? `<path d="M 34 140 H 168 V 106" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+         ${anyPumpActive ? `<path d="M 34 140 H 168 V 106" fill="none" stroke="#26c6da" stroke-width="3" class="awc-flow"></path>` : ""}`
+      : "";
+    const pumpDots = shown.map((pid, i) => {
+      if (!linkedIds.includes(pid)) return "";
+      const x = 14 + i * 52 + 20;
+      const cid = foodIds.find((id) => channels[id]?.reservoir?.productId === pid);
+      const chState = channels[cid]?.state || {};
+      const active = !!chState.haRunEndsAt
+        || (Number.isFinite(Date.parse(chState.lastDoseAt || "")) && Date.now() - Date.parse(chState.lastDoseAt) < 90000);
+      return `<g><title>${esc(channels[cid]?.name || cid)}</title>
+        <circle cx="${x}" cy="159" r="10" fill="${active ? "#1b5e20" : "#2a2a2a"}" stroke="${active ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
+        <g class="${active ? "awc-spin" : ""}"><path d="M ${x} 154 L ${x} 164 M ${x - 5} 159 L ${x + 5} 159" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g></g>`;
+    }).join("");
+
+    // Brine reservoir + matched drain (feed-exchange).
+    const brine = fx.enabled ? `
+      <g><title>Live brine reservoir — ${esc(brineStatus || "no hatch loaded")}</title>
+        <path d="M 375 178 V 96 H 272" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        <rect x="344" y="178" width="62" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${freshColor[brineStatus] || "#455a64"}" stroke-width="2"></rect>
+        <text x="375" y="214" text-anchor="middle" font-size="16">🦐</text>
+        <text x="375" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">brine</text>
+      </g>
+      <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>Matched drain to waste — the Water Change tab owns the reservoirs</title>
+        <path d="M 240 106 V 150 H 300 V 178" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        ${drainActive ? `<path d="M 240 106 V 150 H 300 V 178" fill="none" stroke="#a1887f" stroke-width="3" class="awc-flow"></path>` : ""}
+        <rect x="282" y="178" width="36" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
+        <text x="300" y="214" text-anchor="middle" font-size="11" fill="#8d6e63">≋</text>
+        <text x="300" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">waste</text>
+        ${owedMl > 0 ? `<g><rect x="266" y="128" width="68" height="16" rx="8" fill="${drainActive ? "#1b5e20" : "#37474f"}"></rect><text x="300" y="140" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${drainActive ? "draining" : `owes ${owedMl} ml`}</text></g>` : ""}
+      </g>` : "";
+
+    return `
+      <svg viewBox="0 0 420 258" style="width:100%;max-width:560px;display:block;margin:0 auto;" role="img" aria-label="NPS feeding station diagram">
+        <style>
+          @keyframes awc-flow { to { stroke-dashoffset: -28; } }
+          @keyframes awc-spin { to { transform: rotate(360deg); } }
+          .awc-flow { stroke-dasharray: 7 7; animation: awc-flow .6s linear infinite; }
+          .awc-spin { transform-box: fill-box; transform-origin: center; animation: awc-spin 1.3s linear infinite; }
+        </style>
+        <defs>
+          <linearGradient id="npsTank" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26c6da"/><stop offset="1" stop-color="#00838f"/></linearGradient>
+          <clipPath id="npsTankClip"><rect x="150" y="22" width="120" height="84" rx="8"/></clipPath>
+        </defs>
+        ${manifold}
+        ${brine}
+        <g><title>Display tank</title>
+          <rect x="150" y="22" width="120" height="84" rx="8" fill="rgba(38,198,218,0.08)" stroke="#4dd0e1" stroke-width="2"></rect>
+          <g clip-path="url(#npsTankClip)">
+            <rect x="150" y="44" width="120" height="62" fill="url(#npsTank)" opacity="0.5"></rect>
+            <ellipse cx="180" cy="102" rx="12" ry="7" fill="#ef6c00" opacity="0.55"></ellipse>
+            <ellipse cx="214" cy="104" rx="9" ry="6" fill="#ad1457" opacity="0.5"></ellipse>
+            <ellipse cx="244" cy="101" rx="10" ry="7" fill="#6a1b9a" opacity="0.45"></ellipse>
+          </g>
+          <text x="210" y="16" text-anchor="middle" font-size="11" fill="#90a4ae">Display tank</text>
+        </g>
+        ${pumpDots}
+        ${bottles}
+        ${extra > 0 ? `<text x="14" y="170" font-size="9" fill="#90a4ae">+${extra} more on the shelf</text>` : ""}
+        ${!shown.length ? `<text x="90" y="210" font-size="11" fill="#90a4ae">Add bottles and they appear here</text>` : ""}
+      </svg>`;
+  }
+
+  // --- The 24 h feed timeline (approximate by design — the firmware owns the
+  // exact clock; this shows the shape of the day and what's next).
+  _npsTimelineSvg() {
+    const hm = (s, d) => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || ""));
+      return m ? Math.min(23, +m[1]) * 60 + Math.min(59, +m[2]) : d;
+    };
+    const X = (min) => 10 + (Math.max(0, Math.min(1440, min)) / 1440) * 400;
+    const channels = this._doserChannels();
+    const foodIds = this._npsFoodChannelIds();
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const events = [];   // {min, name, color}
+    const rows = [];
+
+    foodIds.forEach((id, idx) => {
+      const ch = channels[id] || {};
+      const sched = ch.schedule || {};
+      if (!sched.enabled || !(Number(sched.mlPerDay) > 0)) return;
+      const color = this._npsChannelColor(idx);
+      const ws = hm(sched.windowStart, 0);
+      let we = hm(sched.windowEnd, 0);
+      const span = we > ws ? we - ws : (we === ws ? 1440 : 1440 - ws + we);
+      const y = 26 + idx * 7;
+      if ((sched.mode || "doses") === "continuous") {
+        rows.push(`<rect x="${X(ws)}" y="${y}" width="${(span / 1440) * 400}" height="4" rx="2" fill="${color}" opacity="0.55"><title>${this._escape(ch.name || id)} — continuous</title></rect>`);
+        return;
+      }
+      const n = Math.max(1, Math.min(48, Math.round(Number(sched.dosesPerDay) || 1)));
+      const step = span / n;
+      for (let i = 0; i < n; i += 1) {
+        const min = (ws + step * (i + 0.5)) % 1440;
+        events.push({ min, name: ch.name || id, color });
+        rows.push(`<rect x="${X(min) - 1}" y="${y}" width="2.5" height="5" rx="1" fill="${color}"></rect>`);
+      }
+    });
+
+    // AWC slots on the same day (times mode exact; interval mode as a band).
+    const awc = this._config?.automaticWaterChange || {};
+    const asched = awc.schedule || {};
+    if (awc.enabled && asched.enabled) {
+      const color = "#42a5f5";
+      if (String(asched.mode || "times") === "interval") {
+        const ws = hm(asched.windowStart, 0), we = hm(asched.windowEnd, 0);
+        const span = we > ws ? we - ws : (we === ws ? 1440 : 1440 - ws + we);
+        rows.push(`<rect x="${X(ws)}" y="20" width="${(span / 1440) * 400}" height="4" rx="2" fill="${color}" opacity="0.5"><title>Water change — micro-changes</title></rect>`);
+      } else {
+        (Array.isArray(asched.times) ? asched.times : []).forEach((t) => {
+          const min = hm(t, -1);
+          if (min >= 0) {
+            events.push({ min, name: "Water change", color });
+            rows.push(`<rect x="${X(min) - 1}" y="20" width="2.5" height="5" rx="1" fill="${color}"></rect>`);
+          }
+        });
+      }
+    }
+
+    // Night shading from the lighting window (lazy-loaded).
+    let night = "";
+    const win = this._lightingWindow?.data;
+    if (win === null && !this._lightingWindow?.loading) setTimeout(() => this._loadLightingWindow(), 0);
+    if (win && win.configured) {
+      const on = hm(win.onTime, 480), off = hm(win.offTime, 1200);
+      if (off > on) {
+        night = `<rect x="10" y="14" width="${(on / 1440) * 400}" height="34" fill="#0d1b2a" opacity="0.45"></rect>
+                 <rect x="${X(off)}" y="14" width="${410 - X(off)}" height="34" fill="#0d1b2a" opacity="0.45"></rect>`;
+      }
+    }
+
+    // What's next — dose events plus the AWC's own next-run stamp.
+    let next = null;
+    events.forEach((e) => {
+      const delta = e.min > nowMin ? e.min - nowMin : e.min + 1440 - nowMin;
+      if (!next || delta < next.delta) next = { ...e, delta };
+    });
+    const awcNext = Date.parse(this._awcSummary?.state?.nextRun || "");
+    if (Number.isFinite(awcNext) && awcNext > Date.now()) {
+      const delta = Math.round((awcNext - Date.now()) / 60000);
+      if (!next || delta < next.delta) next = { name: "Water change", delta, color: "#42a5f5" };
+    }
+    const nextLine = next
+      ? `Next: <strong>${this._escape(next.name)}</strong> in ${next.delta >= 60 ? `${Math.floor(next.delta / 60)} h ${next.delta % 60} min` : `${next.delta} min`}`
+      : "Nothing scheduled — schedules live on the pump cards and the Water Change tab.";
+
+    return `
+      <div>
+        <svg viewBox="0 0 420 62" style="width:100%;display:block;" role="img" aria-label="24 hour feed timeline">
+          ${night}
+          <line x1="10" y1="48" x2="410" y2="48" stroke="#37474f" stroke-width="2"></line>
+          ${[0, 6, 12, 18, 24].map((h) => `
+            <line x1="${X(h * 60)}" y1="44" x2="${X(h * 60)}" y2="52" stroke="#546e7a" stroke-width="1"></line>
+            <text x="${X(Math.min(h * 60, 1439))}" y="61" text-anchor="middle" font-size="8" fill="#78909c">${String(h).padStart(2, "0")}</text>`).join("")}
+          ${rows.join("")}
+          <line x1="${X(nowMin)}" y1="12" x2="${X(nowMin)}" y2="52" stroke="#e5484d" stroke-width="1.5"></line>
+        </svg>
+        <small>${nextLine}</small>
+      </div>`;
+  }
+
   _npsProductCard(pid, product, state) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
@@ -9642,59 +9917,51 @@ class OpenReefPanel extends HTMLElement {
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
-    // --- Today's feed plan (honest text, Stage A) --------------------------
-    const planLines = foodIds.map((id) => {
-      const ch = channels[id] || {};
-      const entry = dsum[id] || {};
-      const text = (entry.plan && entry.plan.summaryText)
-        || (Number(ch.schedule && ch.schedule.mlPerDay) > 0 ? `${ch.schedule.mlPerDay} ml/day planned` : "No schedule yet — set one in Dosing");
-      return `<li><strong>${this._escape((entry && entry.name) || ch.name || id)}</strong> — ${this._escape(text)}</li>`;
-    });
+    // --- Setup checklist + the feeding station (diagram hero + timeline) ---
+    const setupCard = this._npsSetupCard();
     const awcSum = this._awcSummary && this._awcSummary.summary;
-    if (awcSum && awcSum.scheduleText) {
-      planLines.push(`<li><strong>Water exchange</strong> — ${this._escape(awcSum.scheduleText)}</li>`);
-    }
-    const planPanel = `
+    const heroPanel = `
       <article class="panel stack">
-        <p class="eyebrow">Today's feed plan</p>
-        ${planLines.length
-          ? `<ul style="margin:0;padding-left:18px;display:grid;gap:4px;">${planLines.join("")}</ul>`
-          : `<p class="hint">No food pumps yet — add one below and its schedule shows up here.</p>`}
+        <p class="eyebrow">Feeding station</p>
+        ${this._npsDiagramSvg()}
+        ${this._npsTimelineSvg()}
+        ${awcSum && awcSum.scheduleText ? `<small>📅 ${this._escape(awcSum.scheduleText)}</small>` : ""}
       </article>`;
 
-    // --- Food pumps --------------------------------------------------------
+    // --- Food pumps: the full dosing cards, right here (dose now, prime,
+    // calibrate, freshness — no bouncing to the Dosing tab), each with its
+    // bottle link appended.
     const productOptions = (sel) => [`<option value="">— none —</option>`]
       .concat(pids.map((pid) =>
         `<option value="${this._escape(pid)}" ${sel === pid ? "selected" : ""}>${this._escape(products[pid].name)}</option>`))
       .join("");
-    const pumpRows = foodIds.map((id) => {
+    const bindings = (this._doserSummary && this._doserSummary.bindings) || {};
+    const pumpCards = foodIds.map((id) => {
       const ch = channels[id] || {};
-      const entry = dsum[id] || {};
       const res = ch.reservoir || {};
-      const days = entry.reservoir && entry.reservoir.daysUntilEmpty;
       return `
-        <div class="setting-card subtle-card">
-          <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline;">
-            <strong>${this._escape(ch.name || id)}</strong>
-            <small>${this._escape(this._doserChemicalLabel(ch.chemical))} · ${ch.enabled ? "enabled" : "off"}${days != null ? ` · ~${this._escape(String(days))} days in reservoir` : ""}</small>
-          </div>
-          <div class="mini-grid" style="margin-top:6px;">
-            <label>Draws from bottle<select data-scope="dosing-channel-reservoir" data-id="${this._escape(id)}" data-field="productId">${productOptions(res.productId || "")}</select></label>
-            <label><input type="checkbox" data-scope="dosing-channel-reservoir" data-id="${this._escape(id)}" data-field="productIsBottle" ${res.productIsBottle ? "checked" : ""}> The bottle IS the reservoir (pump doses debit it directly)</label>
+        <div class="stack" style="gap:6px;">
+          ${this._doserChannelCard(id, dsum[id] || null, bindings[id] || null)}
+          <div class="setting-card subtle-card">
+            <div class="mini-grid">
+              <label>Draws from bottle<select data-scope="dosing-channel-reservoir" data-id="${this._escape(id)}" data-field="productId">${productOptions(res.productId || "")}</select></label>
+              <label><input type="checkbox" data-scope="dosing-channel-reservoir" data-id="${this._escape(id)}" data-field="productIsBottle" ${res.productIsBottle ? "checked" : ""}> The bottle IS the reservoir (doses debit it live)</label>
+            </div>
           </div>
         </div>`;
     }).join("");
     const pumpsPanel = `
       <article class="panel stack">
         <p class="eyebrow">Food pumps</p>
-        ${pumpRows || `<p class="hint">No food channels yet. Add one — it becomes a normal dosing channel (schedules, calibration and binding live in the Dosing tab).</p>`}
+        ${pumpCards ? `<div class="dosing-grid">${pumpCards}</div>`
+          : `<p class="hint">No food channels yet. Add one — it becomes a normal dosing channel with its full card right here.</p>`}
         <div class="button-row" style="flex-wrap:wrap;">
           <button class="secondary compact-button" data-action="nps-add-food-pump" data-label="Phyto">+ Phyto pump</button>
           <button class="secondary compact-button" data-action="nps-add-food-pump" data-label="Zooplankton">+ Zooplankton pump</button>
           <button class="secondary compact-button" data-action="nps-add-food-pump" data-label="Bacteria">+ Bacteria pump</button>
           <button class="secondary compact-button" data-action="nps-add-brine-pump">+ Live brine pump</button>
         </div>
-        <p class="hint">Link a pump to a bottle and refills debit the bottle; tick "bottle IS the reservoir" and every dose debits it live. Schedules, calibration and freshness live on the Dosing tab.</p>
+        <p class="hint">Link a pump to a bottle and refills debit the bottle; tick "bottle IS the reservoir" and every dose debits it live. Deep settings (windows, guards, bindings) stay in Settings → Dosing channels.</p>
       </article>`;
 
     // --- Food shelf (consumables) ------------------------------------------
@@ -9747,7 +10014,7 @@ class OpenReefPanel extends HTMLElement {
         <p class="hint">Tick what you keep — the compiler checks the shelf covers every mouth (food type AND particle size) and shapes each pump's cadence. You own the ml/day: no library should guess a colony's appetite.</p>
         <div class="mini-grid">${speciesChecks}</div>
         ${planBits.join("")}
-        ${this._configDirty ? `<p class="hint">Save, then Refresh, to recompile the plan.</p>` : ""}
+        ${this._configDirty ? `<p class="hint">Save and the plan recompiles itself.</p>` : ""}
       </article>`;
 
     // --- Nutrient budget (Stage D) -----------------------------------------
@@ -9869,7 +10136,7 @@ class OpenReefPanel extends HTMLElement {
         <p class="hint">This edits the same canonical AWC schedule the Water Change tab owns — one source of truth, saved with the Save bar. The nutrient-budget advisor that suggests this number lands in a later stage.</p>
       </article>`;
 
-    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${speciesPanel}${hatcheryPanel}${trucePanel}${shelfPanel}${budgetPanel}${waterPanel}</section>`;
+    return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${pumpsPanel}${speciesPanel}${hatcheryPanel}${trucePanel}${shelfPanel}${budgetPanel}${waterPanel}</section>`;
   }
 
   _tabs() {
