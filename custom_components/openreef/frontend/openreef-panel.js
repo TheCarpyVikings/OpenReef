@@ -1686,6 +1686,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded();
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
+      if (action === "nps-apply-species") this._npsApplySpecies(id, Number(target.dataset.doses), target.dataset.night === "1");
       if (action === "doser-mark-refreshed") this._doserCall(
         { type: "openreef/dosing_mark_refreshed", channel_id: id },
         "Freshness clock restarted — dosing re-enables on the next sync.",
@@ -2271,6 +2272,13 @@ class OpenReefPanel extends HTMLElement {
         npsCfg.truce = npsCfg.truce || {};
         npsCfg.truce[field] = value;
       }
+      if (scope === "nps-species") {
+        const npsCfg = this._config.nps = this._config.nps || {};
+        const list = npsCfg.species = Array.isArray(npsCfg.species) ? npsCfg.species : [];
+        const idx = list.indexOf(id);
+        if (value && idx < 0) list.push(id);
+        if (!value && idx >= 0) list.splice(idx, 1);
+      }
       if (scope === "consumable") {
         const block = this._config.consumables = this._config.consumables || {};
         const products = block.products = block.products || {};
@@ -2279,7 +2287,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -9507,6 +9515,20 @@ class OpenReefPanel extends HTMLElement {
       "Hatch loaded — the freshness and prime clocks restarted.");
   }
 
+  _npsApplySpecies(cid, doses, night) {
+    const channel = this._doserChannels()[cid];
+    if (!channel || !doses) return;
+    channel.schedule = channel.schedule || {};
+    channel.schedule.mode = "doses";
+    channel.schedule.dosesPerDay = doses;
+    channel.schedule.night = channel.schedule.night || {};
+    channel.schedule.night.enabled = !!night;
+    if (night) channel.schedule.night.useLightingSchedule = true;
+    this._setDirty(true);
+    this._nps.message = `Applied: ${doses} doses/day${night ? ", night-weighted" : ""} — set the ml/day in Dosing, then Save.`;
+    this._render();
+  }
+
   _npsSeedHatchReminders() {
     // Custom (non-builtin) maintenance tasks: evaluation, snooze, notify and
     // history all come free from the maintenance engine.
@@ -9698,6 +9720,60 @@ class OpenReefPanel extends HTMLElement {
           : `<p class="hint">${st.loading ? "Loading the shelf…" : "Track every bottle you dose — phyto, foods, bacteria, 2-part. Add one and log doses; the shelf forecasts how many days are left."}</p>`}
       </article>`;
 
+    // --- Species plans (Stage D) -------------------------------------------
+    const speciesLib = (st.summary && st.summary.speciesLibrary) || [];
+    const selectedSpecies = (this._config && this._config.nps && this._config.nps.species) || [];
+    const plan = (st.summary && st.summary.speciesPlan) || {};
+    const diffDots = (d) => "●".repeat(Math.max(1, Math.min(5, Number(d) || 1)))
+      + "○".repeat(5 - Math.max(1, Math.min(5, Number(d) || 1)));
+    const speciesChecks = speciesLib.map((s) => `
+      <label title="${this._escape(s.note || "")}"><input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}> ${this._escape(s.name)} <small>${diffDots(s.difficulty)}</small></label>`).join("");
+    const planBits = [];
+    (plan.gaps || []).forEach((g) => planBits.push(
+      `<p class="hint" style="color:var(--warning-color,#f5a524)">🕳 ${this._escape(g)}</p>`));
+    (plan.warnings || []).forEach((w) => planBits.push(
+      `<p class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(w)}</p>`));
+    if (selectedSpecies.length && !(plan.gaps || []).length && !(plan.warnings || []).length) {
+      planBits.push(`<p class="hint">Shelf coverage looks good — every selected mouth has a matching food.</p>`);
+    }
+    (plan.suggestions || []).forEach((sug) => planBits.push(`
+      <div class="setting-card subtle-card" style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;">
+        <small><strong>${this._escape(sug.channelName)}</strong> → ${this._escape(String(sug.dosesPerDay))} doses/day${sug.night ? ", night-weighted" : ""} <em>(for ${this._escape(sug.for)})</em> — ${this._escape(sug.note)}</small>
+        <button class="secondary compact-button" data-action="nps-apply-species" data-id="${this._escape(sug.channelId)}" data-doses="${Number(sug.dosesPerDay) || 1}" data-night="${sug.night ? "1" : ""}">Apply</button>
+      </div>`));
+    const speciesPanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Species plans</p>
+        <p class="hint">Tick what you keep — the compiler checks the shelf covers every mouth (food type AND particle size) and shapes each pump's cadence. You own the ml/day: no library should guess a colony's appetite.</p>
+        <div class="mini-grid">${speciesChecks}</div>
+        ${planBits.join("")}
+        ${this._configDirty ? `<p class="hint">Save, then Refresh, to recompile the plan.</p>` : ""}
+      </article>`;
+
+    // --- Nutrient budget (Stage D) -----------------------------------------
+    const budget = (st.summary && st.summary.budget) || {};
+    let budgetBody;
+    if (!budget.available) {
+      budgetBody = `<p class="hint">The budget switches on once bottles have logged usage — every dose teaches the shelf your real feed rate.</p>`;
+    } else {
+      const verdictCopy = ({
+        balanced: ["✅", "Feed load and water-change export look balanced for an NPS system."],
+        clean: ["🧊", "Projected nutrients sit BELOW the NPS band — too clean. NPS corals and the bacterioplankton loop starve politely in ultra-clean water: feed more, or export less."],
+        heavy: ["🔥", "Feed load outruns the export — nutrients trend up. Raise the exchange in the card below, or trim the heaviest food."],
+        no_export: ["⚠️", "Feeding in, nothing scheduled out — enable the water-change schedule below."],
+      })[budget.verdict] || ["", ""];
+      budgetBody = `
+        <small>Feeding ~${this._escape(String(budget.feedingMlPerDay))} ml/day → ~${this._escape(String(budget.no3PpmPerDay))} ppm NO₃/day and ~${this._escape(String(budget.po4PpmPerDay))} ppm PO₄/day of load.</small>
+        <small>Exchanging ${this._escape(String(budget.dailyExchangeL))} L/day → feeding-only steady state ≈ <strong>${budget.steadyNo3 == null ? "∞" : this._escape(String(budget.steadyNo3))} ppm NO₃</strong> <em>(NPS band: 2–20)</em>.</small>
+        <p class="hint">${verdictCopy[0]} ${verdictCopy[1]}</p>
+        <p class="hint">Deliberately rough: it counts feeding in and water changes out. Your skimmer, bacteria and algae all work in your favour beyond this number.</p>`;
+    }
+    const budgetPanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Nutrient budget</p>
+        ${budgetBody}
+      </article>`;
+
     // --- Hatchery & brine feed-exchange (Stage B) --------------------------
     const fxCfg = (this._config && this._config.nps && this._config.nps.feedExchange) || {};
     const fxSum = (st.summary && st.summary.feedExchange) || {};
@@ -9793,7 +9869,7 @@ class OpenReefPanel extends HTMLElement {
         <p class="hint">This edits the same canonical AWC schedule the Water Change tab owns — one source of truth, saved with the Save bar. The nutrient-budget advisor that suggests this number lands in a later stage.</p>
       </article>`;
 
-    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${hatcheryPanel}${trucePanel}${shelfPanel}${waterPanel}</section>`;
+    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${speciesPanel}${hatcheryPanel}${trucePanel}${shelfPanel}${budgetPanel}${waterPanel}</section>`;
   }
 
   _tabs() {

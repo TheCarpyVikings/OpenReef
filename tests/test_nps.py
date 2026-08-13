@@ -782,6 +782,83 @@ def test_ha_dose_decrements_linked_bottle():
     run(scenario())
 
 
+# --------------------------------------------------------------------------- #
+# Stage D — species plans + nutrient budget
+# --------------------------------------------------------------------------- #
+def test_species_plan_gap_detection():
+    # Dendronephthya with nothing on the shelf → a phyto gap.
+    plan = nps.compile_feed_plan(["dendronephthya"], {}, {})
+    assert len(plan["gaps"]) == 1
+    assert "phyto" in plan["gaps"][0]
+    # A phyto product in the particle window closes the gap.
+    plan = nps.compile_feed_plan(
+        ["dendronephthya"],
+        {"phyto": _product(particleUmMin=1, particleUmMax=10)}, {})
+    assert plan["gaps"] == []
+
+
+def test_species_plan_pump_suggestion_and_night():
+    products = {"brine": _product(name="Baby brine", category="zooLive",
+                                  particleUmMin=400, particleUmMax=500)}
+    channels = {"brine_pump": {
+        "name": "Brine pump", "chemical": "livefood",
+        "reservoir": {"productId": "brine"},
+    }}
+    plan = nps.compile_feed_plan(["chili"], products, channels)
+    assert len(plan["suggestions"]) == 1
+    sug = plan["suggestions"][0]
+    assert sug["channelId"] == "brine_pump"
+    assert sug["night"] is True                      # chili is strictly nocturnal
+    assert sug["dosesPerDay"] == 1
+
+
+def test_species_plan_particle_mismatch_warns():
+    products = {"mysis": _product(name="Mysis blend", category="zooPrepared",
+                                  particleUmMin=1000, particleUmMax=3000)}
+    channels = {"p1": {"name": "Blend pump", "chemical": "food",
+                       "reservoir": {"productId": "mysis"}}}
+    plan = nps.compile_feed_plan(["gorgonian_easy"], products, channels)
+    assert any("particle" in w for w in plan["warnings"])
+    # Difficulty-5 honesty banner
+    plan5 = nps.compile_feed_plan(["dendronephthya"],
+                                  {"phyto": _product(particleUmMin=1, particleUmMax=10)}, {})
+    assert any("expert" in w.lower() for w in plan5["warnings"])
+
+
+def test_nutrient_budget_math_and_verdicts():
+    assert nps.nutrient_budget({}, NOW, 100, 2.0) == {"available": False}
+    history = [{"at": _iso(NOW - timedelta(days=1)), "ml": 10, "kind": "dose"}]
+    phyto = _product(history=history)                 # 10 ml/day phyto
+    budget = nps.nutrient_budget({"phyto": phyto}, NOW, 100, 2.0)
+    assert budget["available"] is True
+    assert budget["feedingMlPerDay"] == 10.0
+    # 10 ml × 0.4 mgN/ml × 4.43 / 100 L = 0.177 ppm NO3/day; ÷ 2% daily = 8.86
+    assert abs(budget["no3PpmPerDay"] - 0.18) < 0.01
+    assert abs(budget["steadyNo3"] - 8.9) < 0.2
+    assert budget["verdict"] == "balanced"
+    assert nps.nutrient_budget({"phyto": phyto}, NOW, 100, 20.0)["verdict"] == "clean"
+    assert nps.nutrient_budget({"phyto": phyto}, NOW, 100, 0.1)["verdict"] == "heavy"
+    assert nps.nutrient_budget({"phyto": phyto}, NOW, 100, 0.0)["verdict"] == "no_export"
+
+
+def test_normalise_species_whitelist():
+    config = integration._normalise_core_config({
+        "nps": {"species": ["chili", "made_up", "chili", "dendronephthya"]},
+    })
+    assert config["nps"]["species"] == ["chili", "dendronephthya"]
+
+
+def test_ws_summary_carries_stage_d_blocks():
+    entry = _entry({"phyto": _product()})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    assert payload["speciesLibrary"]
+    assert "gaps" in payload["speciesPlan"]
+    assert payload["budget"] == {"available": False}   # no usage logged yet
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

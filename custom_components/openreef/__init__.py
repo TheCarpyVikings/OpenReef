@@ -911,8 +911,12 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             "restoreAt": _awc_str(raw_p.get("restoreAt"), 40),
             "turnedOff": [str(e)[:120] for e in raw_off if isinstance(e, str)][:20],
         }
+    raw_species = nps_cfg.get("species") if isinstance(nps_cfg.get("species"), list) else []
+    valid_species = set(nps_engine.species_ids())
     config["nps"] = {
         "enabled": bool(nps_cfg.get("enabled", False)),
+        "species": list(dict.fromkeys(
+            str(s) for s in raw_species if str(s) in valid_species)),
         # Brine feed-exchange (Stage B): dose + chaser volumes bank an owed
         # matched drain; the state block is persisted runtime (an in-flight
         # drain must survive a restart for orphan recovery to stop the pump).
@@ -11872,6 +11876,17 @@ async def websocket_nps_summary(
             for cid, ch in sorted(channels.items())
             if isinstance(ch, dict) and ch.get("chemical") in ("livefood", "food")
         ],
+        # Species plans + nutrient budget (Stage D) — compiled backend-side.
+        "speciesLibrary": [dict(s) for s in nps_engine.SPECIES_LIBRARY],
+        "speciesPlan": nps_engine.compile_feed_plan(
+            list((config.get("nps") or {}).get("species") or []), products, channels),
+        "budget": nps_engine.nutrient_budget(
+            products, now_utc, _awc_effective_tank_l(config),
+            awc_engine.daily_equivalent_litres(
+                (_awc_cfg(config) or {}).get("schedule") or {},
+                _awc_effective_tank_l(config))
+            if (_awc_cfg(config) or {}).get("enabled")
+            and ((_awc_cfg(config) or {}).get("schedule") or {}).get("enabled") else 0.0),
     })
 
 

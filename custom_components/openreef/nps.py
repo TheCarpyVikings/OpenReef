@@ -224,6 +224,234 @@ def hatch_prime_state(mixed_at_iso: Any, now: datetime) -> dict[str, Any]:
             "primeLeftHours": round(max(0.0, left_h), 1)}
 
 
+# --------------------------------------------------------------------------- #
+# Species plans (Stage D) — the research distilled into data + a compiler.
+# Sources: docs/nps-system-brainstorm.md §3 (Reef Builders, Tidal Gardens,
+# AlgaeBarn, Pod Your Reef, Reef Central long-term threads). Difficulty 1–5.
+# cadence: pulse (discrete feeds), continuous (standing food density), target
+# (per-polyp hand feeding — automation assists, never replaces).
+# --------------------------------------------------------------------------- #
+SPECIES_LIBRARY: tuple[dict[str, Any], ...] = (
+    {"id": "tubastraea", "name": "Sun coral (Tubastraea)", "difficulty": 1,
+     "particleUmMin": 300, "particleUmMax": 3000, "cadence": "pulse",
+     "feedsPerDay": 1, "night": True, "trainable": True,
+     "foods": ("zooPrepared", "zooLive", "blend"),
+     "note": "Target feeding is what works; broadcast alone leaves polyps unfed. "
+             "Trainable to open in daylight by feeding at the same time daily."},
+    {"id": "dendrophyllia", "name": "Dendrophyllia / Balanophyllia", "difficulty": 2,
+     "particleUmMin": 300, "particleUmMax": 3000, "cadence": "pulse",
+     "feedsPerDay": 2, "night": True, "trainable": True,
+     "foods": ("zooPrepared", "zooLive", "blend"),
+     "note": "Sun-coral care but hungrier — more feeds, more volume."},
+    {"id": "chili", "name": "Chili coral", "difficulty": 2,
+     "particleUmMin": 150, "particleUmMax": 500, "cadence": "pulse",
+     "feedsPerDay": 1, "night": True, "trainable": False,
+     "foods": ("zooLive", "zooPrepared"),
+     "note": "Strictly nocturnal — feed after lights-out when the polyps are open; "
+             "baby brine and decapsulated cysts are the perfect mouthful."},
+    {"id": "gorgonian_easy", "name": "Gorgonians — Menella, Swiftia, Diodogorgia",
+     "difficulty": 2, "particleUmMin": 50, "particleUmMax": 500, "cadence": "pulse",
+     "feedsPerDay": 1, "night": False, "trainable": False,
+     "foods": ("zooPrepared", "zooLive"),
+     "note": "The recommended starter NPS. Food must be no larger than the polyp mouth."},
+    {"id": "gorgonian_hard", "name": "Gorgonians — Euplexaura, Guaiagorgia",
+     "difficulty": 3, "particleUmMin": 50, "particleUmMax": 300, "cadence": "pulse",
+     "feedsPerDay": 2, "night": False, "trainable": False,
+     "foods": ("zooPrepared", "zooLive"),
+     "note": "Daily fine zooplankton, no days off."},
+    {"id": "rhizotrochus", "name": "Rhizotrochus typus", "difficulty": 3,
+     "particleUmMin": 1000, "particleUmMax": 20000, "cadence": "target",
+     "feedsPerDay": 0, "night": True, "trainable": False,
+     "foods": ("zooPrepared",),
+     "note": "Whole meaty items by hand, 2–3× a week. Deepwater — runs happier cool."},
+    {"id": "blueberry", "name": "Blueberry gorgonian (Acalycigorgia)", "difficulty": 5,
+     "particleUmMin": 5, "particleUmMax": 200, "cadence": "continuous",
+     "feedsPerDay": 8, "night": False, "trainable": False,
+     "foods": ("phyto", "zooLive"),
+     "note": "'Cut flowers of the hobby.' Near-continuous micro-plankton, rotifers, "
+             "oyster eggs. Expert-only, honestly."},
+    {"id": "dendronephthya", "name": "Dendronephthya / Scleronephthya", "difficulty": 5,
+     "particleUmMin": 1, "particleUmMax": 20, "cadence": "continuous",
+     "feedsPerDay": 12, "night": False, "trainable": False,
+     "foods": ("phyto",),
+     "note": "Mostly a PHYTO feeder (weak nematocysts — 50–200× more carbon from "
+             "phyto than zoo). The only proven method is a standing live-phyto "
+             "density (5,000–50,000 cells/mL — a faint green tint), dosed "
+             "continuously."},
+    {"id": "filterfeeders", "name": "Sponges, tunicates, flame scallops", "difficulty": 4,
+     "particleUmMin": 1, "particleUmMax": 40, "cadence": "continuous",
+     "feedsPerDay": 8, "night": False, "trainable": False,
+     "foods": ("phyto", "bacteria"),
+     "note": "Obligate filter feeders; decline is invisible until it's late. "
+             "Standing phyto density is what keeps them."},
+    {"id": "crinoid", "name": "Feather star (crinoid)", "difficulty": 5,
+     "particleUmMin": 300, "particleUmMax": 500, "cadence": "continuous",
+     "feedsPerDay": 4, "night": False, "trainable": False,
+     "foods": ("zooLive", "zooPrepared"),
+     "note": "Two documented long-term successes, ever. The working protocol: four "
+             "feeds a day, each spread over two hours, indefinitely."},
+)
+
+_SPECIES_BY_ID = {s["id"]: s for s in SPECIES_LIBRARY}
+
+
+def species_ids() -> tuple[str, ...]:
+    return tuple(s["id"] for s in SPECIES_LIBRARY)
+
+
+def _ranges_overlap(a_min: float, a_max: float, b_min: float, b_max: float) -> bool:
+    return max(_f(a_min), _f(b_min)) <= min(_f(a_max) or 1e9, _f(b_max) or 1e9)
+
+
+def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
+                      channels: dict[str, Any]) -> dict[str, Any]:
+    """The species compiler: what the selected livestock needs, whether the
+    shelf and pumps cover it, and per-pump schedule suggestions. Advisory
+    only — suggestions carry cadence/window shape; the keeper owns ml/day
+    (per-colony appetite is not something a library should guess)."""
+    selected = [_SPECIES_BY_ID[sid] for sid in selected_ids if sid in _SPECIES_BY_ID]
+    gaps: list[str] = []
+    warnings: list[str] = []
+    suggestions: list[dict[str, Any]] = []
+    product_list = [p for p in products.values() if isinstance(p, dict)]
+
+    for sp in selected:
+        # Shelf coverage: any product in the right category AND particle window?
+        covered = any(
+            p.get("category") in sp["foods"] and _ranges_overlap(
+                p.get("particleUmMin"), p.get("particleUmMax"),
+                sp["particleUmMin"], sp["particleUmMax"])
+            for p in product_list)
+        if not covered and sp["cadence"] != "target":
+            wanted = " or ".join(sp["foods"])
+            gaps.append(
+                f"{sp['name']}: nothing on the shelf feeds it "
+                f"(needs {wanted}, {sp['particleUmMin']:g}–{sp['particleUmMax']:g} µm).")
+
+    # Per-pump suggestions: a channel whose linked bottle matches a selected
+    # species inherits that species' cadence shape.
+    for cid, channel in sorted(channels.items()):
+        if not isinstance(channel, dict) \
+                or channel.get("chemical") not in ("food", "livefood"):
+            continue
+        product = products.get(str((channel.get("reservoir") or {}).get("productId") or ""))
+        if not isinstance(product, dict):
+            continue
+        matches = [
+            sp for sp in selected
+            if product.get("category") in sp["foods"] and _ranges_overlap(
+                product.get("particleUmMin"), product.get("particleUmMax"),
+                sp["particleUmMin"], sp["particleUmMax"])]
+        if not matches:
+            if selected:
+                warnings.append(
+                    f"{channel.get('name') or cid}: its bottle "
+                    f"({product.get('name')}) feeds none of the selected species — "
+                    "check the particle size.")
+            continue
+        # The hungriest matching species shapes the schedule.
+        driver_sp = max(matches, key=lambda s: s["feedsPerDay"])
+        doses = max(1, int(driver_sp["feedsPerDay"]))
+        if driver_sp["cadence"] == "continuous":
+            doses = max(doses, 8)
+        suggestions.append({
+            "channelId": cid,
+            "channelName": channel.get("name") or cid,
+            "for": driver_sp["name"],
+            "dosesPerDay": doses,
+            "night": bool(driver_sp["night"]),
+            "note": ("Nocturnal feeder — weight doses after lights-out"
+                     if driver_sp["night"] else
+                     "Spread doses across the day" if driver_sp["cadence"] == "continuous"
+                     else "Discrete pulse feeds"),
+        })
+
+    hardest = max((s["difficulty"] for s in selected), default=0)
+    if hardest >= 5:
+        warnings.append(
+            "You've selected expert-tier animals (difficulty 5). Most specimens "
+            "starve slowly over 2–6 months even with good automation — source "
+            "well, feed relentlessly, and let the camera and logs tell you the truth.")
+    return {
+        "species": [{"id": s["id"], "name": s["name"], "difficulty": s["difficulty"],
+                     "cadence": s["cadence"], "note": s["note"]} for s in selected],
+        "gaps": gaps,
+        "warnings": warnings,
+        "suggestions": suggestions,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Nutrient budget (Stage D) — a deliberately rough model, labelled as such.
+# Densities are order-of-magnitude estimates of dosable-food nutrient content
+# (mg of N / P per ml of product). N→NO3 ×4.43, P→PO4 ×3.07 (molar mass).
+# --------------------------------------------------------------------------- #
+CATEGORY_NUTRIENTS = {
+    "phyto":       {"n": 0.4, "p": 0.05},
+    "zooLive":     {"n": 0.6, "p": 0.08},
+    "zooPrepared": {"n": 1.2, "p": 0.15},
+    "blend":       {"n": 1.5, "p": 0.20},
+    "bacteria":    {"n": 0.1, "p": 0.01},
+    "amino":       {"n": 0.8, "p": 0.02},
+    "trace":       {"n": 0.0, "p": 0.0},
+    "twoPart":     {"n": 0.0, "p": 0.0},
+    "other":       {"n": 0.5, "p": 0.05},
+}
+NO3_BAND = (2.0, 20.0)     # NPS guardrails: never zero, never runaway
+PO4_BAND = (0.01, 0.1)
+
+
+def nutrient_budget(products: dict[str, Any], now: datetime,
+                    tank_litres: float, daily_exchange_l: float) -> dict[str, Any]:
+    """Feed load vs water-change export, from the shelf's own logged usage.
+    Honesty rules: no logged usage ⇒ no budget (never a guess); the steady-state
+    projection counts ONLY feeding in and water changes out — skimming, bacteria
+    and algae all help you beyond this number, so reality should land lower."""
+    tank_l = max(0.0, _f(tank_litres))
+    load_n = load_p = 0.0
+    feeding_ml_day = 0.0
+    per_category: dict[str, float] = {}
+    for product in products.values():
+        if not isinstance(product, dict):
+            continue
+        daily = usage_ml_per_day(product, now)
+        if not daily:
+            continue
+        density = CATEGORY_NUTRIENTS.get(str(product.get("category")),
+                                         CATEGORY_NUTRIENTS["other"])
+        feeding_ml_day += daily
+        per_category[str(product.get("category"))] = round(
+            per_category.get(str(product.get("category")), 0.0) + daily, 1)
+        load_n += daily * density["n"]
+        load_p += daily * density["p"]
+    if feeding_ml_day <= 0 or tank_l <= 0:
+        return {"available": False}
+    no3_ppm_day = load_n * 4.43 / tank_l
+    po4_ppm_day = load_p * 3.07 / tank_l
+    fraction = max(0.0, _f(daily_exchange_l)) / tank_l
+    steady_no3 = round(no3_ppm_day / fraction, 1) if fraction > 0 else None
+    steady_po4 = round(po4_ppm_day / fraction, 3) if fraction > 0 else None
+    if steady_no3 is None:
+        verdict = "no_export"
+    elif steady_no3 < NO3_BAND[0]:
+        verdict = "clean"       # too clean for NPS — the corals starve politely
+    elif steady_no3 <= NO3_BAND[1]:
+        verdict = "balanced"
+    else:
+        verdict = "heavy"
+    return {
+        "available": True,
+        "feedingMlPerDay": round(feeding_ml_day, 1),
+        "perCategoryMlPerDay": per_category,
+        "no3PpmPerDay": round(no3_ppm_day, 2),
+        "po4PpmPerDay": round(po4_ppm_day, 4),
+        "dailyExchangeL": round(max(0.0, _f(daily_exchange_l)), 2),
+        "steadyNo3": steady_no3,
+        "steadyPo4": steady_po4,
+        "verdict": verdict,
+    }
+
+
 def shelf_summary(products: dict[str, Any], now: datetime) -> dict[str, Any]:
     """The whole food shelf: per-product states plus the attention counts the
     tab header and (later) notifications read."""
