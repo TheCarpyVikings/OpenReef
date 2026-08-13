@@ -9982,14 +9982,19 @@ class OpenReefPanel extends HTMLElement {
     const shown = pids;
     const slot = 52, bottleW = 40, rowX = 14;
     const bottlesEnd = shown.length ? rowX + (shown.length - 1) * slot + bottleW : rowX;
-    const freshX = bottlesEnd + 12;
-    const wasteX = freshX + 48 + 12;
-    const brineX = wasteX + 36 + 24;
-    const totalW = Math.max(420, brineX + 62 + 14);
+    // Station order: bottles | waste | fresh | brine, with the three stations
+    // anchored to the RIGHT edge. The fresh premix sits beside the brine line
+    // it tees into (the chaser flush runs THROUGH the food line), and the
+    // geometry guarantees no pipe ever crosses another at any bottle count:
+    // the drain's run stays left of the fresh riser, the tee only ever heads
+    // right into the brine line.
+    const totalW = Math.max(420, bottlesEnd + 208);
+    const brineX = totalW - 76;
+    const freshX = brineX - 72;
+    const wasteX = freshX - 48;
     const tankW = 120;
     const tankX = Math.round((totalW - tankW) / 2);
     const feedInX = tankX + 24;      // feed manifold enters the tank here
-    const freshInX = tankX + 72;     // fresh premix enters here
     const drainOutX = tankX + 96;    // the drain leaves here
     const freshCX = freshX + 24, wasteCX = wasteX + 18, brineCX = brineX + 31;
     // AWC reservoir levels — the fresh premix feeds the chaser flush and the
@@ -10054,14 +10059,22 @@ class OpenReefPanel extends HTMLElement {
       ? `<path d="${manifoldPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
          ${rowPumpActive ? `<path d="${manifoldPath}" fill="none" stroke="#26c6da" stroke-width="3" class="awc-flow"></path>` : ""}`
       : "";
-    // Fresh premix: its own station, piped into the tank. Animates during the
-    // chaser flush (and carries the level the AWC reports).
+    // Fresh premix: tees INTO the brine line at y120 — the chaser flush rinses
+    // the food line itself, so the animation runs fresh → tee → up the brine
+    // line → into the tank, exactly like the water does. Without a brine
+    // station (exchange off) it falls back to its own tank inlet.
     const freshFillH = 62 * freshPct / 100, freshFillY = 240 - freshFillH;
-    const freshPath = `M ${freshCX} 178 V 122 H ${freshInX} V 106`;
+    const freshPath = fx.enabled
+      ? `M ${freshCX} 178 V 120 H ${brineCX}`
+      : `M ${freshCX} 178 V 120 H ${tankX + tankW - 24} V 106`;
+    const freshFlushPath = fx.enabled
+      ? `M ${freshCX} 178 V 120 H ${brineCX} V 96 H ${tankX + tankW + 2}`
+      : freshPath;
     const freshStation = `
-      <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>AWC fresh reservoir — tank-salinity premix; feeds the chaser flush and water changes</title>
+      <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>AWC fresh reservoir — tank-salinity premix; the chaser flush pushes it through the food line</title>
         <path d="${freshPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
-        ${chaserActive || awcDemo.filling ? `<path d="${freshPath}" fill="none" stroke="#42a5f5" stroke-width="3" class="awc-flow"></path>` : ""}
+        ${fx.enabled ? `<circle cx="${brineCX}" cy="120" r="4.5" fill="#37474f"></circle>` : ""}
+        ${chaserActive || awcDemo.filling ? `<path d="${freshFlushPath}" fill="none" stroke="#42a5f5" stroke-width="3" class="awc-flow"></path>` : ""}
         <rect x="${freshX}" y="178" width="48" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
         <clipPath id="npsFresh"><rect x="${freshX}" y="178" width="48" height="62" rx="5"/></clipPath>
         <g clip-path="url(#npsFresh)"><rect x="${freshX}" y="${freshFillY}" width="48" height="${freshFillH}" fill="url(#npsFreshG)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
