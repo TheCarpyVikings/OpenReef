@@ -273,6 +273,7 @@ AWC_STATE_LOCK = "awc_state_lock"
 # just means at most one re-notify / a fresh sim sandbox.
 AWC_RUNTIME = "awc_runtime"
 AWC_CALRUN_UNSUB = "awc_calrun_unsub"  # timed calibration-run stop timer
+NPS_DRAIN_UNSUB = "nps_drain_unsub"    # feed-exchange matched-drain stop timer
 _AWC_SIM_HAZARDS = ("leak", "highLevel", "freshEmpty", "wasteFull", "returnPumpIssue")
 # Bulky runtime record lists stripped from a settings export (and preserved through
 # an import) — they describe the tank's past, not its configuration.
@@ -880,7 +881,31 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
     nps.py."""
     nps_cfg = config.get("nps")
     nps_cfg = nps_cfg if isinstance(nps_cfg, dict) else {}
-    config["nps"] = {"enabled": bool(nps_cfg.get("enabled", False))}
+    raw_fx = nps_cfg.get("feedExchange") if isinstance(nps_cfg.get("feedExchange"), dict) else {}
+    raw_fx_state = raw_fx.get("state") if isinstance(raw_fx.get("state"), dict) else {}
+    config["nps"] = {
+        "enabled": bool(nps_cfg.get("enabled", False)),
+        # Brine feed-exchange (Stage B): dose + chaser volumes bank an owed
+        # matched drain; the state block is persisted runtime (an in-flight
+        # drain must survive a restart for orphan recovery to stop the pump).
+        "feedExchange": {
+            "enabled": bool(raw_fx.get("enabled", False)),
+            "channelId": _awc_str(raw_fx.get("channelId"), 64),
+            "minDrainMl": _awc_num(raw_fx.get("minDrainMl"), 150, 10, 5000),
+            "maxOwedMl": _awc_num(raw_fx.get("maxOwedMl"), 2000, 100, 20000),
+            "state": {
+                "owedMl": _awc_num(raw_fx_state.get("owedMl"), 0, 0, 100000),
+                "droppedMl": _awc_num(raw_fx_state.get("droppedMl"), 0, 0, 1e9),
+                "totalDrainedL": _awc_num(raw_fx_state.get("totalDrainedL"), 0, 0, 1e9),
+                "lastDrainAt": _awc_str(raw_fx_state.get("lastDrainAt"), 40),
+                "lastDrainMl": _awc_num(raw_fx_state.get("lastDrainMl"), 0, 0, 100000),
+                "drainStartedAt": _awc_str(raw_fx_state.get("drainStartedAt"), 40),
+                "drainEndsAt": _awc_str(raw_fx_state.get("drainEndsAt"), 40),
+                "drainTargetMl": _awc_num(raw_fx_state.get("drainTargetMl"), 0, 0, 100000),
+                "lastBlockedReason": _awc_str(raw_fx_state.get("lastBlockedReason"), 120),
+            },
+        },
+    }
 
     raw_block = config.get("consumables")
     raw_block = raw_block if isinstance(raw_block, dict) else {}
@@ -6383,6 +6408,9 @@ async def _async_awc_start_locked(
     if hass.data.get(DOMAIN, {}).get(AWC_CALRUN_UNSUB) is not None:
         return False, [{"code": "busy", "severity": "block",
                         "message": "A calibration run is in progress"}]
+    if hass.data.get(DOMAIN, {}).get(NPS_DRAIN_UNSUB) is not None:
+        return False, [{"code": "busy", "severity": "block",
+                        "message": "An NPS feed-exchange drain is in progress"}]
     method = method or acfg.get("schedule", {}).get("method", _AWC_SAFE_METHOD)
     if method not in AWC_LIVE_METHODS:
         return False, [{"code": "unsupported_method", "severity": "block",
@@ -7468,6 +7496,11 @@ async def _async_awc_schedule_tick(
         return  # busy or latched — never auto-start over a fault
 
     if not acfg.get("enabled"):
+        return
+    # NPS feed-exchange (Stage B): the owed matched drain runs from the same
+    # idle path — a started drain claims this tick (the busy gate keeps a
+    # change from starting over it, and vice versa).
+    if await _async_nps_matched_drain_maybe(hass, entry, now_local):
         return
     sched = acfg.get("schedule", {})
     if not sched.get("enabled"):
@@ -10242,6 +10275,220 @@ async def _async_awc_credit_chaser_fill(
         await _async_save_config(hass, entry, config)
 
 
+# --- NPS feed-exchange (Stage B): matched drain for live-food dosing ------------------------
+
+async def _async_nps_feed_exchange_accrue(
+    hass: HomeAssistant, entry: OpenReefConfigEntry,
+    channel_id: str, dose_ml: float, chaser_ml: float,
+) -> None:
+    """Bank a matched drain for a live-food dose: the dose AND its line-flush
+    chaser both entered the tank, so the feed-exchange owes that whole volume
+    back out (net-zero level — the ATO never fights the feed). Also credits the
+    dose into the AWC fill ledger as external water in (the chaser was already
+    credited by _async_awc_credit_chaser_fill), keeping the net-imbalance ledger
+    honest. Locked fetch-fresh, the chaser-credit pattern."""
+    if dose_ml <= 0 and chaser_ml <= 0:
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        fx = (config.get("nps") or {}).get("feedExchange") or {}
+        if not fx.get("enabled") or str(fx.get("channelId") or "") != str(channel_id):
+            return
+        state = fx.setdefault("state", {})
+        owed, dropped = nps_engine.feed_exchange_owed(
+            state.get("owedMl"), dose_ml, chaser_ml, fx.get("maxOwedMl"))
+        state["owedMl"] = owed
+        if dropped > 0:
+            state["droppedMl"] = round(
+                _awc_num(state.get("droppedMl"), 0, 0, 1e9) + dropped, 1)
+            _append_activity(
+                config,
+                f"Feed-exchange owed cap reached — {dropped:.0f} ml will NOT be auto-drained "
+                "(clear the drain blocker or raise the cap, then trim manually)", "warning")
+        awc = _awc_cfg(config)
+        if awc and dose_ml > 0:
+            ledger = awc.setdefault("ledger", {})
+            ledger["cumulativeFilledL"] = round(
+                _awc_num(ledger.get("cumulativeFilledL"), 0, 0, 1e9) + dose_ml / 1000.0, 3)
+        _append_activity(
+            config,
+            f"Feed-exchange: banked {dose_ml + chaser_ml:.0f} ml to drain "
+            f"({dose_ml:.0f} ml brine + {chaser_ml:.0f} ml chaser) — owed {owed:.0f} ml",
+            "control")
+        await _async_save_config(hass, entry, config)
+
+
+async def _async_nps_drain_finish(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    drained_ml: float, seconds: float, note: str = "",
+) -> None:
+    """Stop the drain pump and settle the books: waste gains, the owed ledger
+    shrinks, the AWC drained ledger grows. Called from the stop timer (full
+    planned volume) and from orphan recovery (elapsed-time partial). Caller
+    holds the AWC lock."""
+    await _async_awc_stop_pumps(hass, config, ("drain",), None)
+    acfg = _awc_cfg(config)
+    _awc_bump_odometer(acfg, "drain", seconds=seconds)
+    drained_ml = max(0.0, float(drained_ml or 0))
+    waste = acfg.setdefault("reservoirs", {}).setdefault("waste", {})
+    waste["filledMl"] = round(_awc_num(waste.get("filledMl"), 0, 0, 1e9) + drained_ml, 1)
+    ledger = acfg.setdefault("ledger", {})
+    ledger["cumulativeDrainedL"] = round(
+        _awc_num(ledger.get("cumulativeDrainedL"), 0, 0, 1e9) + drained_ml / 1000.0, 3)
+    fx = (config.get("nps") or {}).get("feedExchange") or {}
+    st = fx.setdefault("state", {})
+    st["owedMl"] = round(max(0.0, _awc_num(st.get("owedMl"), 0, 0, 1e9) - drained_ml), 1)
+    st["totalDrainedL"] = round(
+        _awc_num(st.get("totalDrainedL"), 0, 0, 1e9) + drained_ml / 1000.0, 3)
+    st["lastDrainAt"] = datetime.now(timezone.utc).isoformat()
+    st["lastDrainMl"] = round(drained_ml, 1)
+    st["drainStartedAt"] = ""
+    st["drainEndsAt"] = ""
+    st["drainTargetMl"] = 0
+    _append_activity(
+        config,
+        f"Feed-exchange drain finished: {drained_ml:.0f} ml matched back out{note}",
+        "control")
+    await _async_save_config(hass, entry, config)
+
+
+async def _async_nps_matched_drain_maybe(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime,
+) -> bool:
+    """Run the owed feed-exchange drain when it's worth it and safe (called from
+    the minutely AWC tick's idle path). A volume-primary timed run on the AWC
+    drain pump — the calibration-run pattern, with full accounting. Returns True
+    when a drain just started, so the tick doesn't also start a change."""
+    peek_fx = (_config_from_entry(entry).get("nps") or {}).get("feedExchange") or {}
+    if not peek_fx.get("enabled"):
+        return False
+    peek_state = peek_fx.get("state") or {}
+    if _awc_num(peek_state.get("owedMl"), 0, 0, 1e9) \
+            < _awc_num(peek_fx.get("minDrainMl"), 150, 10, 5000):
+        return False
+    store = hass.data.setdefault(DOMAIN, {})
+    if store.get(AWC_CALRUN_UNSUB) is not None or store.get(NPS_DRAIN_UNSUB) is not None:
+        return False
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        acfg = _awc_cfg(config)
+        fx = (config.get("nps") or {}).get("feedExchange") or {}
+        fx_state = fx.setdefault("state", {})
+        if acfg.get("state", {}).get("status") != "idle":
+            return False
+
+        async def _note_blocked(reason_code: str, message: str) -> None:
+            # Activity once per distinct blocker, not once per minute.
+            if fx_state.get("lastBlockedReason") != reason_code:
+                fx_state["lastBlockedReason"] = reason_code
+                _append_activity(config, f"Feed-exchange drain waiting: {message}", "warning")
+                await _async_save_config(hass, entry, config)
+
+        live = _awc_live_state(hass, config)
+        # fill_role="drain" narrows the pump checks to the drain alone — a
+        # matched drain needs no fill source. Hazard/fail-closed/quiet-hours
+        # guards apply exactly as they do to a scheduled change.
+        reasons = awc_engine.start_guard_reasons(
+            _awc_cfg_eff(config), live,
+            now_local.hour * 60 + now_local.minute, False, fill_role="drain")
+        if reasons:
+            await _note_blocked(reasons[0]["code"], reasons[0]["message"])
+            return False
+        waste = (acfg.get("reservoirs") or {}).get("waste") or {}
+        headroom_ml = None
+        cap_l = _awc_num(waste.get("capacityLitres"), 0, 0, 100000)
+        if cap_l > 0:
+            headroom_ml = max(
+                0.0, cap_l * 1000.0 - _awc_num(waste.get("filledMl"), 0, 0, 1e9))
+        batch_ml = nps_engine.feed_exchange_batch(
+            fx_state.get("owedMl"), fx.get("minDrainMl"), fx.get("maxOwedMl"), headroom_ml)
+        if batch_ml <= 0:
+            if headroom_ml is not None and headroom_ml < _awc_num(
+                    fx.get("minDrainMl"), 150, 10, 5000):
+                await _note_blocked(
+                    "waste_headroom", "the waste reservoir is nearly full")
+            return False
+        pump = (acfg.get("pumps") or {}).get("drain") or {}
+        ml_per_s = _awc_num(pump.get("mlPerS"), 0, 0, 1000)
+        factor = _awc_num(pump.get("exchangeFactor"), 1.0, 0.1, 10)
+        spin_up = _awc_num(pump.get("spinUpMl"), 0, -50, 50)
+        runtime_s = awc_engine.runtime_for_volume_s(
+            batch_ml / 1000.0, ml_per_s, factor, spin_up)
+        if runtime_s <= 0:
+            await _note_blocked("no_calibration", "the drain pump is not calibrated")
+            return False
+        # Never exceed the safety max-runtime (the firmware watchdog would
+        # fail-lock the pump): shrink the batch to fit; the rest stays owed.
+        max_run_s = _awc_num((acfg.get("safety") or {}).get("maxRuntimeSeconds"), 0, 0, 36000)
+        if max_run_s > 0 and runtime_s > max_run_s:
+            batch_ml = max(0.0, awc_engine.volume_for_runtime_l(
+                max_run_s, ml_per_s, factor, spin_up) * 1000.0)
+            runtime_s = max_run_s
+            if batch_ml < _awc_num(fx.get("minDrainMl"), 150, 10, 5000):
+                return False
+        try:
+            await _async_awc_set_pump(hass, config, "drain", True, None)
+        except Exception:  # noqa: BLE001 — nothing started; try again next tick
+            await _note_blocked("pump_start_failed", "the drain pump did not switch on")
+            return False
+        started_at = datetime.now(timezone.utc)
+        ends_at = started_at + timedelta(seconds=runtime_s)
+
+        async def _stop(_now: datetime) -> None:
+            latest = _first_entry(hass)
+            async with _awc_lock(hass):
+                # Pop inside the lock (the calibration-run race lesson).
+                hass.data.setdefault(DOMAIN, {}).pop(NPS_DRAIN_UNSUB, None)
+                if latest is None:
+                    return
+                cfg = _config_from_entry(latest)
+                await _async_nps_drain_finish(hass, latest, cfg, batch_ml, runtime_s)
+
+        store[NPS_DRAIN_UNSUB] = async_track_point_in_time(hass, _stop, ends_at)
+        # Persist the in-flight run: the stop timer is in-memory only, so these
+        # stamps are the sole trace a restart has for stopping the orphan.
+        fx_state["drainStartedAt"] = started_at.isoformat()
+        fx_state["drainEndsAt"] = ends_at.isoformat()
+        fx_state["drainTargetMl"] = round(batch_ml, 1)
+        fx_state["lastBlockedReason"] = ""
+        _append_activity(
+            config,
+            f"Feed-exchange drain started: {batch_ml:.0f} ml (~{runtime_s:.0f} s) to match "
+            "live-food dosing", "control")
+        await _async_save_config(hass, entry, config)
+        return True
+
+
+async def _async_nps_recover_orphaned_drain(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """A matched drain's stop timer is in-memory only: if HA restarted mid-run,
+    the drain pump is still physically running with nothing armed to stop it.
+    The persisted drainStartedAt/TargetMl stamps are the trace — stop it and
+    credit the elapsed-time partial volume (the interrupted-leg pattern)."""
+    peek = (_config_from_entry(entry).get("nps") or {}).get("feedExchange") or {}
+    if not (peek.get("state") or {}).get("drainStartedAt"):
+        return
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        fx = (config.get("nps") or {}).get("feedExchange") or {}
+        st = fx.get("state") or {}
+        started = _parse_datetime(st.get("drainStartedAt"))
+        target_ml = _awc_num(st.get("drainTargetMl"), 0, 0, 100000)
+        pump = (_awc_cfg(config).get("pumps") or {}).get("drain") or {}
+        elapsed_s = 0.0
+        if started is not None:
+            elapsed_s = max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+        moved_ml = min(target_ml, max(0.0, awc_engine.volume_for_runtime_l(
+            elapsed_s,
+            _awc_num(pump.get("mlPerS"), 0, 0, 1000),
+            _awc_num(pump.get("exchangeFactor"), 1.0, 0.1, 10),
+            _awc_num(pump.get("spinUpMl"), 0, -50, 50)) * 1000.0))
+        await _async_nps_drain_finish(
+            hass, entry, config, moved_ml, elapsed_s,
+            note=" (interrupted by a restart — elapsed-time credit)")
+
+
 async def _async_dosing_fire_queued(
     hass: HomeAssistant, entry: OpenReefConfigEntry, queued_peek: dict[str, Any]
 ) -> None:
@@ -10424,6 +10671,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     # AWC models for it, unless the firmware says it skipped (the AWC
                     # owned the fresh pump at the time).
                     chaser_s = _awc_num(channel.get("chaserSeconds"), 0, 0, 120)
+                    chaser_credit_ml = 0.0
                     if chaser_s > 0 and dosing_engine.is_brushed(channel):
                         skipped_ent = entities.get("chaserSkippedSensor")
                         skipped_state = hass.states.get(skipped_ent) if skipped_ent else None
@@ -10432,8 +10680,15 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                         flow = _awc_num(channel.get("calibration", {}).get("mlPerS"), 0, 0, 200)
                         doses = max(1, round(delta / per_dose)) if per_dose > 0 else 1
                         if not skipped and flow > 0:
+                            chaser_credit_ml = chaser_s * flow * doses
                             await _async_awc_credit_chaser_fill(
-                                hass, entry, chaser_s * flow * doses)
+                                hass, entry, chaser_credit_ml)
+                    # Feed-exchange (Stage B): the dose AND its chaser rinse are
+                    # water IN — bank both as owed matched drain. The chaser is
+                    # the bigger number at brine scale; skipping it would leave
+                    # the tank creeping up every feeding day.
+                    await _async_nps_feed_exchange_accrue(
+                        hass, entry, cid, delta, chaser_credit_ml)
 
         # --- respread staleness (R17): a schedule edit after an accepted respread
         # invalidates the catch-up override — the safety edit wins immediately.
@@ -11147,12 +11402,40 @@ async def websocket_nps_summary(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
+    now_utc = datetime.now(timezone.utc)
     products = (config.get("consumables") or {}).get("products") or {}
+    channels = _dosing_channels(config)
+    fx = (config.get("nps") or {}).get("feedExchange") or {}
+    fx_channel = channels.get(str(fx.get("channelId") or ""))
+    freshness = prime = None
+    if isinstance(fx_channel, dict):
+        reservoir = fx_channel.get("reservoir") or {}
+        freshness = dosing_engine.freshness_state(reservoir, now_utc)
+        prime = nps_engine.hatch_prime_state(reservoir.get("mixedAt"), now_utc)
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
-        "shelf": nps_engine.shelf_summary(products, datetime.now(timezone.utc)),
+        "shelf": nps_engine.shelf_summary(products, now_utc),
         "library": [dict(item) for item in nps_engine.PRODUCT_LIBRARY],
         "categories": {key: nps_engine.category_label(key) for key in CONSUMABLE_CATEGORIES},
+        # Feed-exchange (Stage B): the hatchery card's whole state — backend
+        # computed (lockstep rule), including the brine freshness clock and the
+        # 24 h nutritional-prime countdown of the linked live-food channel.
+        "feedExchange": {
+            "enabled": bool(fx.get("enabled")),
+            "channelId": str(fx.get("channelId") or ""),
+            "channelName": (fx_channel or {}).get("name") if isinstance(fx_channel, dict) else None,
+            "minDrainMl": _awc_num(fx.get("minDrainMl"), 150, 10, 5000),
+            "maxOwedMl": _awc_num(fx.get("maxOwedMl"), 2000, 100, 20000),
+            "state": dict(fx.get("state") or {}),
+            "freshness": freshness,
+            "prime": prime,
+            "drainActive": hass.data.get(DOMAIN, {}).get(NPS_DRAIN_UNSUB) is not None,
+        },
+        "foodChannels": [
+            {"id": cid, "name": ch.get("name") or cid, "chemical": ch.get("chemical")}
+            for cid, ch in sorted(channels.items())
+            if isinstance(ch, dict) and ch.get("chemical") in ("livefood", "food")
+        ],
     })
 
 
@@ -13507,6 +13790,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_arm_awc_ato_restore(hass, entry, _config_from_entry(entry))
     # Stop a calibration-run pump orphaned by a restart mid-run.
     await _async_awc_recover_orphaned_calrun(hass, entry)
+    # Stop a feed-exchange drain orphaned the same way (partial-volume credit).
+    await _async_nps_recover_orphaned_drain(hass, entry)
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
@@ -13547,6 +13832,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _awc_calrun = _store.pop(AWC_CALRUN_UNSUB, None)
     if _awc_calrun is not None:
         _awc_calrun()
+    # Same for a feed-exchange drain: cancel the timer, the persisted
+    # drainStartedAt stamp lets the next setup stop and credit the pump.
+    _nps_drain = _store.pop(NPS_DRAIN_UNSUB, None)
+    if _nps_drain is not None:
+        _nps_drain()
     _issue_refresh = _store.pop(ISSUE_REFRESH_UNSUB, None)
     if _issue_refresh is not None:
         _issue_refresh()

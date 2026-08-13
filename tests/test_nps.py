@@ -113,7 +113,8 @@ def test_shelf_summary_counts():
 # --------------------------------------------------------------------------- #
 def test_normalise_defaults():
     config = integration._normalise_core_config({})
-    assert config["nps"] == {"enabled": False}
+    assert config["nps"]["enabled"] is False
+    assert config["nps"]["feedExchange"]["enabled"] is False
     assert config["consumables"] == {"products": {}}
 
 
@@ -311,6 +312,205 @@ def test_reset_reservoir_bottle_is_reservoir_not_double_debited():
         hass, conn, {"id": 1, "channel_id": "phyto_pump"}))
     # Doses debit the bottle live in that mode — a refill must not also debit it.
     assert _saved_products(entry)["phyto"]["remainingMl"] == 800.0
+
+
+# --------------------------------------------------------------------------- #
+# Stage B — feed-exchange engine maths
+# --------------------------------------------------------------------------- #
+def test_feed_exchange_owed_includes_chaser():
+    # 30 ml brine + 200 ml line-flush chaser: BOTH entered the tank, both owed.
+    assert nps.feed_exchange_owed(0, 30, 200, 2000) == (230.0, 0.0)
+
+
+def test_feed_exchange_owed_cap_reports_dropped():
+    owed, dropped = nps.feed_exchange_owed(1900, 30, 200, 2000)
+    assert owed == 2000.0
+    assert dropped == 130.0
+
+
+def test_feed_exchange_batch_rules():
+    assert nps.feed_exchange_batch(100, 150, 2000) == 0.0        # below the minimum
+    assert nps.feed_exchange_batch(500, 150, 2000) == 500.0      # drain it all
+    assert nps.feed_exchange_batch(5000, 150, 2000) == 2000.0    # per-run cap
+    assert nps.feed_exchange_batch(500, 150, 2000, waste_headroom_ml=300) == 300.0
+    assert nps.feed_exchange_batch(500, 150, 2000, waste_headroom_ml=100) == 0.0
+
+
+def test_hatch_prime_state():
+    assert nps.hatch_prime_state(_iso(NOW - timedelta(hours=6)), NOW)["status"] == "prime"
+    fading = nps.hatch_prime_state(_iso(NOW - timedelta(hours=30)), NOW)
+    assert fading["status"] == "fading"
+    assert fading["primeLeftHours"] == 0.0
+    assert nps.hatch_prime_state("", NOW)["status"] == "unknown"
+
+
+def test_normalise_feed_exchange():
+    config = integration._normalise_core_config({})
+    fx = config["nps"]["feedExchange"]
+    assert fx["enabled"] is False
+    assert fx["minDrainMl"] == 150
+    assert fx["maxOwedMl"] == 2000
+    assert fx["state"]["owedMl"] == 0
+    clamped = integration._normalise_core_config({
+        "nps": {"feedExchange": {"minDrainMl": 5, "maxOwedMl": 999999,
+                                 "state": {"owedMl": -50}}},
+    })["nps"]["feedExchange"]
+    assert clamped["minDrainMl"] == 10
+    assert clamped["maxOwedMl"] == 20000
+    assert clamped["state"]["owedMl"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Stage B — orchestration against the fake HA
+# --------------------------------------------------------------------------- #
+def _fx_entry(owed=500.0, fx_over=None, awc_over=None):
+    awc = {
+        "enabled": True,
+        "pumps": {
+            "drain": {"switchEntity": "switch.drain", "mlPerS": 10.0,
+                      "exchangeFactor": 1.0, "spinUpMl": 0.0},
+            "fill": {"switchEntity": "switch.fill", "mlPerS": 10.0},
+        },
+        "reservoirs": {"fresh": {"capacityLitres": 25},
+                       "waste": {"capacityLitres": 25, "filledMl": 0}},
+        "safety": {"floodMissingAcknowledged": True},
+        "state": {"status": "idle"},
+    }
+    for key, value in (awc_over or {}).items():
+        if isinstance(value, dict) and isinstance(awc.get(key), dict):
+            awc[key].update(value)
+        else:
+            awc[key] = value
+    fx = {"enabled": True, "channelId": "brine", "minDrainMl": 150,
+          "maxOwedMl": 2000, "state": {"owedMl": owed}}
+    fx.update(fx_over or {})
+    cfg = {
+        "nps": {"enabled": True, "feedExchange": fx},
+        "automaticWaterChange": awc,
+        "consumables": {"products": {}},
+    }
+    return FakeEntry(options={CONF_SETTINGS: cfg})
+
+
+def _fx_state(entry):
+    return entry.options[CONF_SETTINGS]["nps"]["feedExchange"]["state"]
+
+
+def test_accrue_banks_dose_plus_chaser_and_credits_fill_ledger():
+    entry = _fx_entry(owed=0.0)
+    hass = FakeHass(entries=[entry])
+    run(integration._async_nps_feed_exchange_accrue(hass, entry, "brine", 30.0, 200.0))
+    assert _fx_state(entry)["owedMl"] == 230.0
+    ledger = entry.options[CONF_SETTINGS]["automaticWaterChange"]["ledger"]
+    assert abs(ledger["cumulativeFilledL"] - 0.03) < 1e-9   # the dose; chaser credits separately
+
+
+def test_accrue_ignores_disabled_and_other_channels():
+    entry = _fx_entry(owed=0.0)
+    hass = FakeHass(entries=[entry])
+    run(integration._async_nps_feed_exchange_accrue(hass, entry, "kalk_pump", 30.0, 0.0))
+    assert _fx_state(entry)["owedMl"] == 0.0
+    entry2 = _fx_entry(owed=0.0, fx_over={"enabled": False})
+    hass2 = FakeHass(entries=[entry2])
+    run(integration._async_nps_feed_exchange_accrue(hass2, entry2, "brine", 30.0, 0.0))
+    assert _fx_state(entry2)["owedMl"] == 0.0
+
+
+def test_accrue_cap_records_dropped():
+    entry = _fx_entry(owed=1900.0)
+    hass = FakeHass(entries=[entry])
+    run(integration._async_nps_feed_exchange_accrue(hass, entry, "brine", 30.0, 200.0))
+    state = _fx_state(entry)
+    assert state["owedMl"] == 2000.0
+    assert state["droppedMl"] == 130.0
+
+
+def test_matched_drain_full_cycle():
+    from _fake_ha import install_scheduler
+    entry = _fx_entry(owed=500.0)
+    hass = FakeHass(states={"switch.drain": "off", "switch.fill": "off"}, entries=[entry])
+    scheduler = install_scheduler(integration)
+    now_local = datetime(2026, 8, 13, 14, 0, 0)
+
+    async def scenario():
+        started = await integration._async_nps_matched_drain_maybe(hass, entry, now_local)
+        assert started is True
+        assert hass.states.get("switch.drain").state == "on"
+        state = _fx_state(entry)
+        assert state["drainTargetMl"] == 500.0
+        assert state["drainStartedAt"]
+        # Fire the stop timer: books settle, pump stops.
+        assert await scheduler.fire_all() == 1
+        assert hass.states.get("switch.drain").state == "off"
+        state = _fx_state(entry)
+        assert state["owedMl"] == 0.0
+        assert state["lastDrainMl"] == 500.0
+        assert state["drainStartedAt"] == ""
+        awc = entry.options[CONF_SETTINGS]["automaticWaterChange"]
+        assert awc["reservoirs"]["waste"]["filledMl"] == 500.0
+        assert abs(awc["ledger"]["cumulativeDrainedL"] - 0.5) < 1e-9
+
+    run(scenario())
+
+
+def test_matched_drain_blocked_by_leak_records_reason():
+    entry = _fx_entry(owed=500.0, awc_over={"safety": {"leakEntity": "binary_sensor.leak"}})
+    hass = FakeHass(states={"switch.drain": "off", "binary_sensor.leak": "on"}, entries=[entry])
+    started = run(integration._async_nps_matched_drain_maybe(
+        hass, entry, datetime(2026, 8, 13, 14, 0, 0)))
+    assert started is False
+    assert hass.states.get("switch.drain").state == "off"
+    assert _fx_state(entry)["lastBlockedReason"] == "leak"
+
+
+def test_matched_drain_waits_below_minimum_and_when_busy():
+    entry = _fx_entry(owed=100.0)   # below the 150 ml minimum
+    hass = FakeHass(states={"switch.drain": "off"}, entries=[entry])
+    assert run(integration._async_nps_matched_drain_maybe(
+        hass, entry, datetime(2026, 8, 13, 14, 0, 0))) is False
+    busy = _fx_entry(owed=500.0, awc_over={"state": {"status": "draining"}})
+    hass2 = FakeHass(states={"switch.drain": "off"}, entries=[busy])
+    assert run(integration._async_nps_matched_drain_maybe(
+        hass2, busy, datetime(2026, 8, 13, 14, 0, 0))) is False
+    assert hass2.states.get("switch.drain").state == "off"
+
+
+def test_orphaned_drain_recovery_credits_elapsed_partial():
+    entry = _fx_entry(owed=500.0)
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+    _fx_state(entry).update({
+        "drainStartedAt": started_at.isoformat(),
+        "drainEndsAt": (started_at + timedelta(seconds=50)).isoformat(),
+        "drainTargetMl": 500.0,
+    })
+    hass = FakeHass(states={"switch.drain": "on"}, entries=[entry])
+    run(integration._async_nps_recover_orphaned_drain(hass, entry))
+    assert hass.states.get("switch.drain").state == "off"
+    state = _fx_state(entry)
+    # ~30 s at 10 ml/s ≈ 300 ml credited; the rest stays owed.
+    assert abs(state["lastDrainMl"] - 300.0) < 5.0
+    assert abs(state["owedMl"] - 200.0) < 5.0
+    assert state["drainStartedAt"] == ""
+    waste = entry.options[CONF_SETTINGS]["automaticWaterChange"]["reservoirs"]["waste"]
+    assert abs(waste["filledMl"] - 300.0) < 5.0
+
+
+def test_awc_start_blocked_while_matched_drain_runs():
+    from _fake_ha import install_scheduler
+    entry = _fx_entry(owed=500.0)
+    hass = FakeHass(states={"switch.drain": "off", "switch.fill": "off"}, entries=[entry])
+    scheduler = install_scheduler(integration)
+
+    async def scenario():
+        assert await integration._async_nps_matched_drain_maybe(
+            hass, entry, datetime(2026, 8, 13, 14, 0, 0)) is True
+        started, reasons = await integration._async_awc_start(
+            hass, entry, 2.0, "batch_sequential", True, None)
+        assert started is False
+        assert any(r["code"] == "busy" for r in reasons)
+        await scheduler.fire_all()   # let the drain finish cleanly
+
+    run(scenario())
 
 
 if __name__ == "__main__":

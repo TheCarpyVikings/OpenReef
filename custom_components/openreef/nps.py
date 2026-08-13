@@ -29,6 +29,15 @@ RUNWAY_WINDOW_DAYS = 14        # usage averaging window for days-left forecasts
 LOW_PERCENT_DEFAULT = 10.0     # lowThresholdMl 0 = auto ⇒ this % of the bottle
 AGING_FRACTION = 0.25          # final quarter of shelf life ⇒ "aging" (dosing parity)
 
+# Feed-exchange (Stage B): every live-food dose PLUS its line-flush chaser is
+# water IN — the matched drain owes both back out so the tank level (and the
+# ATO) never notices feeding. Research: nauplii lose 30–50% of caloric value
+# between 24 h and 48 h post-hatch — the prime window below drives the
+# hatchery card's countdown.
+FEED_EXCHANGE_MIN_DRAIN_DEFAULT = 150.0   # ml — not worth spinning a pump below this
+FEED_EXCHANGE_MAX_OWED_DEFAULT = 2000.0   # ml — a blocked drain must not bank a flood
+BRINE_PRIME_HOURS = 24.0
+
 # Seed library from the 2026-08 NPS research sweep (docs/nps-system-brainstorm.md
 # §3): real products with handling metadata. The panel offers these as one-tap
 # presets; everything stays user-editable, and "custom" is always available.
@@ -162,6 +171,57 @@ def consumable_state(product: dict[str, Any], now: datetime) -> dict[str, Any]:
         "refrigerated": bool(product.get("refrigerated")),
         "categoryLabel": category_label(product.get("category")),
     }
+
+
+def feed_exchange_owed(owed_ml: float, dose_ml: float, chaser_ml: float,
+                       max_owed_ml: float) -> tuple[float, float]:
+    """New owed-drain total after a brine dose. The dose AND its line-flush
+    chaser both entered the tank, so both must drain back out. Clamped at
+    ``max_owed_ml``: a drain blocked for days must not bank an unbounded
+    catch-up drain (the AWC slot-coalescing lesson) — overflow is returned as
+    ``dropped`` for the caller to report, never kept silently.
+
+    Returns ``(owed_ml, dropped_ml)``."""
+    add = max(0.0, _f(dose_ml)) + max(0.0, _f(chaser_ml))
+    cap = _f(max_owed_ml)
+    if cap <= 0:
+        cap = FEED_EXCHANGE_MAX_OWED_DEFAULT
+    new = max(0.0, _f(owed_ml)) + add
+    return (round(min(new, cap), 1), round(max(0.0, new - cap), 1))
+
+
+def feed_exchange_batch(owed_ml: float, min_drain_ml: float, max_batch_ml: float,
+                        waste_headroom_ml: float | None = None) -> float:
+    """The drain volume worth running now: everything owed, once it clears the
+    minimum worth energising a pump for, clamped to the per-run cap and the
+    waste reservoir's dead-reckoned headroom. 0 = keep waiting."""
+    owed = max(0.0, _f(owed_ml))
+    min_drain = _f(min_drain_ml)
+    if min_drain <= 0:
+        min_drain = FEED_EXCHANGE_MIN_DRAIN_DEFAULT
+    batch = owed
+    if _f(max_batch_ml) > 0:
+        batch = min(batch, _f(max_batch_ml))
+    if waste_headroom_ml is not None:
+        batch = min(batch, max(0.0, _f(waste_headroom_ml)))
+    return round(batch, 1) if batch >= min_drain else 0.0
+
+
+def hatch_prime_state(mixed_at_iso: Any, now: datetime) -> dict[str, Any]:
+    """Where this hatch sits in its nutritional window: ``prime`` (first 24 h,
+    yolk reserves intact), ``fading`` (still alive, calories dropping), or
+    ``unknown`` (no 'Hatched & loaded' stamp yet)."""
+    mixed = _parse_iso(mixed_at_iso)
+    if mixed is None:
+        return {"status": "unknown", "ageHours": None, "primeLeftHours": None}
+    try:
+        age_h = max(0.0, (now - mixed).total_seconds() / 3600.0)
+    except TypeError:
+        return {"status": "unknown", "ageHours": None, "primeLeftHours": None}
+    left_h = BRINE_PRIME_HOURS - age_h
+    return {"status": "prime" if left_h > 0 else "fading",
+            "ageHours": round(age_h, 1),
+            "primeLeftHours": round(max(0.0, left_h), 1)}
 
 
 def shelf_summary(products: dict[str, Any], now: datetime) -> dict[str, Any]:

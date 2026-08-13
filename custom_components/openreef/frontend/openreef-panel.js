@@ -1683,6 +1683,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-product-logdose") this._npsLogDose(id);
       if (action === "nps-product-delete") this._npsDeleteProduct(id);
       if (action === "nps-refresh") this._npsLoadSummary(true);
+      if (action === "nps-hatch-loaded") this._npsHatchLoaded();
+      if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
       if (action === "doser-mark-refreshed") this._doserCall(
         { type: "openreef/dosing_mark_refreshed", channel_id: id },
         "Freshness clock restarted — dosing re-enables on the next sync.",
@@ -2258,6 +2260,11 @@ class OpenReefPanel extends HTMLElement {
         const npsCfg = this._config.nps = this._config.nps || {};
         npsCfg[field] = value;
       }
+      if (scope === "nps-exchange") {
+        const npsCfg = this._config.nps = this._config.nps || {};
+        npsCfg.feedExchange = npsCfg.feedExchange || {};
+        npsCfg.feedExchange[field] = value;
+      }
       if (scope === "consumable") {
         const block = this._config.consumables = this._config.consumables || {};
         const products = block.products = block.products || {};
@@ -2266,7 +2273,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -9485,6 +9492,38 @@ class OpenReefPanel extends HTMLElement {
       .filter((id) => ["food", "livefood"].includes(channels[id] && channels[id].chemical));
   }
 
+  _npsHatchLoaded() {
+    const cid = this._config?.nps?.feedExchange?.channelId;
+    if (!cid) return;
+    this._npsCall({ type: "openreef/dosing_mark_refreshed", channel_id: cid },
+      "Hatch loaded — the freshness and prime clocks restarted.");
+  }
+
+  _npsSeedHatchReminders() {
+    // Custom (non-builtin) maintenance tasks: evaluation, snooze, notify and
+    // history all come free from the maintenance engine.
+    const m = this._config.maintenance = this._config.maintenance || {};
+    const tasks = m.tasks = m.tasks || {};
+    if (!tasks.brine_hatch_start) {
+      tasks.brine_hatch_start = {
+        label: "Start brine shrimp hatch", cadenceDays: 1, criticalAfterDays: 1,
+        enabled: true, notify: true,
+        notes: "Set cysts hatching ~24 h before the next feed window (26–30 °C, ~25 ppt, strong aeration).",
+      };
+    }
+    if (!tasks.brine_hatch_harvest) {
+      tasks.brine_hatch_harvest = {
+        label: "Harvest, rinse & load brine", cadenceDays: 1, criticalAfterDays: 1,
+        enabled: true, notify: true,
+        notes: "Harvest nauplii, rinse (never dose hatch water), resuspend in tank-salinity saltwater, load the reservoir, then tap 'Hatched & loaded' on the NPS tab.",
+      };
+    }
+    this._setDirty(true);
+    this._nps.message = "Hatchery reminders added to Maintenance — save to keep them.";
+    this._recordActivity("Added brine hatchery reminders");
+    this._render();
+  }
+
   _npsProductCard(pid, product, state) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
@@ -9651,6 +9690,57 @@ class OpenReefPanel extends HTMLElement {
           : `<p class="hint">${st.loading ? "Loading the shelf…" : "Track every bottle you dose — phyto, foods, bacteria, 2-part. Add one and log doses; the shelf forecasts how many days are left."}</p>`}
       </article>`;
 
+    // --- Hatchery & brine feed-exchange (Stage B) --------------------------
+    const fxCfg = (this._config && this._config.nps && this._config.nps.feedExchange) || {};
+    const fxSum = (st.summary && st.summary.feedExchange) || {};
+    const fxState = fxSum.state || {};
+    const foodChannelOpts = [`<option value="">— pick a live-food channel —</option>`]
+      .concat(((st.summary && st.summary.foodChannels) || []).map((c) =>
+        `<option value="${this._escape(c.id)}" ${fxCfg.channelId === c.id ? "selected" : ""}>${this._escape(c.name)} (${this._escape(this._doserChemicalLabel(c.chemical))})</option>`))
+      .join("");
+    const prime = fxSum.prime || {};
+    const fresh = fxSum.freshness || {};
+    const primeLine = prime.status === "prime"
+      ? `🦐 Hatch is in its nutritional prime — ~${this._escape(String(prime.primeLeftHours))} h left (nauplii lose 30–50% of their calories by 48 h).`
+      : prime.status === "fading"
+        ? `🦐 Hatch is ${this._escape(String(prime.ageHours))} h old — past the 24 h prime window. Feed it out or hatch fresh.`
+        : `🦐 No hatch loaded yet — tap "Hatched &amp; loaded" once the reservoir is filled.`;
+    const freshLine = fresh.status === "stale"
+      ? `<span style="color:var(--error-color,#e5484d)">Brine is past its shelf life — dosing is blocked until you refresh.</span>`
+      : fresh.status === "aging"
+        ? `<span style="color:var(--warning-color,#f5a524)">Brine is aging (~${this._escape(String(fresh.hoursLeft))} h left).</span>`
+        : fresh.status === "fresh" ? "Brine is fresh." : "";
+    const owedMl = Number(fxState.owedMl) || 0;
+    const fxBits = [];
+    if (fxSum.drainActive) fxBits.push("💧 Drain running now");
+    fxBits.push(`Owed to drain: ${Math.round(owedMl)} ml`);
+    if (fxState.lastDrainAt) fxBits.push(`Last drain: ${Math.round(Number(fxState.lastDrainMl) || 0)} ml`);
+    if (Number(fxState.totalDrainedL) > 0) fxBits.push(`${Number(fxState.totalDrainedL).toFixed(1)} L matched out all-time`);
+    const fxBlocked = fxState.lastBlockedReason && !fxSum.drainActive
+      && owedMl >= (Number(fxCfg.minDrainMl) || 150)
+      ? `<p class="hint" style="color:var(--warning-color,#f5a524)">Drain waiting: ${this._escape(String(fxState.lastBlockedReason).replace(/_/g, " "))}</p>`
+      : "";
+    const hatcheryPanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Hatchery &amp; brine feed-exchange</p>
+        <p class="hint">Every brine dose <strong>and its line-flush chaser</strong> banks a matched drain — the AWC drain pump takes the same volume back out when the system is idle. The tank level never creeps, the ATO never fights the feed, and every feeding exports a little old water.</p>
+        <div class="mini-grid">
+          <label><input type="checkbox" data-scope="nps-exchange" data-field="enabled" ${fxCfg.enabled ? "checked" : ""}> Matched drain on</label>
+          <label>Live-food channel<select data-scope="nps-exchange" data-field="channelId">${foodChannelOpts}</select></label>
+          <label>Min drain batch (ml)<input type="number" min="10" max="5000" data-scope="nps-exchange" data-field="minDrainMl" value="${this._escape(String(fxCfg.minDrainMl ?? 150))}"></label>
+          <label>Owed cap (ml)<input type="number" min="100" max="20000" data-scope="nps-exchange" data-field="maxOwedMl" value="${this._escape(String(fxCfg.maxOwedMl ?? 2000))}"></label>
+        </div>
+        ${fxCfg.enabled ? `
+          <small>${fxBits.join(" · ")}</small>
+          ${fxBlocked}
+          <small>${primeLine}${freshLine ? ` · ${freshLine}` : ""}</small>
+          <div class="button-row">
+            ${fxCfg.channelId ? `<button class="secondary compact-button" data-action="nps-hatch-loaded">Hatched &amp; loaded</button>` : ""}
+            <button class="secondary compact-button" data-action="nps-add-hatch-reminders">Add hatchery reminders</button>
+          </div>
+        ` : `<p class="hint">Needs the AWC drain pump calibrated and a live-food dosing channel. Turn it on and the system handles the matching.</p>`}
+      </article>`;
+
     // --- Water exchange (canonical AWC schedule, edit-in-place) ------------
     const sched = (this._config && this._config.automaticWaterChange && this._config.automaticWaterChange.schedule) || {};
     const waterPanel = `
@@ -9673,7 +9763,7 @@ class OpenReefPanel extends HTMLElement {
         <p class="hint">This edits the same canonical AWC schedule the Water Change tab owns — one source of truth, saved with the Save bar. The nutrient-budget advisor that suggests this number lands in a later stage.</p>
       </article>`;
 
-    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${shelfPanel}${waterPanel}</section>`;
+    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${hatcheryPanel}${shelfPanel}${waterPanel}</section>`;
   }
 
   _tabs() {

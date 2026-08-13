@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.40"
+INTEGRATION_VERSION = "0.7.41"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1368,10 +1368,20 @@ DEFAULT_CORE_CONFIG = {
             "syncIssues": True,
         },
     },
-    # Automated NPS system — gated command-center tab. Stage A carries only the
-    # gate; feed plans/brine exchange/nutrient budget arrive in later stages.
+    # Automated NPS system — gated command-center tab. Stage B: the brine
+    # feed-exchange — every live-food dose (plus its line-flush chaser) banks an
+    # owed matched drain, run by the AWC drain pump when the system is idle.
+    # Net-zero water level: what feeding adds, the drain removes, so the ATO
+    # never fights the feed and nutrient export rides along for free.
     "nps": {
         "enabled": False,
+        "feedExchange": {
+            "enabled": False,
+            "channelId": "",       # the live-food dosing channel being matched
+            "minDrainMl": 150,     # don't spin the drain pump for less
+            "maxOwedMl": 2000,     # blocked-drain banking cap (overflow reported, not kept)
+            "state": {},           # owed/drain runtime — persisted, normaliser owns the shape
+        },
     },
     # Consumables — the system-wide bottle tracker (foods, phyto, bacteria,
     # 2-part, trace...). Products are user-created like dosing channels, so the
