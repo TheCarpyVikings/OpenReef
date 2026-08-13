@@ -848,6 +848,54 @@ def test_normalise_species_whitelist():
     assert config["nps"]["species"] == ["chili", "dendronephthya"]
 
 
+# --------------------------------------------------------------------------- #
+# Hatchery (v1) — the incubation clock
+# --------------------------------------------------------------------------- #
+def test_hatch_state_lifecycle():
+    assert nps.hatch_state("", 24, NOW)["status"] == "none"
+    mid = nps.hatch_state(_iso(NOW - timedelta(hours=15)), 24, NOW)
+    assert mid["status"] == "incubating"
+    assert mid["hoursLeft"] == 9.0
+    assert mid["percent"] == 62
+    assert nps.hatch_state(_iso(NOW - timedelta(hours=25)), 24, NOW)["status"] == "ready"
+    # Past the grace window the yolk clock nags.
+    assert nps.hatch_state(_iso(NOW - timedelta(hours=40)), 24, NOW)["status"] == "overdue"
+
+
+def test_egg_type_hours_and_normaliser():
+    assert nps.egg_type_hours("decapsulated") == 16
+    assert nps.egg_type_hours("nonsense") == 24        # unknown → standard
+    config = integration._normalise_core_config({
+        "nps": {"hatchery": {"eggType": "made_up", "hatchHours": 200}},
+    })
+    hatchery = config["nps"]["hatchery"]
+    assert hatchery["eggType"] == "standard"
+    assert hatchery["hatchHours"] == 48                # clamped
+    assert hatchery["state"]["hatchStartedAt"] == ""
+
+
+def test_ws_hatch_start_and_cancel():
+    entry = _entry({})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    started = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["state"]["hatchStartedAt"]
+    assert started, "hatch start did not stamp the clock"
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 2}))
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["state"]["hatchStartedAt"] == ""
+    assert not conn.errors
+
+
+def test_ws_summary_carries_hatchery():
+    entry = _entry({})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    assert hatchery["state"]["status"] == "none"
+    assert len(hatchery["eggTypes"]) == 4
+
+
 def test_capture_trigger_registered_for_feed_exchange():
     config = integration._normalise_core_config({})
     assert config["capture"]["triggers"]["npsFeedExchange"] is False

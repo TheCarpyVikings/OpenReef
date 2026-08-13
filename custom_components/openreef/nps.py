@@ -207,6 +207,57 @@ def feed_exchange_batch(owed_ml: float, min_drain_ml: float, max_batch_ml: float
     return round(batch, 1) if batch >= min_drain else 0.0
 
 
+# Hatchery (v1): the incubation clock. Hatch times from the 2026-08 research
+# sweep — standard Great Salt Lake cysts run 18–24 h at 26–30 °C; decapsulated
+# cysts (shell dissolved) harvest ~16 h; cooler rooms stretch everything.
+# OVERDUE_GRACE: nauplii left in the hatcher keep burning yolk — past this the
+# card starts nagging (they lose 30–50% of calories by 48 h post-hatch).
+EGG_TYPES: tuple[dict[str, Any], ...] = (
+    {"id": "standard", "name": "Standard cysts (GSL)", "hours": 24,
+     "note": "The usual eBay/LFS cysts: 18–24 h at 26–30 °C, ~25 ppt, strong aeration."},
+    {"id": "decapsulated", "name": "Decapsulated cysts", "hours": 16,
+     "note": "Shell already dissolved — hatches faster (~16 h) and no shell separation."},
+    {"id": "premium", "name": "High-hatch premium cysts", "hours": 20,
+     "note": "90%+ hatch-rate grades tend to pop a little sooner (~20 h)."},
+    {"id": "cool_room", "name": "Cool room (below ~24 °C)", "hours": 36,
+     "note": "No heater on the hatcher? Budget up to 36 h — temperature rules the clock."},
+)
+_EGG_TYPES_BY_ID = {e["id"]: e for e in EGG_TYPES}
+HATCH_OVERDUE_GRACE_H = 12.0
+
+
+def egg_type_ids() -> tuple[str, ...]:
+    return tuple(e["id"] for e in EGG_TYPES)
+
+
+def egg_type_hours(egg_type: str) -> float:
+    return float(_EGG_TYPES_BY_ID.get(str(egg_type or ""), _EGG_TYPES_BY_ID["standard"])["hours"])
+
+
+def hatch_state(started_iso: Any, hatch_hours: float, now: datetime) -> dict[str, Any]:
+    """Where the hatch sits: ``none`` (nothing brewing), ``incubating`` (with an
+    honest percent and hours-to-go), ``ready`` (harvest window), or ``overdue``
+    (still fine, but the yolk clock is running — harvest soon)."""
+    started = _parse_iso(started_iso)
+    hours = _f(hatch_hours)
+    if hours <= 0:
+        hours = 24.0
+    if started is None:
+        return {"status": "none", "hoursElapsed": None, "hoursLeft": None, "percent": None}
+    try:
+        elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0)
+    except TypeError:
+        return {"status": "none", "hoursElapsed": None, "hoursLeft": None, "percent": None}
+    if elapsed_h < hours:
+        return {"status": "incubating",
+                "hoursElapsed": round(elapsed_h, 1),
+                "hoursLeft": round(hours - elapsed_h, 1),
+                "percent": round(min(99.0, elapsed_h / hours * 100.0), 0)}
+    status = "overdue" if elapsed_h > hours + HATCH_OVERDUE_GRACE_H else "ready"
+    return {"status": status, "hoursElapsed": round(elapsed_h, 1),
+            "hoursLeft": 0.0, "percent": 100.0}
+
+
 def hatch_prime_state(mixed_at_iso: Any, now: datetime) -> dict[str, Any]:
     """Where this hatch sits in its nutritional window: ``prime`` (first 24 h,
     yolk reserves intact), ``fading`` (still alive, calories dropping), or

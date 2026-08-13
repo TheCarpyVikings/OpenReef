@@ -373,4 +373,41 @@ test("the diagram carries the fresh reservoir with the AWC's real level", async 
   } finally { restore(); }
 });
 
+test("the hatchery card walks its lifecycle: empty, incubating, ready, overdue", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const withHatch = (state) => {
+      panel._nps.summary.hatchery = { eggType: "standard", hatchHours: 24, eggTypes: [], state };
+      return panel._npsTab();
+    };
+    let html = withHatch({ status: "none" });
+    assert(html.includes("Start hatch"), "empty hatchery missing its start button");
+    html = withHatch({ status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 });
+    assert(html.includes("9 h to go"), "incubating countdown missing");
+    assert(html.includes("Cancel hatch"), "incubating missing cancel");
+    assert(html.includes("nps-bub"), "incubating vessel has no bubbles");
+    html = withHatch({ status: "ready", hoursElapsed: 24.5, hoursLeft: 0, percent: 100 });
+    assert(html.includes("Ready to harvest"), "ready copy missing");
+    assert(html.includes("Hatched &amp; loaded"), "ready missing the harvest button");
+    html = withHatch({ status: "overdue", hoursElapsed: 40, hoursLeft: 0, percent: 100 });
+    assert(html.includes("harvest soon"), "overdue nag missing");
+    noPlaceholders(html, "hatchery card");
+  } finally { restore(); }
+});
+
+test("egg-type choice seeds the recommended hatch hours in settings", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._config.nps.hatchery = { eggType: "standard", hatchHours: 24, state: {} };
+    // Simulate the field handler's nps-hatchery branch for an eggType change.
+    const hatchery = panel._config.nps.hatchery;
+    hatchery.eggType = "decapsulated";
+    const rec = panel._npsEggTypes().find((e) => e.id === "decapsulated");
+    if (rec) hatchery.hatchHours = rec.hours;
+    assert(hatchery.hatchHours === 16, "decapsulated should seed 16 h");
+  } finally { restore(); }
+});
+
 runTests();

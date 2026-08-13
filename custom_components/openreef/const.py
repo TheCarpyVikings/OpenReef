@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.52"
+INTEGRATION_VERSION = "0.7.53"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1403,6 +1403,14 @@ DEFAULT_CORE_CONFIG = {
             "uvOffMinutes": 120,
             "ozoneOffMinutes": 120,
             "skimmerOffMinutes": 45,
+            "state": {},
+        },
+        # Hatchery (v1): the incubation clock for home-hatched baby brine.
+        # eggType seeds the recommended hours (nps.EGG_TYPES); the keeper can
+        # override. state.hatchStartedAt is the running hatch's stamp.
+        "hatchery": {
+            "eggType": "standard",
+            "hatchHours": 24,
             "state": {},
         },
     },

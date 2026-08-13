@@ -1700,6 +1700,10 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-product-delete") this._npsDeleteProduct(id);
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded();
+      if (action === "nps-hatch-start") this._npsCall({ type: "openreef/nps_hatch_start" },
+        "Hatch started — the incubation clock is running.");
+      if (action === "nps-hatch-cancel") this._npsCall({ type: "openreef/nps_hatch_cancel" },
+        "Hatch cancelled — the hatcher stands down.");
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
       if (action === "nps-apply-species") this._npsApplySpecies(id, Number(target.dataset.doses), target.dataset.night === "1");
       if (action === "nps-setup-hide") {
@@ -2294,6 +2298,16 @@ class OpenReefPanel extends HTMLElement {
         npsCfg.truce = npsCfg.truce || {};
         npsCfg.truce[field] = value;
       }
+      if (scope === "nps-hatchery") {
+        const npsCfg = this._config.nps = this._config.nps || {};
+        const hatchery = npsCfg.hatchery = npsCfg.hatchery || {};
+        hatchery[field] = value;
+        if (field === "eggType") {
+          // The recommendation seeds the clock; the keeper can still override.
+          const rec = this._npsEggTypes().find((e) => e.id === value);
+          if (rec) hatchery.hatchHours = rec.hours;
+        }
+      }
       if (scope === "nps-species") {
         const npsCfg = this._config.nps = this._config.nps || {};
         const list = npsCfg.species = Array.isArray(npsCfg.species) ? npsCfg.species : [];
@@ -2309,7 +2323,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && field === "eggType") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -9536,11 +9550,77 @@ class OpenReefPanel extends HTMLElement {
       .filter((id) => ["food", "livefood"].includes(channels[id] && channels[id].chemical));
   }
 
-  _npsHatchLoaded() {
+  // Egg types: backend-served when the summary is loaded, static mirror
+  // otherwise (the category-labels lesson: a select must never render empty).
+  _npsEggTypes() {
+    const served = this._nps.summary?.hatchery?.eggTypes;
+    if (Array.isArray(served) && served.length) return served;
+    return [
+      { id: "standard", name: "Standard cysts (GSL)", hours: 24,
+        note: "The usual eBay/LFS cysts: 18–24 h at 26–30 °C, ~25 ppt, strong aeration." },
+      { id: "decapsulated", name: "Decapsulated cysts", hours: 16,
+        note: "Shell already dissolved — hatches faster (~16 h) and no shell separation." },
+      { id: "premium", name: "High-hatch premium cysts", hours: 20,
+        note: "90%+ hatch-rate grades tend to pop a little sooner (~20 h)." },
+      { id: "cool_room", name: "Cool room (below ~24 °C)", hours: 36,
+        note: "No heater on the hatcher? Budget up to 36 h — temperature rules the clock." },
+    ];
+  }
+
+  // The hatchery vessel: an upside-down-bottle rig with an air line, rising
+  // bubbles while incubating, and a state-coloured outline. Modest v1 — the
+  // layout iterates eyes-on like the rest of the diagram.
+  _npsHatchVesselSvg(hatch) {
+    const status = (hatch && hatch.status) || "none";
+    const pct = Math.max(0, Math.min(100, Number(hatch && hatch.percent) || 0));
+    const stroke = ({ incubating: "#f5a524", ready: "#66bb6a", overdue: "#e5484d" })[status] || "#455a64";
+    const liquid = status === "none" ? "" : `
+      <clipPath id="npsHatchClip"><path d="M 33 9 H 71 V 30 L 59 100 H 45 L 33 30 Z"/></clipPath>
+      <g clip-path="url(#npsHatchClip)"><rect x="30" y="34" width="44" height="70"
+        fill="${status === "incubating" ? "#f5a524" : status === "overdue" ? "#e5484d" : "#66bb6a"}" opacity="0.30"></rect></g>`;
+    const bubbles = status === "incubating" ? `
+      <circle class="nps-bub" cx="50" cy="92" r="2.4" fill="#ffe0b2"></circle>
+      <circle class="nps-bub" cx="57" cy="95" r="1.8" fill="#ffe0b2" style="animation-delay:.6s"></circle>
+      <circle class="nps-bub" cx="46" cy="97" r="1.5" fill="#ffe0b2" style="animation-delay:1.1s"></circle>` : "";
+    const glyph = status === "ready" || status === "overdue" ? "🦐"
+      : status === "incubating" ? "🥚" : "";
+    return `
+      <svg viewBox="0 0 104 124" style="width:96px;flex:0 0 auto;" role="img" aria-label="Brine hatchery — ${this._escape(status)}">
+        <style>
+          @keyframes nps-bub { from { transform: translateY(0); opacity:.9; } to { transform: translateY(-42px); opacity:0; } }
+          .nps-bub { animation: nps-bub 1.8s linear infinite; }
+          @keyframes nps-pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+          .nps-pulse { animation: nps-pulse 1.6s ease-in-out infinite; }
+        </style>
+        <path d="M 33 9 H 71 V 30 L 59 100 H 45 L 33 30 Z" fill="rgba(255,255,255,0.04)"
+          stroke="${stroke}" stroke-width="2.5" ${status === "none" ? 'stroke-dasharray="5 4"' : ""}
+          class="${status === "ready" ? "nps-pulse" : ""}"></path>
+        ${liquid}
+        <path d="M 52 2 V 94" stroke="#546e7a" stroke-width="2" stroke-linecap="round"></path>
+        <rect x="48" y="94" width="8" height="4" rx="2" fill="#78909c"></rect>
+        ${bubbles}
+        ${glyph ? `<text x="52" y="60" text-anchor="middle" font-size="15">${glyph}</text>` : ""}
+        <text x="52" y="120" text-anchor="middle" font-size="10" fill="#90a4ae">${status === "incubating" ? `${Math.round(pct)}%` : status === "none" ? "empty" : "ready"}</text>
+      </svg>`;
+  }
+
+  async _npsHatchLoaded() {
     const cid = this._config?.nps?.feedExchange?.channelId;
     if (!cid) return;
-    this._npsCall({ type: "openreef/dosing_mark_refreshed", channel_id: cid },
-      "Hatch loaded — the freshness and prime clocks restarted.");
+    if (this._nps.demo) {
+      this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
+      this._render();
+      return;
+    }
+    try {
+      await this._callWS({ type: "openreef/dosing_mark_refreshed", channel_id: cid });
+      await this._callWS({ type: "openreef/nps_hatch_cancel" });
+      this._nps.message = "Hatch loaded — freshness and prime clocks restarted; the hatcher stands down.";
+      this._nps.error = "";
+    } catch (err) {
+      this._nps.error = (err && err.message) || "That didn't work — try again.";
+    }
+    this._npsLoadSummary(true);
   }
 
   _npsApplySpecies(cid, doses, night) {
@@ -9599,6 +9679,8 @@ class OpenReefPanel extends HTMLElement {
                  totalDrainedL: 6.4, lastBlockedReason: "", drainStartedAt: "", drainEndsAt: "", drainTargetMl: 0 } },
       truce: { enabled: true, uvOffMinutes: 120, ozoneOffMinutes: 120, skimmerOffMinutes: 45,
         state: { skimmer: { restoreAt: iso(-25 * 60000), turnedOff: ["switch.demo_skimmer"] } } },
+      hatchery: { eggType: "standard", hatchHours: 24,
+        state: { hatchStartedAt: iso(15 * 3600000) } },
     };
     config.consumables = { products: {
       demo_phyto: { name: "Live phyto blend", brand: "AlgaeBarn", category: "phyto", bottleMl: 946, remainingMl: 590, refrigerated: true, stirDaily: true },
@@ -9689,6 +9771,8 @@ class OpenReefPanel extends HTMLElement {
         { id: "demo_zoo_pump", name: "Zooplankton pump", chemical: "food" },
         { id: "demo_brine", name: "Live brine", chemical: "livefood" },
       ],
+      hatchery: { eggType: "standard", hatchHours: 24, eggTypes: [],
+        state: { status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 } },
       speciesLibrary: [
         { id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, note: "" },
         { id: "gorgonian_easy", name: "Gorgonians — Menella, Swiftia, Diodogorgia", difficulty: 2, note: "" },
@@ -10429,13 +10513,38 @@ class OpenReefPanel extends HTMLElement {
       : fresh.status === "aging"
         ? `<span style="color:var(--warning-color,#f5a524)">Brine is aging (~${this._escape(String(fresh.hoursLeft))} h left).</span>`
         : fresh.status === "fresh" ? "Brine is fresh." : "";
+    const hatch = (st.summary && st.summary.hatchery) || {};
+    const hatchState = hatch.state || {};
+    const hatchHours = Number(hatch.hatchHours) || 24;
+    const eggName = (this._npsEggTypes().find((e) => e.id === (hatch.eggType || "standard")) || {}).name
+      || "Standard cysts";
+    const hatchLine = ({
+      incubating: `⏳ Hatching <strong>${this._escape(eggName)}</strong> — ${this._escape(String(hatchState.hoursElapsed))} h of ${this._escape(String(hatchHours))} h (~${this._escape(String(hatchState.hoursLeft))} h to go).`,
+      ready: `🎉 <strong>Ready to harvest</strong> — rinse the nauplii (never dose hatch water), resuspend in tank-salinity saltwater, load the reservoir, then tap "Hatched &amp; loaded".`,
+      overdue: `<span style="color:var(--warning-color,#f5a524)">⚠️ Hatched ~${this._escape(String(Math.max(0, (Number(hatchState.hoursElapsed) || 0) - hatchHours).toFixed(0)))} h ago — harvest soon; nauplii burn 30–50% of their calories by 48 h.</span>`,
+    })[hatchState.status] || `🥚 No hatch running — set the cysts going and tap "Start hatch"; the clock is set for ${this._escape(String(hatchHours))} h (${this._escape(eggName)}).`;
+    const hatchButtons = [
+      hatchState.status === "none"
+        ? `<button class="secondary compact-button" data-action="nps-hatch-start">Start hatch</button>` : "",
+      hatchState.status === "incubating"
+        ? `<button class="secondary compact-button" data-action="nps-hatch-cancel">Cancel hatch</button>` : "",
+      (hatchState.status === "ready" || hatchState.status === "overdue") && fxCfg.channelId
+        ? `<button class="secondary compact-button" data-action="nps-hatch-loaded">Hatched &amp; loaded</button>` : "",
+      `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">Add hatchery reminders</button>`,
+    ].filter(Boolean).join("");
     const hatcheryPanel = fxCfg.enabled ? `
       <article class="panel stack">
-        <p class="eyebrow">Hatchery</p>
-        <small>${primeLine}${freshLine ? ` · ${freshLine}` : ""}</small>
-        <div class="button-row">
-          ${fxCfg.channelId ? `<button class="secondary compact-button" data-action="nps-hatch-loaded">Hatched &amp; loaded</button>` : ""}
-          <button class="secondary compact-button" data-action="nps-add-hatch-reminders">Add hatchery reminders</button>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Hatchery</p>
+          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Hatch settings</button>
+        </div>
+        <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+          ${this._npsHatchVesselSvg(hatchState)}
+          <div class="stack" style="gap:6px;flex:1;min-width:220px;">
+            <small>${hatchLine}</small>
+            <small>${primeLine}${freshLine ? ` · ${freshLine}` : ""}</small>
+            <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
+          </div>
         </div>
       </article>` : "";
 
@@ -21024,6 +21133,16 @@ class OpenReefPanel extends HTMLElement {
         <label>Min drain batch (ml)<input type="number" min="10" max="5000" data-scope="nps-exchange" data-field="minDrainMl" value="${this._escape(String(fxCfg.minDrainMl ?? 150))}"></label>
         <label>Owed cap (ml)<input type="number" min="100" max="20000" data-scope="nps-exchange" data-field="maxOwedMl" value="${this._escape(String(fxCfg.maxOwedMl ?? 2000))}"></label>
       </div>
+
+      <div class="awc-section-title"><p class="eyebrow">Hatchery</p></div>
+      <small class="awc-hint">Different cysts hatch on different clocks — pick the egg type and the recommended hours fill in; override freely if your room runs warm or cool.</small>
+      <div class="mini-grid">
+        <label>Egg type<select data-scope="nps-hatchery" data-field="eggType">
+          ${this._npsEggTypes().map((e) => `<option value="${this._escape(e.id)}" ${(npsCfg.hatchery?.eggType || "standard") === e.id ? "selected" : ""}>${this._escape(e.name)} (~${this._escape(String(e.hours))} h)</option>`).join("")}
+        </select></label>
+        <label>Hatch time (hours)<input type="number" min="8" max="48" data-scope="nps-hatchery" data-field="hatchHours" value="${this._escape(String(npsCfg.hatchery?.hatchHours ?? 24))}"></label>
+      </div>
+      <small class="awc-hint">${this._escape((this._npsEggTypes().find((e) => e.id === (npsCfg.hatchery?.eggType || "standard")) || {}).note || "")}</small>
 
       <div class="awc-section-title"><p class="eyebrow">Feed truce</p></div>
       <small class="awc-hint">UV and ozone kill dosed live food; the skimmer strips it. The truce pauses whatever is armed (Settings → Equipment: UV sterilizer / Ozone / Skimmer profiles) after every food dose, then restores it.</small>

@@ -902,6 +902,7 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
     nps_cfg = nps_cfg if isinstance(nps_cfg, dict) else {}
     raw_fx = nps_cfg.get("feedExchange") if isinstance(nps_cfg.get("feedExchange"), dict) else {}
     raw_fx_state = raw_fx.get("state") if isinstance(raw_fx.get("state"), dict) else {}
+    raw_hatchery = nps_cfg.get("hatchery") if isinstance(nps_cfg.get("hatchery"), dict) else {}
     raw_truce = nps_cfg.get("truce") if isinstance(nps_cfg.get("truce"), dict) else {}
     raw_truce_state = raw_truce.get("state") if isinstance(raw_truce.get("state"), dict) else {}
     truce_state: dict[str, Any] = {}
@@ -936,6 +937,18 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 "drainEndsAt": _awc_str(raw_fx_state.get("drainEndsAt"), 40),
                 "drainTargetMl": _awc_num(raw_fx_state.get("drainTargetMl"), 0, 0, 100000),
                 "lastBlockedReason": _awc_str(raw_fx_state.get("lastBlockedReason"), 120),
+            },
+        },
+        # Hatchery (v1): incubation settings + the running hatch stamp.
+        "hatchery": {
+            "eggType": (raw_hatchery.get("eggType")
+                        if raw_hatchery.get("eggType") in nps_engine.egg_type_ids()
+                        else "standard"),
+            "hatchHours": _awc_num(raw_hatchery.get("hatchHours"), 24, 8, 48),
+            "state": {
+                "hatchStartedAt": _awc_str(
+                    (raw_hatchery.get("state") or {}).get("hatchStartedAt")
+                    if isinstance(raw_hatchery.get("state"), dict) else "", 40),
             },
         },
         # Feed truce (Stage C): plankton-hostile equipment pauses. The state
@@ -11831,6 +11844,45 @@ async def websocket_consumable_refill(
     _awc_send(connection, msg, hass, config)
 
 
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_hatch_start"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_hatch_start(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Stamp the incubation clock: cysts just went into the hatcher. The card
+    counts down the configured hatch hours from here."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = config.setdefault("nps", {}).setdefault("hatchery", {})
+    hatchery.setdefault("state", {})["hatchStartedAt"] = datetime.now(timezone.utc).isoformat()
+    _append_activity(config, "Brine hatch started — the incubation clock is running", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_hatch_cancel"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_hatch_cancel(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Clear the incubation clock — the hatch was harvested (the normal end,
+    chained after 'Hatched & loaded') or abandoned."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = config.setdefault("nps", {}).setdefault("hatchery", {})
+    hatchery.setdefault("state", {})["hatchStartedAt"] = ""
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/nps_summary"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -11880,6 +11932,17 @@ async def websocket_nps_summary(
             for cid, ch in sorted(channels.items())
             if isinstance(ch, dict) and ch.get("chemical") in ("livefood", "food")
         ],
+        # Hatchery (v1): the incubation clock, computed backend-side.
+        "hatchery": {
+            "eggType": str(((config.get("nps") or {}).get("hatchery") or {}).get("eggType") or "standard"),
+            "hatchHours": _awc_num(
+                ((config.get("nps") or {}).get("hatchery") or {}).get("hatchHours"), 24, 8, 48),
+            "eggTypes": [dict(e) for e in nps_engine.EGG_TYPES],
+            "state": nps_engine.hatch_state(
+                (((config.get("nps") or {}).get("hatchery") or {}).get("state") or {}).get("hatchStartedAt"),
+                ((config.get("nps") or {}).get("hatchery") or {}).get("hatchHours") or 24,
+                now_utc),
+        },
         # Species plans + nutrient budget (Stage D) — compiled backend-side.
         "speciesLibrary": [dict(s) for s in nps_engine.SPECIES_LIBRARY],
         "speciesPlan": nps_engine.compile_feed_plan(
@@ -14132,6 +14195,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_mark_refreshed)
     websocket_api.async_register_command(hass, websocket_dosing_reset_tube)
     websocket_api.async_register_command(hass, websocket_nps_summary)
+    websocket_api.async_register_command(hass, websocket_nps_hatch_start)
+    websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
     websocket_api.async_register_command(hass, websocket_consumable_log_dose)
     websocket_api.async_register_command(hass, websocket_consumable_refill)
     websocket_api.async_register_command(hass, websocket_consumable_delete)

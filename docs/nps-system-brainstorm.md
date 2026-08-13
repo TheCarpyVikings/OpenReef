@@ -195,6 +195,32 @@ All water motion stays behind the AWC guard chain (leak/high-level fail-closed, 
 14. **Auto-hatchery hardware** (hardware track): ESPHome hatch node closing the last manual loop.
 15. **Community plan sharing**: export/import species feed plans — the Rich-Ross-guide model, for feeding.
 
+## 6b. Sun-coral day-trainer — design brief (2026-08-13, research-backed) · **STATUS: SHELVED 2026-08-13** (Reece: too much work for now; NPS page polish takes priority. Design + research preserved here — build-ready when wanted.)
+
+**Who it's for first**: Reece's beta tester's two new sun corals — the heaviest test case. Locked decisions: both pump paths (fully functional hand-feed-only; a pump enriches), colonies link to `livestock.corals`, response logging lives on the NPS trainer card, full choreography v1.
+
+**Research verdicts that shape the design** (dedicated sweep, sources in the research log):
+- The mechanism is *consistency of feed time* — anticipation appears in ~2 weeks at any fixed time. Nobody in the hobby quantifies the shift step; the universal rule is "shift once it's reliably opening at the current time" — an **advance criterion, not a calendar**. Our criterion-based engine is the novel IP; **no training automation exists anywhere**.
+- Scent → extension latency is consistently **5–30 min (median ~15)**. Scent cues that aren't followed by food are a real harm (extension costs energy; unrewarded cues extinguish the response) — **never fire an unrewarded cue** is a hard rule, enforced structurally.
+- **Missed feeds are the #1 documented failure** (training lapses long before health does — a healthy colony shrugs off 10 unfed days). Colony moves / flow / lighting changes cause relapse; keepers recover by retreating to the last reliable time.
+- Keep a **supplementary after-dark safety feed** throughout training (Tidal Gardens' hedge) — a failed daytime session is then harmless. Training is optional; eating is not.
+- Honest promise: **"opens for daytime feeding," not "open all day."** Mid-photoperiod arrives in ~6–10 weeks; open-most-of-day is a months-scale, heavy-feeding, new-polyp-growth outcome. 10–30% of colonies (black micranthus especially) plateau at feed-time-only — the copy calls that success, because it is.
+- Stubborn-colony tip worth surfacing: the inverted-bottle isolation technique gets first extensions when weeks of open-water attempts fail.
+
+**The engine** (pure math, `nps.py`): one state machine, no phase enum — session time starts at *lights-out + 30 min* (anchored to the lighting schedule; manual fallback), advances **20 min earlier** (config 15–30) only after **3 consecutive Open responses**, retreats **2 steps** after **2 consecutive Closed**, toward the keeper's chosen showtime. Open increments the advance streak; Partial holds (resets the fail streak, no credit); Closed increments the fail streak; Skipped touches nothing (the coral wasn't cued) but a >5-day gap advises a retreat. `lastReliableMinutes` (time of the last completed streak) is the retreat target for the **"colony moved / flow changed"** button. The settle-in gate for brand-new corals falls out organically: the first advance needs the same 3-streak, which a new colony takes ~2 weeks to build.
+
+**Two colonies, one clock**: colonies are `livestock.corals` entries (suncoral species); each session logs a per-colony response (with "same for both" as one tap); the clock advances only when **every** colony hits the streak — train to the slower coral, because they share the water and abandoning the laggard is how you lose it.
+
+**Session choreography**:
+- *Hand-feed mode (hers, day one)*: notification at the training time → she taps **Start session** on the trainer card → card walks the ritual: scent step (pump fires `scentMl` through the bound food channel, or "add a few drops of thaw juice" instruction) → **15-min countdown** (the extension latency) → "Feed now" → she target-feeds → one-tap Open/Partial/Closed per colony. No tap within the window = Skipped, cue never fired, nothing unrewarded.
+- *Pump-fed unattended mode*: scent dose → 15 min → main dose, guard-checked as one unit (if the main dose would be blocked — stale food, caps — the scent is skipped too). Unattended sessions **maintain** consistency but can't **advance** the clock: progression requires logged evidence. (Camera auto-scoring is the v2 that closes this loop — the response log carries `source: manual|camera` from day one.)
+- Composes with what exists: a scent/feed dose on a food channel already engages the **feed truce** (skimmer stops stripping the scent); optional feed-mode entry for the hand-feed window; optional per-session camera capture.
+- **Night safety feed** (default on): reminder or scheduled dose after lights-out until the keeper tapers it — surfaced on the card with taper advice once the target is reached and stable.
+
+**The card**: today's session time with countdown, a progress strip from anchor to showtime ("40 minutes conquered, 50 to go"), per-colony streak chips, the session-history journal (date × time × response — the screenshot-worthy chart), pause/hold, the moved-colony retreat button, and expectation-honest copy including the plateau-is-success framing and the bottle trick for stubborn colonies.
+
+**Config sketch**: `nps.trainer = {enabled, colonies[], anchorMode: lightsOut|manual, manualAnchor, anchorOffsetMin: 30, targetTime, stepMinutes: 20, advanceAfterOpens: 3, retreatAfterClosed: 2, retreatSteps: 2, scentChannelId, scentMl, mainChannelId, mainMl, openDelayMin: 15, nightSafetyFeed, enterFeedMode, captureSession, state: {currentMinutes, lastReliableMinutes, startedAt, paused, colonies:{id:{streakOpen, streakClosed}}, sessions[≤60], sessionActive}}`.
+
 ## 7. Staged build plan
 
 - **Stage A — foundation**: `config["nps"]` + normaliser + `nps.py` + gated tab skeleton; `food` chemical + channel cap raise + presets; consumables engine + product library + bottle runway; AWC amount card (read/write canonical). *Ships visible value alone.*
