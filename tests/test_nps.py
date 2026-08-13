@@ -513,6 +513,102 @@ def test_awc_start_blocked_while_matched_drain_runs():
     run(scenario())
 
 
+# --------------------------------------------------------------------------- #
+# Stage C — feed truce (UV/ozone/skimmer pause after food doses)
+# --------------------------------------------------------------------------- #
+def _truce_entry(enabled=True, equipment=None, truce_state=None):
+    cfg = {
+        "nps": {
+            "enabled": True,
+            "truce": {"enabled": enabled, "uvOffMinutes": 120,
+                      "ozoneOffMinutes": 120, "skimmerOffMinutes": 45,
+                      "state": truce_state or {}},
+        },
+        "equipment": equipment or {
+            "uv1": {"armed": True, "type": "uv", "switch_entity_id": "switch.uv"},
+            "skim1": {"armed": True, "type": "skimmer", "switch_entity_id": "switch.skimmer"},
+            "uv_unarmed": {"armed": False, "type": "uv", "switch_entity_id": "switch.uv2"},
+        },
+    }
+    return FakeEntry(options={CONF_SETTINGS: cfg})
+
+
+def _truce_state(entry):
+    return entry.options[CONF_SETTINGS]["nps"]["truce"]["state"]
+
+
+def test_truce_engage_pauses_armed_on_equipment_only():
+    entry = _truce_entry()
+    hass = FakeHass(states={"switch.uv": "on", "switch.uv2": "on", "switch.skimmer": "off"},
+                    entries=[entry])
+    run(integration._async_nps_truce_engage(hass, entry))
+    assert hass.states.get("switch.uv").state == "off"
+    assert hass.states.get("switch.uv2").state == "on"        # unarmed: untouched
+    state = _truce_state(entry)
+    assert state["uv"]["turnedOff"] == ["switch.uv"]
+    assert state["uv"]["restoreAt"]
+    # The skimmer was already off (keeper's choice) — never claimed.
+    assert state.get("skimmer", {}).get("turnedOff", []) == []
+
+
+def test_truce_engage_noop_when_disabled():
+    entry = _truce_entry(enabled=False)
+    hass = FakeHass(states={"switch.uv": "on"}, entries=[entry])
+    run(integration._async_nps_truce_engage(hass, entry))
+    assert hass.states.get("switch.uv").state == "on"
+
+
+def test_truce_tick_restores_when_due_and_only_claimed_entities():
+    past = _iso(datetime.now(timezone.utc) - timedelta(minutes=1))
+    entry = _truce_entry(truce_state={
+        "uv": {"restoreAt": past, "turnedOff": ["switch.uv"]},
+    })
+    hass = FakeHass(states={"switch.uv": "off", "switch.skimmer": "off"}, entries=[entry])
+    run(integration._async_nps_truce_tick(hass, entry))
+    assert hass.states.get("switch.uv").state == "on"
+    assert hass.states.get("switch.skimmer").state == "off"   # never claimed, never touched
+    state = _truce_state(entry)
+    assert state["uv"]["turnedOff"] == []
+    assert state["uv"]["restoreAt"] == ""
+
+
+def test_truce_tick_waits_until_due_but_restores_if_disabled():
+    future = _iso(datetime.now(timezone.utc) + timedelta(minutes=30))
+    entry = _truce_entry(truce_state={
+        "uv": {"restoreAt": future, "turnedOff": ["switch.uv"]},
+    })
+    hass = FakeHass(states={"switch.uv": "off"}, entries=[entry])
+    run(integration._async_nps_truce_tick(hass, entry))
+    assert hass.states.get("switch.uv").state == "off"        # window still open
+    disabled = _truce_entry(enabled=False, truce_state={
+        "uv": {"restoreAt": future, "turnedOff": ["switch.uv"]},
+    })
+    hass2 = FakeHass(states={"switch.uv": "off"}, entries=[disabled])
+    run(integration._async_nps_truce_tick(hass2, disabled))
+    assert hass2.states.get("switch.uv").state == "on"        # disabled mid-hold ⇒ restore now
+
+
+def test_truce_repeat_dose_extends_window():
+    entry = _truce_entry(truce_state={
+        "uv": {"restoreAt": _iso(datetime.now(timezone.utc) + timedelta(minutes=5)),
+               "turnedOff": ["switch.uv"]},
+    })
+    hass = FakeHass(states={"switch.uv": "off"}, entries=[entry])
+    run(integration._async_nps_truce_engage(hass, entry))
+    # switch.uv is off so nothing new is claimed, but a fresh ON dose elsewhere
+    # in the profile would extend; simulate the extend path with the uv back on:
+    hass.states.set("switch.uv", "on")
+    before = _truce_state(entry)["uv"]["restoreAt"]
+    run(integration._async_nps_truce_engage(hass, entry))
+    after = _truce_state(entry)["uv"]["restoreAt"]
+    assert after > before                                      # pushed out to now+120 min
+
+
+def test_uv_profile_alias_normalises():
+    assert integration._normalise_equipment_profile("uv sterilizer") == "uv"
+    assert integration._normalise_equipment_profile("Ozone") == "ozone"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

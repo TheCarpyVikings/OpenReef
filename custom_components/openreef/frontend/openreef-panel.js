@@ -2265,6 +2265,11 @@ class OpenReefPanel extends HTMLElement {
         npsCfg.feedExchange = npsCfg.feedExchange || {};
         npsCfg.feedExchange[field] = value;
       }
+      if (scope === "nps-truce") {
+        const npsCfg = this._config.nps = this._config.nps || {};
+        npsCfg.truce = npsCfg.truce || {};
+        npsCfg.truce[field] = value;
+      }
       if (scope === "consumable") {
         const block = this._config.consumables = this._config.consumables || {};
         const products = block.products = block.products || {};
@@ -2273,7 +2278,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -2333,6 +2338,8 @@ class OpenReefPanel extends HTMLElement {
       ["lighting", "Lighting"],
       ["doser", "Doser"],
       ["filtration", "Filter / reactor"],
+      ["uv", "UV sterilizer"],
+      ["ozone", "Ozone"],
       ["other", "Other"],
     ];
   }
@@ -9741,6 +9748,28 @@ class OpenReefPanel extends HTMLElement {
         ` : `<p class="hint">Needs the AWC drain pump calibrated and a live-food dosing channel. Turn it on and the system handles the matching.</p>`}
       </article>`;
 
+    // --- Feed truce (Stage C) ----------------------------------------------
+    const truceCfg = (this._config && this._config.nps && this._config.nps.truce) || {};
+    const truceState = truceCfg.state || {};
+    const truceLabels = { uv: "UV", ozone: "ozone", skimmer: "skimmer" };
+    const trucePaused = ["uv", "ozone", "skimmer"]
+      .filter((p) => (((truceState[p] || {}).turnedOff) || []).length)
+      .map((p) => truceLabels[p]);
+    const trucePanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Feed truce</p>
+        <p class="hint">UV and ozone kill the live food you just dosed, and the skimmer strips it out — the truce pauses whatever is armed for a window after every food dose, then restores it automatically. Map the gear in Settings → Equipment with the UV sterilizer / Ozone / Skimmer profile and arm it.</p>
+        <div class="mini-grid">
+          <label><input type="checkbox" data-scope="nps-truce" data-field="enabled" ${truceCfg.enabled ? "checked" : ""}> Truce on</label>
+          <label>UV off (min)<input type="number" min="5" max="720" data-scope="nps-truce" data-field="uvOffMinutes" value="${this._escape(String(truceCfg.uvOffMinutes ?? 120))}"></label>
+          <label>Ozone off (min)<input type="number" min="5" max="720" data-scope="nps-truce" data-field="ozoneOffMinutes" value="${this._escape(String(truceCfg.ozoneOffMinutes ?? 120))}"></label>
+          <label>Skimmer off (min)<input type="number" min="5" max="720" data-scope="nps-truce" data-field="skimmerOffMinutes" value="${this._escape(String(truceCfg.skimmerOffMinutes ?? 45))}"></label>
+        </div>
+        ${trucePaused.length
+          ? `<small>⏸ Paused now: ${trucePaused.join(", ")} — restores automatically when the window passes.</small>`
+          : truceCfg.enabled ? `<small>Nothing paused right now — the next food dose starts the clock.</small>` : ""}
+      </article>`;
+
     // --- Water exchange (canonical AWC schedule, edit-in-place) ------------
     const sched = (this._config && this._config.automaticWaterChange && this._config.automaticWaterChange.schedule) || {};
     const waterPanel = `
@@ -9763,7 +9792,7 @@ class OpenReefPanel extends HTMLElement {
         <p class="hint">This edits the same canonical AWC schedule the Water Change tab owns — one source of truth, saved with the Save bar. The nutrient-budget advisor that suggests this number lands in a later stage.</p>
       </article>`;
 
-    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${hatcheryPanel}${shelfPanel}${waterPanel}</section>`;
+    return `<section class="stack">${head}${notices}${planPanel}${pumpsPanel}${hatcheryPanel}${trucePanel}${shelfPanel}${waterPanel}</section>`;
   }
 
   _tabs() {

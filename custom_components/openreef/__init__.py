@@ -298,6 +298,8 @@ EQUIPMENT_PROFILE_TYPES = {
     "lighting",
     "doser",
     "filtration",
+    "uv",
+    "ozone",
     "other",
 }
 
@@ -400,6 +402,12 @@ def _normalise_equipment_profile(value: Any) -> str:
         "filter": "filtration",
         "filtration": "filtration",
         "reactor": "filtration",
+        "uv": "uv",
+        "uv_sterilizer": "uv",
+        "steriliser": "uv",
+        "sterilizer": "uv",
+        "ozone": "ozone",
+        "ozonizer": "ozone",
         "other": "other",
     }
     return aliases.get(text, text if text in EQUIPMENT_PROFILE_TYPES else "")
@@ -883,6 +891,16 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
     nps_cfg = nps_cfg if isinstance(nps_cfg, dict) else {}
     raw_fx = nps_cfg.get("feedExchange") if isinstance(nps_cfg.get("feedExchange"), dict) else {}
     raw_fx_state = raw_fx.get("state") if isinstance(raw_fx.get("state"), dict) else {}
+    raw_truce = nps_cfg.get("truce") if isinstance(nps_cfg.get("truce"), dict) else {}
+    raw_truce_state = raw_truce.get("state") if isinstance(raw_truce.get("state"), dict) else {}
+    truce_state: dict[str, Any] = {}
+    for profile in ("uv", "ozone", "skimmer"):
+        raw_p = raw_truce_state.get(profile) if isinstance(raw_truce_state.get(profile), dict) else {}
+        raw_off = raw_p.get("turnedOff") if isinstance(raw_p.get("turnedOff"), list) else []
+        truce_state[profile] = {
+            "restoreAt": _awc_str(raw_p.get("restoreAt"), 40),
+            "turnedOff": [str(e)[:120] for e in raw_off if isinstance(e, str)][:20],
+        }
     config["nps"] = {
         "enabled": bool(nps_cfg.get("enabled", False)),
         # Brine feed-exchange (Stage B): dose + chaser volumes bank an owed
@@ -904,6 +922,16 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 "drainTargetMl": _awc_num(raw_fx_state.get("drainTargetMl"), 0, 0, 100000),
                 "lastBlockedReason": _awc_str(raw_fx_state.get("lastBlockedReason"), 120),
             },
+        },
+        # Feed truce (Stage C): plankton-hostile equipment pauses. The state
+        # tracks exactly which entities the truce itself turned off — restore
+        # never touches equipment the keeper had off already.
+        "truce": {
+            "enabled": bool(raw_truce.get("enabled", False)),
+            "uvOffMinutes": _awc_num(raw_truce.get("uvOffMinutes"), 120, 5, 720),
+            "ozoneOffMinutes": _awc_num(raw_truce.get("ozoneOffMinutes"), 120, 5, 720),
+            "skimmerOffMinutes": _awc_num(raw_truce.get("skimmerOffMinutes"), 45, 5, 720),
+            "state": truce_state,
         },
     }
 
@@ -10318,6 +10346,106 @@ async def _async_nps_feed_exchange_accrue(
         await _async_save_config(hass, entry, config)
 
 
+_NPS_TRUCE_PROFILES = (
+    ("uv", "uvOffMinutes"), ("ozone", "ozoneOffMinutes"), ("skimmer", "skimmerOffMinutes"),
+)
+
+
+async def _async_nps_truce_engage(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any = None
+) -> None:
+    """A food/live-food dose just landed: pause the plankton-hostile equipment
+    (UV kills what was dosed, ozone likewise, the skimmer strips it) for their
+    configured windows. Armed equipment only; a repeat dose extends a running
+    truce. Restore is stamp-driven — the minutely dosing tick is the backstop —
+    so a restart can never leave equipment off forever."""
+    config = _config_from_entry(entry)
+    truce = (config.get("nps") or {}).get("truce") or {}
+    if not truce.get("enabled"):
+        return
+    now = datetime.now(timezone.utc)
+    state = truce.setdefault("state", {})
+    changed = False
+    for profile, minutes_key in _NPS_TRUCE_PROFILES:
+        minutes = _awc_num(truce.get(minutes_key), 0, 0, 720)
+        if minutes <= 0:
+            continue
+        targets = _armed_equipment_by_profile(config, profile)
+        if not targets:
+            continue
+        pstate = state.setdefault(profile, {})
+        turned_off = [e for e in (pstate.get("turnedOff") or []) if isinstance(e, str)]
+        for _equipment_id, mapped in targets:
+            switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+            if not switch_entity:
+                continue
+            live = hass.states.get(switch_entity)
+            if live is None or live.state != "on":
+                continue  # off already (keeper's choice) or unavailable — never claim it
+            try:
+                await hass.services.async_call(
+                    "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity},
+                    blocking=True, context=context)
+            except Exception:  # noqa: BLE001 — a dead switch must not kill the tick
+                continue
+            if switch_entity not in turned_off:
+                turned_off.append(switch_entity)
+            changed = True
+        if turned_off:
+            pstate["turnedOff"] = turned_off
+            restore_at = now + timedelta(minutes=minutes)
+            existing = _parse_datetime(pstate.get("restoreAt"))
+            if existing is None or restore_at > existing:
+                pstate["restoreAt"] = restore_at.isoformat()
+                changed = True
+    if changed:
+        _append_activity(
+            config,
+            "Feed truce: plankton-hostile equipment paused after a food dose",
+            "control")
+        await _async_save_config(hass, entry, config)
+
+
+async def _async_nps_truce_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """Restore truce-paused equipment whose window has passed (or whose truce
+    was disabled mid-hold). Only entities the truce itself turned off are ever
+    restored — a skimmer the keeper had off stays off. A failed turn-on stays
+    in the list and retries next tick."""
+    config = _config_from_entry(entry)
+    truce = (config.get("nps") or {}).get("truce") or {}
+    state = truce.get("state") or {}
+    now = datetime.now(timezone.utc)
+    changed = False
+    for profile, _minutes_key in _NPS_TRUCE_PROFILES:
+        pstate = state.get(profile) or {}
+        turned_off = [e for e in (pstate.get("turnedOff") or []) if isinstance(e, str)]
+        if not turned_off:
+            continue
+        restore_at = _parse_datetime(pstate.get("restoreAt"))
+        due = (not truce.get("enabled")) or restore_at is None or restore_at <= now
+        if not due:
+            continue
+        remaining: list[str] = []
+        for switch_entity in turned_off:
+            try:
+                await hass.services.async_call(
+                    "switch", "turn_on", {ATTR_ENTITY_ID: switch_entity},
+                    blocking=True, context=None)
+            except Exception:  # noqa: BLE001 — retry on the next tick
+                remaining.append(switch_entity)
+        pstate["turnedOff"] = remaining
+        changed = True
+        if not remaining:
+            pstate["restoreAt"] = ""
+            wet = " — expect it to run wet for a while (that's the export working)" \
+                if profile == "skimmer" else ""
+            _append_activity(config, f"Feed truce over: {profile} back on{wet}", "control")
+    if changed:
+        await _async_save_config(hass, entry, config)
+
+
 async def _async_nps_drain_finish(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     drained_ml: float, seconds: float, note: str = "",
@@ -10552,6 +10680,10 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     config blob hourly or on a transition — kalk doses ~144x/day and every blob save
     runs the full pipeline, so per-dose saves are deliberately off the table (per-dose
     granularity lives in the recorder history of the firmware's Dosed Today sensor)."""
+    # Feed-truce restore backstop (Stage C): stamp-driven, fetch-fresh — runs
+    # before the snapshot below so a restore can never be clobbered by it.
+    await _async_nps_truce_tick(hass, entry)
+
     config = _config_from_entry(entry)
     channels = _dosing_channels(config)
     if not channels:
@@ -10689,6 +10821,10 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     # the tank creeping up every feeding day.
                     await _async_nps_feed_exchange_accrue(
                         hass, entry, cid, delta, chaser_credit_ml)
+                    # Feed truce (Stage C): a food dose landed — pause UV/ozone/
+                    # skimmer for their windows so the food survives to be eaten.
+                    if channel.get("chemical") in ("livefood", "food"):
+                        await _async_nps_truce_engage(hass, entry)
 
         # --- respread staleness (R17): a schedule edit after an accepted respread
         # invalidates the catch-up override — the safety edit wins immediately.

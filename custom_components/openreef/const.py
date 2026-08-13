@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.41"
+INTEGRATION_VERSION = "0.7.42"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1381,6 +1381,17 @@ DEFAULT_CORE_CONFIG = {
             "minDrainMl": 150,     # don't spin the drain pump for less
             "maxOwedMl": 2000,     # blocked-drain banking cap (overflow reported, not kept)
             "state": {},           # owed/drain runtime — persisted, normaliser owns the shape
+        },
+        # Feed truce (Stage C): UV/ozone kill dosed live food, the skimmer strips
+        # it — pause whatever is armed for a window after every food dose, then
+        # restore. Stamp-driven (the dosing tick is the restore backstop), so a
+        # restart can never leave equipment off forever.
+        "truce": {
+            "enabled": False,
+            "uvOffMinutes": 120,
+            "ozoneOffMinutes": 120,
+            "skimmerOffMinutes": 45,
+            "state": {},
         },
     },
     # Consumables — the system-wide bottle tracker (foods, phyto, bacteria,
