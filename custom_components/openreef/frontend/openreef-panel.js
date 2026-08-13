@@ -1707,6 +1707,7 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "nps-demo-toggle") this._npsToggleDemo();
+      if (action === "nps-demo-play") this._npsDemoPlay();
       if (action === "doser-mark-refreshed") this._doserCall(
         { type: "openreef/dosing_mark_refreshed", channel_id: id },
         "Freshness clock restarted — dosing re-enables on the next sync.",
@@ -9626,18 +9627,28 @@ class OpenReefPanel extends HTMLElement {
     config.automaticWaterChange.enabled = true;
     config.automaticWaterChange.schedule = { enabled: true, mode: "times",
       times: ["10:00", "22:00"], amount: 4, amountUnit: "percent", period: "week", days: [] };
-    const summaryEntry = (name, chemical, mlPerDay, perDose, days) => ({
-      name, chemical,
-      plan: { mlPerDay, perDoseMl: perDose, summaryText: `${mlPerDay} ml across the day in ${Math.round(mlPerDay / perDose)} doses` },
-      calibration: { stepsPerMl: 11851, mlPerS: 1.2 },
-      reservoir: { daysUntilEmpty: days, percent: 76 },
+    // Full-fidelity entries: every field the pump card reads, staged as a tank
+    // that is visibly RUNNING — synced, calibrated, mid-day progress, next dose
+    // on the clock (the Discord-recording polish).
+    const summaryEntry = (name, chemical, mlPerDay, perDose, days, dosed, nextMin, remainingMl) => ({
+      name, chemical, enabled: true,
+      plan: { mlPerDay, realisedMlPerDay: mlPerDay, perDoseMl: perDose,
+              maxDailyMl: Math.ceil(mlPerDay * 1.25 / 5) * 5,
+              summaryText: `${mlPerDay} ml across the day in ${Math.round(mlPerDay / perDose)} doses` },
+      dosedTodayMl: dosed,
+      calibration: { stepsPerMl: 11851, mlPerS: 1.2, ageDays: 12 },
+      reservoir: { daysUntilEmpty: days, remainingMl, percent: 76 },
+      integrity: { status: "ok", reasons: [] },
+      tube: { runHours: 46, tubeLifeHours: 1000 },
+      sync: { state: "synced", lastSyncedAt: iso(22 * 60000) },
+      nextDose: { inMinutes: nextMin, ml: perDose },
       guards: [],
     });
     const doserSummary = {
       summary: {
-        demo_phyto_pump: summaryEntry("Phyto pump", "food", 12, 1, 49),
-        demo_zoo_pump: summaryEntry("Zooplankton pump", "food", 9, 1.5, 15),
-        demo_brine: summaryEntry("Live brine", "livefood", 12, 3, 2),
+        demo_phyto_pump: summaryEntry("Phyto pump", "food", 12, 1, 49, 7.0, 51, 590),
+        demo_zoo_pump: summaryEntry("Zooplankton pump", "food", 9, 1.5, 15, 6.0, 74, 137),
+        demo_brine: summaryEntry("Live brine", "livefood", 12, 3, 2, 6.0, 12, 710),
       },
       bindings: { demo_phyto_pump: { bound: 8 }, demo_zoo_pump: { bound: 1 }, demo_brine: { bound: 8 } },
     };
@@ -9694,15 +9705,73 @@ class OpenReefPanel extends HTMLElement {
     };
     const awcSummary = {
       summary: { scheduleText: "4% twice a week — Tuesdays and Fridays feel like Sundays",
-        dailyChangeL: 2.9, daysOfFreshRemaining: 8 },
+        dailyChangeL: 2.9, daysOfFreshRemaining: 8,
+        reservoirs: { fresh: { percent: 64, remainingL: 16 },
+                      waste: { percent: 26, filledL: 6.5 } } },
       state: { nextRun: new Date(now + 37 * 60000).toISOString() },
     };
     return { config, doserSummary, npsSummary, awcSummary };
   }
 
+  // The choreographed feeding: dose → chaser flush → matched drain → balanced.
+  // Pure state mutation per stage (testable); _npsDemoPlay owns the clock.
+  _npsDemoAdvance(stage) {
+    const st = this._nps;
+    if (!st.demo || !st.summary) return;
+    const summaryFx = st.summary.feedExchange || {};
+    const brineCh = this._config?.dosing?.channels?.demo_brine;
+    const awcRes = this._awcSummary?.summary?.reservoirs || {};
+    if (stage === "dose") {
+      if (brineCh) brineCh.state.haRunEndsAt = new Date(Date.now() + 4000).toISOString();
+      (summaryFx.state || {}).owedMl = 430;
+    } else if (stage === "flush") {
+      if (brineCh) {
+        brineCh.state.haRunEndsAt = "";
+        brineCh.state.lastDoseAt = new Date().toISOString();
+      }
+      summaryFx.chaserActive = true;
+      (summaryFx.state || {}).owedMl = 642;   // 12 ml brine + 200 ml chaser banked
+      if (awcRes.fresh) awcRes.fresh.percent = Math.max(0, (Number(awcRes.fresh.percent) || 0) - 2);
+    } else if (stage === "drain") {
+      summaryFx.chaserActive = false;
+      summaryFx.drainActive = true;
+    } else if (stage === "done") {
+      summaryFx.drainActive = false;
+      const fxState = summaryFx.state || {};
+      fxState.owedMl = 0;
+      fxState.lastDrainAt = new Date().toISOString();
+      fxState.lastDrainMl = 642;
+      if (awcRes.waste) awcRes.waste.percent = Math.min(100, (Number(awcRes.waste.percent) || 0) + 3);
+      const brineShelf = st.summary.shelf?.products?.demo_brine_b;
+      if (brineShelf) {
+        brineShelf.remainingMl = Math.max(0, (Number(brineShelf.remainingMl) || 0) - 12);
+        brineShelf.percent = Math.round(brineShelf.remainingMl / 10);
+      }
+    } else if (stage === "") {
+      summaryFx.chaserActive = false;
+      summaryFx.drainActive = false;
+    }
+    st.demoStage = stage;
+    this._render();
+  }
+
+  _npsDemoPlay() {
+    const st = this._nps;
+    if (!st.demo || st.demoStage) return;
+    st.demoTimers = st.demoTimers || [];
+    this._npsDemoAdvance("dose");
+    st.demoTimers.push(window.setTimeout(() => this._npsDemoAdvance("flush"), 4000));
+    st.demoTimers.push(window.setTimeout(() => this._npsDemoAdvance("drain"), 8500));
+    st.demoTimers.push(window.setTimeout(() => this._npsDemoAdvance("done"), 13500));
+    st.demoTimers.push(window.setTimeout(() => this._npsDemoAdvance(""), 20000));
+  }
+
   _npsToggleDemo() {
     const st = this._nps;
     if (st.demo) {
+      (st.demoTimers || []).forEach((t) => clearTimeout(t));
+      st.demoTimers = [];
+      st.demoStage = "";
       const stash = this._npsDemoStash || {};
       this._config = stash.config || this._config;
       this._doserSummary = "doserSummary" in stash ? stash.doserSummary : null;
@@ -9801,8 +9870,16 @@ class OpenReefPanel extends HTMLElement {
       const da = shelfStates[a]?.daysUntilEmpty, db = shelfStates[b]?.daysUntilEmpty;
       return (da == null ? 9e9 : da) - (db == null ? 9e9 : db);
     });
-    const shown = pids.slice(0, 5);
+    const shown = pids.slice(0, 4);
     const extra = pids.length - shown.length;
+    // AWC reservoir levels — the fresh premix feeds the chaser flush and the
+    // water changes; the waste box takes the matched drain. Real data in live
+    // mode, staged in demo.
+    const awcRes = (this._awcSummary && this._awcSummary.summary
+      && this._awcSummary.summary.reservoirs) || {};
+    const freshPct = Math.max(0, Math.min(100, Number(awcRes.fresh?.percent) || 0));
+    const wastePct = Math.max(0, Math.min(100, Number(awcRes.waste?.percent) || 0));
+    const chaserActive = !!fx.chaserActive;
     const catColor = { phyto: "#2e7d32", zooLive: "#ef6c00", zooPrepared: "#ad1457",
       blend: "#6a1b9a", bacteria: "#00695c", amino: "#f9a825", trace: "#546e7a",
       twoPart: "#1565c0", other: "#616161" };
@@ -9836,10 +9913,23 @@ class OpenReefPanel extends HTMLElement {
     }).join("");
 
     // Feed manifold: bottle pipes join at y=140 and rise into the tank.
+    const manifoldEnd = Math.max(168, 34 + (shown.length - 1) * 52);
     const manifold = shown.length
-      ? `<path d="M 34 140 H 168 V 106" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
-         ${anyPumpActive ? `<path d="M 34 140 H 168 V 106" fill="none" stroke="#26c6da" stroke-width="3" class="awc-flow"></path>` : ""}`
+      ? `<path d="M 34 140 H ${manifoldEnd} M 168 140 V 106" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+         ${anyPumpActive ? `<path d="M 34 140 H ${manifoldEnd} M 168 140 V 106" fill="none" stroke="#26c6da" stroke-width="3" class="awc-flow"></path>` : ""}`
       : "";
+    // Fresh premix: its own station, piped into the tank. Animates during the
+    // chaser flush (and carries the level the AWC reports).
+    const freshFillH = 62 * freshPct / 100, freshFillY = 240 - freshFillH;
+    const freshStation = `
+      <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>AWC fresh reservoir — tank-salinity premix; feeds the chaser flush and water changes</title>
+        <path d="M 246 178 V 106" fill="none" stroke="#37474f" stroke-width="6" stroke-linecap="round"></path>
+        ${chaserActive ? `<path d="M 246 178 V 106" fill="none" stroke="#42a5f5" stroke-width="3" class="awc-flow"></path>` : ""}
+        <rect x="222" y="178" width="48" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
+        <clipPath id="npsFresh"><rect x="222" y="178" width="48" height="62" rx="5"/></clipPath>
+        <g clip-path="url(#npsFresh)"><rect x="222" y="${freshFillY}" width="48" height="${freshFillH}" fill="url(#npsFreshG)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
+        <text x="246" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">fresh</text>
+      </g>`;
     const pumpDots = shown.map((pid, i) => {
       if (!linkedIds.includes(pid)) return "";
       const x = 14 + i * 52 + 20;
@@ -9868,6 +9958,7 @@ class OpenReefPanel extends HTMLElement {
     const brine = fx.enabled ? `
       <g><title>${esc(brineProduct ? brineProduct.name : "Live brine reservoir")} — ${esc(brineStatus || "no hatch loaded")}${brineProduct ? ` · ${esc(brineShelf.remainingMl)} of ${esc(brineShelf.bottleMl)} ml` : ""}</title>
         <path d="M 375 178 V 96 H 272" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        ${brineActive ? `<path d="M 375 178 V 96 H 272" fill="none" stroke="#ef6c00" stroke-width="3" class="awc-flow"></path>` : ""}
         <g><circle cx="375" cy="146" r="10" fill="${brineActive ? "#1b5e20" : "#2a2a2a"}" stroke="${brineActive ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
           <g class="${brineActive ? "awc-spin" : ""}"><path d="M 375 141 L 375 151 M 370 146 L 380 146" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g></g>
         <rect x="344" y="178" width="62" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="${freshColor[brineStatus] || "#455a64"}" stroke-width="2"></rect>
@@ -9877,12 +9968,14 @@ class OpenReefPanel extends HTMLElement {
         <text x="375" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">${esc(brineLabel)}</text>
       </g>
       <g data-action="tab" data-id="awc" style="cursor:pointer;"><title>Matched drain to waste — the Water Change tab owns the reservoirs</title>
-        <path d="M 240 106 V 150 H 300 V 178" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
-        ${drainActive ? `<path d="M 240 106 V 150 H 300 V 178" fill="none" stroke="#a1887f" stroke-width="3" class="awc-flow"></path>` : ""}
+        <path d="M 264 106 V 156 H 300 V 178" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        ${drainActive ? `<path d="M 264 106 V 156 H 300 V 178" fill="none" stroke="#a1887f" stroke-width="3" class="awc-flow"></path>` : ""}
         <rect x="282" y="178" width="36" height="62" rx="5" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
-        <text x="300" y="214" text-anchor="middle" font-size="11" fill="#8d6e63">≋</text>
+        <clipPath id="npsWaste"><rect x="282" y="178" width="36" height="62" rx="5"/></clipPath>
+        <g clip-path="url(#npsWaste)"><rect x="282" y="${240 - 62 * wastePct / 100}" width="36" height="${62 * wastePct / 100}" fill="url(#npsWasteG)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
+        <text x="300" y="214" text-anchor="middle" font-size="11" fill="#d7ccc8">≋</text>
         <text x="300" y="252" text-anchor="middle" font-size="9" fill="#90a4ae">waste</text>
-        ${owedMl > 0 ? `<g><rect x="266" y="128" width="68" height="16" rx="8" fill="${drainActive ? "#1b5e20" : "#37474f"}"></rect><text x="300" y="140" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${drainActive ? "draining" : `owes ${owedMl} ml`}</text></g>` : ""}
+        ${owedMl > 0 || drainActive ? `<g><rect x="266" y="118" width="68" height="16" rx="8" fill="${drainActive ? "#1b5e20" : "#37474f"}"></rect><text x="300" y="130" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${drainActive ? "draining" : `owes ${owedMl} ml`}</text></g>` : ""}
       </g>` : "";
 
     return `
@@ -9895,9 +9988,12 @@ class OpenReefPanel extends HTMLElement {
         </style>
         <defs>
           <linearGradient id="npsTank" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26c6da"/><stop offset="1" stop-color="#00838f"/></linearGradient>
+          <linearGradient id="npsFreshG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#42a5f5"/><stop offset="1" stop-color="#0d47a1"/></linearGradient>
+          <linearGradient id="npsWasteG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8d6e63"/><stop offset="1" stop-color="#4e342e"/></linearGradient>
           <clipPath id="npsTankClip"><rect x="150" y="22" width="120" height="84" rx="8"/></clipPath>
         </defs>
         ${manifold}
+        ${freshStation}
         ${brine}
         <g><title>Display tank</title>
           <rect x="150" y="22" width="120" height="84" rx="8" fill="rgba(38,198,218,0.08)" stroke="#4dd0e1" stroke-width="2"></rect>
@@ -10191,8 +10287,18 @@ class OpenReefPanel extends HTMLElement {
         </div>
       </div>`;
 
+    const demoStageCopy = ({
+      dose: "🦐 Dosing 12 ml of live brine — the pump spins up, and the feed truce holds the skimmer back from dinner.",
+      flush: "💧 Chaser flush — 200 ml of tank-salinity fresh rinses the food line clean. Both volumes bank as owed drain: 642 ml.",
+      drain: "↘️ Matched drain — the AWC drain pump takes the same 642 ml back out. The level never moved; the ATO never noticed.",
+      done: "✅ Balanced. Old water out, dinner served, books square. That's the feed-exchange.",
+    })[st.demoStage] || "";
     const notices = `
-      ${st.demo ? `<div class="notice info-notice"><small>🧪 <strong>Demo view</strong> — a staged tank so you can see the page fully populated. Nothing here is yours and nothing can be saved; tap "Exit demo" to come back.</small></div>` : ""}
+      ${st.demo ? `<div class="notice info-notice"><small>🧪 <strong>Demo view</strong> — a staged tank so you can see the page fully populated. Nothing here is yours and nothing can be saved; tap "Exit demo" to come back.</small>
+        <div class="button-row" style="margin-top:6px;">
+          <button class="secondary compact-button" data-action="nps-demo-play" ${st.demoStage ? "disabled" : ""}>${st.demoStage ? "Feeding in progress…" : "▶ Run a feeding"}</button>
+        </div></div>` : ""}
+      ${st.demo && demoStageCopy ? `<div class="notice info-notice"><small>${demoStageCopy}</small></div>` : ""}
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 

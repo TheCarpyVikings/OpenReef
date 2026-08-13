@@ -288,4 +288,45 @@ test("settings section checkboxes use the toggle-card convention", async () => {
   } finally { restore(); }
 });
 
+test("the feeding sequence plays dose → flush → drain → balanced with honest numbers", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._npsToggleDemo();
+    const fx = () => panel._nps.summary.feedExchange;
+    panel._npsDemoAdvance("dose");
+    assert(panel._config.dosing.channels.demo_brine.state.haRunEndsAt, "dose stage: brine pump not running");
+    panel._npsDemoAdvance("flush");
+    assert(fx().chaserActive === true, "flush stage: chaser line not animating");
+    assert(fx().state.owedMl === 642, "flush stage: owed must be dose + chaser (642 ml)");
+    panel._npsDemoAdvance("drain");
+    assert(fx().drainActive === true, "drain stage: drain not animating");
+    assert(fx().chaserActive === false, "drain stage: chaser must have stopped");
+    panel._npsDemoAdvance("done");
+    assert(fx().state.owedMl === 0, "done stage: books not settled");
+    assert(fx().state.lastDrainMl === 642, "done stage: drained volume wrong");
+    // The diagram reflects each stage — drain flow visible mid-drain:
+    panel._npsDemoAdvance("drain");
+    const svg = panel._npsDiagramSvg();
+    assert(svg.includes("draining"), "diagram missing the draining badge mid-sequence");
+    panel._npsToggleDemo();   // exit clears timers and stage
+    assert(panel._nps.demoStage === "", "exit demo left a stage behind");
+  } finally { restore(); }
+});
+
+test("the diagram carries the fresh reservoir with the AWC's real level", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._awcSummary.summary.reservoirs = { fresh: { percent: 50 }, waste: { percent: 25 } };
+    const svg = panel._npsDiagramSvg();
+    assert(svg.includes(">fresh<"), "fresh reservoir missing from the diagram");
+    assert(svg.includes("npsFreshG"), "fresh fill gradient missing");
+    // 50% of the 62-high fresh box = 31 units; 25% waste = 15.5.
+    assert(svg.includes('height="15.5"'), "waste fill does not match the 25% level");
+    noPlaceholders(svg, "diagram with reservoirs");
+  } finally { restore(); }
+});
+
 runTests();
