@@ -310,8 +310,52 @@ test("the feeding sequence plays dose → flush → drain → balanced with hone
     panel._npsDemoAdvance("drain");
     const svg = panel._npsDiagramSvg();
     assert(svg.includes("draining"), "diagram missing the draining badge mid-sequence");
+    // Reset: every line must STOP (the "lines never stop" live-test catch).
+    panel._npsDemoAdvance("");
+    const brineState = panel._config.dosing.channels.demo_brine.state;
+    assert(brineState.haRunEndsAt === "", "reset left the brine pump running");
+    assert(Date.now() - Date.parse(brineState.lastDoseAt) > 30000,
+      "reset left a fresh dose stamp — the brine line would keep flowing");
     panel._npsToggleDemo();   // exit clears timers and stage
     assert(panel._nps.demoStage === "", "exit demo left a stage behind");
+  } finally { restore(); }
+});
+
+test("the water-change demo drains, refills, and moves the reservoir levels", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._npsToggleDemo();
+    const res = () => panel._awcSummary.summary.reservoirs;
+    const wasteBefore = res().waste.percent, freshBefore = res().fresh.percent;
+    panel._npsDemoAdvance("awc-drain");
+    assert(panel._nps.summary.awcDemo.draining === true, "drain stage flag missing");
+    assert(panel._npsDiagramSvg().includes("water change"), "drain badge missing");
+    panel._npsDemoAdvance("awc-fill");
+    assert(res().waste.percent > wasteBefore, "waste level did not rise");
+    assert(res().fresh.percent < freshBefore, "fresh level did not fall");
+    assert(panel._npsDiagramSvg().includes("refilling"), "refill badge missing");
+    panel._npsDemoAdvance("");
+    assert(panel._nps.summary.awcDemo.filling === false, "reset left the fill running");
+    panel._npsToggleDemo();
+  } finally { restore(); }
+});
+
+test("overflow bottles become a ghost container, and the manifold hugs its pumps", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._npsToggleDemo();   // demo shelf: 5 row bottles → 3 shown + ghost "+2"
+    const svg = panel._npsDiagramSvg();
+    assert(svg.includes(">+2<"), "ghost overflow container missing");
+    assert(!svg.includes("more on the shelf"), "old loose text still present");
+    // At rest nothing is dosing — no line may flow (class only appears on
+    // animated overlays; the <style> block defines it without using it).
+    const flows = (svg.match(/class="awc-flow"/g) || []).length;
+    assert(flows === 0, `diagram at rest has ${flows} flowing line(s) — lines must stop`);
+    panel._npsToggleDemo();
   } finally { restore(); }
 });
 
