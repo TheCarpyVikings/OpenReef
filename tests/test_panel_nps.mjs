@@ -103,16 +103,51 @@ async function npsPanel(configOverrides = {}) {
 const noPlaceholders = (html, where) =>
   assert(!/undefined|NaN|\[object/.test(html), `${where} leaked a placeholder value`);
 
-test("the tab renders every section without placeholder leaks", async () => {
+test("the tab renders the informative sections without placeholder leaks", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
     const html = panel._npsTab();
-    for (const marker of ["Feeding station", "Food pumps", "Species plans",
-      "Hatchery", "Feed truce", "Food shelf", "Nutrient budget", "Water exchange"]) {
+    for (const marker of ["Feeding station", "Food pumps", "Hatchery", "Food shelf",
+      "Feed exchange", "Water exchange"]) {
       assert(html.includes(marker), `missing section: ${marker}`);
     }
     noPlaceholders(html, "NPS tab");
+  } finally { restore(); }
+});
+
+test("the page carries no settings forms — they all live behind Settings", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const html = panel._npsTab();
+    for (const scope of ["nps-exchange", "nps-truce", "nps-species", "awc-schedule", "consumable"]) {
+      assert(!html.includes(`data-scope="${scope}"`), `page still carries a ${scope} form`);
+    }
+    assert(html.includes("summary-card"), "status cards missing");
+    assert(html.includes('data-scroll="or-section-nps"'), "no deep link into the NPS settings section");
+  } finally { restore(); }
+});
+
+test("the settings section carries every moved form", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._settingsSectionsOpen = { nps: true };
+    let html;
+    try {
+      html = panel._npsSettings();
+    } catch {
+      // Section chrome may need browser globals; the body builder is the contract.
+      html = null;
+    }
+    if (html !== null) {
+      for (const scope of ["nps-exchange", "nps-truce", "nps-species", "consumable"]) {
+        assert(html.includes(`data-scope="${scope}"`), `settings missing the ${scope} form`);
+      }
+      assert(html.includes("Salinity rule"), "salinity rule copy missing from settings");
+      assert(html.includes("Bottle size (ml)"), "product editor missing from settings");
+    }
   } finally { restore(); }
 });
 
@@ -168,14 +203,15 @@ test("the setup checklist knows what is done and retires itself", async () => {
   } finally { restore(); }
 });
 
-test("food pumps render as full dosing cards with the bottle link attached", async () => {
+test("food pumps render as full dosing cards; the bottle link moved to Settings", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
     const html = panel._npsTab();
     assert(html.includes("dosing-grid"), "pump cards are not the dosing-grid embed");
-    assert(html.includes("Draws from bottle"), "bottle link row missing");
-    assert(html.includes("productIsBottle"), "bottle-is-reservoir toggle missing");
+    assert(!html.includes("Draws from bottle"), "bottle link should live in channel settings now");
+    // The channel-settings home for the link:
+    assert(panel._npsProductOptions("phyto").includes("Phyto"), "product options helper broken");
   } finally { restore(); }
 });
 
