@@ -253,15 +253,36 @@ test("demo view stages a full tank, blocks saving, and restores on exit", async 
   } finally { restore(); }
 });
 
-test("settings checkboxes use the toggle-card convention, not bare mini-grid labels", async () => {
+const noBareCheckboxes = (html, where) => {
+  const bare = html.match(/<label(?![^>]*toggle-card)[^>]*>\s*<input type="checkbox"/g) || [];
+  assert(bare.length === 0, `${where}: ${bare.length} bare checkbox label(s) — use toggle-card`);
+};
+
+test("the product editor uses toggle-cards and never an empty category select", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // Unconditional: the editor is pure markup (the earlier section-level test
+    // silently skipped when section chrome needed browser globals — vacuous).
+    const card = panel._npsProductSettingsCard("phyto", panel._config.consumables.products.phyto);
+    noBareCheckboxes(card, "product editor");
+    assert(card.includes("toggle-card compact-toggle"), "toggle-card convention missing from the editor");
+    assert(card.includes("Phytoplankton"), "category select rendered empty");
+    // The fallback holds even before any summary has loaded (and in demo).
+    panel._nps.summary = null;
+    const early = panel._npsProductSettingsCard("phyto", panel._config.consumables.products.phyto);
+    assert(early.includes("Phytoplankton"), "category fallback missing before the summary loads");
+  } finally { restore(); }
+});
+
+test("settings section checkboxes use the toggle-card convention", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
     let html;
     try { html = panel._npsSettings(); } catch { html = null; }
     if (html !== null) {
-      const bare = html.match(/<label(?![^>]*toggle-card)[^>]*>\s*<input type="checkbox"/g) || [];
-      assert(bare.length === 0, `${bare.length} bare checkbox label(s) — use toggle-card`);
+      noBareCheckboxes(html, "settings section");
       assert(html.includes("toggle-card compact-toggle"), "toggle-card convention missing");
     }
   } finally { restore(); }

@@ -9660,7 +9660,10 @@ class OpenReefPanel extends HTMLElement {
         },
         lowCount: 2, expiredCount: 0, count: 6,
       },
-      library: [], categories: {},
+      library: [],
+      categories: { phyto: "Phytoplankton", zooLive: "Live zooplankton",
+        zooPrepared: "Zooplankton (prepared)", blend: "Blend", bacteria: "Bacteria",
+        amino: "Amino acids", trace: "Trace", twoPart: "2-part", other: "Other" },
       feedExchange: {
         enabled: true, channelId: "demo_brine", channelName: "Live brine",
         minDrainMl: 150, maxOwedMl: 2000,
@@ -9674,7 +9677,10 @@ class OpenReefPanel extends HTMLElement {
         { id: "demo_zoo_pump", name: "Zooplankton pump", chemical: "food" },
         { id: "demo_brine", name: "Live brine", chemical: "livefood" },
       ],
-      speciesLibrary: [], categoriesLabels: {},
+      speciesLibrary: [
+        { id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, note: "" },
+        { id: "gorgonian_easy", name: "Gorgonians — Menella, Swiftia, Diodogorgia", difficulty: 2, note: "" },
+      ],
       speciesPlan: {
         species: [{ name: "Sun coral (Tubastraea)" }, { name: "Gorgonians — Menella, Swiftia, Diodogorgia" }],
         gaps: [], warnings: [],
@@ -10054,12 +10060,21 @@ class OpenReefPanel extends HTMLElement {
       .join("");
   }
 
+  // Category labels: backend-served when the summary is loaded, static mirror
+  // otherwise — an empty select is never acceptable (demo-mode catch).
+  _npsCategoryLabels() {
+    const served = this._nps.summary && this._nps.summary.categories;
+    if (served && Object.keys(served).length) return served;
+    return { phyto: "Phytoplankton", zooLive: "Live zooplankton",
+      zooPrepared: "Zooplankton (prepared)", blend: "Blend", bacteria: "Bacteria",
+      amino: "Amino acids", trace: "Trace", twoPart: "2-part", other: "Other" };
+  }
+
   // Full product editor — Settings-side (the page card stays informative).
   _npsProductSettingsCard(pid, product) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
-    const cats = (this._nps.summary && this._nps.summary.categories) || { other: "Other" };
-    const catOptions = Object.entries(cats)
+    const catOptions = Object.entries(this._npsCategoryLabels())
       .map(([v, l]) => `<option value="${esc(v)}" ${product.category === v ? "selected" : ""}>${esc(l)}</option>`)
       .join("");
     const confirmRow = this._nps.confirmDelete === pid
@@ -10081,12 +10096,18 @@ class OpenReefPanel extends HTMLElement {
           <label>Remaining (ml)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="remainingMl" value="${esc(product.remainingMl)}"></label>
           <label>Low alert below (ml)<input type="number" min="0" placeholder="0 = auto 10%" data-scope="consumable" data-id="${eid}" data-field="lowThresholdMl" value="${esc(product.lowThresholdMl)}"></label>
           <label>Shelf life once opened (days)<input type="number" min="0" placeholder="0 = shelf-stable" data-scope="consumable" data-id="${eid}" data-field="shelfLifeDaysOpened" value="${esc(product.shelfLifeDaysOpened)}"></label>
-          <label><input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="refrigerated" ${product.refrigerated ? "checked" : ""}> Refrigerated</label>
-          <label><input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="stirDaily" ${product.stirDaily ? "checked" : ""}> Needs a daily stir/shake</label>
           <label>Particle min (µm)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="particleUmMin" value="${esc(product.particleUmMin)}"></label>
           <label>Particle max (µm)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="particleUmMax" value="${esc(product.particleUmMax)}"></label>
           <label>Notes<input data-scope="consumable" data-id="${eid}" data-field="notes" value="${esc(product.notes)}"></label>
         </div>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="refrigerated" ${product.refrigerated ? "checked" : ""}>
+          <span><strong>Refrigerated</strong><small>Lives in the fridge between doses.</small></span>
+        </label>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="stirDaily" ${product.stirDaily ? "checked" : ""}>
+          <span><strong>Needs a daily stir/shake</strong><small>Settled phyto dies in days — agitation is part of the routine.</small></span>
+        </label>
       </div>`;
   }
 
