@@ -215,4 +215,45 @@ test("food pumps render as full dosing cards; the bottle link moved to Settings"
   } finally { restore(); }
 });
 
+test("demo view stages a full tank, blocks saving, and restores on exit", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const realConfig = panel._config;
+    panel._render = () => {};                    // toggle re-renders; no DOM here
+    panel._npsToggleDemo();
+    assert(panel._nps.demo === true, "demo flag not set");
+    assert(panel._config !== realConfig, "config was not swapped");
+    assert(Object.keys(panel._config.consumables.products).length === 6, "demo shelf not staged");
+    const html = panel._npsTab();
+    assert(html.includes("Demo view"), "demo banner missing");
+    assert(html.includes("Exit demo"), "exit button missing");
+    // Saving the staged config must be refused outright.
+    let saved = false;
+    panel._callWS = async () => { saved = true; return {}; };
+    await panel._saveConfig();
+    assert(saved === false, "demo config reached save_config");
+    await panel._persistConfigSilently();
+    assert(saved === false, "demo config reached the silent persist");
+    // Exit restores the stashed real state untouched.
+    panel._npsToggleDemo();
+    assert(panel._nps.demo === false, "demo flag not cleared");
+    assert(panel._config === realConfig, "real config not restored");
+  } finally { restore(); }
+});
+
+test("settings checkboxes use the toggle-card convention, not bare mini-grid labels", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    let html;
+    try { html = panel._npsSettings(); } catch { html = null; }
+    if (html !== null) {
+      const bare = html.match(/<label(?![^>]*toggle-card)[^>]*>\s*<input type="checkbox"/g) || [];
+      assert(bare.length === 0, `${bare.length} bare checkbox label(s) — use toggle-card`);
+      assert(html.includes("toggle-card compact-toggle"), "toggle-card convention missing");
+    }
+  } finally { restore(); }
+});
+
 runTests();

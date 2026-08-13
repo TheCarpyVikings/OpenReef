@@ -59,7 +59,8 @@ class OpenReefPanel extends HTMLElement {
       speaking: false, keysOpen: false,
     };
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
-    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "" };
+    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false };
+    this._npsDemoStash = null;
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
     this._icpFileInput = null;
@@ -403,6 +404,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _canRefreshFromConfigEvent() {
+    if (this._nps?.demo) return false;   // a refresh would clobber the staged demo view
     if (!this._hass || this._busy || this._configDirty || this._isEditingFormControl()) return false;
     if (this._pulseActive || this._cameraFocus || this._recordingFocus || this._trend) return false;
     if (this._onboarding?.active || this._setupOpen) return false;
@@ -472,6 +474,13 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _saveConfig(nextConfig = this._config) {
+    if (this._nps?.demo) {
+      // The demo swaps in staged config — saving it would write a fake tank
+      // over the real one. Hard refusal, not a warning.
+      this._error = "Demo view is showing sample data — exit the demo before saving.";
+      this._render();
+      return;
+    }
     this._busy = true;
     this._message = "";
     this._error = "";
@@ -503,6 +512,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _persistConfigSilently(nextConfig = this._config) {
+    if (this._nps?.demo) return;   // never persist the staged demo config
     const result = await this._callWS({
       type: "openreef/save_config",
       config: nextConfig,
@@ -1696,6 +1706,7 @@ class OpenReefPanel extends HTMLElement {
         try { window.localStorage?.setItem("openreef:nps-setup-hidden", "1"); } catch { /* no storage */ }
         this._render();
       }
+      if (action === "nps-demo-toggle") this._npsToggleDemo();
       if (action === "doser-mark-refreshed") this._doserCall(
         { type: "openreef/dosing_mark_refreshed", channel_id: id },
         "Freshness clock restarted — dosing re-enables on the next sync.",
@@ -9426,6 +9437,7 @@ class OpenReefPanel extends HTMLElement {
 
   async _npsLoadSummary(force = false) {
     const st = this._nps;
+    if (st.demo) return;   // the staged summary IS the view while the demo is up
     if (st.loading) return;
     if (!force && st.summary && Date.now() - st.at < 30000) return;
     st.loading = true;
@@ -9442,6 +9454,11 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _npsCall(msg, okMessage) {
+    if (this._nps.demo) {
+      this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
+      this._render();
+      return;
+    }
     try {
       await this._callWS(msg);
       this._nps.message = okMessage || "";
@@ -9560,6 +9577,148 @@ class OpenReefPanel extends HTMLElement {
     this._setDirty(true);
     this._nps.message = "Hatchery reminders added to Maintenance — save to keep them.";
     this._recordActivity("Added brine hatchery reminders");
+    this._render();
+  }
+
+  // --- Demo view: a fully-populated sample tank, client-side only ----------
+  // Swaps config + summaries for staged data so the page can be seen (and the
+  // design iterated) with shelves stocked and pumps synced. Nothing is saved:
+  // saving, WS actions and config-event refreshes are all blocked while the
+  // demo is up, and exit restores the stashed real state untouched.
+  _npsDemoData() {
+    const now = Date.now();
+    const iso = (msAgo) => new Date(now - msAgo).toISOString();
+    const config = JSON.parse(JSON.stringify(this._config || {}));
+    config.nps = {
+      enabled: true,
+      species: ["tubastraea", "gorgonian_easy"],
+      feedExchange: { enabled: true, channelId: "demo_brine", minDrainMl: 150, maxOwedMl: 2000,
+        state: { owedMl: 430, lastDrainAt: iso(3.2 * 3600000), lastDrainMl: 380,
+                 totalDrainedL: 6.4, lastBlockedReason: "", drainStartedAt: "", drainEndsAt: "", drainTargetMl: 0 } },
+      truce: { enabled: true, uvOffMinutes: 120, ozoneOffMinutes: 120, skimmerOffMinutes: 45,
+        state: { skimmer: { restoreAt: iso(-25 * 60000), turnedOff: ["switch.demo_skimmer"] } } },
+    };
+    config.consumables = { products: {
+      demo_phyto: { name: "Live phyto blend", brand: "AlgaeBarn", category: "phyto", bottleMl: 946, remainingMl: 590, refrigerated: true, stirDaily: true },
+      demo_oyster: { name: "Oyster-Feast", brand: "Reef Nutrition", category: "zooPrepared", bottleMl: 177, remainingMl: 60, refrigerated: true },
+      demo_roti: { name: "Roti-Feast", brand: "Reef Nutrition", category: "zooPrepared", bottleMl: 177, remainingMl: 143 },
+      demo_roids: { name: "Reef-Roids slurry", brand: "PolypLab", category: "blend", bottleMl: 250, remainingMl: 45 },
+      demo_pods: { name: "GoldPods", brand: "NYOS", category: "zooPrepared", bottleMl: 250, remainingMl: 137 },
+      demo_brine_b: { name: "Live baby brine", brand: "Home hatchery", category: "zooLive", bottleMl: 1000, remainingMl: 710 },
+    } };
+    const mkChannel = (name, chemical, driverType, dosesPerDay, ws, we, productId, isBottle) => ({
+      name, chemical, enabled: true,
+      schedule: { enabled: true, mlPerDay: 12, mode: "doses", dosesPerDay,
+                  windowStart: ws, windowEnd: we, night: {} },
+      reservoir: { volumeMl: 500, remainingMl: 380, productId, productIsBottle: !!isBottle,
+                   mixedAt: chemical === "livefood" ? iso(5 * 3600000) : "", shelfLifeDays: chemical === "livefood" ? 1 : 0 },
+      calibration: { mlPerS: 1.2, stepsPerMl: driverType === "openreef_esphome_stepper" ? 11851 : 0 },
+      driver: { type: driverType, entities: { enabledSwitch: "switch.demo" } },
+      state: { lastDoseAt: iso(40 * 60000) }, guards: {}, wear: {},
+    });
+    config.dosing = config.dosing || {};
+    config.dosing.channels = {
+      demo_phyto_pump: mkChannel("Phyto pump", "food", "openreef_esphome_stepper", 12, "08:00", "20:00", "demo_phyto", true),
+      demo_zoo_pump: mkChannel("Zooplankton pump", "food", "ha_switch_timed", 6, "09:00", "21:00", "demo_pods", false),
+      demo_brine: mkChannel("Live brine", "livefood", "openreef_esphome_brushed", 4, "20:00", "23:00", "demo_brine_b", true),
+    };
+    config.automaticWaterChange = config.automaticWaterChange || {};
+    config.automaticWaterChange.enabled = true;
+    config.automaticWaterChange.schedule = { enabled: true, mode: "times",
+      times: ["10:00", "22:00"], amount: 4, amountUnit: "percent", period: "week", days: [] };
+    const summaryEntry = (name, chemical, mlPerDay, perDose, days) => ({
+      name, chemical,
+      plan: { mlPerDay, perDoseMl: perDose, summaryText: `${mlPerDay} ml across the day in ${Math.round(mlPerDay / perDose)} doses` },
+      calibration: { stepsPerMl: 11851, mlPerS: 1.2 },
+      reservoir: { daysUntilEmpty: days, percent: 76 },
+      guards: [],
+    });
+    const doserSummary = {
+      summary: {
+        demo_phyto_pump: summaryEntry("Phyto pump", "food", 12, 1, 49),
+        demo_zoo_pump: summaryEntry("Zooplankton pump", "food", 9, 1.5, 15),
+        demo_brine: summaryEntry("Live brine", "livefood", 12, 3, 2),
+      },
+      bindings: { demo_phyto_pump: { bound: 8 }, demo_zoo_pump: { bound: 1 }, demo_brine: { bound: 8 } },
+    };
+    const shelfState = (bottle, remaining, opts = {}) => ({
+      bottleMl: bottle, remainingMl: remaining, percent: Math.round(remaining / bottle * 100),
+      usageMlPerDay: opts.use || null, daysUntilEmpty: opts.days ?? null,
+      low: !!opts.low, empty: false, expiry: { status: opts.expiry || "fresh", daysLeft: opts.expiryDays ?? null },
+      categoryLabel: opts.cat || "Other",
+    });
+    const npsSummary = {
+      enabled: true,
+      shelf: {
+        products: {
+          demo_phyto: shelfState(946, 590, { use: 12, days: 49, cat: "Phytoplankton" }),
+          demo_oyster: shelfState(177, 60, { use: 4, days: 15, low: true, expiry: "aging", expiryDays: 9, cat: "Zooplankton (prepared)" }),
+          demo_roti: shelfState(177, 143, { use: 3, days: 47, cat: "Zooplankton (prepared)" }),
+          demo_roids: shelfState(250, 45, { use: 5, days: 9, low: true, cat: "Blend" }),
+          demo_pods: shelfState(250, 137, { use: 9, days: 15, cat: "Zooplankton (prepared)" }),
+          demo_brine_b: shelfState(1000, 710, { use: 240, days: 3, cat: "Live zooplankton" }),
+        },
+        lowCount: 2, expiredCount: 0, count: 6,
+      },
+      library: [], categories: {},
+      feedExchange: {
+        enabled: true, channelId: "demo_brine", channelName: "Live brine",
+        minDrainMl: 150, maxOwedMl: 2000,
+        state: config.nps.feedExchange.state,
+        freshness: { status: "fresh", hoursLeft: 19, ageHours: 5 },
+        prime: { status: "prime", ageHours: 5, primeLeftHours: 19 },
+        drainActive: false,
+      },
+      foodChannels: [
+        { id: "demo_phyto_pump", name: "Phyto pump", chemical: "food" },
+        { id: "demo_zoo_pump", name: "Zooplankton pump", chemical: "food" },
+        { id: "demo_brine", name: "Live brine", chemical: "livefood" },
+      ],
+      speciesLibrary: [], categoriesLabels: {},
+      speciesPlan: {
+        species: [{ name: "Sun coral (Tubastraea)" }, { name: "Gorgonians — Menella, Swiftia, Diodogorgia" }],
+        gaps: [], warnings: [],
+        suggestions: [{ channelId: "demo_zoo_pump", channelName: "Zooplankton pump",
+          for: "Gorgonians — Menella, Swiftia, Diodogorgia", dosesPerDay: 2, night: false,
+          note: "Discrete pulse feeds" }],
+      },
+      budget: { available: true, feedingMlPerDay: 33, perCategoryMlPerDay: {},
+        no3PpmPerDay: 0.31, po4PpmPerDay: 0.011, dailyExchangeL: 2.9,
+        steadyNo3: 8.6, steadyPo4: 0.09, verdict: "balanced" },
+    };
+    const awcSummary = {
+      summary: { scheduleText: "4% twice a week — Tuesdays and Fridays feel like Sundays",
+        dailyChangeL: 2.9, daysOfFreshRemaining: 8 },
+      state: { nextRun: new Date(now + 37 * 60000).toISOString() },
+    };
+    return { config, doserSummary, npsSummary, awcSummary };
+  }
+
+  _npsToggleDemo() {
+    const st = this._nps;
+    if (st.demo) {
+      const stash = this._npsDemoStash || {};
+      this._config = stash.config || this._config;
+      this._doserSummary = "doserSummary" in stash ? stash.doserSummary : null;
+      this._awcSummary = "awcSummary" in stash ? stash.awcSummary : null;
+      st.summary = "npsSummary" in stash ? stash.npsSummary : null;
+      st.at = 0;
+      this._npsDemoStash = null;
+      st.demo = false;
+      st.message = "Demo view closed — back to your real tank.";
+      this._npsLoadSummary(true);
+    } else {
+      this._npsDemoStash = { config: this._config, doserSummary: this._doserSummary,
+        awcSummary: this._awcSummary, npsSummary: st.summary };
+      const demo = this._npsDemoData();
+      this._config = demo.config;
+      this._doserSummary = demo.doserSummary;
+      this._awcSummary = demo.awcSummary;
+      st.summary = demo.npsSummary;
+      st.at = Date.now();
+      st.demo = true;
+      st.message = "";
+    }
     this._render();
   }
 
@@ -9983,10 +10142,14 @@ class OpenReefPanel extends HTMLElement {
     const head = `
       <div class="section-head">
         <div><h2>Automated NPS System</h2><p>Feeding non-photosynthetic corals is a logistics problem — OpenReef turns it into a schedule. Food pumps, the bottle shelf, and the water exchange in one place.</p></div>
-        <button class="secondary compact-button" data-action="nps-refresh">Refresh</button>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="nps-demo-toggle">${st.demo ? "Exit demo" : "Demo view"}</button>
+          ${st.demo ? "" : `<button class="secondary compact-button" data-action="nps-refresh">Refresh</button>`}
+        </div>
       </div>`;
 
     const notices = `
+      ${st.demo ? `<div class="notice info-notice"><small>🧪 <strong>Demo view</strong> — a staged tank so you can see the page fully populated. Nothing here is yours and nothing can be saved; tap "Exit demo" to come back.</small></div>` : ""}
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
@@ -10270,6 +10433,13 @@ class OpenReefPanel extends HTMLElement {
   }
 
   async _doserCall(payload, okMessage) {
+    if (this._nps?.demo) {
+      // Demo channels don't exist backend-side, and the response would replace
+      // the staged config with the real one mid-demo.
+      this._doserMessage = "Demo view — exit it to control real pumps.";
+      this._render();
+      return;
+    }
     // Imperative responses replace this._config with the server's saved copy —
     // persist pending edits first or an unsaved just-added channel would vanish.
     if (this._configDirty) {
@@ -11023,9 +11193,13 @@ class OpenReefPanel extends HTMLElement {
           <label>Low alert below (ml)<input type="number" min="0" step="50" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="lowThresholdMl" value="${esc(reservoir.lowThresholdMl ?? 500)}"></label>
           <label>Float switch (optional)${this._doserEntitySelect("dosing-channel-entities", `data-id="${eid}"`, "reservoirLowSensor", entities.reservoirLowSensor || "", "binary_sensor")}<small>Hardware cross-check; the software ledger works without it.</small></label>
           ${["food", "livefood"].includes(channel.chemical) ? `
-          <label>Draws from bottle<select data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="productId">${this._npsProductOptions(reservoir.productId || "")}</select><small>Refills debit the linked bottle on the NPS shelf.</small></label>
-          <label><input type="checkbox" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="productIsBottle" ${reservoir.productIsBottle ? "checked" : ""}> The bottle IS the reservoir (doses debit it live)</label>` : ""}
+          <label>Draws from bottle<select data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="productId">${this._npsProductOptions(reservoir.productId || "")}</select><small>Refills debit the linked bottle on the NPS shelf.</small></label>` : ""}
         </div>
+        ${["food", "livefood"].includes(channel.chemical) ? `
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="productIsBottle" ${reservoir.productIsBottle ? "checked" : ""}>
+          <span><strong>The bottle IS the reservoir</strong><small>Every dose debits the linked bottle live (no separate refill step).</small></span>
+        </label>` : ""}
         <div class="button-row">
           <button class="secondary" data-action="doser-reset-reservoir" data-id="${eid}">Refilled — reset ledger</button>
           <button class="secondary" data-action="doser-prime" data-id="${eid}">Re-prime 10 s</button>
@@ -20626,22 +20800,30 @@ class OpenReefPanel extends HTMLElement {
       .join("");
 
     const body = `
-      <label><input type="checkbox" data-scope="nps" data-field="enabled" ${npsCfg.enabled ? "checked" : ""}> Enable the NPS tab</label>
-      <p class="hint">The tab stays informative — every knob lives here.</p>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="nps" data-field="enabled" ${npsCfg.enabled ? "checked" : ""}>
+        <span><strong>Enable the NPS tab</strong><small>The tab stays informative — every knob lives here.</small></span>
+      </label>
 
       <div class="awc-section-title"><p class="eyebrow">Species you keep</p></div>
       <small class="awc-hint">The tab's coverage report checks the shelf feeds every mouth (food type AND particle size) and shapes each pump's cadence.</small>
       <div class="mini-grid">
         ${speciesLib.length ? speciesLib.map((s) => `
-          <label title="${this._escape(s.note || "")}"><input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}> ${this._escape(s.name)} <small>${diffDots(s.difficulty)}</small></label>`).join("")
+          <label class="toggle-card compact-toggle" title="${this._escape(s.note || "")}">
+            <input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}>
+            <span><strong>${this._escape(s.name)}</strong><small>Difficulty ${diffDots(s.difficulty)}</small></span>
+          </label>`).join("")
           : `<small class="awc-hint">${this._nps.loading ? "Loading the species library…" : "Species library loads with the NPS summary — open the NPS tab once if this stays empty."}</small>`}
       </div>
 
       <div class="awc-section-title"><p class="eyebrow">Brine feed-exchange</p></div>
       <small class="awc-hint">Every dose on the linked channel — and its line-flush chaser — banks a matched drain the AWC drain pump runs back out when idle.</small>
       <small class="awc-hint">⚠️ <strong>Salinity rule:</strong> only link a channel whose reservoir is <strong>tank-salinity</strong> (rinsed brine resuspended in tank-strength saltwater). Matching a drain to phyto, bacteria or any unmatched liquid removes salt against a fresh addition and slowly freshens the tank — those pumps are deliberately left out of the exchange.</small>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="nps-exchange" data-field="enabled" ${fxCfg.enabled ? "checked" : ""}>
+        <span><strong>Matched drain on</strong><small>Drains dose + chaser back out via the AWC drain pump.</small></span>
+      </label>
       <div class="mini-grid">
-        <label><input type="checkbox" data-scope="nps-exchange" data-field="enabled" ${fxCfg.enabled ? "checked" : ""}> Matched drain on</label>
         <label>Live-food channel<select data-scope="nps-exchange" data-field="channelId">${foodChannelOpts}</select></label>
         <label>Min drain batch (ml)<input type="number" min="10" max="5000" data-scope="nps-exchange" data-field="minDrainMl" value="${this._escape(String(fxCfg.minDrainMl ?? 150))}"></label>
         <label>Owed cap (ml)<input type="number" min="100" max="20000" data-scope="nps-exchange" data-field="maxOwedMl" value="${this._escape(String(fxCfg.maxOwedMl ?? 2000))}"></label>
@@ -20649,8 +20831,11 @@ class OpenReefPanel extends HTMLElement {
 
       <div class="awc-section-title"><p class="eyebrow">Feed truce</p></div>
       <small class="awc-hint">UV and ozone kill dosed live food; the skimmer strips it. The truce pauses whatever is armed (Settings → Equipment: UV sterilizer / Ozone / Skimmer profiles) after every food dose, then restores it.</small>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="nps-truce" data-field="enabled" ${truceCfg.enabled ? "checked" : ""}>
+        <span><strong>Truce on</strong><small>Pauses armed UV / ozone / skimmer after every food dose.</small></span>
+      </label>
       <div class="mini-grid">
-        <label><input type="checkbox" data-scope="nps-truce" data-field="enabled" ${truceCfg.enabled ? "checked" : ""}> Truce on</label>
         <label>UV off (min)<input type="number" min="5" max="720" data-scope="nps-truce" data-field="uvOffMinutes" value="${this._escape(String(truceCfg.uvOffMinutes ?? 120))}"></label>
         <label>Ozone off (min)<input type="number" min="5" max="720" data-scope="nps-truce" data-field="ozoneOffMinutes" value="${this._escape(String(truceCfg.ozoneOffMinutes ?? 120))}"></label>
         <label>Skimmer off (min)<input type="number" min="5" max="720" data-scope="nps-truce" data-field="skimmerOffMinutes" value="${this._escape(String(truceCfg.skimmerOffMinutes ?? 45))}"></label>
