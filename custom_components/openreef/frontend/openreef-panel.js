@@ -10549,7 +10549,12 @@ class OpenReefPanel extends HTMLElement {
         ? `<button class="secondary compact-button" data-action="nps-hatch-loaded">Hatched &amp; loaded</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">Add hatchery reminders</button>`,
     ].filter(Boolean).join("");
-    const hatcheryPanel = fxCfg.enabled ? `
+    // The hatchery is core NPS — hatching happens whether or not the matched
+    // drain is on (live-test catch: it was wrongly gated behind the exchange).
+    const hatchReservoirLine = fxCfg.channelId
+      ? `${primeLine}${freshLine ? ` · ${freshLine}` : ""}`
+      : `Link a live-food channel in Settings and "Hatched &amp; loaded" will restart its freshness clocks automatically.`;
+    const hatcheryPanel = `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
           <p class="eyebrow" style="margin:0;">Hatchery</p>
@@ -10559,11 +10564,11 @@ class OpenReefPanel extends HTMLElement {
           ${this._npsHatchVesselSvg(hatchState)}
           <div class="stack" style="gap:6px;flex:1;min-width:220px;">
             <small>${hatchLine}</small>
-            <small>${primeLine}${freshLine ? ` · ${freshLine}` : ""}</small>
+            <small>${hatchReservoirLine}</small>
             <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
           </div>
         </div>
-      </article>` : "";
+      </article>`;
 
     return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${this._npsStatusCards()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}</section>`;
   }

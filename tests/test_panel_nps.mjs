@@ -406,6 +406,13 @@ test("the hatchery card walks its lifecycle: empty, incubating, ready, overdue",
     html = withHatch({ status: "overdue", hoursElapsed: 40, hoursLeft: 0, percent: 100 });
     assert(html.includes("harvest soon"), "overdue nag missing");
     noPlaceholders(html, "hatchery card");
+    // The hatchery is core NPS — it renders even with the exchange OFF
+    // (hatching happens whether or not the matched drain is on).
+    panel._config.nps.feedExchange.enabled = false;
+    panel._config.nps.feedExchange.channelId = "";
+    const ungated = withHatch({ status: "none" });
+    assert(ungated.includes("Hatchery"), "hatchery hidden when the exchange is off");
+    assert(ungated.includes("Start hatch"), "hatchery unusable when the exchange is off");
   } finally { restore(); }
 });
 
