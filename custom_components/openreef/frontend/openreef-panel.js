@@ -11308,6 +11308,16 @@ class OpenReefPanel extends HTMLElement {
   _doserChannelChecklist(id, name, chem, stateInfo) {
     const { bound, calibrated, hasVolume, bindings } = stateInfo;
     const total = bindings ? bindings.total : 24;
+    // Calibration copy is driver-specific: steppers count revolutions; brushed
+    // heads and generic HA switches calibrate flow from a timed 30 s burst.
+    const driverType = this._doserChannels()[id]?.driver?.type || "";
+    const flowCalibrated = driverType === "openreef_esphome_brushed" || driverType === "ha_switch_timed";
+    const calStep = flowCalibrated
+      ? "2. Calibrate — run a 30 s burst, measure the ml"
+      : "2. Calibrate — run 100 revolutions, measure";
+    const bindStep = driverType === "ha_switch_timed"
+      ? "1. Bind the pump switch"
+      : `1. Bind the doser's entities${bindings ? ` (${bound}/${total})` : ""}`;
     const step = (done, label, extra) => `
       <li>${done ? "✅" : "⬜"} ${label}${extra || ""}</li>`;
     const go = `<button class="secondary inline-btn" data-action="tab" data-id="settings" data-section="dosing" data-scroll="or-dose-ch-${this._escape(id)}">Go →</button>`;
@@ -11319,8 +11329,8 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <p><small>Set up this channel — Prime and Calibrate work as soon as entities are bound; scheduled dosing unlocks when all three are done.</small></p>
         <ul class="dosing-card-lines">
-          ${step(bound > 0, `1. Bind the doser's entities${bindings ? ` (${bound}/${total})` : ""} ${go}`)}
-          ${step(calibrated, `2. Calibrate — run 100 revolutions, measure ${go}`)}
+          ${step(bound > 0, `${bindStep} ${go}`)}
+          ${step(calibrated, `${calStep} ${go}`)}
           ${step(hasVolume, `3. Set the daily volume &amp; window ${go}`)}
         </ul>
       </article>`;

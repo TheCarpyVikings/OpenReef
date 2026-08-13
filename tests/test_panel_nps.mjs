@@ -416,6 +416,27 @@ test("the hatchery card walks its lifecycle: empty, incubating, ready, overdue",
   } finally { restore(); }
 });
 
+test("the setup checklist speaks each driver's calibration language", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._config.dosing.channels.brine.calibration = {};   // force the checklist
+    const brushed = panel._doserChannelChecklist("brine", "Brine", "Live food",
+      { bound: 1, calibrated: false, hasVolume: true, bindings: null });
+    assert(brushed.includes("30 s burst"), "brushed head shown stepper calibration copy");
+    assert(!brushed.includes("100 revolutions"), "brushed head still told to count revolutions");
+    panel._config.dosing.channels.brine.driver.type = "openreef_esphome_stepper";
+    const stepper = panel._doserChannelChecklist("brine", "Brine", "Live food",
+      { bound: 1, calibrated: false, hasVolume: true, bindings: null });
+    assert(stepper.includes("100 revolutions"), "stepper lost its revolution copy");
+    panel._config.dosing.channels.brine.driver.type = "ha_switch_timed";
+    const ha = panel._doserChannelChecklist("brine", "Brine", "Live food",
+      { bound: 1, calibrated: false, hasVolume: true, bindings: null });
+    assert(ha.includes("30 s burst"), "generic driver shown stepper calibration copy");
+    assert(ha.includes("Bind the pump switch"), "generic driver still asks for the full entity set");
+  } finally { restore(); }
+});
+
 test("egg-type choice seeds the recommended hatch hours in settings", async () => {
   const restore = freezeTime(NOW);
   try {
