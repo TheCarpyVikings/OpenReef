@@ -10075,6 +10075,7 @@ class OpenReefPanel extends HTMLElement {
       <article class="panel stack">
         <p class="eyebrow">Hatchery &amp; brine feed-exchange</p>
         <p class="hint">Every brine dose <strong>and its line-flush chaser</strong> banks a matched drain — the AWC drain pump takes the same volume back out when the system is idle. The tank level never creeps, the ATO never fights the feed, and every feeding exports a little old water.</p>
+        <p class="hint">⚠️ <strong>Salinity rule:</strong> only link a channel whose reservoir is <strong>tank-salinity</strong> (rinsed brine resuspended in tank-strength saltwater). Matching a drain to phyto, bacteria or any unmatched liquid removes salt against a fresh addition and slowly freshens the tank — those pumps are deliberately left out of the exchange.</p>
         <div class="mini-grid">
           <label><input type="checkbox" data-scope="nps-exchange" data-field="enabled" ${fxCfg.enabled ? "checked" : ""}> Matched drain on</label>
           <label>Live-food channel<select data-scope="nps-exchange" data-field="channelId">${foodChannelOpts}</select></label>
