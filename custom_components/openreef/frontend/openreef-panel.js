@@ -1672,6 +1672,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "add-doser-channel") this._addDoserChannel();
       if (action === "add-doser-kalk") this._addDoserChannel("Kalkwasser", "kalk");
       if (action === "add-doser-livefood") this._addDoserChannel("Live food", "livefood", "openreef_esphome_brushed");
+      if (action === "add-doser-ha") this._addDoserChannel(undefined, undefined, "ha_switch_timed");
       if (action === "nps-add-food-pump") this._addDoserChannel(target.dataset.label || "Food", "food");
       if (action === "nps-add-brine-pump") this._addDoserChannel("Live food", "livefood", "openreef_esphome_brushed");
       if (action === "nps-add-open") { this._nps.addOpen = !this._nps.addOpen; this._render(); }
@@ -10106,6 +10107,12 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
     const chemical = presetChem || (chemEl && chemEl.value) || "other";
+    if (presetDriver === "ha_switch_timed" && chemical === "kalk") {
+      // Kalk without firmware failsafes is how tanks die — refused outright.
+      this._doserMessage = "Kalkwasser needs the reefnode firmware driver — the generic HA-switch driver won't run it.";
+      this._render();
+      return;
+    }
     const dosing = this._config.dosing = this._config.dosing || {};
     const channels = dosing.channels = dosing.channels || {};
     const base = this._slug(label);
@@ -10411,7 +10418,8 @@ class OpenReefPanel extends HTMLElement {
     // so ready channels don't flash the setup checklist.
     const bound = bindings ? bindings.bound
       : Object.values(channel.driver?.entities || {}).filter(Boolean).length;
-    const calibrated = (entry?.calibration?.stepsPerMl || channel.calibration?.stepsPerMl || 0) > 0;
+    const calibrated = (entry?.calibration?.stepsPerMl || channel.calibration?.stepsPerMl || 0) > 0
+      || (entry?.calibration?.mlPerS || channel.calibration?.mlPerS || 0) > 0;
     const hasVolume = Number(entry?.plan?.mlPerDay ?? channel.schedule?.mlPerDay) > 0;
 
     if (!bound || !calibrated || !hasVolume) {
@@ -10593,6 +10601,7 @@ class OpenReefPanel extends HTMLElement {
           <button class="secondary" data-action="add-doser-channel">Add channel</button>
           <button class="secondary" data-action="add-doser-kalk">+ Kalkwasser doser</button>
           <button class="secondary" data-action="add-doser-livefood">+ Live food doser</button>
+          <button class="secondary" data-action="add-doser-ha">+ Generic pump (HA switch)</button>
         </div>
         ${ids.map((id) => this._doserChannelSettingsCard(id)).join("")}
       </section>
@@ -10767,7 +10776,18 @@ class OpenReefPanel extends HTMLElement {
 
   _doserEntityBindings(id, entities) {
     const eid = this._escape(id);
-    const suffixes = OpenReefPanel.doserSuffixesFor(this._doserChannels()[id]);
+    const channel = this._doserChannels()[id] || {};
+    if (channel.driver?.type === "ha_switch_timed") {
+      // Generic adapter: one switch is the whole binding. No firmware, no
+      // auto-bind, no sync — HA times the runs itself.
+      return `
+        <div class="awc-section-title"><p class="eyebrow">Pump switch</p></div>
+        <small class="awc-hint">Any HA switch that powers a pump (Kamoer wifi, a smart plug on a DC head, a relay). HA runs the schedule for this channel — best-effort by design: nothing doses while HA is down, and if HA crashes mid-dose the pump runs until HA returns, so keep the reservoir modest. Kalkwasser is refused on this driver.</small>
+        <div class="mini-grid">
+          <label>Pump switch entity${this._doserEntitySelect("dosing-channel-entities", `data-id="${eid}"`, "powerSwitch", entities.powerSwitch || "", "switch")}</label>
+        </div>`;
+    }
+    const suffixes = OpenReefPanel.doserSuffixesFor(channel);
     const roles = Object.keys(suffixes);
     const bound = roles.filter((role) => entities[role]).length;
     const states = (this._hass && this._hass.states) || {};

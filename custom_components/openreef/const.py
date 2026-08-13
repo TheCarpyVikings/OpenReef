@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.42"
+INTEGRATION_VERSION = "0.7.43"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -321,7 +321,7 @@ AWC_SPINUP_MAX_ML = 1000.0                # config-normalise absolute sanity cla
 DOSING_MAX_CHANNELS = 32
 DOSING_CHANNEL_CHEMICALS = ("alk", "ca", "mg", "kalk", "trace", "livefood", "food", "other")
 DOSING_CHANNEL_MODES = ("continuous", "doses")
-DOSING_DRIVER_TYPES = ("openreef_esphome_stepper", "openreef_esphome_brushed")  # generic HA adapter is v2
+DOSING_DRIVER_TYPES = ("openreef_esphome_stepper", "openreef_esphome_brushed", "ha_switch_timed")
 DOSING_SYNC_STATES = ("unsynced", "pending", "verifying", "synced", "failed", "offline", "drift")
 DOSING_TICK_SECONDS = 60
 DOSING_FLUSH_INTERVAL_S = 3600            # runtime ledger → config blob cadence (VISION convention)
@@ -376,6 +376,13 @@ DOSING_BRUSHED_BINDING_ROLES = (
     "primeButton", "doseNowButton", "manualDoseButton", "calibrateButton",
     "dosedTodaySensor", "reservoirLowSensor", "lastSkipSensor", "chaserSkippedSensor",
 )
+# Generic adapter (Stage C): any HA switch + a timed-flow calibration is a
+# dosing pump. HA executes the schedule — the INVERSE of the firmware doctrine,
+# so it is deliberately best-effort (no doses while HA is down, never a
+# catch-up bolus on return) and refused outright for kalk. The per-dose runtime
+# cap bounds a miscalibrated flow; the persisted run stamps bound a crash.
+DOSING_HA_TIMED_BINDING_ROLES = ("powerSwitch",)
+DOSING_HA_MAX_DOSE_RUN_S = 120.0
 DOSING_BINDING_ROLES = (
     "doseVolumeNumber", "doseIntervalNumber", "nightIntervalNumber", "maxDailyNumber",
     "doseSpeedNumber", "runCurrentNumber", "phStopNumber", "phResumeNumber",

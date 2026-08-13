@@ -161,7 +161,8 @@ def test_normaliser_clamps_and_defaults():
     assert ch["wear"]["tubeLifeHours"] == 1000.0
     assert ch["sync"]["state"] == "unsynced"
     assert set(ch["driver"]["entities"]) == set(
-        integration.DOSING_BINDING_ROLES + integration.DOSING_BRUSHED_BINDING_ROLES)
+        integration.DOSING_BINDING_ROLES + integration.DOSING_BRUSHED_BINDING_ROLES
+        + integration.DOSING_HA_TIMED_BINDING_ROLES)
 
 
 def test_normaliser_caps_channel_count_and_drops_junk():

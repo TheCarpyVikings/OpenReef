@@ -609,6 +609,179 @@ def test_uv_profile_alias_normalises():
     assert integration._normalise_equipment_profile("Ozone") == "ozone"
 
 
+# --------------------------------------------------------------------------- #
+# Stage C — ha_switch_timed generic pump driver
+# --------------------------------------------------------------------------- #
+def _ha_channel(**over):
+    ch = {
+        "name": "Phyto pump", "chemical": "food", "enabled": True,
+        "driver": {"type": "ha_switch_timed", "entities": {"powerSwitch": "switch.pump"}},
+        "schedule": {"enabled": True, "mlPerDay": 20, "mode": "doses", "dosesPerDay": 4,
+                     "windowStart": "00:00", "windowEnd": "00:00",
+                     "night": {"enabled": False}},
+        "guards": {},
+        "calibration": {"mlPerS": 1.0, "spinUpMl": 0.0},
+        "reservoir": {"volumeMl": 1000, "remainingMl": 500, "shelfLifeDays": 0},
+        "state": {}, "wear": {},
+    }
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(ch.get(key), dict):
+            ch[key].update(value)
+        else:
+            ch[key] = value
+    return ch
+
+
+def _ha_entry(channel=None, products=None):
+    cfg = {
+        "nps": {"enabled": True},
+        "consumables": {"products": products or {}},
+        "dosing": {"enabled": True, "channels": {"phyto_pump": channel or _ha_channel()}},
+    }
+    return FakeEntry(options={CONF_SETTINGS: cfg})
+
+
+def _saved_channel(entry):
+    return entry.options[CONF_SETTINGS]["dosing"]["channels"]["phyto_pump"]
+
+
+def test_ha_timed_guard_calibration_is_flow_based():
+    ch = _ha_channel()
+    codes = [r["code"] for r in dosing.guard_reasons(ch, {}, 720, False, NOW)]
+    assert "not_calibrated" not in codes
+    ch_uncal = _ha_channel(calibration={"mlPerS": 0})
+    codes = [r["code"] for r in dosing.guard_reasons(ch_uncal, {}, 720, False, NOW)]
+    assert "not_calibrated" in codes
+
+
+def test_ha_executor_full_dose_cycle():
+    from _fake_ha import install_scheduler
+    entry = _ha_entry()
+    hass = FakeHass(states={"switch.pump": "off"}, entries=[entry])
+    scheduler = install_scheduler(integration)
+    now_utc = datetime.now(timezone.utc)
+    now_local = datetime(2026, 8, 13, 12, 0, 0)
+
+    async def scenario():
+        config = integration._config_from_entry(entry)
+        changed = await integration._async_dosing_ha_executor(
+            hass, entry, config, now_utc, now_local, None)
+        assert changed is True
+        assert hass.states.get("switch.pump").state == "on"
+        # 20 ml/day over 4 doses = 5 ml per dose at 1 ml/s = 5 s run
+        channel = config["dosing"]["channels"]["phyto_pump"]
+        assert channel["state"]["haRunTargetMl"] == 5.0
+        # stop timer settles the books
+        assert await scheduler.fire_all() == 1
+        assert hass.states.get("switch.pump").state == "off"
+        saved = _saved_channel(entry)
+        assert saved["state"]["haDosedTodayMl"] == 5.0
+        assert saved["state"]["lastDoseAt"]
+        assert saved["reservoir"]["remainingMl"] == 495.0
+        assert saved["wear"]["doseCount"] == 1
+
+    run(scenario())
+
+
+def test_ha_executor_paces_by_interval_and_daily_plan():
+    from _fake_ha import install_scheduler
+    entry = _ha_entry(_ha_channel(state={
+        "haDoseDate": datetime(2026, 8, 13).strftime("%Y-%m-%d"),
+        "haDosedTodayMl": 0.0,
+        "lastDoseAt": _iso(datetime.now(timezone.utc) - timedelta(minutes=2)),
+    }))
+    hass = FakeHass(states={"switch.pump": "off"}, entries=[entry])
+    install_scheduler(integration)
+
+    async def scenario():
+        config = integration._config_from_entry(entry)
+        # last dose 2 min ago, interval is 1440/4 = 360 min — must wait
+        await integration._async_dosing_ha_executor(
+            hass, entry, config, datetime.now(timezone.utc),
+            datetime(2026, 8, 13, 12, 0, 0), None)
+        assert hass.states.get("switch.pump").state == "off"
+        # daily plan met — never a catch-up bolus
+        config["dosing"]["channels"]["phyto_pump"]["state"].update(
+            {"haDosedTodayMl": 20.0, "lastDoseAt": ""})
+        await integration._async_dosing_ha_executor(
+            hass, entry, config, datetime.now(timezone.utc),
+            datetime(2026, 8, 13, 12, 0, 0), None)
+        assert hass.states.get("switch.pump").state == "off"
+
+    run(scenario())
+
+
+def test_ha_executor_refuses_kalk_and_stale_food():
+    from _fake_ha import install_scheduler
+    kalk = _ha_channel(chemical="kalk")
+    entry = _ha_entry(kalk)
+    hass = FakeHass(states={"switch.pump": "off"}, entries=[entry])
+    install_scheduler(integration)
+
+    async def scenario():
+        config = integration._config_from_entry(entry)
+        await integration._async_dosing_ha_executor(
+            hass, entry, config, datetime.now(timezone.utc),
+            datetime(2026, 8, 13, 12, 0, 0), None)
+        assert hass.states.get("switch.pump").state == "off"   # kalk refused outright
+
+    run(scenario())
+    # stale food (shelf life set, no mixedAt) — the guard chain is enforcement
+    stale = _ha_channel(reservoir={"volumeMl": 1000, "remainingMl": 500,
+                                   "shelfLifeDays": 1, "mixedAt": ""})
+    entry2 = _ha_entry(stale)
+    hass2 = FakeHass(states={"switch.pump": "off"}, entries=[entry2])
+
+    async def scenario2():
+        config = integration._config_from_entry(entry2)
+        await integration._async_dosing_ha_executor(
+            hass2, entry2, config, datetime.now(timezone.utc),
+            datetime(2026, 8, 13, 12, 0, 0), None)
+        assert hass2.states.get("switch.pump").state == "off"
+
+    run(scenario2())
+
+
+def test_ha_recover_orphan_credits_honest_overrun():
+    entry = _ha_entry(_ha_channel(state={
+        "haRunStartedAt": _iso(datetime.now(timezone.utc) - timedelta(seconds=60)),
+        "haRunEndsAt": _iso(datetime.now(timezone.utc) - timedelta(seconds=55)),
+        "haRunTargetMl": 5.0,
+        "haDoseDate": datetime.now().strftime("%Y-%m-%d"),
+        "haDosedTodayMl": 0.0,
+    }))
+    hass = FakeHass(states={"switch.pump": "on"}, entries=[entry])
+    run(integration._async_dosing_ha_recover(hass, entry))
+    assert hass.states.get("switch.pump").state == "off"
+    saved = _saved_channel(entry)
+    # pump really ran ~60 s at 1 ml/s → ~60 ml credited, NOT the 5 ml target
+    assert abs(saved["state"]["haDosedTodayMl"] - 60.0) < 3.0
+    assert saved["state"]["haRunEndsAt"] == ""
+    assert any(e.get("kind") == "warn" for e in saved.get("events", []))
+
+
+def test_ha_dose_decrements_linked_bottle():
+    from _fake_ha import install_scheduler
+    channel = _ha_channel(reservoir={"volumeMl": 1000, "remainingMl": 500,
+                                     "shelfLifeDays": 0, "productId": "phyto",
+                                     "productIsBottle": True})
+    entry = _ha_entry(channel, products={"phyto": _product(remainingMl=400)})
+    hass = FakeHass(states={"switch.pump": "off"}, entries=[entry])
+    scheduler = install_scheduler(integration)
+
+    async def scenario():
+        config = integration._config_from_entry(entry)
+        assert await integration._async_dosing_ha_executor(
+            hass, entry, config, datetime.now(timezone.utc),
+            datetime(2026, 8, 13, 12, 0, 0), None)
+        await scheduler.fire_all()
+        products = entry.options[CONF_SETTINGS]["consumables"]["products"]
+        assert products["phyto"]["remainingMl"] == 395.0       # bottle IS the reservoir
+        assert products["phyto"]["history"][-1]["kind"] == "pump"
+
+    run(scenario())
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

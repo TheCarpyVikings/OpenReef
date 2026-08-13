@@ -176,6 +176,8 @@ from .const import (
     DOSING_DRIVER_TYPES,
     DOSING_EVENTS_MAX,
     DOSING_FLUSH_INTERVAL_S,
+    DOSING_HA_MAX_DOSE_RUN_S,
+    DOSING_HA_TIMED_BINDING_ROLES,
     DOSING_MANUAL_PRIME_MAX_S,
     DOSING_MAX_CHANNELS,
     DOSING_MAX_PER_DOSE_ML,
@@ -718,7 +720,8 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
         raw_driver = raw.get("driver") if isinstance(raw.get("driver"), dict) else {}
         raw_entities = raw_driver.get("entities") if isinstance(raw_driver.get("entities"), dict) else {}
         driver_type = raw_driver.get("type")
-        _all_roles = tuple(dict.fromkeys(DOSING_BINDING_ROLES + DOSING_BRUSHED_BINDING_ROLES))
+        _all_roles = tuple(dict.fromkeys(
+            DOSING_BINDING_ROLES + DOSING_BRUSHED_BINDING_ROLES + DOSING_HA_TIMED_BINDING_ROLES))
         entities = {role: _normalise_entity_id(raw_entities.get(role)) for role in _all_roles}
 
         raw_schedule = raw.get("schedule") if isinstance(raw.get("schedule"), dict) else {}
@@ -854,6 +857,13 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
             },
             "state": {
                 "lastSensorMl": _awc_num(raw_state.get("lastSensorMl"), 0, 0, 1e6),
+                # ha_switch_timed run trace: persisted so a restart can stop an
+                # orphaned pump and credit the elapsed volume honestly.
+                "haDoseDate": _awc_str(raw_state.get("haDoseDate"), 20),
+                "haDosedTodayMl": _awc_num(raw_state.get("haDosedTodayMl"), 0, 0, 1e6),
+                "haRunStartedAt": _awc_str(raw_state.get("haRunStartedAt"), 40),
+                "haRunEndsAt": _awc_str(raw_state.get("haRunEndsAt"), 40),
+                "haRunTargetMl": _awc_num(raw_state.get("haRunTargetMl"), 0, 0, 100000),
                 "lastDoseAt": _awc_str(raw_state.get("lastDoseAt"), 40),
                 "lastSensorAt": _awc_str(raw_state.get("lastSensorAt"), 40),
                 "missedMl": _awc_num(raw_state.get("missedMl"), 0, 0, 1e6),
@@ -9780,6 +9790,10 @@ def _dosing_live_state(hass: HomeAssistant, channel: dict[str, Any]) -> dict[str
                 dosed_trusted = True
             except (TypeError, ValueError):
                 dosed = 0.0
+    if dosing_engine.is_ha_timed(channel):
+        # No firmware sensor — the HA executor's dead-reckoned counter is the
+        # honest number (never "trusted": there is no sensor to verify against).
+        dosed = _awc_num((channel.get("state") or {}).get("haDosedTodayMl"), 0, 0, 1e6)
 
     return {
         "deviceOnline": device_online,
@@ -9936,14 +9950,19 @@ async def _async_dosing_save(
     The sync pass and the tick hold a config snapshot across awaited service
     calls; saving that whole blob could silently revert an AWC leg credit or a
     non-dosing user save that landed meanwhile. Re-fetch and graft only what
-    dosing owns — every mutation these paths make lives under
-    ``dosing.channels``. NB: two concurrent dosing-channel writers can still
-    interleave (the graft is wholesale for channels); the single event loop
-    makes that window rare and the 60 s tick self-corrects."""
+    dosing owns — ``dosing.channels`` plus ``consumables.products`` (dose
+    events debit linked bottles, so those ledgers move on dosing's clock too).
+    NB: two concurrent writers can still interleave (the graft is wholesale per
+    block); the single event loop makes that window rare and the 60 s tick
+    self-corrects."""
     fresh = _config_from_entry(entry)
     stale_dosing = stale_config.get("dosing") if isinstance(stale_config.get("dosing"), dict) else {}
     if isinstance(stale_dosing.get("channels"), dict):
         fresh.setdefault("dosing", {})["channels"] = stale_dosing["channels"]
+    stale_consumables = stale_config.get("consumables") \
+        if isinstance(stale_config.get("consumables"), dict) else {}
+    if isinstance(stale_consumables.get("products"), dict):
+        fresh.setdefault("consumables", {})["products"] = stale_consumables["products"]
     await _async_save_config(hass, entry, fresh)
 
 
@@ -10444,6 +10463,237 @@ async def _async_nps_truce_tick(
             _append_activity(config, f"Feed truce over: {profile} back on{wet}", "control")
     if changed:
         await _async_save_config(hass, entry, config)
+
+
+# --- ha_switch_timed driver (Stage C): HA-executed dosing for generic pumps ------------------
+
+async def _async_dosing_ha_finish(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    cid: str, channel: dict[str, Any], actual_elapsed_s: float | None = None,
+) -> None:
+    """Stop an ha_switch_timed run and settle the books dead-reckoned: today
+    counter, lastDoseAt, reservoir ledger (+ linked bottle), wear, and the
+    feed-exchange/truce hooks the firmware channels get from their sensors.
+
+    ``actual_elapsed_s`` None = the stop timer fired on time (credit the target).
+    A value = the pump really ran that long (tick caught an overdue run, or a
+    restart orphaned it) — credit the honest elapsed volume, UNCAPPED: if the
+    pump over-ran, the ledger must say so, loudly."""
+    driver = channel.get("driver") or {}
+    switch_entity = (driver.get("entities") or {}).get("powerSwitch")
+    if switch_entity:
+        try:
+            await hass.services.async_call(
+                "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity}, blocking=True)
+        except Exception:  # noqa: BLE001 — could not stop: keep the stamps, retry next tick
+            return
+    rt = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {}) \
+        .setdefault("channels", {}).setdefault(cid, {})
+    unsub = rt.pop("haRunUnsub", None)
+    if unsub is not None:
+        try:
+            unsub()
+        except Exception:  # noqa: BLE001
+            pass
+    state = channel.setdefault("state", {})
+    target_ml = _awc_num(state.get("haRunTargetMl"), 0, 0, 100000)
+    started = _parse_datetime(state.get("haRunStartedAt"))
+    ends = _parse_datetime(state.get("haRunEndsAt"))
+    run_s = max(0.0, (ends - started).total_seconds()) \
+        if started is not None and ends is not None else 0.0
+    cal = channel.get("calibration") or {}
+    dosed_ml = target_ml
+    if actual_elapsed_s is not None:
+        run_s = actual_elapsed_s
+        dosed_ml = max(0.0, awc_engine.volume_for_runtime_l(
+            actual_elapsed_s, _awc_num(cal.get("mlPerS"), 0, 0, 200), 1.0,
+            _awc_num(cal.get("spinUpMl"), 0, -50, 50)) * 1000.0)
+        if target_ml > 0 and dosed_ml > target_ml * 1.5:
+            _dosing_record_event(
+                channel, "warn",
+                f"Pump ran unattended ~{run_s:.0f} s (~{dosed_ml:.0f} ml; the dose "
+                f"was {target_ml:.0f} ml) — likely an HA outage mid-dose. "
+                "Ledgers credited honestly; check the tank.")
+    state["haRunStartedAt"] = ""
+    state["haRunEndsAt"] = ""
+    state["haRunTargetMl"] = 0
+    if dosed_ml > 0:
+        state["haDosedTodayMl"] = round(
+            _awc_num(state.get("haDosedTodayMl"), 0, 0, 1e6) + dosed_ml, 2)
+        state["lastDoseAt"] = datetime.now(timezone.utc).isoformat()
+        reservoir = channel.setdefault("reservoir", {})
+        reservoir["remainingMl"] = round(max(
+            0.0, _awc_num(reservoir.get("remainingMl"), 0, 0, DOSING_RESERVOIR_MAX_ML)
+            - dosed_ml), 1)
+        product_id = str(reservoir.get("productId") or "")
+        if product_id and reservoir.get("productIsBottle"):
+            product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
+            if isinstance(product, dict):
+                _consumable_debit(product, dosed_ml, "pump")
+        wear = channel.setdefault("wear", {})
+        wear["runSeconds"] = round(_awc_num(wear.get("runSeconds"), 0, 0, 1e9) + run_s, 1)
+        wear["doseCount"] = int(_awc_num(wear.get("doseCount"), 0, 0, 1e9)) + 1
+        # The same NPS hooks firmware channels get from their dosed-today sensor.
+        await _async_nps_feed_exchange_accrue(hass, entry, cid, dosed_ml, 0.0)
+        if channel.get("chemical") in ("livefood", "food"):
+            await _async_nps_truce_engage(hass, entry)
+    await _async_dosing_save(hass, entry, config)
+
+
+async def _async_dosing_ha_run(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    cid: str, channel: dict[str, Any], target_ml: float, burst_s: float | None = None,
+) -> bool:
+    """Energise an ha_switch_timed channel's pump: for exactly the calibrated
+    runtime of ``target_ml``, or (``burst_s``) a raw timed burst that credits
+    nothing — the prime/calibration ceremony. Arms the stop timer and stamps the
+    persisted in-flight trace (the matched-drain pattern). Caller validates
+    guards; this validates the physics."""
+    driver = channel.get("driver") or {}
+    switch_entity = (driver.get("entities") or {}).get("powerSwitch")
+    if not switch_entity:
+        return False
+    cal = channel.get("calibration") or {}
+    if burst_s is not None:
+        runtime_s = max(1.0, min(float(burst_s), DOSING_HA_MAX_DOSE_RUN_S))
+        target_ml = 0.0
+    else:
+        ml_per_s = _awc_num(cal.get("mlPerS"), 0, 0, 200)
+        if ml_per_s <= 0 or target_ml <= 0:
+            return False
+        runtime_s = awc_engine.runtime_for_volume_s(
+            target_ml / 1000.0, ml_per_s, 1.0, _awc_num(cal.get("spinUpMl"), 0, -50, 50))
+        if runtime_s <= 0 or runtime_s > DOSING_HA_MAX_DOSE_RUN_S:
+            _dosing_record_event(
+                channel, "skip",
+                f"Dose skipped: {target_ml:g} ml needs {runtime_s:.0f} s — over the "
+                f"{DOSING_HA_MAX_DOSE_RUN_S:.0f} s per-dose safety cap (check the flow calibration)")
+            return False
+    try:
+        await hass.services.async_call(
+            "switch", "turn_on", {ATTR_ENTITY_ID: switch_entity}, blocking=True)
+    except Exception:  # noqa: BLE001 — nothing started
+        return False
+    started = datetime.now(timezone.utc)
+    ends = started + timedelta(seconds=runtime_s)
+    state = channel.setdefault("state", {})
+    state["haRunStartedAt"] = started.isoformat()
+    state["haRunEndsAt"] = ends.isoformat()
+    state["haRunTargetMl"] = round(float(target_ml), 2)
+    # Persist the stamps BEFORE arming the timer (the matched-drain rule): a
+    # short dose's stop can fire before the tick's own save lands, and the
+    # stop path fetches fresh — without this it would find no run to settle.
+    await _async_dosing_save(hass, entry, config)
+
+    async def _stop(_now: datetime) -> None:
+        latest = _first_entry(hass)
+        if latest is None:
+            return
+        cfg = _config_from_entry(latest)
+        ch = _dosing_channels(cfg).get(cid)
+        if ch is None or not (ch.get("state") or {}).get("haRunEndsAt"):
+            return
+        await _async_dosing_ha_finish(hass, latest, cfg, cid, ch)
+
+    rt = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {}) \
+        .setdefault("channels", {}).setdefault(cid, {})
+    rt["haRunUnsub"] = async_track_point_in_time(hass, _stop, ends)
+    return True
+
+
+async def _async_dosing_ha_executor(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    now_utc: datetime, now_local: datetime, lighting_off: Any,
+) -> bool:
+    """HA-executed scheduling for ha_switch_timed channels — the generic
+    adapter: any HA switch plus a timed-flow calibration is a dosing pump.
+    Deliberately best-effort (no doses while HA is down; on return the schedule
+    resumes, capped by the daily plan — NEVER a catch-up bolus) and deliberately
+    not for kalk (kalk without firmware failsafes is refused outright). The
+    guard chain is ENFORCEMENT here, not the display mirror it is for firmware
+    channels. One action per channel per tick. Returns True when channel state
+    changed (the tick then saves as a transition)."""
+    changed = False
+    now_minutes = now_local.hour * 60 + now_local.minute
+    today = now_local.strftime("%Y-%m-%d")
+    for cid, channel in _dosing_channels(config).items():
+        if not dosing_engine.is_ha_timed(channel):
+            continue
+        state = channel.setdefault("state", {})
+        if state.get("haDoseDate") != today:
+            state["haDoseDate"] = today
+            state["haDosedTodayMl"] = 0.0
+            changed = True
+        ends = _parse_datetime(state.get("haRunEndsAt"))
+        if ends is not None:
+            if now_utc >= ends:
+                # The stop timer missed (reload/latency): settle with the honest
+                # elapsed volume, not the target.
+                started = _parse_datetime(state.get("haRunStartedAt"))
+                elapsed = max(0.0, (now_utc - started).total_seconds()) if started else 0.0
+                await _async_dosing_ha_finish(
+                    hass, entry, config, cid, channel, actual_elapsed_s=elapsed)
+                changed = True
+            continue
+        if channel.get("chemical") == "kalk":
+            continue  # refused outright — kalk needs firmware failsafes
+        if not channel.get("enabled") or not (channel.get("schedule") or {}).get("enabled"):
+            continue
+        compiled = dosing_engine.compile_schedule(channel, lighting_off, now_local)
+        plan = compiled["plan"]
+        per_dose = _awc_num(plan.get("perDoseMl"), 0, 0, DOSING_MAX_PER_DOSE_ML)
+        ml_per_day = _awc_num(plan.get("mlPerDay"), 0, 0, DOSING_ML_PER_DAY_MAX)
+        if per_dose <= 0 or ml_per_day <= 0:
+            continue
+        dosed_today = _awc_num(state.get("haDosedTodayMl"), 0, 0, 1e6)
+        if dosed_today + per_dose > ml_per_day + 0.01:
+            continue  # today's plan is met — resuming later never boluses
+        night_interval = int(_awc_num(plan.get("nightIntervalMin"), 0, 0, 100000))
+        in_night = night_interval > 0 and awc_engine.within_window(
+            now_minutes, int(_awc_num(plan.get("nightStart"), 1320, 0, 1439)),
+            int(_awc_num(plan.get("nightEnd"), 480, 0, 1439)))
+        in_day = awc_engine.within_window(
+            now_minutes, int(_awc_num(plan.get("windowStart"), 0, 0, 1439)),
+            int(_awc_num(plan.get("windowEnd"), 0, 0, 1439)))
+        if in_night:
+            interval_min = night_interval
+        elif in_day:
+            interval_min = int(_awc_num(plan.get("dayIntervalMin"), 60, 1, 100000)) or 60
+        else:
+            continue
+        last = _parse_datetime(state.get("lastDoseAt"))
+        if last is not None and (now_utc - last).total_seconds() < interval_min * 60 - 5:
+            continue
+        live = _dosing_live_state(hass, channel)
+        live["dosedTodayMl"] = dosed_today
+        reasons = dosing_engine.guard_reasons(channel, live, now_minutes, False, now_utc)
+        if any(r.get("severity") == "block" for r in reasons):
+            continue
+        if await _async_dosing_ha_run(hass, entry, config, cid, channel, per_dose):
+            _dosing_record_event(channel, "dose", f"HA-timed dose started: {per_dose:g} ml")
+            changed = True
+    return changed
+
+
+async def _async_dosing_ha_recover(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """ha_switch_timed runs orphaned by a restart: the persisted haRunEndsAt
+    stamp is the trace — stop the switch and credit the honest elapsed volume
+    (which may exceed the target: the pump kept running while HA was down;
+    the finish path warns loudly when it did)."""
+    config = _config_from_entry(entry)
+    now = datetime.now(timezone.utc)
+    for cid, channel in _dosing_channels(config).items():
+        if not dosing_engine.is_ha_timed(channel):
+            continue
+        state = channel.get("state") or {}
+        if not state.get("haRunEndsAt"):
+            continue
+        started = _parse_datetime(state.get("haRunStartedAt"))
+        elapsed = max(0.0, (now - started).total_seconds()) if started else 0.0
+        await _async_dosing_ha_finish(
+            hass, entry, config, cid, channel, actual_elapsed_s=elapsed)
 
 
 async def _async_nps_drain_finish(
@@ -11033,6 +11283,10 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
         # swallow a future GENUINE external-edit notification.
         rt.pop("suppressDriftNotify", None)
 
+    # --- ha_switch_timed executor (Stage C): HA-side scheduling for generic pumps ------
+    if await _async_dosing_ha_executor(hass, entry, config, now_utc, now_local, lighting_off):
+        transition = True
+
     # --- flush policy: transitions save now; quiet accounting flushes hourly ----------
     last_flush = runtime.get("lastFlushAt")
     flush_due = True
@@ -11168,6 +11422,22 @@ async def websocket_dosing_calibrate_start(
     channel = _dosing_channel_for_msg(connection, msg, config)
     if channel is None:
         return
+    if dosing_engine.is_ha_timed(channel):
+        # Generic adapter: no firmware button — a raw timed 30 s burst into the
+        # measuring vessel (credits nothing; the run stamps make it crash-safe).
+        if (channel.get("state") or {}).get("haRunEndsAt"):
+            connection.send_error(msg["id"], "busy", "The pump is already running")
+            return
+        if not await _async_dosing_ha_run(
+                hass, entry, config, msg["channel_id"], channel, 0.0,
+                burst_s=DOSING_BRUSHED_CAL_RUN_S):
+            connection.send_error(msg["id"], "not_bound",
+                                  "Bind the pump switch entity first")
+            return
+        _dosing_record_event(channel, "calibrate_run", "30 s calibration burst started")
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config)
+        return
     if not await _async_dosing_press(hass, channel, "calibrateButton"):
         connection.send_error(msg["id"], "not_bound", "Calibrate button entity is not bound or unavailable")
         return
@@ -11203,8 +11473,9 @@ async def websocket_dosing_calibrate(
     now_iso = datetime.now(timezone.utc).isoformat()
     cal = channel.setdefault("calibration", {})
     history = cal.setdefault("history", [])
-    if dosing_engine.is_brushed(channel):
-        # Brushed heads calibrate in flow terms from the fixed 30 s burst.
+    if dosing_engine.is_brushed(channel) or dosing_engine.is_ha_timed(channel):
+        # Flow-calibrated drivers (brushed heads, generic HA switches) calibrate
+        # in ml/s from the fixed 30 s burst.
         ml_per_s = dosing_engine.brushed_calibration_from_run(msg["measured_ml"])
         if ml_per_s <= 0:
             connection.send_error(msg["id"], "invalid_measurement",
@@ -11308,6 +11579,21 @@ async def websocket_dosing_dose_now(
             "message": (f"{verdict['conflict']} dosed too recently — wait "
                         f"~{verdict['waitMinutes']:.0f} min (or queue it)")}])
         return
+    if dosing_engine.is_ha_timed(channel):
+        # Generic adapter: HA times the run itself; accounting settles when the
+        # stop timer fires (the same guarded, bounded shape as firmware doses).
+        if (channel.get("state") or {}).get("haRunEndsAt"):
+            connection.send_error(msg["id"], "busy", "The pump is already running")
+            return
+        if not await _async_dosing_ha_run(
+                hass, entry, config, msg["channel_id"], channel, ml):
+            connection.send_error(msg["id"], "not_bound",
+                                  "Bind the pump switch entity and calibrate the flow first")
+            return
+        _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose started")
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config, started=True)
+        return
     if not await _async_dosing_fire_bounded_dose(hass, channel, ml, cid=msg["channel_id"]):
         connection.send_error(msg["id"], "not_bound", "Manual-dose button entity is not bound or unavailable")
         return
@@ -11337,6 +11623,20 @@ async def websocket_dosing_prime(
     if channel is None:
         return
     seconds = min(DOSING_MANUAL_PRIME_MAX_S, max(1.0, float(msg.get("seconds") or 5.0)))
+    if dosing_engine.is_ha_timed(channel):
+        # Generic adapter: a raw timed burst instead of firmware button presses.
+        if (channel.get("state") or {}).get("haRunEndsAt"):
+            connection.send_error(msg["id"], "busy", "The pump is already running")
+            return
+        if not await _async_dosing_ha_run(
+                hass, entry, config, msg["channel_id"], channel, 0.0, burst_s=seconds):
+            connection.send_error(msg["id"], "not_bound", "Bind the pump switch entity first")
+            return
+        channel.setdefault("reservoir", {})["primedAt"] = datetime.now(timezone.utc).isoformat()
+        _dosing_record_event(channel, "prime", f"Primed ~{seconds:.0f} s")
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config)
+        return
     presses = max(1, math.ceil(seconds / 5.0))
     for _ in range(presses):
         if not await _async_dosing_press(hass, channel, "primeButton"):
@@ -13928,6 +14228,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_awc_recover_orphaned_calrun(hass, entry)
     # Stop a feed-exchange drain orphaned the same way (partial-volume credit).
     await _async_nps_recover_orphaned_drain(hass, entry)
+    # Stop ha_switch_timed pumps orphaned mid-dose (honest elapsed credit).
+    await _async_dosing_ha_recover(hass, entry)
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)

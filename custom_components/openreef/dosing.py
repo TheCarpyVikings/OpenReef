@@ -333,7 +333,11 @@ def guard_reasons(
         block("disabled", "Channel is disabled.")
     if live.get("enabledSwitch") is False:
         block("firmware_disabled", "The doser's enable switch is off.")
-    if _f(_cfg(channel, "calibration").get("stepsPerMl")) <= 0:
+    # Flow-calibrated drivers (brushed heads, ha_switch_timed) store mlPerS, not
+    # steps — judging them on stepsPerMl left them permanently "not calibrated".
+    cal = _cfg(channel, "calibration")
+    flow_calibrated = is_brushed(channel) or is_ha_timed(channel)
+    if (_f(cal.get("mlPerS")) if flow_calibrated else _f(cal.get("stepsPerMl"))) <= 0:
         block("not_calibrated", "Not calibrated yet — scheduled dosing is blocked until calibration is stored.")
     if live.get("deviceOnline") is False:
         block("device_offline", "Doser entities are unavailable — device appears offline.")
@@ -661,6 +665,14 @@ def is_brushed(channel: dict[str, Any]) -> bool:
     guard hardware — guards and calibration flows branch on this."""
     driver = channel.get("driver") if isinstance(channel.get("driver"), dict) else {}
     return str(driver.get("type") or "") == "openreef_esphome_brushed"
+
+
+def is_ha_timed(channel: dict[str, Any]) -> bool:
+    """The generic adapter: an ordinary HA switch driven by timed runs. HA
+    executes the schedule (best-effort by design); calibration is flow-based
+    like a brushed head."""
+    driver = channel.get("driver") if isinstance(channel.get("driver"), dict) else {}
+    return str(driver.get("type") or "") == "ha_switch_timed"
 
 
 def calibration_from_measured(
