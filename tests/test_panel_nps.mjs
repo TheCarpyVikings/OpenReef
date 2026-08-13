@@ -300,6 +300,14 @@ test("the feeding sequence plays dose → flush → drain → balanced with hone
     panel._npsDemoAdvance("flush");
     assert(fx().chaserActive === true, "flush stage: chaser line not animating");
     assert(fx().state.owedMl === 642, "flush stage: owed must be dose + chaser (642 ml)");
+    // The flush overlay must cover the FULL route (through the brine line into
+    // the tank) and be drawn AFTER the brine's static pipe, or the thicker
+    // grey paints over the blue on the shared segments (z-order live-catch).
+    const flushSvg = panel._npsDiagramSvg();
+    const overlay = /<path d="([^"]+)" fill="none" stroke="#42a5f5"/.exec(flushSvg);
+    assert(overlay, "flush overlay missing");
+    assert(overlay[1].includes("V 96 H"), "flush overlay does not run the full route into the tank");
+    assert(overlay.index > flushSvg.indexOf('id="npsBrine"'), "flush overlay drawn beneath the brine pipe");
     panel._npsDemoAdvance("drain");
     assert(fx().drainActive === true, "drain stage: drain not animating");
     assert(fx().chaserActive === false, "drain stage: chaser must have stopped");

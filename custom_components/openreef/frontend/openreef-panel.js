@@ -10138,8 +10138,8 @@ class OpenReefPanel extends HTMLElement {
           <clipPath id="npsTankClip"><rect x="${tankX}" y="22" width="${tankW}" height="84" rx="8"/></clipPath>
         </defs>
         ${manifold}
-        ${freshStation}
         ${brine}
+        ${freshStation}
         <g><title>Display tank</title>
           <rect x="${tankX}" y="22" width="${tankW}" height="84" rx="8" fill="rgba(38,198,218,0.08)" stroke="#4dd0e1" stroke-width="2"></rect>
           <g clip-path="url(#npsTankClip)">
