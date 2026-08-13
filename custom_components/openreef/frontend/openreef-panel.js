@@ -13709,6 +13709,48 @@ class OpenReefPanel extends HTMLElement {
       }
     } catch { /* no card */ }
 
+    // NPS feeding — the automated NPS system's pulse: owed drain, hatch age,
+    // truce pauses. Config-side facts only; the NPS tab owns the deep view.
+    try {
+      const npsCfg = this._config?.nps;
+      if (npsCfg?.enabled) {
+        const fx = npsCfg.feedExchange || {};
+        const fxState = fx.state || {};
+        const owed = Number(fxState.owedMl) || 0;
+        const truceState = npsCfg.truce?.state || {};
+        const paused = ["uv", "ozone", "skimmer"]
+          .filter((p) => (((truceState[p] || {}).turnedOff) || []).length);
+        const channels = this._doserChannels();
+        const foodCount = Object.values(channels)
+          .filter((c) => ["food", "livefood"].includes(c && c.chemical)).length;
+        const bits = [];
+        if (paused.length) bits.push(`Truce: ${paused.join(" + ")} paused for dinner`);
+        if (fxState.lastDrainAt && Number(fxState.lastDrainMl)) {
+          bits.push(`Last matched drain ${Math.round(Number(fxState.lastDrainMl))} ml`);
+        }
+        const mixedAt = fx.channelId ? channels[fx.channelId]?.reservoir?.mixedAt : "";
+        if (mixedAt) {
+          const ageH = (Date.now() - Date.parse(mixedAt)) / 3600000;
+          if (Number.isFinite(ageH) && ageH >= 0) {
+            bits.push(ageH <= 24
+              ? `Brine hatch in its prime (~${Math.round(24 - ageH)} h left)`
+              : `Brine hatch ${Math.round(ageH)} h old — past prime`);
+          }
+        }
+        const blocked = fx.enabled && fxState.lastBlockedReason
+          && owed >= (Number(fx.minDrainMl) || 150);
+        const title = fx.enabled && owed > 0
+          ? `${Math.round(owed)} ml owed back to the drain`
+          : foodCount ? `${foodCount} food pump${foodCount === 1 ? "" : "s"} on duty` : "Standing by";
+        const detail = bits.join(" · ")
+          || (this._tone() === "cheeky"
+            ? "Filter feeders dine on schedule. No forks required."
+            : "Automated NPS feeding is active.");
+        push("nps", "NPS feeding", title, detail, blocked ? "warning" : "ok",
+          [blocked ? `Matched drain waiting: ${String(fxState.lastBlockedReason).replace(/_/g, " ")}` : ""]);
+      }
+    } catch { /* no card */ }
+
     // ICP analysis cards (cached for hours — lab data changes monthly).
     try {
       (this._pulseIcpCards.cards || []).slice(0, 2).forEach((card, i) => push(`icp-${i}`, "ICP analysis", card.title, card.summary,
@@ -17767,6 +17809,7 @@ class OpenReefPanel extends HTMLElement {
       ["feedMode", "Feed mode", "Specifically when Feed mode starts — check everyone's eating."],
       ["skimmerAutoOff", "Skimmer safety auto-off", "When OpenReef turns a skimmer off because the return pump went off."],
       ["atoWindows", "ATO safety windows", "When the ATO duty-cycle safety window opens or closes."],
+      ["npsFeedExchange", "NPS feed-exchange drains", "When the matched drain runs after live-food dosing — the feeding journal writes itself."],
     ];
     const body = `
       <label class="toggle-card">

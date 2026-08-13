@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.44"
+INTEGRATION_VERSION = "0.7.45"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1039,6 +1039,7 @@ DEFAULT_CORE_CONFIG = {
             "skimmerAutoOff": True,
             "atoWindows": False,
             "feedMode": False,
+            "npsFeedExchange": False,
         },
     },
     "captures": [],

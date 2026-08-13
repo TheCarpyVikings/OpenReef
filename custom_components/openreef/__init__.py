@@ -288,6 +288,7 @@ CAPTURE_TRIGGER_FIELD = {
     "skimmer_auto_off": "skimmerAutoOff",
     "ato_window": "atoWindows",
     "feed_mode": "feedMode",
+    "nps_feed_exchange": "npsFeedExchange",
 }
 EQUIPMENT_PROFILE_TYPES = {
     "return_pump",
@@ -10838,6 +10839,9 @@ async def _async_nps_matched_drain_maybe(
             f"Feed-exchange drain started: {batch_ml:.0f} ml (~{runtime_s:.0f} s) to match "
             "live-food dosing", "control")
         await _async_save_config(hass, entry, config)
+        # Optional camera trace (opt-in trigger): the feeding journal writes itself.
+        _dispatch_capture(hass, entry, "nps_feed_exchange",
+                          f"Feed-exchange drain {batch_ml:.0f} ml")
         return True
 
 

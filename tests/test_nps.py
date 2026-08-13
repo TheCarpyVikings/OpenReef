@@ -848,6 +848,12 @@ def test_normalise_species_whitelist():
     assert config["nps"]["species"] == ["chili", "dendronephthya"]
 
 
+def test_capture_trigger_registered_for_feed_exchange():
+    config = integration._normalise_core_config({})
+    assert config["capture"]["triggers"]["npsFeedExchange"] is False
+    assert integration.CAPTURE_TRIGGER_FIELD["nps_feed_exchange"] == "npsFeedExchange"
+
+
 def test_ws_summary_carries_stage_d_blocks():
     entry = _entry({"phyto": _product()})
     hass = FakeHass(entries=[entry])
