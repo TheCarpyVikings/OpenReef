@@ -100,10 +100,15 @@ from .const import (
     INTEGRATION_VERSION,
     MAINTENANCE_AWC_TASK_ID,
     MAINTENANCE_COMPLETIONS_MAX,
+    MAINTENANCE_HATCH_HARVEST_TASK_ID,
+    MAINTENANCE_HATCH_START_TASK_ID,
     MAINTENANCE_REMINDER_DEFAULT_TIME,
     MAINTENANCE_SOURCE_AWC,
+    MAINTENANCE_SOURCE_HATCHERY,
+    MAINTENANCE_TASK_CADENCE_HOURS_MAX,
     MAINTENANCE_TASK_CADENCE_MAX,
     MAINTENANCE_TASK_CADENCE_MIN,
+    MAINTENANCE_TASK_CRITICAL_HOURS_MAX,
     MAINTENANCE_TASK_CRITICAL_MAX,
     MAINTENANCE_TASK_DEFAULTS,
     MODE_EQUIPMENT_TIMER_MAX_SECONDS,
@@ -2349,6 +2354,20 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             critical_after_days = int(raw.get("criticalAfterDays", cadence_days * 2))
         except (TypeError, ValueError):
             critical_after_days = cadence_days * 2
+        # Optional hour-grained cadence (see const.py) — absent means day-based.
+        try:
+            cadence_hours = float(raw.get("cadenceHours") or 0)
+        except (TypeError, ValueError):
+            cadence_hours = 0.0
+        if cadence_hours > 0:
+            cadence_hours = max(1.0, min(round(cadence_hours, 1), MAINTENANCE_TASK_CADENCE_HOURS_MAX))
+            try:
+                critical_after_hours = float(raw.get("criticalAfterHours") or cadence_hours * 2)
+            except (TypeError, ValueError):
+                critical_after_hours = cadence_hours * 2
+            critical_after_hours = max(
+                cadence_hours, min(round(critical_after_hours, 1), MAINTENANCE_TASK_CRITICAL_HOURS_MAX)
+            )
         schedule_mode = raw.get("scheduleMode")
         if schedule_mode not in ("interval", "fixed"):
             schedule_mode = "interval"
@@ -2371,6 +2390,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             "snoozedUntil": snoozed_until,
             "logsVolume": bool(raw.get("logsVolume", task_id == "water_change")),
         }
+        if cadence_hours > 0:
+            tasks[task_id]["cadenceHours"] = cadence_hours
+            tasks[task_id]["criticalAfterHours"] = critical_after_hours
     maintenance["tasks"] = tasks
 
     raw_completions = maintenance.get("completions")
@@ -2397,8 +2419,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 safe_entry["skipped"] = True
             # Only automatic entries carry a source; a hand-logged completion has none,
             # which is what lets the panel tell the two apart in history and the chart.
-            if item.get("source") == MAINTENANCE_SOURCE_AWC:
-                safe_entry["source"] = MAINTENANCE_SOURCE_AWC
+            if item.get("source") in (MAINTENANCE_SOURCE_AWC, MAINTENANCE_SOURCE_HATCHERY):
+                safe_entry["source"] = item["source"]
             volume = item.get("volume")
             if isinstance(volume, (int, float)) and not isinstance(volume, bool):
                 safe_entry["volume"] = round(float(volume), 2)
@@ -3820,10 +3842,19 @@ def _maintenance_task_state(
         if prev_sched is not None and (done_date is None or done_date < prev_sched):
             return "critical"
         return "warning"
-    # interval mode (default): age since last done vs cadence / critical thresholds
-    cadence = task.get("cadenceDays", 7)
+    # interval mode (default): age since last done vs cadence / critical thresholds.
+    # cadenceHours > 0 switches the same comparison to an hour clock (hatch chores).
     if last_done is None:
         return "warning"
+    cadence_h = task.get("cadenceHours")
+    if isinstance(cadence_h, (int, float)) and not isinstance(cadence_h, bool) and cadence_h > 0:
+        age_h = (now - last_done).total_seconds() / 3600.0
+        if age_h > task.get("criticalAfterHours", cadence_h * 2):
+            return "critical"
+        if age_h > cadence_h:
+            return "warning"
+        return "ok"
+    cadence = task.get("cadenceDays", 7)
     age_days = (now - last_done).total_seconds() / 86400.0
     if age_days > task.get("criticalAfterDays", cadence * 2):
         return "critical"
@@ -11844,6 +11875,76 @@ async def websocket_consumable_refill(
     _awc_send(connection, msg, hass, config)
 
 
+def _nps_hatch_log_completion(
+    maintenance: dict[str, Any], task_id: str, now: datetime, note: str
+) -> None:
+    """Append a hatchery-sourced completion (panel entry shape) to a task."""
+    completions = maintenance.setdefault("completions", {})
+    if not isinstance(completions, dict):
+        completions = {}
+        maintenance["completions"] = completions
+    entries = completions.setdefault(task_id, [])
+    if not isinstance(entries, list):
+        entries = []
+        completions[task_id] = entries
+    timestamp = now.isoformat()
+    entries.insert(0, {
+        "id": f"{task_id}:hatch:{timestamp}",
+        "timestamp": timestamp,
+        "notes": note[:500],
+        "source": MAINTENANCE_SOURCE_HATCHERY,
+    })
+    del entries[MAINTENANCE_COMPLETIONS_MAX:]
+
+
+def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str) -> None:
+    """Keep the brine maintenance reminders honest as the hatchery is driven.
+
+    ``started``: the 'start' chore was literally just done — log it (its next
+    due lands one hatch-cycle out) and point the harvest reminder at the moment
+    this hatch comes ripe (snoozed until start + hatchHours, so it pops due
+    right then). ``harvested``: 'Hatched & loaded' — the harvest chore is done,
+    log it. ``cancelled``: the batch was abandoned — drop a harvest snooze that
+    now points at a hatch that will never come ripe.
+
+    Only touches tasks the user has actually added (the 'Add hatchery
+    reminders' button); config-only, callers save.
+    """
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    if not isinstance(tasks, dict):
+        return
+    start_task = tasks.get(MAINTENANCE_HATCH_START_TASK_ID)
+    harvest_task = tasks.get(MAINTENANCE_HATCH_HARVEST_TASK_ID)
+    if event == "started":
+        if isinstance(start_task, dict):
+            _nps_hatch_log_completion(
+                maintenance, MAINTENANCE_HATCH_START_TASK_ID, now,
+                "Logged automatically — hatch started from the NPS tab",
+            )
+            # Marking it done clears any snooze (lockstep with the panel's _completeTask).
+            start_task["snoozedUntil"] = None
+        if isinstance(harvest_task, dict):
+            hatch_hours = _awc_num(
+                ((config.get("nps") or {}).get("hatchery") or {}).get("hatchHours"), 24, 8, 48
+            )
+            harvest_task["snoozedUntil"] = (now + timedelta(hours=hatch_hours)).isoformat()
+    elif event == "harvested":
+        if isinstance(harvest_task, dict):
+            _nps_hatch_log_completion(
+                maintenance, MAINTENANCE_HATCH_HARVEST_TASK_ID, now,
+                "Logged automatically — 'Hatched & loaded' on the NPS tab",
+            )
+            harvest_task["snoozedUntil"] = None
+    elif event == "cancelled":
+        if isinstance(harvest_task, dict):
+            snoozed = _parse_datetime(harvest_task.get("snoozedUntil"))
+            if snoozed is not None and snoozed > now:
+                harvest_task["snoozedUntil"] = None
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/nps_hatch_start"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -11858,20 +11959,26 @@ async def websocket_nps_hatch_start(
         return
     config = _config_from_entry(entry)
     hatchery = config.setdefault("nps", {}).setdefault("hatchery", {})
-    hatchery.setdefault("state", {})["hatchStartedAt"] = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    hatchery.setdefault("state", {})["hatchStartedAt"] = now.isoformat()
+    _nps_hatch_sync_reminders(config, now, "started")
     _append_activity(config, "Brine hatch started — the incubation clock is running", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
 
-@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_hatch_cancel"})
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_hatch_cancel",
+    vol.Optional("harvested"): bool,
+})
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_nps_hatch_cancel(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Clear the incubation clock — the hatch was harvested (the normal end,
-    chained after 'Hatched & loaded') or abandoned."""
+    chained after 'Hatched & loaded', which passes ``harvested`` so the
+    maintenance reminder is logged done) or abandoned."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -11879,6 +11986,10 @@ async def websocket_nps_hatch_cancel(
     config = _config_from_entry(entry)
     hatchery = config.setdefault("nps", {}).setdefault("hatchery", {})
     hatchery.setdefault("state", {})["hatchStartedAt"] = ""
+    _nps_hatch_sync_reminders(
+        config, datetime.now(timezone.utc),
+        "harvested" if msg.get("harvested") else "cancelled",
+    )
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 

@@ -62,6 +62,26 @@ test("test_every_contract_case_is_exercised", async () => {
   assertEqual(names.size, CASES.cases.length, "duplicate case names in the contract fixture");
 });
 
+test("test_hour_clock_tasks_speak_hours", async () => {
+  const restore = freezeTime(CASES.now);
+  try {
+    const panel = await makePanel(configForCase({
+      task: { cadenceHours: 36, criticalAfterHours: 48 },
+      completions: [{ timestamp: "2026-06-03T03:00:00+00:00" }], // 30 h ago
+    }));
+    const state = panel._maintenanceDueState("subject");
+    assertEqual(state.status, "ok", state.detail);
+    assert(state.detail.includes("30 h ago") && state.detail.includes("every 36 h"),
+      `hour tasks must report in hours, not days: ${state.detail}`);
+    // The next-due clock runs on hours too: due 36 h after the completion.
+    const nextMs = panel._maintenanceNextDueMs("subject");
+    const expected = Date.parse("2026-06-03T03:00:00+00:00") + 36 * 3600000;
+    assertEqual(nextMs, expected, "next-due should be completion + cadenceHours");
+  } finally {
+    restore();
+  }
+});
+
 // --- chart aggregation (panel-only; no backend counterpart to drift from) ----
 
 const TANK = 52;

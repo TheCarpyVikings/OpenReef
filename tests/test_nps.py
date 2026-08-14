@@ -886,6 +886,80 @@ def test_ws_hatch_start_and_cancel():
     assert not conn.errors
 
 
+def _hatch_reminder_entry(hatch_hours=36, harvest_snooze=None, started=""):
+    entry = _entry({})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = {"hatchHours": hatch_hours,
+                              "state": {"hatchStartedAt": started}}
+    cfg["maintenance"] = {
+        "seeded": True,
+        "enabled": True,
+        "tasks": {
+            "brine_hatch_start": {
+                "label": "Start brine shrimp hatch", "enabled": True,
+                "cadenceDays": 2, "criticalAfterDays": 4,
+                "cadenceHours": hatch_hours, "criticalAfterHours": hatch_hours + 24,
+                "snoozedUntil": _iso(NOW + timedelta(hours=5)),
+            },
+            "brine_hatch_harvest": {
+                "label": "Harvest, rinse & load brine", "enabled": True,
+                "cadenceDays": 2, "criticalAfterDays": 4,
+                "cadenceHours": hatch_hours, "criticalAfterHours": hatch_hours + 12,
+                "snoozedUntil": harvest_snooze,
+            },
+        },
+        "completions": {},
+    }
+    return entry
+
+
+def test_ws_hatch_start_syncs_the_reminders():
+    # Starting a hatch IS the "start" chore — it gets logged done (hatchery-
+    # sourced, snooze cleared) — and the harvest reminder is pointed at the
+    # moment this hatch ripens: snoozed until now + hatchHours.
+    entry = _hatch_reminder_entry(hatch_hours=36)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    before = datetime.now(timezone.utc)
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    saved = entry.options[CONF_SETTINGS]["maintenance"]
+    logged = saved["completions"]["brine_hatch_start"]
+    assert logged and logged[0]["source"] == "hatchery"
+    assert not saved["tasks"]["brine_hatch_start"].get("snoozedUntil")
+    assert saved["tasks"]["brine_hatch_harvest"]["cadenceHours"] == 36  # survives the save
+    snooze = datetime.fromisoformat(saved["tasks"]["brine_hatch_harvest"]["snoozedUntil"])
+    hours_out = (snooze - before).total_seconds() / 3600.0
+    assert 35.9 < hours_out < 36.2, f"harvest reminder should land ~36 h out, got {hours_out}"
+    assert not conn.errors
+
+
+def test_ws_hatch_cancel_harvested_logs_the_chore():
+    # "Hatched & loaded" chains a harvested cancel: the harvest chore is done.
+    entry = _hatch_reminder_entry(harvest_snooze=_iso(NOW + timedelta(hours=30)),
+                                  started=_iso(NOW - timedelta(hours=6)))
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 1, "harvested": True}))
+    saved = entry.options[CONF_SETTINGS]["maintenance"]
+    logged = saved["completions"].get("brine_hatch_harvest") or []
+    assert logged and logged[0]["source"] == "hatchery"
+    assert not saved["tasks"]["brine_hatch_harvest"].get("snoozedUntil")
+
+
+def test_ws_hatch_plain_cancel_only_drops_the_stale_snooze():
+    # Abandoning a batch logs NOTHING (nothing was harvested) but drops a
+    # harvest snooze that now points at a hatch that will never come ripe.
+    future = datetime.now(timezone.utc) + timedelta(hours=30)
+    entry = _hatch_reminder_entry(harvest_snooze=future.isoformat(),
+                                  started=_iso(NOW - timedelta(hours=6)))
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 1}))
+    saved = entry.options[CONF_SETTINGS]["maintenance"]
+    assert not (saved["completions"].get("brine_hatch_harvest") or [])
+    assert not saved["tasks"]["brine_hatch_harvest"].get("snoozedUntil")
+
+
 def test_ws_summary_carries_hatchery():
     entry = _entry({})
     hass = FakeHass(entries=[entry])

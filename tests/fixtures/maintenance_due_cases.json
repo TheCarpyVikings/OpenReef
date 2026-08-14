@@ -129,6 +129,30 @@
       "task": { "scheduleMode": "fixed", "scheduleDays": [], "scheduleMonthDays": [] },
       "completions": [],
       "expect": "none"
+    },
+    {
+      "name": "hour clock: done inside the hatch window",
+      "task": { "cadenceHours": 36, "criticalAfterHours": 48 },
+      "completions": [{ "timestamp": "2026-06-03T03:00:00+00:00" }],
+      "expect": "none"
+    },
+    {
+      "name": "hour clock: past the cadence is due",
+      "task": { "cadenceHours": 36, "criticalAfterHours": 48 },
+      "completions": [{ "timestamp": "2026-06-02T17:00:00+00:00" }],
+      "expect": "warning"
+    },
+    {
+      "name": "hour clock: past the critical window is overdue",
+      "task": { "cadenceHours": 36, "criticalAfterHours": 48 },
+      "completions": [{ "timestamp": "2026-06-02T07:00:00+00:00" }],
+      "expect": "critical"
+    },
+    {
+      "name": "hour clock overrides the day cadence when both are set",
+      "task": { "cadenceDays": 7, "criticalAfterDays": 14, "cadenceHours": 18, "criticalAfterHours": 30 },
+      "completions": [{ "timestamp": "2026-06-03T13:00:00+00:00" }],
+      "expect": "warning"
     }
   ]
 }

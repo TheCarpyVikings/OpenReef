@@ -451,4 +451,59 @@ test("egg-type choice seeds the recommended hatch hours in settings", async () =
   } finally { restore(); }
 });
 
+test("hatchery reminders sync to the hatch clock and anchor to a running hatch", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // A 36 h hatch, 6 h in — Reece's exact case: the harvest reminder must
+    // land in 30 h, not "every 1 day".
+    const startedIso = new Date(Date.parse(NOW) - 6 * 3600000).toISOString();
+    const panel = await npsPanel();
+    panel._render = () => {};                    // the seeder re-renders; no DOM here
+    panel._setDirty = () => { panel._configDirty = true; };
+    panel._config.nps.hatchery = { eggType: "cool_room", hatchHours: 36,
+                                   state: { hatchStartedAt: startedIso } };
+    // Stale day-based tasks from the old seeding get re-synced, not duplicated.
+    panel._config.maintenance = {
+      enabled: true,
+      tasks: {
+        brine_hatch_start: { label: "Start brine shrimp hatch", cadenceDays: 1, criticalAfterDays: 1, enabled: true, notify: true },
+        brine_hatch_harvest: { label: "Harvest, rinse & load brine", cadenceDays: 1, criticalAfterDays: 1, enabled: true, notify: true },
+      },
+      completions: {},
+    };
+    panel._npsSeedHatchReminders();
+    const tasks = panel._config.maintenance.tasks;
+    assert(tasks.brine_hatch_start.cadenceHours === 36, "start chore should run on the 36 h hatch clock");
+    assert(tasks.brine_hatch_harvest.cadenceHours === 36, "harvest chore should run on the 36 h hatch clock");
+    assert(tasks.brine_hatch_harvest.criticalAfterHours === 48, "harvest overdue should mirror the 12 h yolk grace");
+    const hoursOut = (Date.parse(tasks.brine_hatch_harvest.snoozedUntil) - Date.parse(NOW)) / 3600000;
+    assert(Math.abs(hoursOut - 30) < 0.01, `harvest reminder should land in 30 h, got ${hoursOut}`);
+    const comps = panel._config.maintenance.completions.brine_hatch_start;
+    assert(comps.length === 1 && comps[0].source === "hatchery", "the running hatch logs the start chore, hatchery-sourced");
+    assert(comps[0].timestamp === startedIso, "the start completion is honestly back-dated to hatchStartedAt");
+    panel._npsSeedHatchReminders();
+    assert(panel._config.maintenance.completions.brine_hatch_start.length === 1, "re-syncing must not duplicate the completion");
+    // The hour clock reaches the due-state: 6 h since "start" on a 36 h cadence is done, in hours.
+    const state = panel._maintenanceDueState("brine_hatch_start");
+    assert(state.status === "ok" && state.detail.includes("every 36 h"), `due state should speak hours: ${state.detail}`);
+  } finally { restore(); }
+});
+
+test("seeding without a running hatch sets the hour cadence but anchors nothing", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};                    // the seeder re-renders; no DOM here
+    panel._setDirty = () => { panel._configDirty = true; };
+    panel._config.nps.hatchery = { eggType: "decapsulated", hatchHours: 16, state: { hatchStartedAt: "" } };
+    assert(panel._npsTab().includes("Add hatchery reminders"), "first visit should offer to ADD the reminders");
+    panel._npsSeedHatchReminders();
+    const m = panel._config.maintenance;
+    assert(m.tasks.brine_hatch_start.cadenceHours === 16, "an 18/16 h egg type should set an hour cadence");
+    assert(!m.tasks.brine_hatch_harvest.snoozedUntil, "no running hatch, nothing to anchor to");
+    assert(!(m.completions?.brine_hatch_start || []).length, "no running hatch, nothing to back-log");
+    assert(panel._npsTab().includes("Sync hatchery reminders"), "once added, the button becomes a re-sync");
+  } finally { restore(); }
+});
+
 runTests();

@@ -2129,9 +2129,14 @@ class OpenReefPanel extends HTMLElement {
           task.cadenceDays = cadenceDays;
           const critical = Number(task.criticalAfterDays);
           if (!Number.isFinite(critical) || critical < cadenceDays) task.criticalAfterDays = Math.min(730, cadenceDays * 2);
+          // A hand-edited day cadence takes the task off the hour clock.
+          delete task.cadenceHours;
+          delete task.criticalAfterHours;
         } else if (field === "criticalAfterDays") {
           const cadenceDays = Math.max(1, Number(task.cadenceDays) || 7);
           task.criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(value) || cadenceDays * 2));
+          delete task.cadenceHours;
+          delete task.criticalAfterHours;
         } else if (field === "scheduleDay") {
           const day = parseInt(target.dataset.day, 10);
           const set = new Set(Array.isArray(task.scheduleDays) ? task.scheduleDays : []);
@@ -9614,7 +9619,9 @@ class OpenReefPanel extends HTMLElement {
     }
     try {
       await this._callWS({ type: "openreef/dosing_mark_refreshed", channel_id: cid });
-      await this._callWS({ type: "openreef/nps_hatch_cancel" });
+      // harvested: the backend logs the "Harvest, rinse & load brine" reminder
+      // done (if the user added it) — loading the reservoir IS that chore.
+      await this._callWS({ type: "openreef/nps_hatch_cancel", harvested: true });
       this._nps.message = "Hatch loaded — freshness and prime clocks restarted; the hatcher stands down.";
       this._nps.error = "";
     } catch (err) {
@@ -9639,26 +9646,62 @@ class OpenReefPanel extends HTMLElement {
 
   _npsSeedHatchReminders() {
     // Custom (non-builtin) maintenance tasks: evaluation, snooze, notify and
-    // history all come free from the maintenance engine.
+    // history all come free from the maintenance engine. Both chores run on the
+    // hatchery's HOUR clock (cadenceHours), not a day grid — an 18 h decap
+    // batch and a 36 h cool-room hatch need different reminders. Re-running the
+    // button re-syncs existing tasks to the current hatch time.
     const m = this._config.maintenance = this._config.maintenance || {};
     const tasks = m.tasks = m.tasks || {};
-    if (!tasks.brine_hatch_start) {
-      tasks.brine_hatch_start = {
-        label: "Start brine shrimp hatch", cadenceDays: 1, criticalAfterDays: 1,
-        enabled: true, notify: true,
-        notes: "Set cysts hatching ~24 h before the next feed window (26–30 °C, ~25 ppt, strong aeration).",
+    const hatchHours = Math.max(8, Math.min(48, Number(this._config?.nps?.hatchery?.hatchHours) || 24));
+    const cadenceDays = Math.max(1, Math.round(hatchHours / 24));
+    const upsert = (id, seed, criticalAfterHours) => {
+      tasks[id] = {
+        ...(tasks[id] || seed),
+        cadenceDays,
+        criticalAfterDays: cadenceDays * 2,
+        cadenceHours: hatchHours,
+        criticalAfterHours,
       };
-    }
-    if (!tasks.brine_hatch_harvest) {
-      tasks.brine_hatch_harvest = {
-        label: "Harvest, rinse & load brine", cadenceDays: 1, criticalAfterDays: 1,
-        enabled: true, notify: true,
-        notes: "Harvest nauplii, rinse (never dose hatch water), resuspend in tank-salinity saltwater, load the reservoir, then tap 'Hatched & loaded' on the NPS tab.",
-      };
+    };
+    upsert("brine_hatch_start", {
+      label: "Start brine shrimp hatch", enabled: true, notify: true,
+      notes: `Set cysts hatching ~${hatchHours} h before the next feed window (26–30 °C, ~25 ppt, strong aeration).`,
+    }, hatchHours + 24);
+    // Harvest is the time-critical one — yolk reserves crash past the hatch
+    // window, so overdue mirrors the hatchery card's 12 h grace.
+    upsert("brine_hatch_harvest", {
+      label: "Harvest, rinse & load brine", enabled: true, notify: true,
+      notes: "Harvest nauplii, rinse (never dose hatch water), resuspend in tank-salinity saltwater, load the reservoir, then tap 'Hatched & loaded' on the NPS tab.",
+    }, hatchHours + 12);
+    // A hatch already running anchors both clocks: the start chore WAS done at
+    // hatchStartedAt (log it, honestly back-dated), and harvest comes due the
+    // moment the hatch ripens — snoozed until start + hatchHours, so a 36 h
+    // hatch that's 6 h in reminds in 30 h, not tomorrow.
+    const startedMs = Date.parse(this._config?.nps?.hatchery?.state?.hatchStartedAt || "");
+    let anchorNote = "";
+    if (Number.isFinite(startedMs) && startedMs <= Date.now()) {
+      const startedIso = new Date(startedMs).toISOString();
+      const comps = m.completions = m.completions || {};
+      if (!Array.isArray(comps.brine_hatch_start)) comps.brine_hatch_start = [];
+      const alreadyLogged = comps.brine_hatch_start.some((e) => !e?.skipped && this._maintenanceCompletionTime(e) >= startedMs);
+      if (!alreadyLogged) {
+        comps.brine_hatch_start.unshift({
+          id: `brine_hatch_start:hatch:${startedIso}`,
+          timestamp: startedIso,
+          notes: "Logged automatically — this hatch was already running",
+          source: "hatchery",
+        });
+      }
+      tasks.brine_hatch_start.snoozedUntil = null;
+      const endMs = startedMs + hatchHours * 3600000;
+      if (endMs > Date.now()) {
+        tasks.brine_hatch_harvest.snoozedUntil = new Date(endMs).toISOString();
+        anchorNote = ` The running hatch is ${this._format((Date.now() - startedMs) / 3600000, 1)} h in, so the harvest reminder lands in ~${this._format((endMs - Date.now()) / 3600000, 1)} h.`;
+      }
     }
     this._setDirty(true);
-    this._nps.message = "Hatchery reminders added to Maintenance — save to keep them.";
-    this._recordActivity("Added brine hatchery reminders");
+    this._nps.message = `Hatchery reminders synced to your ${hatchHours} h hatch — save to keep them.${anchorNote}`;
+    this._recordActivity("Synced brine hatchery reminders");
     this._render();
   }
 
@@ -10547,7 +10590,7 @@ class OpenReefPanel extends HTMLElement {
         ? `<button class="secondary compact-button" data-action="nps-hatch-cancel">Cancel hatch</button>` : "",
       (hatchState.status === "ready" || hatchState.status === "overdue") && fxCfg.channelId
         ? `<button class="secondary compact-button" data-action="nps-hatch-loaded">Hatched &amp; loaded</button>` : "",
-      `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">Add hatchery reminders</button>`,
+      `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${(this._config?.maintenance?.tasks?.brine_hatch_start || this._config?.maintenance?.tasks?.brine_hatch_harvest) ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
     // drain is on (live-test catch: it was wrongly gated behind the exchange).
@@ -21412,6 +21455,13 @@ class OpenReefPanel extends HTMLElement {
     const raw = this._maintenanceConfig().tasks[id] || {};
     const cadenceDays = Math.max(1, Math.min(365, Number(raw.cadenceDays) || 7));
     const criticalAfterDays = Math.max(cadenceDays, Math.min(730, Number(raw.criticalAfterDays) || cadenceDays * 2));
+    // Optional hour-grained cadence (hatch chores); 0 = day-based. Lockstep with
+    // the backend normaliser's clamps.
+    const rawHours = Number(raw.cadenceHours);
+    const cadenceHours = Number.isFinite(rawHours) && rawHours > 0 ? Math.max(1, Math.min(336, rawHours)) : 0;
+    const criticalAfterHours = cadenceHours > 0
+      ? Math.max(cadenceHours, Math.min(672, Number(raw.criticalAfterHours) || cadenceHours * 2))
+      : 0;
     const toIntList = (v, lo, hi) => (Array.isArray(v)
       ? [...new Set(v.map((n) => parseInt(n, 10)).filter((n) => Number.isInteger(n) && n >= lo && n <= hi))].sort((a, b) => a - b)
       : []);
@@ -21419,6 +21469,8 @@ class OpenReefPanel extends HTMLElement {
       label: raw.label || id,
       cadenceDays,
       criticalAfterDays,
+      cadenceHours,
+      criticalAfterHours,
       enabled: raw.enabled === true,
       notes: raw.notes || "",
       builtin: raw.builtin === true,
@@ -21506,6 +21558,16 @@ class OpenReefPanel extends HTMLElement {
     return null;
   }
 
+  // One interval cadence, whichever clock the task runs on (hour-based wins).
+  _maintenanceCadenceMs(task) {
+    return task.cadenceHours > 0 ? task.cadenceHours * 3600000 : task.cadenceDays * 86400000;
+  }
+
+  _maintenanceCadenceLabel(task) {
+    if (task.cadenceHours > 0) return `every ${this._format(task.cadenceHours, task.cadenceHours % 1 ? 1 : 0)} h`;
+    return `every ${task.cadenceDays} day${task.cadenceDays === 1 ? "" : "s"}`;
+  }
+
   // When this task next becomes due (ms). Already-due tasks return now so they sort first.
   _maintenanceNextDueMs(id) {
     const state = this._maintenanceDueState(id);
@@ -21519,7 +21581,7 @@ class OpenReefPanel extends HTMLElement {
     } else {
       const latest = this._maintenanceLatestDone(id);
       const lastMs = latest ? this._maintenanceCompletionTime(latest) : Date.now();
-      baseMs = lastMs + task.cadenceDays * 86400000;
+      baseMs = lastMs + this._maintenanceCadenceMs(task);
     }
     return Number.isFinite(snoozeMs) && snoozeMs > baseMs ? snoozeMs : baseMs;
   }
@@ -21565,7 +21627,21 @@ class OpenReefPanel extends HTMLElement {
       return { status: "warning", label: "due", detail: `${task.label} is due for ${this._maintenanceFormatDate(lastSched)} (${dayLabel}).`, latest };
     }
     if (!latest) {
-      return { status: "warning", label: "never done", detail: `${task.label} is on a ${task.cadenceDays}-day cadence but hasn't been logged yet.`, latest };
+      const cadence = task.cadenceHours > 0 ? `${this._format(task.cadenceHours, task.cadenceHours % 1 ? 1 : 0)}-hour` : `${task.cadenceDays}-day`;
+      return { status: "warning", label: "never done", detail: `${task.label} is on a ${cadence} cadence but hasn't been logged yet.`, latest };
+    }
+    // Hour-based tasks (hatch chores) run the same comparison on an hour clock —
+    // lockstep with the backend's _maintenance_task_state hour branch.
+    if (task.cadenceHours > 0) {
+      const ageH = this._maintenanceAgeDays(latest) * 24;
+      const fmtH = (h) => this._format(h, h < 10 ? 1 : 0);
+      if (ageH > task.criticalAfterHours) {
+        return { status: "critical", label: "overdue", detail: `${task.label} last done ${fmtH(ageH)} h ago; overdue past ${fmtH(task.criticalAfterHours)} h.`, latest };
+      }
+      if (ageH > task.cadenceHours) {
+        return { status: "warning", label: "due", detail: `${task.label} is due. Last done ${fmtH(ageH)} h ago; ${this._maintenanceCadenceLabel(task)}.`, latest };
+      }
+      return { status: "ok", label: "done", detail: `${task.label} done ${fmtH(ageH)} h ago; ${this._maintenanceCadenceLabel(task)}.`, latest };
     }
     const age = this._maintenanceAgeDays(latest);
     if (age > task.criticalAfterDays) {
@@ -21932,20 +22008,24 @@ class OpenReefPanel extends HTMLElement {
     const padT = 8;
     const padB = 14;
     const plotH = height - padT - padB;
-    const max = this._maintenanceNiceMax(Math.max(task.cadenceDays, ...gaps.map((gap) => gap.days)) * 1.1);
+    // Hour-clock tasks chart against their day-equivalent target so bar colours
+    // keep matching the due-state thresholds.
+    const targetDays = task.cadenceHours > 0 ? task.cadenceHours / 24 : task.cadenceDays;
+    const criticalDays = task.cadenceHours > 0 ? task.criticalAfterHours / 24 : task.criticalAfterDays;
+    const max = this._maintenanceNiceMax(Math.max(targetDays, ...gaps.map((gap) => gap.days)) * 1.1);
     const slot = width / gaps.length;
     const barW = Math.max(4, Math.min(26, slot * 0.62));
     const yFor = (value) => padT + plotH - (value / max) * plotH;
-    const targetY = yFor(task.cadenceDays);
+    const targetY = yFor(targetDays);
     const bars = gaps.map((gap, index) => {
-      const status = gap.days > task.criticalAfterDays ? "critical" : gap.days > task.cadenceDays ? "warning" : "ok";
+      const status = gap.days > criticalDays ? "critical" : gap.days > targetDays ? "warning" : "ok";
       const x = width * (index / gaps.length) + (slot - barW) / 2;
       const barH = Math.max(2, plotH - (yFor(gap.days) - padT));
       const label = `${this._formatActivityTime(new Date(gap.time).toISOString())}: ${this._format(gap.days, 1)} days after the previous one`;
       return `<rect class="maint-gap ${status}" x="${x.toFixed(1)}" y="${(padT + plotH - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="2"><title>${this._escape(label)}</title></rect>`;
     }).join("");
     return `
-      <svg class="maint-mini-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this._escape(task.label)} interval history against a ${task.cadenceDays}-day target">
+      <svg class="maint-mini-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this._escape(`${task.label} interval history against a target of ${this._maintenanceCadenceLabel(task).replace("every ", "")}`)}">
         <line class="maint-grid" x1="0" y1="${(padT + plotH).toFixed(1)}" x2="${width}" y2="${(padT + plotH).toFixed(1)}" />
         ${bars}
         <line class="maint-target" x1="0" y1="${targetY.toFixed(1)}" x2="${width}" y2="${targetY.toFixed(1)}" />
@@ -21961,19 +22041,25 @@ class OpenReefPanel extends HTMLElement {
       .filter(({ gaps }) => gaps.length >= 1)
       .map(({ id, task, gaps }) => {
         const avg = gaps.reduce((sum, gap) => sum + gap.days, 0) / gaps.length;
-        const drift = avg - task.cadenceDays;
-        const status = avg > task.criticalAfterDays ? "critical" : avg > task.cadenceDays ? "warning" : "ok";
-        const driftLabel = Math.abs(drift) < 0.5
+        const targetDays = task.cadenceHours > 0 ? task.cadenceHours / 24 : task.cadenceDays;
+        const criticalDays = task.cadenceHours > 0 ? task.criticalAfterHours / 24 : task.criticalAfterDays;
+        const drift = avg - targetDays;
+        const status = avg > criticalDays ? "critical" : avg > targetDays ? "warning" : "ok";
+        const hourly = task.cadenceHours > 0;
+        const driftAbs = Math.abs(drift);
+        const driftLabel = driftAbs < (hourly ? 0.05 : 0.5)
           ? "on schedule"
-          : `${this._format(Math.abs(drift), 1)} day${Math.abs(drift) >= 1.95 ? "s" : ""} ${drift > 0 ? "late" : "early"} on average`;
+          : hourly
+            ? `${this._format(driftAbs * 24, 1)} h ${drift > 0 ? "late" : "early"} on average`
+            : `${this._format(driftAbs, 1)} day${driftAbs >= 1.95 ? "s" : ""} ${drift > 0 ? "late" : "early"} on average`;
         return `
           <article class="metric-card maint-cadence-card">
             <div class="maint-cadence-head">
               <strong>${this._escape(task.label)}</strong>
-              <span class="pill ${status}">${this._escape(`${this._format(avg, 1)} d avg`)}</span>
+              <span class="pill ${status}">${this._escape(hourly ? `${this._format(avg * 24, 1)} h avg` : `${this._format(avg, 1)} d avg`)}</span>
             </div>
             ${this._maintenanceIntervalChart(id, gaps, task)}
-            <small>${this._escape(`Target every ${task.cadenceDays} day${task.cadenceDays === 1 ? "" : "s"} · ${gaps.length} interval${gaps.length === 1 ? "" : "s"} · ${driftLabel}`)}</small>
+            <small>${this._escape(`Target ${this._maintenanceCadenceLabel(task)} · ${gaps.length} interval${gaps.length === 1 ? "" : "s"} · ${driftLabel}`)}</small>
           </article>`;
       });
     if (!cards.length) return "";
@@ -22160,7 +22246,7 @@ class OpenReefPanel extends HTMLElement {
     const autoToday = task.logsVolume ? this._maintenanceAutoLoggedToday(id) : 0;
     const scheduleLine = task.scheduleMode === "fixed"
       ? `Every ${this._escape(this._maintenanceScheduleLabel(task))}`
-      : `Every ${this._escape(task.cadenceDays)} day${task.cadenceDays === 1 ? "" : "s"}`;
+      : this._escape(`E${this._maintenanceCadenceLabel(task).slice(1)}`);
     return `
       <article class="manual-test-card ${state.status}">
         <div class="card-head">
@@ -22261,7 +22347,9 @@ class OpenReefPanel extends HTMLElement {
                   </div>
                   <label class="toggle-card">
                     <input type="checkbox" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="enabled" ${task.enabled ? "checked" : ""}>
-                    <span><strong>Track this task</strong><small>Every ${this._escape(task.cadenceDays)} days; overdue after ${this._escape(task.criticalAfterDays)}.</small></span>
+                    <span><strong>Track this task</strong><small>${this._escape(task.cadenceHours > 0
+                      ? `Every ${this._format(task.cadenceHours, task.cadenceHours % 1 ? 1 : 0)} h; overdue after ${this._format(task.criticalAfterHours, task.criticalAfterHours % 1 ? 1 : 0)} h.`
+                      : `Every ${task.cadenceDays} days; overdue after ${task.criticalAfterDays}.`)}</small></span>
                   </label>
                   ${task.enabled ? `
                     <div class="mini-grid">
@@ -22289,6 +22377,7 @@ class OpenReefPanel extends HTMLElement {
                         <label>Due after days<input type="number" min="1" max="365" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="cadenceDays" value="${this._escape(task.cadenceDays)}"></label>
                         <label>Overdue after days<input type="number" min="${this._escape(task.cadenceDays)}" max="730" step="1" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="criticalAfterDays" value="${this._escape(task.criticalAfterDays)}"></label>
                       </div>
+                      ${task.cadenceHours > 0 ? `<p class="muted">Runs on an hour clock — ${this._escape(this._maintenanceCadenceLabel(task))}, synced from the NPS hatchery. Editing the day fields switches it back to days.</p>` : ""}
                     `}
                     <div class="mini-grid">
                       <label>Notes<input data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="notes" value="${this._escape(task.notes)}" maxlength="300"></label>
@@ -22363,9 +22452,9 @@ class OpenReefPanel extends HTMLElement {
     let untilMs;
     if (task.scheduleMode === "fixed") {
       const next = this._maintenanceNextScheduledAfter(task, new Date());
-      untilMs = next ? next.getTime() : Date.now() + task.cadenceDays * 86400000;
+      untilMs = next ? next.getTime() : Date.now() + this._maintenanceCadenceMs(task);
     } else {
-      untilMs = Date.now() + task.cadenceDays * 86400000;
+      untilMs = Date.now() + this._maintenanceCadenceMs(task);
     }
     config.tasks[id] = { ...(config.tasks[id] || {}), snoozedUntil: new Date(untilMs).toISOString() };
     this._setDirty(true);

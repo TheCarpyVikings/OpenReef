@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.58"
+INTEGRATION_VERSION = "0.7.59"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -243,12 +243,26 @@ MAINTENANCE_TASK_CADENCE_MAX = 365
 MAINTENANCE_TASK_CRITICAL_MAX = 730
 MAINTENANCE_COMPLETIONS_MAX = 200  # kept per task (AWC auto-logs one entry per day)
 
+# Optional hour-grained cadence on interval tasks (cadenceHours > 0 overrides
+# cadenceDays for evaluation and display). Exists for chores tied to a clock the
+# day grid can't express — a 36 h brine hatch, an 18 h decapsulated batch. The
+# NPS hatchery seeds/syncs these; day-based tasks never carry the fields.
+MAINTENANCE_TASK_CADENCE_HOURS_MAX = 24 * 14
+MAINTENANCE_TASK_CRITICAL_HOURS_MAX = 24 * 28
+
 # Automatic water changes are logged against this task, tagged with this source so the
 # panel can separate them from hand-logged ones. Same-day automatic runs merge into one
 # entry — a continuous schedule fires many times a day and would otherwise evict the
 # manual history under the cap above.
 MAINTENANCE_AWC_TASK_ID = "water_change"
 MAINTENANCE_SOURCE_AWC = "awc"
+
+# Hatchery-driven completions: starting a hatch from the NPS tab logs the
+# "start" chore done; "Hatched & loaded" logs the harvest chore done. Tagged so
+# the history can tell them from hand-logged entries.
+MAINTENANCE_SOURCE_HATCHERY = "hatchery"
+MAINTENANCE_HATCH_START_TASK_ID = "brine_hatch_start"
+MAINTENANCE_HATCH_HARVEST_TASK_ID = "brine_hatch_harvest"
 
 # Maintenance Tasks V2 — HA-native reminders. A single daily tick (at this local
 # time) re-evaluates due/overdue tasks and fires an in-HA persistent notification

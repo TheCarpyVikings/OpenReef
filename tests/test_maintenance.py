@@ -455,6 +455,50 @@ def test_save_stamps_the_completion_history():
     assert _saved(entry)["completionsSyncedAt"], "every save must re-stamp the snapshot"
 
 
+# --- hour-grained cadence (hatch chores) -------------------------------------
+# cadenceHours > 0 puts an interval task on an hour clock; the normaliser owns
+# the clamps and drops junk back to day-based.
+
+def test_normalise_hour_cadence_fields():
+    config = integration._normalise_core_config({
+        "maintenance": {
+            "seeded": True,
+            "tasks": {
+                "brine_hatch_harvest": {"label": "Harvest", "cadenceDays": 2,
+                                        "cadenceHours": 36, "criticalAfterHours": 48},
+                "hour_junk": {"label": "Junk", "cadenceDays": 1, "cadenceHours": "nope"},
+                "hour_clamped": {"label": "Clamped", "cadenceDays": 1, "cadenceHours": 9000,
+                                 "criticalAfterHours": 2},
+                "day_based": {"label": "Days", "cadenceDays": 7},
+            },
+            "completions": {},
+        }
+    })
+    tasks = config["maintenance"]["tasks"]
+    assert tasks["brine_hatch_harvest"]["cadenceHours"] == 36
+    assert tasks["brine_hatch_harvest"]["criticalAfterHours"] == 48
+    assert "cadenceHours" not in tasks["hour_junk"], "junk hours must fall back to day-based"
+    assert tasks["hour_clamped"]["cadenceHours"] == 336          # two-week ceiling
+    assert tasks["hour_clamped"]["criticalAfterHours"] == 336    # critical >= cadence
+    assert "cadenceHours" not in tasks["day_based"]
+
+
+def test_normalise_keeps_hatchery_completion_source():
+    config = integration._normalise_core_config({
+        "maintenance": {
+            "seeded": True,
+            "tasks": {"brine_hatch_start": {"label": "Start", "cadenceDays": 1}},
+            "completions": {"brine_hatch_start": [
+                {"timestamp": "2026-08-13T08:00:00+00:00", "source": "hatchery"},
+                {"timestamp": "2026-08-12T08:00:00+00:00", "source": "made_up"},
+            ]},
+        }
+    })
+    entries = config["maintenance"]["completions"]["brine_hatch_start"]
+    assert entries[0]["source"] == "hatchery"
+    assert "source" not in entries[1], "unknown sources must be stripped"
+
+
 # --- the shared due contract (lockstep with the panel) -----------------------
 # _maintenance_task_state here and _maintenanceDueState in the panel are separate
 # implementations of ONE schedule: this one fires the reminders with the panel
