@@ -862,6 +862,47 @@ def test_hatch_state_lifecycle():
     assert nps.hatch_state(_iso(NOW - timedelta(hours=40)), 24, NOW)["status"] == "overdue"
 
 
+def test_next_hatch_suggestion_freshness_timed():
+    # Loaded 4 h ago, 48 h shelf, no reservoir data, 24 h eggs: the new batch
+    # must be ready by loaded+48 -> start 48-4-25 = 19 h from now.
+    s = nps.next_hatch_suggestion(NOW, 24, _iso(NOW - timedelta(hours=4)), 48, None, None, "")
+    assert s["status"] == "wait" and s["driver"] == "freshness"
+    assert s["hoursUntil"] == 19.0
+    assert not s["overlap"]
+
+
+def test_next_hatch_suggestion_depletion_wins():
+    # 100 ml left at 60 ml/day = dry in 40 h, sooner than the 46 h of freshness
+    # left -> depletion drives the clock: start at 40 - 25 = 15 h.
+    s = nps.next_hatch_suggestion(NOW, 24, _iso(NOW - timedelta(hours=2)), 48, 100, 60, "")
+    assert s["status"] == "wait" and s["driver"] == "depletion"
+    assert s["hoursUntil"] == 15.0
+
+
+def test_next_hatch_suggestion_overlap_says_start_now():
+    # 36 h eggs but brine only keeps 24 h: batches must overlap, waiting is
+    # never the answer.
+    s = nps.next_hatch_suggestion(NOW, 36, _iso(NOW - timedelta(hours=2)), 24, None, None, "")
+    assert s["status"] == "start_now"
+    assert s["overlap"] is True
+
+
+def test_next_hatch_suggestion_overdue_and_no_brine():
+    stale = nps.next_hatch_suggestion(NOW, 24, _iso(NOW - timedelta(hours=30)), 24, None, None, "")
+    assert stale["status"] == "overdue"
+    dry = nps.next_hatch_suggestion(NOW, 24, _iso(NOW - timedelta(hours=1)), 48, 0, 40, "")
+    assert dry["status"] == "overdue" and dry["driver"] == "depletion"
+    assert nps.next_hatch_suggestion(NOW, 24, "", 24, None, None, "")["status"] == "no_brine"
+
+
+def test_next_hatch_suggestion_chained_while_incubating():
+    # 6 h into a 36 h hatch with 48 h shelf: the next start keeps the chain
+    # unbroken at started + shelf -> 42 h from now.
+    s = nps.next_hatch_suggestion(NOW, 36, "", 48, None, None, _iso(NOW - timedelta(hours=6)))
+    assert s["status"] == "chained" and s["driver"] == "freshness"
+    assert s["hoursUntil"] == 42.0
+
+
 def test_egg_type_hours_and_normaliser():
     assert nps.egg_type_hours("decapsulated") == 16
     assert nps.egg_type_hours("nonsense") == 24        # unknown → standard
@@ -968,6 +1009,60 @@ def test_ws_summary_carries_hatchery():
     hatchery = conn.results[-1].payload["hatchery"]
     assert hatchery["state"]["status"] == "none"
     assert len(hatchery["eggTypes"]) == 4
+    assert hatchery["nextHatch"]["status"] == "no_brine"
+
+
+def test_ws_summary_hand_dose_brine_clocks():
+    # No linked channel: the hatchery's own "Hatched & loaded" stamp drives
+    # the prime/freshness clocks AND the next-hatch advice.
+    entry = _entry({})
+    cfg = entry.options[CONF_SETTINGS]
+    loaded = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    cfg["nps"]["hatchery"] = {"hatchHours": 24,
+                              "state": {"hatchStartedAt": "", "loadedAt": loaded}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    fx = payload["feedExchange"]
+    assert fx["channelId"] == ""
+    assert fx["prime"]["status"] == "prime"
+    assert fx["freshness"]["status"] == "fresh"
+    next_hatch = payload["hatchery"]["nextHatch"]
+    # 24 h hatch + 24 h shelf = structural overlap: the honest advice is now.
+    assert next_hatch["status"] == "start_now"
+    assert next_hatch["overlap"] is True
+
+
+def test_ws_hatch_loaded_stamps_the_hand_dose_clock():
+    # Harvested without a pump: loadedAt is stamped, and the overlap case
+    # (24 h hatch vs 24 h shelf) re-anchors the start reminder to DUE NOW —
+    # a stale snooze must not suppress it.
+    entry = _hatch_reminder_entry(hatch_hours=24,
+                                  started=_iso(NOW - timedelta(hours=25)))
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    before = datetime.now(timezone.utc)
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 1, "harvested": True}))
+    saved = entry.options[CONF_SETTINGS]
+    loaded = saved["nps"]["hatchery"]["state"]["loadedAt"]
+    assert loaded and datetime.fromisoformat(loaded) >= before - timedelta(seconds=5)
+    assert not saved["maintenance"]["tasks"]["brine_hatch_start"].get("snoozedUntil")
+
+
+def test_ws_hatch_loaded_snoozes_start_to_the_smart_time():
+    # An 8 h hatch against the 24 h shelf: the next start lands at
+    # 24 - (8 + 1) = 15 h out, and the start reminder snoozes right to it.
+    entry = _hatch_reminder_entry(hatch_hours=8,
+                                  started=_iso(NOW - timedelta(hours=9)))
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    before = datetime.now(timezone.utc)
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 1, "harvested": True}))
+    saved = entry.options[CONF_SETTINGS]
+    snooze = saved["maintenance"]["tasks"]["brine_hatch_start"]["snoozedUntil"]
+    hours_out = (datetime.fromisoformat(snooze) - before).total_seconds() / 3600.0
+    assert 14.9 < hours_out < 15.2, f"start reminder should snooze ~15 h, got {hours_out}"
 
 
 def test_capture_trigger_registered_for_feed_exchange():

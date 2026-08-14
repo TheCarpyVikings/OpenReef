@@ -20,7 +20,7 @@ counts as expired — never trust food of unknown age.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .awc import _f, _parse_iso
@@ -256,6 +256,104 @@ def hatch_state(started_iso: Any, hatch_hours: float, now: datetime) -> dict[str
     status = "overdue" if elapsed_h > hours + HATCH_OVERDUE_GRACE_H else "ready"
     return {"status": status, "hoursElapsed": round(elapsed_h, 1),
             "hoursLeft": 0.0, "percent": 100.0}
+
+
+# A harvested batch needs rinsing, resuspending and loading before it feeds —
+# the next-start maths leaves this much slack on top of the incubation hours.
+HATCH_HARVEST_BUFFER_H = 1.0
+
+
+def next_hatch_suggestion(
+    now: datetime,
+    hatch_hours: Any,
+    loaded_iso: Any,
+    shelf_life_hours: Any,
+    remaining_ml: Any,
+    ml_per_day: Any,
+    started_iso: Any,
+) -> dict[str, Any]:
+    """When to set the next batch of cysts going — the daily-driver question.
+
+    The new batch must be READY (incubated + harvested, so ``hatch_hours`` plus
+    a harvest buffer of lead time) by the earlier of two moments: the loaded
+    brine going stale (``loaded_iso`` + shelf life) and the reservoir running
+    dry (``remaining_ml`` at ``ml_per_day``; pass None when unknown — a
+    hand-doser without volume tracking still gets freshness-timed advice).
+
+    Statuses: ``wait`` (start at ``startAt``), ``start_now`` (the lead time has
+    already begun eating into the window), ``overdue`` (the window is gone),
+    ``no_brine`` (nothing loaded, nothing incubating — just start one), and
+    ``chained`` (a hatch is already on the go; ``startAt`` is when to start the
+    one AFTER it, assuming it loads on time — which nets out to the current
+    start plus the shelf life). ``overlap`` flags the structural case where the
+    hatch takes longer than the brine stays fresh, so batches must overlap and
+    "wait" can never be the answer.
+    """
+    hours = _f(hatch_hours)
+    if hours <= 0:
+        hours = 24.0
+    shelf_h = _f(shelf_life_hours)
+    if shelf_h <= 0:
+        shelf_h = 24.0
+    lead_h = hours + HATCH_HARVEST_BUFFER_H
+    base: dict[str, Any] = {
+        "status": "no_brine", "startAt": None, "hoursUntil": None,
+        "readyBy": None, "driver": None,
+        "hatchHours": round(hours, 1), "shelfHours": round(shelf_h, 1),
+        "overlap": shelf_h < lead_h,
+    }
+
+    def _finish(status: str, start_at: datetime | None, ready_by: datetime | None,
+                driver: str | None) -> dict[str, Any]:
+        out = dict(base)
+        out["status"] = status
+        out["driver"] = driver
+        if ready_by is not None:
+            out["readyBy"] = ready_by.isoformat()
+        if start_at is not None:
+            out["startAt"] = start_at.isoformat()
+            out["hoursUntil"] = round(max(0.0, (start_at - now).total_seconds() / 3600.0), 1)
+        return out
+
+    started = _parse_iso(started_iso)
+    if started is not None:
+        # A batch is incubating (or sitting ready): the next start keeps the
+        # chain unbroken. It loads at start + hours (+ buffer), fades shelf_h
+        # later, and the following batch needs lead_h of runway — which nets
+        # out to started + shelf_h. A ready/overdue batch is assumed to load
+        # about now instead.
+        try:
+            elapsed_h = (now - started).total_seconds() / 3600.0
+        except TypeError:
+            elapsed_h = None
+        if elapsed_h is not None and elapsed_h >= 0:
+            if elapsed_h < hours:
+                start_at = started + timedelta(hours=shelf_h)
+                ready_by = started + timedelta(hours=hours + HATCH_HARVEST_BUFFER_H + shelf_h)
+            else:
+                start_at = now + timedelta(hours=shelf_h - lead_h)
+                ready_by = now + timedelta(hours=shelf_h)
+            if start_at <= now:
+                return _finish("start_now", now, ready_by, "freshness")
+            return _finish("chained", start_at, ready_by, "freshness")
+
+    loaded = _parse_iso(loaded_iso)
+    if loaded is None:
+        return _finish("no_brine", None, None, None)
+    fresh_by = loaded + timedelta(hours=shelf_h)
+    ready_by, driver = fresh_by, "freshness"
+    remaining = _f(remaining_ml, -1.0)
+    rate = _f(ml_per_day)
+    if remaining >= 0 and rate > 0:
+        deplete_by = now + timedelta(hours=remaining / rate * 24.0)
+        if deplete_by < ready_by:
+            ready_by, driver = deplete_by, "depletion"
+    start_at = ready_by - timedelta(hours=lead_h)
+    if ready_by <= now:
+        return _finish("overdue", now, ready_by, driver)
+    if start_at <= now:
+        return _finish("start_now", now, ready_by, driver)
+    return _finish("wait", start_at, ready_by, driver)
 
 
 def hatch_prime_state(mixed_at_iso: Any, now: datetime) -> dict[str, Any]:

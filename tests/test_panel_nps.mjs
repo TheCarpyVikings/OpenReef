@@ -451,6 +451,51 @@ test("egg-type choice seeds the recommended hatch hours in settings", async () =
   } finally { restore(); }
 });
 
+test("the hatchery card recommends when to start the next hatch", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const sum = panel._nps.summary;
+    sum.hatchery = { eggType: "standard", hatchHours: 24, eggTypes: [],
+      state: { status: "none" },
+      nextHatch: { status: "wait", startAt: new Date(Date.parse(NOW) + 19 * 3600000).toISOString(),
+        hoursUntil: 19, readyBy: "", driver: "freshness",
+        hatchHours: 24, shelfHours: 48, overlap: false } };
+    let html = panel._npsTab();
+    assert(html.includes("Next hatch: start"), "wait status should render the timed suggestion");
+    assert(html.includes("before the loaded brine fades"), "the freshness driver should say why");
+    sum.hatchery.nextHatch = { status: "start_now", startAt: NOW, hoursUntil: 0,
+      readyBy: "", driver: "depletion", hatchHours: 36, shelfHours: 24, overlap: true };
+    html = panel._npsTab();
+    assert(html.includes("Start the next hatch now"), "start_now should be urgent");
+    assert(html.includes("batches have to overlap"), "the overlap physics should be said out loud");
+    sum.hatchery.nextHatch = { status: "no_brine", startAt: null, hoursUntil: null,
+      readyBy: null, driver: null, hatchHours: 24, shelfHours: 24, overlap: false };
+    html = panel._npsTab();
+    assert(!html.includes("Next hatch: start"), "no_brine adds nothing — the hatch line already says start one");
+  } finally { restore(); }
+});
+
+test("hand-dosers get the brine clocks and the loaded button without a pump", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._config.nps.feedExchange.channelId = "";
+    const sum = panel._nps.summary;
+    sum.feedExchange.channelId = "";
+    sum.feedExchange.prime = { status: "prime", ageHours: 2, primeLeftHours: 22 };
+    sum.feedExchange.freshness = { status: "fresh", hoursLeft: 20, ageHours: 4 };
+    sum.hatchery = { eggType: "standard", hatchHours: 24, eggTypes: [],
+      state: { status: "ready", hoursElapsed: 25, hoursLeft: 0, percent: 100 },
+      nextHatch: { status: "start_now", startAt: NOW, hoursUntil: 0, readyBy: "",
+        driver: "freshness", hatchHours: 24, shelfHours: 24, overlap: true } };
+    const html = panel._npsTab();
+    assert(html.includes('data-action="nps-hatch-loaded"'), "the loaded button must not need a pump");
+    assert(html.includes("Hand-dosing mode"), "hand-dose hint missing");
+    assert(html.includes("nutritional prime"), "the prime clock should run without a pump");
+  } finally { restore(); }
+});
+
 test("hatchery reminders sync to the hatch clock and anchor to a running hatch", async () => {
   const restore = freezeTime(NOW);
   try {

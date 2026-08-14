@@ -9609,20 +9609,53 @@ class OpenReefPanel extends HTMLElement {
       </svg>`;
   }
 
+  // The daily-driver line: when to set the next batch of cysts going. The
+  // maths is backend-side (nps.next_hatch_suggestion — depletion + freshness +
+  // egg-type hours); this just puts words on it. Advisory, never a nag: the
+  // urgent statuses reuse the warning tint, everything else stays calm.
+  _npsNextHatchLine(next, hatchStatus) {
+    if (!next || !next.status || next.status === "no_brine") return "";
+    const when = next.startAt
+      ? `${this._formatActivityTime(next.startAt)} (~${this._escape(String(next.hoursUntil))} h from now)`
+      : "";
+    const why = next.driver === "depletion"
+      ? "the reservoir runs dry"
+      : "the loaded brine fades";
+    const overlapNote = next.overlap
+      ? ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch outlives the brine's ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (a second hatcher helps).`
+      : "";
+    if (next.status === "chained") {
+      return `🔗 Next hatch: start ${when} — keeps the chain unbroken (a fresh batch lands as this one fades).${overlapNote}`;
+    }
+    if (next.status === "wait") {
+      return `🥚 Next hatch: start ${when} — timed so a ${this._escape(String(next.hatchHours))} h batch is ready before ${why}.${overlapNote}`;
+    }
+    if (next.status === "start_now") {
+      return `<span style="color:var(--warning-color,#f5a524)">⏰ Start the next hatch now — a ${this._escape(String(next.hatchHours))} h batch only lands before ${why} if the cysts go in today.</span>${overlapNote}`;
+    }
+    if (next.status === "overdue") {
+      return `<span style="color:var(--warning-color,#f5a524)">⏰ Past time — ${why === "the reservoir runs dry" ? "the reservoir is running dry" : "the loaded brine is going stale"}; start the next hatch as soon as you can.</span>${overlapNote}`;
+    }
+    return "";
+  }
+
   async _npsHatchLoaded() {
+    // Works with or without a linked pump — hand-dosers still get the
+    // freshness/prime clocks from the hatchery's own loadedAt stamp.
     const cid = this._config?.nps?.feedExchange?.channelId;
-    if (!cid) return;
     if (this._nps.demo) {
       this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
       this._render();
       return;
     }
     try {
-      await this._callWS({ type: "openreef/dosing_mark_refreshed", channel_id: cid });
+      if (cid) await this._callWS({ type: "openreef/dosing_mark_refreshed", channel_id: cid });
       // harvested: the backend logs the "Harvest, rinse & load brine" reminder
       // done (if the user added it) — loading the reservoir IS that chore.
       await this._callWS({ type: "openreef/nps_hatch_cancel", harvested: true });
-      this._nps.message = "Hatch loaded — freshness and prime clocks restarted; the hatcher stands down.";
+      this._nps.message = cid
+        ? "Hatch loaded — freshness and prime clocks restarted; the hatcher stands down."
+        : "Hatch loaded — the freshness clock is running; hand-dose from the reservoir and log it on the shelf.";
       this._nps.error = "";
     } catch (err) {
       this._nps.error = (err && err.message) || "That didn't work — try again.";
@@ -9815,7 +9848,10 @@ class OpenReefPanel extends HTMLElement {
         { id: "demo_brine", name: "Live brine", chemical: "livefood" },
       ],
       hatchery: { eggType: "standard", hatchHours: 24, eggTypes: [],
-        state: { status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 } },
+        state: { status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 },
+        nextHatch: { status: "chained", startAt: iso(-18 * 3600000), hoursUntil: 18,
+          readyBy: iso(-43 * 3600000), driver: "freshness",
+          hatchHours: 24, shelfHours: 33, overlap: false } },
       speciesLibrary: [
         { id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, note: "" },
         { id: "gorgonian_easy", name: "Gorgonians — Menella, Swiftia, Diodogorgia", difficulty: 2, note: "" },
@@ -10569,7 +10605,9 @@ class OpenReefPanel extends HTMLElement {
         ? `🦐 Hatch is ${this._escape(String(prime.ageHours))} h old — past the 24 h prime window. Feed it out or hatch fresh.`
         : `🦐 No hatch loaded yet — tap "Hatched &amp; loaded" once the reservoir is filled.`;
     const freshLine = fresh.status === "stale"
-      ? `<span style="color:var(--error-color,#e5484d)">Brine is past its shelf life — dosing is blocked until you refresh.</span>`
+      ? `<span style="color:var(--error-color,#e5484d)">${fxCfg.channelId
+          ? "Brine is past its shelf life — dosing is blocked until you refresh."
+          : "Brine is past its shelf life — hatch and load a fresh batch."}</span>`
       : fresh.status === "aging"
         ? `<span style="color:var(--warning-color,#f5a524)">Brine is aging (~${this._escape(String(fresh.hoursLeft))} h left).</span>`
         : fresh.status === "fresh" ? "Brine is fresh." : "";
@@ -10583,20 +10621,21 @@ class OpenReefPanel extends HTMLElement {
       ready: `🎉 <strong>Ready to harvest</strong> — rinse the nauplii (never dose hatch water), resuspend in tank-salinity saltwater, load the reservoir, then tap "Hatched &amp; loaded".`,
       overdue: `<span style="color:var(--warning-color,#f5a524)">⚠️ Hatched ~${this._escape(String(Math.max(0, (Number(hatchState.hoursElapsed) || 0) - hatchHours).toFixed(0)))} h ago — harvest soon; nauplii burn 30–50% of their calories by 48 h.</span>`,
     })[hatchState.status] || `🥚 No hatch running — set the cysts going and tap "Start hatch"; the clock is set for ${this._escape(String(hatchHours))} h (${this._escape(eggName)}).`;
+    const nextHatchLine = this._npsNextHatchLine(hatch.nextHatch, hatchState.status);
     const hatchButtons = [
       hatchState.status === "none"
         ? `<button class="secondary compact-button" data-action="nps-hatch-start">Start hatch</button>` : "",
       hatchState.status === "incubating"
         ? `<button class="secondary compact-button" data-action="nps-hatch-cancel">Cancel hatch</button>` : "",
-      (hatchState.status === "ready" || hatchState.status === "overdue") && fxCfg.channelId
+      (hatchState.status === "ready" || hatchState.status === "overdue")
         ? `<button class="secondary compact-button" data-action="nps-hatch-loaded">Hatched &amp; loaded</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${(this._config?.maintenance?.tasks?.brine_hatch_start || this._config?.maintenance?.tasks?.brine_hatch_harvest) ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
     // drain is on (live-test catch: it was wrongly gated behind the exchange).
-    const hatchReservoirLine = fxCfg.channelId
-      ? `${primeLine}${freshLine ? ` · ${freshLine}` : ""}`
-      : `Link a live-food channel in Settings and "Hatched &amp; loaded" will restart its freshness clocks automatically.`;
+    // Hand-dosers get the same clocks from the hatchery's own loadedAt stamp.
+    const hatchReservoirLine = `${primeLine}${freshLine ? ` · ${freshLine}` : ""}${fxCfg.channelId
+      ? "" : ` · Hand-dosing mode — link a live-food pump in Settings to automate the dosing.`}`;
     const hatcheryPanel = `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
@@ -10607,6 +10646,7 @@ class OpenReefPanel extends HTMLElement {
           ${this._npsHatchVesselSvg(hatchState)}
           <div class="stack" style="gap:6px;flex:1;min-width:220px;">
             <small>${hatchLine}</small>
+            ${nextHatchLine ? `<small>${nextHatchLine}</small>` : ""}
             <small>${hatchReservoirLine}</small>
             <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
           </div>

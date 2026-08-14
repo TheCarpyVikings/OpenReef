@@ -954,6 +954,11 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 "hatchStartedAt": _awc_str(
                     (raw_hatchery.get("state") or {}).get("hatchStartedAt")
                     if isinstance(raw_hatchery.get("state"), dict) else "", 40),
+                # "Hatched & loaded" stamp — the hand-doser's freshness clock
+                # (channel users get the same stamp mirrored on the reservoir).
+                "loadedAt": _awc_str(
+                    (raw_hatchery.get("state") or {}).get("loadedAt")
+                    if isinstance(raw_hatchery.get("state"), dict) else "", 40),
             },
         },
         # Feed truce (Stage C): plankton-hostile equipment pauses. The state
@@ -11897,6 +11902,33 @@ def _nps_hatch_log_completion(
     del entries[MAINTENANCE_COMPLETIONS_MAX:]
 
 
+def _nps_brine_supply(config: dict[str, Any]) -> tuple[Any, float, Any, Any]:
+    """(loaded_iso, shelf_life_hours, remaining_ml, ml_per_day) for the
+    next-hatch maths. A linked feed-exchange channel is the richest source
+    (reservoir stamp + volume + dose rate); a hand-doser falls back to the
+    hatchery's own 'Hatched & loaded' stamp with the default 24 h shelf life
+    and no depletion data."""
+    nps_cfg = config.get("nps") or {}
+    channels = _dosing_channels(config)
+    fx_channel = channels.get(str((nps_cfg.get("feedExchange") or {}).get("channelId") or ""))
+    if isinstance(fx_channel, dict):
+        reservoir = fx_channel.get("reservoir") or {}
+        try:
+            shelf_days = float(reservoir.get("shelfLifeDays"))
+        except (TypeError, ValueError):
+            shelf_days = 1.0
+        shelf_h = shelf_days * 24.0 if shelf_days > 0 else 24.0
+        try:
+            volume = float(reservoir.get("volumeMl") or 0)
+        except (TypeError, ValueError):
+            volume = 0.0
+        remaining = reservoir.get("remainingMl") if volume > 0 else None
+        rate = (fx_channel.get("schedule") or {}).get("mlPerDay")
+        return reservoir.get("mixedAt"), shelf_h, remaining, rate
+    loaded = ((nps_cfg.get("hatchery") or {}).get("state") or {}).get("loadedAt")
+    return loaded, 24.0, None, None
+
+
 def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str) -> None:
     """Keep the brine maintenance reminders honest as the hatchery is driven.
 
@@ -11938,6 +11970,28 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str)
                 "Logged automatically — 'Hatched & loaded' on the NPS tab",
             )
             harvest_task["snoozedUntil"] = None
+        if isinstance(start_task, dict):
+            # Point the "start the next hatch" reminder at the moment the
+            # next-hatch maths recommends (this batch just loaded, so the clock
+            # runs from now). start_now/overdue leaves the task due — correct
+            # for overlap physics where batches must run back-to-back.
+            hatch_hours = _awc_num(
+                ((config.get("nps") or {}).get("hatchery") or {}).get("hatchHours"), 24, 8, 48
+            )
+            _loaded, shelf_h, _remaining, _rate = _nps_brine_supply(config)
+            # Freshness-timed only: the reservoir is mid-reload at this exact
+            # moment, so its remaining-ml is not yet trustworthy. The card's
+            # live suggestion picks up depletion once the volume is reset.
+            suggestion = nps_engine.next_hatch_suggestion(
+                now, hatch_hours, now.isoformat(), shelf_h, None, None, ""
+            )
+            start_at = _parse_datetime(suggestion.get("startAt"))
+            if suggestion.get("status") == "wait" and start_at is not None and start_at > now:
+                start_task["snoozedUntil"] = start_at.isoformat()
+            else:
+                # Overlap physics (or no window at all): the next start is due
+                # NOW — a stale snooze must not suppress it.
+                start_task["snoozedUntil"] = None
     elif event == "cancelled":
         if isinstance(harvest_task, dict):
             snoozed = _parse_datetime(harvest_task.get("snoozedUntil"))
@@ -11985,10 +12039,15 @@ async def websocket_nps_hatch_cancel(
         return
     config = _config_from_entry(entry)
     hatchery = config.setdefault("nps", {}).setdefault("hatchery", {})
-    hatchery.setdefault("state", {})["hatchStartedAt"] = ""
+    now = datetime.now(timezone.utc)
+    state = hatchery.setdefault("state", {})
+    state["hatchStartedAt"] = ""
+    if msg.get("harvested"):
+        # The hand-doser's freshness clock; channel users get the reservoir
+        # mixedAt stamp too (the panel chains dosing_mark_refreshed first).
+        state["loadedAt"] = now.isoformat()
     _nps_hatch_sync_reminders(
-        config, datetime.now(timezone.utc),
-        "harvested" if msg.get("harvested") else "cancelled",
+        config, now, "harvested" if msg.get("harvested") else "cancelled",
     )
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
@@ -12015,10 +12074,28 @@ async def websocket_nps_summary(
     fx = (config.get("nps") or {}).get("feedExchange") or {}
     fx_channel = channels.get(str(fx.get("channelId") or ""))
     freshness = prime = None
+    hatchery_cfg = (config.get("nps") or {}).get("hatchery") or {}
+    loaded_at = (hatchery_cfg.get("state") or {}).get("loadedAt") or ""
     if isinstance(fx_channel, dict):
         reservoir = fx_channel.get("reservoir") or {}
         freshness = dosing_engine.freshness_state(reservoir, now_utc)
         prime = nps_engine.hatch_prime_state(reservoir.get("mixedAt"), now_utc)
+    else:
+        # Hand-dosers track brine too: the hatchery's own "Hatched & loaded"
+        # stamp drives the same freshness/prime clocks, default 24 h shelf
+        # life. No stamp yet -> prime "unknown", freshness withheld (nothing to
+        # scare anyone about — there is no dosing to block).
+        prime = nps_engine.hatch_prime_state(loaded_at, now_utc)
+        if loaded_at:
+            freshness = dosing_engine.freshness_state(
+                {"mixedAt": loaded_at, "shelfLifeDays": 1.0}, now_utc)
+    supply_loaded, supply_shelf_h, supply_remaining, supply_rate = _nps_brine_supply(config)
+    next_hatch = nps_engine.next_hatch_suggestion(
+        now_utc,
+        _awc_num(hatchery_cfg.get("hatchHours"), 24, 8, 48),
+        supply_loaded, supply_shelf_h, supply_remaining, supply_rate,
+        (hatchery_cfg.get("state") or {}).get("hatchStartedAt"),
+    )
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
         "shelf": nps_engine.shelf_summary(products, now_utc),
@@ -12043,16 +12120,18 @@ async def websocket_nps_summary(
             for cid, ch in sorted(channels.items())
             if isinstance(ch, dict) and ch.get("chemical") in ("livefood", "food")
         ],
-        # Hatchery (v1): the incubation clock, computed backend-side.
+        # Hatchery (v1): the incubation clock, computed backend-side. nextHatch
+        # is the daily-driver advice: when to set the next batch going, timed
+        # from reservoir depletion + brine freshness + the egg type's hours.
         "hatchery": {
-            "eggType": str(((config.get("nps") or {}).get("hatchery") or {}).get("eggType") or "standard"),
-            "hatchHours": _awc_num(
-                ((config.get("nps") or {}).get("hatchery") or {}).get("hatchHours"), 24, 8, 48),
+            "eggType": str(hatchery_cfg.get("eggType") or "standard"),
+            "hatchHours": _awc_num(hatchery_cfg.get("hatchHours"), 24, 8, 48),
             "eggTypes": [dict(e) for e in nps_engine.EGG_TYPES],
             "state": nps_engine.hatch_state(
-                (((config.get("nps") or {}).get("hatchery") or {}).get("state") or {}).get("hatchStartedAt"),
-                ((config.get("nps") or {}).get("hatchery") or {}).get("hatchHours") or 24,
+                (hatchery_cfg.get("state") or {}).get("hatchStartedAt"),
+                hatchery_cfg.get("hatchHours") or 24,
                 now_utc),
+            "nextHatch": next_hatch,
         },
         # Species plans + nutrient budget (Stage D) — compiled backend-side.
         "speciesLibrary": [dict(s) for s in nps_engine.SPECIES_LIBRARY],
