@@ -9744,7 +9744,7 @@ class OpenReefPanel extends HTMLElement {
     const sm = (x, y, text, anchor = "start", fill = "#8798a4") => `<text x="${x}" y="${y}" text-anchor="${anchor}" font-size="11" fill="${fill}" font-family="monospace">${text}</text>`;
     const pipe = (d) => `<path d="${d}" fill="none" stroke="#546e7a" stroke-width="3" stroke-linejoin="round"></path>`;
     return `
-      <svg viewBox="0 0 940 700" style="width:100%;max-width:760px;display:block;margin:0 auto;" role="img" aria-label="Settle and slug rig blueprint">
+      <svg viewBox="0 0 940 760" style="width:100%;max-width:760px;display:block;margin:0 auto;" role="img" aria-label="Settle and slug rig blueprint">
         <rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
         <line x1="114" y1="96" x2="206" y2="96" stroke="#37474f" stroke-width="2"></line>
         <circle cx="128" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="146" cy="90" r="2" fill="#8d6e63"></circle>
@@ -9782,23 +9782,31 @@ class OpenReefPanel extends HTMLElement {
         ${sm(402, 636, "drain spent water → waste (never the tank)")}
         ${pipe("M 610 452 V 476")}
         ${valve(610, 486)}<text x="586" y="490" text-anchor="end" font-size="13" fill="#cfd8dc" font-family="monospace">Ⓐ</text>
-        ${pipe("M 610 494 V 500")}
-        <rect x="592" y="500" width="36" height="58" rx="6" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
-        <rect x="595" y="528" width="30" height="27" rx="4" fill="#ef6c00" opacity="0.8"></rect>
-        ${sm(636, 524, "clear slug chamber")}${sm(636, 538, "~100 ml between valves")}
-        ${pipe("M 610 558 V 574")}
-        ${valve(610, 584)}<text x="586" y="588" text-anchor="end" font-size="13" fill="#cfd8dc" font-family="monospace">Ⓑ</text>
-        ${pipe("M 610 592 V 612")}
-        <path d="M 606 616 Q 560 636 528 648" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
-        <path d="M 614 616 Q 660 636 692 648" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
-        <polygon points="466,652 530,652 522,694 474,694" fill="#101a22" stroke="#8d6e63" stroke-width="2.2"></polygon>
-        ${sm(498, 676, "waste", "middle", "#8d6e63")}${sm(498, 646, "1st fill — tip crud", "middle")}
-        <rect x="686" y="648" width="66" height="48" rx="6" fill="#101a22" stroke="#26a69a" stroke-width="2.2"></rect>
-        <rect x="690" y="668" width="58" height="24" rx="4" fill="#8d6e63" opacity="0.6"></rect>
-        ${sm(719, 642, "2nd fill — the slug", "middle")}
-        ${sm(719, 712, "brine container → top up · tap Hatched &amp; loaded", "middle", "#26a69a")}
-        ${badge(686, 222, 1)}${badge(700, 404, 2)}${badge(556, 486, 3)}${badge(556, 530, 4)}
-        ${badge(556, 584, 5)}${badge(770, 672, 6)}${badge(424, 614, 7)}
+        <rect x="602" y="494" width="16" height="10" rx="2" fill="#131c24" stroke="#42a5f5" stroke-width="1.8"></rect>
+        ${pipe("M 610 504 V 512")}
+        <polygon points="604,512 616,512 620,520 600,520" fill="#101a22" stroke="#42a5f5" stroke-width="2"></polygon>
+        <rect x="588" y="520" width="44" height="96" rx="5" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
+        <rect x="591" y="556" width="38" height="32" rx="3" fill="#ef6c00" opacity="0.8"></rect>
+        <line x1="588" y1="536" x2="596" y2="536" stroke="#42a5f5" stroke-width="1.3"></line>
+        <line x1="588" y1="552" x2="596" y2="552" stroke="#42a5f5" stroke-width="1.3"></line>
+        <line x1="588" y1="568" x2="596" y2="568" stroke="#42a5f5" stroke-width="1.3"></line>
+        <line x1="588" y1="584" x2="596" y2="584" stroke="#42a5f5" stroke-width="1.3"></line>
+        <rect x="592" y="590" width="36" height="8" rx="2" fill="#546e7a"></rect>
+        <rect x="606" y="598" width="8" height="34" fill="#546e7a"></rect>
+        <rect x="596" y="632" width="28" height="8" rx="3" fill="#78909c"></rect>
+        ${sm(642, 540, "100 ml luer-lock syringe")}
+        ${sm(642, 554, "clips on below Ⓐ — draw SLOWLY,")}
+        ${sm(642, 568, "watch the orange through the barrel")}
+        <path d="M 604 648 Q 560 660 528 666" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
+        <path d="M 616 648 Q 660 660 692 666" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
+        <polygon points="466,668 530,668 522,706 474,706" fill="#101a22" stroke="#8d6e63" stroke-width="2.2"></polygon>
+        ${sm(498, 692, "waste", "middle", "#8d6e63")}${sm(498, 662, "1st draw — tip crud", "middle")}
+        <rect x="686" y="664" width="66" height="48" rx="6" fill="#101a22" stroke="#26a69a" stroke-width="2.2"></rect>
+        <rect x="690" y="684" width="58" height="24" rx="4" fill="#8d6e63" opacity="0.6"></rect>
+        ${sm(719, 658, "2nd draw — the slug", "middle")}
+        ${sm(719, 728, "brine container → top up · tap Hatched &amp; loaded", "middle", "#26a69a")}
+        ${badge(686, 222, 1)}${badge(700, 404, 2)}${badge(556, 490, 3)}${badge(556, 560, 4)}
+        ${badge(556, 630, 5)}${badge(770, 688, 6)}${badge(424, 614, 7)}
       </svg>`;
   }
 
@@ -10998,15 +11006,15 @@ class OpenReefPanel extends HTMLElement {
     const rigSteps = [
       ["Air off, ~10 min", "shells float off; cysts and crud sink to the tip."],
       ["Lamp at the cone tip, ~5 min", "room dim — the nauplii pack into a dense orange band."],
-      ["First chamber fill = tip crud", "Ⓐ open for the bottom ~20 ml, then Ⓑ → waste."],
-      ["Second fill = the slug", "open Ⓐ, close when the orange thins."],
-      ["Hand off", "Ⓑ into the brine container — a fixed ~100 ml every time."],
+      ["First draw = tip crud", "syringe on, Ⓐ open, slow-draw the bottom ~20 ml, close Ⓐ, squirt to waste."],
+      ["Second draw = the slug", "reattach, open Ⓐ, pull SLOWLY, close when the orange thins."],
+      ["Hand off", "detach and push gently into the brine container — the graduations make it exact."],
       ["Top to full with tank-salinity water", "≈7× dilution is the rinse — then tap \"Hatched &amp; loaded\"."],
-      ["Drain vessel 2 via ③ to waste", "hatch water never feeds the tank."],
+      ["Drain vessel 2 via ③ to waste", "hatch water never feeds the tank. Rinse the syringe — salt stiffens the seal."],
     ];
     const rigPanel = this._npsRigOpen ? `
       <div class="stack" style="gap:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
-        <small class="muted">Settle &amp; slug — the staggered two-vessel rig with the sieve-free harvest. Blue parts are the upgrade: a tee under the live-brine cone, a ~100 ml clear chamber between two valves, and a lamp doing the filtering.</small>
+        <small class="muted">Settle &amp; slug — the staggered two-vessel rig with the sieve-free harvest. Blue parts are the upgrade: a tee under the live-brine cone, a 100 ml luer-lock syringe below valve Ⓐ (chamber, bottom valve and transfer vessel in one), and a lamp doing the filtering. The same syringe target-feeds from the container — the graduations make the "Fed X ml" log exact.</small>
         ${this._npsHatchRigSvg()}
         <div class="grid two compact">
           ${rigSteps.map(([title, detail], i) => `<small><strong>${i + 1}. ${title}</strong> — ${detail}</small>`).join("")}

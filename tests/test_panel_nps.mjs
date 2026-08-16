@@ -653,12 +653,13 @@ test("the rig blueprint unfolds on demand and walks the settle-and-slug harvest"
     panel._nps.summary.hatchery = v2HatcherySummary();
     let html = panel._npsTab();
     assert(html.includes("Rig blueprint"), "the blueprint toggle is missing");
-    assert(!html.includes("slug chamber"), "the blueprint must start collapsed");
+    assert(!html.includes("luer-lock syringe"), "the blueprint must start collapsed");
     panel._npsRigOpen = true;
     html = panel._npsTab();
-    assert(html.includes("slug chamber"), "the slug chamber is missing from the blueprint");
+    assert(html.includes("luer-lock syringe"), "the syringe is missing from the blueprint");
     assert(html.includes("HATCH EGGS") && html.includes("LIVE BRINE"), "the two staggered vessels are missing");
-    assert(html.includes("Ⓐ") && html.includes("Ⓑ"), "the chamber valves are missing");
+    assert(html.includes("Ⓐ"), "the harvest valve is missing");
+    assert(html.includes("draw SLOWLY"), "the slow-draw warning is missing");
     assert(html.includes("lamp at the tip"), "the lamp step is missing");
     assert(html.includes("never feeds the tank"), "the hatch-water rule must be stated");
     assert(html.includes("7. Drain vessel 2"), "the numbered harvest steps are missing");
