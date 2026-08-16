@@ -513,6 +513,8 @@ function v2HatcherySummary(over = {}) {
       refrigerated: true, shelfHours: 48, mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
       freshness: { status: "fresh", hoursLeft: 43, ageHours: 5 } },
     handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
+    enrichment: { hours: 12, doseMl: 1, productId: "", productName: "Selcon", splitDose: false,
+      sourceVesselId: "", state: { status: "none", secondDoseDue: false } },
     learned: { available: false, hours: null, samples: 0 },
     temp: { available: false, expectedHours: null, factor: null, warm: false },
     vesselPresets: [
@@ -606,6 +608,55 @@ test("settings carry the vessel editor with the researched presets", async () =>
       assert(html.includes('data-scope="nps-hatch-reservoir"'), "container ledger settings missing");
       assert(html.includes("lives in the fridge"), "the refrigerated toggle is missing");
       assert(html.includes('data-field="tempEntity"'), "the temp sensor field is missing");
+    }
+  } finally { restore(); }
+});
+
+test("the enrichment vessel joins the strip while a batch soaks", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // Idle enrichment: incubating vessels offer the per-batch "→ Enrich".
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    let html = panel._npsTab();
+    assert(html.includes("→ Enrich"), "the per-batch enrich choice is missing at harvest");
+    assert(!html.includes("data-enrich-vessel"), "no soak running — no beaker");
+    // Soaking: the beaker tile appears, the enrich buttons leave the vessels.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      enrichment: { hours: 12, doseMl: 1, productId: "selcon", productName: "Selcon",
+        splitDose: true, sourceVesselId: "v1",
+        state: { status: "enriching", hoursElapsed: 10.5, hoursLeft: 1.5, percent: 88, secondDoseDue: true } },
+    });
+    html = panel._npsTab();
+    assert(html.includes("data-enrich-vessel"), "the enrichment beaker is missing");
+    assert(html.includes("10.5 / 12 h soak"), "the soak countdown is missing");
+    assert(html.includes("Log top-up"), "the split-dose top-up button is missing");
+    assert(html.includes("Enriched &amp; loaded"), "the enriched load button is missing");
+    assert(!html.includes("→ Enrich"), "one soak at a time — vessels must not offer enrich while busy");
+    noPlaceholders(html, "enrichment strip");
+    // An enriched load tells you its tighter clock.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      reservoir: { canonical: "hatchery", volumeMl: 1000, remainingMl: 710, loadVolumeMl: 0,
+        refrigerated: false, shelfHours: 12, lastLoadEnriched: true,
+        mixedAt: new Date(Date.parse(NOW) - 2 * 3600000).toISOString(),
+        freshness: { status: "fresh", hoursLeft: 10, ageHours: 2 } },
+    });
+    html = panel._npsTab();
+    assert(html.includes("Enriched load — feed it out within 12 h"), "the enriched shelf line is missing");
+  } finally { restore(); }
+});
+
+test("settings carry the enrichment block", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._settingsSectionsOpen = { nps: true };
+    let html;
+    try { html = panel._npsSettings(); } catch { html = null; }
+    if (html !== null) {
+      assert(html.includes('data-scope="nps-enrichment"'), "enrichment settings missing");
+      assert(html.includes("Split-dose top-up"), "the split-dose toggle is missing");
+      assert(html.includes("proven for larvae, recommended for NPS corals"), "the honest evidence copy is missing");
     }
   } finally { restore(); }
 });

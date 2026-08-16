@@ -949,26 +949,53 @@ def _normalise_hatchery(raw: Any) -> dict[str, Any]:
         "refrigerated": bool(raw_reservoir.get("refrigerated", False)),
         "mixedAt": (_awc_str(raw_reservoir.get("mixedAt"), 40)
                     or _awc_str(raw_state.get("loadedAt"), 40)),
+        # An enriched load runs a tighter freshness clock (doc §10.5).
+        "lastLoadEnriched": bool(raw_reservoir.get("lastLoadEnriched", False)),
+    }
+    raw_enrich = raw.get("enrichment") if isinstance(raw.get("enrichment"), dict) else {}
+    raw_enrich_state = (raw_enrich.get("state")
+                        if isinstance(raw_enrich.get("state"), dict) else {})
+    enrichment = {
+        "hours": _awc_num(raw_enrich.get("hours"), nps_engine.ENRICH_DEFAULT_HOURS, 2, 36),
+        "doseMl": _awc_num(raw_enrich.get("doseMl"), 1, 0.5, 50),
+        "productId": _awc_str(raw_enrich.get("productId"), 40),
+        "splitDose": bool(raw_enrich.get("splitDose", False)),
+        "state": {
+            "startedAt": _awc_str(raw_enrich_state.get("startedAt"), 40),
+            "sourceVesselId": _awc_str(raw_enrich_state.get("sourceVesselId"), 24),
+            "eggType": _awc_str(raw_enrich_state.get("eggType"), 24),
+            "plannedHatchHours": _awc_num(raw_enrich_state.get("plannedHatchHours"), 0, 0, 96),
+            "actualHatchHours": _awc_num(raw_enrich_state.get("actualHatchHours"), 0, 0, 240),
+            "enrichHours": _awc_num(raw_enrich_state.get("enrichHours"), 0, 0, 48),
+            "secondDoseAt": _awc_str(raw_enrich_state.get("secondDoseAt"), 40),
+            "readyNotifiedAt": _awc_str(raw_enrich_state.get("readyNotifiedAt"), 40),
+            "secondDoseNotifiedAt": _awc_str(raw_enrich_state.get("secondDoseNotifiedAt"), 40),
+        },
     }
     history: list[dict[str, Any]] = []
     raw_history = raw.get("history") if isinstance(raw.get("history"), list) else []
     for item in raw_history[:nps_engine.HATCH_HISTORY_MAX]:
         if not isinstance(item, dict):
             continue
-        history.append({
+        entry = {
             "vesselId": _awc_str(item.get("vesselId"), 24),
             "startedAt": _awc_str(item.get("startedAt"), 40),
             "harvestedAt": _awc_str(item.get("harvestedAt"), 40),
             "plannedHours": _awc_num(item.get("plannedHours"), 0, 0, 96),
             "actualHours": _awc_num(item.get("actualHours"), 0, 0, 240),
             "eggType": _awc_str(item.get("eggType"), 24),
-        })
+        }
+        if item.get("enriched"):
+            entry["enriched"] = True
+            entry["enrichedHours"] = _awc_num(item.get("enrichedHours"), 0, 0, 96)
+        history.append(entry)
     raw_hand = raw.get("handFeed") if isinstance(raw.get("handFeed"), dict) else {}
     return {
         "eggType": egg_type,
         "hatchHours": hatch_hours,
         "vessels": vessels,
         "reservoir": reservoir,
+        "enrichment": enrichment,
         "history": history,
         "handFeed": {
             "defaultDoseMl": _awc_num(raw_hand.get("defaultDoseMl"), 30, 1, 1000),
@@ -11092,6 +11119,46 @@ async def _async_nps_hatch_ready_push(
             await hass.services.async_call(
                 "notify", target, {"title": title, "message": message}, blocking=False)
         _append_activity(config, f"Brine ready to harvest in {name}", "info")
+    # Enrichment clocks (doc §10): soak done + optional T+10 top-up, each once.
+    enrichment = hatchery.get("enrichment") if isinstance(hatchery.get("enrichment"), dict) else {}
+    enrich_state = enrichment.get("state") if isinstance(enrichment.get("state"), dict) else {}
+    enrich_started = _parse_datetime(enrich_state.get("startedAt"))
+    if enrich_started is not None:
+        elapsed_h = (now - enrich_started).total_seconds() / 3600.0
+        enrich_hours = _awc_num(enrich_state.get("enrichHours"),
+                                nps_engine.ENRICH_DEFAULT_HOURS, 2, 48)
+        notices = []
+        if elapsed_h >= enrich_hours and not enrich_state.get("readyNotifiedAt"):
+            enrich_state["readyNotifiedAt"] = now.isoformat()
+            notices.append((
+                "openreef_enrich_done",
+                "OpenReef: Brine enrichment done — rinse & load",
+                "The soak is finished. Rinse on a fine screen (emulsion residue "
+                "breeds bacteria), load the container, then tap 'Enriched & "
+                "loaded'. Warm-held enriched brine loses half its boost in a day."))
+        elif (bool(enrichment.get("splitDose"))
+              and elapsed_h >= nps_engine.ENRICH_SECOND_DOSE_H
+              and elapsed_h < enrich_hours
+              and not enrich_state.get("secondDoseAt")
+              and not enrich_state.get("secondDoseNotifiedAt")):
+            enrich_state["secondDoseNotifiedAt"] = now.isoformat()
+            notices.append((
+                "openreef_enrich_topup",
+                "OpenReef: Enrichment top-up due",
+                "The soak is 10 h in — add the second enrichment dose and tap "
+                "'Log top-up' on the NPS tab."))
+        for notification_id, title, message in notices:
+            changed = True
+            await hass.services.async_call(
+                "persistent_notification", "create",
+                {"notification_id": notification_id, "title": title, "message": message},
+                blocking=False)
+            reminders = (config.get("maintenance") or {}).get("reminders") or {}
+            target = str(reminders.get("notifyTarget", "")).strip() if isinstance(reminders, dict) else ""
+            if target:
+                await hass.services.async_call(
+                    "notify", target, {"title": title, "message": message}, blocking=False)
+            _append_activity(config, title.replace("OpenReef: ", ""), "info")
     if changed:
         _persist_entry_config(hass, entry, config)
 
@@ -12029,6 +12096,12 @@ def _nps_brine_supply(config: dict[str, Any]) -> tuple[Any, float, Any, Any]:
     nps_cfg = config.get("nps") or {}
     channels = _dosing_channels(config)
     fx_channel = channels.get(str((nps_cfg.get("feedExchange") or {}).get("channelId") or ""))
+    hatch_res = ((nps_cfg.get("hatchery") or {}).get("reservoir") or {})
+    enriched_load = bool(hatch_res.get("lastLoadEnriched"))
+    # The HUFA boost is transient (doc §10.5): an enriched load caps the shelf
+    # clock at 12 h warm / 48 h fridged, whatever else is configured.
+    enriched_cap_h = (nps_engine.ENRICH_SHELF_H_FRIDGE if hatch_res.get("refrigerated")
+                      else nps_engine.ENRICH_SHELF_H_ROOM)
     if isinstance(fx_channel, dict):
         reservoir = fx_channel.get("reservoir") or {}
         try:
@@ -12036,6 +12109,8 @@ def _nps_brine_supply(config: dict[str, Any]) -> tuple[Any, float, Any, Any]:
         except (TypeError, ValueError):
             shelf_days = 1.0
         shelf_h = shelf_days * 24.0 if shelf_days > 0 else 24.0
+        if enriched_load:
+            shelf_h = min(shelf_h, enriched_cap_h)
         try:
             volume = float(reservoir.get("volumeMl") or 0)
         except (TypeError, ValueError):
@@ -12047,8 +12122,11 @@ def _nps_brine_supply(config: dict[str, Any]) -> tuple[Any, float, Any, Any]:
     # the fridge toggle; the dose rate is estimated from the hand-feed habits.
     hatchery = nps_cfg.get("hatchery") or {}
     reservoir = hatchery.get("reservoir") or {}
-    shelf_h = (nps_engine.BRINE_SHELF_H_FRIDGE if reservoir.get("refrigerated")
-               else nps_engine.BRINE_SHELF_H_ROOM)
+    if enriched_load:
+        shelf_h = enriched_cap_h
+    else:
+        shelf_h = (nps_engine.BRINE_SHELF_H_FRIDGE if reservoir.get("refrigerated")
+                   else nps_engine.BRINE_SHELF_H_ROOM)
     volume = _awc_num(reservoir.get("volumeMl"), 0, 0, 50000)
     remaining = reservoir.get("remainingMl") if volume > 0 else None
     hand = hatchery.get("handFeed") or {}
@@ -12073,11 +12151,81 @@ def _nps_running_batches(config: dict[str, Any]) -> list[tuple[str, datetime, fl
     return running
 
 
+def _nps_enriching_batch(config: dict[str, Any]) -> tuple[datetime, float] | None:
+    """(enrich started, enrich hours) when the enrichment vessel is soaking."""
+    enrich = ((config.get("nps") or {}).get("hatchery") or {}).get("enrichment")
+    state = enrich.get("state") if isinstance(enrich, dict) else None
+    if not isinstance(state, dict):
+        return None
+    started = _parse_datetime(state.get("startedAt"))
+    if started is None:
+        return None
+    return started, _awc_num(state.get("enrichHours"), nps_engine.ENRICH_DEFAULT_HOURS, 2, 48)
+
+
 def _nps_soonest_ready(config: dict[str, Any]) -> datetime | None:
-    """When the next running batch comes ripe — the harvest reminder's anchor."""
+    """When the next batch needs hands on it — the soonest of every incubating
+    batch ripening and the enrichment soak finishing (both end in rinse+load,
+    which is what the harvest reminder nags about)."""
     ends = [started + timedelta(hours=hours)
             for _vid, started, hours in _nps_running_batches(config)]
+    enriching = _nps_enriching_batch(config)
+    if enriching is not None:
+        ends.append(enriching[0] + timedelta(hours=enriching[1]))
     return min(ends) if ends else None
+
+
+def _nps_chain_batches(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every batch of brine that is ON THE WAY, for the next-hatch chain:
+    incubating vessels on their stamped clocks, plus the enriching batch as a
+    pseudo-batch that 'loads' when its soak ends."""
+    batches = [{"startedAt": started.isoformat(), "hatchHours": batch_h}
+               for _vid, started, batch_h in _nps_running_batches(config)]
+    enriching = _nps_enriching_batch(config)
+    if enriching is not None:
+        batches.append({"startedAt": enriching[0].isoformat(), "hatchHours": enriching[1]})
+    return batches
+
+
+def _nps_container_load(
+    config: dict[str, Any], hatchery: dict[str, Any], now: datetime, *, enriched: bool
+) -> tuple[str, str] | None:
+    """The load ledger, shared by plain harvest and enriched load: HARD stale
+    gate, volume move (loadVolumeMl 0 = top-to-full, clamped at the brim),
+    freshness stamp, enriched flag. Returns (code, message) on refusal."""
+    reservoir = _nps_canonical_reservoir(config)
+    remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
+    if remaining > 0:
+        supply_loaded, shelf_h, _r, _rate = _nps_brine_supply(config)
+        loaded_dt = _parse_datetime(supply_loaded)
+        age_ok = (loaded_dt is not None
+                  and (now - loaded_dt).total_seconds() / 3600.0 <= shelf_h)
+        if not age_ok:
+            return ("stale_brine",
+                    "The container still holds brine past its shelf life — "
+                    "discard it before loading the fresh batch.")
+    volume = _awc_num(reservoir.get("volumeMl"), 0, 0, 50000)
+    load = _awc_num(hatchery["reservoir"].get("loadVolumeMl"), 0, 0, 50000)
+    remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
+    if volume > 0:
+        reservoir["remainingMl"] = round(
+            volume if load <= 0 else min(volume, remaining + load), 1)
+    elif load > 0:
+        reservoir["remainingMl"] = round(remaining + load, 1)
+    reservoir["mixedAt"] = now.isoformat()
+    hatchery["reservoir"]["lastLoadEnriched"] = bool(enriched)
+    return None
+
+
+def _nps_enrich_debit(config: dict[str, Any], enrichment: dict[str, Any]) -> None:
+    """Debit the linked enrichment bottle by one dose (the shelf keeps count)."""
+    product_id = str(enrichment.get("productId") or "")
+    if not product_id:
+        return
+    products = (config.get("consumables") or {}).get("products") or {}
+    product = products.get(product_id)
+    if isinstance(product, dict):
+        _consumable_debit(product, _awc_num(enrichment.get("doseMl"), 1, 0.5, 50), "dose")
 
 
 def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str) -> None:
@@ -12135,10 +12283,9 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str)
             # Freshness-timed only: the reservoir is mid-reload at this exact
             # moment, so its remaining-ml is not yet trustworthy. The card's
             # live suggestion picks up depletion once the volume is reset.
-            running_info = [{"startedAt": started.isoformat(), "hatchHours": batch_h}
-                            for _vid, started, batch_h in _nps_running_batches(config)]
             suggestion = nps_engine.next_hatch_suggestion(
-                now, hatch_hours, now.isoformat(), shelf_h, None, None, running_info
+                now, hatch_hours, now.isoformat(), shelf_h, None, None,
+                _nps_chain_batches(config),
             )
             start_at = _parse_datetime(suggestion.get("startAt"))
             if (suggestion.get("status") in ("wait", "chained")
@@ -12148,7 +12295,9 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str)
                 # Overlap physics (or no window at all): the next start is due
                 # NOW — a stale snooze must not suppress it.
                 start_task["snoozedUntil"] = None
-    elif event == "cancelled":
+    elif event in ("cancelled", "enriching"):
+        # Re-anchor the harvest reminder onto whatever now ripens soonest
+        # (an enriching soak counts — it too ends in rinse+load).
         if isinstance(harvest_task, dict):
             if soonest is not None and soonest > now:
                 harvest_task["snoozedUntil"] = soonest.isoformat()
@@ -12275,29 +12424,10 @@ async def websocket_nps_hatch_cancel(
     if harvested:
         # HARD GATE (Reece, locked): stale brine never gets fresh brine poured
         # onto it — the container must be discarded first.
-        reservoir = _nps_canonical_reservoir(config)
-        remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
-        if remaining > 0:
-            supply_loaded, shelf_h, _r, _rate = _nps_brine_supply(config)
-            loaded_dt = _parse_datetime(supply_loaded)
-            age_ok = (loaded_dt is not None
-                      and (now - loaded_dt).total_seconds() / 3600.0 <= shelf_h)
-            if not age_ok:
-                connection.send_error(
-                    msg["id"], "stale_brine",
-                    "The container still holds brine past its shelf life — "
-                    "discard it before loading the fresh batch.")
-                return
-        # Move the load volume into the container. loadVolumeMl 0 = top-to-full.
-        volume = _awc_num(reservoir.get("volumeMl"), 0, 0, 50000)
-        load = _awc_num(hatchery["reservoir"].get("loadVolumeMl"), 0, 0, 50000)
-        remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
-        if volume > 0:
-            reservoir["remainingMl"] = round(
-                volume if load <= 0 else min(volume, remaining + load), 1)
-        elif load > 0:
-            reservoir["remainingMl"] = round(remaining + load, 1)
-        reservoir["mixedAt"] = now.isoformat()
+        error = _nps_container_load(config, hatchery, now, enriched=False)
+        if error is not None:
+            connection.send_error(msg["id"], error[0], error[1])
+            return
         # The batch's story: planned vs actual hours feeds the learned clock.
         if target_id and vessels.get(target_id, {}).get("state", {}).get("hatchStartedAt"):
             state = vessels[target_id]["state"]
@@ -12320,6 +12450,173 @@ async def websocket_nps_hatch_cancel(
     if harvested:
         name = vessels.get(target_id, {}).get("name") or "the hatchery"
         _append_activity(config, f"Brine harvested from {name} — container loaded", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_hatch_enrich",
+    vol.Optional("vessel_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_hatch_enrich(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Harvest → enrich (per-batch choice, Reece locked): rinse the batch into
+    the SEPARATE enrichment vessel — the cone frees up immediately for the
+    next batch. Debits one dose from the linked enrichment bottle and starts
+    the soak clock."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    enrichment = hatchery["enrichment"]
+    if enrichment["state"]["startedAt"]:
+        connection.send_error(msg["id"], "enrich_busy",
+                              "The enrichment vessel is already soaking a batch — "
+                              "load or cancel it first")
+        return
+    vessels = hatchery["vessels"]
+    requested = str(msg.get("vessel_id") or "")
+    if requested and requested not in vessels:
+        connection.send_error(msg["id"], "unknown_vessel", f"No hatchery '{requested}'")
+        return
+    now = datetime.now(timezone.utc)
+    running = _nps_running_batches(config)
+    target_id = requested
+    if not target_id and running:
+        def _progress(item: tuple[str, datetime, float]) -> float:
+            _vid, started, hours = item
+            return (now - started).total_seconds() / 3600.0 / max(hours, 1.0)
+        target_id = max(running, key=_progress)[0]
+    state = vessels.get(target_id, {}).get("state", {}) if target_id else {}
+    started = _parse_datetime(state.get("hatchStartedAt"))
+    if started is None:
+        connection.send_error(msg["id"], "no_batch", "No batch to harvest into enrichment")
+        return
+    enrichment["state"] = {
+        "startedAt": now.isoformat(),
+        "sourceVesselId": target_id,
+        "eggType": str(state.get("eggType") or hatchery["eggType"]),
+        "plannedHatchHours": _awc_num(state.get("hatchHours"), 24, 8, 48),
+        "actualHatchHours": round((now - started).total_seconds() / 3600.0, 1),
+        "enrichHours": enrichment["hours"],
+        "secondDoseAt": "", "readyNotifiedAt": "", "secondDoseNotifiedAt": "",
+    }
+    _nps_enrich_debit(config, enrichment)
+    vessels[target_id]["state"]["hatchStartedAt"] = ""
+    vessels[target_id]["state"]["readyNotifiedAt"] = ""
+    _nps_hatch_sync_reminders(config, now, "enriching")
+    _append_activity(
+        config,
+        f"Batch from {vessels[target_id]['name']} rinsed into the enrichment vessel — "
+        f"{enrichment['hours']:g} h soak running",
+        "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_loaded"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_enrich_loaded(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Enrichment done: rinse (100–125 µm screen — emulsion residue breeds
+    bacteria) and load. Same hard stale gate and volume move as a plain load;
+    the container's freshness clock switches to the ENRICHED shelf life (the
+    HUFA boost halves within 24 h warm). History records the enriched batch."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    state = hatchery["enrichment"]["state"]
+    enrich_started = _parse_datetime(state.get("startedAt"))
+    if enrich_started is None:
+        connection.send_error(msg["id"], "no_enrichment", "Nothing is enriching")
+        return
+    now = datetime.now(timezone.utc)
+    error = _nps_container_load(config, hatchery, now, enriched=True)
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
+        return
+    actual_hatch = _awc_num(state.get("actualHatchHours"), 0, 0, 240)
+    hatchery["history"].insert(0, {
+        "vesselId": str(state.get("sourceVesselId") or ""),
+        "startedAt": (enrich_started - timedelta(hours=actual_hatch)).isoformat(),
+        "harvestedAt": now.isoformat(),
+        "plannedHours": _awc_num(state.get("plannedHatchHours"), 24, 0, 96),
+        "actualHours": actual_hatch,
+        "eggType": str(state.get("eggType") or hatchery["eggType"]),
+        "enriched": True,
+        "enrichedHours": round((now - enrich_started).total_seconds() / 3600.0, 1),
+    })
+    del hatchery["history"][nps_engine.HATCH_HISTORY_MAX:]
+    hatchery["enrichment"]["state"] = {
+        "startedAt": "", "sourceVesselId": "", "eggType": "",
+        "plannedHatchHours": 0, "actualHatchHours": 0, "enrichHours": 0,
+        "secondDoseAt": "", "readyNotifiedAt": "", "secondDoseNotifiedAt": "",
+    }
+    _nps_hatch_sync_reminders(config, now, "harvested")
+    _append_activity(config, "Enriched brine loaded — the container runs the enriched "
+                             "freshness clock now", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_cancel"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_enrich_cancel(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Abandon the soak — the batch is discarded, nothing is logged done."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    hatchery["enrichment"]["state"] = {
+        "startedAt": "", "sourceVesselId": "", "eggType": "",
+        "plannedHatchHours": 0, "actualHatchHours": 0, "enrichHours": 0,
+        "secondDoseAt": "", "readyNotifiedAt": "", "secondDoseNotifiedAt": "",
+    }
+    _nps_hatch_sync_reminders(config, datetime.now(timezone.utc), "cancelled")
+    _append_activity(config, "Enrichment abandoned — the soak was discarded", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_second_dose"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_enrich_second_dose(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Log the INVE-style T+10 h top-up: debits another dose and stamps the
+    soak so the reminder stands down."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    state = hatchery["enrichment"]["state"]
+    if not state.get("startedAt"):
+        connection.send_error(msg["id"], "no_enrichment", "Nothing is enriching")
+        return
+    if state.get("secondDoseAt"):
+        connection.send_error(msg["id"], "already_dosed", "The top-up is already logged")
+        return
+    _nps_enrich_debit(config, hatchery["enrichment"])
+    state["secondDoseAt"] = datetime.now(timezone.utc).isoformat()
+    _append_activity(config, "Enrichment top-up dosed", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -12405,33 +12702,34 @@ async def websocket_nps_summary(
     freshness = prime = None
     hatchery_cfg = _nps_hatchery_v2(config)  # migration-safe v2 view
     reservoir_cfg = hatchery_cfg["reservoir"]
+    supply_loaded, supply_shelf_h, supply_remaining, supply_rate = _nps_brine_supply(config)
     if isinstance(fx_channel, dict):
         reservoir = fx_channel.get("reservoir") or {}
-        freshness = dosing_engine.freshness_state(reservoir, now_utc)
+        if reservoir_cfg.get("lastLoadEnriched"):
+            # The enriched cap outranks the channel's configured shelf life.
+            freshness = dosing_engine.freshness_state(
+                {"mixedAt": reservoir.get("mixedAt"),
+                 "shelfLifeDays": supply_shelf_h / 24.0}, now_utc)
+        else:
+            freshness = dosing_engine.freshness_state(reservoir, now_utc)
         prime = nps_engine.hatch_prime_state(reservoir.get("mixedAt"), now_utc)
     else:
         # Hand-dosers track brine too: the hatchery's own container stamp
         # drives the same freshness/prime clocks (shelf life follows the
-        # fridge toggle). No stamp yet -> prime "unknown", freshness withheld
-        # (nothing to scare anyone about — there is no dosing to block).
+        # fridge toggle, tightened for an enriched load). No stamp yet ->
+        # prime "unknown", freshness withheld (no dosing to block).
         loaded_at = reservoir_cfg.get("mixedAt") or ""
         prime = nps_engine.hatch_prime_state(loaded_at, now_utc)
         if loaded_at:
-            shelf_days = (nps_engine.BRINE_SHELF_H_FRIDGE
-                          if reservoir_cfg.get("refrigerated")
-                          else nps_engine.BRINE_SHELF_H_ROOM) / 24.0
             freshness = dosing_engine.freshness_state(
-                {"mixedAt": loaded_at, "shelfLifeDays": shelf_days}, now_utc)
-    supply_loaded, supply_shelf_h, supply_remaining, supply_rate = _nps_brine_supply(config)
-    running_batches = _nps_running_batches(config)
+                {"mixedAt": loaded_at, "shelfLifeDays": supply_shelf_h / 24.0}, now_utc)
     next_hatch = nps_engine.next_hatch_suggestion(
         now_utc,
         hatchery_cfg["hatchHours"],
         supply_loaded, supply_shelf_h, supply_remaining, supply_rate,
-        # Per-batch clocks: a 36 h batch mid-run chains as a 36 h batch even
-        # after the default egg type changes (Reece's live catch, 0.7.62).
-        [{"startedAt": started.isoformat(), "hatchHours": batch_h}
-         for _vid, started, batch_h in running_batches],
+        # Per-batch clocks (0.7.62) + the enriching pseudo-batch (§10): brine
+        # on the way is brine on the way, whatever vessel it sits in.
+        _nps_chain_batches(config),
     )
     # Per-vessel clocks + the "primary" one the compact surfaces show.
     vessels_payload = []
@@ -12482,6 +12780,7 @@ async def websocket_nps_summary(
     container.update({
         "loadVolumeMl": reservoir_cfg["loadVolumeMl"],
         "refrigerated": bool(reservoir_cfg["refrigerated"]),
+        "lastLoadEnriched": bool(reservoir_cfg["lastLoadEnriched"]),
         "shelfHours": round(supply_shelf_h, 1),
         "freshness": freshness,
     })
@@ -12521,6 +12820,21 @@ async def websocket_nps_summary(
                 hatchery_cfg["hatchHours"], supply_shelf_h),
             "state": primary_state,
             "reservoir": container,
+            "enrichment": {
+                "hours": hatchery_cfg["enrichment"]["hours"],
+                "doseMl": hatchery_cfg["enrichment"]["doseMl"],
+                "productId": hatchery_cfg["enrichment"]["productId"],
+                "productName": (products.get(hatchery_cfg["enrichment"]["productId"]) or {}).get("name")
+                    if isinstance(products.get(hatchery_cfg["enrichment"]["productId"]), dict) else None,
+                "splitDose": bool(hatchery_cfg["enrichment"]["splitDose"]),
+                "sourceVesselId": hatchery_cfg["enrichment"]["state"]["sourceVesselId"],
+                "state": nps_engine.enrich_state(
+                    hatchery_cfg["enrichment"]["state"]["startedAt"],
+                    hatchery_cfg["enrichment"]["state"]["enrichHours"],
+                    bool(hatchery_cfg["enrichment"]["splitDose"]),
+                    hatchery_cfg["enrichment"]["state"]["secondDoseAt"],
+                    now_utc),
+            },
             "handFeed": dict(hatchery_cfg["handFeed"]),
             "learned": nps_engine.learned_hatch_hours(
                 hatchery_cfg["history"], hatchery_cfg["eggType"]),
@@ -14784,6 +15098,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
     websocket_api.async_register_command(hass, websocket_nps_reservoir_discard)
     websocket_api.async_register_command(hass, websocket_nps_hand_feed)
+    websocket_api.async_register_command(hass, websocket_nps_hatch_enrich)
+    websocket_api.async_register_command(hass, websocket_nps_enrich_loaded)
+    websocket_api.async_register_command(hass, websocket_nps_enrich_cancel)
+    websocket_api.async_register_command(hass, websocket_nps_enrich_second_dose)
     websocket_api.async_register_command(hass, websocket_consumable_log_dose)
     websocket_api.async_register_command(hass, websocket_consumable_refill)
     websocket_api.async_register_command(hass, websocket_consumable_delete)

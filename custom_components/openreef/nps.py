@@ -43,6 +43,11 @@ BRINE_PRIME_HOURS = 24.0
 # presets; everything stays user-editable, and "custom" is always available.
 # particleUm ranges feed the Stage D species/particle matcher.
 PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
+    {"name": "Selcon", "brand": "American Marine", "category": "other",
+     "bottleMl": 60, "shelfLifeDaysOpened": 120, "refrigerated": True, "stirDaily": False,
+     "particleUmMin": 0, "particleUmMax": 0,
+     "notes": "HUFA/B12 enrichment emulsion for the hatchery's enrichment soak — "
+              "shake well; use less if the water does not clear."},
     {"name": "Live phytoplankton blend", "brand": "AlgaeBarn OceanMagik", "category": "phyto",
      "bottleMl": 946, "shelfLifeDaysOpened": 28, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 1, "particleUmMax": 10},
@@ -277,6 +282,18 @@ HATCH_HISTORY_MAX = 50
 BRINE_SHELF_H_ROOM = 24.0
 BRINE_SHELF_H_FRIDGE = 48.0
 
+# Enrichment chain (doc §10): the HUFA boost is TRANSIENT — DHA falls to under
+# half within 24 h at room temp (Evjemo 1997), so an enriched load keeps a
+# tighter clock: 12 h on the counter, 48 h fridged (<10 °C holds ≥24 h with
+# <5% loss). Hobby single-dose soak defaults to 12 h; the INVE-style split
+# protocol tops up at T+10 h. Done batches get a short grace — enriched brine
+# degrades faster than a plain hatch.
+ENRICH_SHELF_H_ROOM = 12.0
+ENRICH_SHELF_H_FRIDGE = 48.0
+ENRICH_DEFAULT_HOURS = 12.0
+ENRICH_SECOND_DOSE_H = 10.0
+ENRICH_OVERDUE_GRACE_H = 6.0
+
 # Named vessel presets for the volume picker (product → working water volume).
 # Research note: the Ziss line is ZH-700 / ZH-2000 — there is no ZH-1000.
 HATCH_VESSEL_PRESETS: tuple[dict[str, Any], ...] = (
@@ -454,6 +471,39 @@ def next_hatch_suggestion(
     if start_at <= now:
         return _finish("start_now", now, ready_by, driver)
     return _finish("wait", start_at, ready_by, driver)
+
+
+def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
+                 second_dose_iso: Any, now: datetime) -> dict[str, Any]:
+    """Where the enrichment soak sits: ``none`` (vessel idle), ``enriching``
+    (percent + hours-to-go, plus whether the optional split-dose top-up is
+    due), ``done`` (rinse and load), or ``overdue`` (the boost is draining —
+    enriched brine degrades fast warm)."""
+    started = _parse_iso(started_iso)
+    hours = _f(enrich_hours)
+    if hours <= 0:
+        hours = ENRICH_DEFAULT_HOURS
+    if started is None:
+        return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
+                "percent": None, "secondDoseDue": False}
+    try:
+        elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0)
+    except TypeError:
+        return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
+                "percent": None, "secondDoseDue": False}
+    second_due = (bool(split_dose)
+                  and _parse_iso(second_dose_iso) is None
+                  and elapsed_h >= ENRICH_SECOND_DOSE_H
+                  and elapsed_h < hours)
+    if elapsed_h < hours:
+        return {"status": "enriching",
+                "hoursElapsed": round(elapsed_h, 1),
+                "hoursLeft": round(hours - elapsed_h, 1),
+                "percent": round(min(99.0, elapsed_h / hours * 100.0), 0),
+                "secondDoseDue": second_due}
+    status = "overdue" if elapsed_h > hours + ENRICH_OVERDUE_GRACE_H else "done"
+    return {"status": status, "hoursElapsed": round(elapsed_h, 1),
+            "hoursLeft": 0.0, "percent": 100.0, "secondDoseDue": False}
 
 
 def hatch_prime_state(mixed_at_iso: Any, now: datetime) -> dict[str, Any]:

@@ -1049,6 +1049,119 @@ def test_hatch_ready_push_fires_exactly_once():
     assert len(pushes) == 1, "a batch must notify exactly once"
 
 
+def test_enrich_state_lifecycle():
+    assert nps.enrich_state("", 12, False, "", NOW)["status"] == "none"
+    mid = nps.enrich_state(_iso(NOW - timedelta(hours=7)), 12, False, "", NOW)
+    assert mid["status"] == "enriching" and mid["hoursLeft"] == 5.0
+    assert mid["secondDoseDue"] is False
+    # Split-dose protocol: the T+10 top-up comes due mid-soak, once.
+    due = nps.enrich_state(_iso(NOW - timedelta(hours=10.5)), 12, True, "", NOW)
+    assert due["secondDoseDue"] is True
+    dosed = nps.enrich_state(_iso(NOW - timedelta(hours=10.5)), 12, True,
+                             _iso(NOW - timedelta(minutes=5)), NOW)
+    assert dosed["secondDoseDue"] is False
+    assert nps.enrich_state(_iso(NOW - timedelta(hours=13)), 12, False, "", NOW)["status"] == "done"
+    assert nps.enrich_state(_iso(NOW - timedelta(hours=19)), 12, False, "", NOW)["status"] == "overdue"
+
+
+def _enrich_entry():
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 0})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["enrichment"] = {
+        "hours": 12, "doseMl": 2, "productId": "selcon", "splitDose": True,
+    }
+    cfg["consumables"] = {"products": {"selcon": _product(
+        name="Selcon", category="other", bottleMl=60, remainingMl=50)}}
+    return entry
+
+
+def test_ws_enrich_flow_end_to_end():
+    # Harvest → enrich frees the cone, stamps the soak, debits the bottle;
+    # a second enrich is refused; Enriched & loaded runs the ledger and the
+    # container switches to the tighter enriched clock.
+    entry = _enrich_entry()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 2}))
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert not saved["vessels"]["v1"]["state"]["hatchStartedAt"], "the cone must free at harvest"
+    assert saved["enrichment"]["state"]["startedAt"], "the soak clock must start"
+    assert saved["enrichment"]["state"]["sourceVesselId"] == "v1"
+    products = entry.options[CONF_SETTINGS]["consumables"]["products"]
+    assert products["selcon"]["remainingMl"] == 48                   # 50 - 2
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 3}))
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 4}))
+    assert conn.errors and conn.errors[-1].code == "enrich_busy"
+    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 5}))
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert saved["reservoir"]["remainingMl"] == 500                  # top-to-full
+    assert saved["reservoir"]["lastLoadEnriched"] is True
+    assert not saved["enrichment"]["state"]["startedAt"], "the soak must clear on load"
+    assert saved["history"] and saved["history"][0]["enriched"] is True
+    assert saved["history"][0]["enrichedHours"] >= 0
+
+
+def test_ws_enrich_second_dose_debits_once():
+    entry = _enrich_entry()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 2}))
+    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 3}))
+    products = entry.options[CONF_SETTINGS]["consumables"]["products"]
+    assert products["selcon"]["remainingMl"] == 46                   # 50 - 2 - 2
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["enrichment"]["state"]["secondDoseAt"]
+    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 4}))
+    assert conn.errors and conn.errors[-1].code == "already_dosed"
+
+
+def test_enriched_load_caps_the_shelf_clock():
+    # The HUFA boost is transient: enriched load = 12 h shelf warm, 48 h fridged.
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 300,
+                                 "mixedAt": datetime.now(timezone.utc).isoformat(),
+                                 "lastLoadEnriched": True})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"])
+    _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
+    assert shelf_h == 12.0
+    cfg["nps"]["hatchery"]["reservoir"]["refrigerated"] = True
+    _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
+    assert shelf_h == 48.0
+
+
+def test_enrich_push_fires_done_and_topup_once():
+    entry = _enrich_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"])
+    cfg["nps"]["hatchery"]["enrichment"]["state"].update({
+        "startedAt": (datetime.now(timezone.utc) - timedelta(hours=10.5)).isoformat(),
+        "enrichHours": 12,
+    })
+    hass = FakeHass(entries=[entry])
+    def _topups():
+        return [c for c in hass.services.calls
+                if c.domain == "persistent_notification" and c.service == "create"
+                and (c.data or {}).get("notification_id") == "openreef_enrich_topup"]
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert len(_topups()) == 1, "the split-dose top-up should notify at T+10"
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert len(_topups()) == 1, "the top-up must notify exactly once"
+    # Roll the soak past done: the finish push fires once too.
+    cfg = integration._config_from_entry(entry)
+    cfg["nps"]["hatchery"]["enrichment"]["state"]["startedAt"] = (
+        datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+    integration._persist_entry_config(hass, entry, cfg)
+    def _dones():
+        return [c for c in hass.services.calls
+                if c.domain == "persistent_notification" and c.service == "create"
+                and (c.data or {}).get("notification_id") == "openreef_enrich_done"]
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert len(_dones()) == 1, "the enrichment-done push should fire"
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert len(_dones()) == 1, "the done push must fire exactly once"
+
+
 def test_egg_type_hours_and_normaliser():
     assert nps.egg_type_hours("decapsulated") == 16
     assert nps.egg_type_hours("nonsense") == 24        # unknown → standard

@@ -521,7 +521,15 @@ Schizochytrium powder, with the Nanno warning; hobby 12 h single-dose default
 with optional T+10 h split reminder; enriched shelf life 12 h room / 48 h
 fridge wired into the container freshness when the loaded batch was enriched.
 
-### 10.6 Open questions for Reece (the grill)
+### 10.6 Open questions for Reece (the grill) · **ANSWERED 2026-08-16 — decisions LOCKED**
+
+> 1. **Separate enrichment vessel** (cone frees at harvest). 2. **Selcon** is
+> the primary preset. 3. Shelf-bottle link **yes** (per-run debits). 4.
+> **Per-batch choice** at harvest. 5. **Hobby single dose** default + optional
+> split-dose extra. 6. Chain counts enrichment **only while a batch is actually
+> enriching** (an enriching batch rides the chain as a pseudo-batch that loads
+> at enrich-end; no standing lead change). 7. Enrichment-done push **yes**.
+> 8. **Build now** (v0.7.63).
 
 1. **Cone or separate container?** Do you enrich in the hatching cone (vessel
    stays busy) or decant into a separate enrichment vessel (cone freed for the

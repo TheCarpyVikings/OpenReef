@@ -1708,6 +1708,15 @@ class OpenReefPanel extends HTMLElement {
         "Hatch cancelled — the hatcher stands down.");
       if (action === "nps-discard-brine") this._npsCall({ type: "openreef/nps_reservoir_discard" },
         "Old brine discarded — the container is empty and ready for the fresh batch.");
+      if (action === "nps-enrich") this._npsCall(
+        id ? { type: "openreef/nps_hatch_enrich", vessel_id: id } : { type: "openreef/nps_hatch_enrich" },
+        "Batch rinsed into the enrichment vessel — the soak clock is running and the cone is free.");
+      if (action === "nps-enrich-loaded") this._npsCall({ type: "openreef/nps_enrich_loaded" },
+        "Enriched brine loaded — the container runs the tighter enriched freshness clock now.");
+      if (action === "nps-enrich-cancel") this._npsCall({ type: "openreef/nps_enrich_cancel" },
+        "Enrichment abandoned — the soak was discarded.");
+      if (action === "nps-enrich-second-dose") this._npsCall({ type: "openreef/nps_enrich_second_dose" },
+        "Top-up dosed and debited from the bottle.");
       if (action === "nps-hand-feed") this._npsCall({ type: "openreef/nps_hand_feed" },
         "Hand-feed logged — the container keeps count.");
       if (action === "nps-apply-learned-hours") {
@@ -2381,6 +2390,14 @@ class OpenReefPanel extends HTMLElement {
           = this._config.nps.hatchery || {};
         const hand = hatchery.handFeed = hatchery.handFeed || {};
         hand[field] = Math.max(1, Number(value) || 1);
+      }
+      if (scope === "nps-enrichment") {
+        const hatchery = (this._config.nps = this._config.nps || {}).hatchery
+          = this._config.nps.hatchery || {};
+        const enrich = hatchery.enrichment = hatchery.enrichment || {};
+        if (field === "splitDose") enrich.splitDose = value;
+        else if (field === "productId") enrich.productId = value;
+        else enrich[field] = Math.max(0.5, Number(value) || 0);
       }
       if (scope === "nps-species") {
         const npsCfg = this._config.nps = this._config.nps || {};
@@ -9713,6 +9730,27 @@ class OpenReefPanel extends HTMLElement {
     return "";
   }
 
+  // The enrichment vessel: a beaker mid-soak — oily swirl, bubbles, % of the
+  // soak done. Only drawn while a batch is actually enriching.
+  _npsEnrichVesselSvg(state) {
+    const pct = Math.max(0, Math.min(100, Number(state?.percent) || 0));
+    const fillH = Math.round(58 * 0.8);
+    const doneish = state?.status === "done" || state?.status === "overdue";
+    const stroke = state?.status === "overdue" ? "var(--warning-color,#f5a524)"
+      : doneish ? "#26a69a" : "#7e57c2";
+    return `
+      <svg viewBox="0 0 104 124" style="width:96px;flex:0 0 auto;" role="img" aria-label="Enrichment vessel — ${this._escape(String(state?.status || "none"))}">
+        <path d="M 38 14 V 44 L 22 96 A 10 10 0 0 0 32 108 H 72 A 10 10 0 0 0 82 96 L 66 44 V 14" fill="#12141c" stroke="${stroke}" stroke-width="2.5" stroke-linejoin="round"></path>
+        <rect x="34" y="8" width="36" height="8" rx="3" fill="#37474f"></rect>
+        <path d="M 27 ${104 - fillH * pct / 100} H 77 L 72 104 H 32 Z" fill="#8d6e63" opacity="0.55"></path>
+        <circle cx="46" cy="88" r="2.4" fill="#ffcc80" opacity="0.8" class="nps-bub"></circle>
+        <circle cx="58" cy="78" r="1.8" fill="#ffcc80" opacity="0.7" class="nps-bub"></circle>
+        <circle cx="52" cy="96" r="2" fill="#ffe0b2" opacity="0.6" class="nps-bub"></circle>
+        <text x="52" y="60" text-anchor="middle" font-size="14">🧪</text>
+        <text x="52" y="120" text-anchor="middle" font-size="10" fill="#90a4ae">${this._escape(doneish ? "rinse & load" : `${Math.round(pct)}%`)}</text>
+      </svg>`;
+  }
+
   // The brine dosing container beside the vessels: fill from the ledger,
   // stroke from the freshness clock (AWC-reservoir idiom), ❄ when fridged.
   _npsBrineContainerSvg(reservoir) {
@@ -9995,6 +10033,8 @@ class OpenReefPanel extends HTMLElement {
           loadVolumeMl: 0, refrigerated: true, shelfHours: 48, mixedAt: iso(5 * 3600000),
           freshness: { status: "fresh", hoursLeft: 43, ageHours: 5 } },
         handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
+        enrichment: { hours: 12, doseMl: 1, productId: "", productName: "Selcon", splitDose: false,
+          sourceVesselId: "", state: { status: "none", secondDoseDue: false } },
         learned: { available: true, hours: 21.3, samples: 3 },
         temp: { available: true, expectedHours: 26.9, factor: 1.12, warm: false, tempC: 26.6 },
         vesselPresets: [
@@ -10794,6 +10834,9 @@ class OpenReefPanel extends HTMLElement {
     const reservoirSum = hatch.reservoir || {};
     const containerStale = reservoirSum.freshness?.status === "stale"
       && Number(reservoirSum.remainingMl) > 0;
+    const enrichSum = hatch.enrichment || {};
+    const enrichState = enrichSum.state || {};
+    const enrichIdle = !enrichState.status || enrichState.status === "none";
     const vesselTiles = vessels.map((v) => {
       const vs = v.state || {};
       const vEgg = (this._npsEggTypes().find((e) => e.id === v.eggType) || {}).name || "cysts";
@@ -10804,16 +10847,19 @@ class OpenReefPanel extends HTMLElement {
       })[vs.status] || "idle";
       const guide = v.guide && v.guide.available
         ? `<small class="muted" title="2 g/L is the documented optimum — more cysts hatch WORSE">~${this._escape(String(v.guide.grams))} g cysts</small>` : "";
+      const canEnrich = enrichIdle && ["incubating", "ready", "overdue"].includes(vs.status);
       const buttons = [
         vs.status === "none" || !vs.status
           ? `<button class="secondary compact-button" data-action="nps-hatch-start" data-id="${this._escape(v.id)}">Start hatch</button>` : "",
         vs.status === "incubating"
           ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}" title="Instar I nauplii (first ~18 h) are the most nutritious — harvesting early is the premium move">Harvest now</button>`
           : "",
-        vs.status === "incubating"
-          ? `<button class="danger-text compact-button" data-action="nps-hatch-cancel" data-id="${this._escape(v.id)}">Cancel</button>` : "",
         (vs.status === "ready" || vs.status === "overdue")
           ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}">Hatched &amp; loaded</button>` : "",
+        canEnrich
+          ? `<button class="secondary compact-button" data-action="nps-enrich" data-id="${this._escape(v.id)}" title="Rinse the batch into the enrichment vessel for a ${this._escape(String(enrichSum.hours ?? 12))} h ${this._escape(enrichSum.productName || "Selcon")} soak — only pays past instar II (~12 h old)">→ Enrich</button>` : "",
+        vs.status === "incubating"
+          ? `<button class="danger-text compact-button" data-action="nps-hatch-cancel" data-id="${this._escape(v.id)}">Cancel</button>` : "",
       ].filter(Boolean).join("");
       return `
         <div class="stack" style="gap:4px;align-items:center;min-width:120px;" data-vessel="${this._escape(v.id)}">
@@ -10855,6 +10901,26 @@ class OpenReefPanel extends HTMLElement {
     // drain is on. Hand-dosers get the same clocks from the container's stamp.
     const hatchReservoirLine = `${primeLine}${freshLine ? ` · ${freshLine}` : ""}${fxCfg.channelId
       ? "" : ` · Hand-dosing mode — link a live-food pump in Settings to automate the dosing.`}`;
+    // The enrichment vessel tile — only while a batch is soaking.
+    const enrichTile = !enrichIdle ? `
+      <div class="stack" style="gap:4px;align-items:center;min-width:120px;" data-enrich-vessel>
+        ${this._npsEnrichVesselSvg(enrichState)}
+        <small><strong>Enrichment</strong> · ${this._escape(enrichSum.productName || "Selcon")}</small>
+        <small>${enrichState.status === "enriching"
+          ? `${this._escape(String(enrichState.hoursElapsed))} / ${this._escape(String(enrichSum.hours ?? 12))} h soak`
+          : enrichState.status === "overdue"
+            ? `<span style="color:var(--warning-color,#f5a524)">load now — the boost is draining</span>`
+            : "<strong>done</strong> — rinse &amp; load"}</small>
+        ${enrichState.secondDoseDue ? `<small><span style="color:var(--warning-color,#f5a524)">Top-up due</span></small>` : ""}
+        <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
+          ${enrichState.secondDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-second-dose">Log top-up</button>` : ""}
+          <button class="secondary compact-button" data-action="nps-enrich-loaded">Enriched &amp; loaded</button>
+          <button class="danger-text compact-button" data-action="nps-enrich-cancel">Cancel</button>
+        </div>
+      </div>` : "";
+    const enrichedShelfLine = reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
+      ? `🧪 Enriched load — feed it out within ${this._escape(String(reservoirSum.shelfHours ?? 12))} h${reservoirSum.refrigerated ? " (fridged)" : " at room temp"}; the HUFA boost halves within a day warm.`
+      : "";
     const hatcheryPanel = `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
@@ -10862,11 +10928,12 @@ class OpenReefPanel extends HTMLElement {
           <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Hatch settings</button>
         </div>
         <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
-          <div style="display:flex;gap:14px;flex-wrap:wrap;">${vesselTiles}</div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;">${vesselTiles}${enrichTile}</div>
           ${this._npsBrineContainerSvg(reservoirSum)}
           <div class="stack" style="gap:6px;flex:1;min-width:220px;">
             ${nextHatchLine ? `<small>${nextHatchLine}</small>` : ""}
             ${staleGateLine ? `<small>${staleGateLine}</small>` : ""}
+            ${enrichedShelfLine ? `<small>${enrichedShelfLine}</small>` : ""}
             ${learnedLine ? `<small>${learnedLine}</small>` : ""}
             ${tempLine ? `<small>${tempLine}</small>` : ""}
             ${neededLine ? `<small>${neededLine}</small>` : ""}
@@ -14795,6 +14862,13 @@ class OpenReefPanel extends HTMLElement {
           return { name: v?.name || vid, leftH };
         })
         .filter(Boolean);
+      // The enrichment soak counts — it too ends in rinse & load.
+      const enrichSt = npsCfg?.hatchery?.enrichment?.state || {};
+      const enrichMs = Date.parse(enrichSt.startedAt || "");
+      if (npsCfg?.enabled && Number.isFinite(enrichMs)) {
+        const soakH = Number(enrichSt.enrichHours) || 12;
+        batches.push({ name: "Enrichment vessel", leftH: soakH - (Date.now() - enrichMs) / 3600000 });
+      }
       const ripe = batches.filter((b) => b.leftH <= 0);
       if (ripe.length) {
         push("nps-hatch", "Hatchery", `Brine ready to harvest — ${ripe.map((b) => b.name).join(" + ")}`,
@@ -21532,6 +21606,19 @@ class OpenReefPanel extends HTMLElement {
         <label>Hatchery temp sensor (optional)<input data-scope="nps-hatchery" data-field="tempEntity" value="${this._escape(npsCfg.hatchery?.tempEntity || "")}" placeholder="sensor.hatchery_temperature"></label>
       </div>
       <small class="awc-hint">Advisory only: 26–28 °C is the sweet spot; each degree cooler stretches the clock ~8% (20 °C roughly doubles it). The countdown never moves — you just get told what to expect.</small>
+      <small class="awc-hint"><strong>Enrichment</strong> — per-batch "→ Enrich" at harvest rinses the batch into a separate soak vessel (GSL nauplii carry no DHA; the soak restores it — proven for larvae, recommended for NPS corals). Only pays past instar II (~12 h); an enriched load runs a tighter freshness clock (12 h room / 48 h fridged).</small>
+      <div class="mini-grid">
+        <label>Soak time (hours)<input type="number" min="2" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
+        <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>
+        <label>Enrichment bottle<select data-scope="nps-enrichment" data-field="productId">
+          <option value="">Not linked</option>
+          ${Object.entries(this._config?.consumables?.products || {}).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(npsCfg.hatchery?.enrichment?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}
+        </select></label>
+      </div>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="nps-enrichment" data-field="splitDose" ${npsCfg.hatchery?.enrichment?.splitDose ? "checked" : ""}>
+        <span><strong>Split-dose top-up</strong><small>INVE-style second dose ~10 h into the soak — you get a reminder and a "Log top-up" button (debits the bottle again).</small></span>
+      </label>
 
       <div class="awc-section-title"><p class="eyebrow">Feed truce</p></div>
       <small class="awc-hint">UV and ozone kill dosed live food; the skimmer strips it. The truce pauses whatever is armed (Settings → Equipment: UV sterilizer / Ozone / Skimmer profiles) after every food dose, then restores it.</small>
