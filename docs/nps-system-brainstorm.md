@@ -417,7 +417,7 @@ schedule and advise; we don't robotically harvest).
 
 ---
 
-## 10. Enrichment chain — design brief (2026-08-16) · STATUS: brainstorm, awaiting Reece's answers
+## 10. Enrichment chain — design brief (2026-08-16) · STATUS: **SHIPPED 0.7.63** (all §10.6 answers locked + built same day)
 
 Instar II nauplii can gut-load — the enrichment stage turns "live food" into
 "live food carrying exactly what you want in it". This slots between harvest
