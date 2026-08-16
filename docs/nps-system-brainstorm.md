@@ -238,3 +238,172 @@ Tests per harness: `tests/test_nps.py` (fake-HA WS + engine + guard chains) and 
 2. Channel cap: 32 acceptable, or truly uncapped?
 3. Nutrient-budget suggestions: advisory-with-Apply only (assumed, consistent with the advisor), or ever auto-adjust AWC within a user-set band?
 4. v1 hardware reality check: how many physical food heads on your bench today? (Shapes how hard Stage C's generic driver needs to push vs manual binding.)
+
+---
+
+## 9. Hatchery v2 — design brief (2026-08-16) · STATUS: brainstorm, awaiting Reece's answers
+
+The hatchery is the screen Reece touches every single day — v2 turns the v1 clock
+into a small production system: real volumes, multiple vessels, a brine ledger,
+and advice that learns. Everything stays advisory (recommend, never act).
+
+### 9.1 The model (v2 config shape)
+
+```
+nps.hatchery: {
+  eggType, hatchHours,            # defaults seeded into each new start (unchanged)
+  vessels: {                      # NEW — up to N hatcheries, each its own clock
+    v1: { name: "Hatchery 1", volumeL: 1.0,
+          state: { hatchStartedAt, eggType, hatchHours } },   # per-BATCH stamps
+    ...
+  },
+  reservoir: {                    # NEW — the brine dosing container, hand-dose path
+    volumeMl, remainingMl, loadVolumeMl,   # pump users: channel reservoir stays canonical
+  },
+  history: [ { vesselId, startedAt, harvestedAt, plannedHours, actualHours, eggType } ],
+}
+```
+
+- **Per-batch stamps fix a v1 flaw**: changing egg type / hours mid-hatch currently
+  rewrites a running countdown. v2 stamps `eggType` + `hatchHours` into the vessel
+  state at start; settings changes only affect the NEXT batch.
+- Back-compat: v1's single `state.hatchStartedAt` migrates to `vessels.v1`.
+- The reservoir mirrors the dosing-channel reservoir schema so `_nps_brine_supply`
+  reads either source with one shape.
+
+### 9.2 Sizes and the brine ledger
+
+- **Hatchery volume** (per vessel): drives the cyst-dose guide (density g/L from
+  research §9.6) and the yield estimate on the card.
+- **Dosing-container volume**: pump users already have `channel.reservoir.volumeMl`;
+  hand-dosers get `hatchery.reservoir`. Both feed the depletion half of
+  `next_hatch_suggestion` (v1 passes None for hand-dosers — v2 closes that).
+- **"Hatched & loaded" moves volume**: adds `loadVolumeMl` to the container's
+  `remainingMl` (clamped at `volumeMl`, with an overflow warning). Default for
+  `loadVolumeMl` is Reece's open question §9.7-Q1 — hatchery volume vs top-to-full
+  vs fixed amount. Never dose hatch water stays doctrine: the loaded volume is the
+  RESUSPENSION volume, whatever the answer.
+- **Stale-first gate**: if the container still holds brine past its shelf life,
+  the load flow leads with "Discard the old brine first" (zero it, then load).
+  Mixing fresh into old (non-stale) keeps the OLDEST mixedAt — the freshness clock
+  never resets on a top-up (fail-closed; mirrors the expiry doctrine).
+- **Refrigerated toggle** on the container (research §9.6): default shelf life
+  24 h at room temp, 48 h fridged — the freshness clock and next-hatch maths
+  both read it.
+- **Hand-feed ledger**: a one-tap "Fed X ml" action on the card debits the
+  reservoir (default dose size configurable) → hand-dosers get depletion-aware
+  next-hatch advice and an honest fill level in the visuals.
+
+### 9.3 Multiple hatcheries (overlap made real)
+
+- Up to N vessels (cap TBD — Q3), each with name, volume, own clock, own vessel SVG.
+- `next_hatch_suggestion` v2: same ready-by maths, plus **which vessel** — the
+  first idle one; if all are incubating, "all hatchers busy — next free ~T".
+- Structural guidance: continuous supply needs `ceil((hatchHours + buffer) / shelfHours)`
+  vessels — the card can say "with 36 h eggs and 24 h brine life you need 2
+  hatcheries; you have 1" (the v1 overlap flag, now with a number).
+- Reminders stay vessel-aware: "Start hatch (Hatchery 2)".
+
+### 9.4 Ending a hatch early + learning
+
+- **Harvest now** during incubation (single tap, honest activity log) — first
+  major hatch is often well before the nominal clock (research §9.6).
+- Every harvest appends to `history` (planned vs actual hours, egg type).
+- **Learned hatch times** (Q6): rolling average of actual hours per egg type →
+  advisory chip "your standard cysts run ~20 h — tighten the clock?" with Apply.
+  Same advisory-with-Apply doctrine as the nutrient budget.
+- Optional later: hatch quality rating (good/poor) → "this tin is fading" trend.
+
+### 9.5 Visuals, notifications, presence
+
+- **Hatchery strip**: all vessel SVGs side by side (name, %, status ring), the
+  brine dosing container drawn at the right with the AWC-reservoir idiom (fill =
+  remaining/volume, stroke = freshness colour), a brief vessel→container pour
+  animation on load (and in the demo).
+- **Hour-precise "hatch ready" push**: maintenance reminders fire on a daily
+  tick — fine for chores, wrong for a 20-minute harvest window. v2 dispatches
+  hatch-ready (and start-now) notifications from the minutely tick, same
+  plumbing as AWC events.
+- Pulse insight rotator gains hatch-ready / start-now lines.
+- Diagram: hand-doser brine station in the main feeding-station is Q9 (defer?).
+
+### 9.6 Research digest (agent sweep, 2026-08-16)
+
+**Density & yield** (SRAC 702 Texas A&M; Salt Lake Brine Shrimp; Reed Mariculture):
+1–3 g cysts/L typical, **2 g/L optimum** (>2 reduces hatch-out, 5 g/L hard ceiling —
+foaming/O₂ crash). ~250k cysts/g; premium GSL 90% grade ≈ 220–235k nauplii/g,
+cheap grades ≈ 50% hatch ≈ 125–150k/g. → *Card guide: "your 1 L hatcher wants
+~2 g (≈ a level tsp) — ~450k nauplii at 90% grade."*
+
+**Timing vs temperature** (SRAC 702; brineshrimp.com.au; PodDrop; INVE): at
+27–28 °C first free swimmers ~16–18 h, **peak 20–24 h**, stragglers to ~30–36 h.
+At ~21 °C → ~36 h; 20 °C → 36–48 h. Rule of thumb: **28→20 °C roughly doubles the
+cycle**. → validates the temperature-advisory idea (Q7) with a concrete curve;
+egg-type presets already bracket this (16/20/24/36 h).
+
+**Early harvest is BEST practice, not a compromise** (Brine Shrimp Direct; SRAC
+702; TFH): harvest at ~18 h catches instar I — smallest (~430 µm) and most
+nutritious (body fat peaks in the first ~12 h post-hatch, down ~39% by end of
+instar I). Trade-off: leaves the straggler 10–30% behind. → "Harvest now" copy
+can honestly say *earlier = more nutritious*; learned-hours has a real target.
+
+**Storing harvested nauplii** (BSD FAQ; SRAC 702; breeder forums): room temp —
+instar II moult at ~8–12 h @28 °C, yolk largely burned by ~12 h. **Fridge ~4 °C:
+metabolism nearly stops; 24 h conservative, 2–3 days survival; nutrition argues
+24–48 h.** → reservoir gains a `refrigerated` toggle: default shelf life 24 h
+un-fridged, 48 h fridged (sources disagree mildly; we take the middle).
+
+**Enrichment** (INVE S.presso; SRAC 702): instar II can gut-load from ~8–12 h;
+INVE window ≈ start at 22–25 h, 18–22 h duration. → stays a v3 optional chain.
+
+**Vessel presets** (product → water volume): Ziss ZH-700 **0.7 L**, Ziss ZH-2000
+**2 L** (note: no "ZH-1000" exists), Hobby Artemia Breeder **0.47 L**, JBL
+ArtemioSet **~0.5 L**, inverted 2 L bottle rig **~1.5–1.8 L**, BSD flat dish
+~0.5 L. → volume preset picker seeds these.
+
+**Rotation practice** (Reefphyto; Reef2Reef; SimplyDiscus): the documented
+standard for continuous supply is exactly **two vessels staggered 12–24 h** —
+matches the `ceil(lead/shelf)` formula; cap of 4 vessels is generous.
+
+**Prior art — the niche is EMPTY at hobby level.** Aquaculture-scale automation
+exists (INVE SEP-Art AutoMag magnetic harvester; US Patent 12,433,261 full-auto
+hatch-and-supply; a 1973 semi-automated 250M/day rig), and hobby "auto
+hatcheries" (TOM Hatch'n Feeder, Reefing Art) are PASSIVE swim-out vessels —
+zero scheduling, zero monitoring, zero electronics. **No hobby product or open
+project does hatchery scheduling/monitoring** (start advice, temp-compensated
+timing, rotation management). Claim available: *"the first hatchery scheduler
+for home aquariums"* — wording stays clear of the industrial patents (we
+schedule and advise; we don't robotically harvest).
+
+### 9.7 Open questions for Reece (the grill)
+
+1. **Load volume physics**: when you tap "Hatched & loaded", what actually lands
+   in the container — top it up to FULL with fresh tank-salinity water, a fixed
+   configurable volume, or literally the hatchery's volume? (You said hatchery
+   volume — but the rinse-and-resuspend doctrine means hatch water never goes in,
+   so the loaded volume is whatever you resuspend into. Proposal: per-setup
+   `loadVolumeMl`, defaulted to top-to-full, editable.)
+2. **Stale-first**: hard gate (must discard before load unlocks) or warn-and-allow?
+   And mixing fresh into non-stale leftovers: allow with oldest-clock-wins, or block?
+3. **How many hatcheries** do we cap at (2? 4?) — and per-vessel egg types, or one
+   global egg type across all vessels?
+4. **Hand-feed logging**: is one-tap "Fed 30 ml" (configurable default) enough, or
+   do you want scheduled hand-feed reminders too?
+5. **Cyst tin on the food shelf** (grams, grams-per-hatch debit at start, runway in
+   "hatches left"): v2 or later? (Needs a units extension to consumables.)
+6. **Learned hatch times** (advisory Apply from your actual harvests): v2 or later?
+7. **Temperature link** (optional HA sensor per hatchery → expected-hours advisory,
+   e.g. "room runs 22 °C — expect ~30 h, not 24"): v2 or later?
+8. **Hatch-ready push at the right hour** (minutely dispatch): assume yes?
+9. **Main diagram**: add a brine station for hand-dosers too, or hatchery-strip
+   visuals only for now?
+
+### 9.8 Staged build (once answers land)
+
+- **H-A model**: vessels + migration, per-batch stamps, reservoir + sizes, early
+  harvest, load ledger + stale gate, history. *(Engine + WS + normaliser + tests.)*
+- **H-B brain**: multi-vessel `next_hatch_suggestion`, vessel-aware reminders,
+  hour-precise hatch-ready push, structural "you need N hatcheries" line.
+- **H-C presence**: hatchery strip + container visual, pour animation, demo stage,
+  Pulse insights.
+- **H-D options** (per grill): cyst inventory, learned hours, temperature advisory.
