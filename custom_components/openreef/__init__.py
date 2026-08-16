@@ -12135,10 +12135,10 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str)
             # Freshness-timed only: the reservoir is mid-reload at this exact
             # moment, so its remaining-ml is not yet trustworthy. The card's
             # live suggestion picks up depletion once the volume is reset.
-            running_iso = [started.isoformat()
-                           for _vid, started, _h in _nps_running_batches(config)]
+            running_info = [{"startedAt": started.isoformat(), "hatchHours": batch_h}
+                            for _vid, started, batch_h in _nps_running_batches(config)]
             suggestion = nps_engine.next_hatch_suggestion(
-                now, hatch_hours, now.isoformat(), shelf_h, None, None, running_iso
+                now, hatch_hours, now.isoformat(), shelf_h, None, None, running_info
             )
             start_at = _parse_datetime(suggestion.get("startAt"))
             if (suggestion.get("status") in ("wait", "chained")
@@ -12428,7 +12428,10 @@ async def websocket_nps_summary(
         now_utc,
         hatchery_cfg["hatchHours"],
         supply_loaded, supply_shelf_h, supply_remaining, supply_rate,
-        [started.isoformat() for _vid, started, _h in running_batches],
+        # Per-batch clocks: a 36 h batch mid-run chains as a 36 h batch even
+        # after the default egg type changes (Reece's live catch, 0.7.62).
+        [{"startedAt": started.isoformat(), "hatchHours": batch_h}
+         for _vid, started, batch_h in running_batches],
     )
     # Per-vessel clocks + the "primary" one the compact surfaces show.
     vessels_payload = []

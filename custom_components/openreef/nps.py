@@ -378,11 +378,13 @@ def next_hatch_suggestion(
     hatch takes longer than the brine stays fresh, so batches must overlap and
     "wait" can never be the answer.
 
-    ``started_iso`` accepts one stamp or a LIST of them (hatchery v2: several
-    vessels can incubate at once). The chain anchors on the LATEST start —
-    every load resets the container's clock, so the last batch to land is the
-    one whose fade the next start must beat. ``busyCount`` reports how many
-    batches are on the go.
+    ``started_iso`` accepts one stamp, a LIST of stamps, or a list of
+    ``{"startedAt", "hatchHours"}`` dicts (hatchery v2: several vessels, each
+    batch on its OWN stamped clock — a 36 h batch mid-run stays a 36 h batch
+    even after the default drops to 24). The chain anchors on the batch that
+    LOADS last — every load resets the container's clock, so the last batch to
+    land is the one whose fade the next start must beat. ``busyCount`` reports
+    how many batches are on the go.
     """
     hours = _f(hatch_hours)
     if hours <= 0:
@@ -391,8 +393,15 @@ def next_hatch_suggestion(
     if shelf_h <= 0:
         shelf_h = 24.0
     lead_h = hours + HATCH_HARVEST_BUFFER_H
-    starts = started_iso if isinstance(started_iso, (list, tuple)) else [started_iso]
-    running = [p for p in (_parse_iso(s) for s in starts) if p is not None]
+    raw_starts = started_iso if isinstance(started_iso, (list, tuple)) else [started_iso]
+    running: list[tuple[datetime, float]] = []
+    for item in raw_starts:
+        if isinstance(item, dict):
+            stamp, batch_h = _parse_iso(item.get("startedAt")), _f(item.get("hatchHours"))
+        else:
+            stamp, batch_h = _parse_iso(item), 0.0
+        if stamp is not None:
+            running.append((stamp, batch_h if batch_h > 0 else hours))
     base: dict[str, Any] = {
         "status": "no_brine", "startAt": None, "hoursUntil": None,
         "readyBy": None, "driver": None,
@@ -413,27 +422,20 @@ def next_hatch_suggestion(
             out["hoursUntil"] = round(max(0.0, (start_at - now).total_seconds() / 3600.0), 1)
         return out
 
-    started = max(running) if running else None
-    if started is not None:
-        # A batch is incubating (or sitting ready): the next start keeps the
-        # chain unbroken. It loads at start + hours (+ buffer), fades shelf_h
-        # later, and the following batch needs lead_h of runway — which nets
-        # out to started + shelf_h. A ready/overdue batch is assumed to load
-        # about now instead.
-        try:
-            elapsed_h = (now - started).total_seconds() / 3600.0
-        except TypeError:
-            elapsed_h = None
-        if elapsed_h is not None and elapsed_h >= 0:
-            if elapsed_h < hours:
-                start_at = started + timedelta(hours=shelf_h)
-                ready_by = started + timedelta(hours=hours + HATCH_HARVEST_BUFFER_H + shelf_h)
-            else:
-                start_at = now + timedelta(hours=shelf_h - lead_h)
-                ready_by = now + timedelta(hours=shelf_h)
-            if start_at <= now:
-                return _finish("start_now", now, ready_by, "freshness")
-            return _finish("chained", start_at, ready_by, "freshness")
+    if running:
+        # Batches are on the go: the next start keeps the chain unbroken. The
+        # anchor is when the LAST batch loads (its own stamped clock, floored
+        # at now — a ripe batch loads about now); its brine fades shelf_h
+        # later, and the following batch needs lead_h of runway.
+        anchor = max(
+            max(stamp + timedelta(hours=batch_h), now)
+            for stamp, batch_h in running
+        )
+        ready_by = anchor + timedelta(hours=HATCH_HARVEST_BUFFER_H + shelf_h)
+        start_at = ready_by - timedelta(hours=lead_h)
+        if start_at <= now:
+            return _finish("start_now", now, ready_by, "freshness")
+        return _finish("chained", start_at, ready_by, "freshness")
 
     loaded = _parse_iso(loaded_iso)
     if loaded is None:

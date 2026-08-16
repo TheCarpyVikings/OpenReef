@@ -9690,8 +9690,13 @@ class OpenReefPanel extends HTMLElement {
     const why = next.driver === "depletion"
       ? "the reservoir runs dry"
       : "the loaded brine fades";
+    const refrigerated = !!this._nps?.summary?.hatchery?.reservoir?.refrigerated;
+    const fridgeHint = refrigerated ? "a second hatcher helps"
+      : "a second hatcher helps — or fridge the container in Settings for a 48 h shelf life";
     const overlapNote = next.overlap
-      ? ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch outlives the brine's ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (a second hatcher helps).`
+      ? (Number(next.shelfHours) >= Number(next.hatchHours)
+        ? ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch plus harvest time uses the brine's whole ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`
+        : ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch outlives the brine's ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`)
       : "";
     if (next.status === "chained") {
       return `🔗 Next hatch: start ${when} — keeps the chain unbroken (a fresh batch lands as this one fades).${overlapNote}`;

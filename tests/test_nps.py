@@ -912,6 +912,18 @@ def test_next_hatch_multi_vessel_chains_on_latest():
     assert s["hoursUntil"] == 42.0    # latest start + 48 h shelf
 
 
+def test_next_hatch_respects_each_batches_stamped_clock():
+    # Reece's live catch (0.7.62): a 36 h batch was 9.2 h in when the default
+    # clock was dropped to 24 h. The chain must anchor on the BATCH's stamped
+    # clock — it loads at +26.8 h — not the new default, which would have
+    # called for a start 12 h early.
+    batch = [{"startedAt": _iso(NOW - timedelta(hours=9.2)), "hatchHours": 36}]
+    s = nps.next_hatch_suggestion(NOW, 24, "", 24, None, None, batch)
+    assert s["status"] == "chained"
+    assert s["hoursUntil"] == 26.8
+    assert s["busyCount"] == 1
+
+
 def test_hatchery_v2_pure_helpers():
     assert nps.vessels_needed(36, 24) == 2      # the documented 2-vessel stagger
     assert nps.vessels_needed(24, 48) == 1
