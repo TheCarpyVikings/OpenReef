@@ -414,3 +414,135 @@ schedule and advise; we don't robotically harvest).
 - **H-C presence**: hatchery strip + container visual, pour animation, demo stage,
   Pulse insights.
 - **H-D options** (per grill): cyst inventory, learned hours, temperature advisory.
+
+---
+
+## 10. Enrichment chain — design brief (2026-08-16) · STATUS: brainstorm, awaiting Reece's answers
+
+Instar II nauplii can gut-load — the enrichment stage turns "live food" into
+"live food carrying exactly what you want in it". This slots between harvest
+and load as an OPTIONAL stage in the batch lifecycle, riding everything the
+hatchery v2 already has: per-batch clocks, the container ledger, the reminder
+sync, the hour-precise push.
+
+### 10.1 The batch lifecycle grows one stage
+
+```
+incubating ──harvest──▶ [enriching] ──rinse+load──▶ loaded (container)
+                └───────── skip ─────────▶
+```
+
+- Per-batch: at harvest time the keeper chooses "Load now" (today's flow,
+  unchanged) or "Harvest → enrich". Enriching batches get their own clock
+  (enrichHours), their own countdown, and an "Enriched & loaded" completion
+  that runs the same stale gate + volume move + history append (history gains
+  `enrichedHours` + product).
+- Enrichment config: `hatchery.enrichment { hours, productId (a SHELF bottle —
+  doses debit it, runway forecasts it), doseMlPerL, splitDose (second dose at
+  T+10 h, INVE-style, as an optional reminder) }`.
+- The chain maths: when a batch is enriching (or enrichment is the standing
+  mode), the next-start lead time becomes hatchHours + enrichHours + buffer —
+  `next_hatch_suggestion` and `vessels_needed` both take the longer lead.
+- Push: "enrichment done — rinse and load" fires from the minutely tick like
+  hatch-ready, once per batch.
+- Consumables tie-in: the enrichment bottle is a first-class shelf product
+  (category exists already); each enrichment debits doseMlPerL × enrichment
+  volume. SELCO presets land in the product library with handling facts.
+
+### 10.2 Where does enrichment happen? (the load-bearing modelling question)
+
+Option A — in the hatching cone: the vessel stays BUSY through enrichment
+(idle-vessel picking + vessels_needed must count it). Option B — a separate
+enrichment container: the cone frees up at harvest for the next batch; the
+enrichment container is one more visual in the strip. Research (§10.6) says
+which is common practice; Reece's answer (Q1) decides the model. B is more
+honest for continuous supply — cones are the scarce resource.
+
+### 10.3 Freshness impact — research-gated
+
+Enrichment emulsions foul water and enriched nauplii may burn the boost within
+hours; the enriched batch's shelf life (and whether the fridge rule changes)
+comes straight from §10.6. Whatever the numbers, the honest rule stands: the
+container's freshness clock uses the ENRICHED shelf life when the loaded batch
+was enriched.
+
+### 10.4 Species tie-in (light touch)
+
+Species-library entries gain a `benefitsFromEnrichment` flag surfaced in the
+coverage report ("your sun corals take instar II+ — enriched batches carry the
+HUFAs instar I burns off"). Advisory line only, no plan changes.
+
+### 10.5 Research digest (agent sweep, 2026-08-16)
+
+**Why enrich** (SRAC 702; FAO Live Food Manual): GSL nauplii are essentially
+DHA-free; enrichment restores ~17.7 mg/g DW DHA / ~50 mg/g total n-3 HUFA, and
+DHA now outranks EPA in importance. **Coral evidence is THIN**: controlled
+trials are fish/shrimp larvae; NPS guidance recommends enriched zooplankton on
+nutritional theory. Honest copy rule: *"proven for larvae, recommended for NPS
+corals"* — never claim proven coral benefit.
+
+**When it pays** (SRAC; BSD): nauplii can't eat until instar II (~6–12 h
+post-hatch, temp-dependent — sources disagree inside that band). Fed out
+≤12 h = enrichment pointless AND unnecessary (instar I yolk is the peak).
+Decision rule for the card: harvest early → load straight; holding past the
+molt → enrich.
+
+**Products + doses**: INVE S.presso 2 × 0.5 g/L at T0/T10, ≤400 nauplii/ml,
+18–22 h; Easy DHA Selco 0.6 g/L ≥24 h; FAO emulsion 300 mg/L at T0 + T10–12;
+Selcon (hobby) ~12 h soak, heavy aeration. Live phyto: **T-Iso (Isochrysis) is
+the DHA source; Nannochloropsis is EPA-only and does NOT fix the DHA gap** —
+preset warning required. Schizochytrium powder enriches DHA without emulsion
+fouling. Hobby short protocol (~0.5 ml/L, 4–12 h) = partial gut-load; full
+tissue incorporation needs the 18–24 h split-dose.
+
+**Vessel practice** (SRAC; FAO; Reef2Reef): aquaculture standard = RINSE at
+harvest, then a SEPARATE enrichment vessel (hatch water + emulsion = bacteria);
+an in-cone variant exists but even SRAC prefers separate. Density 100–400/ml,
+strong aeration (emulsions strip O₂, keep DO > 4 mg/L), 25–28 °C.
+
+**Risks**: oil emulsions foul water/appendages and depress O₂; overdose =
+cloudy water/surface scum (Selcon: "use less if the water does not clear");
+enrichment media boost Vibrio. **The HUFA boost is transient: DHA falls to
+under HALF within 24 h warm** (Evjemo 1997) and artemia retro-convert DHA→EPA.
+
+**Storage after enrichment** (FAO; BSD): rinse on a 100–125 µm screen, then
+<10 °C holds ≥24 h with <5% HUFA loss, usable 2–3 days. → **Freshness rule for
+the scheduler: enriched batch at room temp = 12 h shelf; refrigerated = 48 h
+(full value first 24 h).** The fridge toggle goes from nice-to-have to the
+thing that makes enrichment worth doing at all.
+
+**Prior art: none.** No app or product models an artemia enrichment stage,
+dose or cold-storage clock. *"First hatchery scheduler with an enrichment
+stage"* is safe wording.
+
+**Defaults these numbers dictate**: separate-vessel flow as the default model
+(Q1); presets = S.presso (split), Easy DHA Selco, Selcon, T-Iso phyto,
+Schizochytrium powder, with the Nanno warning; hobby 12 h single-dose default
+with optional T+10 h split reminder; enriched shelf life 12 h room / 48 h
+fridge wired into the container freshness when the loaded batch was enriched.
+
+### 10.6 Open questions for Reece (the grill)
+
+1. **Cone or separate container?** Do you enrich in the hatching cone (vessel
+   stays busy) or decant into a separate enrichment vessel (cone freed for the
+   next batch, one more visual in the strip)?
+2. **What's your enrichment food** — SELCO-type emulsion, live phyto, both?
+   (Decides the presets and whether doseMlPerL needs per-product defaults.)
+3. **Shelf bottle link**: enrichment product as a tracked bottle on the food
+   shelf with per-enrichment debits — yes?
+4. **Per-batch choice or standing mode?** "Harvest → enrich" offered every
+   harvest, or a global "always enrich" toggle (with per-batch skip)?
+5. **Protocol depth**: hobby single-dose (~1 ml/L, one clock) as the default,
+   with the INVE split-dose (T0 + T10) as an optional extra reminder — enough?
+6. **Chain maths**: include enrichment lead time in next-hatch advice ALWAYS
+   when the standing mode is on, or only while a batch is actually enriching?
+7. **Enrichment-done push** from the minutely tick (like hatch-ready) — assume yes?
+8. **Scope**: build this next (v2.1 of the hatchery), or park it documented?
+
+### 10.7 Staged build (once answers land)
+
+- **E-A**: batch stage model + enrichment config + WS (harvest→enrich,
+  enriched&loaded) + shelf debits + history fields + engine lead-time change.
+- **E-B**: strip visual (enriching state / enrichment container), split-dose
+  reminder, enrichment-done push, freshness rule.
+- **E-C**: species flag + coverage line + demo + docs.
