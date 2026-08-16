@@ -667,6 +667,55 @@ test("the rig blueprint unfolds on demand and walks the settle-and-slug harvest"
   } finally { restore(); }
 });
 
+test("the rig blueprint is live — it follows the hatchery's stage", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._npsRigOpen = true;
+    // Incubating: bubbles on, orange density, the countdown caption.
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    let html = panel._npsTab();
+    assert(html.includes("INCUBATING —"), "incubating caption missing");
+    assert(html.includes("air ON"), "air must run while incubating");
+    // Ready: the lamp lights, the transfer valves go hot, the slug packs.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      state: { status: "ready", hoursElapsed: 24.5, hoursLeft: 0, percent: 100 } });
+    html = panel._npsTab();
+    assert(html.includes("READY —"), "ready caption missing");
+    assert(html.includes("lamp ON at the tip"), "the lamp must light at ready");
+    // Enriching: the soak beaker with its own clock.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      state: { status: "none" },
+      enrichment: { hours: 12, doseMl: 1, productId: "", productName: "Selcon", splitDose: false,
+        sourceVesselId: "v1",
+        state: { status: "enriching", hoursElapsed: 7, hoursLeft: 5, percent: 58, secondDoseDue: false } } });
+    html = panel._npsTab();
+    assert(html.includes("ENRICHING —"), "enriching caption missing");
+    assert(html.includes("% soak"), "the soak beaker is missing");
+    // Nothing running, container holding brine: the ledger speaks.
+    panel._nps.summary.hatchery = v2HatcherySummary({ state: { status: "none" } });
+    html = panel._npsTab();
+    assert(html.includes("LOADED — container 71%"), "the loaded stage must read the real ledger");
+    noPlaceholders(html, "live rig");
+  } finally { restore(); }
+});
+
+test("the walkthrough plays every stage client-side", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._npsRigOpen = true;
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    const stages = panel._npsRigPreviewStages();
+    assert(stages.length >= 6, "the walkthrough should cover the whole cycle");
+    assert(stages.every((s) => s.caption && s.stage), "every stage needs a caption");
+    panel._npsRigPreview = stages[3];
+    const html = panel._npsTab();
+    assert(html.includes("4 · DRAW"), "a running preview must override the live state");
+    assert(panel._npsTab().includes("■ Stop"), "the play button must become a stop button");
+  } finally { restore(); }
+});
+
 test("settings carry the enrichment block", async () => {
   const restore = freezeTime(NOW);
   try {

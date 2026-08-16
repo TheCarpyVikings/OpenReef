@@ -1733,8 +1733,13 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
       if (action === "nps-rig-toggle") {
         this._npsRigOpen = !this._npsRigOpen;
+        if (!this._npsRigOpen) {
+          if (this._npsRigTimer) { clearTimeout(this._npsRigTimer); this._npsRigTimer = null; }
+          this._npsRigPreview = null;
+        }
         this._render();
       }
+      if (action === "nps-rig-play") this._npsRigPlay();
       if (action === "nps-add-vessel") {
         const hatchery = (this._config.nps = this._config.nps || {}).hatchery
           = this._config.nps.hatchery || {};
@@ -9734,22 +9739,114 @@ class OpenReefPanel extends HTMLElement {
     return "";
   }
 
+  // What the rig is doing RIGHT NOW, mapped from the same summary the strip
+  // uses. A running preview (the ▶ walkthrough) overrides it client-side.
+  _npsRigState() {
+    if (this._npsRigPreview) return this._npsRigPreview;
+    const hatch = this._nps?.summary?.hatchery || {};
+    const hs = hatch.state || {};
+    const es = hatch.enrichment?.state || {};
+    const res = hatch.reservoir || {};
+    const pct = (v) => Math.max(0, Math.min(100, Number(v) || 0));
+    const containerPct = Number(res.volumeMl) > 0
+      ? pct(100 * (Number(res.remainingMl) || 0) / Number(res.volumeMl)) : 0;
+    const base = {
+      hatchPct: pct(hs.percent), enrichPct: null,
+      containerPct, containerFresh: res.freshness?.status || "",
+      airOn: false, lampOn: false, transferHot: false,
+      slugPacked: false, syringeFull: false, caption: "",
+    };
+    if (es.status && es.status !== "none") {
+      return { ...base, stage: "enrich", enrichPct: pct(es.percent),
+        lampOn: false,
+        caption: es.status === "enriching"
+          ? `ENRICHING — ${es.hoursLeft} h of soak left`
+          : "ENRICHMENT DONE — rinse & load" };
+    }
+    if (hs.status === "ready" || hs.status === "overdue") {
+      return { ...base, stage: "ready", hatchPct: 100, lampOn: true,
+        transferHot: true, slugPacked: true, syringeFull: true,
+        caption: "READY — open ① + ② to transfer · air off · lamp at the tip · draw the slug" };
+    }
+    if (hs.status === "incubating") {
+      return { ...base, stage: "incubating", airOn: true,
+        caption: `INCUBATING — ${hs.hoursElapsed} h in · ~${hs.hoursLeft} h to go` };
+    }
+    if (containerPct > 0) {
+      return { ...base, stage: "loaded",
+        caption: `LOADED — container ${Math.round(containerPct)}%${base.containerFresh ? ` · ${base.containerFresh}` : ""}` };
+    }
+    return { ...base, stage: "idle", caption: "IDLE — start a hatch and the rig comes alive" };
+  }
+
+  // The ▶ walkthrough: every stage of the cycle in ~25 s, client-side only.
+  _npsRigPreviewStages() {
+    const base = { hatchPct: 0, enrichPct: null, containerPct: 20, containerFresh: "aging",
+      airOn: false, lampOn: false, transferHot: false, slugPacked: false, syringeFull: false };
+    return [
+      { ...base, stage: "incubating", airOn: true, hatchPct: 62,
+        caption: "1 · INCUBATING — cysts in, bubbles on, the clock runs" },
+      { ...base, stage: "ready", hatchPct: 100, transferHot: true,
+        caption: "2 · HATCHED — open ① + ② · nauplii transfer down, shells stay behind" },
+      { ...base, stage: "settle", hatchPct: 100, lampOn: true, slugPacked: true,
+        caption: "3 · SETTLE — air off 10 min, lamp at the tip, the slug packs" },
+      { ...base, stage: "draw", hatchPct: 100, lampOn: true, slugPacked: true, syringeFull: true,
+        caption: "4 · DRAW — first pull (crud) to waste, then the slug, slowly" },
+      { ...base, stage: "enrich", enrichPct: 60,
+        caption: "5 · ENRICH (optional) — the 12 h Selcon soak" },
+      { ...base, stage: "loaded", containerPct: 100, containerFresh: "fresh",
+        caption: "6 · LOADED — top to full with tank-salinity water · tap Hatched & loaded" },
+    ];
+  }
+
+  _npsRigPlay() {
+    if (this._npsRigTimer) { clearTimeout(this._npsRigTimer); this._npsRigTimer = null; }
+    if (this._npsRigPreview) {          // second tap stops the walkthrough
+      this._npsRigPreview = null;
+      this._render();
+      return;
+    }
+    const stages = this._npsRigPreviewStages();
+    const step = (i) => {
+      if (i >= stages.length) {
+        this._npsRigPreview = null;
+        this._npsRigTimer = null;
+        this._render();
+        return;
+      }
+      this._npsRigPreview = stages[i];
+      this._render();
+      this._npsRigTimer = setTimeout(() => step(i + 1), 4200);
+    };
+    step(0);
+  }
+
   // The DIY rig blueprint (Reece's staggered two-vessel hatchery + the
-  // settle-and-slug harvest assembly). Instructional, static — the strip above
-  // carries the live state. Inline attributes only: a <style> inside the SVG
-  // would leak into the whole shadow tree.
-  _npsHatchRigSvg() {
-    const valve = (x, y) => `<polygon points="${x - 8},${y - 8} ${x - 8},${y + 8} ${x + 8},${y}" fill="#131c24" stroke="#cfd8dc" stroke-width="2"></polygon><polygon points="${x + 8},${y - 8} ${x + 8},${y + 8} ${x - 8},${y}" fill="#131c24" stroke="#cfd8dc" stroke-width="2"></polygon>`;
+  // settle-and-slug harvest assembly), LIVE: bound to the current stage —
+  // bubbles while incubating, lamp + packed slug at ready, the soak beaker
+  // while enriching, the container straight from the ledger. Inline
+  // attributes only: a <style> inside the SVG would leak into the shadow tree.
+  _npsHatchRigSvg(rig) {
+    rig = rig || this._npsRigState();
+    const hot = (on) => (on ? "#f5a524" : "#cfd8dc");
+    const valve = (x, y, isHot) => `<polygon points="${x - 8},${y - 8} ${x - 8},${y + 8} ${x + 8},${y}" fill="#131c24" stroke="${hot(isHot)}" stroke-width="2"></polygon><polygon points="${x + 8},${y - 8} ${x + 8},${y + 8} ${x - 8},${y}" fill="#131c24" stroke="${hot(isHot)}" stroke-width="2"></polygon>`;
     const badge = (x, y, n) => `<circle cx="${x}" cy="${y}" r="11" fill="none" stroke="#ef6c00" stroke-width="1.5"></circle><text x="${x}" y="${y + 4}" text-anchor="middle" font-size="12" fill="#ef6c00" font-family="monospace">${n}</text>`;
     const sm = (x, y, text, anchor = "start", fill = "#8798a4") => `<text x="${x}" y="${y}" text-anchor="${anchor}" font-size="11" fill="${fill}" font-family="monospace">${text}</text>`;
     const pipe = (d) => `<path d="${d}" fill="none" stroke="#546e7a" stroke-width="3" stroke-linejoin="round"></path>`;
     return `
-      <svg viewBox="0 0 940 760" style="width:100%;max-width:760px;display:block;margin:0 auto;" role="img" aria-label="Settle and slug rig blueprint">
+      <svg viewBox="0 0 940 760" style="width:100%;max-width:760px;display:block;margin:0 auto;" role="img" aria-label="Settle and slug rig — live">
+        <text x="20" y="34" font-size="13" fill="#ef6c00" font-family="monospace" letter-spacing="0.08em">${this._escape(rig.caption || "")}</text>
         <rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
         <line x1="114" y1="96" x2="206" y2="96" stroke="#37474f" stroke-width="2"></line>
+        ${rig.hatchPct > 0 ? `<polygon points="114,98 206,98 206,240 172,318 148,318 114,240" fill="#ef6c00" opacity="${(0.08 + 0.45 * rig.hatchPct / 100).toFixed(2)}"></polygon>` : ""}
+        ${rig.airOn ? `
+          <circle cx="150" cy="220" r="2.4" fill="#b0bec5" opacity="0.8" class="nps-bub"></circle>
+          <circle cx="168" cy="180" r="1.8" fill="#b0bec5" opacity="0.7" class="nps-bub"></circle>
+          <circle cx="182" cy="250" r="2" fill="#b0bec5" opacity="0.6" class="nps-bub"></circle>` : ""}
+        ${rig.hatchPct > 0 ? `<text x="160" y="58" text-anchor="middle" font-size="11" fill="#ef6c00" font-family="monospace">${Math.round(rig.hatchPct)}%</text>` : ""}
         <circle cx="128" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="146" cy="90" r="2" fill="#8d6e63"></circle>
         <circle cx="168" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="189" cy="90" r="2" fill="#8d6e63"></circle>
-        <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" stroke="#78909c" stroke-width="2.5"></polygon>
+        <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" fill-opacity="0" stroke="#78909c" stroke-width="2.5"></polygon>
         <rect x="146" y="320" width="28" height="14" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
         <text x="160" y="150" text-anchor="middle" transform="rotate(-90 160 150)" font-size="13" fill="#cfd8dc" font-family="monospace">HATCH EGGS</text>
         ${sm(222, 94, "shells float — stay behind")}
@@ -9757,25 +9854,29 @@ class OpenReefPanel extends HTMLElement {
         <text x="422" y="131" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">AIR PUMP</text>
         ${pipe("M 422 152 V 340 H 196 L 176 334")}
         ${pipe("M 422 340 V 430 H 588 L 600 444")}
-        ${sm(432, 250, "air to both cones")}
+        ${rig.airOn ? `<path d="M 422 152 V 340 H 196 L 176 334" fill="none" stroke="#4dd0e1" stroke-width="1.6" class="awc-flow"></path>` : ""}
+        ${sm(432, 250, rig.airOn ? "air ON" : "air off")}
         <rect x="560" y="210" width="100" height="150" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
         <line x1="564" y1="232" x2="656" y2="232" stroke="#37474f" stroke-width="2"></line>
         <polygon points="560,360 660,360 622,440 598,440" fill="#101a22" stroke="#78909c" stroke-width="2.5"></polygon>
-        <polygon points="588,412 632,412 622,436 598,436" fill="#ef6c00" opacity="0.75"></polygon>
-        <circle cx="606" cy="438" r="1.8" fill="#4e342e"></circle><circle cx="617" cy="438" r="1.8" fill="#4e342e"></circle>
+        ${rig.slugPacked ? `<polygon points="588,412 632,412 622,436 598,436" fill="#ef6c00" opacity="0.85"></polygon>
+        <circle cx="606" cy="438" r="1.8" fill="#4e342e"></circle><circle cx="617" cy="438" r="1.8" fill="#4e342e"></circle>` : ""}
         <rect x="596" y="440" width="28" height="12" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
         <text x="610" y="292" text-anchor="middle" transform="rotate(-90 610 292)" font-size="13" fill="#cfd8dc" font-family="monospace">LIVE BRINE</text>
-        ${sm(548, 404, "slug packs here →", "end")}
-        ${sm(548, 452, "tip crud (sinks) →", "end")}
-        <rect x="716" y="420" width="34" height="20" rx="4" fill="#131c24" stroke="#f5a524" stroke-width="2"></rect>
-        <line x1="712" y1="424" x2="668" y2="428" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
-        <line x1="712" y1="430" x2="664" y2="436" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
-        <line x1="712" y1="436" x2="668" y2="444" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
-        ${sm(756, 434, "lamp at the tip")}${sm(756, 448, "(air OFF · room dim)")}
+        ${rig.slugPacked ? `${sm(548, 404, "slug packs here →", "end")}${sm(548, 452, "tip crud (sinks) →", "end")}` : ""}
+        <g opacity="${rig.lampOn ? "1" : "0.35"}">
+          <rect x="716" y="420" width="34" height="20" rx="4" fill="#131c24" stroke="#f5a524" stroke-width="2"></rect>
+          ${rig.lampOn ? `
+          <line x1="712" y1="424" x2="668" y2="428" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
+          <line x1="712" y1="430" x2="664" y2="436" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
+          <line x1="712" y1="436" x2="668" y2="444" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>` : ""}
+        </g>
+        ${sm(756, 434, rig.lampOn ? "lamp ON at the tip" : "lamp at the tip")}${sm(756, 448, "(air OFF · room dim)")}
         ${pipe("M 146 328 H 70 V 600 H 700 V 466")}
-        ${valve(104, 328)}<text x="104" y="308" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">①</text>
+        ${rig.transferHot ? `<path d="M 146 328 H 70 V 600 H 700 V 466" fill="none" stroke="#ef6c00" stroke-width="2" class="awc-flow"></path>` : ""}
+        ${valve(104, 328, rig.transferHot)}<text x="104" y="308" text-anchor="middle" font-size="13" fill="${hot(rig.transferHot)}" font-family="monospace">①</text>
         ${pipe("M 624 452 H 700 V 466")}
-        ${valve(664, 452)}<text x="664" y="482" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">②</text>
+        ${valve(664, 452, rig.transferHot)}<text x="664" y="482" text-anchor="middle" font-size="13" fill="${hot(rig.transferHot)}" font-family="monospace">②</text>
         ${sm(240, 592, "equalisation transfer (valves ① + ②)")}
         ${pipe("M 380 600 V 632")}
         ${valve(380, 614)}<text x="402" y="620" font-size="13" fill="#cfd8dc" font-family="monospace">③</text>
@@ -9786,7 +9887,7 @@ class OpenReefPanel extends HTMLElement {
         ${pipe("M 610 504 V 512")}
         <polygon points="604,512 616,512 620,520 600,520" fill="#101a22" stroke="#42a5f5" stroke-width="2"></polygon>
         <rect x="588" y="520" width="44" height="96" rx="5" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
-        <rect x="591" y="556" width="38" height="32" rx="3" fill="#ef6c00" opacity="0.8"></rect>
+        ${rig.syringeFull ? `<rect x="591" y="556" width="38" height="32" rx="3" fill="#ef6c00" opacity="0.85"></rect>` : ""}
         <line x1="588" y1="536" x2="596" y2="536" stroke="#42a5f5" stroke-width="1.3"></line>
         <line x1="588" y1="552" x2="596" y2="552" stroke="#42a5f5" stroke-width="1.3"></line>
         <line x1="588" y1="568" x2="596" y2="568" stroke="#42a5f5" stroke-width="1.3"></line>
@@ -9801,10 +9902,19 @@ class OpenReefPanel extends HTMLElement {
         <path d="M 616 648 Q 660 660 692 666" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
         <polygon points="466,668 530,668 522,706 474,706" fill="#101a22" stroke="#8d6e63" stroke-width="2.2"></polygon>
         ${sm(498, 692, "waste", "middle", "#8d6e63")}${sm(498, 662, "1st draw — tip crud", "middle")}
-        <rect x="686" y="664" width="66" height="48" rx="6" fill="#101a22" stroke="#26a69a" stroke-width="2.2"></rect>
-        <rect x="690" y="684" width="58" height="24" rx="4" fill="#8d6e63" opacity="0.6"></rect>
+        <rect x="686" y="664" width="66" height="48" rx="6" fill="#101a22" stroke="${
+          rig.containerFresh === "stale" ? "#e5484d"
+            : rig.containerFresh === "aging" ? "#f5a524"
+              : rig.containerFresh === "fresh" ? "#26a69a" : "#546e7a"}" stroke-width="2.2"></rect>
+        ${rig.containerPct > 0 ? `<rect x="690" y="${Math.round(708 - 40 * rig.containerPct / 100)}" width="58" height="${Math.round(40 * rig.containerPct / 100)}" rx="4" fill="#8d6e63" opacity="0.7" style="transition:y .4s ease,height .4s ease;"></rect>` : ""}
+        ${rig.containerPct > 0 ? `<text x="719" y="680" text-anchor="middle" font-size="10" fill="#cfd8dc" font-family="monospace">${Math.round(rig.containerPct)}%</text>` : ""}
         ${sm(719, 658, "2nd draw — the slug", "middle")}
         ${sm(719, 728, "brine container → top up · tap Hatched &amp; loaded", "middle", "#26a69a")}
+        ${rig.enrichPct != null ? `
+        <path d="M 800 520 V 544 L 786 596 A 9 9 0 0 0 795 606 H 833 A 9 9 0 0 0 842 596 L 828 544 V 520" fill="#101a22" stroke="#7e57c2" stroke-width="2.2" stroke-linejoin="round"></path>
+        <path d="M 791 ${Math.round(600 - 44 * rig.enrichPct / 100)} H 837 L 833 600 H 795 Z" fill="#8d6e63" opacity="0.55"></path>
+        <text x="814" y="514" text-anchor="middle" font-size="11" fill="#7e57c2" font-family="monospace">ENRICH</text>
+        <text x="814" y="622" text-anchor="middle" font-size="10" fill="#90a4ae" font-family="monospace">${Math.round(rig.enrichPct)}% soak</text>` : ""}
         ${badge(686, 222, 1)}${badge(700, 404, 2)}${badge(556, 490, 3)}${badge(556, 560, 4)}
         ${badge(556, 630, 5)}${badge(770, 688, 6)}${badge(424, 614, 7)}
       </svg>`;
@@ -11014,7 +11124,10 @@ class OpenReefPanel extends HTMLElement {
     ];
     const rigPanel = this._npsRigOpen ? `
       <div class="stack" style="gap:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
-        <small class="muted">Settle &amp; slug — the staggered two-vessel rig with the sieve-free harvest. Blue parts are the upgrade: a tee under the live-brine cone, a 100 ml luer-lock syringe below valve Ⓐ (chamber, bottom valve and transfer vessel in one), and a lamp doing the filtering. The same syringe target-feeds from the container — the graduations make the "Fed X ml" log exact.</small>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <small class="muted" style="flex:1;min-width:260px;">Settle &amp; slug — the staggered two-vessel rig with the sieve-free harvest, LIVE: the drawing follows whatever stage the hatchery is in. Blue parts are the upgrade: a tee under the live-brine cone, a 100 ml luer-lock syringe below valve Ⓐ, and a lamp doing the filtering.</small>
+          <button class="secondary compact-button" data-action="nps-rig-play">${this._npsRigPreview ? "■ Stop" : "▶ Play the stages"}</button>
+        </div>
         ${this._npsHatchRigSvg()}
         <div class="grid two compact">
           ${rigSteps.map(([title, detail], i) => `<small><strong>${i + 1}. ${title}</strong> — ${detail}</small>`).join("")}
