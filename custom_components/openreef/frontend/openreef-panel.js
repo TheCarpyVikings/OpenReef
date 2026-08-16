@@ -1731,6 +1731,10 @@ class OpenReefPanel extends HTMLElement {
         }
       }
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
+      if (action === "nps-rig-toggle") {
+        this._npsRigOpen = !this._npsRigOpen;
+        this._render();
+      }
       if (action === "nps-add-vessel") {
         const hatchery = (this._config.nps = this._config.nps || {}).hatchery
           = this._config.nps.hatchery || {};
@@ -9730,6 +9734,74 @@ class OpenReefPanel extends HTMLElement {
     return "";
   }
 
+  // The DIY rig blueprint (Reece's staggered two-vessel hatchery + the
+  // settle-and-slug harvest assembly). Instructional, static — the strip above
+  // carries the live state. Inline attributes only: a <style> inside the SVG
+  // would leak into the whole shadow tree.
+  _npsHatchRigSvg() {
+    const valve = (x, y) => `<polygon points="${x - 8},${y - 8} ${x - 8},${y + 8} ${x + 8},${y}" fill="#131c24" stroke="#cfd8dc" stroke-width="2"></polygon><polygon points="${x + 8},${y - 8} ${x + 8},${y + 8} ${x - 8},${y}" fill="#131c24" stroke="#cfd8dc" stroke-width="2"></polygon>`;
+    const badge = (x, y, n) => `<circle cx="${x}" cy="${y}" r="11" fill="none" stroke="#ef6c00" stroke-width="1.5"></circle><text x="${x}" y="${y + 4}" text-anchor="middle" font-size="12" fill="#ef6c00" font-family="monospace">${n}</text>`;
+    const sm = (x, y, text, anchor = "start", fill = "#8798a4") => `<text x="${x}" y="${y}" text-anchor="${anchor}" font-size="11" fill="${fill}" font-family="monospace">${text}</text>`;
+    const pipe = (d) => `<path d="${d}" fill="none" stroke="#546e7a" stroke-width="3" stroke-linejoin="round"></path>`;
+    return `
+      <svg viewBox="0 0 940 700" style="width:100%;max-width:760px;display:block;margin:0 auto;" role="img" aria-label="Settle and slug rig blueprint">
+        <rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+        <line x1="114" y1="96" x2="206" y2="96" stroke="#37474f" stroke-width="2"></line>
+        <circle cx="128" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="146" cy="90" r="2" fill="#8d6e63"></circle>
+        <circle cx="168" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="189" cy="90" r="2" fill="#8d6e63"></circle>
+        <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" stroke="#78909c" stroke-width="2.5"></polygon>
+        <rect x="146" y="320" width="28" height="14" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+        <text x="160" y="150" text-anchor="middle" transform="rotate(-90 160 150)" font-size="13" fill="#cfd8dc" font-family="monospace">HATCH EGGS</text>
+        ${sm(222, 94, "shells float — stay behind")}
+        <rect x="380" y="100" width="84" height="52" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+        <text x="422" y="131" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">AIR PUMP</text>
+        ${pipe("M 422 152 V 340 H 196 L 176 334")}
+        ${pipe("M 422 340 V 430 H 588 L 600 444")}
+        ${sm(432, 250, "air to both cones")}
+        <rect x="560" y="210" width="100" height="150" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+        <line x1="564" y1="232" x2="656" y2="232" stroke="#37474f" stroke-width="2"></line>
+        <polygon points="560,360 660,360 622,440 598,440" fill="#101a22" stroke="#78909c" stroke-width="2.5"></polygon>
+        <polygon points="588,412 632,412 622,436 598,436" fill="#ef6c00" opacity="0.75"></polygon>
+        <circle cx="606" cy="438" r="1.8" fill="#4e342e"></circle><circle cx="617" cy="438" r="1.8" fill="#4e342e"></circle>
+        <rect x="596" y="440" width="28" height="12" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+        <text x="610" y="292" text-anchor="middle" transform="rotate(-90 610 292)" font-size="13" fill="#cfd8dc" font-family="monospace">LIVE BRINE</text>
+        ${sm(548, 404, "slug packs here →", "end")}
+        ${sm(548, 452, "tip crud (sinks) →", "end")}
+        <rect x="716" y="420" width="34" height="20" rx="4" fill="#131c24" stroke="#f5a524" stroke-width="2"></rect>
+        <line x1="712" y1="424" x2="668" y2="428" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
+        <line x1="712" y1="430" x2="664" y2="436" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
+        <line x1="712" y1="436" x2="668" y2="444" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
+        ${sm(756, 434, "lamp at the tip")}${sm(756, 448, "(air OFF · room dim)")}
+        ${pipe("M 146 328 H 70 V 600 H 700 V 466")}
+        ${valve(104, 328)}<text x="104" y="308" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">①</text>
+        ${pipe("M 624 452 H 700 V 466")}
+        ${valve(664, 452)}<text x="664" y="482" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">②</text>
+        ${sm(240, 592, "equalisation transfer (valves ① + ②)")}
+        ${pipe("M 380 600 V 632")}
+        ${valve(380, 614)}<text x="402" y="620" font-size="13" fill="#cfd8dc" font-family="monospace">③</text>
+        ${sm(402, 636, "drain spent water → waste (never the tank)")}
+        ${pipe("M 610 452 V 476")}
+        ${valve(610, 486)}<text x="586" y="490" text-anchor="end" font-size="13" fill="#cfd8dc" font-family="monospace">Ⓐ</text>
+        ${pipe("M 610 494 V 500")}
+        <rect x="592" y="500" width="36" height="58" rx="6" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
+        <rect x="595" y="528" width="30" height="27" rx="4" fill="#ef6c00" opacity="0.8"></rect>
+        ${sm(636, 524, "clear slug chamber")}${sm(636, 538, "~100 ml between valves")}
+        ${pipe("M 610 558 V 574")}
+        ${valve(610, 584)}<text x="586" y="588" text-anchor="end" font-size="13" fill="#cfd8dc" font-family="monospace">Ⓑ</text>
+        ${pipe("M 610 592 V 612")}
+        <path d="M 606 616 Q 560 636 528 648" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
+        <path d="M 614 616 Q 660 636 692 648" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
+        <polygon points="466,652 530,652 522,694 474,694" fill="#101a22" stroke="#8d6e63" stroke-width="2.2"></polygon>
+        ${sm(498, 676, "waste", "middle", "#8d6e63")}${sm(498, 646, "1st fill — tip crud", "middle")}
+        <rect x="686" y="648" width="66" height="48" rx="6" fill="#101a22" stroke="#26a69a" stroke-width="2.2"></rect>
+        <rect x="690" y="668" width="58" height="24" rx="4" fill="#8d6e63" opacity="0.6"></rect>
+        ${sm(719, 642, "2nd fill — the slug", "middle")}
+        ${sm(719, 712, "brine container → top up · tap Hatched &amp; loaded", "middle", "#26a69a")}
+        ${badge(686, 222, 1)}${badge(700, 404, 2)}${badge(556, 486, 3)}${badge(556, 530, 4)}
+        ${badge(556, 584, 5)}${badge(770, 672, 6)}${badge(424, 614, 7)}
+      </svg>`;
+  }
+
   // The enrichment vessel: a beaker mid-soak — oily swirl, bubbles, % of the
   // soak done. Only drawn while a batch is actually enriching.
   _npsEnrichVesselSvg(state) {
@@ -10921,11 +10993,33 @@ class OpenReefPanel extends HTMLElement {
     const enrichedShelfLine = reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
       ? `🧪 Enriched load — feed it out within ${this._escape(String(reservoirSum.shelfHours ?? 12))} h${reservoirSum.refrigerated ? " (fridged)" : " at room temp"}; the HUFA boost halves within a day warm.`
       : "";
+    // The DIY rig blueprint (settle & slug) — collapsed by default; the page
+    // stays informative, the how-to unfolds on demand.
+    const rigSteps = [
+      ["Air off, ~10 min", "shells float off; cysts and crud sink to the tip."],
+      ["Lamp at the cone tip, ~5 min", "room dim — the nauplii pack into a dense orange band."],
+      ["First chamber fill = tip crud", "Ⓐ open for the bottom ~20 ml, then Ⓑ → waste."],
+      ["Second fill = the slug", "open Ⓐ, close when the orange thins."],
+      ["Hand off", "Ⓑ into the brine container — a fixed ~100 ml every time."],
+      ["Top to full with tank-salinity water", "≈7× dilution is the rinse — then tap \"Hatched &amp; loaded\"."],
+      ["Drain vessel 2 via ③ to waste", "hatch water never feeds the tank."],
+    ];
+    const rigPanel = this._npsRigOpen ? `
+      <div class="stack" style="gap:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
+        <small class="muted">Settle &amp; slug — the staggered two-vessel rig with the sieve-free harvest. Blue parts are the upgrade: a tee under the live-brine cone, a ~100 ml clear chamber between two valves, and a lamp doing the filtering.</small>
+        ${this._npsHatchRigSvg()}
+        <div class="grid two compact">
+          ${rigSteps.map(([title, detail], i) => `<small><strong>${i + 1}. ${title}</strong> — ${detail}</small>`).join("")}
+        </div>
+      </div>` : "";
     const hatcheryPanel = `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
           <p class="eyebrow" style="margin:0;">Hatchery</p>
-          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Hatch settings</button>
+          <div class="button-row">
+            <button class="secondary compact-button" data-action="nps-rig-toggle">${this._npsRigOpen ? "Hide rig blueprint" : "Rig blueprint"}</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Hatch settings</button>
+          </div>
         </div>
         <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
           <div style="display:flex;gap:14px;flex-wrap:wrap;">${vesselTiles}${enrichTile}</div>
@@ -10941,6 +11035,7 @@ class OpenReefPanel extends HTMLElement {
             <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
           </div>
         </div>
+        ${rigPanel}
       </article>`;
 
     return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${this._npsStatusCards()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}</section>`;
