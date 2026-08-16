@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.60"
+INTEGRATION_VERSION = "0.7.61"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -263,6 +263,7 @@ MAINTENANCE_SOURCE_AWC = "awc"
 MAINTENANCE_SOURCE_HATCHERY = "hatchery"
 MAINTENANCE_HATCH_START_TASK_ID = "brine_hatch_start"
 MAINTENANCE_HATCH_HARVEST_TASK_ID = "brine_hatch_harvest"
+MAINTENANCE_HAND_FEED_TASK_ID = "brine_hand_feed"
 
 # Maintenance Tasks V2 — HA-native reminders. A single daily tick (at this local
 # time) re-evaluates due/overdue tasks and fires an in-HA persistent notification

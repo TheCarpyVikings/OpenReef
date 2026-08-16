@@ -375,7 +375,14 @@ timing, rotation management). Claim available: *"the first hatchery scheduler
 for home aquariums"* — wording stays clear of the industrial patents (we
 schedule and advise; we don't robotically harvest).
 
-### 9.7 Open questions for Reece (the grill)
+### 9.7 Open questions for Reece (the grill) · **ANSWERED 2026-08-16 — decisions LOCKED**
+
+> 1. loadVolumeMl per-setup, **default top-to-full**. 2. Stale-first is a **HARD
+> GATE** (discard unlocks load). 3. **Cap 4 vessels, ONE global egg type**.
+> 4. Hand-feed: **both** — one-tap "Fed X ml" AND scheduled hand-feed reminders.
+> 5. Cyst tin: **later** (not v2). 6. Learned hatch times: **v2**. 7. Temperature
+> link: **v2**. 8. Hour-precise hatch-ready push: **yes**. 9. Hand-doser brine
+> station in the main diagram: **yes**.
 
 1. **Load volume physics**: when you tap "Hatched & loaded", what actually lands
    in the container — top it up to FULL with fresh tank-salinity water, a fixed

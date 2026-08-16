@@ -262,6 +262,95 @@ def hatch_state(started_iso: Any, hatch_hours: float, now: datetime) -> dict[str
 # the next-start maths leaves this much slack on top of the incubation hours.
 HATCH_HARVEST_BUFFER_H = 1.0
 
+# Hatchery v2 (doc §9): vessel cap, dosing-density guide (research §9.6 — 2 g/L
+# is the documented optimum, >2 reduces hatch-out), and the temperature rule of
+# thumb (28 °C is the sweet spot; each degree cooler stretches the clock ~8%,
+# capped where the sources run out of data).
+HATCH_VESSEL_CAP = 4
+HATCH_CYST_G_PER_L = 2.0
+HATCH_TEMP_OPTIMUM_C = 28.0
+HATCH_HISTORY_MAX = 50
+
+# Fridge storage nearly stops nauplii metabolism: 24 h shelf life at room temp,
+# 48 h refrigerated (sources span 24 h conservative to 2–3 days survival; we
+# take the nutritional middle).
+BRINE_SHELF_H_ROOM = 24.0
+BRINE_SHELF_H_FRIDGE = 48.0
+
+# Named vessel presets for the volume picker (product → working water volume).
+# Research note: the Ziss line is ZH-700 / ZH-2000 — there is no ZH-1000.
+HATCH_VESSEL_PRESETS: tuple[dict[str, Any], ...] = (
+    {"id": "ziss_zh700", "name": "Ziss ZH-700", "volumeL": 0.7},
+    {"id": "ziss_zh2000", "name": "Ziss ZH-2000", "volumeL": 2.0},
+    {"id": "hobby_breeder", "name": "Hobby Artemia Breeder", "volumeL": 0.47},
+    {"id": "jbl_artemio", "name": "JBL ArtemioSet", "volumeL": 0.5},
+    {"id": "soda_bottle", "name": "2 L bottle rig", "volumeL": 1.6},
+)
+
+
+def expected_hatch_hours(base_hours: Any, temp_c: Any) -> dict[str, Any]:
+    """Advisory only — never moves the real clock. At 28 °C the configured
+    hours stand; each degree cooler stretches them ~8% (research: 24 h at 28 °C
+    becomes ~36 h at 21 °C, 36–48 h at 20 °C), clamped at 2.2×. Warmer than
+    optimum is not rewarded — above ~30 °C hatch quality drops, so we flag it
+    instead of promising speed."""
+    base = _f(base_hours)
+    if base <= 0:
+        base = 24.0
+    temp = _f(temp_c, -999.0)
+    if temp < -50 or temp > 60:
+        return {"available": False, "expectedHours": None, "factor": None, "warm": False}
+    factor = 1.0 + max(0.0, (HATCH_TEMP_OPTIMUM_C - temp)) * 0.08
+    factor = min(factor, 2.2)
+    return {"available": True,
+            "expectedHours": round(base * factor, 1),
+            "factor": round(factor, 2),
+            "warm": temp > 30.0}
+
+
+def learned_hatch_hours(history: Any, egg_type: str) -> dict[str, Any]:
+    """Rolling average of the last three ACTUAL hatch durations for this egg
+    type (early harvests included — that's the point). Needs two samples before
+    it says anything; advisory-with-Apply like every other suggestion."""
+    if not isinstance(history, list):
+        return {"available": False, "hours": None, "samples": 0}
+    actuals = [
+        _f(item.get("actualHours"))
+        for item in history
+        if isinstance(item, dict) and item.get("eggType") == egg_type
+        and _f(item.get("actualHours")) > 0
+    ]
+    actuals = actuals[:3]
+    if len(actuals) < 2:
+        return {"available": False, "hours": None, "samples": len(actuals)}
+    return {"available": True,
+            "hours": round(sum(actuals) / len(actuals), 1),
+            "samples": len(actuals)}
+
+
+def vessels_needed(hatch_hours: Any, shelf_hours: Any) -> int:
+    """Continuous supply needs ceil(lead / shelf) staggered vessels — the
+    documented two-vessel 12–24 h rotation falls straight out of this."""
+    hours = _f(hatch_hours)
+    if hours <= 0:
+        hours = 24.0
+    shelf = _f(shelf_hours)
+    if shelf <= 0:
+        shelf = 24.0
+    lead = hours + HATCH_HARVEST_BUFFER_H
+    return max(1, int(-(-lead // shelf)))
+
+
+def cyst_dose_guide(volume_l: Any) -> dict[str, Any]:
+    """The card's dosing hint: grams at the 2 g/L optimum, and the rough
+    nauplii count at premium (90%-grade GSL ≈ 225k/g) yield."""
+    volume = _f(volume_l)
+    if volume <= 0:
+        return {"available": False, "grams": None, "nauplii": None}
+    grams = round(volume * HATCH_CYST_G_PER_L, 1)
+    return {"available": True, "grams": grams,
+            "nauplii": int(grams * 225000)}
+
 
 def next_hatch_suggestion(
     now: datetime,
@@ -288,6 +377,12 @@ def next_hatch_suggestion(
     start plus the shelf life). ``overlap`` flags the structural case where the
     hatch takes longer than the brine stays fresh, so batches must overlap and
     "wait" can never be the answer.
+
+    ``started_iso`` accepts one stamp or a LIST of them (hatchery v2: several
+    vessels can incubate at once). The chain anchors on the LATEST start —
+    every load resets the container's clock, so the last batch to land is the
+    one whose fade the next start must beat. ``busyCount`` reports how many
+    batches are on the go.
     """
     hours = _f(hatch_hours)
     if hours <= 0:
@@ -296,11 +391,14 @@ def next_hatch_suggestion(
     if shelf_h <= 0:
         shelf_h = 24.0
     lead_h = hours + HATCH_HARVEST_BUFFER_H
+    starts = started_iso if isinstance(started_iso, (list, tuple)) else [started_iso]
+    running = [p for p in (_parse_iso(s) for s in starts) if p is not None]
     base: dict[str, Any] = {
         "status": "no_brine", "startAt": None, "hoursUntil": None,
         "readyBy": None, "driver": None,
         "hatchHours": round(hours, 1), "shelfHours": round(shelf_h, 1),
         "overlap": shelf_h < lead_h,
+        "busyCount": len(running),
     }
 
     def _finish(status: str, start_at: datetime | None, ready_by: datetime | None,
@@ -315,7 +413,7 @@ def next_hatch_suggestion(
             out["hoursUntil"] = round(max(0.0, (start_at - now).total_seconds() / 3600.0), 1)
         return out
 
-    started = _parse_iso(started_iso)
+    started = max(running) if running else None
     if started is not None:
         # A batch is incubating (or sitting ready): the next start keeps the
         # chain unbroken. It loads at start + hours (+ buffer), fades shelf_h

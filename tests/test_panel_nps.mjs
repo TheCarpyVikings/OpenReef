@@ -397,14 +397,14 @@ test("the hatchery card walks its lifecycle: empty, incubating, ready, overdue",
     let html = withHatch({ status: "none" });
     assert(html.includes("Start hatch"), "empty hatchery missing its start button");
     html = withHatch({ status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 });
-    assert(html.includes("9 h to go"), "incubating countdown missing");
-    assert(html.includes("Cancel hatch"), "incubating missing cancel");
+    assert(html.includes("15 / 24 h"), "incubating countdown missing");
+    assert(html.includes("Harvest now"), "early harvest must be offered mid-incubation (instar I is the premium harvest)");
+    assert(html.includes(">Cancel<"), "incubating missing cancel");
     assert(html.includes("nps-bub"), "incubating vessel has no bubbles");
     html = withHatch({ status: "ready", hoursElapsed: 24.5, hoursLeft: 0, percent: 100 });
-    assert(html.includes("Ready to harvest"), "ready copy missing");
     assert(html.includes("Hatched &amp; loaded"), "ready missing the harvest button");
     html = withHatch({ status: "overdue", hoursElapsed: 40, hoursLeft: 0, percent: 100 });
-    assert(html.includes("harvest soon"), "overdue nag missing");
+    assert(html.includes("harvest now"), "overdue nag missing");
     noPlaceholders(html, "hatchery card");
     // The hatchery is core NPS — it renders even with the exchange OFF
     // (hatching happens whether or not the matched drain is on).
@@ -493,6 +493,120 @@ test("hand-dosers get the brine clocks and the loaded button without a pump", as
     assert(html.includes('data-action="nps-hatch-loaded"'), "the loaded button must not need a pump");
     assert(html.includes("Hand-dosing mode"), "hand-dose hint missing");
     assert(html.includes("nutritional prime"), "the prime clock should run without a pump");
+  } finally { restore(); }
+});
+
+function v2HatcherySummary(over = {}) {
+  return {
+    eggType: "standard", hatchHours: 24, eggTypes: [],
+    state: { status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 },
+    vessels: [
+      { id: "v1", name: "Hatchery 1", volumeL: 1.0, eggType: "standard", hatchHours: 24,
+        state: { status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 },
+        guide: { available: true, grams: 2.0, nauplii: 450000 } },
+      { id: "v2", name: "Hatchery 2", volumeL: 0.7, eggType: "standard", hatchHours: 24,
+        state: { status: "none", hoursElapsed: null, hoursLeft: null, percent: null },
+        guide: { available: true, grams: 1.4, nauplii: 315000 } },
+    ],
+    idleVessel: "v2", vesselsNeeded: 1,
+    reservoir: { canonical: "hatchery", volumeMl: 1000, remainingMl: 710, loadVolumeMl: 0,
+      refrigerated: true, shelfHours: 48, mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
+      freshness: { status: "fresh", hoursLeft: 43, ageHours: 5 } },
+    handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
+    learned: { available: false, hours: null, samples: 0 },
+    temp: { available: false, expectedHours: null, factor: null, warm: false },
+    vesselPresets: [
+      { id: "ziss_zh700", name: "Ziss ZH-700", volumeL: 0.7 },
+      { id: "ziss_zh2000", name: "Ziss ZH-2000", volumeL: 2.0 },
+    ],
+    nextHatch: { status: "chained", startAt: new Date(Date.parse(NOW) + 18 * 3600000).toISOString(),
+      hoursUntil: 18, readyBy: "", driver: "freshness", hatchHours: 24, shelfHours: 48,
+      overlap: false, busyCount: 1 },
+    ...over,
+  };
+}
+
+test("the v2 strip shows every vessel, the container, and the advisory brains", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      learned: { available: true, hours: 20.0, samples: 3 },
+      temp: { available: true, expectedHours: 36.0, factor: 1.5, warm: false, tempC: 21 },
+      vesselsNeeded: 2,
+    });
+    const html = panel._npsTab();
+    assert(html.includes("Hatchery 1") && html.includes("Hatchery 2"), "every vessel must render");
+    assert(html.includes("data-brine-container"), "the brine container visual is missing");
+    assert(html.includes("710 / 1000 ml"), "the container must show its honest fill");
+    assert(html.includes("Fed 30 ml"), "the one-tap hand-feed button is missing");
+    assert(html.includes("~2 g cysts"), "the cyst-dose guide (2 g/L optimum) is missing");
+    assert(html.includes("Set clock to 20 h"), "the learned-clock Apply is missing");
+    assert(html.includes("expect ~36 h"), "the temperature advisory is missing");
+    assert(!html.includes("needs 2 hatcheries"), "two vessels for a needed-2 setup — no nag");
+    // Down a vessel, the structural advice appears.
+    const short = v2HatcherySummary({ vesselsNeeded: 2 });
+    short.vessels = short.vessels.slice(0, 1);
+    panel._nps.summary.hatchery = short;
+    assert(panel._npsTab().includes("needs 2 hatcheries"), "the structural vessel-count advice is missing");
+    noPlaceholders(html, "v2 hatchery strip");
+  } finally { restore(); }
+});
+
+test("a stale container hard-gates the load with a discard flow", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      reservoir: { canonical: "hatchery", volumeMl: 1000, remainingMl: 400, loadVolumeMl: 0,
+        refrigerated: false, shelfHours: 24,
+        mixedAt: new Date(Date.parse(NOW) - 30 * 3600000).toISOString(),
+        freshness: { status: "stale", hoursLeft: 0, ageHours: 30 } },
+    });
+    const html = panel._npsTab();
+    assert(html.includes("Discard old brine"), "the discard button is missing");
+    assert(html.includes("discard it before loading"), "the hard-gate copy is missing");
+  } finally { restore(); }
+});
+
+test("the hand-fed brine container joins the diagram with no pipework", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.feedExchange.enabled = false;
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    const svg = panel._npsDiagramSvg();
+    assert(svg.includes("npsHandBrine"), "hand-fed container missing from the diagram");
+    assert(svg.includes("hand-fed"), "hand-fed label missing");
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      reservoir: { canonical: "hatchery", volumeMl: 0, remainingMl: 0, loadVolumeMl: 0,
+        refrigerated: false, shelfHours: 24, mixedAt: "", freshness: null } });
+    assert(!panel._npsDiagramSvg().includes("npsHandBrine"),
+      "no container volume configured — nothing to draw");
+  } finally { restore(); }
+});
+
+test("settings carry the vessel editor with the researched presets", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    panel._config.nps.hatchery = {
+      eggType: "standard", hatchHours: 24,
+      vessels: { v1: { name: "Hatchery 1", volumeL: 1, state: {} } },
+      reservoir: { volumeMl: 1000, remainingMl: 710, loadVolumeMl: 0, refrigerated: true },
+      handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
+    };
+    panel._settingsSectionsOpen = { nps: true };
+    let html;
+    try { html = panel._npsSettings(); } catch { html = null; }
+    if (html !== null) {
+      assert(html.includes("Ziss ZH-700"), "vessel presets missing (and remember: no ZH-1000 exists)");
+      assert(html.includes("Add a hatchery"), "the add-vessel button is missing");
+      assert(html.includes('data-scope="nps-hatch-reservoir"'), "container ledger settings missing");
+      assert(html.includes("lives in the fridge"), "the refrigerated toggle is missing");
+      assert(html.includes('data-field="tempEntity"'), "the temp sensor field is missing");
+    }
   } finally { restore(); }
 });
 

@@ -903,6 +903,140 @@ def test_next_hatch_suggestion_chained_while_incubating():
     assert s["hoursUntil"] == 42.0
 
 
+def test_next_hatch_multi_vessel_chains_on_latest():
+    # Two batches running (18 h and 6 h in): every load resets the container's
+    # clock, so the chain anchors on the LATEST start.
+    starts = [_iso(NOW - timedelta(hours=18)), _iso(NOW - timedelta(hours=6))]
+    s = nps.next_hatch_suggestion(NOW, 24, "", 48, None, None, starts)
+    assert s["status"] == "chained" and s["busyCount"] == 2
+    assert s["hoursUntil"] == 42.0    # latest start + 48 h shelf
+
+
+def test_hatchery_v2_pure_helpers():
+    assert nps.vessels_needed(36, 24) == 2      # the documented 2-vessel stagger
+    assert nps.vessels_needed(24, 48) == 1
+    history = [
+        {"eggType": "standard", "actualHours": 20.0},
+        {"eggType": "standard", "actualHours": 21.0},
+        {"eggType": "decapsulated", "actualHours": 14.0},
+        {"eggType": "standard", "actualHours": 19.0},
+    ]
+    learned = nps.learned_hatch_hours(history, "standard")
+    assert learned["available"] and learned["hours"] == 20.0 and learned["samples"] == 3
+    assert not nps.learned_hatch_hours(history, "decapsulated")["available"]  # 1 sample
+    temp = nps.expected_hatch_hours(24, 21)     # 7 °C below optimum
+    assert temp["available"] and temp["factor"] == 1.56
+    assert temp["expectedHours"] == 37.4
+    assert nps.expected_hatch_hours(24, 32)["warm"] is True
+    guide = nps.cyst_dose_guide(1.0)
+    assert guide["grams"] == 2.0 and guide["nauplii"] == 450000
+
+
+def _v2_entry(reservoir=None, vessels=None):
+    entry = _entry({})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = {
+        "hatchHours": 24, "eggType": "standard",
+        "vessels": vessels or {
+            "v1": {"name": "Hatchery 1", "volumeL": 1.0, "state": {}},
+            "v2": {"name": "Hatchery 2", "volumeL": 0.7, "state": {}},
+        },
+        "reservoir": reservoir or {},
+    }
+    return entry
+
+
+def test_ws_hatch_start_picks_idle_vessel_and_refuses_when_all_busy():
+    entry = _v2_entry()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 2}))
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    assert vessels["v1"]["state"]["hatchStartedAt"] and vessels["v2"]["state"]["hatchStartedAt"]
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 3}))
+    assert conn.errors and conn.errors[-1].code == "all_busy"
+
+
+def test_ws_harvest_hard_gate_and_volume_move():
+    # Stale leftovers HARD-block the load (Reece, locked); discard unlocks it,
+    # and the load then tops the container to full (loadVolumeMl 0).
+    stale_mix = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 200, "mixedAt": stale_mix})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+        "eggType": "standard", "hatchHours": 24,
+    }
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 1, "harvested": True}))
+    assert conn.errors and conn.errors[-1].code == "stale_brine"
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    assert vessels["v1"]["state"]["hatchStartedAt"], "a blocked load must not clear the batch"
+    run(integration.websocket_nps_reservoir_discard(hass, conn, {"id": 2}))
+    reservoir = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert reservoir["remainingMl"] == 0 and not reservoir["mixedAt"]
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 3, "harvested": True}))
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert saved["reservoir"]["remainingMl"] == 500     # top-to-full
+    assert saved["reservoir"]["mixedAt"]
+    assert not saved["vessels"]["v1"]["state"]["hatchStartedAt"]
+    assert saved["history"] and saved["history"][0]["vesselId"] == "v1"
+
+
+def test_ws_harvest_fixed_load_volume_clamps():
+    entry = _v2_entry(reservoir={"volumeMl": 1000, "remainingMl": 800,
+                                 "loadVolumeMl": 400,
+                                 "mixedAt": datetime.now(timezone.utc).isoformat()})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 1, "harvested": True}))
+    assert not conn.errors
+    reservoir = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert reservoir["remainingMl"] == 1000    # 800 + 400 clamped at the brim
+
+
+def test_ws_hand_feed_debits_the_container():
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 300,
+                                 "mixedAt": datetime.now(timezone.utc).isoformat()})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["handFeed"] = {"defaultDoseMl": 30, "feedsPerDay": 2}
+    cfg["maintenance"] = {"seeded": True, "enabled": True, "tasks": {
+        "brine_hand_feed": {"label": "Feed live brine", "enabled": True,
+                            "cadenceDays": 1, "cadenceHours": 12}}, "completions": {}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hand_feed(hass, conn, {"id": 1}))
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["hatchery"]["reservoir"]["remainingMl"] == 270   # default dose
+    logged = saved["maintenance"]["completions"].get("brine_hand_feed") or []
+    assert logged and logged[0]["source"] == "hatchery"
+    run(integration.websocket_nps_hand_feed(hass, conn, {"id": 2, "ml": 50}))
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]["remainingMl"] == 220
+
+
+def test_hatch_ready_push_fires_exactly_once():
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+        "eggType": "standard", "hatchHours": 24, "readyNotifiedAt": "",
+    }
+    hass = FakeHass(entries=[entry])
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    pushes = [c for c in hass.services.calls
+              if c.domain == "persistent_notification" and c.service == "create"
+              and "hatch_ready" in (c.data or {}).get("notification_id", "")]
+    assert len(pushes) == 1, "the ready push should fire for the ripe batch"
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"]["readyNotifiedAt"]
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    pushes = [c for c in hass.services.calls
+              if c.domain == "persistent_notification" and c.service == "create"
+              and "hatch_ready" in (c.data or {}).get("notification_id", "")]
+    assert len(pushes) == 1, "a batch must notify exactly once"
+
+
 def test_egg_type_hours_and_normaliser():
     assert nps.egg_type_hours("decapsulated") == 16
     assert nps.egg_type_hours("nonsense") == 24        # unknown → standard
@@ -912,7 +1046,8 @@ def test_egg_type_hours_and_normaliser():
     hatchery = config["nps"]["hatchery"]
     assert hatchery["eggType"] == "standard"
     assert hatchery["hatchHours"] == 48                # clamped
-    assert hatchery["state"]["hatchStartedAt"] == ""
+    # v2: the single clock migrated into vessel v1.
+    assert hatchery["vessels"]["v1"]["state"]["hatchStartedAt"] == ""
 
 
 def test_ws_hatch_start_and_cancel():
@@ -920,10 +1055,13 @@ def test_ws_hatch_start_and_cancel():
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
-    started = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["state"]["hatchStartedAt"]
-    assert started, "hatch start did not stamp the clock"
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    assert vessels["v1"]["state"]["hatchStartedAt"], "hatch start did not stamp the clock"
+    # Per-batch stamps: the batch carries its own egg type + hours (v2).
+    assert vessels["v1"]["state"]["eggType"] == "standard"
+    assert vessels["v1"]["state"]["hatchHours"] == 24
     run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 2}))
-    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["state"]["hatchStartedAt"] == ""
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchStartedAt"] == ""
     assert not conn.errors
 
 
@@ -1037,17 +1175,24 @@ def test_ws_summary_hand_dose_brine_clocks():
 def test_ws_hatch_loaded_stamps_the_hand_dose_clock():
     # Harvested without a pump: loadedAt is stamped, and the overlap case
     # (24 h hatch vs 24 h shelf) re-anchors the start reminder to DUE NOW —
-    # a stale snooze must not suppress it.
-    entry = _hatch_reminder_entry(hatch_hours=24,
-                                  started=_iso(NOW - timedelta(hours=25)))
+    # a stale snooze must not suppress it. Started relative to REAL now: the
+    # handler computes actualHours against the wall clock.
+    entry = _hatch_reminder_entry(
+        hatch_hours=24,
+        started=(datetime.now(timezone.utc) - timedelta(hours=25)).isoformat())
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     before = datetime.now(timezone.utc)
     run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 1, "harvested": True}))
     saved = entry.options[CONF_SETTINGS]
-    loaded = saved["nps"]["hatchery"]["state"]["loadedAt"]
+    # v2: the load stamp lives on the container ledger (reservoir.mixedAt).
+    loaded = saved["nps"]["hatchery"]["reservoir"]["mixedAt"]
     assert loaded and datetime.fromisoformat(loaded) >= before - timedelta(seconds=5)
     assert not saved["maintenance"]["tasks"]["brine_hatch_start"].get("snoozedUntil")
+    # The harvested batch's story landed in the history (learned-clock feed).
+    history = saved["nps"]["hatchery"]["history"]
+    assert history and history[0]["plannedHours"] == 24
+    assert 24.9 < history[0]["actualHours"] < 25.2
 
 
 def test_ws_hatch_loaded_snoozes_start_to_the_smart_time():
