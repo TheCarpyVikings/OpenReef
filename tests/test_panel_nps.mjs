@@ -658,14 +658,13 @@ test("the rig blueprint unfolds on demand and walks the settle-and-slug harvest"
     assert(!html.includes("luer-lock syringe"), "the blueprint must start collapsed");
     panel._npsRigOpen = true;
     html = panel._npsTab();
-    assert(html.includes("luer-lock syringe"), "the syringe is missing from the blueprint");
     assert(html.includes("HATCH EGGS") && html.includes("LIVE BRINE"), "the two staggered vessels are missing");
     assert(html.includes("120 µm mesh"), "the mesh capsule is missing");
-    assert(html.includes("Ⓐ"), "the crud-bleed valve is missing");
-    assert(html.includes("draw SLOWLY"), "the slow-draw warning is missing");
-    assert(html.includes("lamp at the tip"), "the lamp step is missing");
+    assert(html.includes("mesh half OFF"), "the crud-bleed-through-③ step is missing");
+    assert(!html.includes("syringe") && !html.includes("Ⓐ"), "the syringe is retired — Reece bleeds crud via ② + ③");
+    assert(!html.includes("lamp"), "the lamp is retired — the mesh needs no packing");
     assert(html.includes("never the tank"), "the hatch-water rule must be stated");
-    assert(html.includes("5. Mesh drain"), "the numbered harvest steps are missing");
+    assert(html.includes("4. Mesh drain"), "the numbered harvest steps are missing");
     assert(html.includes("the vessel IS the aerated container"), "vessel-2-as-container must be stated");
     noPlaceholders(html, "rig blueprint");
   } finally { restore(); }
@@ -686,7 +685,7 @@ test("the rig blueprint is live — it follows the hatchery's stage", async () =
       state: { status: "ready", hoursElapsed: 24.5, hoursLeft: 0, percent: 100 } });
     html = panel._npsTab();
     assert(html.includes("READY —"), "ready caption missing");
-    assert(html.includes("lamp ON at the tip"), "the lamp must light at ready");
+    assert(html.includes("crud bleed"), "ready must walk the bleed-then-mesh sequence");
     // Enriching: the soak beaker with its own clock.
     panel._nps.summary.hatchery = v2HatcherySummary({
       state: { status: "none" },

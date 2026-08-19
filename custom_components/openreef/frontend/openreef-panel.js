@@ -9758,13 +9758,13 @@ class OpenReefPanel extends HTMLElement {
     const base = {
       hatchPct: pct(hs.percent), enrichPct: null,
       containerPct, containerFresh: res.freshness?.status || "", containerLabel,
-      airOn: false, lampOn: false, transferHot: false, meshHot: false,
-      backflushHot: false, slugPacked: false, syringeFull: false, caption: "",
+      airOn: false, air2On: false, transferHot: false, meshHot: false,
+      backflushHot: false, caption: "",
     };
     if (es.status && es.status !== "none") {
       // In-vessel soak (the mesh flow): the LIVE BRINE vessel is the enrichment
-      // vessel too — the purple ring and % land on it.
-      return { ...base, stage: "enrich", enrichPct: pct(es.percent),
+      // vessel too — purple ring, % on it, air ON (emulsions strip oxygen).
+      return { ...base, stage: "enrich", enrichPct: pct(es.percent), air2On: true,
         caption: es.status === "enriching"
           ? (es.firstDoseDue
             ? "SOAKING — mouths are open: add the Selcon now"
@@ -9774,16 +9774,18 @@ class OpenReefPanel extends HTMLElement {
           : "ENRICHMENT DONE — mesh cycle to rinse, then load" };
     }
     if (hs.status === "ready" || hs.status === "overdue") {
-      return { ...base, stage: "ready", hatchPct: 100, lampOn: true,
-        transferHot: true, meshHot: true, slugPacked: true, syringeFull: true,
-        caption: "READY — transfer ① + ② · settle · bleed the crud · mesh-drain via ③" };
+      return { ...base, stage: "ready", hatchPct: 100,
+        transferHot: true, meshHot: true,
+        caption: "READY — transfer ① + ② · crud bleed (mesh half off) · then mesh-drain via ③" };
     }
     if (hs.status === "incubating") {
-      return { ...base, stage: "incubating", airOn: true,
+      // The real overlap: the hatch cone bubbles for the batch, the vessel
+      // bubbles for whatever brine it is holding.
+      return { ...base, stage: "incubating", airOn: true, air2On: containerPct > 0,
         caption: `INCUBATING — ${hs.hoursElapsed} h in · ~${hs.hoursLeft} h to go` };
     }
     if (containerPct > 0) {
-      return { ...base, stage: "loaded", airOn: true,
+      return { ...base, stage: "loaded", air2On: true,
         caption: `LOADED — container ${Math.round(containerPct)}%${base.containerFresh ? ` · ${base.containerFresh}` : ""}` };
     }
     return { ...base, stage: "idle", caption: "IDLE — start a hatch and the rig comes alive" };
@@ -9792,21 +9794,22 @@ class OpenReefPanel extends HTMLElement {
   // The ▶ walkthrough: every stage of the mesh-flow cycle in ~30 s, client-side only.
   _npsRigPreviewStages() {
     const base = { hatchPct: 0, enrichPct: null, containerPct: 20, containerFresh: "aging",
-      containerLabel: "140 / 700 ml", airOn: false, lampOn: false, transferHot: false,
-      meshHot: false, backflushHot: false, slugPacked: false, syringeFull: false };
+      containerLabel: "140 / 700 ml", airOn: false, air2On: false, transferHot: false,
+      meshHot: false, backflushHot: false };
     return [
-      { ...base, stage: "incubating", airOn: true, hatchPct: 62,
+      { ...base, stage: "incubating", airOn: true, air2On: true, hatchPct: 62,
         caption: "1 · INCUBATING — cysts in, bubbles on, the clock runs" },
-      { ...base, stage: "transfer", hatchPct: 100, transferHot: true,
+      { ...base, stage: "transfer", hatchPct: 100, transferHot: true, containerPct: 60,
+        containerFresh: "", containerLabel: "",
         caption: "2 · TRANSFER — air off · open ① + ② · nauplii ride down, shells stay · close ①" },
-      { ...base, stage: "settle", lampOn: true, slugPacked: true, syringeFull: true,
-        caption: "3 · SETTLE + BLEED — lamp at the tip 10 min · syringe draws the ~20 ml of crud to waste" },
-      { ...base, stage: "mesh", meshHot: true,
+      { ...base, stage: "bleed", meshHot: true, containerPct: 60, containerFresh: "", containerLabel: "",
+        caption: "3 · CRUD BLEED — a few min for the crud to sink · mesh half OFF · crack ② + ③ · ~20 ml to waste · mesh half ON" },
+      { ...base, stage: "mesh", meshHot: true, containerPct: 10, containerFresh: "", containerLabel: "",
         caption: "4 · MESH DRAIN — open ② + ③ part-way · everything through the 120 µm disc · water to waste" },
       { ...base, stage: "backflush", backflushHot: true, containerPct: 100, containerFresh: "fresh",
         containerLabel: "700 / 700 ml",
         caption: "5 · BACKFLUSH — invert the mesh half over the vessel · 700 ml fresh 35 ppt washes them home · air ON · tap Hatched & loaded" },
-      { ...base, stage: "loaded", airOn: true, containerPct: 100, containerFresh: "fresh",
+      { ...base, stage: "loaded", air2On: true, containerPct: 100, containerFresh: "fresh",
         containerLabel: "700 / 700 ml",
         caption: "6 · LOADED — the vessel IS the aerated brine container · optional Selcon at instar II" },
     ];
@@ -9888,30 +9891,23 @@ class OpenReefPanel extends HTMLElement {
         ${pipe("M 422 152 V 340 H 196 L 176 334")}
         ${pipe("M 422 340 V 430 H 588 L 600 444")}
         ${rig.airOn ? `<path d="M 422 152 V 340 H 196 L 176 334" fill="none" stroke="#4dd0e1" stroke-width="1.6" class="awc-flow"></path>` : ""}
-        ${sm(432, 250, rig.airOn ? "air ON" : "air off")}
+        ${rig.air2On ? `<path d="M 422 152 V 430 H 588 L 600 444" fill="none" stroke="#4dd0e1" stroke-width="1.6" class="awc-flow"></path>` : ""}
+        ${sm(300, 334, rig.airOn ? "air ON" : "air off", "middle")}
+        ${sm(508, 420, rig.air2On ? "air ON" : "air off", "middle")}
         <rect x="560" y="210" width="100" height="150" fill="#101a22" stroke="${v2Stroke}" stroke-width="2.5"></rect>
         <line x1="564" y1="232" x2="656" y2="232" stroke="#37474f" stroke-width="2"></line>
         ${v2Fill}
-        ${rig.airOn && rig.containerPct > 0 ? `
+        ${rig.air2On && rig.containerPct > 0 ? `
           <circle cx="600" cy="330" r="2.2" fill="#b0bec5" opacity="0.7" class="nps-bub"></circle>
           <circle cx="622" cy="300" r="1.8" fill="#b0bec5" opacity="0.6" class="nps-bub"></circle>` : ""}
         <polygon points="560,360 660,360 622,440 598,440" fill="#101a22" fill-opacity="0" stroke="${v2Stroke}" stroke-width="2.5"></polygon>
-        ${rig.slugPacked ? `<polygon points="588,412 632,412 622,436 598,436" fill="#ef6c00" opacity="0.85"></polygon>
-        <circle cx="606" cy="438" r="1.8" fill="#4e342e"></circle><circle cx="617" cy="438" r="1.8" fill="#4e342e"></circle>` : ""}
+        ${rig.meshHot ? `<circle cx="606" cy="434" r="1.8" fill="#4e342e"></circle><circle cx="612" cy="436" r="1.6" fill="#4e342e"></circle><circle cx="617" cy="434" r="1.8" fill="#4e342e"></circle>
+        ${sm(548, 448, "crud sinks to the tip →", "end")}` : ""}
         <rect x="596" y="440" width="28" height="12" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
         <text x="610" y="292" text-anchor="middle" transform="rotate(-90 610 292)" font-size="13" fill="#cfd8dc" font-family="monospace">LIVE BRINE</text>
         ${rig.containerLabel ? `<text x="720" y="238" font-size="11" fill="${rig.containerFresh === "stale" ? "#e5484d" : "#26a69a"}" font-family="monospace">${this._escape(rig.containerLabel)}</text>
         ${sm(720, 253, "the vessel IS the container", "start")}` : ""}
         ${rig.enrichPct != null ? `<text x="720" y="278" font-size="11" fill="#7e57c2" font-family="monospace">SOAK · ${Math.round(rig.enrichPct)}% soak</text>` : ""}
-        ${rig.slugPacked ? `${sm(548, 404, "slug packs here →", "end")}${sm(548, 452, "tip crud (sinks) →", "end")}` : ""}
-        <g opacity="${rig.lampOn ? "1" : "0.35"}">
-          <rect x="716" y="420" width="34" height="20" rx="4" fill="#131c24" stroke="#f5a524" stroke-width="2"></rect>
-          ${rig.lampOn ? `
-          <line x1="712" y1="424" x2="668" y2="428" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
-          <line x1="712" y1="430" x2="664" y2="436" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>
-          <line x1="712" y1="436" x2="668" y2="444" stroke="#f5a524" stroke-width="1.6" opacity="0.8"></line>` : ""}
-        </g>
-        ${sm(756, 434, rig.lampOn ? "lamp ON at the tip" : "lamp at the tip")}${sm(756, 448, "(air OFF · room dim)")}
         ${pipe("M 146 328 H 70 V 600 H 700 V 466")}
         ${rig.transferHot ? `<path d="M 146 328 H 70 V 600 H 700 V 466" fill="none" stroke="#ef6c00" stroke-width="2" class="awc-flow"></path>` : ""}
         ${valve(104, 328, rig.transferHot)}<text x="104" y="308" text-anchor="middle" font-size="13" fill="${hot(rig.transferHot)}" font-family="monospace">①</text>
@@ -9940,27 +9936,11 @@ class OpenReefPanel extends HTMLElement {
         ${sm(198, 470, "invert the mesh half over the vessel —", "start", rig.backflushHot ? "#26a69a" : "#8798a4")}
         ${sm(198, 484, "backflush 700 ml fresh 35 ppt · air ON", "start", rig.backflushHot ? "#26a69a" : "#8798a4")}
         ${sm(198, 498, "then tap Hatched &amp; loaded", "start", rig.backflushHot ? "#26a69a" : "#8798a4")}
-        ${pipe("M 610 452 V 476")}
-        ${valve(610, 486)}<text x="586" y="490" text-anchor="end" font-size="13" fill="#cfd8dc" font-family="monospace">Ⓐ</text>
-        <rect x="602" y="494" width="16" height="10" rx="2" fill="#131c24" stroke="#42a5f5" stroke-width="1.8"></rect>
-        ${pipe("M 610 504 V 512")}
-        <polygon points="604,512 616,512 620,520 600,520" fill="#101a22" stroke="#42a5f5" stroke-width="2"></polygon>
-        <rect x="588" y="520" width="44" height="96" rx="5" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
-        ${rig.syringeFull ? `<rect x="591" y="556" width="38" height="32" rx="3" fill="#4e342e" opacity="0.9"></rect>` : ""}
-        <line x1="588" y1="536" x2="596" y2="536" stroke="#42a5f5" stroke-width="1.3"></line>
-        <line x1="588" y1="552" x2="596" y2="552" stroke="#42a5f5" stroke-width="1.3"></line>
-        <line x1="588" y1="568" x2="596" y2="568" stroke="#42a5f5" stroke-width="1.3"></line>
-        <line x1="588" y1="584" x2="596" y2="584" stroke="#42a5f5" stroke-width="1.3"></line>
-        <rect x="592" y="590" width="36" height="8" rx="2" fill="#546e7a"></rect>
-        <rect x="606" y="598" width="8" height="34" fill="#546e7a"></rect>
-        <rect x="596" y="632" width="28" height="8" rx="3" fill="#78909c"></rect>
-        ${sm(642, 540, "100 ml luer-lock syringe")}
-        ${sm(642, 554, "crud bleed: draw SLOWLY, the bottom")}
-        ${sm(642, 568, "~20 ml only — then backflush duty")}
-        <path d="M 600 648 C 520 690 460 700 418 706" fill="none" stroke="#8798a4" stroke-width="1.5" stroke-dasharray="4 4"></path>
-        ${sm(548, 700, "crud → waste", "middle")}
-        ${badge(500, 126, 1)}${badge(716, 452, 2)}${badge(770, 472, 3)}${badge(556, 560, 4)}
-        ${badge(340, 596, 5)}${badge(544, 262, 6)}${badge(736, 330, 7)}
+        ${sm(716, 560, "crud bleed: mesh half OFF,")}
+        ${sm(716, 574, "crack ② + ③ — first ~20 ml")}
+        ${sm(716, 588, "of tip crud straight to waste")}
+        ${badge(500, 126, 1)}${badge(716, 452, 2)}${badge(700, 546, 3)}${badge(300, 652, 4)}
+        ${badge(544, 262, 5)}${badge(736, 330, 6)}${badge(428, 716, 7)}
       </svg>`;
   }
 
@@ -11164,18 +11144,18 @@ class OpenReefPanel extends HTMLElement {
     // The DIY rig blueprint (settle & slug) — collapsed by default; the page
     // stays informative, the how-to unfolds on demand.
     const rigSteps = [
-      ["Air off", "shells float in the hatch cone; cysts and crud sink to the tips."],
+      ["Air off", "shells float in the hatch cone; cysts and crud sink to the tips (a few minutes)."],
       ["Transfer: open ① + ②", "nauplii ride down to LIVE BRINE, shells stay behind. Close ①."],
-      ["Settle ~10 min, lamp at the tip", "room dim — crud to the very tip, the swimmers just above."],
-      ["Crud bleed", "syringe on Ⓐ — slow-draw the bottom ~20 ml only, squirt to waste."],
+      ["Crud bleed", "mesh half OFF — crack ② + ③, the first ~20 ml of tip crud runs straight to waste. Mesh half back ON."],
       ["Mesh drain: open ② + ③ part-way", "everything through the 120 µm disc — water to waste, every nauplius stays on the mesh."],
       ["Backflush", "invert the mesh half over the vessel; 700 ml fresh 35 ppt washes them home. Air ON — the vessel IS the aerated container. Tap \"Hatched &amp; loaded\"."],
-      ["Optional Selcon, on the dose push (instar II)", "a second mesh cycle before feed-out is the rinse. Crack ③ a moment to bleed the dead leg; rinse mesh + syringe."],
+      ["Optional Selcon, on the dose push (instar II)", "a second mesh cycle before feed-out is the rinse."],
+      ["Housekeeping", "crack ③ a moment to bleed the dead leg; rinse the mesh in the waste water."],
     ];
     const rigPanel = this._npsRigOpen ? `
       <div class="stack" style="gap:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <small class="muted" style="flex:1;min-width:260px;">The mesh flow — the staggered two-vessel rig where the LIVE BRINE vessel is also the aerated holding container, LIVE: the drawing follows whatever stage the hatchery is in. Blue parts are the upgrade: the 120 µm mesh capsule under valve ③, the 100 ml luer-lock syringe below Ⓐ (crud bleed + backflush + target feeding), and the lamp.</small>
+          <small class="muted" style="flex:1;min-width:260px;">The mesh flow — the staggered two-vessel rig where the LIVE BRINE vessel is also the aerated holding container, LIVE: the drawing follows whatever stage the hatchery is in. The blue part is the whole upgrade: the 120 µm mesh capsule under valve ③. Two vessels, three valves, one mesh — nothing else.</small>
           <button class="secondary compact-button" data-action="nps-rig-play">${this._npsRigPreview ? "■ Stop" : "▶ Play the stages"}</button>
         </div>
         ${this._npsHatchRigSvg()}
