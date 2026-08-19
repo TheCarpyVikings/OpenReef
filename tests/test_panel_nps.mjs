@@ -660,11 +660,13 @@ test("the rig blueprint unfolds on demand and walks the settle-and-slug harvest"
     html = panel._npsTab();
     assert(html.includes("luer-lock syringe"), "the syringe is missing from the blueprint");
     assert(html.includes("HATCH EGGS") && html.includes("LIVE BRINE"), "the two staggered vessels are missing");
-    assert(html.includes("Ⓐ"), "the harvest valve is missing");
+    assert(html.includes("120 µm mesh"), "the mesh capsule is missing");
+    assert(html.includes("Ⓐ"), "the crud-bleed valve is missing");
     assert(html.includes("draw SLOWLY"), "the slow-draw warning is missing");
     assert(html.includes("lamp at the tip"), "the lamp step is missing");
-    assert(html.includes("never feeds the tank"), "the hatch-water rule must be stated");
-    assert(html.includes("7. Drain vessel 2"), "the numbered harvest steps are missing");
+    assert(html.includes("never the tank"), "the hatch-water rule must be stated");
+    assert(html.includes("5. Mesh drain"), "the numbered harvest steps are missing");
+    assert(html.includes("the vessel IS the aerated container"), "vessel-2-as-container must be stated");
     noPlaceholders(html, "rig blueprint");
   } finally { restore(); }
 });
@@ -698,6 +700,8 @@ test("the rig blueprint is live — it follows the hatchery's stage", async () =
     panel._nps.summary.hatchery = v2HatcherySummary({ state: { status: "none" } });
     html = panel._npsTab();
     assert(html.includes("LOADED — container 71%"), "the loaded stage must read the real ledger");
+    assert(html.includes("710 / 1000 ml") && html.includes("the vessel IS the container"),
+      "vessel 2 must carry the ledger in the mesh flow");
     noPlaceholders(html, "live rig");
   } finally { restore(); }
 });
@@ -713,7 +717,7 @@ test("the walkthrough plays every stage client-side", async () => {
     assert(stages.every((s) => s.caption && s.stage), "every stage needs a caption");
     panel._npsRigPreview = stages[3];
     const html = panel._npsTab();
-    assert(html.includes("4 · DRAW"), "a running preview must override the live state");
+    assert(html.includes("4 · MESH DRAIN"), "a running preview must override the live state");
     assert(panel._npsTab().includes("■ Stop"), "the play button must become a stop button");
   } finally { restore(); }
 });
