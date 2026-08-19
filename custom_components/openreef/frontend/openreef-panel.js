@@ -1715,6 +1715,8 @@ class OpenReefPanel extends HTMLElement {
         "Enriched brine loaded — the container runs the tighter enriched freshness clock now.");
       if (action === "nps-enrich-cancel") this._npsCall({ type: "openreef/nps_enrich_cancel" },
         "Enrichment abandoned — the soak was discarded.");
+      if (action === "nps-enrich-dose") this._npsCall({ type: "openreef/nps_enrich_dose" },
+        "Dose logged and debited — the soak clock proper is running.");
       if (action === "nps-enrich-second-dose") this._npsCall({ type: "openreef/nps_enrich_second_dose" },
         "Top-up dosed and debited from the bottle.");
       if (action === "nps-hand-feed") this._npsCall({ type: "openreef/nps_hand_feed" },
@@ -10223,8 +10225,9 @@ class OpenReefPanel extends HTMLElement {
           loadVolumeMl: 0, refrigerated: true, shelfHours: 48, mixedAt: iso(5 * 3600000),
           freshness: { status: "fresh", hoursLeft: 43, ageHours: 5 } },
         handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
-        enrichment: { hours: 12, doseMl: 1, productId: "", productName: "Selcon", splitDose: false,
-          sourceVesselId: "", state: { status: "none", secondDoseDue: false } },
+        enrichment: { hours: 12, doseMl: 1, doseDelayH: 6, batchDoseDelayH: 0, productId: "",
+          productName: "Selcon", splitDose: false, sourceVesselId: "",
+          state: { status: "none", firstDoseDue: false, secondDoseDue: false } },
         learned: { available: true, hours: 21.3, samples: 3 },
         temp: { available: true, expectedHours: 26.9, factor: 1.12, warm: false, tempC: 26.6 },
         vesselPresets: [
@@ -11097,12 +11100,17 @@ class OpenReefPanel extends HTMLElement {
         ${this._npsEnrichVesselSvg(enrichState)}
         <small><strong>Enrichment</strong> · ${this._escape(enrichSum.productName || "Selcon")}</small>
         <small>${enrichState.status === "enriching"
-          ? `${this._escape(String(enrichState.hoursElapsed))} / ${this._escape(String(enrichSum.hours ?? 12))} h soak`
+          ? (enrichState.firstDoseDue
+            ? `<span style="color:var(--warning-color,#f5a524)">mouths are open — add the ${this._escape(enrichSum.productName || "Selcon")} now</span>`
+            : enrichState.hoursLeft == null
+              ? `holding — dose at +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 6))} h (instar II)`
+              : `~${this._escape(String(enrichState.hoursLeft))} h of soak left`)
           : enrichState.status === "overdue"
             ? `<span style="color:var(--warning-color,#f5a524)">load now — the boost is draining</span>`
             : "<strong>done</strong> — rinse &amp; load"}</small>
         ${enrichState.secondDoseDue ? `<small><span style="color:var(--warning-color,#f5a524)">Top-up due</span></small>` : ""}
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
+          ${enrichState.firstDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-dose">Add dose</button>` : ""}
           ${enrichState.secondDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-second-dose">Log top-up</button>` : ""}
           <button class="secondary compact-button" data-action="nps-enrich-loaded">Enriched &amp; loaded</button>
           <button class="danger-text compact-button" data-action="nps-enrich-cancel">Cancel</button>
@@ -21822,10 +21830,12 @@ class OpenReefPanel extends HTMLElement {
         <label>Hatchery temp sensor (optional)<input data-scope="nps-hatchery" data-field="tempEntity" value="${this._escape(npsCfg.hatchery?.tempEntity || "")}" placeholder="sensor.hatchery_temperature"></label>
       </div>
       <small class="awc-hint">Advisory only: 26–28 °C is the sweet spot; each degree cooler stretches the clock ~8% (20 °C roughly doubles it). The countdown never moves — you just get told what to expect.</small>
-      <small class="awc-hint"><strong>Enrichment</strong> — per-batch "→ Enrich" at harvest rinses the batch into a separate soak vessel (GSL nauplii carry no DHA; the soak restores it — proven for larvae, recommended for NPS corals). Only pays past instar II (~12 h); an enriched load runs a tighter freshness clock (12 h room / 48 h fridged).</small>
+      <small class="awc-hint"><strong>Enrichment</strong> — per-batch "→ Enrich" at harvest rinses the batch into a separate soak vessel (GSL nauplii carry no DHA; the soak restores it — proven for larvae, recommended for NPS corals). An enriched load runs a tighter freshness clock (12 h room / 48 h fridged).</small>
+      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I can't eat: the molt to instar II lands ~6–12 h post-hatch at 26–28 °C, LATER on a cool bench (8–12 is a good cool-room setting). "→ Enrich" holds the batch in clean water and the dose push arrives at +N h; 0 = dose at load (warm benches, fully-hatched-out batches).</small>
       <div class="mini-grid">
         <label>Soak time (hours)<input type="number" min="2" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
         <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>
+        <label>First dose at +hours<input type="number" min="0" max="24" data-scope="nps-enrichment" data-field="doseDelayH" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseDelayH ?? 6))}"></label>
         <label>Enrichment bottle<select data-scope="nps-enrichment" data-field="productId">
           <option value="">Not linked</option>
           ${Object.entries(this._config?.consumables?.products || {}).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(npsCfg.hatchery?.enrichment?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}

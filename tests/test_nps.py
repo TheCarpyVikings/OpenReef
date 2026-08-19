@@ -1064,15 +1064,82 @@ def test_enrich_state_lifecycle():
     assert nps.enrich_state(_iso(NOW - timedelta(hours=19)), 12, False, "", NOW)["status"] == "overdue"
 
 
-def _enrich_entry():
+def _enrich_entry(dose_delay_h=0):
     entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 0})
     cfg = entry.options[CONF_SETTINGS]
     cfg["nps"]["hatchery"]["enrichment"] = {
         "hours": 12, "doseMl": 2, "productId": "selcon", "splitDose": True,
+        "doseDelayH": dose_delay_h,
     }
     cfg["consumables"] = {"products": {"selcon": _product(
         name="Selcon", category="other", bottleMl=60, remainingMl=50)}}
     return entry
+
+
+def test_enrich_state_dose_delay_anchors_on_first_dose():
+    # Reece's catch: instar I can't eat. Holding phase — no dose yet, +8 h
+    # delay: percent 0, no clock, the dose comes due only past the molt.
+    early = nps.enrich_state(_iso(NOW - timedelta(hours=3)), 12, False, "", NOW, "", 8)
+    assert early["status"] == "enriching" and early["percent"] == 0.0
+    assert early["firstDoseDue"] is False and early["hoursLeft"] is None
+    due = nps.enrich_state(_iso(NOW - timedelta(hours=9)), 12, False, "", NOW, "", 8)
+    assert due["firstDoseDue"] is True
+    # Dosed: the soak counts from the DOSE — 5 h fed of 12 leaves 7.
+    fed = nps.enrich_state(_iso(NOW - timedelta(hours=13)), 12, False, "", NOW,
+                           _iso(NOW - timedelta(hours=5)), 8)
+    assert fed["status"] == "enriching" and fed["hoursLeft"] == 7.0
+    assert fed["firstDoseDue"] is False
+    # Done anchors on the dose too, not the load.
+    done = nps.enrich_state(_iso(NOW - timedelta(hours=21)), 12, False, "", NOW,
+                            _iso(NOW - timedelta(hours=13)), 8)
+    assert done["status"] == "done"
+    # And the split top-up counts 10 h from the first dose.
+    topup = nps.enrich_state(_iso(NOW - timedelta(hours=19)), 12, True, "", NOW,
+                             _iso(NOW - timedelta(hours=10.5)), 8)
+    assert topup["secondDoseDue"] is True
+
+
+def test_ws_enrich_dose_delay_flow():
+    # Delayed protocol: no debit at soak start (nothing to eat it), the first
+    # dose logs later — and the top-up refuses to jump the queue.
+    entry = _enrich_entry(dose_delay_h=8)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 2}))
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["consumables"]["products"]["selcon"]["remainingMl"] == 50, \
+        "no debit before the batch can eat"
+    state = saved["nps"]["hatchery"]["enrichment"]["state"]
+    assert not state["firstDoseAt"] and state["doseDelayH"] == 8
+    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 3}))
+    assert conn.errors and conn.errors[-1].code == "no_first_dose"
+    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 4}))
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["consumables"]["products"]["selcon"]["remainingMl"] == 48
+    assert saved["nps"]["hatchery"]["enrichment"]["state"]["firstDoseAt"]
+    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 5}))
+    assert conn.errors[-1].code == "already_dosed"
+
+
+def test_enrich_push_reminds_the_first_dose_once():
+    entry = _enrich_entry(dose_delay_h=8)
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"])
+    cfg["nps"]["hatchery"]["enrichment"]["state"].update({
+        "startedAt": (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat(),
+        "enrichHours": 12, "doseDelayH": 8,
+    })
+    hass = FakeHass(entries=[entry])
+    def _notes(nid):
+        return [c for c in hass.services.calls
+                if c.domain == "persistent_notification" and c.service == "create"
+                and (c.data or {}).get("notification_id") == nid]
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert len(_notes("openreef_enrich_dose")) == 1, "the dose push should fire past the molt"
+    assert not _notes("openreef_enrich_done"), "no done push before any food went in"
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert len(_notes("openreef_enrich_dose")) == 1, "the dose push must fire exactly once"
 
 
 def test_ws_enrich_flow_end_to_end():

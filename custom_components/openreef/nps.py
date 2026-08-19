@@ -474,36 +474,56 @@ def next_hatch_suggestion(
 
 
 def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
-                 second_dose_iso: Any, now: datetime) -> dict[str, Any]:
+                 second_dose_iso: Any, now: datetime,
+                 first_dose_iso: Any = None, dose_delay_h: Any = 0) -> dict[str, Any]:
     """Where the enrichment soak sits: ``none`` (vessel idle), ``enriching``
-    (percent + hours-to-go, plus whether the optional split-dose top-up is
-    due), ``done`` (rinse and load), or ``overdue`` (the boost is draining —
-    enriched brine degrades fast warm)."""
+    (with an honest percent), ``done`` (rinse and load), or ``overdue`` (the
+    boost is draining — enriched brine degrades fast warm).
+
+    The dose delay (Reece's catch): instar I nauplii CANNOT eat — the molt to
+    instar II lands ~6–12 h post-hatch at 26–28 °C, later on a cool bench, and
+    a batch harvested off a 24 h clock is a mix of 0–8 h-olds. Emulsion dosed
+    before the molt just fouls. So the soak clock proper anchors on the FIRST
+    DOSE, not on the load: until Selcon goes in the batch is merely holding
+    (percent 0, ``firstDoseDue`` fires once the delay has passed), and done /
+    overdue / the split-dose top-up all count from ``first_dose_iso``. A zero
+    delay keeps the old dose-at-load behaviour (the first dose IS the start)."""
     started = _parse_iso(started_iso)
     hours = _f(enrich_hours)
     if hours <= 0:
         hours = ENRICH_DEFAULT_HOURS
     if started is None:
         return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
-                "percent": None, "secondDoseDue": False}
+                "percent": None, "firstDoseDue": False, "secondDoseDue": False}
     try:
         elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0)
     except TypeError:
         return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
-                "percent": None, "secondDoseDue": False}
+                "percent": None, "firstDoseDue": False, "secondDoseDue": False}
+    delay_h = max(0.0, _f(dose_delay_h))
+    first = _parse_iso(first_dose_iso)
+    if first is None and delay_h <= 0:
+        first = started  # immediate-dose protocol: food went in at soak start
+    if first is None:
+        # Holding in clean water — waiting for the molt before the dose.
+        return {"status": "enriching", "hoursElapsed": round(elapsed_h, 1),
+                "hoursLeft": None, "percent": 0.0,
+                "firstDoseDue": elapsed_h >= delay_h, "secondDoseDue": False}
+    fed_h = max(0.0, (now - first).total_seconds() / 3600.0)
     second_due = (bool(split_dose)
                   and _parse_iso(second_dose_iso) is None
-                  and elapsed_h >= ENRICH_SECOND_DOSE_H
-                  and elapsed_h < hours)
-    if elapsed_h < hours:
+                  and fed_h >= ENRICH_SECOND_DOSE_H
+                  and fed_h < hours)
+    if fed_h < hours:
         return {"status": "enriching",
                 "hoursElapsed": round(elapsed_h, 1),
-                "hoursLeft": round(hours - elapsed_h, 1),
-                "percent": round(min(99.0, elapsed_h / hours * 100.0), 0),
-                "secondDoseDue": second_due}
-    status = "overdue" if elapsed_h > hours + ENRICH_OVERDUE_GRACE_H else "done"
+                "hoursLeft": round(hours - fed_h, 1),
+                "percent": round(min(99.0, fed_h / hours * 100.0), 0),
+                "firstDoseDue": False, "secondDoseDue": second_due}
+    status = "overdue" if fed_h > hours + ENRICH_OVERDUE_GRACE_H else "done"
     return {"status": status, "hoursElapsed": round(elapsed_h, 1),
-            "hoursLeft": 0.0, "percent": 100.0, "secondDoseDue": False}
+            "hoursLeft": 0.0, "percent": 100.0,
+            "firstDoseDue": False, "secondDoseDue": False}
 
 
 def hatch_prime_state(mixed_at_iso: Any, now: datetime) -> dict[str, Any]:

@@ -513,8 +513,9 @@ function v2HatcherySummary(over = {}) {
       refrigerated: true, shelfHours: 48, mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
       freshness: { status: "fresh", hoursLeft: 43, ageHours: 5 } },
     handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
-    enrichment: { hours: 12, doseMl: 1, productId: "", productName: "Selcon", splitDose: false,
-      sourceVesselId: "", state: { status: "none", secondDoseDue: false } },
+    enrichment: { hours: 12, doseMl: 1, doseDelayH: 6, batchDoseDelayH: 0, productId: "",
+      productName: "Selcon", splitDose: false, sourceVesselId: "",
+      state: { status: "none", firstDoseDue: false, secondDoseDue: false } },
     learned: { available: false, hours: null, samples: 0 },
     temp: { available: false, expectedHours: null, factor: null, warm: false },
     vesselPresets: [
@@ -623,13 +624,14 @@ test("the enrichment vessel joins the strip while a batch soaks", async () => {
     assert(!html.includes("data-enrich-vessel"), "no soak running — no beaker");
     // Soaking: the beaker tile appears, the enrich buttons leave the vessels.
     panel._nps.summary.hatchery = v2HatcherySummary({
-      enrichment: { hours: 12, doseMl: 1, productId: "selcon", productName: "Selcon",
-        splitDose: true, sourceVesselId: "v1",
-        state: { status: "enriching", hoursElapsed: 10.5, hoursLeft: 1.5, percent: 88, secondDoseDue: true } },
+      enrichment: { hours: 12, doseMl: 1, doseDelayH: 0, batchDoseDelayH: 0, productId: "selcon",
+        productName: "Selcon", splitDose: true, sourceVesselId: "v1",
+        state: { status: "enriching", hoursElapsed: 10.5, hoursLeft: 1.5, percent: 88,
+          firstDoseDue: false, secondDoseDue: true } },
     });
     html = panel._npsTab();
     assert(html.includes("data-enrich-vessel"), "the enrichment beaker is missing");
-    assert(html.includes("10.5 / 12 h soak"), "the soak countdown is missing");
+    assert(html.includes("~1.5 h of soak left"), "the soak countdown is missing");
     assert(html.includes("Log top-up"), "the split-dose top-up button is missing");
     assert(html.includes("Enriched &amp; loaded"), "the enriched load button is missing");
     assert(!html.includes("→ Enrich"), "one soak at a time — vessels must not offer enrich while busy");
@@ -726,8 +728,36 @@ test("settings carry the enrichment block", async () => {
     if (html !== null) {
       assert(html.includes('data-scope="nps-enrichment"'), "enrichment settings missing");
       assert(html.includes("Split-dose top-up"), "the split-dose toggle is missing");
+      assert(html.includes('data-field="doseDelayH"'), "the first-dose delay field is missing");
+      assert(html.includes("instar II"), "the instar II explanation is missing");
       assert(html.includes("proven for larvae, recommended for NPS corals"), "the honest evidence copy is missing");
     }
+  } finally { restore(); }
+});
+
+test("the enrichment tile holds the Selcon until instar II", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const withEnrich = (state, batchDelay) => {
+      panel._nps.summary.hatchery = v2HatcherySummary({
+        enrichment: { hours: 12, doseMl: 1, doseDelayH: 8, batchDoseDelayH: batchDelay,
+          productId: "selcon", productName: "Selcon", splitDose: false, sourceVesselId: "v1",
+          state },
+      });
+      return panel._npsTab();
+    };
+    // Holding: clean water, no dose yet — the tile says when the dose lands.
+    let html = withEnrich({ status: "enriching", hoursElapsed: 3, hoursLeft: null,
+      percent: 0, firstDoseDue: false, secondDoseDue: false }, 8);
+    assert(html.includes("holding — dose at +8 h"), "the holding copy is missing");
+    assert(!html.includes(">Add dose<"), "no dose button before the molt");
+    // The molt has landed: the amber prompt and the Add dose button appear.
+    html = withEnrich({ status: "enriching", hoursElapsed: 8.5, hoursLeft: null,
+      percent: 0, firstDoseDue: true, secondDoseDue: false }, 8);
+    assert(html.includes("mouths are open"), "the dose-due prompt is missing");
+    assert(html.includes('data-action="nps-enrich-dose"'), "the Add dose button is missing");
+    noPlaceholders(html, "enrichment dose-delay tile");
   } finally { restore(); }
 });
 

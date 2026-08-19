@@ -958,6 +958,9 @@ def _normalise_hatchery(raw: Any) -> dict[str, Any]:
     enrichment = {
         "hours": _awc_num(raw_enrich.get("hours"), nps_engine.ENRICH_DEFAULT_HOURS, 2, 36),
         "doseMl": _awc_num(raw_enrich.get("doseMl"), 1, 0.5, 50),
+        # Instar I can't eat — the Selcon goes in this many hours after load
+        # (the molt; ~6-12 h warm, longer on a cool bench). 0 = dose at load.
+        "doseDelayH": _awc_num(raw_enrich.get("doseDelayH"), 6, 0, 24),
         "productId": _awc_str(raw_enrich.get("productId"), 40),
         "splitDose": bool(raw_enrich.get("splitDose", False)),
         "state": {
@@ -967,8 +970,11 @@ def _normalise_hatchery(raw: Any) -> dict[str, Any]:
             "plannedHatchHours": _awc_num(raw_enrich_state.get("plannedHatchHours"), 0, 0, 96),
             "actualHatchHours": _awc_num(raw_enrich_state.get("actualHatchHours"), 0, 0, 240),
             "enrichHours": _awc_num(raw_enrich_state.get("enrichHours"), 0, 0, 48),
+            "doseDelayH": _awc_num(raw_enrich_state.get("doseDelayH"), 0, 0, 24),
+            "firstDoseAt": _awc_str(raw_enrich_state.get("firstDoseAt"), 40),
             "secondDoseAt": _awc_str(raw_enrich_state.get("secondDoseAt"), 40),
             "readyNotifiedAt": _awc_str(raw_enrich_state.get("readyNotifiedAt"), 40),
+            "firstDoseNotifiedAt": _awc_str(raw_enrich_state.get("firstDoseNotifiedAt"), 40),
             "secondDoseNotifiedAt": _awc_str(raw_enrich_state.get("secondDoseNotifiedAt"), 40),
         },
     }
@@ -11127,8 +11133,23 @@ async def _async_nps_hatch_ready_push(
         elapsed_h = (now - enrich_started).total_seconds() / 3600.0
         enrich_hours = _awc_num(enrich_state.get("enrichHours"),
                                 nps_engine.ENRICH_DEFAULT_HOURS, 2, 48)
+        delay_h = _awc_num(enrich_state.get("doseDelayH"), 0, 0, 24)
+        first_dose = _parse_datetime(enrich_state.get("firstDoseAt"))
+        if first_dose is None and delay_h <= 0:
+            first_dose = enrich_started  # immediate protocol (engine lockstep)
+        fed_h = ((now - first_dose).total_seconds() / 3600.0
+                 if first_dose is not None else None)
         notices = []
-        if elapsed_h >= enrich_hours and not enrich_state.get("readyNotifiedAt"):
+        if (first_dose is None and delay_h > 0 and elapsed_h >= delay_h
+                and not enrich_state.get("firstDoseNotifiedAt")):
+            # The molt has landed — mouths are open, the Selcon can go in.
+            enrich_state["firstDoseNotifiedAt"] = now.isoformat()
+            notices.append((
+                "openreef_enrich_dose",
+                "OpenReef: Add the enrichment dose",
+                "The batch has crossed instar II — add the Selcon and tap "
+                "'Add dose' on the NPS tab. The soak clock proper starts there."))
+        elif fed_h is not None and fed_h >= enrich_hours and not enrich_state.get("readyNotifiedAt"):
             enrich_state["readyNotifiedAt"] = now.isoformat()
             notices.append((
                 "openreef_enrich_done",
@@ -11137,16 +11158,17 @@ async def _async_nps_hatch_ready_push(
                 "breeds bacteria), load the container, then tap 'Enriched & "
                 "loaded'. Warm-held enriched brine loses half its boost in a day."))
         elif (bool(enrichment.get("splitDose"))
-              and elapsed_h >= nps_engine.ENRICH_SECOND_DOSE_H
-              and elapsed_h < enrich_hours
+              and fed_h is not None
+              and fed_h >= nps_engine.ENRICH_SECOND_DOSE_H
+              and fed_h < enrich_hours
               and not enrich_state.get("secondDoseAt")
               and not enrich_state.get("secondDoseNotifiedAt")):
             enrich_state["secondDoseNotifiedAt"] = now.isoformat()
             notices.append((
                 "openreef_enrich_topup",
                 "OpenReef: Enrichment top-up due",
-                "The soak is 10 h in — add the second enrichment dose and tap "
-                "'Log top-up' on the NPS tab."))
+                "The soak is 10 h past the first dose — add the second "
+                "enrichment dose and tap 'Log top-up' on the NPS tab."))
         for notification_id, title, message in notices:
             changed = True
             await hass.services.async_call(
@@ -12497,6 +12519,9 @@ async def websocket_nps_hatch_enrich(
     if started is None:
         connection.send_error(msg["id"], "no_batch", "No batch to harvest into enrichment")
         return
+    # Per-batch stamp of the dose delay too — editing settings mid-soak must
+    # never move a running batch's dose reminder.
+    delay_h = enrichment["doseDelayH"]
     enrichment["state"] = {
         "startedAt": now.isoformat(),
         "sourceVesselId": target_id,
@@ -12504,16 +12529,25 @@ async def websocket_nps_hatch_enrich(
         "plannedHatchHours": _awc_num(state.get("hatchHours"), 24, 8, 48),
         "actualHatchHours": round((now - started).total_seconds() / 3600.0, 1),
         "enrichHours": enrichment["hours"],
-        "secondDoseAt": "", "readyNotifiedAt": "", "secondDoseNotifiedAt": "",
+        "doseDelayH": delay_h,
+        # Delay 0 = the old dose-at-load protocol: food goes in right now.
+        # Otherwise the batch HOLDS in clean water until the instar II molt —
+        # the dose push fires at +delay and nps_enrich_dose logs it.
+        "firstDoseAt": now.isoformat() if delay_h <= 0 else "",
+        "secondDoseAt": "", "readyNotifiedAt": "",
+        "firstDoseNotifiedAt": "", "secondDoseNotifiedAt": "",
     }
-    _nps_enrich_debit(config, enrichment)
+    if delay_h <= 0:
+        _nps_enrich_debit(config, enrichment)
     vessels[target_id]["state"]["hatchStartedAt"] = ""
     vessels[target_id]["state"]["readyNotifiedAt"] = ""
     _nps_hatch_sync_reminders(config, now, "enriching")
     _append_activity(
         config,
         f"Batch from {vessels[target_id]['name']} rinsed into the enrichment vessel — "
-        f"{enrichment['hours']:g} h soak running",
+        + (f"{enrichment['hours']:g} h soak running"
+           if delay_h <= 0 else
+           f"holding until the Selcon dose at +{delay_h:g} h (instar II), then {enrichment['hours']:g} h soak"),
         "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
@@ -12546,6 +12580,9 @@ async def websocket_nps_enrich_loaded(
         connection.send_error(msg["id"], error[0], error[1])
         return
     actual_hatch = _awc_num(state.get("actualHatchHours"), 0, 0, 240)
+    # Enriched time counts from the FIRST DOSE — holding in clean water before
+    # the instar II molt is not enrichment.
+    fed_from = _parse_datetime(state.get("firstDoseAt")) or enrich_started
     hatchery["history"].insert(0, {
         "vesselId": str(state.get("sourceVesselId") or ""),
         "startedAt": (enrich_started - timedelta(hours=actual_hatch)).isoformat(),
@@ -12554,13 +12591,14 @@ async def websocket_nps_enrich_loaded(
         "actualHours": actual_hatch,
         "eggType": str(state.get("eggType") or hatchery["eggType"]),
         "enriched": True,
-        "enrichedHours": round((now - enrich_started).total_seconds() / 3600.0, 1),
+        "enrichedHours": round(max(0.0, (now - fed_from).total_seconds() / 3600.0), 1),
     })
     del hatchery["history"][nps_engine.HATCH_HISTORY_MAX:]
     hatchery["enrichment"]["state"] = {
         "startedAt": "", "sourceVesselId": "", "eggType": "",
         "plannedHatchHours": 0, "actualHatchHours": 0, "enrichHours": 0,
-        "secondDoseAt": "", "readyNotifiedAt": "", "secondDoseNotifiedAt": "",
+        "doseDelayH": 0, "firstDoseAt": "", "secondDoseAt": "",
+        "readyNotifiedAt": "", "firstDoseNotifiedAt": "", "secondDoseNotifiedAt": "",
     }
     _nps_hatch_sync_reminders(config, now, "harvested")
     _append_activity(config, "Enriched brine loaded — the container runs the enriched "
@@ -12585,10 +12623,40 @@ async def websocket_nps_enrich_cancel(
     hatchery["enrichment"]["state"] = {
         "startedAt": "", "sourceVesselId": "", "eggType": "",
         "plannedHatchHours": 0, "actualHatchHours": 0, "enrichHours": 0,
-        "secondDoseAt": "", "readyNotifiedAt": "", "secondDoseNotifiedAt": "",
+        "doseDelayH": 0, "firstDoseAt": "", "secondDoseAt": "",
+        "readyNotifiedAt": "", "firstDoseNotifiedAt": "", "secondDoseNotifiedAt": "",
     }
     _nps_hatch_sync_reminders(config, datetime.now(timezone.utc), "cancelled")
     _append_activity(config, "Enrichment abandoned — the soak was discarded", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_dose"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_enrich_dose(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Log the FIRST enrichment dose (delayed protocols): the batch crossed
+    instar II, the Selcon goes in now — debit the bottle and anchor the soak
+    clock proper here."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    state = hatchery["enrichment"]["state"]
+    if not state.get("startedAt"):
+        connection.send_error(msg["id"], "no_enrichment", "Nothing is enriching")
+        return
+    if state.get("firstDoseAt"):
+        connection.send_error(msg["id"], "already_dosed", "The dose is already logged")
+        return
+    _nps_enrich_debit(config, hatchery["enrichment"])
+    state["firstDoseAt"] = datetime.now(timezone.utc).isoformat()
+    _append_activity(config, "Enrichment dose added — the soak proper begins", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -12599,8 +12667,8 @@ async def websocket_nps_enrich_cancel(
 async def websocket_nps_enrich_second_dose(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Log the INVE-style T+10 h top-up: debits another dose and stamps the
-    soak so the reminder stands down."""
+    """Log the INVE-style top-up, 10 h after the FIRST dose: debits another
+    dose and stamps the soak so the reminder stands down."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -12610,6 +12678,10 @@ async def websocket_nps_enrich_second_dose(
     state = hatchery["enrichment"]["state"]
     if not state.get("startedAt"):
         connection.send_error(msg["id"], "no_enrichment", "Nothing is enriching")
+        return
+    if not state.get("firstDoseAt"):
+        connection.send_error(msg["id"], "no_first_dose",
+                              "Add the first dose before the top-up")
         return
     if state.get("secondDoseAt"):
         connection.send_error(msg["id"], "already_dosed", "The top-up is already logged")
@@ -12823,6 +12895,8 @@ async def websocket_nps_summary(
             "enrichment": {
                 "hours": hatchery_cfg["enrichment"]["hours"],
                 "doseMl": hatchery_cfg["enrichment"]["doseMl"],
+                "doseDelayH": hatchery_cfg["enrichment"]["doseDelayH"],
+                "batchDoseDelayH": hatchery_cfg["enrichment"]["state"]["doseDelayH"],
                 "productId": hatchery_cfg["enrichment"]["productId"],
                 "productName": (products.get(hatchery_cfg["enrichment"]["productId"]) or {}).get("name")
                     if isinstance(products.get(hatchery_cfg["enrichment"]["productId"]), dict) else None,
@@ -12833,7 +12907,9 @@ async def websocket_nps_summary(
                     hatchery_cfg["enrichment"]["state"]["enrichHours"],
                     bool(hatchery_cfg["enrichment"]["splitDose"]),
                     hatchery_cfg["enrichment"]["state"]["secondDoseAt"],
-                    now_utc),
+                    now_utc,
+                    hatchery_cfg["enrichment"]["state"]["firstDoseAt"],
+                    hatchery_cfg["enrichment"]["state"]["doseDelayH"]),
             },
             "handFeed": dict(hatchery_cfg["handFeed"]),
             "learned": nps_engine.learned_hatch_hours(
@@ -15100,6 +15176,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_nps_hand_feed)
     websocket_api.async_register_command(hass, websocket_nps_hatch_enrich)
     websocket_api.async_register_command(hass, websocket_nps_enrich_loaded)
+    websocket_api.async_register_command(hass, websocket_nps_enrich_dose)
     websocket_api.async_register_command(hass, websocket_nps_enrich_cancel)
     websocket_api.async_register_command(hass, websocket_nps_enrich_second_dose)
     websocket_api.async_register_command(hass, websocket_consumable_log_dose)
