@@ -617,15 +617,17 @@ test("the enrichment vessel joins the strip while a batch soaks", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    // Idle enrichment: incubating vessels offer the per-batch "→ Enrich".
+    // Idle soak + loaded brine: the CONTAINER offers "Enrich brine" — the
+    // vessels never do (a soak must not touch a running hatch).
     panel._nps.summary.hatchery = v2HatcherySummary();
     let html = panel._npsTab();
-    assert(html.includes("→ Enrich"), "the per-batch enrich choice is missing at harvest");
+    assert(html.includes("Enrich brine"), "the container enrich action is missing");
+    assert(html.includes("The running hatch is untouched"), "the no-touch promise is missing");
     assert(!html.includes("data-enrich-vessel"), "no soak running — no beaker");
-    // Soaking: the beaker tile appears, the enrich buttons leave the vessels.
+    // Soaking: the beaker tile appears, the container button stands down.
     panel._nps.summary.hatchery = v2HatcherySummary({
       enrichment: { hours: 12, doseMl: 1, doseDelayH: 0, batchDoseDelayH: 0, productId: "selcon",
-        productName: "Selcon", splitDose: true, sourceVesselId: "v1",
+        productName: "Selcon", splitDose: true, sourceVesselId: "",
         state: { status: "enriching", hoursElapsed: 10.5, hoursLeft: 1.5, percent: 88,
           firstDoseDue: false, secondDoseDue: true } },
     });
@@ -633,8 +635,8 @@ test("the enrichment vessel joins the strip while a batch soaks", async () => {
     assert(html.includes("data-enrich-vessel"), "the enrichment beaker is missing");
     assert(html.includes("~1.5 h of soak left"), "the soak countdown is missing");
     assert(html.includes("Log top-up"), "the split-dose top-up button is missing");
-    assert(html.includes("Enriched &amp; loaded"), "the enriched load button is missing");
-    assert(!html.includes("→ Enrich"), "one soak at a time — vessels must not offer enrich while busy");
+    assert(html.includes("Soak done"), "the soak-done button is missing");
+    assert(!html.includes("Enrich brine"), "one soak at a time — the container button stands down");
     noPlaceholders(html, "enrichment strip");
     // An enriched load tells you its tighter clock.
     panel._nps.summary.hatchery = v2HatcherySummary({

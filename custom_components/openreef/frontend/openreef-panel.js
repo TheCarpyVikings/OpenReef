@@ -1708,11 +1708,10 @@ class OpenReefPanel extends HTMLElement {
         "Hatch cancelled — the hatcher stands down.");
       if (action === "nps-discard-brine") this._npsCall({ type: "openreef/nps_reservoir_discard" },
         "Old brine discarded — the container is empty and ready for the fresh batch.");
-      if (action === "nps-enrich") this._npsCall(
-        id ? { type: "openreef/nps_hatch_enrich", vessel_id: id } : { type: "openreef/nps_hatch_enrich" },
-        "Batch rinsed into the enrichment vessel — the soak clock is running and the cone is free.");
+      if (action === "nps-enrich") this._npsCall({ type: "openreef/nps_hatch_enrich" },
+        "Enrichment engaged on the loaded brine — the dose reminder is anchored to this batch's age. The running hatch is untouched.");
       if (action === "nps-enrich-loaded") this._npsCall({ type: "openreef/nps_enrich_loaded" },
-        "Enriched brine loaded — the container runs the tighter enriched freshness clock now.");
+        "Soak done — gut-loaded brine in the vessel; the boost clock runs from now.");
       if (action === "nps-enrich-cancel") this._npsCall({ type: "openreef/nps_enrich_cancel" },
         "Enrichment abandoned — the soak was discarded.");
       if (action === "nps-enrich-dose") this._npsCall({ type: "openreef/nps_enrich_dose" },
@@ -11062,7 +11061,6 @@ class OpenReefPanel extends HTMLElement {
       })[vs.status] || "idle";
       const guide = v.guide && v.guide.available
         ? `<small class="muted" title="2 g/L is the documented optimum — more cysts hatch WORSE">~${this._escape(String(v.guide.grams))} g cysts</small>` : "";
-      const canEnrich = enrichIdle && ["incubating", "ready", "overdue"].includes(vs.status);
       const buttons = [
         vs.status === "none" || !vs.status
           ? `<button class="secondary compact-button" data-action="nps-hatch-start" data-id="${this._escape(v.id)}">Start hatch</button>` : "",
@@ -11071,8 +11069,6 @@ class OpenReefPanel extends HTMLElement {
           : "",
         (vs.status === "ready" || vs.status === "overdue")
           ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}">Hatched &amp; loaded</button>` : "",
-        canEnrich
-          ? `<button class="secondary compact-button" data-action="nps-enrich" data-id="${this._escape(v.id)}" title="Rinse the batch into the enrichment vessel for a ${this._escape(String(enrichSum.hours ?? 12))} h ${this._escape(enrichSum.productName || "Selcon")} soak — only pays past instar II (~12 h old)">→ Enrich</button>` : "",
         vs.status === "incubating"
           ? `<button class="danger-text compact-button" data-action="nps-hatch-cancel" data-id="${this._escape(v.id)}">Cancel</button>` : "",
       ].filter(Boolean).join("");
@@ -11110,6 +11106,11 @@ class OpenReefPanel extends HTMLElement {
       : "";
     const hatchButtons = [
       handFeedBtn,
+      // Enrichment is a CONTAINER action (never touches a running hatch): the
+      // Selcon goes into the holding vessel; the dose reminder anchors on the
+      // loaded batch's age (instar II).
+      enrichIdle && Number(reservoirSum.remainingMl) > 0
+        ? `<button class="secondary compact-button" data-action="nps-enrich" title="Selcon into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II). The running hatch is untouched.">Enrich brine</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${(this._config?.maintenance?.tasks?.brine_hatch_start || this._config?.maintenance?.tasks?.brine_hatch_harvest) ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
@@ -11134,7 +11135,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
           ${enrichState.firstDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-dose">Add dose</button>` : ""}
           ${enrichState.secondDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-second-dose">Log top-up</button>` : ""}
-          <button class="secondary compact-button" data-action="nps-enrich-loaded">Enriched &amp; loaded</button>
+          <button class="secondary compact-button" data-action="nps-enrich-loaded" title="The gut-loaded brine stays in the vessel — this just stamps the boost clock. Mesh-rinse before feed-out if you like.">Soak done</button>
           <button class="danger-text compact-button" data-action="nps-enrich-cancel">Cancel</button>
         </div>
       </div>` : "";

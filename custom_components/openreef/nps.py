@@ -475,7 +475,8 @@ def next_hatch_suggestion(
 
 def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
                  second_dose_iso: Any, now: datetime,
-                 first_dose_iso: Any = None, dose_delay_h: Any = 0) -> dict[str, Any]:
+                 first_dose_iso: Any = None, dose_delay_h: Any = 0,
+                 batch_loaded_iso: Any = None) -> dict[str, Any]:
     """Where the enrichment soak sits: ``none`` (vessel idle), ``enriching``
     (with an honest percent), ``done`` (rinse and load), or ``overdue`` (the
     boost is draining — enriched brine degrades fast warm).
@@ -487,7 +488,14 @@ def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
     DOSE, not on the load: until Selcon goes in the batch is merely holding
     (percent 0, ``firstDoseDue`` fires once the delay has passed), and done /
     overdue / the split-dose top-up all count from ``first_dose_iso``. A zero
-    delay keeps the old dose-at-load behaviour (the first dose IS the start)."""
+    delay keeps the old dose-at-load behaviour (the first dose IS the start).
+
+    Container semantics (Reece's mesh flow): enrichment engages on brine that
+    was ALREADY loaded — so the instar II delay counts from the BATCH's load
+    stamp (``batch_loaded_iso``), not from the moment the button was tapped.
+    Evening-enriching a morning batch is due immediately; enriching right
+    after loading waits out the molt. Missing stamp falls back to the engage
+    time (the pre-container behaviour)."""
     started = _parse_iso(started_iso)
     hours = _f(enrich_hours)
     if hours <= 0:
@@ -505,10 +513,16 @@ def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
     if first is None and delay_h <= 0:
         first = started  # immediate-dose protocol: food went in at soak start
     if first is None:
-        # Holding in clean water — waiting for the molt before the dose.
+        # Holding — waiting for the molt. The age that matters is the BATCH's,
+        # measured from its load stamp when we have one.
+        dose_ref = _parse_iso(batch_loaded_iso) or started
+        try:
+            batch_age_h = max(0.0, (now - dose_ref).total_seconds() / 3600.0)
+        except TypeError:
+            batch_age_h = elapsed_h
         return {"status": "enriching", "hoursElapsed": round(elapsed_h, 1),
                 "hoursLeft": None, "percent": 0.0,
-                "firstDoseDue": elapsed_h >= delay_h, "secondDoseDue": False}
+                "firstDoseDue": batch_age_h >= delay_h, "secondDoseDue": False}
     fed_h = max(0.0, (now - first).total_seconds() / 3600.0)
     second_due = (bool(split_dose)
                   and _parse_iso(second_dose_iso) is None

@@ -1064,8 +1064,13 @@ def test_enrich_state_lifecycle():
     assert nps.enrich_state(_iso(NOW - timedelta(hours=19)), 12, False, "", NOW)["status"] == "overdue"
 
 
-def _enrich_entry(dose_delay_h=0):
-    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 0})
+def _enrich_entry(dose_delay_h=0, remaining=300, mixed_hours_ago=10):
+    # Container semantics: the brine being enriched is ALREADY loaded — give
+    # the reservoir a batch of the requested age (wall clock; handlers do).
+    mixed_at = ((datetime.now(timezone.utc) - timedelta(hours=mixed_hours_ago)).isoformat()
+                if mixed_hours_ago is not None else "")
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": remaining,
+                                 "mixedAt": mixed_at})
     cfg = entry.options[CONF_SETTINGS]
     cfg["nps"]["hatchery"]["enrichment"] = {
         "hours": 12, "doseMl": 2, "productId": "selcon", "splitDose": True,
@@ -1084,6 +1089,14 @@ def test_enrich_state_dose_delay_anchors_on_first_dose():
     assert early["firstDoseDue"] is False and early["hoursLeft"] is None
     due = nps.enrich_state(_iso(NOW - timedelta(hours=9)), 12, False, "", NOW, "", 8)
     assert due["firstDoseDue"] is True
+    # Container semantics: the molt clock runs on the BATCH's load stamp —
+    # engaging 1 h ago on a 9 h-old batch is due immediately.
+    batch_due = nps.enrich_state(_iso(NOW - timedelta(hours=1)), 12, False, "", NOW,
+                                 "", 8, _iso(NOW - timedelta(hours=9)))
+    assert batch_due["firstDoseDue"] is True
+    batch_young = nps.enrich_state(_iso(NOW - timedelta(hours=1)), 12, False, "", NOW,
+                                   "", 8, _iso(NOW - timedelta(hours=3)))
+    assert batch_young["firstDoseDue"] is False
     # Dosed: the soak counts from the DOSE — 5 h fed of 12 leaves 7.
     fed = nps.enrich_state(_iso(NOW - timedelta(hours=13)), 12, False, "", NOW,
                            _iso(NOW - timedelta(hours=5)), 8)
@@ -1100,26 +1113,40 @@ def test_enrich_state_dose_delay_anchors_on_first_dose():
 
 
 def test_ws_enrich_dose_delay_flow():
-    # Delayed protocol: no debit at soak start (nothing to eat it), the first
-    # dose logs later — and the top-up refuses to jump the queue.
-    entry = _enrich_entry(dose_delay_h=8)
+    # A YOUNG batch (3 h old, delay 8): engage holds — no debit, no dose —
+    # and the top-up refuses to jump the queue. The dose logs later.
+    entry = _enrich_entry(dose_delay_h=8, mixed_hours_ago=3)
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
-    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
-    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 2}))
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
     saved = entry.options[CONF_SETTINGS]
     assert saved["consumables"]["products"]["selcon"]["remainingMl"] == 50, \
         "no debit before the batch can eat"
     state = saved["nps"]["hatchery"]["enrichment"]["state"]
     assert not state["firstDoseAt"] and state["doseDelayH"] == 8
-    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 3}))
+    assert state["batchLoadedAt"], "the soak must remember the batch's load stamp"
+    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 2}))
     assert conn.errors and conn.errors[-1].code == "no_first_dose"
-    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 4}))
+    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 3}))
     saved = entry.options[CONF_SETTINGS]
     assert saved["consumables"]["products"]["selcon"]["remainingMl"] == 48
     assert saved["nps"]["hatchery"]["enrichment"]["state"]["firstDoseAt"]
-    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 5}))
+    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 4}))
     assert conn.errors[-1].code == "already_dosed"
+
+
+def test_ws_enrich_old_batch_doses_immediately():
+    # Reece's evening scenario: brine loaded at 8am, enriched at night — the
+    # batch is past the molt, so the dose (and debit) happen at engage even
+    # with a delay configured.
+    entry = _enrich_entry(dose_delay_h=8, mixed_hours_ago=10)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["consumables"]["products"]["selcon"]["remainingMl"] == 48
+    assert saved["nps"]["hatchery"]["enrichment"]["state"]["firstDoseAt"]
+    assert not conn.errors
 
 
 def test_enrich_push_reminds_the_first_dose_once():
@@ -1127,7 +1154,9 @@ def test_enrich_push_reminds_the_first_dose_once():
     cfg = entry.options[CONF_SETTINGS]
     cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"])
     cfg["nps"]["hatchery"]["enrichment"]["state"].update({
-        "startedAt": (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat(),
+        # Engaged only 1 h ago — but the BATCH is 9 h old: the dose is due.
+        "startedAt": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        "batchLoadedAt": (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat(),
         "enrichHours": 12, "doseDelayH": 8,
     })
     hass = FakeHass(entries=[entry])
@@ -1142,44 +1171,52 @@ def test_enrich_push_reminds_the_first_dose_once():
     assert len(_notes("openreef_enrich_dose")) == 1, "the dose push must fire exactly once"
 
 
-def test_ws_enrich_flow_end_to_end():
-    # Harvest → enrich frees the cone, stamps the soak, debits the bottle;
-    # a second enrich is refused; Enriched & loaded runs the ledger and the
-    # container switches to the tighter enriched clock.
+def test_ws_enrich_is_a_container_action():
+    # Reece's mesh flow: "Enrich" soaks the LOADED brine and must NEVER touch
+    # a running hatch. Soak done stamps the boost clock — nothing moves.
     entry = _enrich_entry()
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
     run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 2}))
     saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
-    assert not saved["vessels"]["v1"]["state"]["hatchStartedAt"], "the cone must free at harvest"
+    assert saved["vessels"]["v1"]["state"]["hatchStartedAt"], \
+        "the running hatch must be untouched"
     assert saved["enrichment"]["state"]["startedAt"], "the soak clock must start"
-    assert saved["enrichment"]["state"]["sourceVesselId"] == "v1"
+    assert saved["enrichment"]["state"]["batchLoadedAt"]
     products = entry.options[CONF_SETTINGS]["consumables"]["products"]
-    assert products["selcon"]["remainingMl"] == 48                   # 50 - 2
-    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 3}))
-    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 4}))
+    assert products["selcon"]["remainingMl"] == 48                   # dose at engage (delay 0)
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 3}))
     assert conn.errors and conn.errors[-1].code == "enrich_busy"
-    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 5}))
+    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 4}))
     saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
-    assert saved["reservoir"]["remainingMl"] == 500                  # top-to-full
+    assert saved["reservoir"]["remainingMl"] == 300, "soak done moves NO volume"
     assert saved["reservoir"]["lastLoadEnriched"] is True
-    assert not saved["enrichment"]["state"]["startedAt"], "the soak must clear on load"
-    assert saved["history"] and saved["history"][0]["enriched"] is True
-    assert saved["history"][0]["enrichedHours"] >= 0
+    assert saved["reservoir"]["enrichedAt"], "the boost decays from soak end"
+    assert not saved["enrichment"]["state"]["startedAt"], "the soak must clear"
+    assert not saved["history"], "a container soak writes no batch history"
+    assert saved["vessels"]["v1"]["state"]["hatchStartedAt"], \
+        "the hatch survives the whole soak lifecycle"
+
+
+def test_ws_enrich_needs_loaded_brine():
+    entry = _enrich_entry(remaining=0, mixed_hours_ago=None)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    assert conn.errors and conn.errors[-1].code == "no_brine"
 
 
 def test_ws_enrich_second_dose_debits_once():
-    entry = _enrich_entry()
+    entry = _enrich_entry()   # old batch → first dose at engage
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
-    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
-    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 2}))
-    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 3}))
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 2}))
     products = entry.options[CONF_SETTINGS]["consumables"]["products"]
     assert products["selcon"]["remainingMl"] == 46                   # 50 - 2 - 2
     assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["enrichment"]["state"]["secondDoseAt"]
-    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 4}))
+    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 3}))
     assert conn.errors and conn.errors[-1].code == "already_dosed"
 
 
@@ -1195,6 +1232,16 @@ def test_enriched_load_caps_the_shelf_clock():
     cfg["nps"]["hatchery"]["reservoir"]["refrigerated"] = True
     _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
     assert shelf_h == 48.0
+    # Container soak (0.7.70): the boost decays from SOAK END, so an evening
+    # enrich of a morning batch keeps an honest clock — loaded 6 h ago,
+    # soaked done 1 h ago, room temp: shelf = min(24, 5 + 12) = 17 h.
+    cfg["nps"]["hatchery"]["reservoir"].update({
+        "refrigerated": False,
+        "mixedAt": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
+        "enrichedAt": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    })
+    _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
+    assert abs(shelf_h - 17.0) < 0.1
 
 
 def test_enrich_push_fires_done_and_topup_once():
