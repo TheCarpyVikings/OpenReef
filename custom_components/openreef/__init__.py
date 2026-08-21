@@ -899,9 +899,14 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
     dosing["channels"] = channels
 
 
-def _normalise_hatchery(raw: Any) -> dict[str, Any]:
+def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, Any]:
     """Hatchery v2 (doc §9): vessels with per-BATCH egg/hours stamps, the brine
     dosing-container ledger, hatch history, hand-feed defaults, temp sensor.
+
+    ``enabled`` gates the STANDALONE hatchery tab (0.7.71) — breeders run
+    hatcheries with zero NPS corals. Existing configs inherit nps.enabled via
+    ``default_enabled`` so nothing changes for NPS users; pass the same
+    default from EVERY caller or a migration-time save flips it off.
 
     Migration from v1: the single ``state.hatchStartedAt`` clock becomes vessel
     ``v1``; the v1 ``state.loadedAt`` stamp becomes ``reservoir.mixedAt``."""
@@ -1000,6 +1005,7 @@ def _normalise_hatchery(raw: Any) -> dict[str, Any]:
         history.append(entry)
     raw_hand = raw.get("handFeed") if isinstance(raw.get("handFeed"), dict) else {}
     return {
+        "enabled": bool(raw.get("enabled", default_enabled)),
         "eggType": egg_type,
         "hatchHours": hatch_hours,
         "vessels": vessels,
@@ -1061,7 +1067,7 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             },
         },
         # Hatchery (v2): vessels, brine ledger, history — see _normalise_hatchery.
-        "hatchery": _normalise_hatchery(raw_hatchery),
+        "hatchery": _normalise_hatchery(raw_hatchery, bool(nps_cfg.get("enabled", False))),
         # Feed truce (Stage C): plankton-hostile equipment pauses. The state
         # tracks exactly which entities the truce itself turned off — restore
         # never touches equipment the keeper had off already.
@@ -11091,9 +11097,12 @@ async def _async_nps_hatch_ready_push(
     and self-persisting, so it can't clobber (or be clobbered by) the tick's
     accounting snapshot. Phone push reuses the maintenance reminders' target."""
     config = _config_from_entry(entry)
-    hatchery = (config.get("nps") or {}).get("hatchery") or {}
+    nps_cfg = config.get("nps") or {}
+    hatchery = nps_cfg.get("hatchery") or {}
     vessels = hatchery.get("vessels") if isinstance(hatchery.get("vessels"), dict) else {}
-    if not vessels or not (config.get("nps") or {}).get("enabled"):
+    # Standalone hatcheries (0.7.71): the gate is the hatchery's own flag —
+    # breeders run brine rigs with NPS off. Pre-migration configs inherit.
+    if not vessels or not hatchery.get("enabled", nps_cfg.get("enabled")):
         return
     now = datetime.now(timezone.utc)
     changed = False
@@ -12331,7 +12340,8 @@ def _nps_hatchery_v2(config: dict[str, Any]) -> dict[str, Any]:
     hatchery block through the v2 normaliser (migration included) and write it
     back so every caller sees vessels/reservoir/history."""
     nps_cfg = config.setdefault("nps", {})
-    nps_cfg["hatchery"] = _normalise_hatchery(nps_cfg.get("hatchery"))
+    nps_cfg["hatchery"] = _normalise_hatchery(
+        nps_cfg.get("hatchery"), bool(nps_cfg.get("enabled", False)))
     return nps_cfg["hatchery"]
 
 
@@ -12854,9 +12864,11 @@ async def websocket_nps_summary(
         # Hatchery (v2): per-vessel clocks, the canonical container ledger,
         # and the daily-driver advice (nextHatch + learned clock + temp).
         "hatchery": {
+            "enabled": bool(hatchery_cfg["enabled"]),
             "eggType": hatchery_cfg["eggType"],
             "hatchHours": hatchery_cfg["hatchHours"],
             "eggTypes": [dict(e) for e in nps_engine.EGG_TYPES],
+            "history": [dict(item) for item in hatchery_cfg["history"][:10]],
             "vessels": vessels_payload,
             "idleVessel": idle_vessel,
             "vesselsNeeded": nps_engine.vessels_needed(

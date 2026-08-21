@@ -418,7 +418,7 @@ class OpenReefPanel extends HTMLElement {
       if (!this._canRefreshFromConfigEvent()) return;
       this._refreshConfigSilently();
       // An external save invalidates the backend-compiled NPS summaries too.
-      if (this._activeTab === "nps") this._npsLoadSummary(true);
+      if (this._activeTab === "nps" || this._activeTab === "hatchery") this._npsLoadSummary(true);
     }, 250);
   }
 
@@ -502,7 +502,7 @@ class OpenReefPanel extends HTMLElement {
       // NPS summaries (species plan, shelf, budget) are compiled backend-side
       // from config — a save invalidates them, so recompile without the
       // save-then-refresh dance.
-      if (this._activeTab === "nps") this._npsLoadSummary(true);
+      if (this._activeTab === "nps" || this._activeTab === "hatchery") this._npsLoadSummary(true);
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not save OpenReef";
     } finally {
@@ -1732,14 +1732,6 @@ class OpenReefPanel extends HTMLElement {
         }
       }
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
-      if (action === "nps-rig-toggle") {
-        this._npsRigOpen = !this._npsRigOpen;
-        if (!this._npsRigOpen) {
-          if (this._npsRigTimer) { clearTimeout(this._npsRigTimer); this._npsRigTimer = null; }
-          this._npsRigPreview = null;
-        }
-        this._render();
-      }
       if (action === "nps-rig-play") this._npsRigPlay();
       if (action === "nps-add-vessel") {
         const hatchery = (this._config.nps = this._config.nps || {}).hatchery
@@ -2424,7 +2416,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && field === "eggType") || (scope === "nps-hatch-vessel" && field === "volumePreset") || (scope === "nps-hatch-reservoir" && field === "refrigerated") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-hatch-vessel" && field === "volumePreset") || (scope === "nps-hatch-reservoir" && field === "refrigerated") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -10910,114 +10902,12 @@ class OpenReefPanel extends HTMLElement {
     return cards.length ? `<div class="summary-grid">${cards.join("")}</div>` : "";
   }
 
-  _npsTab() {
+  // Shared hatchery strip — vessels, soak, container, advice, daily
+  // actions. Rendered on BOTH the Hatchery tab (full) and the NPS tab
+  // (compact, with a door to the dedicated page). One implementation,
+  // two doors — no divergence.
+  _hatcheryPanel(compact = false) {
     const st = this._nps;
-    if (st.summary === null && !st.loading) setTimeout(() => this._npsLoadSummary(), 0);
-    if (!this._awcSummary) setTimeout(() => this._awcLoadSummary(), 0);
-    if (this._doserSummary === null && !this._doserSummaryLoading) setTimeout(() => this._doserLoadSummary(), 0);
-
-    const channels = this._doserChannels();
-    const foodIds = this._npsFoodChannelIds();
-    const dsum = (this._doserSummary && this._doserSummary.summary) || {};
-    const products = (this._config && this._config.consumables && this._config.consumables.products) || {};
-    const shelfStates = (st.summary && st.summary.shelf && st.summary.shelf.products) || {};
-    const pids = Object.keys(products).sort((a, b) =>
-      String(products[a].name || "").localeCompare(String(products[b].name || "")));
-
-    const head = `
-      <div class="section-head">
-        <div><h2>Automated NPS System</h2><p>Feeding non-photosynthetic corals is a logistics problem — OpenReef turns it into a schedule. Food pumps, the bottle shelf, and the water exchange in one place.</p></div>
-        <div class="button-row">
-          <button class="secondary compact-button" data-action="nps-demo-toggle">${st.demo ? "Exit demo" : "Demo view"}</button>
-          ${st.demo ? "" : `<button class="secondary compact-button" data-action="nps-refresh">Refresh</button>`}
-        </div>
-      </div>`;
-
-    const demoStageCopy = ({
-      dose: "🦐 Dosing 12 ml of live brine — the pump spins up, and the feed truce holds the skimmer back from dinner.",
-      flush: "💧 Chaser flush — 200 ml of tank-salinity fresh rinses the food line clean. Both volumes bank as owed drain: 642 ml.",
-      drain: "↘️ Matched drain — the AWC drain pump takes the same 642 ml back out. The level never moved; the ATO never noticed.",
-      done: "✅ Balanced. Old water out, dinner served, books square. That's the feed-exchange.",
-      "awc-drain": "💧 Water change — draining old tank water to waste, exactly as scheduled…",
-      "awc-fill": "💙 …and refilling the same volume from the fresh premix. Parameters glide, never step.",
-      "awc-done": "✅ 4% exchanged. Feeding hard AND staying clean — that's the NPS rhythm.",
-    })[st.demoStage] || "";
-    const notices = `
-      ${st.demo ? `<div class="notice info-notice"><small>🧪 <strong>Demo view</strong> — a staged tank so you can see the page fully populated. Nothing here is yours and nothing can be saved; tap "Exit demo" to come back.</small>
-        <div class="button-row" style="margin-top:6px;">
-          <button class="secondary compact-button" data-action="nps-demo-play" ${st.demoStage ? "disabled" : ""}>${st.demoStage && !st.demoStage.startsWith("awc") ? "Feeding in progress…" : "▶ Run a feeding"}</button>
-          <button class="secondary compact-button" data-action="nps-demo-awc" ${st.demoStage ? "disabled" : ""}>${st.demoStage && st.demoStage.startsWith("awc") ? "Water change in progress…" : "💧 Run a water change"}</button>
-        </div></div>` : ""}
-      ${st.demo && demoStageCopy ? `<div class="notice info-notice"><small>${demoStageCopy}</small></div>` : ""}
-      ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
-      ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
-
-    // --- Setup checklist + the feeding station (diagram hero + timeline) ---
-    const setupCard = this._npsSetupCard();
-    const awcSum = this._awcSummary && this._awcSummary.summary;
-    const heroPanel = `
-      <article class="panel stack">
-        <p class="eyebrow">Feeding station</p>
-        ${this._npsDiagramSvg()}
-        ${this._npsTimelineSvg()}
-        ${awcSum && awcSum.scheduleText ? `<small>📅 ${this._escape(awcSum.scheduleText)}</small>` : ""}
-      </article>`;
-
-    // --- Food pumps: the full dosing cards — daily actions only; every form
-    // (bottle links, schedules, bindings) lives in Settings.
-    const bindings = (this._doserSummary && this._doserSummary.bindings) || {};
-    const pumpCards = foodIds.map((id) =>
-      this._doserChannelCard(id, dsum[id] || null, bindings[id] || null)).join("");
-    const pumpsPanel = `
-      <article class="panel stack">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <p class="eyebrow" style="margin:0;">Food pumps</p>
-          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Add / configure</button>
-        </div>
-        ${pumpCards ? `<div class="dosing-grid">${pumpCards}</div>`
-          : `<p class="hint">No food pumps yet — add one in Settings → Automated NPS system. Hand-feeding? The shelf below still tracks every bottle.</p>`}
-      </article>`;
-
-    // --- Food shelf: status + the two daily actions; editing is Settings ---
-    const shelfPanel = `
-      <article class="panel stack">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <p class="eyebrow" style="margin:0;">Food shelf</p>
-          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Manage shelf</button>
-        </div>
-        ${pids.length
-          ? `<div class="grid two">${pids.map((pid) => this._npsProductCard(pid, products[pid], shelfStates[pid])).join("")}</div>`
-          : `<p class="hint">${st.loading ? "Loading the shelf…" : "Track every bottle you dose — phyto, foods, bacteria, 2-part. Add your first in Settings → Automated NPS system; log doses here and the shelf forecasts how many days are left."}</p>`}
-      </article>`;
-
-    // --- Species coverage: RESULTS only (picking what you keep is Settings) -
-    const selectedSpecies = (this._config && this._config.nps && this._config.nps.species) || [];
-    const plan = (st.summary && st.summary.speciesPlan) || {};
-    const planBits = [];
-    (plan.gaps || []).forEach((g) => planBits.push(
-      `<p class="hint" style="color:var(--warning-color,#f5a524)">🕳 ${this._escape(g)}</p>`));
-    (plan.warnings || []).forEach((w) => planBits.push(
-      `<p class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(w)}</p>`));
-    if (selectedSpecies.length && !(plan.gaps || []).length && !(plan.warnings || []).length) {
-      planBits.push(`<p class="hint">Shelf coverage looks good — every selected mouth has a matching food.</p>`);
-    }
-    (plan.suggestions || []).forEach((sug) => planBits.push(`
-      <div class="setting-card subtle-card" style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;">
-        <small><strong>${this._escape(sug.channelName)}</strong> → ${this._escape(String(sug.dosesPerDay))} doses/day${sug.night ? ", night-weighted" : ""} <em>(for ${this._escape(sug.for)})</em> — ${this._escape(sug.note)}</small>
-        <button class="secondary compact-button" data-action="nps-apply-species" data-id="${this._escape(sug.channelId)}" data-doses="${Number(sug.dosesPerDay) || 1}" data-night="${sug.night ? "1" : ""}">Apply</button>
-      </div>`));
-    const speciesNames = (plan.species || []).map((s) => this._escape(s.name)).join(" · ");
-    const speciesPanel = selectedSpecies.length ? `
-      <article class="panel stack">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <p class="eyebrow" style="margin:0;">Species coverage</p>
-          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Edit species</button>
-        </div>
-        ${speciesNames ? `<small>${speciesNames}</small>` : ""}
-        ${planBits.join("")}
-      </article>` : "";
-
-    // --- Hatchery: status + daily actions only (config lives in Settings) --
     const fxCfg = (this._config && this._config.nps && this._config.nps.feedExchange) || {};
     const fxSum = (st.summary && st.summary.feedExchange) || {};
     const prime = fxSum.prime || {};
@@ -11144,33 +11034,13 @@ class OpenReefPanel extends HTMLElement {
       : "";
     // The DIY rig blueprint (settle & slug) — collapsed by default; the page
     // stays informative, the how-to unfolds on demand.
-    const rigSteps = [
-      ["Air off", "shells float in the hatch cone; cysts and crud sink to the tips (a few minutes)."],
-      ["Transfer: open ① + ②", "nauplii ride down to LIVE BRINE, shells stay behind. Close ①."],
-      ["Crud bleed", "mesh half OFF — crack ② + ③, the first ~20 ml of tip crud runs straight to waste. Mesh half back ON."],
-      ["Mesh drain: open ② + ③ part-way", "everything through the 120 µm disc — water to waste, every nauplius stays on the mesh."],
-      ["Backflush", "invert the mesh half over the vessel; 700 ml fresh 35 ppt washes them home. Air ON — the vessel IS the aerated container. Tap \"Hatched &amp; loaded\"."],
-      ["Optional Selcon, on the dose push (instar II)", "a second mesh cycle before feed-out is the rinse."],
-      ["Housekeeping", "crack ③ a moment to bleed the dead leg; rinse the mesh in the waste water."],
-    ];
-    const rigPanel = this._npsRigOpen ? `
-      <div class="stack" style="gap:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <small class="muted" style="flex:1;min-width:260px;">The mesh flow — the staggered two-vessel rig where the LIVE BRINE vessel is also the aerated holding container, LIVE: the drawing follows whatever stage the hatchery is in. The blue part is the whole upgrade: the 120 µm mesh capsule under valve ③. Two vessels, three valves, one mesh — nothing else.</small>
-          <button class="secondary compact-button" data-action="nps-rig-play">${this._npsRigPreview ? "■ Stop" : "▶ Play the stages"}</button>
-        </div>
-        ${this._npsHatchRigSvg()}
-        <div class="grid two compact">
-          ${rigSteps.map(([title, detail], i) => `<small><strong>${i + 1}. ${title}</strong> — ${detail}</small>`).join("")}
-        </div>
-      </div>` : "";
-    const hatcheryPanel = `
+    return `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <p class="eyebrow" style="margin:0;">Hatchery</p>
+          <p class="eyebrow" style="margin:0;">${compact ? "Hatchery" : "Today"}</p>
           <div class="button-row">
-            <button class="secondary compact-button" data-action="nps-rig-toggle">${this._npsRigOpen ? "Hide rig blueprint" : "Rig blueprint"}</button>
-            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Hatch settings</button>
+            ${compact ? `<button class="secondary compact-button" data-action="tab" data-id="hatchery">Open Hatchery →</button>` : ""}
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="hatchery" data-scroll="or-section-hatchery">Hatch settings</button>
           </div>
         </div>
         <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
@@ -11187,8 +11057,298 @@ class OpenReefPanel extends HTMLElement {
             <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
           </div>
         </div>
-        ${rigPanel}
       </article>`;
+  }
+
+  // The rig, live — the hero of the Hatchery tab: always open, the
+  // walkthrough one tap away. (It left the NPS tab in 0.7.71.)
+  _hatcheryRigPanel() {
+const rigSteps = [
+      ["Air off", "shells float in the hatch cone; cysts and crud sink to the tips (a few minutes)."],
+      ["Transfer: open ① + ②", "nauplii ride down to LIVE BRINE, shells stay behind. Close ①."],
+      ["Crud bleed", "mesh half OFF — crack ② + ③, the first ~20 ml of tip crud runs straight to waste. Mesh half back ON."],
+      ["Mesh drain: open ② + ③ part-way", "everything through the 120 µm disc — water to waste, every nauplius stays on the mesh."],
+      ["Backflush", "invert the mesh half over the vessel; 700 ml fresh 35 ppt washes them home. Air ON — the vessel IS the aerated container. Tap \"Hatched &amp; loaded\"."],
+      ["Optional Selcon, on the dose push (instar II)", "a second mesh cycle before feed-out is the rinse."],
+      ["Housekeeping", "crack ③ a moment to bleed the dead leg; rinse the mesh in the waste water."],
+    ];
+    return `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:260px;">
+            <p class="eyebrow" style="margin:0;">The rig — live</p>
+            <small class="muted">Two vessels, three valves, one mesh — nothing else. The drawing follows whatever stage the hatchery is in; the blue part is the whole upgrade: the 120 µm mesh capsule under valve ③.</small>
+          </div>
+          <button class="secondary compact-button" data-action="nps-rig-play">${this._npsRigPreview ? "■ Stop" : "▶ Play the stages"}</button>
+        </div>
+        ${this._npsHatchRigSvg()}
+        <div class="grid two compact">
+          ${rigSteps.map(([title, detail], i) => `<small><strong>${i + 1}. ${title}</strong> — ${detail}</small>`).join("")}
+        </div>
+      </article>`;
+  }
+
+  // Standalone gate (0.7.71): breeders run hatcheries with zero NPS corals.
+  // Pre-migration configs (no explicit flag) inherit nps.enabled.
+  _hatcheryEnabled() {
+    const nps = this._config?.nps;
+    const hatchery = nps?.hatchery;
+    return hatchery && hatchery.enabled !== undefined ? !!hatchery.enabled : !!nps?.enabled;
+  }
+
+  // The Hatchery tab — the first hatchery scheduler for home aquariums,
+  // standing on its own: mission row, daily actions, the live rig as the
+  // hero, the hatch journal, and the reminders — one page, one rhythm.
+  _hatcheryTab() {
+    this._npsLoadSummary();
+    const st = this._nps;
+    const hatch = st.summary?.hatchery || {};
+    const hs = hatch.state || {};
+    const res = hatch.reservoir || {};
+    const es = hatch.enrichment?.state || {};
+    const next = hatch.nextHatch || {};
+    const eggName = (this._npsEggTypes().find((e) => e.id === (hatch.eggType || "standard")) || {}).name || "Standard cysts";
+
+    // --- The mission row: four numbers that run the day -------------------
+    const batchCard = (es.status && es.status !== "none")
+      ? this._missionSummaryCard("Soak",
+        es.status === "enriching" ? (es.hoursLeft == null ? "holding" : `${es.hoursLeft} h left`) : "rinse & load",
+        es.firstDoseDue ? "mouths are open — add the Selcon" : es.status === "enriching" ? "gut-loading in the vessel" : "the boost clock is running",
+        es.status === "overdue" || es.firstDoseDue ? "warning" : "ok", "hatchery")
+      : hs.status === "incubating"
+        ? this._missionSummaryCard("Batch", `${hs.percent}%`, `${eggName} · ~${hs.hoursLeft} h to go`, "ok", "hatchery")
+        : hs.status === "ready"
+          ? this._missionSummaryCard("Batch", "ready", "harvest via the mesh — walk-through below", "warning", "hatchery")
+          : hs.status === "overdue"
+            ? this._missionSummaryCard("Batch", "harvest now", "yolk calories burn past the window", "warning", "hatchery")
+            : this._missionSummaryCard("Batch", "none", "start a hatch below", "unknown", "hatchery");
+    const contPct = Number(res.volumeMl) > 0
+      ? Math.round(100 * (Number(res.remainingMl) || 0) / Number(res.volumeMl)) : null;
+    const contCard = this._missionSummaryCard("Container",
+      contPct == null ? "unset" : `${Math.round(Number(res.remainingMl) || 0)} ml`,
+      contPct == null ? "set the volume in Hatch settings"
+        : `${contPct}%${res.freshness?.status ? ` · ${res.freshness.status}` : ""}${res.lastLoadEnriched ? " · enriched" : ""}`,
+      contPct == null ? "unknown"
+        : res.freshness?.status === "stale" ? "critical"
+          : res.freshness?.status === "aging" ? "warning" : "ok",
+      "hatchery");
+    const nextCard = this._missionSummaryCard("Next hatch",
+      next.status === "wait" || next.status === "chained" ? `in ~${next.hoursUntil} h`
+        : next.status === "start_now" ? "now"
+          : next.status === "overdue" ? "past due" : "—",
+      next.status === "no_brine" || !next.status ? "nothing in play — start when ready"
+        : next.driver === "depletion" ? "before the container runs dry" : "before the loaded brine fades",
+      next.status === "start_now" || next.status === "overdue" ? "warning" : "ok", "hatchery");
+    const learned = hatch.learned || {};
+    const temp = hatch.temp || {};
+    const clockCard = this._missionSummaryCard("The clock",
+      `${hatch.hatchHours || 24} h`,
+      learned.available ? `your batches actually run ~${learned.hours} h`
+        : temp.available ? `${temp.tempC} °C → expect ~${temp.expectedHours} h` : eggName,
+      learned.available && Math.abs(Number(learned.hours) - Number(hatch.hatchHours || 24)) >= 2 ? "warning" : "ok",
+      "settings", { section: "hatchery", scroll: "or-section-hatchery" });
+    const summaryCards = `<div class="summary-grid">${batchCard}${contCard}${nextCard}${clockCard}</div>`;
+
+    // --- The hatch journal: every batch's story, honestly ------------------
+    const history = Array.isArray(hatch.history) ? hatch.history : [];
+    const journal = history.length ? `
+      <article class="panel stack">
+        <p class="eyebrow" style="margin:0;">Hatch journal</p>
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;">
+            <thead><tr>
+              <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Harvested</th>
+              <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Eggs</th>
+              <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Planned</th>
+              <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Actual</th>
+              <th style="text-align:left;padding:6px 10px;"></th>
+            </tr></thead>
+            <tbody>
+              ${history.map((entry) => {
+                const planned = Number(entry.plannedHours) || 0;
+                const actual = Number(entry.actualHours) || 0;
+                const delta = actual - planned;
+                const eggLabel = (this._npsEggTypes().find((e) => e.id === entry.eggType) || {}).name || entry.eggType || "—";
+                return `<tr style="border-top:1px solid rgba(255,255,255,0.06);">
+                  <td style="padding:6px 10px;">${this._escape(this._formatActivityTime(entry.harvestedAt))}</td>
+                  <td style="padding:6px 10px;">${this._escape(eggLabel)}</td>
+                  <td style="padding:6px 10px;text-align:right;">${this._escape(String(planned))} h</td>
+                  <td style="padding:6px 10px;text-align:right;color:${Math.abs(delta) >= 3 ? "var(--warning-color,#f5a524)" : "inherit"};">${this._escape(String(actual))} h</td>
+                  <td style="padding:6px 10px;">${entry.enriched ? `<span class="pill ok">enriched ${this._escape(String(entry.enrichedHours ?? ""))} h</span>` : ""}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+        ${learned.available ? `<small class="muted">Learned clock: your last ${this._escape(String(learned.samples))} ${this._escape(eggName)} batches averaged ~${this._escape(String(learned.hours))} h — the "Set clock" chip above applies it.</small>` : ""}
+      </article>` : "";
+
+    // --- Reminders: the three chores, on the hatch clock -------------------
+    const reminderTasks = [
+      ["brine_hatch_start", "Start the next hatch"],
+      ["brine_hatch_harvest", "Harvest, rinse & load"],
+      ["brine_hand_feed", "Hand-feed the tank"],
+    ].filter(([id]) => this._config?.maintenance?.tasks?.[id]);
+    const reminderRows = reminderTasks.map(([id, label]) => {
+      const state = this._maintenanceDueState(id);
+      return `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
+        <small>${label}</small><span class="pill ${state.status}">${this._escape(state.label)}</span>
+      </div>`;
+    });
+    const reminders = `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Reminders</p>
+          <button class="secondary compact-button" data-action="nps-add-hatch-reminders">${reminderRows.length ? "Sync to the hatch clock" : "Add hatchery reminders"}</button>
+        </div>
+        ${reminderRows.length
+          ? `<div class="stack tight">${reminderRows.join("")}</div>`
+          : `<small class="muted">One tap seeds the start and harvest chores on your hatch clock — hour-precise, phone pushes included, anchored to whatever is actually incubating.</small>`}
+      </article>`;
+
+    // --- First-run welcome (only when the page is genuinely empty) ---------
+    const virgin = (!hs.status || hs.status === "none") && !(Number(res.volumeMl) > 0)
+      && !history.length && (!es.status || es.status === "none");
+    const welcome = virgin ? `
+      <article class="panel stack" style="border-color:rgba(66,165,245,0.4);">
+        <p class="eyebrow" style="margin:0;">Getting started</p>
+        <small>A brine hatchery is <strong>two vessels, three valves and one mesh disc</strong> — the blueprint below is the whole build. Three steps and the page comes alive:</small>
+        <div class="grid three compact">
+          <small><strong>1. Build the rig</strong> — or run any hatcher you already own; the scheduler doesn't mind.</small>
+          <small><strong>2. Set the container volume</strong> in <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="hatchery" data-scroll="or-section-hatchery">Hatch settings</button> so the ledger and depletion maths wake up.</small>
+          <small><strong>3. Tap "Start hatch"</strong> — the clock, the ready push and the next-hatch advice take it from there.</small>
+        </div>
+      </article>` : "";
+
+    // Personality earns its place only on a calm page (never on warnings).
+    const calm = hs.status !== "overdue" && res.freshness?.status !== "stale" && !es.firstDoseDue;
+    const closing = this._tone() === "cheeky" && calm && !virgin
+      ? `<small class="muted" style="text-align:center;">The fleet hatches on schedule. Ragnar approves. 🛶</small>` : "";
+
+    const head = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:260px;">
+          <p class="eyebrow" style="margin:0 0 2px;">Hatchery</p>
+          <h2 style="margin:0 0 4px;">Live brine, on schedule</h2>
+          <p class="muted" style="margin:0;">Hatch, harvest, hold, enrich — every clock on this page is real, and the pushes land at the hour that matters. No NPS corals required.</p>
+        </div>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="nps-refresh">Refresh</button>
+          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="hatchery" data-scroll="or-section-hatchery">Hatch settings</button>
+        </div>
+      </div>`;
+
+    return `<section class="stack">${head}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}${closing}</section>`;
+  }
+
+  _npsTab() {
+    const st = this._nps;
+    if (st.summary === null && !st.loading) setTimeout(() => this._npsLoadSummary(), 0);
+    if (!this._awcSummary) setTimeout(() => this._awcLoadSummary(), 0);
+    if (this._doserSummary === null && !this._doserSummaryLoading) setTimeout(() => this._doserLoadSummary(), 0);
+
+    const channels = this._doserChannels();
+    const foodIds = this._npsFoodChannelIds();
+    const dsum = (this._doserSummary && this._doserSummary.summary) || {};
+    const products = (this._config && this._config.consumables && this._config.consumables.products) || {};
+    const shelfStates = (st.summary && st.summary.shelf && st.summary.shelf.products) || {};
+    const pids = Object.keys(products).sort((a, b) =>
+      String(products[a].name || "").localeCompare(String(products[b].name || "")));
+
+    const head = `
+      <div class="section-head">
+        <div><h2>Automated NPS System</h2><p>Feeding non-photosynthetic corals is a logistics problem — OpenReef turns it into a schedule. Food pumps, the bottle shelf, and the water exchange in one place.</p></div>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="nps-demo-toggle">${st.demo ? "Exit demo" : "Demo view"}</button>
+          ${st.demo ? "" : `<button class="secondary compact-button" data-action="nps-refresh">Refresh</button>`}
+        </div>
+      </div>`;
+
+    const demoStageCopy = ({
+      dose: "🦐 Dosing 12 ml of live brine — the pump spins up, and the feed truce holds the skimmer back from dinner.",
+      flush: "💧 Chaser flush — 200 ml of tank-salinity fresh rinses the food line clean. Both volumes bank as owed drain: 642 ml.",
+      drain: "↘️ Matched drain — the AWC drain pump takes the same 642 ml back out. The level never moved; the ATO never noticed.",
+      done: "✅ Balanced. Old water out, dinner served, books square. That's the feed-exchange.",
+      "awc-drain": "💧 Water change — draining old tank water to waste, exactly as scheduled…",
+      "awc-fill": "💙 …and refilling the same volume from the fresh premix. Parameters glide, never step.",
+      "awc-done": "✅ 4% exchanged. Feeding hard AND staying clean — that's the NPS rhythm.",
+    })[st.demoStage] || "";
+    const notices = `
+      ${st.demo ? `<div class="notice info-notice"><small>🧪 <strong>Demo view</strong> — a staged tank so you can see the page fully populated. Nothing here is yours and nothing can be saved; tap "Exit demo" to come back.</small>
+        <div class="button-row" style="margin-top:6px;">
+          <button class="secondary compact-button" data-action="nps-demo-play" ${st.demoStage ? "disabled" : ""}>${st.demoStage && !st.demoStage.startsWith("awc") ? "Feeding in progress…" : "▶ Run a feeding"}</button>
+          <button class="secondary compact-button" data-action="nps-demo-awc" ${st.demoStage ? "disabled" : ""}>${st.demoStage && st.demoStage.startsWith("awc") ? "Water change in progress…" : "💧 Run a water change"}</button>
+        </div></div>` : ""}
+      ${st.demo && demoStageCopy ? `<div class="notice info-notice"><small>${demoStageCopy}</small></div>` : ""}
+      ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
+      ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
+
+    // --- Setup checklist + the feeding station (diagram hero + timeline) ---
+    const setupCard = this._npsSetupCard();
+    const awcSum = this._awcSummary && this._awcSummary.summary;
+    const heroPanel = `
+      <article class="panel stack">
+        <p class="eyebrow">Feeding station</p>
+        ${this._npsDiagramSvg()}
+        ${this._npsTimelineSvg()}
+        ${awcSum && awcSum.scheduleText ? `<small>📅 ${this._escape(awcSum.scheduleText)}</small>` : ""}
+      </article>`;
+
+    // --- Food pumps: the full dosing cards — daily actions only; every form
+    // (bottle links, schedules, bindings) lives in Settings.
+    const bindings = (this._doserSummary && this._doserSummary.bindings) || {};
+    const pumpCards = foodIds.map((id) =>
+      this._doserChannelCard(id, dsum[id] || null, bindings[id] || null)).join("");
+    const pumpsPanel = `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Food pumps</p>
+          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Add / configure</button>
+        </div>
+        ${pumpCards ? `<div class="dosing-grid">${pumpCards}</div>`
+          : `<p class="hint">No food pumps yet — add one in Settings → Automated NPS system. Hand-feeding? The shelf below still tracks every bottle.</p>`}
+      </article>`;
+
+    // --- Food shelf: status + the two daily actions; editing is Settings ---
+    const shelfPanel = `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Food shelf</p>
+          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Manage shelf</button>
+        </div>
+        ${pids.length
+          ? `<div class="grid two">${pids.map((pid) => this._npsProductCard(pid, products[pid], shelfStates[pid])).join("")}</div>`
+          : `<p class="hint">${st.loading ? "Loading the shelf…" : "Track every bottle you dose — phyto, foods, bacteria, 2-part. Add your first in Settings → Automated NPS system; log doses here and the shelf forecasts how many days are left."}</p>`}
+      </article>`;
+
+    // --- Species coverage: RESULTS only (picking what you keep is Settings) -
+    const selectedSpecies = (this._config && this._config.nps && this._config.nps.species) || [];
+    const plan = (st.summary && st.summary.speciesPlan) || {};
+    const planBits = [];
+    (plan.gaps || []).forEach((g) => planBits.push(
+      `<p class="hint" style="color:var(--warning-color,#f5a524)">🕳 ${this._escape(g)}</p>`));
+    (plan.warnings || []).forEach((w) => planBits.push(
+      `<p class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(w)}</p>`));
+    if (selectedSpecies.length && !(plan.gaps || []).length && !(plan.warnings || []).length) {
+      planBits.push(`<p class="hint">Shelf coverage looks good — every selected mouth has a matching food.</p>`);
+    }
+    (plan.suggestions || []).forEach((sug) => planBits.push(`
+      <div class="setting-card subtle-card" style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;">
+        <small><strong>${this._escape(sug.channelName)}</strong> → ${this._escape(String(sug.dosesPerDay))} doses/day${sug.night ? ", night-weighted" : ""} <em>(for ${this._escape(sug.for)})</em> — ${this._escape(sug.note)}</small>
+        <button class="secondary compact-button" data-action="nps-apply-species" data-id="${this._escape(sug.channelId)}" data-doses="${Number(sug.dosesPerDay) || 1}" data-night="${sug.night ? "1" : ""}">Apply</button>
+      </div>`));
+    const speciesNames = (plan.species || []).map((s) => this._escape(s.name)).join(" · ");
+    const speciesPanel = selectedSpecies.length ? `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Species coverage</p>
+          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Edit species</button>
+        </div>
+        ${speciesNames ? `<small>${speciesNames}</small>` : ""}
+        ${planBits.join("")}
+      </article>` : "";
+
+    const hatcheryPanel = this._hatcheryPanel(true);
 
     return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${this._npsStatusCards()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}</section>`;
   }
@@ -11220,6 +11380,11 @@ class OpenReefPanel extends HTMLElement {
     if (this._config?.nps?.enabled) {
       tabs.splice(tabs.findIndex(([tabId]) => tabId === "controls"), 0, ["nps", "NPS"]);
     }
+    // Hatchery (0.7.71): standalone — breeders run brine rigs with zero NPS
+    // corals. Sits beside NPS when both are on, before Controls otherwise.
+    if (this._hatcheryEnabled()) {
+      tabs.splice(tabs.findIndex(([tabId]) => tabId === "controls"), 0, ["hatchery", "Hatchery"]);
+    }
     // Vision only exists for installs that opted in (Frigate + MQTT owners):
     // no permanent empty-state tab advertising hardware a tester doesn't have.
     if (this._config?.vision?.enabled) {
@@ -11233,7 +11398,8 @@ class OpenReefPanel extends HTMLElement {
     // Mission — highlight Mission so the nav doesn't show no active tab.
     const activeId = ((this._activeTab === "vision" && !this._config?.vision?.enabled)
       || (this._activeTab === "dosing" && !this._dosingEnabled())
-      || (this._activeTab === "nps" && !this._config?.nps?.enabled))
+      || (this._activeTab === "nps" && !this._config?.nps?.enabled)
+      || (this._activeTab === "hatchery" && !this._hatcheryEnabled()))
       ? "mission" : this._activeTab;
     return `
       <nav class="tabs">
@@ -11264,6 +11430,9 @@ class OpenReefPanel extends HTMLElement {
     if (this._activeTab === "nps") {
       // Falls back to Mission if NPS was disabled while this tab was active.
       return this._config?.nps?.enabled ? this._npsTab() : this._mission();
+    }
+    if (this._activeTab === "hatchery") {
+      return this._hatcheryEnabled() ? this._hatcheryTab() : this._mission();
     }
     if (this._activeTab === "vision") {
       // Falls back to Mission if vision was disabled while this tab was active.
@@ -21743,6 +21912,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._dosingSettings()}
         ${this._awcSettings()}
         ${this._npsSettings()}
+        ${this._hatcherySettings()}
         ${this._equipmentSettings()}
         ${this._cameraSettings()}
         ${this._captureSettings()}
@@ -21761,6 +21931,75 @@ class OpenReefPanel extends HTMLElement {
         ${this._backupRestoreSettings()}
       </section>
     `;
+  }
+
+  // Hatchery settings — its own section (0.7.71): breeders configure a
+  // brine rig without ever opening the NPS section.
+  _hatcherySettings() {
+    const npsCfg = this._config?.nps || {};
+    const body = `
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="nps-hatchery" data-field="enabled" ${this._hatcheryEnabled() ? "checked" : ""}>
+        <span><strong>Hatchery on</strong><small>The standalone Hatchery tab — hatch clocks, harvest pushes, the container ledger and the rig blueprint. No NPS corals required.</small></span>
+      </label>
+      <small class="awc-hint">Different cysts hatch on different clocks — pick the egg type and the recommended hours fill in; override freely if your room runs warm or cool.</small>
+      <div class="mini-grid">
+        <label>Egg type<select data-scope="nps-hatchery" data-field="eggType">
+          ${this._npsEggTypes().map((e) => `<option value="${this._escape(e.id)}" ${(npsCfg.hatchery?.eggType || "standard") === e.id ? "selected" : ""}>${this._escape(e.name)} (~${this._escape(String(e.hours))} h)</option>`).join("")}
+        </select></label>
+        <label>Hatch time (hours)<input type="number" min="8" max="48" data-scope="nps-hatchery" data-field="hatchHours" value="${this._escape(String(npsCfg.hatchery?.hatchHours ?? 24))}"></label>
+      </div>
+      <small class="awc-hint">${this._escape((this._npsEggTypes().find((e) => e.id === (npsCfg.hatchery?.eggType || "standard")) || {}).note || "")}</small>
+      <small class="awc-hint">Hatcheries (up to 4 — two staggered vessels is the classic continuous-supply rig). Volume drives the cyst-dose guide: 2 g/L is the documented optimum.</small>
+      ${Object.entries(npsCfg.hatchery?.vessels || { v1: { name: "Hatchery 1", volumeL: 1 } }).map(([vid, v]) => `
+        <div class="mini-grid" data-vessel-row="${this._escape(vid)}">
+          <label>Name<input data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="name" value="${this._escape(v?.name || "Hatchery")}" maxlength="40"></label>
+          <label>Vessel preset<select data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="volumePreset">
+            <option value="">Custom</option>
+            ${(this._nps?.summary?.hatchery?.vesselPresets || []).map((p) => `<option value="${this._escape(p.id)}">${this._escape(p.name)} (${this._escape(String(p.volumeL))} L)</option>`).join("")}
+          </select></label>
+          <label>Volume (L)<input type="number" min="0.1" max="10" step="0.1" data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="volumeL" value="${this._escape(String(v?.volumeL ?? 1))}"></label>
+          ${Object.keys(npsCfg.hatchery?.vessels || {}).length > 1 ? `<button class="danger-text compact-button" data-action="nps-remove-vessel" data-id="${this._escape(vid)}">Remove</button>` : ""}
+        </div>`).join("")}
+      ${Object.keys(npsCfg.hatchery?.vessels || { v1: 1 }).length < 4 ? `<div class="button-row"><button class="secondary compact-button" data-action="nps-add-vessel">+ Add a hatchery</button></div>` : ""}
+      <small class="awc-hint">Brine dosing container — the ledger behind the fill level, the depletion maths and the stale gate. "Load volume" 0 = top to full on every load.</small>
+      <div class="mini-grid">
+        <label>Container volume (ml)<input type="number" min="0" max="50000" data-scope="nps-hatch-reservoir" data-field="volumeMl" value="${this._escape(String(npsCfg.hatchery?.reservoir?.volumeMl ?? 0))}"></label>
+        <label>Load volume (ml, 0 = fill)<input type="number" min="0" max="50000" data-scope="nps-hatch-reservoir" data-field="loadVolumeMl" value="${this._escape(String(npsCfg.hatchery?.reservoir?.loadVolumeMl ?? 0))}"></label>
+        <label>Hand-feed dose (ml)<input type="number" min="1" max="1000" data-scope="nps-hand-feed" data-field="defaultDoseMl" value="${this._escape(String(npsCfg.hatchery?.handFeed?.defaultDoseMl ?? 30))}"></label>
+        <label>Hand feeds / day<input type="number" min="1" max="24" data-scope="nps-hand-feed" data-field="feedsPerDay" value="${this._escape(String(npsCfg.hatchery?.handFeed?.feedsPerDay ?? 2))}"></label>
+      </div>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="nps-hatch-reservoir" data-field="refrigerated" ${npsCfg.hatchery?.reservoir?.refrigerated ? "checked" : ""}>
+        <span><strong>Container lives in the fridge</strong><small>Near-stopped metabolism: 48 h shelf life instead of 24 h — the freshness clock and next-hatch maths both use it.</small></span>
+      </label>
+      <div class="mini-grid">
+        <label>Hatchery temp sensor (optional)<input data-scope="nps-hatchery" data-field="tempEntity" value="${this._escape(npsCfg.hatchery?.tempEntity || "")}" placeholder="sensor.hatchery_temperature"></label>
+      </div>
+      <small class="awc-hint">Advisory only: 26–28 °C is the sweet spot; each degree cooler stretches the clock ~8% (20 °C roughly doubles it). The countdown never moves — you just get told what to expect.</small>
+      <small class="awc-hint"><strong>Enrichment</strong> — per-batch "→ Enrich" at harvest rinses the batch into a separate soak vessel (GSL nauplii carry no DHA; the soak restores it — proven for larvae, recommended for NPS corals). An enriched load runs a tighter freshness clock (12 h room / 48 h fridged).</small>
+      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I can't eat: the molt to instar II lands ~6–12 h post-hatch at 26–28 °C, LATER on a cool bench (8–12 is a good cool-room setting). "→ Enrich" holds the batch in clean water and the dose push arrives at +N h; 0 = dose at load (warm benches, fully-hatched-out batches).</small>
+      <div class="mini-grid">
+        <label>Soak time (hours)<input type="number" min="2" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
+        <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>
+        <label>First dose at +hours<input type="number" min="0" max="24" data-scope="nps-enrichment" data-field="doseDelayH" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseDelayH ?? 6))}"></label>
+        <label>Enrichment bottle<select data-scope="nps-enrichment" data-field="productId">
+          <option value="">Not linked</option>
+          ${Object.entries(this._config?.consumables?.products || {}).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(npsCfg.hatchery?.enrichment?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}
+        </select></label>
+      </div>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="nps-enrichment" data-field="splitDose" ${npsCfg.hatchery?.enrichment?.splitDose ? "checked" : ""}>
+        <span><strong>Split-dose top-up</strong><small>INVE-style second dose ~10 h into the soak — you get a reminder and a "Log top-up" button (debits the bottle again).</small></span>
+      </label>
+
+    `;
+    return this._settingsPanel(
+      "hatchery",
+      "Hatchery",
+      "The brine hatchery scheduler — egg clocks, vessels, the dosing container, enrichment. Standalone: it works with NPS off.",
+      body,
+    );
   }
 
   _npsSettings() {
@@ -21818,56 +22057,7 @@ class OpenReefPanel extends HTMLElement {
       </div>
 
       <div class="awc-section-title"><p class="eyebrow">Hatchery</p></div>
-      <small class="awc-hint">Different cysts hatch on different clocks — pick the egg type and the recommended hours fill in; override freely if your room runs warm or cool.</small>
-      <div class="mini-grid">
-        <label>Egg type<select data-scope="nps-hatchery" data-field="eggType">
-          ${this._npsEggTypes().map((e) => `<option value="${this._escape(e.id)}" ${(npsCfg.hatchery?.eggType || "standard") === e.id ? "selected" : ""}>${this._escape(e.name)} (~${this._escape(String(e.hours))} h)</option>`).join("")}
-        </select></label>
-        <label>Hatch time (hours)<input type="number" min="8" max="48" data-scope="nps-hatchery" data-field="hatchHours" value="${this._escape(String(npsCfg.hatchery?.hatchHours ?? 24))}"></label>
-      </div>
-      <small class="awc-hint">${this._escape((this._npsEggTypes().find((e) => e.id === (npsCfg.hatchery?.eggType || "standard")) || {}).note || "")}</small>
-      <small class="awc-hint">Hatcheries (up to 4 — two staggered vessels is the classic continuous-supply rig). Volume drives the cyst-dose guide: 2 g/L is the documented optimum.</small>
-      ${Object.entries(npsCfg.hatchery?.vessels || { v1: { name: "Hatchery 1", volumeL: 1 } }).map(([vid, v]) => `
-        <div class="mini-grid" data-vessel-row="${this._escape(vid)}">
-          <label>Name<input data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="name" value="${this._escape(v?.name || "Hatchery")}" maxlength="40"></label>
-          <label>Vessel preset<select data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="volumePreset">
-            <option value="">Custom</option>
-            ${(this._nps?.summary?.hatchery?.vesselPresets || []).map((p) => `<option value="${this._escape(p.id)}">${this._escape(p.name)} (${this._escape(String(p.volumeL))} L)</option>`).join("")}
-          </select></label>
-          <label>Volume (L)<input type="number" min="0.1" max="10" step="0.1" data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="volumeL" value="${this._escape(String(v?.volumeL ?? 1))}"></label>
-          ${Object.keys(npsCfg.hatchery?.vessels || {}).length > 1 ? `<button class="danger-text compact-button" data-action="nps-remove-vessel" data-id="${this._escape(vid)}">Remove</button>` : ""}
-        </div>`).join("")}
-      ${Object.keys(npsCfg.hatchery?.vessels || { v1: 1 }).length < 4 ? `<div class="button-row"><button class="secondary compact-button" data-action="nps-add-vessel">+ Add a hatchery</button></div>` : ""}
-      <small class="awc-hint">Brine dosing container — the ledger behind the fill level, the depletion maths and the stale gate. "Load volume" 0 = top to full on every load.</small>
-      <div class="mini-grid">
-        <label>Container volume (ml)<input type="number" min="0" max="50000" data-scope="nps-hatch-reservoir" data-field="volumeMl" value="${this._escape(String(npsCfg.hatchery?.reservoir?.volumeMl ?? 0))}"></label>
-        <label>Load volume (ml, 0 = fill)<input type="number" min="0" max="50000" data-scope="nps-hatch-reservoir" data-field="loadVolumeMl" value="${this._escape(String(npsCfg.hatchery?.reservoir?.loadVolumeMl ?? 0))}"></label>
-        <label>Hand-feed dose (ml)<input type="number" min="1" max="1000" data-scope="nps-hand-feed" data-field="defaultDoseMl" value="${this._escape(String(npsCfg.hatchery?.handFeed?.defaultDoseMl ?? 30))}"></label>
-        <label>Hand feeds / day<input type="number" min="1" max="24" data-scope="nps-hand-feed" data-field="feedsPerDay" value="${this._escape(String(npsCfg.hatchery?.handFeed?.feedsPerDay ?? 2))}"></label>
-      </div>
-      <label class="toggle-card compact-toggle">
-        <input type="checkbox" data-scope="nps-hatch-reservoir" data-field="refrigerated" ${npsCfg.hatchery?.reservoir?.refrigerated ? "checked" : ""}>
-        <span><strong>Container lives in the fridge</strong><small>Near-stopped metabolism: 48 h shelf life instead of 24 h — the freshness clock and next-hatch maths both use it.</small></span>
-      </label>
-      <div class="mini-grid">
-        <label>Hatchery temp sensor (optional)<input data-scope="nps-hatchery" data-field="tempEntity" value="${this._escape(npsCfg.hatchery?.tempEntity || "")}" placeholder="sensor.hatchery_temperature"></label>
-      </div>
-      <small class="awc-hint">Advisory only: 26–28 °C is the sweet spot; each degree cooler stretches the clock ~8% (20 °C roughly doubles it). The countdown never moves — you just get told what to expect.</small>
-      <small class="awc-hint"><strong>Enrichment</strong> — per-batch "→ Enrich" at harvest rinses the batch into a separate soak vessel (GSL nauplii carry no DHA; the soak restores it — proven for larvae, recommended for NPS corals). An enriched load runs a tighter freshness clock (12 h room / 48 h fridged).</small>
-      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I can't eat: the molt to instar II lands ~6–12 h post-hatch at 26–28 °C, LATER on a cool bench (8–12 is a good cool-room setting). "→ Enrich" holds the batch in clean water and the dose push arrives at +N h; 0 = dose at load (warm benches, fully-hatched-out batches).</small>
-      <div class="mini-grid">
-        <label>Soak time (hours)<input type="number" min="2" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
-        <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>
-        <label>First dose at +hours<input type="number" min="0" max="24" data-scope="nps-enrichment" data-field="doseDelayH" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseDelayH ?? 6))}"></label>
-        <label>Enrichment bottle<select data-scope="nps-enrichment" data-field="productId">
-          <option value="">Not linked</option>
-          ${Object.entries(this._config?.consumables?.products || {}).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(npsCfg.hatchery?.enrichment?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}
-        </select></label>
-      </div>
-      <label class="toggle-card compact-toggle">
-        <input type="checkbox" data-scope="nps-enrichment" data-field="splitDose" ${npsCfg.hatchery?.enrichment?.splitDose ? "checked" : ""}>
-        <span><strong>Split-dose top-up</strong><small>INVE-style second dose ~10 h into the soak — you get a reminder and a "Log top-up" button (debits the bottle again).</small></span>
-      </label>
+      <small class="awc-hint">The hatchery has its own settings section now (it runs standalone — no NPS required). <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="hatchery" data-scroll="or-section-hatchery">Open hatchery settings</button></small>
 
       <div class="awc-section-title"><p class="eyebrow">Feed truce</p></div>
       <small class="awc-hint">UV and ozone kill dosed live food; the skimmer strips it. The truce pauses whatever is armed (Settings → Equipment: UV sterilizer / Ozone / Skimmer profiles) after every food dose, then restores it.</small>

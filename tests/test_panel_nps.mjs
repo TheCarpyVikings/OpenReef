@@ -498,7 +498,7 @@ test("hand-dosers get the brine clocks and the loaded button without a pump", as
 
 function v2HatcherySummary(over = {}) {
   return {
-    eggType: "standard", hatchHours: 24, eggTypes: [],
+    enabled: true, eggType: "standard", hatchHours: 24, eggTypes: [], history: [],
     state: { status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 },
     vessels: [
       { id: "v1", name: "Hatchery 1", volumeL: 1.0, eggType: "standard", hatchHours: 24,
@@ -650,20 +650,21 @@ test("the enrichment vessel joins the strip while a batch soaks", async () => {
   } finally { restore(); }
 });
 
-test("the rig blueprint unfolds on demand and walks the settle-and-slug harvest", async () => {
+test("the rig blueprint lives on the Hatchery tab; NPS keeps a compact door", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
     panel._nps.summary.hatchery = v2HatcherySummary();
+    // NPS tab: compact strip, a door to the Hatchery, and NO blueprint.
     let html = panel._npsTab();
-    assert(html.includes("Rig blueprint"), "the blueprint toggle is missing");
-    assert(!html.includes("luer-lock syringe"), "the blueprint must start collapsed");
-    panel._npsRigOpen = true;
-    html = panel._npsTab();
+    assert(html.includes("Open Hatchery"), "the door to the Hatchery tab is missing from NPS");
+    assert(!html.includes("120 µm mesh"), "the blueprint must live on the Hatchery tab only");
+    // Hatchery tab: the rig is the hero, always open.
+    html = panel._hatcheryTab();
     assert(html.includes("HATCH EGGS") && html.includes("LIVE BRINE"), "the two staggered vessels are missing");
     assert(html.includes("120 µm mesh"), "the mesh capsule is missing");
     assert(html.includes("mesh half OFF"), "the crud-bleed-through-③ step is missing");
-    assert(!html.includes("syringe") && !html.includes("Ⓐ"), "the syringe is retired — Reece bleeds crud via ② + ③");
+    assert(!html.includes("Ⓐ"), "the syringe valve is retired — crud bleeds via ② + ③");
     assert(!html.includes("lamp"), "the lamp is retired — the mesh needs no packing");
     assert(html.includes("never the tank"), "the hatch-water rule must be stated");
     assert(html.includes("4. Mesh drain"), "the numbered harvest steps are missing");
@@ -676,16 +677,15 @@ test("the rig blueprint is live — it follows the hatchery's stage", async () =
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    panel._npsRigOpen = true;
     // Incubating: bubbles on, orange density, the countdown caption.
     panel._nps.summary.hatchery = v2HatcherySummary();
-    let html = panel._npsTab();
+    let html = panel._hatcheryTab();
     assert(html.includes("INCUBATING —"), "incubating caption missing");
     assert(html.includes("air ON"), "air must run while incubating");
     // Ready: the lamp lights, the transfer valves go hot, the slug packs.
     panel._nps.summary.hatchery = v2HatcherySummary({
       state: { status: "ready", hoursElapsed: 24.5, hoursLeft: 0, percent: 100 } });
-    html = panel._npsTab();
+    html = panel._hatcheryTab();
     assert(html.includes("READY —"), "ready caption missing");
     assert(html.includes("crud bleed"), "ready must walk the bleed-then-mesh sequence");
     // Enriching: the soak beaker with its own clock.
@@ -694,12 +694,12 @@ test("the rig blueprint is live — it follows the hatchery's stage", async () =
       enrichment: { hours: 12, doseMl: 1, productId: "", productName: "Selcon", splitDose: false,
         sourceVesselId: "v1",
         state: { status: "enriching", hoursElapsed: 7, hoursLeft: 5, percent: 58, secondDoseDue: false } } });
-    html = panel._npsTab();
+    html = panel._hatcheryTab();
     assert(html.includes("ENRICHING —"), "enriching caption missing");
     assert(html.includes("% soak"), "the soak beaker is missing");
     // Nothing running, container holding brine: the ledger speaks.
     panel._nps.summary.hatchery = v2HatcherySummary({ state: { status: "none" } });
-    html = panel._npsTab();
+    html = panel._hatcheryTab();
     assert(html.includes("LOADED — container 71%"), "the loaded stage must read the real ledger");
     assert(html.includes("710 / 1000 ml") && html.includes("the vessel IS the container"),
       "vessel 2 must carry the ledger in the mesh flow");
@@ -711,32 +711,73 @@ test("the walkthrough plays every stage client-side", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    panel._npsRigOpen = true;
     panel._nps.summary.hatchery = v2HatcherySummary();
     const stages = panel._npsRigPreviewStages();
     assert(stages.length >= 6, "the walkthrough should cover the whole cycle");
     assert(stages.every((s) => s.caption && s.stage), "every stage needs a caption");
     panel._npsRigPreview = stages[3];
-    const html = panel._npsTab();
+    const html = panel._hatcheryTab();
     assert(html.includes("4 · MESH DRAIN"), "a running preview must override the live state");
-    assert(panel._npsTab().includes("■ Stop"), "the play button must become a stop button");
+    assert(panel._hatcheryTab().includes("■ Stop"), "the play button must become a stop button");
   } finally { restore(); }
 });
 
-test("settings carry the enrichment block", async () => {
+test("hatchery settings live in their own section (0.7.71)", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    panel._settingsSectionsOpen = { nps: true };
+    panel._settingsSectionsOpen = { hatchery: true, nps: true };
     let html;
-    try { html = panel._npsSettings(); } catch { html = null; }
+    try { html = panel._hatcherySettings(); } catch { html = null; }
     if (html !== null) {
+      assert(html.includes("or-section-hatchery"), "the hatchery settings anchor is missing");
+      assert(html.includes('data-field="enabled"'), "the standalone enable toggle is missing");
+      assert(html.includes('data-scope="nps-hatch-vessel"'), "the vessel editor moved out of the section");
       assert(html.includes('data-scope="nps-enrichment"'), "enrichment settings missing");
       assert(html.includes("Split-dose top-up"), "the split-dose toggle is missing");
       assert(html.includes('data-field="doseDelayH"'), "the first-dose delay field is missing");
       assert(html.includes("instar II"), "the instar II explanation is missing");
-      assert(html.includes("proven for larvae, recommended for NPS corals"), "the honest evidence copy is missing");
     }
+    let npsHtml;
+    try { npsHtml = panel._npsSettings(); } catch { npsHtml = null; }
+    if (npsHtml !== null) {
+      assert(npsHtml.includes("Open hatchery settings"), "NPS settings must link to the hatchery section");
+      assert(!npsHtml.includes('data-scope="nps-hatch-vessel"'), "the vessel editor must not live in NPS settings any more");
+    }
+  } finally { restore(); }
+});
+
+test("the Hatchery tab stands alone — hero, journal, reminders, gating", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      history: [
+        { vesselId: "v1", harvestedAt: NOW, startedAt: NOW, plannedHours: 24,
+          actualHours: 30.5, eggType: "standard", enriched: true, enrichedHours: 11.5 },
+        { vesselId: "v1", harvestedAt: NOW, startedAt: NOW, plannedHours: 24,
+          actualHours: 24.2, eggType: "standard" },
+      ],
+      learned: { available: true, hours: 27.4, samples: 2 },
+    });
+    const html = panel._hatcheryTab();
+    assert(html.includes("Live brine, on schedule"), "the hero head is missing");
+    assert(html.includes("No NPS corals required"), "the standalone promise is missing");
+    assert(html.includes("summary-grid"), "the mission row is missing");
+    assert(html.includes("Hatch journal") && html.includes("30.5"), "the journal must show real batches");
+    assert(html.includes("enriched 11.5 h"), "the enriched badge is missing from the journal");
+    assert(html.includes("Reminders"), "the reminders card is missing");
+    noPlaceholders(html, "hatchery tab");
+    // Gating: inherits nps.enabled, works standalone, hides when off.
+    assert(panel._tabs().includes('data-id="hatchery"'), "the tab should show when NPS is on (inheritance)");
+    panel._config.nps.enabled = false;
+    panel._config.nps.hatchery = { enabled: true };
+    assert(panel._hatcheryEnabled() === true, "standalone: hatchery on with NPS off");
+    assert(panel._tabs().includes('data-id="hatchery"'), "standalone tab missing");
+    assert(!panel._tabs().includes('data-id="nps"'), "NPS tab must stay hidden when NPS is off");
+    panel._config.nps.hatchery = { enabled: false };
+    assert(panel._hatcheryEnabled() === false, "explicit off must win");
+    assert(!panel._tabs().includes('data-id="hatchery"'), "disabled hatchery must hide the tab");
   } finally { restore(); }
 });
 

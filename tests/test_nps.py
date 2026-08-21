@@ -1152,7 +1152,7 @@ def test_ws_enrich_old_batch_doses_immediately():
 def test_enrich_push_reminds_the_first_dose_once():
     entry = _enrich_entry(dose_delay_h=8)
     cfg = entry.options[CONF_SETTINGS]
-    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"])
+    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"], True)
     cfg["nps"]["hatchery"]["enrichment"]["state"].update({
         # Engaged only 1 h ago — but the BATCH is 9 h old: the dose is due.
         "startedAt": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
@@ -1226,7 +1226,7 @@ def test_enriched_load_caps_the_shelf_clock():
                                  "mixedAt": datetime.now(timezone.utc).isoformat(),
                                  "lastLoadEnriched": True})
     cfg = entry.options[CONF_SETTINGS]
-    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"])
+    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"], True)
     _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
     assert shelf_h == 12.0
     cfg["nps"]["hatchery"]["reservoir"]["refrigerated"] = True
@@ -1247,7 +1247,7 @@ def test_enriched_load_caps_the_shelf_clock():
 def test_enrich_push_fires_done_and_topup_once():
     entry = _enrich_entry()
     cfg = entry.options[CONF_SETTINGS]
-    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"])
+    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"], True)
     cfg["nps"]["hatchery"]["enrichment"]["state"].update({
         "startedAt": (datetime.now(timezone.utc) - timedelta(hours=10.5)).isoformat(),
         "enrichHours": 12,
@@ -1274,6 +1274,37 @@ def test_enrich_push_fires_done_and_topup_once():
     assert len(_dones()) == 1, "the enrichment-done push should fire"
     run(integration._async_nps_hatch_ready_push(hass, entry))
     assert len(_dones()) == 1, "the done push must fire exactly once"
+
+
+def test_hatchery_standalone_gate():
+    # 0.7.71: hatchery.enabled inherits nps.enabled for existing configs, and
+    # an explicit choice wins in both directions (breeders: NPS off, rig on).
+    on = integration._normalise_core_config({"nps": {"enabled": True}})
+    assert on["nps"]["hatchery"]["enabled"] is True
+    off = integration._normalise_core_config({"nps": {"enabled": False}})
+    assert off["nps"]["hatchery"]["enabled"] is False
+    standalone = integration._normalise_core_config(
+        {"nps": {"enabled": False, "hatchery": {"enabled": True}}})
+    assert standalone["nps"]["hatchery"]["enabled"] is True
+    opted_out = integration._normalise_core_config(
+        {"nps": {"enabled": True, "hatchery": {"enabled": False}}})
+    assert opted_out["nps"]["hatchery"]["enabled"] is False
+
+
+def test_hatch_ready_push_fires_for_standalone_hatcheries():
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["enabled"] = False
+    cfg["nps"]["hatchery"]["enabled"] = True
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
+        "eggType": "standard", "hatchHours": 24, "readyNotifiedAt": "",
+    }
+    hass = FakeHass(entries=[entry])
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    pushes = [c for c in hass.services.calls
+              if c.domain == "persistent_notification" and c.service == "create"]
+    assert pushes, "a breeder with NPS off must still get the harvest push"
 
 
 def test_egg_type_hours_and_normaliser():
