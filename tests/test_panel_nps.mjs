@@ -768,16 +768,19 @@ test("the Hatchery tab stands alone — hero, journal, reminders, gating", async
     assert(html.includes("enriched 11.5 h"), "the enriched badge is missing from the journal");
     assert(html.includes("Reminders"), "the reminders card is missing");
     noPlaceholders(html, "hatchery tab");
-    // Gating: inherits nps.enabled, works standalone, hides when off.
-    assert(panel._tabs().includes('data-id="hatchery"'), "the tab should show when NPS is on (inheritance)");
+    // Gating (via The Helm's Feeding group): inherits nps.enabled, works
+    // standalone, hides when off.
+    const feedingPages = () => panel._navGroups().find((g) => g.id === "feeding").pages.map(([id]) => id);
+    assert(feedingPages().includes("hatchery"), "the page should show when NPS is on (inheritance)");
     panel._config.nps.enabled = false;
     panel._config.nps.hatchery = { enabled: true };
     assert(panel._hatcheryEnabled() === true, "standalone: hatchery on with NPS off");
-    assert(panel._tabs().includes('data-id="hatchery"'), "standalone tab missing");
-    assert(!panel._tabs().includes('data-id="nps"'), "NPS tab must stay hidden when NPS is off");
+    assert(feedingPages().includes("hatchery"), "standalone page missing from Feeding");
+    assert(!feedingPages().includes("nps"), "NPS must stay hidden when NPS is off");
+    assert(panel._hubTab("feeding").includes('data-id="hatchery"'), "the Feeding hub must card the hatchery");
     panel._config.nps.hatchery = { enabled: false };
     assert(panel._hatcheryEnabled() === false, "explicit off must win");
-    assert(!panel._tabs().includes('data-id="hatchery"'), "disabled hatchery must hide the tab");
+    assert(!feedingPages().includes("hatchery"), "disabled hatchery must leave the group");
   } finally { restore(); }
 });
 

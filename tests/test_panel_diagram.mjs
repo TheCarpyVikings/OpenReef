@@ -878,7 +878,10 @@ test("chip labels break at a word, never mid-word", async () => {
 
 test("diagram is a first-class tab that routes its own content", async () => {
   const panel = prep(await makePanel(structuredClone(RIG)), ALL_ON, { _activeTab: "diagram" });
-  assert(panel._tabs().includes('data-id="diagram"'), "tab button present");
+  // The Helm (0.7.72): pages live inside groups — Diagram sits in Home's
+  // second deck, and the top bar highlights its group.
+  assert(panel._subNav().includes('data-id="diagram"'), "diagram missing from Home's second deck");
+  assert(panel._tabs().includes("Home"), "the group bar is missing Home");
   const content = panel._activeContent();
   assert(content.includes("data-pulse-diagram-svg"), "tab renders the living schematic");
   assert(content.includes('data-action="diagram-arrange"'), "arrange control offered in the tab");

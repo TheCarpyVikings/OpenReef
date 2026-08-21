@@ -6675,6 +6675,7 @@ class OpenReefPanel extends HTMLElement {
 
         ${this._messages()}
         ${this._tabs()}
+        ${this._subNav()}
         ${this._activeContent()}
         ${this._setupOpen ? this._setupWizard() : ""}
         ${this._trend ? this._trendModal() : ""}
@@ -11353,63 +11354,166 @@ const rigSteps = [
     return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${this._npsStatusCards()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}</section>`;
   }
 
-  _tabs() {
-    const tabs = [
-      ["mission", "Mission Control"],
-      ["diagram", "Diagram"],
-      ["live", "Live Stats"],
-      ["manual", "Manual Tests"],
-      ["icp", "ICP"],
-      ["maintenance", "Maintenance"],
-      ["awc", "Water Change"],
-      ["controls", "Controls"],
-      ["spawning", "Spawning"],
-      ["cameras", "Cameras"],
-      ["energy", "Energy"],
-      ["settings", "Settings"],
+  // The Helm (0.7.72, Reece's pick — option C): five task groups replace the
+  // sixteen-tab wrap. Every page keeps its id, so deep links, settings
+  // anchors and the wall modes all keep working — the groups are structure
+  // laid OVER the pages, not a rewrite of them.
+  _navGroups() {
+    return [
+      { id: "home", label: "Home", icon: "⌂",
+        pages: [["mission", "Mission Control"], ["diagram", "Diagram"]] },
+      { id: "water", label: "Water", icon: "💧",
+        pages: [
+          ["awc", "Water Change"],
+          ...(this._dosingEnabled() ? [["dosing", "Dosing"]] : []),
+          ["maintenance", "Maintenance"],
+          ["icp", "ICP"],
+          ["manual", "Manual Tests"],
+        ] },
+      { id: "feeding", label: "Feeding", icon: "🦐",
+        pages: [
+          ...(this._config?.nps?.enabled ? [["nps", "NPS"]] : []),
+          ...(this._hatcheryEnabled() ? [["hatchery", "Hatchery"]] : []),
+          ["spawning", "Spawning"],
+        ] },
+      { id: "watch", label: "Watch", icon: "👁",
+        pages: [
+          ["cameras", "Cameras"],
+          ["live", "Live Stats"],
+          ["energy", "Energy"],
+          ...(this._config?.vision?.enabled ? [["vision", "Vision"]] : []),
+        ] },
+      { id: "system", label: "System", icon: "⚙",
+        pages: [
+          ["controls", "Controls"],
+          ...(this._config?.guardian?.enabled !== false ? [["guardian", "Lagertha"]] : []),
+          ["settings", "Settings"],
+        ] },
     ];
-    // Dosing sits beside Water Change and is on by default (it also hosts the
-    // Advisor every install already has); the existing dosing.enabled toggle is
-    // its opt-out. Static insert after "awc" so ordering never races Vision's
-    // end-of-list splice.
-    if (this._dosingEnabled()) {
-      tabs.splice(tabs.findIndex(([tabId]) => tabId === "awc") + 1, 0, ["dosing", "Dosing"]);
-    }
-    // Automated NPS system — opt-in via Settings; sits beside the feeding
-    // engines it orchestrates (Water Change / Dosing), before Controls.
-    if (this._config?.nps?.enabled) {
-      tabs.splice(tabs.findIndex(([tabId]) => tabId === "controls"), 0, ["nps", "NPS"]);
-    }
-    // Hatchery (0.7.71): standalone — breeders run brine rigs with zero NPS
-    // corals. Sits beside NPS when both are on, before Controls otherwise.
-    if (this._hatcheryEnabled()) {
-      tabs.splice(tabs.findIndex(([tabId]) => tabId === "controls"), 0, ["hatchery", "Hatchery"]);
-    }
-    // Vision only exists for installs that opted in (Frigate + MQTT owners):
-    // no permanent empty-state tab advertising hardware a tester doesn't have.
-    if (this._config?.vision?.enabled) {
-      tabs.splice(tabs.length - 1, 0, ["vision", "Vision"]);
-    }
-    // Guardian (Lagertha): on by default, opt-out via guardian.enabled.
-    if (this._config?.guardian?.enabled !== false) {
-      tabs.splice(tabs.length - 1, 0, ["guardian", "Lagertha"]);
-    }
-    // If a gated tab was disabled while active, the content falls back to
-    // Mission — highlight Mission so the nav doesn't show no active tab.
-    const activeId = ((this._activeTab === "vision" && !this._config?.vision?.enabled)
-      || (this._activeTab === "dosing" && !this._dosingEnabled())
-      || (this._activeTab === "nps" && !this._config?.nps?.enabled)
-      || (this._activeTab === "hatchery" && !this._hatcheryEnabled()))
-      ? "mission" : this._activeTab;
+  }
+
+  _navGroupFor(tabId) {
+    const groups = this._navGroups();
+    const direct = groups.find((group) => group.id === tabId);
+    if (direct) return direct;
+    return groups.find((group) => group.pages.some(([id]) => id === tabId)) || groups[0];
+  }
+
+  _tabs() {
+    // Home goes straight to Mission Control (the dashboard IS the hub);
+    // every other group lands on its hub page of live cards.
+    const activeGroup = this._navGroupFor(this._activeTab).id;
     return `
       <nav class="tabs">
-        ${tabs.map(([id, label]) => `
-          <button class="${activeId === id ? "active" : ""}" data-action="tab" data-id="${id}">
-            ${label}
+        ${this._navGroups().map((group) => `
+          <button class="${activeGroup === group.id ? "active" : ""}" data-action="tab"
+            data-id="${group.id === "home" ? "mission" : group.id}" aria-label="${group.label}">
+            <span class="tab-icon">${group.icon}</span> ${group.label}
           </button>
         `).join("")}
       </nav>
     `;
+  }
+
+  // The second deck: on any page, its siblings one tap away — the answer to
+  // "hubs add a hop". Hidden on the hubs themselves.
+  _subNav() {
+    const groups = this._navGroups();
+    if (groups.some((group) => group.id === this._activeTab)) return "";
+    const group = groups.find((g) => g.pages.some(([id]) => id === this._activeTab));
+    if (!group || group.pages.length < 2) return "";
+    return `
+      <nav class="subnav">
+        ${group.id !== "home"
+          ? `<button class="crumb" data-action="tab" data-id="${group.id}">${group.icon} ${group.label}</button>` : ""}
+        ${group.pages.map(([id, label]) => `
+          <button class="${id === this._activeTab ? "active" : ""}" data-action="tab" data-id="${id}">${label}</button>
+        `).join("")}
+      </nav>`;
+  }
+
+  _hubCard(tabId, label, value, detail, status = "ok") {
+    return `
+      <button class="summary-card hub-card ${status}" data-action="tab" data-id="${tabId}"
+        aria-label="${this._escape(`${label}: ${value}`)}">
+        <span>${this._escape(label)}</span>
+        <strong>${this._escape(value)}</strong>
+        <small>${this._escape(detail)}</small>
+      </button>`;
+  }
+
+  // A group's hub: one live card per page — often the hub answers the
+  // question before the tap. Every value is computed defensively from state
+  // already in hand; a hub must render instantly and never fetch.
+  _hubTab(groupId) {
+    const group = this._navGroups().find((g) => g.id === groupId);
+    if (!group) return this._mission();
+    const safe = (fn, fallback) => { try { return fn() ?? fallback; } catch { return fallback; } };
+    const cards = group.pages.map(([id, label]) => {
+      if (id === "awc") {
+        const text = safe(() => this._awcSummary?.summary?.scheduleText, "");
+        return this._hubCard(id, label, text ? "scheduled" : "manual", text || "drain, fill, log — the tank's turnover", "ok");
+      }
+      if (id === "dosing") {
+        const count = safe(() => Object.values(this._doserChannels()).filter((c) => c?.enabled).length, 0);
+        return this._hubCard(id, label, `${count} channel${count === 1 ? "" : "s"}`, "pumps, advisor, reservoirs", "ok");
+      }
+      if (id === "maintenance") {
+        const due = safe(() => this._maintenanceUpcoming(7).filter((e) => e.state.status === "warning" || e.state.status === "critical").length, 0);
+        return this._hubCard(id, label, due ? `${due} due` : "clear", due ? "chores need attention" : "every chore inside its cadence", due ? "warning" : "ok");
+      }
+      if (id === "manual") {
+        const due = safe(() => this._manualTestParameterIds().filter((pid) => ["warning", "critical"].includes(this._manualDueState(pid).status)).length, 0);
+        return this._hubCard(id, label, due ? `${due} due` : "fresh", due ? "test kits are calling" : "results inside their cadence", due ? "warning" : "ok");
+      }
+      if (id === "icp") {
+        const count = safe(() => (this._config?.icp?.reports || []).length, 0);
+        return this._hubCard(id, label, count ? `${count} report${count === 1 ? "" : "s"}` : "—", "lab results, trace elements", "ok");
+      }
+      if (id === "nps") {
+        const owed = safe(() => Math.round(Number(this._config?.nps?.feedExchange?.state?.owedMl) || 0), 0);
+        return this._hubCard(id, label, owed ? `${owed} ml owed` : "balanced", "the feeding station and the matched drain", "ok");
+      }
+      if (id === "hatchery") {
+        const running = safe(() => Object.values(this._config?.nps?.hatchery?.vessels || {})
+          .filter((v) => v?.state?.hatchStartedAt).length, 0);
+        return this._hubCard(id, label, running ? `${running} hatching` : "idle",
+          running ? "clocks running — the rig is live" : "start a batch when you're ready", "ok");
+      }
+      if (id === "spawning") {
+        return this._hubCard(id, label, "—", "lunar windows and broadcast nights", "ok");
+      }
+      if (id === "cameras") {
+        const count = safe(() => Object.keys(this._config?.cameras?.devices || this._config?.cameras || {}).length, 0);
+        return this._hubCard(id, label, count ? `${count} eye${count === 1 ? "" : "s"}` : "—", "live views, clips, timelapses", "ok");
+      }
+      if (id === "live") {
+        const count = safe(() => Object.values(this._config?.sensors || {}).filter((s) => s?.entity).length, 0);
+        return this._hubCard(id, label, count ? `${count} mapped` : "—", "every probe, charted", "ok");
+      }
+      if (id === "energy") return this._hubCard(id, label, "—", "watts, costs, and what's hungry", "ok");
+      if (id === "vision") return this._hubCard(id, label, "on", "the tank, seen by AI", "ok");
+      if (id === "controls") {
+        const armed = safe(() => Object.values(this._config?.equipment || {}).filter((e) => e?.entity).length, 0);
+        return this._hubCard(id, label, armed ? `${armed} armed` : "—", "switches, timers, interlocks", "ok");
+      }
+      if (id === "guardian") return this._hubCard(id, label, "standing by", "ask Lagertha anything", "ok");
+      if (id === "settings") return this._hubCard(id, label, "→", "every knob, one place", "ok");
+      return this._hubCard(id, label, "→", "", "ok");
+    }).join("");
+    return `
+      <section class="stack">
+        <div>
+          <p class="eyebrow" style="margin:0 0 2px;">${group.icon} ${this._escape(group.label)}</p>
+          <p class="muted" style="margin:0;">${this._escape({
+            water: "Everything the water needs — changes, dosing, chores, and the tests that keep them honest.",
+            feeding: "Everything that eats — the feeding station, the hatchery, and the spawning calendar.",
+            watch: "Eyes on the tank — cameras, live numbers, and the power they burn.",
+            system: "The machinery — switches, the guardian, and every setting.",
+          }[groupId] || "")}</p>
+        </div>
+        <div class="summary-grid hub-grid">${cards}</div>
+      </section>`;
   }
 
   _activeContent() {
@@ -11433,6 +11537,10 @@ const rigSteps = [
     }
     if (this._activeTab === "hatchery") {
       return this._hatcheryEnabled() ? this._hatcheryTab() : this._mission();
+    }
+    // The Helm's hubs (0.7.72): a group id as the active tab renders its hub.
+    if (["water", "feeding", "watch", "system"].includes(this._activeTab)) {
+      return this._hubTab(this._activeTab);
     }
     if (this._activeTab === "vision") {
       // Falls back to Mission if vision was disabled while this tab was active.
@@ -25497,7 +25605,17 @@ const rigSteps = [
         .coral-swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
         .coral-swatch.selected { border-color: #f4fbff; box-shadow: 0 0 8px 1px currentColor; }
         .button-row.end { justify-content: flex-end; }
-        .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
+        .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 10px; }
+        .tab-icon { opacity: 0.85; margin-right: 2px; }
+        /* The Helm's second deck: siblings of the current page, one tap away. */
+        .subnav { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0 0 14px; }
+        .subnav button { border: 1px solid rgba(255,255,255,0.14); border-radius: 999px; background: transparent; color: #9fb3c0; padding: 5px 13px; font-size: 12.5px; min-height: 28px; }
+        .subnav button.active { border-color: var(--openreef-accent); color: #eaf6ff; font-weight: 700; }
+        .subnav button:hover { border-color: var(--openreef-accent); }
+        .subnav .crumb { opacity: 0.75; border-style: dashed; }
+        .hub-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+        .hub-card { min-height: 128px; }
+        .hub-card strong { font-size: 21px; }
         .tabs button, .primary, .secondary, .warning, .candidate, .danger-text, .range-picker button, .mode-button { border: 1px solid #294055; border-radius: 8px; padding: 11px 14px; color: #dcecff; background: #172536; }
         .tabs button.active, .primary, .range-picker button.active, .mode-button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
         .secondary:hover, .tabs button:hover { border-color: var(--openreef-accent); }
@@ -26626,6 +26744,9 @@ const rigSteps = [
             -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
           }
           .tabs::-webkit-scrollbar { display: none; }
+          .subnav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--or-page-pad, 12px)) 12px; padding: 0 var(--or-page-pad, 12px); }
+          .subnav::-webkit-scrollbar { display: none; }
+          .subnav button { flex: 0 0 auto; white-space: nowrap; }
           .tabs button {
             flex: 0 0 auto; scroll-snap-align: center;
             min-height: 40px; padding: 9px 15px;
