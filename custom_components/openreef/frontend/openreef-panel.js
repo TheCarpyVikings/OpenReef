@@ -2423,6 +2423,14 @@ class OpenReefPanel extends HTMLElement {
           : target.type === "number" ? Number(value) : value;
         if ((field === "mode" || field === "armed") && event.type === "change") this._render();
       }
+      if (scope === "spawn-exec-temp") {
+        const sp = this._config.spawningProgram = this._config.spawningProgram || {};
+        const ex = sp.execution = sp.execution || {};
+        const temp = ex.temp = ex.temp || {};
+        temp[field] = target.type === "checkbox" ? value
+          : target.type === "number" ? Number(value) : value;
+        if ((field === "enabled" || field === "acknowledged") && event.type === "change") this._render();
+      }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
@@ -7838,6 +7846,7 @@ class OpenReefPanel extends HTMLElement {
         ${today}
         ${this._spawnExecChannelRow("Daylight", "light")}
         ${this._spawnExecChannelRow("Moonlight", "moon")}
+        ${this._spawnExecTempSection(ex, st, state)}
         ${issues}
         <div class="button-row">
           <button class="secondary compact-button" data-action="spawn-exec-pargate">${parGated ? "Stop gating light alerts from this program" : "Gate light alerts from this program"}</button>
@@ -7845,6 +7854,45 @@ class OpenReefPanel extends HTMLElement {
         </div>
         <small class="hint">Plugs are hard on/off — the seasonal day-length drift, temperature and lunar cycle carry the program; there is no dawn/dusk ramp. Best-effort by design: nothing switches while Home Assistant is down.</small>
       </article>`;
+  }
+
+  _spawnExecTempSection(ex, st, state) {
+    const temp = ex.temp || {};
+    const fieldStyle = "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
+    const ctrlStyle = "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
+    const pill = (e) => !e ? "" : (!e.state || e.state === "unavailable" || e.state === "unknown")
+      ? `<span class="pill warning">unavailable</span>`
+      : `<span class="pill ${e.state === "on" ? "ok" : "unknown"}">${e.state === "on" ? "ON" : "OFF"}</span>`;
+    const reading = st.runtime?.tempReading;
+    const target = state && state.valid ? state.targetTempC : null;
+    const heaterEnt = st.entities?.heater;
+    const coolEnt = st.entities?.cool;
+    const live = (st.entities?.tempSensor || heaterEnt || coolEnt) ? `
+      <div class="button-row" style="align-items:center;gap:8px;flex-wrap:wrap">
+        <strong>Temperature</strong>
+        <small class="hint">${reading != null ? `tank ${Number(reading).toFixed(1)} °C` : "no reading yet"}${target != null ? ` · target ${target} °C` : ""}</small>
+        ${heaterEnt ? `<small class="hint">heater</small>${pill(heaterEnt)}` : ""}
+        ${coolEnt ? `<small class="hint">fan</small>${pill(coolEnt)}` : ""}
+      </div>` : "";
+    return `
+      <div class="awc-section-title"><p class="eyebrow">Seasonal temperature</p></div>
+      <small class="hint">Today's target always publishes as <code>sensor.openreef_spawning_target_temp</code> while spawning is on — wire your own thermostat to it, zero risk. Direct control below is guarded: heating fails OFF, every sensor doubt switches both plugs off, and hard clamps beat the curve.</small>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="spawn-exec-temp" data-field="acknowledged" ${temp.acknowledged ? "checked" : ""}>
+        <span><strong>I have an independent inline thermostat as the guard</strong><small>e.g. an Inkbird set to the seasonal maximum + 0.5 °C, never driven by software — OpenReef only modulates beneath it. Required before control arms.</small></span>
+      </label>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="spawn-exec-temp" data-field="enabled" ${temp.enabled ? "checked" : ""} ${temp.acknowledged ? "" : "disabled"}>
+        <span><strong>OpenReef holds the seasonal temperature</strong><small>Bang-bang at target ± 0.2 °C — the exact heater/chiller mirror of the Apex snippets. Needs the guard acknowledged, a sensor, and at least one plug.</small></span>
+      </label>
+      <div class="grid two">
+        <label style="${fieldStyle}"><span>Tank temperature sensor</span>${this._awcEntitySelect("spawn-exec-temp", "", "sensorEntity", temp.sensorEntity || "", "sensor")}</label>
+        <label style="${fieldStyle}"><span>Heater plug <small>(in series through the guard's heat socket)</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "heaterEntity", temp.heaterEntity || "", "switch")}</label>
+        <label style="${fieldStyle}"><span>Cooling fan plug <small>(straight to wall — never through the guard's cool socket)</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "coolEntity", temp.coolEntity || "", "switch")}</label>
+        <label style="${fieldStyle}"><span>Never heat at/above (°C)</span><input style="${ctrlStyle}" type="number" min="20" max="32" step="0.1" value="${Number.isFinite(Number(temp.maxC)) ? Number(temp.maxC) : 27.5}" data-scope="spawn-exec-temp" data-field="maxC" /></label>
+        <label style="${fieldStyle}"><span>Never cool at/below (°C)</span><input style="${ctrlStyle}" type="number" min="15" max="26" step="0.1" value="${Number.isFinite(Number(temp.minC)) ? Number(temp.minC) : 22.0}" data-scope="spawn-exec-temp" data-field="minC" /></label>
+      </div>
+      ${live}`;
   }
 
   _spawningTab() {
@@ -15618,6 +15666,11 @@ const rigSteps = [
         pred.fullMoonUtc ? `Full moon: ${String(pred.fullMoonUtc).slice(0, 10)}` : "",
         pred.windowStart && pred.windowEnd ? `Spawn window: ${pred.windowStart} → ${pred.windowEnd}` : "",
       ] : [];
+      const spawnExec = this._config?.spawningProgram?.execution;
+      if (spawnExec?.mode === "openreef" && spawnExec?.armed) {
+        moonMore.push(`OpenReef runs the lights — ${this._pulseSpawn.program?.preset?.label || "reef"} photoperiod live`);
+        if (detail === "Spawning window is open now") detail += " — keep nights dark";
+      }
       push("moon", "Tonight's moon", `${moon.phaseName} · ${Math.round(moon.illumination * 100)}% lit`, detail, "ok", moonMore);
     } catch { /* no card */ }
 
@@ -19655,6 +19708,7 @@ const rigSteps = [
       ["skimmerAutoOff", "Skimmer safety auto-off", "When OpenReef turns a skimmer off because the return pump went off."],
       ["atoWindows", "ATO safety windows", "When the ATO duty-cycle safety window opens or closes."],
       ["npsFeedExchange", "NPS feed-exchange drains", "When the matched drain runs after live-food dosing — the feeding journal writes itself."],
+      ["spawnWindowNight", "Spawn-window nights", "One capture at sunset on each predicted coral-spawning night — OpenReef films your spawn."],
     ];
     const body = `
       <label class="toggle-card">

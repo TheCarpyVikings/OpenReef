@@ -28,7 +28,7 @@ import openreef as integration  # noqa: E402
 from openreef import spawning  # noqa: E402
 from openreef.const import CORE_SCHEMA_VERSION, REEF_PRESETS  # noqa: E402
 
-from _fake_ha import FakeConnection, FakeEntry, FakeHass, run  # noqa: E402
+from _fake_ha import FakeConnection, FakeEntry, FakeHass, FakeState, run  # noqa: E402
 
 normalise = integration._normalise_core_config
 CONF_SETTINGS = integration.CONF_SETTINGS
@@ -405,6 +405,10 @@ def test_normalise_execution_defaults():
     assert ex == {
         "mode": "apex", "armed": False, "lightEntity": None, "moonEntity": None,
         "moonMinIlluminationPct": 25, "overridePolicy": "hold",
+        "temp": {
+            "enabled": False, "acknowledged": False, "sensorEntity": None,
+            "heaterEntity": None, "coolEntity": None, "maxC": 27.5, "minC": 22.0,
+        },
     }
 
 
@@ -428,7 +432,7 @@ def test_normalise_lighting_mode_spawning_survives():
 
 # --- Smart-plug execution: the reconcile tick --------------------------------
 
-def _exec_entry(**exec_over):
+def _exec_entry(extra=None, **exec_over):
     execution = {
         "mode": "openreef", "armed": True, "lightEntity": "switch.tank_light",
         "moonEntity": None, "moonMinIlluminationPct": 25, "overridePolicy": "hold",
@@ -438,6 +442,7 @@ def _exec_entry(**exec_over):
         "enabled": True, "reefPreset": "gbr_central", "offsetMonths": 0,
         "solarNoonHour": 13.0, "execution": execution,
     }}
+    cfg.update(extra or {})
     return FakeEntry(options={CONF_SETTINGS: normalise(cfg)})
 
 
@@ -527,6 +532,144 @@ def test_tick_moonlight_follows_the_real_moon():
     run(integration._async_spawning_tick(
         hass2, entry, datetime(2000, 1, 21, 22, 0, tzinfo=timezone.utc)))
     assert len(_switch_calls(hass2, "turn_on", "switch.moon")) == 1
+
+
+# --- Stage C: RT target sensor + guarded seasonal heat/cool ------------------
+
+_TEMP_BINDINGS = {
+    "enabled": True, "acknowledged": True, "sensorEntity": "sensor.tank_temp",
+    "heaterEntity": "switch.heater", "coolEntity": "switch.fan",
+}
+_GBR_JUNE_RT = 24.7  # gbr_central sstMonthlyC[5]
+
+
+def _fresh(value, attrs=None):
+    return FakeState(str(value), attrs, last_changed=datetime.now(timezone.utc))
+
+
+def _temp_entry(**temp_over):
+    temp = dict(_TEMP_BINDINGS)
+    temp.update(temp_over)
+    return _exec_entry(lightEntity=None, temp=temp)
+
+
+def test_temp_normalise_requires_ack_and_bindings():
+    no_ack = normalise({"spawningProgram": {"execution": {"temp": {
+        "enabled": True, "sensorEntity": "sensor.t", "heaterEntity": "switch.h",
+    }}}})["spawningProgram"]["execution"]["temp"]
+    assert no_ack["enabled"] is False  # unacknowledged never arms
+    ok = normalise({"spawningProgram": {"execution": {"temp": dict(_TEMP_BINDINGS)}}})
+    assert ok["spawningProgram"]["execution"]["temp"]["enabled"] is True
+    swapped = normalise({"spawningProgram": {"execution": {"temp": {
+        **_TEMP_BINDINGS, "maxC": 21.0, "minC": 25.0,
+    }}}})["spawningProgram"]["execution"]["temp"]
+    assert swapped["minC"] < swapped["maxC"]  # inverted clamps fall back to defaults
+
+
+def test_tick_publish_only_mode_sets_sensor_and_never_switches():
+    # Feature on, execution left on "apex": the sensor publishes, nothing actuates.
+    entry = _exec_entry(mode="apex", armed=False)
+    hass = _exec_hass(entry)
+    run(integration._async_spawning_tick(hass, entry, _noon()))
+    sensor = hass.states.get("sensor.openreef_spawning_target_temp")
+    assert sensor is not None and sensor.state == f"{_GBR_JUNE_RT:.1f}"
+    assert sensor.attributes["reefMonth"] == "June"
+    assert not hass.services.calls
+
+
+def test_tick_temp_bang_bang_mirrors_apex_snippets():
+    entry = _temp_entry()
+    # Cold tank: heater on, fan stays off.
+    hass = _exec_hass(entry, {
+        "sensor.tank_temp": _fresh(_GBR_JUNE_RT - 0.7),
+        "switch.heater": "off", "switch.fan": "off",
+    })
+    run(integration._async_spawning_tick(hass, entry, _noon()))
+    assert len(_switch_calls(hass, "turn_on", "switch.heater")) == 1
+    assert not _switch_calls(hass, "turn_on", "switch.fan")
+    # Warm tank: heater (left on) switches off, fan comes on.
+    hass2 = _exec_hass(entry, {
+        "sensor.tank_temp": _fresh(_GBR_JUNE_RT + 0.7),
+        "switch.heater": "on", "switch.fan": "off",
+    })
+    run(integration._async_spawning_tick(hass2, entry, _noon()))
+    assert len(_switch_calls(hass2, "turn_off", "switch.heater")) == 1
+    assert len(_switch_calls(hass2, "turn_on", "switch.fan")) == 1
+    # Inside the band: hysteresis holds whatever is running — no calls at all.
+    hass3 = _exec_hass(entry, {
+        "sensor.tank_temp": _fresh(_GBR_JUNE_RT),
+        "switch.heater": "on", "switch.fan": "off",
+    })
+    run(integration._async_spawning_tick(hass3, entry, _noon()))
+    assert not [c for c in hass3.services.calls if c.domain == "switch"]
+
+
+def test_tick_temp_hard_clamp_beats_the_curve():
+    entry = _temp_entry(maxC=24.0)
+    hass = _exec_hass(entry, {
+        "sensor.tank_temp": _fresh(24.2),  # below RT−tol (wants heat) but at/above maxC
+        "switch.heater": "on", "switch.fan": "off",
+    })
+    run(integration._async_spawning_tick(hass, entry, _noon()))
+    assert len(_switch_calls(hass, "turn_off", "switch.heater")) == 1
+
+
+def test_tick_temp_stale_sensor_fails_everything_off():
+    entry = _temp_entry()
+    hass = _exec_hass(entry, {
+        "sensor.tank_temp": "24.0",  # default FakeState timestamp = long stale
+        "switch.heater": "on", "switch.fan": "on",
+    })
+    run(integration._async_spawning_tick(hass, entry, _noon()))
+    assert len(_switch_calls(hass, "turn_off", "switch.heater")) == 1
+    assert len(_switch_calls(hass, "turn_off", "switch.fan")) == 1
+    runtime = hass.data[integration.DOMAIN][integration.SPAWNING_RUNTIME]
+    assert "temp" in runtime["issues"]
+    assert len([c for c in hass.services.calls if c.domain == "persistent_notification"]) == 1
+
+
+def test_tick_temp_fahrenheit_sensor_converts():
+    entry = _temp_entry()
+    hass = _exec_hass(entry, {
+        "sensor.tank_temp": _fresh(75.2, {"unit_of_measurement": "°F"}),  # 24.0 °C
+        "switch.heater": "off", "switch.fan": "off",
+    })
+    run(integration._async_spawning_tick(hass, entry, _noon()))
+    assert len(_switch_calls(hass, "turn_on", "switch.heater")) == 1
+    runtime = hass.data[integration.DOMAIN][integration.SPAWNING_RUNTIME]
+    assert abs(runtime["tempReading"] - 24.0) < 0.05
+
+
+# --- Stage D: spawn-window night capture --------------------------------------
+
+def test_tick_captures_one_window_night():
+    prediction = spawning.predict_spawn_window(
+        REEF_PRESETS["gbr_central"], 2026, 0,
+        today=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    night = datetime.fromisoformat(prediction["windowStart"] + "T22:00:00+00:00")
+    entry = _exec_entry(
+        mode="apex", armed=False,
+        extra={"capture": {"enabled": True, "triggers": {"spawnWindowNight": True}}},
+    )
+    hass = _exec_hass(entry)
+    run(integration._async_spawning_tick(hass, entry, night))
+    assert hass.tasks.count("openreef_capture") == 1
+    run(integration._async_spawning_tick(hass, entry, night.replace(minute=30)))
+    assert hass.tasks.count("openreef_capture") == 1  # one capture per night
+
+
+def test_tick_no_capture_when_trigger_off():
+    prediction = spawning.predict_spawn_window(
+        REEF_PRESETS["gbr_central"], 2026, 0,
+        today=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    night = datetime.fromisoformat(prediction["windowStart"] + "T22:00:00+00:00")
+    entry = _exec_entry(mode="apex", armed=False,
+                        extra={"capture": {"enabled": True}})  # trigger defaults off
+    hass = _exec_hass(entry)
+    run(integration._async_spawning_tick(hass, entry, night))
+    assert "openreef_capture" not in hass.tasks
 
 
 # --- Smart-plug execution: websocket + lighting bridge -----------------------

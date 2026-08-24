@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.73"
+INTEGRATION_VERSION = "0.7.74"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -749,6 +749,15 @@ SPAWNING_OFFSET_MONTHS_MAX = 11
 SPAWNING_TICK_UNSUB = "spawning_tick_unsub"
 SPAWNING_TICK_SECONDS = 60
 SPAWNING_RUNTIME = "spawning_runtime"     # hass.data: asserted states, overrides, issues, notify cooldowns
+# Stage C — seasonal temperature. The RT target publishes as a bare state-machine
+# sensor (no entity platform, same as the dosing pH mirror); the optional guarded
+# heat/cool control mirrors the Apex heater/chiller snippets at RT ± tolerance.
+SPAWNING_TARGET_TEMP_ENTITY = "sensor.openreef_spawning_target_temp"
+SPAWNING_TEMP_TOLERANCE_C = 0.2           # Rich Ross / Craggs ±0.2° — the Apex snippet mirror
+SPAWNING_TEMP_STALE_MINUTES = 15          # sensor silence beyond this ⇒ everything fails OFF
+SPAWNING_TEMP_PLAUSIBLE_MIN_C = 15.0      # outside this band the probe is not in the water
+SPAWNING_TEMP_PLAUSIBLE_MAX_C = 32.0
+SPAWNING_TEMP_DRIFT_ALERT_C = 1.0         # |tank − RT| beyond this ⇒ deduped drift alert
 
 # Lighting schedule — gates light-dependent alerts (PAR especially) to the hours
 # the lights are actually meant to be on, so a 0-PAR reading at night doesn't fire
@@ -1060,6 +1069,7 @@ DEFAULT_CORE_CONFIG = {
             "atoWindows": False,
             "feedMode": False,
             "npsFeedExchange": False,
+            "spawnWindowNight": False,
         },
     },
     "captures": [],
@@ -1469,6 +1479,18 @@ DEFAULT_CORE_CONFIG = {
             "moonEntity": None,              # optional — real lunar cycle at night
             "moonMinIlluminationPct": 25,    # below this the night stays genuinely dark
             "overridePolicy": "hold",        # hold (until next transition) | reassert
+            # Stage C — guarded seasonal heat/cool. enabled only takes effect once
+            # acknowledged (the inline-guard-thermostat checklist) AND a sensor +
+            # at least one actuator are bound; normalisation enforces that.
+            "temp": {
+                "enabled": False,
+                "acknowledged": False,       # "I have an independent inline thermostat set as the guard"
+                "sensorEntity": None,        # sensor.* — the tank temperature (°C, or °F auto-converted)
+                "heaterEntity": None,        # switch.* — fails OFF, AND-gated through the inline guard
+                "coolEntity": None,          # switch.* — the fan; cooling's safe direction is ON
+                "maxC": 27.5,                # hard clamp: never command heat at/above this
+                "minC": 22.0,                # hard clamp: never command cooling at/below this
+            },
         },
     },
     # Automatic Water Change — volume-primary (calibrated pump-math) with float/cutoff

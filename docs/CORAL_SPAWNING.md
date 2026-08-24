@@ -114,20 +114,26 @@ with all locked decisions: `docs/spawning-smartplug-brainstorm.md`.
   execution is best-effort — nothing switches while HA is down.
 
 ## Tests
-`tests/test_spawning.py` (50 tests, in CI): astronomy validated against known anchors
+`tests/test_spawning.py` (58 tests, in CI): astronomy validated against known anchors
 (2000-01-06 new moon, 2000-01-21 full moon, equinox/solstice day lengths), the
 compiler emitting Rich Ross's exact code, offset mapping, preset integrity, config
 normalisation, the WS handlers end-to-end, and the smart-plug execution stack
 (desired-state engine, reconcile tick incl. override hold/reassert +
-unavailable-alert dedupe + dark-night moonlight, execution WS, lighting bridge).
+unavailable-alert dedupe + dark-night moonlight, execution WS, lighting bridge,
+temperature bang-bang law + hard clamps + stale/°F sensor handling + fail-safe-OFF,
+spawn-window capture dedupe, publish-only sensor mode).
 
 ## Roadmap
 - **v0 (shipped):** the compiler — preset → Season Table + Profiles + code + walkthrough.
 - **A+B (shipped, 0.7.73):** smart-plug execution — daylight + moonlight/dark-nights
   (see above; brainstorm doc §0 for the locked decisions).
-- **Stage C:** seasonal temperature — RT target sensor first, then guarded heat/cool
-  around Reece's Inkbird-inline design (symmetric: heater fails OFF, fan fails ON).
-- **Stage D:** camera auto-arm on predicted spawn-window nights + Pulse card.
+- **C (shipped, 0.7.74):** seasonal temperature — `sensor.openreef_spawning_target_temp`
+  (publish-only, wire your own thermostat) + guarded heat/cool per the Inkbird-inline
+  design: RT ± 0.2 bang-bang (Apex snippet mirror), fail-OFF on any sensor doubt,
+  hard clamps beat the curve, opt-in only with the inline-guard acknowledgement.
+- **D (shipped, 0.7.74):** one camera capture per predicted spawn-window night
+  (opt-in trigger, "OpenReef films your spawn") + the Pulse moon tile's live-execution
+  line.
 - **v1 (framing):** "Reef Location Simulation" for all users; maintenance-reminder
   hooks (Jan-1 new-moon reset nag, "nights until window" countdown); gravid-coral
   readiness checklist.
