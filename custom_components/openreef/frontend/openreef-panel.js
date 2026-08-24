@@ -503,6 +503,9 @@ class OpenReefPanel extends HTMLElement {
       // from config — a save invalidates them, so recompile without the
       // save-then-refresh dance.
       if (this._activeTab === "nps" || this._activeTab === "hatchery") this._npsLoadSummary(true);
+      // The spawning execution strip is computed backend-side from the saved
+      // program — a save (new reef/offset/noon) must refresh it immediately.
+      if (this._activeTab === "spawning") this._loadSpawnExecStatus(true);
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not save OpenReef";
     } finally {
@@ -2415,6 +2418,17 @@ class OpenReefPanel extends HTMLElement {
         const block = this._config.consumables = this._config.consumables || {};
         const products = block.products = block.products || {};
         if (products[id]) products[id][field] = value;
+      }
+      if (target.dataset.spawnField) {
+        // The compiler form fields are ALSO what the execution strip runs on —
+        // edits flow into config like every other setting (dirty → Save), instead
+        // of only persisting when Generate is clicked (which hid a stale strip).
+        const sp = this._config.spawningProgram = this._config.spawningProgram || {};
+        const f = target.dataset.spawnField;
+        sp[f] = (f === "offsetMonths" || f === "solarNoonHour") ? Number(value) : value;
+        this._setDirty(true);
+        if (event.type === "change") this._render();
+        return;
       }
       if (scope === "spawn-exec") {
         const sp = this._config.spawningProgram = this._config.spawningProgram || {};
@@ -7812,7 +7826,8 @@ class OpenReefPanel extends HTMLElement {
         <span class="pill unknown">🌡 target ${this._escape(String(state.targetTempC ?? "—"))}°C</span>
         ${state.inSpawnWindow ? `<span class="pill ok">🥚 Spawn window is OPEN — keep nights dark</span>` : ""}
       </div>
-      ${state.nextTransition ? `<small class="hint">Next: ${this._escape(this._spawnExecCountdown(state.nextTransition))} · mimicking ${this._escape(state.reefDate || "")}</small>` : ""}` : "";
+      ${state.nextTransition ? `<small class="hint">Next: ${this._escape(this._spawnExecCountdown(state.nextTransition))} · mimicking ${this._escape(state.reefDate || "")}</small>` : ""}
+      ${this._configDirty ? `<small class="hint" style="color:var(--warning-color,#f5a524)">Settings changed — Save to refresh this preview.</small>` : ""}` : "";
 
     const issues = (st.runtime?.issues || [])
       .map((i) => `<small class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(i)}</small>`)
