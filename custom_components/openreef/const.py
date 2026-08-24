@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.72"
+INTEGRATION_VERSION = "0.7.73"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -744,6 +744,11 @@ SPAWNING_DEFAULT_SOLAR_NOON_HOUR = 13.0   # local clock time the photoperiod cen
 SPAWNING_SUNUP_RAMP_MIN = 60              # default dawn ramp (minutes)
 SPAWNING_SUNSET_RAMP_MIN = 60             # default dusk ramp (minutes) — proximate spawn trigger
 SPAWNING_OFFSET_MONTHS_MAX = 11
+# Smart-plug execution — the minutely reconcile tick that switches the daylight /
+# moonlight plugs to the program's desired state (spawning.execution_desired_state).
+SPAWNING_TICK_UNSUB = "spawning_tick_unsub"
+SPAWNING_TICK_SECONDS = 60
+SPAWNING_RUNTIME = "spawning_runtime"     # hass.data: asserted states, overrides, issues, notify cooldowns
 
 # Lighting schedule — gates light-dependent alerts (PAR especially) to the hours
 # the lights are actually meant to be on, so a 0-PAR reading at night doesn't fire
@@ -1438,7 +1443,7 @@ DEFAULT_CORE_CONFIG = {
     # Lighting schedule — drives when light-dependent (lightGated) sensor alerts
     # may fire. mode "off" = no gating (alerts always evaluated, legacy behaviour).
     "lightingSchedule": {
-        "mode": "off",                 # off | simple | reef
+        "mode": "off",                 # off | simple | reef | spawning (follow the executed spawning program)
         "onTime": "08:00",             # simple mode
         "offTime": "20:00",            # simple mode
         "reefPreset": "gbr_central",   # reef mode — reuses REEF_PRESETS
@@ -1455,6 +1460,16 @@ DEFAULT_CORE_CONFIG = {
         "tempUnit": "C",
         "tempProbe": "Tmp",
         "acknowledgedAdvisory": False,
+        # Smart-plug execution: OpenReef runs the program itself on HA switch/light
+        # entities instead of compiling it for an Apex. Default "apex" = compile-only.
+        "execution": {
+            "mode": "apex",                  # apex | openreef
+            "armed": False,                  # master: disarmed, OpenReef never switches
+            "lightEntity": None,             # switch.* or light.* — on sunrise→sunset
+            "moonEntity": None,              # optional — real lunar cycle at night
+            "moonMinIlluminationPct": 25,    # below this the night stays genuinely dark
+            "overridePolicy": "hold",        # hold (until next transition) | reassert
+        },
     },
     # Automatic Water Change — volume-primary (calibrated pump-math) with float/cutoff
     # sensors as arbiters. Two pumps (drain + fill), single tank, premixed saltwater.

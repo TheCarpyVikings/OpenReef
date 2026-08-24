@@ -58,7 +58,7 @@ class OpenReefPanel extends HTMLElement {
       face: null, videoEl: null, audioEl: null,
       speaking: false, keysOpen: false,
     };
-    this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "" };
+    this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
     this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false };
     this._npsDemoStash = null;
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
@@ -1264,6 +1264,9 @@ class OpenReefPanel extends HTMLElement {
         const text = this._spawningCopyText(target.dataset.id);
         if (text) this._copyText(text, "Copied to clipboard", "Could not copy");
       }
+      if (action === "spawn-exec-resume") this._spawnExecResume();
+      if (action === "spawn-exec-refresh") this._loadSpawnExecStatus(true);
+      if (action === "spawn-exec-pargate") this._spawnExecToggleParGate();
       if (action === "icp-subview") {
         this._icp.subview = id || "dashboard";
         if (this._icp.subview === "dashboard") this._loadIcpDashboard(true);
@@ -2412,6 +2415,13 @@ class OpenReefPanel extends HTMLElement {
         const block = this._config.consumables = this._config.consumables || {};
         const products = block.products = block.products || {};
         if (products[id]) products[id][field] = value;
+      }
+      if (scope === "spawn-exec") {
+        const sp = this._config.spawningProgram = this._config.spawningProgram || {};
+        const ex = sp.execution = sp.execution || {};
+        ex[field] = target.type === "checkbox" ? value
+          : target.type === "number" ? Number(value) : value;
+        if ((field === "mode" || field === "armed") && event.type === "change") this._render();
       }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
@@ -7655,12 +7665,194 @@ class OpenReefPanel extends HTMLElement {
     return "";
   }
 
+  // --- Coral Spawning · smart-plug execution ------------------------------
+  // The backend's minutely reconcile tick is authoritative; this card only
+  // edits config (saved via the normal Save flow) and renders the status the
+  // openreef/spawning_execution_status WS reports.
+
+  async _loadSpawnExecStatus(force = false) {
+    const st = this._spawning;
+    if (st.execLoading) return;
+    if (!force && st.execStatus && Date.now() - st.execAt < 30000) return;
+    st.execLoading = true;
+    try {
+      st.execStatus = await this._callWS({ type: "openreef/spawning_execution_status" });
+    } catch (err) {
+      st.execStatus = { error: err?.message || "Could not load execution status" };
+    } finally {
+      st.execAt = Date.now();
+      st.execLoading = false;
+      this._render();
+    }
+  }
+
+  async _spawnExecResume() {
+    try {
+      await this._callWS({ type: "openreef/spawning_execution_resume" });
+      this._message = "Override cleared — the program has the plugs again.";
+    } catch (err) {
+      this._error = err?.message || "Could not resume the program";
+    }
+    this._loadSpawnExecStatus(true);
+  }
+
+  // Opt-in PAR-alert gating (locked decision: click, never automatic). Uses a
+  // lighting mode of "spawning" that the backend resolves to the executed
+  // program's own sunrise/sunset — one sun model, no second config to drift.
+  _spawnExecToggleParGate() {
+    const lighting = this._config.lightingSchedule = this._config.lightingSchedule || {};
+    if (lighting.mode === "spawning") {
+      lighting.mode = lighting.preSpawningMode || "off";
+      delete lighting.preSpawningMode;
+    } else {
+      lighting.preSpawningMode = lighting.mode || "off";
+      lighting.mode = "spawning";
+    }
+    this._saveConfig();
+  }
+
+  _spawnExecEntitySelect(field, value) {
+    const states = (this._hass && this._hass.states) || {};
+    const opts = Object.keys(states)
+      .filter((e) => e.startsWith("switch.") || e.startsWith("light."))
+      .sort()
+      .map((e) => `<option value="${this._escape(e)}" ${e === value ? "selected" : ""}>${this._escape(e)}</option>`)
+      .join("");
+    // Same stored-id preservation rule as _awcEntitySelect (R20): a binding whose
+    // entity is missing stays visible and selected instead of silently unbinding.
+    const missing = value && !states[value]
+      ? `<option value="${this._escape(value)}" selected>${this._escape(value)} (unavailable)</option>`
+      : "";
+    return `<select data-scope="spawn-exec" data-field="${field}">
+      <option value="">— none —</option>${missing}${opts}</select>`;
+  }
+
+  _spawnExecCountdown(nt) {
+    if (!nt) return "";
+    const m = Math.max(0, Number(nt.inMinutes) || 0);
+    const h = Math.floor(m / 60);
+    const when = h ? `${h} h ${m % 60} m` : `${m % 60} m`;
+    return `${nt.kind === "sunrise" ? "🌅 Sunrise" : "🌇 Sunset"}${nt.tomorrow ? " tomorrow" : ""} at ${nt.at} — in ${when}`;
+  }
+
+  _spawnExecChannelRow(label, channel) {
+    const st = this._spawning.execStatus || {};
+    const ent = st.entities?.[channel];
+    if (!ent || !ent.entity) return "";
+    const desired = st.state?.[channel];
+    const actualState = ent.state;
+    const unavailable = !actualState || actualState === "unavailable" || actualState === "unknown";
+    const actualOn = actualState === "on";
+    const pill = unavailable
+      ? `<span class="pill warning">unavailable</span>`
+      : `<span class="pill ${actualOn ? "ok" : "unknown"}">${actualOn ? "ON" : "OFF"}</span>`;
+    const override = st.runtime?.overrides?.[channel];
+    const overrideNote = override
+      ? `<small class="hint" style="color:var(--warning-color,#f5a524)">✋ Manual override — program resumes at the next ${this._escape(override.resumesAt || "transition")}</small>
+         <button class="secondary compact-button" data-action="spawn-exec-resume">Resume now</button>`
+      : "";
+    const mismatch = !unavailable && !override && typeof desired === "boolean" && desired !== actualOn
+      ? `<small class="hint">→ switching to ${desired ? "ON" : "OFF"} on the next tick</small>` : "";
+    return `<div class="button-row" style="align-items:center;gap:8px;flex-wrap:wrap">
+      <strong>${this._escape(label)}</strong>
+      <small class="hint">${this._escape(ent.entity)}</small>
+      ${pill}
+      ${typeof desired === "boolean" ? `<small class="hint">program wants ${desired ? "ON" : "OFF"}</small>` : ""}
+      ${mismatch}${overrideNote}
+    </div>`;
+  }
+
+  _spawnExecutionCard(sp) {
+    const ex = sp.execution || {};
+    const mode = ex.mode === "openreef" ? "openreef" : "apex";
+    if (mode === "openreef") this._loadSpawnExecStatus();
+    const fieldStyle = "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
+    const ctrlStyle = "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
+    const modeSelect = `
+      <label style="${fieldStyle}"><span>Execute on</span>
+        <select style="${ctrlStyle}" data-scope="spawn-exec" data-field="mode">
+          <option value="apex" ${mode === "apex" ? "selected" : ""}>Neptune Apex — paste the program</option>
+          <option value="openreef" ${mode === "openreef" ? "selected" : ""}>OpenReef — smart plugs, no Apex needed</option>
+        </select></label>`;
+
+    if (mode === "apex") {
+      return `
+        <article class="panel stack">
+          <div class="section-head"><div><h3>⚡ Execution</h3><p>Who runs this program.</p></div></div>
+          <div class="grid two">${modeSelect}</div>
+          <small class="hint">Generate below and paste into Apex Local — your Apex executes with its own failsafes. Or switch to OpenReef execution and run the same program on any smart plug.</small>
+        </article>`;
+    }
+
+    const st = this._spawning.execStatus || {};
+    const state = st.state || {};
+    const armedBackend = !!st.execution?.armed;
+    const armedLocal = !!ex.armed;
+    const controlling = !!st.runtime?.controlling;
+    const statusPill = st.error
+      ? `<span class="pill warning">status unavailable</span>`
+      : controlling
+        ? `<span class="pill ok">running the plugs</span>`
+        : `<span class="pill unknown">${armedBackend ? "standing by" : "disarmed"}</span>`;
+
+    const today = state.valid ? `
+      <div class="pill-stack" style="flex-wrap:wrap;gap:6px">
+        <span class="pill unknown">🌅 ${this._escape(state.sunrise || "—")}</span>
+        <span class="pill unknown">🌇 ${this._escape(state.sunset || "—")}</span>
+        <span class="pill unknown">⏱ ${this._escape(String(state.dayLengthHours ?? "—"))} h day</span>
+        <span class="pill unknown">🌙 ${this._escape(String(state.moonIlluminationPct ?? "—"))}% ${this._escape(state.moonPhase || "")}${state.moonQualifies === false ? " · dark-night hold" : ""}</span>
+        <span class="pill unknown">🌡 target ${this._escape(String(state.targetTempC ?? "—"))}°C</span>
+        ${state.inSpawnWindow ? `<span class="pill ok">🥚 Spawn window is OPEN — keep nights dark</span>` : ""}
+      </div>
+      ${state.nextTransition ? `<small class="hint">Next: ${this._escape(this._spawnExecCountdown(state.nextTransition))} · mimicking ${this._escape(state.reefDate || "")}</small>` : ""}` : "";
+
+    const issues = (st.runtime?.issues || [])
+      .map((i) => `<small class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(i)}</small>`)
+      .join("");
+    const parGated = this._config.lightingSchedule?.mode === "spawning";
+    const dirtyHint = armedLocal !== armedBackend && !st.error
+      ? `<small class="hint">Save changes to apply.</small>` : "";
+
+    return `
+      <article class="panel stack">
+        <div class="section-head">
+          <div><h3>⚡ Execution</h3><p>OpenReef reconciles the plugs to the program every minute — restart-safe, no tables, no Apex.</p></div>
+          ${statusPill}
+        </div>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="spawn-exec" data-field="armed" ${armedLocal ? "checked" : ""}>
+          <span><strong>Armed — OpenReef switches the plugs</strong><small>Disarmed, OpenReef never touches them and leaves everything as it stands.</small></span>
+        </label>
+        ${dirtyHint}
+        <div class="grid two">
+          ${modeSelect}
+          <label style="${fieldStyle}"><span>Daylight plug <small>(on at sunrise, off at sunset)</small></span>${this._spawnExecEntitySelect("lightEntity", ex.lightEntity || "")}</label>
+          <label style="${fieldStyle}"><span>Moonlight plug <small>(optional — real lunar cycle, dark around new moon)</small></span>${this._spawnExecEntitySelect("moonEntity", ex.moonEntity || "")}</label>
+          <label style="${fieldStyle}"><span>Moonlight from <small>(% illumination — below this the night stays dark)</small></span><input style="${ctrlStyle}" type="number" min="0" max="100" step="5" value="${Number.isFinite(Number(ex.moonMinIlluminationPct)) ? Number(ex.moonMinIlluminationPct) : 25}" data-scope="spawn-exec" data-field="moonMinIlluminationPct" /></label>
+          <label style="${fieldStyle}"><span>If someone flips a plug by hand</span>
+            <select style="${ctrlStyle}" data-scope="spawn-exec" data-field="overridePolicy">
+              <option value="hold" ${ex.overridePolicy !== "reassert" ? "selected" : ""}>Respect it until the next sunrise/sunset</option>
+              <option value="reassert" ${ex.overridePolicy === "reassert" ? "selected" : ""}>Put it back within a minute</option>
+            </select></label>
+        </div>
+        ${today}
+        ${this._spawnExecChannelRow("Daylight", "light")}
+        ${this._spawnExecChannelRow("Moonlight", "moon")}
+        ${issues}
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="spawn-exec-pargate">${parGated ? "Stop gating light alerts from this program" : "Gate light alerts from this program"}</button>
+          <button class="secondary compact-button" data-action="spawn-exec-refresh">Refresh status</button>
+        </div>
+        <small class="hint">Plugs are hard on/off — the seasonal day-length drift, temperature and lunar cycle carry the program; there is no dawn/dusk ramp. Best-effort by design: nothing switches while Home Assistant is down.</small>
+      </article>`;
+  }
+
   _spawningTab() {
     const sp = (this._config && this._config.spawningProgram) || {};
     const st = this._spawning;
     const head = `
       <div class="section-head">
-        <div><h2>Coral Spawning</h2><p>Pick a reef — OpenReef compiles the seasonal photoperiod, temperature &amp; lunar program your Apex needs, so you never hand-build the data tables again.</p></div>
+        <div><h2>Coral Spawning</h2><p>Pick a reef — OpenReef compiles the seasonal photoperiod, temperature &amp; lunar program, so you never hand-build the data tables again. Paste it into your Apex, or let OpenReef run the lights itself on any smart plug.</p></div>
       </div>`;
 
     if (st.presets === null) {
@@ -7705,7 +7897,7 @@ class OpenReefPanel extends HTMLElement {
       </article>`;
 
     const program = st.program ? this._spawningProgramView(st.program) : "";
-    return `<section class="stack">${head}${form}${program}${advisory}</section>`;
+    return `<section class="stack">${head}${this._spawnExecutionCard(sp)}${form}${program}${advisory}</section>`;
   }
 
   _spawningProgramView(prog) {

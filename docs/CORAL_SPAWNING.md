@@ -85,15 +85,50 @@ Caribbean/Florida. Monthly SST is approximate climatology; **GBR & Singapore are
 validated against Craggs' published profiles**. The GBR spawn window uses Rich Ross's
 documented "12–15 nights after the full moon" template.
 
+## Smart-plug execution (0.7.73) — OpenReef as the controller
+
+The compiler's premium sibling: instead of pasting the program into an Apex, OpenReef
+**executes it directly** against ordinary HA `switch.`/`light.` entities. Same brain
+(`execution_desired_state()` in spawning.py — pure, per-date, more faithful than the
+12-row table), new hands (a minutely reconcile tick in `__init__.py`). Design record
+with all locked decisions: `docs/spawning-smartplug-brainstorm.md`.
+
+- **Declarative reconcile, never timers**: each tick asks what the plugs SHOULD be
+  and corrects mismatches — restart-safe, DST-safe, config edits live next tick.
+- **Daylight plug**: on sunrise → off sunset, the offset-mapped reef date's anchored
+  photoperiod. **Moonlight plug**: real lunar cycle at night, illumination-gated so
+  nights around the new moon stay *genuinely dark* (the biologically loaded half).
+- **Manual override** (stamp-and-compare — we remember what we last asserted; a
+  mismatch we didn't cause is a human): policy `hold` respects it until the next
+  natural transition (with a "Resume now" escape), `reassert` corrects in a minute.
+- **Spawn-window vigilance**: lights forced on by hand during a predicted window
+  night raises a deduped warning — dark nights matter.
+- **PAR-gate bridge**: `lightingSchedule.mode: "spawning"` (opt-in click on the tab)
+  resolves the alert-gating window from the *executed* program via
+  `_effective_lighting_cfg` — one sun model, no drift between gate and plugs.
+- Config: `spawningProgram.execution` (mode `apex`|`openreef`, `armed`, entities,
+  `moonMinIlluminationPct`, `overridePolicy`). WS: `spawning_execution_status`,
+  `spawning_execution_resume`. Disarmed or mode `apex`, the tick is not even
+  registered — OpenReef releases the plugs wherever they stand.
+- Honest limits (stated in the UI): plugs are hard on/off — no dawn/dusk ramp; and
+  execution is best-effort — nothing switches while HA is down.
+
 ## Tests
-`tests/test_spawning.py` (23 tests, in CI): astronomy validated against known anchors
+`tests/test_spawning.py` (50 tests, in CI): astronomy validated against known anchors
 (2000-01-06 new moon, 2000-01-21 full moon, equinox/solstice day lengths), the
 compiler emitting Rich Ross's exact code, offset mapping, preset integrity, config
-normalisation, and the WS handlers end-to-end.
+normalisation, the WS handlers end-to-end, and the smart-plug execution stack
+(desired-state engine, reconcile tick incl. override hold/reassert +
+unavailable-alert dedupe + dark-night moonlight, execution WS, lighting bridge).
 
 ## Roadmap
 - **v0 (shipped):** the compiler — preset → Season Table + Profiles + code + walkthrough.
-- **v1:** "Reef Location Simulation" framing for all users; maintenance-reminder
+- **A+B (shipped, 0.7.73):** smart-plug execution — daylight + moonlight/dark-nights
+  (see above; brainstorm doc §0 for the locked decisions).
+- **Stage C:** seasonal temperature — RT target sensor first, then guarded heat/cool
+  around Reece's Inkbird-inline design (symmetric: heater fails OFF, fan fails ON).
+- **Stage D:** camera auto-arm on predicted spawn-window nights + Pulse card.
+- **v1 (framing):** "Reef Location Simulation" for all users; maintenance-reminder
   hooks (Jan-1 new-moon reset nag, "nights until window" countdown); gravid-coral
   readiness checklist.
 - **v2 (premium):** HA-native direct drive for MXM-Radions — night-by-night lunar

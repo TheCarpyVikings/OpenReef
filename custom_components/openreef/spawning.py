@@ -578,6 +578,121 @@ def generate_program(
 
 
 # --------------------------------------------------------------------------- #
+# Smart-plug execution — the desired-state half of the reconcile loop.
+#
+# The integration's minutely tick asks "what SHOULD the plugs be right now?"
+# and reconciles reality to the answer; everything here stays pure so a whole
+# simulated year runs in CI in milliseconds. Daylight replays the offset-mapped
+# reef date's anchored photoperiod (the Season Table is 12 samples of this same
+# curve). Moonlight follows the REAL moon — illumination-gated so the nights
+# around the new moon stay genuinely dark, which is the biologically important
+# half of a lunar cycle (light pollution desynchronises spawning).
+# --------------------------------------------------------------------------- #
+def _shift_months(d: date, months: int) -> date:
+    """Shift a date by whole months, clamping the day into the target month."""
+    total = d.year * 12 + (d.month - 1) + months
+    y, m0 = divmod(total, 12)
+    m = m0 + 1
+    nxt = date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1)
+    return date(y, m, min(d.day, (nxt - timedelta(days=1)).day))
+
+
+def _sun_minutes(lat: float, reef_date: date, solar_noon_hour: float) -> tuple[int, int, float]:
+    """(sunrise_minute, sunset_minute, day_length_hours) for a reef date,
+    anchored on the local solar-noon clock. Minutes are mod-1440 (may wrap)."""
+    dl = day_length_hours(lat, reef_date)
+    sr = int(round((solar_noon_hour - dl / 2) * 60)) % 1440
+    ss = int(round((solar_noon_hour + dl / 2) * 60)) % 1440
+    return sr, ss, dl
+
+
+def execution_desired_state(cfg: dict[str, Any], now_local: datetime) -> dict[str, Any]:
+    """What the daylight & moonlight plugs SHOULD be at ``now_local`` (tz-aware).
+
+    ``cfg`` is the full ``spawningProgram`` config (preset/offset/solar-noon plus
+    the ``execution`` block). Pure — no HA, no side effects. Returns
+    ``{"valid": False, "reason": ...}`` for an unknown preset; otherwise the
+    desired booleans plus today's context for the panel (sunrise/sunset, next
+    transition, moon, spawn window, seasonal target temperature).
+    """
+    preset = REEF_PRESETS.get(cfg.get("reefPreset"))
+    if not preset:
+        return {"valid": False, "reason": "unknown reef preset"}
+    try:
+        offset = int(cfg.get("offsetMonths", 0)) % 12
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        noon = float(cfg.get("solarNoonHour", SPAWNING_DEFAULT_SOLAR_NOON_HOUR))
+    except (TypeError, ValueError):
+        noon = SPAWNING_DEFAULT_SOLAR_NOON_HOUR
+    execution = cfg.get("execution") or {}
+    try:
+        moon_threshold = max(0, min(100, int(execution.get("moonMinIlluminationPct", 25))))
+    except (TypeError, ValueError):
+        moon_threshold = 25
+
+    lat = preset["lat"]
+    local_date = now_local.date()
+    reef_date = _shift_months(local_date, -offset)
+    sr_min, ss_min, dl = _sun_minutes(lat, reef_date, noon)
+    now_min = now_local.hour * 60 + now_local.minute
+    light_on = _in_window(now_min, sr_min, ss_min)
+
+    now_utc = now_local if now_local.tzinfo else now_local.replace(tzinfo=timezone.utc)
+    age = moon_age_days(now_utc)
+    illum_pct = int(round(moon_illumination(now_utc) * 100))
+    moon_qualifies = illum_pct >= moon_threshold
+    moon_on = (not light_on) and moon_qualifies
+
+    # Next transition among today's and tomorrow's sunrise/sunset (tomorrow uses
+    # tomorrow's shifted reef date, so the countdown tracks the seasonal drift).
+    next_transition: dict[str, Any] | None = None
+    candidates: list[tuple[int, str, int]] = []
+    for day_off in (0, 1):
+        d_sr, d_ss, _dl = _sun_minutes(lat, _shift_months(local_date + timedelta(days=day_off), -offset), noon)
+        for kind, minute in (("sunrise", d_sr), ("sunset", d_ss)):
+            abs_min = day_off * 1440 + minute
+            if abs_min > now_min:
+                candidates.append((abs_min, kind, minute))
+    if candidates:
+        abs_min, kind, minute = min(candidates)
+        next_transition = {
+            "kind": kind,
+            "at": _fmt_hhmm(minute / 60),
+            "inMinutes": abs_min - now_min,
+            "tomorrow": abs_min >= 1440,
+        }
+
+    prediction = predict_spawn_window(preset, now_local.year, offset, today=now_utc)
+    window_start = prediction.get("windowStart")
+    window_end = prediction.get("windowEnd")
+    today_iso = local_date.isoformat()
+    in_window = bool(window_start and window_end and window_start <= today_iso <= window_end)
+
+    return {
+        "valid": True,
+        "light": light_on,
+        "moon": moon_on,
+        "sunrise": _fmt_hhmm(sr_min / 60),
+        "sunset": _fmt_hhmm(ss_min / 60),
+        "sunriseMinute": sr_min,
+        "sunsetMinute": ss_min,
+        "dayLengthHours": round(dl, 2),
+        "reefDate": reef_date.isoformat(),
+        "reefMonthName": _MONTHS_FULL[reef_date.month - 1],
+        "moonIlluminationPct": illum_pct,
+        "moonPhase": moon_phase_name(age),
+        "moonQualifies": moon_qualifies,
+        "moonThresholdPct": moon_threshold,
+        "targetTempC": round(preset["sstMonthlyC"][reef_date.month - 1], 1),
+        "nextTransition": next_transition,
+        "inSpawnWindow": in_window,
+        "spawnWindow": {"start": window_start, "end": window_end} if window_start else None,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Lighting schedule — used to gate light-dependent alerts (e.g. PAR) to the
 # hours the lights are actually meant to be on. Reuses the same solar day-length
 # math as the spawning compiler. Two modes:

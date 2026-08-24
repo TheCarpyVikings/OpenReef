@@ -127,6 +127,9 @@ from .const import (
     REEF_PRESETS,
     SPAWNING_DEFAULT_SOLAR_NOON_HOUR,
     SPAWNING_OFFSET_MONTHS_MAX,
+    SPAWNING_RUNTIME,
+    SPAWNING_TICK_SECONDS,
+    SPAWNING_TICK_UNSUB,
     LIGHTING_SCHEDULE_DEFAULT_GRACE_MIN,
     LIGHTING_SCHEDULE_GRACE_MAX,
     LIGHTING_OFFSET_HOURS_MAX,
@@ -2795,7 +2798,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     else:
         ls_defaults = DEFAULT_CORE_CONFIG["lightingSchedule"]
         mode = lighting_cfg.get("mode")
-        lighting_cfg["mode"] = mode if mode in {"off", "simple", "reef"} else "off"
+        lighting_cfg["mode"] = mode if mode in {"off", "simple", "reef", "spawning"} else "off"
         lighting_cfg["onTime"] = (
             _normalise_schedule_time(lighting_cfg.get("onTime")) or ls_defaults["onTime"]
         )
@@ -2846,6 +2849,33 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             else sp_defaults["tempProbe"]
         )
         spawning_cfg["acknowledgedAdvisory"] = bool(spawning_cfg.get("acknowledgedAdvisory", False))
+        execution = spawning_cfg.get("execution")
+        if not isinstance(execution, dict):
+            execution = {}
+        ex_defaults = sp_defaults["execution"]
+        ex_mode = execution.get("mode")
+        entities: dict[str, Any] = {}
+        for key in ("lightEntity", "moonEntity"):
+            ent = execution.get(key)
+            entities[key] = (
+                ent.strip()
+                if isinstance(ent, str) and ent.strip().split(".", 1)[0] in ("switch", "light")
+                and "." in ent.strip() and len(ent.strip()) > len(ent.strip().split(".", 1)[0]) + 1
+                else None
+            )
+        try:
+            moon_pct = int(execution.get("moonMinIlluminationPct", ex_defaults["moonMinIlluminationPct"]))
+        except (TypeError, ValueError):
+            moon_pct = ex_defaults["moonMinIlluminationPct"]
+        policy = execution.get("overridePolicy")
+        spawning_cfg["execution"] = {
+            "mode": ex_mode if ex_mode in ("apex", "openreef") else ex_defaults["mode"],
+            "armed": bool(execution.get("armed", False)),
+            "lightEntity": entities["lightEntity"],
+            "moonEntity": entities["moonEntity"],
+            "moonMinIlluminationPct": max(0, min(100, moon_pct)),
+            "overridePolicy": policy if policy in ("hold", "reassert") else "hold",
+        }
 
     _normalise_awc_config(config)
 
@@ -3153,7 +3183,7 @@ def _sensor_low_suppressed(
     the clock and behave exactly as before this feature existed."""
     if not isinstance(sensor, dict) or not sensor.get("lightGated"):
         return False
-    lighting_cfg = config.get("lightingSchedule")
+    lighting_cfg = _effective_lighting_cfg(config, now_local)
     if not isinstance(lighting_cfg, dict) or lighting_cfg.get("mode", "off") == "off":
         return False
     try:
@@ -5359,6 +5389,7 @@ async def _async_save_config(
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
+    await _async_schedule_spawning_tick(hass, entry, normalised)
     await _async_setup_dosing_mirror(hass, entry, normalised)
     if _dosing_channels(normalised):
         _async_kick_dosing_sync(hass, entry)
@@ -9890,7 +9921,7 @@ def _dosing_awc_suspended(config: dict[str, Any]) -> bool:
 def _dosing_lighting_off_window(config: dict[str, Any], local_dt: datetime) -> tuple[int, int] | None:
     """The tank's lights-OFF window (minutes since midnight) for night weighting —
     the complement of the profile's lights-on window when one is configured."""
-    lighting_cfg = config.get("lightingSchedule") if isinstance(config.get("lightingSchedule"), dict) else None
+    lighting_cfg = _effective_lighting_cfg(config, local_dt)
     win = spawning.lighting_window(lighting_cfg, local_dt.date())
     if win is None:
         return None
@@ -14189,6 +14220,283 @@ async def websocket_delete_feed_session(
     connection.send_result(msg["id"], {"success": True, "sessionId": session_id, "config": saved})
 
 
+# --------------------------------------------------------------------------- #
+# Coral Spawning — smart-plug execution (the reconcile tick)
+#
+# spawning.execution_desired_state() is the pure brain; this tick is the hands.
+# Declarative reconcile, never scheduled timers: every minute it asks what the
+# plugs SHOULD be and corrects only mismatches — restart-safe, DST-safe, and a
+# config edit takes effect on the next tick because saves re-arm the scheduler.
+# Manual changes are detected by stamp-and-compare (we remember what we last
+# asserted; a mismatch we didn't cause is a human) — policy "hold" respects the
+# human until the next natural sunrise/sunset, "reassert" corrects within a
+# minute. Disarmed or mode "apex", the tick is never even registered: OpenReef
+# releases the plugs wherever they stand.
+# --------------------------------------------------------------------------- #
+_SPAWNING_EXEC_CHANNELS = (("light", "lightEntity", "daylight"), ("moon", "moonEntity", "moonlight"))
+
+
+def _spawning_execution_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    sp_cfg = config.get("spawningProgram")
+    if not isinstance(sp_cfg, dict):
+        return {}
+    execution = sp_cfg.get("execution")
+    return execution if isinstance(execution, dict) else {}
+
+
+def _spawning_execution_enabled(execution: dict[str, Any]) -> bool:
+    return (
+        execution.get("mode") == "openreef"
+        and bool(execution.get("armed"))
+        and bool(execution.get("lightEntity") or execution.get("moonEntity"))
+    )
+
+
+def _clear_spawning_tick(hass: HomeAssistant) -> None:
+    store = hass.data.setdefault(DOMAIN, {})
+    unsub = store.pop(SPAWNING_TICK_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_schedule_spawning_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry | None, config: dict[str, Any] | None = None
+) -> None:
+    """Arm/disarm the minutely spawning reconcile tick (idempotent, called on
+    every save). Disarming also drops the runtime (asserted stamps, overrides)
+    so a re-arm starts with a clean sync instead of stale override state."""
+    _clear_spawning_tick(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    if not _spawning_execution_enabled(_spawning_execution_cfg(config)):
+        hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
+        return
+
+    async def _handle(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        await _async_spawning_tick(hass, latest_entry, dt_util.now())
+
+    hass.data.setdefault(DOMAIN, {})[SPAWNING_TICK_UNSUB] = async_track_time_interval(
+        hass, _handle, timedelta(seconds=SPAWNING_TICK_SECONDS)
+    )
+
+
+async def _async_spawning_notify_once(
+    hass: HomeAssistant, config: dict[str, Any], key: str, cooldown_s: int, title: str, message: str
+) -> bool:
+    """Cooldown-deduped notification for tick-detected conditions — the minutely
+    tick may re-detect the same fault thousands of times; the user hears about
+    it once per cooldown. Stamps live in hass.data (no save, no lock)."""
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(SPAWNING_RUNTIME, {})
+    notified = runtime.setdefault("notified", {})
+    now = datetime.now(timezone.utc)
+    previous = notified.get(key)
+    if previous is not None:
+        try:
+            if (now - datetime.fromisoformat(previous)).total_seconds() < cooldown_s:
+                return False
+        except (ValueError, TypeError):
+            pass
+    notified[key] = now.isoformat()
+    await _async_send_mode_notification(hass, config, f"openreef_spawning_{key}", title, message)
+    return True
+
+
+async def _async_spawning_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime
+) -> None:
+    """Reconcile the spawning plugs to the program's desired state at ``now_local``."""
+    config = _config_from_entry(entry)
+    sp_cfg = config.get("spawningProgram", {})
+    execution = _spawning_execution_cfg(config)
+    if not _spawning_execution_enabled(execution):
+        return
+    state = spawning.execution_desired_state(sp_cfg, now_local)
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(SPAWNING_RUNTIME, {})
+    issues = runtime.setdefault("issues", {})
+    if not state.get("valid"):
+        issues["program"] = "the spawning program has no valid reef preset"
+        return
+    issues.pop("program", None)
+    asserted = runtime.setdefault("asserted", {})
+    overrides = runtime.setdefault("overrides", {})
+    policy = execution.get("overridePolicy", "hold")
+    activity: list[tuple[str, str]] = []
+
+    for channel, entity_key, label in _SPAWNING_EXEC_CHANNELS:
+        entity = execution.get(entity_key)
+        if not entity:
+            asserted.pop(channel, None)
+            overrides.pop(channel, None)
+            issues.pop(channel, None)
+            continue
+        desired = bool(state.get(channel))
+        st = hass.states.get(entity)
+        if st is None or st.state in ("unavailable", "unknown"):
+            issues[channel] = f"{label} plug ({entity}) is unavailable"
+            await _async_spawning_notify_once(
+                hass, config, f"unavailable_{channel}", 6 * 3600,
+                "Spawning plug unreachable",
+                f"The spawning {label} plug ({entity}) is unavailable — the program "
+                "cannot switch it. It will keep trying every minute.",
+            )
+            continue
+        issues.pop(channel, None)
+        actual = st.state == "on"
+
+        override = overrides.get(channel)
+        if override is not None:
+            if bool(override.get("desiredAtOverride")) != desired:
+                overrides.pop(channel, None)  # the natural transition passed — program resumes
+            else:
+                if (
+                    channel == "light" and not desired and actual
+                    and state.get("inSpawnWindow")
+                ):
+                    fired = await _async_spawning_notify_once(
+                        hass, config, "spawn_window_light", 2 * 3600,
+                        "Spawn-window night — lights are on",
+                        "Tonight is inside the predicted spawn window and the daylight "
+                        "plug was switched on by hand. Genuinely dark nights matter — "
+                        "light pollution desynchronises spawning.",
+                    )
+                    if fired:
+                        activity.append(("Spawn-window night with the lights on — dark nights matter", "warning"))
+                continue  # respect the human until the next sunrise/sunset
+
+        if actual == desired:
+            asserted[channel] = desired
+            continue
+
+        prior = asserted.get(channel)
+        if prior == desired and policy == "hold":
+            # We already put this plug where the program wants it and something
+            # else moved it — that's a human. Hold until the next transition.
+            overrides[channel] = {
+                "since": dt_util.utcnow().isoformat(),
+                "desiredAtOverride": desired,
+            }
+            activity.append((
+                f"Spawning {label} plug flipped by hand — holding until the next "
+                f"{'sunset' if desired else 'sunrise'}",
+                "info",
+            ))
+            continue
+
+        domain = entity.split(".", 1)[0]
+        try:
+            await hass.services.async_call(
+                domain, "turn_on" if desired else "turn_off",
+                {ATTR_ENTITY_ID: entity}, blocking=True, context=None,
+            )
+        except Exception:  # noqa: BLE001 — a dead plug must not kill the tick; retry next minute
+            _LOGGER.exception("Spawning execution could not switch %s", entity)
+            issues[channel] = f"could not switch the {label} plug ({entity})"
+            continue
+        asserted[channel] = desired
+        if channel == "light":
+            if prior is None:
+                activity.append((
+                    f"Spawning program took the daylight plug — switched {'on' if desired else 'off'}",
+                    "control",
+                ))
+            elif desired:
+                activity.append((
+                    f"Spawning sunrise — lights on until {state.get('sunset')} "
+                    f"({state.get('dayLengthHours')} h {state.get('reefMonthName')} day)",
+                    "control",
+                ))
+            else:
+                night_note = (
+                    " — spawn-window night, keep the room dark" if state.get("inSpawnWindow") else ""
+                )
+                activity.append((f"Spawning sunset — lights off{night_note}", "control"))
+
+    if activity:
+        for message, activity_type in activity:
+            _append_activity(config, message, activity_type)
+        await _async_save_config(hass, entry, config)
+
+
+def _effective_lighting_cfg(
+    config: dict[str, Any], now_local: datetime | None = None
+) -> dict[str, Any] | None:
+    """``lightingSchedule`` with mode "spawning" resolved to the executed spawning
+    program's own sunrise/sunset — one sun model, so the PAR-alert gate and the
+    plugs can never disagree. Falls back to mode "off" (the callers' never-
+    suppress path) when the program can't produce a window."""
+    lighting_cfg = config.get("lightingSchedule")
+    if not isinstance(lighting_cfg, dict):
+        return None
+    if lighting_cfg.get("mode") != "spawning":
+        return lighting_cfg
+    state = spawning.execution_desired_state(
+        config.get("spawningProgram") or {}, now_local or dt_util.now()
+    )
+    if not state.get("valid"):
+        return {**lighting_cfg, "mode": "off"}
+    return {**lighting_cfg, "mode": "simple", "onTime": state["sunrise"], "offTime": state["sunset"]}
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/spawning_execution_status"})
+@callback
+def websocket_spawning_execution_status(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Live execution snapshot for the Spawning tab: the program's desired state
+    right now, the configured plugs' actual states, and any overrides/issues."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    sp_cfg = config.get("spawningProgram", {})
+    execution = _spawning_execution_cfg(config)
+    state = spawning.execution_desired_state(sp_cfg, dt_util.now())
+    runtime = hass.data.setdefault(DOMAIN, {}).get(SPAWNING_RUNTIME) or {}
+    entities: dict[str, Any] = {}
+    for channel, entity_key, _label in _SPAWNING_EXEC_CHANNELS:
+        ent = execution.get(entity_key)
+        if ent:
+            st = hass.states.get(ent)
+            entities[channel] = {"entity": ent, "state": st.state if st else None}
+    overrides = {
+        channel: {
+            "since": data.get("since"),
+            "resumesAt": "sunset" if data.get("desiredAtOverride") else "sunrise",
+        }
+        for channel, data in (runtime.get("overrides") or {}).items()
+    }
+    connection.send_result(
+        msg["id"],
+        {
+            "execution": execution,
+            "state": state,
+            "entities": entities,
+            "runtime": {
+                "overrides": overrides,
+                "issues": sorted((runtime.get("issues") or {}).values()),
+                "controlling": _spawning_execution_enabled(execution),
+            },
+        },
+    )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/spawning_execution_resume"})
+@websocket_api.require_admin
+@callback
+def websocket_spawning_execution_resume(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Clear a manual-override hold early — the next tick re-asserts the program."""
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(SPAWNING_RUNTIME, {})
+    runtime["overrides"] = {}
+    connection.send_result(msg["id"], {"success": True})
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/list_reef_presets"})
 @callback
 def websocket_list_reef_presets(
@@ -14261,14 +14569,12 @@ def websocket_lighting_window(
 ) -> None:
     """Return today's computed lighting-on window + whether the lights are on now."""
     config = _config_from_entry(_first_entry(hass))
-    lighting_cfg = (
-        config.get("lightingSchedule")
-        if isinstance(config.get("lightingSchedule"), dict)
-        else {}
-    )
-    connection.send_result(
-        msg["id"], {"lighting": spawning.lighting_window_summary(lighting_cfg, dt_util.now())}
-    )
+    raw_mode = (config.get("lightingSchedule") or {}).get("mode") if isinstance(config.get("lightingSchedule"), dict) else "off"
+    lighting_cfg = _effective_lighting_cfg(config) or {}
+    summary = spawning.lighting_window_summary(lighting_cfg, dt_util.now())
+    if raw_mode == "spawning":
+        summary["mode"] = "spawning"  # resolved via the executed spawning program
+    connection.send_result(msg["id"], {"lighting": summary})
 
 
 @websocket_api.websocket_command(
@@ -15125,6 +15431,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_list_feed_frames)
     websocket_api.async_register_command(hass, websocket_delete_feed_session)
     websocket_api.async_register_command(hass, websocket_list_reef_presets)
+    websocket_api.async_register_command(hass, websocket_spawning_execution_status)
+    websocket_api.async_register_command(hass, websocket_spawning_execution_resume)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)
     websocket_api.async_register_command(hass, websocket_icp_dashboard)
@@ -15283,6 +15591,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
+    await _async_schedule_spawning_tick(hass, entry, normalised)
     await _async_setup_dosing_mirror(hass, entry, normalised)
     if _dosing_channels(normalised):
         _async_kick_dosing_sync(hass, entry)
@@ -15310,6 +15619,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_awc_timer(hass)
     _clear_awc_scheduler(hass)
     _clear_dosing(hass)
+    _clear_spawning_tick(hass)
+    hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
     beta_feedback.async_stop(hass)  # BETA-FEEDBACK: remove after beta
     _store = hass.data.setdefault(DOMAIN, {})
     _awc_restore = _store.pop(AWC_ATO_RESTORE_UNSUB, None)
