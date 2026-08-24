@@ -7827,7 +7827,7 @@ class OpenReefPanel extends HTMLElement {
         ${state.inSpawnWindow ? `<span class="pill ok">🥚 Spawn window is OPEN — keep nights dark</span>` : ""}
       </div>
       ${state.nextTransition ? `<small class="hint">Next: ${this._escape(this._spawnExecCountdown(state.nextTransition))} · mimicking ${this._escape(state.reefDate || "")}</small>` : ""}
-      ${this._configDirty ? `<small class="hint" style="color:var(--warning-color,#f5a524)">Settings changed — Save to refresh this preview.</small>` : ""}` : "";
+      ${this._configDirty ? `<div class="button-row" style="align-items:center;gap:10px;flex-wrap:wrap"><small class="hint" style="color:var(--warning-color,#f5a524)">Settings changed — Save to refresh this preview.</small><button class="primary compact-button" data-action="save">Save now</button></div>` : ""}` : "";
 
     const issues = (st.runtime?.issues || [])
       .map((i) => `<small class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(i)}</small>`)
@@ -7916,6 +7916,7 @@ class OpenReefPanel extends HTMLElement {
     const head = `
       <div class="section-head">
         <div><h2>Coral Spawning</h2><p>Pick a reef — OpenReef compiles the seasonal photoperiod, temperature &amp; lunar program, so you never hand-build the data tables again. Paste it into your Apex, or let OpenReef run the lights itself on any smart plug.</p></div>
+        ${this._configDirty ? `<div class="button-row"><button class="primary" data-action="save">Save changes</button></div>` : ""}
       </div>`;
 
     if (st.presets === null) {

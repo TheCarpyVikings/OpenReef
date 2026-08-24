@@ -73,15 +73,20 @@ test("the form fields are BOUND — the input pipeline writes spawn-field edits 
   );
 });
 
-test("unsaved edits flag the execution strip as a stale preview", async () => {
+test("unsaved edits flag the execution strip as a stale preview WITH a Save button in reach", async () => {
   const panel = await spawningPanel();
   panel._configDirty = true;
   const html = panel._spawningTab();
   assert(html.includes("Save to refresh this preview"),
     "dirty settings must announce the strip previews older values");
+  // Reece's field catch #2: the hint told users to Save, but the tab had no Save
+  // button (the app's only one lives on the Settings tab). Dirty must render one.
+  assert((html.match(/data-action="save"/g) || []).length >= 1,
+    "a dirty spawning tab must offer a Save button");
   panel._configDirty = false;
-  assert(!panel._spawningTab().includes("Save to refresh this preview"),
-    "the hint must clear once saved");
+  const clean = panel._spawningTab();
+  assert(!clean.includes("Save to refresh this preview"), "the hint must clear once saved");
+  assert(!clean.includes('data-action="save"'), "no Save button when nothing is dirty");
 });
 
 test("the execution strip renders the backend status — sunrise, sunset, moon, target", async () => {
