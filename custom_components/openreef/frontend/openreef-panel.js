@@ -7769,8 +7769,8 @@ class OpenReefPanel extends HTMLElement {
       : "";
     const mismatch = !unavailable && !override && typeof desired === "boolean" && desired !== actualOn
       ? `<small class="hint">→ switching to ${desired ? "ON" : "OFF"} on the next tick</small>` : "";
-    return `<div class="button-row" style="align-items:center;gap:8px;flex-wrap:wrap">
-      <strong>${this._escape(label)}</strong>
+    return `<div class="spawn-channel-row">
+      <strong>${label === "Daylight" ? "🌅" : "🌙"} ${this._escape(label)}</strong>
       <small class="hint">${this._escape(ent.entity)}</small>
       ${pill}
       ${typeof desired === "boolean" ? `<small class="hint">program wants ${desired ? "ON" : "OFF"}</small>` : ""}
@@ -7781,48 +7781,25 @@ class OpenReefPanel extends HTMLElement {
   _spawnExecutionCard(sp) {
     const ex = sp.execution || {};
     const mode = ex.mode === "openreef" ? "openreef" : "apex";
-    if (mode === "openreef") this._loadSpawnExecStatus();
-    const fieldStyle = "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
-    const ctrlStyle = "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
     const modeSelect = `
-      <label style="${fieldStyle}"><span>Execute on</span>
-        <select style="${ctrlStyle}" data-scope="spawn-exec" data-field="mode">
+      <label><span>Execute on</span>
+        <select data-scope="spawn-exec" data-field="mode">
           <option value="apex" ${mode === "apex" ? "selected" : ""}>Neptune Apex — paste the program</option>
           <option value="openreef" ${mode === "openreef" ? "selected" : ""}>OpenReef — smart plugs, no Apex needed</option>
         </select></label>`;
 
     if (mode === "apex") {
       return `
-        <article class="panel stack">
-          <div class="section-head"><div><h3>⚡ Execution</h3><p>Who runs this program.</p></div></div>
+        <article class="panel stack spawn-card">
+          <div class="awc-section-title"><p class="eyebrow">⚡ Execution</p></div>
           <div class="grid two">${modeSelect}</div>
           <small class="hint">Generate below and paste into Apex Local — your Apex executes with its own failsafes. Or switch to OpenReef execution and run the same program on any smart plug.</small>
         </article>`;
     }
 
     const st = this._spawning.execStatus || {};
-    const state = st.state || {};
     const armedBackend = !!st.execution?.armed;
     const armedLocal = !!ex.armed;
-    const controlling = !!st.runtime?.controlling;
-    const statusPill = st.error
-      ? `<span class="pill warning">status unavailable</span>`
-      : controlling
-        ? `<span class="pill ok">running the plugs</span>`
-        : `<span class="pill unknown">${armedBackend ? "standing by" : "disarmed"}</span>`;
-
-    const today = state.valid ? `
-      <div class="pill-stack" style="flex-wrap:wrap;gap:6px">
-        <span class="pill unknown">🌅 ${this._escape(state.sunrise || "—")}</span>
-        <span class="pill unknown">🌇 ${this._escape(state.sunset || "—")}</span>
-        <span class="pill unknown">⏱ ${this._escape(String(state.dayLengthHours ?? "—"))} h day</span>
-        <span class="pill unknown">🌙 ${this._escape(String(state.moonIlluminationPct ?? "—"))}% ${this._escape(state.moonPhase || "")}${state.moonQualifies === false ? " · dark-night hold" : ""}</span>
-        <span class="pill unknown">🌡 target ${this._escape(String(state.targetTempC ?? "—"))}°C</span>
-        ${state.inSpawnWindow ? `<span class="pill ok">🥚 Spawn window is OPEN — keep nights dark</span>` : ""}
-      </div>
-      ${state.nextTransition ? `<small class="hint">Next: ${this._escape(this._spawnExecCountdown(state.nextTransition))} · mimicking ${this._escape(state.reefDate || "")}</small>` : ""}
-      ${this._configDirty ? `<div class="button-row" style="align-items:center;gap:10px;flex-wrap:wrap"><small class="hint" style="color:var(--warning-color,#f5a524)">Settings changed — Save to refresh this preview.</small><button class="primary compact-button" data-action="save">Save now</button></div>` : ""}` : "";
-
     const issues = (st.runtime?.issues || [])
       .map((i) => `<small class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(i)}</small>`)
       .join("");
@@ -7831,31 +7808,26 @@ class OpenReefPanel extends HTMLElement {
       ? `<small class="hint">Save changes to apply.</small>` : "";
 
     return `
-      <article class="panel stack">
-        <div class="section-head">
-          <div><h3>⚡ Execution</h3><p>OpenReef reconciles the plugs to the program every minute — restart-safe, no tables, no Apex.</p></div>
-          ${statusPill}
-        </div>
-        <label class="toggle-card compact-toggle">
+      <article class="panel stack spawn-card">
+        <div class="awc-section-title"><p class="eyebrow">⚡ Execution</p></div>
+        <label class="toggle-card compact-toggle spawn-master">
           <input type="checkbox" data-scope="spawn-exec" data-field="armed" ${armedLocal ? "checked" : ""}>
-          <span><strong>Armed — OpenReef switches the plugs</strong><small>Disarmed, OpenReef never touches them and leaves everything as it stands.</small></span>
+          <span><strong>Armed — OpenReef switches the plugs</strong><small>Reconciled every minute, restart-safe. Disarmed, OpenReef never touches them.</small></span>
         </label>
         ${dirtyHint}
         <div class="grid two">
           ${modeSelect}
-          <label style="${fieldStyle}"><span>Daylight plug <small>(on at sunrise, off at sunset)</small></span>${this._spawnExecEntitySelect("lightEntity", ex.lightEntity || "")}</label>
-          <label style="${fieldStyle}"><span>Moonlight plug <small>(optional — real lunar cycle, dark around new moon)</small></span>${this._spawnExecEntitySelect("moonEntity", ex.moonEntity || "")}</label>
-          <label style="${fieldStyle}"><span>Moonlight from <small>(% illumination — below this the night stays dark)</small></span><input style="${ctrlStyle}" type="number" min="0" max="100" step="5" value="${Number.isFinite(Number(ex.moonMinIlluminationPct)) ? Number(ex.moonMinIlluminationPct) : 25}" data-scope="spawn-exec" data-field="moonMinIlluminationPct" /></label>
-          <label style="${fieldStyle}"><span>If someone flips a plug by hand</span>
-            <select style="${ctrlStyle}" data-scope="spawn-exec" data-field="overridePolicy">
+          <label><span>Daylight plug <small>on at sunrise, off at sunset</small></span>${this._spawnExecEntitySelect("lightEntity", ex.lightEntity || "")}</label>
+          <label><span>Moonlight plug <small>optional — real lunar cycle, dark around the new moon</small></span>${this._spawnExecEntitySelect("moonEntity", ex.moonEntity || "")}</label>
+          <label><span>Moonlight from <small>% illumination — below this the night stays dark</small></span><input type="number" min="0" max="100" step="5" value="${Number.isFinite(Number(ex.moonMinIlluminationPct)) ? Number(ex.moonMinIlluminationPct) : 25}" data-scope="spawn-exec" data-field="moonMinIlluminationPct" /></label>
+          <label><span>If someone flips a plug by hand</span>
+            <select data-scope="spawn-exec" data-field="overridePolicy">
               <option value="hold" ${ex.overridePolicy !== "reassert" ? "selected" : ""}>Respect it until the next sunrise/sunset</option>
               <option value="reassert" ${ex.overridePolicy === "reassert" ? "selected" : ""}>Put it back within a minute</option>
             </select></label>
         </div>
-        ${today}
         ${this._spawnExecChannelRow("Daylight", "light")}
         ${this._spawnExecChannelRow("Moonlight", "moon")}
-        ${this._spawnExecTempSection(ex, st, state)}
         ${issues}
         <div class="button-row">
           <button class="secondary compact-button" data-action="spawn-exec-pargate">${parGated ? "Stop gating light alerts from this program" : "Gate light alerts from this program"}</button>
@@ -7865,10 +7837,12 @@ class OpenReefPanel extends HTMLElement {
       </article>`;
   }
 
-  _spawnExecTempSection(ex, st, state) {
+  _spawnExecTempSection(sp) {
+    const ex = sp.execution || {};
+    if ((ex.mode === "openreef" ? "openreef" : "apex") === "apex") return "";
     const temp = ex.temp || {};
-    const fieldStyle = "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
-    const ctrlStyle = "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
+    const st = this._spawning.execStatus || {};
+    const state = st.state || {};
     const pill = (e) => !e ? "" : (!e.state || e.state === "unavailable" || e.state === "unknown")
       ? `<span class="pill warning">unavailable</span>`
       : `<span class="pill ${e.state === "on" ? "ok" : "unknown"}">${e.state === "on" ? "ON" : "OFF"}</span>`;
@@ -7877,46 +7851,159 @@ class OpenReefPanel extends HTMLElement {
     const heaterEnt = st.entities?.heater;
     const coolEnt = st.entities?.cool;
     const live = (st.entities?.tempSensor || heaterEnt || coolEnt) ? `
-      <div class="button-row" style="align-items:center;gap:8px;flex-wrap:wrap">
-        <strong>Temperature</strong>
+      <div class="spawn-channel-row">
+        <strong>🌡 Temperature</strong>
         <small class="hint">${reading != null ? `tank ${Number(reading).toFixed(1)} °C` : "no reading yet"}${target != null ? ` · target ${target} °C` : ""}</small>
         ${heaterEnt ? `<small class="hint">heater</small>${pill(heaterEnt)}` : ""}
         ${coolEnt ? `<small class="hint">fan</small>${pill(coolEnt)}` : ""}
       </div>` : "";
     return `
-      <div class="awc-section-title"><p class="eyebrow">Seasonal temperature</p></div>
-      <small class="hint">Today's target always publishes as <code>sensor.openreef_spawning_target_temp</code> while spawning is on — wire your own thermostat to it, zero risk. Direct control below is guarded: heating fails OFF, every sensor doubt switches both plugs off, and hard clamps beat the curve.</small>
-      <label class="toggle-card compact-toggle">
-        <input type="checkbox" data-scope="spawn-exec-temp" data-field="acknowledged" ${temp.acknowledged ? "checked" : ""}>
-        <span><strong>I have an independent inline thermostat as the guard</strong><small>e.g. an Inkbird set to the seasonal maximum + 0.5 °C, never driven by software — OpenReef only modulates beneath it. Required before control arms.</small></span>
-      </label>
-      <label class="toggle-card compact-toggle">
-        <input type="checkbox" data-scope="spawn-exec-temp" data-field="enabled" ${temp.enabled ? "checked" : ""} ${temp.acknowledged ? "" : "disabled"}>
-        <span><strong>OpenReef holds the seasonal temperature</strong><small>Bang-bang at target ± 0.2 °C — the exact heater/chiller mirror of the Apex snippets. Needs the guard acknowledged, a sensor, and at least one plug.</small></span>
-      </label>
-      <div class="grid two">
-        <label style="${fieldStyle}"><span>Tank temperature sensor</span>${this._awcEntitySelect("spawn-exec-temp", "", "sensorEntity", temp.sensorEntity || "", "sensor")}</label>
-        <label style="${fieldStyle}"><span>Heater plug <small>(in series through the guard's heat socket)</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "heaterEntity", temp.heaterEntity || "", "switch")}</label>
-        <label style="${fieldStyle}"><span>Cooling fan plug <small>(straight to wall — never through the guard's cool socket)</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "coolEntity", temp.coolEntity || "", "switch")}</label>
-        <label style="${fieldStyle}"><span>Never heat at/above (°C)</span><input style="${ctrlStyle}" type="number" min="20" max="32" step="0.1" value="${Number.isFinite(Number(temp.maxC)) ? Number(temp.maxC) : 27.5}" data-scope="spawn-exec-temp" data-field="maxC" /></label>
-        <label style="${fieldStyle}"><span>Never cool at/below (°C)</span><input style="${ctrlStyle}" type="number" min="15" max="26" step="0.1" value="${Number.isFinite(Number(temp.minC)) ? Number(temp.minC) : 22.0}" data-scope="spawn-exec-temp" data-field="minC" /></label>
-      </div>
-      ${live}`;
+      <article class="panel stack spawn-card">
+        <div class="awc-section-title"><p class="eyebrow">🌡 Seasonal temperature</p></div>
+        <small class="hint">Today's target always publishes as <code>sensor.openreef_spawning_target_temp</code> while spawning is on — wire your own thermostat to it, zero risk. Direct control below is guarded: heating fails OFF, every sensor doubt switches both plugs off, and hard clamps beat the curve.</small>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="spawn-exec-temp" data-field="acknowledged" ${temp.acknowledged ? "checked" : ""}>
+          <span><strong>I have an independent inline thermostat as the guard</strong><small>e.g. an Inkbird set to the seasonal maximum + 0.5 °C, never driven by software — OpenReef only modulates beneath it. Required before control arms.</small></span>
+        </label>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="spawn-exec-temp" data-field="enabled" ${temp.enabled ? "checked" : ""} ${temp.acknowledged ? "" : "disabled"}>
+          <span><strong>OpenReef holds the seasonal temperature</strong><small>Bang-bang at target ± 0.2 °C — the exact heater/chiller mirror of the Apex snippets. Needs the guard acknowledged, a sensor, and at least one plug.</small></span>
+        </label>
+        <div class="grid two">
+          <label><span>Tank temperature sensor</span>${this._awcEntitySelect("spawn-exec-temp", "", "sensorEntity", temp.sensorEntity || "", "sensor")}</label>
+          <label><span>Heater plug <small>in series through the guard's heat socket</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "heaterEntity", temp.heaterEntity || "", "switch")}</label>
+          <label><span>Cooling fan plug <small>straight to wall — never through the guard's cool socket</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "coolEntity", temp.coolEntity || "", "switch")}</label>
+          <label><span>Never heat at/above (°C)</span><input type="number" min="20" max="32" step="0.1" value="${Number.isFinite(Number(temp.maxC)) ? Number(temp.maxC) : 27.5}" data-scope="spawn-exec-temp" data-field="maxC" /></label>
+          <label><span>Never cool at/below (°C)</span><input type="number" min="15" max="26" step="0.1" value="${Number.isFinite(Number(temp.minC)) ? Number(temp.minC) : 22.0}" data-scope="spawn-exec-temp" data-field="minC" /></label>
+        </div>
+        ${live}
+      </article>`;
+  }
+
+  // The hero's sky: today's sun arc between the program's sunrise and sunset,
+  // the real moon at its actual illuminated fraction, and a "now" marker. Pure
+  // geometry from the status payload — the backend stays the only brain.
+  _spawnHhmmToMin(text) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(text || ""));
+    return m ? (Number(m[1]) % 24) * 60 + Number(m[2]) : null;
+  }
+
+  _spawnSkySvg(state) {
+    const W = 1000, H = 234, HOR = 178, PAD = 56;
+    const sr = Number.isFinite(state.sunriseMinute) ? state.sunriseMinute : this._spawnHhmmToMin(state.sunrise);
+    const ss = Number.isFinite(state.sunsetMinute) ? state.sunsetMinute : this._spawnHhmmToMin(state.sunset);
+    if (sr == null || ss == null || ss <= sr) return "";
+    const d = new Date();
+    const now = d.getHours() * 60 + d.getMinutes();
+    const x = (min) => PAD + (Math.max(0, Math.min(1440, min)) / 1440) * (W - 2 * PAD);
+    const xsr = x(sr), xss = x(ss), xnow = x(now), cx = (xsr + xss) / 2, apexY = 30;
+    const isDay = now >= sr && now < ss;
+    const t = Math.max(0, Math.min(1, (now - sr) / (ss - sr)));
+    const bez = (p0, p1, p2, u) => (1 - u) * (1 - u) * p0 + 2 * (1 - u) * u * p1 + u * u * p2;
+    const sunX = bez(xsr, cx, xss, t).toFixed(1), sunY = bez(HOR, apexY, HOR, t).toFixed(1);
+    const nightFill = state.inSpawnWindow ? "rgba(91, 33, 182, .30)" : "rgba(2, 6, 23, .55)";
+    const stars = [[80, 52, 1.6], [150, 96, 1.1], [216, 40, 1.3], [905, 60, 1.6], [842, 110, 1.1], [954, 128, 1.3], [36, 122, 1.2], [880, 34, 1.1]]
+      .filter(([sx]) => sx < xsr || sx > xss)
+      .map(([sx, sy, r]) => `<circle cx="${sx}" cy="${sy}" r="${r}" fill="#cbd5e1" opacity=".85"/>`)
+      .join("");
+    // Real phase: the shadow disc slides away as illumination grows — gone at
+    // full, dead-centre at new. Waxing lights the right limb, waning the left.
+    const f = Math.max(0, Math.min(1, (Number(state.moonIlluminationPct) || 0) / 100));
+    const moonR = 13;
+    const shadowOff = (f * 2 * moonR + (f >= 1 ? 6 : 0)) * (/waning|last/i.test(state.moonPhase || "") ? 1 : -1);
+    const moonX = !isDay
+      ? Math.max(26, Math.min(W - 26, xnow))
+      : ((W - xss) > xsr ? xss + (W - xss) / 2 : xsr / 2);
+    const moon = `
+      <mask id="spawn-moon"><circle cx="${moonX.toFixed(1)}" cy="64" r="${moonR}" fill="#fff"/><circle cx="${(moonX + shadowOff).toFixed(1)}" cy="60" r="${moonR + 1}" fill="#000"/></mask>
+      <circle cx="${moonX.toFixed(1)}" cy="64" r="${moonR}" fill="rgba(148,163,184,.25)"/>
+      <circle cx="${moonX.toFixed(1)}" cy="64" r="${moonR}" fill="#e2e8f0" mask="url(#spawn-moon)"/>
+      <text x="${moonX.toFixed(1)}" y="100" text-anchor="middle" font-size="19" fill="#a8bed4">${this._escape(String(state.moonIlluminationPct ?? "—"))}%</text>`;
+    const sun = isDay ? `
+      <circle cx="${sunX}" cy="${sunY}" r="24" fill="#fbbf24" opacity=".16"/>
+      <circle cx="${sunX}" cy="${sunY}" r="11" fill="#fbbf24"/>` : "";
+    const arc = `M ${xsr.toFixed(1)} ${HOR} Q ${cx.toFixed(1)} ${apexY} ${xss.toFixed(1)} ${HOR}`;
+    const progress = isDay
+      ? `<path d="${arc}" pathLength="100" fill="none" stroke="var(--openreef-accent)" stroke-width="3" stroke-linecap="round" stroke-dasharray="${(t * 100).toFixed(1)} 100"/>` : "";
+    return `
+      <svg class="spawn-sky" viewBox="0 0 ${W} ${H}" role="img" aria-label="Today's photoperiod">
+        <rect x="0" y="0" width="${xsr.toFixed(1)}" height="${HOR}" fill="${nightFill}"/>
+        <rect x="${xss.toFixed(1)}" y="0" width="${(W - xss).toFixed(1)}" height="${HOR}" fill="${nightFill}"/>
+        ${stars}
+        <rect x="0" y="${HOR}" width="${W}" height="${H - HOR}" fill="rgba(8, 18, 30, .85)"/>
+        <line x1="0" y1="${HOR}" x2="${W}" y2="${HOR}" stroke="var(--openreef-accent)" stroke-width="1.5" opacity=".55"/>
+        <path d="${arc}" fill="none" stroke="rgba(148,163,184,.4)" stroke-width="2" stroke-dasharray="5 7"/>
+        ${progress}
+        <line x1="${xnow.toFixed(1)}" y1="16" x2="${xnow.toFixed(1)}" y2="${HOR}" stroke="rgba(226,232,240,.35)" stroke-width="1.5" stroke-dasharray="3 5"/>
+        ${sun}${moon}
+        ${state.inSpawnWindow ? `<text x="${W - 14}" y="24" text-anchor="end" font-size="21" fill="#c4b5fd">🥚 spawn window</text>` : ""}
+        <text x="${xsr.toFixed(1)}" y="${HOR + 26}" text-anchor="middle" font-size="24" fill="#dbe7f3">🌅 ${this._escape(state.sunrise || "")}</text>
+        <text x="${xss.toFixed(1)}" y="${HOR + 26}" text-anchor="middle" font-size="24" fill="#dbe7f3">🌇 ${this._escape(state.sunset || "")}</text>
+        <text x="${cx.toFixed(1)}" y="${HOR + 26}" text-anchor="middle" font-size="19" fill="#8da2ba">${this._escape(String(state.dayLengthHours ?? ""))} h of light</text>
+      </svg>`;
+  }
+
+  _spawnHeroCard(sp) {
+    const st = this._spawning.execStatus || {};
+    const state = st.state || {};
+    const ex = sp.execution || {};
+    const mode = ex.mode === "openreef" ? "openreef" : "apex";
+    const controlling = !!st.runtime?.controlling;
+    const armedBackend = !!st.execution?.armed;
+    const statusPill = st.error
+      ? `<span class="pill warning">status unavailable</span>`
+      : mode === "apex"
+        ? `<span class="pill unknown">Apex executes</span>`
+        : controlling
+          ? `<span class="pill ok">running the plugs</span>`
+          : `<span class="pill unknown">${armedBackend ? "standing by" : "disarmed"}</span>`;
+    const preset = (this._spawning.presets || []).find((p) => p.id === sp.reefPreset);
+    const reefLabel = preset ? preset.label : "Pick a reef";
+    const offset = Number(sp.offsetMonths) || 0;
+    const sub = state.valid
+      ? `mimicking ${this._escape(state.reefMonthName || state.reefDate || "")} on the reef${offset ? ` · season shifted +${offset} mo` : ""}`
+      : "the compiled photoperiod, live over your tank";
+    const chips = state.valid ? `
+      <span class="pill unknown">⏱ ${this._escape(String(state.dayLengthHours ?? "—"))} h day</span>
+      <span class="pill unknown">🌙 ${this._escape(String(state.moonIlluminationPct ?? "—"))}% ${this._escape(state.moonPhase || "")}${state.moonQualifies === false ? " · dark-night hold" : ""}</span>
+      <span class="pill unknown">🌡 target ${this._escape(String(state.targetTempC ?? "—"))}°C</span>
+      ${state.inSpawnWindow ? `<span class="pill ok">🥚 Spawn window is OPEN — keep nights dark</span>` : ""}` : "";
+    const next = state.valid && state.nextTransition
+      ? `<small class="hint">Next: ${this._escape(this._spawnExecCountdown(state.nextTransition))}</small>` : "";
+    const dirtyRow = this._configDirty
+      ? `<small class="hint" style="color:var(--warning-color,#f5a524)">Settings changed — Save to refresh this preview.</small>
+         <button class="primary compact-button" data-action="save">Save now</button>` : "";
+    const body = state.valid
+      ? `${this._spawnSkySvg(state)}<div class="spawn-hero-foot">${chips}${next}${dirtyRow}</div>`
+      : `<div class="spawn-hero-foot"><small class="hint">${st.error ? this._escape(st.error) : "Reading the sky…"}</small>${dirtyRow}</div>`;
+    return `
+      <article class="panel spawn-hero">
+        <div class="spawn-hero-head">
+          <div><p class="eyebrow">Live program</p><h3>${this._escape(reefLabel)}</h3><p class="spawn-hero-sub">${sub}</p></div>
+          ${statusPill}
+        </div>
+        ${body}
+      </article>`;
   }
 
   _spawningTab() {
     const sp = (this._config && this._config.spawningProgram) || {};
     const st = this._spawning;
+    const cheeky = this._tone() === "cheeky";
     const head = `
       <div class="section-head">
-        <div><h2>Coral Spawning</h2><p>Pick a reef — OpenReef compiles the seasonal photoperiod, temperature &amp; lunar program, so you never hand-build the data tables again. Paste it into your Apex, or let OpenReef run the lights itself on any smart plug.</p></div>
+        <div><p class="eyebrow">Intelligence layer</p><h2>Coral Spawning</h2><p>${cheeky
+          ? "A year on a wild reef, replayed over your tank — real sunrises, real seasons, the actual moon. Apex owners hand-type data tables for this; you pick a reef."
+          : "Replays a wild reef's seasonal photoperiod, temperature and lunar cycle over your tank — compiled for a Neptune Apex, or executed live on any smart plug."}</p></div>
         ${this._configDirty ? `<div class="button-row"><button class="primary" data-action="save">Save changes</button></div>` : ""}
       </div>`;
 
     if (st.presets === null) {
       if (!st.loading) setTimeout(() => this._loadReefPresets(), 0);
-      return `<section class="stack">${head}<article class="panel"><p class="hint">${st.error ? this._escape(st.error) : "Loading reef presets…"}</p></article></section>`;
+      return `<section class="stack spawn-stack">${head}<article class="panel"><p class="hint">${st.error ? this._escape(st.error) : "Loading reef presets…"}</p></article></section>`;
     }
+
+    this._loadSpawnExecStatus();
 
     const selPreset = sp.reefPreset || "gbr_central";
     const offset = Number.isFinite(Number(sp.offsetMonths)) ? Number(sp.offsetMonths) : 0;
@@ -7931,16 +8018,15 @@ class OpenReefPanel extends HTMLElement {
       `<option value="${i}" ${i === offset ? "selected" : ""}>${i === 0 ? "None — run the reef's own calendar" : `+${i} month${i > 1 ? "s" : ""}`}</option>`
     ).join("");
 
-    const fieldStyle = "display:flex;flex-direction:column;gap:4px;font-size:0.85rem;";
-    const ctrlStyle = "padding:6px 8px;border-radius:8px;border:1px solid var(--divider-color,#444);background:var(--card-background-color,#1c1c1c);color:inherit;";
     const form = `
-      <article class="panel stack">
+      <article class="panel stack spawn-card">
+        <div class="awc-section-title"><p class="eyebrow">🗺 The reef</p></div>
         <div class="grid two">
-          <label style="${fieldStyle}"><span>Reef location</span><select style="${ctrlStyle}" data-spawn-field="reefPreset">${presetOptions}</select></label>
-          <label style="${fieldStyle}"><span>Seasonal offset <small>(align the reef's season to your calendar)</small></span><select style="${ctrlStyle}" data-spawn-field="offsetMonths">${offsetOptions}</select></label>
-          <label style="${fieldStyle}"><span>Solar-noon hour <small>(local clock the photoperiod centers on)</small></span><input style="${ctrlStyle}" type="number" min="0" max="23.5" step="0.5" value="${noon}" data-spawn-field="solarNoonHour" /></label>
-          <label style="${fieldStyle}"><span>Temperature unit</span><select style="${ctrlStyle}" data-spawn-field="tempUnit"><option value="C" ${unit === "C" ? "selected" : ""}>°C</option><option value="F" ${unit === "F" ? "selected" : ""}>°F</option></select></label>
-          <label style="${fieldStyle}"><span>Apex temp probe name</span><input style="${ctrlStyle}" type="text" maxlength="16" value="${this._escape(probe)}" data-spawn-field="tempProbe" /></label>
+          <label><span>Reef location</span><select data-spawn-field="reefPreset">${presetOptions}</select></label>
+          <label><span>Seasonal offset <small>align the reef's season to your calendar</small></span><select data-spawn-field="offsetMonths">${offsetOptions}</select></label>
+          <label><span>Solar-noon hour <small>local clock the photoperiod centers on</small></span><input type="number" min="0" max="23.5" step="0.5" value="${noon}" data-spawn-field="solarNoonHour" /></label>
+          <label><span>Temperature unit</span><select data-spawn-field="tempUnit"><option value="C" ${unit === "C" ? "selected" : ""}>°C</option><option value="F" ${unit === "F" ? "selected" : ""}>°F</option></select></label>
+          <label><span>Apex temp probe name</span><input type="text" maxlength="16" value="${this._escape(probe)}" data-spawn-field="tempProbe" /></label>
         </div>
         <div class="button-row">
           <button class="primary" data-action="spawn-generate" ${st.generating ? "disabled" : ""}>${st.generating ? "Generating…" : "Generate program"}</button>
@@ -7950,12 +8036,12 @@ class OpenReefPanel extends HTMLElement {
       </article>`;
 
     const advisory = `
-      <article class="panel">
-        <p class="hint">⚠️ Spawning needs sexually mature, same-species colonies, genuinely dark nights, and many months of conditioning. OpenReef generates the program; your Apex executes it with its own failsafes. Curated presets use approximate monthly SST climatology — the GBR &amp; Singapore curves are validated against Craggs' published profiles.</p>
+      <article class="panel spawn-card">
+        <small class="hint">⚠️ Spawning needs sexually mature, same-species colonies, genuinely dark nights, and many months of conditioning. OpenReef generates the program; your Apex executes it with its own failsafes. Curated presets use approximate monthly SST climatology — the GBR &amp; Singapore curves are validated against Craggs' published profiles.</small>
       </article>`;
 
     const program = st.program ? this._spawningProgramView(st.program) : "";
-    return `<section class="stack">${head}${this._spawnExecutionCard(sp)}${form}${program}${advisory}</section>`;
+    return `<section class="stack spawn-stack">${head}${this._spawnHeroCard(sp)}${this._spawnExecutionCard(sp)}${this._spawnExecTempSection(sp)}${form}${program}${advisory}</section>`;
   }
 
   _spawningProgramView(prog) {
@@ -27187,6 +27273,23 @@ const rigSteps = [
           .pulse-root.pulse-merged .pulse-head-right .pulse-ring-text small { font-size: 8px; }
           .pulse-root.pulse-merged .pulse-diagram-zone { top: 178px; bottom: 70px; left: 14px; right: 14px; gap: 12px; }
         }
+        /* --- Coral Spawning: the sky hero + card language ---------------- */
+        .spawn-stack label > span { color: #a7b7ca; font-size: 13px; font-weight: 700; display: grid; gap: 2px; }
+        .spawn-stack label > span small { color: #8da2ba; font-weight: 500; }
+        .spawn-stack input, .spawn-stack select { border: 1px solid #2b4056; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 10px 12px; min-height: 42px; width: 100%; min-width: 0; color-scheme: dark; }
+        .spawn-stack .hint, .spawn-stack small { color: #9fb3c8; }
+        .spawn-stack .section-head h2 { margin: 0; }
+        .spawn-hero { padding: 0; overflow: hidden; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(11, 23, 36, .92)); box-shadow: inset 4px 0 0 var(--openreef-accent); }
+        .spawn-hero-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px 18px 6px; }
+        .spawn-hero-head h3 { margin: 0; font-size: 17px; color: #eef4fa; }
+        .spawn-hero-sub { color: #a8bed4; margin: 3px 0 0; font-size: 13px; }
+        .spawn-sky { display: block; width: 100%; height: auto; }
+        .spawn-hero-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 18px 16px; }
+        .spawn-hero-foot .hint { flex-basis: 100%; }
+        .spawn-card .eyebrow { margin: 0; }
+        .spawn-master { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
+        .spawn-channel-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 12px; border: 1px solid #24364a; border-radius: 8px; background: #101d2c; }
+        .spawn-channel-row strong { color: #e5edf5; }
       </style>
     `;
   }
