@@ -7605,6 +7605,7 @@ class OpenReefPanel extends HTMLElement {
       ${this._error ? `<div class="notice error">${this._escape(this._error)}</div>` : ""}
       ${this._message ? `<div class="notice success">${this._escape(this._message)}</div>` : ""}
       ${this._busy ? `<div class="notice">Working...</div>` : ""}
+      ${this._dirtySaveNotice()}
     `;
   }
 
@@ -9812,17 +9813,20 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
-  // The Save bar lives in Settings, so unsaved changes made from any other
-  // page are stranded — a message that says "save to keep them" next to no
-  // Save button (0.7.81, Reece). This rides with the message AND outlives it,
-  // so navigating away and back still offers the save.
+  // The Save bar lives in Settings, so unsaved changes made ANYWHERE else were
+  // stranded — a message saying "save to keep them" with no Save button
+  // (0.7.81 Reece, swept global in 0.7.82). Thirty-two methods across corals,
+  // cameras, modes, doser suggestions, species and the hatchery can leave the
+  // config pending, so this rides in the global message slot rather than being
+  // bolted onto tabs one screenshot at a time. Sticky, because a long page
+  // scrolls the offer out of view and that is the same bug again.
   _dirtySaveNotice() {
     if (!this._configDirty || this._nps?.demo) return "";
-    return `<div class="notice info-notice">
+    // Settings already carries its own save bar in the toolbar.
+    if (this._activeTab === "settings") return "";
+    return `<div class="notice dirty-bar">
         <small><strong>Unsaved changes</strong> — they live in this page only until you save.</small>
-        <div class="button-row" style="margin-top:6px;">
-          <button class="primary compact-button" data-action="save" ${this._busy ? "disabled" : ""}>${this._busy ? "Saving…" : "Save changes"}</button>
-        </div>
+        <button class="primary compact-button" data-action="save" ${this._busy ? "disabled" : ""}>${this._busy ? "Saving…" : "Save changes"}</button>
       </div>`;
   }
 
@@ -11564,11 +11568,6 @@ const rigSteps = [
         </div>
       </article>` : "";
 
-    // Personality earns its place only on a calm page (never on warnings).
-    const calm = hs.status !== "overdue" && res.freshness?.status !== "stale" && !es.firstDoseDue;
-    const closing = this._tone() === "cheeky" && calm && !virgin
-      ? `<small class="muted" style="text-align:center;">The fleet hatches on schedule. Ragnar approves. 🛶</small>` : "";
-
     const head = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
         <div style="flex:1;min-width:260px;">
@@ -11584,10 +11583,9 @@ const rigSteps = [
 
     const notices = `
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
-      ${this._dirtySaveNotice()}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
-    return `<section class="stack">${head}${notices}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}${closing}</section>`;
+    return `<section class="stack">${head}${notices}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}</section>`;
   }
 
   _npsTab() {
@@ -11630,7 +11628,6 @@ const rigSteps = [
         </div></div>` : ""}
       ${st.demo && demoStageCopy ? `<div class="notice info-notice"><small>${demoStageCopy}</small></div>` : ""}
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
-      ${this._dirtySaveNotice()}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
     // --- Setup checklist + the feeding station (diagram hero + timeline) ---
@@ -25989,6 +25986,10 @@ const rigSteps = [
         .notice.warning-notice { color: #fde68a; border-color: #a16207; background: #2f2614; }
         .notice.danger-notice { color: #fecaca; border-color: #ef4444; background: #2b171c; }
         .notice.compact-notice { margin-bottom: 0; }
+        .notice.dirty-bar { position: sticky; top: 0; z-index: 30; display: flex;
+          align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+          color: #fde68a; border-color: #a16207; background: #2f2614;
+          box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45); }
         .notice.success { color: #bbf7d0; border-color: #166534; }
         .stack { display: grid; gap: 16px; }
         .stack.tight { gap: 10px; }

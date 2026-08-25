@@ -991,26 +991,39 @@ test("unsaved changes carry their own Save button off the Settings page", async 
     panel._render = () => {};
     panel._setDirty = (d = true) => { panel._configDirty = d; };
     panel._nps.summary.hatchery = v2HatcherySummary();
+    panel._activeTab = "hatchery";
     // Clean page: nothing to nag about.
-    assert(!panel._hatcheryTab().includes('data-action="save"'),
+    assert(!panel._messages().includes('data-action="save"'),
       "no pending changes, no Save button");
     // "Sync hatchery reminders" leaves the config dirty — and the Save bar
     // lives in Settings, so from here it was unreachable (Reece, 0.7.81).
     panel._config.nps.hatchery = { eggType: "standard", hatchHours: 34, state: {} };
     panel._npsSeedHatchReminders();
     assert(panel._configDirty, "the seeder must still leave the change pending");
-    let html = panel._hatcheryTab();
-    assert(html.includes("save to keep them"), "the message says a save is needed...");
-    assert(html.includes('data-action="save"') && html.includes("Save changes"),
-      "...so the Save button has to be right there");
-    // And it outlives the message — navigating away must not strand the edit.
+    assert(panel._hatcheryTab().includes("save to keep them"),
+      "the message says a save is needed...");
+    assert(panel._messages().includes('data-action="save"')
+      && panel._messages().includes("Save changes"),
+      "...so a Save button has to be reachable from this page");
+    // It rides in the GLOBAL slot (0.7.82), so it covers every tab that can go
+    // dirty — corals, cameras, modes, doser suggestions — not just this one.
     panel._nps.message = "";
-    assert(panel._hatcheryTab().includes('data-action="save"'),
+    assert(panel._messages().includes('data-action="save"'),
       "a dirty page keeps offering the save even once the message has gone");
-    assert(panel._npsTab().includes('data-action="save"'), "same on the NPS page");
+    panel._activeTab = "corals";
+    assert(panel._messages().includes('data-action="save"'), "same on every other tab");
+    // Settings already carries its own save bar — don't stack a second.
+    panel._activeTab = "settings";
+    assert(!panel._messages().includes('data-action="save"'),
+      "Settings has _saveControls; a second bar would be noise");
     // Saved: the offer retires itself.
+    panel._activeTab = "hatchery";
     panel._configDirty = false;
-    assert(!panel._hatcheryTab().includes('data-action="save"'), "saved — nothing to offer");
+    assert(!panel._messages().includes('data-action="save"'), "saved — nothing to offer");
+    // The demo can never persist, so it must never promise a save.
+    panel._configDirty = true;
+    panel._nps.demo = true;
+    assert(!panel._messages().includes('data-action="save"'), "the demo saves nothing");
   } finally { restore(); }
 });
 
