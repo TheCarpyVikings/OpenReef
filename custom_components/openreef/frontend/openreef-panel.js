@@ -9811,9 +9811,12 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
-  // Apply the learned clock. The card reads the BACKEND summary, so a local
-  // config edit alone changes nothing on screen (0.7.73 live catch): persist
-  // it, then recompile the summary so the new clock is visible immediately.
+  // Apply the learned clock. Backend-authoritative (0.7.79 live catch): the
+  // number in settings is only a third of the job — the batch already
+  // incubating carries its own stamped countdown and the harvest reminder
+  // carries a cadence, so a config-only write leaves most of the page quoting
+  // the old hours. One command moves all three, and it fetches fresh rather
+  // than saving this page's snapshot of the whole config over the ledger.
   async _npsApplyLearnedHours(rawHours) {
     const hours = Math.max(8, Math.min(48, Math.round(Number(rawHours) || 0)));
     if (!hours) return;
@@ -9822,18 +9825,31 @@ class OpenReefPanel extends HTMLElement {
       this._render();
       return;
     }
-    this._config.nps = this._config.nps || {};
-    this._config.nps.hatchery = this._config.nps.hatchery || {};
-    this._config.nps.hatchery.hatchHours = hours;
     try {
-      await this._persistConfigSilently();
-      this._nps.message = `Hatch clock set to ${hours} h from your real batches. Running batches keep their stamped clocks.`;
+      const res = await this._callWS({ type: "openreef/nps_hatch_clock", hours });
+      if (res && res.config) {
+        // Unsaved edits pending on the Save bar must survive — take the whole
+        // saved config only when there is nothing of the keeper's to lose.
+        if (this._configDirty) {
+          this._config.nps = this._config.nps || {};
+          this._config.nps.hatchery = this._config.nps.hatchery || {};
+          this._config.nps.hatchery.hatchHours = hours;
+        } else {
+          this._config = res.config;
+        }
+      }
+      const moved = Array.isArray(res && res.restamped) ? res.restamped : [];
+      const kept = Array.isArray(res && res.kept) ? res.kept : [];
+      const movedNote = moved.length
+        ? ` ${moved.map((b) => `${b.name} moved onto it — ~${this._format(b.hoursLeft, 1)} h to go`).join("; ")}.`
+        : "";
+      const keptNote = kept.length
+        ? ` ${kept.join(", ")} already hatched, so that batch keeps its own result.`
+        : "";
+      this._nps.message = `Hatch clock set to ${hours} h — reminders re-timed with it.${movedNote}${keptNote}`;
       this._nps.error = "";
     } catch (err) {
-      // Saving failed — leave the edit pending on the Save bar rather than
-      // pretending it landed.
-      this._setDirty(true);
-      this._nps.error = (err && err.message) || "Could not save the new hatch clock — hit Save changes.";
+      this._nps.error = (err && err.message) || "Could not set the hatch clock — try again.";
     }
     this._render();
     this._npsLoadSummary(true);
@@ -11226,6 +11242,12 @@ class OpenReefPanel extends HTMLElement {
         ready: `<strong>ready</strong>`,
         overdue: `<span style="color:var(--warning-color,#f5a524)">harvest now</span>`,
       })[vs.status] || "idle";
+      // Per-batch stamping means a running batch can legitimately disagree
+      // with the settings clock (0.7.79) — say so rather than looking broken.
+      const clockNote = vs.status === "incubating"
+        && Math.abs(Number(v.hatchHours) - hatchHours) >= 0.5
+        ? `<small class="muted" title="The clock is stamped into a batch when it starts, so a settings change never rewrites a countdown that is already running.">on its own ${this._escape(String(v.hatchHours))} h clock</small>`
+        : "";
       const guide = v.guide && v.guide.available
         ? `<small class="muted" title="2 g/L is the documented optimum — more cysts hatch WORSE">~${this._escape(String(v.guide.grams))} g cysts</small>` : "";
       const buttons = [
@@ -11244,6 +11266,7 @@ class OpenReefPanel extends HTMLElement {
           ${this._npsHatchVesselSvg(vs)}
           <small><strong>${this._escape(v.name)}</strong> · ${this._escape(String(v.volumeL))} L</small>
           <small>${statusLine}${vs.status === "incubating" ? ` · ${this._escape(vEgg)}` : ""}</small>
+          ${clockNote}
           ${guide}
           <div class="button-row" style="flex-wrap:wrap;justify-content:center;">${buttons}</div>
         </div>`;
@@ -11264,6 +11287,14 @@ class OpenReefPanel extends HTMLElement {
     const needed = Number(hatch.vesselsNeeded) || 0;
     const neededLine = needed > vessels.length
       ? `⚙️ With ${this._escape(String(hatchHours))} h eggs and ${this._escape(String(reservoirSum.shelfHours || 24))} h brine life, continuous supply needs ${this._escape(String(needed))} hatcheries — you have ${this._escape(String(vessels.length))}. Add one in Settings.`
+      : "";
+    // The reminders hang off the clock too — if they were added before it
+    // moved, the whole system is quoting two different numbers. Say which.
+    const hatchTasks = this._config?.maintenance?.tasks || {};
+    const reminderHours = Number(hatchTasks.brine_hatch_harvest?.cadenceHours
+      || hatchTasks.brine_hatch_start?.cadenceHours) || 0;
+    const reminderDriftLine = reminderHours && Math.abs(reminderHours - hatchHours) >= 0.5
+      ? `⏰ Your hatchery reminders still run a ${this._escape(String(reminderHours))} h cycle — the hatch clock says ${this._escape(String(hatchHours))} h. <button class="secondary compact-button" data-action="nps-add-hatch-reminders">Sync hatchery reminders</button>`
       : "";
     const staleGateLine = containerStale
       ? `<span style="color:var(--error-color,#e5484d)">🛑 The container still holds brine past its shelf life — discard it before loading a fresh batch.</span> <button class="danger-text compact-button" data-action="nps-discard-brine">Discard old brine</button>`
@@ -11330,6 +11361,7 @@ class OpenReefPanel extends HTMLElement {
             ${learnedLine ? `<small>${learnedLine}</small>` : ""}
             ${tempLine ? `<small>${tempLine}</small>` : ""}
             ${neededLine ? `<small>${neededLine}</small>` : ""}
+            ${reminderDriftLine ? `<small>${reminderDriftLine}</small>` : ""}
             <small>${hatchReservoirLine}</small>
             <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
           </div>

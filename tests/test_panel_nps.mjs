@@ -747,7 +747,7 @@ test("hatchery settings live in their own section (0.7.71)", async () => {
   } finally { restore(); }
 });
 
-test("the learned-clock chip actually applies — it saves and refreshes", async () => {
+test("the learned-clock chip actually applies — one command moves the lot", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
@@ -758,20 +758,74 @@ test("the learned-clock chip actually applies — it saves and refreshes", async
     const sent = [];
     panel._callWS = async (msg) => {
       sent.push(msg);
-      return { config: panel._config, entry_id: "e1" };
+      return {
+        config: { ...panel._config, nps: { ...panel._config.nps, hatchery: { hatchHours: 34 } } },
+        entry_id: "e1", hours: 34, previous: 24,
+        restamped: [{ id: "v1", name: "Hatchery 1", hoursLeft: 33.3 }],
+        kept: ["Hatchery 2"],
+      };
     };
     let reloaded = false;
     panel._npsLoadSummary = () => { reloaded = true; };
     await panel._npsApplyLearnedHours(33.8);
     const save = sent.find((m) => m.type === "openreef/save_config");
-    assert(save, "the chip must SAVE — a local edit alone leaves the card unchanged");
-    assert(save.config.nps.hatchery.hatchHours === 34, "the rounded clock must reach the config");
+    assert(!save, "the whole-config save would write this page's stale snapshot over the ledger");
+    const clock = sent.find((m) => m.type === "openreef/nps_hatch_clock");
+    assert(clock, "the chip must reach the backend — a local edit alone leaves the card unchanged");
+    assert(clock.hours === 34, "the rounded clock must reach the command");
+    assert(panel._config.nps.hatchery.hatchHours === 34,
+      "the settings input reads _config — it must agree with the new clock too");
     assert(reloaded, "the summary must recompile so the new clock is visible immediately");
     assert(panel._nps.message.includes("34 h"), "the keeper needs confirmation the clock moved");
+    assert(panel._nps.message.includes("Hatchery 1") && panel._nps.message.includes("33.3"),
+      "the running batch moved onto the new clock — say so, that is the visible half");
+    assert(panel._nps.message.includes("Hatchery 2"),
+      "a batch already hatched keeps its result — say that too");
     // And that confirmation has somewhere to land on the Hatchery page.
     panel._nps.summary.hatchery = v2HatcherySummary();
     assert(panel._hatcheryTab().includes(panel._nps.message.slice(0, 24)),
       "the Hatchery tab must render its own messages");
+  } finally { restore(); }
+});
+
+test("unsaved edits survive a clock apply", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    panel._npsLoadSummary = () => {};
+    panel._config.tank.volumeLitres = 999;        // the keeper is mid-edit
+    panel._configDirty = true;
+    panel._callWS = async () => ({ config: { nps: {}, tank: { volumeLitres: 100 } }, hours: 34 });
+    await panel._npsApplyLearnedHours(34);
+    assert(panel._config.tank.volumeLitres === 999,
+      "adopting the server config would silently bin the keeper's pending edit");
+    assert(panel._config.nps.hatchery.hatchHours === 34, "the clock must still land");
+  } finally { restore(); }
+});
+
+test("a batch on its own clock says so, and stale reminders own up", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // Clock moved to 34 h; the running batch was stamped at 24 h.
+    panel._nps.summary.hatchery = v2HatcherySummary({ hatchHours: 34 });
+    let html = panel._hatcheryPanel();
+    assert(html.includes("on its own 24 h clock"),
+      "a countdown that disagrees with settings must explain itself, not look broken");
+    // Same clock top and bottom — nothing to explain.
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    assert(!panel._hatcheryPanel().includes("on its own"),
+      "no drift, no note");
+    // Reminders added on the old clock are part of the same lie.
+    panel._config.maintenance = { tasks: { brine_hatch_harvest: { cadenceHours: 24 } } };
+    panel._nps.summary.hatchery = v2HatcherySummary({ hatchHours: 34 });
+    html = panel._hatcheryPanel();
+    assert(html.includes("still run a 24 h cycle"), "the reminder drift must be surfaced");
+    assert(html.includes("Sync hatchery reminders"), "and it must offer the one-tap fix");
+    panel._config.maintenance.tasks.brine_hatch_harvest.cadenceHours = 34;
+    assert(!panel._hatcheryPanel().includes("still run a"), "in step — no nag");
   } finally { restore(); }
 });
 

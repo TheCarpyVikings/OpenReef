@@ -1028,6 +1028,99 @@ def test_ws_hand_feed_debits_the_container():
     assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]["remainingMl"] == 220
 
 
+def test_ws_hatch_clock_moves_the_batch_the_push_and_the_reminders():
+    """Reece's live catch (0.7.79): "Set clock to 34 h" changed the number and
+    nothing else. Everything downstream of the clock has to move with it —
+    the countdown already running, the ready push, and the hour cadence of the
+    hatchery reminders."""
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=0.7)).isoformat(),
+        "eggType": "standard", "hatchHours": 24,
+    }
+    # v2 is already ripe on its own clock — no arithmetic un-hatches nauplii.
+    cfg["nps"]["hatchery"]["vessels"]["v2"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=26)).isoformat(),
+        "eggType": "standard", "hatchHours": 24,
+        "readyNotifiedAt": now.isoformat(),
+    }
+    cfg["maintenance"] = {"seeded": True, "enabled": True, "completions": {}, "tasks": {
+        "brine_hatch_start": {"label": "Start brine shrimp hatch", "enabled": True,
+                              "cadenceDays": 1, "cadenceHours": 24,
+                              "criticalAfterDays": 2, "criticalAfterHours": 48},
+        "brine_hatch_harvest": {"label": "Harvest, rinse & load brine", "enabled": True,
+                                "cadenceDays": 1, "cadenceHours": 24,
+                                "criticalAfterDays": 2, "criticalAfterHours": 36,
+                                "snoozedUntil": (now + timedelta(hours=23.3)).isoformat()},
+    }}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 1, "hours": 33.8}))
+    assert not conn.errors
+    hatchery = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert hatchery["hatchHours"] == 34                     # rounded into the grid
+    v1_state = hatchery["vessels"]["v1"]["state"]
+    assert v1_state["hatchHours"] == 34, "the running countdown is the visible half"
+    assert not v1_state["readyNotifiedAt"], "a longer clock must re-arm the ready push"
+    v2_state = hatchery["vessels"]["v2"]["state"]
+    assert v2_state["hatchHours"] == 24 and v2_state["readyNotifiedAt"], \
+        "a hatched batch keeps its own result"
+    tasks = entry.options[CONF_SETTINGS]["maintenance"]["tasks"]
+    assert tasks["brine_hatch_start"]["cadenceHours"] == 34
+    assert tasks["brine_hatch_start"]["criticalAfterHours"] == 58
+    assert tasks["brine_hatch_harvest"]["cadenceHours"] == 34
+    assert tasks["brine_hatch_harvest"]["criticalAfterHours"] == 46
+    assert tasks["brine_hatch_harvest"]["cadenceDays"] == 1     # round(34/24) == 1
+    # v2 is ripe NOW, so the harvest reminder must not sit snoozed on a stamp
+    # that belonged to the old clock.
+    assert tasks["brine_hatch_harvest"]["snoozedUntil"] is None
+    payload = conn.results[-1].payload
+    assert payload["hours"] == 34 and payload["previous"] == 24
+    assert [b["name"] for b in payload["restamped"]] == ["Hatchery 1"]
+    assert payload["restamped"][0]["hoursLeft"] == 33.3
+    assert payload["kept"] == ["Hatchery 2"]
+
+
+def test_ws_hatch_clock_re_anchors_the_harvest_snooze_and_clamps():
+    now = datetime.now(timezone.utc)
+    started = now - timedelta(hours=2)
+    entry = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.7, "state": {
+        "hatchStartedAt": started.isoformat(), "eggType": "standard", "hatchHours": 24}}})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["maintenance"] = {"seeded": True, "enabled": True, "completions": {}, "tasks": {
+        "brine_hatch_harvest": {"label": "Harvest", "enabled": True, "cadenceDays": 1,
+                                "cadenceHours": 24, "snoozedUntil": None}}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # Out of range on purpose: the clock is an 8-48 h grid.
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 1, "hours": 96}))
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["hatchery"]["hatchHours"] == 48
+    snoozed = datetime.fromisoformat(
+        saved["maintenance"]["tasks"]["brine_hatch_harvest"]["snoozedUntil"])
+    assert abs((snoozed - (started + timedelta(hours=48))).total_seconds()) < 5, \
+        "the harvest reminder lands when this batch actually ripens"
+    # A start chore the keeper never added must not be conjured into existence.
+    assert "brine_hatch_start" not in saved["maintenance"]["tasks"]
+
+
+def test_ws_hatch_clock_can_leave_running_batches_alone():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.7, "state": {
+        "hatchStartedAt": (now - timedelta(hours=3)).isoformat(),
+        "eggType": "standard", "hatchHours": 24}}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_clock(
+        hass, conn, {"id": 1, "hours": 36, "restamp": False}))
+    hatchery = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert hatchery["hatchHours"] == 36
+    assert hatchery["vessels"]["v1"]["state"]["hatchHours"] == 24
+    assert conn.results[-1].payload["kept"] == ["Hatchery 1"]
+
+
 def test_hatch_ready_push_fires_exactly_once():
     entry = _v2_entry()
     cfg = entry.options[CONF_SETTINGS]

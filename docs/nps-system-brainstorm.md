@@ -554,3 +554,40 @@ fridge wired into the container freshness when the loaded batch was enriched.
 - **E-B**: strip visual (enriching state / enrichment container), split-dose
   reminder, enrichment-done push, freshness rule.
 - **E-C**: species flag + coverage line + demo + docs.
+
+---
+
+## 11. The hatch-clock contract (0.7.79) — one number, four places
+
+Reece's live catch: tapping **"Set clock to 34 h"** moved the headline number
+and left the rest of the page quoting 24 h. It looked like a broken button; it
+was actually a missing contract. The clock is not a setting — it is a number
+four different things hang off, and they must move as one:
+
+| # | Surface | Owner | Rule |
+|---|---------|-------|------|
+| 1 | `nps.hatchery.hatchHours` | config | the clock for the **next** batch |
+| 2 | `vessels.<id>.state.hatchHours` | per-batch stamp | the countdown already running |
+| 3 | `state.readyNotifiedAt` | per-batch stamp | the once-per-batch ready push |
+| 4 | `maintenance.tasks.brine_hatch_*` `cadenceHours` + harvest `snoozedUntil` | maintenance | when the phone actually nags |
+
+**The rule.** A *settings* edit touches (1) only — per-batch stamping exists so
+a mid-hatch countdown is never rewritten under the keeper. Applying the
+*learned* clock touches all four, because it is not a preference change: it is
+a better measurement of the very process already under way. The exception is a
+batch already `ready`/`overdue` — those nauplii have hatched, and no arithmetic
+un-hatches them, so that batch keeps its own result.
+
+**Where it lives.** `websocket_nps_hatch_clock` (backend-authoritative,
+fetch-fresh). The panel must NOT do this with a whole-config save: the page's
+`_config` is a snapshot, so saving it writes a stale ledger (reservoir
+remaining-ml, history, notify stamps) back over whatever the tick has done
+since the page loaded. `_nps_hatch_retime_reminders` stays LOCKSTEP with the
+panel's `_npsSeedHatchReminders` cadence half, and only ever re-times reminders
+the keeper already added — a clock change never conjures a reminder.
+
+**Residual drift is now spoken, not hidden.** A vessel whose stamp disagrees
+with the config says *"on its own 24 h clock"*; reminders whose cadence
+disagrees say *"still run a 24 h cycle"* and offer the one-tap sync. The
+failure mode this kills is a page that quietly contradicts itself and reads as
+a broken button.

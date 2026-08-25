@@ -344,7 +344,11 @@ def test_answering_a_prompt_stamps_its_clock():
 
 
 def test_public_state_exposes_the_due_prompt():
-    state = _enrolled_state(enrolledAt=_at(10))
+    # public_state reads the REAL clock (due_prompt itself is clock-injected
+    # and pinned above), so the stamp has to be anchored to real now — a fixed
+    # base eventually drifts past day 30 and the NPS prompt outranks the pulse.
+    from datetime import datetime, timezone
+    state = _enrolled_state(enrolledAt=_at(10, datetime.now(timezone.utc)))
     assert beta.public_state(state)["duePrompt"] == "pulse"
 
 

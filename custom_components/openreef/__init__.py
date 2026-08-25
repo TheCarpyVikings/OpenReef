@@ -12419,6 +12419,42 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str)
                     harvest_task["snoozedUntil"] = None
 
 
+def _nps_hatch_retime_reminders(config: dict[str, Any], hours: float,
+                                now: datetime) -> None:
+    """Re-point the brine reminders at a NEW hatch clock.
+
+    LOCKSTEP with the panel's ``_npsSeedHatchReminders`` cadence half: both
+    chores run on the HOUR clock (``cadenceHours``), harvest carrying the
+    tighter 12 h grace and start the looser 24 h. It only ever RE-TIMES tasks
+    the keeper already added — a clock change must never conjure a reminder
+    behind their back. The harvest snooze is re-anchored onto whatever batch
+    now ripens soonest, so callers re-stamp vessels BEFORE calling.
+    """
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    if not isinstance(tasks, dict):
+        return
+    cadence_days = max(1, round(hours / 24.0))
+    for task_id, critical_h in (
+        (MAINTENANCE_HATCH_START_TASK_ID, hours + 24),
+        (MAINTENANCE_HATCH_HARVEST_TASK_ID, hours + 12),
+    ):
+        task = tasks.get(task_id)
+        if not isinstance(task, dict):
+            continue
+        task["cadenceDays"] = cadence_days
+        task["criticalAfterDays"] = cadence_days * 2
+        task["cadenceHours"] = hours
+        task["criticalAfterHours"] = critical_h
+    harvest_task = tasks.get(MAINTENANCE_HATCH_HARVEST_TASK_ID)
+    if isinstance(harvest_task, dict):
+        soonest = _nps_soonest_ready(config)
+        harvest_task["snoozedUntil"] = (
+            soonest.isoformat() if soonest is not None and soonest > now else None)
+
+
 def _nps_hatchery_v2(config: dict[str, Any]) -> dict[str, Any]:
     """Handlers may run against a config saved by an older version — run the
     hatchery block through the v2 normaliser (migration included) and write it
@@ -12493,6 +12529,73 @@ async def websocket_nps_hatch_start(
         "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_hatch_clock",
+    vol.Required("hours"): vol.Coerce(float),
+    vol.Optional("restamp"): bool,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_hatch_clock(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Set the hatch clock — the learned-hours advisory's one-tap apply.
+
+    Backend-authoritative on purpose (0.7.79, Reece's live catch): the clock
+    number is only a third of the job. The batch already incubating carries
+    its own stamped countdown, and the harvest reminder carries a cadence and
+    a snooze — write only the config value and the whole page keeps quoting
+    the old hours. One command moves all three, fetch-fresh so it can never
+    write back a stale snapshot of the ledger.
+
+    Re-stamping rule: a batch still INCUBATING moves onto the new clock — the
+    learned number is a better estimate of the very process already under way
+    — but a batch already ready/overdue is left alone. Those nauplii have
+    hatched, and no arithmetic un-hatches them.
+    """
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    previous = hatchery["hatchHours"]
+    hours = float(round(_awc_num(msg.get("hours"), previous, 8, 48)))
+    hatchery["hatchHours"] = hours
+    now = datetime.now(timezone.utc)
+    restamp = bool(msg.get("restamp", True))
+    moved: list[dict[str, Any]] = []
+    kept: list[str] = []
+    for vid in sorted(hatchery["vessels"]):
+        vessel = hatchery["vessels"][vid]
+        state = vessel["state"]
+        started = _parse_datetime(state.get("hatchStartedAt"))
+        if started is None:
+            continue
+        name = str(vessel.get("name") or vid)
+        elapsed = (now - started).total_seconds() / 3600.0
+        if not restamp or elapsed >= _awc_num(state.get("hatchHours"), previous, 8, 48):
+            kept.append(name)
+            continue
+        state["hatchHours"] = hours
+        # Re-arm the ready push: a longer clock must not stay "already told
+        # you", and a shorter one that lands the batch ripe right now should
+        # say so on the next tick.
+        state["readyNotifiedAt"] = ""
+        moved.append({"id": vid, "name": name,
+                      "hoursLeft": round(max(hours - elapsed, 0.0), 1)})
+    _nps_hatch_retime_reminders(config, hours, now)
+    if hours != previous or moved:
+        _append_activity(
+            config,
+            f"Hatch clock set to {hours:g} h"
+            + (f" — {', '.join(b['name'] for b in moved)} moved onto it" if moved else ""),
+            "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config,
+              hours=hours, previous=previous, restamped=moved, kept=kept)
 
 
 @websocket_api.websocket_command({
@@ -15722,6 +15825,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_nps_summary)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
+    websocket_api.async_register_command(hass, websocket_nps_hatch_clock)
     websocket_api.async_register_command(hass, websocket_nps_reservoir_discard)
     websocket_api.async_register_command(hass, websocket_nps_hand_feed)
     websocket_api.async_register_command(hass, websocket_nps_hatch_enrich)
