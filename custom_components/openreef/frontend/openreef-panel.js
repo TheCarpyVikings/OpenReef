@@ -9812,6 +9812,20 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  // The Save bar lives in Settings, so unsaved changes made from any other
+  // page are stranded — a message that says "save to keep them" next to no
+  // Save button (0.7.81, Reece). This rides with the message AND outlives it,
+  // so navigating away and back still offers the save.
+  _dirtySaveNotice() {
+    if (!this._configDirty || this._nps?.demo) return "";
+    return `<div class="notice info-notice">
+        <small><strong>Unsaved changes</strong> — they live in this page only until you save.</small>
+        <div class="button-row" style="margin-top:6px;">
+          <button class="primary compact-button" data-action="save" ${this._busy ? "disabled" : ""}>${this._busy ? "Saving…" : "Save changes"}</button>
+        </div>
+      </div>`;
+  }
+
   // Apply the learned clock. Backend-authoritative (0.7.79 live catch): the
   // number in settings is only a third of the job — the batch already
   // incubating carries its own stamped countdown and the harvest reminder
@@ -11570,6 +11584,7 @@ const rigSteps = [
 
     const notices = `
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
+      ${this._dirtySaveNotice()}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
     return `<section class="stack">${head}${notices}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}${closing}</section>`;
@@ -11615,6 +11630,7 @@ const rigSteps = [
         </div></div>` : ""}
       ${st.demo && demoStageCopy ? `<div class="notice info-notice"><small>${demoStageCopy}</small></div>` : ""}
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
+      ${this._dirtySaveNotice()}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
     // --- Setup checklist + the feeding station (diagram hero + timeline) ---

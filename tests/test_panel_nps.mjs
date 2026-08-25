@@ -983,4 +983,35 @@ test("aligning a stranded batch needs no hours — and no Save bar", async () =>
   } finally { restore(); }
 });
 
+
+test("unsaved changes carry their own Save button off the Settings page", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._setDirty = (d = true) => { panel._configDirty = d; };
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    // Clean page: nothing to nag about.
+    assert(!panel._hatcheryTab().includes('data-action="save"'),
+      "no pending changes, no Save button");
+    // "Sync hatchery reminders" leaves the config dirty — and the Save bar
+    // lives in Settings, so from here it was unreachable (Reece, 0.7.81).
+    panel._config.nps.hatchery = { eggType: "standard", hatchHours: 34, state: {} };
+    panel._npsSeedHatchReminders();
+    assert(panel._configDirty, "the seeder must still leave the change pending");
+    let html = panel._hatcheryTab();
+    assert(html.includes("save to keep them"), "the message says a save is needed...");
+    assert(html.includes('data-action="save"') && html.includes("Save changes"),
+      "...so the Save button has to be right there");
+    // And it outlives the message — navigating away must not strand the edit.
+    panel._nps.message = "";
+    assert(panel._hatcheryTab().includes('data-action="save"'),
+      "a dirty page keeps offering the save even once the message has gone");
+    assert(panel._npsTab().includes('data-action="save"'), "same on the NPS page");
+    // Saved: the offer retires itself.
+    panel._configDirty = false;
+    assert(!panel._hatcheryTab().includes('data-action="save"'), "saved — nothing to offer");
+  } finally { restore(); }
+});
+
 runTests();
