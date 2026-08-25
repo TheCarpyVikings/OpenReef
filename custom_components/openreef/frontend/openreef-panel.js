@@ -1727,15 +1727,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-hand-feed") this._npsCall({ type: "openreef/nps_hand_feed" },
         "Hand-feed logged — the container keeps count.");
       if (action === "nps-apply-learned-hours") {
-        const hours = Math.max(8, Math.min(48, Math.round(Number(target.dataset.hours) || 0)));
-        if (hours) {
-          this._config.nps = this._config.nps || {};
-          this._config.nps.hatchery = this._config.nps.hatchery || {};
-          this._config.nps.hatchery.hatchHours = hours;
-          this._setDirty(true);
-          this._nps.message = `Hatch clock set to ${hours} h from your real batches — save to keep it. Running batches keep their stamped clocks.`;
-          this._render();
-        }
+        this._npsApplyLearnedHours(Number(target.dataset.hours));
       }
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
       if (action === "nps-rig-play") this._npsRigPlay();
@@ -9819,6 +9811,34 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  // Apply the learned clock. The card reads the BACKEND summary, so a local
+  // config edit alone changes nothing on screen (0.7.73 live catch): persist
+  // it, then recompile the summary so the new clock is visible immediately.
+  async _npsApplyLearnedHours(rawHours) {
+    const hours = Math.max(8, Math.min(48, Math.round(Number(rawHours) || 0)));
+    if (!hours) return;
+    if (this._nps.demo) {
+      this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
+      this._render();
+      return;
+    }
+    this._config.nps = this._config.nps || {};
+    this._config.nps.hatchery = this._config.nps.hatchery || {};
+    this._config.nps.hatchery.hatchHours = hours;
+    try {
+      await this._persistConfigSilently();
+      this._nps.message = `Hatch clock set to ${hours} h from your real batches. Running batches keep their stamped clocks.`;
+      this._nps.error = "";
+    } catch (err) {
+      // Saving failed — leave the edit pending on the Save bar rather than
+      // pretending it landed.
+      this._setDirty(true);
+      this._nps.error = (err && err.message) || "Could not save the new hatch clock — hit Save changes.";
+    }
+    this._render();
+    this._npsLoadSummary(true);
+  }
+
   async _npsCall(msg, okMessage) {
     if (this._nps.demo) {
       this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
@@ -11495,7 +11515,11 @@ const rigSteps = [
         </div>
       </div>`;
 
-    return `<section class="stack">${head}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}${closing}</section>`;
+    const notices = `
+      ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
+      ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
+
+    return `<section class="stack">${head}${notices}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}${closing}</section>`;
   }
 
   _npsTab() {

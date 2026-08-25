@@ -747,6 +747,34 @@ test("hatchery settings live in their own section (0.7.71)", async () => {
   } finally { restore(); }
 });
 
+test("the learned-clock chip actually applies — it saves and refreshes", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      learned: { available: true, hours: 33.8, samples: 3 },
+    });
+    const sent = [];
+    panel._callWS = async (msg) => {
+      sent.push(msg);
+      return { config: panel._config, entry_id: "e1" };
+    };
+    let reloaded = false;
+    panel._npsLoadSummary = () => { reloaded = true; };
+    await panel._npsApplyLearnedHours(33.8);
+    const save = sent.find((m) => m.type === "openreef/save_config");
+    assert(save, "the chip must SAVE — a local edit alone leaves the card unchanged");
+    assert(save.config.nps.hatchery.hatchHours === 34, "the rounded clock must reach the config");
+    assert(reloaded, "the summary must recompile so the new clock is visible immediately");
+    assert(panel._nps.message.includes("34 h"), "the keeper needs confirmation the clock moved");
+    // And that confirmation has somewhere to land on the Hatchery page.
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    assert(panel._hatcheryTab().includes(panel._nps.message.slice(0, 24)),
+      "the Hatchery tab must render its own messages");
+  } finally { restore(); }
+});
+
 test("the Hatchery tab stands alone — hero, journal, reminders, gating", async () => {
   const restore = freezeTime(NOW);
   try {
