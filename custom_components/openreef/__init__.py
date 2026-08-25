@@ -8702,6 +8702,9 @@ async def websocket_save_config(
     # an automatic water change, a completion from an automation — would be dropped.
     _merge_recent_completions(entry.options.get(CONF_SETTINGS), msg["config"])
     _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["config"])
+    # A hatch-clock change here has to reach the batch already incubating and
+    # the reminders hanging off it, or the page contradicts itself (0.7.80).
+    _nps_hatch_clock_follow(entry.options.get(CONF_SETTINGS), msg["config"])
     config = await _async_save_config(hass, entry, msg["config"])
     connection.send_result(
         msg["id"],
@@ -12455,6 +12458,52 @@ def _nps_hatch_retime_reminders(config: dict[str, Any], hours: float,
             soonest.isoformat() if soonest is not None and soonest > now else None)
 
 
+def _nps_hatch_clock_follow(previous: Any, incoming: Any) -> None:
+    """A saved hatch-clock change carries the batch already running with it.
+
+    Reece hit this three times (0.7.80). Per-batch stamping is right — two
+    vessels can genuinely run different egg types on different clocks — but on
+    its own it strands a countdown quoting a number the keeper has already
+    corrected, with no way back. So EVERY route that changes the clock (the
+    learned-clock chip, the settings field, a config import) now moves the
+    batches that are still incubating on the same egg type.
+
+    Left alone, deliberately: a batch already ripe (no arithmetic un-hatches
+    nauplii) and a batch on a different egg type. Both explain themselves on
+    the tile, and both have an explicit per-vessel override.
+    """
+    if not isinstance(previous, dict) or not isinstance(incoming, dict):
+        return
+    was = ((previous.get("nps") or {}).get("hatchery") or {})
+    now_cfg = ((incoming.get("nps") or {}).get("hatchery") or {})
+    if not isinstance(was, dict) or not isinstance(now_cfg, dict):
+        return
+    old_h = _awc_num(was.get("hatchHours"), 0, 0, 48)
+    new_h = _awc_num(now_cfg.get("hatchHours"), 0, 0, 48)
+    if not new_h or not old_h or new_h == old_h:
+        return
+    egg = now_cfg.get("eggType")
+    vessels = now_cfg.get("vessels") if isinstance(now_cfg.get("vessels"), dict) else {}
+    now = datetime.now(timezone.utc)
+    for vessel in vessels.values():
+        if not isinstance(vessel, dict):
+            continue
+        state = vessel.get("state") if isinstance(vessel.get("state"), dict) else None
+        if not isinstance(state, dict):
+            continue
+        started = _parse_datetime(state.get("hatchStartedAt"))
+        if started is None:
+            continue
+        stamped = _awc_num(state.get("hatchHours"), old_h, 8, 48)
+        if (now - started).total_seconds() / 3600.0 >= stamped:
+            continue                       # ripe already — it keeps its result
+        if state.get("eggType") and state.get("eggType") != egg:
+            continue                       # a different animal on a different clock
+        state["hatchHours"] = new_h
+        state["readyNotifiedAt"] = ""
+    _nps_hatch_retime_reminders(incoming, new_h, now)
+
+
 def _nps_hatchery_v2(config: dict[str, Any]) -> dict[str, Any]:
     """Handlers may run against a config saved by an older version — run the
     hatchery block through the v2 normaliser (migration included) and write it
@@ -12533,7 +12582,8 @@ async def websocket_nps_hatch_start(
 
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/nps_hatch_clock",
-    vol.Required("hours"): vol.Coerce(float),
+    vol.Optional("hours"): vol.Coerce(float),
+    vol.Optional("vessel_id"): str,
     vol.Optional("restamp"): bool,
 })
 @websocket_api.require_admin
@@ -12562,13 +12612,21 @@ async def websocket_nps_hatch_clock(
     config = _config_from_entry(entry)
     hatchery = _nps_hatchery_v2(config)
     previous = hatchery["hatchHours"]
+    # No hours at all means "bring everything onto the clock we already have"
+    # — the align button, for a batch stranded on an older stamp.
     hours = float(round(_awc_num(msg.get("hours"), previous, 8, 48)))
     hatchery["hatchHours"] = hours
     now = datetime.now(timezone.utc)
     restamp = bool(msg.get("restamp", True))
+    only = str(msg.get("vessel_id") or "")
+    if only and only not in hatchery["vessels"]:
+        connection.send_error(msg["id"], "unknown_vessel", f"No hatchery '{only}'")
+        return
     moved: list[dict[str, Any]] = []
     kept: list[str] = []
     for vid in sorted(hatchery["vessels"]):
+        if only and vid != only:
+            continue
         vessel = hatchery["vessels"][vid]
         state = vessel["state"]
         started = _parse_datetime(state.get("hatchStartedAt"))
@@ -12576,7 +12634,12 @@ async def websocket_nps_hatch_clock(
             continue
         name = str(vessel.get("name") or vid)
         elapsed = (now - started).total_seconds() / 3600.0
-        if not restamp or elapsed >= _awc_num(state.get("hatchHours"), previous, 8, 48):
+        ripe = elapsed >= _awc_num(state.get("hatchHours"), previous, 8, 48)
+        # A sweeping change follows the egg type it was computed for: moving a
+        # 36 h standard batch onto an 18 h decapsulated clock would be wrong.
+        # Naming a vessel is an explicit override — move THAT batch.
+        wrong_egg = not only and state.get("eggType") != hatchery["eggType"]
+        if not restamp or ripe or wrong_egg:
             kept.append(name)
             continue
         state["hatchHours"] = hours

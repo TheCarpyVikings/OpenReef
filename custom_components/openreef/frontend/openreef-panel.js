@@ -1729,6 +1729,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-apply-learned-hours") {
         this._npsApplyLearnedHours(Number(target.dataset.hours));
       }
+      if (action === "nps-align-clock") this._npsAlignClock(target.dataset.id || "");
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
       if (action === "nps-rig-play") this._npsRigPlay();
       if (action === "nps-add-vessel") {
@@ -9818,22 +9819,38 @@ class OpenReefPanel extends HTMLElement {
   // the old hours. One command moves all three, and it fetches fresh rather
   // than saving this page's snapshot of the whole config over the ledger.
   async _npsApplyLearnedHours(rawHours) {
-    const hours = Math.max(8, Math.min(48, Math.round(Number(rawHours) || 0)));
-    if (!hours) return;
+    return this._npsSetClock({ hours: rawHours });
+  }
+
+  // Bring a stranded batch onto the clock that is already configured. The
+  // learned chip retires itself once the clock agrees with the history, so
+  // without this a batch stamped before the change has NO route back
+  // (0.7.80 — Reece hit it three times).
+  async _npsAlignClock(vesselId) {
+    return this._npsSetClock({ vesselId: vesselId || "" });
+  }
+
+  async _npsSetClock({ hours: rawHours = null, vesselId = "" } = {}) {
+    const hours = rawHours == null
+      ? null : Math.max(8, Math.min(48, Math.round(Number(rawHours) || 0)));
+    if (rawHours != null && !hours) return;
     if (this._nps.demo) {
       this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
       this._render();
       return;
     }
+    const call = { type: "openreef/nps_hatch_clock" };
+    if (hours != null) call.hours = hours;
+    if (vesselId) call.vessel_id = vesselId;
     try {
-      const res = await this._callWS({ type: "openreef/nps_hatch_clock", hours });
+      const res = await this._callWS(call);
       if (res && res.config) {
         // Unsaved edits pending on the Save bar must survive — take the whole
         // saved config only when there is nothing of the keeper's to lose.
         if (this._configDirty) {
           this._config.nps = this._config.nps || {};
           this._config.nps.hatchery = this._config.nps.hatchery || {};
-          this._config.nps.hatchery.hatchHours = hours;
+          if (hours != null) this._config.nps.hatchery.hatchHours = hours;
         } else {
           this._config = res.config;
         }
@@ -9846,7 +9863,10 @@ class OpenReefPanel extends HTMLElement {
       const keptNote = kept.length
         ? ` ${kept.join(", ")} already hatched, so that batch keeps its own result.`
         : "";
-      this._nps.message = `Hatch clock set to ${hours} h — reminders re-timed with it.${movedNote}${keptNote}`;
+      const landed = Number(res && res.hours) || hours || 0;
+      this._nps.message = hours == null
+        ? `Everything is on the ${landed} h clock now — reminders re-timed with it.${movedNote}${keptNote}`
+        : `Hatch clock set to ${landed} h — reminders re-timed with it.${movedNote}${keptNote}`;
       this._nps.error = "";
     } catch (err) {
       this._nps.error = (err && err.message) || "Could not set the hatch clock — try again.";
@@ -11246,7 +11266,8 @@ class OpenReefPanel extends HTMLElement {
       // with the settings clock (0.7.79) — say so rather than looking broken.
       const clockNote = vs.status === "incubating"
         && Math.abs(Number(v.hatchHours) - hatchHours) >= 0.5
-        ? `<small class="muted" title="The clock is stamped into a batch when it starts, so a settings change never rewrites a countdown that is already running.">on its own ${this._escape(String(v.hatchHours))} h clock</small>`
+        ? `<small class="muted" title="The clock is stamped into a batch when it starts, so a settings change never rewrites a countdown that is already running.">on its own ${this._escape(String(v.hatchHours))} h clock</small>
+           <button class="secondary compact-button" data-action="nps-align-clock" data-id="${this._escape(v.id)}" title="Move this running batch onto the ${this._escape(String(hatchHours))} h clock — its countdown, its ready push and the harvest reminder all follow.">Move to ${this._escape(String(hatchHours))} h</button>`
         : "";
       const guide = v.guide && v.guide.available
         ? `<small class="muted" title="2 g/L is the documented optimum — more cysts hatch WORSE">~${this._escape(String(v.guide.grams))} g cysts</small>` : "";
@@ -11294,7 +11315,7 @@ class OpenReefPanel extends HTMLElement {
     const reminderHours = Number(hatchTasks.brine_hatch_harvest?.cadenceHours
       || hatchTasks.brine_hatch_start?.cadenceHours) || 0;
     const reminderDriftLine = reminderHours && Math.abs(reminderHours - hatchHours) >= 0.5
-      ? `⏰ Your hatchery reminders still run a ${this._escape(String(reminderHours))} h cycle — the hatch clock says ${this._escape(String(hatchHours))} h. <button class="secondary compact-button" data-action="nps-add-hatch-reminders">Sync hatchery reminders</button>`
+      ? `⏰ Your hatchery reminders still run a ${this._escape(String(reminderHours))} h cycle — the hatch clock says ${this._escape(String(hatchHours))} h. <button class="secondary compact-button" data-action="nps-align-clock" title="Re-times both hatchery chores onto the ${this._escape(String(hatchHours))} h clock and re-anchors the harvest reminder. Lands immediately — no save needed.">Bring them onto ${this._escape(String(hatchHours))} h</button>`
       : "";
     const staleGateLine = containerStale
       ? `<span style="color:var(--error-color,#e5484d)">🛑 The container still holds brine past its shelf life — discard it before loading a fresh batch.</span> <button class="danger-text compact-button" data-action="nps-discard-brine">Discard old brine</button>`

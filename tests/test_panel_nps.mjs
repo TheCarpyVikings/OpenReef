@@ -814,6 +814,11 @@ test("a batch on its own clock says so, and stale reminders own up", async () =>
     let html = panel._hatcheryPanel();
     assert(html.includes("on its own 24 h clock"),
       "a countdown that disagrees with settings must explain itself, not look broken");
+    // Explaining is not enough — the learned chip retires once the clock and
+    // the history agree, so this button is the ONLY route back for a batch
+    // stamped before the change (0.7.80).
+    assert(html.includes('data-action="nps-align-clock"') && html.includes("Move to 34 h"),
+      "a stranded batch must have a one-tap way onto the current clock");
     // Same clock top and bottom — nothing to explain.
     panel._nps.summary.hatchery = v2HatcherySummary();
     assert(!panel._hatcheryPanel().includes("on its own"),
@@ -823,7 +828,12 @@ test("a batch on its own clock says so, and stale reminders own up", async () =>
     panel._nps.summary.hatchery = v2HatcherySummary({ hatchHours: 34 });
     html = panel._hatcheryPanel();
     assert(html.includes("still run a 24 h cycle"), "the reminder drift must be surfaced");
-    assert(html.includes("Sync hatchery reminders"), "and it must offer the one-tap fix");
+    assert(html.includes("Bring them onto 34 h"), "and it must offer the one-tap fix");
+    // The row keeps its seeder button, but the two must not read identically —
+    // Reece's screenshot stacked two buttons labelled the same thing.
+    assert(!html.includes(">Sync hatchery reminders</button> <button") &&
+      html.split(">Sync hatchery reminders<").length === 2,
+      "the instant re-time and the seeder must be distinguishable");
     panel._config.maintenance.tasks.brine_hatch_harvest.cadenceHours = 34;
     assert(!panel._hatcheryPanel().includes("still run a"), "in step — no nag");
   } finally { restore(); }
@@ -944,6 +954,32 @@ test("seeding without a running hatch sets the hour cadence but anchors nothing"
     assert(!m.tasks.brine_hatch_harvest.snoozedUntil, "no running hatch, nothing to anchor to");
     assert(!(m.completions?.brine_hatch_start || []).length, "no running hatch, nothing to back-log");
     assert(panel._npsTab().includes("Sync hatchery reminders"), "once added, the button becomes a re-sync");
+  } finally { restore(); }
+});
+
+
+test("aligning a stranded batch needs no hours — and no Save bar", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._npsLoadSummary = () => {};
+    panel._nps.summary.hatchery = v2HatcherySummary({ hatchHours: 34 });
+    const sent = [];
+    panel._callWS = async (msg) => {
+      sent.push(msg);
+      return { config: panel._config, hours: 34,
+               restamped: [{ id: "v1", name: "Hatchery 1", hoursLeft: 32.2 }], kept: [] };
+    };
+    await panel._npsAlignClock("v1");
+    const call = sent.find((m) => m.type === "openreef/nps_hatch_clock");
+    assert(call, "the align button must reach the backend");
+    assert(call.hours === undefined,
+      "no hours means 'use the clock we already have' — sending one could move it");
+    assert(call.vessel_id === "v1", "the named batch is the one that moves");
+    assert(panel._nps.message.includes("34 h") && panel._nps.message.includes("32.2"),
+      "say what actually moved, in hours the keeper can check against the tile");
+    assert(!panel._configDirty, "this lands immediately — it must not arm the Save bar");
   } finally { restore(); }
 });
 

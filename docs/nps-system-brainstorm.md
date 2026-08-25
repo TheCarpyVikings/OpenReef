@@ -591,3 +591,31 @@ with the config says *"on its own 24 h clock"*; reminders whose cadence
 disagrees say *"still run a 24 h cycle"* and offer the one-tap sync. The
 failure mode this kills is a page that quietly contradicts itself and reads as
 a broken button.
+
+### 11.1 Reachability (0.7.80) — the rule was right, the route was missing
+
+0.7.79 made the *learned-clock chip* move all four surfaces. It was still
+wrong, because the chip **retires itself** the moment the clock and the
+history agree — so a batch stamped before the change had no route back at all.
+Reece hit exactly that: clock 34 h, batch stamped 24 h, chip gone, three taps
+and nothing to tap.
+
+The rule is only as good as the routes into it:
+
+- **Every route that changes the clock now carries the batch.** The settings
+  field goes through `_nps_hatch_clock_follow` in `websocket_save_config`,
+  in the same slot as `_merge_recent_completions` — old config vs incoming,
+  clock changed, move the incubating batches.
+- **A stranded batch has an explicit override.** `nps_hatch_clock` accepts no
+  `hours` at all ("align onto the clock we already have") and an optional
+  `vessel_id`. The tile's *"on its own 24 h clock"* note now carries a
+  **Move to 34 h** button; the reminder-drift line carries **Bring them onto
+  34 h**, which lands instantly rather than arming the Save bar.
+- **Egg type gates the sweeping case only.** A 36 h standard batch is not an
+  18 h decapsulated one because the default moved — so a sweep skips a batch
+  on a different egg type, and naming the vessel overrides that.
+
+**Design lesson worth keeping:** an advisory chip that retires on success is a
+fine affordance and a terrible *only* affordance. Any state the system can
+describe ("this batch is on a different clock") needs an action attached to
+the description itself, not to the transient control that created the state.

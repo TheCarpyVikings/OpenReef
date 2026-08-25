@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+from copy import deepcopy as _deepcopy
 from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1119,6 +1120,100 @@ def test_ws_hatch_clock_can_leave_running_batches_alone():
     assert hatchery["hatchHours"] == 36
     assert hatchery["vessels"]["v1"]["state"]["hatchHours"] == 24
     assert conn.results[-1].payload["kept"] == ["Hatchery 1"]
+
+
+def test_ws_hatch_clock_aligns_a_stranded_batch_with_no_hours():
+    """Reece's state on 2026-08-25: the clock already said 34 h, so the
+    learned chip had retired itself — and the batch started before the change
+    was stamped 24 h with NO route back. Aligning takes no hours at all."""
+    now = datetime.now(timezone.utc)
+    started = now - timedelta(hours=1.8)
+    entry = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.7, "state": {
+        "hatchStartedAt": started.isoformat(), "eggType": "standard",
+        "hatchHours": 24, "readyNotifiedAt": ""}}})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["hatchHours"] = 34
+    cfg["maintenance"] = {"seeded": True, "enabled": True, "completions": {}, "tasks": {
+        "brine_hatch_harvest": {"label": "Harvest", "enabled": True,
+                                "cadenceDays": 1, "cadenceHours": 24}}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 1}))
+    assert not conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["hatchery"]["hatchHours"] == 34, "no hours given — the clock must not move"
+    assert saved["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchHours"] == 34
+    assert saved["maintenance"]["tasks"]["brine_hatch_harvest"]["cadenceHours"] == 34
+    payload = conn.results[-1].payload
+    assert payload["restamped"][0]["hoursLeft"] == 32.2
+
+
+def test_ws_hatch_clock_vessel_id_overrides_the_egg_type_rule():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(vessels={
+        "v1": {"name": "Hatchery 1", "volumeL": 0.7, "state": {
+            "hatchStartedAt": (now - timedelta(hours=2)).isoformat(),
+            "eggType": "decapsulated", "hatchHours": 18}},
+        "v2": {"name": "Hatchery 2", "volumeL": 0.7, "state": {
+            "hatchStartedAt": (now - timedelta(hours=2)).isoformat(),
+            "eggType": "standard", "hatchHours": 24}},
+    })
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # Sweeping change: the decapsulated batch is a different animal, left alone.
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 1, "hours": 34}))
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    assert vessels["v1"]["state"]["hatchHours"] == 18, "an 18 h decap batch is not a 34 h one"
+    assert vessels["v2"]["state"]["hatchHours"] == 34
+    assert conn.results[-1].payload["kept"] == ["Hatchery 1"]
+    # Naming it is an explicit override — move THAT batch.
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 2, "vessel_id": "v1"}))
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    assert vessels["v1"]["state"]["hatchHours"] == 34
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 3, "vessel_id": "nope"}))
+    assert conn.errors[-1].code == "unknown_vessel"
+
+
+def test_save_config_carries_the_running_batch_onto_a_new_clock():
+    """The settings field is a route to the clock too — Reece changed it there
+    and the running countdown stayed behind (0.7.80)."""
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.7, "state": {
+        "hatchStartedAt": (now - timedelta(hours=3)).isoformat(),
+        "eggType": "standard", "hatchHours": 24, "readyNotifiedAt": ""}}})
+    incoming = _deepcopy(entry.options[CONF_SETTINGS])
+    incoming["nps"]["hatchery"]["hatchHours"] = 36
+    incoming["maintenance"] = {"seeded": True, "enabled": True, "completions": {}, "tasks": {
+        "brine_hatch_harvest": {"label": "Harvest", "enabled": True,
+                                "cadenceDays": 1, "cadenceHours": 24}}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_save_config(hass, conn, {"id": 1, "config": incoming}))
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchHours"] == 36
+    assert saved["maintenance"]["tasks"]["brine_hatch_harvest"]["cadenceHours"] == 36
+    # A save that does NOT touch the clock leaves the batch entirely alone.
+    again = _deepcopy(saved)
+    again["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchHours"] = 36
+    again["tank"] = {"volumeLitres": 60}
+    run(integration.websocket_save_config(hass, conn, {"id": 2, "config": again}))
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchHours"] == 36
+
+
+def test_save_config_never_un_hatches_a_ripe_batch():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.7, "state": {
+        "hatchStartedAt": (now - timedelta(hours=26)).isoformat(),
+        "eggType": "standard", "hatchHours": 24,
+        "readyNotifiedAt": now.isoformat()}}})
+    incoming = _deepcopy(entry.options[CONF_SETTINGS])
+    incoming["nps"]["hatchery"]["hatchHours"] = 40
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_save_config(hass, conn, {"id": 1, "config": incoming}))
+    state = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"]
+    assert state["hatchHours"] == 24, "those nauplii have hatched"
+    assert state["readyNotifiedAt"], "and the keeper was already told"
 
 
 def test_hatch_ready_push_fires_exactly_once():
