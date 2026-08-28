@@ -173,8 +173,14 @@ def batch_state(batch: Any, cfg: Any, now: datetime) -> dict[str, Any]:
                                       (cfg.get("heat") or {}).get("enabled"))),
         "mix": {"percent": None, "hoursLeft": None, "testUnlocked": False},
         "ageDays": None, "retestDue": False,
+        # Storing circulation: a burst is running while circulateUntil is ahead
+        # of now — the diagram spins the impellers off this, never off a guess.
+        "circulating": False,
         "loggedPpt": batch.get("loggedPpt"),
     }
+    if status in ("ready", "storing"):
+        until = _parse_iso(batch.get("circulateUntil"))
+        out["circulating"] = until is not None and until > now
     if status == "salting":
         stamp = _parse_iso(batch.get("stageAt"))
         hours = mix_hours(salt_cfg.get("brand"), salt_cfg.get("mixHours"))

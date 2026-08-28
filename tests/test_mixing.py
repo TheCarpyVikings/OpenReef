@@ -500,6 +500,187 @@ def test_sim_mode_never_touches_real_switches():
     assert sim["rodiBooster"] is True
 
 
+# ---------------------------------------------------------------- Stage C: storing & the ledger
+# Circulation chain (stamps ARE the schedule), mark-used, level corrections,
+# retests on stored batches, the reminder bridge, mid-burst orphan recovery.
+
+def _stored_batch(**over):
+    batch = {"state": "storing", "type": "salt", "litres": 40, "usedLitres": 0,
+             "stageAt": _iso(NOW), "testedAt": _iso(NOW),
+             "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": ""}
+    batch.update(over)
+    return batch
+
+
+def test_engine_circulating_follows_the_stamp():
+    cfg = _cfg()
+    batch = _stored_batch(circulateUntil=_iso(NOW + timedelta(minutes=5)))
+    assert mixing.batch_state(batch, cfg, NOW)["circulating"] is True
+    batch["circulateUntil"] = _iso(NOW - timedelta(minutes=5))
+    assert mixing.batch_state(batch, cfg, NOW)["circulating"] is False
+
+
+def test_pass_from_salting_stamps_the_circulation_cadence():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 35.0}))
+    batch = _mix_state(entry)["batch"]
+    from datetime import datetime as _dt, timezone as _tz
+    next_at = _dt.fromisoformat(batch["nextCirculateAt"])
+    hours_out = (next_at - _dt.now(_tz.utc)).total_seconds() / 3600.0
+    assert 5.9 < hours_out < 6.1                     # storage.circulateEveryH = 6
+
+
+def test_circulation_chain_burst_starts_stops_and_rearms():
+    from datetime import datetime as _dt, timezone as _tz
+    scheduler = install_scheduler(integration)
+    now = _dt.now(_tz.utc)
+    hass, entry = _station({"batch": _stored_batch(
+        nextCirculateAt=(now + timedelta(hours=1)).isoformat())})
+
+    async def _arm():
+        await integration._async_schedule_mixing_circulation(
+            hass, entry, integration._config_from_entry(entry))
+    run(_arm())
+    start = next(r for r in scheduler.scheduled if not r["cancelled"])
+
+    async def _fire(record):
+        await record["callback"](record["run_at"])
+    before = len(scheduler.scheduled)
+    run(_fire(start))
+    # Burst started: pumps on, ready→storing edge stamped, stop leg armed by the save.
+    assert ("turn_on", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "storing" and batch["circulateUntil"]
+    assert batch["nextCirculateAt"] == ""
+    stop = next(r for r in scheduler.scheduled[before:]
+                if not r["cancelled"] and 9 * 60 < (r["run_at"] - _dt.now(_tz.utc)).total_seconds() < 11 * 60)
+    run(_fire(stop))
+    # Burst stopped: pumps off, cadence re-anchored, last-stir stamped.
+    assert ("turn_off", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    batch = _mix_state(entry)["batch"]
+    assert batch["circulateUntil"] == "" and batch["lastCirculatedAt"]
+    hours_out = (_dt.fromisoformat(batch["nextCirculateAt"]) - _dt.now(_tz.utc)).total_seconds() / 3600.0
+    assert 5.9 < hours_out < 6.1
+
+
+def test_rodi_batches_never_circulate():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": _stored_batch(
+        type="rodi", nextCirculateAt=_iso(NOW + timedelta(hours=1)))})
+
+    async def _arm():
+        await integration._async_schedule_mixing_circulation(
+            hass, entry, integration._config_from_entry(entry))
+    run(_arm())
+    assert integration.MIXING_CIRC_UNSUB not in hass.data.get(integration.DOMAIN, {})
+
+
+def test_mark_used_debits_then_closes_the_batch():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": _stored_batch()})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_mark_used(hass, conn, {"id": 1, "litres": 15}))
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "storing" and batch["usedLitres"] == 15.0
+    run(integration.websocket_mixing_mark_used(hass, conn, {"id": 2, "litres": 25}))
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "idle" and batch["litres"] == 0
+    # Drawing from an empty station is an error, not a silent success.
+    run(integration.websocket_mixing_mark_used(hass, conn, {"id": 3, "litres": 5}))
+    assert conn.errors and conn.errors[-1].code == "invalid_state"
+
+
+def test_set_level_corrects_both_vessels_honestly():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": _stored_batch()})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_set_level(
+        hass, conn, {"id": 1, "vessel": "rodi", "litres": 200}))   # clamps to the vessel
+    assert _mix_state(entry)["vessels"]["rodi"]["estimatedLitres"] == 50.0
+    run(integration.websocket_mixing_set_level(
+        hass, conn, {"id": 2, "vessel": "mix", "litres": 25}))
+    assert _mix_state(entry)["batch"]["usedLitres"] == 15.0        # 40 total − 25 left
+    # No batch ⇒ nothing in the mix vessel to correct.
+    hass2, entry2 = _station()
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_set_level(
+        hass2, conn2, {"id": 3, "vessel": "mix", "litres": 10}))
+    assert conn2.errors[-1].code == "invalid_state"
+    # A single-vessel layout has no RODI store to correct.
+    hass3, entry3 = _station({"layout": "single"})
+    conn3 = FakeConnection()
+    run(integration.websocket_mixing_set_level(
+        hass3, conn3, {"id": 4, "vessel": "rodi", "litres": 10}))
+    assert conn3.errors[-1].code == "invalid_vessel"
+
+
+def test_retest_pass_refreshes_stay_stored_fail_returns_to_the_pumps():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": _stored_batch(
+        testedAt=_iso(NOW - timedelta(days=8)),
+        nextCirculateAt=_iso(NOW + timedelta(hours=2)))})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 35.1}))
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "storing"
+    assert batch["testedAt"] != _iso(NOW - timedelta(days=8))     # clock refreshed
+    # Drifted high: back onto the pumps, circulation stamps cleared.
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 2, "ppt": 37.5}))
+    payload = conn.results[-1].payload
+    assert payload["correction"]["status"] == "high"
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "salting" and batch["nextCirculateAt"] == ""
+    assert ("turn_on", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+
+
+def test_reminder_bridge_never_conjures_and_serves_the_keepers_task():
+    install_scheduler(integration)
+    # No task added ⇒ a test must not create one.
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 35.0}))
+    config = integration._config_from_entry(entry)
+    assert "mixing_retest" not in config["maintenance"]["tasks"]
+    # Keeper-added task: a test logs a completion and re-times the cadence.
+    cfg_over = {"batch": {"state": "salting", "type": "salt", "litres": 40,
+                          "stageAt": _iso(NOW)},
+                "storage": {"circulateEveryH": 6, "circulateForMin": 10,
+                            "retestAfterDays": 5}}
+    cfg = _station_cfg(**cfg_over)
+    entry2 = FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config({
+        "mixingStation": cfg,
+        "maintenance": {"tasks": {"mixing_retest": {
+            "label": "Retest stored saltwater", "cadenceDays": 7,
+            "criticalAfterDays": 14, "enabled": True, "notify": True}}},
+    })})
+    hass2 = FakeHass(states=dict(_STATION_SWITCHES), entries=[entry2])
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass2, conn2, {"id": 1, "ppt": 35.0}))
+    config2 = integration._config_from_entry(entry2)
+    task = config2["maintenance"]["tasks"]["mixing_retest"]
+    assert task["cadenceDays"] == 5 and task["enabled"] is True
+    completions = config2["maintenance"]["completions"]["mixing_retest"]
+    assert completions and completions[0]["source"] == "mixing"
+    # Batch gone ⇒ the chore stands down instead of nagging an empty vessel.
+    run(integration.websocket_mixing_abort(hass2, conn2, {"id": 2}))
+    config2 = integration._config_from_entry(entry2)
+    assert config2["maintenance"]["tasks"]["mixing_retest"]["enabled"] is False
+
+
+def test_orphan_recovery_mid_burst_stops_pumps_and_reanchors():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": _stored_batch(
+        circulateUntil=_iso(NOW + timedelta(minutes=5)))})
+    run(integration._async_mixing_recover_orphaned(hass, entry))
+    assert ("turn_off", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    batch = _mix_state(entry)["batch"]
+    assert batch["circulateUntil"] == "" and batch["nextCirculateAt"]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

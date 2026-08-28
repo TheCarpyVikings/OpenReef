@@ -119,6 +119,8 @@ from .const import (
     ICP_REPORTS_MAX,
     MANUAL_TEST_CADENCE_PRESETS,
     MANUAL_TEST_PARAMETERS,
+    MAINTENANCE_MIXING_RETEST_TASK_ID,
+    MAINTENANCE_SOURCE_MIXING,
     MIXING_BATCH_TYPES,
     MIXING_CIRCULATE_EVERY_MAX_H,
     MIXING_CIRCULATE_FOR_MAX_MIN,
@@ -312,6 +314,7 @@ NPS_DRAIN_UNSUB = "nps_drain_unsub"    # feed-exchange matched-drain stop timer
 # does for water changes (start / advance / cap-fire / abort can interleave).
 MIXING_STATE_LOCK = "mixing_state_lock"
 MIXING_FILL_UNSUB = "mixing_fill_unsub"  # booster fill-cap stop timer
+MIXING_CIRC_UNSUB = "mixing_circ_unsub"  # storing-circulation chain (start OR stop leg)
 MIXING_RUNTIME = "mixing_runtime"        # sim switch states (mirrors AWC_RUNTIME)
 _AWC_SIM_HAZARDS = ("leak", "highLevel", "freshEmpty", "wasteFull", "returnPumpIssue")
 # Bulky runtime record lists stripped from a settings export (and preserved through
@@ -1565,6 +1568,9 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "testedAt": _awc_str(raw_batch.get("testedAt"), 40),
         "usedLitres": round(_awc_num(raw_batch.get("usedLitres"), 0, 0,
                                      batch_litres if batch_litres > 0 else MIXING_VESSEL_MAX_L), 1),
+        "circulateUntil": _awc_str(raw_batch.get("circulateUntil"), 40),
+        "nextCirculateAt": _awc_str(raw_batch.get("nextCirculateAt"), 40),
+        "lastCirculatedAt": _awc_str(raw_batch.get("lastCirculatedAt"), 40),
     }
 
     raw_integrations = mix_cfg.get("integrations") if isinstance(mix_cfg.get("integrations"), dict) else {}
@@ -2668,7 +2674,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 safe_entry["skipped"] = True
             # Only automatic entries carry a source; a hand-logged completion has none,
             # which is what lets the panel tell the two apart in history and the chart.
-            if item.get("source") in (MAINTENANCE_SOURCE_AWC, MAINTENANCE_SOURCE_HATCHERY):
+            if item.get("source") in (MAINTENANCE_SOURCE_AWC, MAINTENANCE_SOURCE_HATCHERY,
+                                      MAINTENANCE_SOURCE_MIXING):
                 safe_entry["source"] = item["source"]
             volume = item.get("volume")
             if isinstance(volume, (int, float)) and not isinstance(volume, bool):
@@ -5571,6 +5578,9 @@ async def _async_save_config(
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
     await _async_schedule_spawning_tick(hass, entry, normalised)
+    # The circulation chain re-arms from its persisted stamps on every save —
+    # that save-driven re-arm IS how its burst legs chain (see the scheduler).
+    await _async_schedule_mixing_circulation(hass, entry, normalised)
     await _async_setup_dosing_mirror(hass, entry, normalised)
     if _dosing_channels(normalised):
         _async_kick_dosing_sync(hass, entry)
@@ -13680,6 +13690,141 @@ def _clear_mixing_fill_timer(hass: HomeAssistant) -> None:
         unsub()
 
 
+def _clear_mixing_circ_timer(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MIXING_CIRC_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+def _mixing_clear_circ_stamps(batch: dict[str, Any]) -> None:
+    batch["circulateUntil"] = ""
+    batch["nextCirculateAt"] = ""
+
+
+async def _async_schedule_mixing_circulation(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
+) -> None:
+    """(Re)arm the storing-circulation chain from its persisted stamps — pumps
+    stir the stored batch for circulateForMin every circulateEveryH, never
+    continuously (doc §5). The callbacks only stamp-and-save; the save pass
+    re-enters here and arms whichever leg the stamps now call for, which is
+    what makes the chain restart-proof: the stamps ARE the schedule."""
+    _clear_mixing_circ_timer(hass)
+    cfg = _mixing_cfg(config)
+    batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
+    storage = cfg.get("storage") if isinstance(cfg.get("storage"), dict) else {}
+    every_h = _awc_num(storage.get("circulateEveryH"), 0, 0, MIXING_CIRCULATE_EVERY_MAX_H)
+    if (not cfg.get("enabled") or batch.get("type") == "rodi" or every_h <= 0
+            or str(batch.get("state") or "idle") not in ("ready", "storing")):
+        return
+    now = datetime.now(timezone.utc)
+    store = hass.data.setdefault(DOMAIN, {})
+    until = _parse_datetime(batch.get("circulateUntil"))
+    if until is not None and until > now:
+        # A burst is in flight — arm its stop leg.
+        async def _stop(_now: datetime) -> None:
+            latest = _first_entry(hass)
+            async with _mixing_lock(hass):
+                hass.data.setdefault(DOMAIN, {}).pop(MIXING_CIRC_UNSUB, None)
+                if latest is None:
+                    return
+                cfg2 = _config_from_entry(latest)
+                batch2 = _mixing_cfg(cfg2).get("batch", {})
+                if str(batch2.get("state") or "idle") not in ("ready", "storing"):
+                    return
+                await _async_mixing_stop_switches(
+                    hass, cfg2, ("mixPumpA", "mixPumpB"), None)
+                stamp = datetime.now(timezone.utc)
+                batch2["circulateUntil"] = ""
+                batch2["lastCirculatedAt"] = stamp.isoformat()
+                every2 = _awc_num(_mixing_cfg(cfg2).get("storage", {}).get("circulateEveryH"),
+                                  0, 0, MIXING_CIRCULATE_EVERY_MAX_H)
+                batch2["nextCirculateAt"] = (
+                    (stamp + timedelta(hours=every2)).isoformat() if every2 > 0 else "")
+                await _async_save_config(hass, latest, cfg2)  # save re-arms the start leg
+
+        store[MIXING_CIRC_UNSUB] = async_track_point_in_time(hass, _stop, until)
+        return
+    next_at = _parse_datetime(batch.get("nextCirculateAt"))
+    if next_at is None:
+        return  # stamped when the batch goes ready; absent = nothing scheduled
+
+    async def _start(_now: datetime) -> None:
+        latest = _first_entry(hass)
+        async with _mixing_lock(hass):
+            hass.data.setdefault(DOMAIN, {}).pop(MIXING_CIRC_UNSUB, None)
+            if latest is None:
+                return
+            cfg2 = _config_from_entry(latest)
+            mix2 = _mixing_cfg(cfg2)
+            batch2 = mix2.get("batch", {})
+            if (not mix2.get("enabled") or batch2.get("type") == "rodi"
+                    or str(batch2.get("state") or "idle") not in ("ready", "storing")):
+                return
+            for role in ("mixPumpA", "mixPumpB"):
+                try:
+                    await _async_mixing_set_switch(hass, cfg2, role, True, None)
+                except Exception:  # noqa: BLE001 - one dead pump must not kill the burst
+                    _LOGGER.exception("Could not start %s for the circulation burst", role)
+            for_min = _awc_num(mix2.get("storage", {}).get("circulateForMin"),
+                               10, 1, MIXING_CIRCULATE_FOR_MAX_MIN)
+            stamp = datetime.now(timezone.utc)
+            batch2["state"] = "storing"       # the first burst is the ready→storing edge
+            batch2["circulateUntil"] = (stamp + timedelta(minutes=for_min)).isoformat()
+            batch2["nextCirculateAt"] = ""
+            await _async_save_config(hass, latest, cfg2)  # save re-arms the stop leg
+
+    store[MIXING_CIRC_UNSUB] = async_track_point_in_time(
+        hass, _start, max(next_at, now + timedelta(seconds=30)))
+
+
+def _mixing_sync_reminders(config: dict[str, Any], now: datetime, event: str) -> None:
+    """Hatchery-pattern bridge: only ever touches the retest chore IF THE
+    KEEPER ADDED IT (the panel's seed button) — a sync must never conjure a
+    reminder behind their back. 'tested' logs a completion (the due clock runs
+    from the refractometer) and re-times the cadence to the current
+    retestAfterDays; 'gone' disables the chore so an empty station never nags;
+    'stored' re-enables it for a fresh batch."""
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    if not isinstance(tasks, dict):
+        return
+    task = tasks.get(MAINTENANCE_MIXING_RETEST_TASK_ID)
+    if not isinstance(task, dict):
+        return
+    if event == "tested":
+        retest_days = int(_awc_num(
+            _mixing_cfg(config).get("storage", {}).get("retestAfterDays"),
+            7, 0, MIXING_RETEST_MAX_DAYS))
+        if retest_days > 0:
+            task["cadenceDays"] = retest_days
+            task["criticalAfterDays"] = retest_days * 2
+        task["enabled"] = True
+        task["snoozedUntil"] = None
+        completions = maintenance.setdefault("completions", {})
+        if not isinstance(completions, dict):
+            completions = {}
+            maintenance["completions"] = completions
+        entries = completions.setdefault(MAINTENANCE_MIXING_RETEST_TASK_ID, [])
+        if not isinstance(entries, list):
+            entries = []
+            completions[MAINTENANCE_MIXING_RETEST_TASK_ID] = entries
+        timestamp = now.isoformat()
+        entries.insert(0, {
+            "id": f"{MAINTENANCE_MIXING_RETEST_TASK_ID}:mixing:{timestamp}",
+            "timestamp": timestamp,
+            "notes": "Logged automatically — salinity tested on the Mixing Station tab",
+            "source": MAINTENANCE_SOURCE_MIXING,
+        })
+        del entries[MAINTENANCE_COMPLETIONS_MAX:]
+    elif event == "gone":
+        task["enabled"] = False
+    elif event == "stored":
+        task["enabled"] = True
+
+
 def _mixing_booster_driven(config: dict[str, Any]) -> bool:
     """Whether OpenReef itself drives the fill: sim mode, or a bound booster plug.
     A manual tap still walks the workflow — there is just nothing to switch or cap."""
@@ -13740,11 +13885,26 @@ async def _async_mixing_recover_orphaned(
     the mixing pumps re-assert ON during 'salting' — circulation is the safe
     direction and the vessel provably holds water by that stage."""
     state = _mixing_cfg(_config_from_entry(entry)).get("batch", {}).get("state")
-    if state not in ("filling", "transferring", "heating", "salting"):
+    if state not in ("filling", "transferring", "heating", "salting", "ready", "storing"):
         return
     async with _mixing_lock(hass):
         config = _config_from_entry(entry)
-        st = _mixing_cfg(config).get("batch", {}).get("state")
+        batch = _mixing_cfg(config).get("batch", {})
+        st = batch.get("state")
+        if st in ("ready", "storing"):
+            # Only a restart mid-circulation-burst leaves pumps energised; the
+            # cadence re-anchors from now and the schedule pass re-arms it.
+            if not batch.get("circulateUntil"):
+                return
+            await _async_mixing_stop_switches(hass, config, ("mixPumpA", "mixPumpB"), None)
+            batch["circulateUntil"] = ""
+            every_h = _awc_num(_mixing_cfg(config).get("storage", {}).get("circulateEveryH"),
+                               0, 0, MIXING_CIRCULATE_EVERY_MAX_H)
+            batch["nextCirculateAt"] = (
+                (datetime.now(timezone.utc) + timedelta(hours=every_h)).isoformat()
+                if every_h > 0 else "")
+            await _async_save_config(hass, entry, config)
+            return
         if st == "filling":
             await _async_mixing_stop_switches(hass, config, ("rodiBooster",), None)
             _append_activity(
@@ -13925,10 +14085,12 @@ async def websocket_mixing_advance(
 async def websocket_mixing_log_salinity(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Log a refractometer reading against the target. Within tolerance the
-    batch goes 'ready' (pumps and heater off, testedAt stamped); out of band it
-    stays 'salting' and the reply carries the correction — real grams-to-add or
-    litres-to-dilute maths from the engine, never 'try again'."""
+    """Log a refractometer reading against the target — the first test while
+    'salting', or a RETEST on a ready/storing batch. In band: the batch goes
+    (or stays) ready/storing with testedAt refreshed, the circulation cadence
+    stamped, and the keeper's retest chore marked done. Out of band: back to
+    (or stays in) 'salting' — pumps on, mix clock restarted — and the reply
+    carries real grams-to-add or litres-to-dilute maths, never 'try again'."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -13938,20 +14100,40 @@ async def websocket_mixing_log_salinity(
         config = _config_from_entry(entry)
         cfg = _mixing_cfg(config)
         batch = cfg.get("batch", {})
-        if str(batch.get("state") or "idle") != "salting":
+        state = str(batch.get("state") or "idle")
+        if state not in ("salting", "ready", "storing"):
             connection.send_error(msg["id"], "invalid_state",
-                                  "Salinity is logged while the batch is salting")
+                                  "Salinity is logged while a batch is mixing or stored")
             return
         salt_cfg = cfg.get("salt", {})
         correction = mixing_engine.salinity_correction(
             ppt, salt_cfg.get("targetPpt"), batch.get("litres"),
             salt_cfg.get("brand"), salt_cfg.get("customGPerL"))
+        now = datetime.now(timezone.utc)
         batch["loggedPpt"] = round(ppt, 2)
         if correction.get("status") == "pass":
-            batch["testedAt"] = datetime.now(timezone.utc).isoformat()
-            await _async_mixing_enter_stage(hass, config, "ready", connection.context(msg))
+            batch["testedAt"] = now.isoformat()
+            if state == "salting":
+                await _async_mixing_enter_stage(hass, config, "ready", connection.context(msg))
+                every_h = _awc_num(cfg.get("storage", {}).get("circulateEveryH"),
+                                   0, 0, MIXING_CIRCULATE_EVERY_MAX_H)
+                batch["nextCirculateAt"] = (
+                    (now + timedelta(hours=every_h)).isoformat() if every_h > 0 else "")
+                _append_activity(
+                    config, f"Mixing station: batch tested at {ppt:g} ppt — ready", "control")
+            else:
+                _append_activity(
+                    config, f"Mixing station: retested {ppt:g} ppt — still good", "control")
+            _mixing_sync_reminders(config, now, "tested")
+        elif state in ("ready", "storing"):
+            # A stored batch that drifted out of band goes back onto the pumps —
+            # the honest fix is re-mixing, not a stale "ready" with an asterisk.
+            _clear_mixing_circ_timer(hass)
+            _mixing_clear_circ_stamps(batch)
+            await _async_mixing_enter_stage(hass, config, "salting", connection.context(msg))
             _append_activity(
-                config, f"Mixing station: batch tested at {ppt:g} ppt — ready", "control")
+                config, f"Mixing station: retest {ppt:g} ppt out of band — back to mixing",
+                "warning")
         else:
             _append_activity(
                 config, f"Mixing station: tested {ppt:g} ppt — "
@@ -13979,14 +14161,111 @@ async def websocket_mixing_abort(
             connection.send_error(msg["id"], "not_running", "No batch to abort")
             return
         _clear_mixing_fill_timer(hass)
+        _clear_mixing_circ_timer(hass)
         await _async_mixing_stop_switches(
             hass, config, MIXING_SWITCH_ROLES, connection.context(msg))
         cfg["batch"] = {
             "state": "idle", "type": "salt", "startedAt": "", "stageAt": "",
             "litres": 0, "loggedPpt": 0, "testedAt": "", "usedLitres": 0,
+            "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": "",
         }
+        _mixing_sync_reminders(config, datetime.now(timezone.utc), "gone")
         _append_activity(config, "Mixing station: batch aborted — everything switched off",
                          "warning")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_mark_used",
+    vol.Required("litres"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=2000)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_mark_used(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Debit the batch ledger by used litres (a water change, a top-off jug).
+    An exhausted batch closes honestly: back to idle, circulation stopped, the
+    retest chore stood down. AWC's Stage D completion will call this too."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    litres = float(msg["litres"])
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        batch = cfg.get("batch", {})
+        if str(batch.get("state") or "idle") not in ("ready", "storing"):
+            connection.send_error(msg["id"], "invalid_state",
+                                  "Only a ready or stored batch can be drawn from")
+            return
+        total = _awc_num(batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
+        used = min(total, _awc_num(batch.get("usedLitres"), 0, 0, total) + litres)
+        batch["usedLitres"] = round(used, 1)
+        remaining = round(total - used, 1)
+        if remaining <= 0.05:
+            _clear_mixing_circ_timer(hass)
+            cfg["batch"] = {
+                "state": "idle", "type": "salt", "startedAt": "", "stageAt": "",
+                "litres": 0, "loggedPpt": 0, "testedAt": "", "usedLitres": 0,
+                "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": "",
+            }
+            _mixing_sync_reminders(config, datetime.now(timezone.utc), "gone")
+            _append_activity(config, "Mixing station: batch used up — the vessel stands empty",
+                             "control")
+        else:
+            _append_activity(
+                config, f"Mixing station: {litres:g} L used — {remaining:g} L left", "control")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_set_level",
+    vol.Required("vessel"): cv.string,
+    vol.Required("litres"): vol.All(vol.Coerce(float), vol.Range(min=0, max=2000)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_set_level(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Manual level correction — the keeper looked at the container and the
+    estimate was wrong. 'rodi' re-anchors the store's ledger; 'mix' re-anchors
+    the live batch's remaining litres (usedLitres absorbs the difference)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    vessel = str(msg["vessel"])
+    litres = float(msg["litres"])
+    if vessel not in ("rodi", "mix"):
+        connection.send_error(msg["id"], "invalid_vessel", "Vessel must be 'rodi' or 'mix'")
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        if vessel == "rodi":
+            if str(cfg.get("layout") or "dual") != "dual":
+                connection.send_error(msg["id"], "invalid_vessel",
+                                      "A single-vessel layout has no RODI store")
+                return
+            rodi = cfg.setdefault("vessels", {}).setdefault("rodi", {})
+            vol = _awc_num(rodi.get("volumeLitres"), 0, 0, MIXING_VESSEL_MAX_L)
+            rodi["estimatedLitres"] = round(
+                max(0.0, min(litres, vol if vol > 0 else litres)), 1)
+        else:
+            batch = cfg.get("batch", {})
+            if str(batch.get("state") or "idle") == "idle":
+                connection.send_error(msg["id"], "invalid_state",
+                                      "No batch in the mix vessel to correct")
+                return
+            total = _awc_num(batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
+            batch["usedLitres"] = round(max(0.0, min(total, total - litres)), 1)
+        _append_activity(
+            config, f"Mixing station: {vessel} level corrected to {litres:g} L", "control")
         config = await _async_save_config(hass, entry, config)
     _mixing_send(connection, msg, hass, config)
 
@@ -16393,6 +16672,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_mixing_advance)
     websocket_api.async_register_command(hass, websocket_mixing_log_salinity)
     websocket_api.async_register_command(hass, websocket_mixing_abort)
+    websocket_api.async_register_command(hass, websocket_mixing_mark_used)
+    websocket_api.async_register_command(hass, websocket_mixing_set_level)
     websocket_api.async_register_command(hass, websocket_nps_summary)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
@@ -16522,8 +16803,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     # Stop ha_switch_timed pumps orphaned mid-dose (honest elapsed credit).
     await _async_dosing_ha_recover(hass, entry)
     # Mixing station plugs orphaned mid-batch: booster/heater off, pumps
-    # re-asserted during salting (doc §11 fail-safe directions).
+    # re-asserted during salting (doc §11 fail-safe directions), a mid-burst
+    # circulation stopped and re-anchored.
     await _async_mixing_recover_orphaned(hass, entry)
+    await _async_schedule_mixing_circulation(hass, entry, _config_from_entry(entry))
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
@@ -16577,6 +16860,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _mixing_fill = _store.pop(MIXING_FILL_UNSUB, None)
     if _mixing_fill is not None:
         _mixing_fill()
+    # The circulation chain likewise: its stamps re-arm it on the next setup.
+    _mixing_circ = _store.pop(MIXING_CIRC_UNSUB, None)
+    if _mixing_circ is not None:
+        _mixing_circ()
     _issue_refresh = _store.pop(ISSUE_REFRESH_UNSUB, None)
     if _issue_refresh is not None:
         _issue_refresh()

@@ -263,4 +263,73 @@ test("simulate mode announces itself on the batch card and in settings", async (
   assert(/data-field="simulate"[^>]*checked/.test(body), "settings lost the armed sim toggle");
 });
 
+test("a stored batch offers usage, retest and the reminder seed — RODI batches only usage", async () => {
+  const panel = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", type: "salt", litres: 40, remainingLitres: 25 } }));
+  panel._activeTab = "mixing";
+  let html = panel._mixingTab();
+  assert(html.includes("data-mixing-used"), "storing lost its usage input");
+  assert(html.includes('data-action="mixing-mark-used"'), "storing lost Log usage");
+  assert(html.includes('data-action="mixing-log"'), "storing lost Log retest");
+  assert(html.includes('data-action="mixing-add-retest-reminder"'),
+    "no reminder task yet — the seed button should offer itself");
+  panel._config.maintenance = { tasks: { mixing_retest: { label: "Retest" } } };
+  html = panel._mixingTab();
+  assert(!html.includes('data-action="mixing-add-retest-reminder"'),
+    "task exists — the seed button must stand down");
+  const rodi = await mixingPanel({ batch: { state: "ready", type: "rodi", litres: 30 } },
+    summaryBlob({ batch: { status: "ready", type: "rodi", litres: 30, remainingLitres: 30 } }));
+  rodi._activeTab = "mixing";
+  const rodiHtml = rodi._mixingTab();
+  assert(rodiHtml.includes("data-mixing-used"), "rodi batch lost its usage input");
+  assert(!rodiHtml.includes('data-action="mixing-log"'), "a top-off batch has nothing to retest");
+});
+
+test("the storing card tells the circulation rhythm honestly", async () => {
+  const still = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", type: "salt", litres: 40, remainingLitres: 40, circulating: false } }));
+  still._activeTab = "mixing";
+  assert(/stir 10 min every 6 h/.test(still._mixingTab()), "quiet storage lost its cadence line");
+  const stirring = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", type: "salt", litres: 40, remainingLitres: 40, circulating: true } }));
+  stirring._activeTab = "mixing";
+  assert(stirring._mixingTab().includes("Stirring now"), "a live burst went unannounced");
+});
+
+test("a circulation burst spins the impellers without salting's snow", async () => {
+  const panel = await mixingPanel();
+  const svg = panel._mixingDiagramSvg(mixConfig(),
+    { status: "storing", type: "salt", circulating: true }, summaryBlob().levels);
+  assert(svg.includes('class="mix-spin"'), "the burst did not spin the impellers");
+  assert(!svg.includes('class="mix-snow"'), "a storage stir must not snow salt");
+});
+
+test("level corrections follow the layout and the batch", async () => {
+  const dual = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", litres: 40, remainingLitres: 40 } }));
+  dual._activeTab = "mixing";
+  const html = dual._mixingTab();
+  assert(html.includes('data-mixing-level="rodi"'), "dual layout lost the RODI correction");
+  assert(html.includes('data-mixing-level="mix"'), "an active batch lost the mix correction");
+  const idleSingle = await mixingPanel({ layout: "single" },
+    summaryBlob({ levels: { mix: { litres: 0, volumeLitres: 50, percent: 0, estimated: true } } }));
+  idleSingle._activeTab = "mixing";
+  const idleHtml = idleSingle._mixingTab();
+  assert(!idleHtml.includes('data-mixing-level="rodi"'), "single layout offered a phantom RODI correction");
+  assert(!idleHtml.includes('data-mixing-level="mix"'), "idle vessel offered a correction with nothing in it");
+});
+
+test("the seed button writes the keeper's retest chore from the storage setting", async () => {
+  const panel = await mixingPanel({ storage: { circulateEveryH: 6, circulateForMin: 10, retestAfterDays: 5 } });
+  panel._setDirty = () => { panel._dirtied = true; };
+  panel._recordActivity = () => {};
+  panel._render = () => {};
+  panel._mixingSeedRetestReminder();
+  const task = panel._config.maintenance.tasks.mixing_retest;
+  assert(task && task.enabled === true, "seed did not create the chore");
+  assert(task.cadenceDays === 5 && task.criticalAfterDays === 10,
+    "cadence did not follow retestAfterDays");
+  assert(panel._dirtied, "seeding must mark the config dirty");
+});
+
 runTests();

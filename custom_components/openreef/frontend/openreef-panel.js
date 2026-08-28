@@ -1667,6 +1667,19 @@ class OpenReefPanel extends HTMLElement {
         else { this._mixingMessage = "Enter the refractometer reading first."; this._render(); }
       }
       if (action === "mixing-abort") this._mixingAction({ type: "openreef/mixing_abort" });
+      if (action === "mixing-mark-used") {
+        const used = Number(this.shadowRoot.querySelector("[data-mixing-used]")?.value) || 0;
+        if (used > 0) this._mixingAction({ type: "openreef/mixing_mark_used", litres: used });
+        else { this._mixingMessage = "Enter how many litres you drew off."; this._render(); }
+      }
+      if (action === "mixing-set-level") {
+        const input = this.shadowRoot.querySelector(`[data-mixing-level="${id}"]`);
+        const litres = Number(input?.value);
+        if (input && Number.isFinite(litres) && litres >= 0) {
+          this._mixingAction({ type: "openreef/mixing_set_level", vessel: id, litres });
+        }
+      }
+      if (action === "mixing-add-retest-reminder") this._mixingSeedRetestReminder();
       if (action === "awc-run") this._awcRunNow();
       if (action === "awc-focus-run") {
         const el = this.shadowRoot.querySelector("[data-awc-run-amount]");
@@ -22519,6 +22532,27 @@ const rigSteps = [
     }
   }
 
+  _mixingSeedRetestReminder() {
+    // Custom (non-builtin) maintenance task: evaluation, snooze, notify and
+    // history come free from the maintenance engine (the hatchery precedent).
+    // The keeper adds it here; the backend bridge only ever re-times it, logs
+    // completions on tested batches, and stands it down when the vessel empties.
+    const m = this._config.maintenance = this._config.maintenance || {};
+    const tasks = m.tasks = m.tasks || {};
+    const retestDays = Math.max(1, Number(this._mixingCfg().storage?.retestAfterDays) || 7);
+    tasks.mixing_retest = {
+      ...(tasks.mixing_retest || {
+        label: "Retest stored saltwater", enabled: true, notify: true,
+        notes: "Stored batches drift (evaporation raises salinity) — check with the refractometer and log it on the Mixing Station tab.",
+      }),
+      cadenceDays: retestDays,
+      criticalAfterDays: retestDays * 2,
+    };
+    this._recordActivity("Added reminder: retest stored saltwater");
+    this._setDirty(true);
+    this._render();
+  }
+
   async _mixingAction(payload) {
     this._busy = true;
     this._render();
@@ -22638,8 +22672,34 @@ const rigSteps = [
       controls = `
         <div class="mini-grid"><label>Measured salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label></div>
         <div class="button-row"><button data-action="mixing-log" ${disabled}>Log test</button>${abortBtn}</div>`;
+    } else if (status === "ready" || status === "storing") {
+      const saltBatch = batch.type !== "rodi";
+      const hasRetestTask = !!this._config?.maintenance?.tasks?.mixing_retest;
+      controls = `
+        <div class="mini-grid">
+          <label>Litres used<input type="number" min="0" step="1" data-mixing-used placeholder="${Number(batch.remainingLitres) || 0}"></label>
+          ${saltBatch ? `<label>Retest salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label>` : ""}
+        </div>
+        <div class="button-row">
+          <button data-action="mixing-mark-used" ${disabled}>Log usage</button>
+          ${saltBatch ? `<button class="secondary" data-action="mixing-log" ${disabled}>Log retest</button>` : ""}
+          ${saltBatch && !hasRetestTask ? `<button class="secondary" data-action="mixing-add-retest-reminder" ${disabled}>+ Retest reminder</button>` : ""}
+          ${abortBtn}
+        </div>`;
     } else {
       controls = `<div class="button-row">${abortBtn}</div>`;
+    }
+    // The storing rhythm, told honestly: what the schedule is, and whether the
+    // pumps are stirring right now (the diagram spins off the same flag).
+    let circulationLine = "";
+    if ((status === "ready" || status === "storing") && batch.type !== "rodi") {
+      const everyH = Number(mix.storage?.circulateEveryH) || 0;
+      const forMin = Number(mix.storage?.circulateForMin) || 0;
+      circulationLine = everyH > 0
+        ? `<small class="awc-hint">${batch.circulating
+          ? "Stirring now — the pumps are running their scheduled burst."
+          : `Pumps stir ${forMin} min every ${everyH} h to keep the batch mixed — never continuously.`}</small>`
+        : `<small class="awc-hint">Storage circulation is off (set a cadence in settings to keep the batch stirred).</small>`;
     }
 
     const statusCard = `
@@ -22649,6 +22709,7 @@ const rigSteps = [
         </div>
         ${rail}
         <p class="muted">${this._escape(statusDetail)}</p>
+        ${circulationLine}
         ${this._mixingMessage ? `<div class="notice warning-notice">${this._escape(this._mixingMessage)}</div>` : ""}
         ${batch.retestDue ? `<div class="notice warning-notice"><strong>Retest due.</strong> This batch has aged past its window — check salinity before it touches the tank.</div>` : ""}
         ${controls}
@@ -22670,6 +22731,18 @@ const rigSteps = [
         <div class="section-head"><div><p class="eyebrow">Live view</p><h3>${this._escape(this._mixingStatusLabel(status))}</h3></div></div>
         ${this._mixingDiagramSvg(mix, batch, levels)}
         <small class="awc-hint">Levels are estimates moved by confirmed events — bind level sensors in settings when the hardware lands and the picture goes real.</small>
+        <div class="mini-grid">
+          ${mix.layout !== "single" ? `
+          <label>Correct RODI store (L)
+            <input type="number" min="0" step="1" data-mixing-level="rodi" placeholder="${levels?.rodi ? this._format(levels.rodi.litres, 1) : ""}">
+          </label>
+          <button class="secondary compact-button" data-action="mixing-set-level" data-id="rodi" ${this._busy ? "disabled" : ""}>Set</button>` : ""}
+          ${status !== "idle" ? `
+          <label>Correct ${mix.layout === "single" ? "vessel" : "mix vessel"} (L)
+            <input type="number" min="0" step="1" data-mixing-level="mix" placeholder="${levels?.mix ? this._format(levels.mix.litres, 1) : ""}">
+          </label>
+          <button class="secondary compact-button" data-action="mixing-set-level" data-id="mix" ${this._busy ? "disabled" : ""}>Set</button>` : ""}
+        </div>
       </section>`;
 
     return `<section class="stack">${head}${diagramCard}${statusCard}${doseCard}</section>`;
@@ -22686,6 +22759,9 @@ const rigSteps = [
     const transferring = status === "transferring";
     const heating = status === "heating";
     const salting = status === "salting";
+    // A storing batch's scheduled burst spins the same impellers (the flag is
+    // the backend's clock, never a guess) — but only salting gets salt snow.
+    const stirring = salting || !!batch?.circulating;
     const heatOn = !!mix.heat?.enabled;
     const rodiPct = Math.max(0, Math.min(100, Number(levels?.rodi?.percent) || 0));
     const mixPct = Math.max(0, Math.min(100, Number(levels?.mix?.percent) || 0));
@@ -22766,8 +22842,8 @@ const rigSteps = [
             <rect x="${mixX + 92}" y="130" width="7" height="70" rx="3" fill="#4e342e" stroke="#8d6e63" stroke-width="1.5"></rect>
             ${heating ? `<rect x="${mixX + 92}" y="130" width="7" height="70" rx="3" fill="#ff7043" class="mix-glow"></rect>` : ""}
           </g>` : ""}
-          ${impeller(mixX + 24, salting)}
-          ${impeller(mixX + 54, salting)}
+          ${impeller(mixX + 24, stirring)}
+          ${impeller(mixX + 54, stirring)}
           <text x="${mixX + 54}" y="232" text-anchor="middle" font-size="10" fill="#b0bec5">${dual ? "Mix vessel" : "The vessel"} ${levels?.mix ? `${this._format(levels.mix.litres, 1)}L` : "—"}</text>
           <text x="${mixX + 54}" y="245" text-anchor="middle" font-size="8" fill="#78909c">estimated</text>
           ${ready && batch?.type !== "rodi" ? badge(mixX + 25, 102, batch.loggedPpt ? `${this._format(batch.loggedPpt, 1)} ppt` : "READY", "#2e7d32") : ""}

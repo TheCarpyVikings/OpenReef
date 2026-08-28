@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.85"
+INTEGRATION_VERSION = "0.7.86"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -264,6 +264,13 @@ MAINTENANCE_SOURCE_HATCHERY = "hatchery"
 MAINTENANCE_HATCH_START_TASK_ID = "brine_hatch_start"
 MAINTENANCE_HATCH_HARVEST_TASK_ID = "brine_hatch_harvest"
 MAINTENANCE_HAND_FEED_TASK_ID = "brine_hand_feed"
+
+# Mixing-station-driven completions: a logged salinity test (first pass or a
+# retest) marks the keeper-added retest chore done, so its due clock always
+# runs from the refractometer. The task itself is seeded by a panel button —
+# the sync bridge never conjures a reminder behind the keeper's back.
+MAINTENANCE_SOURCE_MIXING = "mixing"
+MAINTENANCE_MIXING_RETEST_TASK_ID = "mixing_retest"
 
 # Maintenance Tasks V2 — HA-native reminders. A single daily tick (at this local
 # time) re-evaluates due/overdue tasks and fires an in-HA persistent notification
@@ -1661,6 +1668,12 @@ DEFAULT_CORE_CONFIG = {
             "loggedPpt": 0,
             "testedAt": "",
             "usedLitres": 0,
+            # Storing circulation stamps (Stage C): the persisted traces the
+            # burst chain runs on — circulateUntil while a burst is in flight,
+            # nextCirculateAt between bursts, lastCirculatedAt for display.
+            "circulateUntil": "",
+            "nextCirculateAt": "",
+            "lastCirculatedAt": "",
         },
         "integrations": {
             "awcGuard": "warn",                 # off | warn | block (Stage D)
