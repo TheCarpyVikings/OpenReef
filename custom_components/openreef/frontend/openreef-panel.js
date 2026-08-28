@@ -282,6 +282,7 @@ class OpenReefPanel extends HTMLElement {
       sensors: false,
       manualTests: false,
       maintenance: false,
+      mixing: false,
       equipment: false,
       modes: false,
       alerts: false,
@@ -503,6 +504,9 @@ class OpenReefPanel extends HTMLElement {
       // from config — a save invalidates them, so recompile without the
       // save-then-refresh dance.
       if (this._activeTab === "nps" || this._activeTab === "hatchery") this._npsLoadSummary(true);
+      // Mixing summary (batch clocks, dose guide, levels) is computed backend-side
+      // from config — a save (brand, volumes, layout) invalidates it the same way.
+      if (this._activeTab === "mixing") this._mixingLoadSummary(true);
       // The spawning execution strip is computed backend-side from the saved
       // program — a save (new reef/offset/noon) must refresh it immediately.
       if (this._activeTab === "spawning") this._loadSpawnExecStatus(true);
@@ -2341,6 +2345,28 @@ class OpenReefPanel extends HTMLElement {
         a.sourcePolicy.ratio = a.sourcePolicy.ratio || {};
         a.sourcePolicy.ratio[id] = Math.max(0, Number(value) || 0);
       }
+      if (scope === "mixing") {
+        const m = this._config.mixingStation = this._config.mixingStation || {};
+        m[field] = (field === "enabled") ? value
+          : (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+      }
+      if (scope === "mixing-vessel") {
+        const m = this._config.mixingStation = this._config.mixingStation || {};
+        m.vessels = m.vessels || {}; m.vessels[id] = m.vessels[id] || {};
+        m.vessels[id][field] = (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+      }
+      if (scope === "mixing-switch") {
+        const m = this._config.mixingStation = this._config.mixingStation || {};
+        m.switches = m.switches || {}; m.switches[id] = m.switches[id] || {};
+        m.switches[id][field] = value;
+      }
+      if (["mixing-rodi", "mixing-salt", "mixing-heat", "mixing-storage"].includes(scope)) {
+        const m = this._config.mixingStation = this._config.mixingStation || {};
+        const key = scope.slice("mixing-".length);
+        const sub = m[key] = m[key] || {};
+        sub[field] = (target.type === "checkbox") ? value
+          : (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+      }
       if (scope === "nps") {
         const npsCfg = this._config.nps = this._config.nps || {};
         npsCfg[field] = value;
@@ -2441,7 +2467,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-hatch-vessel" && field === "volumePreset") || (scope === "nps-hatch-reservoir" && field === "refrigerated") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && field === "brand") || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-hatch-vessel" && field === "volumePreset") || (scope === "nps-hatch-reservoir" && field === "refrigerated") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -11797,6 +11823,7 @@ const rigSteps = [
       { id: "water", label: "Water", icon: "💧",
         pages: [
           ["awc", "Water Change"],
+          ...(this._mixingEnabled() ? [["mixing", "Mixing Station"]] : []),
           ...(this._dosingEnabled() ? [["dosing", "Dosing"]] : []),
           ["maintenance", "Maintenance"],
           ["icp", "ICP"],
@@ -11890,6 +11917,11 @@ const rigSteps = [
         const count = safe(() => Object.values(this._doserChannels()).filter((c) => c?.enabled).length, 0);
         return this._hubCard(id, label, `${count} channel${count === 1 ? "" : "s"}`, "pumps, advisor, reservoirs", "ok");
       }
+      if (id === "mixing") {
+        const state = safe(() => this._config?.mixingStation?.batch?.state, "idle") || "idle";
+        return this._hubCard(id, label, this._mixingStatusLabel(state),
+          state === "idle" ? "RODI in, salt to target — batches you can trust" : "a batch is on the go", "ok");
+      }
       if (id === "maintenance") {
         const due = safe(() => this._maintenanceUpcoming(7).filter((e) => e.state.status === "warning" || e.state.status === "critical").length, 0);
         return this._hubCard(id, label, due ? `${due} due` : "clear", due ? "chores need attention" : "every chore inside its cadence", due ? "warning" : "ok");
@@ -11954,6 +11986,10 @@ const rigSteps = [
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
     if (this._activeTab === "awc") return this._automaticWaterChange();
+    if (this._activeTab === "mixing") {
+      // Falls back to Mission if the station was disabled while this tab was active.
+      return this._mixingEnabled() ? this._mixingTab() : this._mission();
+    }
     if (this._activeTab === "controls") return this._controls();
     if (this._activeTab === "spawning") return this._spawningTab();
     if (this._activeTab === "icp") return this._icpTab();
@@ -22434,6 +22470,313 @@ const rigSteps = [
     `;
   }
 
+  // --- Saltwater Mixing Station -------------------------------------------
+  // Maths live backend-side in mixing.py (lockstep rule) — this tab renders the
+  // summary blob and the live station diagram. The guided workflow's buttons
+  // land in Stage B (docs/mixing-station-brainstorm.md §12); Stage A ships the
+  // tab, the diagram, the dose guide and the settings.
+
+  _mixingEnabled() {
+    return !!this._config?.mixingStation?.enabled;
+  }
+
+  _mixingCfg() {
+    return this._config?.mixingStation || {};
+  }
+
+  async _mixingLoadSummary(force = false) {
+    if (this._mixingSummaryLoading) return;
+    if (!force && this._mixingSummary && Date.now() - (this._mixingSummaryAt || 0) < 8000) return;
+    this._mixingSummaryLoading = true;
+    try {
+      const result = await this._callWS({ type: "openreef/mixing_summary" });
+      this._mixingSummary = result?.summary || this._mixingSummary;
+    } catch (err) {
+      /* leave the last summary in place */
+    } finally {
+      // Always stamp the time — even on failure — so the refresh gate prevents
+      // a render→reload→render hot loop when the WS call keeps failing.
+      this._mixingSummaryAt = Date.now();
+      this._mixingSummaryLoading = false;
+      if (this._activeTab === "mixing") this._render();
+    }
+  }
+
+  _mixingStatusLabel(status) {
+    return ({
+      idle: "Idle", filling: "Filling RODI…", transferring: "Transferring…",
+      heating: "Heating…", salting: "Salting & mixing…", ready: "Batch ready",
+      storing: "Storing", fault: "Faulted",
+    })[status] || "Idle";
+  }
+
+  _mixingStageLabel(stage) {
+    return ({
+      filling: "Fill RODI", transferring: "Transfer", heating: "Heat",
+      salting: "Salt & mix", ready: "Ready", storing: "Store",
+    })[stage] || stage;
+  }
+
+  _mixingTab() {
+    const mix = this._mixingCfg();
+    const sum = this._mixingSummary;
+    if (!sum && !this._mixingSummaryLoading) setTimeout(() => this._mixingLoadSummary(), 0);
+    const batch = sum?.batch || { status: mix.batch?.state || "idle", stages: [] };
+    const levels = sum?.levels || {};
+    const dose = sum?.dose || { available: false };
+    const status = batch.status || "idle";
+
+    const head = `
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Intelligence layer</p>
+          <h2>Saltwater Mixing Station</h2>
+          <p class="muted">${mix.layout === "single"
+            ? "One vessel: fill it with RODI, salt it in place."
+            : "RODI store and mix vessel — the batch OpenReef can vouch for."}</p>
+        </div>
+        <div class="button-row">
+          <button class="secondary" data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing">Settings</button>
+        </div>
+      </div>`;
+
+    // The progress rail: the stages THIS batch walks (layout-aware — Transfer
+    // and Heat only appear when the setup includes them).
+    const stages = Array.isArray(batch.stages) && batch.stages.length
+      ? batch.stages : ["filling", "salting", "ready", "storing"];
+    const activeIdx = stages.indexOf(status);
+    const rail = `
+      <div class="button-row" style="flex-wrap:wrap;gap:6px;">
+        ${stages.map((stage, i) => `
+          <span class="pill" style="${i === activeIdx ? "background:#1b5e20;color:#e8f5e9;" : activeIdx >= 0 && i < activeIdx ? "opacity:.75;" : "opacity:.45;"}">
+            ${i === activeIdx ? "● " : activeIdx >= 0 && i < activeIdx ? "✓ " : ""}${this._escape(this._mixingStageLabel(stage))}
+          </span>`).join("")}
+      </div>`;
+
+    const mixClock = batch.mix || {};
+    const statusDetail = status === "idle"
+      ? "No batch underway. The vessels are dry, the salt bucket is sealed, and nobody is pretending otherwise."
+      : status === "salting"
+        ? (mixClock.testUnlocked
+          ? "Mix window done — test the batch with your refractometer."
+          : `Mixing — ${this._format(mixClock.hoursLeft, 1)} h left in the ${this._format(sum?.mixHours, 1)} h window.`)
+        : status === "ready" || status === "storing"
+          ? `${this._format(batch.remainingLitres, 1)} L on hand${batch.loggedPpt ? ` · tested ${this._format(batch.loggedPpt, 1)} ppt` : ""}${batch.retestDue ? " · retest before use" : ""}`
+          : this._mixingStatusLabel(status);
+
+    const statusCard = `
+      <article class="setting-card">
+        <div class="section-head">
+          <div><p class="eyebrow">Batch</p><h3>${this._escape(this._mixingStatusLabel(status))}</h3></div>
+        </div>
+        ${rail}
+        <p class="muted">${this._escape(statusDetail)}</p>
+        ${batch.retestDue ? `<div class="notice warning-notice"><strong>Retest due.</strong> This batch has aged past its window — check salinity before it touches the tank.</div>` : ""}
+        <small class="awc-hint">The guided workflow — start, stage advances, salinity log — arrives with the next release. Today the station shows its state honestly; it doesn't drive the plugs yet.</small>
+      </article>`;
+
+    const doseCard = `
+      <article class="setting-card">
+        <div class="section-head"><div><p class="eyebrow">Salt dose guide</p>
+          <h3>${this._escape(sum?.brand?.label || "—")} → ${this._format(sum?.targetPpt, 1)} ppt</h3></div></div>
+        ${dose.available
+          ? `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. The refractometer has the final word.</p>`
+          : `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`}
+        <small class="awc-hint">Mix window: ${this._format(sum?.mixHours, 1)} h${sum?.brand?.useWithinH ? ` · this brand wants the batch used within ~${this._format(sum.brand.useWithinH, 0)} h of mixing` : ""}.</small>
+      </article>`;
+
+    const diagramCard = `
+      <section class="setting-card">
+        <div class="section-head"><div><p class="eyebrow">Live view</p><h3>${this._escape(this._mixingStatusLabel(status))}</h3></div></div>
+        ${this._mixingDiagramSvg(mix, batch, levels)}
+        <small class="awc-hint">Levels are estimates moved by confirmed events — bind level sensors in settings when the hardware lands and the picture goes real.</small>
+      </section>`;
+
+    return `<section class="stack">${head}${diagramCard}${statusCard}${doseCard}</section>`;
+  }
+
+  // Inline SVG on the AWC-diagram pattern: static scene, CSS keyframes, state-
+  // conditional classes. Dual layout = RODI store + gravity line + mix vessel;
+  // single = the one vessel. Nothing here ever invents a reading: unknown
+  // percentages draw an empty vessel and say so.
+  _mixingDiagramSvg(mix, batch, levels) {
+    const status = batch?.status || "idle";
+    const dual = (mix.layout || "dual") !== "single";
+    const filling = status === "filling";
+    const transferring = status === "transferring";
+    const heating = status === "heating";
+    const salting = status === "salting";
+    const heatOn = !!mix.heat?.enabled;
+    const rodiPct = Math.max(0, Math.min(100, Number(levels?.rodi?.percent) || 0));
+    const mixPct = Math.max(0, Math.min(100, Number(levels?.mix?.percent) || 0));
+    const ready = status === "ready" || status === "storing";
+
+    // Geometry: dual puts the store left and the vessel right; single centres
+    // the one vessel. All heights hang off the 120-tall vessel body.
+    const mixX = dual ? 252 : 156;
+    const rodiFillH = 120 * rodiPct / 100, rodiFillY = 216 - rodiFillH;
+    const mixFillH = 120 * mixPct / 100, mixFillY = 216 - mixFillH;
+    const feedTargetX = dual ? 80 : mixX + 54;
+    const feedPath = `M 18 40 H ${feedTargetX} V 92`;
+    const transferPath = `M 126 168 H ${mixX}`;
+
+    const impeller = (cx, active) => `
+      <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;">
+        <title>Mixing pump — tap for settings</title>
+        <circle cx="${cx}" cy="196" r="10" fill="${active ? "#1b5e20" : "#2a2a2a"}" stroke="${active ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
+        <g class="${active ? "mix-spin" : ""}"><path d="M ${cx} 190 L ${cx} 202 M ${cx - 6} 196 L ${cx + 6} 196" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g>
+      </g>`;
+    const badge = (x, y, text, color) =>
+      `<g><rect x="${x}" y="${y}" width="58" height="16" rx="8" fill="${color}"></rect>` +
+      `<text x="${x + 29}" y="${y + 12}" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">${text}</text></g>`;
+
+    return `
+      <svg viewBox="0 0 420 262" style="width:100%;max-width:560px;display:block;margin:0 auto;" role="img"
+        aria-label="Mixing station diagram — ${this._escape(this._mixingStatusLabel(status))}">
+        <style>
+          @keyframes mix-flow { to { stroke-dashoffset: -28; } }
+          @keyframes mix-spin { to { transform: rotate(360deg); } }
+          @keyframes mix-snow { to { transform: translateY(70px); opacity: 0; } }
+          @keyframes mix-glow { 50% { opacity: 1; } }
+          .mix-flow { stroke-dasharray: 7 7; animation: mix-flow .6s linear infinite; }
+          .mix-spin { transform-box: fill-box; transform-origin: center; animation: mix-spin 1.3s linear infinite; }
+          .mix-snow { animation: mix-snow 1.6s linear infinite; }
+          .mix-glow { opacity: .35; animation: mix-glow 1.2s ease-in-out infinite; }
+          @media (prefers-reduced-motion: reduce) { .mix-flow, .mix-spin, .mix-snow, .mix-glow { animation: none; } }
+        </style>
+        <defs>
+          <linearGradient id="mixRodi" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#42a5f5"/><stop offset="1" stop-color="#0d47a1"/></linearGradient>
+          <linearGradient id="mixSalt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26c6da"/><stop offset="1" stop-color="#00838f"/></linearGradient>
+          <clipPath id="mixRodiClip"><rect x="38" y="96" width="88" height="120" rx="6"/></clipPath>
+          <clipPath id="mixVesselClip"><rect x="${mixX}" y="96" width="108" height="120" rx="6"/></clipPath>
+        </defs>
+
+        <text x="18" y="30" font-size="11" fill="#90a4ae">RODI unit</text>
+        <path d="${feedPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
+        ${filling ? `<path d="${feedPath}" fill="none" stroke="#42a5f5" stroke-width="3" class="mix-flow"></path>` : ""}
+        <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;">
+          <title>RODI booster pump — tap for settings</title>
+          <circle cx="46" cy="40" r="11" fill="${filling ? "#0d47a1" : "#2a2a2a"}" stroke="${filling ? "#42a5f5" : "#556"}" stroke-width="2"></circle>
+          <g class="${filling ? "mix-spin" : ""}"><path d="M 46 34 L 46 46 M 40 40 L 52 40" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g>
+        </g>
+
+        ${dual ? `
+        <g>
+          <rect x="38" y="96" width="88" height="120" rx="6" fill="rgba(255,255,255,0.04)" stroke="#455a64" stroke-width="2"></rect>
+          <g clip-path="url(#mixRodiClip)"><rect x="38" y="${rodiFillY}" width="88" height="${rodiFillH}" fill="url(#mixRodi)" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect></g>
+          <text x="82" y="232" text-anchor="middle" font-size="10" fill="#b0bec5">RODI store ${levels?.rodi ? `${this._format(levels.rodi.litres, 1)}L` : "—"}</text>
+          <text x="82" y="245" text-anchor="middle" font-size="8" fill="#78909c">estimated</text>
+        </g>
+        <path d="${transferPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linecap="round"></path>
+        ${transferring ? `<path d="${transferPath}" fill="none" stroke="#42a5f5" stroke-width="3" class="mix-flow"></path>` : ""}
+        <g><title>Gravity transfer — manual ball valve</title>
+          <rect x="${(126 + mixX) / 2 - 7}" y="161" width="14" height="14" rx="3" fill="#2a2a2a" stroke="${transferring ? "#42a5f5" : "#556"}" stroke-width="2"></rect>
+          <path d="M ${(126 + mixX) / 2 - 4} 168 H ${(126 + mixX) / 2 + 4}" stroke="#cfd8dc" stroke-width="2"></path>
+        </g>` : ""}
+
+        <g>
+          <rect x="${mixX}" y="96" width="108" height="120" rx="6" fill="rgba(255,255,255,0.04)" stroke="${ready ? "#66bb6a" : "#455a64"}" stroke-width="2"></rect>
+          <g clip-path="url(#mixVesselClip)">
+            <rect x="${mixX}" y="${mixFillY}" width="108" height="${mixFillH}" fill="url(#${batch?.type === "rodi" ? "mixRodi" : "mixSalt"})" opacity="0.8" style="transition:y .4s ease,height .4s ease;"></rect>
+            ${salting ? [0, 1, 2, 3].map((i) => `<circle cx="${mixX + 22 + i * 22}" cy="${104 + (i % 2) * 10}" r="2" fill="#eceff1" class="mix-snow" style="animation-delay:${i * 0.4}s;"></circle>`).join("") : ""}
+          </g>
+          ${heatOn ? `
+          <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;">
+            <title>Heater — tap for settings</title>
+            <rect x="${mixX + 92}" y="130" width="7" height="70" rx="3" fill="#4e342e" stroke="#8d6e63" stroke-width="1.5"></rect>
+            ${heating ? `<rect x="${mixX + 92}" y="130" width="7" height="70" rx="3" fill="#ff7043" class="mix-glow"></rect>` : ""}
+          </g>` : ""}
+          ${impeller(mixX + 24, salting)}
+          ${impeller(mixX + 54, salting)}
+          <text x="${mixX + 54}" y="232" text-anchor="middle" font-size="10" fill="#b0bec5">${dual ? "Mix vessel" : "The vessel"} ${levels?.mix ? `${this._format(levels.mix.litres, 1)}L` : "—"}</text>
+          <text x="${mixX + 54}" y="245" text-anchor="middle" font-size="8" fill="#78909c">estimated</text>
+          ${ready && batch?.type !== "rodi" ? badge(mixX + 25, 102, batch.loggedPpt ? `${this._format(batch.loggedPpt, 1)} ppt` : "READY", "#2e7d32") : ""}
+          ${batch?.retestDue ? badge(mixX + 25, 102, "RETEST", "#ef6c00") : ""}
+        </g>
+      </svg>`;
+  }
+
+  _mixingSettings() {
+    return this._settingsPanel(
+      "mixing",
+      "Saltwater Mixing Station",
+      "Layout, vessels, the four plugs, salt brand & target, heat, and storage circulation.",
+      this._mixingSettingsBody(this._mixingCfg()),
+    );
+  }
+
+  _mixingSettingsBody(mix) {
+    const vessels = mix.vessels || {};
+    const switches = mix.switches || {};
+    const salt = mix.salt || {};
+    const heat = mix.heat || {};
+    const storage = mix.storage || {};
+    const rodi = mix.rodi || {};
+    const dual = (mix.layout || "dual") !== "single";
+    // Brand list comes from the backend summary (lockstep — the engine owns the
+    // table); before the first summary lands, the stored brand still renders.
+    if (!this._mixingSummary && !this._mixingSummaryLoading) setTimeout(() => this._mixingLoadSummary(), 0);
+    const brands = this._mixingSummary?.brands
+      || (salt.brand ? [{ id: salt.brand, label: salt.brand }] : []);
+    const switchRow = (role, label, hint) => `
+      <label><span>${label} <small>${hint}</small></span>
+        ${this._awcEntitySelect("mixing-switch", `data-id="${role}"`, "switchEntity", switches[role]?.switchEntity || "", "switch")}</label>`;
+
+    return `
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="mixing" data-field="enabled" ${mix.enabled ? "checked" : ""}>
+        <span><strong>Mixing station on</strong><small>The Mixing Station tab — the live station diagram, the batch clock and the salt-dose guide.</small></span>
+      </label>
+      <div class="mini-grid">
+        <label>Station layout<select data-scope="mixing" data-field="layout">
+          <option value="dual" ${dual ? "selected" : ""}>Two vessels — RODI store + mix vessel</option>
+          <option value="single" ${dual ? "" : "selected"}>One vessel — fill RODI, salt in place</option>
+        </select></label>
+      </div>
+      <small class="awc-hint">Vessel volumes drive the estimation maths and the diagram's proportions. Level sensors are optional — bind them when the hardware lands and estimates step aside.</small>
+      <div class="mini-grid">
+        ${dual ? `<label>RODI store volume (L)<input type="number" min="0" step="1" data-scope="mixing-vessel" data-id="rodi" data-field="volumeLitres" value="${Number(vessels.rodi?.volumeLitres) || 0}"></label>` : ""}
+        <label>${dual ? "Mix vessel" : "Vessel"} volume (L)<input type="number" min="0" step="1" data-scope="mixing-vessel" data-id="mix" data-field="volumeLitres" value="${Number(vessels.mix?.volumeLitres) || 0}"></label>
+      </div>
+      <div class="mini-grid">
+        ${dual ? `<label>RODI level sensor (optional)${this._awcEntitySelect("mixing-vessel", `data-id="rodi"`, "levelSensorEntity", vessels.rodi?.levelSensorEntity || "", "sensor")}</label>` : ""}
+        <label>${dual ? "Mix vessel" : "Vessel"} level sensor (optional)${this._awcEntitySelect("mixing-vessel", `data-id="mix"`, "levelSensorEntity", vessels.mix?.levelSensorEntity || "", "sensor")}</label>
+      </div>
+      <small class="awc-hint">The plugs. Transfer between vessels is gravity + your ball valve — nothing to bind there. A float valve in the ${dual ? "RODI store" : "vessel"} stays the hard stop on the fill; the software cap below is the backup, never the plan.</small>
+      ${switchRow("rodiBooster", "RODI booster pump", "drives the fill")}
+      ${switchRow("mixPumpA", "Mixing pump 1", "circulation while salting & storing")}
+      ${switchRow("mixPumpB", "Mixing pump 2", "the second powerhead — optional")}
+      ${switchRow("heater", "Heater", "heats BEFORE the salt goes in")}
+      <div class="mini-grid">
+        <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.5" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
+        <label>Fill cap (minutes)<input type="number" min="1" step="5" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
+      </div>
+      <small class="awc-hint">Salt. The brand sets the dose guide and the default mix window — your refractometer stays the referee.</small>
+      <div class="mini-grid">
+        <label>Salt brand<select data-scope="mixing-salt" data-field="brand">
+          ${brands.map((b) => `<option value="${this._escape(b.id)}" ${(salt.brand || "nyos_pure") === b.id ? "selected" : ""}>${this._escape(b.label || b.id)}</option>`).join("")}
+        </select></label>
+        <label>Target salinity (ppt)<input type="number" min="20" max="45" step="0.1" data-scope="mixing-salt" data-field="targetPpt" value="${Number(salt.targetPpt) || 35}"></label>
+        <label>Mix window (h, 0 = brand default)<input type="number" min="0" max="72" step="0.5" data-scope="mixing-salt" data-field="mixHours" value="${Number(salt.mixHours) || 0}"></label>
+        ${(salt.brand || "") === "custom" ? `<label>Custom salt g/L @35 ppt<input type="number" min="0" max="100" step="0.1" data-scope="mixing-salt" data-field="customGPerL" value="${Number(salt.customGPerL) || 0}"></label>` : ""}
+      </div>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="mixing-heat" data-field="enabled" ${heat.enabled ? "checked" : ""}>
+        <span><strong>Heat before salting</strong><small>Brands want the water at temperature before the salt goes in — and salinity reads true only at temp. Skip it if you mix at ambient.</small></span>
+      </label>
+      ${heat.enabled ? `
+      <div class="mini-grid">
+        <label>Target temperature (°C)<input type="number" min="15" max="32" step="0.5" data-scope="mixing-heat" data-field="targetC" value="${Number(heat.targetC) || 25}"></label>
+        <label>Temp sensor (optional)${this._awcEntitySelect("mixing-heat", "", "tempSensorEntity", heat.tempSensorEntity || "", "sensor")}</label>
+      </div>` : ""}
+      <small class="awc-hint">Storage. A stored batch gets stirred on a schedule — never run continuously — and ages honestly: past the retest window it drops out of "ready" until you test it again.</small>
+      <div class="mini-grid">
+        <label>Circulate every (h)<input type="number" min="0" max="168" step="1" data-scope="mixing-storage" data-field="circulateEveryH" value="${Number(storage.circulateEveryH) || 0}"></label>
+        <label>Circulate for (min)<input type="number" min="1" max="120" step="1" data-scope="mixing-storage" data-field="circulateForMin" value="${Number(storage.circulateForMin) || 10}"></label>
+        <label>Retest after (days)<input type="number" min="0" max="60" step="1" data-scope="mixing-storage" data-field="retestAfterDays" value="${Number(storage.retestAfterDays) || 0}"></label>
+      </div>`;
+  }
+
   _settings() {
     return `
       <section class="stack">
@@ -22457,6 +22800,7 @@ const rigSteps = [
         ${this._maintenanceSettings()}
         ${this._dosingSettings()}
         ${this._awcSettings()}
+        ${this._mixingSettings()}
         ${this._npsSettings()}
         ${this._hatcherySettings()}
         ${this._equipmentSettings()}

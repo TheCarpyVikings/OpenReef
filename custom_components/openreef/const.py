@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 54
+CORE_SCHEMA_VERSION = 55
 
 # Reef Layer vocabulary — species decide which rock zone a coral may occupy
 # (SPS crest / LPS mid-rock / softies low / gorgonian at the back), colours
@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.83"
+INTEGRATION_VERSION = "0.7.84"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -326,6 +326,30 @@ AWC_HISTORY_MAX = 100                     # completed changes kept
 AWC_SPINUP_MAX_SECONDS = 3.0              # calibrate: max plausible spin-up = 3 s of flow
 AWC_SPINUP_MIN_CAP_ML = 5.0              # ...but never clamp the spin-up below 5 mL (slow pumps)
 AWC_SPINUP_MAX_ML = 1000.0                # config-normalise absolute sanity clamp on spinUpMl
+
+# Saltwater Mixing Station — guided batch workflow (fill → transfer → heat →
+# salt & mix → test → ready → storing). Maths in mixing.py, orchestration in
+# __init__.py, matching the awc.py split. Heat comes BEFORE salt: brands want
+# the water at temperature before the salt goes in (doc §2/§5). Levels are
+# estimated anchors until real level entities are bound (sensor-first design).
+MIXING_STATUSES = (
+    "idle", "filling", "transferring", "heating", "salting", "ready", "storing", "fault",
+)
+MIXING_LAYOUTS = ("dual", "single")
+MIXING_BATCH_TYPES = ("salt", "rodi")
+MIXING_SWITCH_ROLES = ("rodiBooster", "mixPumpA", "mixPumpB", "heater")
+MIXING_VESSEL_MAX_L = 2000.0              # sanity ceiling on a container size (AWC parity)
+MIXING_TARGET_PPT_MIN = 20.0              # brackish floor — below this is a typo, not a reef
+MIXING_TARGET_PPT_MAX = 45.0
+MIXING_FILL_CAP_MAX_MIN = 720             # 12 h ceiling on the booster software cap
+MIXING_FILL_CAP_DEFAULT_MIN = 240
+MIXING_MIX_HOURS_MAX = 72.0               # ceiling on a mix-window override
+MIXING_HEAT_TARGET_MIN_C = 15.0
+MIXING_HEAT_TARGET_MAX_C = 32.0           # above this no reef batch should ever be commanded
+MIXING_CIRCULATE_EVERY_MAX_H = 168        # storing circulation cadence ceiling (a week)
+MIXING_CIRCULATE_FOR_MAX_MIN = 120        # storing circulation burst ceiling
+MIXING_RETEST_MAX_DAYS = 60
+MIXING_RODI_RATE_MAX_LPH = 500.0          # sanity ceiling on a configured RODI rate
 
 # Dosing channels — multi-pump dosing control (kalk stepper doser first). The
 # firmware executes the schedule and the full guard chain (HA edits, never runs,
@@ -1589,6 +1613,58 @@ DEFAULT_CORE_CONFIG = {
         "todayLitres": 0,
         "weekLitres": 0,
         "monthLitres": 0,
+    },
+    # Saltwater Mixing Station — guided batch workflow with a live diagram.
+    # Maths in mixing.py; orchestration/state machine in __init__.py. Layout is
+    # dual (RODI store + mix vessel, gravity transfer) or single (salt in place).
+    # batch is stamped by the state machine, never hand-edited; vessel
+    # estimatedLitres are the honest anchors moved by confirmed events.
+    "mixingStation": {
+        "enabled": False,
+        "layout": "dual",
+        "vessels": {
+            "rodi": {"volumeLitres": 50, "estimatedLitres": 0, "levelSensorEntity": ""},
+            "mix": {"volumeLitres": 50, "levelSensorEntity": ""},
+        },
+        "switches": {
+            role: {"switchEntity": ""}
+            for role in ("rodiBooster", "mixPumpA", "mixPumpB", "heater")
+        },
+        "rodi": {
+            "rateLph": 0,                       # 0 = unknown ⇒ no fill ETA shown
+            "fillCapMin": MIXING_FILL_CAP_DEFAULT_MIN,
+        },
+        "salt": {
+            "brand": "nyos_pure",
+            "targetPpt": 35.0,
+            "mixHours": 0,                      # 0 = brand default
+            "customGPerL": 0,                   # brand "custom" only
+        },
+        "heat": {
+            "enabled": False,
+            "targetC": 25.0,
+            "tempSensorEntity": "",
+        },
+        "salinitySensorEntity": "",             # optional live probe (later stage)
+        "storage": {
+            "circulateEveryH": 6,
+            "circulateForMin": 10,
+            "retestAfterDays": 7,
+        },
+        "batch": {
+            "state": "idle",
+            "type": "salt",
+            "startedAt": "",
+            "stageAt": "",
+            "litres": 0,
+            "loggedPpt": 0,
+            "testedAt": "",
+            "usedLitres": 0,
+        },
+        "integrations": {
+            "awcGuard": "warn",                 # off | warn | block (Stage D)
+            "atoFromRodi": False,
+        },
     },
     # ICP test importer — stored lab reports + saved generic-mapper templates.
     # Reports are appended on import; overlapping core params are also fanned out

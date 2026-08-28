@@ -119,6 +119,22 @@ from .const import (
     ICP_REPORTS_MAX,
     MANUAL_TEST_CADENCE_PRESETS,
     MANUAL_TEST_PARAMETERS,
+    MIXING_BATCH_TYPES,
+    MIXING_CIRCULATE_EVERY_MAX_H,
+    MIXING_CIRCULATE_FOR_MAX_MIN,
+    MIXING_FILL_CAP_DEFAULT_MIN,
+    MIXING_FILL_CAP_MAX_MIN,
+    MIXING_HEAT_TARGET_MAX_C,
+    MIXING_HEAT_TARGET_MIN_C,
+    MIXING_LAYOUTS,
+    MIXING_MIX_HOURS_MAX,
+    MIXING_RETEST_MAX_DAYS,
+    MIXING_RODI_RATE_MAX_LPH,
+    MIXING_STATUSES,
+    MIXING_SWITCH_ROLES,
+    MIXING_TARGET_PPT_MAX,
+    MIXING_TARGET_PPT_MIN,
+    MIXING_VESSEL_MAX_L,
     MVP_SENSORS,
     NAME,
     PANEL_ICON,
@@ -175,6 +191,7 @@ from . import beta as beta_feedback  # BETA-FEEDBACK: remove after beta (see doc
 from . import dosing as dosing_engine
 from . import guardian as guardian_engine
 from . import icp
+from . import mixing as mixing_engine
 from . import nps as nps_engine
 from . import spawning
 from . import vision
@@ -1446,6 +1463,110 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
             "perSource": {r: 0.0 for r in valid_fill},
             "netSaltGrams": 0.0,
         }
+
+
+def _normalise_mixing_config(config: dict[str, Any]) -> None:
+    """Clamp/validate the Saltwater Mixing Station section in place. Layout,
+    vessels (volumes + the estimated-level anchor), the four switch roles,
+    salt brand/target, heat, storage circulation, and the stamped batch state
+    (docs/mixing-station-brainstorm.md §4). The batch block is preserved, only
+    clamped — a normalise pass must never move a running batch."""
+    defaults = DEFAULT_CORE_CONFIG["mixingStation"]
+    mix_cfg = config.get("mixingStation")
+    if not isinstance(mix_cfg, dict):
+        config["mixingStation"] = deepcopy(defaults)
+        return
+    config["mixingStation"] = mix_cfg
+
+    mix_cfg["enabled"] = bool(mix_cfg.get("enabled", False))
+    layout = str(mix_cfg.get("layout") or "dual")
+    mix_cfg["layout"] = layout if layout in MIXING_LAYOUTS else "dual"
+
+    raw_vessels = mix_cfg.get("vessels") if isinstance(mix_cfg.get("vessels"), dict) else {}
+    raw_rodi_v = raw_vessels.get("rodi") if isinstance(raw_vessels.get("rodi"), dict) else {}
+    raw_mix_v = raw_vessels.get("mix") if isinstance(raw_vessels.get("mix"), dict) else {}
+    rodi_vol = round(_awc_num(raw_rodi_v.get("volumeLitres"), 50, 0, MIXING_VESSEL_MAX_L), 1)
+    mix_cfg["vessels"] = {
+        "rodi": {
+            "volumeLitres": rodi_vol,
+            # The honest anchor: moved by confirmed events, capped by the vessel.
+            "estimatedLitres": round(_awc_num(
+                raw_rodi_v.get("estimatedLitres"), 0, 0,
+                rodi_vol if rodi_vol > 0 else MIXING_VESSEL_MAX_L), 1),
+            "levelSensorEntity": _normalise_entity_id(raw_rodi_v.get("levelSensorEntity")),
+        },
+        "mix": {
+            "volumeLitres": round(_awc_num(raw_mix_v.get("volumeLitres"), 50, 0, MIXING_VESSEL_MAX_L), 1),
+            "levelSensorEntity": _normalise_entity_id(raw_mix_v.get("levelSensorEntity")),
+        },
+    }
+
+    raw_switches = mix_cfg.get("switches") if isinstance(mix_cfg.get("switches"), dict) else {}
+    mix_cfg["switches"] = {
+        role: {"switchEntity": _normalise_entity_id(
+            (raw_switches.get(role) or {}).get("switchEntity")
+            if isinstance(raw_switches.get(role), dict) else None)}
+        for role in MIXING_SWITCH_ROLES
+    }
+
+    raw_rodi = mix_cfg.get("rodi") if isinstance(mix_cfg.get("rodi"), dict) else {}
+    mix_cfg["rodi"] = {
+        "rateLph": round(_awc_num(raw_rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH), 1),
+        "fillCapMin": int(_awc_num(raw_rodi.get("fillCapMin"),
+                                   MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)),
+    }
+
+    raw_salt = mix_cfg.get("salt") if isinstance(mix_cfg.get("salt"), dict) else {}
+    brand = str(raw_salt.get("brand") or "nyos_pure")
+    mix_cfg["salt"] = {
+        "brand": brand if brand in mixing_engine.brand_ids() else "nyos_pure",
+        "targetPpt": round(_awc_num(raw_salt.get("targetPpt"), 35.0,
+                                    MIXING_TARGET_PPT_MIN, MIXING_TARGET_PPT_MAX), 1),
+        "mixHours": round(_awc_num(raw_salt.get("mixHours"), 0, 0, MIXING_MIX_HOURS_MAX), 1),
+        "customGPerL": round(_awc_num(raw_salt.get("customGPerL"), 0, 0, 100), 1),
+    }
+
+    raw_heat = mix_cfg.get("heat") if isinstance(mix_cfg.get("heat"), dict) else {}
+    mix_cfg["heat"] = {
+        "enabled": bool(raw_heat.get("enabled", False)),
+        "targetC": round(_awc_num(raw_heat.get("targetC"), 25.0,
+                                  MIXING_HEAT_TARGET_MIN_C, MIXING_HEAT_TARGET_MAX_C), 1),
+        "tempSensorEntity": _normalise_entity_id(raw_heat.get("tempSensorEntity")),
+    }
+    mix_cfg["salinitySensorEntity"] = _normalise_entity_id(mix_cfg.get("salinitySensorEntity"))
+
+    raw_storage = mix_cfg.get("storage") if isinstance(mix_cfg.get("storage"), dict) else {}
+    mix_cfg["storage"] = {
+        "circulateEveryH": int(_awc_num(raw_storage.get("circulateEveryH"), 6, 0,
+                                        MIXING_CIRCULATE_EVERY_MAX_H)),
+        "circulateForMin": int(_awc_num(raw_storage.get("circulateForMin"), 10, 1,
+                                        MIXING_CIRCULATE_FOR_MAX_MIN)),
+        "retestAfterDays": int(_awc_num(raw_storage.get("retestAfterDays"), 7, 0,
+                                        MIXING_RETEST_MAX_DAYS)),
+    }
+
+    raw_batch = mix_cfg.get("batch") if isinstance(mix_cfg.get("batch"), dict) else {}
+    state = str(raw_batch.get("state") or "idle")
+    btype = str(raw_batch.get("type") or "salt")
+    batch_litres = round(_awc_num(raw_batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L), 1)
+    mix_cfg["batch"] = {
+        "state": state if state in MIXING_STATUSES else "idle",
+        "type": btype if btype in MIXING_BATCH_TYPES else "salt",
+        "startedAt": _awc_str(raw_batch.get("startedAt"), 40),
+        "stageAt": _awc_str(raw_batch.get("stageAt"), 40),
+        "litres": batch_litres,
+        "loggedPpt": round(_awc_num(raw_batch.get("loggedPpt"), 0, 0, 100), 2),
+        "testedAt": _awc_str(raw_batch.get("testedAt"), 40),
+        "usedLitres": round(_awc_num(raw_batch.get("usedLitres"), 0, 0,
+                                     batch_litres if batch_litres > 0 else MIXING_VESSEL_MAX_L), 1),
+    }
+
+    raw_integrations = mix_cfg.get("integrations") if isinstance(mix_cfg.get("integrations"), dict) else {}
+    awc_guard = str(raw_integrations.get("awcGuard") or "warn")
+    mix_cfg["integrations"] = {
+        "awcGuard": awc_guard if awc_guard in ("off", "warn", "block") else "warn",
+        "atoFromRodi": bool(raw_integrations.get("atoFromRodi", False)),
+    }
 
 
 def _normalise_core_config(settings: Any) -> dict[str, Any]:
@@ -2931,6 +3052,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         }
 
     _normalise_awc_config(config)
+    _normalise_mixing_config(config)
 
     return config
 
@@ -13488,6 +13610,34 @@ async def websocket_dosing_delete_channel(
     _awc_send(connection, msg, hass, config)
 
 
+# --- Saltwater Mixing Station: websocket actions -------------------------------------------
+# Maths in mixing.py; the batch state machine's transitions land in Stage B
+# (docs/mixing-station-brainstorm.md §5/§12). Stage A ships the read side: the
+# summary blob the tab and diagram render.
+
+def _mixing_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    section = config.get("mixingStation")
+    return section if isinstance(section, dict) else {}
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_summary"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_summary(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The mixing-station snapshot the tab polls: batch state + clocks, vessel
+    levels, dose guide and brand catalogue — all computed backend-side by
+    mixing.py so the panel never re-implements the maths (lockstep lesson)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    summary = mixing_engine.summary(_mixing_cfg(config), datetime.now(timezone.utc))
+    connection.send_result(msg["id"], {"success": True, "summary": summary})
+
+
 # --- Camera V2 / Phase A: event-triggered capture -----------------------------------------
 
 def _captures_dir(hass: HomeAssistant) -> Path:
@@ -15885,6 +16035,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_reset_reservoir)
     websocket_api.async_register_command(hass, websocket_dosing_mark_refreshed)
     websocket_api.async_register_command(hass, websocket_dosing_reset_tube)
+    websocket_api.async_register_command(hass, websocket_mixing_summary)
     websocket_api.async_register_command(hass, websocket_nps_summary)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
