@@ -214,4 +214,53 @@ test("settings body offers the four plugs and keeps the stored brand before the 
   assert(coldBody.includes('value="nyos_pure"'), "cold settings dropped the stored brand");
 });
 
+test("each stage offers exactly its one next action", async () => {
+  const expectations = [
+    ["idle", "mixing-start", "data-mixing-litres"],
+    ["filling", "mixing-advance", null],
+    ["transferring", "mixing-advance", "data-mixing-transfer"],
+    ["heating", "mixing-advance", null],
+    ["salting", "mixing-log", "data-mixing-ppt"],
+  ];
+  for (const [status, action, input] of expectations) {
+    const panel = await mixingPanel({ batch: { state: status, type: "salt", litres: 40 } },
+      summaryBlob({ batch: { status, litres: 40, remainingLitres: 40 } }));
+    panel._activeTab = "mixing";
+    const html = panel._mixingTab();
+    assert(html.includes(`data-action="${action}"`), `${status} lost its ${action} button`);
+    if (input) assert(html.includes(input), `${status} lost its ${input} input`);
+    if (status !== "idle") {
+      assert(html.includes('data-action="mixing-abort"'), `${status} lost its abort`);
+    }
+    noPlaceholders(html, `controls ${status}`);
+  }
+});
+
+test("a ready batch offers Discard, not Abort — and idle offers no abort at all", async () => {
+  const ready = await mixingPanel({ batch: { state: "ready", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "ready", litres: 40, remainingLitres: 40, loggedPpt: 35.1 } }));
+  ready._activeTab = "mixing";
+  assert(ready._mixingTab().includes("Discard batch"), "ready batch lost its Discard");
+  const idle = await mixingPanel();
+  idle._activeTab = "mixing";
+  assert(!idle._mixingTab().includes("mixing-abort"), "idle offered an abort with nothing running");
+});
+
+test("the correction message renders where the keeper can read it", async () => {
+  const panel = await mixingPanel({ batch: { state: "salting", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "salting", litres: 40, remainingLitres: 40 } }));
+  panel._activeTab = "mixing";
+  panel._mixingMessage = "Low — add about 89 g of salt, let it dissolve, retest.";
+  const html = panel._mixingTab();
+  assert(html.includes("89 g of salt"), "the correction message did not render");
+});
+
+test("simulate mode announces itself on the batch card and in settings", async () => {
+  const panel = await mixingPanel({ simulate: true });
+  panel._activeTab = "mixing";
+  assert(panel._mixingTab().includes("Simulate is on"), "sim mode was silent on the tab");
+  const body = panel._mixingSettingsBody(mixConfig({ simulate: true }));
+  assert(/data-field="simulate"[^>]*checked/.test(body), "settings lost the armed sim toggle");
+});
+
 runTests();

@@ -1650,6 +1650,23 @@ class OpenReefPanel extends HTMLElement {
         if (this._trend?.source === "manual") this._loadManualTrend(id, this._trend?.range || "all");
         else this._loadTrend(id, this._trend?.range || "24h");
       }
+      if (action === "mixing-start") {
+        const litres = Number(this.shadowRoot.querySelector("[data-mixing-litres]")?.value) || 0;
+        const batchType = this.shadowRoot.querySelector("[data-mixing-type]")?.value || "salt";
+        this._mixingAction({ type: "openreef/mixing_start_batch", litres, batch_type: batchType });
+      }
+      if (action === "mixing-advance") {
+        const payload = { type: "openreef/mixing_advance" };
+        const moved = this.shadowRoot.querySelector("[data-mixing-transfer]");
+        if (moved && Number(moved.value) > 0) payload.litres = Number(moved.value);
+        this._mixingAction(payload);
+      }
+      if (action === "mixing-log") {
+        const ppt = Number(this.shadowRoot.querySelector("[data-mixing-ppt]")?.value) || 0;
+        if (ppt > 0) this._mixingAction({ type: "openreef/mixing_log_salinity", ppt });
+        else { this._mixingMessage = "Enter the refractometer reading first."; this._render(); }
+      }
+      if (action === "mixing-abort") this._mixingAction({ type: "openreef/mixing_abort" });
       if (action === "awc-run") this._awcRunNow();
       if (action === "awc-focus-run") {
         const el = this.shadowRoot.querySelector("[data-awc-run-amount]");
@@ -22502,6 +22519,32 @@ const rigSteps = [
     }
   }
 
+  async _mixingAction(payload) {
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS(payload);
+      if (result?.config) this._config = result.config;
+      if (result?.summary) { this._mixingSummary = result.summary; this._mixingSummaryAt = Date.now(); }
+      this._mixingMessage = "";
+      if (result && result.success === false && Array.isArray(result.reasons)) {
+        this._mixingMessage = result.reasons.join(" · ");
+      }
+      const c = result?.correction;
+      if (c && c.status && c.status !== "pass") {
+        this._mixingMessage = c.status === "low"
+          ? (c.addGrams
+            ? `Low — add about ${c.addGrams} g of salt, let it dissolve, retest.`
+            : "Low — add salt gradually and retest.")
+          : `High — dilute with about ${c.diluteLitres} L of RODI and retest.`;
+      }
+    } catch (err) {
+      this._mixingMessage = "Failed: " + (err instanceof Error ? err.message : err);
+    }
+    this._busy = false;
+    this._render();
+  }
+
   _mixingStatusLabel(status) {
     return ({
       idle: "Idle", filling: "Filling RODI…", transferring: "Transferring…",
@@ -22520,11 +22563,16 @@ const rigSteps = [
   _mixingTab() {
     const mix = this._mixingCfg();
     const sum = this._mixingSummary;
-    if (!sum && !this._mixingSummaryLoading) setTimeout(() => this._mixingLoadSummary(), 0);
     const batch = sum?.batch || { status: mix.batch?.state || "idle", stages: [] };
     const levels = sum?.levels || {};
     const dose = sum?.dose || { available: false };
     const status = batch.status || "idle";
+    // Refresh while a batch is live so the mix clock and levels stay honest.
+    const active = !["idle", "ready", "storing", "fault"].includes(status);
+    if (!this._mixingSummaryLoading
+        && (!sum || (active && Date.now() - (this._mixingSummaryAt || 0) > 8000))) {
+      setTimeout(() => this._mixingLoadSummary(true), 0);
+    }
 
     const head = `
       <div class="section-head">
@@ -22564,6 +22612,36 @@ const rigSteps = [
           ? `${this._format(batch.remainingLitres, 1)} L on hand${batch.loggedPpt ? ` · tested ${this._format(batch.loggedPpt, 1)} ppt` : ""}${batch.retestDue ? " · retest before use" : ""}`
           : this._mixingStatusLabel(status);
 
+    // The one next action per stage — the user is the sensor in v1.
+    const disabled = this._busy ? "disabled" : "";
+    const abortBtn = `<button class="danger-text" data-action="mixing-abort" ${disabled}>${status === "ready" || status === "storing" ? "Discard batch" : "Abort"}</button>`;
+    let controls = "";
+    if (status === "idle") {
+      controls = `
+        <div class="mini-grid">
+          <label>Batch size (L)<input type="number" min="1" step="1" data-mixing-litres value="${Number(mix.vessels?.mix?.volumeLitres) || 50}"></label>
+          <label>Batch type<select data-mixing-type>
+            <option value="salt">Saltwater</option>
+            <option value="rodi">RODI only (top-off)</option>
+          </select></label>
+        </div>
+        <div class="button-row"><button data-action="mixing-start" ${disabled}>Start batch</button></div>`;
+    } else if (status === "filling") {
+      controls = `<div class="button-row"><button data-action="mixing-advance" ${disabled}>Fill done →</button>${abortBtn}</div>`;
+    } else if (status === "transferring") {
+      controls = `
+        <div class="mini-grid"><label>Litres moved<input type="number" min="0" step="1" data-mixing-transfer value="${Number(batch.litres) || 0}"></label></div>
+        <div class="button-row"><button data-action="mixing-advance" ${disabled}>Transferred →</button>${abortBtn}</div>`;
+    } else if (status === "heating") {
+      controls = `<div class="button-row"><button data-action="mixing-advance" ${disabled}>At temperature →</button>${abortBtn}</div>`;
+    } else if (status === "salting") {
+      controls = `
+        <div class="mini-grid"><label>Measured salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label></div>
+        <div class="button-row"><button data-action="mixing-log" ${disabled}>Log test</button>${abortBtn}</div>`;
+    } else {
+      controls = `<div class="button-row">${abortBtn}</div>`;
+    }
+
     const statusCard = `
       <article class="setting-card">
         <div class="section-head">
@@ -22571,8 +22649,10 @@ const rigSteps = [
         </div>
         ${rail}
         <p class="muted">${this._escape(statusDetail)}</p>
+        ${this._mixingMessage ? `<div class="notice warning-notice">${this._escape(this._mixingMessage)}</div>` : ""}
         ${batch.retestDue ? `<div class="notice warning-notice"><strong>Retest due.</strong> This batch has aged past its window — check salinity before it touches the tank.</div>` : ""}
-        <small class="awc-hint">The guided workflow — start, stage advances, salinity log — arrives with the next release. Today the station shows its state honestly; it doesn't drive the plugs yet.</small>
+        ${controls}
+        ${mix.simulate ? `<small class="awc-hint">Simulate is on — virtual switches only, nothing real is energised.</small>` : ""}
       </article>`;
 
     const doseCard = `
@@ -22726,6 +22806,10 @@ const rigSteps = [
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="mixing" data-field="enabled" ${mix.enabled ? "checked" : ""}>
         <span><strong>Mixing station on</strong><small>The Mixing Station tab — the live station diagram, the batch clock and the salt-dose guide.</small></span>
+      </label>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="mixing" data-field="simulate" ${mix.simulate ? "checked" : ""}>
+        <span><strong>Simulate (no plugs)</strong><small>Walk the whole workflow on virtual switches — nothing real is energised. For dry runs before the hardware is bound.</small></span>
       </label>
       <div class="mini-grid">
         <label>Station layout<select data-scope="mixing" data-field="layout">

@@ -278,6 +278,228 @@ def test_ws_mixing_summary_unconfigured():
     assert conn.errors and conn.errors[-1].code == "not_configured"
 
 
+# ---------------------------------------------------------------- Stage B: the workflow runs
+# Real orchestration in __init__.py against the fake HA: plug actuation, the
+# fill-cap timer, stage advances, salinity logging, abort, orphan recovery and
+# sim mode (the test_awc_safety technique — timers fired by hand).
+
+from _fake_ha import install_scheduler  # noqa: E402
+
+_STATION_SWITCHES = {
+    "switch.mix_booster": "off", "switch.mix_pump_a": "off",
+    "switch.mix_pump_b": "off", "switch.mix_heater": "off",
+}
+
+
+def _station_cfg(**over):
+    cfg = _cfg()
+    cfg["switches"] = {
+        "rodiBooster": {"switchEntity": "switch.mix_booster"},
+        "mixPumpA": {"switchEntity": "switch.mix_pump_a"},
+        "mixPumpB": {"switchEntity": "switch.mix_pump_b"},
+        "heater": {"switchEntity": "switch.mix_heater"},
+    }
+    cfg["rodi"] = {"rateLph": 0, "fillCapMin": 240}
+    cfg.update(over)
+    return cfg
+
+
+def _station(cfg_over=None):
+    cfg = _station_cfg(**(cfg_over or {}))
+    entry = FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config(
+        {"mixingStation": cfg})})
+    hass = FakeHass(states=dict(_STATION_SWITCHES), entries=[entry])
+    return hass, entry
+
+
+def _mix_state(entry):
+    return integration._config_from_entry(entry)["mixingStation"]
+
+
+def _switch_calls(hass, entity):
+    # Under the HA stubs ATTR_ENTITY_ID is a stub object, not "entity_id" —
+    # match by value the way _FakeServices itself does.
+    return [(c.service, entity) for c in hass.services.calls
+            if c.domain == "switch" and entity in c.data.values()]
+
+
+def test_start_refused_while_busy_returns_reasons_not_an_error():
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 40, "batch_type": "salt"}))
+    payload = conn.results[-1].payload
+    assert payload["success"] is False
+    assert any("already in progress" in r for r in payload["reasons"])
+    assert not hass.services.calls                      # nothing energised
+
+
+def test_start_energises_the_booster_and_arms_the_cap():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station()
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 40, "batch_type": "salt"}))
+    assert conn.results[-1].payload["success"] is True
+    assert ("turn_on", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "filling" and batch["litres"] == 40.0
+    # The cap timer is armed ~fillCapMin out (240 min) — find it among any
+    # re-arms the save pass registered.
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    caps = [r for r in scheduler.scheduled[before:]
+            if not r["cancelled"] and 235 * 60 < (r["run_at"] - now).total_seconds() < 245 * 60]
+    assert len(caps) == 1, "expected exactly one fill-cap timer"
+
+
+def test_fill_cap_fires_booster_off_batch_stays_filling():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station()
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 40, "batch_type": "salt"}))
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    cap = next(r for r in scheduler.scheduled[before:]
+               if not r["cancelled"] and 235 * 60 < (r["run_at"] - now).total_seconds() < 245 * 60)
+
+    async def _fire():
+        await cap["callback"](cap["run_at"])
+    run(_fire())
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    assert _mix_state(entry)["batch"]["state"] == "filling"   # the user still confirms
+    assert integration.MIXING_FILL_UNSUB not in hass.data.get(integration.DOMAIN, {})
+
+
+def test_advance_walks_the_dual_heat_chain_and_moves_the_ledger():
+    install_scheduler(integration)
+    hass, entry = _station()
+    conn = FakeConnection()
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 40, "batch_type": "salt"}))
+    # Fill done: booster off, RODI store credited (40 anchor + 40 fill, capped at 50).
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 2}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "transferring"
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 50.0
+    # Transferred 38 L: anchor debited, heater on, stage heating.
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 3, "litres": 38}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "heating"
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 12.0
+    assert ("turn_on", "switch.mix_heater") in _switch_calls(hass, "switch.mix_heater")
+    # At temperature: both pumps on, stage salting.
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 4}))
+    assert _mix_state(entry)["batch"]["state"] == "salting"
+    assert ("turn_on", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    assert ("turn_on", "switch.mix_pump_b") in _switch_calls(hass, "switch.mix_pump_b")
+
+
+def test_log_salinity_low_stays_salting_with_real_correction():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 33.0}))
+    payload = conn.results[-1].payload
+    assert payload["correction"]["status"] == "low"
+    assert payload["correction"]["addGrams"] == round(2.0 / 35.0 * 39.0 * 40, 0)
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "salting" and batch["loggedPpt"] == 33.0
+
+
+def test_log_salinity_pass_goes_ready_and_switches_everything_off():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 35.2}))
+    payload = conn.results[-1].payload
+    assert payload["correction"]["status"] == "pass"
+    assert payload["summary"]["batch"]["status"] == "ready"
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "ready" and batch["testedAt"]
+    for entity in ("switch.mix_pump_a", "switch.mix_pump_b", "switch.mix_heater"):
+        assert ("turn_off", entity) in _switch_calls(hass, entity)
+
+
+def test_rodi_batch_goes_straight_from_fill_to_ready():
+    install_scheduler(integration)
+    hass, entry = _station()
+    conn = FakeConnection()
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 30, "batch_type": "rodi"}))
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 2}))
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "ready" and batch["type"] == "rodi"
+    # No salt stages ⇒ pumps and heater were never ENERGISED (ready's
+    # belt-and-braces stop pass may still turn them off).
+    assert ("turn_on", "switch.mix_pump_a") not in _switch_calls(hass, "switch.mix_pump_a")
+    assert ("turn_on", "switch.mix_heater") not in _switch_calls(hass, "switch.mix_heater")
+
+
+def test_single_layout_skips_the_transfer():
+    install_scheduler(integration)
+    hass, entry = _station({"layout": "single"})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 40, "batch_type": "salt"}))
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 2}))
+    assert _mix_state(entry)["batch"]["state"] == "heating"
+
+
+def test_abort_switches_everything_off_and_resets():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_abort(hass, conn, {"id": 1}))
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "idle" and batch["litres"] == 0
+    for entity in _STATION_SWITCHES:
+        assert ("turn_off", entity) in _switch_calls(hass, entity)
+    # Idle abort is an error, not a silent success.
+    run(integration.websocket_mixing_abort(hass, conn, {"id": 2}))
+    assert conn.errors and conn.errors[-1].code == "not_running"
+
+
+def test_orphan_recovery_fill_stops_the_booster():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {"state": "filling", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}})
+    run(integration._async_mixing_recover_orphaned(hass, entry))
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    assert _mix_state(entry)["batch"]["state"] == "filling"
+
+
+def test_orphan_recovery_salting_restarts_pumps_never_the_heater():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}})
+    run(integration._async_mixing_recover_orphaned(hass, entry))
+    assert ("turn_on", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    assert ("turn_on", "switch.mix_pump_b") in _switch_calls(hass, "switch.mix_pump_b")
+    assert ("turn_off", "switch.mix_heater") in _switch_calls(hass, "switch.mix_heater")
+    assert ("turn_on", "switch.mix_heater") not in _switch_calls(hass, "switch.mix_heater")
+
+
+def test_sim_mode_never_touches_real_switches():
+    install_scheduler(integration)
+    hass, entry = _station({"simulate": True})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 40, "batch_type": "salt"}))
+    assert conn.results[-1].payload["success"] is True
+    # No switch-domain calls at all (the save pass may touch notifications).
+    assert not [c for c in hass.services.calls if c.domain == "switch"]
+    sim = hass.data[integration.DOMAIN][integration.MIXING_RUNTIME]["simSwitches"]
+    assert sim["rodiBooster"] is True
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

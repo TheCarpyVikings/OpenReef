@@ -308,6 +308,11 @@ AWC_STATE_LOCK = "awc_state_lock"
 AWC_RUNTIME = "awc_runtime"
 AWC_CALRUN_UNSUB = "awc_calrun_unsub"  # timed calibration-run stop timer
 NPS_DRAIN_UNSUB = "nps_drain_unsub"    # feed-exchange matched-drain stop timer
+# Mixing station: serialises batch-state transitions the same way AWC_STATE_LOCK
+# does for water changes (start / advance / cap-fire / abort can interleave).
+MIXING_STATE_LOCK = "mixing_state_lock"
+MIXING_FILL_UNSUB = "mixing_fill_unsub"  # booster fill-cap stop timer
+MIXING_RUNTIME = "mixing_runtime"        # sim switch states (mirrors AWC_RUNTIME)
 _AWC_SIM_HAZARDS = ("leak", "highLevel", "freshEmpty", "wasteFull", "returnPumpIssue")
 # Bulky runtime record lists stripped from a settings export (and preserved through
 # an import) — they describe the tank's past, not its configuration.
@@ -1479,6 +1484,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
     config["mixingStation"] = mix_cfg
 
     mix_cfg["enabled"] = bool(mix_cfg.get("enabled", False))
+    mix_cfg["simulate"] = bool(mix_cfg.get("simulate", False))
     layout = str(mix_cfg.get("layout") or "dual")
     mix_cfg["layout"] = layout if layout in MIXING_LAYOUTS else "dual"
 
@@ -13610,14 +13616,167 @@ async def websocket_dosing_delete_channel(
     _awc_send(connection, msg, hass, config)
 
 
-# --- Saltwater Mixing Station: websocket actions -------------------------------------------
-# Maths in mixing.py; the batch state machine's transitions land in Stage B
-# (docs/mixing-station-brainstorm.md §5/§12). Stage A ships the read side: the
-# summary blob the tab and diagram render.
+# --- Saltwater Mixing Station: orchestration + websocket actions ---------------------------
+# Maths in mixing.py; the batch state machine's TRANSITIONS live here
+# (docs/mixing-station-brainstorm.md §5). Stamped-timestamp state, a single
+# HA-timed cap (the booster fill cap — the software backup behind the float
+# valve), and the AWC locking/stop-path/orphan-recovery conventions throughout.
 
 def _mixing_cfg(config: dict[str, Any]) -> dict[str, Any]:
     section = config.get("mixingStation")
     return section if isinstance(section, dict) else {}
+
+
+def _mixing_lock(hass: HomeAssistant) -> asyncio.Lock:
+    """The per-instance mixing state lock (see MIXING_STATE_LOCK). Held by the
+    top-level entry points only — never acquire it from an inner helper."""
+    store = hass.data.setdefault(DOMAIN, {})
+    lock = store.get(MIXING_STATE_LOCK)
+    if lock is None:
+        lock = store[MIXING_STATE_LOCK] = asyncio.Lock()
+    return lock
+
+
+def _mixing_sim_enabled(config: dict[str, Any]) -> bool:
+    """Simulate mode: virtual switches, zero real actuation — dry runs and demos."""
+    return bool(_mixing_cfg(config).get("simulate"))
+
+
+async def _async_mixing_set_switch(
+    hass: HomeAssistant, config: dict[str, Any], role: str, on: bool, context: Any
+) -> None:
+    if _mixing_sim_enabled(config):
+        # Before the entity check on purpose — a dry run needs no real plugs at all.
+        sim = hass.data.setdefault(DOMAIN, {}).setdefault(
+            MIXING_RUNTIME, {}).setdefault("simSwitches", {})
+        sim[role] = bool(on)
+        return
+    switch = _mixing_cfg(config).get("switches", {}).get(role, {})
+    entity = _normalise_entity_id(switch.get("switchEntity")) if isinstance(switch, dict) else ""
+    if not entity:
+        return
+    await hass.services.async_call(
+        "switch", "turn_on" if on else "turn_off",
+        {ATTR_ENTITY_ID: entity}, blocking=True, context=context,
+    )
+
+
+async def _async_mixing_stop_switches(
+    hass: HomeAssistant, config: dict[str, Any], roles: Iterable[str], context: Any
+) -> None:
+    """Turn every listed plug OFF, best-effort — the sole shutdown primitive.
+    A failed turn_off must be logged and swallowed, never raised, or one dead
+    plug abandons the state transition half-done (the AWC stop-path rule)."""
+    for role in roles:
+        try:
+            await _async_mixing_set_switch(hass, config, role, False, context)
+        except Exception:  # noqa: BLE001 - best-effort stop: log and keep stopping the rest
+            _LOGGER.exception("Failed to turn off mixing-station %s during stop", role)
+
+
+def _clear_mixing_fill_timer(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MIXING_FILL_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+def _mixing_booster_driven(config: dict[str, Any]) -> bool:
+    """Whether OpenReef itself drives the fill: sim mode, or a bound booster plug.
+    A manual tap still walks the workflow — there is just nothing to switch or cap."""
+    if _mixing_sim_enabled(config):
+        return True
+    switch = _mixing_cfg(config).get("switches", {}).get("rodiBooster", {})
+    return bool(isinstance(switch, dict) and _normalise_entity_id(switch.get("switchEntity")))
+
+
+def _mixing_next_stage(cfg: dict[str, Any], current: str) -> str | None:
+    stages = mixing_engine.stage_sequence(
+        cfg.get("layout"), (cfg.get("batch") or {}).get("type"),
+        (cfg.get("heat") or {}).get("enabled"))
+    try:
+        idx = stages.index(current)
+    except ValueError:
+        return None
+    return stages[idx + 1] if idx + 1 < len(stages) else None
+
+
+async def _async_mixing_enter_stage(
+    hass: HomeAssistant, config: dict[str, Any], stage: str, context: Any
+) -> None:
+    """Stamp the stage and actuate what it needs. The heater is stage-gated
+    (doc §11): it only ever comes ON in 'heating' — by which point the vessel
+    provably holds water — and stays on through 'salting' to hold temperature;
+    every path into 'ready'/'idle' forces everything off."""
+    batch = _mixing_cfg(config).setdefault("batch", {})
+    if stage == "heating":
+        await _async_mixing_set_switch(hass, config, "heater", True, context)
+    elif stage == "salting":
+        await _async_mixing_set_switch(hass, config, "mixPumpA", True, context)
+        await _async_mixing_set_switch(hass, config, "mixPumpB", True, context)
+    elif stage in ("ready", "idle"):
+        await _async_mixing_stop_switches(hass, config, MIXING_SWITCH_ROLES, context)
+    batch["state"] = stage
+    batch["stageAt"] = datetime.now(timezone.utc).isoformat()
+
+
+def _mixing_credit_rodi(cfg: dict[str, Any], delta_l: float) -> None:
+    """Move the RODI store's honest anchor by a confirmed event (fill done +,
+    transfer done −), clamped to [0, vessel volume]."""
+    vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+    rodi = vessels.get("rodi") if isinstance(vessels.get("rodi"), dict) else None
+    if rodi is None:
+        return
+    vol = _awc_num(rodi.get("volumeLitres"), 0, 0, MIXING_VESSEL_MAX_L)
+    level = _awc_num(rodi.get("estimatedLitres"), 0, 0, MIXING_VESSEL_MAX_L) + delta_l
+    rodi["estimatedLitres"] = round(max(0.0, min(level, vol if vol > 0 else level)), 1)
+
+
+async def _async_mixing_recover_orphaned(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """Restart mid-batch: the fill-cap timer is memory-only and plugs may be
+    energised with nothing armed to manage them. Fail-safe per role (doc §11):
+    booster and heater force OFF — unattended, their direction is the hazard;
+    the mixing pumps re-assert ON during 'salting' — circulation is the safe
+    direction and the vessel provably holds water by that stage."""
+    state = _mixing_cfg(_config_from_entry(entry)).get("batch", {}).get("state")
+    if state not in ("filling", "transferring", "heating", "salting"):
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        st = _mixing_cfg(config).get("batch", {}).get("state")
+        if st == "filling":
+            await _async_mixing_stop_switches(hass, config, ("rodiBooster",), None)
+            _append_activity(
+                config, "Mixing station: restart during the fill — booster stopped; "
+                "confirm the fill to continue", "warning")
+        elif st == "heating":
+            await _async_mixing_stop_switches(hass, config, ("rodiBooster", "heater"), None)
+            _append_activity(
+                config, "Mixing station: restart during heating — heater off; "
+                "confirm temperature to continue", "warning")
+        elif st == "salting":
+            await _async_mixing_stop_switches(hass, config, ("rodiBooster", "heater"), None)
+            try:
+                await _async_mixing_set_switch(hass, config, "mixPumpA", True, None)
+                await _async_mixing_set_switch(hass, config, "mixPumpB", True, None)
+            except Exception:  # noqa: BLE001 - recovery is best-effort; the clock still runs
+                _LOGGER.exception("Could not re-start the mixing pumps after a restart")
+            _append_activity(
+                config, "Mixing station: restart during the mix — pumps re-started, "
+                "heater stays off", "info")
+        else:  # transferring — nothing of ours should be on; belt and braces
+            await _async_mixing_stop_switches(hass, config, ("rodiBooster",), None)
+            return
+        await _async_save_config(hass, entry, config)
+
+
+def _mixing_send(connection: websocket_api.ActiveConnection, msg: dict[str, Any],
+                 hass: HomeAssistant, config: dict[str, Any], **extra: Any) -> None:
+    """Every mixing reply carries the fresh backend-computed summary so the tab
+    never renders a stale clock after an action."""
+    summary = mixing_engine.summary(_mixing_cfg(config), datetime.now(timezone.utc))
+    _awc_send(connection, msg, hass, config, summary=summary, **extra)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_summary"})
@@ -13636,6 +13795,200 @@ async def websocket_mixing_summary(
     config = _config_from_entry(entry)
     summary = mixing_engine.summary(_mixing_cfg(config), datetime.now(timezone.utc))
     connection.send_result(msg["id"], {"success": True, "summary": summary})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_start_batch",
+    vol.Required("litres"): vol.All(vol.Coerce(float), vol.Range(min=0, max=2000)),
+    vol.Optional("batch_type", default="salt"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_start_batch(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Start a batch: guards, then into 'filling' — booster ON when bound (or
+    simulated) with the fill-cap timer armed behind the physical float valve.
+    A manual RODI tap still starts the stage; there is just nothing to switch."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    litres = float(msg["litres"])
+    batch_type = str(msg.get("batch_type") or "salt")
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        reasons = mixing_engine.start_guard_reasons(cfg, litres, batch_type)
+        if reasons:
+            connection.send_result(msg["id"], {"success": False, "reasons": reasons})
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cfg["batch"] = {
+            "state": "filling", "type": batch_type, "startedAt": now_iso,
+            "stageAt": now_iso, "litres": round(litres, 1),
+            "loggedPpt": 0, "testedAt": "", "usedLitres": 0,
+        }
+        if _mixing_booster_driven(config):
+            try:
+                await _async_mixing_set_switch(
+                    hass, config, "rodiBooster", True, connection.context(msg))
+            except Exception as exc:  # noqa: BLE001 - surface the failure, nothing started
+                connection.send_error(msg["id"], "booster_start_failed",
+                                      f"Could not start the RODI booster: {exc}")
+                return
+            cap_min = int(_awc_num(cfg.get("rodi", {}).get("fillCapMin"),
+                                   MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN))
+            ends_at = datetime.now(timezone.utc) + timedelta(minutes=cap_min)
+
+            async def _cap(_now: datetime) -> None:
+                latest = _first_entry(hass)
+                async with _mixing_lock(hass):
+                    # Pop the guard INSIDE the lock (the calrun lesson): popping
+                    # earlier opens a window for an interleaved transition.
+                    hass.data.setdefault(DOMAIN, {}).pop(MIXING_FILL_UNSUB, None)
+                    if latest is None:
+                        return
+                    cfg2 = _config_from_entry(latest)
+                    if _mixing_cfg(cfg2).get("batch", {}).get("state") != "filling":
+                        return
+                    await _async_mixing_stop_switches(hass, cfg2, ("rodiBooster",), None)
+                    _append_activity(
+                        cfg2, "Mixing station: fill cap reached — booster stopped; "
+                        "confirm the fill when you're back", "warning")
+                    await _async_save_config(hass, latest, cfg2)
+
+            _clear_mixing_fill_timer(hass)
+            hass.data.setdefault(DOMAIN, {})[MIXING_FILL_UNSUB] = \
+                async_track_point_in_time(hass, _cap, ends_at)
+        _append_activity(
+            config, f"Mixing station: batch started — {litres:g} L "
+            f"{'RODI top-off' if batch_type == 'rodi' else 'saltwater'}", "control")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config, started=True)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_advance",
+    vol.Optional("litres"): vol.All(vol.Coerce(float), vol.Range(min=0, max=2000)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_advance(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Confirm the current stage done and enter the next one — the user IS the
+    sensor in v1 (fill done / transferred / at temperature). Leaving 'filling'
+    stops the booster and credits the RODI anchor; leaving 'transferring'
+    debits it by the confirmed litres (optional ``litres``, default the batch)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        batch = cfg.get("batch", {})
+        state = str(batch.get("state") or "idle")
+        if state not in ("filling", "transferring", "heating"):
+            connection.send_error(msg["id"], "invalid_state",
+                                  f"Nothing to confirm while the batch is '{state}'")
+            return
+        next_stage = _mixing_next_stage(cfg, state)
+        if not next_stage:
+            connection.send_error(msg["id"], "invalid_state", "No next stage from here")
+            return
+        context = connection.context(msg)
+        if state == "filling":
+            _clear_mixing_fill_timer(hass)
+            await _async_mixing_stop_switches(hass, config, ("rodiBooster",), context)
+            if str(cfg.get("layout") or "dual") == "dual" and batch.get("type") != "rodi":
+                _mixing_credit_rodi(cfg, _awc_num(batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L))
+        elif state == "transferring":
+            moved = _awc_num(msg.get("litres"), _awc_num(batch.get("litres"), 0, 0,
+                                                         MIXING_VESSEL_MAX_L),
+                             0, MIXING_VESSEL_MAX_L)
+            _mixing_credit_rodi(cfg, -moved)
+        await _async_mixing_enter_stage(hass, config, next_stage, context)
+        _append_activity(
+            config, f"Mixing station: {state} confirmed → {next_stage}", "control")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_log_salinity",
+    vol.Required("ppt"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=60)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_log_salinity(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Log a refractometer reading against the target. Within tolerance the
+    batch goes 'ready' (pumps and heater off, testedAt stamped); out of band it
+    stays 'salting' and the reply carries the correction — real grams-to-add or
+    litres-to-dilute maths from the engine, never 'try again'."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    ppt = float(msg["ppt"])
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        batch = cfg.get("batch", {})
+        if str(batch.get("state") or "idle") != "salting":
+            connection.send_error(msg["id"], "invalid_state",
+                                  "Salinity is logged while the batch is salting")
+            return
+        salt_cfg = cfg.get("salt", {})
+        correction = mixing_engine.salinity_correction(
+            ppt, salt_cfg.get("targetPpt"), batch.get("litres"),
+            salt_cfg.get("brand"), salt_cfg.get("customGPerL"))
+        batch["loggedPpt"] = round(ppt, 2)
+        if correction.get("status") == "pass":
+            batch["testedAt"] = datetime.now(timezone.utc).isoformat()
+            await _async_mixing_enter_stage(hass, config, "ready", connection.context(msg))
+            _append_activity(
+                config, f"Mixing station: batch tested at {ppt:g} ppt — ready", "control")
+        else:
+            _append_activity(
+                config, f"Mixing station: tested {ppt:g} ppt — "
+                f"{correction.get('status', 'out of band')}", "info")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config, correction=correction)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_abort"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_abort(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Abort/discard the batch from any state: cap timer cancelled, every plug
+    OFF best-effort, batch back to idle. The one command that always works."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        if str(cfg.get("batch", {}).get("state") or "idle") == "idle":
+            connection.send_error(msg["id"], "not_running", "No batch to abort")
+            return
+        _clear_mixing_fill_timer(hass)
+        await _async_mixing_stop_switches(
+            hass, config, MIXING_SWITCH_ROLES, connection.context(msg))
+        cfg["batch"] = {
+            "state": "idle", "type": "salt", "startedAt": "", "stageAt": "",
+            "litres": 0, "loggedPpt": 0, "testedAt": "", "usedLitres": 0,
+        }
+        _append_activity(config, "Mixing station: batch aborted — everything switched off",
+                         "warning")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
 
 
 # --- Camera V2 / Phase A: event-triggered capture -----------------------------------------
@@ -16036,6 +16389,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_mark_refreshed)
     websocket_api.async_register_command(hass, websocket_dosing_reset_tube)
     websocket_api.async_register_command(hass, websocket_mixing_summary)
+    websocket_api.async_register_command(hass, websocket_mixing_start_batch)
+    websocket_api.async_register_command(hass, websocket_mixing_advance)
+    websocket_api.async_register_command(hass, websocket_mixing_log_salinity)
+    websocket_api.async_register_command(hass, websocket_mixing_abort)
     websocket_api.async_register_command(hass, websocket_nps_summary)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
@@ -16164,6 +16521,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_nps_recover_orphaned_drain(hass, entry)
     # Stop ha_switch_timed pumps orphaned mid-dose (honest elapsed credit).
     await _async_dosing_ha_recover(hass, entry)
+    # Mixing station plugs orphaned mid-batch: booster/heater off, pumps
+    # re-asserted during salting (doc §11 fail-safe directions).
+    await _async_mixing_recover_orphaned(hass, entry)
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
@@ -16212,6 +16572,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _nps_drain = _store.pop(NPS_DRAIN_UNSUB, None)
     if _nps_drain is not None:
         _nps_drain()
+    # And the mixing fill cap: cancel the timer; batch.state == "filling" is the
+    # persisted trace the next setup uses to stop the orphaned booster.
+    _mixing_fill = _store.pop(MIXING_FILL_UNSUB, None)
+    if _mixing_fill is not None:
+        _mixing_fill()
     _issue_refresh = _store.pop(ISSUE_REFRESH_UNSUB, None)
     if _issue_refresh is not None:
         _issue_refresh()

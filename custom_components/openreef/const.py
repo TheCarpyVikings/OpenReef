@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.84"
+INTEGRATION_VERSION = "0.7.85"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1621,6 +1621,7 @@ DEFAULT_CORE_CONFIG = {
     # estimatedLitres are the honest anchors moved by confirmed events.
     "mixingStation": {
         "enabled": False,
+        "simulate": False,                      # virtual switches — nothing real energised
         "layout": "dual",
         "vessels": {
             "rodi": {"volumeLitres": 50, "estimatedLitres": 0, "levelSensorEntity": ""},

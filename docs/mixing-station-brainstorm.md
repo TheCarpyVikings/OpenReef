@@ -182,7 +182,7 @@ AWC completion calls `mixing_mark_used` with the fill litres so the ledger stays
 1. Float valve = hard stop on fill; software `fillCapMin` cap behind it (HA-timed, orphan-recovered).
 2. Heater: stage-gated (never in idle/filling), forced OFF on abort/fault/restart, optional temp-sensor ceiling.
 3. Best-effort stop paths: one dead plug never abandons a transition half-done.
-4. Orphan recovery in `async_setup_entry`: booster/pumps/heater found mid-stage after restart are switched OFF and the stage clock credited.
+4. Orphan recovery in `async_setup_entry`, fail-safe per role: booster and heater force OFF after a restart (unattended, their direction is the hazard); the mixing pumps re-assert ON during `salting` — circulation is the safe direction and the vessel provably holds water by that stage. The stamped clocks keep running regardless.
 5. Configured level sensors are fail-closed (`_awc_binary_unknown` pattern): unavailable blocks a start, pauses circulation, never latches a fault.
 6. Guards return reason lists (engine) — orchestrator/panel decide presentation.
 
