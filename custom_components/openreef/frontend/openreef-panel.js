@@ -11350,9 +11350,11 @@ class OpenReefPanel extends HTMLElement {
       const value = fx.drainActive ? "Draining now" : owed > 0 ? `${owed} ml owed` : "Balanced";
       const detail = blocked
         ? `Waiting: ${String(fxState.lastBlockedReason).replace(/_/g, " ")}`
-        : prime.status === "prime" ? `Hatch in its prime — ~${prime.primeLeftHours} h left`
-          : prime.status === "fading" ? `Hatch ${prime.ageHours} h old — past prime`
-            : "No hatch loaded";
+        : prime.status === "gutloaded" ? `Gut-loaded — boost holds ~${prime.primeLeftHours} h`
+          : prime.status === "boost_fading" ? "Enriched batch — boost drained, still live"
+            : prime.status === "prime" ? `Hatch in its prime — ~${prime.primeLeftHours} h left`
+              : prime.status === "fading" ? `Hatch ${prime.ageHours} h old — past prime`
+                : "No hatch loaded";
       cards.push(this._missionSummaryCard("Feed exchange", value, detail,
         blocked ? "warning" : "ok", "settings", toSettings));
     }
@@ -11400,11 +11402,20 @@ class OpenReefPanel extends HTMLElement {
     const fxSum = (st.summary && st.summary.feedExchange) || {};
     const prime = fxSum.prime || {};
     const fresh = fxSum.freshness || {};
-    const primeLine = prime.status === "prime"
-      ? `🦐 Hatch is in its nutritional prime — ~${this._escape(String(prime.primeLeftHours))} h left (nauplii lose 30–50% of their calories by 48 h).`
-      : prime.status === "fading"
-        ? `🦐 Hatch is ${this._escape(String(prime.ageHours))} h old — past the 24 h prime window. Feed it out or hatch fresh.`
-        : `🦐 No hatch loaded yet — tap "Hatched &amp; loaded" once the reservoir is filled.`;
+    // Two clocks, not one (0.7.89). Yolk burn is what "past prime" measures,
+    // and enrichment answers it — a gut-loaded batch has EATEN. What ticks
+    // after a soak is the HUFA boost retro-converting, which is a different
+    // number with a different honest ending.
+    const primeHold = Number(prime.windowHours) >= 48 ? "fridged" : "at room temp";
+    const primeLine = prime.status === "gutloaded"
+      ? `🦐 Gut-loaded — this batch has been FED, so it is not running on yolk any more. The HUFA boost holds ~${this._escape(String(prime.primeLeftHours))} h (${this._escape(String(prime.windowHours))} h ${primeHold}, counted from the end of the soak).`
+      : prime.status === "boost_fading"
+        ? `🦐 The enrichment boost has drained — the soak ended ${this._escape(String(prime.soakAgeHours))} h ago, and DHA retro-converts within a day at room temp. Still live food, just no longer enriched food.`
+        : prime.status === "prime"
+          ? `🦐 Hatch is in its nutritional prime — ~${this._escape(String(prime.primeLeftHours))} h left (unenriched nauplii lose 30–50% of their calories by 48 h).`
+          : prime.status === "fading"
+            ? `🦐 Hatch is ${this._escape(String(prime.ageHours))} h old and was never enriched — past the 24 h yolk window. Feed it out, enrich it, or hatch fresh.`
+            : `🦐 No hatch loaded yet — tap "Hatched &amp; loaded" once the reservoir is filled.`;
     const freshLine = fresh.status === "stale"
       ? `<span style="color:var(--error-color,#e5484d)">${fxCfg.channelId
           ? "Brine is past its shelf life — dosing is blocked until you refresh."
@@ -11480,6 +11491,14 @@ class OpenReefPanel extends HTMLElement {
           ? `🌡️ Hatchery runs ${this._escape(String(temp.tempC))} °C — expect ~${this._escape(String(temp.expectedHours))} h, not ${this._escape(String(hatchHours))} h (cooler water stretches the clock).`
           : "")
       : "";
+    // The molt is temperature-driven too (0.7.89) — a cool bench moves the
+    // moment the batch grows a mouth, and dosing before it just fouls water.
+    const instar = hatch.instar || {};
+    const doseDelayH = Number((hatch.enrichment || {}).doseDelayH);
+    const moltLine = instar.available && Number.isFinite(doseDelayH)
+      && Number(instar.hours) - doseDelayH >= 1
+      ? `🍼 At ${this._escape(String(temp.tempC))} °C the molt to instar II lands nearer ~${this._escape(String(instar.hours))} h, not +${this._escape(String(doseDelayH))} h. Nauplii have no mouth before it — an earlier dose just fouls the vessel. Raise "First dose at +hours" in Settings.`
+      : "";
     const needed = Number(hatch.vesselsNeeded) || 0;
     const neededLine = needed > vessels.length
       ? `⚙️ With ${this._escape(String(hatchHours))} h eggs and ${this._escape(String(reservoirSum.shelfHours || 24))} h brine life, continuous supply needs ${this._escape(String(needed))} hatcheries — you have ${this._escape(String(vessels.length))}. Add one in Settings.`
@@ -11520,7 +11539,7 @@ class OpenReefPanel extends HTMLElement {
           ? (enrichState.firstDoseDue
             ? `<span style="color:var(--warning-color,#f5a524)">mouths are open — add the ${this._escape(enrichSum.productName || "Selcon")} now</span>`
             : enrichState.hoursLeft == null
-              ? `holding — dose at +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 6))} h (instar II)`
+              ? `holding — dose at +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 8))} h (instar II)`
               : `~${this._escape(String(enrichState.hoursLeft))} h of soak left`)
           : enrichState.status === "overdue"
             ? `<span style="color:var(--warning-color,#f5a524)">load now — the boost is draining</span>`
@@ -11556,6 +11575,7 @@ class OpenReefPanel extends HTMLElement {
             ${enrichedShelfLine ? `<small>${enrichedShelfLine}</small>` : ""}
             ${learnedLine ? `<small>${learnedLine}</small>` : ""}
             ${tempLine ? `<small>${tempLine}</small>` : ""}
+            ${moltLine ? `<small>${moltLine}</small>` : ""}
             ${neededLine ? `<small>${neededLine}</small>` : ""}
             ${reminderDriftLine ? `<small>${reminderDriftLine}</small>` : ""}
             <small>${hatchReservoirLine}</small>
@@ -15869,8 +15889,20 @@ const rigSteps = [
         if (fxState.lastDrainAt && Number(fxState.lastDrainMl)) {
           bits.push(`Last matched drain ${Math.round(Number(fxState.lastDrainMl))} ml`);
         }
+        // Backend-authoritative when the summary is loaded — it knows whether
+        // the batch was enriched, and the local 24 h maths never could.
+        const primeSum = this._nps?.summary?.feedExchange?.prime;
         const mixedAt = fx.channelId ? channels[fx.channelId]?.reservoir?.mixedAt : "";
-        if (mixedAt) {
+        if (primeSum && primeSum.status && primeSum.status !== "unknown") {
+          const left = Math.round(Number(primeSum.primeLeftHours) || 0);
+          bits.push(primeSum.status === "gutloaded"
+            ? `Gut-loaded brine — boost holds ~${left} h`
+            : primeSum.status === "boost_fading"
+              ? "Enriched brine — boost drained, still live food"
+              : primeSum.status === "prime"
+                ? `Brine hatch in its prime (~${left} h left)`
+                : `Brine hatch ${Math.round(Number(primeSum.ageHours) || 0)} h old — past prime`);
+        } else if (mixedAt) {
           const ageH = (Date.now() - Date.parse(mixedAt)) / 3600000;
           if (Number.isFinite(ageH) && ageH >= 0) {
             bits.push(ageH <= 24
@@ -23141,11 +23173,11 @@ const rigSteps = [
       </div>
       <small class="awc-hint">Advisory only: 26–28 °C is the sweet spot; each degree cooler stretches the clock ~8% (20 °C roughly doubles it). The countdown never moves — you just get told what to expect.</small>
       <small class="awc-hint"><strong>Enrichment</strong> — per-batch "→ Enrich" at harvest rinses the batch into a separate soak vessel (GSL nauplii carry no DHA; the soak restores it — proven for larvae, recommended for NPS corals). An enriched load runs a tighter freshness clock (12 h room / 48 h fridged).</small>
-      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I can't eat: the molt to instar II lands ~6–12 h post-hatch at 26–28 °C, LATER on a cool bench (8–12 is a good cool-room setting). "→ Enrich" holds the batch in clean water and the dose push arrives at +N h; 0 = dose at load (warm benches, fully-hatched-out batches).</small>
+      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I can't eat: the molt to instar II lands ~8 h at the 28 °C optimum (sources span 6–12 h) and LATER on a cool bench — with a hatchery temp sensor the card tells you the stretched number. "→ Enrich" holds the batch in clean water and the dose push arrives at +N h; 0 = dose at load (warm benches, fully-hatched-out batches).</small>
       <div class="mini-grid">
         <label>Soak time (hours)<input type="number" min="2" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
         <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>
-        <label>First dose at +hours<input type="number" min="0" max="24" data-scope="nps-enrichment" data-field="doseDelayH" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseDelayH ?? 6))}"></label>
+        <label>First dose at +hours<input type="number" min="0" max="24" data-scope="nps-enrichment" data-field="doseDelayH" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseDelayH ?? 8))}"></label>
         <label>Enrichment bottle<select data-scope="nps-enrichment" data-field="productId">
           <option value="">Not linked</option>
           ${Object.entries(this._config?.consumables?.products || {}).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(npsCfg.hatchery?.enrichment?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}

@@ -466,6 +466,61 @@ comes straight from §10.6. Whatever the numbers, the honest rule stands: the
 container's freshness clock uses the ENRICHED shelf life when the loaded batch
 was enriched.
 
+### 10.3.1 CORRECTION (0.7.89) — "stale" was the wrong word, and one clock was the wrong model
+
+Reece, live-testing 2026-08-28: *"the current hatchery will always show that the
+current hatch is stale. What you are calling 'stale' is actually nutritionally
+depleted — but if the container has been enriched, it is no longer nutritionally
+depleted, it is now gut loaded."*
+
+He is right, and the app was contradicting its own protocol. Trace it:
+
+| t | what happens | what the card said |
+|---|---|---|
+| T+0 | harvest → load the container (`mixedAt`) | prime, ~24 h left |
+| T+8 | molt to instar II — the batch grows a mouth, first dose | prime |
+| T+20 | 12 h soak ends (`enrichedAt`) — the batch is GUT-LOADED | prime, ~4 h left |
+| T+24 | — | **"past the 24 h prime window. Feed it out or hatch fresh."** |
+
+The 24 h yolk window exists because UNFED nauplii burn their reserves down
+(30–50% of calories by 48 h). Enrichment is the one thing that falsifies that
+premise: the batch has eaten. Running a single clock meant the app condemned
+every batch four hours after finishing the soak it had itself asked for — and
+because §10.1's flow enriches IN the loaded container, the collision was
+guaranteed, not occasional.
+
+**Two clocks, not one.** Which one runs depends on whether the batch was fed:
+
+- **Unenriched** → the yolk clock. `prime` for 24 h from the load, then
+  `fading`. Unchanged, but now labelled as the yolk window and offering
+  *enrich it* as a third way out.
+- **Enriched** → the boost clock, counted from the END of the soak
+  (`enrichedAt`), not from the load. `gutloaded` while it holds
+  (`ENRICH_SHELF_H_ROOM` 12 h / `ENRICH_SHELF_H_FRIDGE` 48 h), then
+  `boost_fading`. What ticks here is not starvation but retro-conversion —
+  Evjemo 1997, DHA to under half within a day warm, <5% loss for 24 h+ under
+  10 °C. The honest ending is *"still live food, no longer enriched food"*,
+  never *"hatch fresh"*.
+
+**The container shelf had the same bug.** `_enriched_shelf` computed
+`min(plain_shelf, soak_offset + enriched_cap)` — so enrichment could only ever
+SHORTEN the window, never survive past the yolk shelf that no longer applied.
+The `min()` against the plain shelf is gone; the cap is now
+`ENRICH_SHELF_MAX_H` (72 h) so a bad stamp cannot grant a week.
+
+**Molt timing re-checked at the same time.** §10.5 puts instar II at "6–12 h
+post-hatch, temperature-dependent". The default dose delay was **6 h** — the
+early edge of a band whose whole point is that it moves. It is now
+`INSTAR_II_HOURS = 8.0` at the 28 °C optimum, and `instar_two_delay_hours()`
+rides the SAME temperature factor as the hatch clock (Reece's bench runs
+26.4 °C, so his molt lands nearer 9 h). Advisory only, like every other
+suggestion here: the card argues, the keeper decides.
+
+**The rule that generalises:** a status word has to name the mechanism it
+measures. "Stale" conflated three different things — yolk burn, HUFA
+retro-conversion and water hygiene — and once they were conflated, no amount of
+correct arithmetic could produce a true sentence.
+
 ### 10.4 Species tie-in (light touch)
 
 Species-library entries gain a `benefitsFromEnrichment` flag surfaced in the

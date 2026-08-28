@@ -1008,7 +1008,8 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
         "doseMl": _awc_num(raw_enrich.get("doseMl"), 1, 0.5, 50),
         # Instar I can't eat — the Selcon goes in this many hours after load
         # (the molt; ~6-12 h warm, longer on a cool bench). 0 = dose at load.
-        "doseDelayH": _awc_num(raw_enrich.get("doseDelayH"), 6, 0, 24),
+        "doseDelayH": _awc_num(raw_enrich.get("doseDelayH"),
+                               nps_engine.INSTAR_II_HOURS, 0, 24),
         "productId": _awc_str(raw_enrich.get("productId"), 40),
         "splitDose": bool(raw_enrich.get("splitDose", False)),
         "state": {
@@ -12424,7 +12425,11 @@ def _nps_brine_supply(config: dict[str, Any]) -> tuple[Any, float, Any, Any]:
         if enriched_dt is None or loaded_dt is None:
             return min(shelf_h, enriched_cap_h)
         soak_offset_h = max(0.0, (enriched_dt - loaded_dt).total_seconds() / 3600.0)
-        return min(shelf_h, soak_offset_h + enriched_cap_h)
+        # NOT min()'d against the plain shelf (0.7.89): that 24 h exists because
+        # unfed nauplii burn their yolk down, and a gut-loaded batch is the one
+        # case where the premise is false. Capping here made the container go
+        # "stale" a few hours after the soak the app itself asked for.
+        return min(nps_engine.ENRICH_SHELF_MAX_H, soak_offset_h + enriched_cap_h)
     if isinstance(fx_channel, dict):
         reservoir = fx_channel.get("reservoir") or {}
         try:
@@ -13192,6 +13197,10 @@ async def websocket_nps_summary(
     hatchery_cfg = _nps_hatchery_v2(config)  # migration-safe v2 view
     reservoir_cfg = hatchery_cfg["reservoir"]
     supply_loaded, supply_shelf_h, supply_remaining, supply_rate = _nps_brine_supply(config)
+    # An enriched load is on the BOOST clock, not the yolk clock (0.7.89).
+    enriched_at = (str(reservoir_cfg.get("enrichedAt") or "")
+                   if reservoir_cfg.get("lastLoadEnriched") else "")
+    fridged = bool(reservoir_cfg.get("refrigerated"))
     if isinstance(fx_channel, dict):
         reservoir = fx_channel.get("reservoir") or {}
         if reservoir_cfg.get("lastLoadEnriched"):
@@ -13201,14 +13210,16 @@ async def websocket_nps_summary(
                  "shelfLifeDays": supply_shelf_h / 24.0}, now_utc)
         else:
             freshness = dosing_engine.freshness_state(reservoir, now_utc)
-        prime = nps_engine.hatch_prime_state(reservoir.get("mixedAt"), now_utc)
+        prime = nps_engine.hatch_prime_state(
+            reservoir.get("mixedAt"), now_utc, enriched_at, fridged)
     else:
         # Hand-dosers track brine too: the hatchery's own container stamp
         # drives the same freshness/prime clocks (shelf life follows the
         # fridge toggle, tightened for an enriched load). No stamp yet ->
         # prime "unknown", freshness withheld (no dosing to block).
         loaded_at = reservoir_cfg.get("mixedAt") or ""
-        prime = nps_engine.hatch_prime_state(loaded_at, now_utc)
+        prime = nps_engine.hatch_prime_state(
+            loaded_at, now_utc, enriched_at, fridged)
         if loaded_at:
             freshness = dosing_engine.freshness_state(
                 {"mixedAt": loaded_at, "shelfLifeDays": supply_shelf_h / 24.0}, now_utc)
@@ -13243,6 +13254,7 @@ async def websocket_nps_summary(
             primary_state = hatch_st
     # Temperature advisory (never moves the clock) from the optional sensor.
     temp_advice = {"available": False, "expectedHours": None, "factor": None, "warm": False}
+    instar_advice = nps_engine.instar_two_delay_hours(None)
     temp_entity = hatchery_cfg.get("tempEntity") or ""
     if temp_entity:
         temp_state = hass.states.get(temp_entity)
@@ -13253,6 +13265,8 @@ async def websocket_nps_summary(
         if temp_c is not None:
             temp_advice = nps_engine.expected_hatch_hours(hatchery_cfg["hatchHours"], temp_c)
             temp_advice["tempC"] = round(temp_c, 1)
+            # The molt is as temperature-driven as the hatch (0.7.89).
+            instar_advice = nps_engine.instar_two_delay_hours(temp_c)
     # Container payload: the CANONICAL reservoir (pump channel's when linked).
     if isinstance(fx_channel, dict):
         ch_res = fx_channel.get("reservoir") or {}
@@ -13335,6 +13349,7 @@ async def websocket_nps_summary(
             "learned": nps_engine.learned_hatch_hours(
                 hatchery_cfg["history"], hatchery_cfg["eggType"]),
             "temp": temp_advice,
+            "instar": instar_advice,
             "vesselPresets": [dict(p) for p in nps_engine.HATCH_VESSEL_PRESETS],
             "nextHatch": next_hatch,
         },

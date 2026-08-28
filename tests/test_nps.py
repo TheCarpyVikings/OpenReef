@@ -342,7 +342,44 @@ def test_hatch_prime_state():
     fading = nps.hatch_prime_state(_iso(NOW - timedelta(hours=30)), NOW)
     assert fading["status"] == "fading"
     assert fading["primeLeftHours"] == 0.0
+    assert fading["enriched"] is False and fading["window"] == "yolk"
     assert nps.hatch_prime_state("", NOW)["status"] == "unknown"
+
+
+def test_an_enriched_batch_is_gut_loaded_not_depleted():
+    """Reece, 0.7.89: the yolk clock condemned the batch the app had just told
+    him to gut-load. Loaded 22 h ago, soak finished 2 h ago -> fed, not fading."""
+    loaded = _iso(NOW - timedelta(hours=22))
+    soaked = _iso(NOW - timedelta(hours=2))
+    st = nps.hatch_prime_state(loaded, NOW, soaked)
+    assert st["status"] == "gutloaded"          # NOT "fading"
+    assert st["enriched"] is True and st["window"] == "boost"
+    assert st["ageHours"] == 22.0               # the load age is still reported
+    assert st["primeLeftHours"] == 10.0         # 12 h room hold, 2 h spent
+    assert st["windowHours"] == nps.ENRICH_SHELF_H_ROOM
+
+
+def test_the_boost_has_its_own_ending_and_the_fridge_extends_it():
+    loaded = _iso(NOW - timedelta(hours=40))
+    soaked = _iso(NOW - timedelta(hours=20))
+    warm = nps.hatch_prime_state(loaded, NOW, soaked)
+    assert warm["status"] == "boost_fading"     # 20 h > 12 h room hold
+    assert warm["primeLeftHours"] == 0.0
+    assert warm["soakAgeHours"] == 20.0
+    cold = nps.hatch_prime_state(loaded, NOW, soaked, refrigerated=True)
+    assert cold["status"] == "gutloaded"        # <10 C holds the HUFAs
+    assert cold["primeLeftHours"] == 28.0
+    # No soak stamp = never enriched: the yolk clock still rules.
+    assert nps.hatch_prime_state(loaded, NOW, "")["status"] == "fading"
+
+
+def test_instar_two_delay_follows_the_temperature():
+    warm = nps.instar_two_delay_hours(28.0)
+    assert warm["available"] is True and warm["hours"] == nps.INSTAR_II_HOURS
+    cool = nps.instar_two_delay_hours(26.4)      # Reece's bench
+    assert cool["hours"] > warm["hours"]
+    assert nps.instar_two_delay_hours(2.0)["hours"] <= nps.INSTAR_II_DELAY_MAX_H
+    assert nps.instar_two_delay_hours(None)["available"] is False
 
 
 def test_normalise_feed_exchange():
@@ -1628,6 +1665,37 @@ def test_ws_summary_hand_dose_brine_clocks():
     # 24 h hatch + 24 h shelf = structural overlap: the honest advice is now.
     assert next_hatch["status"] == "start_now"
     assert next_hatch["overlap"] is True
+
+
+def test_ws_summary_never_calls_an_enriched_batch_stale():
+    """The whole of Reece's 0.7.89 report in one assert set: load, wait out the
+    molt, soak 12 h, and the card used to answer "past prime, hatch fresh" —
+    about the batch it had just had him gut-load. Now the boost clock rules,
+    and the container's shelf runs to the end of that boost too."""
+    now = datetime.now(timezone.utc)
+    entry = _entry({})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = {
+        "hatchHours": 34,
+        "reservoir": {"volumeMl": 750, "remainingMl": 500,
+                      "mixedAt": (now - timedelta(hours=26)).isoformat(),
+                      "refrigerated": False, "lastLoadEnriched": True,
+                      "enrichedAt": (now - timedelta(hours=4)).isoformat()},
+    }
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    prime = payload["feedExchange"]["prime"]
+    assert prime["status"] == "gutloaded"        # 26 h old, and NOT fading
+    assert prime["primeLeftHours"] == 8.0        # 12 h room hold, 4 h spent
+    container = payload["hatchery"]["reservoir"]
+    # Soak ended 22 h after the load, so the window is 22 + 12 — the old min()
+    # against the 24 h yolk shelf declared it stale two hours ago.
+    assert container["shelfHours"] == 34.0
+    assert payload["feedExchange"]["freshness"]["status"] != "stale"
+    # And the molt advice is on the payload for the card to argue with.
+    assert "instar" in payload["hatchery"]
 
 
 def test_ws_hatch_loaded_stamps_the_hand_dose_clock():

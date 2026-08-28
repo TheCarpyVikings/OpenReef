@@ -1027,4 +1027,61 @@ test("unsaved changes carry their own Save button off the Settings page", async 
   } finally { restore(); }
 });
 
+test("an enriched batch reads gut-loaded, never 'past prime, hatch fresh'", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    const fx = panel._nps.summary.feedExchange;
+    // 26 h since the load, soak finished 4 h ago. The old single clock called
+    // this "past the 24 h prime window" — about a batch that had just been fed.
+    fx.prime = { status: "gutloaded", ageHours: 26, primeLeftHours: 8,
+                 enriched: true, window: "boost", windowHours: 12, soakAgeHours: 4 };
+    let html = panel._hatcheryPanel();
+    assert(html.includes("Gut-loaded"), "an enriched batch says so");
+    assert(html.includes("has been FED"), "and says why the yolk clock stopped applying");
+    assert(!html.includes("past the 24 h yolk window"), "it must not also condemn it");
+    assert(html.includes("at room temp"), "the hold length is qualified by storage");
+    // Fridged: same status, a much longer hold, and the copy has to follow.
+    fx.prime.windowHours = 48; fx.prime.primeLeftHours = 44;
+    assert(panel._hatcheryPanel().includes("fridged"), "48 h only makes sense cold");
+    // Boost drained is not the same as stale — it is still live food.
+    fx.prime = { status: "boost_fading", ageHours: 44, primeLeftHours: 0,
+                 enriched: true, window: "boost", windowHours: 12, soakAgeHours: 20 };
+    html = panel._hatcheryPanel();
+    assert(html.includes("boost has drained"), "the honest ending for an enriched batch");
+    assert(html.includes("Still live food"), "...and it does not tell him to bin it");
+    // The unenriched path keeps the yolk story, now labelled as such.
+    fx.prime = { status: "fading", ageHours: 30, primeLeftHours: 0,
+                 enriched: false, window: "yolk", windowHours: 24 };
+    html = panel._hatcheryPanel();
+    assert(html.includes("never enriched") && html.includes("yolk window"),
+      "unenriched brine still ages out — and now names the reason");
+    assert(html.includes("enrich it"), "with enrichment offered as the way out");
+  } finally { restore(); }
+});
+
+test("a cool bench moves the molt, so the dose-delay advice moves with it", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    const hatch = panel._nps.summary.hatchery;
+    hatch.temp = { available: true, tempC: 26.4, expectedHours: 38.4, factor: 1.13, warm: false };
+    hatch.instar = { available: true, hours: 9.0, factor: 1.13 };
+    hatch.enrichment = { ...(hatch.enrichment || {}), doseDelayH: 6 };
+    let html = panel._hatcheryPanel();
+    assert(html.includes("molt to instar II lands nearer"), "6 h is early at 26.4 °C");
+    assert(html.includes("no mouth"), "and it says why an early dose is wasted");
+    // Setting already past the molt: no nag.
+    hatch.enrichment.doseDelayH = 10;
+    assert(!panel._hatcheryPanel().includes("lands nearer"), "in step — no nag");
+    // No sensor, no claim.
+    hatch.enrichment.doseDelayH = 6;
+    hatch.instar = { available: false, hours: 8, factor: null };
+    assert(!panel._hatcheryPanel().includes("lands nearer"),
+      "without a temperature reading the app has nothing to argue with");
+  } finally { restore(); }
+});
+
 runTests();

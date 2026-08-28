@@ -293,6 +293,18 @@ ENRICH_SHELF_H_FRIDGE = 48.0
 ENRICH_DEFAULT_HOURS = 12.0
 ENRICH_SECOND_DOSE_H = 10.0
 ENRICH_OVERDUE_GRACE_H = 6.0
+# An enriched container's window is the soak's own length PLUS the hold above
+# (the boost decays from soak-end, not from the load), bounded so a bad stamp
+# cannot grant a week of "fresh".
+ENRICH_SHELF_MAX_H = 72.0
+
+# Instar I has no mouth and no anus — it cannot eat, full stop. The molt to
+# instar II lands ~8 h post-hatch at the 28 C optimum (SRAC/FAO put the band at
+# 6-12 h, temperature-dependent) and runs later on a cool bench, so the delay
+# rides the SAME factor as the hatch clock. Dosing emulsion before the molt
+# just fouls the water.
+INSTAR_II_HOURS = 8.0
+INSTAR_II_DELAY_MAX_H = 24.0
 
 # Named vessel presets for the volume picker (product → working water volume).
 # Research note: the Ziss line is ZH-700 / ZH-2000 — there is no ZH-1000.
@@ -540,21 +552,81 @@ def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
             "firstDoseDue": False, "secondDoseDue": False}
 
 
-def hatch_prime_state(mixed_at_iso: Any, now: datetime) -> dict[str, Any]:
-    """Where this hatch sits in its nutritional window: ``prime`` (first 24 h,
-    yolk reserves intact), ``fading`` (still alive, calories dropping), or
-    ``unknown`` (no 'Hatched & loaded' stamp yet)."""
+def instar_two_delay_hours(temp_c: Any = None,
+                           base_hours: Any = INSTAR_II_HOURS) -> dict[str, Any]:
+    """When the batch can first EAT — the honest dose-delay advice.
+
+    The molt to instar II is as temperature-driven as the hatch itself, so it
+    rides the same factor: ~8 h at 28 C, later on a cool bench. Advisory only,
+    exactly like ``expected_hatch_hours`` — it never moves the keeper's
+    setting, it just says what the water is doing."""
+    base = _f(base_hours)
+    if base <= 0:
+        base = INSTAR_II_HOURS
+    temp = _f(temp_c, -999.0)
+    if temp < -50 or temp > 60:
+        return {"available": False, "hours": round(base, 1), "factor": None}
+    factor = min(1.0 + max(0.0, (HATCH_TEMP_OPTIMUM_C - temp)) * 0.08, 2.2)
+    return {"available": True,
+            "hours": round(min(INSTAR_II_DELAY_MAX_H, base * factor), 1),
+            "factor": round(factor, 2)}
+
+
+def hatch_prime_state(mixed_at_iso: Any, now: datetime,
+                      enriched_at_iso: Any = None,
+                      refrigerated: bool = False) -> dict[str, Any]:
+    """Where this hatch sits in its NUTRITIONAL window - and which window that
+    even is, because enrichment swaps one clock for another.
+
+    An UNENRICHED batch runs on yolk: ``prime`` for the first 24 h, then
+    ``fading`` as the reserves burn down (30-50% of calories gone by 48 h).
+
+    An ENRICHED batch has been FED. Calling it depleted at 24 h is simply
+    wrong - it is gut-loaded, and it now carries the DHA that Great Salt Lake
+    nauplii never have on their own. What ticks is no longer starvation but
+    retro-conversion: the HUFA boost is transient (Evjemo 1997 - DHA under
+    half within a day warm; <5% loss for 24 h+ below 10 C). So an enriched
+    batch reads ``gutloaded`` while the boost holds (12 h room / 48 h fridge,
+    counted from the END of the soak) and ``boost_fading`` after - still live
+    food, no longer enriched food. Never "past prime, hatch fresh".
+
+    This matters because the app's own protocol guarantees the collision: no
+    mouths until the molt, then a 12 h soak, and the yolk window is spent by
+    the time the soak finishes. The old single clock condemned every batch it
+    had just told the keeper to gut-load (Reece, 0.7.89).
+
+    ``primeLeftHours`` always means "hours left in the window that matters",
+    so compact surfaces need no new arithmetic."""
+    unknown = {"status": "unknown", "ageHours": None, "primeLeftHours": None,
+               "enriched": False, "window": None, "windowHours": None,
+               "soakAgeHours": None}
     mixed = _parse_iso(mixed_at_iso)
     if mixed is None:
-        return {"status": "unknown", "ageHours": None, "primeLeftHours": None}
+        return dict(unknown)
     try:
         age_h = max(0.0, (now - mixed).total_seconds() / 3600.0)
     except TypeError:
-        return {"status": "unknown", "ageHours": None, "primeLeftHours": None}
+        return dict(unknown)
+    enriched = _parse_iso(enriched_at_iso)
+    if enriched is not None:
+        hold_h = ENRICH_SHELF_H_FRIDGE if refrigerated else ENRICH_SHELF_H_ROOM
+        try:
+            soak_age_h = max(0.0, (now - enriched).total_seconds() / 3600.0)
+        except TypeError:
+            return dict(unknown)
+        left_h = hold_h - soak_age_h
+        return {"status": "gutloaded" if left_h > 0 else "boost_fading",
+                "ageHours": round(age_h, 1),
+                "primeLeftHours": round(max(0.0, left_h), 1),
+                "enriched": True, "window": "boost",
+                "windowHours": round(hold_h, 1),
+                "soakAgeHours": round(soak_age_h, 1)}
     left_h = BRINE_PRIME_HOURS - age_h
     return {"status": "prime" if left_h > 0 else "fading",
             "ageHours": round(age_h, 1),
-            "primeLeftHours": round(max(0.0, left_h), 1)}
+            "primeLeftHours": round(max(0.0, left_h), 1),
+            "enriched": False, "window": "yolk",
+            "windowHours": BRINE_PRIME_HOURS, "soakAgeHours": None}
 
 
 # --------------------------------------------------------------------------- #
