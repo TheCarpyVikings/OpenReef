@@ -506,7 +506,9 @@ class OpenReefPanel extends HTMLElement {
       if (this._activeTab === "nps" || this._activeTab === "hatchery") this._npsLoadSummary(true);
       // Mixing summary (batch clocks, dose guide, levels) is computed backend-side
       // from config — a save (brand, volumes, layout) invalidates it the same way.
-      if (this._activeTab === "mixing") this._mixingLoadSummary(true);
+      // Saves usually land from the Settings tab, so refresh regardless of where
+      // the keeper is standing — otherwise the dose guide shows the old vessel.
+      if (this._mixingEnabled()) this._mixingLoadSummary(true);
       // The spawning execution strip is computed backend-side from the saved
       // program — a save (new reef/offset/noon) must refresh it immediately.
       if (this._activeTab === "spawning") this._loadSpawnExecStatus(true);
@@ -22655,12 +22657,12 @@ const rigSteps = [
     const dose = sum?.dose || { available: false };
     const status = batch.status || "idle";
     const rodi = sum?.rodi || {};
-    // Refresh while a batch, a RODI draw or a calibration run is live so the
-    // clocks and levels stay honest.
-    const active = !["idle", "ready", "storing", "fault"].includes(status)
-      || !!rodi.draw || !!rodi.calibration;
+    // Refetch whenever the cache has gone stale — live batches and RODI runs
+    // need their clocks, and even an idle tab must pick up a settings save
+    // made elsewhere (the stamp in _mixingLoadSummary throttles this to one
+    // call per 8 s, so a render storm can never hammer the WS).
     if (!this._mixingSummaryLoading
-        && (!sum || (active && Date.now() - (this._mixingSummaryAt || 0) > 8000))) {
+        && (!sum || Date.now() - (this._mixingSummaryAt || 0) > 8000)) {
       setTimeout(() => this._mixingLoadSummary(true), 0);
     }
 

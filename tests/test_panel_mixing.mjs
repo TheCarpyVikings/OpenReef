@@ -459,4 +459,21 @@ test("settings carries the filter rating field", async () => {
   noPlaceholders(body, "rodi settings");
 });
 
+test("an idle tab refetches a stale summary — a settings save elsewhere must reach the dose guide", async () => {
+  const panel = await mixingPanel();
+  let called = 0;
+  panel._mixingLoadSummary = () => { called += 1; };
+  panel._mixingSummaryLoading = false;
+  panel._mixingSummaryAt = Date.now() - 9000;          // stale cache, idle batch
+  panel._activeTab = "mixing";
+  panel._mixingTab();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert(called >= 1, "a stale idle summary was never refetched — vessel edits go unseen");
+  called = 0;
+  panel._mixingSummaryAt = Date.now();                 // fresh cache: stay quiet
+  panel._mixingTab();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert(called === 0, "a fresh summary was refetched needlessly");
+});
+
 runTests();
