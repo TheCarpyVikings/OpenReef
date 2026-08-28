@@ -122,9 +122,14 @@ from .const import (
     MAINTENANCE_MIXING_RETEST_TASK_ID,
     MAINTENANCE_SOURCE_MIXING,
     MIXING_BATCH_TYPES,
+    MIXING_CAL_CAP_MIN,
+    MIXING_CAL_MIN_SECONDS,
     MIXING_CIRCULATE_EVERY_MAX_H,
     MIXING_CIRCULATE_FOR_MAX_MIN,
+    MIXING_DRAW_DESTINATIONS,
     MIXING_FILL_CAP_DEFAULT_MIN,
+    MIXING_FILTER_RATED_MAX_L,
+    MIXING_LITRES_PROCESSED_MAX,
     MIXING_FILL_CAP_MAX_MIN,
     MIXING_HEAT_TARGET_MAX_C,
     MIXING_HEAT_TARGET_MIN_C,
@@ -315,6 +320,7 @@ NPS_DRAIN_UNSUB = "nps_drain_unsub"    # feed-exchange matched-drain stop timer
 MIXING_STATE_LOCK = "mixing_state_lock"
 MIXING_FILL_UNSUB = "mixing_fill_unsub"  # booster fill-cap stop timer
 MIXING_CIRC_UNSUB = "mixing_circ_unsub"  # storing-circulation chain (start OR stop leg)
+MIXING_RODI_UNSUB = "mixing_rodi_unsub"  # RODI draw stop leg OR calibration cap (mutually exclusive)
 MIXING_RUNTIME = "mixing_runtime"        # sim switch states (mirrors AWC_RUNTIME)
 _AWC_SIM_HAZARDS = ("leak", "highLevel", "freshEmpty", "wasteFull", "returnPumpIssue")
 # Bulky runtime record lists stripped from a settings export (and preserved through
@@ -1519,10 +1525,32 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
     }
 
     raw_rodi = mix_cfg.get("rodi") if isinstance(mix_cfg.get("rodi"), dict) else {}
+    raw_draw = raw_rodi.get("draw") if isinstance(raw_rodi.get("draw"), dict) else {}
+    raw_cal = raw_rodi.get("calibration") if isinstance(raw_rodi.get("calibration"), dict) else {}
+    draw_dest = str(raw_draw.get("destination") or "store")
     mix_cfg["rodi"] = {
         "rateLph": round(_awc_num(raw_rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH), 1),
         "fillCapMin": int(_awc_num(raw_rodi.get("fillCapMin"),
                                    MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)),
+        "calibratedAt": _awc_str(raw_rodi.get("calibratedAt"), 40),
+        "litresProcessed": round(_awc_num(raw_rodi.get("litresProcessed"), 0, 0,
+                                          MIXING_LITRES_PROCESSED_MAX), 1),
+        "filterRatedL": round(_awc_num(raw_rodi.get("filterRatedL"), 0, 0,
+                                       MIXING_FILTER_RATED_MAX_L), 1),
+        "filterChangedAt": _awc_str(raw_rodi.get("filterChangedAt"), 40),
+        # Live-run stamps preserved, only clamped — a normalise pass must never
+        # move a running draw or calibration (the batch-block rule).
+        "draw": {
+            "active": bool(raw_draw.get("active", False)),
+            "litres": round(_awc_num(raw_draw.get("litres"), 0, 0, MIXING_VESSEL_MAX_L), 1),
+            "destination": draw_dest if draw_dest in MIXING_DRAW_DESTINATIONS else "store",
+            "startedAt": _awc_str(raw_draw.get("startedAt"), 40),
+            "endsAt": _awc_str(raw_draw.get("endsAt"), 40),
+        },
+        "calibration": {
+            "active": bool(raw_cal.get("active", False)),
+            "startedAt": _awc_str(raw_cal.get("startedAt"), 40),
+        },
     }
 
     raw_salt = mix_cfg.get("salt") if isinstance(mix_cfg.get("salt"), dict) else {}
@@ -5581,6 +5609,8 @@ async def _async_save_config(
     # The circulation chain re-arms from its persisted stamps on every save —
     # that save-driven re-arm IS how its burst legs chain (see the scheduler).
     await _async_schedule_mixing_circulation(hass, entry, normalised)
+    # Same contract for the RODI draw stop leg / calibration cap.
+    await _async_schedule_mixing_rodi(hass, entry, normalised)
     await _async_setup_dosing_mirror(hass, entry, normalised)
     if _dosing_channels(normalised):
         _async_kick_dosing_sync(hass, entry)
@@ -13935,6 +13965,129 @@ def _mixing_credit_rodi(cfg: dict[str, Any], delta_l: float) -> None:
     rodi["estimatedLitres"] = round(max(0.0, min(level, vol if vol > 0 else level)), 1)
 
 
+def _mixing_add_processed(cfg: dict[str, Any], litres: float) -> None:
+    """Bump the filter-litres ledger — every litre through the membrane counts:
+    batch fills, draws, calibration runs."""
+    if litres <= 0:
+        return
+    rodi = cfg.setdefault("rodi", {})
+    if not isinstance(rodi, dict):
+        return
+    level = _awc_num(rodi.get("litresProcessed"), 0, 0, MIXING_LITRES_PROCESSED_MAX) + litres
+    rodi["litresProcessed"] = round(min(level, MIXING_LITRES_PROCESSED_MAX), 1)
+
+
+def _clear_mixing_rodi_timer(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MIXING_RODI_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_mixing_finish_draw(
+    hass: HomeAssistant, config: dict[str, Any], context: Any, stopped_early: bool
+) -> None:
+    """End the active RODI draw honestly: booster OFF, litres credited from the
+    stamps (rate x elapsed — at the scheduled stop that IS the target; an early
+    stop credits only what ran; a late fire credits the overrun, because the
+    water kept flowing). Store draws move the anchor; every draw feeds the
+    filter ledger. Caller holds the lock and saves."""
+    cfg = _mixing_cfg(config)
+    rodi = cfg.get("rodi") if isinstance(cfg.get("rodi"), dict) else {}
+    draw = rodi.get("draw") if isinstance(rodi.get("draw"), dict) else {}
+    if not draw.get("active"):
+        return
+    await _async_mixing_stop_switches(hass, config, ("rodiBooster",), context)
+    now = datetime.now(timezone.utc)
+    started = _parse_datetime(draw.get("startedAt"))
+    rate = _awc_num(rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH)
+    target = _awc_num(draw.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
+    elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0) if started else 0.0
+    done = round(rate * elapsed_h, 1)
+    if not stopped_early:
+        # The scheduled stop fired: never claim more than the float valve /
+        # keeper asked for unless it genuinely overran (late fire after a
+        # restart) — and say so when it did.
+        if done > target + 0.5:
+            _append_activity(
+                config, f"Mixing station: RODI draw overran its stop — about {done:g} L "
+                f"of a planned {target:g} L (restart delay); levels credited honestly",
+                "warning")
+        else:
+            done = round(target, 1)
+    dest = str(draw.get("destination") or "store")
+    if dest == "store":
+        _mixing_credit_rodi(cfg, done)
+    _mixing_add_processed(cfg, done)
+    rodi["draw"] = {"active": False, "litres": 0, "destination": dest,
+                    "startedAt": "", "endsAt": ""}
+    where = "into the RODI store" if dest == "store" else "to the T-off"
+    if stopped_early:
+        _append_activity(config, f"Mixing station: RODI draw stopped — about {done:g} L "
+                         f"of {target:g} L {where}", "control")
+    else:
+        _append_activity(config, f"Mixing station: RODI draw done — {done:g} L {where}",
+                         "control")
+
+
+async def _async_schedule_mixing_rodi(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
+) -> None:
+    """(Re)arm the RODI-draw stop leg or the calibration cap from persisted
+    stamps — the circulation chain's contract: callbacks stamp-and-save, the
+    save pass re-enters here, and a restart re-arms whatever the stamps call
+    for. These are safety legs, so they run even if the station was disabled
+    mid-run — a booster left ON is never acceptable."""
+    _clear_mixing_rodi_timer(hass)
+    cfg = _mixing_cfg(config)
+    rodi = cfg.get("rodi") if isinstance(cfg.get("rodi"), dict) else {}
+    draw = rodi.get("draw") if isinstance(rodi.get("draw"), dict) else {}
+    cal = rodi.get("calibration") if isinstance(rodi.get("calibration"), dict) else {}
+    now = datetime.now(timezone.utc)
+    store = hass.data.setdefault(DOMAIN, {})
+    if draw.get("active"):
+        ends = _parse_datetime(draw.get("endsAt")) or now
+
+        async def _stop(_now: datetime) -> None:
+            latest = _first_entry(hass)
+            async with _mixing_lock(hass):
+                # Pop the guard INSIDE the lock (the calrun lesson).
+                hass.data.setdefault(DOMAIN, {}).pop(MIXING_RODI_UNSUB, None)
+                if latest is None:
+                    return
+                cfg2 = _config_from_entry(latest)
+                if not (_mixing_cfg(cfg2).get("rodi", {}).get("draw") or {}).get("active"):
+                    return
+                await _async_mixing_finish_draw(hass, cfg2, None, stopped_early=False)
+                await _async_save_config(hass, latest, cfg2)
+
+        store[MIXING_RODI_UNSUB] = async_track_point_in_time(
+            hass, _stop, max(ends, now + timedelta(seconds=2)))
+        return
+    if cal.get("active"):
+        started = _parse_datetime(cal.get("startedAt")) or now
+        cap_at = started + timedelta(minutes=MIXING_CAL_CAP_MIN)
+
+        async def _cap(_now: datetime) -> None:
+            latest = _first_entry(hass)
+            async with _mixing_lock(hass):
+                hass.data.setdefault(DOMAIN, {}).pop(MIXING_RODI_UNSUB, None)
+                if latest is None:
+                    return
+                cfg2 = _config_from_entry(latest)
+                rodi2 = _mixing_cfg(cfg2).get("rodi", {})
+                if not (rodi2.get("calibration") or {}).get("active"):
+                    return
+                await _async_mixing_stop_switches(hass, cfg2, ("rodiBooster",), None)
+                rodi2["calibration"] = {"active": False, "startedAt": ""}
+                _append_activity(
+                    cfg2, f"Mixing station: flow calibration hit the {MIXING_CAL_CAP_MIN}-min "
+                    "cap and was cancelled — run it again into a known container", "warning")
+                await _async_save_config(hass, latest, cfg2)
+
+        store[MIXING_RODI_UNSUB] = async_track_point_in_time(
+            hass, _cap, max(cap_at, now + timedelta(seconds=2)))
+
+
 async def _async_mixing_recover_orphaned(
     hass: HomeAssistant, entry: OpenReefConfigEntry
 ) -> None:
@@ -14121,8 +14274,12 @@ async def websocket_mixing_advance(
         if state == "filling":
             _clear_mixing_fill_timer(hass)
             await _async_mixing_stop_switches(hass, config, ("rodiBooster",), context)
+            filled = _awc_num(batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
             if str(cfg.get("layout") or "dual") == "dual" and batch.get("type") != "rodi":
-                _mixing_credit_rodi(cfg, _awc_num(batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L))
+                _mixing_credit_rodi(cfg, filled)
+            # Every confirmed fill went through the membrane — the filter
+            # ledger counts it whatever the layout or batch type.
+            _mixing_add_processed(cfg, filled)
         elif state == "transferring":
             moved = _awc_num(msg.get("litres"), _awc_num(batch.get("litres"), 0, 0,
                                                          MIXING_VESSEL_MAX_L),
@@ -14313,6 +14470,197 @@ async def websocket_mixing_set_level(
             batch["usedLitres"] = round(max(0.0, min(total, total - litres)), 1)
         _append_activity(
             config, f"Mixing station: {vessel} level corrected to {litres:g} L", "control")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_rodi_draw",
+    vol.Required("litres"): vol.All(vol.Coerce(float), vol.Range(min=0, max=2000)),
+    vol.Optional("destination", default="store"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_rodi_draw(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Run the RODI unit OUTSIDE any batch — a litre-targeted booster run into
+    the store, or an external T-off (the ATO reservoir). rate x time is the
+    meter, so the guards refuse without a known flow rate; the stop leg is
+    armed by the save pass off the endsAt stamp (stamps ARE the schedule)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    litres = float(msg["litres"])
+    destination = str(msg.get("destination") or "store")
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        reasons = mixing_engine.draw_guard_reasons(cfg, litres, destination)
+        if reasons:
+            connection.send_result(msg["id"], {"success": False, "reasons": reasons})
+            return
+        try:
+            await _async_mixing_set_switch(
+                hass, config, "rodiBooster", True, connection.context(msg))
+        except Exception as exc:  # noqa: BLE001 - surface the failure, nothing started
+            connection.send_error(msg["id"], "booster_start_failed",
+                                  f"Could not start the RODI booster: {exc}")
+            return
+        rate = _awc_num(cfg.get("rodi", {}).get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH)
+        now = datetime.now(timezone.utc)
+        minutes = litres / rate * 60.0
+        cfg.setdefault("rodi", {})["draw"] = {
+            "active": True, "litres": round(litres, 1), "destination": destination,
+            "startedAt": now.isoformat(),
+            "endsAt": (now + timedelta(minutes=minutes)).isoformat(),
+        }
+        where = "the RODI store" if destination == "store" else "the T-off"
+        _append_activity(
+            config, f"Mixing station: RODI draw started — {litres:g} L to {where} "
+            f"(about {minutes:.0f} min at {rate:g} L/h)", "control")
+        config = await _async_save_config(hass, entry, config)  # save arms the stop leg
+    _mixing_send(connection, msg, hass, config, started=True)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_rodi_stop"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_rodi_stop(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Stop the running draw early — only what actually ran gets credited."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        if not (cfg.get("rodi", {}).get("draw") or {}).get("active"):
+            connection.send_error(msg["id"], "invalid_state", "No RODI draw is running")
+            return
+        _clear_mixing_rodi_timer(hass)
+        await _async_mixing_finish_draw(
+            hass, config, connection.context(msg), stopped_early=True)
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_calibrate",
+    vol.Required("action"): vol.In(("start", "finish", "cancel")),
+    vol.Optional("litres"): vol.All(vol.Coerce(float), vol.Range(min=0, max=2000)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_calibrate(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Timed-run flow calibration: start runs the booster into the keeper's
+    known container; finish takes the measured litres and sets rateLph from
+    litres/elapsed. A run under a minute is refused — that maths is noise, not
+    data. The cap leg (save-armed) cancels a forgotten run."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    action = str(msg["action"])
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        rodi = cfg.setdefault("rodi", {})
+        cal = rodi.get("calibration") if isinstance(rodi.get("calibration"), dict) else {}
+        if action == "start":
+            reasons: list[str] = []
+            if not cfg.get("enabled"):
+                reasons.append("Mixing station is not enabled")
+            if not _mixing_booster_driven(config):
+                reasons.append("Bind the RODI booster plug (or turn on Simulate) — "
+                               "a calibration run needs OpenReef on the switch")
+            busy = mixing_engine.rodi_busy_reason(cfg)
+            if busy:
+                reasons.append(f"The booster is busy — {busy}")
+            if reasons:
+                connection.send_result(msg["id"], {"success": False, "reasons": reasons})
+                return
+            try:
+                await _async_mixing_set_switch(
+                    hass, config, "rodiBooster", True, connection.context(msg))
+            except Exception as exc:  # noqa: BLE001
+                connection.send_error(msg["id"], "booster_start_failed",
+                                      f"Could not start the RODI booster: {exc}")
+                return
+            rodi["calibration"] = {"active": True,
+                                   "startedAt": datetime.now(timezone.utc).isoformat()}
+            _append_activity(
+                config, "Mixing station: flow calibration started — let it run into a "
+                "known container, then enter the litres", "control")
+        else:
+            if not cal.get("active"):
+                connection.send_error(msg["id"], "invalid_state",
+                                      "No calibration run is active")
+                return
+            _clear_mixing_rodi_timer(hass)
+            await _async_mixing_stop_switches(
+                hass, config, ("rodiBooster",), connection.context(msg))
+            started = _parse_datetime(cal.get("startedAt"))
+            rodi["calibration"] = {"active": False, "startedAt": ""}
+            failure: str | None = None
+            if action == "finish":
+                elapsed_s = max(0.0, (datetime.now(timezone.utc) - started).total_seconds()) \
+                    if started else 0.0
+                litres = _awc_num(msg.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
+                rate = mixing_engine.calibration_rate(litres, elapsed_s)
+                if rate <= 0:
+                    # The run is over either way (booster stopped) — record the
+                    # failure honestly and leave the stored rate untouched.
+                    failure = ("Not enough to calibrate from — the run must be at "
+                               f"least {MIXING_CAL_MIN_SECONDS} s with measured "
+                               "litres above 0; the rate is unchanged")
+                    _append_activity(
+                        config, "Mixing station: flow calibration too short to "
+                        "trust — rate unchanged", "warning")
+                else:
+                    rate = round(min(rate, MIXING_RODI_RATE_MAX_LPH), 1)
+                    rodi["rateLph"] = rate
+                    rodi["calibratedAt"] = datetime.now(timezone.utc).isoformat()
+                    _mixing_add_processed(cfg, litres)
+                    _append_activity(
+                        config, f"Mixing station: RODI rate calibrated — {rate:g} L/h "
+                        f"from a {elapsed_s / 60.0:.1f}-min run of {litres:g} L",
+                        "control")
+            else:
+                _append_activity(
+                    config, "Mixing station: flow calibration cancelled — rate unchanged",
+                    "control")
+            if failure is not None:
+                config = await _async_save_config(hass, entry, config)
+                connection.send_result(msg["id"], {"success": False, "reasons": [failure]})
+                return
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_filters_changed"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_filters_changed(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The keeper serviced the RODI filters — the litre counter starts again."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        rodi = _mixing_cfg(config).setdefault("rodi", {})
+        rodi["litresProcessed"] = 0
+        rodi["filterChangedAt"] = datetime.now(timezone.utc).isoformat()
+        _append_activity(config, "Mixing station: RODI filters marked changed — "
+                         "the litre counter starts again", "control")
         config = await _async_save_config(hass, entry, config)
     _mixing_send(connection, msg, hass, config)
 
@@ -16721,6 +17069,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_mixing_abort)
     websocket_api.async_register_command(hass, websocket_mixing_mark_used)
     websocket_api.async_register_command(hass, websocket_mixing_set_level)
+    websocket_api.async_register_command(hass, websocket_mixing_rodi_draw)
+    websocket_api.async_register_command(hass, websocket_mixing_rodi_stop)
+    websocket_api.async_register_command(hass, websocket_mixing_calibrate)
+    websocket_api.async_register_command(hass, websocket_mixing_filters_changed)
     websocket_api.async_register_command(hass, websocket_nps_summary)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
@@ -16854,6 +17206,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     # circulation stopped and re-anchored.
     await _async_mixing_recover_orphaned(hass, entry)
     await _async_schedule_mixing_circulation(hass, entry, _config_from_entry(entry))
+    await _async_schedule_mixing_rodi(hass, entry, _config_from_entry(entry))
     await _async_schedule_awc(hass, entry, normalised)
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
@@ -16911,6 +17264,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _mixing_circ = _store.pop(MIXING_CIRC_UNSUB, None)
     if _mixing_circ is not None:
         _mixing_circ()
+    # And the RODI draw/calibration leg — its stamps re-arm it too.
+    _mixing_rodi = _store.pop(MIXING_RODI_UNSUB, None)
+    if _mixing_rodi is not None:
+        _mixing_rodi()
     _issue_refresh = _store.pop(ISSUE_REFRESH_UNSUB, None)
     if _issue_refresh is not None:
         _issue_refresh()

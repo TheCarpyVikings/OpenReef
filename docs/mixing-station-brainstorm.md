@@ -209,3 +209,33 @@ tile, live salinity probe stage auto-advance, TDS/filter-exhaustion tracking.
 Full "make me a batch" one-button automation (needs level sensors + electric transfer
 valve), salinity-probe-driven auto-dosing of salt, multi-batch history/analytics, Pulse
 wall tile.
+
+## §14 RODI utility (0.7.88 — post-arc)
+
+The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than
+batches — above all the single-vessel crowd filling an ATO reservoir from a T-off.
+
+- **RODI draw** (`mixing_rodi_draw` / `mixing_rodi_stop`): a litre-targeted booster run
+  to a chosen destination — `store` (dual only; the anchor is credited) or `external`
+  (the T-off; nothing in our vessels moves, the litres still count for the filters).
+  Litres are metered by **rate × time**, so a draw REFUSES without a known flow rate —
+  never runs blind. Stop leg = persisted `draw.endsAt` stamp, armed by the save pass
+  (the circulation chain's contract, so it is restart-proof); an early stop credits
+  only what ran; a late fire (restart delay) credits the overrun and says so. Single
+  layout refuses `store` — filling the vessel IS a RODI-only batch.
+- **Flow calibration** (`mixing_calibrate` start/finish/cancel): timed run into a
+  keeper-measured container; finish sets `rodi.rateLph` + `calibratedAt` from
+  litres/elapsed. Runs under `MIXING_CAL_MIN_SECONDS` (60 s) refuse — that maths is
+  noise. A forgotten run is cancelled by the `MIXING_CAL_CAP_MIN` (30 min) cap leg.
+- **Filter ledger**: `rodi.litresProcessed` counts every litre through the membrane
+  (batch fills, draws, calibration runs); `filterRatedL` (settings, 0 = untracked)
+  turns it into a service warning on the tab; `mixing_filters_changed` resets it.
+  This is the "RODI filter litres processed" reminder from §10, delivered as an
+  honest counter rather than a day-cadence chore.
+- **Mutual exclusion**: draw, calibration and the batch fill share one plug — each
+  guards against the others (engine `rodi_busy_reason`); one runtime key
+  (`MIXING_RODI_UNSUB`) since only one leg can live at a time.
+- Same release: the visual pass — every mixing action button carries a panel class
+  (a bare `<button>` rendered as an unreadable white rectangle), level corrections
+  get proper compact Set buttons, idle pump glyphs dim, and the diagram animates
+  draws (store = feed line, external/calibration = a labelled T-off branch).

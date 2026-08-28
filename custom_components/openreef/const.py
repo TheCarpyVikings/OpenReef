@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 55
+CORE_SCHEMA_VERSION = 56
 
 # Reef Layer vocabulary — species decide which rock zone a coral may occupy
 # (SPS crest / LPS mid-rock / softies low / gorgonian at the back), colours
@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.87"
+INTEGRATION_VERSION = "0.7.88"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -357,6 +357,14 @@ MIXING_CIRCULATE_EVERY_MAX_H = 168        # storing circulation cadence ceiling 
 MIXING_CIRCULATE_FOR_MAX_MIN = 120        # storing circulation burst ceiling
 MIXING_RETEST_MAX_DAYS = 60
 MIXING_RODI_RATE_MAX_LPH = 500.0          # sanity ceiling on a configured RODI rate
+# RODI utility runs (0.7.88): a litre-targeted booster run outside any batch —
+# into the store, or an external T-off (the ATO reservoir) — plus a timed-run
+# flow calibration and the filter-litres ledger it feeds.
+MIXING_DRAW_DESTINATIONS = ("store", "external")
+MIXING_CAL_CAP_MIN = 30                   # a calibration run into a jug is short; past this we cancel it
+MIXING_CAL_MIN_SECONDS = 60               # under a minute the rate maths is noise, not data
+MIXING_FILTER_RATED_MAX_L = 500000.0      # sanity ceiling on a membrane/filter litre rating
+MIXING_LITRES_PROCESSED_MAX = 1000000.0   # sanity ceiling on the lifetime litres ledger
 
 # Dosing channels — multi-pump dosing control (kalk stepper doser first). The
 # firmware executes the schedule and the full guard chain (HA edits, never runs,
@@ -1641,6 +1649,18 @@ DEFAULT_CORE_CONFIG = {
         "rodi": {
             "rateLph": 0,                       # 0 = unknown ⇒ no fill ETA shown
             "fillCapMin": MIXING_FILL_CAP_DEFAULT_MIN,
+            "calibratedAt": "",                 # stamp of the last timed-run flow calibration
+            "litresProcessed": 0,               # litres through the membrane since the filters last changed
+            "filterRatedL": 0,                  # 0 = filter life not tracked
+            "filterChangedAt": "",
+            # RODI draw — a litre-targeted booster run OUTSIDE any batch: into
+            # the store, or an external T-off (the ATO jug). Rate x time is the
+            # meter; the stamps ARE the schedule (circulation-chain contract).
+            "draw": {"active": False, "litres": 0, "destination": "store",
+                     "startedAt": "", "endsAt": ""},
+            # Timed-run flow calibration: start → run into a known container →
+            # finish with the measured litres sets rateLph.
+            "calibration": {"active": False, "startedAt": ""},
         },
         "salt": {
             "brand": "nyos_pure",

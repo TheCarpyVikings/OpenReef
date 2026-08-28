@@ -239,6 +239,134 @@ def vessel_levels(cfg: Any) -> dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------- RODI utility
+
+RODI_DRAW_DESTINATIONS = ("store", "external")
+
+
+def _rodi_cfg(cfg: Any) -> dict[str, Any]:
+    cfg = cfg if isinstance(cfg, dict) else {}
+    rodi = cfg.get("rodi")
+    return rodi if isinstance(rodi, dict) else {}
+
+
+def rodi_busy_reason(cfg: Any) -> str | None:
+    """Why the booster is spoken for right now — a draw, a calibration run and
+    a batch fill are mutually exclusive users of the same plug."""
+    rodi = _rodi_cfg(cfg)
+    if (rodi.get("draw") or {}).get("active"):
+        return "a RODI draw is already running"
+    if (rodi.get("calibration") or {}).get("active"):
+        return "a flow calibration is running"
+    batch = cfg.get("batch") if isinstance(cfg, dict) and isinstance(cfg.get("batch"), dict) else {}
+    if str(batch.get("state") or "idle") == "filling":
+        return "the batch fill is using the booster"
+    return None
+
+
+def _booster_driven(cfg: Any) -> bool:
+    """Simulate counts; otherwise a bound booster plug. Engine-side twin of the
+    orchestrator's check — a timed run is meaningless with nothing to switch."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    if cfg.get("simulate"):
+        return True
+    switch = (cfg.get("switches") or {}).get("rodiBooster")
+    return bool(isinstance(switch, dict) and str(switch.get("switchEntity") or "").strip())
+
+
+def draw_guard_reasons(cfg: Any, litres: Any, destination: Any) -> list[str]:
+    """Why a RODI draw must not start. Litres are metered by rate x time, so an
+    unknown rate refuses honestly instead of running blind; a draw into the
+    store also refuses what the vessel cannot hold."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    reasons: list[str] = []
+    if not cfg.get("enabled"):
+        reasons.append("Mixing station is not enabled")
+    dest = str(destination or "store")
+    if dest not in RODI_DRAW_DESTINATIONS:
+        reasons.append(f"Unknown draw destination '{dest}'")
+    if dest == "store" and str(cfg.get("layout") or "dual") == "single":
+        reasons.append("Single-vessel layout has no RODI store — "
+                       "start a RODI-only batch to fill the vessel instead")
+    lit = _f(litres)
+    if lit <= 0:
+        reasons.append("Draw must be more than 0 litres")
+    rate = _f(_rodi_cfg(cfg).get("rateLph"))
+    if rate <= 0:
+        reasons.append("RODI flow rate is unknown — calibrate it "
+                       "(or set a rate in settings) before a timed draw")
+    if not _booster_driven(cfg):
+        reasons.append("Bind the RODI booster plug (or turn on Simulate) — "
+                       "a timed draw needs OpenReef on the switch")
+    busy = rodi_busy_reason(cfg)
+    if busy:
+        reasons.append(f"The booster is busy — {busy}")
+    if dest == "store" and lit > 0:
+        vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+        rodi_v = vessels.get("rodi") if isinstance(vessels.get("rodi"), dict) else {}
+        vol = _f(rodi_v.get("volumeLitres"))
+        if vol > 0:
+            free = max(0.0, vol - max(0.0, _f(rodi_v.get("estimatedLitres"))))
+            if lit > free + 0.05:
+                reasons.append(f"That would overflow the store — "
+                               f"about {free:g} L of {vol:g} L free")
+    return reasons
+
+
+def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
+    """The RODI unit's honest snapshot: the configured/calibrated rate, the
+    filter-litres ledger, and the live draw/calibration clocks (read from the
+    stamps, never mutated here — the batch_state contract)."""
+    rodi = _rodi_cfg(cfg)
+    rate = max(0.0, _f(rodi.get("rateLph")))
+    rated = max(0.0, _f(rodi.get("filterRatedL")))
+    processed = max(0.0, _f(rodi.get("litresProcessed")))
+    out: dict[str, Any] = {
+        "rateLph": round(rate, 1),
+        "calibratedAt": str(rodi.get("calibratedAt") or ""),
+        "litresProcessed": round(processed, 1),
+        "filterRatedL": round(rated, 1),
+        "filterChangedAt": str(rodi.get("filterChangedAt") or ""),
+        "filterDue": rated > 0 and processed >= rated,
+        "draw": None,
+        "calibration": None,
+    }
+    draw = rodi.get("draw") if isinstance(rodi.get("draw"), dict) else {}
+    if draw.get("active"):
+        target = max(0.0, _f(draw.get("litres")))
+        started = _parse_iso(draw.get("startedAt"))
+        ends = _parse_iso(draw.get("endsAt"))
+        elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0) if started else 0.0
+        done = min(target, rate * elapsed_h) if rate > 0 else 0.0
+        out["draw"] = {
+            "litres": round(target, 1),
+            "destination": str(draw.get("destination") or "store"),
+            "litresDone": round(done, 1),
+            "percent": round(min(100.0, done / target * 100.0), 0) if target > 0 else None,
+            "minutesLeft": round(max(0.0, (ends - now).total_seconds() / 60.0), 0)
+            if ends else None,
+        }
+    cal = rodi.get("calibration") if isinstance(rodi.get("calibration"), dict) else {}
+    if cal.get("active"):
+        started = _parse_iso(cal.get("startedAt"))
+        out["calibration"] = {
+            "startedAt": str(cal.get("startedAt") or ""),
+            "elapsedMin": round(max(0.0, (now - started).total_seconds() / 60.0), 1)
+            if started else 0.0,
+        }
+    return out
+
+
+def calibration_rate(litres: Any, elapsed_seconds: Any) -> float:
+    """L/h from a timed run. 0 = not computable (nothing measured, or a run too
+    short to mean anything) — callers refuse, never guess."""
+    lit = _f(litres)
+    secs = _f(elapsed_seconds)
+    if lit <= 0 or secs < 60.0:
+        return 0.0
+    return round(lit / (secs / 3600.0), 1)
+
+
 # ---------------------------------------------------------------- guards
 
 def start_guard_reasons(cfg: Any, litres: Any, batch_type: Any) -> list[str]:
@@ -251,6 +379,11 @@ def start_guard_reasons(cfg: Any, litres: Any, batch_type: Any) -> list[str]:
     batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
     if str(batch.get("state") or "idle") not in ("idle",):
         reasons.append("A batch is already in progress — finish or abort it first")
+    rodi = _rodi_cfg(cfg)
+    if (rodi.get("draw") or {}).get("active"):
+        reasons.append("A RODI draw is running — stop it before starting a batch")
+    if (rodi.get("calibration") or {}).get("active"):
+        reasons.append("A flow calibration is running — finish it before starting a batch")
     btype = str(batch_type or "salt")
     if btype not in MIX_BATCH_TYPES:
         reasons.append(f"Unknown batch type '{btype}'")
@@ -326,4 +459,5 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
         "brand": brand_info(salt_cfg.get("brand")),
         "brands": [dict(b) for b in SALT_BRANDS],
         "targetPpt": _f(salt_cfg.get("targetPpt"), REFERENCE_PPT),
+        "rodi": rodi_status(cfg, now),
     }

@@ -812,6 +812,240 @@ def test_debit_helper_draws_down_and_closes_only_when_coupled():
     assert config2["mixingStation"]["batch"]["usedLitres"] == 0.0
 
 
+# ---------------------------------------------------------------- Stage E: the RODI utility
+# Draws outside a batch (store top-up or the external T-off), the timed-run
+# flow calibration, and the filter-litres ledger — 0.7.88.
+
+
+def test_draw_guards_demand_rate_booster_and_room():
+    # No rate, no bound booster: both refusals, honestly worded.
+    cfg = _cfg(rodi={"rateLph": 0, "fillCapMin": 240})
+    reasons = mixing.draw_guard_reasons(cfg, 10, "store")
+    assert any("flow rate is unknown" in r for r in reasons)
+    assert any("booster plug" in r for r in reasons)
+    # Simulate + a rate: a store draw that fits passes clean...
+    cfg = _cfg(simulate=True, rodi={"rateLph": 120, "fillCapMin": 240})
+    assert mixing.draw_guard_reasons(cfg, 10, "store") == []
+    # ...but the store only has 10 L free (40 of 50) — 20 L overflows.
+    assert any("overflow" in r for r in mixing.draw_guard_reasons(cfg, 20, "store"))
+    # Single layout has no store — external is the only draw destination.
+    single = _cfg(simulate=True, layout="single", rodi={"rateLph": 120, "fillCapMin": 240})
+    assert any("RODI-only batch" in r for r in mixing.draw_guard_reasons(single, 10, "store"))
+    assert mixing.draw_guard_reasons(single, 10, "external") == []
+
+
+def test_draw_guards_respect_the_busy_booster():
+    filling = _cfg(simulate=True, rodi={"rateLph": 120, "fillCapMin": 240},
+                   batch={"state": "filling", "type": "salt", "litres": 40})
+    assert any("batch fill is using the booster" in r
+               for r in mixing.draw_guard_reasons(filling, 5, "external"))
+    drawing = _cfg(simulate=True, rodi={
+        "rateLph": 120, "fillCapMin": 240,
+        "draw": {"active": True, "litres": 10, "destination": "store",
+                 "startedAt": _iso(NOW), "endsAt": _iso(NOW + timedelta(minutes=5))}})
+    assert any("already running" in r
+               for r in mixing.draw_guard_reasons(drawing, 5, "external"))
+    # And a batch must not start over a live draw either.
+    assert any("RODI draw is running" in r
+               for r in mixing.start_guard_reasons(drawing, 40, "salt"))
+
+
+def test_rodi_status_reads_the_draw_clock_pro_rata():
+    cfg = _cfg(rodi={
+        "rateLph": 120, "fillCapMin": 240,
+        "draw": {"active": True, "litres": 10, "destination": "external",
+                 "startedAt": _iso(NOW - timedelta(minutes=2, seconds=30)),
+                 "endsAt": _iso(NOW + timedelta(minutes=2, seconds=30))}})
+    status = mixing.rodi_status(cfg, NOW)
+    assert status["draw"]["litresDone"] == 5.0
+    assert status["draw"]["percent"] == 50.0
+    assert status["draw"]["minutesLeft"] in (2.0, 3.0)   # 2.5 min, rounded whole
+    assert status["draw"]["destination"] == "external"
+
+
+def test_calibration_rate_maths_refuses_noise():
+    assert mixing.calibration_rate(2.5, 600) == 15.0      # 2.5 L in 10 min
+    assert mixing.calibration_rate(1.0, 30) == 0.0        # under a minute = noise
+    assert mixing.calibration_rate(0, 600) == 0.0         # nothing measured
+
+
+def test_filter_ledger_flags_due_only_when_rated():
+    due = mixing.rodi_status(_cfg(rodi={
+        "rateLph": 0, "fillCapMin": 240,
+        "litresProcessed": 1500, "filterRatedL": 1500}), NOW)
+    assert due["filterDue"] is True
+    untracked = mixing.rodi_status(_cfg(rodi={
+        "rateLph": 0, "fillCapMin": 240,
+        "litresProcessed": 99999, "filterRatedL": 0}), NOW)
+    assert untracked["filterDue"] is False
+
+
+def _rodi_over(**extra):
+    base = {"rateLph": 120, "fillCapMin": 240}
+    base.update(extra)
+    return {"rodi": base}
+
+
+def test_rodi_draw_runs_the_booster_and_the_stop_leg_finishes_it():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station(_rodi_over())
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 10, "destination": "store"}))
+    assert conn.results[-1].payload["success"] is True
+    assert ("turn_on", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    rodi = _mix_state(entry)["rodi"]
+    assert rodi["draw"]["active"] is True and rodi["draw"]["litres"] == 10.0
+    # 10 L at 120 L/h = 5 min: the save pass armed exactly one stop leg there.
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    stops = [r for r in scheduler.scheduled[before:]
+             if not r["cancelled"] and 4 * 60 < (r["run_at"] - now).total_seconds() < 6 * 60]
+    assert len(stops) == 1, "expected exactly one draw stop leg"
+
+    async def _fire():
+        await stops[0]["callback"](stops[0]["run_at"])
+    run(_fire())
+    state = _mix_state(entry)
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    assert state["rodi"]["draw"]["active"] is False
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 50.0    # 40 anchor + 10 drawn
+    assert state["rodi"]["litresProcessed"] == 10.0
+    assert integration.MIXING_RODI_UNSUB not in hass.data.get(integration.DOMAIN, {})
+
+
+def test_rodi_draw_external_taps_the_t_never_the_store():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station(_rodi_over())
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 20, "destination": "external"}))
+    assert conn.results[-1].payload["success"] is True
+    stop = next(r for r in scheduler.scheduled[before:] if not r["cancelled"])
+
+    async def _fire():
+        await stop["callback"](stop["run_at"])
+    run(_fire())
+    state = _mix_state(entry)
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 40.0    # the anchor never moved
+    assert state["rodi"]["litresProcessed"] == 20.0               # the membrane still counted
+
+
+def test_rodi_draw_refused_without_a_rate_and_summary_carries_the_status():
+    install_scheduler(integration)
+    hass, entry = _station()                                       # rateLph 0
+    conn = FakeConnection()
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 10, "destination": "store"}))
+    payload = conn.results[-1].payload
+    assert payload["success"] is False
+    assert any("flow rate is unknown" in r for r in payload["reasons"])
+    assert not hass.services.calls
+    # The summary blob now carries the rodi block the panel renders from.
+    run(integration.websocket_mixing_summary(hass, conn, {"id": 2}))
+    summary = conn.results[-1].payload["summary"]
+    assert summary["rodi"]["rateLph"] == 0.0 and summary["rodi"]["draw"] is None
+
+
+def test_rodi_stop_credits_only_what_ran():
+    install_scheduler(integration)
+    started = datetime.now(timezone.utc) - timedelta(minutes=3)
+    hass, entry = _station(_rodi_over(rateLph=100, draw={
+        "active": True, "litres": 20, "destination": "store",
+        "startedAt": _iso(started), "endsAt": _iso(started + timedelta(minutes=12))}))
+    conn = FakeConnection()
+    run(integration.websocket_mixing_rodi_stop(hass, conn, {"id": 1}))
+    assert conn.results[-1].payload["success"] is True
+    state = _mix_state(entry)
+    assert state["rodi"]["draw"]["active"] is False
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 45.0     # 40 + 3 min at 100 L/h
+    assert state["rodi"]["litresProcessed"] == 5.0
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+
+
+def test_calibrate_start_arms_the_cap_and_finish_sets_the_rate():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station()
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_calibrate(hass, conn, {"id": 1, "action": "start"}))
+    assert conn.results[-1].payload["success"] is True
+    assert ("turn_on", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    caps = [r for r in scheduler.scheduled[before:]
+            if not r["cancelled"] and 29 * 60 < (r["run_at"] - now).total_seconds() < 31 * 60]
+    assert len(caps) == 1, "expected exactly one calibration cap leg"
+    # A separate station whose run started 10 minutes ago finishes with 20 L.
+    started = datetime.now(timezone.utc) - timedelta(minutes=10)
+    hass2, entry2 = _station(_rodi_over(
+        rateLph=0, calibration={"active": True, "startedAt": _iso(started)}))
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_calibrate(
+        hass2, conn2, {"id": 2, "action": "finish", "litres": 20}))
+    assert conn2.results[-1].payload["success"] is True
+    rodi = _mix_state(entry2)["rodi"]
+    assert rodi["rateLph"] == 120.0 and rodi["calibratedAt"]
+    assert rodi["calibration"]["active"] is False
+    assert rodi["litresProcessed"] == 20.0
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass2, "switch.mix_booster")
+
+
+def test_calibrate_finish_too_short_keeps_the_old_rate():
+    install_scheduler(integration)
+    started = datetime.now(timezone.utc) - timedelta(seconds=20)
+    hass, entry = _station(_rodi_over(
+        rateLph=80, calibration={"active": True, "startedAt": _iso(started)}))
+    conn = FakeConnection()
+    run(integration.websocket_mixing_calibrate(
+        hass, conn, {"id": 1, "action": "finish", "litres": 5}))
+    payload = conn.results[-1].payload
+    assert payload["success"] is False
+    assert any("at least" in r for r in payload["reasons"])
+    rodi = _mix_state(entry)["rodi"]
+    assert rodi["rateLph"] == 80.0 and rodi["calibration"]["active"] is False
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+
+
+def test_calibration_cap_cancels_a_forgotten_run():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station()
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_calibrate(hass, conn, {"id": 1, "action": "start"}))
+    cap = next(r for r in scheduler.scheduled[before:] if not r["cancelled"])
+
+    async def _fire():
+        await cap["callback"](cap["run_at"])
+    run(_fire())
+    rodi = _mix_state(entry)["rodi"]
+    assert rodi["calibration"]["active"] is False
+    assert rodi["rateLph"] == 0.0                                  # rate untouched
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+
+
+def test_filters_changed_resets_the_counter():
+    install_scheduler(integration)
+    hass, entry = _station(_rodi_over(litresProcessed=1234.5, filterRatedL=1500))
+    conn = FakeConnection()
+    run(integration.websocket_mixing_filters_changed(hass, conn, {"id": 1}))
+    rodi = _mix_state(entry)["rodi"]
+    assert rodi["litresProcessed"] == 0.0 and rodi["filterChangedAt"]
+    assert rodi["filterRatedL"] == 1500.0                          # the rating survives
+
+
+def test_fill_confirm_feeds_the_filter_ledger():
+    install_scheduler(integration)
+    hass, entry = _station()
+    conn = FakeConnection()
+    run(integration.websocket_mixing_start_batch(
+        hass, conn, {"id": 1, "litres": 40, "batch_type": "salt"}))
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 2}))
+    assert _mix_state(entry)["rodi"]["litresProcessed"] == 40.0
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

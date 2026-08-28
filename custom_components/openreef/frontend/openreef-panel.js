@@ -1680,6 +1680,21 @@ class OpenReefPanel extends HTMLElement {
         }
       }
       if (action === "mixing-add-retest-reminder") this._mixingSeedRetestReminder();
+      if (action === "mixing-rodi-draw") {
+        const litres = Number(this.shadowRoot.querySelector("[data-mixing-draw-litres]")?.value) || 0;
+        const destination = this.shadowRoot.querySelector("[data-mixing-draw-dest]")?.value || "store";
+        if (litres > 0) this._mixingAction({ type: "openreef/mixing_rodi_draw", litres, destination });
+        else { this._mixingMessage = "Enter how many litres of RODI to run."; this._render(); }
+      }
+      if (action === "mixing-rodi-stop") this._mixingAction({ type: "openreef/mixing_rodi_stop" });
+      if (action === "mixing-cal-start") this._mixingAction({ type: "openreef/mixing_calibrate", action: "start" });
+      if (action === "mixing-cal-finish") {
+        const litres = Number(this.shadowRoot.querySelector("[data-mixing-cal-litres]")?.value) || 0;
+        if (litres > 0) this._mixingAction({ type: "openreef/mixing_calibrate", action: "finish", litres });
+        else { this._mixingMessage = "Measure the container and enter the litres first."; this._render(); }
+      }
+      if (action === "mixing-cal-cancel") this._mixingAction({ type: "openreef/mixing_calibrate", action: "cancel" });
+      if (action === "mixing-filters-changed") this._mixingAction({ type: "openreef/mixing_filters_changed" });
       if (action === "awc-run") this._awcRunNow();
       if (action === "awc-focus-run") {
         const el = this.shadowRoot.querySelector("[data-awc-run-amount]");
@@ -22607,8 +22622,11 @@ const rigSteps = [
     const levels = sum?.levels || {};
     const dose = sum?.dose || { available: false };
     const status = batch.status || "idle";
-    // Refresh while a batch is live so the mix clock and levels stay honest.
-    const active = !["idle", "ready", "storing", "fault"].includes(status);
+    const rodi = sum?.rodi || {};
+    // Refresh while a batch, a RODI draw or a calibration run is live so the
+    // clocks and levels stay honest.
+    const active = !["idle", "ready", "storing", "fault"].includes(status)
+      || !!rodi.draw || !!rodi.calibration;
     if (!this._mixingSummaryLoading
         && (!sum || (active && Date.now() - (this._mixingSummaryAt || 0) > 8000))) {
       setTimeout(() => this._mixingLoadSummary(true), 0);
@@ -22665,19 +22683,19 @@ const rigSteps = [
             <option value="rodi">RODI only (top-off)</option>
           </select></label>
         </div>
-        <div class="button-row"><button data-action="mixing-start" ${disabled}>Start batch</button></div>`;
+        <div class="button-row"><button class="primary" data-action="mixing-start" ${disabled}>Start batch</button></div>`;
     } else if (status === "filling") {
-      controls = `<div class="button-row"><button data-action="mixing-advance" ${disabled}>Fill done →</button>${abortBtn}</div>`;
+      controls = `<div class="button-row"><button class="primary" data-action="mixing-advance" ${disabled}>Fill done →</button>${abortBtn}</div>`;
     } else if (status === "transferring") {
       controls = `
         <div class="mini-grid"><label>Litres moved<input type="number" min="0" step="1" data-mixing-transfer value="${Number(batch.litres) || 0}"></label></div>
-        <div class="button-row"><button data-action="mixing-advance" ${disabled}>Transferred →</button>${abortBtn}</div>`;
+        <div class="button-row"><button class="primary" data-action="mixing-advance" ${disabled}>Transferred →</button>${abortBtn}</div>`;
     } else if (status === "heating") {
-      controls = `<div class="button-row"><button data-action="mixing-advance" ${disabled}>At temperature →</button>${abortBtn}</div>`;
+      controls = `<div class="button-row"><button class="primary" data-action="mixing-advance" ${disabled}>At temperature →</button>${abortBtn}</div>`;
     } else if (status === "salting") {
       controls = `
         <div class="mini-grid"><label>Measured salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label></div>
-        <div class="button-row"><button data-action="mixing-log" ${disabled}>Log test</button>${abortBtn}</div>`;
+        <div class="button-row"><button class="primary" data-action="mixing-log" ${disabled}>Log test</button>${abortBtn}</div>`;
     } else if (status === "ready" || status === "storing") {
       const saltBatch = batch.type !== "rodi";
       const hasRetestTask = !!this._config?.maintenance?.tasks?.mixing_retest;
@@ -22687,7 +22705,7 @@ const rigSteps = [
           ${saltBatch ? `<label>Retest salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label>` : ""}
         </div>
         <div class="button-row">
-          <button data-action="mixing-mark-used" ${disabled}>Log usage</button>
+          <button class="primary" data-action="mixing-mark-used" ${disabled}>Log usage</button>
           ${saltBatch ? `<button class="secondary" data-action="mixing-log" ${disabled}>Log retest</button>` : ""}
           ${saltBatch && !hasRetestTask ? `<button class="secondary" data-action="mixing-add-retest-reminder" ${disabled}>+ Retest reminder</button>` : ""}
           ${abortBtn}
@@ -22735,33 +22753,104 @@ const rigSteps = [
     const diagramCard = `
       <section class="setting-card">
         <div class="section-head"><div><p class="eyebrow">Live view</p><h3>${this._escape(this._mixingStatusLabel(status))}</h3></div></div>
-        ${this._mixingDiagramSvg(mix, batch, levels)}
+        ${this._mixingDiagramSvg(mix, batch, levels, rodi)}
         <small class="awc-hint">Levels are estimates moved by confirmed events — bind level sensors in settings when the hardware lands and the picture goes real.</small>
         <div class="mini-grid">
           ${mix.layout !== "single" ? `
           <label>Correct RODI store (L)
             <input type="number" min="0" step="1" data-mixing-level="rodi" placeholder="${levels?.rodi ? this._format(levels.rodi.litres, 1) : ""}">
           </label>
-          <button class="secondary compact-button" data-action="mixing-set-level" data-id="rodi" ${this._busy ? "disabled" : ""}>Set</button>` : ""}
+          <div style="display:flex;align-items:flex-end;"><button class="secondary compact-button" data-action="mixing-set-level" data-id="rodi" ${this._busy ? "disabled" : ""}>Set level</button></div>` : ""}
           ${status !== "idle" ? `
           <label>Correct ${mix.layout === "single" ? "vessel" : "mix vessel"} (L)
             <input type="number" min="0" step="1" data-mixing-level="mix" placeholder="${levels?.mix ? this._format(levels.mix.litres, 1) : ""}">
           </label>
-          <button class="secondary compact-button" data-action="mixing-set-level" data-id="mix" ${this._busy ? "disabled" : ""}>Set</button>` : ""}
+          <div style="display:flex;align-items:flex-end;"><button class="secondary compact-button" data-action="mixing-set-level" data-id="mix" ${this._busy ? "disabled" : ""}>Set level</button></div>` : ""}
         </div>
       </section>`;
 
-    return `<section class="stack">${head}${diagramCard}${statusCard}${doseCard}</section>`;
+    return `<section class="stack">${head}${diagramCard}${statusCard}${this._mixingRodiCard(mix, rodi)}${doseCard}</section>`;
+  }
+
+  // The RODI unit's own card: run it WITHOUT a batch (top the store up, or T
+  // off to the ATO reservoir), calibrate the flow rate from a timed run, and
+  // watch the filter-litres ledger. Litres are metered by rate x time, so an
+  // unknown rate says so instead of guessing.
+  _mixingRodiCard(mix, rodi) {
+    const dual = (mix.layout || "dual") !== "single";
+    const disabled = this._busy ? "disabled" : "";
+    const rate = Number(rodi?.rateLph) || 0;
+    let body = "";
+    if (rodi?.draw) {
+      const d = rodi.draw;
+      body = `
+        <p class="muted"><strong>${this._format(d.litresDone, 1)} of ${this._format(d.litres, 1)} L</strong>
+          → ${d.destination === "store" ? "the RODI store" : "the T-off (ATO / external)"}
+          ${d.minutesLeft != null ? ` · about ${this._format(d.minutesLeft, 0)} min left` : ""}.</p>
+        <div class="button-row"><button class="danger-text" data-action="mixing-rodi-stop" ${disabled}>Stop draw</button></div>`;
+    } else if (rodi?.calibration) {
+      body = `
+        <p class="muted">Calibration run — <strong>${this._format(rodi.calibration.elapsedMin, 1)} min</strong> so far.
+          Let it run into a container you can measure, then enter what it collected.</p>
+        <div class="mini-grid">
+          <label>Measured litres<input type="number" min="0" step="0.1" data-mixing-cal-litres></label>
+          <div style="display:flex;align-items:flex-end;gap:8px;">
+            <button class="primary" data-action="mixing-cal-finish" ${disabled}>Finish &amp; set rate</button>
+            <button class="danger-text" data-action="mixing-cal-cancel" ${disabled}>Cancel</button>
+          </div>
+        </div>`;
+    } else {
+      body = `
+        <p class="muted">Run the unit without a batch — ${dual
+          ? "top the store up, or T off to the ATO reservoir."
+          : "T off to the ATO reservoir (the vessel itself fills via a RODI-only batch)."}</p>
+        <div class="mini-grid">
+          <label>Litres<input type="number" min="1" step="1" data-mixing-draw-litres value="10"></label>
+          <label>Destination<select data-mixing-draw-dest>
+            ${dual ? `<option value="store">RODI store</option>` : ""}
+            <option value="external" ${dual ? "" : "selected"}>T-off (ATO / external)</option>
+          </select></label>
+        </div>
+        <div class="button-row">
+          <button class="primary" data-action="mixing-rodi-draw" ${disabled}>Run RODI</button>
+          <button class="secondary" data-action="mixing-cal-start" ${disabled}>Calibrate flow</button>
+        </div>
+        <small class="awc-hint">${rate > 0
+          ? `Flow rate: ${this._format(rate, 1)} L/h${rodi?.calibratedAt
+            ? ` — calibrated ${new Date(rodi.calibratedAt).toLocaleDateString()}`
+            : " — set by hand; a timed calibration makes the litres honest"}.`
+          : "Flow rate unknown — calibrate it (or set one in settings) before a timed draw."}</small>`;
+    }
+    const processed = Number(rodi?.litresProcessed) || 0;
+    const ratedL = Number(rodi?.filterRatedL) || 0;
+    const filterLine = `
+      ${rodi?.filterDue ? `<div class="notice warning-notice"><strong>Filter service due.</strong> The membrane has processed its rated litres — TDS creep is next if it stays in.</div>` : ""}
+      <div class="button-row" style="align-items:center;justify-content:space-between;">
+        <small class="awc-hint">Filters: ${this._format(processed, 0)} L processed${ratedL > 0 ? ` of ${this._format(ratedL, 0)} L rated` : " (set a rated capacity in settings to track filter life)"}.</small>
+        <button class="secondary compact-button" data-action="mixing-filters-changed" ${disabled}>Filters changed</button>
+      </div>`;
+    return `
+      <article class="setting-card">
+        <div class="section-head"><div><p class="eyebrow">RODI unit</p>
+          <h3>${rodi?.draw ? "Drawing RODI…" : rodi?.calibration ? "Calibrating flow…" : "RODI on demand"}</h3></div></div>
+        ${body}
+        ${filterLine}
+      </article>`;
   }
 
   // Inline SVG on the AWC-diagram pattern: static scene, CSS keyframes, state-
   // conditional classes. Dual layout = RODI store + gravity line + mix vessel;
   // single = the one vessel. Nothing here ever invents a reading: unknown
   // percentages draw an empty vessel and say so.
-  _mixingDiagramSvg(mix, batch, levels) {
+  _mixingDiagramSvg(mix, batch, levels, rodi) {
     const status = batch?.status || "idle";
     const dual = (mix.layout || "dual") !== "single";
     const filling = status === "filling";
+    // RODI utility runs: a store draw flows like a fill; an external draw (or
+    // a calibration run into a jug) flows out of the T-off instead.
+    const storeDraw = !!rodi?.draw && rodi.draw.destination === "store";
+    const externalRun = (!!rodi?.draw && rodi.draw.destination === "external") || !!rodi?.calibration;
+    const boosterOn = filling || storeDraw || externalRun;
     const transferring = status === "transferring";
     const heating = status === "heating";
     const salting = status === "salting";
@@ -22783,7 +22872,7 @@ const rigSteps = [
     const transferPath = `M 126 168 H ${mixX}`;
 
     const impeller = (cx, active) => `
-      <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;">
+      <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;" opacity="${active ? 1 : 0.6}">
         <title>Mixing pump — tap for settings</title>
         <circle cx="${cx}" cy="196" r="10" fill="${active ? "#1b5e20" : "#2a2a2a"}" stroke="${active ? "#66bb6a" : "#556"}" stroke-width="2"></circle>
         <g class="${active ? "mix-spin" : ""}"><path d="M ${cx} 190 L ${cx} 202 M ${cx - 6} 196 L ${cx + 6} 196" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g>
@@ -22815,11 +22904,18 @@ const rigSteps = [
 
         <text x="18" y="30" font-size="11" fill="#90a4ae">RODI unit</text>
         <path d="${feedPath}" fill="none" stroke="#37474f" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"></path>
-        ${filling ? `<path d="${feedPath}" fill="none" stroke="#42a5f5" stroke-width="3" class="mix-flow"></path>` : ""}
-        <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;">
+        ${filling || storeDraw ? `<path d="${feedPath}" fill="none" stroke="#42a5f5" stroke-width="3" class="mix-flow"></path>` : ""}
+        ${externalRun ? `
+        <g>
+          <title>T-off — RODI running to an external container (ATO reservoir, jug)</title>
+          <path d="M ${feedTargetX - 12} 40 V 18" fill="none" stroke="#37474f" stroke-width="6" stroke-linecap="round"></path>
+          <path d="M 18 40 H ${feedTargetX - 12} V 18" fill="none" stroke="#42a5f5" stroke-width="3" class="mix-flow"></path>
+          <text x="${feedTargetX - 4}" y="16" font-size="9" fill="#90caf9">T-off → ${rodi?.calibration ? "measuring jug" : "ATO / external"}</text>
+        </g>` : ""}
+        <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;" opacity="${boosterOn ? 1 : 0.6}">
           <title>RODI booster pump — tap for settings</title>
-          <circle cx="46" cy="40" r="11" fill="${filling ? "#0d47a1" : "#2a2a2a"}" stroke="${filling ? "#42a5f5" : "#556"}" stroke-width="2"></circle>
-          <g class="${filling ? "mix-spin" : ""}"><path d="M 46 34 L 46 46 M 40 40 L 52 40" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g>
+          <circle cx="46" cy="40" r="11" fill="${boosterOn ? "#0d47a1" : "#2a2a2a"}" stroke="${boosterOn ? "#42a5f5" : "#556"}" stroke-width="2"></circle>
+          <g class="${boosterOn ? "mix-spin" : ""}"><path d="M 46 34 L 46 46 M 40 40 L 52 40" stroke="#cfd8dc" stroke-width="2" stroke-linecap="round"></path></g>
         </g>
 
         ${dual ? `
@@ -22916,7 +23012,9 @@ const rigSteps = [
       <div class="mini-grid">
         <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.5" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
         <label>Fill cap (minutes)<input type="number" min="1" step="5" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
+        <label>Filter rated litres (0 = untracked)<input type="number" min="0" step="100" data-scope="mixing-rodi" data-field="filterRatedL" value="${Number(rodi.filterRatedL) || 0}"></label>
       </div>
+      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. Rated litres turns the processed-litre counter into a filter-service reminder.</small>
       <small class="awc-hint">Salt. The brand sets the dose guide and the default mix window — your refractometer stays the referee.</small>
       <div class="mini-grid">
         <label>Salt brand<select data-scope="mixing-salt" data-field="brand">

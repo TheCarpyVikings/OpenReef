@@ -72,6 +72,10 @@ function summaryBlob(over = {}) {
     brand: { id: "nyos_pure", label: "NYOS Pure", useWithinH: 0 },
     brands: [{ id: "nyos_pure", label: "NYOS Pure" }, { id: "custom", label: "Custom / other" }],
     targetPpt: 35,
+    rodi: over.rodi || {
+      rateLph: 0, calibratedAt: "", litresProcessed: 0, filterRatedL: 0,
+      filterChangedAt: "", filterDue: false, draw: null, calibration: null,
+    },
   };
 }
 
@@ -345,6 +349,114 @@ test("the Water hub card counts the litres a stored batch has left", async () =>
   const hub = panel._hubTab("water");
   assert(hub.includes("25") && hub.includes("L ready"), "hub card lost the remaining litres");
   assert(hub.includes("tested saltwater on hand"), "hub card lost its vouching line");
+});
+
+test("no mixing action button ever renders classless — the invisible-button regression", async () => {
+  // A bare <button> has no panel styling (browser white + inherited light
+  // text = unreadable). Every mixing button must carry a class.
+  const states = ["idle", "filling", "transferring", "heating", "salting", "ready", "storing"];
+  for (const status of states) {
+    const panel = await mixingPanel({ batch: { state: status, type: "salt", litres: 40 } },
+      summaryBlob({ batch: { status, litres: 40, remainingLitres: 40 } }));
+    panel._activeTab = "mixing";
+    const html = panel._mixingTab();
+    assert(!/<button\s+data-action=/.test(html),
+      `${status} rendered a classless (invisible) button`);
+  }
+});
+
+test("the RODI card offers a draw and a calibration when the unit is quiet", async () => {
+  const panel = await mixingPanel();
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes("RODI on demand"), "the RODI card lost its title");
+  assert(html.includes('data-action="mixing-rodi-draw"'), "the draw button is missing");
+  assert(html.includes('data-action="mixing-cal-start"'), "the calibrate button is missing");
+  assert(html.includes('value="store"'), "dual layout lost the store destination");
+  assert(html.includes('value="external"'), "the T-off destination is missing");
+  assert(html.includes("Flow rate unknown"), "an unknown rate must say so, not guess");
+  noPlaceholders(html, "rodi card idle");
+  // Single vessel: external is the only destination — the vessel fills via a batch.
+  const single = await mixingPanel({ layout: "single" },
+    summaryBlob({ levels: { mix: { litres: 0, volumeLitres: 50, percent: 0, estimated: true } } }));
+  single._activeTab = "mixing";
+  const singleHtml = single._mixingTab();
+  assert(!singleHtml.includes('value="store"'), "single layout offered a phantom store destination");
+  assert(singleHtml.includes('value="external"'), "single layout lost its T-off destination");
+});
+
+test("a live draw shows its progress and a Stop — and the diagram runs the right line", async () => {
+  const drawSummary = summaryBlob({ rodi: {
+    rateLph: 120, calibratedAt: "", litresProcessed: 200, filterRatedL: 0,
+    filterChangedAt: "", filterDue: false, calibration: null,
+    draw: { litres: 10, destination: "external", litresDone: 5, percent: 50, minutesLeft: 3 },
+  } });
+  const panel = await mixingPanel({}, drawSummary);
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes('data-action="mixing-rodi-stop"'), "a live draw lost its Stop");
+  assert(html.includes("5") && html.includes("10"), "the draw progress lost its litres");
+  noPlaceholders(html, "rodi card drawing");
+  // External run: the T-off flows, the vessel feed does not.
+  const extSvg = panel._mixingDiagramSvg(mixConfig(), { status: "idle" },
+    summaryBlob().levels, drawSummary.rodi);
+  assert(extSvg.includes("T-off"), "an external draw did not draw the T-off");
+  assert(extSvg.includes('class="mix-flow"'), "an external draw did not flow");
+  // Store draw: flows down the feed line, no T-off.
+  const storeSvg = panel._mixingDiagramSvg(mixConfig(), { status: "idle" },
+    summaryBlob().levels, { ...drawSummary.rodi, draw: { ...drawSummary.rodi.draw, destination: "store" } });
+  assert(!storeSvg.includes("T-off"), "a store draw drew a phantom T-off");
+  assert(storeSvg.includes('class="mix-flow"'), "a store draw did not flow the feed line");
+  // Quiet unit: nothing flows.
+  const quiet = panel._mixingDiagramSvg(mixConfig(), { status: "idle" },
+    summaryBlob().levels, summaryBlob().rodi);
+  assert(!quiet.includes('class="mix-flow"'), "a quiet RODI unit animated a flow");
+});
+
+test("a calibration run asks for the measured litres and jugs the diagram", async () => {
+  const calSummary = summaryBlob({ rodi: {
+    rateLph: 0, calibratedAt: "", litresProcessed: 0, filterRatedL: 0,
+    filterChangedAt: "", filterDue: false, draw: null,
+    calibration: { startedAt: "2026-08-28T12:00:00+00:00", elapsedMin: 4.2 },
+  } });
+  const panel = await mixingPanel({}, calSummary);
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes("data-mixing-cal-litres"), "calibration lost its litres input");
+  assert(html.includes('data-action="mixing-cal-finish"'), "calibration lost its finish");
+  assert(html.includes('data-action="mixing-cal-cancel"'), "calibration lost its cancel");
+  noPlaceholders(html, "rodi card calibrating");
+  const svg = panel._mixingDiagramSvg(mixConfig(), { status: "idle" },
+    summaryBlob().levels, calSummary.rodi);
+  assert(svg.includes("measuring jug"), "a calibration run did not label the jug");
+});
+
+test("the filter ledger tells its count and shouts only when due", async () => {
+  const fine = await mixingPanel({}, summaryBlob({ rodi: {
+    rateLph: 100, calibratedAt: "", litresProcessed: 800, filterRatedL: 1500,
+    filterChangedAt: "", filterDue: false, draw: null, calibration: null,
+  } }));
+  fine._activeTab = "mixing";
+  let html = fine._mixingTab();
+  assert(html.includes("800") && html.includes("1,500") || html.includes("1500"),
+    "the ledger lost its litres");
+  assert(html.includes('data-action="mixing-filters-changed"'), "the reset button is missing");
+  assert(!html.includes("Filter service due"), "an in-life filter must not shout");
+  const due = await mixingPanel({}, summaryBlob({ rodi: {
+    rateLph: 100, calibratedAt: "", litresProcessed: 1600, filterRatedL: 1500,
+    filterChangedAt: "", filterDue: true, draw: null, calibration: null,
+  } }));
+  due._activeTab = "mixing";
+  html = due._mixingTab();
+  assert(html.includes("Filter service due"), "a spent filter went unannounced");
+});
+
+test("settings carries the filter rating field", async () => {
+  const panel = await mixingPanel();
+  const body = panel._mixingSettingsBody(mixConfig({ rodi: { rateLph: 0, fillCapMin: 240, filterRatedL: 1500 } }));
+  assert(body.includes('data-field="filterRatedL"'), "settings lost the filter rating");
+  assert(body.includes('value="1500"'), "the stored rating did not render");
+  noPlaceholders(body, "rodi settings");
 });
 
 runTests();
