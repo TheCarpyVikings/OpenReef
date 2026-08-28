@@ -332,4 +332,19 @@ test("the seed button writes the keeper's retest chore from the storage setting"
   assert(panel._dirtied, "seeding must mark the config dirty");
 });
 
+test("settings carries the AWC guard with the stored mode selected", async () => {
+  const panel = await mixingPanel();
+  const body = panel._mixingSettingsBody(mixConfig({ integrations: { awcGuard: "block", atoFromRodi: false } }));
+  assert(body.includes('data-field="awcGuard"'), "settings lost the AWC guard select");
+  assert(/value="block"\s+selected/.test(body), "the stored guard mode was not selected");
+  noPlaceholders(body, "guard settings");
+});
+
+test("the Water hub card counts the litres a stored batch has left", async () => {
+  const panel = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40, usedLitres: 15 } });
+  const hub = panel._hubTab("water");
+  assert(hub.includes("25") && hub.includes("L ready"), "hub card lost the remaining litres");
+  assert(hub.includes("tested saltwater on hand"), "hub card lost its vouching line");
+});
+
 runTests();

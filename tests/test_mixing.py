@@ -681,6 +681,137 @@ def test_orphan_recovery_mid_burst_stops_pumps_and_reanchors():
     assert batch["circulateUntil"] == "" and batch["nextCirculateAt"]
 
 
+# ---------------------------------------------------------------- Stage D: the Trust Moat
+# AWC asks the mixing station before it runs; a completed change draws from
+# the batch ledger. Engine verdicts + the real _async_awc_start seam.
+
+def test_awc_guard_reason_verdicts():
+    now = NOW
+    # Unhooked or irrelevant ⇒ silence.
+    cfg = _cfg(enabled=False)
+    assert mixing.awc_guard_reason(cfg, 10, now) is None
+    cfg = _cfg(integrations={"awcGuard": "off"})
+    assert mixing.awc_guard_reason(cfg, 10, now) is None
+    assert mixing.awc_guard_reason(_cfg(), 0, now) is None
+    # No batch ⇒ the configured mode speaks.
+    cfg = _cfg(integrations={"awcGuard": "warn"})
+    verdict = mixing.awc_guard_reason(cfg, 10, now)
+    assert verdict["mode"] == "warn" and "no ready saltwater batch" in verdict["message"]
+    cfg["integrations"]["awcGuard"] = "block"
+    assert mixing.awc_guard_reason(cfg, 10, now)["mode"] == "block"
+    # A RODI batch is not saltwater.
+    cfg["batch"] = {"state": "ready", "type": "rodi", "litres": 40, "usedLitres": 0,
+                    "testedAt": _iso(now)}
+    assert mixing.awc_guard_reason(cfg, 10, now) is not None
+    # Aged past the retest window ⇒ not vouched.
+    cfg["batch"] = {"state": "storing", "type": "salt", "litres": 40, "usedLitres": 0,
+                    "testedAt": _iso(now - timedelta(days=9))}
+    assert "retest window" in mixing.awc_guard_reason(cfg, 10, now)["message"]
+    # Not enough left ⇒ says how short.
+    cfg["batch"] = {"state": "storing", "type": "salt", "litres": 40, "usedLitres": 35,
+                    "testedAt": _iso(now)}
+    assert "only 5 L" in mixing.awc_guard_reason(cfg, 10, now)["message"]
+    # Tested, in date, sufficient ⇒ vouched.
+    cfg["batch"]["usedLitres"] = 0
+    assert mixing.awc_guard_reason(cfg, 10, now) is None
+
+
+_AWC_SENSORS = {
+    "binary_sensor.high": "off", "binary_sensor.leak": "off",
+    "binary_sensor.fresh_empty": "off", "binary_sensor.waste_full": "off",
+}
+
+
+def _awc_station_entry(guard="block", batch=None):
+    """An entry where the AWC could genuinely start — calibrated pumps, stocked
+    reservoir, safety sensors bound — so the ONLY thing standing in its way is
+    the mixing-station guard under test."""
+    awc = {
+        "enabled": True,
+        "tankVolumeLitres": 200,
+        "pumps": {
+            "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
+            "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 100},
+        },
+        "reservoirs": {
+            "fresh": {"capacityLitres": 25, "remainingMl": 25000,
+                      "emptyEntity": "binary_sensor.fresh_empty"},
+            "waste": {"capacityLitres": 25, "filledMl": 0,
+                      "fullEntity": "binary_sensor.waste_full"},
+        },
+        "safety": {"highLevelEntity": "binary_sensor.high",
+                   "leakEntity": "binary_sensor.leak", "maxSingleChangePercent": 25},
+        "schedule": {"method": "batch_sequential"},
+    }
+    mix_cfg = _station_cfg(integrations={"awcGuard": guard, "atoFromRodi": False})
+    if batch is not None:
+        mix_cfg["batch"] = batch
+    entry = FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config(
+        {"automaticWaterChange": awc, "mixingStation": mix_cfg})})
+    states = dict(_STATION_SWITCHES)
+    states.update(_AWC_SENSORS)
+    states.update({"switch.awc_drain": "off", "switch.awc_fill": "off"})
+    return FakeHass(states=states, entries=[entry]), entry
+
+
+def test_awc_block_guard_refuses_without_a_tested_batch():
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="block")
+    started, reasons = run(integration._async_awc_start(
+        hass, entry, 10, "batch_sequential", True, None))
+    assert started is False
+    assert any(r.get("code") == "mixing_batch" for r in reasons)
+    # Nothing energised on a refusal.
+    assert not [c for c in hass.services.calls if c.domain == "switch"]
+
+
+def test_awc_block_guard_stands_aside_for_a_vouched_batch():
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="block", batch=_stored_batch())
+    started, reasons = run(integration._async_awc_start(
+        hass, entry, 10, "batch_sequential", True, None))
+    assert started is True and not reasons
+
+
+def test_awc_warn_guard_lets_it_run_but_says_so():
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn")
+    started, reasons = run(integration._async_awc_start(
+        hass, entry, 10, "batch_sequential", True, None))
+    assert started is True and not reasons
+    activity = integration._config_from_entry(entry)["activity"]
+    assert any("without the mixing station's blessing" in a.get("message", "")
+               for a in activity)
+
+
+def test_awc_guard_off_is_silent():
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="off")
+    started, _reasons = run(integration._async_awc_start(
+        hass, entry, 10, "batch_sequential", True, None))
+    assert started is True
+    activity = integration._config_from_entry(entry)["activity"]
+    assert not any("mixing station" in a.get("message", "").lower() for a in activity)
+
+
+def test_debit_helper_draws_down_and_closes_only_when_coupled():
+    install_scheduler(integration)
+    # Coupled + live batch: partial debit, then exhaustion closes the batch.
+    hass, entry = _station({"batch": _stored_batch(),
+                            "integrations": {"awcGuard": "warn", "atoFromRodi": False}})
+    config = integration._config_from_entry(entry)
+    integration._mixing_debit_batch(hass, config, 15, "the water change")
+    assert config["mixingStation"]["batch"]["usedLitres"] == 15.0
+    integration._mixing_debit_batch(hass, config, 30, "the water change")
+    assert config["mixingStation"]["batch"]["state"] == "idle"
+    # Uncoupled (guard off): the ledger must NOT phantom-drain.
+    hass2, entry2 = _station({"batch": _stored_batch(),
+                              "integrations": {"awcGuard": "off", "atoFromRodi": False}})
+    config2 = integration._config_from_entry(entry2)
+    integration._mixing_debit_batch(hass2, config2, 15, "the water change")
+    assert config2["mixingStation"]["batch"]["usedLitres"] == 0.0
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

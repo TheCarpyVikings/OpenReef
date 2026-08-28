@@ -2390,7 +2390,7 @@ class OpenReefPanel extends HTMLElement {
         m.switches = m.switches || {}; m.switches[id] = m.switches[id] || {};
         m.switches[id][field] = value;
       }
-      if (["mixing-rodi", "mixing-salt", "mixing-heat", "mixing-storage"].includes(scope)) {
+      if (["mixing-rodi", "mixing-salt", "mixing-heat", "mixing-storage", "mixing-integrations"].includes(scope)) {
         const m = this._config.mixingStation = this._config.mixingStation || {};
         const key = scope.slice("mixing-".length);
         const sub = m[key] = m[key] || {};
@@ -11948,7 +11948,13 @@ const rigSteps = [
         return this._hubCard(id, label, `${count} channel${count === 1 ? "" : "s"}`, "pumps, advisor, reservoirs", "ok");
       }
       if (id === "mixing") {
-        const state = safe(() => this._config?.mixingStation?.batch?.state, "idle") || "idle";
+        const batch = safe(() => this._config?.mixingStation?.batch, {}) || {};
+        const state = batch.state || "idle";
+        if (state === "ready" || state === "storing") {
+          const left = Math.max(0, (Number(batch.litres) || 0) - (Number(batch.usedLitres) || 0));
+          return this._hubCard(id, label, `${this._format(left, 1)} L ready`,
+            batch.type === "rodi" ? "top-off water on hand" : "tested saltwater on hand", "ok");
+        }
         return this._hubCard(id, label, this._mixingStatusLabel(state),
           state === "idle" ? "RODI in, salt to target — batches you can trust" : "a batch is on the go", "ok");
       }
@@ -22934,7 +22940,16 @@ const rigSteps = [
         <label>Circulate every (h)<input type="number" min="0" max="168" step="1" data-scope="mixing-storage" data-field="circulateEveryH" value="${Number(storage.circulateEveryH) || 0}"></label>
         <label>Circulate for (min)<input type="number" min="1" max="120" step="1" data-scope="mixing-storage" data-field="circulateForMin" value="${Number(storage.circulateForMin) || 10}"></label>
         <label>Retest after (days)<input type="number" min="0" max="60" step="1" data-scope="mixing-storage" data-field="retestAfterDays" value="${Number(storage.retestAfterDays) || 0}"></label>
-      </div>`;
+      </div>
+      <small class="awc-hint">Water-change guard. Before an automatic change runs, it asks this station whether the water is vouched for — a tested, in-date batch with enough litres. No controller does this; that's the point.</small>
+      <div class="mini-grid">
+        <label>AWC ready-batch guard<select data-scope="mixing-integrations" data-field="awcGuard">
+          <option value="off" ${(mix.integrations?.awcGuard || "warn") === "off" ? "selected" : ""}>Off — AWC runs regardless</option>
+          <option value="warn" ${(mix.integrations?.awcGuard || "warn") === "warn" ? "selected" : ""}>Warn — the change runs, the activity log says so</option>
+          <option value="block" ${(mix.integrations?.awcGuard || "warn") === "block" ? "selected" : ""}>Block — refuse without a tested batch</option>
+        </select></label>
+      </div>
+      <small class="awc-hint">While coupled (warn or block), a completed water change also draws its litres from this station's batch ledger automatically.</small>`;
   }
 
   _settings() {

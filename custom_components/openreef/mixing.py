@@ -272,6 +272,37 @@ def start_guard_reasons(cfg: Any, litres: Any, batch_type: Any) -> list[str]:
     return reasons
 
 
+# ---------------------------------------------------------------- AWC guard
+
+def awc_guard_reason(cfg: Any, litres: Any, now: datetime) -> dict[str, Any] | None:
+    """The Trust Moat check (doc §9): can this station vouch for the water an
+    automatic change is about to put in the tank? ``None`` means yes — a
+    tested, in-date salt batch with enough litres. Anything else returns
+    ``{"mode": "warn"|"block", "message": ...}`` and the AWC orchestrator
+    decides whether that warns or refuses. ``integrations.awcGuard`` "off"
+    always returns None — the keeper unhooked the two features."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    if not cfg.get("enabled"):
+        return None
+    mode = str((cfg.get("integrations") or {}).get("awcGuard") or "warn")
+    if mode not in ("warn", "block"):
+        return None
+    lit = _f(litres)
+    if lit <= 0:
+        return None
+    state = batch_state(cfg.get("batch"), cfg, now)
+    if state["status"] not in ("ready", "storing") or state["type"] != "salt":
+        message = "the mixing station has no ready saltwater batch"
+    elif state["retestDue"]:
+        message = "the stored batch is past its retest window — test it before it touches the tank"
+    elif state["remainingLitres"] + 0.05 < lit:
+        message = (f"only {state['remainingLitres']:g} L of tested saltwater on hand "
+                   f"for a {lit:g} L change")
+    else:
+        return None
+    return {"mode": mode, "message": message}
+
+
 # ---------------------------------------------------------------- summary
 
 def summary(cfg: Any, now: datetime) -> dict[str, Any]:

@@ -6882,8 +6882,23 @@ async def _async_awc_start_locked(
             reasons.append({"code": "imbalance_too_large", "severity": "block",
                             "message": f"Pumps too rate-mismatched for a simultaneous {target:.1f} L change "
                                        f"(~{excursion:.1f} L sump swing > {cap} L cap) — use sequential or rate-match"})
+    # The Trust Moat (mixing doc §9): does the mixing station vouch for this
+    # water? Skipped in demo mode like the other physical-world guards. "block"
+    # joins the refusal reasons; "warn" lets the change run but says so below,
+    # where the keeper will see it.
+    mix_guard = None
+    if not _awc_sim_enabled(config):
+        mix_guard = mixing_engine.awc_guard_reason(
+            _mixing_cfg(config), target, datetime.now(timezone.utc))
+    if mix_guard is not None and mix_guard.get("mode") == "block":
+        reasons.append({"code": "mixing_batch", "severity": "block",
+                        "message": f"Mixing-station guard: {mix_guard.get('message', '')}"})
     if reasons:
         return False, reasons
+    if mix_guard is not None:
+        _append_activity(
+            config, "Water change starting without the mixing station's blessing — "
+            f"{mix_guard.get('message', '')}", "warning")
 
     now = datetime.now(timezone.utc)
     threshold_ml = _awc_num(acfg.get("ato", {}).get("microChangeThresholdMl"), 0, 0, 1e9)
@@ -7267,6 +7282,9 @@ async def _async_awc_finalize(
     awc["todayLitres"] = round(awc.get("todayLitres", 0) + filled_l, 3)
     awc["weekLitres"] = round(awc.get("weekLitres", 0) + filled_l, 3)
     awc["monthLitres"] = round(awc.get("monthLitres", 0) + filled_l, 3)
+    # The completed change drew its fill from the mixing station's batch —
+    # keep that ledger honest too (mixing doc §9; no-op when uncoupled).
+    _mixing_debit_batch(hass, config, filled_l, "the water change")
     holdoff = awc.get("ato", {}).get("stabilizationHoldoffMinutes", AWC_DEFAULT_HOLDOFF_MINUTES)
     if state.get("microChange"):
         holdoff = 0  # micro-changes get no stabilization hold-off of their own
@@ -13825,6 +13843,47 @@ def _mixing_sync_reminders(config: dict[str, Any], now: datetime, event: str) ->
         task["enabled"] = True
 
 
+def _mixing_close_batch(hass: HomeAssistant, config: dict[str, Any]) -> None:
+    """The one way a batch leaves the books: circulation stopped, the batch
+    block reset to idle, the keeper's retest chore stood down. Abort, an
+    exhausted mark-used, and the AWC completion debit all end here."""
+    _clear_mixing_circ_timer(hass)
+    _mixing_cfg(config)["batch"] = {
+        "state": "idle", "type": "salt", "startedAt": "", "stageAt": "",
+        "litres": 0, "loggedPpt": 0, "testedAt": "", "usedLitres": 0,
+        "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": "",
+    }
+    _mixing_sync_reminders(config, datetime.now(timezone.utc), "gone")
+
+
+def _mixing_debit_batch(hass: HomeAssistant, config: dict[str, Any], litres: float,
+                        note: str) -> None:
+    """Draw litres from the live batch ledger (doc §9's completion debit).
+    Quietly does nothing unless the station is enabled, coupled to AWC
+    (awcGuard not 'off'), and holding a live salt batch — an AWC filling from
+    some other reservoir must not phantom-drain this one."""
+    cfg = _mixing_cfg(config)
+    if (not cfg.get("enabled") or litres <= 0
+            or str((cfg.get("integrations") or {}).get("awcGuard") or "warn") == "off"):
+        return
+    batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
+    if str(batch.get("state") or "idle") not in ("ready", "storing") \
+            or str(batch.get("type") or "salt") != "salt":
+        return
+    total = _awc_num(batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
+    used = min(total, _awc_num(batch.get("usedLitres"), 0, 0, total) + litres)
+    batch["usedLitres"] = round(used, 1)
+    remaining = round(total - used, 1)
+    if remaining <= 0.05:
+        _mixing_close_batch(hass, config)
+        _append_activity(config, f"Mixing station: batch used up by {note} — "
+                         "the vessel stands empty", "control")
+    else:
+        _append_activity(
+            config, f"Mixing station: {litres:g} L drawn by {note} — {remaining:g} L left",
+            "control")
+
+
 def _mixing_booster_driven(config: dict[str, Any]) -> bool:
     """Whether OpenReef itself drives the fill: sim mode, or a bound booster plug.
     A manual tap still walks the workflow — there is just nothing to switch or cap."""
@@ -14161,15 +14220,9 @@ async def websocket_mixing_abort(
             connection.send_error(msg["id"], "not_running", "No batch to abort")
             return
         _clear_mixing_fill_timer(hass)
-        _clear_mixing_circ_timer(hass)
         await _async_mixing_stop_switches(
             hass, config, MIXING_SWITCH_ROLES, connection.context(msg))
-        cfg["batch"] = {
-            "state": "idle", "type": "salt", "startedAt": "", "stageAt": "",
-            "litres": 0, "loggedPpt": 0, "testedAt": "", "usedLitres": 0,
-            "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": "",
-        }
-        _mixing_sync_reminders(config, datetime.now(timezone.utc), "gone")
+        _mixing_close_batch(hass, config)
         _append_activity(config, "Mixing station: batch aborted — everything switched off",
                          "warning")
         config = await _async_save_config(hass, entry, config)
@@ -14206,13 +14259,7 @@ async def websocket_mixing_mark_used(
         batch["usedLitres"] = round(used, 1)
         remaining = round(total - used, 1)
         if remaining <= 0.05:
-            _clear_mixing_circ_timer(hass)
-            cfg["batch"] = {
-                "state": "idle", "type": "salt", "startedAt": "", "stageAt": "",
-                "litres": 0, "loggedPpt": 0, "testedAt": "", "usedLitres": 0,
-                "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": "",
-            }
-            _mixing_sync_reminders(config, datetime.now(timezone.utc), "gone")
+            _mixing_close_batch(hass, config)
             _append_activity(config, "Mixing station: batch used up — the vessel stands empty",
                              "control")
         else:

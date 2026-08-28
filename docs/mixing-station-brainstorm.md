@@ -171,7 +171,11 @@ AWC completion calls `mixing_mark_used` with the fill litres so the ledger stays
 
 - **ATO from RODI** (dual only, opt-in): decrement the RODI ledger from the ATO litres
   OpenReef already tracks where available; if no usage source exists, show nothing
-  (no guess).
+  (no guess). **Stage D finding (2026-08-28): OpenReef tracks no ATO volume anywhere**
+  — duty-cycle interlocks time the ATO, nothing measures its litres — so this ships
+  with the sensor track (a level entity on the RODI store makes it trivial and honest),
+  not as a dead toggle. Stage C's manual level correction covers it meanwhile. The
+  `integrations.atoFromRodi` config field stays reserved.
 - **Maintenance:** seed/sync reminders the hatchery way (`_mixing_sync_reminders`):
   batch retest when `retestAfterDays` elapses; RODI filter throughput reminder fed by
   cumulative litres filled (interval task on litres is v2 if the task model fights it —
