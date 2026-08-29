@@ -1603,6 +1603,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "calibratedAt": _awc_str(raw_rodi.get("calibratedAt"), 40),
         "litresProcessed": round(_awc_num(raw_rodi.get("litresProcessed"), 0, 0,
                                           MIXING_LITRES_PROCESSED_MAX), 1),
+        "meteredSince": _awc_str(raw_rodi.get("meteredSince"), 40),
         "filters": _normalise_mixing_filters(raw_rodi),
         # Live-run stamps preserved, only clamped — a normalise pass must never
         # move a running draw or calibration (the batch-block rule).
@@ -14082,8 +14083,13 @@ def _mixing_add_processed(cfg: dict[str, Any], litres: float) -> None:
     rodi = cfg.setdefault("rodi", {})
     if not isinstance(rodi, dict):
         return
-    level = _awc_num(rodi.get("litresProcessed"), 0, 0, MIXING_LITRES_PROCESSED_MAX) + litres
-    rodi["litresProcessed"] = round(min(level, MIXING_LITRES_PROCESSED_MAX), 1)
+    before = _awc_num(rodi.get("litresProcessed"), 0, 0, MIXING_LITRES_PROCESSED_MAX)
+    # The "since" stamp is earned by the FIRST litre counted from zero — an
+    # install that arrives already carrying litres keeps no date, because we
+    # cannot know when that counting began (no date beats a false one).
+    if before <= 0 and not rodi.get("meteredSince"):
+        rodi["meteredSince"] = datetime.now(timezone.utc).isoformat()
+    rodi["litresProcessed"] = round(min(before + litres, MIXING_LITRES_PROCESSED_MAX), 1)
     filters = rodi.get("filters") if isinstance(rodi.get("filters"), list) else []
     for stage in filters:
         if not isinstance(stage, dict):
@@ -14842,7 +14848,7 @@ async def websocket_mixing_filters_changed(
 ) -> None:
     """The keeper serviced ONE filter stage (filters v2) — that stage's litre
     counter starts again; its neighbours keep their own clocks. The lifetime
-    odometer never resets."""
+    odometer is untouched — only a whole-unit replacement resets it."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -14863,6 +14869,43 @@ async def websocket_mixing_filters_changed(
         name = stage.get("label") or stage.get("type") or "filter"
         _append_activity(config, f"Mixing station: {name} marked changed — "
                          "its litre counter starts again", "control")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_unit_replaced"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_unit_replaced(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The keeper replaced the WHOLE RODI unit — a new unit arrives with new
+    cartridges, so the lifetime odometer AND every stage clock start again
+    from zero, and meteredSince stamps the new unit's first day. This is the
+    odometer's only reset. Refused while the booster is running — you don't
+    swap a unit that's mid-draw, and the run's litres belong to one unit."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        busy = mixing_engine.rodi_busy_reason(cfg)
+        if busy:
+            connection.send_result(msg["id"], {"success": False, "reasons": [busy]})
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        rodi = cfg.setdefault("rodi", {})
+        rodi["litresProcessed"] = 0
+        rodi["meteredSince"] = now
+        filters = rodi.get("filters") if isinstance(rodi.get("filters"), list) else []
+        for stage in filters:
+            if isinstance(stage, dict):
+                stage["litresProcessed"] = 0
+                stage["changedAt"] = now
+        _append_activity(config, "Mixing station: RODI unit replaced — the litre "
+                         "odometer and every filter stage start again from zero", "control")
         config = await _async_save_config(hass, entry, config)
     _mixing_send(connection, msg, hass, config)
 
@@ -17276,6 +17319,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_mixing_rodi_stop)
     websocket_api.async_register_command(hass, websocket_mixing_calibrate)
     websocket_api.async_register_command(hass, websocket_mixing_filters_changed)
+    websocket_api.async_register_command(hass, websocket_mixing_unit_replaced)
     websocket_api.async_register_command(hass, websocket_nps_summary)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)

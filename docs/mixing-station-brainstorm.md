@@ -284,6 +284,26 @@ FIRST — sat under the mix vessel). Panel-only rework, no config or WS change:
   transfers are paused (standing saltwater / heating / salting → dilution lives
   on the mix card) instead of hiding. The guard, visible.
 
+## §19 The odometer tells the truth (0.7.98)
+
+Two honesty gaps in §17's lifetime odometer, both raised by Reece: no way to
+reset it when the WHOLE unit is replaced, and most keepers install OpenReef
+long after their RODI unit — so "unit lifetime" was quietly wrong for them.
+
+- **`rodi.meteredSince`** — stamped by the FIRST litre counted from zero
+  (`_mixing_add_processed`), never by an install that arrives already carrying
+  litres: OpenReef cannot know when that counting began, and no date beats a
+  false one. The panel says "N L metered since <date>" when stamped, and
+  "the count began when OpenReef arrived, not when the unit was new" when not.
+- **`mixing_unit_replaced` WS** — the odometer's ONLY reset: a new unit comes
+  with new cartridges, so it zeroes the odometer AND every stage clock, stamps
+  a fresh meteredSince, and writes the activity line. Refused while the booster
+  runs (`rodi_busy_reason` — a run's litres belong to one unit). Panel: the
+  "New RODI unit" button on the filter card, behind a confirm.
+- **Stage-clock caveat, shown only when it applies**: stages that have never
+  been swapped under OpenReef carry a hint that their clock starts true at the
+  next real swap — the pre-OpenReef wear is invisible to us and we say so.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

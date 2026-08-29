@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.97"
+INTEGRATION_VERSION = "0.7.98"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1665,7 +1665,13 @@ DEFAULT_CORE_CONFIG = {
             "alertPct": 80,
             "externalVolumeL": 0,
             "calibratedAt": "",                 # stamp of the last timed-run flow calibration
-            "litresProcessed": 0,               # unit lifetime odometer — never resets
+            # Unit lifetime odometer. It counts what OpenReef meters — nothing
+            # before — and resets only when the keeper replaces the WHOLE unit
+            # (mixing_unit_replaced). meteredSince stamps the first litre it
+            # ever counted, so the panel can say "since <date>" honestly; an
+            # install that inherited litres keeps no date rather than a lie.
+            "litresProcessed": 0,
+            "meteredSince": "",
             # Filters v2: one entry per physical stage, in flow order. Every
             # litre through the unit counts against EVERY stage; each stage
             # carries its own rated life and its own changed-clock.

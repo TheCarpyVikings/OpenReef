@@ -1704,6 +1704,11 @@ class OpenReefPanel extends HTMLElement {
       if (action === "mixing-filters-changed") {
         this._mixingAction({ type: "openreef/mixing_filters_changed", filter_id: id });
       }
+      if (action === "mixing-unit-replaced") {
+        if (typeof window.confirm === "function" && !window.confirm(
+          "Replaced the whole RODI unit? The litre odometer and every filter stage's clock start again from zero.")) return;
+        this._mixingAction({ type: "openreef/mixing_unit_replaced" });
+      }
       if (action === "mixing-filter-add") {
         const m = this._config.mixingStation = this._config.mixingStation || {};
         const rodiCfg = m.rodi = m.rodi || {};
@@ -23120,12 +23125,26 @@ const rigSteps = [
     const body = filters.length ? `
       ${dueNames.length ? `<div class="notice warning-notice"><strong>Filter service due:</strong> ${this._escape(dueNames.join(", "))} — past the rated litres; TDS creep is next.</div>` : ""}
       ${this._mixingFilterSvg(filters)}
-      ${filterRows}
-      <small class="awc-hint">Unit lifetime: ${this._format(processed, 0)} L processed.</small>`
+      ${filterRows}`
       : `
       <p class="muted">Track each cartridge's own life — sediment, carbon, membrane, DI resin, doubles welcome. Every litre the unit meters counts against every stage.</p>
-      <div class="button-row"><button class="secondary" data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" ${disabled}>Add filter stages</button></div>
-      <small class="awc-hint">Unit lifetime so far: ${this._format(processed, 0)} L.</small>`;
+      <div class="button-row"><button class="secondary" data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" ${disabled}>Add filter stages</button></div>`;
+    // The odometer, told honestly: it counts what OpenReef has metered and
+    // nothing before — a unit that predates OpenReef gets no false birthday.
+    // "New RODI unit" is the odometer's ONLY reset (new unit, new cartridges).
+    const since = rodi?.meteredSince ? new Date(rodi.meteredSince) : null;
+    const odometerLine = since && !Number.isNaN(since.getTime())
+      ? `Unit lifetime: ${this._format(processed, 0)} L metered since ${since.toLocaleDateString()}.`
+      : processed > 0
+        ? `Unit lifetime: ${this._format(processed, 0)} L metered — the count began when OpenReef arrived, not when the unit was new.`
+        : "Nothing metered yet — the odometer starts with the first litre OpenReef runs.";
+    const neverSwapped = filters.some((f) => !f.changedAt);
+    const footer = `
+      <div class="button-row" style="align-items:center;justify-content:space-between;flex-wrap:wrap;">
+        <small class="awc-hint">${odometerLine}</small>
+        <button class="danger-text" data-action="mixing-unit-replaced" ${disabled}>New RODI unit</button>
+      </div>
+      ${filters.length && neverSwapped ? `<small class="awc-hint">Stage clocks count what OpenReef meters — a cartridge older than OpenReef starts true at its next real swap (tap Changed).</small>` : ""}`;
     return `
       <article class="panel stack" id="or-mixing-filters">
         <div class="section-head">
@@ -23133,6 +23152,7 @@ const rigSteps = [
           <div class="button-row"><button class="secondary compact-button" data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing">Configure</button></div>
         </div>
         ${body}
+        ${footer}
       </article>`;
   }
 

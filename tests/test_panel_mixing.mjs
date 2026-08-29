@@ -519,6 +519,31 @@ test("the filter train draws a canister per stage and shouts only when due", asy
   assert(!bareHtml.includes('rx="7"'), "no-stage setups drew phantom canisters");
 });
 
+test("the filter card resets honestly — New RODI unit and the metered-since story", async () => {
+  // A stamped odometer tells its date; the whole-unit reset is always offered.
+  const stamped = await mixingPanel({}, summaryBlob({ rodi: {
+    rateLph: 100, calibratedAt: "", litresProcessed: 122,
+    meteredSince: "2026-08-01T00:00:00+00:00",
+    filters: FILTER_SET, filterDue: false, draw: null, calibration: null,
+  } }));
+  stamped._activeTab = "mixing";
+  let html = stamped._mixingTab();
+  assert(html.includes('data-action="mixing-unit-replaced"'), "the whole-unit reset went missing");
+  assert(html.includes("metered since"), "a stamped odometer must tell its date");
+  assert(html.includes("starts true at its next real swap"),
+    "never-swapped stages must warn that their clocks predate OpenReef");
+  // An inherited odometer (no stamp) refuses to invent a birthday.
+  const inherited = await mixingPanel({}, summaryBlob({ rodi: {
+    rateLph: 0, calibratedAt: "", litresProcessed: 122,
+    filters: [], filterDue: false, draw: null, calibration: null,
+  } }));
+  inherited._activeTab = "mixing";
+  html = inherited._mixingTab();
+  assert(html.includes("not when the unit was new"), "an inherited count must say it is partial");
+  assert(html.includes('data-action="mixing-unit-replaced"'), "no-stage setups still replace units");
+  noPlaceholders(html, "filter card footer");
+});
+
 // --- The 0.7.97 layout: hero cards up top, sections in the water's order ----
 
 test("hero cards read in the water's flow order and jump to their sections", async () => {

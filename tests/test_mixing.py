@@ -1200,6 +1200,70 @@ def test_transfers_never_double_count_the_filter_ledger():
     assert _mix_state(entry)["rodi"]["litresProcessed"] == 50.0
 
 
+def test_unit_replaced_resets_every_clock_and_stamps_a_new_since():
+    # A new unit arrives with new cartridges: the odometer's ONLY reset takes
+    # every stage clock with it and stamps the new unit's first day.
+    install_scheduler(integration)
+    hass, entry = _station(_rodi_over(
+        litresProcessed=5000, meteredSince="2026-01-01T00:00:00+00:00", filters=[
+            {"id": "f1", "label": "Sediment", "type": "sediment",
+             "ratedLitres": 2000, "litresProcessed": 1900, "changedAt": ""},
+            {"id": "f2", "label": "Carbon", "type": "carbon",
+             "ratedLitres": 2000, "litresProcessed": 500,
+             "changedAt": "2026-05-01T00:00:00+00:00"},
+        ]))
+    conn = FakeConnection()
+    run(integration.websocket_mixing_unit_replaced(hass, conn, {"id": 1}))
+    assert conn.results[-1].payload["success"] is True
+    rodi = _mix_state(entry)["rodi"]
+    assert rodi["litresProcessed"] == 0.0
+    assert rodi["meteredSince"] and rodi["meteredSince"] != "2026-01-01T00:00:00+00:00"
+    for stage in rodi["filters"]:
+        assert stage["litresProcessed"] == 0.0
+        assert stage["changedAt"] == rodi["meteredSince"]
+
+
+def test_unit_replaced_refused_while_the_booster_runs():
+    # You don't swap a unit mid-draw — and the run's litres belong to one unit.
+    install_scheduler(integration)
+    hass, entry = _station(_rodi_over(litresProcessed=100))
+    conn = FakeConnection()
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 10, "destination": "store"}))
+    run(integration.websocket_mixing_unit_replaced(hass, conn, {"id": 2}))
+    payload = conn.results[-1].payload
+    assert payload["success"] is False and payload["reasons"]
+    assert _mix_state(entry)["rodi"]["litresProcessed"] == 100.0    # nothing reset
+
+
+def test_metered_since_is_earned_by_the_first_litre_never_inherited():
+    # A fresh odometer stamps its birthday with the first metered litre…
+    cfg = {"rodi": {"litresProcessed": 0}}
+    integration._mixing_add_processed(cfg, 10)
+    first = cfg["rodi"]["meteredSince"]
+    assert first
+    integration._mixing_add_processed(cfg, 5)
+    assert cfg["rodi"]["meteredSince"] == first                     # never re-stamped
+    # …but an install that arrives already carrying litres keeps NO date —
+    # OpenReef cannot know when that counting began, and no date beats a lie.
+    inherited = {"rodi": {"litresProcessed": 122}}
+    integration._mixing_add_processed(inherited, 10)
+    assert not inherited["rodi"].get("meteredSince")
+
+
+def test_rodi_status_and_normaliser_carry_the_metered_since_stamp():
+    stamp = "2026-08-29T10:00:00+00:00"
+    status = mixing.rodi_status(
+        _cfg(rodi={"rateLph": 0, "meteredSince": stamp}), datetime.now(timezone.utc))
+    assert status["meteredSince"] == stamp
+    cfg = integration._normalise_core_config(
+        {"mixingStation": {"rodi": {"meteredSince": stamp, "litresProcessed": 50}}})
+    assert cfg["mixingStation"]["rodi"]["meteredSince"] == stamp
+    trimmed = integration._normalise_core_config(
+        {"mixingStation": {"rodi": {"meteredSince": "x" * 200}}})
+    assert len(trimmed["mixingStation"]["rodi"]["meteredSince"]) == 40
+
+
 # ---------------------------------------------------------------- salinity units
 # Specific-gravity keepers (0.7.92): ppt stays canonical everywhere; SG is a
 # display/input skin converted by the engine on the 35 ppt ↔ 1.0264 anchor.

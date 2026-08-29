@@ -386,6 +386,9 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
         "externalVolumeL": round(max(0.0, _f(rodi.get("externalVolumeL"))), 1),
         "calibratedAt": str(rodi.get("calibratedAt") or ""),
         "litresProcessed": round(processed, 1),
+        # When the odometer started counting — empty on installs that inherited
+        # litres from before the stamp existed (no date beats a false one).
+        "meteredSince": str(rodi.get("meteredSince") or ""),
         "filters": filters,
         "filterDue": any(f["due"] for f in filters),
         "draw": None,
