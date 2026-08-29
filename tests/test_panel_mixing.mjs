@@ -72,6 +72,8 @@ function summaryBlob(over = {}) {
     brand: { id: "nyos_pure", label: "NYOS Pure", useWithinH: 0 },
     brands: [{ id: "nyos_pure", label: "NYOS Pure" }, { id: "custom", label: "Custom / other" }],
     targetPpt: 35,
+    salinityUnit: over.salinityUnit || "ppt",
+    targetSg: 1.0264,
     rodi: over.rodi || {
       rateLph: 0, calibratedAt: "", litresProcessed: 0, filterRatedL: 0,
       filterChangedAt: "", filterDue: false, draw: null, calibration: null,
@@ -474,6 +476,62 @@ test("an idle tab refetches a stale summary — a settings save elsewhere must r
   panel._mixingTab();
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert(called === 0, "a fresh summary was refetched needlessly");
+});
+
+const SG_SALT = { brand: "nyos_pure", targetPpt: 35, unit: "sg", mixHours: 0, customGPerL: 0 };
+
+test("the panel's SG anchor cannot drift from mixing.py", async () => {
+  const py = fs.readFileSync(path.join(ROOT, "custom_components", "openreef", "mixing.py"), "utf8");
+  const anchor = Number(py.match(/REFERENCE_SG\s*=\s*([\d.]+)/)?.[1]);
+  assert(anchor > 1.02 && anchor < 1.03, `could not read REFERENCE_SG from mixing.py: ${anchor}`);
+  const panel = await mixingPanel({ salt: SG_SALT });
+  assert(Math.abs(panel._mixingPptToSg(35) - anchor) < 0.0002,
+    "the panel's ppt→SG anchor drifted from the Python");
+  assert(Math.abs(panel._mixingSgToPpt(anchor) - 35) < 0.05,
+    "the panel's SG→ppt anchor drifted from the Python");
+});
+
+test("an SG keeper reads and types SG everywhere on the tab", async () => {
+  const panel = await mixingPanel({ salt: SG_SALT },
+    summaryBlob({ batch: { status: "salting", litres: 40, remainingLitres: 40,
+                           mix: { percent: 50, hoursLeft: 1.0, testUnlocked: false } } }));
+  panel._activeTab = "mixing";
+  let html = panel._mixingTab();
+  assert(html.includes("Measured salinity (SG)"), "the salting input did not speak SG");
+  assert(html.includes('step="0.001"'), "the SG input lost its 0.001 step");
+  assert(html.includes("1.0264"), "the SG placeholder lost the converted target");
+  assert(html.includes("1.0264 SG"), "the dose header did not convert to SG");
+  const stored = await mixingPanel({ salt: SG_SALT, batch: { state: "storing", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", type: "salt", litres: 40, remainingLitres: 40,
+                           loggedPpt: 35.1, loggedSg: 1.0265 } }));
+  stored._activeTab = "mixing";
+  html = stored._mixingTab();
+  assert(html.includes("1.0265 SG"), "a stored batch's tested line did not speak SG");
+  noPlaceholders(html, "sg tab");
+  const badge = stored._mixingDiagramSvg(mixConfig({ salt: SG_SALT }),
+    { status: "ready", type: "salt", loggedPpt: 35.1, loggedSg: 1.0265 }, summaryBlob().levels);
+  assert(badge.includes("1.0265"), "the diagram badge did not convert to SG");
+});
+
+test("a ppt keeper sees exactly what they always saw", async () => {
+  const panel = await mixingPanel({},
+    summaryBlob({ batch: { status: "salting", litres: 40, remainingLitres: 40,
+                           mix: { percent: 50, hoursLeft: 1.0, testUnlocked: false } } }));
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes("Measured salinity (ppt)"), "ppt keepers lost their ppt input");
+  assert(html.includes("35.0 ppt"), "the dose header stopped speaking ppt");
+});
+
+test("settings offers the unit picker and converts the target box for SG", async () => {
+  const panel = await mixingPanel();
+  const ppt = panel._mixingSettingsBody(mixConfig());
+  assert(ppt.includes('data-field="unit"'), "settings lost the salinity unit picker");
+  assert(ppt.includes("Target salinity (ppt)"), "ppt settings lost the ppt target box");
+  const sg = panel._mixingSettingsBody(mixConfig({ salt: SG_SALT }));
+  assert(sg.includes("Target salinity (SG)"), "sg settings did not convert the target box");
+  assert(sg.includes('value="1.0264"'), "the stored 35 ppt did not render as 1.0264 SG");
+  noPlaceholders(sg, "sg settings");
 });
 
 runTests();

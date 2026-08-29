@@ -1556,10 +1556,12 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
 
     raw_salt = mix_cfg.get("salt") if isinstance(mix_cfg.get("salt"), dict) else {}
     brand = str(raw_salt.get("brand") or "nyos_pure")
+    salinity_unit = str(raw_salt.get("unit") or "ppt")
     mix_cfg["salt"] = {
         "brand": brand if brand in mixing_engine.brand_ids() else "nyos_pure",
         "targetPpt": round(_awc_num(raw_salt.get("targetPpt"), 35.0,
                                     MIXING_TARGET_PPT_MIN, MIXING_TARGET_PPT_MAX), 1),
+        "unit": salinity_unit if salinity_unit in mixing_engine.SALINITY_UNITS else "ppt",
         "mixHours": round(_awc_num(raw_salt.get("mixHours"), 0, 0, MIXING_MIX_HOURS_MAX), 1),
         "customGPerL": round(_awc_num(raw_salt.get("customGPerL"), 0, 0, 100), 1),
     }
@@ -14309,7 +14311,8 @@ async def websocket_mixing_advance(
 
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/mixing_log_salinity",
-    vol.Required("ppt"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=60)),
+    vol.Optional("ppt"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=60)),
+    vol.Optional("sg"): vol.All(vol.Coerce(float), vol.Range(min=1.001, max=1.1)),
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -14317,16 +14320,25 @@ async def websocket_mixing_log_salinity(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Log a salinity reading against the target — the first test while
-    'salting', or a RETEST on a ready/storing batch. In band: the batch goes
-    (or stays) ready/storing with testedAt refreshed, the circulation cadence
-    stamped, and the keeper's retest chore marked done. Out of band: back to
-    (or stays in) 'salting' — pumps on, mix clock restarted — and the reply
-    carries real grams-to-add or litres-to-dilute maths, never 'try again'."""
+    'salting', or a RETEST on a ready/storing batch. Takes ``ppt`` or ``sg``
+    (specific-gravity keepers exist too); the engine owns the conversion and
+    ppt stays the canonical stored unit. In band: the batch goes (or stays)
+    ready/storing with testedAt refreshed, the circulation cadence stamped,
+    and the keeper's retest chore marked done. Out of band: back to (or stays
+    in) 'salting' — pumps on, mix clock restarted — and the reply carries real
+    grams-to-add or litres-to-dilute maths, never 'try again'."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
-    ppt = float(msg["ppt"])
+    if msg.get("ppt") is not None:
+        ppt = float(msg["ppt"])
+    elif msg.get("sg") is not None:
+        ppt = mixing_engine.ppt_from_sg(msg["sg"])
+    else:
+        connection.send_error(msg["id"], "invalid_format",
+                              "Send the reading as 'ppt' or 'sg'")
+        return
     async with _mixing_lock(hass):
         config = _config_from_entry(entry)
         cfg = _mixing_cfg(config)

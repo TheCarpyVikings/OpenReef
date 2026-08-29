@@ -64,6 +64,24 @@ PPT_TOLERANCE = 0.5            # |measured − target| within this ⇒ batch pas
 RETEST_DEFAULT_DAYS = 7.0
 MIX_BATCH_TYPES = ("salt", "rodi")
 MIX_LAYOUTS = ("dual", "single")
+SALINITY_UNITS = ("ppt", "sg")
+# The hobby anchor every SG scale is drawn around: 35 ppt ↔ 1.0264 SG (20/20).
+# A linear map through it is well inside hobby-instrument accuracy across the
+# reef range (±0.001 SG on a swing-arm is ±1.3 ppt by itself). ppt stays the
+# canonical stored unit everywhere; SG is a keeper-facing skin on it.
+REFERENCE_SG = 1.0264
+PPT_PER_SG_POINT = REFERENCE_PPT / (REFERENCE_SG - 1.0)   # ≈ 1325.8
+
+
+def ppt_from_sg(sg: Any) -> float:
+    """Specific gravity → ppt on the hobby anchor line. Non-physical readings
+    (≤ 1.000) come back 0 — the guards treat that as 'no reading'."""
+    return round(max(0.0, (_f(sg) - 1.0) * PPT_PER_SG_POINT), 2)
+
+
+def sg_from_ppt(ppt: Any) -> float:
+    """ppt → specific gravity, 4 decimals (the resolution SG scales print)."""
+    return round(1.0 + max(0.0, _f(ppt)) / PPT_PER_SG_POINT, 4)
 
 
 def brand_ids() -> tuple[str, ...]:
@@ -177,6 +195,9 @@ def batch_state(batch: Any, cfg: Any, now: datetime) -> dict[str, Any]:
         # of now — the diagram spins the impellers off this, never off a guess.
         "circulating": False,
         "loggedPpt": batch.get("loggedPpt"),
+        # Pre-converted for SG-reading keepers — the panel shows, never computes.
+        "loggedSg": sg_from_ppt(batch.get("loggedPpt"))
+        if _f(batch.get("loggedPpt")) > 0 else None,
     }
     if status in ("ready", "storing"):
         until = _parse_iso(batch.get("circulateUntil"))
@@ -459,5 +480,9 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
         "brand": brand_info(salt_cfg.get("brand")),
         "brands": [dict(b) for b in SALT_BRANDS],
         "targetPpt": _f(salt_cfg.get("targetPpt"), REFERENCE_PPT),
+        # The keeper's display unit and the ready-converted target — the panel
+        # shows SG without ever owning the conversion constant.
+        "salinityUnit": str(salt_cfg.get("unit") or "ppt"),
+        "targetSg": sg_from_ppt(_f(salt_cfg.get("targetPpt"), REFERENCE_PPT)),
         "rodi": rodi_status(cfg, now),
     }

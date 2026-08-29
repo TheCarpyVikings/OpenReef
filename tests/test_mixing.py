@@ -1046,6 +1046,62 @@ def test_fill_confirm_feeds_the_filter_ledger():
     assert _mix_state(entry)["rodi"]["litresProcessed"] == 40.0
 
 
+# ---------------------------------------------------------------- salinity units
+# Specific-gravity keepers (0.7.92): ppt stays canonical everywhere; SG is a
+# display/input skin converted by the engine on the 35 ppt ↔ 1.0264 anchor.
+
+
+def test_sg_conversion_round_trips_on_the_hobby_anchor():
+    assert mixing.sg_from_ppt(35.0) == 1.0264
+    assert mixing.ppt_from_sg(1.0264) == 35.0
+    assert mixing.ppt_from_sg(1.0) == 0.0                  # non-physical → no reading
+    assert abs(mixing.ppt_from_sg(mixing.sg_from_ppt(33.0)) - 33.0) < 0.1
+
+
+def test_log_salinity_accepts_sg_and_stores_ppt():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {
+        "state": "salting", "type": "salt", "litres": 40,
+        "stageAt": _iso(datetime.now(timezone.utc) - timedelta(hours=3))}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "sg": 1.0264}))
+    assert conn.results[-1].payload["success"] is True
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "ready" and abs(batch["loggedPpt"] - 35.0) < 0.1
+
+
+def test_log_salinity_requires_a_reading_in_some_unit():
+    install_scheduler(integration)
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1}))
+    assert conn.errors and conn.errors[-1].code == "invalid_format"
+
+
+def test_normalise_validates_the_salinity_unit():
+    junk = integration._normalise_core_config({"mixingStation": _cfg(
+        salt={"brand": "nyos_pure", "targetPpt": 35.0, "unit": "cups",
+              "mixHours": 0, "customGPerL": 0})})["mixingStation"]
+    assert junk["salt"]["unit"] == "ppt"
+    sg = integration._normalise_core_config({"mixingStation": _cfg(
+        salt={"brand": "nyos_pure", "targetPpt": 35.0, "unit": "sg",
+              "mixHours": 0, "customGPerL": 0})})["mixingStation"]
+    assert sg["salt"]["unit"] == "sg"
+
+
+def test_summary_carries_the_unit_and_converted_targets():
+    cfg = _cfg(salt={"brand": "nyos_pure", "targetPpt": 35.0, "unit": "sg",
+                     "mixHours": 0, "customGPerL": 0},
+               batch={"state": "ready", "type": "salt", "litres": 40, "usedLitres": 0,
+                      "loggedPpt": 35.1, "testedAt": _iso(NOW), "stageAt": _iso(NOW)})
+    summary = mixing.summary(cfg, NOW)
+    assert summary["salinityUnit"] == "sg"
+    assert summary["targetSg"] == 1.0264
+    assert summary["batch"]["loggedSg"] == mixing.sg_from_ppt(35.1)
+    # An untested batch offers no SG figure — never a fake 1.0000.
+    assert mixing.batch_state({"state": "salting", "litres": 40}, cfg, NOW)["loggedSg"] is None
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

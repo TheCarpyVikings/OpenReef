@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.91"
+INTEGRATION_VERSION = "0.7.92"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1664,7 +1664,8 @@ DEFAULT_CORE_CONFIG = {
         },
         "salt": {
             "brand": "nyos_pure",
-            "targetPpt": 35.0,
+            "targetPpt": 35.0,                  # canonical unit — SG is display-only
+            "unit": "ppt",                      # ppt | sg (how the keeper reads salinity)
             "mixHours": 0,                      # 0 = brand default
             "customGPerL": 0,                   # brand "custom" only
         },

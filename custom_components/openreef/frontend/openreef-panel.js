@@ -1664,9 +1664,13 @@ class OpenReefPanel extends HTMLElement {
         this._mixingAction(payload);
       }
       if (action === "mixing-log") {
-        const ppt = Number(this.shadowRoot.querySelector("[data-mixing-ppt]")?.value) || 0;
-        if (ppt > 0) this._mixingAction({ type: "openreef/mixing_log_salinity", ppt });
-        else { this._mixingMessage = "Enter the salinity reading first."; this._render(); }
+        const reading = Number(this.shadowRoot.querySelector("[data-mixing-ppt]")?.value) || 0;
+        if (reading > 0) {
+          // SG keepers type 1.026x — send it as sg and the backend converts.
+          this._mixingAction(this._mixingUnit() === "sg"
+            ? { type: "openreef/mixing_log_salinity", sg: reading }
+            : { type: "openreef/mixing_log_salinity", ppt: reading });
+        } else { this._mixingMessage = "Enter the salinity reading first."; this._render(); }
       }
       if (action === "mixing-abort") this._mixingAction({ type: "openreef/mixing_abort" });
       if (action === "mixing-mark-used") {
@@ -2411,8 +2415,15 @@ class OpenReefPanel extends HTMLElement {
         const m = this._config.mixingStation = this._config.mixingStation || {};
         const key = scope.slice("mixing-".length);
         const sub = m[key] = m[key] || {};
-        sub[field] = (target.type === "checkbox") ? value
+        let v = (target.type === "checkbox") ? value
           : (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+        // SG keepers type 1.0264 into the target box — stored canonically as
+        // ppt (the backend's only salinity unit; see mixing.py REFERENCE_SG).
+        if (scope === "mixing-salt" && field === "targetPpt"
+            && (sub.unit || "ppt") === "sg") {
+          v = Math.round(this._mixingSgToPpt(v) * 10) / 10;
+        }
+        sub[field] = v;
       }
       if (scope === "nps") {
         const npsCfg = this._config.nps = this._config.nps || {};
@@ -2514,7 +2525,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && field === "brand") || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-hatch-vessel" && field === "volumePreset") || (scope === "nps-hatch-reservoir" && field === "refrigerated") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && ["brand", "unit"].includes(field)) || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-hatch-vessel" && field === "volumePreset") || (scope === "nps-hatch-reservoir" && field === "refrigerated") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -22649,6 +22660,23 @@ const rigSteps = [
     })[stage] || stage;
   }
 
+  // How this keeper reads salinity: ppt, or specific gravity. ppt stays the
+  // canonical stored unit everywhere — SG is a skin. Display values come
+  // pre-converted from the backend (targetSg, loggedSg); the two functions
+  // below exist only for the settings input, on the same 35 ppt ↔ 1.0264
+  // anchor as mixing.py (the panel suite pins them against the Python).
+  _mixingUnit() {
+    return (this._mixingCfg().salt || {}).unit === "sg" ? "sg" : "ppt";
+  }
+
+  _mixingSgToPpt(sg) {
+    return Math.max(0, (Number(sg) || 0) - 1) * (35 / 0.0264);
+  }
+
+  _mixingPptToSg(ppt) {
+    return 1 + Math.max(0, Number(ppt) || 0) * (0.0264 / 35);
+  }
+
   _mixingTab() {
     const mix = this._mixingCfg();
     const sum = this._mixingSummary;
@@ -22657,6 +22685,7 @@ const rigSteps = [
     const dose = sum?.dose || { available: false };
     const status = batch.status || "idle";
     const rodi = sum?.rodi || {};
+    const sgUnit = this._mixingUnit() === "sg";
     // Refetch whenever the cache has gone stale — live batches and RODI runs
     // need their clocks, and even an idle tab must pick up a settings save
     // made elsewhere (the stamp in _mixingLoadSummary throttles this to one
@@ -22701,11 +22730,16 @@ const rigSteps = [
           ? "Mix window done — test the batch's salinity."
           : `Mixing — ${this._format(mixClock.hoursLeft, 1)} h left in the ${this._format(sum?.mixHours, 1)} h window.`)
         : status === "ready" || status === "storing"
-          ? `${this._format(batch.remainingLitres, 1)} L on hand${batch.loggedPpt ? ` · tested ${this._format(batch.loggedPpt, 1)} ppt` : ""}${batch.retestDue ? " · retest before use" : ""}`
+          ? `${this._format(batch.remainingLitres, 1)} L on hand${batch.loggedPpt ? ` · tested ${sgUnit && batch.loggedSg ? `${batch.loggedSg} SG` : `${this._format(batch.loggedPpt, 1)} ppt`}` : ""}${batch.retestDue ? " · retest before use" : ""}`
           : this._mixingStatusLabel(status);
 
-    // The one next action per stage — the user is the sensor in v1.
+    // The one next action per stage — the user is the sensor in v1. The
+    // salinity field speaks the keeper's unit; SG placeholders come converted
+    // from the backend (targetSg), never computed here.
     const disabled = this._busy ? "disabled" : "";
+    const salinityField = (labelText) => sgUnit
+      ? `<label>${labelText} (SG)<input type="number" min="1.001" max="1.1" step="0.001" data-mixing-ppt placeholder="${sum?.targetSg || "1.0264"}"></label>`
+      : `<label>${labelText} (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label>`;
     const abortBtn = `<button class="danger-text" data-action="mixing-abort" ${disabled}>${status === "ready" || status === "storing" ? "Discard batch" : "Abort"}</button>`;
     let controls = "";
     if (status === "idle") {
@@ -22728,7 +22762,7 @@ const rigSteps = [
       controls = `<div class="button-row"><button class="primary" data-action="mixing-advance" ${disabled}>At temperature →</button>${abortBtn}</div>`;
     } else if (status === "salting") {
       controls = `
-        <div class="mini-grid"><label>Measured salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label></div>
+        <div class="mini-grid">${salinityField("Measured salinity")}</div>
         <div class="button-row"><button class="primary" data-action="mixing-log" ${disabled}>Log test</button>${abortBtn}</div>`;
     } else if (status === "ready" || status === "storing") {
       const saltBatch = batch.type !== "rodi";
@@ -22736,7 +22770,7 @@ const rigSteps = [
       controls = `
         <div class="mini-grid">
           <label>Litres used<input type="number" min="0" step="1" data-mixing-used placeholder="${Number(batch.remainingLitres) || 0}"></label>
-          ${saltBatch ? `<label>Retest salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label>` : ""}
+          ${saltBatch ? salinityField("Retest salinity") : ""}
         </div>
         <div class="button-row">
           <button class="primary" data-action="mixing-mark-used" ${disabled}>Log usage</button>
@@ -22777,7 +22811,7 @@ const rigSteps = [
     const doseCard = `
       <article class="setting-card">
         <div class="section-head"><div><p class="eyebrow">Salt dose guide</p>
-          <h3>${this._escape(sum?.brand?.label || "—")} → ${this._format(sum?.targetPpt, 1)} ppt</h3></div></div>
+          <h3>${this._escape(sum?.brand?.label || "—")} → ${sgUnit ? `${sum?.targetSg || "—"} SG` : `${this._format(sum?.targetPpt, 1)} ppt`}</h3></div></div>
         ${dose.available
           ? `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`
           : `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`}
@@ -22982,7 +23016,7 @@ const rigSteps = [
           ${impeller(mixX + 54, stirring)}
           <text x="${mixX + 54}" y="232" text-anchor="middle" font-size="10" fill="#b0bec5">${dual ? "Mix vessel" : "The vessel"} ${levels?.mix ? `${this._format(levels.mix.litres, 1)}L` : "—"}</text>
           <text x="${mixX + 54}" y="245" text-anchor="middle" font-size="8" fill="#78909c">estimated</text>
-          ${ready && batch?.type !== "rodi" ? badge(mixX + 25, 102, batch.loggedPpt ? `${this._format(batch.loggedPpt, 1)} ppt` : "READY", "#2e7d32") : ""}
+          ${ready && batch?.type !== "rodi" ? badge(mixX + 25, 102, batch.loggedPpt ? (this._mixingUnit() === "sg" && batch.loggedSg ? `${batch.loggedSg}` : `${this._format(batch.loggedPpt, 1)} ppt`) : "READY", "#2e7d32") : ""}
           ${batch?.retestDue ? badge(mixX + 25, 102, "RETEST", "#ef6c00") : ""}
         </g>
       </svg>`;
@@ -23054,7 +23088,13 @@ const rigSteps = [
         <label>Salt brand<select data-scope="mixing-salt" data-field="brand">
           ${brands.map((b) => `<option value="${this._escape(b.id)}" ${(salt.brand || "nyos_pure") === b.id ? "selected" : ""}>${this._escape(b.label || b.id)}</option>`).join("")}
         </select></label>
-        <label>Target salinity (ppt)<input type="number" min="20" max="45" step="0.1" data-scope="mixing-salt" data-field="targetPpt" value="${Number(salt.targetPpt) || 35}"></label>
+        <label>Salinity unit<select data-scope="mixing-salt" data-field="unit">
+          <option value="ppt" ${(salt.unit || "ppt") === "sg" ? "" : "selected"}>ppt — parts per thousand (35.0)</option>
+          <option value="sg" ${(salt.unit || "ppt") === "sg" ? "selected" : ""}>Specific gravity (1.0264)</option>
+        </select></label>
+        ${(salt.unit || "ppt") === "sg"
+          ? `<label>Target salinity (SG)<input type="number" min="1.015" max="1.034" step="0.001" data-scope="mixing-salt" data-field="targetPpt" value="${this._mixingPptToSg(Number(salt.targetPpt) || 35).toFixed(4)}"></label>`
+          : `<label>Target salinity (ppt)<input type="number" min="20" max="45" step="0.1" data-scope="mixing-salt" data-field="targetPpt" value="${Number(salt.targetPpt) || 35}"></label>`}
         <label>Mix window (h, 0 = brand default)<input type="number" min="0" max="72" step="0.5" data-scope="mixing-salt" data-field="mixHours" value="${Number(salt.mixHours) || 0}"></label>
         ${(salt.brand || "") === "custom" ? `<label>Custom salt g/L @35 ppt<input type="number" min="0" max="100" step="0.1" data-scope="mixing-salt" data-field="customGPerL" value="${Number(salt.customGPerL) || 0}"></label>` : ""}
       </div>
