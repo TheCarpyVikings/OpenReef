@@ -98,7 +98,7 @@ def mix_hours(brand: Any, override_hours: Any = 0) -> float:
 def salt_dose(brand: Any, litres: Any, target_ppt: Any,
               custom_g_per_l: Any = 0) -> dict[str, Any]:
     """The scoop guide: grams for this batch, linear-scaled off the brand's
-    35 ppt figure. Approximate by nature — the refractometer is the truth."""
+    35 ppt figure. Approximate by nature — the keeper's salinity test is the truth."""
     g_per_l = brand_g_per_l(brand, custom_g_per_l)
     lit = _f(litres)
     ppt = _f(target_ppt, REFERENCE_PPT)

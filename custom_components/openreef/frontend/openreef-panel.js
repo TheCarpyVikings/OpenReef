@@ -1666,7 +1666,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "mixing-log") {
         const ppt = Number(this.shadowRoot.querySelector("[data-mixing-ppt]")?.value) || 0;
         if (ppt > 0) this._mixingAction({ type: "openreef/mixing_log_salinity", ppt });
-        else { this._mixingMessage = "Enter the refractometer reading first."; this._render(); }
+        else { this._mixingMessage = "Enter the salinity reading first."; this._render(); }
       }
       if (action === "mixing-abort") this._mixingAction({ type: "openreef/mixing_abort" });
       if (action === "mixing-mark-used") {
@@ -22598,7 +22598,7 @@ const rigSteps = [
     tasks.mixing_retest = {
       ...(tasks.mixing_retest || {
         label: "Retest stored saltwater", enabled: true, notify: true,
-        notes: "Stored batches drift (evaporation raises salinity) — check with the refractometer and log it on the Mixing Station tab.",
+        notes: "Stored batches drift (evaporation raises salinity) — test the salinity however you measure it and log it on the Mixing Station tab.",
       }),
       cadenceDays: retestDays,
       criticalAfterDays: retestDays * 2,
@@ -22698,7 +22698,7 @@ const rigSteps = [
       ? "No batch underway. The vessels are dry, the salt bucket is sealed, and nobody is pretending otherwise."
       : status === "salting"
         ? (mixClock.testUnlocked
-          ? "Mix window done — test the batch with your refractometer."
+          ? "Mix window done — test the batch's salinity."
           : `Mixing — ${this._format(mixClock.hoursLeft, 1)} h left in the ${this._format(sum?.mixHours, 1)} h window.`)
         : status === "ready" || status === "storing"
           ? `${this._format(batch.remainingLitres, 1)} L on hand${batch.loggedPpt ? ` · tested ${this._format(batch.loggedPpt, 1)} ppt` : ""}${batch.retestDue ? " · retest before use" : ""}`
@@ -22779,7 +22779,7 @@ const rigSteps = [
         <div class="section-head"><div><p class="eyebrow">Salt dose guide</p>
           <h3>${this._escape(sum?.brand?.label || "—")} → ${this._format(sum?.targetPpt, 1)} ppt</h3></div></div>
         ${dose.available
-          ? `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. The refractometer has the final word.</p>`
+          ? `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`
           : `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`}
         <small class="awc-hint">Mix window: ${this._format(sum?.mixHours, 1)} h${sum?.brand?.useWithinH ? ` · this brand wants the batch used within ~${this._format(sum.brand.useWithinH, 0)} h of mixing` : ""}.</small>
       </article>`;
@@ -23049,7 +23049,7 @@ const rigSteps = [
         <label>Filter rated litres (0 = untracked)<input type="number" min="0" step="100" data-scope="mixing-rodi" data-field="filterRatedL" value="${Number(rodi.filterRatedL) || 0}"></label>
       </div>
       <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. Rated litres turns the processed-litre counter into a filter-service reminder.</small>
-      <small class="awc-hint">Salt. The brand sets the dose guide and the default mix window — your refractometer stays the referee.</small>
+      <small class="awc-hint">Salt. The brand sets the dose guide and the default mix window — your salinity test stays the referee, whatever you measure with.</small>
       <div class="mini-grid">
         <label>Salt brand<select data-scope="mixing-salt" data-field="brand">
           ${brands.map((b) => `<option value="${this._escape(b.id)}" ${(salt.brand || "nyos_pure") === b.id ? "selected" : ""}>${this._escape(b.label || b.id)}</option>`).join("")}

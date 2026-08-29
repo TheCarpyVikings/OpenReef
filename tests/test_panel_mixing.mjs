@@ -187,7 +187,7 @@ test("salting tab shows the countdown; unlocked window asks for the test", async
   });
   panel._mixingSummary = done;
   html = panel._mixingTab();
-  assert(html.includes("refractometer"), "an unlocked window did not ask for the test");
+  assert(html.includes("salinity"), "an unlocked window did not ask for the test");
 });
 
 test("nav gates on the master switch; the Water hub card renders", async () => {

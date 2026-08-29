@@ -13845,7 +13845,7 @@ def _mixing_sync_reminders(config: dict[str, Any], now: datetime, event: str) ->
     """Hatchery-pattern bridge: only ever touches the retest chore IF THE
     KEEPER ADDED IT (the panel's seed button) — a sync must never conjure a
     reminder behind their back. 'tested' logs a completion (the due clock runs
-    from the refractometer) and re-times the cadence to the current
+    from the salinity test) and re-times the cadence to the current
     retestAfterDays; 'gone' disables the chore so an empty station never nags;
     'stored' re-enables it for a fresh batch."""
     maintenance = config.get("maintenance")
@@ -14316,7 +14316,7 @@ async def websocket_mixing_advance(
 async def websocket_mixing_log_salinity(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Log a refractometer reading against the target — the first test while
+    """Log a salinity reading against the target — the first test while
     'salting', or a RETEST on a ready/storing batch. In band: the batch goes
     (or stays) ready/storing with testedAt refreshed, the circulation cadence
     stamped, and the keeper's retest chore marked done. Out of band: back to
