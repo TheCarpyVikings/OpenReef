@@ -75,8 +75,8 @@ function summaryBlob(over = {}) {
     salinityUnit: over.salinityUnit || "ppt",
     targetSg: 1.0264,
     rodi: over.rodi || {
-      rateLph: 0, calibratedAt: "", litresProcessed: 0, filterRatedL: 0,
-      filterChangedAt: "", filterDue: false, draw: null, calibration: null,
+      rateLph: 0, calibratedAt: "", litresProcessed: 0,
+      filters: [], filterDue: false, draw: null, calibration: null,
     },
   };
 }
@@ -485,33 +485,52 @@ test("a calibration run asks for the measured litres and jugs the diagram", asyn
   assert(svg.includes("measuring jug"), "a calibration run did not label the jug");
 });
 
-test("the filter ledger tells its count and shouts only when due", async () => {
-  const fine = await mixingPanel({}, summaryBlob({ rodi: {
-    rateLph: 100, calibratedAt: "", litresProcessed: 800, filterRatedL: 1500,
-    filterChangedAt: "", filterDue: false, draw: null, calibration: null,
+const FILTER_SET = [
+  { id: "f1", label: "Sediment 5µm", type: "sediment", ratedLitres: 2000,
+    litresProcessed: 500, percentLeft: 75, due: false, changedAt: "" },
+  { id: "f2", label: "", type: "carbon", ratedLitres: 2000,
+    litresProcessed: 2100, percentLeft: 0, due: true, changedAt: "" },
+  { id: "f3", label: "DI resin", type: "di", ratedLitres: 0,
+    litresProcessed: 300, percentLeft: null, due: false, changedAt: "" },
+];
+
+test("the filter train draws a canister per stage and shouts only when due", async () => {
+  const panel = await mixingPanel({}, summaryBlob({ rodi: {
+    rateLph: 100, calibratedAt: "", litresProcessed: 5000,
+    filters: FILTER_SET, filterDue: true, draw: null, calibration: null,
   } }));
-  fine._activeTab = "mixing";
-  let html = fine._mixingTab();
-  assert(html.includes("800") && html.includes("1,500") || html.includes("1500"),
-    "the ledger lost its litres");
-  assert(html.includes('data-action="mixing-filters-changed"'), "the reset button is missing");
-  assert(!html.includes("Filter service due"), "an in-life filter must not shout");
-  const due = await mixingPanel({}, summaryBlob({ rodi: {
-    rateLph: 100, calibratedAt: "", litresProcessed: 1600, filterRatedL: 1500,
-    filterChangedAt: "", filterDue: true, draw: null, calibration: null,
-  } }));
-  due._activeTab = "mixing";
-  html = due._mixingTab();
-  assert(html.includes("Filter service due"), "a spent filter went unannounced");
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert((html.match(/rx="7"/g) || []).length === 3, "expected three filter canisters");
+  assert(html.includes("75%"), "a tracked stage lost its life percentage");
+  assert(html.includes('stroke-dasharray'), "an untracked stage must draw hollow, not full");
+  assert(html.includes("Filter service due"), "a spent stage went unannounced");
+  assert(html.includes("carbon"), "the due notice must name the stage");
+  assert((html.match(/data-action="mixing-filters-changed"/g) || []).length === 3,
+    "every stage gets its own Changed button");
+  assert(html.includes('data-id="f2"'), "Changed buttons must address the stage by id");
+  assert(html.includes("5,000") || html.includes("5000"), "the lifetime odometer went missing");
+  noPlaceholders(html, "filter train");
+  // No stages configured: an honest hint, never an empty diagram.
+  const bare = await mixingPanel();
+  bare._activeTab = "mixing";
+  const bareHtml = bare._mixingTab();
+  assert(bareHtml.includes("add your filter stages"), "no-stage setups lost the settings hint");
+  assert(!bareHtml.includes('rx="7"'), "no-stage setups drew phantom canisters");
 });
 
-test("settings carries the filter rating and near-full alert fields", async () => {
+test("settings offers the per-stage filter editor and the alert fields", async () => {
   const panel = await mixingPanel();
   const body = panel._mixingSettingsBody(mixConfig({ rodi: {
-    rateLph: 0, fillCapMin: 240, filterRatedL: 1500, alertPct: 80, externalVolumeL: 20,
+    rateLph: 0, fillCapMin: 240, alertPct: 80, externalVolumeL: 20,
+    filters: [{ id: "f1", label: "Sediment 5µm", type: "sediment",
+                ratedLitres: 2000, litresProcessed: 500, changedAt: "" }],
   } }));
-  assert(body.includes('data-field="filterRatedL"'), "settings lost the filter rating");
-  assert(body.includes('value="1500"'), "the stored rating did not render");
+  assert(body.includes('data-scope="mixing-filter"'), "settings lost the stage editor");
+  assert(body.includes('value="Sediment 5µm"'), "the stage label did not render");
+  assert(body.includes('value="2000"'), "the stage rated life did not render");
+  assert(body.includes('data-action="mixing-filter-remove"'), "stages lost their Remove");
+  assert(body.includes('data-action="mixing-filter-add"'), "settings lost Add filter stage");
   assert(body.includes('data-field="alertPct"'), "settings lost the near-full alert threshold");
   assert(body.includes('data-field="externalVolumeL"'), "settings lost the T-off container volume");
   assert(body.includes('value="80"') && body.includes('value="20"'),

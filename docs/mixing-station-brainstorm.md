@@ -239,6 +239,32 @@ days; they transfer and mix only when the tank asks. The forced pipeline
   as vessel contents. RODI-only batches are gone: plain RODI in a vessel IS the
   top-off supply.
 
+## §16 Near-full alerts (0.7.95)
+
+Configurable heads-up (`rodi.alertPct`, default 80, 0 = off) fired ONCE per RODI run
+when a container is projected past the threshold — HA persistent notification + the
+configured phone push (`_async_send_mode_notification`). Rate-projected, so it exists
+only when a rate makes it honest; the T-off gets its own `rodi.externalVolumeL`
+(assumes it starts empty — said in settings). Runs that END at/above the threshold
+without crossing mid-run get the boundary message at the finish. The alert leg rides
+the stamps contract: `draw.alertedAt` + save re-arm ⇒ restart-proof, never twice.
+
+## §17 Filters v2 — every stage its own life (0.7.96)
+
+The single processed-litres counter (§14) grew up: `rodi.filters[]` holds one entry
+per PHYSICAL stage in flow order — a 5-stage keeper runs sediment + carbon + carbon +
+membrane + DI, each `{id, label, type, ratedLitres, litresProcessed, changedAt}`.
+Every litre through the unit counts against EVERY stage (all water passes all
+stages — litres are the honest proxy we have; DI keepers can rate by experience).
+`mixing_filters_changed` now takes `filter_id` and resets ONE stage;
+`rodi.litresProcessed` stays as the unit's lifetime odometer and never resets.
+Panel: the filter train — one canister per stage on the tab, fill = percent life
+REMAINING (backend-computed; untracked stages draw hollow and dashed, never a guess),
+green/amber/red by margin, a Changed button per stage, and the due notice names the
+spent stage. Settings: per-stage editor (label, type, rated litres, remove) + Add.
+Legacy `filterRatedL` counters migrate into one tracked stage exactly once; the old
+keys are read for migration and never emitted again.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

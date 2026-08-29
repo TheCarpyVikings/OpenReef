@@ -359,17 +359,35 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
     stamps, never mutated here — the batch_state contract)."""
     rodi = _rodi_cfg(cfg)
     rate = max(0.0, _f(rodi.get("rateLph")))
-    rated = max(0.0, _f(rodi.get("filterRatedL")))
     processed = max(0.0, _f(rodi.get("litresProcessed")))
+    # Filters v2: each stage reports its own life. percentLeft is None when a
+    # stage is untracked (rated 0) — the panel draws "unknown", never a guess.
+    filters: list[dict[str, Any]] = []
+    raw_filters = rodi.get("filters") if isinstance(rodi.get("filters"), list) else []
+    for stage in raw_filters:
+        if not isinstance(stage, dict):
+            continue
+        rated = max(0.0, _f(stage.get("ratedLitres")))
+        used = max(0.0, _f(stage.get("litresProcessed")))
+        filters.append({
+            "id": str(stage.get("id") or ""),
+            "label": str(stage.get("label") or ""),
+            "type": str(stage.get("type") or "other"),
+            "ratedLitres": round(rated, 1),
+            "litresProcessed": round(used, 1),
+            "percentLeft": round(max(0.0, min(100.0, (1 - used / rated) * 100.0)), 0)
+            if rated > 0 else None,
+            "due": rated > 0 and used >= rated,
+            "changedAt": str(stage.get("changedAt") or ""),
+        })
     out: dict[str, Any] = {
         "rateLph": round(rate, 1),
         "alertPct": int(max(0.0, _f(rodi.get("alertPct")))),
         "externalVolumeL": round(max(0.0, _f(rodi.get("externalVolumeL"))), 1),
         "calibratedAt": str(rodi.get("calibratedAt") or ""),
         "litresProcessed": round(processed, 1),
-        "filterRatedL": round(rated, 1),
-        "filterChangedAt": str(rodi.get("filterChangedAt") or ""),
-        "filterDue": rated > 0 and processed >= rated,
+        "filters": filters,
+        "filterDue": any(f["due"] for f in filters),
         "draw": None,
         "calibration": None,
     }

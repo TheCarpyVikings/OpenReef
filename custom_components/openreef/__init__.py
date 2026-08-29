@@ -127,7 +127,9 @@ from .const import (
     MIXING_CIRCULATE_FOR_MAX_MIN,
     MIXING_DRAW_DESTINATIONS,
     MIXING_FILL_CAP_DEFAULT_MIN,
+    MIXING_FILTER_MAX_STAGES,
     MIXING_FILTER_RATED_MAX_L,
+    MIXING_FILTER_TYPES,
     MIXING_LITRES_PROCESSED_MAX,
     MIXING_FILL_CAP_MAX_MIN,
     MIXING_HEAT_TARGET_MAX_C,
@@ -1480,6 +1482,46 @@ def _normalise_awc_config(config: dict[str, Any]) -> None:
         }
 
 
+def _normalise_mixing_filters(raw_rodi: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate the per-stage filter list (filters v2, doc §17). Every stage
+    keeps a stable id (assigned once, never re-derived — the panel's Changed
+    buttons address stages by it). Legacy single-counter configs (filterRatedL
+    from 0.7.88) migrate into one tracked stage, exactly once — the legacy
+    keys are read here and never emitted again."""
+    raw_list = raw_rodi.get("filters") if isinstance(raw_rodi.get("filters"), list) else []
+    filters: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, stage in enumerate(raw_list[:MIXING_FILTER_MAX_STAGES]):
+        if not isinstance(stage, dict):
+            continue
+        stage_id = _awc_str(stage.get("id"), 40) or f"f{index + 1}"
+        while stage_id in seen:
+            stage_id = f"{stage_id}x"
+        seen.add(stage_id)
+        stage_type = str(stage.get("type") or "other")
+        filters.append({
+            "id": stage_id,
+            "label": _awc_str(stage.get("label"), 40),
+            "type": stage_type if stage_type in MIXING_FILTER_TYPES else "other",
+            "ratedLitres": round(_awc_num(stage.get("ratedLitres"), 0, 0,
+                                          MIXING_FILTER_RATED_MAX_L), 1),
+            "litresProcessed": round(_awc_num(stage.get("litresProcessed"), 0, 0,
+                                              MIXING_LITRES_PROCESSED_MAX), 1),
+            "changedAt": _awc_str(stage.get("changedAt"), 40),
+        })
+    if not filters:
+        legacy_rated = _awc_num(raw_rodi.get("filterRatedL"), 0, 0, MIXING_FILTER_RATED_MAX_L)
+        if legacy_rated > 0:
+            filters.append({
+                "id": "f1", "label": "Filters", "type": "other",
+                "ratedLitres": round(legacy_rated, 1),
+                "litresProcessed": round(_awc_num(raw_rodi.get("litresProcessed"), 0, 0,
+                                                  MIXING_LITRES_PROCESSED_MAX), 1),
+                "changedAt": _awc_str(raw_rodi.get("filterChangedAt"), 40),
+            })
+    return filters
+
+
 def _normalise_mixing_config(config: dict[str, Any]) -> None:
     """Clamp/validate the Saltwater Mixing Station section in place. Layout,
     vessels (volumes + the estimated-level anchor), the four switch roles,
@@ -1561,9 +1603,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "calibratedAt": _awc_str(raw_rodi.get("calibratedAt"), 40),
         "litresProcessed": round(_awc_num(raw_rodi.get("litresProcessed"), 0, 0,
                                           MIXING_LITRES_PROCESSED_MAX), 1),
-        "filterRatedL": round(_awc_num(raw_rodi.get("filterRatedL"), 0, 0,
-                                       MIXING_FILTER_RATED_MAX_L), 1),
-        "filterChangedAt": _awc_str(raw_rodi.get("filterChangedAt"), 40),
+        "filters": _normalise_mixing_filters(raw_rodi),
         # Live-run stamps preserved, only clamped — a normalise pass must never
         # move a running draw or calibration (the batch-block rule).
         "draw": {
@@ -14034,8 +14074,9 @@ def _mixing_credit_mix(cfg: dict[str, Any], delta_l: float) -> None:
 
 
 def _mixing_add_processed(cfg: dict[str, Any], litres: float) -> None:
-    """Bump the filter-litres ledger — every litre through the membrane counts:
-    batch fills, draws, calibration runs."""
+    """Bump the litre ledgers — every litre through the unit counts on the
+    lifetime odometer AND against EVERY filter stage (all water passes all
+    stages): fills, draws, calibration runs."""
     if litres <= 0:
         return
     rodi = cfg.setdefault("rodi", {})
@@ -14043,6 +14084,12 @@ def _mixing_add_processed(cfg: dict[str, Any], litres: float) -> None:
         return
     level = _awc_num(rodi.get("litresProcessed"), 0, 0, MIXING_LITRES_PROCESSED_MAX) + litres
     rodi["litresProcessed"] = round(min(level, MIXING_LITRES_PROCESSED_MAX), 1)
+    filters = rodi.get("filters") if isinstance(rodi.get("filters"), list) else []
+    for stage in filters:
+        if not isinstance(stage, dict):
+            continue
+        used = _awc_num(stage.get("litresProcessed"), 0, 0, MIXING_LITRES_PROCESSED_MAX) + litres
+        stage["litresProcessed"] = round(min(used, MIXING_LITRES_PROCESSED_MAX), 1)
 
 
 def _clear_mixing_rodi_timer(hass: HomeAssistant) -> None:
@@ -14784,24 +14831,38 @@ async def websocket_mixing_calibrate(
     _mixing_send(connection, msg, hass, config)
 
 
-@websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_filters_changed"})
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_filters_changed",
+    vol.Required("filter_id"): cv.string,
+})
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_mixing_filters_changed(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """The keeper serviced the RODI filters — the litre counter starts again."""
+    """The keeper serviced ONE filter stage (filters v2) — that stage's litre
+    counter starts again; its neighbours keep their own clocks. The lifetime
+    odometer never resets."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
+    filter_id = str(msg["filter_id"])
     async with _mixing_lock(hass):
         config = _config_from_entry(entry)
         rodi = _mixing_cfg(config).setdefault("rodi", {})
-        rodi["litresProcessed"] = 0
-        rodi["filterChangedAt"] = datetime.now(timezone.utc).isoformat()
-        _append_activity(config, "Mixing station: RODI filters marked changed — "
-                         "the litre counter starts again", "control")
+        filters = rodi.get("filters") if isinstance(rodi.get("filters"), list) else []
+        stage = next((s for s in filters
+                      if isinstance(s, dict) and s.get("id") == filter_id), None)
+        if stage is None:
+            connection.send_error(msg["id"], "unknown_filter",
+                                  f"No filter stage '{filter_id}' is configured")
+            return
+        stage["litresProcessed"] = 0
+        stage["changedAt"] = datetime.now(timezone.utc).isoformat()
+        name = stage.get("label") or stage.get("type") or "filter"
+        _append_activity(config, f"Mixing station: {name} marked changed — "
+                         "its litre counter starts again", "control")
         config = await _async_save_config(hass, entry, config)
     _mixing_send(connection, msg, hass, config)
 

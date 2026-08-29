@@ -956,15 +956,69 @@ def test_calibration_rate_maths_refuses_noise():
     assert mixing.calibration_rate(0, 600) == 0.0         # nothing measured
 
 
-def test_filter_ledger_flags_due_only_when_rated():
-    due = mixing.rodi_status(_cfg(rodi={
+def test_filter_stages_report_their_own_lives():
+    cfg = _cfg(rodi={"rateLph": 0, "fillCapMin": 240, "litresProcessed": 5000,
+                     "filters": [
+                         {"id": "f1", "label": "Sediment 5µm", "type": "sediment",
+                          "ratedLitres": 2000, "litresProcessed": 1500, "changedAt": ""},
+                         {"id": "f2", "label": "", "type": "carbon",
+                          "ratedLitres": 2000, "litresProcessed": 2200, "changedAt": ""},
+                         {"id": "f3", "label": "DI", "type": "di",
+                          "ratedLitres": 0, "litresProcessed": 900, "changedAt": ""},
+                     ]})
+    status = mixing.rodi_status(cfg, NOW)
+    f1, f2, f3 = status["filters"]
+    assert f1["percentLeft"] == 25.0 and f1["due"] is False
+    assert f2["percentLeft"] == 0.0 and f2["due"] is True      # past its life
+    assert f3["percentLeft"] is None and f3["due"] is False    # untracked ⇒ no guess
+    assert status["filterDue"] is True                          # any stage due ⇒ due
+    assert status["litresProcessed"] == 5000.0                  # odometer untouched
+
+
+def test_normaliser_migrates_the_v1_counter_and_caps_the_list():
+    # A 0.7.88-style single counter becomes one tracked stage, exactly once.
+    config = integration._normalise_core_config({"mixingStation": _cfg(rodi={
         "rateLph": 0, "fillCapMin": 240,
-        "litresProcessed": 1500, "filterRatedL": 1500}), NOW)
-    assert due["filterDue"] is True
-    untracked = mixing.rodi_status(_cfg(rodi={
+        "litresProcessed": 800, "filterRatedL": 1500, "filterChangedAt": _iso(NOW)})})
+    filters = config["mixingStation"]["rodi"]["filters"]
+    assert len(filters) == 1
+    assert filters[0]["ratedLitres"] == 1500.0 and filters[0]["litresProcessed"] == 800.0
+    assert "filterRatedL" not in config["mixingStation"]["rodi"]   # legacy keys retired
+    # Junk entries are dropped, ids assigned, and the list is capped at 10.
+    config2 = integration._normalise_core_config({"mixingStation": _cfg(rodi={
         "rateLph": 0, "fillCapMin": 240,
-        "litresProcessed": 99999, "filterRatedL": 0}), NOW)
-    assert untracked["filterDue"] is False
+        "filters": ["garbage"] + [{"type": "carbon"} for _ in range(12)]})})
+    filters2 = config2["mixingStation"]["rodi"]["filters"]
+    assert 1 <= len(filters2) <= 10
+    assert all(f["id"] for f in filters2)
+    assert len({f["id"] for f in filters2}) == len(filters2)      # ids unique
+
+
+def test_processed_litres_fan_out_to_every_stage():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station(_rodi_over(filters=[
+        {"id": "f1", "label": "Sediment", "type": "sediment",
+         "ratedLitres": 2000, "litresProcessed": 100, "changedAt": ""},
+        {"id": "f2", "label": "Membrane", "type": "membrane",
+         "ratedLitres": 30000, "litresProcessed": 500, "changedAt": ""},
+    ]))
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 10, "destination": "external"}))
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    stop = next(r for r in scheduler.scheduled[before:]
+                if not r["cancelled"] and 4 * 60 < (r["run_at"] - now).total_seconds() < 6 * 60)
+
+    async def _fire():
+        await stop["callback"](stop["run_at"])
+    run(_fire())
+    state = _mix_state(entry)
+    stages = {f["id"]: f for f in state["rodi"]["filters"]}
+    assert stages["f1"]["litresProcessed"] == 110.0
+    assert stages["f2"]["litresProcessed"] == 510.0
+    assert state["rodi"]["litresProcessed"] == 10.0            # odometer moved too
 
 
 def _rodi_over(**extra):
@@ -1113,14 +1167,26 @@ def test_calibration_cap_cancels_a_forgotten_run():
     assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
 
 
-def test_filters_changed_resets_the_counter():
+def test_filters_changed_resets_one_stage_never_its_neighbours():
     install_scheduler(integration)
-    hass, entry = _station(_rodi_over(litresProcessed=1234.5, filterRatedL=1500))
+    hass, entry = _station(_rodi_over(litresProcessed=5000, filters=[
+        {"id": "f1", "label": "Sediment", "type": "sediment",
+         "ratedLitres": 2000, "litresProcessed": 1900, "changedAt": ""},
+        {"id": "f2", "label": "Carbon", "type": "carbon",
+         "ratedLitres": 2000, "litresProcessed": 1900, "changedAt": ""},
+    ]))
     conn = FakeConnection()
-    run(integration.websocket_mixing_filters_changed(hass, conn, {"id": 1}))
+    run(integration.websocket_mixing_filters_changed(
+        hass, conn, {"id": 1, "filter_id": "f1"}))
     rodi = _mix_state(entry)["rodi"]
-    assert rodi["litresProcessed"] == 0.0 and rodi["filterChangedAt"]
-    assert rodi["filterRatedL"] == 1500.0                          # the rating survives
+    stages = {f["id"]: f for f in rodi["filters"]}
+    assert stages["f1"]["litresProcessed"] == 0.0 and stages["f1"]["changedAt"]
+    assert stages["f2"]["litresProcessed"] == 1900.0               # neighbour untouched
+    assert rodi["litresProcessed"] == 5000.0                       # odometer never resets
+    # An unknown stage is an error, not a silent success.
+    run(integration.websocket_mixing_filters_changed(
+        hass, conn, {"id": 2, "filter_id": "nope"}))
+    assert conn.errors and conn.errors[-1].code == "unknown_filter"
 
 
 def test_transfers_never_double_count_the_filter_ledger():

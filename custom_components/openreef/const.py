@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.95"
+INTEGRATION_VERSION = "0.7.96"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -368,6 +368,10 @@ MIXING_CAL_CAP_MIN = 30                   # a calibration run into a jug is shor
 MIXING_CAL_MIN_SECONDS = 60               # under a minute the rate maths is noise, not data
 MIXING_FILTER_RATED_MAX_L = 500000.0      # sanity ceiling on a membrane/filter litre rating
 MIXING_LITRES_PROCESSED_MAX = 1000000.0   # sanity ceiling on the lifetime litres ledger
+# Filters v2: every stage of the unit tracked on its own — a 5-stage keeper
+# runs sediment + carbon + carbon + membrane + DI, each with its own lifespan.
+MIXING_FILTER_TYPES = ("sediment", "carbon", "membrane", "di", "other")
+MIXING_FILTER_MAX_STAGES = 10
 
 # Dosing channels — multi-pump dosing control (kalk stepper doser first). The
 # firmware executes the schedule and the full guard chain (HA edits, never runs,
@@ -1661,9 +1665,12 @@ DEFAULT_CORE_CONFIG = {
             "alertPct": 80,
             "externalVolumeL": 0,
             "calibratedAt": "",                 # stamp of the last timed-run flow calibration
-            "litresProcessed": 0,               # litres through the membrane since the filters last changed
-            "filterRatedL": 0,                  # 0 = filter life not tracked
-            "filterChangedAt": "",
+            "litresProcessed": 0,               # unit lifetime odometer — never resets
+            # Filters v2: one entry per physical stage, in flow order. Every
+            # litre through the unit counts against EVERY stage; each stage
+            # carries its own rated life and its own changed-clock.
+            # {id, label, type, ratedLitres (0 = untracked), litresProcessed, changedAt}
+            "filters": [],
             # RODI draw — a litre-targeted booster run OUTSIDE any batch: into
             # the store, or an external T-off (the ATO jug). Rate x time is the
             # meter; the stamps ARE the schedule (circulation-chain contract).

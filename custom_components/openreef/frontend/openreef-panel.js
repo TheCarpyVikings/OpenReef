@@ -1701,7 +1701,28 @@ class OpenReefPanel extends HTMLElement {
         else { this._mixingMessage = "Measure the container and enter the litres first."; this._render(); }
       }
       if (action === "mixing-cal-cancel") this._mixingAction({ type: "openreef/mixing_calibrate", action: "cancel" });
-      if (action === "mixing-filters-changed") this._mixingAction({ type: "openreef/mixing_filters_changed" });
+      if (action === "mixing-filters-changed") {
+        this._mixingAction({ type: "openreef/mixing_filters_changed", filter_id: id });
+      }
+      if (action === "mixing-filter-add") {
+        const m = this._config.mixingStation = this._config.mixingStation || {};
+        const rodiCfg = m.rodi = m.rodi || {};
+        const list = rodiCfg.filters = Array.isArray(rodiCfg.filters) ? rodiCfg.filters : [];
+        if (list.length < 10) {
+          list.push({ id: `f${Date.now()}`, label: "", type: "sediment",
+            ratedLitres: 0, litresProcessed: 0, changedAt: "" });
+          this._setDirty(true);
+        }
+        this._render();
+      }
+      if (action === "mixing-filter-remove") {
+        const rodiCfg = this._config.mixingStation?.rodi;
+        if (rodiCfg && Array.isArray(rodiCfg.filters)) {
+          rodiCfg.filters = rodiCfg.filters.filter((f) => f.id !== id);
+          this._setDirty(true);
+        }
+        this._render();
+      }
       if (action === "awc-run") this._awcRunNow();
       if (action === "awc-focus-run") {
         const el = this.shadowRoot.querySelector("[data-awc-run-amount]");
@@ -2411,6 +2432,14 @@ class OpenReefPanel extends HTMLElement {
         const m = this._config.mixingStation = this._config.mixingStation || {};
         m.switches = m.switches || {}; m.switches[id] = m.switches[id] || {};
         m.switches[id][field] = value;
+      }
+      if (scope === "mixing-filter") {
+        const m = this._config.mixingStation = this._config.mixingStation || {};
+        const rodiCfg = m.rodi = m.rodi || {};
+        const stage = (Array.isArray(rodiCfg.filters) ? rodiCfg.filters : []).find((f) => f.id === id);
+        if (stage) {
+          stage[field] = (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
+        }
       }
       if (["mixing-rodi", "mixing-salt", "mixing-heat", "mixing-storage", "mixing-integrations"].includes(scope)) {
         const m = this._config.mixingStation = this._config.mixingStation || {};
@@ -22912,20 +22941,60 @@ const rigSteps = [
           : "Flow rate unknown — timed draws need one (calibrate it, or set it in settings); open-ended fills don't."}</small>`;
     }
     const processed = Number(rodi?.litresProcessed) || 0;
-    const ratedL = Number(rodi?.filterRatedL) || 0;
-    const filterLine = `
-      ${rodi?.filterDue ? `<div class="notice warning-notice"><strong>Filter service due.</strong> The membrane has processed its rated litres — TDS creep is next if it stays in.</div>` : ""}
+    const filters = Array.isArray(rodi?.filters) ? rodi.filters : [];
+    const dueNames = filters.filter((f) => f.due).map((f) => f.label || f.type);
+    const filterRows = filters.map((f) => `
       <div class="button-row" style="align-items:center;justify-content:space-between;">
-        <small class="awc-hint">Filters: ${this._format(processed, 0)} L processed${ratedL > 0 ? ` of ${this._format(ratedL, 0)} L rated` : " (set a rated capacity in settings to track filter life)"}.</small>
-        <button class="secondary compact-button" data-action="mixing-filters-changed" ${disabled}>Filters changed</button>
-      </div>`;
+        <small class="awc-hint">${this._escape(f.label || f.type)} — ${f.percentLeft != null
+          ? `${this._format(f.percentLeft, 0)}% life left (${this._format(f.litresProcessed, 0)} of ${this._format(f.ratedLitres, 0)} L)`
+          : `${this._format(f.litresProcessed, 0)} L through it (no rated life set)`}.</small>
+        <button class="secondary compact-button" data-action="mixing-filters-changed" data-id="${this._escape(f.id)}" ${disabled}>Changed</button>
+      </div>`).join("");
+    const filterBlock = filters.length ? `
+      ${dueNames.length ? `<div class="notice warning-notice"><strong>Filter service due:</strong> ${this._escape(dueNames.join(", "))} — past the rated litres; TDS creep is next.</div>` : ""}
+      ${this._mixingFilterSvg(filters)}
+      ${filterRows}
+      <small class="awc-hint">Unit lifetime: ${this._format(processed, 0)} L processed.</small>`
+      : `<small class="awc-hint">Track each cartridge's own life — add your filter stages (sediment, carbon, membrane, DI…) in settings. Unit lifetime so far: ${this._format(processed, 0)} L.</small>`;
     return `
       <article class="setting-card">
         <div class="section-head"><div><p class="eyebrow">RODI unit</p>
           <h3>${rodi?.draw ? "Drawing RODI…" : rodi?.calibration ? "Calibrating flow…" : "RODI on demand"}</h3></div></div>
         ${body}
-        ${filterLine}
+        ${filterBlock}
       </article>`;
+  }
+
+  // The filter train: one canister per stage, in flow order, its fill the
+  // life REMAINING (backend-computed percentLeft — the panel never invents a
+  // lifespan). Untracked stages draw hollow with a dashed shell.
+  _mixingFilterSvg(filters) {
+    const typeLabel = { sediment: "Sediment", carbon: "Carbon", membrane: "RO membrane", di: "DI resin", other: "Filter" };
+    const width = 24 + filters.length * 62;
+    const canister = (f, i) => {
+      const x = 20 + i * 62;
+      const pct = f.percentLeft;
+      const tracked = pct != null;
+      const colour = !tracked ? "#78909c" : pct > 40 ? "#2e7d32" : pct > 15 ? "#ef6c00" : "#c62828";
+      const fillH = tracked ? Math.round(64 * pct / 100) : 0;
+      const label = (f.label || typeLabel[f.type] || "Filter").slice(0, 12);
+      return `
+        <g data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" style="cursor:pointer;">
+          <title>${this._escape(f.label || typeLabel[f.type] || "Filter")} — ${tracked ? `${pct}% life left` : "no rated life set"}; tap for settings</title>
+          ${i > 0 ? `<path d="M ${x - 22} 46 H ${x - 2}" stroke="#37474f" stroke-width="5" stroke-linecap="round"></path>` : ""}
+          <rect x="${x}" y="12" width="42" height="70" rx="7" fill="rgba(255,255,255,0.04)"
+            stroke="${tracked ? colour : "#556"}" stroke-width="2" ${tracked ? "" : `stroke-dasharray="4 3"`}></rect>
+          ${tracked ? `<rect x="${x + 3}" y="${79 - fillH}" width="36" height="${fillH}" rx="4" fill="${colour}" opacity="0.55"></rect>` : ""}
+          <text x="${x + 21}" y="50" text-anchor="middle" font-size="11" font-weight="700" fill="#eceff1">${tracked ? `${this._format(pct, 0)}%` : "—"}</text>
+          <text x="${x + 21}" y="94" text-anchor="middle" font-size="8" fill="#90a4ae">${this._escape(label)}</text>
+        </g>`;
+    };
+    return `
+      <svg viewBox="0 0 ${width} 102" style="width:100%;max-width:${Math.min(560, width * 1.4)}px;display:block;margin:6px auto;" role="img"
+        aria-label="RODI filter train — estimated life per stage">
+        <path d="M 4 46 H 18" stroke="#37474f" stroke-width="5" stroke-linecap="round"></path>
+        ${filters.map(canister).join("")}
+      </svg>`;
   }
 
   // Inline SVG on the AWC-diagram pattern: static scene, CSS keyframes, state-
@@ -23105,11 +23174,21 @@ const rigSteps = [
       <div class="mini-grid">
         <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.5" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
         <label>Fill cap (minutes)<input type="number" min="1" step="5" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
-        <label>Filter rated litres (0 = untracked)<input type="number" min="0" step="100" data-scope="mixing-rodi" data-field="filterRatedL" value="${Number(rodi.filterRatedL) || 0}"></label>
         <label>Near-full alert (%, 0 = off)<input type="number" min="0" max="99" step="5" data-scope="mixing-rodi" data-field="alertPct" value="${Number(rodi.alertPct) || 0}"></label>
         <label>T-off container volume (L, 0 = no T-off alert)<input type="number" min="0" step="1" data-scope="mixing-rodi" data-field="externalVolumeL" value="${Number(rodi.externalVolumeL) || 0}"></label>
       </div>
-      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. Rated litres turns the processed-litre counter into a filter-service reminder. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty.</small>
+      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty.</small>
+      <small class="awc-hint">Filter stages, in flow order — each cartridge tracks its own litres and rated life (0 = untracked; the maker's spec or your own experience sets it). Every litre through the unit counts against every stage.</small>
+      ${(Array.isArray(rodi.filters) ? rodi.filters : []).map((f) => `
+      <div class="mini-grid">
+        <label>Label<input type="text" maxlength="40" data-scope="mixing-filter" data-id="${this._escape(f.id)}" data-field="label" value="${this._escape(f.label || "")}" placeholder="e.g. Sediment 5µm"></label>
+        <label>Type<select data-scope="mixing-filter" data-id="${this._escape(f.id)}" data-field="type">
+          ${["sediment", "carbon", "membrane", "di", "other"].map((t) => `<option value="${t}" ${(f.type || "other") === t ? "selected" : ""}>${{ sediment: "Sediment / pre-filter", carbon: "Carbon block", membrane: "RO membrane", di: "DI resin", other: "Other" }[t]}</option>`).join("")}
+        </select></label>
+        <label>Rated life (L, 0 = untracked)<input type="number" min="0" step="100" data-scope="mixing-filter" data-id="${this._escape(f.id)}" data-field="ratedLitres" value="${Number(f.ratedLitres) || 0}"></label>
+        <div style="display:flex;align-items:flex-end;"><button class="danger-text compact-button" data-action="mixing-filter-remove" data-id="${this._escape(f.id)}">Remove</button></div>
+      </div>`).join("")}
+      <div class="button-row"><button class="secondary compact-button" data-action="mixing-filter-add">+ Add filter stage</button></div>
       <small class="awc-hint">Salt. The brand sets the dose guide and the default mix window — your salinity test stays the referee, whatever you measure with.</small>
       <div class="mini-grid">
         <label>Salt brand<select data-scope="mixing-salt" data-field="brand">
