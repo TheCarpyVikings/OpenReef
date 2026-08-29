@@ -21,7 +21,7 @@ batch.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .awc import _f, _parse_iso
@@ -363,6 +363,8 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
     processed = max(0.0, _f(rodi.get("litresProcessed")))
     out: dict[str, Any] = {
         "rateLph": round(rate, 1),
+        "alertPct": int(max(0.0, _f(rodi.get("alertPct")))),
+        "externalVolumeL": round(max(0.0, _f(rodi.get("externalVolumeL"))), 1),
         "calibratedAt": str(rodi.get("calibratedAt") or ""),
         "litresProcessed": round(processed, 1),
         "filterRatedL": round(rated, 1),
@@ -401,6 +403,84 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
             if started else 0.0,
         }
     return out
+
+
+def draw_alert(cfg: Any) -> dict[str, Any] | None:
+    """When (and about what) the near-full heads-up should fire for the active
+    RODI run — rate-projected, so it is only ever offered when a rate makes it
+    honest. None = nothing to arm (alerts off, no run, no rate, no container
+    volume to measure against, already fired, or a timed draw that ends before
+    the threshold). Returns {"at": datetime, "pct": int, "message": str}."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    rodi = _rodi_cfg(cfg)
+    pct = _f(rodi.get("alertPct"))
+    if pct <= 0:
+        return None
+    draw = rodi.get("draw") if isinstance(rodi.get("draw"), dict) else {}
+    if not draw.get("active") or draw.get("alertedAt"):
+        return None
+    rate = _f(rodi.get("rateLph"))
+    if rate <= 0:
+        return None
+    started = _parse_iso(draw.get("startedAt"))
+    if started is None:
+        return None
+    dest = str(draw.get("destination") or "store")
+    if dest in ("store", "mix"):
+        vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+        vessel = vessels.get("rodi" if dest == "store" else "mix")
+        vessel = vessel if isinstance(vessel, dict) else {}
+        vol = _f(vessel.get("volumeLitres"))
+        if vol <= 0:
+            return None
+        # Anchors move at finish, so the current anchor IS the start level.
+        level = max(0.0, _f(vessel.get("estimatedLitres")))
+        remaining_to_threshold = vol * pct / 100.0 - level
+        name = "RODI store" if dest == "store" else "mix vessel"
+    else:
+        ext_vol = _f(rodi.get("externalVolumeL"))
+        if ext_vol <= 0:
+            return None
+        remaining_to_threshold = ext_vol * pct / 100.0
+        name = "T-off container"
+    at = started + timedelta(hours=max(0.0, remaining_to_threshold) / rate)
+    target = _f(draw.get("litres"))
+    ends = _parse_iso(draw.get("endsAt"))
+    # A TIMED draw that stops before the threshold never gets there — the
+    # finish check covers the boundary case honestly.
+    if target > 0 and ends is not None and at >= ends:
+        return None
+    return {
+        "at": at, "pct": int(pct),
+        "message": (f"The {name} is passing {pct:g}% full — the RODI run is "
+                    "still going; stop it if that's enough water."),
+    }
+
+
+def draw_finish_alert(cfg: Any, dest: str, done_litres: float) -> str | None:
+    """The boundary case at the end of a run: it finished AT or ABOVE the
+    threshold without the mid-run alert firing. Returns the message, or None."""
+    rodi = _rodi_cfg(cfg)
+    pct = _f(rodi.get("alertPct"))
+    if pct <= 0:
+        return None
+    if dest in ("store", "mix"):
+        vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+        vessel = vessels.get("rodi" if dest == "store" else "mix")
+        vessel = vessel if isinstance(vessel, dict) else {}
+        vol = _f(vessel.get("volumeLitres"))
+        level = max(0.0, _f(vessel.get("estimatedLitres")))   # post-credit level
+        if vol <= 0 or level < vol * pct / 100.0:
+            return None
+        name = "RODI store" if dest == "store" else "mix vessel"
+        return (f"The {name} finished its fill at about "
+                f"{min(100.0, level / vol * 100.0):.0f}% full.")
+    ext_vol = _f(rodi.get("externalVolumeL"))
+    if ext_vol <= 0 or done_litres < ext_vol * pct / 100.0:
+        return None
+    return (f"The T-off container took about {done_litres:g} L — around "
+            f"{min(100.0, done_litres / ext_vol * 100.0):.0f}% of its "
+            f"{ext_vol:g} L.")
 
 
 def calibration_rate(litres: Any, elapsed_seconds: Any) -> float:

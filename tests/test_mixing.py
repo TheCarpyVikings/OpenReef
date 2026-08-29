@@ -1190,6 +1190,139 @@ def test_summary_carries_the_unit_and_converted_targets():
     assert mixing.batch_state({"state": "salting", "litres": 40}, cfg, NOW)["loggedSg"] is None
 
 
+# ---------------------------------------------------------------- near-full alerts (§16)
+# Rate-projected heads-up when a container is heading past its threshold —
+# once per run, into HA (and the phone target) via the mode-notification path.
+
+
+def _draw_over(dest="store", litres=0, ends_h=4.0, **rodi_extra):
+    rodi = {"rateLph": 120, "fillCapMin": 240, "alertPct": 80,
+            "draw": {"active": True, "litres": litres, "destination": dest,
+                     "startedAt": _iso(NOW), "endsAt": _iso(NOW + timedelta(hours=ends_h)),
+                     "alertedAt": ""}}
+    rodi.update(rodi_extra)
+    return rodi
+
+
+def test_draw_alert_computes_the_crossing_from_the_anchor():
+    # Store already at 40/50 with an 80% threshold: fire immediately.
+    cfg = _cfg(simulate=True, rodi=_draw_over())
+    alert = mixing.draw_alert(cfg)
+    assert alert is not None and alert["at"] == NOW
+    assert "RODI store" in alert["message"] and alert["pct"] == 80
+    # Anchor at 10: 30 L to the threshold at 120 L/h = 15 minutes.
+    cfg["vessels"]["rodi"]["estimatedLitres"] = 10
+    alert = mixing.draw_alert(cfg)
+    assert abs((alert["at"] - NOW).total_seconds() - 900) < 1
+    # Off, rate-less, or already-fired runs never arm.
+    assert mixing.draw_alert(_cfg(simulate=True, rodi=_draw_over(alertPct=0))) is None
+    assert mixing.draw_alert(_cfg(simulate=True, rodi=_draw_over(rateLph=0))) is None
+    fired = _cfg(simulate=True, rodi=_draw_over())
+    fired["rodi"]["draw"]["alertedAt"] = _iso(NOW)
+    assert mixing.draw_alert(fired) is None
+
+
+def test_draw_alert_external_needs_a_container_volume():
+    # No configured T-off volume ⇒ nothing to measure against ⇒ silence.
+    cfg = _cfg(simulate=True, rodi=_draw_over(dest="external", litres=30, ends_h=0.25))
+    assert mixing.draw_alert(cfg) is None
+    # 20 L container, 80% ⇒ heads-up at 16 L = 8 minutes into a 120 L/h run.
+    cfg["rodi"]["externalVolumeL"] = 20
+    alert = mixing.draw_alert(cfg)
+    assert alert is not None and abs((alert["at"] - NOW).total_seconds() - 480) < 1
+    assert "T-off container" in alert["message"]
+
+
+def test_draw_alert_timed_run_ending_short_stays_quiet():
+    # A 10 L timed draw into a store sitting at 0/50 never reaches 80%.
+    cfg = _cfg(simulate=True, rodi=_draw_over(litres=10, ends_h=10 / 120))
+    cfg["vessels"]["rodi"]["estimatedLitres"] = 0
+    assert mixing.draw_alert(cfg) is None
+
+
+def test_finish_alert_covers_the_boundary():
+    # A run that ENDED at/above the threshold speaks at the finish line.
+    cfg = _cfg(simulate=True, rodi={"rateLph": 120, "fillCapMin": 240, "alertPct": 80})
+    cfg["vessels"]["rodi"]["estimatedLitres"] = 45   # post-credit level
+    message = mixing.draw_finish_alert(cfg, "store", 10)
+    assert message and "90% full" in message
+    cfg["vessels"]["rodi"]["estimatedLitres"] = 20
+    assert mixing.draw_finish_alert(cfg, "store", 10) is None
+    cfg["rodi"]["externalVolumeL"] = 20
+    assert "T-off container" in mixing.draw_finish_alert(cfg, "external", 16)
+    assert mixing.draw_finish_alert(cfg, "external", 10) is None
+
+
+def _notifications(hass):
+    return [c for c in hass.services.calls
+            if c.domain == "persistent_notification" and c.service == "create"
+            and "openreef_mixing_nearfull" in c.data.values()]
+
+
+def test_nearfull_alert_leg_fires_once_into_home_assistant():
+    scheduler = install_scheduler(integration)
+    # Store at 40/50, threshold 80% already crossed ⇒ the leg arms ~now.
+    hass, entry = _station(_rodi_over(alertPct=80))
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 0, "destination": "store"}))
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    legs = [r for r in scheduler.scheduled[before:]
+            if not r["cancelled"] and (r["run_at"] - now).total_seconds() < 5]
+    assert len(legs) == 1, "expected exactly one near-full alert leg"
+
+    async def _fire():
+        await legs[0]["callback"](legs[0]["run_at"])
+    run(_fire())
+    assert len(_notifications(hass)) == 1
+    state = _mix_state(entry)
+    assert state["rodi"]["draw"]["active"] is True        # the run keeps going
+    assert state["rodi"]["draw"]["alertedAt"]
+    # The save re-arm must NOT arm a second alert leg for this run.
+    config = integration._config_from_entry(entry)
+    assert integration.mixing_engine.draw_alert(config["mixingStation"]) is None
+
+
+def test_nearfull_boundary_notifies_at_the_finish_line():
+    scheduler = install_scheduler(integration)
+    # 16 L timed external draw into a 20 L T-off at 80%: crossing == the end,
+    # so no mid-run leg — the finish check speaks instead.
+    hass, entry = _station(_rodi_over(alertPct=80, externalVolumeL=20))
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 16, "destination": "external"}))
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    stop = next(r for r in scheduler.scheduled[before:]
+                if not r["cancelled"] and 7 * 60 < (r["run_at"] - now).total_seconds() < 9 * 60)
+
+    async def _fire():
+        await stop["callback"](stop["run_at"])
+    run(_fire())
+    notes = _notifications(hass)
+    assert len(notes) == 1
+    assert _mix_state(entry)["rodi"]["draw"]["active"] is False
+
+
+def test_alert_off_means_silence():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station(_rodi_over(alertPct=0))
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 0, "destination": "store"}))
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    near = [r for r in scheduler.scheduled[before:]
+            if not r["cancelled"] and (r["run_at"] - now).total_seconds() < 60]
+    assert not near, "alerts off must arm no near-term leg"
+    run(integration.websocket_mixing_rodi_stop(hass, conn, {"id": 2}))
+    assert not _notifications(hass)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

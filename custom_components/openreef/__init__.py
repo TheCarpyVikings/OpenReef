@@ -320,6 +320,7 @@ NPS_DRAIN_UNSUB = "nps_drain_unsub"    # feed-exchange matched-drain stop timer
 MIXING_STATE_LOCK = "mixing_state_lock"
 MIXING_CIRC_UNSUB = "mixing_circ_unsub"  # storing-circulation chain (start OR stop leg)
 MIXING_RODI_UNSUB = "mixing_rodi_unsub"  # RODI draw stop leg OR calibration cap (mutually exclusive)
+MIXING_ALERT_UNSUB = "mixing_alert_unsub"  # near-full heads-up leg for the active RODI run
 MIXING_RUNTIME = "mixing_runtime"        # sim switch states (mirrors AWC_RUNTIME)
 _AWC_SIM_HAZARDS = ("leak", "highLevel", "freshEmpty", "wasteFull", "returnPumpIssue")
 # Bulky runtime record lists stripped from a settings export (and preserved through
@@ -1554,6 +1555,9 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "rateLph": round(_awc_num(raw_rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH), 1),
         "fillCapMin": int(_awc_num(raw_rodi.get("fillCapMin"),
                                    MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)),
+        "alertPct": int(_awc_num(raw_rodi.get("alertPct"), 80, 0, 99)),
+        "externalVolumeL": round(_awc_num(raw_rodi.get("externalVolumeL"), 0, 0,
+                                          MIXING_VESSEL_MAX_L), 1),
         "calibratedAt": _awc_str(raw_rodi.get("calibratedAt"), 40),
         "litresProcessed": round(_awc_num(raw_rodi.get("litresProcessed"), 0, 0,
                                           MIXING_LITRES_PROCESSED_MAX), 1),
@@ -1568,6 +1572,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
             "destination": draw_dest if draw_dest in MIXING_DRAW_DESTINATIONS else "store",
             "startedAt": _awc_str(raw_draw.get("startedAt"), 40),
             "endsAt": _awc_str(raw_draw.get("endsAt"), 40),
+            "alertedAt": _awc_str(raw_draw.get("alertedAt"), 40),
         },
         "calibration": {
             "active": bool(raw_cal.get("active", False)),
@@ -14046,6 +14051,12 @@ def _clear_mixing_rodi_timer(hass: HomeAssistant) -> None:
         unsub()
 
 
+def _clear_mixing_alert_timer(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(MIXING_ALERT_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
 async def _async_mixing_finish_draw(
     hass: HomeAssistant, config: dict[str, Any], context: Any, stopped_early: bool
 ) -> None:
@@ -14103,8 +14114,16 @@ async def _async_mixing_finish_draw(
     elif dest == "mix":
         _mixing_credit_mix(cfg, done)
     _mixing_add_processed(cfg, done)
+    # The boundary case: the run ended at/above the near-full threshold
+    # without the mid-run heads-up having fired (doc §16).
+    if not draw.get("alertedAt"):
+        boundary = mixing_engine.draw_finish_alert(cfg, dest, done)
+        if boundary:
+            _append_activity(config, f"Mixing station: {boundary}", "warning")
+            await _async_send_mode_notification(
+                hass, config, "openreef_mixing_nearfull", "Mixing station", boundary)
     rodi["draw"] = {"active": False, "litres": 0, "destination": dest,
-                    "startedAt": "", "endsAt": ""}
+                    "startedAt": "", "endsAt": "", "alertedAt": ""}
     where = {"store": "into the RODI store", "mix": "into the vessel"}.get(dest, "to the T-off")
     if open_ended and not stopped_early:
         _append_activity(
@@ -14131,6 +14150,7 @@ async def _async_schedule_mixing_rodi(
     for. These are safety legs, so they run even if the station was disabled
     mid-run — a booster left ON is never acceptable."""
     _clear_mixing_rodi_timer(hass)
+    _clear_mixing_alert_timer(hass)
     cfg = _mixing_cfg(config)
     rodi = cfg.get("rodi") if isinstance(cfg.get("rodi"), dict) else {}
     draw = rodi.get("draw") if isinstance(rodi.get("draw"), dict) else {}
@@ -14155,6 +14175,32 @@ async def _async_schedule_mixing_rodi(
 
         store[MIXING_RODI_UNSUB] = async_track_point_in_time(
             hass, _stop, max(ends, now + timedelta(seconds=2)))
+        # The near-full heads-up (doc §16): rate-projected, once per run —
+        # firing stamps alertedAt, the save re-enters here, and the stamp
+        # keeps it from ever arming twice.
+        alert = mixing_engine.draw_alert(cfg)
+        if alert is not None:
+
+            async def _alert(_now: datetime) -> None:
+                latest = _first_entry(hass)
+                async with _mixing_lock(hass):
+                    hass.data.setdefault(DOMAIN, {}).pop(MIXING_ALERT_UNSUB, None)
+                    if latest is None:
+                        return
+                    cfg2 = _config_from_entry(latest)
+                    draw2 = _mixing_cfg(cfg2).get("rodi", {}).get("draw") or {}
+                    if not draw2.get("active") or draw2.get("alertedAt"):
+                        return
+                    draw2["alertedAt"] = datetime.now(timezone.utc).isoformat()
+                    message = alert["message"]
+                    _append_activity(cfg2, f"Mixing station: {message}", "warning")
+                    await _async_send_mode_notification(
+                        hass, cfg2, "openreef_mixing_nearfull",
+                        "Mixing station", message)
+                    await _async_save_config(hass, latest, cfg2)
+
+            store[MIXING_ALERT_UNSUB] = async_track_point_in_time(
+                hass, _alert, max(alert["at"], now + timedelta(seconds=1)))
         return
     if cal.get("active"):
         started = _parse_datetime(cal.get("startedAt")) or now
@@ -17359,6 +17405,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _mixing_rodi = _store.pop(MIXING_RODI_UNSUB, None)
     if _mixing_rodi is not None:
         _mixing_rodi()
+    _mixing_alert = _store.pop(MIXING_ALERT_UNSUB, None)
+    if _mixing_alert is not None:
+        _mixing_alert()
     _issue_refresh = _store.pop(ISSUE_REFRESH_UNSUB, None)
     if _issue_refresh is not None:
         _issue_refresh()

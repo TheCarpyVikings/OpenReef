@@ -23106,8 +23106,10 @@ const rigSteps = [
         <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.5" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
         <label>Fill cap (minutes)<input type="number" min="1" step="5" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
         <label>Filter rated litres (0 = untracked)<input type="number" min="0" step="100" data-scope="mixing-rodi" data-field="filterRatedL" value="${Number(rodi.filterRatedL) || 0}"></label>
+        <label>Near-full alert (%, 0 = off)<input type="number" min="0" max="99" step="5" data-scope="mixing-rodi" data-field="alertPct" value="${Number(rodi.alertPct) || 0}"></label>
+        <label>T-off container volume (L, 0 = no T-off alert)<input type="number" min="0" step="1" data-scope="mixing-rodi" data-field="externalVolumeL" value="${Number(rodi.externalVolumeL) || 0}"></label>
       </div>
-      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. Rated litres turns the processed-litre counter into a filter-service reminder.</small>
+      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. Rated litres turns the processed-litre counter into a filter-service reminder. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty.</small>
       <small class="awc-hint">Salt. The brand sets the dose guide and the default mix window — your salinity test stays the referee, whatever you measure with.</small>
       <div class="mini-grid">
         <label>Salt brand<select data-scope="mixing-salt" data-field="brand">

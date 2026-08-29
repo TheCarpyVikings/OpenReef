@@ -505,11 +505,17 @@ test("the filter ledger tells its count and shouts only when due", async () => {
   assert(html.includes("Filter service due"), "a spent filter went unannounced");
 });
 
-test("settings carries the filter rating field", async () => {
+test("settings carries the filter rating and near-full alert fields", async () => {
   const panel = await mixingPanel();
-  const body = panel._mixingSettingsBody(mixConfig({ rodi: { rateLph: 0, fillCapMin: 240, filterRatedL: 1500 } }));
+  const body = panel._mixingSettingsBody(mixConfig({ rodi: {
+    rateLph: 0, fillCapMin: 240, filterRatedL: 1500, alertPct: 80, externalVolumeL: 20,
+  } }));
   assert(body.includes('data-field="filterRatedL"'), "settings lost the filter rating");
   assert(body.includes('value="1500"'), "the stored rating did not render");
+  assert(body.includes('data-field="alertPct"'), "settings lost the near-full alert threshold");
+  assert(body.includes('data-field="externalVolumeL"'), "settings lost the T-off container volume");
+  assert(body.includes('value="80"') && body.includes('value="20"'),
+    "the stored alert settings did not render");
   noPlaceholders(body, "rodi settings");
 });
 

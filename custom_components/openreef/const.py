@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.94"
+INTEGRATION_VERSION = "0.7.95"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1655,6 +1655,11 @@ DEFAULT_CORE_CONFIG = {
         "rodi": {
             "rateLph": 0,                       # 0 = unknown ⇒ no fill ETA shown
             "fillCapMin": MIXING_FILL_CAP_DEFAULT_MIN,
+            # Near-full heads-up during a RODI run (rate-projected, so it needs
+            # a known rate): alertPct 0 = off. externalVolumeL sizes the T-off
+            # container (ATO reservoir) — the alert assumes it starts empty.
+            "alertPct": 80,
+            "externalVolumeL": 0,
             "calibratedAt": "",                 # stamp of the last timed-run flow calibration
             "litresProcessed": 0,               # litres through the membrane since the filters last changed
             "filterRatedL": 0,                  # 0 = filter life not tracked
@@ -1663,7 +1668,7 @@ DEFAULT_CORE_CONFIG = {
             # the store, or an external T-off (the ATO jug). Rate x time is the
             # meter; the stamps ARE the schedule (circulation-chain contract).
             "draw": {"active": False, "litres": 0, "destination": "store",
-                     "startedAt": "", "endsAt": ""},
+                     "startedAt": "", "endsAt": "", "alertedAt": ""},
             # Timed-run flow calibration: start → run into a known container →
             # finish with the measured litres sets rateLph.
             "calibration": {"active": False, "startedAt": ""},
