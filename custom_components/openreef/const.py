@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 56
+CORE_SCHEMA_VERSION = 57
 
 # Reef Layer vocabulary — species decide which rock zone a coral may occupy
 # (SPS crest / LPS mid-rock / softies low / gorgonian at the back), colours
@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.93"
+INTEGRATION_VERSION = "0.7.94"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -334,16 +334,19 @@ AWC_SPINUP_MAX_SECONDS = 3.0              # calibrate: max plausible spin-up = 3
 AWC_SPINUP_MIN_CAP_ML = 5.0              # ...but never clamp the spin-up below 5 mL (slow pumps)
 AWC_SPINUP_MAX_ML = 1000.0                # config-normalise absolute sanity clamp on spinUpMl
 
-# Saltwater Mixing Station — guided batch workflow (fill → transfer → heat →
-# salt & mix → test → ready → storing). Maths in mixing.py, orchestration in
-# __init__.py, matching the awc.py split. Heat comes BEFORE salt: brands want
-# the water at temperature before the salt goes in (doc §2/§5). Levels are
-# estimated anchors until real level entities are bound (sensor-first design).
+# Saltwater Mixing Station — independent processes on shared vessels (doc §15).
+# Fill the store, transfer, and mix are each runnable on their own; only the
+# MIX RUN is a state machine (heat → salt & mix → test → ready → storing —
+# heat BEFORE salt, doc §2/§5). What ties them together is the vessel ledger:
+# each vessel holds estimated litres and the mix vessel knows WHAT it holds
+# (empty | rodi | salt) — that contents field is what makes the guards smart
+# (no transfer over standing saltwater, no mixing an empty vessel). Maths in
+# mixing.py, orchestration in __init__.py, matching the awc.py split.
 MIXING_STATUSES = (
-    "idle", "filling", "transferring", "heating", "salting", "ready", "storing", "fault",
+    "idle", "heating", "salting", "ready", "storing", "fault",
 )
 MIXING_LAYOUTS = ("dual", "single")
-MIXING_BATCH_TYPES = ("salt", "rodi")
+MIXING_VESSEL_CONTENTS = ("empty", "rodi", "salt")
 MIXING_SWITCH_ROLES = ("rodiBooster", "mixPumpA", "mixPumpB", "heater")
 MIXING_VESSEL_MAX_L = 2000.0              # sanity ceiling on a container size (AWC parity)
 MIXING_TARGET_PPT_MIN = 20.0              # brackish floor — below this is a typo, not a reef
@@ -360,7 +363,7 @@ MIXING_RODI_RATE_MAX_LPH = 500.0          # sanity ceiling on a configured RODI 
 # RODI utility runs (0.7.88): a litre-targeted booster run outside any batch —
 # into the store, or an external T-off (the ATO reservoir) — plus a timed-run
 # flow calibration and the filter-litres ledger it feeds.
-MIXING_DRAW_DESTINATIONS = ("store", "external")
+MIXING_DRAW_DESTINATIONS = ("store", "mix", "external")
 MIXING_CAL_CAP_MIN = 30                   # a calibration run into a jug is short; past this we cancel it
 MIXING_CAL_MIN_SECONDS = 60               # under a minute the rate maths is noise, not data
 MIXING_FILTER_RATED_MAX_L = 500000.0      # sanity ceiling on a membrane/filter litre rating
@@ -1640,7 +1643,10 @@ DEFAULT_CORE_CONFIG = {
         "layout": "dual",
         "vessels": {
             "rodi": {"volumeLitres": 50, "estimatedLitres": 0, "levelSensorEntity": ""},
-            "mix": {"volumeLitres": 50, "levelSensorEntity": ""},
+            # The mix vessel's ledger: litres + what the water IS. contents is
+            # what keeps the independent processes honest with each other.
+            "mix": {"volumeLitres": 50, "estimatedLitres": 0, "contents": "empty",
+                    "levelSensorEntity": ""},
         },
         "switches": {
             role: {"switchEntity": ""}
@@ -1680,15 +1686,16 @@ DEFAULT_CORE_CONFIG = {
             "circulateForMin": 10,
             "retestAfterDays": 7,
         },
+        # The MIX RUN only (doc §15): litres is the vessel's water when the
+        # salt went in (dose maths); remaining litres live on the vessel
+        # ledger, not here. Water movement (fills, transfers) is not a run.
         "batch": {
             "state": "idle",
-            "type": "salt",
             "startedAt": "",
             "stageAt": "",
             "litres": 0,
             "loggedPpt": 0,
             "testedAt": "",
-            "usedLitres": 0,
             # Storing circulation stamps (Stage C): the persisted traces the
             # burst chain runs on — circulateUntil while a burst is in flight,
             # nextCirculateAt between bursts, lastCirculatedAt for display.

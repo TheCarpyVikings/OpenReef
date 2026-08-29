@@ -62,8 +62,8 @@ _BRANDS_BY_ID = {b["id"]: b for b in SALT_BRANDS}
 REFERENCE_PPT = 35.0
 PPT_TOLERANCE = 0.5            # |measured − target| within this ⇒ batch passes
 RETEST_DEFAULT_DAYS = 7.0
-MIX_BATCH_TYPES = ("salt", "rodi")
 MIX_LAYOUTS = ("dual", "single")
+VESSEL_CONTENTS = ("empty", "rodi", "salt")
 SALINITY_UNITS = ("ppt", "sg")
 # The hobby anchor every SG scale is drawn around: 35 ppt ↔ 1.0264 SG (20/20).
 # A linear map through it is well inside hobby-instrument accuracy across the
@@ -154,19 +154,32 @@ def salinity_correction(measured_ppt: Any, target_ppt: Any, litres: Any,
 
 # ---------------------------------------------------------------- stage plan
 
-def stage_sequence(layout: Any, batch_type: Any, heat_enabled: Any) -> tuple[str, ...]:
-    """The stages THIS batch walks, in order — the panel's progress rail.
-    Transfer exists only on a dual layout mixing salt; Heat only when enabled
-    and salting; rodi batches go straight from filling to ready."""
-    stages = ["filling"]
-    salt = str(batch_type or "salt") != "rodi"
-    if salt and str(layout or "dual") == "dual":
-        stages.append("transferring")
-    if salt and bool(heat_enabled):
-        stages.append("heating")
-    if salt:
-        stages.append("salting")
-    stages.extend(["ready", "storing"])
+def mix_contents(cfg: Any) -> str:
+    """What the mix vessel holds — the field the independent processes guard
+    each other with (doc §15)."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+    mix_v = vessels.get("mix") if isinstance(vessels.get("mix"), dict) else {}
+    contents = str(mix_v.get("contents") or "empty")
+    return contents if contents in VESSEL_CONTENTS else "empty"
+
+
+def mix_vessel_litres(cfg: Any) -> float:
+    """The mix vessel's estimated litres — its own anchor, clamped by volume."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+    mix_v = vessels.get("mix") if isinstance(vessels.get("mix"), dict) else {}
+    vol = max(0.0, _f(mix_v.get("volumeLitres")))
+    litres = max(0.0, _f(mix_v.get("estimatedLitres")))
+    return min(litres, vol) if vol > 0 else litres
+
+
+def stage_sequence(heat_enabled: Any) -> tuple[str, ...]:
+    """The stages a MIX RUN walks — the panel's progress rail. Water movement
+    (fills, transfers) is not a run stage any more (doc §15): only the salt
+    part is a machine, and Heat comes before the salt when enabled."""
+    stages = ["heating"] if bool(heat_enabled) else []
+    stages.extend(["salting", "ready", "storing"])
     return tuple(stages)
 
 
@@ -179,16 +192,16 @@ def batch_state(batch: Any, cfg: Any, now: datetime) -> dict[str, Any]:
     batch = batch if isinstance(batch, dict) else {}
     cfg = cfg if isinstance(cfg, dict) else {}
     status = str(batch.get("state") or "idle")
-    btype = str(batch.get("type") or "salt")
     litres = _f(batch.get("litres"))
-    used = _f(batch.get("usedLitres"))
-    remaining = max(0.0, litres - used)
+    # Remaining litres are the VESSEL's ledger — usage, AWC debits and manual
+    # corrections all move the one anchor (doc §15).
+    remaining = mix_vessel_litres(cfg)
     salt_cfg = cfg.get("salt") if isinstance(cfg.get("salt"), dict) else {}
     out: dict[str, Any] = {
-        "status": status, "type": btype,
+        "status": status,
+        "contents": mix_contents(cfg),
         "litres": round(litres, 1), "remainingLitres": round(remaining, 1),
-        "stages": list(stage_sequence(cfg.get("layout"), btype,
-                                      (cfg.get("heat") or {}).get("enabled"))),
+        "stages": list(stage_sequence((cfg.get("heat") or {}).get("enabled"))),
         "mix": {"percent": None, "hoursLeft": None, "testUnlocked": False},
         "ageDays": None, "retestDue": False,
         # Storing circulation: a burst is running while circulateUntil is ahead
@@ -220,11 +233,10 @@ def batch_state(batch: Any, cfg: Any, now: datetime) -> dict[str, Any]:
             retest_days = _f((cfg.get("storage") or {}).get("retestAfterDays"),
                              RETEST_DEFAULT_DAYS)
             use_within_h = _f(brand_info(salt_cfg.get("brand")).get("useWithinH"))
-            if btype == "salt":
-                due = retest_days > 0 and age_d >= retest_days
-                if use_within_h > 0:
-                    due = due or age_d * 24.0 >= use_within_h
-                out["retestDue"] = due
+            due = retest_days > 0 and age_d >= retest_days
+            if use_within_h > 0:
+                due = due or age_d * 24.0 >= use_within_h
+            out["retestDue"] = due
     return out
 
 
@@ -232,23 +244,21 @@ def batch_state(batch: Any, cfg: Any, now: datetime) -> dict[str, Any]:
 
 def vessel_levels(cfg: Any) -> dict[str, Any]:
     """Estimated levels: stored anchors moved by confirmed events (fill done,
-    transfer done, batch used). RODI level is the dual layout's store; on a
-    single layout the one vessel IS the batch, so only the mix side reports.
-    estimated=True until real level entities take over (sensor-first, later)."""
+    transfer logged, water used). Each vessel owns its ledger now — the mix
+    side also says WHAT it holds (doc §15). estimated=True until real level
+    entities take over (sensor-first, later)."""
     cfg = cfg if isinstance(cfg, dict) else {}
     vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
-    batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
     dual = str(cfg.get("layout") or "dual") == "dual"
     rodi = vessels.get("rodi") if isinstance(vessels.get("rodi"), dict) else {}
     mix = vessels.get("mix") if isinstance(vessels.get("mix"), dict) else {}
     rodi_vol = max(0.0, _f(rodi.get("volumeLitres")))
     mix_vol = max(0.0, _f(mix.get("volumeLitres")))
-    mix_l = max(0.0, _f(batch.get("litres")) - _f(batch.get("usedLitres")))
-    if str(batch.get("state") or "idle") == "idle":
-        mix_l = 0.0
+    mix_l = mix_vessel_litres(cfg)
     out = {"mix": {"litres": round(mix_l, 1), "volumeLitres": mix_vol,
                    "percent": round(min(100.0, mix_l / mix_vol * 100.0), 0)
                    if mix_vol > 0 else None,
+                   "contents": mix_contents(cfg),
                    "estimated": True}}
     if dual:
         rodi_l = min(rodi_vol, max(0.0, _f(rodi.get("estimatedLitres")))) \
@@ -262,7 +272,7 @@ def vessel_levels(cfg: Any) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- RODI utility
 
-RODI_DRAW_DESTINATIONS = ("store", "external")
+RODI_DRAW_DESTINATIONS = ("store", "mix", "external")
 
 
 def _rodi_cfg(cfg: Any) -> dict[str, Any]:
@@ -272,16 +282,13 @@ def _rodi_cfg(cfg: Any) -> dict[str, Any]:
 
 
 def rodi_busy_reason(cfg: Any) -> str | None:
-    """Why the booster is spoken for right now — a draw, a calibration run and
-    a batch fill are mutually exclusive users of the same plug."""
+    """Why the booster is spoken for right now — a draw and a calibration run
+    are mutually exclusive users of the same plug."""
     rodi = _rodi_cfg(cfg)
     if (rodi.get("draw") or {}).get("active"):
-        return "a RODI draw is already running"
+        return "a RODI run is already going"
     if (rodi.get("calibration") or {}).get("active"):
         return "a flow calibration is running"
-    batch = cfg.get("batch") if isinstance(cfg, dict) and isinstance(cfg.get("batch"), dict) else {}
-    if str(batch.get("state") or "idle") == "filling":
-        return "the batch fill is using the booster"
     return None
 
 
@@ -296,9 +303,12 @@ def _booster_driven(cfg: Any) -> bool:
 
 
 def draw_guard_reasons(cfg: Any, litres: Any, destination: Any) -> list[str]:
-    """Why a RODI draw must not start. Litres are metered by rate x time, so an
-    unknown rate refuses honestly instead of running blind; a draw into the
-    store also refuses what the vessel cannot hold."""
+    """Why a RODI run must not start. Two shapes (doc §15): litres > 0 is a
+    TIMED draw metered by rate x time (an unknown rate refuses honestly);
+    litres == 0 is an OPEN-ENDED fill into one of our vessels — it runs until
+    the keeper confirms it done (the float valve is the real stop, the fill
+    cap the software backstop), so it needs no rate but does need a vessel.
+    Water never lands on standing saltwater outside the dilution window."""
     cfg = cfg if isinstance(cfg, dict) else {}
     reasons: list[str] = []
     if not cfg.get("enabled"):
@@ -308,28 +318,37 @@ def draw_guard_reasons(cfg: Any, litres: Any, destination: Any) -> list[str]:
         reasons.append(f"Unknown draw destination '{dest}'")
     if dest == "store" and str(cfg.get("layout") or "dual") == "single":
         reasons.append("Single-vessel layout has no RODI store — "
-                       "start a RODI-only batch to fill the vessel instead")
+                       "fill the vessel instead")
     lit = _f(litres)
-    if lit <= 0:
-        reasons.append("Draw must be more than 0 litres")
+    if lit < 0:
+        reasons.append("Draw litres cannot be negative")
     rate = _f(_rodi_cfg(cfg).get("rateLph"))
-    if rate <= 0:
-        reasons.append("RODI flow rate is unknown — calibrate it "
-                       "(or set a rate in settings) before a timed draw")
+    if lit > 0 and rate <= 0:
+        reasons.append("RODI flow rate is unknown — calibrate it (or set a rate "
+                       "in settings) for a timed draw, or use an open-ended fill")
+    if lit == 0 and dest == "external":
+        reasons.append("An open-ended run needs one of our vessels — "
+                       "a T-off has no float valve to stop at")
     if not _booster_driven(cfg):
         reasons.append("Bind the RODI booster plug (or turn on Simulate) — "
-                       "a timed draw needs OpenReef on the switch")
+                       "a RODI run needs OpenReef on the switch")
     busy = rodi_busy_reason(cfg)
     if busy:
         reasons.append(f"The booster is busy — {busy}")
-    if dest == "store" and lit > 0:
+    state = str((cfg.get("batch") or {}).get("state") or "idle")
+    if dest == "mix" and mix_contents(cfg) == "salt" and state != "salting":
+        reasons.append("The vessel still holds mixed saltwater — "
+                       "use or discard it before adding fresh RODI")
+    if dest in ("store", "mix") and lit > 0:
         vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
-        rodi_v = vessels.get("rodi") if isinstance(vessels.get("rodi"), dict) else {}
-        vol = _f(rodi_v.get("volumeLitres"))
+        vessel = vessels.get("rodi" if dest == "store" else "mix")
+        vessel = vessel if isinstance(vessel, dict) else {}
+        vol = _f(vessel.get("volumeLitres"))
         if vol > 0:
-            free = max(0.0, vol - max(0.0, _f(rodi_v.get("estimatedLitres"))))
+            free = max(0.0, vol - max(0.0, _f(vessel.get("estimatedLitres"))))
             if lit > free + 0.05:
-                reasons.append(f"That would overflow the store — "
+                name = "store" if dest == "store" else "vessel"
+                reasons.append(f"That would overflow the {name} — "
                                f"about {free:g} L of {vol:g} L free")
     return reasons
 
@@ -358,12 +377,18 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
         started = _parse_iso(draw.get("startedAt"))
         ends = _parse_iso(draw.get("endsAt"))
         elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0) if started else 0.0
-        done = min(target, rate * elapsed_h) if rate > 0 else 0.0
+        # Open-ended fill (target 0): no percent, no promise — litresDone only
+        # when a rate makes it honest; endsAt is the fill-cap backstop.
+        done = rate * elapsed_h if rate > 0 else None
+        if done is not None and target > 0:
+            done = min(target, done)
         out["draw"] = {
             "litres": round(target, 1),
+            "openEnded": target <= 0,
             "destination": str(draw.get("destination") or "store"),
-            "litresDone": round(done, 1),
-            "percent": round(min(100.0, done / target * 100.0), 0) if target > 0 else None,
+            "litresDone": round(done, 1) if done is not None else None,
+            "percent": round(min(100.0, done / target * 100.0), 0)
+            if target > 0 and done is not None else None,
             "minutesLeft": round(max(0.0, (ends - now).total_seconds() / 60.0), 0)
             if ends else None,
         }
@@ -390,39 +415,61 @@ def calibration_rate(litres: Any, elapsed_seconds: Any) -> float:
 
 # ---------------------------------------------------------------- guards
 
-def start_guard_reasons(cfg: Any, litres: Any, batch_type: Any) -> list[str]:
-    """Why a batch must not start. Reason strings only — the orchestrator and
-    panel decide presentation (the AWC start_guard_reasons contract)."""
+def mix_guard_reasons(cfg: Any) -> list[str]:
+    """Why a MIX RUN must not start. The litres are whatever the vessel holds
+    (doc §15) — so the real question is whether it holds plain RODI water.
+    Reason strings only — the orchestrator and panel decide presentation."""
     cfg = cfg if isinstance(cfg, dict) else {}
     reasons: list[str] = []
     if not cfg.get("enabled"):
         reasons.append("Mixing station is not enabled")
     batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
     if str(batch.get("state") or "idle") not in ("idle",):
-        reasons.append("A batch is already in progress — finish or abort it first")
+        reasons.append("A mix run is already going — finish or discard it first")
+    contents = mix_contents(cfg)
+    litres = mix_vessel_litres(cfg)
+    if contents == "salt":
+        reasons.append("The vessel already holds mixed saltwater — "
+                       "use or discard it before mixing fresh")
+    elif contents != "rodi" or litres <= 0:
+        reasons.append("The vessel holds no RODI water yet — "
+                       "transfer or fill some in first")
     rodi = _rodi_cfg(cfg)
-    if (rodi.get("draw") or {}).get("active"):
-        reasons.append("A RODI draw is running — stop it before starting a batch")
-    if (rodi.get("calibration") or {}).get("active"):
-        reasons.append("A flow calibration is running — finish it before starting a batch")
-    btype = str(batch_type or "salt")
-    if btype not in MIX_BATCH_TYPES:
-        reasons.append(f"Unknown batch type '{btype}'")
+    draw = rodi.get("draw") if isinstance(rodi.get("draw"), dict) else {}
+    if draw.get("active") and str(draw.get("destination") or "") == "mix":
+        reasons.append("The vessel is still filling — let the RODI run finish first")
+    salt_cfg = cfg.get("salt") if isinstance(cfg.get("salt"), dict) else {}
+    if _f(salt_cfg.get("targetPpt"), REFERENCE_PPT) <= 0:
+        reasons.append("Target salinity must be set")
+    return reasons
+
+
+def transfer_guard_reasons(cfg: Any, litres: Any) -> list[str]:
+    """Why a transfer (store → mix vessel, gravity + the keeper's ball valve)
+    must not be logged. The smart part of doc §15: never onto standing
+    saltwater — EXCEPT while 'salting', where adding RODI is exactly how a
+    too-salty batch gets diluted."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    reasons: list[str] = []
+    if not cfg.get("enabled"):
+        reasons.append("Mixing station is not enabled")
+    if str(cfg.get("layout") or "dual") != "dual":
+        reasons.append("Single-vessel layout has no store to transfer from")
     lit = _f(litres)
     if lit <= 0:
-        reasons.append("Batch size must be more than 0 litres")
+        reasons.append("Transfer must be more than 0 litres")
+    state = str((cfg.get("batch") or {}).get("state") or "idle")
+    if mix_contents(cfg) == "salt" and state != "salting":
+        reasons.append("The vessel still holds mixed saltwater — "
+                       "use or discard it before transferring fresh RODI in")
     vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
-    dual = str(cfg.get("layout") or "dual") == "dual"
-    mix_vol = _f((vessels.get("mix") or {}).get("volumeLitres"))
-    if mix_vol > 0 and lit > mix_vol:
-        reasons.append(f"Batch of {lit:g} L exceeds the mixing vessel ({mix_vol:g} L)")
-    if dual and btype == "salt":
-        rodi_vol = _f((vessels.get("rodi") or {}).get("volumeLitres"))
-        if rodi_vol > 0 and lit > rodi_vol:
-            reasons.append(f"Batch of {lit:g} L exceeds the RODI vessel ({rodi_vol:g} L)")
-    salt_cfg = cfg.get("salt") if isinstance(cfg.get("salt"), dict) else {}
-    if btype == "salt" and _f(salt_cfg.get("targetPpt"), REFERENCE_PPT) <= 0:
-        reasons.append("Target salinity must be set")
+    mix_v = vessels.get("mix") if isinstance(vessels.get("mix"), dict) else {}
+    vol = _f(mix_v.get("volumeLitres"))
+    if vol > 0 and lit > 0:
+        free = max(0.0, vol - mix_vessel_litres(cfg))
+        if lit > free + 0.05:
+            reasons.append(f"That would overflow the vessel — "
+                           f"about {free:g} L of {vol:g} L free")
     return reasons
 
 
@@ -445,7 +492,7 @@ def awc_guard_reason(cfg: Any, litres: Any, now: datetime) -> dict[str, Any] | N
     if lit <= 0:
         return None
     state = batch_state(cfg.get("batch"), cfg, now)
-    if state["status"] not in ("ready", "storing") or state["type"] != "salt":
+    if state["status"] not in ("ready", "storing"):
         message = "the mixing station has no ready saltwater batch"
     elif state["retestDue"]:
         message = "the stored batch is past its retest window — test it before it touches the tank"
@@ -466,7 +513,11 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
     salt_cfg = cfg.get("salt") if isinstance(cfg.get("salt"), dict) else {}
     batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
     state = batch_state(batch, cfg, now)
+    # Dose guide litres: the live run's, else what the vessel actually holds,
+    # else the configured volume — the best honest figure available.
     litres = _f(batch.get("litres"))
+    if litres <= 0:
+        litres = mix_vessel_litres(cfg)
     if litres <= 0:
         litres = _f((cfg.get("vessels") or {}).get("mix", {}).get("volumeLitres"))
     return {

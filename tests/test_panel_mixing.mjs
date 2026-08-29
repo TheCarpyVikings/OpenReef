@@ -26,7 +26,7 @@ function backendStatuses() {
   const source = fs.readFileSync(path.join(ROOT, "custom_components", "openreef", "const.py"), "utf8");
   const block = source.match(/MIXING_STATUSES\s*=\s*\(([\s\S]*?)\)/);
   const found = block ? [...block[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]) : [];
-  assert(found.length >= 8 && found.includes("idle") && found.includes("salting"),
+  assert(found.length >= 6 && found.includes("idle") && found.includes("salting"),
     `could not read MIXING_STATUSES from const.py: got ${JSON.stringify(found)}`);
   return found;
 }
@@ -37,7 +37,7 @@ function mixConfig(over = {}) {
     layout: "dual",
     vessels: {
       rodi: { volumeLitres: 50, estimatedLitres: 40, levelSensorEntity: "" },
-      mix: { volumeLitres: 50, levelSensorEntity: "" },
+      mix: { volumeLitres: 50, estimatedLitres: 0, contents: "empty", levelSensorEntity: "" },
     },
     switches: {
       rodiBooster: { switchEntity: "" }, mixPumpA: { switchEntity: "" },
@@ -57,15 +57,15 @@ function summaryBlob(over = {}) {
     enabled: true,
     layout: "dual",
     batch: {
-      status: "idle", type: "salt", litres: 0, remainingLitres: 0,
-      stages: ["filling", "transferring", "heating", "salting", "ready", "storing"],
+      status: "idle", contents: "empty", litres: 0, remainingLitres: 0,
+      stages: ["heating", "salting", "ready", "storing"],
       mix: { percent: null, hoursLeft: null, testUnlocked: false },
       ageDays: null, retestDue: false, loggedPpt: 0,
       ...over.batch,
     },
     levels: over.levels || {
       rodi: { litres: 40, volumeLitres: 50, percent: 80, estimated: true },
-      mix: { litres: 0, volumeLitres: 50, percent: 0, estimated: true },
+      mix: { litres: 0, volumeLitres: 50, percent: 0, contents: "empty", estimated: true },
     },
     dose: over.dose || { available: true, grams: 1950, gPerL: 39.0 },
     mixHours: 2.0,
@@ -170,8 +170,54 @@ test("the tab renders idle state with the dose guide and no placeholders", async
   const html = panel._mixingTab();
   assert(html.includes("Saltwater Mixing Station"), "tab lost its title");
   assert(html.includes("1,950") || html.includes("1950"), "dose guide lost its grams");
-  assert(html.includes("Fill RODI"), "progress rail lost its first stage");
+  assert(html.includes("Salt &amp; mix") || html.includes("Salt & mix"),
+    "progress rail lost the mix stage");
+  assert(html.includes("nothing here forces the next step"),
+    "an empty idle vessel lost its each-process-on-its-own line");
   noPlaceholders(html, "mixing tab");
+});
+
+test("the independent processes surface as their own controls", async () => {
+  // Empty vessel, dual: the transfer row is there, Start mixing is not yet.
+  const empty = await mixingPanel();
+  empty._activeTab = "mixing";
+  let html = empty._mixingTab();
+  assert(html.includes('data-action="mixing-transfer"'), "idle lost its transfer row");
+  assert(!html.includes('data-action="mixing-start"'),
+    "an empty vessel offered Start mixing with nothing to mix");
+  // RODI water on hand: Start mixing appears with the litres named.
+  const rodiWater = await mixingPanel(
+    { vessels: { rodi: { volumeLitres: 50, estimatedLitres: 10, levelSensorEntity: "" },
+                 mix: { volumeLitres: 50, estimatedLitres: 40, contents: "rodi", levelSensorEntity: "" } } },
+    summaryBlob({ batch: { contents: "rodi", remainingLitres: 40 },
+                  levels: { rodi: { litres: 10, volumeLitres: 50, percent: 20, estimated: true },
+                            mix: { litres: 40, volumeLitres: 50, percent: 80, contents: "rodi", estimated: true } } }));
+  rodiWater._activeTab = "mixing";
+  html = rodiWater._mixingTab();
+  assert(html.includes('data-action="mixing-start"'), "RODI water on hand lost Start mixing");
+  assert(html.includes("Start mixing 40"), "Start mixing lost the vessel's litres");
+  assert(html.includes("RODI water on hand"), "the card head lost the water-on-hand line");
+  // Single layout: no transfer row — the vessel fills from the RODI unit.
+  const single = await mixingPanel({ layout: "single" },
+    summaryBlob({ levels: { mix: { litres: 0, volumeLitres: 50, percent: 0, contents: "empty", estimated: true } } }));
+  single._activeTab = "mixing";
+  assert(!single._mixingTab().includes('data-action="mixing-transfer"'),
+    "single layout offered a transfer with no store");
+});
+
+test("salting offers the dilution transfer; a stored batch does not", async () => {
+  const salting = await mixingPanel({ batch: { state: "salting", litres: 40 } },
+    summaryBlob({ batch: { status: "salting", contents: "salt", litres: 40, remainingLitres: 40,
+                           mix: { percent: 50, hoursLeft: 1.0, testUnlocked: false } } }));
+  salting._activeTab = "mixing";
+  const html = salting._mixingTab();
+  assert(html.includes("dilute"), "salting lost its dilution hint");
+  assert(html.includes('data-action="mixing-transfer"'), "salting lost the dilution transfer row");
+  const stored = await mixingPanel({ batch: { state: "storing", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", contents: "salt", litres: 40, remainingLitres: 40 } }));
+  stored._activeTab = "mixing";
+  assert(!stored._mixingTab().includes('data-action="mixing-transfer"'),
+    "a stored batch offered a transfer over standing saltwater");
 });
 
 test("salting tab shows the countdown; unlocked window asks for the test", async () => {
@@ -220,36 +266,36 @@ test("settings body offers the four plugs and keeps the stored brand before the 
   assert(coldBody.includes('value="nyos_pure"'), "cold settings dropped the stored brand");
 });
 
-test("each stage offers exactly its one next action", async () => {
+test("each run stage offers exactly its one next action", async () => {
   const expectations = [
-    ["idle", "mixing-start", "data-mixing-litres"],
-    ["filling", "mixing-advance", null],
-    ["transferring", "mixing-advance", "data-mixing-transfer"],
     ["heating", "mixing-advance", null],
     ["salting", "mixing-log", "data-mixing-ppt"],
   ];
   for (const [status, action, input] of expectations) {
-    const panel = await mixingPanel({ batch: { state: status, type: "salt", litres: 40 } },
-      summaryBlob({ batch: { status, litres: 40, remainingLitres: 40 } }));
+    const panel = await mixingPanel({ batch: { state: status, litres: 40 } },
+      summaryBlob({ batch: { status, contents: "salt", litres: 40, remainingLitres: 40 } }));
     panel._activeTab = "mixing";
     const html = panel._mixingTab();
     assert(html.includes(`data-action="${action}"`), `${status} lost its ${action} button`);
     if (input) assert(html.includes(input), `${status} lost its ${input} input`);
-    if (status !== "idle") {
-      assert(html.includes('data-action="mixing-abort"'), `${status} lost its abort`);
-    }
+    assert(html.includes('data-action="mixing-abort"'), `${status} lost its stop/discard`);
     noPlaceholders(html, `controls ${status}`);
   }
 });
 
-test("a ready batch offers Discard, not Abort — and idle offers no abort at all", async () => {
-  const ready = await mixingPanel({ batch: { state: "ready", type: "salt", litres: 40 } },
-    summaryBlob({ batch: { status: "ready", litres: 40, remainingLitres: 40, loggedPpt: 35.1 } }));
+test("stopping heat keeps its own label; discard names the loss; idle empty offers neither", async () => {
+  const heating = await mixingPanel({ batch: { state: "heating", litres: 40 } },
+    summaryBlob({ batch: { status: "heating", contents: "rodi", litres: 40, remainingLitres: 40 } }));
+  heating._activeTab = "mixing";
+  assert(heating._mixingTab().includes("Stop heating"),
+    "heating's stop must say heating — the water survives it");
+  const ready = await mixingPanel({ batch: { state: "ready", litres: 40 } },
+    summaryBlob({ batch: { status: "ready", contents: "salt", litres: 40, remainingLitres: 40, loggedPpt: 35.1 } }));
   ready._activeTab = "mixing";
   assert(ready._mixingTab().includes("Discard batch"), "ready batch lost its Discard");
   const idle = await mixingPanel();
   idle._activeTab = "mixing";
-  assert(!idle._mixingTab().includes("mixing-abort"), "idle offered an abort with nothing running");
+  assert(!idle._mixingTab().includes("mixing-abort"), "an empty idle vessel offered a discard");
 });
 
 test("the correction message renders where the keeper can read it", async () => {
@@ -269,9 +315,9 @@ test("simulate mode announces itself on the batch card and in settings", async (
   assert(/data-field="simulate"[^>]*checked/.test(body), "settings lost the armed sim toggle");
 });
 
-test("a stored batch offers usage, retest and the reminder seed — RODI batches only usage", async () => {
-  const panel = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } },
-    summaryBlob({ batch: { status: "storing", type: "salt", litres: 40, remainingLitres: 25 } }));
+test("a stored batch offers usage, retest and the reminder seed", async () => {
+  const panel = await mixingPanel({ batch: { state: "storing", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", contents: "salt", litres: 40, remainingLitres: 25 } }));
   panel._activeTab = "mixing";
   let html = panel._mixingTab();
   assert(html.includes("data-mixing-used"), "storing lost its usage input");
@@ -283,12 +329,6 @@ test("a stored batch offers usage, retest and the reminder seed — RODI batches
   html = panel._mixingTab();
   assert(!html.includes('data-action="mixing-add-retest-reminder"'),
     "task exists — the seed button must stand down");
-  const rodi = await mixingPanel({ batch: { state: "ready", type: "rodi", litres: 30 } },
-    summaryBlob({ batch: { status: "ready", type: "rodi", litres: 30, remainingLitres: 30 } }));
-  rodi._activeTab = "mixing";
-  const rodiHtml = rodi._mixingTab();
-  assert(rodiHtml.includes("data-mixing-used"), "rodi batch lost its usage input");
-  assert(!rodiHtml.includes('data-action="mixing-log"'), "a top-off batch has nothing to retest");
 });
 
 test("the storing card tells the circulation rhythm honestly", async () => {
@@ -310,19 +350,20 @@ test("a circulation burst spins the impellers without salting's snow", async () 
   assert(!svg.includes('class="mix-snow"'), "a storage stir must not snow salt");
 });
 
-test("level corrections follow the layout and the batch", async () => {
-  const dual = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } },
-    summaryBlob({ batch: { status: "storing", litres: 40, remainingLitres: 40 } }));
+test("level corrections follow the layout — both vessels own a ledger now", async () => {
+  const dual = await mixingPanel({ batch: { state: "storing", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", contents: "salt", litres: 40, remainingLitres: 40 } }));
   dual._activeTab = "mixing";
   const html = dual._mixingTab();
   assert(html.includes('data-mixing-level="rodi"'), "dual layout lost the RODI correction");
-  assert(html.includes('data-mixing-level="mix"'), "an active batch lost the mix correction");
+  assert(html.includes('data-mixing-level="mix"'), "the mix vessel lost its correction");
   const idleSingle = await mixingPanel({ layout: "single" },
-    summaryBlob({ levels: { mix: { litres: 0, volumeLitres: 50, percent: 0, estimated: true } } }));
+    summaryBlob({ levels: { mix: { litres: 0, volumeLitres: 50, percent: 0, contents: "empty", estimated: true } } }));
   idleSingle._activeTab = "mixing";
   const idleHtml = idleSingle._mixingTab();
   assert(!idleHtml.includes('data-mixing-level="rodi"'), "single layout offered a phantom RODI correction");
-  assert(!idleHtml.includes('data-mixing-level="mix"'), "idle vessel offered a correction with nothing in it");
+  assert(idleHtml.includes('data-mixing-level="mix"'),
+    "an idle vessel can still hold water — its correction must stay");
 });
 
 test("the seed button writes the keeper's retest chore from the storage setting", async () => {
@@ -346,11 +387,22 @@ test("settings carries the AWC guard with the stored mode selected", async () =>
   noPlaceholders(body, "guard settings");
 });
 
-test("the Water hub card counts the litres a stored batch has left", async () => {
-  const panel = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40, usedLitres: 15 } });
+test("the Water hub card reads the vessel ledger", async () => {
+  const panel = await mixingPanel({
+    batch: { state: "storing", litres: 40 },
+    vessels: { rodi: { volumeLitres: 50, estimatedLitres: 40, levelSensorEntity: "" },
+               mix: { volumeLitres: 50, estimatedLitres: 25, contents: "salt", levelSensorEntity: "" } },
+  });
   const hub = panel._hubTab("water");
   assert(hub.includes("25") && hub.includes("L ready"), "hub card lost the remaining litres");
   assert(hub.includes("tested saltwater on hand"), "hub card lost its vouching line");
+  // Plain RODI water on hand tells its own story.
+  const rodi = await mixingPanel({
+    vessels: { rodi: { volumeLitres: 50, estimatedLitres: 40, levelSensorEntity: "" },
+               mix: { volumeLitres: 50, estimatedLitres: 30, contents: "rodi", levelSensorEntity: "" } },
+  });
+  const rodiHub = rodi._hubTab("water");
+  assert(rodiHub.includes("30") && rodiHub.includes("L RODI"), "hub card lost the RODI-on-hand line");
 });
 
 test("no mixing action button ever renders classless — the invisible-button regression", async () => {

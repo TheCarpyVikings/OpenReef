@@ -210,6 +210,35 @@ Full "make me a batch" one-button automation (needs level sensors + electric tra
 valve), salinity-probe-driven auto-dosing of salt, multi-batch history/analytics, Pulse
 wall tile.
 
+## §15 The pipeline dissolves — independent processes (0.7.94)
+
+Real keepers rarely run a start-to-finish batch. They fill the store and leave it for
+days; they transfer and mix only when the tank asks. The forced pipeline
+(fill → transfer → … as ONE state machine) is gone; supersedes §5's shape.
+
+- **The vessel is the source of truth.** `vessels.mix` gains its own ledger:
+  `estimatedLitres` + `contents` (`empty | rodi | salt`). Every process reads and
+  moves that ledger; `remainingLitres` for the run/AWC guard IS the vessel's litres.
+- **Independent processes:** *Fill* (RODI runs, §14 — now with destination `mix` and
+  an open-ended shape: litres 0 = run to the float valve, fill-cap backstop; no rate
+  needed; keeper-confirmed = vessel-full — announced, one Set-level from corrected;
+  cap-expired without a rate credits nothing). *Transfer* (`mixing_transfer` — one-shot
+  ledger move, gravity did the work). *Mix run* (`mixing_start_mix` — the only state
+  machine left: heating? → salting → ready → storing, on whatever RODI the vessel
+  holds; `MIXING_STATUSES` shrinks accordingly; salt enters ON the salting edge, so
+  the contents flip there).
+- **Smart guards across processes:** no transfer or vessel-fill onto standing
+  saltwater — EXCEPT while `salting`, where adding RODI is exactly how a too-salty
+  batch is diluted (correction maths now uses the live vessel litres); no mixing an
+  empty or salty vessel; one booster — draw, calibration and each other exclude.
+- **Discard is contents-aware:** stopping a HEATING run keeps the vessel's plain RODI
+  (nothing ruined, only warmed); from salting onward discard drains the ledger.
+- **Legacy migration (schema 57):** a batch still carrying `type`/`usedLitres` seeds
+  the vessel ledger once (litres−used, contents from stage/type); `filling`/
+  `transferring` and rodi-type stored "batches" fold to idle — the water stays,
+  as vessel contents. RODI-only batches are gone: plain RODI in a vessel IS the
+  top-off supply.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than
