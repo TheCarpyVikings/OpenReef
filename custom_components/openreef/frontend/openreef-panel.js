@@ -22594,7 +22594,9 @@ const rigSteps = [
       // a render→reload→render hot loop when the WS call keeps failing.
       this._mixingSummaryAt = Date.now();
       this._mixingSummaryLoading = false;
-      if (this._activeTab === "mixing") this._render();
+      // Never repaint over someone mid-keystroke — a render resets every
+      // input's value attribute (the hass-update path has the same guard).
+      if (this._activeTab === "mixing" && !this._isEditingFormControl()) this._render();
     }
   }
 
