@@ -304,6 +304,32 @@ long after their RODI unit — so "unit lifetime" was quietly wrong for them.
   been swapped under OpenReef carry a hint that their clock starts true at the
   next real swap — the pre-OpenReef wear is invisible to us and we say so.
 
+## §20 The stir schedule shows its face (0.7.99)
+
+Reece, with a fresh ready batch: "struggling to work out how to activate the
+store button… is it possible to turn auto mixing on and off?" Store was never
+a button — the first scheduled burst IS the ready→storing edge — but every
+other rail chip had one, and between bursts the schedule was invisible. Two
+real bugs fell out of tracing his question:
+
+- **`nextCirculateAt` joins the batch summary** (ready/storing only; empty
+  mid-burst — `circulating` tells that half). The vessel card now says
+  "Next stir at 21:40" — day-marked (`Sun 21:40`) when the stir crosses into
+  another day, since the cadence can be a week. On ready it adds the chip
+  lesson: "that first stir flips the batch to Store by itself. Nothing to
+  press." Settings names the switch: "Circulate every (h, 0 = off)".
+- **Bug: cadence→0 mid-burst abandoned the pumps ON.** The schedule pass
+  cleared the timer, then bailed on `every_h <= 0` before re-arming the stop
+  leg — no save while `every_h == 0` could ever stop the burst. The in-flight
+  branch now arms the stop leg unconditionally (state alone gates it); the
+  stop leg's own cadence read stamps no next burst when it lands on 0.
+- **Bug: turning circulation ON could never stir a batch that went ready
+  while it was off.** The ready edge stamps no `nextCirculateAt` when the
+  cadence is 0, and the pass arms only from stamps — permanent void. The
+  normaliser self-heals it: ready/storing + cadence on + no stamps ⇒ anchor
+  `now + every_h` on any save (mid-burst untouched; `circulateUntil` owns
+  that moment). Stamps stay the schedule; the void just can't survive a save.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

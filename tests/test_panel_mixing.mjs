@@ -710,4 +710,63 @@ test("settings offers the unit picker and converts the target box for SG", async
   noPlaceholders(sg, "sg settings");
 });
 
+test("the stir schedule shows its face — next stir, the self-flipping Store chip, and the off switch", async () => {
+  const vesselSlice = (h) => h.slice(h.indexOf('id="or-mixing-vessel"'), h.indexOf('id="or-mixing-filters"'));
+  const saltLevels = {
+    rodi: { litres: 40, volumeLitres: 50, percent: 80, estimated: true },
+    mix: { litres: 15, volumeLitres: 50, percent: 30, contents: "salt", estimated: true },
+  };
+  const readyBatch = (over = {}) => ({
+    status: "ready", contents: "salt", litres: 15, remainingLitres: 15, loggedPpt: 35,
+    stages: ["heating", "salting", "ready", "storing"], circulating: false, ...over,
+  });
+
+  // Ready: the next stir has a clock, and the chip explains itself — the
+  // first stir flips the batch to Store with nothing to press.
+  const soon = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const ready = await mixingPanel({ batch: { state: "ready" } }, summaryBlob({
+    batch: readyBatch({ nextCirculateAt: soon }), levels: saltLevels }));
+  ready._activeTab = "mixing";
+  let slice = vesselSlice(ready._mixingTab());
+  assert(slice.includes("Next stir"), "ready lost the next-stir clock");
+  assert(slice.includes("flips the batch to Store by itself"), "ready must explain the self-flipping chip");
+  assert(slice.includes("Nothing to press"), "ready must say no button is waiting");
+  noPlaceholders(slice, "ready stir hint");
+
+  // Storing keeps the cadence in view but drops the chip lesson.
+  const storing = await mixingPanel({ batch: { state: "storing" } }, summaryBlob({
+    batch: readyBatch({ status: "storing", nextCirculateAt: soon }), levels: saltLevels }));
+  storing._activeTab = "mixing";
+  slice = vesselSlice(storing._mixingTab());
+  assert(slice.includes("Next stir") && slice.includes("every 6 h"), "storing lost its schedule line");
+  assert(!slice.includes("flips the batch"), "storing must not re-teach the Store chip");
+
+  // A stir days out carries a day marker — a bare clock time would lie.
+  const farOut = new Date(Date.now() + 72 * 3600 * 1000).toISOString();
+  const far = await mixingPanel({ batch: { state: "storing" } }, summaryBlob({
+    batch: readyBatch({ status: "storing", nextCirculateAt: farOut }), levels: saltLevels }));
+  far._activeTab = "mixing";
+  slice = vesselSlice(far._mixingTab());
+  assert(slice.includes("Next stir") && !slice.includes("Next stir at"),
+    "a stir on another day must not read as today's clock time");
+
+  // Mid-burst: the live story, not the schedule.
+  const bursting = await mixingPanel({ batch: { state: "storing" } }, summaryBlob({
+    batch: readyBatch({ status: "storing", circulating: true }), levels: saltLevels }));
+  bursting._activeTab = "mixing";
+  assert(vesselSlice(bursting._mixingTab()).includes("Stirring now"), "a running burst must say so");
+
+  // Cadence 0: circulation reads as off, and settings names 0 as the switch.
+  const off = await mixingPanel({
+    batch: { state: "ready" },
+    storage: { circulateEveryH: 0, circulateForMin: 10, retestAfterDays: 7 },
+  }, summaryBlob({ batch: readyBatch(), levels: saltLevels }));
+  off._activeTab = "mixing";
+  assert(vesselSlice(off._mixingTab()).includes("Storage circulation is off"),
+    "cadence 0 must read as circulation off");
+  const settings = (await mixingPanel())._mixingSettingsBody(mixConfig());
+  assert(settings.includes("Circulate every (h, 0 = off)"),
+    "settings must name 0 as the off switch");
+});
+
 runTests();

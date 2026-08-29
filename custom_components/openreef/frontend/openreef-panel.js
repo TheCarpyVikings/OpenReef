@@ -23016,17 +23016,29 @@ const rigSteps = [
       controls = `<div class="button-row">${abortBtn}</div>`;
     }
 
-    // The storing rhythm, told honestly: what the schedule is, and whether the
-    // pumps are stirring right now (the diagram spins off the same flag).
+    // The storing rhythm, told honestly: WHEN the next stir is, not just the
+    // cadence — the keeper should never have to trust an invisible timer.
+    // Ready also says that the first stir flips the batch to Store by itself,
+    // because a rail chip with no button looks like a step waiting for one.
     let circulationLine = "";
     if (status === "ready" || status === "storing") {
       const everyH = Number(mix.storage?.circulateEveryH) || 0;
       const forMin = Number(mix.storage?.circulateForMin) || 0;
-      circulationLine = everyH > 0
-        ? `<small class="awc-hint">${batch.circulating
-          ? "Stirring now — the pumps are running their scheduled burst."
-          : `Pumps stir ${forMin} min every ${everyH} h to keep the batch mixed — never continuously.`}</small>`
-        : `<small class="awc-hint">Storage circulation is off (set a cadence in settings to keep the batch stirred).</small>`;
+      let text;
+      if (everyH <= 0) {
+        text = "Storage circulation is off (set a cadence in settings to keep the batch stirred).";
+      } else if (batch.circulating) {
+        text = "Stirring now — the pumps are running their scheduled burst.";
+      } else {
+        const next = batch.nextCirculateAt ? new Date(batch.nextCirculateAt) : null;
+        const when = next && !Number.isNaN(next.getTime()) ? this._mixingStirClock(next) : "";
+        text = !when
+          ? `Pumps stir ${forMin} min every ${everyH} h to keep the batch mixed — never continuously.`
+          : status === "ready"
+            ? `Next stir ${when} — pumps run ${forMin} min, and that first stir flips the batch to Store by itself. Nothing to press.`
+            : `Next stir ${when} — pumps run ${forMin} min every ${everyH} h, never continuously.`;
+      }
+      circulationLine = `<small class="awc-hint">${text}</small>`;
     }
 
     return `
@@ -23040,6 +23052,16 @@ const rigSteps = [
         ${controls}
         ${mix.simulate ? `<small class="awc-hint">Simulate is on — virtual switches only, nothing real is energised.</small>` : ""}
       </article>`;
+  }
+
+  // "at 21:40" while the stir lands today; "Sun 21:40" once it crosses into
+  // another day — the cadence can be a week, and a bare clock time would lie
+  // about which day it means.
+  _mixingStirClock(date) {
+    const clock = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return date.toDateString() === new Date().toDateString()
+      ? `at ${clock}`
+      : `${date.toLocaleDateString([], { weekday: "short" })} ${clock}`;
   }
 
   // Make water — the RODI unit's own card: run it WITHOUT a batch (top the
@@ -23406,7 +23428,7 @@ const rigSteps = [
       </div>` : ""}
       <small class="awc-hint">Storage. A stored batch gets stirred on a schedule — never run continuously — and ages honestly: past the retest window it drops out of "ready" until you test it again.</small>
       <div class="mini-grid">
-        <label>Circulate every (h)<input type="number" min="0" max="168" step="1" data-scope="mixing-storage" data-field="circulateEveryH" value="${Number(storage.circulateEveryH) || 0}"></label>
+        <label>Circulate every (h, 0 = off)<input type="number" min="0" max="168" step="1" data-scope="mixing-storage" data-field="circulateEveryH" value="${Number(storage.circulateEveryH) || 0}"></label>
         <label>Circulate for (min)<input type="number" min="1" max="120" step="1" data-scope="mixing-storage" data-field="circulateForMin" value="${Number(storage.circulateForMin) || 10}"></label>
         <label>Retest after (days)<input type="number" min="0" max="60" step="1" data-scope="mixing-storage" data-field="retestAfterDays" value="${Number(storage.retestAfterDays) || 0}"></label>
       </div>

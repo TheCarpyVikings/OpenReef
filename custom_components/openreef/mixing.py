@@ -215,6 +215,10 @@ def batch_state(batch: Any, cfg: Any, now: datetime) -> dict[str, Any]:
     if status in ("ready", "storing"):
         until = _parse_iso(batch.get("circulateUntil"))
         out["circulating"] = until is not None and until > now
+        # The schedule, visible: the panel says "next stir at HH:MM" instead
+        # of asking the keeper to trust an invisible timer. Empty mid-burst
+        # by design — "circulating" carries that half of the story.
+        out["nextCirculateAt"] = str(batch.get("nextCirculateAt") or "")
     if status == "salting":
         stamp = _parse_iso(batch.get("stageAt"))
         hours = mix_hours(salt_cfg.get("brand"), salt_cfg.get("mixHours"))

@@ -1674,6 +1674,21 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "lastCirculatedAt": _awc_str(raw_batch.get("lastCirculatedAt"), 40),
     }
 
+    # Self-heal the stir schedule: a batch that went ready while the cadence
+    # was 0 carries no nextCirculateAt, and the schedule pass arms only from
+    # stamps — so turning circulation back on later would never actually
+    # stir. Any save that finds the void while the cadence is on anchors it
+    # afresh (mid-burst is left alone: circulateUntil owns that moment).
+    batch_norm = mix_cfg["batch"]
+    if (batch_norm["state"] in ("ready", "storing")
+            and not batch_norm["nextCirculateAt"]
+            and not batch_norm["circulateUntil"]
+            and mix_cfg["storage"]["circulateEveryH"] > 0):
+        batch_norm["nextCirculateAt"] = (
+            datetime.now(timezone.utc)
+            + timedelta(hours=mix_cfg["storage"]["circulateEveryH"])
+        ).isoformat()
+
     raw_integrations = mix_cfg.get("integrations") if isinstance(mix_cfg.get("integrations"), dict) else {}
     awc_guard = str(raw_integrations.get("awcGuard") or "warn")
     mix_cfg["integrations"] = {
@@ -13843,14 +13858,17 @@ async def _async_schedule_mixing_circulation(
     batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
     storage = cfg.get("storage") if isinstance(cfg.get("storage"), dict) else {}
     every_h = _awc_num(storage.get("circulateEveryH"), 0, 0, MIXING_CIRCULATE_EVERY_MAX_H)
-    if (not cfg.get("enabled") or every_h <= 0
-            or str(batch.get("state") or "idle") not in ("ready", "storing")):
+    if str(batch.get("state") or "idle") not in ("ready", "storing"):
         return
     now = datetime.now(timezone.utc)
     store = hass.data.setdefault(DOMAIN, {})
     until = _parse_datetime(batch.get("circulateUntil"))
     if until is not None and until > now:
-        # A burst is in flight — arm its stop leg.
+        # A burst is in flight — arm its stop leg no matter what the cadence
+        # or enabled flag says NOW: this pass just cleared the old timer, and
+        # turning circulation off mid-burst must end the burst, never abandon
+        # the pumps running. The stop leg reads the cadence itself, so 0
+        # stamps no next burst — that is where the off switch lands.
         async def _stop(_now: datetime) -> None:
             latest = _first_entry(hass)
             async with _mixing_lock(hass):
@@ -13873,6 +13891,8 @@ async def _async_schedule_mixing_circulation(
                 await _async_save_config(hass, latest, cfg2)  # save re-arms the start leg
 
         store[MIXING_CIRC_UNSUB] = async_track_point_in_time(hass, _stop, until)
+        return
+    if not cfg.get("enabled") or every_h <= 0:
         return
     next_at = _parse_datetime(batch.get("nextCirculateAt"))
     if next_at is None:

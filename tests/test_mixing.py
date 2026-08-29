@@ -653,6 +653,69 @@ def test_legacy_rodi_stored_batch_folds_to_water_on_hand():
     assert integration.MIXING_CIRC_UNSUB not in hass.data.get(integration.DOMAIN, {})
 
 
+def test_summary_exposes_the_next_stir_stamp():
+    # The panel says "next stir at 21:40" off this — the schedule must be
+    # visible, not a timer the keeper is asked to trust.
+    cfg = _cfg()
+    stamp = _iso(NOW + timedelta(hours=3))
+    out = mixing.batch_state(_stored_batch(nextCirculateAt=stamp), cfg, NOW)
+    assert out["nextCirculateAt"] == stamp
+    # Mid-burst the stamp is empty by design — "circulating" tells that half.
+    burst = mixing.batch_state(
+        _stored_batch(circulateUntil=_iso(NOW + timedelta(minutes=5))), cfg, NOW)
+    assert burst["circulating"] is True and burst["nextCirculateAt"] == ""
+    # No batch, no schedule: idle summaries carry no stir clock at all.
+    assert "nextCirculateAt" not in mixing.batch_state({"state": "idle"}, cfg, NOW)
+
+
+def test_cadence_turned_off_mid_burst_still_stops_the_pumps():
+    # Setting "circulate every" to 0 while a burst runs must end the burst —
+    # the schedule pass may never clear the stop leg and walk away, or the
+    # pumps run until someone notices.
+    from datetime import datetime as _dt, timezone as _tz
+    scheduler = install_scheduler(integration)
+    now = _dt.now(_tz.utc)
+    hass, entry = _station({
+        "storage": {"circulateEveryH": 0, "circulateForMin": 10, "retestAfterDays": 7},
+        "batch": _stored_batch(circulateUntil=(now + timedelta(minutes=8)).isoformat())})
+
+    async def _arm():
+        await integration._async_schedule_mixing_circulation(
+            hass, entry, integration._config_from_entry(entry))
+    run(_arm())
+    stop = next(r for r in scheduler.scheduled
+                if not r["cancelled"] and 7 * 60 < (r["run_at"] - now).total_seconds() < 9 * 60)
+
+    async def _fire(record):
+        await record["callback"](record["run_at"])
+    run(_fire(stop))
+    assert ("turn_off", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    assert ("turn_off", "switch.mix_pump_b") in _switch_calls(hass, "switch.mix_pump_b")
+    batch = _mix_state(entry)["batch"]
+    assert batch["circulateUntil"] == ""
+    assert batch["nextCirculateAt"] == ""       # cadence 0 = honestly off, no next burst
+
+
+def test_turning_the_cadence_on_heals_a_ready_batch_with_no_schedule():
+    # A batch that went ready while the cadence was 0 has no stir stamp, and
+    # the schedule arms only from stamps — turning circulation on later must
+    # anchor one (the normaliser heals the void on any save), or "on" is a lie.
+    from datetime import datetime as _dt, timezone as _tz
+    install_scheduler(integration)
+    hass, entry = _station({
+        "storage": {"circulateEveryH": 6, "circulateForMin": 10, "retestAfterDays": 7},
+        "batch": _stored_batch(state="ready")})
+    batch = _mix_state(entry)["batch"]
+    hours_out = (_dt.fromisoformat(batch["nextCirculateAt"])
+                 - _dt.now(_tz.utc)).total_seconds() / 3600.0
+    assert 5.9 < hours_out < 6.1
+    # And with the cadence off, the void stays honestly empty — no phantom stir.
+    hass2, entry2 = _station({
+        "storage": {"circulateEveryH": 0, "circulateForMin": 10, "retestAfterDays": 7},
+        "batch": _stored_batch(state="ready")})
+    assert _mix_state(entry2)["batch"]["nextCirculateAt"] == ""
+
+
 def test_mark_used_debits_the_vessel_then_closes_the_batch():
     install_scheduler(integration)
     hass, entry = _station({"batch": _stored_batch()})
