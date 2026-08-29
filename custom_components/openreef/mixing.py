@@ -385,7 +385,7 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
             "changedAt": str(stage.get("changedAt") or ""),
         })
     out: dict[str, Any] = {
-        "rateLph": round(rate, 1),
+        "rateLph": round(rate, 2),
         "alertPct": int(max(0.0, _f(rodi.get("alertPct")))),
         "externalVolumeL": round(max(0.0, _f(rodi.get("externalVolumeL"))), 1),
         "calibratedAt": str(rodi.get("calibratedAt") or ""),
@@ -510,12 +510,14 @@ def draw_finish_alert(cfg: Any, dest: str, done_litres: float) -> str | None:
 
 def calibration_rate(litres: Any, elapsed_seconds: Any) -> float:
     """L/h from a timed run. 0 = not computable (nothing measured, or a run too
-    short to mean anything) — callers refuse, never guess."""
+    short to mean anything) — callers refuse, never guess. Two decimals: at
+    the trickle rates small RODI units run, a whole-decimal round moves a
+    long fill's ETA by many minutes."""
     lit = _f(litres)
     secs = _f(elapsed_seconds)
     if lit <= 0 or secs < 60.0:
         return 0.0
-    return round(lit / (secs / 3600.0), 1)
+    return round(lit / (secs / 3600.0), 2)
 
 
 # ---------------------------------------------------------------- guards

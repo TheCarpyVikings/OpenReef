@@ -1017,6 +1017,10 @@ def test_calibration_rate_maths_refuses_noise():
     assert mixing.calibration_rate(2.5, 600) == 15.0      # 2.5 L in 10 min
     assert mixing.calibration_rate(1.0, 30) == 0.0        # under a minute = noise
     assert mixing.calibration_rate(0, 600) == 0.0         # nothing measured
+    # Two decimals: at trickle rates a whole-decimal round moves a long
+    # fill's ETA by many minutes (2.3 L in 28 min is 4.93, not 4.9).
+    assert mixing.calibration_rate(2.3, 1680) == 4.93
+    assert mixing.rodi_status(_cfg(rodi={"rateLph": 4.93}), NOW)["rateLph"] == 4.93
 
 
 def test_filter_stages_report_their_own_lives():

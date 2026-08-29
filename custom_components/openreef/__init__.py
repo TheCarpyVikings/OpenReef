@@ -1594,7 +1594,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
     raw_cal = raw_rodi.get("calibration") if isinstance(raw_rodi.get("calibration"), dict) else {}
     draw_dest = str(raw_draw.get("destination") or "store")
     mix_cfg["rodi"] = {
-        "rateLph": round(_awc_num(raw_rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH), 1),
+        "rateLph": round(_awc_num(raw_rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH), 2),
         "fillCapMin": int(_awc_num(raw_rodi.get("fillCapMin"),
                                    MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)),
         "alertPct": int(_awc_num(raw_rodi.get("alertPct"), 80, 0, 99)),
@@ -14837,7 +14837,7 @@ async def websocket_mixing_calibrate(
                         config, "Mixing station: flow calibration too short to "
                         "trust — rate unchanged", "warning")
                 else:
-                    rate = round(min(rate, MIXING_RODI_RATE_MAX_LPH), 1)
+                    rate = round(min(rate, MIXING_RODI_RATE_MAX_LPH), 2)
                     rodi["rateLph"] = rate
                     rodi["calibratedAt"] = datetime.now(timezone.utc).isoformat()
                     _mixing_add_processed(cfg, litres)

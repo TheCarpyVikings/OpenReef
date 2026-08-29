@@ -23385,8 +23385,8 @@ const rigSteps = [
       ${switchRow("mixPumpB", "Mixing pump 2", "the second powerhead — optional")}
       ${switchRow("heater", "Heater", "heats BEFORE the salt goes in")}
       <div class="mini-grid">
-        <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.5" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
-        <label>Fill cap (minutes)<input type="number" min="1" step="5" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
+        <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.01" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
+        <label>Fill cap (minutes)<input type="number" min="1" step="1" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
         <label>Near-full alert (%, 0 = off)<input type="number" min="0" max="99" step="5" data-scope="mixing-rodi" data-field="alertPct" value="${Number(rodi.alertPct) || 0}"></label>
         <label>T-off container volume (L, 0 = no T-off alert)<input type="number" min="0" step="1" data-scope="mixing-rodi" data-field="externalVolumeL" value="${Number(rodi.externalVolumeL) || 0}"></label>
       </div>

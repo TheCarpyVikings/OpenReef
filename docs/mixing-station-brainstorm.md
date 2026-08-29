@@ -330,6 +330,18 @@ real bugs fell out of tracing his question:
   `now + every_h` on any save (mid-burst untouched; `circulateUntil` owns
   that moment). Stamps stay the schedule; the void just can't survive a save.
 
+## §21 The rate earns its decimals (0.7.100)
+
+Reece calibrated for real and the browser threw both inputs back at him.
+
+- **Rate to 2 dp everywhere**: `calibration_rate` (engine), the calibrate-WS
+  round, the normaliser clamp and `rodi_status` all round to 2 decimals. At
+  trickle rates a whole-decimal round moves a long fill's ETA by many
+  minutes (4.93 vs 4.9 L/h is ~20 min across a 50 L fill).
+- **Input grids fixed**: the rate box was `step=0.5` — it refused the real
+  4.9; now `step=0.01`. The fill cap was `min=1 step=5`, a grid anchored at
+  1 that made 120 invalid ("nearest are 116 and 121"); now by the minute.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

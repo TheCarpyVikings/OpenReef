@@ -769,4 +769,17 @@ test("the stir schedule shows its face — next stir, the self-flipping Store ch
     "settings must name 0 as the off switch");
 });
 
+test("settings accepts real-world numbers — 2 dp rates, by-the-minute fill cap", async () => {
+  const body = (await mixingPanel())._mixingSettingsBody(mixConfig({ rodi: {
+    rateLph: 4.93, fillCapMin: 120, alertPct: 80, externalVolumeL: 0, filters: [],
+  } }));
+  const rate = body.match(/<input[^>]*data-field="rateLph"[^>]*>/)[0];
+  assert(rate.includes('step="0.01"'),
+    "the rate input must accept 2 dp (a real 4.93 L/h was refused by step=0.5)");
+  assert(rate.includes('value="4.93"'), "the stored 2 dp rate did not render");
+  const cap = body.match(/<input[^>]*data-field="fillCapMin"[^>]*>/)[0];
+  assert(cap.includes('step="1"'),
+    "the fill cap must move by the minute (120 sat off the min=1 step=5 grid)");
+});
+
 runTests();
