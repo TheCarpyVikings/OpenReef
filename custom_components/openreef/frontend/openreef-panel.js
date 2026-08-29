@@ -23089,6 +23089,7 @@ const rigSteps = [
       body = `
         <p class="muted">Calibration run — <strong>${this._format(rodi.calibration.elapsedMin, 1)} min</strong> so far.
           Let it run into a container you can measure, then enter what it collected.</p>
+        ${Number(rodi.flushSeconds) > 0 ? `<small class="awc-hint">The first ${Number(rodi.flushSeconds)} s is your unit's auto-flush — discounted from the maths automatically, so don't subtract it yourself.</small>` : ""}
         <div class="mini-grid">
           <label>Measured litres<input type="number" min="0" step="0.1" data-mixing-cal-litres></label>
           <div style="display:flex;align-items:flex-end;gap:8px;">
@@ -23115,7 +23116,7 @@ const rigSteps = [
           <button class="secondary" data-action="mixing-cal-start" ${disabled}>Calibrate flow</button>
         </div>
         <small class="awc-hint">Fill until full runs to the float valve (the fill cap is the backstop). ${rate > 0
-          ? `Flow rate: ${this._format(rate, 1)} L/h${rodi?.calibratedAt
+          ? `Flow rate: ${Number(rate)} L/h${rodi?.calibratedAt
             ? ` — calibrated ${new Date(rodi.calibratedAt).toLocaleDateString()}`
             : " — set by hand; a timed calibration makes the litres honest"}.`
           : "Flow rate unknown — timed draws need one (calibrate it, or set it in settings); open-ended fills don't."}</small>`;
@@ -23387,10 +23388,11 @@ const rigSteps = [
       <div class="mini-grid">
         <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.01" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
         <label>Fill cap (minutes)<input type="number" min="1" step="1" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
+        <label>Auto-flush (s, 0 = none)<input type="number" min="0" max="900" step="1" data-scope="mixing-rodi" data-field="flushSeconds" value="${Number(rodi.flushSeconds) || 0}"></label>
         <label>Near-full alert (%, 0 = off)<input type="number" min="0" max="99" step="5" data-scope="mixing-rodi" data-field="alertPct" value="${Number(rodi.alertPct) || 0}"></label>
         <label>T-off container volume (L, 0 = no T-off alert)<input type="number" min="0" step="1" data-scope="mixing-rodi" data-field="externalVolumeL" value="${Number(rodi.externalVolumeL) || 0}"></label>
       </div>
-      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty.</small>
+      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. If your unit auto-flushes to drain before producing, set the flush seconds: that time is discounted from calibration and every metered run, so the flush never counts as water. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty.</small>
       <small class="awc-hint">Filter stages, in flow order — each cartridge tracks its own litres and rated life (0 = untracked; the maker's spec or your own experience sets it). Every litre through the unit counts against every stage.</small>
       ${(Array.isArray(rodi.filters) ? rodi.filters : []).map((f) => `
       <div class="mini-grid">

@@ -132,6 +132,7 @@ from .const import (
     MIXING_FILTER_TYPES,
     MIXING_LITRES_PROCESSED_MAX,
     MIXING_FILL_CAP_MAX_MIN,
+    MIXING_FLUSH_MAX_S,
     MIXING_HEAT_TARGET_MAX_C,
     MIXING_HEAT_TARGET_MIN_C,
     MIXING_LAYOUTS,
@@ -1597,6 +1598,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "rateLph": round(_awc_num(raw_rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH), 2),
         "fillCapMin": int(_awc_num(raw_rodi.get("fillCapMin"),
                                    MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)),
+        "flushSeconds": int(_awc_num(raw_rodi.get("flushSeconds"), 0, 0, MIXING_FLUSH_MAX_S)),
         "alertPct": int(_awc_num(raw_rodi.get("alertPct"), 80, 0, 99)),
         "externalVolumeL": round(_awc_num(raw_rodi.get("externalVolumeL"), 0, 0,
                                           MIXING_VESSEL_MAX_L), 1),
@@ -14153,7 +14155,11 @@ async def _async_mixing_finish_draw(
     rate = _awc_num(rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH)
     target = _awc_num(draw.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
     dest = str(draw.get("destination") or "store")
-    elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0) if started else 0.0
+    # Production hours: the auto-flush ran the clock but made no water, so it
+    # never earns litres — a run stopped inside the flush credits nothing.
+    flush_s = _awc_num(rodi.get("flushSeconds"), 0, 0, MIXING_FLUSH_MAX_S)
+    elapsed_s = max(0.0, (now - started).total_seconds()) if started else 0.0
+    elapsed_h = max(0.0, elapsed_s - flush_s) / 3600.0
     open_ended = target <= 0
     vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
     vessel = vessels.get("rodi" if dest == "store" else "mix")
@@ -14714,9 +14720,12 @@ async def websocket_mixing_rodi_draw(
                                   f"Could not start the RODI booster: {exc}")
             return
         rate = _awc_num(cfg.get("rodi", {}).get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH)
+        flush_s = _awc_num(cfg.get("rodi", {}).get("flushSeconds"), 0, 0, MIXING_FLUSH_MAX_S)
         now = datetime.now(timezone.utc)
         if litres > 0:
-            minutes = litres / rate * 60.0
+            # The auto-flush produces no water, so a timed draw runs flush +
+            # production — otherwise every run comes up a flush short.
+            minutes = flush_s / 60.0 + litres / rate * 60.0
         else:
             minutes = _awc_num(cfg.get("rodi", {}).get("fillCapMin"),
                                MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)
@@ -14727,9 +14736,10 @@ async def websocket_mixing_rodi_draw(
         }
         where = {"store": "the RODI store", "mix": "the vessel"}.get(destination, "the T-off")
         if litres > 0:
+            flush_note = f" incl. the {flush_s:g} s flush" if flush_s > 0 else ""
             _append_activity(
                 config, f"Mixing station: RODI run started — {litres:g} L to {where} "
-                f"(about {minutes:.0f} min at {rate:g} L/h)", "control")
+                f"(about {minutes:.0f} min at {rate:g} L/h{flush_note})", "control")
         else:
             _append_activity(
                 config, f"Mixing station: filling {where} — the float valve is the stop, "
@@ -14826,13 +14836,17 @@ async def websocket_mixing_calibrate(
                 elapsed_s = max(0.0, (datetime.now(timezone.utc) - started).total_seconds()) \
                     if started else 0.0
                 litres = _awc_num(msg.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
-                rate = mixing_engine.calibration_rate(litres, elapsed_s)
+                flush_s = _awc_num(rodi.get("flushSeconds"), 0, 0, MIXING_FLUSH_MAX_S)
+                rate = mixing_engine.calibration_rate(litres, elapsed_s, flush_s)
                 if rate <= 0:
                     # The run is over either way (booster stopped) — record the
                     # failure honestly and leave the stored rate untouched.
-                    failure = ("Not enough to calibrate from — the run must be at "
-                               f"least {MIXING_CAL_MIN_SECONDS} s with measured "
-                               "litres above 0; the rate is unchanged")
+                    flush_note = (f" after the {flush_s:g} s auto-flush"
+                                  if flush_s > 0 else "")
+                    failure = ("Not enough to calibrate from — the run needs at "
+                               f"least {MIXING_CAL_MIN_SECONDS} s of production"
+                               f"{flush_note} with measured litres above 0; "
+                               "the rate is unchanged")
                     _append_activity(
                         config, "Mixing station: flow calibration too short to "
                         "trust — rate unchanged", "warning")
@@ -14841,10 +14855,12 @@ async def websocket_mixing_calibrate(
                     rodi["rateLph"] = rate
                     rodi["calibratedAt"] = datetime.now(timezone.utc).isoformat()
                     _mixing_add_processed(cfg, litres)
+                    flush_note = (f", {flush_s:g} s flush discounted"
+                                  if flush_s > 0 else "")
                     _append_activity(
                         config, f"Mixing station: RODI rate calibrated — {rate:g} L/h "
-                        f"from a {elapsed_s / 60.0:.1f}-min run of {litres:g} L",
-                        "control")
+                        f"from a {elapsed_s / 60.0:.1f}-min run of {litres:g} L"
+                        f"{flush_note}", "control")
             else:
                 _append_activity(
                     config, "Mixing station: flow calibration cancelled — rate unchanged",

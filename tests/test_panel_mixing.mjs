@@ -782,4 +782,28 @@ test("settings accepts real-world numbers — 2 dp rates, by-the-minute fill cap
     "the fill cap must move by the minute (120 sat off the min=1 step=5 grid)");
 });
 
+test("the auto-flush is a setting, a calibration hint, and never water", async () => {
+  const body = (await mixingPanel())._mixingSettingsBody(mixConfig({ rodi: {
+    rateLph: 4.93, fillCapMin: 120, alertPct: 80, externalVolumeL: 0, flushSeconds: 45, filters: [],
+  } }));
+  const flush = body.match(/<input[^>]*data-field="flushSeconds"[^>]*>/);
+  assert(flush, "settings lost the auto-flush field");
+  assert(flush[0].includes('value="45"'), "the stored flush did not render");
+  assert(body.includes("discounted from calibration"), "the hint must explain the discount");
+  // Calibrating with a flush set: the card says the first seconds don't count.
+  const calRodi = (flushSeconds) => ({
+    rateLph: 0, calibratedAt: "", litresProcessed: 0, filters: [], filterDue: false,
+    draw: null, flushSeconds,
+    calibration: { startedAt: new Date().toISOString(), elapsedMin: 1.2 },
+  });
+  const cal = await mixingPanel({}, summaryBlob({ rodi: calRodi(45) }));
+  cal._activeTab = "mixing";
+  assert(cal._mixingTab().includes("The first 45 s is your unit's auto-flush"),
+    "calibrating must name the flush discount");
+  // No flush configured: no phantom hint.
+  const plain = await mixingPanel({}, summaryBlob({ rodi: calRodi(0) }));
+  plain._activeTab = "mixing";
+  assert(!plain._mixingTab().includes("auto-flush —"), "no flush set must mean no flush hint");
+});
+
 runTests();

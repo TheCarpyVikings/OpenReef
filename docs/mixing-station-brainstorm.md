@@ -342,6 +342,28 @@ Reece calibrated for real and the browser threw both inputs back at him.
   4.9; now `step=0.01`. The fill cap was `min=1 step=5`, a grid anchored at
   1 that made 120 invalid ("nearest are 116 and 121"); now by the minute.
 
+## §22 The flush isn't water (0.7.101)
+
+Reece: many RODI units auto-flush to drain for a set time before producing —
+that time corrupts a timed calibration (and every rate × time read). New
+setting `rodi.flushSeconds` (0–900, default 0, "Auto-flush (s, 0 = none)"),
+threaded through EVERY rate × time consumer so they can't drift:
+
+- **`calibration_rate(litres, elapsed, flush)`** — production seconds =
+  elapsed − flush; the 60 s floor applies to PRODUCTION (a run the flush
+  swallows is refused, and the refusal names the flush).
+- **Timed draws budget it**: run length = flush + litres/rate, or every run
+  comes up one flush short of its target.
+- **Crediting discounts it**: finish/stop legs and the live `litresDone`
+  meter production time only — inside the flush window a draw honestly
+  reads 0 L; a run stopped inside the flush credits nothing.
+- **The near-full projection starts after it** (`draw_alert`).
+- Panel: settings field + hint; the calibrating card says "the first N s is
+  your unit's auto-flush — discounted automatically, don't subtract it
+  yourself" so keepers don't double-correct. `rodi_status` exposes
+  `flushSeconds` for that copy. Idle card now prints the raw 2 dp rate
+  (`Number(rate)`, was `_format(rate,1)` — a 0.7.100 straggler).
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

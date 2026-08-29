@@ -1217,6 +1217,84 @@ def test_calibrate_finish_too_short_keeps_the_old_rate():
     assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
 
 
+def test_flush_seconds_never_count_as_water():
+    # Calibration: 10 L over 11 min with a 60 s flush is 10 L in 10 min of
+    # PRODUCTION — 60 L/h, not 54.5. A run the flush swallows is refused.
+    assert mixing.calibration_rate(10, 660, 60) == 60.0
+    assert mixing.calibration_rate(1.0, 100, 60) == 0.0    # 40 s of production = noise
+    # Live-draw progress reads 0 inside the flush window, then meters honestly.
+    cfg = _cfg(rodi={"rateLph": 60, "flushSeconds": 120, "draw": {
+        "active": True, "litres": 0, "destination": "store",
+        "startedAt": _iso(NOW - timedelta(seconds=60)),
+        "endsAt": _iso(NOW + timedelta(minutes=30))}})
+    assert mixing.rodi_status(cfg, NOW)["draw"]["litresDone"] == 0.0
+    cfg["rodi"]["draw"]["startedAt"] = _iso(NOW - timedelta(seconds=120 + 360))
+    assert mixing.rodi_status(cfg, NOW)["draw"]["litresDone"] == 6.0   # 6 min of production
+    assert mixing.rodi_status(cfg, NOW)["flushSeconds"] == 120
+    # The near-full projection starts after the flush too.
+    cfg2 = _cfg(
+        vessels={"rodi": {"volumeLitres": 50, "estimatedLitres": 0},
+                 "mix": {"volumeLitres": 50, "estimatedLitres": 0, "contents": "empty"}},
+        rodi={"rateLph": 60, "flushSeconds": 300, "alertPct": 80, "draw": {
+            "active": True, "litres": 0, "destination": "store",
+            "startedAt": _iso(NOW), "endsAt": _iso(NOW + timedelta(hours=4))}})
+    alert = mixing.draw_alert(cfg2)
+    assert alert is not None
+    minutes = (alert["at"] - NOW).total_seconds() / 60.0
+    assert 44.9 < minutes < 45.1        # 40 L to threshold at 60 L/h = 40 min, + 5 min flush
+
+
+def test_calibrate_finish_discounts_the_configured_flush():
+    install_scheduler(integration)
+    started = datetime.now(timezone.utc) - timedelta(minutes=11)
+    hass, entry = _station(_rodi_over(
+        rateLph=0, flushSeconds=60,
+        calibration={"active": True, "startedAt": _iso(started)}))
+    conn = FakeConnection()
+    run(integration.websocket_mixing_calibrate(
+        hass, conn, {"id": 1, "action": "finish", "litres": 10}))
+    assert conn.results[-1].payload["success"] is True
+    rodi = _mix_state(entry)["rodi"]
+    assert 59.5 <= rodi["rateLph"] <= 60.5      # 10 L in 10 min of production
+    # A run the flush swallows is refused, and the refusal names the flush.
+    started2 = datetime.now(timezone.utc) - timedelta(seconds=70)
+    hass2, entry2 = _station(_rodi_over(
+        rateLph=80, flushSeconds=60,
+        calibration={"active": True, "startedAt": _iso(started2)}))
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_calibrate(
+        hass2, conn2, {"id": 2, "action": "finish", "litres": 2}))
+    payload = conn2.results[-1].payload
+    assert payload["success"] is False
+    assert any("auto-flush" in r for r in payload["reasons"])
+    assert _mix_state(entry2)["rodi"]["rateLph"] == 80.0
+
+
+def test_timed_draw_budgets_the_flush_and_credits_production_only():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station(_rodi_over(rateLph=60, flushSeconds=120))
+    conn = FakeConnection()
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 10, "destination": "store"}))
+    assert conn.results[-1].payload["success"] is True
+    # 10 L at 60 L/h = 10 min of production + 2 min flush = a 12-min leg.
+    stops = [r for r in scheduler.scheduled
+             if not r["cancelled"] and 11 * 60 < (r["run_at"] - now).total_seconds() < 13 * 60]
+    assert len(stops) == 1, "the stop leg must include the flush budget"
+    # Stopped early 8 minutes in: only 6 min of production gets credited.
+    started = _dt.now(_tz.utc) - timedelta(minutes=8)
+    hass2, entry2 = _station(_rodi_over(rateLph=60, flushSeconds=120, draw={
+        "active": True, "litres": 0, "destination": "store",
+        "startedAt": _iso(started), "endsAt": _iso(started + timedelta(minutes=240))}))
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_rodi_stop(hass2, conn2, {"id": 2}))
+    state = _mix_state(entry2)
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 46.0   # 40 + 6 min at 60 L/h
+    assert state["rodi"]["litresProcessed"] == 6.0
+
+
 def test_calibration_cap_cancels_a_forgotten_run():
     scheduler = install_scheduler(integration)
     hass, entry = _station()

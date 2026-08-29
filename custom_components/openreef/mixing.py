@@ -386,6 +386,7 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
         })
     out: dict[str, Any] = {
         "rateLph": round(rate, 2),
+        "flushSeconds": int(max(0.0, _f(rodi.get("flushSeconds")))),
         "alertPct": int(max(0.0, _f(rodi.get("alertPct")))),
         "externalVolumeL": round(max(0.0, _f(rodi.get("externalVolumeL"))), 1),
         "calibratedAt": str(rodi.get("calibratedAt") or ""),
@@ -403,7 +404,11 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
         target = max(0.0, _f(draw.get("litres")))
         started = _parse_iso(draw.get("startedAt"))
         ends = _parse_iso(draw.get("endsAt"))
-        elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0) if started else 0.0
+        # Production time only: the auto-flush runs the clock but makes no
+        # water — inside the flush window litresDone honestly reads 0.
+        flush_s = max(0.0, _f(rodi.get("flushSeconds")))
+        elapsed_s = max(0.0, (now - started).total_seconds()) if started else 0.0
+        elapsed_h = max(0.0, elapsed_s - flush_s) / 3600.0
         # Open-ended fill (target 0): no percent, no promise — litresDone only
         # when a rate makes it honest; endsAt is the fill-cap backstop.
         done = rate * elapsed_h if rate > 0 else None
@@ -468,7 +473,10 @@ def draw_alert(cfg: Any) -> dict[str, Any] | None:
             return None
         remaining_to_threshold = ext_vol * pct / 100.0
         name = "T-off container"
-    at = started + timedelta(hours=max(0.0, remaining_to_threshold) / rate)
+    # The flush produces nothing, so the projection starts after it.
+    flush_s = max(0.0, _f(rodi.get("flushSeconds")))
+    at = (started + timedelta(seconds=flush_s)
+          + timedelta(hours=max(0.0, remaining_to_threshold) / rate))
     target = _f(draw.get("litres"))
     ends = _parse_iso(draw.get("endsAt"))
     # A TIMED draw that stops before the threshold never gets there — the
@@ -508,13 +516,16 @@ def draw_finish_alert(cfg: Any, dest: str, done_litres: float) -> str | None:
             f"{ext_vol:g} L.")
 
 
-def calibration_rate(litres: Any, elapsed_seconds: Any) -> float:
-    """L/h from a timed run. 0 = not computable (nothing measured, or a run too
-    short to mean anything) — callers refuse, never guess. Two decimals: at
-    the trickle rates small RODI units run, a whole-decimal round moves a
-    long fill's ETA by many minutes."""
+def calibration_rate(litres: Any, elapsed_seconds: Any, flush_seconds: Any = 0) -> float:
+    """L/h from a timed run, with the unit's auto-flush discounted — those
+    seconds ran the clock but produced no water, and dividing by them would
+    understate the true rate on every unit that flushes. 0 = not computable
+    (nothing measured, or under a minute of PRODUCTION once the flush is
+    subtracted) — callers refuse, never guess. Two decimals: at the trickle
+    rates small RODI units run, a whole-decimal round moves a long fill's
+    ETA by many minutes."""
     lit = _f(litres)
-    secs = _f(elapsed_seconds)
+    secs = _f(elapsed_seconds) - max(0.0, _f(flush_seconds))
     if lit <= 0 or secs < 60.0:
         return 0.0
     return round(lit / (secs / 3600.0), 2)

@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.100"
+INTEGRATION_VERSION = "0.7.101"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -365,7 +365,8 @@ MIXING_RODI_RATE_MAX_LPH = 500.0          # sanity ceiling on a configured RODI 
 # flow calibration and the filter-litres ledger it feeds.
 MIXING_DRAW_DESTINATIONS = ("store", "mix", "external")
 MIXING_CAL_CAP_MIN = 30                   # a calibration run into a jug is short; past this we cancel it
-MIXING_CAL_MIN_SECONDS = 60               # under a minute the rate maths is noise, not data
+MIXING_CAL_MIN_SECONDS = 60               # under a minute of PRODUCTION the rate maths is noise, not data
+MIXING_FLUSH_MAX_S = 900                  # ceiling on a unit's auto-flush (flush-to-drain before producing)
 MIXING_FILTER_RATED_MAX_L = 500000.0      # sanity ceiling on a membrane/filter litre rating
 MIXING_LITRES_PROCESSED_MAX = 1000000.0   # sanity ceiling on the lifetime litres ledger
 # Filters v2: every stage of the unit tracked on its own — a 5-stage keeper
@@ -1659,6 +1660,10 @@ DEFAULT_CORE_CONFIG = {
         "rodi": {
             "rateLph": 0,                       # 0 = unknown ⇒ no fill ETA shown
             "fillCapMin": MIXING_FILL_CAP_DEFAULT_MIN,
+            # Auto-flush: seconds the unit flushes to drain before producing
+            # water. Discounted from calibration and every metered run — the
+            # flush is real time but not real water. 0 = the unit has none.
+            "flushSeconds": 0,
             # Near-full heads-up during a RODI run (rate-projected, so it needs
             # a known rate): alertPct 0 = off. externalVolumeL sizes the T-off
             # container (ATO reservoir) — the alert assumes it starts empty.
