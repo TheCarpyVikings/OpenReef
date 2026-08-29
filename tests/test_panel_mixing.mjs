@@ -515,8 +515,82 @@ test("the filter train draws a canister per stage and shouts only when due", asy
   const bare = await mixingPanel();
   bare._activeTab = "mixing";
   const bareHtml = bare._mixingTab();
-  assert(bareHtml.includes("add your filter stages"), "no-stage setups lost the settings hint");
+  assert(bareHtml.includes(">Add filter stages<"), "no-stage setups lost the settings affordance");
   assert(!bareHtml.includes('rx="7"'), "no-stage setups drew phantom canisters");
+});
+
+// --- The 0.7.97 layout: hero cards up top, sections in the water's order ----
+
+test("hero cards read in the water's flow order and jump to their sections", async () => {
+  const panel = await mixingPanel({}, summaryBlob({
+    batch: { status: "idle", contents: "rodi", remainingLitres: 0 },
+    levels: {
+      rodi: { litres: 40, volumeLitres: 50, percent: 80, estimated: true },
+      mix: { litres: 40, volumeLitres: 50, percent: 80, contents: "rodi", estimated: true },
+    },
+    rodi: { rateLph: 120, calibratedAt: "2026-08-20T00:00:00+00:00", litresProcessed: 122,
+            filters: FILTER_SET, filterDue: true, draw: null, calibration: null },
+  }));
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  const grid = html.slice(html.indexOf('class="summary-grid"'), html.indexOf("or-mixing-live"));
+  assert(grid.length > 0, "the hero summary grid went missing");
+  const order = [...grid.matchAll(/data-scroll="or-mixing-([a-z]+)"/g)].map((m) => m[1]);
+  assert(JSON.stringify(order) === JSON.stringify(["rodi", "transfer", "vessel", "filters"]),
+    `hero cards out of flow order: ${order.join(" → ")}`);
+  assert(/120(\.0)? L\/h/.test(grid), "the unit card lost its calibrated rate");
+  assert(/40(\.0)? L RODI/.test(grid), "the vessel card lost its RODI litres");
+  assert(grid.includes("Service due"), "a due filter train must headline on its hero card");
+  assert(grid.includes('summary-card warning'), "the due filters card must wear warning");
+  noPlaceholders(grid, "hero cards");
+  // Single layout: no store card, three heroes.
+  const single = await mixingPanel({ layout: "single" }, summaryBlob({
+    levels: { mix: { litres: 0, volumeLitres: 50, percent: 0, contents: "empty", estimated: true } },
+  }));
+  single._activeTab = "mixing";
+  const singleGrid = single._mixingTab().match(/summary-card/g) || [];
+  assert(singleGrid.length === 3, `single layout should show 3 hero cards, got ${singleGrid.length}`);
+});
+
+test("the page reads in flow order — make, move, salt, health, guide", async () => {
+  const panel = await mixingPanel();
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  const at = (s) => { const i = html.indexOf(s); assert(i >= 0, `section missing: ${s}`); return i; };
+  assert(at("Make water") < at("Move water"), "the RODI unit must lead — water is made first");
+  assert(at("Move water") < at("Salt &amp; mix"), "transfer comes before the mix run");
+  assert(at("Salt &amp; mix") < at("RODI unit health"), "the mix run comes before unit health");
+  assert(at("RODI unit health") < at("Salt dose guide"), "the dose guide closes the page");
+  assert(at('id="or-mixing-live"') < at('id="or-mixing-rodi"'), "the live view anchors the page");
+  assert(/<details>[\s\S]{0,200}Correct the levels/.test(html), "level corrections lost their fold");
+  assert(html.includes('data-mixing-level="rodi"'), "the fold must still hold the correction inputs");
+  noPlaceholders(html, "flow-order tab");
+});
+
+test("the transfer card owns the move — and says why when it's paused", async () => {
+  const transferSlice = (h) => h.slice(h.indexOf('id="or-mixing-transfer"'), h.indexOf('id="or-mixing-vessel"'));
+  const idle = await mixingPanel();
+  idle._activeTab = "mixing";
+  let slice = transferSlice(idle._mixingTab());
+  assert(slice.includes('data-action="mixing-transfer"'), "idle transfer lost its log form");
+  assert(slice.includes("Move water"), "the transfer card lost its eyebrow");
+  // Standing saltwater: the guard shows itself instead of an input.
+  const stored = await mixingPanel({ batch: { state: "storing" } }, summaryBlob({
+    batch: { status: "storing", contents: "salt", remainingLitres: 38, loggedPpt: 35,
+             stages: ["heating", "salting", "ready", "storing"] },
+    levels: { rodi: { litres: 40, volumeLitres: 50, percent: 80, estimated: true },
+              mix: { litres: 38, volumeLitres: 50, percent: 76, contents: "salt", estimated: true } },
+  }));
+  stored._activeTab = "mixing";
+  slice = transferSlice(stored._mixingTab());
+  assert(slice.includes("Transfers are paused"), "standing salt must pause the card");
+  assert(!slice.includes("data-mixing-transfer"), "a paused card must not offer the input");
+  noPlaceholders(slice, "paused transfer card");
+  // Single layout has no store — and no transfer card at all.
+  const single = await mixingPanel({ layout: "single" });
+  single._activeTab = "mixing";
+  assert(!single._mixingTab().includes("or-mixing-transfer"),
+    "single layout must not draw a transfer card");
 });
 
 test("settings offers the per-stage filter editor and the alert fields", async () => {

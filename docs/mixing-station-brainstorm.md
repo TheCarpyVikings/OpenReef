@@ -265,6 +265,25 @@ spent stage. Settings: per-stage editor (label, type, rated litres, remove) + Ad
 Legacy `filterRatedL` counters migrate into one tracked stage exactly once; the old
 keys are read for migration and never emitted again.
 
+## §18 The page in flow order — hero cards (0.7.97)
+
+The tab grew feature-by-feature and read back to front (RODI — the thing you run
+FIRST — sat under the mix vessel). Panel-only rework, no config or WS change:
+
+- **Hero cards** (house `summary-grid` / `_missionSummaryCard`): one glance-card
+  per station element, left→right in the order the water travels — RODI unit →
+  RODI store (dual only) → Mix vessel → Filters. Values come straight from the
+  summary; each card scrolls to its section (`or-mixing-*` anchors).
+- **Sections in the same order**: Live view (diagram; the level-correction
+  inputs fold into a `<details>` — utility, not headline) → *Make water* (RODI
+  unit runs/calibration) → *Move water* (transfer, dual only) → *Salt & mix*
+  (the mix run: rail, controls, circulation) → *RODI unit health* (the filter
+  train on its own card) → Salt dose guide. Notices (refusals, retest-due) pin
+  to the top of the page.
+- **Transfer as its own card** — and when the vessel is spoken for it says WHY
+  transfers are paused (standing saltwater / heating / salting → dilution lives
+  on the mix card) instead of hiding. The guard, visible.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

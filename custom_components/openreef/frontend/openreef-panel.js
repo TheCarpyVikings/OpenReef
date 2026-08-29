@@ -22721,6 +22721,8 @@ const rigSteps = [
     const status = batch.status || "idle";
     const rodi = sum?.rodi || {};
     const sgUnit = this._mixingUnit() === "sg";
+    const contents = batch.contents || levels?.mix?.contents || "empty";
+    const vesselL = Number(levels?.mix?.litres) || 0;
     // Refetch whenever the cache has gone stale — live batches and RODI runs
     // need their clocks, and even an idle tab must pick up a settings save
     // made elsewhere (the stamp in _mixingLoadSummary throttles this to one
@@ -22744,8 +22746,197 @@ const rigSteps = [
         </div>
       </div>`;
 
-    // The progress rail: the stages a MIX RUN walks. Fill and Transfer are
-    // not on it any more — they are their own processes (doc §15).
+    // Anything that needs the keeper's eyes sits above the fold — a refusal
+    // reason or an aging batch must never hide below the filter train.
+    const notices = `
+      ${this._mixingMessage ? `<div class="notice warning-notice">${this._escape(this._mixingMessage)}</div>` : ""}
+      ${batch.retestDue ? `<div class="notice warning-notice"><strong>Retest due.</strong> This batch has aged past its window — check salinity before it touches the tank.</div>` : ""}`;
+
+    const doseCard = `
+      <article class="panel stack">
+        <div class="section-head"><div><p class="eyebrow">Salt dose guide</p>
+          <h3>${this._escape(sum?.brand?.label || "—")} → ${sgUnit ? `${sum?.targetSg || "—"} SG` : `${this._format(sum?.targetPpt, 1)} ppt`}</h3></div></div>
+        ${dose.available
+          ? `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`
+          : `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`}
+        <small class="awc-hint">Mix window: ${this._format(sum?.mixHours, 1)} h${sum?.brand?.useWithinH ? ` · this brand wants the batch used within ~${this._format(sum.brand.useWithinH, 0)} h of mixing` : ""}.</small>
+      </article>`;
+
+    // The live picture stays the page's anchor; the correction inputs are a
+    // utility, not a headline — they fold away until the estimate needs a nudge.
+    const diagramCard = `
+      <article class="panel stack" id="or-mixing-live">
+        <div class="section-head"><div><p class="eyebrow">Live view</p><h3>${this._escape(this._mixingStatusLabel(status))}</h3></div></div>
+        ${this._mixingDiagramSvg(mix, batch, levels, rodi)}
+        <small class="awc-hint">Levels are estimates moved by confirmed events — bind level sensors in settings when the hardware lands and the picture goes real.</small>
+        <details>
+          <summary class="hint">Correct the levels</summary>
+          <div class="mini-grid" style="margin-top:10px;">
+            ${mix.layout !== "single" ? `
+            <label>Correct RODI store (L)
+              <input type="number" min="0" step="1" data-mixing-level="rodi" placeholder="${levels?.rodi ? this._format(levels.rodi.litres, 1) : ""}">
+            </label>
+            <div style="display:flex;align-items:flex-end;"><button class="secondary compact-button" data-action="mixing-set-level" data-id="rodi" ${this._busy ? "disabled" : ""}>Set level</button></div>` : ""}
+            <label>Correct ${mix.layout === "single" ? "vessel" : "mix vessel"} (L)
+              <input type="number" min="0" step="1" data-mixing-level="mix" placeholder="${levels?.mix ? this._format(levels.mix.litres, 1) : ""}">
+            </label>
+            <div style="display:flex;align-items:flex-end;"><button class="secondary compact-button" data-action="mixing-set-level" data-id="mix" ${this._busy ? "disabled" : ""}>Set level</button></div>
+          </div>
+        </details>
+      </article>`;
+
+    // The page reads the way the water travels: make it (RODI unit), move it
+    // (transfer, dual only), salt it (mix vessel), then the unit's own health
+    // and the reference guide. Hero cards up top jump to each section.
+    return `<section class="stack">
+      ${head}${notices}
+      ${this._mixingHeroCards(mix, batch, levels, rodi, status)}
+      ${diagramCard}
+      ${this._mixingRodiCard(mix, rodi)}
+      ${this._mixingTransferCard(mix, status, contents, vesselL, levels)}
+      ${this._mixingVesselCard(mix, sum, batch, levels, status)}
+      ${this._mixingFilterCard(rodi)}
+      ${doseCard}
+    </section>`;
+  }
+
+  // The hero row: one glance-card per station element, left to right in the
+  // order the water travels — unit → store → vessel → the unit's health.
+  // Every number is the summary's own (the panel never invents a reading);
+  // each card scrolls to the section where the matching controls live.
+  _mixingHeroCards(mix, batch, levels, rodi, status) {
+    const dual = (mix.layout || "dual") !== "single";
+    const contents = batch.contents || levels?.mix?.contents || "empty";
+    const vesselL = Number(levels?.mix?.litres) || 0;
+    const mixClock = batch.mix || {};
+    const cards = [];
+
+    const rate = Number(rodi?.rateLph) || 0;
+    let unitValue = rate > 0 ? `${this._format(rate, 1)} L/h` : "Idle";
+    let unitDetail = rate > 0
+      ? (rodi?.calibratedAt ? "Flow calibrated — litres are honest" : "Flow rate set by hand")
+      : "Flow rate unknown — open-ended fills still work";
+    let unitStatus = rate > 0 ? "ok" : "unknown";
+    if (rodi?.draw) {
+      const d = rodi.draw;
+      unitValue = d.openEnded ? "Filling…"
+        : `${this._format(d.litresDone, 1)} of ${this._format(d.litres, 1)} L`;
+      unitDetail = { store: "Running into the RODI store", mix: "Running into the vessel" }[d.destination]
+        || "Running out the T-off (ATO / external)";
+      unitStatus = "ok";
+    } else if (rodi?.calibration) {
+      unitValue = "Calibrating";
+      unitDetail = `Timed run — ${this._format(rodi.calibration.elapsedMin, 1)} min so far`;
+      unitStatus = "ok";
+    }
+    cards.push(this._missionSummaryCard("RODI unit", unitValue, unitDetail,
+      unitStatus, "mixing", { scroll: "or-mixing-rodi" }));
+
+    if (dual) {
+      const st = levels?.rodi;
+      cards.push(this._missionSummaryCard("RODI store",
+        st ? `${this._format(st.litres, 1)} L` : "—",
+        st ? `${this._format(st.percent, 0)}% full · estimated` : "No reading yet",
+        st ? "ok" : "unknown", "mixing", { scroll: "or-mixing-transfer" }));
+    }
+
+    let vesselValue = "Empty";
+    let vesselDetail = "Fill or transfer RODI to begin";
+    let vesselStatus = "unknown";
+    if (status === "idle" && contents === "rodi" && vesselL > 0) {
+      vesselValue = `${this._format(vesselL, 1)} L RODI`;
+      vesselDetail = "Ready to mix whenever you are — it keeps";
+      vesselStatus = "ok";
+    } else if (status === "idle" && contents === "salt" && vesselL > 0) {
+      vesselValue = `${this._format(vesselL, 1)} L salt`;
+      vesselDetail = "Unfinished saltwater standing — mix or discard";
+      vesselStatus = "warning";
+    } else if (status === "heating") {
+      vesselValue = "Heating";
+      vesselDetail = `Warming ${this._format(vesselL, 1)} L to temperature`;
+      vesselStatus = "ok";
+    } else if (status === "salting") {
+      vesselValue = mixClock.testUnlocked ? "Test due" : "Mixing";
+      vesselDetail = mixClock.testUnlocked
+        ? "The mix window is done — test salinity"
+        : `${this._format(mixClock.hoursLeft, 1)} h left in the mix window`;
+      vesselStatus = mixClock.testUnlocked ? "warning" : "ok";
+    } else if (status === "ready" || status === "storing") {
+      vesselValue = `${this._format(batch.remainingLitres, 1)} L ready`;
+      vesselDetail = batch.retestDue ? "Aged past its window — retest before use"
+        : batch.loggedPpt ? "Tested saltwater on hand" : "Batch on hand";
+      vesselStatus = batch.retestDue ? "warning" : "ok";
+    } else if (status === "fault") {
+      vesselValue = "Fault";
+      vesselDetail = "The run stopped itself — check the activity log";
+      vesselStatus = "critical";
+    }
+    cards.push(this._missionSummaryCard("Mix vessel", vesselValue, vesselDetail,
+      vesselStatus, "mixing", { scroll: "or-mixing-vessel" }));
+
+    const filters = Array.isArray(rodi?.filters) ? rodi.filters : [];
+    const processed = Number(rodi?.litresProcessed) || 0;
+    if (filters.length) {
+      const tracked = filters.filter((f) => f.percentLeft != null);
+      const dueNames = filters.filter((f) => f.due).map((f) => f.label || f.type);
+      const worst = tracked.length ? Math.min(...tracked.map((f) => Number(f.percentLeft))) : null;
+      cards.push(this._missionSummaryCard("Filters",
+        dueNames.length ? "Service due" : worst != null ? `${this._format(worst, 0)}% left` : `${filters.length} stage${filters.length === 1 ? "" : "s"}`,
+        dueNames.length ? `${dueNames.join(", ")} past the rated litres`
+          : worst != null ? `Worst stage of ${filters.length} · ${this._format(processed, 0)} L metered`
+            : `No rated lives set · ${this._format(processed, 0)} L metered`,
+        dueNames.length ? "warning" : worst != null ? "ok" : "unknown",
+        "mixing", { scroll: "or-mixing-filters" }));
+    } else {
+      cards.push(this._missionSummaryCard("Filters", "Not tracked",
+        "Add your stages in settings — each earns its own clock", "unknown",
+        "mixing", { scroll: "or-mixing-filters" }));
+    }
+    return `<div class="summary-grid">${cards.join("")}</div>`;
+  }
+
+  // Move water: the gravity transfer logged as its own act (dual layout only —
+  // single-vessel keepers fill in place). When the vessel is spoken for, the
+  // card says WHY transfers are paused instead of hiding — the guard, visible.
+  _mixingTransferCard(mix, status, contents, vesselL, levels) {
+    if ((mix.layout || "dual") === "single") return "";
+    const disabled = this._busy ? "disabled" : "";
+    let body;
+    if (status === "idle" && !(contents === "salt" && vesselL > 0)) {
+      body = `
+        <p class="muted">Open the ball valve, let gravity move the RODI across, then log the litres — OpenReef moves the ledgers.</p>
+        <div class="mini-grid">
+          <label>Litres transferred from the store
+            <input type="number" min="1" step="1" data-mixing-transfer placeholder="${this._format(Number(levels?.rodi?.litres) || 0, 0)}"></label>
+          <div style="display:flex;align-items:flex-end;"><button class="primary" data-action="mixing-transfer" ${disabled}>Log transfer →</button></div>
+        </div>`;
+    } else {
+      const why = status === "heating"
+        ? `the vessel is warming ${this._format(vesselL, 1)} L for a batch`
+        : status === "salting"
+          ? "a batch is salting — dilution top-ups live on the mix card below"
+          : `${this._format(vesselL, 1)} L of saltwater is standing in the vessel — use it or discard it first`;
+      body = `<p class="muted">Transfers are paused: ${why}. Fresh RODI never lands on a batch by accident.</p>`;
+    }
+    return `
+      <article class="panel stack" id="or-mixing-transfer">
+        <div class="section-head"><div><p class="eyebrow">Move water</p><h3>Store → mix vessel</h3></div></div>
+        ${body}
+      </article>`;
+  }
+
+  // Salt & mix: the MIX RUN's own card — the stage rail, the one next action,
+  // and the storing rhythm. Fill and transfer live on their own cards now
+  // (doc §15); only salting's dilution top-up stays here, because correcting
+  // a too-salty batch is part of the run, not a separate errand.
+  _mixingVesselCard(mix, sum, batch, levels, status) {
+    const sgUnit = this._mixingUnit() === "sg";
+    const dual = (mix.layout || "dual") !== "single";
+    const contents = batch.contents || levels?.mix?.contents || "empty";
+    const vesselL = Number(levels?.mix?.litres) || 0;
+    const mixClock = batch.mix || {};
+    const disabled = this._busy ? "disabled" : "";
+
     const stages = Array.isArray(batch.stages) && batch.stages.length
       ? batch.stages : ["salting", "ready", "storing"];
     const activeIdx = stages.indexOf(status);
@@ -22757,9 +22948,6 @@ const rigSteps = [
           </span>`).join("")}
       </div>`;
 
-    const contents = batch.contents || levels?.mix?.contents || "empty";
-    const vesselL = Number(levels?.mix?.litres) || 0;
-    const mixClock = batch.mix || {};
     const statusDetail = status === "idle"
       ? (contents === "rodi" && vesselL > 0
         ? `${this._format(vesselL, 1)} L of RODI water in the vessel — mix whenever you're ready. It keeps.`
@@ -22774,20 +22962,16 @@ const rigSteps = [
             ? `${this._format(batch.remainingLitres, 1)} L on hand${batch.loggedPpt ? ` · tested ${sgUnit && batch.loggedSg ? `${batch.loggedSg} SG` : `${this._format(batch.loggedPpt, 1)} ppt`}` : ""}${batch.retestDue ? " · retest before use" : ""}`
             : this._mixingStatusLabel(status);
 
-    // Contextual controls — each process on its own. The salinity field
-    // speaks the keeper's unit; SG placeholders come converted from the
-    // backend (targetSg), never computed here.
-    const disabled = this._busy ? "disabled" : "";
-    const dual = (mix.layout || "dual") !== "single";
+    // Contextual controls — the salinity field speaks the keeper's unit; SG
+    // placeholders come converted from the backend (targetSg), never computed
+    // here. The dilution row is salting-only: a too-salty batch comes back
+    // down with fresh RODI, and that top-up belongs to the run.
     const salinityField = (labelText) => sgUnit
       ? `<label>${labelText} (SG)<input type="number" min="1.001" max="1.1" step="0.001" data-mixing-ppt placeholder="${sum?.targetSg || "1.0264"}"></label>`
       : `<label>${labelText} (ppt)<input type="number" min="0" max="60" step="0.1" data-mixing-ppt placeholder="${this._format(sum?.targetPpt, 1)}"></label>`;
-    // The transfer row: gravity + the keeper's ball valve did the moving —
-    // this logs the litres. Offered while idle (get water in) and while
-    // salting (dilution is how a too-salty batch comes back down).
-    const transferRow = dual ? `
+    const dilutionRow = dual && status === "salting" ? `
         <div class="mini-grid">
-          <label>${status === "salting" ? "RODI added to dilute (L)" : "Litres transferred from the store"}
+          <label>RODI added to dilute (L)
             <input type="number" min="1" step="1" data-mixing-transfer placeholder="${this._format(Number(levels?.rodi?.litres) || 0, 0)}"></label>
           <div style="display:flex;align-items:flex-end;"><button class="secondary" data-action="mixing-transfer" ${disabled}>Log transfer →</button></div>
         </div>` : "";
@@ -22796,21 +22980,20 @@ const rigSteps = [
     if (status === "idle") {
       const canMix = contents === "rodi" && vesselL > 0;
       controls = `
-        ${transferRow}
         <div class="button-row">
           ${canMix ? `<button class="primary" data-action="mixing-start" ${disabled}>Start mixing ${this._format(vesselL, 1)} L</button>` : ""}
           ${contents === "salt" && vesselL > 0 ? abortBtn : ""}
         </div>
         ${canMix ? "" : `<small class="awc-hint">${dual
-          ? "Open the valve, let gravity move the RODI across, and log the litres — mixing unlocks once the vessel holds water."
-          : "Fill the vessel from the RODI unit below — mixing unlocks once it holds water."}</small>`}`;
+          ? "Move RODI across on the transfer card above — mixing unlocks once the vessel holds water."
+          : "Fill the vessel from the RODI unit above — mixing unlocks once it holds water."}</small>`}`;
     } else if (status === "heating") {
       controls = `<div class="button-row"><button class="primary" data-action="mixing-advance" ${disabled}>At temperature →</button>${abortBtn}</div>`;
     } else if (status === "salting") {
       controls = `
         <div class="mini-grid">${salinityField("Measured salinity")}</div>
         <div class="button-row"><button class="primary" data-action="mixing-log" ${disabled}>Log test</button>${abortBtn}</div>
-        ${transferRow}`;
+        ${dilutionRow}`;
     } else if (status === "ready" || status === "storing") {
       const hasRetestTask = !!this._config?.maintenance?.tasks?.mixing_retest;
       controls = `
@@ -22827,6 +23010,7 @@ const rigSteps = [
     } else {
       controls = `<div class="button-row">${abortBtn}</div>`;
     }
+
     // The storing rhythm, told honestly: what the schedule is, and whether the
     // pumps are stirring right now (the diagram spins off the same flag).
     let circulationLine = "";
@@ -22840,55 +23024,24 @@ const rigSteps = [
         : `<small class="awc-hint">Storage circulation is off (set a cadence in settings to keep the batch stirred).</small>`;
     }
 
-    const statusCard = `
-      <article class="setting-card">
+    return `
+      <article class="panel stack" id="or-mixing-vessel">
         <div class="section-head">
-          <div><p class="eyebrow">Mix vessel</p><h3>${this._escape(status === "idle" && contents === "rodi" && vesselL > 0 ? "RODI water on hand" : this._mixingStatusLabel(status))}</h3></div>
+          <div><p class="eyebrow">Salt &amp; mix</p><h3>${this._escape(status === "idle" && contents === "rodi" && vesselL > 0 ? "RODI water on hand" : this._mixingStatusLabel(status))}</h3></div>
         </div>
         ${rail}
         <p class="muted">${this._escape(statusDetail)}</p>
         ${circulationLine}
-        ${this._mixingMessage ? `<div class="notice warning-notice">${this._escape(this._mixingMessage)}</div>` : ""}
-        ${batch.retestDue ? `<div class="notice warning-notice"><strong>Retest due.</strong> This batch has aged past its window — check salinity before it touches the tank.</div>` : ""}
         ${controls}
         ${mix.simulate ? `<small class="awc-hint">Simulate is on — virtual switches only, nothing real is energised.</small>` : ""}
       </article>`;
-
-    const doseCard = `
-      <article class="setting-card">
-        <div class="section-head"><div><p class="eyebrow">Salt dose guide</p>
-          <h3>${this._escape(sum?.brand?.label || "—")} → ${sgUnit ? `${sum?.targetSg || "—"} SG` : `${this._format(sum?.targetPpt, 1)} ppt`}</h3></div></div>
-        ${dose.available
-          ? `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`
-          : `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`}
-        <small class="awc-hint">Mix window: ${this._format(sum?.mixHours, 1)} h${sum?.brand?.useWithinH ? ` · this brand wants the batch used within ~${this._format(sum.brand.useWithinH, 0)} h of mixing` : ""}.</small>
-      </article>`;
-
-    const diagramCard = `
-      <section class="setting-card">
-        <div class="section-head"><div><p class="eyebrow">Live view</p><h3>${this._escape(this._mixingStatusLabel(status))}</h3></div></div>
-        ${this._mixingDiagramSvg(mix, batch, levels, rodi)}
-        <small class="awc-hint">Levels are estimates moved by confirmed events — bind level sensors in settings when the hardware lands and the picture goes real.</small>
-        <div class="mini-grid">
-          ${mix.layout !== "single" ? `
-          <label>Correct RODI store (L)
-            <input type="number" min="0" step="1" data-mixing-level="rodi" placeholder="${levels?.rodi ? this._format(levels.rodi.litres, 1) : ""}">
-          </label>
-          <div style="display:flex;align-items:flex-end;"><button class="secondary compact-button" data-action="mixing-set-level" data-id="rodi" ${this._busy ? "disabled" : ""}>Set level</button></div>` : ""}
-          <label>Correct ${mix.layout === "single" ? "vessel" : "mix vessel"} (L)
-            <input type="number" min="0" step="1" data-mixing-level="mix" placeholder="${levels?.mix ? this._format(levels.mix.litres, 1) : ""}">
-          </label>
-          <div style="display:flex;align-items:flex-end;"><button class="secondary compact-button" data-action="mixing-set-level" data-id="mix" ${this._busy ? "disabled" : ""}>Set level</button></div>
-        </div>
-      </section>`;
-
-    return `<section class="stack">${head}${diagramCard}${statusCard}${this._mixingRodiCard(mix, rodi)}${doseCard}</section>`;
   }
 
-  // The RODI unit's own card: run it WITHOUT a batch (top the store up, or T
-  // off to the ATO reservoir), calibrate the flow rate from a timed run, and
-  // watch the filter-litres ledger. Litres are metered by rate x time, so an
-  // unknown rate says so instead of guessing.
+  // Make water — the RODI unit's own card: run it WITHOUT a batch (top the
+  // store up, fill the vessel, or T off to the ATO reservoir), and calibrate
+  // the flow rate from a timed run. Litres are metered by rate x time, so an
+  // unknown rate says so instead of guessing. The filter train lives on its
+  // own card below — this one is for running water, that one for unit health.
   _mixingRodiCard(mix, rodi) {
     const dual = (mix.layout || "dual") !== "single";
     const disabled = this._busy ? "disabled" : "";
@@ -22940,6 +23093,20 @@ const rigSteps = [
             : " — set by hand; a timed calibration makes the litres honest"}.`
           : "Flow rate unknown — timed draws need one (calibrate it, or set it in settings); open-ended fills don't."}</small>`;
     }
+    return `
+      <article class="panel stack" id="or-mixing-rodi">
+        <div class="section-head"><div><p class="eyebrow">Make water</p>
+          <h3>${rodi?.draw ? "Drawing RODI…" : rodi?.calibration ? "Calibrating flow…" : "RODI on demand"}</h3></div></div>
+        ${body}
+      </article>`;
+  }
+
+  // The unit's own health: the filter train in flow order, each stage's
+  // remaining life, and the lifetime odometer underneath. Kept apart from
+  // the run controls so "make water" and "how tired is the unit" never
+  // fight for the same card.
+  _mixingFilterCard(rodi) {
+    const disabled = this._busy ? "disabled" : "";
     const processed = Number(rodi?.litresProcessed) || 0;
     const filters = Array.isArray(rodi?.filters) ? rodi.filters : [];
     const dueNames = filters.filter((f) => f.due).map((f) => f.label || f.type);
@@ -22950,18 +23117,22 @@ const rigSteps = [
           : `${this._format(f.litresProcessed, 0)} L through it (no rated life set)`}.</small>
         <button class="secondary compact-button" data-action="mixing-filters-changed" data-id="${this._escape(f.id)}" ${disabled}>Changed</button>
       </div>`).join("");
-    const filterBlock = filters.length ? `
+    const body = filters.length ? `
       ${dueNames.length ? `<div class="notice warning-notice"><strong>Filter service due:</strong> ${this._escape(dueNames.join(", "))} — past the rated litres; TDS creep is next.</div>` : ""}
       ${this._mixingFilterSvg(filters)}
       ${filterRows}
       <small class="awc-hint">Unit lifetime: ${this._format(processed, 0)} L processed.</small>`
-      : `<small class="awc-hint">Track each cartridge's own life — add your filter stages (sediment, carbon, membrane, DI…) in settings. Unit lifetime so far: ${this._format(processed, 0)} L.</small>`;
+      : `
+      <p class="muted">Track each cartridge's own life — sediment, carbon, membrane, DI resin, doubles welcome. Every litre the unit meters counts against every stage.</p>
+      <div class="button-row"><button class="secondary" data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing" ${disabled}>Add filter stages</button></div>
+      <small class="awc-hint">Unit lifetime so far: ${this._format(processed, 0)} L.</small>`;
     return `
-      <article class="setting-card">
-        <div class="section-head"><div><p class="eyebrow">RODI unit</p>
-          <h3>${rodi?.draw ? "Drawing RODI…" : rodi?.calibration ? "Calibrating flow…" : "RODI on demand"}</h3></div></div>
+      <article class="panel stack" id="or-mixing-filters">
+        <div class="section-head">
+          <div><p class="eyebrow">RODI unit health</p><h3>${dueNames.length ? "Filter service due" : "Filter train"}</h3></div>
+          <div class="button-row"><button class="secondary compact-button" data-action="tab" data-id="settings" data-section="mixing" data-scroll="or-section-mixing">Configure</button></div>
+        </div>
         ${body}
-        ${filterBlock}
       </article>`;
   }
 
