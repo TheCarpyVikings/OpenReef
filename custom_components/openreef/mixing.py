@@ -448,9 +448,16 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
 def draw_alert(cfg: Any) -> dict[str, Any] | None:
     """When (and about what) the near-full heads-up should fire for the active
     RODI run — rate-projected, so it is only ever offered when a rate makes it
-    honest. None = nothing to arm (alerts off, no run, no rate, no container
-    volume to measure against, already fired, or a timed draw that ends before
-    the threshold). Returns {"at": datetime, "pct": int, "message": str}."""
+    honest, and once per run. Two candidate stories, EARLIEST WINS:
+
+    - the CONTAINER passing the threshold (store/mix volume, or the T-off
+      container when its volume is set) — the overflow story;
+    - timed draws only: the RUN ITSELF passing the same threshold of its own
+      target — the nearly-done story, so "run 10 L to the T-off" still warns
+      at 8 L even with no container size to measure against.
+
+    None = nothing to arm (alerts off, no run, no rate, already fired, or
+    nothing reachable before the run ends). Returns {"at", "pct", "message"}."""
     cfg = cfg if isinstance(cfg, dict) else {}
     rodi = _rodi_cfg(cfg)
     pct = _f(rodi.get("alertPct"))
@@ -466,38 +473,57 @@ def draw_alert(cfg: Any) -> dict[str, Any] | None:
     if started is None:
         return None
     dest = str(draw.get("destination") or "store")
+    # The flush produces nothing, so every projection starts after it.
+    base = started + timedelta(seconds=max(0.0, _f(rodi.get("flushSeconds"))))
+    target = _f(draw.get("litres"))
+    ends = _parse_iso(draw.get("endsAt"))
+    candidates: list[dict[str, Any]] = []
+
+    remaining_to_threshold = None
+    name = ""
     if dest in ("store", "mix"):
         vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
         vessel = vessels.get("rodi" if dest == "store" else "mix")
         vessel = vessel if isinstance(vessel, dict) else {}
         vol = _f(vessel.get("volumeLitres"))
-        if vol <= 0:
-            return None
-        # Anchors move at finish, so the current anchor IS the start level.
-        level = max(0.0, _f(vessel.get("estimatedLitres")))
-        remaining_to_threshold = vol * pct / 100.0 - level
-        name = "RODI store" if dest == "store" else "mix vessel"
+        if vol > 0:
+            # Anchors move at finish, so the current anchor IS the start level.
+            level = max(0.0, _f(vessel.get("estimatedLitres")))
+            remaining_to_threshold = vol * pct / 100.0 - level
+            name = "RODI store" if dest == "store" else "mix vessel"
     else:
         ext_vol = _f(rodi.get("externalVolumeL"))
-        if ext_vol <= 0:
-            return None
-        remaining_to_threshold = ext_vol * pct / 100.0
-        name = "T-off container"
-    # The flush produces nothing, so the projection starts after it.
-    flush_s = max(0.0, _f(rodi.get("flushSeconds")))
-    at = (started + timedelta(seconds=flush_s)
-          + timedelta(hours=max(0.0, remaining_to_threshold) / rate))
-    target = _f(draw.get("litres"))
-    ends = _parse_iso(draw.get("endsAt"))
-    # A TIMED draw that stops before the threshold never gets there — the
-    # finish check covers the boundary case honestly.
-    if target > 0 and ends is not None and at >= ends:
+        if ext_vol > 0:
+            remaining_to_threshold = ext_vol * pct / 100.0
+            name = "T-off container"
+    if remaining_to_threshold is not None:
+        at = base + timedelta(hours=max(0.0, remaining_to_threshold) / rate)
+        # A TIMED draw that stops before the threshold never gets there — the
+        # finish check covers the boundary case honestly.
+        if not (target > 0 and ends is not None and at >= ends):
+            candidates.append({
+                "at": at, "pct": int(pct),
+                "message": (f"The {name} is passing {pct:g}% full — the RODI "
+                            "run is still going; stop it if that's enough "
+                            "water."),
+            })
+
+    if target > 0:
+        # The run's own finish line: by construction this lands before endsAt
+        # (pct < 100), so it needs no suppression check.
+        where = {"store": "the RODI store", "mix": "the mix vessel"}.get(dest, "the T-off")
+        done = target * pct / 100.0
+        mins_left = (target - done) / rate * 60.0
+        candidates.append({
+            "at": base + timedelta(hours=done / rate), "pct": int(pct),
+            "message": (f"The {target:g} L RODI run to {where} is passing "
+                        f"{pct:g}% ({round(done, 1):g} of {target:g} L) — "
+                        f"about {mins_left:.0f} min to go."),
+        })
+
+    if not candidates:
         return None
-    return {
-        "at": at, "pct": int(pct),
-        "message": (f"The {name} is passing {pct:g}% full — the RODI run is "
-                    "still going; stop it if that's enough water."),
-    }
+    return min(candidates, key=lambda c: c["at"])
 
 
 def draw_finish_alert(cfg: Any, dest: str, done_litres: float) -> str | None:

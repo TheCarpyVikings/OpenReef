@@ -394,6 +394,30 @@ Engine: `rodi_status.calibration` gains `stopped` / `elapsedSeconds` /
 freezes at stop. Hero: "Read the jug" state; hero rate now raw 2 dp.
 One-click finish-while-running still works at the WS level (back-compat).
 
+## §24 The run warns on its own finish line (0.7.103)
+
+Reece: "am I right that I never get an alert on the T-off without a
+container size? …if I select 10 L to T-off, I'd also like an alert when
+the 10 L is 80% complete." He was right — `draw_alert` only measured
+containers, so a timed external draw with no `externalVolumeL` ran silent.
+
+`draw_alert` now weighs TWO candidate stories and fires the EARLIEST
+(still once per run, one `alertedAt` stamp):
+
+- **Container** (unchanged): store/mix volume, or the T-off container when
+  its volume is set — the overflow story; still suppressed when a timed
+  draw ends before reaching it (finish-boundary check covers that edge).
+- **Run** (new, timed draws only): the run passing `alertPct` of its OWN
+  target — "The 10 L RODI run to the T-off is passing 80% (8 of 10 L) —
+  about 3 min to go." By construction it lands before endsAt, needs no
+  suppression, starts after the flush like everything else.
+
+Earliest-wins keeps it one notification per run: a brimming store's
+container story beats the run story; an empty store flips it. Ties go to
+the container (listed first — the safety flavour). `draw_finish_alert` is
+untouched: a "nearly done" that arrives after done is noise. Settings hint
+now names the nearly-done heads-up. No new config — alertPct governs both.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

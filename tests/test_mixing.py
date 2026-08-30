@@ -1567,22 +1567,37 @@ def test_draw_alert_computes_the_crossing_from_the_anchor():
     assert mixing.draw_alert(fired) is None
 
 
-def test_draw_alert_external_needs_a_container_volume():
-    # No configured T-off volume ⇒ nothing to measure against ⇒ silence.
+def test_draw_alert_external_without_a_container_warns_on_the_run_itself():
+    # No configured T-off volume ⇒ no container story — but a TIMED draw
+    # still gets the nearly-done heads-up on its own target: 30 L at 80%
+    # is 24 L = 12 minutes into a 120 L/h run.
     cfg = _cfg(simulate=True, rodi=_draw_over(dest="external", litres=30, ends_h=0.25))
-    assert mixing.draw_alert(cfg) is None
-    # 20 L container, 80% ⇒ heads-up at 16 L = 8 minutes into a 120 L/h run.
+    alert = mixing.draw_alert(cfg)
+    assert alert is not None and abs((alert["at"] - NOW).total_seconds() - 720) < 1
+    assert "30 L RODI run to the T-off" in alert["message"]
+    assert "24 of 30 L" in alert["message"]
+    # With a 20 L container the container story lands FIRST (16 L = 8 min)
+    # and wins — earliest story fires, one alert per run.
     cfg["rodi"]["externalVolumeL"] = 20
     alert = mixing.draw_alert(cfg)
     assert alert is not None and abs((alert["at"] - NOW).total_seconds() - 480) < 1
     assert "T-off container" in alert["message"]
 
 
-def test_draw_alert_timed_run_ending_short_stays_quiet():
-    # A 10 L timed draw into a store sitting at 0/50 never reaches 80%.
+def test_draw_alert_timed_run_warns_near_its_own_finish_line():
+    # A 10 L timed draw into a store sitting at 0/50 never reaches the
+    # container's 80% — the run's own 80% (8 L = 4 min at 120 L/h) speaks.
     cfg = _cfg(simulate=True, rodi=_draw_over(litres=10, ends_h=10 / 120))
     cfg["vessels"]["rodi"]["estimatedLitres"] = 0
-    assert mixing.draw_alert(cfg) is None
+    alert = mixing.draw_alert(cfg)
+    assert alert is not None and abs((alert["at"] - NOW).total_seconds() - 240) < 1
+    assert "10 L RODI run to the RODI store" in alert["message"]
+    # But a store already brimming flips it: the container's threshold comes
+    # first (1 L to 80% of 50 = 30 s) and the overflow story wins.
+    cfg["vessels"]["rodi"]["estimatedLitres"] = 39
+    alert = mixing.draw_alert(cfg)
+    assert alert is not None and abs((alert["at"] - NOW).total_seconds() - 30) < 1
+    assert "RODI store is passing 80% full" in alert["message"]
 
 
 def test_finish_alert_covers_the_boundary():
