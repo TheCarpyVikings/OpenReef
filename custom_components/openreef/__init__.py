@@ -1698,6 +1698,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "awcGuard": awc_guard if awc_guard in ("off", "warn", "block") else "warn",
         "atoFromRodi": bool(raw_integrations.get("atoFromRodi", False)),
         "freshFromVessel": bool(raw_integrations.get("freshFromVessel", True)),
+        "maintenanceFromVessel": bool(raw_integrations.get("maintenanceFromVessel", True)),
     }
 
 
@@ -8923,6 +8924,16 @@ async def _handle_record_task_completion(
     _append_activity(
         config, f"Maintenance done: {tasks[task_id].get('label', task_id)}", "control"
     )
+    # Doc §28: this service writes straight into the stored config, so the
+    # save-time diff never sees it — debit the vessel here instead. Same
+    # rules: volume-logging task, source-less entry, flag + guard willing.
+    task = tasks.get(task_id)
+    if (isinstance(task, dict) and task.get("logsVolume")
+            and _mixing_maintenance_from_vessel(config)):
+        litres = _mixing_manual_change_litres(completion, _maintenance_tank_litres(config))
+        if litres > 0.05:
+            _mixing_debit_batch(hass, config, round(litres, 1),
+                                "the water change you logged")
     await _async_save_config(hass, entry, config)
 
 
@@ -8981,6 +8992,12 @@ async def websocket_save_config(
     # A panel posts the whole config, so anything logged since it last refreshed —
     # an automatic water change, a completion from an automation — would be dropped.
     _merge_recent_completions(entry.options.get(CONF_SETTINGS), msg["config"])
+    # Doc §28: a hand-logged water change debits the mix vessel. Diffed here —
+    # the one door a manual Maintenance completion enters the backend through —
+    # and only for entries the stored config has never seen, so a re-save
+    # never charges the same bucket twice. AWC-sourced rows carry ``source``
+    # and are skipped: those litres are the AWC coupling's to account.
+    _mixing_debit_manual_changes(hass, entry.options.get(CONF_SETTINGS), msg["config"])
     _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["config"])
     # A hatch-clock change here has to reach the batch already incubating and
     # the reminders hanging off it, or the page contradicts itself (0.7.80).
@@ -14060,6 +14077,94 @@ def _mixing_run_debit(hass: HomeAssistant, config: dict[str, Any], litres: float
     if _mixing_fresh_from_vessel(config):
         return
     _mixing_debit_batch(hass, config, litres, "the water change")
+
+
+def _mixing_maintenance_from_vessel(config: dict[str, Any]) -> bool:
+    """Whether a water change logged BY HAND in Maintenance debits the mix
+    vessel (doc §28) — the bucket-change model. AWC-driven changes never come
+    through here (their completions carry ``source``), so pump-and-container
+    users are accounted once, by the AWC coupling alone."""
+    return bool((_mixing_cfg(config).get("integrations") or {})
+                .get("maintenanceFromVessel", True))
+
+
+def _maintenance_tank_litres(config: dict[str, Any]) -> float:
+    """Tank litres the Maintenance history converts % logs with — LOCKSTEP
+    with the panel's _maintenanceTankVolumeLitres (profile → dosing system →
+    dosing parameters → AWC), so a % entry debits exactly the litres its
+    history row shows."""
+    tank = config.get("tank") if isinstance(config.get("tank"), dict) else {}
+    vol = _awc_num(tank.get("volumeLitres"), 0, 0, AWC_TANK_MAX_L)
+    if vol > 0:
+        return vol
+    dosing = config.get("dosing") if isinstance(config.get("dosing"), dict) else {}
+    system = dosing.get("system") if isinstance(dosing.get("system"), dict) else {}
+    vol = _awc_num(system.get("tankVolumeLitres"), 0, 0, AWC_TANK_MAX_L)
+    if vol <= 0:
+        params = dosing.get("parameters") if isinstance(dosing.get("parameters"), dict) else {}
+        vol = max((_awc_num(p.get("tankVolumeLitres"), 0, 0, AWC_TANK_MAX_L)
+                   for p in params.values() if isinstance(p, dict)), default=0.0)
+    if vol > 0:
+        return vol
+    return _awc_num(_awc_cfg(config).get("tankVolumeLitres"), 0, 0, AWC_TANK_MAX_L)
+
+
+def _mixing_manual_change_litres(entry: Any, tank_l: float) -> float:
+    """Litres a hand-logged Maintenance completion moved. Zero for anything
+    that is not a plain manual volume log: AWC/hatchery-sourced rows and
+    skips are excluded outright, and a %-of-tank log on a tank with no
+    volume set has no litres to claim."""
+    if not isinstance(entry, dict) or entry.get("source") or entry.get("skipped"):
+        return 0.0
+    volume = entry.get("volume")
+    if not isinstance(volume, (int, float)) or isinstance(volume, bool) or volume <= 0:
+        return 0.0
+    if entry.get("volumeUnit") == "L":
+        return float(volume)
+    return float(volume) * tank_l / 100.0
+
+
+def _mixing_debit_manual_changes(
+    hass: HomeAssistant, stored: Any, incoming: dict[str, Any]
+) -> None:
+    """Doc §28: a water change logged by hand in Maintenance is water that
+    left the mix vessel by bucket — debit the batch for it. Runs on the
+    panel's full-config save, so 'new' means a volume entry on a
+    volume-logging task whose id the stored config has never seen. Called
+    AFTER _merge_recent_completions: re-merged stored rows keep their stored
+    ids and are excluded, so a debit can only ever fire once per entry."""
+    if not _mixing_maintenance_from_vessel(incoming):
+        return
+    maintenance = incoming.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks") if isinstance(maintenance.get("tasks"), dict) else {}
+    completions = maintenance.get("completions")
+    if not isinstance(completions, dict):
+        return
+    stored_maintenance = stored.get("maintenance") if isinstance(stored, dict) else {}
+    stored_completions = (
+        stored_maintenance.get("completions")
+        if isinstance(stored_maintenance, dict)
+        and isinstance(stored_maintenance.get("completions"), dict)
+        else {}
+    )
+    tank_l = _maintenance_tank_litres(incoming)
+    litres = 0.0
+    for task_id, entries in completions.items():
+        task = tasks.get(task_id)
+        if (not isinstance(task, dict) or not task.get("logsVolume")
+                or not isinstance(entries, list)):
+            continue
+        prior = stored_completions.get(task_id)
+        seen = {e.get("id") for e in (prior if isinstance(prior, list) else [])
+                if isinstance(e, dict)}
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") not in seen:
+                litres += _mixing_manual_change_litres(entry, tank_l)
+    if litres > 0.05:
+        _mixing_debit_batch(hass, incoming, round(litres, 1),
+                            "the water change you logged")
 
 
 def _mixing_booster_driven(config: dict[str, Any]) -> bool:

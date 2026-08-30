@@ -495,6 +495,43 @@ Settings: checkbox under the AWC guard picker, both models spelled out.
 Level estimates and the dose guide's top-up story follow automatically
 (save → summary refetch, held litres drop, top-up grams grow).
 
+## §28 The bucket change pays the vessel too (0.7.107)
+
+Reece: debit the saltwater vessel when a water change is done BY HAND — but
+NOT when the AWC's pumps and containers did the moving, "only when a water
+change is logged manually in maintenance". The discriminator already
+existed: AWC auto-logged completions carry `source="awc"` (hatchery rows
+`source="hatchery"`); hand-logged rows carry no source at all.
+
+New integrations flag **`maintenanceFromVessel`** (default ON). Under it, a
+source-less completion WITH a volume on a volume-logging task debits the
+batch — through the same `_mixing_debit_batch` choke point as every other
+consumer (station enabled, awcGuard ≠ off, live ready/storing batch;
+exhaustion closes the batch; activity says "drawn by the water change you
+logged").
+
+The mechanics are shaped by how a manual log reaches the backend — a full
+config save, not an event:
+
+- **`websocket_save_config`** diffs completions AFTER
+  `_merge_recent_completions`: an entry is "new" only if its id is absent
+  from the stored config, so re-saves, merges and other-tab tweaks can
+  never charge the same bucket twice. All new hand-logged litres in one
+  save sum into a single debit.
+- **`record_task_completion` (the HA service)** writes straight into the
+  stored config, so the save-time diff would never see it — it debits
+  inline under the same rules.
+- **% logs** convert through `_maintenance_tank_litres` — LOCKSTEP with the
+  panel's `_maintenanceTankVolumeLitres` precedence (profile tank → dosing
+  system → dosing parameters → AWC), so the debit equals the litres the
+  history row displays. No tank volume = no litres to claim.
+- Skips never debit. Deleting a history row does NOT refund (the batch may
+  have closed; correct a mis-log from the Mixing tab's vessel level).
+
+Settings: checkbox under the `freshFromVessel` one; the shared hint now
+says the guard-off escape hatch covers everything — "this station's ledger
+is never touched from outside the Mixing tab."
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

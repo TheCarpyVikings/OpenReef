@@ -14,6 +14,7 @@ Or with pytest:  pytest tests/
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -863,7 +864,8 @@ _AWC_SENSORS = {
 }
 
 
-def _awc_station_entry(guard="block", batch=None, fresh_ml=25000, fresh_from_vessel=True):
+def _awc_station_entry(guard="block", batch=None, fresh_ml=25000, fresh_from_vessel=True,
+                       maintenance_from_vessel=True):
     """An entry where the AWC could genuinely start — calibrated pumps, stocked
     reservoir, safety sensors bound — so the ONLY thing standing in its way is
     the mixing-station guard under test."""
@@ -885,7 +887,8 @@ def _awc_station_entry(guard="block", batch=None, fresh_ml=25000, fresh_from_ves
         "schedule": {"method": "batch_sequential"},
     }
     mix_cfg = _station_cfg(integrations={"awcGuard": guard, "atoFromRodi": False,
-                                         "freshFromVessel": fresh_from_vessel})
+                                         "freshFromVessel": fresh_from_vessel,
+                                         "maintenanceFromVessel": maintenance_from_vessel})
     if batch is not None:
         mix_cfg["batch"] = batch
     entry = FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config(
@@ -1000,6 +1003,104 @@ def test_run_debit_belongs_to_direct_draw_plumbing_only():
     assert config2["mixingStation"]["integrations"]["freshFromVessel"] is False
     integration._mixing_run_debit(hass2, config2, 12)
     assert config2["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 28.0
+
+
+def test_hand_logged_water_change_debits_the_vessel():
+    # Doc §28: the bucket change pays the vessel too. End-to-end through
+    # websocket_save_config — the door every panel Mark-done comes through —
+    # a NEW hand-logged volume entry draws its litres from the batch, and a
+    # re-save of the same config never charges the same bucket twice.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch())
+    incoming = copy.deepcopy(entry.options[CONF_SETTINGS])
+    incoming["maintenance"]["completions"]["water_change"] = [{
+        "id": "water_change:2026-08-30T18:40:00+00:00:0",
+        "timestamp": "2026-08-30T18:40:00+00:00",
+        "notes": "", "volume": 17.5, "volumeUnit": "L",
+    }]
+    run(integration.websocket_save_config(hass, FakeConnection(), {"id": 1, "config": incoming}))
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 22.5
+    assert any("the water change you logged" in str(a.get("message", ""))
+               for a in saved.get("activity", []))
+    again = copy.deepcopy(saved)
+    run(integration.websocket_save_config(hass, FakeConnection(), {"id": 2, "config": again}))
+    assert entry.options[CONF_SETTINGS][
+        "mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 22.5
+
+
+def test_percent_log_converts_through_the_history_rows_tank_litres():
+    # A % log debits exactly the litres its history row shows — the panel's
+    # tank precedence (profile first, AWC volume as the stand-in) mirrored.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch())
+    stored = entry.options[CONF_SETTINGS]
+    incoming = copy.deepcopy(stored)
+    incoming["maintenance"]["completions"]["water_change"] = [{
+        "id": "water_change:pct:0", "timestamp": "2026-08-30T18:40:00+00:00",
+        "volume": 10, "volumeUnit": "pct",
+    }]
+    integration._mixing_debit_manual_changes(hass, stored, incoming)
+    # No profile/dosing volume in this fixture, so the AWC's 200 L stands in:
+    # 10% = 20 L off the 40 L vessel.
+    assert incoming["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 20.0
+    # A profile tank volume outranks it, exactly like the history rows do.
+    incoming2 = copy.deepcopy(stored)
+    incoming2["tank"]["volumeLitres"] = 100
+    incoming2["maintenance"]["completions"]["water_change"] = [{
+        "id": "water_change:pct:1", "timestamp": "2026-08-30T18:41:00+00:00",
+        "volume": 10, "volumeUnit": "pct",
+    }]
+    integration._mixing_debit_manual_changes(hass, stored, incoming2)
+    assert incoming2["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 30.0
+
+
+def test_awc_tagged_skipped_and_replayed_rows_never_debit():
+    # source="awc" rows are the AWC coupling's to account, skips move no
+    # water, and a row the stored config already knows is not new.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch())
+    stored = copy.deepcopy(entry.options[CONF_SETTINGS])
+    stored["maintenance"]["completions"]["water_change"] = [
+        {"id": "old", "timestamp": "2026-08-25T10:49:00+00:00",
+         "volume": 12, "volumeUnit": "L"},
+    ]
+    incoming = copy.deepcopy(stored)
+    incoming["maintenance"]["completions"]["water_change"] = [
+        {"id": "awc-row", "timestamp": "2026-08-30T18:40:00+00:00",
+         "volume": 17.5, "volumeUnit": "L", "source": "awc"},
+        {"id": "skip-row", "timestamp": "2026-08-30T18:41:00+00:00",
+         "skipped": True, "volume": 5, "volumeUnit": "L"},
+        {"id": "old", "timestamp": "2026-08-25T10:49:00+00:00",
+         "volume": 12, "volumeUnit": "L"},
+    ]
+    integration._mixing_debit_manual_changes(hass, stored, incoming)
+    assert incoming["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
+
+
+def test_manual_change_debit_respects_flag_and_guard():
+    install_scheduler(integration)
+    new_row = [{
+        "id": "water_change:new:0", "timestamp": "2026-08-30T18:40:00+00:00",
+        "volume": 17.5, "volumeUnit": "L",
+    }]
+    # Flag off: this keeper's buckets come from somewhere else entirely.
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch(),
+                                     maintenance_from_vessel=False)
+    stored = entry.options[CONF_SETTINGS]
+    assert stored["mixingStation"]["integrations"]["maintenanceFromVessel"] is False
+    incoming = copy.deepcopy(stored)
+    incoming["maintenance"]["completions"]["water_change"] = list(new_row)
+    integration._mixing_debit_manual_changes(hass, stored, incoming)
+    assert incoming["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
+    # Guard off: the ledger is never touched from outside the Mixing tab.
+    hass2, entry2 = _awc_station_entry(guard="off", batch=_stored_batch())
+    stored2 = entry2.options[CONF_SETTINGS]
+    assert stored2["mixingStation"]["integrations"]["maintenanceFromVessel"] is True
+    incoming2 = copy.deepcopy(stored2)
+    incoming2["maintenance"]["completions"]["water_change"] = list(new_row)
+    integration._mixing_debit_manual_changes(hass2, stored2, incoming2)
+    assert incoming2["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
 
 
 # ---------------------------------------------------------------- Stage E: the RODI utility

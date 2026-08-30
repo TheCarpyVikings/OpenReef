@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.106"
+INTEGRATION_VERSION = "0.7.107"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1735,6 +1735,10 @@ DEFAULT_CORE_CONFIG = {
             # (no per-run vessel debit). Off = direct-draw plumbing: every
             # completed change debits the vessel instead.
             "freshFromVessel": True,
+            # Bucket-change model (doc §28): a water change logged BY HAND in
+            # Maintenance (with a volume) debits the mix vessel — AWC-sourced
+            # completions never do; those litres are the coupling's above.
+            "maintenanceFromVessel": True,
         },
     },
     # ICP test importer — stored lab reports + saved generic-mapper templates.
