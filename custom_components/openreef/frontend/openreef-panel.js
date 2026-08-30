@@ -23598,7 +23598,11 @@ const rigSteps = [
           <option value="block" ${(mix.integrations?.awcGuard || "warn") === "block" ? "selected" : ""}>Block — refuse without a tested batch</option>
         </select></label>
       </div>
-      <small class="awc-hint">While coupled (warn or block), a completed water change also draws its litres from this station's batch ledger automatically.</small>`;
+      <label class="toggle">
+        <input type="checkbox" data-scope="mixing-integrations" data-field="freshFromVessel" ${mix.integrations?.freshFromVessel !== false ? "checked" : ""}>
+        <span><strong>AWC fresh container fills from the mix vessel</strong><small>"Fresh refilled" then draws the refill volume from this station's batch — the vessel level and salt guide follow — and water changes debit the AWC container, not the vessel. Untick for direct-draw plumbing (the AWC pumps straight from the vessel): each completed change debits the vessel instead.</small></span>
+      </label>
+      <small class="awc-hint">Either way the coupling respects the guard above — set it to Off and this station's ledger is never touched by the AWC.</small>`;
   }
 
   _settings() {

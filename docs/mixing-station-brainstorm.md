@@ -466,6 +466,35 @@ No what-if on RODI contents (RODI into RODI needs no salt) or mid-run
 (dilution has its own maths on the mix card). Caveat now plural: the
 top-up figures assume the standing water tested at target.
 
+## §27 Fresh refilled is the transfer (0.7.106)
+
+Reece: fold the vessel estimates into the AWC — "Fresh refilled" should
+compute what the container took and debit it from the mix vessel. Status
+check first: the AWC DOES dead-reckon its fresh container (capacityLitres /
+remainingMl / dispensedSinceFullMl, every fill debits it through the single
+choke point, drift-graded at the empty-float bookend). What was wrong was
+WHERE the mixing vessel paid: Stage D debited it per RUN — the direct-draw
+model — while a keeper with a separate AWC container moves water at the
+REFILL moment.
+
+New integrations flag **`freshFromVessel`** (default ON — the container
+model; the capacity default of 25 L meant "reservoir tracked" could never
+be the discriminator):
+
+- **ON**: `websocket_awc_reset_reservoir(fresh)` measures the refill BEFORE
+  zeroing (`capacity − remaining`), then `_mixing_debit_batch(refill_l,
+  "the AWC fresh refill")` — all the old guards still apply (station
+  enabled, awcGuard ≠ off, live tested batch; exhaustion closes the batch).
+  Completed changes no longer touch the vessel (`_mixing_run_debit` no-ops)
+  — the same litres must never be counted twice. fresh2 never folds back:
+  the multi-source line (live-food water) is not the mixing station's.
+- **OFF** (direct-draw plumbing): exactly the Stage D behaviour — each
+  completed change debits the vessel; refills are a ledger reset only.
+
+Settings: checkbox under the AWC guard picker, both models spelled out.
+Level estimates and the dose guide's top-up story follow automatically
+(save → summary refetch, held litres drop, top-up grams grow).
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

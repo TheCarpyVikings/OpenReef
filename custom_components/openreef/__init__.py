@@ -1697,6 +1697,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
     mix_cfg["integrations"] = {
         "awcGuard": awc_guard if awc_guard in ("off", "warn", "block") else "warn",
         "atoFromRodi": bool(raw_integrations.get("atoFromRodi", False)),
+        "freshFromVessel": bool(raw_integrations.get("freshFromVessel", True)),
     }
 
 
@@ -7403,9 +7404,11 @@ async def _async_awc_finalize(
     awc["todayLitres"] = round(awc.get("todayLitres", 0) + filled_l, 3)
     awc["weekLitres"] = round(awc.get("weekLitres", 0) + filled_l, 3)
     awc["monthLitres"] = round(awc.get("monthLitres", 0) + filled_l, 3)
-    # The completed change drew its fill from the mixing station's batch —
-    # keep that ledger honest too (mixing doc §9; no-op when uncoupled).
-    _mixing_debit_batch(hass, config, filled_l, "the water change")
+    # Direct-draw plumbing only: the completed change drew its fill from the
+    # mixing station's batch, so keep that ledger honest too (mixing doc §9;
+    # no-op when uncoupled). Under the container model (doc §27) the vessel
+    # already paid when the keeper refilled the AWC's fresh container.
+    _mixing_run_debit(hass, config, filled_l)
     holdoff = awc.get("ato", {}).get("stabilizationHoldoffMinutes", AWC_DEFAULT_HOLDOFF_MINUTES)
     if state.get("microChange"):
         holdoff = 0  # micro-changes get no stabilization hold-off of their own
@@ -9765,6 +9768,15 @@ async def websocket_awc_reset_reservoir(
                 verdict = _awc_grade_fresh_drift(config, kind)
                 if verdict is not None:
                     await _async_awc_notify_drift(hass, config, verdict, kind)
+            # The refill IS the physical transfer (mixing doc §27): what it
+            # took to reach full is what left the mix vessel. Measured BEFORE
+            # the ledger resets; only the PRIMARY fresh source folds back —
+            # fresh2 is the multi-source line (live-food water, a second mix)
+            # and its refills are not the mixing station's to account.
+            refill_l = max(0.0, _awc_num(fresh.get("capacityLitres"), 0, 0,
+                                         AWC_RESERVOIR_MAX_L)
+                           - _awc_num(fresh.get("remainingMl"), 0, 0,
+                                      AWC_RESERVOIR_MAX_L * 1000) / 1000.0)
             fresh["remainingMl"] = fresh.get("capacityLitres", 0) * 1000.0
             fresh["dispensedSinceFullMl"] = 0
             fresh["driftCheckedAt"] = ""  # new fill cycle — re-arm the check
@@ -9773,6 +9785,13 @@ async def websocket_awc_reset_reservoir(
             fresh["fullConfirmedAt"] = datetime.now(timezone.utc).isoformat()
             name = "Fresh saltwater" if kind == "fresh" else f"Source '{kind}'"
             _append_activity(config, f"{name} reservoir marked full", "control")
+            if (kind == "fresh" and refill_l > 0.05
+                    and _mixing_fresh_from_vessel(config)):
+                # _mixing_debit_batch carries the rest of the guards (station
+                # enabled, awcGuard not off, a live tested batch) and writes
+                # its own activity line with the litres and what remains.
+                _mixing_debit_batch(hass, config, round(refill_l, 1),
+                                    "the AWC fresh refill")
         else:
             reservoirs.get("waste", {})["filledMl"] = 0
             _append_activity(config, "Waste reservoir marked empty", "control")
@@ -14024,6 +14043,23 @@ def _mixing_debit_batch(hass: HomeAssistant, config: dict[str, Any], litres: flo
         _append_activity(
             config, f"Mixing station: {litres:g} L drawn by {note} — {remaining:g} L left",
             "control")
+
+
+def _mixing_fresh_from_vessel(config: dict[str, Any]) -> bool:
+    """Whether the AWC's fresh container is modelled as FILLED FROM the mix
+    vessel (doc §27): refills transfer litres out of the vessel, and change
+    runs drink the container. Off = direct-draw plumbing."""
+    return bool((_mixing_cfg(config).get("integrations") or {})
+                .get("freshFromVessel", True))
+
+
+def _mixing_run_debit(hass: HomeAssistant, config: dict[str, Any], litres: float) -> None:
+    """The per-run vessel debit — direct-draw plumbing only. Under the
+    container model the vessel already paid at refill time, so debiting each
+    change again would count the same litres twice."""
+    if _mixing_fresh_from_vessel(config):
+        return
+    _mixing_debit_batch(hass, config, litres, "the water change")
 
 
 def _mixing_booster_driven(config: dict[str, Any]) -> bool:

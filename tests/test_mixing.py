@@ -863,7 +863,7 @@ _AWC_SENSORS = {
 }
 
 
-def _awc_station_entry(guard="block", batch=None):
+def _awc_station_entry(guard="block", batch=None, fresh_ml=25000, fresh_from_vessel=True):
     """An entry where the AWC could genuinely start — calibrated pumps, stocked
     reservoir, safety sensors bound — so the ONLY thing standing in its way is
     the mixing-station guard under test."""
@@ -875,7 +875,7 @@ def _awc_station_entry(guard="block", batch=None):
             "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 100},
         },
         "reservoirs": {
-            "fresh": {"capacityLitres": 25, "remainingMl": 25000,
+            "fresh": {"capacityLitres": 25, "remainingMl": fresh_ml,
                       "emptyEntity": "binary_sensor.fresh_empty"},
             "waste": {"capacityLitres": 25, "filledMl": 0,
                       "fullEntity": "binary_sensor.waste_full"},
@@ -884,7 +884,8 @@ def _awc_station_entry(guard="block", batch=None):
                    "leakEntity": "binary_sensor.leak", "maxSingleChangePercent": 25},
         "schedule": {"method": "batch_sequential"},
     }
-    mix_cfg = _station_cfg(integrations={"awcGuard": guard, "atoFromRodi": False})
+    mix_cfg = _station_cfg(integrations={"awcGuard": guard, "atoFromRodi": False,
+                                         "freshFromVessel": fresh_from_vessel})
     if batch is not None:
         mix_cfg["batch"] = batch
     entry = FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config(
@@ -952,6 +953,53 @@ def test_debit_helper_draws_down_and_closes_only_when_coupled():
     config2 = integration._config_from_entry(entry2)
     integration._mixing_debit_batch(hass2, config2, 15, "the water change")
     assert config2["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
+
+
+def test_fresh_refill_transfers_the_litres_from_the_vessel():
+    # "Fresh refilled" IS the physical transfer (doc §27): the container took
+    # 15 L to reach full, so exactly 15 L leaves the mix vessel — the level
+    # estimate and the dose guide's top-up story follow automatically.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch(), fresh_ml=10000)
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass, conn, {"id": 1, "reservoir": "fresh"}))
+    config = integration._config_from_entry(entry)
+    assert config["automaticWaterChange"]["reservoirs"]["fresh"]["remainingMl"] == 25000.0
+    assert config["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 25.0
+    assert any("AWC fresh refill" in str(a.get("message", ""))
+               for a in config.get("activity", []))
+    # Guard off = fully uncoupled: the reservoir resets, the vessel stands.
+    hass2, entry2 = _awc_station_entry(guard="off", batch=_stored_batch(), fresh_ml=10000)
+    conn2 = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass2, conn2, {"id": 2, "reservoir": "fresh"}))
+    config2 = integration._config_from_entry(entry2)
+    assert config2["automaticWaterChange"]["reservoirs"]["fresh"]["remainingMl"] == 25000.0
+    assert config2["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
+    # Direct-draw plumbing (flag off): a refill is just a ledger reset.
+    hass3, entry3 = _awc_station_entry(guard="warn", batch=_stored_batch(),
+                                       fresh_ml=10000, fresh_from_vessel=False)
+    conn3 = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass3, conn3, {"id": 3, "reservoir": "fresh"}))
+    assert integration._config_from_entry(entry3)[
+        "mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
+
+
+def test_run_debit_belongs_to_direct_draw_plumbing_only():
+    # Container model (the default): the vessel paid at refill time, so a
+    # completed change must not charge it again — that would count the same
+    # litres twice. Direct-draw plumbing keeps the per-run debit.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch())
+    config = integration._config_from_entry(entry)
+    assert config["mixingStation"]["integrations"]["freshFromVessel"] is True
+    integration._mixing_run_debit(hass, config, 12)
+    assert config["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
+    hass2, entry2 = _awc_station_entry(guard="warn", batch=_stored_batch(),
+                                       fresh_from_vessel=False)
+    config2 = integration._config_from_entry(entry2)
+    assert config2["mixingStation"]["integrations"]["freshFromVessel"] is False
+    integration._mixing_run_debit(hass2, config2, 12)
+    assert config2["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 28.0
 
 
 # ---------------------------------------------------------------- Stage E: the RODI utility

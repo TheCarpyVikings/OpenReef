@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.105"
+INTEGRATION_VERSION = "0.7.106"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1729,6 +1729,12 @@ DEFAULT_CORE_CONFIG = {
         "integrations": {
             "awcGuard": "warn",                 # off | warn | block (Stage D)
             "atoFromRodi": False,
+            # Container model (doc §27): the AWC's fresh reservoir is FILLED
+            # FROM the mix vessel — "Fresh refilled" transfers the refill
+            # volume out of the vessel, and changes then drink the container
+            # (no per-run vessel debit). Off = direct-draw plumbing: every
+            # completed change debits the vessel instead.
+            "freshFromVessel": True,
         },
     },
     # ICP test importer — stored lab reports + saved generic-mapper templates.

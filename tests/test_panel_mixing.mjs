@@ -634,6 +634,8 @@ test("settings offers the per-stage filter editor and the alert fields", async (
   assert(body.includes('data-field="alertPct"'), "settings lost the near-full alert threshold");
   assert(body.includes('data-field="externalVolumeL"'), "settings lost the T-off container volume");
   assert(body.includes("nearly-done heads-up"), "the hint must tell timed draws they warn on their own target");
+  assert(body.includes('data-field="freshFromVessel"'),
+    "settings lost the fresh-fills-from-vessel toggle");
   assert(body.includes('value="80"') && body.includes('value="20"'),
     "the stored alert settings did not render");
   noPlaceholders(body, "rodi settings");
