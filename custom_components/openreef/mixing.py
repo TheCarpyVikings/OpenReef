@@ -674,6 +674,37 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
         litres = mix_vessel_litres(cfg)
     if litres <= 0:
         litres = _f((cfg.get("vessels") or {}).get("mix", {}).get("volumeLitres"))
+    # The dose guide's two stories (doc §25). The FULL line always follows
+    # the CONFIGURED volume, so resizing the vessel moves it instantly —
+    # standing contents used to pin the one dose figure and the guide looked
+    # frozen. The second line follows what the vessel holds right now:
+    # top-up salt for standing saltwater, a straight dose for standing RODI,
+    # the run's own dose while a mix is under way.
+    def _dose(for_litres: float) -> dict[str, Any]:
+        return salt_dose(salt_cfg.get("brand"), for_litres,
+                         salt_cfg.get("targetPpt"), salt_cfg.get("customGPerL"))
+
+    vol_l = _f((cfg.get("vessels") or {}).get("mix", {}).get("volumeLitres"))
+    held_l = mix_vessel_litres(cfg)
+    held_contents = mix_contents(cfg)
+    status_now = str(batch.get("state") or "idle")
+    run_l = _f(batch.get("litres"))
+    guide: dict[str, Any] = {
+        "full": _dose(vol_l), "fullLitres": round(vol_l, 1),
+        "heldLitres": round(held_l, 1),
+        "topUp": None, "topUpLitres": 0.0,
+        "standingRodi": None,
+        "run": None, "runLitres": round(run_l, 1),
+    }
+    if status_now in ("heating", "salting") and run_l > 0:
+        guide["run"] = _dose(run_l)
+    elif held_contents == "salt" and vol_l > 0 and held_l < vol_l - 0.05:
+        top = vol_l - held_l
+        guide["topUp"] = _dose(top)
+        guide["topUpLitres"] = round(top, 1)
+    elif held_contents == "rodi" and held_l > 0:
+        guide["standingRodi"] = _dose(held_l)
+
     return {
         "enabled": bool(cfg.get("enabled")),
         "layout": str(cfg.get("layout") or "dual"),
@@ -681,6 +712,7 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
         "levels": vessel_levels(cfg),
         "dose": salt_dose(salt_cfg.get("brand"), litres,
                           salt_cfg.get("targetPpt"), salt_cfg.get("customGPerL")),
+        "doseGuide": guide,
         "mixHours": mix_hours(salt_cfg.get("brand"), salt_cfg.get("mixHours")),
         "brand": brand_info(salt_cfg.get("brand")),
         "brands": [dict(b) for b in SALT_BRANDS],

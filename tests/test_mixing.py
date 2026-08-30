@@ -1270,6 +1270,43 @@ def test_calibrate_finish_discounts_the_configured_flush():
     assert _mix_state(entry2)["rodi"]["rateLph"] == 80.0
 
 
+def test_dose_guide_tells_both_stories():
+    # The FULL line follows the CONFIGURED volume — resizing the vessel moves
+    # it even while water stands (the bug: contents pinned the one figure).
+    cfg = _cfg()
+    cfg["vessels"]["mix"].update({"volumeLitres": 50, "estimatedLitres": 15,
+                                  "contents": "salt"})
+    cfg["batch"] = {"state": "ready", "litres": 15}
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["full"] == mixing.salt_dose("nyos_pure", 50, 35)
+    assert guide["fullLitres"] == 50.0 and guide["heldLitres"] == 15.0
+    # Standing saltwater short of full ⇒ the top-up story: salt for the NEW
+    # water only (35 L), the standing 15 L keeps its own.
+    assert guide["topUpLitres"] == 35.0
+    assert guide["topUp"] == mixing.salt_dose("nyos_pure", 35, 35)
+    cfg["vessels"]["mix"]["volumeLitres"] = 80          # the keeper resizes
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["full"] == mixing.salt_dose("nyos_pure", 80, 35)
+    assert guide["topUpLitres"] == 65.0
+    # Standing RODI ⇒ a straight dose for what's on hand; no top-up story.
+    cfg["vessels"]["mix"].update({"volumeLitres": 50, "estimatedLitres": 20,
+                                  "contents": "rodi"})
+    cfg["batch"] = {"state": "idle"}
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["topUp"] is None
+    assert guide["standingRodi"] == mixing.salt_dose("nyos_pure", 20, 35)
+    # A brim-full vessel needs no top-up line at all.
+    cfg["vessels"]["mix"].update({"estimatedLitres": 50, "contents": "salt"})
+    cfg["batch"] = {"state": "ready", "litres": 50}
+    assert mixing.summary(cfg, NOW)["doseGuide"]["topUp"] is None
+    # While a mix runs, the run's own dose rides along instead.
+    cfg["vessels"]["mix"].update({"estimatedLitres": 40, "contents": "salt"})
+    cfg["batch"] = {"state": "salting", "litres": 40, "stageAt": _iso(NOW)}
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["run"] == mixing.salt_dose("nyos_pure", 40, 35)
+    assert guide["runLitres"] == 40.0 and guide["topUp"] is None
+
+
 def test_calibrate_stop_freezes_the_window_and_finish_reads_it():
     # The ceremony's middle step: stop turns the water off and freezes the
     # clock — the litres are read from THAT window, however long the keeper

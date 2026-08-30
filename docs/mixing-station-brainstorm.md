@@ -418,6 +418,35 @@ the container (listed first — the safety flavour). `draw_finish_alert` is
 untouched: a "nearly done" that arrives after done is noise. Settings hint
 now names the nearly-done heads-up. No new config — alertPct governs both.
 
+## §25 The dose guide tells two stories (0.7.104)
+
+Reece: "the estimated salt stopped updating — I changed vessel size" and
+"tell the user how much salt to fill back to full from the current level.
+Make the wording obvious." The frozen number was the litres pick order:
+the one dose figure preferred vessel CONTENTS over configured volume, so
+his standing 15 L pinned it at 585 g while the copy claimed "full batch" —
+resizing could never move it.
+
+`summary()` gains `doseGuide` (legacy `dose` kept for old readers; the
+panel falls back to it when a stale summary lacks the guide):
+
+- **`full`** — ALWAYS the configured `volumeLitres`: "Fresh full batch:
+  50 L from empty needs roughly 1950 g (39.0 g/L)." Resizes move it
+  instantly (the save→refetch chain from 0.7.90 already delivers it).
+- One **context story** beside it, mutually exclusive:
+  - `run` (heating/salting): "This run: the 40 L mixing now took ~1560 g."
+  - `topUp` (standing salt, short of full): "Top back up to full: the
+    vessel holds 15 L of saltwater — adding 35 L of fresh RODI needs
+    roughly **1365 g more** salt. The water already standing keeps its
+    own." Caveat appended: assumes the standing water tested at target.
+  - `standingRodi` (contents rodi): "Salting what's on hand: the 20 L of
+    RODI standing in the vessel needs roughly 780 g."
+
+Maths note: top-up grams = g/L × ADDED litres only — water at target
+needs nothing; salt rides in with the new RODI. (The contents guard still
+blocks fresh RODI onto standing salt outside a salting run — the top-up
+figure is the plan for the next mix, not a button.)
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

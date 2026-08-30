@@ -869,4 +869,38 @@ test("calibration is a ceremony — prep first, live clock, stop before the jug"
   noPlaceholders(stopHtml, "calibration ceremony");
 });
 
+test("the dose guide tells the top-up story in plain words", async () => {
+  const guideOver = {
+    full: { available: true, grams: 1950, gPerL: 39.0 }, fullLitres: 50,
+    heldLitres: 15, topUp: { available: true, grams: 1365, gPerL: 39.0 },
+    topUpLitres: 35, standingRodi: null, run: null, runLitres: 0,
+  };
+  const blob = summaryBlob({ batch: { status: "ready", contents: "salt", litres: 15,
+    remainingLitres: 15, loggedPpt: 35 } });
+  blob.doseGuide = guideOver;
+  const panel = await mixingPanel({ batch: { state: "ready" } }, blob);
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes("Fresh full batch:") && html.includes("50 L from empty"),
+    "the full-batch line must follow the configured volume");
+  assert(html.includes("Top back up to full:"), "the top-up story lost its headline");
+  assert(html.includes("adding 35 L of fresh RODI") && (html.includes("1,365") || html.includes("1365")),
+    "the top-up line must give the RODI litres and the extra grams");
+  assert(html.includes("The water already standing keeps its own"),
+    "the top-up line must say the standing water needs nothing");
+  assert(html.includes("assumes the standing water tested at target"),
+    "the top-up caveat must be spoken");
+  // Standing RODI flips the second story to a straight dose.
+  blob.doseGuide = { ...guideOver, topUp: null, topUpLitres: 0, heldLitres: 20,
+    standingRodi: { available: true, grams: 780, gPerL: 39.0 } };
+  blob.batch = { ...blob.batch, contents: "rodi", status: "idle" };
+  const rodiPanel = await mixingPanel({}, blob);
+  rodiPanel._activeTab = "mixing";
+  const rodiHtml = rodiPanel._mixingTab();
+  assert(rodiHtml.includes("Salting what's on hand:") && rodiHtml.includes("780"),
+    "standing RODI must get its straight dose");
+  assert(!rodiHtml.includes("Top back up"), "no phantom top-up on RODI contents");
+  noPlaceholders(rodiHtml, "dose guide");
+});
+
 runTests();

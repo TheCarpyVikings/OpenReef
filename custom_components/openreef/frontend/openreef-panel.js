@@ -22770,13 +22770,33 @@ const rigSteps = [
       ${this._mixingMessage ? `<div class="notice warning-notice">${this._escape(this._mixingMessage)}</div>` : ""}
       ${batch.retestDue ? `<div class="notice warning-notice"><strong>Retest due.</strong> This batch has aged past its window — check salinity before it touches the tank.</div>` : ""}`;
 
+    // Two dose stories, in plain words: the FULL batch (always follows the
+    // configured volume — resizing the vessel moves it instantly), and what
+    // the vessel holds right now — how much MORE salt a top-up needs, a
+    // straight dose for standing RODI, or the live run's own figure.
+    const guide = sum?.doseGuide || null;
+    let doseBody;
+    if (guide && guide.full?.available) {
+      const lines = [`<p class="muted"><strong>Fresh full batch:</strong> ${this._format(guide.fullLitres, 0)} L from empty needs roughly <strong>${this._format(guide.full.grams, 0)} g</strong> (${this._format(guide.full.gPerL, 1)} g/L).</p>`];
+      if (guide.run?.available) {
+        lines.push(`<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong>.</p>`);
+      } else if (guide.topUp?.available) {
+        lines.push(`<p class="muted"><strong>Top back up to full:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L of saltwater — adding ${this._format(guide.topUpLitres, 0)} L of fresh RODI needs roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong> more salt. The water already standing keeps its own.</p>`);
+      } else if (guide.standingRodi?.available) {
+        lines.push(`<p class="muted"><strong>Salting what's on hand:</strong> the ${this._format(guide.heldLitres, 0)} L of RODI standing in the vessel needs roughly <strong>${this._format(guide.standingRodi.grams, 0)} g</strong>.</p>`);
+      }
+      doseBody = `${lines.join("")}
+        <small class="awc-hint">A guide from the brand's own dosing, not a promise — your salinity test has the final word${guide.topUp?.available ? "; the top-up figure assumes the standing water tested at target" : ""}.</small>`;
+    } else if (dose.available) {
+      doseBody = `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`;
+    } else {
+      doseBody = `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`;
+    }
     const doseCard = `
       <article class="panel stack">
         <div class="section-head"><div><p class="eyebrow">Salt dose guide</p>
           <h3>${this._escape(sum?.brand?.label || "—")} → ${sgUnit ? `${sum?.targetSg || "—"} SG` : `${this._format(sum?.targetPpt, 1)} ppt`}</h3></div></div>
-        ${dose.available
-          ? `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`
-          : `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`}
+        ${doseBody}
         <small class="awc-hint">Mix window: ${this._format(sum?.mixHours, 1)} h${sum?.brand?.useWithinH ? ` · this brand wants the batch used within ~${this._format(sum.brand.useWithinH, 0)} h of mixing` : ""}.</small>
       </article>`;
 
