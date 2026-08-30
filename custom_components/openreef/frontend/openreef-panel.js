@@ -1694,13 +1694,26 @@ class OpenReefPanel extends HTMLElement {
         this._mixingAction({ type: "openreef/mixing_rodi_draw", litres: 0, destination });
       }
       if (action === "mixing-rodi-stop") this._mixingAction({ type: "openreef/mixing_rodi_stop" });
-      if (action === "mixing-cal-start") this._mixingAction({ type: "openreef/mixing_calibrate", action: "start" });
+      // The calibration ceremony: prep is pure panel state — NOTHING runs
+      // until "Start the water" on the prep card. Stop freezes the clock so
+      // the jug is read with the water off; finish sets the rate from the
+      // frozen window.
+      if (action === "mixing-cal-prep") { this._mixingCalPrep = true; this._render(); }
+      if (action === "mixing-cal-back") { this._mixingCalPrep = false; this._render(); }
+      if (action === "mixing-cal-start") {
+        this._mixingCalPrep = false;
+        this._mixingAction({ type: "openreef/mixing_calibrate", action: "start" });
+      }
+      if (action === "mixing-cal-stop") this._mixingAction({ type: "openreef/mixing_calibrate", action: "stop" });
       if (action === "mixing-cal-finish") {
         const litres = Number(this.shadowRoot.querySelector("[data-mixing-cal-litres]")?.value) || 0;
         if (litres > 0) this._mixingAction({ type: "openreef/mixing_calibrate", action: "finish", litres });
         else { this._mixingMessage = "Measure the container and enter the litres first."; this._render(); }
       }
-      if (action === "mixing-cal-cancel") this._mixingAction({ type: "openreef/mixing_calibrate", action: "cancel" });
+      if (action === "mixing-cal-cancel") {
+        this._mixingCalPrep = false;
+        this._mixingAction({ type: "openreef/mixing_calibrate", action: "cancel" });
+      }
       if (action === "mixing-filters-changed") {
         this._mixingAction({ type: "openreef/mixing_filters_changed", filter_id: id });
       }
@@ -22817,7 +22830,7 @@ const rigSteps = [
     const cards = [];
 
     const rate = Number(rodi?.rateLph) || 0;
-    let unitValue = rate > 0 ? `${this._format(rate, 1)} L/h` : "Idle";
+    let unitValue = rate > 0 ? `${Number(rate)} L/h` : "Idle";
     let unitDetail = rate > 0
       ? (rodi?.calibratedAt ? "Flow calibrated — litres are honest" : "Flow rate set by hand")
       : "Flow rate unknown — open-ended fills still work";
@@ -22830,8 +22843,10 @@ const rigSteps = [
         || "Running out the T-off (ATO / external)";
       unitStatus = "ok";
     } else if (rodi?.calibration) {
-      unitValue = "Calibrating";
-      unitDetail = `Timed run — ${this._format(rodi.calibration.elapsedMin, 1)} min so far`;
+      unitValue = rodi.calibration.stopped ? "Read the jug" : "Calibrating";
+      unitDetail = rodi.calibration.stopped
+        ? "Water stopped — enter the litres to set the rate"
+        : `Timed run — ${this._format(rodi.calibration.elapsedMin, 1)} min so far`;
       unitStatus = "ok";
     }
     cards.push(this._missionSummaryCard("RODI unit", unitValue, unitDetail,
@@ -23064,6 +23079,55 @@ const rigSteps = [
       : `${date.toLocaleDateString([], { weekday: "short" })} ${clock}`;
   }
 
+  // The calibration run's live story, computed fresh each second: the m:ss
+  // clock, the phase (flushing / collecting), and — when an old rate exists —
+  // the litres that rate predicts, so the jug gets to argue with it.
+  _mixingCalLive(cal, flush, rate) {
+    const started = cal?.startedAt ? new Date(cal.startedAt).getTime() : NaN;
+    const elapsed = Number.isNaN(started) ? 0 : Math.max(0, Math.floor((Date.now() - started) / 1000));
+    const clock = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
+    const production = Math.max(0, elapsed - flush);
+    let phase;
+    if (flush > 0 && elapsed < flush) {
+      phase = `Flushing — ${flush - elapsed} s until the water counts.`;
+    } else if (production < 60) {
+      phase = `Collecting — ${production} s of production; usable from 60 s, longer reads truer.`;
+    } else {
+      phase = `Collecting — ${Math.floor(production / 60)} min ${production % 60} s of production. Stop whenever the jug has a clean number.`;
+    }
+    const expect = rate > 0 && production > 0
+      ? `The old ${Number(rate)} L/h says ~${(rate * production / 3600).toFixed(2)} L by now — the jug is the judge.`
+      : "";
+    return { clock, phase, expect };
+  }
+
+  // One-second ticker for the running calibration card. It patches text
+  // nodes directly — never _render() — so it can't wipe a keeper's typing,
+  // and it dissolves itself the moment the clock element leaves the DOM.
+  _mixingCalArmTicker() {
+    if (this._mixingCalTimer) return;
+    this._mixingCalTimer = setInterval(() => {
+      const root = this.shadowRoot;
+      const clock = root && root.querySelector("[data-mixing-cal-clock]");
+      if (!clock) {
+        clearInterval(this._mixingCalTimer);
+        this._mixingCalTimer = null;
+        return;
+      }
+      const rodi = this._mixingSummary?.rodi;
+      const cal = rodi?.calibration;
+      if (!cal || cal.stopped) return;
+      const live = this._mixingCalLive(cal, Number(rodi.flushSeconds) || 0, Number(rodi.rateLph) || 0);
+      clock.textContent = live.clock;
+      const phase = root.querySelector("[data-mixing-cal-phase]");
+      if (phase) phase.textContent = live.phase;
+      const expect = root.querySelector("[data-mixing-cal-expect]");
+      if (expect && live.expect) expect.textContent = live.expect;
+    }, 1000);
+    // Under Node (tests) an interval pins the process open — unref it there.
+    if (typeof this._mixingCalTimer?.unref === "function") this._mixingCalTimer.unref();
+  }
+
   // Make water — the RODI unit's own card: run it WITHOUT a batch (top the
   // store up, fill the vessel, or T off to the ATO reservoir), and calibrate
   // the flow rate from a timed run. Litres are metered by rate x time, so an
@@ -23086,16 +23150,51 @@ const rigSteps = [
           → ${where}${d.minutesLeft != null ? ` · about ${this._format(d.minutesLeft, 0)} min left` : ""}.</p>
         <div class="button-row"><button class="danger-text" data-action="mixing-rodi-stop" ${disabled}>Stop draw</button></div>`;
     } else if (rodi?.calibration) {
-      body = `
-        <p class="muted">Calibration run — <strong>${this._format(rodi.calibration.elapsedMin, 1)} min</strong> so far.
-          Let it run into a container you can measure, then enter what it collected.</p>
-        ${Number(rodi.flushSeconds) > 0 ? `<small class="awc-hint">The first ${Number(rodi.flushSeconds)} s is your unit's auto-flush — discounted from the maths automatically, so don't subtract it yourself.</small>` : ""}
+      const cal = rodi.calibration;
+      const flush = Number(rodi.flushSeconds) || 0;
+      if (cal.stopped) {
+        // Water off, clock frozen — the jug is read calmly, and the number
+        // can't drift while the keeper types.
+        const prodS = Number(cal.productionSeconds) || 0;
+        const timed = `${Math.floor(prodS / 60)} min ${prodS % 60} s`;
+        body = `
+        <p class="muted">The water is stopped and the clock is frozen — read the jug at eye level, then enter what it collected.</p>
+        <small class="awc-hint">${flush > 0
+          ? `${timed} of production timed (the ${flush} s flush is already discounted — don't subtract it yourself).`
+          : `${timed} timed.`}</small>
         <div class="mini-grid">
-          <label>Measured litres<input type="number" min="0" step="0.1" data-mixing-cal-litres></label>
+          <label>Measured litres<input type="number" min="0" step="0.01" data-mixing-cal-litres></label>
           <div style="display:flex;align-items:flex-end;gap:8px;">
-            <button class="primary" data-action="mixing-cal-finish" ${disabled}>Finish &amp; set rate</button>
+            <button class="primary" data-action="mixing-cal-finish" ${disabled}>Set the rate</button>
             <button class="danger-text" data-action="mixing-cal-cancel" ${disabled}>Cancel</button>
           </div>
+        </div>`;
+      } else {
+        const live = this._mixingCalLive(cal, flush, rate);
+        body = `
+        <p class="muted">Water is running into the jug — <strong data-mixing-cal-clock>${live.clock}</strong> on the clock.</p>
+        <p class="muted" data-mixing-cal-phase>${live.phase}</p>
+        ${rate > 0 ? `<small class="awc-hint" data-mixing-cal-expect>${live.expect}</small>` : ""}
+        <div class="button-row">
+          <button class="primary" data-action="mixing-cal-stop" ${disabled}>Stop the water</button>
+          <button class="danger-text" data-action="mixing-cal-cancel" ${disabled}>Cancel</button>
+        </div>`;
+        this._mixingCalArmTicker();
+      }
+    } else if (this._mixingCalPrep) {
+      // The prep card: the whole ceremony explained BEFORE any water moves —
+      // clicking Calibrate flow must never energise the booster by surprise.
+      body = `
+        <p class="muted">Three steps, one honest number. Nothing runs until you say so.</p>
+        <ol class="muted" style="margin:0 0 4px 18px;padding:0;display:grid;gap:4px;">
+          <li>Park a measuring jug under the T-off (or wherever the line ends).</li>
+          <li>Start the water and let it run — a minute is the floor, five reads truer.</li>
+          <li>Stop the water, read the jug, enter the litres. The rate sets itself.</li>
+        </ol>
+        ${Number(rodi?.flushSeconds) > 0 ? `<small class="awc-hint">Your unit auto-flushes for ${Number(rodi.flushSeconds)} s first — the clock discounts it; don't subtract it yourself.</small>` : ""}
+        <div class="button-row">
+          <button class="primary" data-action="mixing-cal-start" ${disabled}>Start the water</button>
+          <button class="secondary" data-action="mixing-cal-back" ${disabled}>Back</button>
         </div>`;
     } else {
       body = `
@@ -23113,7 +23212,7 @@ const rigSteps = [
         <div class="button-row">
           <button class="primary" data-action="mixing-rodi-fill" ${disabled}>Fill until full</button>
           <button class="secondary" data-action="mixing-rodi-draw" ${disabled}>Run the litres</button>
-          <button class="secondary" data-action="mixing-cal-start" ${disabled}>Calibrate flow</button>
+          <button class="secondary" data-action="mixing-cal-prep" ${disabled}>Calibrate flow</button>
         </div>
         <small class="awc-hint">Fill until full runs to the float valve (the fill cap is the backstop). ${rate > 0
           ? `Flow rate: ${Number(rate)} L/h${rodi?.calibratedAt
@@ -23124,7 +23223,9 @@ const rigSteps = [
     return `
       <article class="panel stack" id="or-mixing-rodi">
         <div class="section-head"><div><p class="eyebrow">Make water</p>
-          <h3>${rodi?.draw ? "Drawing RODI…" : rodi?.calibration ? "Calibrating flow…" : "RODI on demand"}</h3></div></div>
+          <h3>${rodi?.draw ? "Drawing RODI…"
+            : rodi?.calibration ? (rodi.calibration.stopped ? "Read the jug" : "Calibrating flow…")
+            : this._mixingCalPrep ? "Calibrate the flow" : "RODI on demand"}</h3></div></div>
         ${body}
       </article>`;
   }

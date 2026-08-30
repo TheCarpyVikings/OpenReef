@@ -427,10 +427,20 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
     cal = rodi.get("calibration") if isinstance(rodi.get("calibration"), dict) else {}
     if cal.get("active"):
         started = _parse_iso(cal.get("startedAt"))
+        stopped = _parse_iso(cal.get("stoppedAt"))
+        # Stopped freezes the clock: the litres are read from THAT window,
+        # not from however long the keeper takes to type them in.
+        end = stopped or now
+        elapsed = max(0.0, (end - started).total_seconds()) if started else 0.0
+        cal_flush = max(0.0, _f(rodi.get("flushSeconds")))
         out["calibration"] = {
             "startedAt": str(cal.get("startedAt") or ""),
-            "elapsedMin": round(max(0.0, (now - started).total_seconds() / 60.0), 1)
-            if started else 0.0,
+            "stopped": stopped is not None,
+            "elapsedMin": round(elapsed / 60.0, 1),
+            "elapsedSeconds": int(elapsed),
+            # The part of the run that made water — flush already out, so the
+            # panel shows, never computes.
+            "productionSeconds": int(max(0.0, elapsed - cal_flush)),
         }
     return out
 

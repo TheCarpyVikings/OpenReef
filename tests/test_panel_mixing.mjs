@@ -425,7 +425,7 @@ test("the RODI card offers a draw and a calibration when the unit is quiet", asy
   const html = panel._mixingTab();
   assert(html.includes("RODI on demand"), "the RODI card lost its title");
   assert(html.includes('data-action="mixing-rodi-draw"'), "the draw button is missing");
-  assert(html.includes('data-action="mixing-cal-start"'), "the calibrate button is missing");
+  assert(html.includes('data-action="mixing-cal-prep"'), "the calibrate button is missing");
   assert(html.includes('value="store"'), "dual layout lost the store destination");
   assert(html.includes('value="external"'), "the T-off destination is missing");
   assert(html.includes("Flow rate unknown"), "an unknown rate must say so, not guess");
@@ -467,19 +467,20 @@ test("a live draw shows its progress and a Stop — and the diagram runs the rig
   assert(!quiet.includes('class="mix-flow"'), "a quiet RODI unit animated a flow");
 });
 
-test("a calibration run asks for the measured litres and jugs the diagram", async () => {
+test("a stopped calibration asks for the measured litres; a running one jugs the diagram", async () => {
   const calSummary = summaryBlob({ rodi: {
     rateLph: 0, calibratedAt: "", litresProcessed: 0, filterRatedL: 0,
     filterChangedAt: "", filterDue: false, draw: null,
-    calibration: { startedAt: "2026-08-28T12:00:00+00:00", elapsedMin: 4.2 },
+    calibration: { startedAt: "2026-08-28T12:00:00+00:00", elapsedMin: 4.2,
+                   stopped: true, elapsedSeconds: 252, productionSeconds: 252 },
   } });
   const panel = await mixingPanel({}, calSummary);
   panel._activeTab = "mixing";
   const html = panel._mixingTab();
-  assert(html.includes("data-mixing-cal-litres"), "calibration lost its litres input");
-  assert(html.includes('data-action="mixing-cal-finish"'), "calibration lost its finish");
-  assert(html.includes('data-action="mixing-cal-cancel"'), "calibration lost its cancel");
-  noPlaceholders(html, "rodi card calibrating");
+  assert(html.includes("data-mixing-cal-litres"), "the stopped run lost its litres input");
+  assert(html.includes('data-action="mixing-cal-finish"'), "the stopped run lost Set the rate");
+  assert(html.includes('data-action="mixing-cal-cancel"'), "the stopped run lost its cancel");
+  noPlaceholders(html, "rodi card measuring");
   const svg = panel._mixingDiagramSvg(mixConfig(), { status: "idle" },
     summaryBlob().levels, calSummary.rodi);
   assert(svg.includes("measuring jug"), "a calibration run did not label the jug");
@@ -790,20 +791,81 @@ test("the auto-flush is a setting, a calibration hint, and never water", async (
   assert(flush, "settings lost the auto-flush field");
   assert(flush[0].includes('value="45"'), "the stored flush did not render");
   assert(body.includes("discounted from calibration"), "the hint must explain the discount");
-  // Calibrating with a flush set: the card says the first seconds don't count.
-  const calRodi = (flushSeconds) => ({
+  // The prep card names the flush before any water moves; a running card
+  // counts it down live as the Flushing phase.
+  const calRodi = (flushSeconds, calibration) => ({
     rateLph: 0, calibratedAt: "", litresProcessed: 0, filters: [], filterDue: false,
-    draw: null, flushSeconds,
-    calibration: { startedAt: new Date().toISOString(), elapsedMin: 1.2 },
+    draw: null, flushSeconds, calibration,
   });
-  const cal = await mixingPanel({}, summaryBlob({ rodi: calRodi(45) }));
+  const prep = await mixingPanel({}, summaryBlob({ rodi: calRodi(45, null) }));
+  prep._mixingCalPrep = true;
+  prep._activeTab = "mixing";
+  assert(prep._mixingTab().includes("auto-flushes for 45 s"),
+    "the prep card must name the flush discount");
+  const cal = await mixingPanel({}, summaryBlob({ rodi: calRodi(45, {
+    startedAt: new Date().toISOString(), elapsedMin: 0.0,
+    stopped: false, elapsedSeconds: 0, productionSeconds: 0,
+  }) }));
   cal._activeTab = "mixing";
-  assert(cal._mixingTab().includes("The first 45 s is your unit's auto-flush"),
-    "calibrating must name the flush discount");
-  // No flush configured: no phantom hint.
-  const plain = await mixingPanel({}, summaryBlob({ rodi: calRodi(0) }));
+  assert(cal._mixingTab().includes("Flushing —"),
+    "a running card inside the flush window must say Flushing");
+  clearInterval(cal._mixingCalTimer); cal._mixingCalTimer = null;
+  // No flush configured: no phantom flush talk anywhere.
+  const plain = await mixingPanel({}, summaryBlob({ rodi: calRodi(0, {
+    startedAt: new Date().toISOString(), elapsedMin: 0.0,
+    stopped: false, elapsedSeconds: 0, productionSeconds: 0,
+  }) }));
   plain._activeTab = "mixing";
-  assert(!plain._mixingTab().includes("auto-flush —"), "no flush set must mean no flush hint");
+  assert(!plain._mixingTab().includes("Flushing"), "no flush set must mean no flush phase");
+  clearInterval(plain._mixingCalTimer); plain._mixingCalTimer = null;
+});
+
+test("calibration is a ceremony — prep first, live clock, stop before the jug", async () => {
+  // Idle: the button PREPARES; nothing may start water from the idle card.
+  const idle = await mixingPanel();
+  idle._activeTab = "mixing";
+  const idleHtml = idle._mixingTab();
+  assert(idleHtml.includes('data-action="mixing-cal-prep"'), "Calibrate flow must open the prep card");
+  assert(!idleHtml.includes('data-action="mixing-cal-start"'), "idle must not offer a direct start");
+  // Prep: the steps, the promise, Start the water, Back.
+  idle._mixingCalPrep = true;
+  const prepHtml = idle._mixingTab();
+  assert(prepHtml.includes("Calibrate the flow"), "prep lost its heading");
+  assert(prepHtml.includes("Nothing runs until you say so"), "prep must promise no surprise water");
+  assert(prepHtml.includes('data-action="mixing-cal-start"') && prepHtml.includes('data-action="mixing-cal-back"'),
+    "prep must offer Start the water and Back");
+  // Running: a live clock, Stop the water, no litres input yet — and the old
+  // rate predicting litres so the jug gets to argue with it.
+  const run = await mixingPanel({}, summaryBlob({ rodi: {
+    rateLph: 4.93, calibratedAt: "", litresProcessed: 0, filters: [], filterDue: false, draw: null,
+    flushSeconds: 0,
+    calibration: { startedAt: new Date(Date.now() - 90 * 1000).toISOString(), elapsedMin: 1.5,
+                   stopped: false, elapsedSeconds: 90, productionSeconds: 90 },
+  } }));
+  run._activeTab = "mixing";
+  const runHtml = run._mixingTab();
+  assert(runHtml.includes("data-mixing-cal-clock"), "running lost its live clock");
+  assert(runHtml.includes('data-action="mixing-cal-stop"'), "running must offer Stop the water");
+  assert(!runHtml.includes("data-mixing-cal-litres"), "no litres input while water runs");
+  assert(runHtml.includes("the jug is the judge"), "the old rate must argue with the jug");
+  clearInterval(run._mixingCalTimer); run._mixingCalTimer = null;
+  // Stopped: frozen window told in production seconds, Read the jug, a
+  // 10 ml-honest litres input, Set the rate.
+  const stop = await mixingPanel({}, summaryBlob({ rodi: {
+    rateLph: 4.93, calibratedAt: "", litresProcessed: 0, filters: [], filterDue: false, draw: null,
+    flushSeconds: 45,
+    calibration: { startedAt: "", elapsedMin: 10.0, stopped: true,
+                   elapsedSeconds: 600, productionSeconds: 555 },
+  } }));
+  stop._activeTab = "mixing";
+  const stopHtml = stop._mixingTab();
+  assert(stopHtml.includes("Read the jug"), "stopped state must say Read the jug");
+  assert(stopHtml.includes("9 min 15 s of production"), "the frozen production window must be told");
+  const litres = stopHtml.match(/<input[^>]*data-mixing-cal-litres[^>]*>/)[0];
+  assert(litres.includes('step="0.01"'), "jugs read to 10 ml — the litres input must accept it");
+  assert(stopHtml.includes('data-action="mixing-cal-finish"') && stopHtml.includes("Set the rate"),
+    "stopped must offer Set the rate");
+  noPlaceholders(stopHtml, "calibration ceremony");
 });
 
 runTests();

@@ -364,6 +364,36 @@ threaded through EVERY rate × time consumer so they can't drift:
   `flushSeconds` for that copy. Idle card now prints the raw 2 dp rate
   (`Number(rate)`, was `_format(rate,1)` — a 0.7.100 straggler).
 
+## §23 Calibration becomes a ceremony (0.7.102)
+
+Reece: "as soon as you click calibrate, it starts — not very obvious… this
+section deserves more work; users will find this very cool." The old flow
+also had a physics bug: litres were read while water still ran, and elapsed
+was computed at finish-click — the number drifted while the keeper typed.
+Now a guided three-step:
+
+1. **Prep** (panel state `_mixingCalPrep`, NO backend call): "Calibrate
+   flow" opens the ceremony card — jug placement, the 60 s floor, the flush
+   note — with "Start the water" as the only way any water moves.
+2. **Run**: live m:ss clock ticking every second — `_mixingCalArmTicker`
+   patches text nodes directly (`[data-mixing-cal-clock/phase/expect]`),
+   never `_render()`, so typing survives; self-clears when the element
+   leaves the DOM; `unref()`d under Node. Phase line: "Flushing — N s until
+   the water counts" → "Collecting — N of production". When an old rate
+   exists: "the old 4.93 L/h says ~0.35 L by now — the jug is the judge."
+3. **Stop, then read**: new WS action `calibrate stop` — booster off,
+   `stoppedAt` stamped, run stays active (still owns the booster; second
+   stop refused). Finish computes from the FROZEN window
+   (`stoppedAt − startedAt`), so reading the jug takes as long as it takes.
+   Litres input step 0.01 (jugs read to 10 ml). The cap leg re-anchors from
+   the stop stamp — a 40-min run still leaves the full 30 min to measure;
+   an abandoned measure is still tidied (message: "litres never arrived").
+
+Engine: `rodi_status.calibration` gains `stopped` / `elapsedSeconds` /
+`productionSeconds` (flush out — panel shows, never computes); `elapsedMin`
+freezes at stop. Hero: "Read the jug" state; hero rate now raw 2 dp.
+One-click finish-while-running still works at the WS level (back-compat).
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

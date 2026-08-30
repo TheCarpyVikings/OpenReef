@@ -1620,6 +1620,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "calibration": {
             "active": bool(raw_cal.get("active", False)),
             "startedAt": _awc_str(raw_cal.get("startedAt"), 40),
+            "stoppedAt": _awc_str(raw_cal.get("stoppedAt"), 40),
         },
     }
 
@@ -14282,8 +14283,12 @@ async def _async_schedule_mixing_rodi(
                 hass, _alert, max(alert["at"], now + timedelta(seconds=1)))
         return
     if cal.get("active"):
-        started = _parse_datetime(cal.get("startedAt")) or now
-        cap_at = started + timedelta(minutes=MIXING_CAL_CAP_MIN)
+        # A stopped run has no booster hazard left — its cap re-anchors from
+        # the stop stamp, so however long the water ran the keeper still gets
+        # the full window to read the jug before the run is tidied away.
+        anchor = (_parse_datetime(cal.get("stoppedAt"))
+                  or _parse_datetime(cal.get("startedAt")) or now)
+        cap_at = anchor + timedelta(minutes=MIXING_CAL_CAP_MIN)
 
         async def _cap(_now: datetime) -> None:
             latest = _first_entry(hass)
@@ -14293,13 +14298,20 @@ async def _async_schedule_mixing_rodi(
                     return
                 cfg2 = _config_from_entry(latest)
                 rodi2 = _mixing_cfg(cfg2).get("rodi", {})
-                if not (rodi2.get("calibration") or {}).get("active"):
+                cal2 = rodi2.get("calibration") or {}
+                if not cal2.get("active"):
                     return
                 await _async_mixing_stop_switches(hass, cfg2, ("rodiBooster",), None)
-                rodi2["calibration"] = {"active": False, "startedAt": ""}
+                was_stopped = bool(cal2.get("stoppedAt"))
+                rodi2["calibration"] = {"active": False, "startedAt": "", "stoppedAt": ""}
                 _append_activity(
-                    cfg2, f"Mixing station: flow calibration hit the {MIXING_CAL_CAP_MIN}-min "
-                    "cap and was cancelled — run it again into a known container", "warning")
+                    cfg2,
+                    ("Mixing station: calibration was stopped but the measured litres "
+                     f"never arrived ({MIXING_CAL_CAP_MIN} min) — run it again"
+                     if was_stopped else
+                     f"Mixing station: flow calibration hit the {MIXING_CAL_CAP_MIN}-min "
+                     "cap and was cancelled — run it again into a known container"),
+                    "warning")
                 await _async_save_config(hass, latest, cfg2)
 
         store[MIXING_RODI_UNSUB] = async_track_point_in_time(
@@ -14774,7 +14786,7 @@ async def websocket_mixing_rodi_stop(
 
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/mixing_calibrate",
-    vol.Required("action"): vol.In(("start", "finish", "cancel")),
+    vol.Required("action"): vol.In(("start", "stop", "finish", "cancel")),
     vol.Optional("litres"): vol.All(vol.Coerce(float), vol.Range(min=0, max=2000)),
 })
 @websocket_api.require_admin
@@ -14817,10 +14829,33 @@ async def websocket_mixing_calibrate(
                                       f"Could not start the RODI booster: {exc}")
                 return
             rodi["calibration"] = {"active": True,
-                                   "startedAt": datetime.now(timezone.utc).isoformat()}
+                                   "startedAt": datetime.now(timezone.utc).isoformat(),
+                                   "stoppedAt": ""}
             _append_activity(
                 config, "Mixing station: flow calibration started — let it run into a "
                 "known container, then enter the litres", "control")
+        elif action == "stop":
+            # The ceremony's middle step: freeze the clock BEFORE the keeper
+            # reads the jug — measuring while water still runs is a race the
+            # number always loses. The run stays active (still owns the
+            # booster) until finish or cancel; the cap leg re-anchors from
+            # this stamp so a long run still leaves 30 min to measure.
+            if not cal.get("active"):
+                connection.send_error(msg["id"], "invalid_state",
+                                      "No calibration run is active")
+                return
+            if cal.get("stoppedAt"):
+                connection.send_error(msg["id"], "invalid_state",
+                                      "The water is already stopped — enter the "
+                                      "litres and set the rate")
+                return
+            await _async_mixing_stop_switches(
+                hass, config, ("rodiBooster",), connection.context(msg))
+            cal["stoppedAt"] = datetime.now(timezone.utc).isoformat()
+            rodi["calibration"] = cal
+            _append_activity(
+                config, "Mixing station: calibration water stopped — read the jug "
+                "and enter the litres", "control")
         else:
             if not cal.get("active"):
                 connection.send_error(msg["id"], "invalid_state",
@@ -14830,10 +14865,13 @@ async def websocket_mixing_calibrate(
             await _async_mixing_stop_switches(
                 hass, config, ("rodiBooster",), connection.context(msg))
             started = _parse_datetime(cal.get("startedAt"))
-            rodi["calibration"] = {"active": False, "startedAt": ""}
+            # A stopped run's clock froze at the stop — the litres were read
+            # from THAT window, however long the keeper took to type them.
+            ended = _parse_datetime(cal.get("stoppedAt")) or datetime.now(timezone.utc)
+            rodi["calibration"] = {"active": False, "startedAt": "", "stoppedAt": ""}
             failure: str | None = None
             if action == "finish":
-                elapsed_s = max(0.0, (datetime.now(timezone.utc) - started).total_seconds()) \
+                elapsed_s = max(0.0, (ended - started).total_seconds()) \
                     if started else 0.0
                 litres = _awc_num(msg.get("litres"), 0, 0, MIXING_VESSEL_MAX_L)
                 flush_s = _awc_num(rodi.get("flushSeconds"), 0, 0, MIXING_FLUSH_MAX_S)

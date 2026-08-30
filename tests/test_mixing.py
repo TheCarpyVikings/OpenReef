@@ -1270,6 +1270,76 @@ def test_calibrate_finish_discounts_the_configured_flush():
     assert _mix_state(entry2)["rodi"]["rateLph"] == 80.0
 
 
+def test_calibrate_stop_freezes_the_window_and_finish_reads_it():
+    # The ceremony's middle step: stop turns the water off and freezes the
+    # clock — the litres are read from THAT window, however long the keeper
+    # takes to type them. Here the run was stopped after 10 minutes and
+    # finished 5 minutes later: 20 L in the FROZEN 10 min is 120 L/h (using
+    # "now" would understate it to 80).
+    install_scheduler(integration)
+    hass, entry = _station(_rodi_over(
+        rateLph=0, calibration={
+            "active": True,
+            "startedAt": _iso(datetime.now(timezone.utc) - timedelta(minutes=15)),
+            "stoppedAt": _iso(datetime.now(timezone.utc) - timedelta(minutes=5))}))
+    conn = FakeConnection()
+    run(integration.websocket_mixing_calibrate(
+        hass, conn, {"id": 1, "action": "finish", "litres": 20}))
+    assert conn.results[-1].payload["success"] is True
+    assert _mix_state(entry)["rodi"]["rateLph"] == 120.0
+    # The stop action itself: booster off, run STILL active (it owns the
+    # booster until finish/cancel), stamp written, second stop refused.
+    hass2, entry2 = _station(_rodi_over(
+        rateLph=0, calibration={
+            "active": True,
+            "startedAt": _iso(datetime.now(timezone.utc) - timedelta(minutes=3))}))
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_calibrate(hass2, conn2, {"id": 2, "action": "stop"}))
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass2, "switch.mix_booster")
+    cal = _mix_state(entry2)["rodi"]["calibration"]
+    assert cal["active"] is True and cal["stoppedAt"]
+    assert mixing.rodi_busy_reason(_mix_state(entry2)) == "a flow calibration is running"
+    run(integration.websocket_mixing_calibrate(hass2, conn2, {"id": 3, "action": "stop"}))
+    assert conn2.errors and conn2.errors[-1].code == "invalid_state"
+    # And the engine tells the frozen story: stopped, seconds, production.
+    status = mixing.rodi_status(_cfg(rodi={
+        "rateLph": 120, "flushSeconds": 60,
+        "calibration": {"active": True,
+                        "startedAt": _iso(NOW - timedelta(minutes=15)),
+                        "stoppedAt": _iso(NOW - timedelta(minutes=5))}}), NOW)["calibration"]
+    assert status["stopped"] is True and status["elapsedMin"] == 10.0
+    assert status["elapsedSeconds"] == 600 and status["productionSeconds"] == 540
+
+
+def test_stopped_calibration_cap_reanchors_from_the_stop():
+    # A stopped run holds no booster hazard, so its tidy-up cap re-anchors
+    # from the stop stamp — a 40-minute run still leaves the full window to
+    # read the jug, and an abandoned measure is still swept away.
+    from datetime import datetime as _dt, timezone as _tz
+    scheduler = install_scheduler(integration)
+    now = _dt.now(_tz.utc)
+    hass, entry = _station(_rodi_over(
+        rateLph=0, calibration={
+            "active": True,
+            "startedAt": _iso(now - timedelta(minutes=40)),
+            "stoppedAt": _iso(now - timedelta(minutes=2))}))
+
+    async def _arm():
+        await integration._async_schedule_mixing_rodi(
+            hass, entry, integration._config_from_entry(entry))
+    run(_arm())
+    cap = next(r for r in scheduler.scheduled
+               if not r["cancelled"] and 27 * 60 < (r["run_at"] - now).total_seconds() < 29 * 60)
+
+    async def _fire(record):
+        await record["callback"](record["run_at"])
+    run(_fire(cap))
+    state = _mix_state(entry)
+    assert state["rodi"]["calibration"]["active"] is False
+    assert any("never arrived" in str(a.get("message", "")) for a in
+               integration._config_from_entry(entry).get("activity", []))
+
+
 def test_timed_draw_budgets_the_flush_and_credits_production_only():
     scheduler = install_scheduler(integration)
     hass, entry = _station(_rodi_over(rateLph=60, flushSeconds=120))
