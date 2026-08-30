@@ -888,8 +888,20 @@ test("the dose guide tells the top-up story in plain words", async () => {
     "the top-up line must give the RODI litres and the extra grams");
   assert(html.includes("The water already standing keeps its own"),
     "the top-up line must say the standing water needs nothing");
-  assert(html.includes("assumes the standing water tested at target"),
+  assert(html.includes("assume the standing water tested at target"),
     "the top-up caveat must be spoken");
+  // The what-if row: 10 L default at the engine's 39 g/L reads 390 g live.
+  assert(html.includes("Your own top-up:"), "the what-if row lost its headline");
+  assert(html.includes("data-mixing-dose-whatif") && html.includes(">390 g<"),
+    "the what-if row must price the default 10 L at the engine's g/L");
+  // A keeper-typed figure survives re-renders, and over-room speaks up:
+  // 40 L into 35 L of free space names the ceiling.
+  panel._mixingDoseWhatIfL = 40;
+  const big = panel._mixingTab();
+  assert(big.includes('value="40"') && big.includes(">1560 g<"),
+    "the typed what-if litres must survive a re-render");
+  assert(big.includes("more than the vessel has room for"),
+    "an over-room what-if must name the ceiling");
   // Standing RODI flips the second story to a straight dose.
   blob.doseGuide = { ...guideOver, topUp: null, topUpLitres: 0, heldLitres: 20,
     standingRodi: { available: true, grams: 780, gPerL: 39.0 } };
@@ -900,6 +912,7 @@ test("the dose guide tells the top-up story in plain words", async () => {
   assert(rodiHtml.includes("Salting what's on hand:") && rodiHtml.includes("780"),
     "standing RODI must get its straight dose");
   assert(!rodiHtml.includes("Top back up"), "no phantom top-up on RODI contents");
+  assert(!rodiHtml.includes("Your own top-up"), "no what-if row on RODI contents — RODI into RODI needs no salt");
   noPlaceholders(rodiHtml, "dose guide");
 });
 

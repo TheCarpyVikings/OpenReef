@@ -447,6 +447,25 @@ needs nothing; salt rides in with the new RODI. (The contents guard still
 blocks fresh RODI onto standing salt outside a salting run — the top-up
 figure is the plan for the next mix, not a button.)
 
+## §26 Your own top-up — the what-if row (0.7.105)
+
+Reece: "if the user decides to add a further 10 L of RODI to the mixed
+saltwater — it should calculate how much extra salt to add roughly."
+
+Panel-only (the engine already hands `doseGuide.full.gPerL`): when the
+vessel holds saltwater and no mix is running, the dose card grows a live
+row — "**Your own top-up:** adding [10] L of fresh RODI needs roughly
+**390 g** more salt." Typing updates the grams instantly: a
+`data-mixing-dose-whatif` branch in `handleFieldInput` (fires on input AND
+change) patches `[data-mixing-dose-whatif-g]` textContent directly — the
+cal-ticker pattern, never `_render()`, so typing never fights a repaint.
+The litres persist in `_mixingDoseWhatIfL`, so a summary refetch re-renders
+with the keeper's figure, not the default. Litres beyond the vessel's free
+space get named: "more than the vessel has room for — about 35 L free."
+No what-if on RODI contents (RODI into RODI needs no salt) or mid-run
+(dilution has its own maths on the mix card). Caveat now plural: the
+top-up figures assume the standing water tested at target.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

@@ -1899,6 +1899,25 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "feed-seek") { this._feedSeek(Number(target.value)); return; }
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
+      if (target.dataset.mixingDoseWhatif !== undefined) {
+        // Live what-if maths on the dose card: litres × the engine's own
+        // g/L, patched into the text in place — typing never fights a render.
+        const litres = Math.max(0, Number(target.value) || 0);
+        this._mixingDoseWhatIfL = litres;
+        const g = this._mixingSummary?.doseGuide;
+        const gPerL = Number(g?.full?.gPerL) || 0;
+        const out = this.shadowRoot.querySelector("[data-mixing-dose-whatif-g]");
+        if (out) out.textContent = `${this._format(litres * gPerL, 0)} g`;
+        const room = this.shadowRoot.querySelector("[data-mixing-dose-whatif-room]");
+        if (room) {
+          const free = Math.max(0, (Number(g?.fullLitres) || 0) - (Number(g?.heldLitres) || 0));
+          room.textContent = litres > free + 0.05
+            ? `That's more than the vessel has room for — about ${this._format(free, 0)} L free.`
+            : "";
+        }
+        return;
+      }
+
       if (target.dataset.action === "icp-lab") {
         this._icp.lab = target.value;
         this._icpReparse();   // re-run the template on an already-loaded file
@@ -22785,8 +22804,24 @@ const rigSteps = [
       } else if (guide.standingRodi?.available) {
         lines.push(`<p class="muted"><strong>Salting what's on hand:</strong> the ${this._format(guide.heldLitres, 0)} L of RODI standing in the vessel needs roughly <strong>${this._format(guide.standingRodi.grams, 0)} g</strong>.</p>`);
       }
+      // The what-if row: standing saltwater + any litres the keeper fancies
+      // adding — grams computed live off the engine's own g/L as they type.
+      if (!guide.run?.available && contents === "salt") {
+        const whatIfL = Math.max(0, Number(this._mixingDoseWhatIfL ?? 10) || 0);
+        const free = Math.max(0, (Number(guide.fullLitres) || 0) - (Number(guide.heldLitres) || 0));
+        lines.push(`
+        <div class="button-row" style="align-items:center;gap:8px;flex-wrap:wrap;">
+          <strong>Your own top-up:</strong>
+          <span class="muted">adding</span>
+          <input type="number" min="0" step="0.5" class="dose-ml-input" data-mixing-dose-whatif value="${whatIfL}">
+          <span class="muted">L of fresh RODI needs roughly</span>
+          <strong data-mixing-dose-whatif-g>${this._format(whatIfL * (Number(guide.full.gPerL) || 0), 0)} g</strong>
+          <span class="muted">more salt.</span>
+        </div>
+        <small class="awc-hint" data-mixing-dose-whatif-room>${whatIfL > free + 0.05 ? `That's more than the vessel has room for — about ${this._format(free, 0)} L free.` : ""}</small>`);
+      }
       doseBody = `${lines.join("")}
-        <small class="awc-hint">A guide from the brand's own dosing, not a promise — your salinity test has the final word${guide.topUp?.available ? "; the top-up figure assumes the standing water tested at target" : ""}.</small>`;
+        <small class="awc-hint">A guide from the brand's own dosing, not a promise — your salinity test has the final word${guide.topUp?.available || contents === "salt" ? "; the top-up figures assume the standing water tested at target" : ""}.</small>`;
     } else if (dose.available) {
       doseBody = `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`;
     } else {
