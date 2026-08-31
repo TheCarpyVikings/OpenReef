@@ -139,6 +139,7 @@ from .const import (
     MIXING_MIX_HOURS_MAX,
     MIXING_RETEST_MAX_DAYS,
     MIXING_RODI_RATE_MAX_LPH,
+    MIXING_RUN_SWITCH_ROLES,
     MIXING_STATUSES,
     MIXING_SWITCH_ROLES,
     MIXING_VESSEL_CONTENTS,
@@ -13873,6 +13874,18 @@ async def _async_mixing_stop_switches(
             _LOGGER.exception("Failed to turn off mixing-station %s during stop", role)
 
 
+def _mixing_run_stop_roles(cfg: dict[str, Any]) -> tuple[str, ...]:
+    """Which plugs a MIX-RUN transition (abort, or landing in ready/idle) may
+    switch off. The run owns the heater and the two mixing pumps outright; the
+    booster is shared property. Whenever a RODI draw or a flow calibration is
+    in flight that run OWNS the booster and manages its own stop leg — sweeping
+    it off from here would cut the water mid-measurement and leave the RODI
+    run's stamps claiming litres that never flowed. With nothing holding it,
+    the booster is swept off too: an idle station leaves no plug energised."""
+    return (MIXING_RUN_SWITCH_ROLES if mixing_engine.rodi_busy_reason(cfg)
+            else MIXING_SWITCH_ROLES)
+
+
 def _clear_mixing_circ_timer(hass: HomeAssistant) -> None:
     unsub = hass.data.setdefault(DOMAIN, {}).pop(MIXING_CIRC_UNSUB, None)
     if unsub is not None:
@@ -14205,7 +14218,7 @@ async def _async_mixing_enter_stage(
         mix_v["contents"] = "salt"
         batch["litres"] = round(mixing_engine.mix_vessel_litres(cfg), 1)
     elif stage in ("ready", "idle"):
-        await _async_mixing_stop_switches(hass, config, MIXING_SWITCH_ROLES, context)
+        await _async_mixing_stop_switches(hass, config, _mixing_run_stop_roles(cfg), context)
     batch["state"] = stage
     batch["stageAt"] = datetime.now(timezone.utc).isoformat()
 
@@ -14489,13 +14502,18 @@ async def _async_mixing_recover_orphaned(
                 if every_h > 0 else "")
             await _async_save_config(hass, entry, config)
             return
+        # A RODI draw or calibration that survived the restart owns the booster
+        # and re-arms its own leg in the schedule pass — the run's fail-safe
+        # sweep must not reach across and cut it.
+        off_roles = (("heater",) if mixing_engine.rodi_busy_reason(_mixing_cfg(config))
+                     else ("rodiBooster", "heater"))
         if st == "heating":
-            await _async_mixing_stop_switches(hass, config, ("rodiBooster", "heater"), None)
+            await _async_mixing_stop_switches(hass, config, off_roles, None)
             _append_activity(
                 config, "Mixing station: restart during heating — heater off; "
                 "confirm temperature to continue", "warning")
         else:  # salting
-            await _async_mixing_stop_switches(hass, config, ("rodiBooster", "heater"), None)
+            await _async_mixing_stop_switches(hass, config, off_roles, None)
             try:
                 await _async_mixing_set_switch(hass, config, "mixPumpA", True, None)
                 await _async_mixing_set_switch(hass, config, "mixPumpB", True, None)
@@ -14734,15 +14752,19 @@ async def websocket_mixing_abort(
             connection.send_error(msg["id"], "not_running", "No mix run to stop")
             return
         await _async_mixing_stop_switches(
-            hass, config, MIXING_SWITCH_ROLES, connection.context(msg))
+            hass, config, _mixing_run_stop_roles(cfg), connection.context(msg))
         _mixing_close_batch(hass, config)
+        # Said out loud when the booster was left alone, so "switched off"
+        # never over-claims: the RODI card's run is still making water.
+        rodi_busy = mixing_engine.rodi_busy_reason(cfg)
+        kept = f" ({rodi_busy} — left running)" if rodi_busy else ""
         if state == "heating":
             _append_activity(config, "Mixing station: heating stopped — the vessel "
-                             "keeps its RODI water", "control")
+                             f"keeps its RODI water{kept}", "control")
         else:
             _mixing_empty_vessel(cfg)
             _append_activity(config, "Mixing station: mix run discarded — vessel "
-                             "emptied, everything switched off", "warning")
+                             f"emptied, the run's plugs switched off{kept}", "warning")
         config = await _async_save_config(hass, entry, config)
     _mixing_send(connection, msg, hass, config)
 

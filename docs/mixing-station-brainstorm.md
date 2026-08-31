@@ -532,6 +532,41 @@ Settings: checkbox under the `freshFromVessel` one; the shared hint now
 says the guard-off escape hatch covers everything — "this station's ledger
 is never touched from outside the Mixing tab."
 
+## §29 The booster belongs to the RODI card (0.7.108)
+
+Reece, mid-calibration: "I clicked Discard batch — it stopped the
+calibration (powered off the booster pump plug). This should never happen."
+
+The mix run and the RODI unit are **independent processes** that happen to
+live on the same tab (§14's whole premise). The run owns the heater and the
+two mixing pumps; the booster is the RODI card's — held by a draw or a flow
+calibration, each with its own stop leg. But every mix-run shutdown swept
+`MIXING_SWITCH_ROLES` (all four plugs), so discarding a batch reached across
+and cut water the keeper was standing there measuring.
+
+Worse than the interruption: nothing told the RODI run it had been cut.
+- A **calibration** stayed `active` with no `stoppedAt`, so the litres the
+  keeper eventually typed were divided by a window that kept running after
+  the water stopped — a rate silently far too low, written to config as
+  fact. Exactly the kind of quiet wrong number the Trust Moat is against.
+- A **draw** stayed `active` with its stop leg still armed: at the scheduled
+  fire it credited rate × elapsed for litres that never flowed — phantom
+  water in the vessel anchor AND on the filter odometer.
+
+Fix: `_mixing_run_stop_roles(cfg)` — a run transition stops
+`MIXING_RUN_SWITCH_ROLES` (pumps + heater) whenever `rodi_busy_reason` says
+something owns the booster, and the full four otherwise (an idle station
+still leaves no plug energised). Applied at all three run-shutdown paths:
+`mixing_abort`, `_async_mixing_enter_stage` landing in ready/idle, and the
+restart's orphan sweep (a surviving RODI run re-arms its own leg in the
+schedule pass, so the fail-safe must not pre-empt it).
+
+The abort's activity line no longer over-claims: "the run's plugs switched
+off (a flow calibration is running — left running)".
+
+Unchanged: discarding still empties the vessel, and a draw landing in a
+just-emptied mix vessel still credits normally (empty + fresh RODI = rodi).
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

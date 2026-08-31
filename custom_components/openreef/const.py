@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.107"
+INTEGRATION_VERSION = "0.7.108"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -348,6 +348,10 @@ MIXING_STATUSES = (
 MIXING_LAYOUTS = ("dual", "single")
 MIXING_VESSEL_CONTENTS = ("empty", "rodi", "salt")
 MIXING_SWITCH_ROLES = ("rodiBooster", "mixPumpA", "mixPumpB", "heater")
+# The plugs a MIX-RUN transition owns. The booster is deliberately absent: it
+# belongs to the RODI card (a draw or a flow calibration), and a batch being
+# discarded must never cut the water a keeper is standing there measuring.
+MIXING_RUN_SWITCH_ROLES = ("mixPumpA", "mixPumpB", "heater")
 MIXING_VESSEL_MAX_L = 2000.0              # sanity ceiling on a container size (AWC parity)
 MIXING_TARGET_PPT_MIN = 20.0              # brackish floor — below this is a typo, not a reef
 MIXING_TARGET_PPT_MAX = 45.0

@@ -1869,6 +1869,82 @@ def test_alert_off_means_silence():
     assert not _notifications(hass)
 
 
+# ----------------------------------------------------------------------------
+# The booster belongs to the RODI card. A mix-run transition (discard, or the
+# run landing in ready/idle) sweeps its OWN plugs off; it must never reach
+# across and cut a draw or a flow calibration mid-run — the keeper is standing
+# there with a jug, and the RODI run's stamps would go on claiming litres that
+# stopped flowing. 0.7.108.
+
+def _cal_station(**over):
+    started = datetime.now(timezone.utc) - timedelta(minutes=5)
+    cfg = _rodi_over(rateLph=0, calibration={"active": True, "startedAt": _iso(started)})
+    cfg.update(over)
+    return _station(cfg)
+
+
+def test_discard_mid_calibration_leaves_the_booster_making_water():
+    install_scheduler(integration)
+    hass, entry = _cal_station(batch={"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_abort(hass, conn, {"id": 1}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "idle"
+    assert state["vessels"]["mix"]["estimatedLitres"] == 0.0        # the batch still goes
+    assert state["vessels"]["mix"]["contents"] == "empty"
+    for entity in ("switch.mix_pump_a", "switch.mix_pump_b", "switch.mix_heater"):
+        assert ("turn_off", entity) in _switch_calls(hass, entity)
+    # The calibration run is untouched: booster still on, stamps intact.
+    assert ("turn_off", "switch.mix_booster") not in _switch_calls(hass, "switch.mix_booster")
+    assert state["rodi"]["calibration"]["active"] is True
+    assert state["rodi"]["calibration"]["startedAt"]
+    # And the log says so rather than claiming everything went off.
+    activity = integration._config_from_entry(entry).get("activity", [])
+    assert any("left running" in a.get("message", "") for a in activity), activity
+
+
+def test_discard_mid_draw_leaves_the_run_alone():
+    install_scheduler(integration)
+    started = datetime.now(timezone.utc) - timedelta(minutes=2)
+    over = _rodi_over(draw={"active": True, "litres": 20, "destination": "store",
+                            "startedAt": _iso(started),
+                            "endsAt": _iso(started + timedelta(minutes=10))})
+    over["batch"] = {"state": "salting", "type": "salt", "litres": 40, "stageAt": _iso(NOW)}
+    hass, entry = _station(over)
+    conn = FakeConnection()
+    run(integration.websocket_mixing_abort(hass, conn, {"id": 1}))
+    assert ("turn_off", "switch.mix_booster") not in _switch_calls(hass, "switch.mix_booster")
+    assert _mix_state(entry)["rodi"]["draw"]["active"] is True
+
+
+def test_batch_landing_in_ready_leaves_a_calibration_running():
+    install_scheduler(integration)
+    hass, entry = _cal_station(batch={"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW - timedelta(hours=6))})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 35.0}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "ready"
+    assert ("turn_off", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    assert ("turn_off", "switch.mix_booster") not in _switch_calls(hass, "switch.mix_booster")
+    assert state["rodi"]["calibration"]["active"] is True
+
+
+def test_restart_recovery_never_cuts_a_live_calibration():
+    install_scheduler(integration)
+    hass, entry = _cal_station(batch={"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)})
+    run(integration._async_mixing_recover_orphaned(hass, entry))
+    assert ("turn_off", "switch.mix_heater") in _switch_calls(hass, "switch.mix_heater")
+    assert ("turn_off", "switch.mix_booster") not in _switch_calls(hass, "switch.mix_booster")
+    # With nothing holding the booster, the restart sweep still forces it off.
+    hass2, entry2 = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                        "stageAt": _iso(NOW)}})
+    run(integration._async_mixing_recover_orphaned(hass2, entry2))
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass2, "switch.mix_booster")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
