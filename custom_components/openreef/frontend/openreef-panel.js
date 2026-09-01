@@ -23858,15 +23858,15 @@ const rigSteps = [
           <option value="block" ${(mix.integrations?.awcGuard || "warn") === "block" ? "selected" : ""}>Block — refuse without a tested batch</option>
         </select></label>
       </div>
-      <label class="toggle">
+      <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="mixing-integrations" data-field="freshFromVessel" ${mix.integrations?.freshFromVessel !== false ? "checked" : ""}>
         <span><strong>AWC fresh container fills from the mix vessel</strong><small>"Fresh refilled" then draws the refill volume from this station's batch — the vessel level and salt guide follow — and water changes debit the AWC container, not the vessel. Untick for direct-draw plumbing (the AWC pumps straight from the vessel): each completed change debits the vessel instead.</small></span>
       </label>
-      <label class="toggle">
+      <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="mixing-integrations" data-field="maintenanceFromVessel" ${mix.integrations?.maintenanceFromVessel !== false ? "checked" : ""}>
         <span><strong>Hand-logged water changes draw from the vessel</strong><small>Log a water change in Maintenance with a volume and that many litres leave this station's batch — bucket changes keep the ledger honest, and a % log converts through your tank volume. Changes the AWC ran are never counted here (its history rows are tagged); those litres are already accounted by the coupling above. Untick if you change water by hand from some other container.</small></span>
       </label>
-      <label class="toggle">
+      <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="mixing-integrations" data-field="hatcheryFromVessel" ${mix.integrations?.hatcheryFromVessel !== false ? "checked" : ""}>
         <span><strong>The hatchery draws from the vessel</strong><small>Starting a brine hatch draws that cone's volume (a 0.5 L hatchery takes 0.5 L), and harvesting draws whatever fresh saltwater the backflush pushed into the live-brine container (a 750 ml container filled from empty takes 0.75 L). Untick if you mix hatch water somewhere else.</small></span>
       </label>
