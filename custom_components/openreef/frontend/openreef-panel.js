@@ -10334,7 +10334,20 @@ class OpenReefPanel extends HTMLElement {
     const containerLabel = Number(res.volumeMl) > 0
       ? `${Math.round(Number(res.remainingMl) || 0)} / ${Math.round(Number(res.volumeMl))} ml`
       : "";
+    // Per-vessel truth for the drawing: every hatch cone renders with its own
+    // fill, bubbles and valve, whatever aggregate stage the machine below
+    // picks. The ▶ walkthrough deliberately carries none — it tells one
+    // batch's story through the original single cone.
+    const hatchVessels = (Array.isArray(hatch.vessels) ? hatch.vessels : [])
+      .slice(0, 4)
+      .map((v) => ({
+        name: v.name || "",
+        pct: pct(v.state?.percent),
+        incubating: v.state?.status === "incubating",
+        ready: v.state?.status === "ready" || v.state?.status === "overdue",
+      }));
     const base = {
+      hatchVessels: hatchVessels.length ? hatchVessels : null,
       hatchPct: pct(hs.percent), enrichPct: null,
       containerPct, containerFresh: res.freshness?.status || "", containerLabel,
       airOn: false, air2On: false, transferHot: false, meshHot: false,
@@ -10448,30 +10461,74 @@ class OpenReefPanel extends HTMLElement {
           : rig.containerFresh === "aging" ? "#f5a524"
             : rig.containerFresh === "fresh" ? "#26a69a" : "#78909c")
         : "#78909c";
+    // Hatch cones: one per configured vessel (the settings cap is 4), scaled
+    // to share the band left of the air pump. Each cone keeps the original
+    // local geometry; the group transform pins its outlet to y=334 so the air
+    // manifold and transfer runs line up at any scale. One vessel = the
+    // original drawing, pixel for pixel.
+    const cones = (rig.hatchVessels && rig.hatchVessels.length)
+      ? rig.hatchVessels
+      : [{ name: "", pct: rig.hatchPct, incubating: rig.airOn, ready: rig.transferHot }];
+    const n = cones.length;
+    const cs = n <= 1 ? 1 : n === 2 ? 0.85 : n === 3 ? 0.7 : 0.6;
+    const cx = (i) => (n <= 1 ? 160 : n === 2 ? 138 + i * 118 : n === 3 ? 122 + i * 92 : 112 + i * 76);
+    const outX = (i) => Math.round(cx(i) - 14 * cs);
+    const outY = Math.round(334 - 6 * cs);
+    const stubX = (i) => Math.round(cx(i) + 16 * cs);
+    const anyAir = cones.some((c) => c.incubating);
+    const coneSvg = (c, i) => {
+      const tx = (cx(i) - 160 * cs).toFixed(1);
+      const ty = (334 * (1 - cs)).toFixed(1);
+      const label = n > 1
+        ? this._escape((c.name || `Hatchery ${i + 1}`).replace(/hatchery\s*/i, "HATCH ").toUpperCase())
+        : "HATCH EGGS";
+      return `
+        <g transform="translate(${tx} ${ty}) scale(${cs})">
+          <rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+          <line x1="114" y1="96" x2="206" y2="96" stroke="#37474f" stroke-width="2"></line>
+          ${c.pct > 0 ? `<polygon points="114,98 206,98 206,240 172,318 148,318 114,240" fill="#ef6c00" opacity="${(0.08 + 0.45 * c.pct / 100).toFixed(2)}"></polygon>` : ""}
+          ${c.incubating ? `
+            <circle cx="150" cy="220" r="2.4" fill="#b0bec5" opacity="0.8" class="nps-bub"></circle>
+            <circle cx="168" cy="180" r="1.8" fill="#b0bec5" opacity="0.7" class="nps-bub"></circle>
+            <circle cx="182" cy="250" r="2" fill="#b0bec5" opacity="0.6" class="nps-bub"></circle>` : ""}
+          ${c.pct > 0 ? `<text x="160" y="58" text-anchor="middle" font-size="${n > 1 ? 13 : 11}" fill="#ef6c00" font-family="monospace">${Math.round(c.pct)}%</text>` : ""}
+          <circle cx="128" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="146" cy="90" r="2" fill="#8d6e63"></circle>
+          <circle cx="168" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="189" cy="90" r="2" fill="#8d6e63"></circle>
+          <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" fill-opacity="0" stroke="#78909c" stroke-width="2.5"></polygon>
+          <rect x="146" y="320" width="28" height="14" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+          <text x="160" y="150" text-anchor="middle" transform="rotate(-90 160 150)" font-size="13" fill="#cfd8dc" font-family="monospace">${label}</text>
+        </g>`;
+    };
+    // Air: one manifold at y=340 from the pump to the leftmost cone, a short
+    // stub up into every tip; flow animates per incubating cone.
+    const airMain = `M 422 152 V 340 H ${stubX(0) + 20}`;
+    const airStubs = cones.map((c, i) => pipe(`M ${stubX(i) + 20} 340 L ${stubX(i)} 334`)
+      + (c.incubating ? `<path d="M ${stubX(i) + 20} 340 L ${stubX(i)} 334" fill="none" stroke="#4dd0e1" stroke-width="1.6" class="awc-flow"></path>` : "")).join("");
+    // Transfer: the first cone keeps the original left route; every extra
+    // cone drops its own valve-①'d run straight down to the shared
+    // equalisation manifold at y=600.
+    const transferMain = `M ${outX(0)} ${outY} H 70 V 600 H 700 V 466`;
+    const valve1X = Math.max(86, outX(0) - 42);
+    const extraDrops = cones.slice(1).map((c, j) => {
+      const i = j + 1;
+      return pipe(`M ${outX(i)} ${outY} V 600`)
+        + (c.ready ? `<path d="M ${outX(i)} ${outY} V 600" fill="none" stroke="#ef6c00" stroke-width="2" class="awc-flow"></path>` : "")
+        + `<g transform="rotate(90 ${outX(i)} 380)">${valve(outX(i), 380, c.ready)}</g>`
+        + `<text x="${outX(i) + 16}" y="384" font-size="13" fill="${hot(c.ready)}" font-family="monospace">①</text>`;
+    }).join("");
     return `
       <svg viewBox="0 0 940 760" style="width:100%;max-width:760px;display:block;margin:0 auto;" role="img" aria-label="Settle and slug rig — live">
         <text x="20" y="34" font-size="13" fill="#ef6c00" font-family="monospace" letter-spacing="0.08em">${this._escape(rig.caption || "")}</text>
-        <rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
-        <line x1="114" y1="96" x2="206" y2="96" stroke="#37474f" stroke-width="2"></line>
-        ${rig.hatchPct > 0 ? `<polygon points="114,98 206,98 206,240 172,318 148,318 114,240" fill="#ef6c00" opacity="${(0.08 + 0.45 * rig.hatchPct / 100).toFixed(2)}"></polygon>` : ""}
-        ${rig.airOn ? `
-          <circle cx="150" cy="220" r="2.4" fill="#b0bec5" opacity="0.8" class="nps-bub"></circle>
-          <circle cx="168" cy="180" r="1.8" fill="#b0bec5" opacity="0.7" class="nps-bub"></circle>
-          <circle cx="182" cy="250" r="2" fill="#b0bec5" opacity="0.6" class="nps-bub"></circle>` : ""}
-        ${rig.hatchPct > 0 ? `<text x="160" y="58" text-anchor="middle" font-size="11" fill="#ef6c00" font-family="monospace">${Math.round(rig.hatchPct)}%</text>` : ""}
-        <circle cx="128" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="146" cy="90" r="2" fill="#8d6e63"></circle>
-        <circle cx="168" cy="92" r="2.4" fill="#8d6e63"></circle><circle cx="189" cy="90" r="2" fill="#8d6e63"></circle>
-        <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" fill-opacity="0" stroke="#78909c" stroke-width="2.5"></polygon>
-        <rect x="146" y="320" width="28" height="14" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
-        <text x="160" y="150" text-anchor="middle" transform="rotate(-90 160 150)" font-size="13" fill="#cfd8dc" font-family="monospace">HATCH EGGS</text>
-        ${sm(222, 94, "shells float — stay behind")}
+        ${cones.map(coneSvg).join("")}
+        ${n > 1 ? sm(20, 58, "shells float — stay behind") : sm(222, 94, "shells float — stay behind")}
         <rect x="380" y="100" width="84" height="52" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
         <text x="422" y="131" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">AIR PUMP</text>
-        ${pipe("M 422 152 V 340 H 196 L 176 334")}
+        ${pipe(airMain)}
         ${pipe("M 422 340 V 430 H 588 L 600 444")}
-        ${rig.airOn ? `<path d="M 422 152 V 340 H 196 L 176 334" fill="none" stroke="#4dd0e1" stroke-width="1.6" class="awc-flow"></path>` : ""}
+        ${anyAir ? `<path d="${airMain}" fill="none" stroke="#4dd0e1" stroke-width="1.6" class="awc-flow"></path>` : ""}
+        ${airStubs}
         ${rig.air2On ? `<path d="M 422 152 V 430 H 588 L 600 444" fill="none" stroke="#4dd0e1" stroke-width="1.6" class="awc-flow"></path>` : ""}
-        ${sm(300, 334, rig.airOn ? "air ON" : "air off", "middle")}
+        ${n > 1 ? sm(416, 356, anyAir ? "air ON" : "air off", "end") : sm(300, 334, anyAir ? "air ON" : "air off", "middle")}
         ${sm(508, 420, rig.air2On ? "air ON" : "air off", "middle")}
         <rect x="560" y="210" width="100" height="150" fill="#101a22" stroke="${v2Stroke}" stroke-width="2.5"></rect>
         <line x1="564" y1="232" x2="656" y2="232" stroke="#37474f" stroke-width="2"></line>
@@ -10487,12 +10544,13 @@ class OpenReefPanel extends HTMLElement {
         ${rig.containerLabel ? `<text x="720" y="238" font-size="11" fill="${rig.containerFresh === "stale" ? "#e5484d" : "#26a69a"}" font-family="monospace">${this._escape(rig.containerLabel)}</text>
         ${sm(720, 253, "the vessel IS the container", "start")}` : ""}
         ${rig.enrichPct != null ? `<text x="720" y="278" font-size="11" fill="#7e57c2" font-family="monospace">SOAK · ${Math.round(rig.enrichPct)}% soak</text>` : ""}
-        ${pipe("M 146 328 H 70 V 600 H 700 V 466")}
-        ${rig.transferHot ? `<path d="M 146 328 H 70 V 600 H 700 V 466" fill="none" stroke="#ef6c00" stroke-width="2" class="awc-flow"></path>` : ""}
-        ${valve(104, 328, rig.transferHot)}<text x="104" y="308" text-anchor="middle" font-size="13" fill="${hot(rig.transferHot)}" font-family="monospace">①</text>
+        ${pipe(transferMain)}
+        ${(rig.transferHot || cones[0].ready) ? `<path d="${transferMain}" fill="none" stroke="#ef6c00" stroke-width="2" class="awc-flow"></path>` : ""}
+        ${valve(valve1X, outY, cones[0].ready)}<text x="${valve1X}" y="${outY - 20}" text-anchor="middle" font-size="13" fill="${hot(cones[0].ready)}" font-family="monospace">①</text>
+        ${extraDrops}
         ${pipe("M 624 452 H 700 V 466")}
         ${valve(664, 452, rig.transferHot)}<text x="664" y="482" text-anchor="middle" font-size="13" fill="${hot(rig.transferHot)}" font-family="monospace">②</text>
-        ${sm(240, 592, "equalisation transfer (valves ① + ②)")}
+        ${sm(n > 1 ? 344 : 240, 592, "equalisation transfer (valves ① + ②)")}
         ${pipe("M 380 600 V 628")}
         ${rig.meshHot ? `<path d="M 624 452 H 700 V 600 H 380 V 628" fill="none" stroke="#8d6e63" stroke-width="2" class="awc-flow"></path>` : ""}
         ${valve(380, 614, rig.meshHot)}<text x="404" y="608" font-size="13" fill="${hot(rig.meshHot)}" font-family="monospace">③</text>
@@ -11697,12 +11755,20 @@ const rigSteps = [
       ["Optional Selcon, on the dose push (instar II)", "a second mesh cycle before feed-out is the rinse."],
       ["Housekeeping", "crack ③ a moment to bleed the dead leg; rinse the mesh in the waste water."],
     ];
+    // The shape line counts the real rig: N hatch cones + the live-brine
+    // vessel. Summary first (demo swaps it), config as the fallback.
+    const coneCount = Math.max(1, Math.min(4,
+      (Array.isArray(this._nps?.summary?.hatchery?.vessels) ? this._nps.summary.hatchery.vessels.length : 0)
+      || Object.keys(this._config?.nps?.hatchery?.vessels || {}).length || 1));
+    const shapeLine = coneCount === 1
+      ? "Two vessels, three valves, one mesh — nothing else."
+      : `${{ 2: "Three", 3: "Four", 4: "Five" }[coneCount]} vessels — ${coneCount} hatch cones sharing one LIVE BRINE vessel — a valve ① each plus ② + ③, one mesh — nothing else.`;
     return `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
           <div style="flex:1;min-width:260px;">
             <p class="eyebrow" style="margin:0;">The rig — live</p>
-            <small class="muted">Two vessels, three valves, one mesh — nothing else. The drawing follows whatever stage the hatchery is in; the blue part is the whole upgrade: the 120 µm mesh capsule under valve ③.</small>
+            <small class="muted">${shapeLine} The drawing follows whatever stage the hatchery is in; the blue part is the whole upgrade: the 120 µm mesh capsule under valve ③.</small>
           </div>
           <button class="secondary compact-button" data-action="nps-rig-play">${this._npsRigPreview ? "■ Stop" : "▶ Play the stages"}</button>
         </div>
