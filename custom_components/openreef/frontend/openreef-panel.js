@@ -13268,15 +13268,72 @@ const rigSteps = [
     await this._awcLoadSummary();
   }
 
+  // The pending top-up: what "Fresh refilled" would draw right now —
+  // capacity minus what the dead-reckoned ledger says is left.
+  _awcFreshTopUpL(kind = "fresh") {
+    const fresh = this._config?.automaticWaterChange?.reservoirs?.[kind] || {};
+    const capacity = Number(fresh.capacityLitres) || 0;
+    return Math.max(0, capacity - (Number(fresh.remainingMl) || 0) / 1000);
+  }
+
+  // The confirm has to tell the WHOLE story before the tap: the litres to
+  // full, and — when the container fills from the mix vessel — exactly what
+  // the vessel's side of the transfer will be, including the two ways it can
+  // refuse or fall short. No more marking a container full and only finding
+  // out from the activity log that the vessel never paid.
+  _awcFreshRefillPrompt(kind) {
+    const topUp = this._awcFreshTopUpL(kind);
+    const label = kind === "fresh" ? "FRESH" : kind.toUpperCase();
+    if (topUp <= 0.05) {
+      return `The ${label} container already reads full — tap again to re-confirm it anyway.`;
+    }
+    const base = `Tap again to confirm: top the ${label} container up to full — that's ${topUp.toFixed(1)} L.`;
+    if (kind !== "fresh") return base;
+    const mix = this._mixingCfg();
+    const coupled = mix.enabled
+      && mix.integrations?.freshFromVessel !== false
+      && (mix.integrations?.awcGuard || "warn") !== "off";
+    if (!coupled) return base;
+    if (!["ready", "storing"].includes(mix.batch?.state)) {
+      return `${base} The mixing station has no tested batch, so the vessel will NOT be debited.`;
+    }
+    const vesselL = Number(mix.vessels?.mix?.estimatedLitres) || 0;
+    if (vesselL + 0.05 < topUp) {
+      return `${base} The mixing vessel only holds ${vesselL.toFixed(1)} L — it will be drained empty and the batch closed, ${(topUp - vesselL).toFixed(1)} L short.`;
+    }
+    return `${base} Drawn from the mixing vessel — ${(vesselL - topUp).toFixed(1)} L will remain.`;
+  }
+
+  // What actually happened, from the backend's own accounting.
+  _awcFreshRefillDone(kind, result) {
+    const label = kind === "fresh" ? "Fresh" : kind;
+    const topUp = Number(result?.topUpL) || 0;
+    if (topUp <= 0.05) return `${label} container confirmed full.`;
+    const base = `${label} topped up — ${topUp.toFixed(1)} L to full.`;
+    const vessel = result?.vessel || {};
+    if (vessel.outcome === "debited") {
+      return Number(vessel.remainingL) > 0.05
+        ? `${base} Drawn from the mixing vessel — ${Number(vessel.remainingL).toFixed(1)} L left.`
+        : `${base} That drained the mixing vessel — the batch is closed.`;
+    }
+    if (vessel.outcome === "shortfall") {
+      return `${base} The vessel only covered ${Number(vessel.drawnL).toFixed(1)} L of it — it stands empty and the batch is closed.`;
+    }
+    if (vessel.outcome === "untested") {
+      return `${base} NOT debited from the mixing vessel — its saltwater has no tested batch.`;
+    }
+    return base;
+  }
+
   async _awcResetReservoir(kind) {
     // Two-step confirm (T3): the reset targets sit on the big clickable SVG —
     // one stray tap marked a near-empty bin "full" and defeated the
     // fresh-insufficient preflight, with no undo.
     if (this._awcResetConfirm !== kind) {
       this._awcResetConfirm = kind;
-      this._awcMessage = kind === "fresh"
-        ? "Tap again to confirm: mark the FRESH reservoir as refilled to full."
-        : "Tap again to confirm: mark the WASTE reservoir as emptied.";
+      this._awcMessage = kind === "waste"
+        ? "Tap again to confirm: mark the WASTE reservoir as emptied."
+        : this._awcFreshRefillPrompt(kind);
       this._render();
       return;
     }
@@ -13286,7 +13343,9 @@ const rigSteps = [
     try {
       const result = await this._callWS({ type: "openreef/awc_reset_reservoir", reservoir: kind });
       this._config = result.config || this._config;
-      this._awcMessage = kind === "fresh" ? "Fresh reservoir marked refilled." : "Waste reservoir marked emptied.";
+      this._awcMessage = kind === "waste"
+        ? "Waste reservoir marked emptied."
+        : this._awcFreshRefillDone(kind, result);
     } catch (err) {
       this._awcMessage = "Failed: " + (err instanceof Error ? err.message : err);
     }
@@ -13502,7 +13561,7 @@ const rigSteps = [
       <section class="setting-card">
         <div class="section-head"><div><p class="eyebrow">Live view</p><h3>${this._escape(this._awcStatusLabel(state.status || "idle"))}</h3></div>
           <div class="button-row">
-            <button class="secondary" data-action="awc-reset" data-id="fresh">Fresh refilled</button>
+            <button class="secondary" data-action="awc-reset" data-id="fresh" title="Top the fresh container up to full — any time, not just when it's empty">Fresh refilled${this._awcFreshTopUpL() > 0.05 ? ` (+${this._awcFreshTopUpL().toFixed(1)} L)` : ""}</button>
             <button class="secondary" data-action="awc-reset" data-id="waste">Waste emptied</button>
           </div>
         </div>

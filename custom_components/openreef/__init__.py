@@ -10075,19 +10075,28 @@ async def websocket_awc_reset_reservoir(
             # odometer genuinely counts from a full reservoir.
             fresh["fullConfirmedAt"] = datetime.now(timezone.utc).isoformat()
             name = "Fresh saltwater" if kind == "fresh" else f"Source '{kind}'"
-            _append_activity(config, f"{name} reservoir marked full", "control")
+            _append_activity(
+                config,
+                f"{name} reservoir topped up — {round(refill_l, 1):g} L to full"
+                if refill_l > 0.05 else f"{name} reservoir confirmed full",
+                "control")
+            vessel: dict[str, Any] = {"outcome": "direct"}
             if (kind == "fresh" and refill_l > 0.05
                     and _mixing_fresh_from_vessel(config)):
                 # _mixing_debit_batch carries the rest of the guards (station
                 # enabled, awcGuard not off, a live tested batch) and writes
                 # its own activity line with the litres and what remains.
-                _mixing_debit_batch(hass, config, round(refill_l, 1),
-                                    "the AWC fresh refill")
+                vessel = _mixing_debit_batch(hass, config, round(refill_l, 1),
+                                             "the AWC fresh refill")
+            # What the top-up actually did rides back to the panel: the
+            # litres to full, and the vessel's side of the transfer.
+            extra = {"topUpL": round(refill_l, 1), "vessel": vessel}
         else:
             reservoirs.get("waste", {})["filledMl"] = 0
             _append_activity(config, "Waste reservoir marked empty", "control")
+            extra = {}
         config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    _awc_send(connection, msg, hass, config, **extra)
 
 
 def _sanitize_imported_config(incoming: dict[str, Any], current: dict[str, Any]) -> None:
@@ -14322,30 +14331,52 @@ def _mixing_empty_vessel(cfg: dict[str, Any]) -> None:
 
 
 def _mixing_debit_batch(hass: HomeAssistant, config: dict[str, Any], litres: float,
-                        note: str) -> None:
+                        note: str) -> dict[str, Any]:
     """Draw litres from the vessel ledger (doc §9's completion debit).
-    Quietly does nothing unless the station is enabled, coupled to AWC
-    (awcGuard not 'off'), and holding a tested salt run — an AWC filling from
-    some other reservoir must not phantom-drain this one."""
+    Does nothing unless the station is enabled, coupled to AWC (awcGuard not
+    'off'), and holding a tested salt run — an AWC filling from some other
+    reservoir must not phantom-drain this one. Returns what happened so the
+    caller can tell the keeper: skips are only quiet when there is genuinely
+    nothing to account (saltwater standing with NO tested batch gets a
+    warning — that water is leaving the building unaccounted), and a vessel
+    that can't cover the draw says how short it fell instead of just
+    standing empty."""
     cfg = _mixing_cfg(config)
     if (not cfg.get("enabled") or litres <= 0
             or str((cfg.get("integrations") or {}).get("awcGuard") or "warn") == "off"):
-        return
+        return {"outcome": "decoupled"}
     batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
     if str(batch.get("state") or "idle") not in ("ready", "storing"):
-        return
-    remaining = round(max(0.0, mixing_engine.mix_vessel_litres(cfg) - litres), 1)
+        mix_v = cfg.get("vessels", {}).get("mix", {}) if isinstance(cfg.get("vessels"), dict) else {}
+        if str(mix_v.get("contents") or "empty") == "salt":
+            _append_activity(
+                config, f"Mixing station: {note} was NOT debited — the vessel's "
+                "saltwater has no tested batch (log a salinity test to vouch for it)",
+                "warning")
+            return {"outcome": "untested"}
+        return {"outcome": "no_water"}
+    available = mixing_engine.mix_vessel_litres(cfg)
+    remaining = round(max(0.0, available - litres), 1)
     mix_v = cfg.setdefault("vessels", {}).setdefault("mix", {})
     mix_v["estimatedLitres"] = remaining
     if remaining <= 0.05:
+        shortfall = round(litres - available, 1)
         _mixing_empty_vessel(cfg)
         _mixing_close_batch(hass, config)
+        if shortfall > 0.05:
+            _append_activity(
+                config, f"Mixing station: {note} needed {litres:g} L but the vessel "
+                f"only held {round(available, 1):g} L — it stands empty, "
+                f"{shortfall:g} L short", "warning")
+            return {"outcome": "shortfall",
+                    "drawnL": round(available, 1), "shortfallL": shortfall}
         _append_activity(config, f"Mixing station: batch used up by {note} — "
                          "the vessel stands empty", "control")
-    else:
-        _append_activity(
-            config, f"Mixing station: {litres:g} L drawn by {note} — {remaining:g} L left",
-            "control")
+        return {"outcome": "debited", "drawnL": round(litres, 1), "remainingL": 0.0}
+    _append_activity(
+        config, f"Mixing station: {litres:g} L drawn by {note} — {remaining:g} L left",
+        "control")
+    return {"outcome": "debited", "drawnL": round(litres, 1), "remainingL": remaining}
 
 
 def _mixing_fresh_from_vessel(config: dict[str, Any]) -> bool:

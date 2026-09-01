@@ -987,6 +987,77 @@ def test_fresh_refill_transfers_the_litres_from_the_vessel():
         "mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
 
 
+def test_fresh_topup_works_at_any_level_and_reports_the_transfer():
+    # Not an empty-only reset: 18 of 25 L standing → exactly 7 L to full,
+    # echoed back to the panel with the vessel's side of the transfer.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch(), fresh_ml=18000)
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass, conn, {"id": 1, "reservoir": "fresh"}))
+    payload = conn.results[0].payload
+    assert payload["topUpL"] == 7.0
+    assert payload["vessel"] == {"outcome": "debited", "drawnL": 7.0, "remainingL": 33.0}
+    config = integration._config_from_entry(entry)
+    assert config["automaticWaterChange"]["reservoirs"]["fresh"]["remainingMl"] == 25000.0
+    assert config["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 33.0
+
+
+def test_fresh_topup_shortfall_is_said_out_loud():
+    # The vessel can't cover the top-up: it gives what it has, stands empty,
+    # the batch closes — and both the payload and the activity say how short.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch(), fresh_ml=0)
+    entry.options[CONF_SETTINGS]["mixingStation"]["vessels"]["mix"]["estimatedLitres"] = 10.0
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass, conn, {"id": 1, "reservoir": "fresh"}))
+    payload = conn.results[0].payload
+    assert payload["topUpL"] == 25.0
+    assert payload["vessel"] == {"outcome": "shortfall", "drawnL": 10.0, "shortfallL": 15.0}
+    config = integration._config_from_entry(entry)
+    assert config["mixingStation"]["vessels"]["mix"]["contents"] == "empty"
+    assert config["mixingStation"]["batch"]["state"] == "idle"
+    assert any(a.get("type") == "warning" and "15 L short" in str(a.get("message", ""))
+               for a in config.get("activity", []))
+
+
+def test_fresh_topup_with_untested_saltwater_warns_and_stands_off():
+    # Salt standing but no tested batch: the vessel is NOT debited (the debit
+    # only trusts a vouched batch) — but silence would be phantom saltwater,
+    # so the payload and the activity both say so.
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", fresh_ml=15000)
+    mix_v = entry.options[CONF_SETTINGS]["mixingStation"]["vessels"]["mix"]
+    mix_v["estimatedLitres"] = 30.0
+    mix_v["contents"] = "salt"
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass, conn, {"id": 1, "reservoir": "fresh"}))
+    payload = conn.results[0].payload
+    assert payload["vessel"] == {"outcome": "untested"}
+    config = integration._config_from_entry(entry)
+    assert config["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 30.0
+    assert any(a.get("type") == "warning" and "no tested batch" in str(a.get("message", ""))
+               for a in config.get("activity", []))
+    # A vessel of plain RODI (or nothing) is a genuinely quiet skip.
+    hass2, entry2 = _awc_station_entry(guard="warn", fresh_ml=15000)
+    conn2 = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass2, conn2, {"id": 2, "reservoir": "fresh"}))
+    assert conn2.results[0].payload["vessel"] == {"outcome": "no_water"}
+    assert not any(a.get("type") == "warning"
+                   for a in integration._config_from_entry(entry2).get("activity", []))
+
+
+def test_fresh_already_full_confirms_without_a_transfer():
+    install_scheduler(integration)
+    hass, entry = _awc_station_entry(guard="warn", batch=_stored_batch(), fresh_ml=25000)
+    conn = FakeConnection()
+    run(integration.websocket_awc_reset_reservoir(hass, conn, {"id": 1, "reservoir": "fresh"}))
+    payload = conn.results[0].payload
+    assert payload["topUpL"] == 0.0
+    assert payload["vessel"] == {"outcome": "direct"}
+    assert integration._config_from_entry(entry)[
+        "mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 40.0
+
+
 def test_run_debit_belongs_to_direct_draw_plumbing_only():
     # Container model (the default): the vessel paid at refill time, so a
     # completed change must not charge it again — that would count the same
