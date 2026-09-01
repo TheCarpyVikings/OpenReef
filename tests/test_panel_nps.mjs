@@ -545,7 +545,10 @@ test("the v2 strip shows every vessel, the container, and the advisory brains", 
     assert(html.includes("Fed 30 ml"), "the one-tap hand-feed button is missing");
     assert(html.includes("~2 g cysts"), "the cyst-dose guide (2 g/L optimum) is missing");
     assert(html.includes("Set clock to 20 h"), "the learned-clock Apply is missing");
-    assert(html.includes("expect ~36 h"), "the temperature advisory is missing");
+    // A learned clock exists, so the temperature line quotes the rule of
+    // thumb but defers to the measured runs (0.7.115).
+    assert(html.includes("rule of thumb ~36 h") && html.includes("measured beats modelled"),
+      "the temperature advisory is missing or stretches the learned clock");
     assert(!html.includes("needs 2 hatcheries"), "two vessels for a needed-2 setup — no nag");
     // Down a vessel, the structural advice appears.
     const short = v2HatcherySummary({ vesselsNeeded: 2 });
@@ -607,7 +610,8 @@ test("settings carry the vessel editor with the researched presets", async () =>
       assert(html.includes("Ziss ZH-700"), "vessel presets missing (and remember: no ZH-1000 exists)");
       assert(html.includes("Add a hatchery"), "the add-vessel button is missing");
       assert(html.includes('data-scope="nps-hatch-reservoir"'), "container ledger settings missing");
-      assert(html.includes("lives in the fridge"), "the refrigerated toggle is missing");
+      assert(!html.includes('data-field="refrigerated"'), "the fridge is per batch now — no global toggle");
+      assert(html.includes("per batch, not a setting"), "settings must point at the inline ❄ Refrigerate button");
       assert(html.includes('data-field="tempEntity"'), "the temp sensor field is missing");
     }
   } finally { restore(); }
@@ -661,7 +665,10 @@ test("the rig blueprint lives on the Hatchery tab; NPS keeps a compact door", as
     assert(!html.includes("120 µm mesh"), "the blueprint must live on the Hatchery tab only");
     // Hatchery tab: the rig is the hero, always open.
     html = panel._hatcheryTab();
-    assert(html.includes("HATCH EGGS") && html.includes("LIVE BRINE"), "the two staggered vessels are missing");
+    // One cone keeps the original "HATCH EGGS" drawing; a multi-cone rig
+    // labels each cone by number (0.7.111).
+    assert((html.includes("HATCH EGGS") || html.includes("HATCH 1")) && html.includes("LIVE BRINE"),
+      "the staggered vessels are missing");
     assert(html.includes("120 µm mesh"), "the mesh capsule is missing");
     assert(html.includes("mesh half OFF"), "the crud-bleed-through-③ step is missing");
     assert(!html.includes("Ⓐ"), "the syringe valve is retired — crud bleeds via ② + ③");
@@ -1049,7 +1056,7 @@ test("an enriched batch reads gut-loaded, never 'past prime, hatch fresh'", asyn
     assert(!html.includes("past the 24 h yolk window"), "it must not also condemn it");
     assert(html.includes("at room temp"), "the hold length is qualified by storage");
     // Fridged: same status, a much longer hold, and the copy has to follow.
-    fx.prime.windowHours = 48; fx.prime.primeLeftHours = 44;
+    fx.prime.windowHours = 48; fx.prime.primeLeftHours = 44; fx.prime.refrigerated = true;
     assert(panel._hatcheryPanel().includes("fridged"), "48 h only makes sense cold");
     // Boost drained is not the same as stale — it is still live food.
     fx.prime = { status: "boost_fading", ageHours: 44, primeLeftHours: 0,
@@ -1091,3 +1098,69 @@ test("a cool bench moves the molt, so the dose-delay advice moves with it", asyn
 });
 
 runTests();
+
+test("the fridge is per batch — inline button, its own tile, and the hero card says so", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // Warm load: the advice line carries ❄ Refrigerate, no fridge tile.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      reservoir: { canonical: "hatchery", volumeMl: 750, remainingMl: 500, loadVolumeMl: 0,
+        refrigerated: false, refrigeratedAt: "", fridgeSavedH: 0, shelfHours: 24, plainShelfHours: 24,
+        mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
+        freshness: { status: "fresh", hoursLeft: 19, ageHours: 5 } },
+    });
+    let html = panel._hatcheryPanel();
+    assert(html.includes('data-action="nps-fridge-in"'), "a warm load must offer ❄ Refrigerate inline");
+    assert(!html.includes("data-fridge-tile"), "no fridge tile for a warm load");
+    assert(!html.includes("fridge the container in Settings"), "the old settings pointer must be gone");
+    // Cold load: the tile appears with the life left, and the button flips.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      reservoir: { canonical: "hatchery", volumeMl: 750, remainingMl: 500, loadVolumeMl: 0,
+        refrigerated: true, refrigeratedAt: new Date(Date.parse(NOW) - 2 * 3600000).toISOString(),
+        fridgeSavedH: 0, shelfHours: 43, plainShelfHours: 43,
+        mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
+        freshness: { status: "fresh", hoursLeft: 38, ageHours: 5 } },
+    });
+    html = panel._hatcheryPanel();
+    assert(html.includes("data-fridge-tile"), "a cold load gets its own tile");
+    assert(html.includes("38 h of life left"), "the tile wears the life left");
+    assert(html.includes('data-action="nps-fridge-out"'), "and offers Take out");
+    assert(!html.includes('data-action="nps-fridge-in"'), "never both buttons at once");
+    const tab = panel._hatcheryTab();
+    assert(tab.includes("in the fridge"), "the hero Container card says it is cold");
+    noPlaceholders(html, "fridge tile");
+  } finally { restore(); }
+});
+
+test("the temperature line measures the stretch against the rated hours and defers to the learned clock", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // Reece's live case: 26.1 °C, a 38 h clock set from batches that ran ~36 h.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      hatchHours: 38,
+      temp: { available: true, tempC: 26.1, expectedHours: 27.6, factor: 1.15, warm: false, ratedHours: 24 },
+      learned: { available: true, hours: 36.3, samples: 3 },
+    });
+    let html = panel._hatcheryPanel();
+    assert(!html.includes("not 38 h"), "the learned clock must not be stretched again");
+    assert(html.includes("measured beats modelled"), "the line defers to the measured runs");
+    // No learned clock, a 24 h clock: the honest stretch on the rated hours.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      hatchHours: 24,
+      temp: { available: true, tempC: 26.1, expectedHours: 27.6, factor: 1.15, warm: false, ratedHours: 24 },
+      learned: { available: false, hours: null, samples: 0 },
+    });
+    html = panel._hatcheryPanel();
+    assert(html.includes("expect ~27.6 h, not 24 h"), "no learned clock: the rule of thumb speaks");
+    // A clock already longer than the rule of thumb is not told to stretch.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      hatchHours: 36,
+      temp: { available: true, tempC: 26.1, expectedHours: 27.6, factor: 1.15, warm: false, ratedHours: 24 },
+      learned: { available: false, hours: null, samples: 0 },
+    });
+    html = panel._hatcheryPanel();
+    assert(html.includes("already allows for it"), "a generous clock is left alone");
+  } finally { restore(); }
+});

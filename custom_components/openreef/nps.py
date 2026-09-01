@@ -277,8 +277,13 @@ HATCH_TEMP_OPTIMUM_C = 28.0
 HATCH_HISTORY_MAX = 50
 
 # Fridge storage nearly stops nauplii metabolism: 24 h shelf life at room temp,
-# 48 h refrigerated (sources span 24 h conservative to 2–3 days survival; we
-# take the nutritional middle).
+# 48 h refrigerated. Audit 2026-09-01 (doc §12): unfed nauplii lose ~20% dry
+# weight / ~27% energy in their first 24 h warm (FAO 361); at 2–4 °C viability
+# stays very high through 48 h with dry weight and biochemistry unchanged for
+# most strains (Léger et al. 1983, "International study on Artemia XXIV").
+# The two numbers are RATES, not a switch: brine_window_hours() below spends
+# the batch at the room rate until it goes cold and at the fridge rate after
+# — a load that sat warm for 20 h does not get 48 h for being fridged late.
 BRINE_SHELF_H_ROOM = 24.0
 BRINE_SHELF_H_FRIDGE = 48.0
 
@@ -299,10 +304,11 @@ ENRICH_OVERDUE_GRACE_H = 6.0
 ENRICH_SHELF_MAX_H = 72.0
 
 # Instar I has no mouth and no anus — it cannot eat, full stop. The molt to
-# instar II lands ~8 h post-hatch at the 28 C optimum (SRAC/FAO put the band at
-# 6-12 h, temperature-dependent) and runs later on a cool bench, so the delay
-# rides the SAME factor as the hatch clock. Dosing emulsion before the molt
-# just fouls the water.
+# instar II lands ~8 h post-hatch at the 28 C optimum (FAO 361: "after about
+# 8 h"; SRAC 702: "approximately 12 hours"; hatchery practice: harvest at
+# 16 h + 6–8 h more at room temp — audit 2026-09-01, doc §12) and runs later
+# on a cool bench, so the delay rides the SAME factor as the hatch clock.
+# Dosing emulsion before the molt just fouls the water.
 INSTAR_II_HOURS = 8.0
 INSTAR_II_DELAY_MAX_H = 24.0
 
@@ -317,12 +323,82 @@ HATCH_VESSEL_PRESETS: tuple[dict[str, Any], ...] = (
 )
 
 
+def brine_window_hours(loaded_iso: Any, now: datetime, room_h: Any, fridge_h: Any,
+                       fridged_at_iso: Any = None, fridge_saved_h: Any = 0.0) -> float:
+    """How many hours FROM THE LOAD this batch stays good — the two-rate clock
+    behind every freshness number (doc §12, 0.7.115).
+
+    A batch burns through its window at the room rate (``room_h`` to spend
+    it all) until the moment it goes into the fridge, and at the fridge rate
+    (``fridge_h``) from then on. So a fresh load fridged at once gets the
+    full ``fridge_h``; one fridged after 12 warm hours of a 24 h window has
+    half its life left and spends that half slowly — 12 + 24 = 36 h in all;
+    one fridged after it is already spent gets nothing back. Taking it OUT
+    banks the hours the fridge saved (``fridge_saved_h``, see
+    ``fridge_saved_on_exit``) so the credit survives the spell ending.
+
+    Returns hours-from-load, so it drops straight into every consumer that
+    already reads ``mixedAt`` + a shelf length (freshness, next-hatch,
+    vessels-needed) — nothing downstream has to know about the fridge."""
+    room = _f(room_h)
+    if room <= 0:
+        room = BRINE_SHELF_H_ROOM
+    fridge = max(_f(fridge_h), room)
+    saved = max(0.0, _f(fridge_saved_h))
+    loaded = _parse_iso(loaded_iso)
+    if loaded is None:
+        return round(room + saved, 2)
+    try:
+        age_h = max(0.0, (now - loaded).total_seconds() / 3600.0)
+    except TypeError:
+        return round(room + saved, 2)
+    fridged = _parse_iso(fridged_at_iso)
+    if fridged is None:
+        return round(room + saved, 2)
+    try:
+        in_at_h = (fridged - loaded).total_seconds() / 3600.0
+    except TypeError:
+        return round(room + saved, 2)
+    in_at_h = min(age_h, max(0.0, in_at_h))
+    room_spent_h = max(0.0, in_at_h - saved)
+    cold_h = max(0.0, age_h - in_at_h)
+    consumed = room_spent_h / room + cold_h / fridge
+    remaining = max(0.0, 1.0 - consumed)
+    return round(age_h + remaining * fridge, 2)
+
+
+def fridge_saved_on_exit(fridged_at_iso: Any, now: datetime,
+                         room_h: Any, fridge_h: Any) -> tuple[float, float]:
+    """The batch comes out of the fridge: (hours it spent cold, hours of shelf
+    life that spell banked). Cold hours count against the window at only
+    room/fridge of the room rate, so the rest is credit the room clock keeps
+    — 20 h at 4 °C on a 24 h/48 h clock spends 10 warm-equivalent hours and
+    banks the other 10."""
+    room = _f(room_h)
+    if room <= 0:
+        room = BRINE_SHELF_H_ROOM
+    fridge = max(_f(fridge_h), room)
+    fridged = _parse_iso(fridged_at_iso)
+    if fridged is None:
+        return 0.0, 0.0
+    try:
+        cold_h = max(0.0, (now - fridged).total_seconds() / 3600.0)
+    except TypeError:
+        return 0.0, 0.0
+    return round(cold_h, 2), round(cold_h * (1.0 - room / fridge), 2)
+
+
 def expected_hatch_hours(base_hours: Any, temp_c: Any) -> dict[str, Any]:
-    """Advisory only — never moves the real clock. At 28 °C the configured
-    hours stand; each degree cooler stretches them ~8% (research: 24 h at 28 °C
+    """Advisory only — never moves the real clock. At 28 °C the RATED hours
+    stand; each degree cooler stretches them ~8% (research: 24 h at 28 °C
     becomes ~36 h at 21 °C, 36–48 h at 20 °C), clamped at 2.2×. Warmer than
     optimum is not rewarded — above ~30 °C hatch quality drops, so we flag it
-    instead of promising speed."""
+    instead of promising speed.
+
+    Feed it the egg type's RATED hours, never the keeper's clock (audit
+    2026-09-01, doc §12): a clock set from the learned average was measured
+    at this very temperature, and stretching it again double-counted the
+    cold — "expect ~43.7 h, not 38 h" about batches that actually ran 36."""
     base = _f(base_hours)
     if base <= 0:
         base = 24.0
@@ -389,6 +465,7 @@ def next_hatch_suggestion(
     remaining_ml: Any,
     ml_per_day: Any,
     started_iso: Any,
+    chain_shelf_hours: Any = None,
 ) -> dict[str, Any]:
     """When to set the next batch of cysts going — the daily-driver question.
 
@@ -421,6 +498,12 @@ def next_hatch_suggestion(
     shelf_h = _f(shelf_life_hours)
     if shelf_h <= 0:
         shelf_h = 24.0
+    # The chain's shelf is the PLAIN one (audit 2026-09-01, doc §12): the
+    # batch that loads next is unfed at load, so an enriched container's
+    # longer boost window must not be projected onto it.
+    chain_shelf_h = _f(chain_shelf_hours)
+    if chain_shelf_h <= 0:
+        chain_shelf_h = shelf_h
     lead_h = hours + HATCH_HARVEST_BUFFER_H
     raw_starts = started_iso if isinstance(started_iso, (list, tuple)) else [started_iso]
     running: list[tuple[datetime, float]] = []
@@ -460,7 +543,7 @@ def next_hatch_suggestion(
             max(stamp + timedelta(hours=batch_h), now)
             for stamp, batch_h in running
         )
-        ready_by = anchor + timedelta(hours=HATCH_HARVEST_BUFFER_H + shelf_h)
+        ready_by = anchor + timedelta(hours=HATCH_HARVEST_BUFFER_H + chain_shelf_h)
         start_at = ready_by - timedelta(hours=lead_h)
         if start_at <= now:
             return _finish("start_now", now, ready_by, "freshness")
@@ -574,7 +657,9 @@ def instar_two_delay_hours(temp_c: Any = None,
 
 def hatch_prime_state(mixed_at_iso: Any, now: datetime,
                       enriched_at_iso: Any = None,
-                      refrigerated: bool = False) -> dict[str, Any]:
+                      refrigerated: bool = False,
+                      fridged_at_iso: Any = None,
+                      fridge_saved_h: Any = 0.0) -> dict[str, Any]:
     """Where this hatch sits in its NUTRITIONAL window - and which window that
     even is, because enrichment swaps one clock for another.
 
@@ -596,10 +681,17 @@ def hatch_prime_state(mixed_at_iso: Any, now: datetime,
     had just told the keeper to gut-load (Reece, 0.7.89).
 
     ``primeLeftHours`` always means "hours left in the window that matters",
-    so compact surfaces need no new arithmetic."""
+    so compact surfaces need no new arithmetic.
+
+    The fridge is per batch (doc §12, 0.7.115): ``fridged_at_iso`` says when
+    THIS load went cold and both windows run the two-rate clock from there
+    (``brine_window_hours``). The yolk window is fridge-aware too — the old
+    fixed 24 h called a cold, unfed batch "fading" while the container beside
+    it still read fresh. ``refrigerated`` (legacy) means "cold since the
+    window began"."""
     unknown = {"status": "unknown", "ageHours": None, "primeLeftHours": None,
                "enriched": False, "window": None, "windowHours": None,
-               "soakAgeHours": None}
+               "soakAgeHours": None, "refrigerated": False}
     mixed = _parse_iso(mixed_at_iso)
     if mixed is None:
         return dict(unknown)
@@ -609,7 +701,10 @@ def hatch_prime_state(mixed_at_iso: Any, now: datetime,
         return dict(unknown)
     enriched = _parse_iso(enriched_at_iso)
     if enriched is not None:
-        hold_h = ENRICH_SHELF_H_FRIDGE if refrigerated else ENRICH_SHELF_H_ROOM
+        stamp = (fridged_at_iso if _parse_iso(fridged_at_iso) is not None
+                 else (enriched_at_iso if refrigerated else None))
+        hold_h = brine_window_hours(enriched_at_iso, now, ENRICH_SHELF_H_ROOM,
+                                    ENRICH_SHELF_H_FRIDGE, stamp, fridge_saved_h)
         try:
             soak_age_h = max(0.0, (now - enriched).total_seconds() / 3600.0)
         except TypeError:
@@ -620,13 +715,19 @@ def hatch_prime_state(mixed_at_iso: Any, now: datetime,
                 "primeLeftHours": round(max(0.0, left_h), 1),
                 "enriched": True, "window": "boost",
                 "windowHours": round(hold_h, 1),
-                "soakAgeHours": round(soak_age_h, 1)}
-    left_h = BRINE_PRIME_HOURS - age_h
+                "soakAgeHours": round(soak_age_h, 1),
+                "refrigerated": stamp is not None}
+    stamp = (fridged_at_iso if _parse_iso(fridged_at_iso) is not None
+             else (mixed_at_iso if refrigerated else None))
+    window_h = brine_window_hours(mixed_at_iso, now, BRINE_PRIME_HOURS,
+                                  BRINE_SHELF_H_FRIDGE, stamp, fridge_saved_h)
+    left_h = window_h - age_h
     return {"status": "prime" if left_h > 0 else "fading",
             "ageHours": round(age_h, 1),
             "primeLeftHours": round(max(0.0, left_h), 1),
             "enriched": False, "window": "yolk",
-            "windowHours": BRINE_PRIME_HOURS, "soakAgeHours": None}
+            "windowHours": round(window_h, 1), "soakAgeHours": None,
+            "refrigerated": stamp is not None}
 
 
 # --------------------------------------------------------------------------- #

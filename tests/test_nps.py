@@ -1488,14 +1488,16 @@ def test_enriched_load_caps_the_shelf_clock():
     cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"], True)
     _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
     assert shelf_h == 12.0
-    cfg["nps"]["hatchery"]["reservoir"]["refrigerated"] = True
+    # Per batch (0.7.115): fridged the moment it was loaded = the full 48 h.
+    cfg["nps"]["hatchery"]["reservoir"]["refrigeratedAt"] = \
+        cfg["nps"]["hatchery"]["reservoir"]["mixedAt"]
     _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
-    assert shelf_h == 48.0
+    assert abs(shelf_h - 48.0) < 0.05
     # Container soak (0.7.70): the boost decays from SOAK END, so an evening
     # enrich of a morning batch keeps an honest clock — loaded 6 h ago,
     # soaked done 1 h ago, room temp: shelf = min(24, 5 + 12) = 17 h.
     cfg["nps"]["hatchery"]["reservoir"].update({
-        "refrigerated": False,
+        "refrigeratedAt": "", "fridgeSavedH": 0,
         "mixedAt": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
         "enrichedAt": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
     })
@@ -1888,3 +1890,190 @@ def test_ws_hatchery_draw_respects_the_toggle_and_the_guard():
     hass2 = FakeHass(entries=[entry2])
     run(integration.websocket_nps_hatch_start(hass2, FakeConnection(), {"id": 1}))
     assert _mix_litres(entry2) == 40.0, "guard Off: the ledger is never touched from outside"
+
+
+# ------------------------------------------------- the per-batch fridge and
+# the hatchery audit (doc §12, 0.7.115)
+
+def test_brine_window_is_a_two_rate_clock():
+    loaded = _iso(NOW - timedelta(hours=12))
+    # Never fridged: the room window, full stop.
+    assert nps.brine_window_hours(loaded, NOW, 24, 48) == 24.0
+    # Fridged at load: the full fridge window.
+    assert nps.brine_window_hours(loaded, NOW, 24, 48, loaded) == 48.0
+    # Fridged after 12 warm hours of a 24 h window: half the life is left and
+    # it is spent at the slow rate — 12 + 24 = 36 h from load, not 48.
+    assert nps.brine_window_hours(loaded, NOW, 24, 48, loaded) == 48.0
+    late = nps.brine_window_hours(loaded, NOW, 24, 48, _iso(NOW))
+    assert late == 36.0
+    # Fridged once it is already spent: nothing comes back.
+    spent = _iso(NOW - timedelta(hours=30))
+    assert nps.brine_window_hours(spent, NOW, 24, 48, _iso(NOW)) == 30.0
+    # Banked credit from an earlier spell extends the room window.
+    assert nps.brine_window_hours(loaded, NOW, 24, 48, None, 5.0) == 29.0
+    # Exit: 20 h at 4 °C on a 24/48 clock spends 10 warm-equivalent hours and
+    # banks the other 10.
+    cold_h, saved_h = nps.fridge_saved_on_exit(_iso(NOW - timedelta(hours=20)), NOW, 24, 48)
+    assert cold_h == 20.0 and saved_h == 10.0
+    # A fridge no better than the room banks nothing.
+    assert nps.fridge_saved_on_exit(_iso(NOW - timedelta(hours=20)), NOW, 24, 24)[1] == 0.0
+
+
+def test_prime_yolk_window_is_fridge_aware_per_batch():
+    # The old fixed 24 h called a cold unfed batch "fading" while the container
+    # beside it read fresh for 48 h. Loaded 30 h ago, fridged after 6 h warm:
+    # 6 + (18/24) * 48 = 42 h window -> still prime with 12 h left.
+    loaded = _iso(NOW - timedelta(hours=30))
+    st = nps.hatch_prime_state(loaded, NOW, fridged_at_iso=_iso(NOW - timedelta(hours=24)))
+    assert st["status"] == "prime" and st["refrigerated"] is True
+    assert st["windowHours"] == 42.0 and st["primeLeftHours"] == 12.0
+    # Same batch never fridged: fading, as before.
+    assert nps.hatch_prime_state(loaded, NOW)["status"] == "fading"
+    # The boost window rides the same clock from the soak end.
+    soaked = _iso(NOW - timedelta(hours=20))
+    st = nps.hatch_prime_state(loaded, NOW, soaked, fridged_at_iso=_iso(NOW - timedelta(hours=14)))
+    # 6 h warm of a 12 h hold = half left, spent at 48 h rate: 6 + 24 = 30 h hold.
+    assert st["status"] == "gutloaded" and st["windowHours"] == 30.0
+    assert st["primeLeftHours"] == 10.0
+
+
+def test_legacy_fridge_toggle_migrates_to_the_batch_stamp():
+    loaded = _iso(NOW - timedelta(hours=3))
+    cfg = integration._normalise_hatchery({"reservoir": {
+        "volumeMl": 500, "remainingMl": 300, "mixedAt": loaded, "refrigerated": True}}, True)
+    assert "refrigerated" not in cfg["reservoir"]
+    assert cfg["reservoir"]["refrigeratedAt"] == loaded, "cold since the window began"
+    assert cfg["reservoir"]["fridgeSavedH"] == 0
+    # An enriched legacy load anchors on the soak end.
+    soaked = _iso(NOW - timedelta(hours=1))
+    cfg = integration._normalise_hatchery({"reservoir": {
+        "volumeMl": 500, "remainingMl": 300, "mixedAt": loaded, "refrigerated": True,
+        "lastLoadEnriched": True, "enrichedAt": soaked}}, True)
+    assert cfg["reservoir"]["refrigeratedAt"] == soaked
+
+
+def test_ws_fridge_in_and_out_is_per_batch():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500,
+                                 "mixedAt": (now - timedelta(hours=6)).isoformat()})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 1, "in_fridge": True}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["refrigeratedAt"], "the stamp says WHEN it went cold"
+    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 2, "in_fridge": True}))
+    assert conn.errors and conn.errors[-1].code == "already_fridged"
+    # 6 h warm of 24 then cold: the summary's shelf is 6 + (18/24)*48 = 42 h.
+    run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
+    payload = conn.results[-1].payload
+    container = payload["hatchery"]["reservoir"]
+    assert container["refrigerated"] is True and container["refrigeratedAt"]
+    assert abs(container["shelfHours"] - 42.0) < 0.1
+    assert payload["feedExchange"]["prime"]["refrigerated"] is True
+    assert payload["hatchery"]["nextHatch"]["shelfHours"] == container["shelfHours"]
+    # Out again straight away: nothing cold to bank, stamp cleared.
+    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 4, "in_fridge": False}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["refrigeratedAt"] == "" and res["fridgeSavedH"] < 0.05
+    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 5, "in_fridge": False}))
+    assert conn.errors[-1].code == "already_warm"
+    # A fresh load is a fresh batch: the fridge starts over.
+    res["refrigeratedAt"] = now.isoformat(); res["fridgeSavedH"] = 4.0
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 6}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 7, "harvested": True}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["refrigeratedAt"] == "" and res["fridgeSavedH"] == 0
+    # Empty container: nothing to refrigerate.
+    entry2 = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 0})
+    conn2 = FakeConnection()
+    run(integration.websocket_nps_container_fridge(FakeHass(entries=[entry2]), conn2,
+                                                    {"id": 1, "in_fridge": True}))
+    assert conn2.errors and conn2.errors[-1].code == "no_brine"
+
+
+def test_fridge_exit_banks_the_saved_hours():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500,
+                                 "mixedAt": (now - timedelta(hours=26)).isoformat(),
+                                 "refrigeratedAt": (now - timedelta(hours=20)).isoformat()})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 1, "in_fridge": False}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["refrigeratedAt"] == ""
+    assert abs(res["fridgeSavedH"] - 10.0) < 0.05, "20 h cold on a 24/48 clock banks 10 h"
+    # 26 h old, 10 h banked: the room clock reads 24 + 10 = 34 h window.
+    _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(
+        integration._config_from_entry(entry), now)
+    assert abs(shelf_h - 34.0) < 0.1
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("banked" in str(i.get("message", "")) for i in log)
+
+
+def test_enrich_engage_takes_the_load_out_of_the_fridge_and_soak_done_resets():
+    now = datetime.now(timezone.utc)
+    entry = _enrich_entry(mixed_hours_ago=10)
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    res["refrigeratedAt"] = (now - timedelta(hours=4)).isoformat()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["refrigeratedAt"] == "", "a soak is warm — the load comes out"
+    assert abs(res["fridgeSavedH"] - 2.0) < 0.05, "4 h cold banks 2 h"
+    # Refrigerating mid-soak is refused: the soak needs to stay warm.
+    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 2, "in_fridge": True}))
+    assert conn.errors and conn.errors[-1].code == "soaking"
+    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 3}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["fridgeSavedH"] == 0 and res["refrigeratedAt"] == "", \
+        "the boost window starts warm from the soak end"
+    # Now fridge the gut-loaded batch: the boost hold runs at the 48 h rate.
+    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 4, "in_fridge": True}))
+    run(integration.websocket_nps_summary(hass, conn, {"id": 5}))
+    prime = conn.results[-1].payload["feedExchange"]["prime"]
+    assert prime["status"] == "gutloaded" and prime["refrigerated"] is True
+    assert abs(prime["windowHours"] - 48.0) < 0.1
+
+
+def test_summary_temperature_stretch_uses_the_rated_hours():
+    # Reece's live case: 26.1 °C, a 38 h clock. Stretching the clock itself
+    # said "expect ~43.7 h" — about batches that actually ran 36.
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["hatchHours"] = 38
+    cfg["nps"]["hatchery"]["tempEntity"] = "sensor.hatch_temp"
+    hass = FakeHass(states={"sensor.hatch_temp": "26.1"}, entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    temp = conn.results[-1].payload["hatchery"]["temp"]
+    assert temp["available"] is True and temp["ratedHours"] == 24.0
+    assert temp["expectedHours"] == nps.expected_hatch_hours(24, 26.1)["expectedHours"]
+    assert temp["expectedHours"] < 38, "the stretch is on the rated 24 h, never on the clock"
+
+
+def test_next_hatch_chain_plans_on_the_plain_shelf():
+    # An enriched container holds for 34 h, but the batch that loads NEXT is
+    # unfed at load: the chain must plan on 24 h, not 34.
+    started = _iso(NOW - timedelta(hours=2))
+    plain = nps.next_hatch_suggestion(NOW, 24, None, 34, None, None, [started],
+                                      chain_shelf_hours=24)
+    boosted = nps.next_hatch_suggestion(NOW, 24, None, 34, None, None, [started])
+    assert plain["status"] == "chained" and boosted["status"] == "chained"
+    assert plain["hoursUntil"] < boosted["hoursUntil"]
+    assert abs(boosted["hoursUntil"] - plain["hoursUntil"] - 10.0) < 0.1
+    # Wired: the summary hands the chain the plain shelf and the payload says so.
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500,
+                                 "mixedAt": (now - timedelta(hours=26)).isoformat(),
+                                 "lastLoadEnriched": True,
+                                 "enrichedAt": (now - timedelta(hours=4)).isoformat()})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    assert hatchery["reservoir"]["shelfHours"] == 34.0
+    assert hatchery["reservoir"]["plainShelfHours"] == 24.0
+    assert hatchery["vesselsNeeded"] == nps.vessels_needed(24, 24), \
+        "vessels-needed is structural: the plain shelf, never the boost"

@@ -674,3 +674,89 @@ The rule is only as good as the routes into it:
 fine affordance and a terrible *only* affordance. Any state the system can
 describe ("this batch is on a different clock") needs an action attached to
 the description itself, not to the transient control that created the state.
+
+
+## 12. Hatchery audit — the biology re-checked and the fridge made per batch (2026-09-01, 0.7.115)
+
+Reece: "many changes have been made over time, I want to make sure
+everything has kept up." Research refreshed first, then every constant and
+advisory checked against it, then the fixes.
+
+### 12.1 The research, refreshed
+
+| Question | What the sources say | OpenReef | Verdict |
+| --- | --- | --- | --- |
+| Hatch time vs temperature | Optimum 25–28 °C; "some 24-h incubation" (FAO 361); 24–30 h at 24–30 °C, ~36 h at 21–24 °C, 36–48 h at 20 °C; SRAC 702 quotes 15–20 h at 25–28 °C for decapsulated cysts; below 25 °C markedly slower, above 33 °C lethal | `standard` 24 h, `decapsulated` 16 h, `premium` 20 h, `cool_room` 36 h; +8 %/°C below 28 °C, capped 2.2×; warm flag above 30 °C | **Holds.** Reece's own journal (36.3 h at 26 °C) runs longer than the rule of thumb — which is exactly why the learned clock exists. |
+| Instar I → II (mouths open) | FAO 361: "after about 8 h the animal molts into the 2nd larval stage"; SRAC 702: "approximately 12 hours after hatch"; practice: harvest at 16 h + 6–8 h at room temp | `INSTAR_II_HOURS` 8 h at 28 °C, temperature-stretched, capped 24 h | **Holds.** 8 h at optimum is the FAO number; the stretch covers SRAC's 12 h on a cooler bench. |
+| Unfed nauplii nutrition | ~20 % dry weight / ~27 % energy gone in the first 24 h warm (FAO 361, widely cited); 30–50 % of calories by 48 h; "feed as soon as possible after hatching" (SRAC) | `BRINE_PRIME_HOURS` 24 h, "fading" after | **Holds.** |
+| Cold storage, unfed | Léger et al. 1983 ("International study on Artemia XXIV"): 2–4 °C, densities ≥2000/ml, viability very high after 48 h, dry weight and biochemistry unchanged for most strains | `BRINE_SHELF_H_FRIDGE` 48 h | **Holds** — but see 12.2: it was a switch, not a rate. |
+| Enriched boost, warm | Evjemo 1997: DHA retro-converts to EPA during starvation; large loss within a day at 22 °C; low temperature (6 °C, 12 °C, 14 °C in later work) retains it | `ENRICH_SHELF_H_ROOM` 12 h | **Holds, conservative.** Feed the boost out within half a day warm. |
+| Enriched boost, cold | Retention "≥24 h with <5 % loss" below 10 °C in the sources we had; Evjemo's 6 °C series flat over the period | `ENRICH_SHELF_H_FRIDGE` 48 h | **Holds.** |
+| Enrichment duration | SRAC: ≥4 h; DHA protocols: 12–24 h, split dosing (INVE) tops up at ~10 h | 12 h default, split at 10 h, 2–36 h range | **Holds.** |
+
+Sources: FAO Fisheries Technical Paper 361 (Lavens & Sorgeloos 1996), ch. 4;
+SRAC Publication 702 (Artemia production for marine larval fish culture);
+Léger, Sorgeloos et al. 1983, Aquacultural Engineering 2; Evjemo, Danielsen &
+Olsen 1997, Aquaculture 155; Navarro et al. 1999 (fatty-acid changes in
+enriched-then-starved A. franciscana); reefs.com Breeder's Net (instar II at
+~12 h); algova.com hatching guides; Kumar et al. 2017 (Sci. Rep. 7:40394,
+temperature × salinity hatching response).
+
+### 12.2 What had NOT kept up
+
+1. **The temperature advisory stretched the keeper's clock, not the rated
+   hours.** `expected_hatch_hours(hatchHours, temp)` — and Reece had set the
+   clock to 38 h from a learned average measured at this very temperature.
+   The card said "expect ~43.7 h, not 38 h" about batches that ran 36.3 h.
+   Now the stretch is on the egg type's RATED hours (24 h), and when a
+   learned clock exists the line defers to it: "measured beats modelled".
+   A clock already longer than the rule of thumb is left alone.
+2. **The fridge was a global setting that rewrote history.** "Container
+   lives in the fridge" granted 48 h to whatever was loaded — including a
+   load that had already sat warm for 20 h — and the yolk prime window
+   ignored it entirely (fixed 24 h), so a cold unfed batch read "fading"
+   while the container beside it read fresh for another day.
+3. **The next-hatch chain and vessels-needed planned on the current load's
+   boost window.** An enriched container holding 34 h told the chain the
+   NEXT batch (unfed at load) also had 34 h, and could say one hatchery was
+   enough when the structural answer on 24 h is two.
+
+### 12.3 The two-rate clock (`nps.brine_window_hours`)
+
+A batch spends its window at the room rate until the moment it goes cold
+and at the fridge rate from then on. Fridged at load: the full 48 h.
+Fridged after 12 warm hours of a 24 h window: half the life left, spent
+slowly — 12 + 24 = 36 h from load. Fridged once it is spent: nothing comes
+back. Taking it out banks what the spell saved (`fridge_saved_on_exit`:
+20 h cold on a 24/48 clock spends 10 warm-equivalent hours and banks 10),
+so the credit survives the spell ending. The function returns hours FROM
+LOAD, so it drops into every existing consumer — `freshness_state`,
+`next_hatch_suggestion`, `vessels_needed`, the stale gate — unchanged.
+
+Per-batch state on the reservoir: `refrigeratedAt` (when THIS load went
+cold) and `fridgeSavedH` (banked credit). Both reset on every load and on
+discard. Enrich-engage takes the load out (a soak is warm and aerated) and
+banks the cold hours; soak-done resets both (the boost window starts warm
+from the soak end). Refrigerating mid-soak is refused. Both fields joined
+the stale-save guard.
+
+### 12.4 The keeper's side
+
+- **Inline, not a setting:** the "❄ Refrigerate" / "Take out of the fridge"
+  button sits on the nutritional advice line it changes. The settings
+  toggle is gone (legacy `refrigerated: true` migrates to a stamp at the
+  window's start, so nobody's current load changes state on update).
+- **Its own tile:** a refrigerated load draws as the bottle inside a fridge
+  in the row with the cones and the soak, stroke from the freshness clock,
+  "~N h of life left" underneath, Take out on the tile.
+- **The hero Container card** says "❄ in the fridge, ~N h left".
+- **The overlap heads-up** points at the button, not at Settings.
+
+### 12.5 Left alone, on purpose
+
+- The prime clock counts from the LOAD stamp. On a 38 h hatch the first
+  nauplii out are ~14 h old at harvest; there is no honest way to know the
+  mix, and every source dates the window from hatch-out, so the load stamp
+  stays the anchor. The learned clock already tells the keeper to harvest
+  early.
+- `HATCH_OVERDUE_GRACE_H` 12 h and `ENRICH_OVERDUE_GRACE_H` 6 h stand.
