@@ -12933,6 +12933,36 @@ def _nps_container_load(
     return None
 
 
+def _nps_journal_mark_enriched(
+    hatchery: dict[str, Any], state: dict[str, Any], soak_started: datetime | None,
+    enriched_h: float,
+) -> dict[str, Any] | None:
+    """Soak done: the journal earns its badge (0.7.112). Enrichment is a
+    container action, so the batch that soaked is the one whose harvest
+    filled this container load. The harvest writes its journal row and the
+    container's load stamp from the same clock tick, so the stamp is the
+    key; the newest row harvested before the soak began is the fallback
+    (top-ups, hand-edited stamps). Nothing is inserted — the row the harvest
+    wrote is the row that gets the badge. Returns the marked row."""
+    history = hatchery.get("history") if isinstance(hatchery.get("history"), list) else []
+    loaded_iso = str(state.get("batchLoadedAt") or "")
+    target = None
+    if loaded_iso:
+        target = next((row for row in history
+                       if str(row.get("harvestedAt") or "") == loaded_iso), None)
+    if target is None and soak_started is not None:
+        for row in history:  # newest first
+            harvested = _parse_datetime(row.get("harvestedAt"))
+            if harvested is not None and harvested <= soak_started:
+                target = row
+                break
+    if target is None:
+        return None
+    target["enriched"] = True
+    target["enrichedHours"] = enriched_h
+    return target
+
+
 def _nps_enrich_debit(config: dict[str, Any], enrichment: dict[str, Any]) -> None:
     """Debit the linked enrichment bottle by one dose (the shelf keeps count)."""
     product_id = str(enrichment.get("productId") or "")
@@ -13426,15 +13456,30 @@ async def websocket_nps_enrich_loaded(
     now = datetime.now(timezone.utc)
     hatchery["reservoir"]["lastLoadEnriched"] = True
     hatchery["reservoir"]["enrichedAt"] = now.isoformat()
+    # Enriched time counts from the FIRST DOSE — holding in clean water
+    # before the instar II molt is not enrichment.
+    soak_started = _parse_datetime(state.get("startedAt"))
+    fed_from = _parse_datetime(state.get("firstDoseAt")) or soak_started
+    enriched_h = round(max(0.0, (now - fed_from).total_seconds() / 3600.0), 1)
+    marked = _nps_journal_mark_enriched(hatchery, state, soak_started, enriched_h)
     hatchery["enrichment"]["state"] = {
         "startedAt": "", "sourceVesselId": "", "eggType": "",
         "plannedHatchHours": 0, "actualHatchHours": 0, "enrichHours": 0,
         "doseDelayH": 0, "batchLoadedAt": "", "firstDoseAt": "", "secondDoseAt": "",
         "readyNotifiedAt": "", "firstDoseNotifiedAt": "", "secondDoseNotifiedAt": "",
     }
-    _append_activity(config, "Soak done — gut-loaded brine in the vessel; the boost "
-                             "clock runs from now (mesh-rinse before feed-out if you like)",
-                     "control")
+    if marked is not None:
+        vessel_name = (hatchery["vessels"].get(str(marked.get("vesselId") or ""), {})
+                       .get("name") or "the hatchery")
+        _append_activity(
+            config,
+            f"Soak done — the {vessel_name} batch is gut-loaded ({enriched_h:g} h); "
+            "the boost clock runs from now (mesh-rinse before feed-out if you like)",
+            "control")
+    else:
+        _append_activity(config, "Soak done — gut-loaded brine in the vessel; the boost "
+                                 "clock runs from now (mesh-rinse before feed-out if you like)",
+                         "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 

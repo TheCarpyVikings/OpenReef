@@ -847,12 +847,18 @@ test("the Hatchery tab stands alone — hero, journal, reminders, gating", async
       history: [
         { vesselId: "v1", harvestedAt: NOW, startedAt: NOW, plannedHours: 24,
           actualHours: 30.5, eggType: "standard", enriched: true, enrichedHours: 11.5 },
-        { vesselId: "v1", harvestedAt: NOW, startedAt: NOW, plannedHours: 24,
+        { vesselId: "v2", harvestedAt: NOW, startedAt: NOW, plannedHours: 24,
           actualHours: 24.2, eggType: "standard" },
+        { vesselId: "v9", harvestedAt: NOW, startedAt: NOW, plannedHours: 24,
+          actualHours: 25.0, eggType: "standard" },
       ],
       learned: { available: true, hours: 27.4, samples: 2 },
     });
     const html = panel._hatcheryTab();
+    assert(html.includes(">Hatchery</th>"), "the journal must say which hatchery each batch came from");
+    assert(html.includes(">Hatchery 1</td>") && html.includes(">Hatchery 2</td>"),
+      "journal rows must carry the live vessel name");
+    assert(html.includes(">v9</td>"), "a removed vessel falls back to its id, not a blank");
     assert(html.includes("Live brine, on schedule"), "the hero head is missing");
     assert(html.includes("No NPS corals required"), "the standalone promise is missing");
     assert(html.includes("summary-grid"), "the mission row is missing");

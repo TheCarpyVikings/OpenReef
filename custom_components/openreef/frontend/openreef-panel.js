@@ -11842,6 +11842,7 @@ const rigSteps = [
 
     // --- The hatch journal: every batch's story, honestly ------------------
     const history = Array.isArray(hatch.history) ? hatch.history : [];
+    const journalVessels = Array.isArray(hatch.vessels) ? hatch.vessels : [];
     const journal = history.length ? `
       <article class="panel stack">
         <p class="eyebrow" style="margin:0;">Hatch journal</p>
@@ -11849,6 +11850,7 @@ const rigSteps = [
           <table style="width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;">
             <thead><tr>
               <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Harvested</th>
+              <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Hatchery</th>
               <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Eggs</th>
               <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Planned</th>
               <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Actual</th>
@@ -11860,8 +11862,12 @@ const rigSteps = [
                 const actual = Number(entry.actualHours) || 0;
                 const delta = actual - planned;
                 const eggLabel = (this._npsEggTypes().find((e) => e.id === entry.eggType) || {}).name || entry.eggType || "—";
+                // Which cone the batch came from: the live vessel name, or the
+                // bare id if that vessel has since been removed.
+                const vesselLabel = (journalVessels.find((v) => v.id === entry.vesselId) || {}).name || entry.vesselId || "—";
                 return `<tr style="border-top:1px solid rgba(255,255,255,0.06);">
                   <td style="padding:6px 10px;">${this._escape(this._formatActivityTime(entry.harvestedAt))}</td>
+                  <td style="padding:6px 10px;">${this._escape(vesselLabel)}</td>
                   <td style="padding:6px 10px;">${this._escape(eggLabel)}</td>
                   <td style="padding:6px 10px;text-align:right;">${this._escape(String(planned))} h</td>
                   <td style="padding:6px 10px;text-align:right;color:${Math.abs(delta) >= 3 ? "var(--warning-color,#f5a524)" : "inherit"};">${this._escape(String(actual))} h</td>

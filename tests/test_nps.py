@@ -1419,9 +1419,43 @@ def test_ws_enrich_is_a_container_action():
     assert saved["reservoir"]["lastLoadEnriched"] is True
     assert saved["reservoir"]["enrichedAt"], "the boost decays from soak end"
     assert not saved["enrichment"]["state"]["startedAt"], "the soak must clear"
-    assert not saved["history"], "a container soak writes no batch history"
+    assert not saved["history"], "a container soak inserts no journal row of its own"
     assert saved["vessels"]["v1"]["state"]["hatchStartedAt"], \
         "the hatch survives the whole soak lifecycle"
+
+
+def test_ws_soak_done_badges_the_harvested_batch():
+    # Reece's catch (0.7.112): every enriched batch after 0.7.70 lost its
+    # journal badge — soak done stamped the container but never the row.
+    # The row the HARVEST wrote is the one that earns "enriched N h", keyed
+    # by the shared load stamp; no second row appears.
+    entry = _enrich_entry(remaining=0, mixed_hours_ago=None)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 2, "harvested": True}))
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert len(saved["history"]) == 1 and not saved["history"][0].get("enriched")
+    assert saved["history"][0]["vesselId"] == "v1"
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 3}))
+    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 4}))
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert len(saved["history"]) == 1, "soak done badges the harvest row, never adds one"
+    row = saved["history"][0]
+    assert row["enriched"] is True and row["enrichedHours"] == 0.0
+    assert row["vesselId"] == "v1", "the badge stays on the cone that hatched it"
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("Hatchery 1 batch is gut-loaded" in str(item.get("message", "")) for item in log), \
+        "the log names the hatchery whose batch soaked"
+    # A second harvest into the same container (top-up) then a second soak
+    # badges the NEW row and leaves the first badge alone.
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 5}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 6, "harvested": True}))
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 7}))
+    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 8}))
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert len(saved["history"]) == 2
+    assert saved["history"][0]["enriched"] is True and saved["history"][1]["enriched"] is True
 
 
 def test_ws_enrich_needs_loaded_brine():
