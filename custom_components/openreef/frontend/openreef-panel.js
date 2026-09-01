@@ -3,6 +3,12 @@
 // weight limit, and the list says so when it bites.
 const MAINTENANCE_HISTORY_ROWS = 100;
 
+// The activity feed's stored depth — MUST match ACTIVITY_MAX_ENTRIES in
+// __init__.py (both writers clamp to it). The Log tab pages through it
+// LOG_PAGE_SIZE rows at a time.
+const LOG_MAX_ENTRIES = 200;
+const LOG_PAGE_SIZE = 30;
+
 class OpenReefPanel extends HTMLElement {
   constructor() {
     super();
@@ -1629,6 +1635,20 @@ class OpenReefPanel extends HTMLElement {
       if (action === "clear-activity") {
         this._config.activity = [];
         this._saveConfig();
+      }
+      if (action === "log-type") {
+        const view = this._logViewState();
+        view.type = ["control", "warning", "info"].includes(target.dataset.id) ? target.dataset.id : "all";
+        view.limit = LOG_PAGE_SIZE;   // a new filter starts back at the top
+        this._render();
+      }
+      if (action === "log-group") {
+        this._logViewState().group = target.dataset.id === "type" ? "type" : "date";
+        this._render();
+      }
+      if (action === "log-show-more") {
+        this._logViewState().limit += LOG_PAGE_SIZE;
+        this._render();
       }
       if (action === "live-mode") {
         const mode = target.dataset.mode;
@@ -4030,7 +4050,7 @@ class OpenReefPanel extends HTMLElement {
       message,
       type,
     });
-    this._config.activity = this._config.activity.slice(0, 50);
+    this._config.activity = this._config.activity.slice(0, LOG_MAX_ENTRIES);
   }
 
   async _copySupportSummary() {
@@ -11964,7 +11984,7 @@ const rigSteps = [
   _navGroups() {
     return [
       { id: "home", label: "Home", icon: "⌂",
-        pages: [["mission", "Mission Control"], ["diagram", "Diagram"]] },
+        pages: [["mission", "Mission Control"], ["diagram", "Diagram"], ["log", "Log"]] },
       { id: "water", label: "Water", icon: "💧",
         pages: [
           ["awc", "Water Change"],
@@ -12138,6 +12158,7 @@ const rigSteps = [
 
   _activeContent() {
     if (this._activeTab === "diagram") return this._diagramTab();
+    if (this._activeTab === "log") return this._logTab();
     if (this._activeTab === "live") return this._liveStats();
     if (this._activeTab === "manual") return this._manualTests();
     if (this._activeTab === "maintenance") return this._maintenance();
@@ -20715,7 +20736,10 @@ const rigSteps = [
           </div>
         `).join("")}
       </div>
-      <div class="button-row"><button class="secondary compact-button" data-action="clear-activity">Clear activity</button></div>
+      <div class="button-row">
+        <button class="secondary compact-button" data-action="tab" data-id="log">Open the full log</button>
+        <button class="secondary compact-button" data-action="clear-activity">Clear activity</button>
+      </div>
     ` : `<p class="muted">No OpenReef activity has been recorded yet.</p>`;
     const tankCols = [
       cards.live ? `<div class="mission-detail-col"><h4>Core Sensors</h4>${sensors.length ? sensors.map(([id, sensor]) => this._sensorRow(id, sensor)).join("") : this._emptyState("No sensors enabled", "Enable the sensor types you own in Settings. Disabled sensors stay out of Mission Control.", "settings", "Choose sensors")}</div>` : "",
@@ -20753,7 +20777,7 @@ const rigSteps = [
           this._missionIssuesHtml(issueRows),
           attentionCount > 0, "attention")}
         ${this._missionSection("mission-activity", "Log", "Activity",
-          activityItems.length ? `<span class="pill unknown">${activityItems.length} recent</span>` : `<span class="pill ok">quiet</span>`,
+          activityItems.length ? `<span class="pill unknown">${this._logEntries().length} logged</span>` : `<span class="pill ok">quiet</span>`,
           activityBody, false)}
         ${tankSection}
       </section>
@@ -20987,28 +21011,133 @@ const rigSteps = [
     `;
   }
 
-  _activityPanel() {
-    const activity = Array.isArray(this._config.activity) ? this._config.activity.slice(0, 12) : [];
+  // --- The Log tab: the whole activity feed, grouped and paged -------------
+
+  _logViewState() {
+    // Session-local view state (not persisted — a fresh open starts at the top).
+    if (!this._logView) this._logView = { limit: LOG_PAGE_SIZE, group: "date", type: "all" };
+    return this._logView;
+  }
+
+  _logEntries() {
+    return (Array.isArray(this._config?.activity) ? this._config.activity : [])
+      .filter((item) => item && typeof item === "object" && item.message);
+  }
+
+  // Every entry folds to one of the three types the writers actually emit —
+  // junk/missing types read as info so no entry can vanish from the tab.
+  _logEntryType(item) {
+    return item.type === "control" || item.type === "warning" ? item.type : "info";
+  }
+
+  // Local-day date ranges, newest bucket first. Anchored on calendar days,
+  // not 24 h windows — "Yesterday, 23:50" must not read as Today.
+  _logDateBucket(timestamp, now = new Date()) {
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) return "Undated";
+    const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const days = Math.round((startOfDay(now) - startOfDay(date)) / 86400000);
+    if (days <= 0) return "Today";
+    if (days === 1) return "Yesterday";
+    if (days < 7) return "This week";
+    if (days < 31) return "This month";
+    return "Older";
+  }
+
+  _logTypeLabel(type) {
+    return { info: "System", control: "Actions", warning: "Warnings" }[type] || "System";
+  }
+
+  _logTime(item, bucket) {
+    const date = new Date(item.timestamp);
+    if (!Number.isFinite(date.getTime())) return "Unknown time";
+    // Inside Today/Yesterday the heading carries the day — the row needs only a clock.
+    if (bucket === "Today" || bucket === "Yesterday") {
+      return date.toLocaleTimeString([], { timeStyle: "short" });
+    }
+    return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+  }
+
+  // Ordered groups over the visible slice: date ranges, or the three types.
+  _logGroups(shown, mode, now = new Date()) {
+    const groups = [];
+    const byLabel = new Map();
+    const push = (label, item) => {
+      if (!byLabel.has(label)) {
+        const group = { label, items: [] };
+        byLabel.set(label, group);
+        groups.push(group);
+      }
+      byLabel.get(label).items.push(item);
+    };
+    if (mode === "type") {
+      for (const type of ["warning", "control", "info"]) {
+        for (const item of shown) {
+          if (this._logEntryType(item) === type) push(this._logTypeLabel(type), item);
+        }
+      }
+    } else {
+      // Entries arrive newest-first, so buckets fall out already ordered.
+      for (const item of shown) push(this._logDateBucket(item.timestamp, now), item);
+    }
+    return groups;
+  }
+
+  _logTab() {
+    const view = this._logViewState();
+    const all = this._logEntries();
+    const counts = { all: all.length, info: 0, control: 0, warning: 0 };
+    for (const item of all) counts[this._logEntryType(item)] += 1;
+    const filtered = view.type === "all"
+      ? all : all.filter((item) => this._logEntryType(item) === view.type);
+    const shown = filtered.slice(0, view.limit);
+    const groups = this._logGroups(shown, view.group);
+    const typeChip = (type, label) => `
+      <button class="${view.type === type ? "primary" : "secondary"} compact-button"
+        data-action="log-type" data-id="${type}">${label} (${counts[type] || 0})</button>`;
+    const pillClass = { warning: "warning", control: "ok", info: "unknown" };
     return `
-      <article class="panel">
-        <div class="section-head">
-          <div>
-            <h3>Activity</h3>
-            <p>Recent OpenReef changes and manual actions.</p>
+      <section class="stack">
+        <article class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Log</p>
+              <h3>Activity</h3>
+              <p>Everything OpenReef did or saw — actions, warnings and system events. The feed keeps the last ${LOG_MAX_ENTRIES} entries.</p>
+            </div>
+            ${all.length ? `<button class="secondary compact-button danger-button" data-action="clear-activity">Clear activity</button>` : ""}
           </div>
-          ${activity.length ? `<button class="secondary compact-button" data-action="clear-activity">Clear</button>` : ""}
-        </div>
-        ${activity.length ? `
-          <div class="activity-list">
-            ${activity.map((item) => `
-              <div class="activity-item ${this._escape(item.type || "info")}">
-                <span>${this._escape(this._formatActivityTime(item.timestamp))}</span>
-                <strong>${this._escape(item.message)}</strong>
+          ${all.length ? `
+            <div class="button-row log-controls">
+              ${typeChip("all", "All")}
+              ${typeChip("control", "Actions")}
+              ${typeChip("warning", "Warnings")}
+              ${typeChip("info", "System")}
+            </div>
+            <div class="button-row log-controls">
+              <button class="${view.group === "date" ? "primary" : "secondary"} compact-button" data-action="log-group" data-id="date">Group by date</button>
+              <button class="${view.group === "type" ? "primary" : "secondary"} compact-button" data-action="log-group" data-id="type">Group by type</button>
+            </div>
+            ${groups.map((group) => `
+              <p class="eyebrow">${this._escape(group.label)}</p>
+              <div class="activity-list log-list">
+                ${group.items.map((item) => `
+                  <div class="activity-item ${this._escape(this._logEntryType(item))}">
+                    <span>${this._escape(this._logTime(item, view.group === "date" ? group.label : ""))}</span>
+                    <strong>${this._escape(item.message)}</strong>
+                    ${view.group === "date"
+                      ? `<span class="pill ${pillClass[this._logEntryType(item)]}">${this._escape(this._logTypeLabel(this._logEntryType(item)))}</span>`
+                      : ""}
+                  </div>
+                `).join("")}
               </div>
             `).join("")}
-          </div>
-        ` : `<p class="muted">No OpenReef activity has been recorded yet.</p>`}
-      </article>
+            ${filtered.length > shown.length
+              ? `<div class="button-row"><button class="secondary compact-button" data-action="log-show-more">Show more (${filtered.length - shown.length} older)</button></div>`
+              : shown.length ? `<p class="muted">That's the whole feed.</p>` : `<p class="muted">Nothing matches this filter.</p>`}
+          ` : `<p class="muted">No OpenReef activity has been recorded yet — actions, warnings and system events will land here.</p>`}
+        </article>
+      </section>
     `;
   }
 
@@ -27516,6 +27645,8 @@ const rigSteps = [
         .activity-item.warning strong { color: #fde68a; }
         .activity-item.muted strong { color: #ddd6fe; }
         .activity-item.resolved strong { color: #bbf7d0; }
+        .log-list .activity-item { grid-template-columns: minmax(90px, .16fr) 1fr auto; }
+        .log-controls { flex-wrap: wrap; }
         .settings-toolbar, .settings-save { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
         .settings-save { position: sticky; top: 10px; z-index: 2; }
         .sticky-save-warning { position: sticky; top: 10px; z-index: 3; box-shadow: 0 10px 30px rgba(0,0,0,.28); }

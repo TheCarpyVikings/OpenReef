@@ -321,6 +321,11 @@ AWC_CALRUN_UNSUB = "awc_calrun_unsub"  # timed calibration-run stop timer
 NPS_DRAIN_UNSUB = "nps_drain_unsub"    # feed-exchange matched-drain stop timer
 # Mixing station: serialises batch-state transitions the same way AWC_STATE_LOCK
 # does for water changes (start / advance / cap-fire / abort can interleave).
+# The activity feed's stored depth. The Log tab groups and pages it; entries
+# beyond this roll off oldest-first (both writers clamp: _append_activity
+# backend-side, _recordActivity in the panel — keep them matched).
+ACTIVITY_MAX_ENTRIES = 200
+
 MIXING_STATE_LOCK = "mixing_state_lock"
 MIXING_CIRC_UNSUB = "mixing_circ_unsub"  # storing-circulation chain (start OR stop leg)
 MIXING_RODI_UNSUB = "mixing_rodi_unsub"  # RODI draw stop leg OR calibration cap (mutually exclusive)
@@ -2569,7 +2574,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     else:
         config["activity"] = [
             item
-            for item in activity[:50]
+            for item in activity[:ACTIVITY_MAX_ENTRIES]
             if isinstance(item, dict)
             and isinstance(item.get("timestamp"), str)
             and isinstance(item.get("message"), str)
@@ -5744,7 +5749,7 @@ def _append_activity(config: dict[str, Any], message: str, activity_type: str = 
             "type": activity_type,
         },
     )
-    config["activity"] = activity[:50]
+    config["activity"] = activity[:ACTIVITY_MAX_ENTRIES]
 
 
 def _mode_label(config: dict[str, Any], mode_id: str) -> str:
@@ -7197,6 +7202,262 @@ def _preserve_runtime_mode(stored: Any, incoming: dict[str, Any]) -> None:
     stored_mode = stored.get("mode")
     if isinstance(stored_mode, dict):
         incoming["mode"] = deepcopy(stored_mode)
+
+
+def _copy_runtime_fields(src: Any, dst: Any, fields: tuple[str, ...]) -> None:
+    """Copy server-owned runtime fields from the stored config into a client
+    payload, in place on ``dst``. Skips silently when either side is not a
+    dict — an old client may simply not carry the block yet."""
+    if not isinstance(src, dict) or not isinstance(dst, dict):
+        return
+    for field in fields:
+        if field in src:
+            dst[field] = deepcopy(src[field])
+
+
+def _calibration_newer_in_stored(src: Any, dst: Any, stamp_key: str) -> bool:
+    """Whether the stored side carries a calibration stamped AFTER the one the
+    client posted back. Calibration-written numbers (a flow rate, a pump's
+    ml/s fit) are the one ledger the settings form ALSO edits by hand, so
+    neither side can win unconditionally: the stored calibration wins only
+    when its stamp is strictly newer — a hand edit round-trips the stamp
+    unchanged, so equal stamps mean the client's edit stands."""
+    if not isinstance(src, dict):
+        return False
+    stored_stamp = _parse_datetime(src.get(stamp_key))
+    if stored_stamp is None:
+        return False
+    incoming_stamp = _parse_datetime(dst.get(stamp_key)) if isinstance(dst, dict) else None
+    return incoming_stamp is None or stored_stamp > incoming_stamp
+
+
+def _mixing_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
+    """Carry the mixing station's server-owned ledger through a whole-config
+    save, in place on ``incoming``.
+
+    The 2026-09-01 incident: a wall client left in Pulse mode never refreshes
+    from config-updated events (by design — a refresh rebuilds the whole
+    presentation layer), so it held a config snapshot from before a
+    35 L-vessel fill + salt & mix session. One silent whole-blob save from
+    that client later (a diagram nudge is enough) reverted the vessel to
+    "50 L RODI on hand" and erased the ready batch. The mix runs, levels and
+    odometers are written ONLY by the mixing WS actions under the state lock —
+    the client has no business posting any of it, so the stored copy always
+    wins. Settings fields (volumes, layout, switches, salt, heat, storage
+    cadence, filter labels/rated life) stay the client's to edit.
+
+    MUST run BEFORE _mixing_debit_manual_changes, which debits the vessel on
+    ``incoming`` — the debit has to land on the preserved, current ledger.
+    """
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    stored_mix = stored.get("mixingStation")
+    if not isinstance(stored_mix, dict):
+        return
+    incoming_mix = incoming.get("mixingStation")
+    if not isinstance(incoming_mix, dict):
+        # The client predates the station entirely — keep everything.
+        incoming["mixingStation"] = deepcopy(stored_mix)
+        return
+
+    stored_vessels = stored_mix.get("vessels") if isinstance(stored_mix.get("vessels"), dict) else {}
+    incoming_vessels = incoming_mix.setdefault("vessels", {})
+    if isinstance(incoming_vessels, dict):
+        for vessel_id, fields in (("rodi", ("estimatedLitres",)),
+                                  ("mix", ("estimatedLitres", "contents"))):
+            if isinstance(stored_vessels.get(vessel_id), dict):
+                dst = incoming_vessels.setdefault(vessel_id, {})
+                _copy_runtime_fields(stored_vessels[vessel_id], dst, fields)
+
+    if isinstance(stored_mix.get("batch"), dict):
+        incoming_mix["batch"] = deepcopy(stored_mix["batch"])
+
+    stored_rodi = stored_mix.get("rodi")
+    if isinstance(stored_rodi, dict):
+        incoming_rodi = incoming_mix.setdefault("rodi", {})
+        if isinstance(incoming_rodi, dict):
+            _copy_runtime_fields(stored_rodi, incoming_rodi,
+                                 ("draw", "calibration", "litresProcessed", "meteredSince"))
+            if _calibration_newer_in_stored(stored_rodi, incoming_rodi, "calibratedAt"):
+                _copy_runtime_fields(stored_rodi, incoming_rodi, ("rateLph", "calibratedAt"))
+            # Filter stages: structure/label/rated life are the client's, the
+            # per-stage odometer and Changed stamp are the backend's.
+            stored_stages = {
+                stage.get("id"): stage
+                for stage in (stored_rodi.get("filters")
+                              if isinstance(stored_rodi.get("filters"), list) else [])
+                if isinstance(stage, dict)
+            }
+            incoming_stages = incoming_rodi.get("filters")
+            for stage in (incoming_stages if isinstance(incoming_stages, list) else []):
+                if isinstance(stage, dict):
+                    _copy_runtime_fields(stored_stages.get(stage.get("id")), stage,
+                                         ("litresProcessed", "changedAt"))
+
+
+def _awc_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
+    """Carry the AWC engine's server-owned runtime through a whole-config
+    save, in place on ``incoming`` — same stale-client hazard, worse stakes:
+    a reverted ``state`` block can un-fault a faulted change or resurrect a
+    finished one, and reverted reservoir levels defeat the empty/full guards.
+    Run state, history, the lifetime ledger, reservoir levels/drift, pump
+    wear odometers and the sim snapshot are written only by the AWC engine
+    and its WS actions; capacities, entities, safety limits and the schedule
+    stay the client's."""
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    stored_awc = stored.get("automaticWaterChange")
+    if not isinstance(stored_awc, dict):
+        return
+    incoming_awc = incoming.get("automaticWaterChange")
+    if not isinstance(incoming_awc, dict):
+        incoming["automaticWaterChange"] = deepcopy(stored_awc)
+        return
+
+    _copy_runtime_fields(stored_awc, incoming_awc,
+                         ("state", "history", "ledger",
+                          "todayLitres", "weekLitres", "monthLitres",
+                          # Demo mode is toggled via awc_sim_set only — the
+                          # block carries the pre-demo accounting snapshot.
+                          "simulation"))
+
+    stored_res = stored_awc.get("reservoirs") if isinstance(stored_awc.get("reservoirs"), dict) else {}
+    incoming_res = incoming_awc.get("reservoirs")
+    if isinstance(incoming_res, dict):
+        for rid, dst in incoming_res.items():
+            fields = (("filledMl",) if rid == "waste"
+                      else ("remainingMl", "dispensedSinceFullMl", "driftPct",
+                            "driftStatus", "driftCheckedAt", "fullConfirmedAt"))
+            _copy_runtime_fields(stored_res.get(rid), dst, fields)
+
+    stored_pumps = stored_awc.get("pumps") if isinstance(stored_awc.get("pumps"), dict) else {}
+    incoming_pumps = incoming_awc.get("pumps")
+    if isinstance(incoming_pumps, dict):
+        for role, dst in incoming_pumps.items():
+            src = stored_pumps.get(role)
+            _copy_runtime_fields(src, dst, ("runSeconds", "startCount", "tubingInstalledAt"))
+            if _calibration_newer_in_stored(src, dst, "calibratedAt"):
+                _copy_runtime_fields(src, dst, ("mlPerS", "interceptMl", "spinUpMl",
+                                                "primeMl", "calibratedAt"))
+
+    stored_policy = stored_awc.get("sourcePolicy")
+    if isinstance(stored_policy, dict) and isinstance(incoming_awc.get("sourcePolicy"), dict):
+        _copy_runtime_fields(stored_policy, incoming_awc["sourcePolicy"], ("lastSourceUsed",))
+
+
+def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
+    """Carry the NPS/hatchery server-owned runtime through a whole-config
+    save, in place on ``incoming``: the feed-exchange owed-drain state, the
+    truce's turned-off registry (restore must never touch equipment the
+    keeper had off already), the per-vessel hatch-batch stamps, the brine
+    reservoir ledger, the enrichment run and hatch history — all written only
+    by the NPS WS actions and ticks. Vessel names/volumes, clock settings and
+    enrichment settings stay the client's.
+
+    MUST run BEFORE _nps_hatch_clock_follow, which applies a settings-driven
+    clock change onto the (now-preserved) incubating batch stamps.
+
+    Consumables share one scalar between both writers — doses drain
+    ``remainingMl`` server-side, refills/corrections edit it client-side —
+    so the stored bottle wins only when its history carries an entry newer
+    than anything the client posted back (doses happened after the client's
+    snapshot); otherwise the client's edit stands.
+    """
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    stored_nps = stored.get("nps")
+    incoming_nps = incoming.get("nps")
+    if isinstance(stored_nps, dict):
+        if not isinstance(incoming_nps, dict):
+            incoming["nps"] = deepcopy(stored_nps)
+        else:
+            for block in ("feedExchange", "truce"):
+                src = stored_nps.get(block)
+                dst = incoming_nps.get(block)
+                if not isinstance(src, dict):
+                    continue
+                if not isinstance(dst, dict):
+                    incoming_nps[block] = deepcopy(src)
+                elif isinstance(src.get("state"), dict):
+                    dst["state"] = deepcopy(src["state"])
+
+            src_hatchery = stored_nps.get("hatchery")
+            dst_hatchery = incoming_nps.get("hatchery")
+            if isinstance(src_hatchery, dict):
+                if not isinstance(dst_hatchery, dict):
+                    incoming_nps["hatchery"] = deepcopy(src_hatchery)
+                else:
+                    src_vessels = (src_hatchery.get("vessels")
+                                   if isinstance(src_hatchery.get("vessels"), dict) else {})
+                    dst_vessels = dst_hatchery.get("vessels")
+                    if isinstance(dst_vessels, dict):
+                        for vid, dst_vessel in dst_vessels.items():
+                            src_vessel = src_vessels.get(vid)
+                            if (isinstance(src_vessel, dict) and isinstance(dst_vessel, dict)
+                                    and isinstance(src_vessel.get("state"), dict)):
+                                dst_vessel["state"] = deepcopy(src_vessel["state"])
+                    _copy_runtime_fields(
+                        src_hatchery.get("reservoir"), dst_hatchery.get("reservoir"),
+                        ("remainingMl", "mixedAt", "lastLoadEnriched", "enrichedAt"))
+                    src_enrich = src_hatchery.get("enrichment")
+                    dst_enrich = dst_hatchery.get("enrichment")
+                    if (isinstance(src_enrich, dict) and isinstance(dst_enrich, dict)
+                            and isinstance(src_enrich.get("state"), dict)):
+                        dst_enrich["state"] = deepcopy(src_enrich["state"])
+                    if isinstance(src_hatchery.get("history"), list):
+                        dst_hatchery["history"] = deepcopy(src_hatchery["history"])
+
+    stored_products = ((stored.get("consumables") or {}).get("products")
+                       if isinstance(stored.get("consumables"), dict) else None)
+    incoming_products = ((incoming.get("consumables") or {}).get("products")
+                         if isinstance(incoming.get("consumables"), dict) else None)
+    if isinstance(stored_products, dict) and isinstance(incoming_products, dict):
+        def _latest(product: Any) -> datetime | None:
+            history = product.get("history") if isinstance(product, dict) else None
+            stamps = [_parse_datetime(item.get("at"))
+                      for item in (history if isinstance(history, list) else [])
+                      if isinstance(item, dict)]
+            stamps = [stamp for stamp in stamps if stamp is not None]
+            return max(stamps) if stamps else None
+
+        for pid, dst in incoming_products.items():
+            src = stored_products.get(pid)
+            if not isinstance(src, dict) or not isinstance(dst, dict):
+                continue
+            src_stamp = _latest(src)
+            if src_stamp is not None:
+                dst_stamp = _latest(dst)
+                if dst_stamp is None or src_stamp > dst_stamp:
+                    _copy_runtime_fields(src, dst, ("remainingMl", "history"))
+
+
+def _merge_activity(stored: Any, incoming: dict[str, Any]) -> None:
+    """Union the activity feed through a whole-config save, in place on
+    ``incoming`` — the audit trail is what let the 2026-09-01 clobber be
+    reconstructed at all, so a stale save must not truncate it. Entries are
+    keyed on (timestamp, message); the union re-sorts newest-first and the
+    normalise pass caps the length. An EMPTY incoming list is respected as a
+    deliberate Clear activity."""
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    stored_activity = stored.get("activity")
+    incoming_activity = incoming.get("activity")
+    if not isinstance(stored_activity, list) or not isinstance(incoming_activity, list):
+        return
+    if not incoming_activity:
+        return
+    seen = {(item.get("timestamp"), item.get("message"))
+            for item in incoming_activity if isinstance(item, dict)}
+    restored = [deepcopy(item) for item in stored_activity
+                if isinstance(item, dict)
+                and (item.get("timestamp"), item.get("message")) not in seen]
+    if restored:
+        incoming_activity.extend(restored)
+        incoming_activity.sort(
+            key=lambda item: _parse_datetime(item.get("timestamp") if isinstance(item, dict) else None)
+            or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
 
 
 def _merge_recent_completions(stored: Any, incoming: dict[str, Any]) -> None:
@@ -8993,6 +9254,10 @@ async def websocket_save_config(
     # A panel posts the whole config, so anything logged since it last refreshed —
     # an automatic water change, a completion from an automation — would be dropped.
     _merge_recent_completions(entry.options.get(CONF_SETTINGS), msg["config"])
+    # Server-owned runtime always survives a client save (the 2026-09-01
+    # stale-wall clobber): the mixing ledger FIRST — the manual-change debit
+    # below has to land on the preserved, current vessel.
+    _mixing_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
     # Doc §28: a hand-logged water change debits the mix vessel. Diffed here —
     # the one door a manual Maintenance completion enters the backend through —
     # and only for entries the stored config has never seen, so a re-save
@@ -9000,8 +9265,12 @@ async def websocket_save_config(
     # and are skipped: those litres are the AWC coupling's to account.
     _mixing_debit_manual_changes(hass, entry.options.get(CONF_SETTINGS), msg["config"])
     _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["config"])
+    _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
+    _nps_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
+    _merge_activity(entry.options.get(CONF_SETTINGS), msg["config"])
     # A hatch-clock change here has to reach the batch already incubating and
     # the reminders hanging off it, or the page contradicts itself (0.7.80).
+    # AFTER the NPS preserve: the new clock applies to the live batch stamps.
     _nps_hatch_clock_follow(entry.options.get(CONF_SETTINGS), msg["config"])
     config = await _async_save_config(hass, entry, msg["config"])
     connection.send_result(
@@ -9036,7 +9305,11 @@ async def websocket_update_config_alias(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
 
+    _mixing_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
     _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["settings"])
+    _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
+    _nps_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
+    _merge_activity(entry.options.get(CONF_SETTINGS), msg["settings"])
     config = await _async_save_config(hass, entry, msg["settings"])
     connection.send_result(
         msg["id"],
