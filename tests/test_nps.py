@@ -1798,3 +1798,93 @@ if __name__ == "__main__":
                 failures += 1
                 print(f"FAIL  {name}: {err}")
     raise SystemExit(1 if failures else 0)
+
+
+# ------------------------------------------------- the mixing station pays
+# for hatch water (doc §30)
+
+def _mixing_station_for_hatchery(entry, *, coupled=True, guard="warn", litres=40.0):
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["mixingStation"] = {
+        "enabled": True, "layout": "dual",
+        "vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40},
+                    "mix": {"volumeLitres": 50, "estimatedLitres": litres, "contents": "salt"}},
+        "salt": {"brand": "nyos_pure", "targetPpt": 35.0, "mixHours": 0, "customGPerL": 0},
+        "storage": {"circulateEveryH": 6, "circulateForMin": 10, "retestAfterDays": 7},
+        "batch": {"state": "storing", "type": "salt", "litres": litres, "usedLitres": 0,
+                  "stageAt": _iso(NOW), "testedAt": _iso(NOW)},
+        "integrations": {"awcGuard": guard, "hatcheryFromVessel": coupled},
+    }
+
+
+def _mix_litres(entry):
+    return entry.options[CONF_SETTINGS]["mixingStation"]["vessels"]["mix"]["estimatedLitres"]
+
+
+def test_hatchery_from_vessel_defaults_on():
+    cfg = integration._normalise_core_config({"mixingStation": {"enabled": True}})
+    assert cfg["mixingStation"]["integrations"]["hatcheryFromVessel"] is True
+    cfg = integration._normalise_core_config(
+        {"mixingStation": {"integrations": {"hatcheryFromVessel": False}}})
+    assert cfg["mixingStation"]["integrations"]["hatcheryFromVessel"] is False
+
+
+def test_ws_hatch_start_draws_the_cone_from_the_mix_vessel():
+    # Reece (0.7.113): a 0.5 L hatchery set up in settings takes 0.5 L of
+    # saltwater out of the mixing station's vessel the moment a hatch starts.
+    entry = _v2_entry(vessels={
+        "v1": {"name": "Hatchery 1", "volumeL": 0.5, "state": {}},
+        "v2": {"name": "Hatchery 2", "volumeL": 0.7, "state": {}},
+    })
+    _mixing_station_for_hatchery(entry)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    assert _mix_litres(entry) == 39.5, "the 0.5 L cone must leave the vessel ledger"
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 2}))
+    assert _mix_litres(entry) == 38.8, "the second cone draws its own 0.7 L"
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("0.5 L drawn by the hatch in Hatchery 1" in str(i.get("message", "")) for i in log)
+
+
+def test_ws_harvest_backflush_draws_the_container_fill_from_the_mix_vessel():
+    # The harvest backflushes the nauplii home on fresh 35 ppt — a 750 ml
+    # container filled from empty is 0.75 L out of the vessel. A top-up onto
+    # a half-full container draws only what the container actually gained.
+    entry = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.5, "state": {}}},
+                      reservoir={"volumeMl": 750, "remainingMl": 0, "loadVolumeMl": 0})
+    _mixing_station_for_hatchery(entry)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    assert _mix_litres(entry) == 39.5
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 2, "harvested": True}))
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]["remainingMl"] == 750
+    assert _mix_litres(entry) == 38.75, "the 750 ml backflush must leave the vessel"
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("0.75 L drawn by the brine backflush" in str(i.get("message", "")) for i in log)
+    # Second batch: the container still holds 750 ml (top-to-full) — the
+    # backflush gains it nothing, so nothing is drawn beyond the cone.
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 3}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 4, "harvested": True}))
+    assert _mix_litres(entry) == 38.25, "a full container gains nothing, draws nothing"
+    # A cancelled (not harvested) hatch never backflushes — no container draw.
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 5}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 6, "harvested": False}))
+    assert _mix_litres(entry) == 37.75
+
+
+def test_ws_hatchery_draw_respects_the_toggle_and_the_guard():
+    entry = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.5, "state": {}}},
+                      reservoir={"volumeMl": 750, "remainingMl": 0, "loadVolumeMl": 0})
+    _mixing_station_for_hatchery(entry, coupled=False)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 2, "harvested": True}))
+    assert _mix_litres(entry) == 40.0, "unticked: the keeper's hatch water comes from elsewhere"
+    entry2 = _v2_entry(vessels={"v1": {"name": "Hatchery 1", "volumeL": 0.5, "state": {}}})
+    _mixing_station_for_hatchery(entry2, guard="off")
+    hass2 = FakeHass(entries=[entry2])
+    run(integration.websocket_nps_hatch_start(hass2, FakeConnection(), {"id": 1}))
+    assert _mix_litres(entry2) == 40.0, "guard Off: the ledger is never touched from outside"

@@ -1705,6 +1705,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "atoFromRodi": bool(raw_integrations.get("atoFromRodi", False)),
         "freshFromVessel": bool(raw_integrations.get("freshFromVessel", True)),
         "maintenanceFromVessel": bool(raw_integrations.get("maintenanceFromVessel", True)),
+        "hatcheryFromVessel": bool(raw_integrations.get("hatcheryFromVessel", True)),
     }
 
 
@@ -13206,6 +13207,10 @@ async def websocket_nps_hatch_start(
         config,
         f"Brine hatch started in {vessels[target_id]['name']} — the incubation clock is running",
         "control")
+    # The cone was just filled with saltwater — that water came out of the
+    # mixing station's vessel (doc §30), cone volume's worth.
+    _mixing_hatchery_debit(hass, config, vessels[target_id]["volumeL"],
+                           f"the hatch in {vessels[target_id]['name']}")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -13333,10 +13338,16 @@ async def websocket_nps_hatch_cancel(
     if harvested:
         # HARD GATE (Reece, locked): stale brine never gets fresh brine poured
         # onto it — the container must be discarded first.
+        before_ml = _awc_num(_nps_canonical_reservoir(config).get("remainingMl"), 0, 0, 1e9)
         error = _nps_container_load(config, hatchery, now, enriched=False)
         if error is not None:
             connection.send_error(msg["id"], error[0], error[1])
             return
+        # The backflush: the nauplii ride home on fresh 35 ppt, and every ml
+        # the container gained is saltwater out of the mix vessel (doc §30).
+        after_ml = _awc_num(_nps_canonical_reservoir(config).get("remainingMl"), 0, 0, 1e9)
+        _mixing_hatchery_debit(hass, config, (after_ml - before_ml) / 1000.0,
+                               "the brine backflush into the container")
         # The batch's story: planned vs actual hours feeds the learned clock.
         if target_id and vessels.get(target_id, {}).get("state", {}).get("hatchStartedAt"):
             state = vessels[target_id]["state"]
@@ -14401,27 +14412,29 @@ def _mixing_debit_batch(hass: HomeAssistant, config: dict[str, Any], litres: flo
             return {"outcome": "untested"}
         return {"outcome": "no_water"}
     available = mixing_engine.mix_vessel_litres(cfg)
-    remaining = round(max(0.0, available - litres), 1)
+    # 2 dp: the hatchery's draws are sub-litre (a 0.5 L cone, a 750 ml
+    # container) and must not round to the nearest 100 ml on the ledger.
+    remaining = round(max(0.0, available - litres), 2)
     mix_v = cfg.setdefault("vessels", {}).setdefault("mix", {})
     mix_v["estimatedLitres"] = remaining
     if remaining <= 0.05:
-        shortfall = round(litres - available, 1)
+        shortfall = round(litres - available, 2)
         _mixing_empty_vessel(cfg)
         _mixing_close_batch(hass, config)
         if shortfall > 0.05:
             _append_activity(
                 config, f"Mixing station: {note} needed {litres:g} L but the vessel "
-                f"only held {round(available, 1):g} L — it stands empty, "
+                f"only held {round(available, 2):g} L — it stands empty, "
                 f"{shortfall:g} L short", "warning")
             return {"outcome": "shortfall",
-                    "drawnL": round(available, 1), "shortfallL": shortfall}
+                    "drawnL": round(available, 2), "shortfallL": shortfall}
         _append_activity(config, f"Mixing station: batch used up by {note} — "
                          "the vessel stands empty", "control")
-        return {"outcome": "debited", "drawnL": round(litres, 1), "remainingL": 0.0}
+        return {"outcome": "debited", "drawnL": round(litres, 2), "remainingL": 0.0}
     _append_activity(
         config, f"Mixing station: {litres:g} L drawn by {note} — {remaining:g} L left",
         "control")
-    return {"outcome": "debited", "drawnL": round(litres, 1), "remainingL": remaining}
+    return {"outcome": "debited", "drawnL": round(litres, 2), "remainingL": remaining}
 
 
 def _mixing_fresh_from_vessel(config: dict[str, Any]) -> bool:
@@ -14448,6 +14461,24 @@ def _mixing_maintenance_from_vessel(config: dict[str, Any]) -> bool:
     users are accounted once, by the AWC coupling alone."""
     return bool((_mixing_cfg(config).get("integrations") or {})
                 .get("maintenanceFromVessel", True))
+
+
+def _mixing_hatchery_from_vessel(config: dict[str, Any]) -> bool:
+    """Whether the hatchery's saltwater comes out of the mix vessel (doc §30):
+    a fresh hatch draws its cone's volume, and the harvest backflush draws
+    whatever fresh 35 ppt it pushed into the live-brine container. Off = the
+    keeper mixes hatch water somewhere else."""
+    return bool((_mixing_cfg(config).get("integrations") or {})
+                .get("hatcheryFromVessel", True))
+
+
+def _mixing_hatchery_debit(hass: HomeAssistant, config: dict[str, Any],
+                           litres: float, note: str) -> None:
+    """The hatchery's vessel draw — the same ledger, guard and warnings as
+    every other coupling; quiet when the keeper has unticked it."""
+    if litres <= 0 or not _mixing_hatchery_from_vessel(config):
+        return
+    _mixing_debit_batch(hass, config, round(litres, 2), note)
 
 
 def _maintenance_tank_litres(config: dict[str, Any]) -> float:

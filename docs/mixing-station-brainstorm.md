@@ -567,6 +567,34 @@ off (a flow calibration is running — left running)".
 Unchanged: discarding still empties the vessel, and a draw landing in a
 just-emptied mix vessel still credits normally (empty + fresh RODI = rodi).
 
+## §30 The hatchery pays the vessel (0.7.113)
+
+Reece: "when starting fresh brine hatches — if the user has a 0.5 L
+container set up in settings, it should automatically debit this amount.
+Also when rinsing/backflushing the live brine back into the live brine
+vessel — if that's set at 750 ml then this should also be debiting from
+the saltwater mixing station vessel."
+
+Two more couplings on the same ledger, the same shape as §27 and §28:
+
+- **Hatch start** draws the cone's configured volume (`vessels[vid].volumeL`)
+  — the cone was just filled with saltwater, and that water came from here.
+- **Harvest** draws whatever the live-brine container *gained* from the
+  backflush: `remainingMl` after `_nps_container_load` minus before. A
+  750 ml container filled from empty is 0.75 L; a top-up onto a half-full
+  container draws only the half; a container already at the brim draws
+  nothing. A cancelled hatch never backflushes, so it never draws.
+
+Both go through `_mixing_debit_batch`, so the guard (§27's `awcGuard`
+Off = never touched from outside), the "untested saltwater" warning and
+the shortfall line all apply unchanged. The new toggle
+`integrations.hatcheryFromVessel` (default on) is the off-switch for
+keepers who mix hatch water somewhere else.
+
+One ledger change underneath: the debit now rounds to 2 dp. The AWC and
+bucket draws were whole-ish litres; a 0.5 L cone and a 0.75 L container
+would have rounded to the nearest 100 ml and drifted the anchor.
+
 ## §14 RODI utility (0.7.88 — post-arc)
 
 The RODI unit becomes usable OUTSIDE a batch, because keepers run it for more than

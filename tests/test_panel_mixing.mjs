@@ -638,6 +638,8 @@ test("settings offers the per-stage filter editor and the alert fields", async (
     "settings lost the fresh-fills-from-vessel toggle");
   assert(body.includes('data-field="maintenanceFromVessel"'),
     "settings lost the hand-logged-changes-draw-from-vessel toggle");
+  assert(body.includes('data-field="hatcheryFromVessel"'),
+    "settings lost the hatchery-draws-from-vessel toggle");
   assert(body.includes('value="80"') && body.includes('value="20"'),
     "the stored alert settings did not render");
   noPlaceholders(body, "rodi settings");

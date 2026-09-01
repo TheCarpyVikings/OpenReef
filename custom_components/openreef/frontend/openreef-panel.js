@@ -23866,6 +23866,10 @@ const rigSteps = [
         <input type="checkbox" data-scope="mixing-integrations" data-field="maintenanceFromVessel" ${mix.integrations?.maintenanceFromVessel !== false ? "checked" : ""}>
         <span><strong>Hand-logged water changes draw from the vessel</strong><small>Log a water change in Maintenance with a volume and that many litres leave this station's batch — bucket changes keep the ledger honest, and a % log converts through your tank volume. Changes the AWC ran are never counted here (its history rows are tagged); those litres are already accounted by the coupling above. Untick if you change water by hand from some other container.</small></span>
       </label>
+      <label class="toggle">
+        <input type="checkbox" data-scope="mixing-integrations" data-field="hatcheryFromVessel" ${mix.integrations?.hatcheryFromVessel !== false ? "checked" : ""}>
+        <span><strong>The hatchery draws from the vessel</strong><small>Starting a brine hatch draws that cone's volume (a 0.5 L hatchery takes 0.5 L), and harvesting draws whatever fresh saltwater the backflush pushed into the live-brine container (a 750 ml container filled from empty takes 0.75 L). Untick if you mix hatch water somewhere else.</small></span>
+      </label>
       <small class="awc-hint">Every coupling here respects the guard above — set it to Off and this station's ledger is never touched from outside the Mixing tab.</small>`;
   }
 
