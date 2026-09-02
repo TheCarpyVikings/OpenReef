@@ -760,3 +760,59 @@ the stale-save guard.
   stays the anchor. The learned clock already tells the keeper to harvest
   early.
 - `HATCH_OVERDUE_GRACE_H` 12 h and `ENRICH_OVERDUE_GRACE_H` 6 h stand.
+
+### 12.6 The fridge is a separate feeding bottle (2026-09-02, 0.7.116)
+
+Reece's actual practice, which 12.3–12.4 got wrong: the container is never
+refrigerated. The brine is DRAINED out of the live-brine container into a
+separate feeding bottle, and that bottle is what goes in the fridge. The
+container is then empty and free for the next hatch.
+
+So the model is now two vessels, each with its own batch and its own clock:
+
+- **`hatchery.reservoir`** — the container. Never cold. It keeps
+  `fridgeSavedH` only for the case where a bottle is poured back (the credit
+  the cold spell banked). `refrigeratedAt` is gone from it.
+- **`hatchery.fridgeBottle`** — `remainingMl`, `mixedAt`, `refrigeratedAt`,
+  `lastLoadEnriched`, `enrichedAt`, `fridgeSavedH`. The same stamp shape as
+  the container, so the one helper (`_nps_batch_shelf_hours`) runs the
+  two-rate clock for both: the batch's window from ITS load, room rate
+  until it went cold, fridge rate after, the boost window instead of the
+  yolk window when enriched.
+
+One command, `openreef/nps_fridge_bottle`, four actions:
+
+- **fill** — the inline "❄ Refrigerate": moves the container's whole load
+  into the bottle with its stamps, stamps `refrigeratedAt = now`, empties
+  the container (and clears its enriched/credit stamps). Refused for stale
+  brine (`stale_brine` — the fridge won't bring it back), mid-soak
+  (`soaking`), or onto a bottle whose brine is already past its shelf
+  (`bottle_stale` — empty it first). Topping up a bottle that still holds
+  good brine is allowed: the OLDER batch's clock rules the mix.
+- **feed** — a hand feed debited from the bottle (default dose, or `ml`),
+  logging the hand-feed reminder done like the container's button.
+- **return** — the bottle poured back into the container: the cold hours
+  bank as credit (`fridge_saved_on_exit`), the volume clamps at the brim,
+  and if the container already holds brine the older batch's clock rules.
+- **empty** — discard.
+
+Planning: `_nps_brine_supply_for_planning` feeds `next_hatch_suggestion`
+the bottle as supply — whichever of container/bottle dies LATER anchors
+the clock, the volume is both. The container's own freshness line and the
+stale gate are unchanged (container only). Migration: a 0.7.115 container
+stamp (or the older global toggle) on a loaded container moves that load
+into the bottle on normalise; the bottle joined the stale-save guard whole.
+
+Panel: the ❄ button stays inline on the advice line and only ever says
+"Refrigerate" (the container is never "taken out"). The bottle draws as
+its own tile beside the cones and the soak — "Feeding bottle · in the
+fridge", ml, "~N h of life left" (or "past its shelf life — empty it"),
+and three buttons: Fed N ml / Back in container / Empty. The hero
+Container card carries "❄ bottle N ml, ~H h left".
+
+Two things the sweep turned up: both test runners had their `main` block
+mid-file, so every test added below it (the whole 0.7.115 fridge set, and
+0.7.113's backflush test) had never actually run; they run now, at the
+end. And the mixing vessel ledger rounded `estimatedLitres` to 1 dp on
+every save, so 0.7.113's 0.75 L backflush was logged as 0.75 and stored as
+0.8 — the ledger keeps 2 dp now.

@@ -1829,10 +1829,14 @@ class OpenReefPanel extends HTMLElement {
         "Hatch cancelled — the hatcher stands down.");
       if (action === "nps-discard-brine") this._npsCall({ type: "openreef/nps_reservoir_discard" },
         "Old brine discarded — the container is empty and ready for the fresh batch.");
-      if (action === "nps-fridge-in") this._npsCall({ type: "openreef/nps_container_fridge", in_fridge: true },
-        "Brine in the fridge — the clock runs at the 48 h rate from now.");
-      if (action === "nps-fridge-out") this._npsCall({ type: "openreef/nps_container_fridge", in_fridge: false },
-        "Brine out of the fridge — the cold hours stay banked.");
+      if (action === "nps-fridge-in") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "fill" },
+        "Drained into the feeding bottle — its clock runs at the 48 h rate from now.");
+      if (action === "nps-fridge-feed") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "feed" },
+        "Fed from the bottle — logged.");
+      if (action === "nps-fridge-return") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "return" },
+        "Bottle poured back into the container — the cold hours stay banked.");
+      if (action === "nps-fridge-empty") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "empty" },
+        "Feeding bottle emptied.");
       if (action === "nps-enrich") this._npsCall({ type: "openreef/nps_hatch_enrich" },
         "Enrichment engaged on the loaded brine — the dose reminder is anchored to this batch's age. The running hatch is untouched.");
       if (action === "nps-enrich-loaded") this._npsCall({ type: "openreef/nps_enrich_loaded" },
@@ -10301,9 +10305,7 @@ class OpenReefPanel extends HTMLElement {
     const why = next.driver === "depletion"
       ? "the reservoir runs dry"
       : "the loaded brine fades";
-    const refrigerated = !!this._nps?.summary?.hatchery?.reservoir?.refrigerated;
-    const fridgeHint = refrigerated ? "a second hatcher helps"
-      : "a second hatcher helps — or tap ❄ Refrigerate on the loaded brine: the clock slows to the 48 h rate from that moment";
+    const fridgeHint = "a second hatcher helps — or tap ❄ Refrigerate on the loaded brine: it drains into a feeding bottle in the fridge (the clock slows to the 48 h rate from that moment) and the container is free for the next hatch";
     const overlapNote = next.overlap
       ? (Number(next.shelfHours) >= Number(next.hatchHours)
         ? ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch plus harvest time uses the brine's whole ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`
@@ -10606,19 +10608,20 @@ class OpenReefPanel extends HTMLElement {
       </svg>`;
   }
 
-  // A refrigerated load: the bottle inside a fridge, stroke from the
-  // freshness clock, the life left written underneath (0.7.115).
-  _npsFridgeTileSvg(reservoir) {
-    const volume = Number(reservoir?.volumeMl) || 0;
-    const remaining = Math.max(0, Number(reservoir?.remainingMl) || 0);
-    const pct = volume > 0 ? Math.min(1, remaining / volume) : 0.5;
-    const status = reservoir?.freshness?.status || "";
+  // The feeding bottle inside a fridge (0.7.116): a SEPARATE bottle the
+  // container was drained into, its fill scaled against the container it
+  // came from, stroke from its own freshness clock, life left underneath.
+  _npsFridgeTileSvg(bottle, scaleMl) {
+    const scale = Number(scaleMl) || 0;
+    const remaining = Math.max(0, Number(bottle?.remainingMl) || 0);
+    const pct = scale > 0 ? Math.min(1, remaining / scale) : 0.5;
+    const status = bottle?.freshness?.status || "";
     const stroke = status === "stale" ? "var(--error-color,#e5484d)"
       : status === "aging" ? "var(--warning-color,#f5a524)" : "#4fc3f7";
     const fillH = Math.round(44 * pct);
-    const left = reservoir?.freshness?.hoursLeft;
+    const left = bottle?.freshness?.hoursLeft;
     return `
-      <svg viewBox="0 0 84 124" style="width:84px;flex:0 0 auto;" role="img" aria-label="Brine in the fridge — ${this._escape(left != null ? `${left} h left` : (status || "cold"))}">
+      <svg viewBox="0 0 84 124" style="width:84px;flex:0 0 auto;" role="img" aria-label="Feeding bottle in the fridge — ${this._escape(left != null ? `${left} h left` : (status || "cold"))}">
         <rect x="16" y="4" width="52" height="106" rx="7" fill="#0b1a24" stroke="${stroke}" stroke-width="2.5"></rect>
         <line x1="16" y1="36" x2="68" y2="36" stroke="${stroke}" stroke-width="1.5" opacity="0.55"></line>
         <rect x="61" y="12" width="3" height="16" rx="1.5" fill="#90a4ae"></rect>
@@ -10649,7 +10652,6 @@ class OpenReefPanel extends HTMLElement {
           <rect x="14" y="16" width="56" height="90" rx="8" fill="#0d1f26" stroke="${stroke}" stroke-width="2.5"></rect>
           <rect x="17" y="${103 - fillH}" width="50" height="${fillH}" rx="5" fill="#8d6e63" opacity="0.85"></rect>
           <rect x="26" y="8" width="32" height="10" rx="3" fill="#37474f"></rect>
-          ${reservoir?.refrigerated ? `<text x="64" y="30" font-size="12">❄️</text>` : ""}
           <text x="42" y="120" text-anchor="middle" font-size="10" fill="#90a4ae">${this._escape(`${Math.round(remaining)} / ${Math.round(volume)} ml`)}</text>
         </svg>
         <small><strong>Brine container</strong></small>
@@ -10910,8 +10912,10 @@ class OpenReefPanel extends HTMLElement {
         ],
         idleVessel: "v2", vesselsNeeded: 1,
         reservoir: { canonical: "channel", volumeMl: 1000, remainingMl: 710,
-          loadVolumeMl: 0, refrigerated: true, shelfHours: 48, mixedAt: iso(5 * 3600000),
-          freshness: { status: "fresh", hoursLeft: 43, ageHours: 5 } },
+          loadVolumeMl: 0, shelfHours: 24, mixedAt: iso(5 * 3600000),
+          freshness: { status: "fresh", hoursLeft: 19, ageHours: 5 } },
+        fridgeBottle: { remainingMl: 400, mixedAt: iso(20 * 3600000), refrigeratedAt: iso(14 * 3600000),
+          lastLoadEnriched: false, shelfHours: 42, freshness: { status: "fresh", hoursLeft: 22, ageHours: 20 } },
         handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
         enrichment: { hours: 12, doseMl: 1, doseDelayH: 6, batchDoseDelayH: 0, productId: "",
           productName: "Selcon", splitDose: false, sourceVesselId: "",
@@ -11593,7 +11597,8 @@ class OpenReefPanel extends HTMLElement {
     // and enrichment answers it — a gut-loaded batch has EATEN. What ticks
     // after a soak is the HUFA boost retro-converting, which is a different
     // number with a different honest ending.
-    const primeHold = prime.refrigerated || Number(prime.windowHours) >= 48 ? "fridged" : "at room temp";
+    const bankedH = Number(st.summary?.hatchery?.reservoir?.fridgeSavedH) || 0;
+    const primeHold = bankedH > 0 ? "at room temp, with the bottle's cold hours banked" : "at room temp";
     const primeLine = prime.status === "gutloaded"
       ? `🦐 Gut-loaded — this batch has been FED, so it is not running on yolk any more. The HUFA boost holds ~${this._escape(String(prime.primeLeftHours))} h (${this._escape(String(prime.windowHours))} h ${primeHold}, counted from the end of the soak).`
       : prime.status === "boost_fading"
@@ -11611,13 +11616,12 @@ class OpenReefPanel extends HTMLElement {
         ? `<span style="color:var(--warning-color,#f5a524)">Brine is aging (~${this._escape(String(fresh.hoursLeft))} h left).</span>`
         : fresh.status === "fresh" ? "Brine is fresh." : "";
     const hatch = (st.summary && st.summary.hatchery) || {};
-    // The fridge is per batch (0.7.115): the option sits INLINE with the
-    // nutritional advice it changes, never in a settings menu.
+    // The fridge is per batch (0.7.115) and a separate BOTTLE (0.7.116): the
+    // option sits INLINE with the nutritional advice it changes, and it
+    // drains the container into the feeding bottle that goes cold.
     const fridgeRes = hatch.reservoir || {};
     const fridgeButton = Number(fridgeRes.remainingMl) > 0 && fridgeRes.mixedAt
-      ? (fridgeRes.refrigerated
-        ? `<button class="secondary compact-button" data-action="nps-fridge-out" title="The cold hours stay banked — the clock just returns to the room rate from now.">Take out of the fridge</button>`
-        : `<button class="secondary compact-button" data-action="nps-fridge-in" title="2–4 °C near-stops nauplii metabolism: the clock runs at the 48 h rate from this moment. Warm hours already spent stay spent.">❄ Refrigerate</button>`)
+      ? `<button class="secondary compact-button" data-action="nps-fridge-in" title="Drain the container into a separate feeding bottle and put THAT in the fridge. 2–4 °C near-stops nauplii metabolism: the bottle's clock runs at the 48 h rate from this moment (warm hours already spent stay spent), and the container is free for the next hatch.">❄ Refrigerate</button>`
       : "";
     const hatchState = hatch.state || {};
     const hatchHours = Number(hatch.hatchHours) || 24;
@@ -11755,21 +11759,30 @@ class OpenReefPanel extends HTMLElement {
           <button class="danger-text compact-button" data-action="nps-enrich-cancel">Cancel</button>
         </div>
       </div>` : "";
-    // The fridge tile (0.7.115): a refrigerated load gets its own drawing in
-    // the row, beside the cones and the soak, wearing its life left.
-    const fridgeTile = reservoirSum.refrigerated && Number(reservoirSum.remainingMl) > 0 ? `
-      <div class="stack" style="gap:4px;align-items:center;min-width:120px;" data-fridge-tile>
-        ${this._npsFridgeTileSvg(reservoirSum)}
-        <small><strong>In the fridge</strong></small>
-        <small>${reservoirSum.freshness?.hoursLeft != null
-          ? `~${this._escape(String(reservoirSum.freshness.hoursLeft))} h of life left`
-          : "clock at the 48 h rate"}${reservoirSum.lastLoadEnriched ? " · enriched" : ""}</small>
+    // The feeding bottle tile (0.7.116): the refrigerated batch is a
+    // SEPARATE bottle the container was drained into — it draws in the row
+    // beside the cones and the soak, with its own life left and its own
+    // buttons (feed from it, pour it back, empty it).
+    const bottle = hatch.fridgeBottle || {};
+    const bottleMl = Math.max(0, Number(bottle.remainingMl) || 0);
+    const bottleLife = bottle.freshness?.status === "stale"
+      ? `<span style="color:var(--error-color,#e5484d)">past its shelf life — empty it</span>`
+      : bottle.freshness?.hoursLeft != null
+        ? `~${this._escape(String(bottle.freshness.hoursLeft))} h of life left`
+        : "clock at the 48 h rate";
+    const fridgeTile = bottleMl > 0 ? `
+      <div class="stack" style="gap:4px;align-items:center;min-width:130px;" data-fridge-tile>
+        ${this._npsFridgeTileSvg(bottle, Number(reservoirSum.volumeMl) || 0)}
+        <small><strong>Feeding bottle</strong> · in the fridge</small>
+        <small>${Math.round(bottleMl)} ml · ${bottleLife}${bottle.lastLoadEnriched ? " · enriched" : ""}</small>
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
-          <button class="secondary compact-button" data-action="nps-fridge-out">Take out</button>
+          <button class="secondary compact-button" data-action="nps-fridge-feed" title="Debits the bottle and logs the hand-feed reminder done">Fed ${this._escape(String(hatch.handFeed?.defaultDoseMl ?? 30))} ml</button>
+          <button class="secondary compact-button" data-action="nps-fridge-return" title="Pour the bottle back into the container — the cold hours stay banked, the clock returns to the room rate from now.">Back in container</button>
+          <button class="danger-text compact-button" data-action="nps-fridge-empty">Empty</button>
         </div>
       </div>` : "";
     const enrichedShelfLine = reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
-      ? `🧪 Enriched load — feed it out within ${this._escape(String(reservoirSum.shelfHours ?? 12))} h${reservoirSum.refrigerated ? " (fridged)" : " at room temp"}; the HUFA boost halves within a day warm.`
+      ? `🧪 Enriched load — feed it out within ${this._escape(String(reservoirSum.shelfHours ?? 12))} h at room temp; the HUFA boost halves within a day warm.`
       : "";
     // The DIY rig blueprint (settle & slug) — collapsed by default; the page
     // stays informative, the how-to unfolds on demand.
@@ -11873,12 +11886,16 @@ const rigSteps = [
             : this._missionSummaryCard("Batch", "none", "start a hatch below", "unknown", "hatchery");
     const contPct = Number(res.volumeMl) > 0
       ? Math.round(100 * (Number(res.remainingMl) || 0) / Number(res.volumeMl)) : null;
+    // The feeding bottle (0.7.116) rides on the Container card: it is the
+    // same brine, drained out and kept cold.
+    const heroBottle = hatch.fridgeBottle || {};
+    const heroBottleMl = Math.max(0, Number(heroBottle.remainingMl) || 0);
     const contCard = this._missionSummaryCard("Container",
       contPct == null ? "unset" : `${Math.round(Number(res.remainingMl) || 0)} ml`,
       contPct == null ? "set the volume in Hatch settings"
-        : `${contPct}%${res.freshness?.status ? ` · ${res.freshness.status}` : ""}${res.lastLoadEnriched ? " · enriched" : ""}${res.refrigerated ? ` · ❄ in the fridge${res.freshness?.hoursLeft != null ? `, ~${res.freshness.hoursLeft} h left` : ""}` : ""}`,
-      contPct == null ? "unknown"
-        : res.freshness?.status === "stale" ? "critical"
+        : `${contPct}%${res.freshness?.status ? ` · ${res.freshness.status}` : ""}${res.lastLoadEnriched ? " · enriched" : ""}${heroBottleMl > 0 ? ` · ❄ bottle ${Math.round(heroBottleMl)} ml${heroBottle.freshness?.hoursLeft != null ? `, ~${heroBottle.freshness.hoursLeft} h left` : ""}` : ""}`,
+      contPct == null ? (heroBottleMl > 0 ? "ok" : "unknown")
+        : res.freshness?.status === "stale" || heroBottle.freshness?.status === "stale" ? "critical"
           : res.freshness?.status === "aging" ? "warning" : "ok",
       "hatchery");
     const nextCard = this._missionSummaryCard("Next hatch",
@@ -24013,7 +24030,7 @@ const rigSteps = [
         <label>Hand-feed dose (ml)<input type="number" min="1" max="1000" data-scope="nps-hand-feed" data-field="defaultDoseMl" value="${this._escape(String(npsCfg.hatchery?.handFeed?.defaultDoseMl ?? 30))}"></label>
         <label>Hand feeds / day<input type="number" min="1" max="24" data-scope="nps-hand-feed" data-field="feedsPerDay" value="${this._escape(String(npsCfg.hatchery?.handFeed?.feedsPerDay ?? 2))}"></label>
       </div>
-      <small class="awc-hint"><strong>Fridge</strong> — per batch, not a setting: the "❄ Refrigerate" button beside the brine advice on the Hatchery tab stamps WHEN a load went cold. The clock then runs at the 48 h rate from that moment (2–4 °C near-stops nauplii metabolism), and the warm hours already spent stay spent — a load fridged late is not granted a fresh 48 h.</small>
+      <small class="awc-hint"><strong>Fridge</strong> — per batch, not a setting, and a separate feeding bottle, not the container: the "❄ Refrigerate" button beside the brine advice on the Hatchery tab drains the container into the bottle and stamps WHEN it went cold. The bottle's clock then runs at the 48 h rate from that moment (2–4 °C near-stops nauplii metabolism), the warm hours already spent stay spent, and the container is free for the next hatch. Feed from the bottle by hand, pour it back, or empty it from its tile.</small>
       <div class="mini-grid">
         <label>Hatchery temp sensor (optional)<input data-scope="nps-hatchery" data-field="tempEntity" value="${this._escape(npsCfg.hatchery?.tempEntity || "")}" placeholder="sensor.hatchery_temperature"></label>
       </div>

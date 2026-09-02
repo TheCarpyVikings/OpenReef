@@ -241,8 +241,10 @@ def _nps_stored():
                                              "readyNotifiedAt": ""}}},
                 "reservoir": {"volumeMl": 500.0, "remainingMl": 120.0,
                               "mixedAt": _iso(EARLIER), "lastLoadEnriched": True,
-                              "enrichedAt": _iso(EARLIER),
-                              "refrigeratedAt": _iso(EARLIER), "fridgeSavedH": 3.5},
+                              "enrichedAt": _iso(EARLIER), "fridgeSavedH": 3.5},
+                "fridgeBottle": {"remainingMl": 400.0, "mixedAt": _iso(EARLIER),
+                                 "refrigeratedAt": _iso(EARLIER), "lastLoadEnriched": False,
+                                 "enrichedAt": "", "fridgeSavedH": 0},
                 "enrichment": {"hours": 12, "state": {"startedAt": _iso(EARLIER)}},
                 "history": [{"vesselId": "v1", "startedAt": _iso(EARLIER - timedelta(days=1)),
                              "harvestedAt": _iso(EARLIER)}],
@@ -265,8 +267,8 @@ def test_nps_runtime_survives_a_stale_save():
     nps["hatchery"]["vessels"]["v1"]["name"] = "Left rack"   # the client's edit
     nps["hatchery"]["reservoir"]["remainingMl"] = 500.0
     nps["hatchery"]["reservoir"]["volumeMl"] = 700.0         # the client's edit
-    nps["hatchery"]["reservoir"]["refrigeratedAt"] = ""      # stale snapshot: fridged since
     nps["hatchery"]["reservoir"]["fridgeSavedH"] = 0
+    nps["hatchery"]["fridgeBottle"] = {"remainingMl": 0, "mixedAt": ""}   # stale: filled since
     nps["hatchery"]["enrichment"]["state"] = {"startedAt": ""}
     nps["hatchery"]["history"] = []
     integration._nps_preserve_runtime(stored, incoming)
@@ -276,9 +278,15 @@ def test_nps_runtime_survives_a_stale_save():
     assert nps["hatchery"]["vessels"]["v1"]["name"] == "Left rack"
     assert nps["hatchery"]["reservoir"]["remainingMl"] == 120.0
     assert nps["hatchery"]["reservoir"]["volumeMl"] == 700.0
-    assert nps["hatchery"]["reservoir"]["refrigeratedAt"] == _iso(EARLIER), \
-        "the per-batch fridge stamp is server-owned runtime (0.7.115)"
     assert nps["hatchery"]["reservoir"]["fridgeSavedH"] == 3.5
+    assert nps["hatchery"]["fridgeBottle"]["remainingMl"] == 400.0, \
+        "the feeding bottle is server-owned runtime (0.7.116)"
+    assert nps["hatchery"]["fridgeBottle"]["refrigeratedAt"] == _iso(EARLIER)
+    # A snapshot from a client that predates the bottle: it still comes back.
+    older = copy.deepcopy(stored)
+    del older["nps"]["hatchery"]["fridgeBottle"]
+    integration._nps_preserve_runtime(stored, older)
+    assert older["nps"]["hatchery"]["fridgeBottle"]["remainingMl"] == 400.0
     assert nps["hatchery"]["enrichment"]["state"]["startedAt"] == _iso(EARLIER)
     assert nps["hatchery"]["history"]
 

@@ -510,8 +510,10 @@ function v2HatcherySummary(over = {}) {
     ],
     idleVessel: "v2", vesselsNeeded: 1,
     reservoir: { canonical: "hatchery", volumeMl: 1000, remainingMl: 710, loadVolumeMl: 0,
-      refrigerated: true, shelfHours: 48, mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
-      freshness: { status: "fresh", hoursLeft: 43, ageHours: 5 } },
+      fridgeSavedH: 0, shelfHours: 24, mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
+      freshness: { status: "fresh", hoursLeft: 19, ageHours: 5 } },
+    fridgeBottle: { remainingMl: 0, mixedAt: "", refrigeratedAt: "", lastLoadEnriched: false,
+      shelfHours: null, freshness: null },
     handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
     enrichment: { hours: 12, doseMl: 1, doseDelayH: 6, batchDoseDelayH: 0, productId: "",
       productName: "Selcon", splitDose: false, sourceVesselId: "",
@@ -600,7 +602,7 @@ test("settings carry the vessel editor with the researched presets", async () =>
     panel._config.nps.hatchery = {
       eggType: "standard", hatchHours: 24,
       vessels: { v1: { name: "Hatchery 1", volumeL: 1, state: {} } },
-      reservoir: { volumeMl: 1000, remainingMl: 710, loadVolumeMl: 0, refrigerated: true },
+      reservoir: { volumeMl: 1000, remainingMl: 710, loadVolumeMl: 0 },
       handFeed: { defaultDoseMl: 30, feedsPerDay: 2 },
     };
     panel._settingsSectionsOpen = { nps: true };
@@ -1056,8 +1058,9 @@ test("an enriched batch reads gut-loaded, never 'past prime, hatch fresh'", asyn
     assert(!html.includes("past the 24 h yolk window"), "it must not also condemn it");
     assert(html.includes("at room temp"), "the hold length is qualified by storage");
     // Fridged: same status, a much longer hold, and the copy has to follow.
-    fx.prime.windowHours = 48; fx.prime.primeLeftHours = 44; fx.prime.refrigerated = true;
-    assert(panel._hatcheryPanel().includes("fridged"), "48 h only makes sense cold");
+    fx.prime.windowHours = 34; fx.prime.primeLeftHours = 30;
+    panel._nps.summary.hatchery.reservoir.fridgeSavedH = 10;
+    assert(panel._hatcheryPanel().includes("cold hours banked"), "a 34 h hold came from the bottle's cold spell");
     // Boost drained is not the same as stale — it is still live food.
     fx.prime = { status: "boost_fading", ageHours: 44, primeLeftHours: 0,
                  enriched: true, window: "boost", windowHours: 12, soakAgeHours: 20 };
@@ -1097,39 +1100,49 @@ test("a cool bench moves the molt, so the dose-delay advice moves with it", asyn
   } finally { restore(); }
 });
 
-runTests();
-
-test("the fridge is per batch — inline button, its own tile, and the hero card says so", async () => {
+test("the fridge is a separate feeding bottle — inline ❄ drains the container, the bottle gets its own tile", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    // Warm load: the advice line carries ❄ Refrigerate, no fridge tile.
+    // Warm load, empty bottle: the advice line carries ❄ Refrigerate, no tile.
     panel._nps.summary.hatchery = v2HatcherySummary({
       reservoir: { canonical: "hatchery", volumeMl: 750, remainingMl: 500, loadVolumeMl: 0,
-        refrigerated: false, refrigeratedAt: "", fridgeSavedH: 0, shelfHours: 24, plainShelfHours: 24,
+        fridgeSavedH: 0, shelfHours: 24, plainShelfHours: 24,
         mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
         freshness: { status: "fresh", hoursLeft: 19, ageHours: 5 } },
     });
     let html = panel._hatcheryPanel();
-    assert(html.includes('data-action="nps-fridge-in"'), "a warm load must offer ❄ Refrigerate inline");
-    assert(!html.includes("data-fridge-tile"), "no fridge tile for a warm load");
+    assert(html.includes('data-action="nps-fridge-in"'), "a loaded container must offer ❄ Refrigerate inline");
+    assert(html.includes("feeding bottle"), "the button says where the brine goes");
+    assert(!html.includes("data-fridge-tile"), "no tile while the bottle is empty");
     assert(!html.includes("fridge the container in Settings"), "the old settings pointer must be gone");
-    // Cold load: the tile appears with the life left, and the button flips.
+    assert(!html.includes('data-action="nps-fridge-out"'), "the container is never 'taken out' — it was never cold");
+    // The container drained into the bottle: the container is empty and free,
+    // the bottle tile wears the life left and its own three buttons.
     panel._nps.summary.hatchery = v2HatcherySummary({
-      reservoir: { canonical: "hatchery", volumeMl: 750, remainingMl: 500, loadVolumeMl: 0,
-        refrigerated: true, refrigeratedAt: new Date(Date.parse(NOW) - 2 * 3600000).toISOString(),
-        fridgeSavedH: 0, shelfHours: 43, plainShelfHours: 43,
-        mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(),
-        freshness: { status: "fresh", hoursLeft: 38, ageHours: 5 } },
+      reservoir: { canonical: "hatchery", volumeMl: 750, remainingMl: 0, loadVolumeMl: 0,
+        fridgeSavedH: 0, shelfHours: 24, plainShelfHours: 24, mixedAt: "", freshness: null },
+      fridgeBottle: { remainingMl: 500, refrigeratedAt: new Date(Date.parse(NOW) - 2 * 3600000).toISOString(),
+        mixedAt: new Date(Date.parse(NOW) - 5 * 3600000).toISOString(), lastLoadEnriched: false,
+        shelfHours: 43, freshness: { status: "fresh", hoursLeft: 38, ageHours: 5 } },
     });
     html = panel._hatcheryPanel();
-    assert(html.includes("data-fridge-tile"), "a cold load gets its own tile");
+    assert(html.includes("data-fridge-tile"), "a filled bottle gets its own tile");
+    assert(html.includes("Feeding bottle"), "named as the separate bottle it is");
+    assert(html.includes("500 ml"), "the tile says what it holds");
     assert(html.includes("38 h of life left"), "the tile wears the life left");
-    assert(html.includes('data-action="nps-fridge-out"'), "and offers Take out");
-    assert(!html.includes('data-action="nps-fridge-in"'), "never both buttons at once");
+    assert(html.includes('data-action="nps-fridge-feed"'), "feed from the bottle");
+    assert(html.includes('data-action="nps-fridge-return"'), "pour it back");
+    assert(html.includes('data-action="nps-fridge-empty"'), "or empty it");
+    assert(!html.includes('data-action="nps-fridge-in"'), "an empty container has nothing to drain");
     const tab = panel._hatcheryTab();
-    assert(tab.includes("in the fridge"), "the hero Container card says it is cold");
+    assert(tab.includes("❄ bottle 500 ml"), "the hero Container card carries the bottle");
+    assert(tab.includes("38 h left"), "and its life left");
     noPlaceholders(html, "fridge tile");
+    // A stale bottle says so on the tile.
+    panel._nps.summary.hatchery.fridgeBottle.freshness = { status: "stale", hoursLeft: 0, ageHours: 50 };
+    html = panel._hatcheryPanel();
+    assert(html.includes("past its shelf life — empty it"), "a stale bottle is told to go");
   } finally { restore(); }
 });
 
@@ -1164,3 +1177,6 @@ test("the temperature line measures the stretch against the rated hours and defe
     assert(html.includes("already allows for it"), "a generous clock is left alone");
   } finally { restore(); }
 });
+
+// Keep this LAST: a test defined below the runner is a test that never runs.
+runTests();

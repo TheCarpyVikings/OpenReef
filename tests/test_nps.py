@@ -1488,16 +1488,19 @@ def test_enriched_load_caps_the_shelf_clock():
     cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"], True)
     _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
     assert shelf_h == 12.0
-    # Per batch (0.7.115): fridged the moment it was loaded = the full 48 h.
-    cfg["nps"]["hatchery"]["reservoir"]["refrigeratedAt"] = \
-        cfg["nps"]["hatchery"]["reservoir"]["mixedAt"]
-    _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(cfg)
-    assert abs(shelf_h - 48.0) < 0.05
+    # The same batch in the feeding bottle, fridged the moment it was loaded
+    # (0.7.116): the bottle's own clock reads the full 48 h.
+    cfg["nps"]["hatchery"]["fridgeBottle"] = {
+        "remainingMl": 300, "mixedAt": cfg["nps"]["hatchery"]["reservoir"]["mixedAt"],
+        "refrigeratedAt": cfg["nps"]["hatchery"]["reservoir"]["mixedAt"],
+        "lastLoadEnriched": True}
+    bottle = integration._nps_fridge_bottle_state(cfg, datetime.now(timezone.utc))
+    assert abs(bottle["shelfHours"] - 48.0) < 0.05
     # Container soak (0.7.70): the boost decays from SOAK END, so an evening
     # enrich of a morning batch keeps an honest clock — loaded 6 h ago,
     # soaked done 1 h ago, room temp: shelf = min(24, 5 + 12) = 17 h.
     cfg["nps"]["hatchery"]["reservoir"].update({
-        "refrigeratedAt": "", "fridgeSavedH": 0,
+        "fridgeSavedH": 0,
         "mixedAt": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
         "enrichedAt": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
     })
@@ -1789,17 +1792,6 @@ def test_ws_summary_carries_stage_d_blocks():
     assert payload["budget"] == {"available": False}   # no usage logged yet
 
 
-if __name__ == "__main__":
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"  ok  {name}")
-            except AssertionError as err:
-                failures += 1
-                print(f"FAIL  {name}: {err}")
-    raise SystemExit(1 if failures else 0)
 
 
 # ------------------------------------------------- the mixing station pays
@@ -1937,103 +1929,221 @@ def test_prime_yolk_window_is_fridge_aware_per_batch():
     assert st["primeLeftHours"] == 10.0
 
 
-def test_legacy_fridge_toggle_migrates_to_the_batch_stamp():
+def test_legacy_fridge_stamps_migrate_to_the_feeding_bottle():
     loaded = _iso(NOW - timedelta(hours=3))
+    # Pre-0.7.115 global toggle: the current load moves to the bottle, cold
+    # since its window began. The container comes back empty and warm.
     cfg = integration._normalise_hatchery({"reservoir": {
         "volumeMl": 500, "remainingMl": 300, "mixedAt": loaded, "refrigerated": True}}, True)
-    assert "refrigerated" not in cfg["reservoir"]
-    assert cfg["reservoir"]["refrigeratedAt"] == loaded, "cold since the window began"
-    assert cfg["reservoir"]["fridgeSavedH"] == 0
-    # An enriched legacy load anchors on the soak end.
+    assert "refrigerated" not in cfg["reservoir"] and "refrigeratedAt" not in cfg["reservoir"]
+    assert cfg["reservoir"]["remainingMl"] == 0 and cfg["reservoir"]["mixedAt"] == ""
+    bottle = cfg["fridgeBottle"]
+    assert bottle["remainingMl"] == 300 and bottle["mixedAt"] == loaded
+    assert bottle["refrigeratedAt"] == loaded
+    # 0.7.115's container stamp: the same move, stamp and credit ride along,
+    # the enriched anchors carry.
     soaked = _iso(NOW - timedelta(hours=1))
+    cold = _iso(NOW - timedelta(minutes=30))
     cfg = integration._normalise_hatchery({"reservoir": {
-        "volumeMl": 500, "remainingMl": 300, "mixedAt": loaded, "refrigerated": True,
-        "lastLoadEnriched": True, "enrichedAt": soaked}}, True)
-    assert cfg["reservoir"]["refrigeratedAt"] == soaked
+        "volumeMl": 500, "remainingMl": 300, "mixedAt": loaded, "refrigeratedAt": cold,
+        "fridgeSavedH": 2.5, "lastLoadEnriched": True, "enrichedAt": soaked}}, True)
+    bottle = cfg["fridgeBottle"]
+    assert bottle["refrigeratedAt"] == cold and bottle["fridgeSavedH"] == 2.5
+    assert bottle["lastLoadEnriched"] is True and bottle["enrichedAt"] == soaked
+    assert cfg["reservoir"]["lastLoadEnriched"] is False and cfg["reservoir"]["fridgeSavedH"] == 0
+    # A stamp on an EMPTY container is just dropped.
+    cfg = integration._normalise_hatchery({"reservoir": {
+        "volumeMl": 500, "remainingMl": 0, "refrigeratedAt": cold}}, True)
+    assert cfg["fridgeBottle"]["remainingMl"] == 0 and cfg["fridgeBottle"]["mixedAt"] == ""
+    # A stored bottle survives the normaliser untouched.
+    cfg = integration._normalise_hatchery({"fridgeBottle": {
+        "remainingMl": 400, "mixedAt": loaded, "refrigeratedAt": cold}}, True)
+    assert cfg["fridgeBottle"]["remainingMl"] == 400
+    assert cfg["fridgeBottle"]["refrigeratedAt"] == cold
 
 
-def test_ws_fridge_in_and_out_is_per_batch():
+def _bottle(entry):
+    return entry.options[CONF_SETTINGS]["nps"]["hatchery"]["fridgeBottle"]
+
+
+def test_ws_fridge_fill_drains_the_container_into_the_bottle():
     now = datetime.now(timezone.utc)
-    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500,
-                                 "mixedAt": (now - timedelta(hours=6)).isoformat()})
+    loaded = (now - timedelta(hours=6)).isoformat()
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500, "mixedAt": loaded})
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
-    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 1, "in_fridge": True}))
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 1, "action": "fill"}))
     res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    assert res["refrigeratedAt"], "the stamp says WHEN it went cold"
-    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 2, "in_fridge": True}))
-    assert conn.errors and conn.errors[-1].code == "already_fridged"
-    # 6 h warm of 24 then cold: the summary's shelf is 6 + (18/24)*48 = 42 h.
+    bottle = _bottle(entry)
+    assert res["remainingMl"] == 0 and res["mixedAt"] == "", \
+        "the container is drained — free for the next hatch"
+    assert bottle["remainingMl"] == 500 and bottle["mixedAt"] == loaded
+    assert bottle["refrigeratedAt"], "the stamp says WHEN it went cold"
+    # Nothing left to fill from.
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 2, "action": "fill"}))
+    assert conn.errors and conn.errors[-1].code == "no_brine"
+    # The summary: the bottle wears its OWN clock — 6 h warm of 24 then cold
+    # = 6 + (18/24) * 48 = 42 h from load, 36 h of it still to come.
     run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
-    payload = conn.results[-1].payload
-    container = payload["hatchery"]["reservoir"]
-    assert container["refrigerated"] is True and container["refrigeratedAt"]
-    assert abs(container["shelfHours"] - 42.0) < 0.1
-    assert payload["feedExchange"]["prime"]["refrigerated"] is True
-    assert payload["hatchery"]["nextHatch"]["shelfHours"] == container["shelfHours"]
-    # Out again straight away: nothing cold to bank, stamp cleared.
-    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 4, "in_fridge": False}))
-    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    assert res["refrigeratedAt"] == "" and res["fridgeSavedH"] < 0.05
-    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 5, "in_fridge": False}))
-    assert conn.errors[-1].code == "already_warm"
-    # A fresh load is a fresh batch: the fridge starts over.
-    res["refrigeratedAt"] = now.isoformat(); res["fridgeSavedH"] = 4.0
-    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 6}))
-    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 7, "harvested": True}))
-    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    assert res["refrigeratedAt"] == "" and res["fridgeSavedH"] == 0
-    # Empty container: nothing to refrigerate.
-    entry2 = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 0})
-    conn2 = FakeConnection()
-    run(integration.websocket_nps_container_fridge(FakeHass(entries=[entry2]), conn2,
-                                                    {"id": 1, "in_fridge": True}))
-    assert conn2.errors and conn2.errors[-1].code == "no_brine"
-
-
-def test_fridge_exit_banks_the_saved_hours():
-    now = datetime.now(timezone.utc)
-    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500,
-                                 "mixedAt": (now - timedelta(hours=26)).isoformat(),
-                                 "refrigeratedAt": (now - timedelta(hours=20)).isoformat()})
-    hass = FakeHass(entries=[entry])
-    conn = FakeConnection()
-    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 1, "in_fridge": False}))
-    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    assert res["refrigeratedAt"] == ""
-    assert abs(res["fridgeSavedH"] - 10.0) < 0.05, "20 h cold on a 24/48 clock banks 10 h"
-    # 26 h old, 10 h banked: the room clock reads 24 + 10 = 34 h window.
-    _loaded, shelf_h, _rem, _rate = integration._nps_brine_supply(
-        integration._config_from_entry(entry), now)
-    assert abs(shelf_h - 34.0) < 0.1
+    hatchery = conn.results[-1].payload["hatchery"]
+    bottle_sum = hatchery["fridgeBottle"]
+    assert bottle_sum["remainingMl"] == 500 and abs(bottle_sum["shelfHours"] - 42.0) < 0.1
+    assert bottle_sum["freshness"]["status"] == "fresh"
+    assert abs(bottle_sum["freshness"]["hoursLeft"] - 36.0) < 0.1
+    assert "refrigerated" not in hatchery["reservoir"], "the container is never the cold thing"
+    assert hatchery["reservoir"]["freshness"] is None, "the container is empty"
+    # Next-hatch planning counts the bottle as supply: its clock, its volume.
+    assert abs(hatchery["nextHatch"]["shelfHours"] - 42.0) < 0.1
     log = entry.options[CONF_SETTINGS]["activity"]
-    assert any("banked" in str(i.get("message", "")) for i in log)
+    assert any("drained into the feeding bottle" in str(i.get("message", "")) for i in log)
 
 
-def test_enrich_engage_takes_the_load_out_of_the_fridge_and_soak_done_resets():
+def test_ws_fridge_fill_refusals_and_the_enriched_bottle():
     now = datetime.now(timezone.utc)
+    # Stale brine: the fridge won't bring it back.
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500,
+                                 "mixedAt": (now - timedelta(hours=30)).isoformat()})
+    conn = FakeConnection()
+    run(integration.websocket_nps_fridge_bottle(FakeHass(entries=[entry]), conn,
+                                                {"id": 1, "action": "fill"}))
+    assert conn.errors and conn.errors[-1].code == "stale_brine"
+    # Mid-soak: the soak needs to stay warm.
     entry = _enrich_entry(mixed_hours_ago=10)
-    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    res["refrigeratedAt"] = (now - timedelta(hours=4)).isoformat()
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
-    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    assert res["refrigeratedAt"] == "", "a soak is warm — the load comes out"
-    assert abs(res["fridgeSavedH"] - 2.0) < 0.05, "4 h cold banks 2 h"
-    # Refrigerating mid-soak is refused: the soak needs to stay warm.
-    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 2, "in_fridge": True}))
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 2, "action": "fill"}))
     assert conn.errors and conn.errors[-1].code == "soaking"
+    # Soak done, then fill: the gut-loaded batch goes cold on the BOOST clock.
     run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 3}))
-    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    assert res["fridgeSavedH"] == 0 and res["refrigeratedAt"] == "", \
-        "the boost window starts warm from the soak end"
-    # Now fridge the gut-loaded batch: the boost hold runs at the 48 h rate.
-    run(integration.websocket_nps_container_fridge(hass, conn, {"id": 4, "in_fridge": True}))
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 4, "action": "fill"}))
+    bottle = _bottle(entry)
+    assert bottle["lastLoadEnriched"] is True and bottle["enrichedAt"] and bottle["refrigeratedAt"]
     run(integration.websocket_nps_summary(hass, conn, {"id": 5}))
-    prime = conn.results[-1].payload["feedExchange"]["prime"]
-    assert prime["status"] == "gutloaded" and prime["refrigerated"] is True
-    assert abs(prime["windowHours"] - 48.0) < 0.1
+    bottle_sum = conn.results[-1].payload["hatchery"]["fridgeBottle"]
+    assert bottle_sum["lastLoadEnriched"] is True
+    assert bottle_sum["shelfHours"] > 48, "soak offset + the 48 h cold boost hold"
+    assert bottle_sum["shelfHours"] <= 72
+    # A stale bottle refuses a refill until it is emptied.
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500, "mixedAt": now.isoformat()})
+    entry.options[CONF_SETTINGS]["nps"]["hatchery"]["fridgeBottle"] = {
+        "remainingMl": 200, "mixedAt": (now - timedelta(hours=60)).isoformat(),
+        "refrigeratedAt": (now - timedelta(hours=59)).isoformat()}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 1, "action": "fill"}))
+    assert conn.errors and conn.errors[-1].code == "bottle_stale"
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    assert conn.results[-1].payload["hatchery"]["fridgeBottle"]["freshness"]["status"] == "stale"
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 3, "action": "empty"}))
+    assert _bottle(entry)["remainingMl"] == 0 and _bottle(entry)["mixedAt"] == ""
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 4, "action": "fill"}))
+    assert _bottle(entry)["remainingMl"] == 500
+
+
+def test_ws_fridge_feed_return_and_empty():
+    now = datetime.now(timezone.utc)
+    loaded = (now - timedelta(hours=26)).isoformat()
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 0, "loadVolumeMl": 0})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["fridgeBottle"] = {
+        "remainingMl": 400, "mixedAt": loaded,
+        "refrigeratedAt": (now - timedelta(hours=20)).isoformat()}
+    cfg["nps"]["hatchery"]["handFeed"] = {"defaultDoseMl": 30, "feedsPerDay": 2}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # Feed by hand from the bottle: the default dose, then an explicit one.
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 1, "action": "feed"}))
+    assert _bottle(entry)["remainingMl"] == 370
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 2, "action": "feed", "ml": 70}))
+    assert _bottle(entry)["remainingMl"] == 300
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("Hand-fed 70 ml of live brine from the fridge bottle" in str(i.get("message", ""))
+               for i in log)
+    # Pour back: 20 h cold on a 24/48 clock banks 10 h; the container takes
+    # the batch, its load stamp and the credit.
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 3, "action": "return"}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["remainingMl"] == 300 and res["mixedAt"] == loaded
+    assert abs(res["fridgeSavedH"] - 10.0) < 0.05
+    assert _bottle(entry)["remainingMl"] == 0 and _bottle(entry)["refrigeratedAt"] == ""
+    # 26 h old with 10 h banked: the room clock reads a 34 h window.
+    _l, shelf_h, _r, _rt = integration._nps_brine_supply(
+        integration._config_from_entry(entry), now)
+    assert abs(shelf_h - 34.0) < 0.1
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("poured back" in str(i.get("message", "")) and "banked" in str(i.get("message", ""))
+               for i in log)
+    # Empty bottle: feed / return / empty all say so.
+    for action in ("feed", "return", "empty"):
+        run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 9, "action": action}))
+        assert conn.errors[-1].code == "bottle_empty"
+
+
+def test_ws_fridge_fill_on_top_and_return_keep_the_older_clock():
+    now = datetime.now(timezone.utc)
+    older = (now - timedelta(hours=20)).isoformat()
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 300, "loadVolumeMl": 0,
+                                 "mixedAt": now.isoformat()})
+    entry.options[CONF_SETTINGS]["nps"]["hatchery"]["fridgeBottle"] = {
+        "remainingMl": 200, "mixedAt": older,
+        "refrigeratedAt": (now - timedelta(hours=19)).isoformat()}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 1, "action": "fill"}))
+    bottle = _bottle(entry)
+    assert bottle["remainingMl"] == 500 and bottle["mixedAt"] == older, \
+        "topping up: the older batch's clock rules the mix"
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("older batch's clock rules" in str(i.get("message", "")) for i in log)
+    # A fresh harvest fills the drained container; pouring the bottle back
+    # clamps at the brim and the older batch's clock rules again.
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 2}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 3, "harvested": True}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["remainingMl"] == 750
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 4, "action": "return"}))
+    res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
+    assert res["remainingMl"] == 750, "clamped at the brim"
+    assert res["mixedAt"] == older
+    assert _bottle(entry)["remainingMl"] == 0
+
+
+def test_planning_supply_counts_the_feeding_bottle():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 200,
+                                 "mixedAt": (now - timedelta(hours=20)).isoformat()})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["handFeed"] = {"defaultDoseMl": 30, "feedsPerDay": 2}
+    bottle_loaded = (now - timedelta(hours=8)).isoformat()
+    cfg["nps"]["hatchery"]["fridgeBottle"] = {
+        "remainingMl": 300, "mixedAt": bottle_loaded,
+        "refrigeratedAt": (now - timedelta(hours=6)).isoformat()}
+    config = integration._config_from_entry(entry)
+    c_loaded, c_shelf, c_rem, c_rate = integration._nps_brine_supply(config, now)
+    p_loaded, p_shelf, p_rem, p_rate = integration._nps_brine_supply_for_planning(config, now)
+    assert c_shelf == 24.0 and c_rem == 200, "the container's own clock is unchanged"
+    assert p_loaded == bottle_loaded, "the bottle dies later: it anchors the planning clock"
+    assert abs(p_shelf - (2 + 22 / 24 * 48)) < 0.1
+    assert p_rem == 500 and p_rate == c_rate, "the volume is both"
+    # An older bottle than the container: the container anchors, the volume is still both.
+    cfg["nps"]["hatchery"]["fridgeBottle"] = {
+        "remainingMl": 300, "mixedAt": (now - timedelta(hours=45)).isoformat(),
+        "refrigeratedAt": (now - timedelta(hours=44)).isoformat()}
+    config = integration._config_from_entry(entry)
+    p_loaded, p_shelf, p_rem, _ = integration._nps_brine_supply_for_planning(config, now)
+    assert p_loaded == c_loaded and p_shelf == 24.0 and p_rem == 500
+
+
+def test_vessel_ledger_keeps_two_decimals_across_a_save():
+    # 0.7.113's sub-litre hatchery draws were rounded away by the next save:
+    # a 0.75 L backflush left 38.75 L on the log and 38.8 L in the ledger.
+    cfg = integration._normalise_core_config({"mixingStation": {
+        "enabled": True,
+        "vessels": {"mix": {"volumeLitres": 50, "estimatedLitres": 38.75},
+                    "rodi": {"volumeLitres": 50, "estimatedLitres": 12.25}}}})
+    assert cfg["mixingStation"]["vessels"]["mix"]["estimatedLitres"] == 38.75
+    assert cfg["mixingStation"]["vessels"]["rodi"]["estimatedLitres"] == 12.25
 
 
 def test_summary_temperature_stretch_uses_the_rated_hours():
@@ -2077,3 +2187,17 @@ def test_next_hatch_chain_plans_on_the_plain_shelf():
     assert hatchery["reservoir"]["plainShelfHours"] == 24.0
     assert hatchery["vesselsNeeded"] == nps.vessels_needed(24, 24), \
         "vessels-needed is structural: the plain shelf, never the boost"
+
+
+# Keep this LAST: a test defined below the runner is a test that never runs.
+if __name__ == "__main__":
+    failures = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"  ok  {name}")
+            except Exception as err:  # noqa: BLE001 - report every failure kind
+                failures += 1
+                print(f"FAIL  {name}: {type(err).__name__}: {err}")
+    raise SystemExit(1 if failures else 0)
