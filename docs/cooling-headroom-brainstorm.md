@@ -503,6 +503,36 @@ Tests: `tests/test_cooling.py` 45, `tests/test_panel_cooling.mjs` 18.
 contact on the intake window; leave Advise on with the dehumidifier for a few days, then arm
 both. Watch for the muggy-evening "close up" line — that is the case a humidistat gets wrong.
 
-Arc complete for now. Later candidates: an outdoor temp/humidity sensor to replace the forecast
-for the live vent rule; learned per-hour offsets from recorder history; a chip on the diagram
-once the fans are HA entities.
+Later candidates: an outdoor temp/humidity sensor to replace the forecast for the live vent
+rule; a chip on the diagram once the fans are HA entities. Per-hour learned offsets: §12.
+
+## 12. Learned per-hour offsets — shipped as 0.7.122 (2026-09-03)
+
+The projection's indoor-minus-outdoor offsets were one smoothed pair for the whole day. A tank
+room is not that: it lags the street in the morning, overshoots it at 4 pm with the lights on,
+and holds its humidity overnight. So the offsets are now learned **per hour of day**.
+
+**Why OpenReef's own readings rather than recorder history.** The outdoor side (the weather
+entity's temperature/humidity) is not in long-term statistics, and pulling seven days of raw
+state history for three entities through the recorder on every reschedule is heavy for a
+marginal gain. Reece's call: collect from now. The tick already sees both sides every five
+minutes; that is the ledger.
+
+**Maths** (`cooling.learn_slot`): 24 slots, each a capped-count running mean of (room − outdoor)
+and (indoor dew − outdoor dew): a plain mean while the count grows, then an EMA with weight
+1/84 — at 12 ticks an hour that is roughly a seven-day memory, so a heatwave week reshapes the
+slot without one odd afternoon doing so. A slot is **trusted at 6 samples** (half an hour);
+`project()` uses the slot for each forecast hour's local hour of day when trusted and the live
+smoothed pair otherwise, and reports how many hours were learned. Deltas are clamped to the
+same −3…+12 °C range as the live offsets.
+
+**Persistence**: `<config>/openreef_cooling_learning.json`, loaded once per schedule, written
+atomically at most every 30 min while dirty and flushed on unload. Never a config field, so no
+stale-save guard. A missing or corrupt file is an empty ledger.
+
+**Panel**: a line under the forecast strip — "Per-hour offsets learned for 14 of 24 hours from
+3.1 days of readings since …" — plus **Forget learned offsets** (WS `openreef/cooling_learning`
+reset; the sensor moved, the room changed). The strip's hint says on how many of the projected
+hours the learned slots were used.
+
+Tests: `tests/test_cooling.py` 50, `tests/test_panel_cooling.mjs` 19.

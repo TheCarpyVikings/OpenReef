@@ -805,6 +805,107 @@ def test_leaving_vent_auto_fails_off_and_ws_vent_actions():
     assert conn.error_codes[-1] == "not_bound"
 
 
+
+# --------------------------------------------------------------------------- #
+# Learned per-hour offsets
+# --------------------------------------------------------------------------- #
+
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+
+
+def test_learn_slot_running_mean_then_capped_ema():
+    table = None
+    for _ in range(4):
+        table = cooling.learn_slot(table, 14, 4.0, 5.0)
+    assert table["14"] == {"n": 4, "t": 4.0, "dew": 5.0}
+    table = cooling.learn_slot(table, 14, 8.0, 9.0)          # running mean: (4*4+8)/5
+    assert abs(table["14"]["t"] - 4.8) < 0.01 and table["14"]["n"] == 5
+    for _ in range(300):
+        table = cooling.learn_slot(table, 14, 1.0, 1.0)
+    assert table["14"]["n"] == cooling.LEARN_MAX_SAMPLES        # capped
+    assert abs(table["14"]["t"] - 1.0) < 0.1                    # and it forgot the old days
+    wild = cooling.learn_slot(None, 3, 99.0, -99.0)
+    assert wild["3"]["t"] == cooling.OFFSET_T_RANGE[1] and wild["3"]["dew"] == cooling.OFFSET_DEW_RANGE[0]
+    junk = cooling.learn_slot({"7": {"n": "x", "t": None}}, 7, 2.0, 3.0)
+    assert junk["7"] == {"n": 1, "t": 2.0, "dew": 3.0}
+    assert cooling.learn_slot(None, 27, 1.0, 1.0).get("3")     # hour wraps
+
+
+def test_offsets_for_hour_trusts_a_slot_only_with_enough_samples():
+    fb = {"offsetT": 2.0, "offsetDew": 3.0}
+    table = {"9": {"n": cooling.LEARN_MIN_SAMPLES - 1, "t": 7.0, "dew": 8.0},
+             "10": {"n": cooling.LEARN_MIN_SAMPLES, "t": 7.0, "dew": 8.0}}
+    assert cooling.offsets_for_hour(table, 9, fb) == (2.0, 3.0, False)
+    assert cooling.offsets_for_hour(table, 10, fb) == (7.0, 8.0, True)
+    assert cooling.offsets_for_hour(None, 10, fb) == (2.0, 3.0, False)
+    summary = cooling.learning_summary(table)
+    assert summary["hoursLearned"] == 1 and len(summary["byHour"]) == 24
+    assert summary["byHour"][10]["learned"] and not summary["byHour"][9]["learned"]
+
+
+def test_projection_uses_the_learned_slot_for_its_hour_and_falls_back_elsewhere():
+    hours = cooling.parse_forecast(_fc(4, out_c=20, out_rh=60))   # NOW is 14:00 UTC
+    table = {"15": {"n": 50, "t": 9.0, "dew": 9.0}}               # 15:00 learned hot & wet
+    proj = cooling.project(hours, NOW, 24, 25.5, 25.5, {"offsetT": 2.0, "offsetDew": 3.0}, 1.0,
+                           offsets_by_hour=table)
+    by_hour = {cooling._parse_when(r["at"]).hour: r for r in proj["hours"]}
+    assert by_hour[15]["learned"] and by_hour[15]["roomC"] == 29.0
+    assert not by_hour[14]["learned"] and by_hour[14]["roomC"] == 22.0
+    assert proj["learnedHours"] == 1
+
+
+def test_tick_learns_the_hour_persists_and_reloads():
+    tmp = tempfile.mkdtemp(prefix="openreef_cooling_")
+    try:
+        now = datetime.now(timezone.utc)
+        entry = _l2_entry()
+        hass = _l2_hass(entry, room=23.0, rh=60.0, out=(20.0, 60.0), forecast=_humid_afternoon(now))
+        hass.config._dir = tmp
+        for i in range(cooling.LEARN_MIN_SAMPLES):
+            run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=5 * i)))
+        runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
+        slot = runtime["learning"]["byHour"][str(now.hour)]
+        assert slot["n"] >= 1 and abs(slot["t"] - 3.0) < 0.01          # 23 − 20
+        assert abs(slot["dew"] - (cooling.dew_point_c(23, 60) - cooling.dew_point_c(20, 60))) < 0.05
+        assert runtime["snapshot"]["learned"]["hoursLearned"] >= 0
+        # Saved at most every 30 min: force via the unload-style flush, then reload fresh.
+        assert runtime["learning"]["dirty"] is True
+        run(integration._async_cooling_learning_save(hass, runtime, force=True))
+        path = integration._cooling_learning_path(hass)
+        assert path.exists() and runtime["learning"]["dirty"] is False
+        fresh = {}
+        run(integration._async_cooling_learning_load(hass, fresh))
+        assert fresh["learning"]["byHour"][str(now.hour)]["n"] == slot["n"]
+        # Corrupt file → empty ledger, no crash.
+        path.write_text("{not json", encoding="utf-8")
+        fresh = {}
+        run(integration._async_cooling_learning_load(hass, fresh))
+        assert fresh["learning"]["byHour"] == {}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_learning_needs_both_sides_and_reset_ws_forgets():
+    tmp = tempfile.mkdtemp(prefix="openreef_cooling_")
+    try:
+        now = datetime.now(timezone.utc)
+        entry = _entry()                                             # no weather entity
+        hass = _hass(entry, room=23.0, rh=60.0)
+        hass.config._dir = tmp
+        run(integration._async_cooling_tick(hass, entry, now))
+        runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
+        assert runtime["learning"]["byHour"] == {} and runtime["learning"]["dirty"] is False
+        runtime["learning"]["byHour"] = {"3": {"n": 40, "t": 5.0, "dew": 5.0}}
+        conn = FakeConnection()
+        run(integration.websocket_cooling_learning(hass, conn, {"id": 1, "type": "x", "action": "reset"}))
+        assert conn.results[-1].payload["success"] and runtime["learning"]["byHour"] == {}
+        assert integration._cooling_learning_path(hass).exists()
+        assert any("forgotten" in a["message"] for a in entry.options[CONF_SETTINGS]["activity"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

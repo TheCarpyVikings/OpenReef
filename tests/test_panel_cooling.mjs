@@ -273,4 +273,24 @@ test("layer 3 settings render the vent fields, window state and controls", async
   assert(!off._coolingSettings().includes('data-scope="cooling-vent" data-field="armed"'));
 });
 
+
+// --- learned per-hour offsets ----------------------------------------------
+
+test("learned-offsets line: learning, then coverage; strip hint counts learned hours", async () => {
+  const none = l2({ learned: { hoursLearned: 0, samples: 30, days: 0.1, since: "", byHour: [] } });
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, none);
+  assert(panel._coolingLearnedLine(none).startsWith("Per-hour offsets: learning"));
+  const some = l2({ learned: { hoursLearned: 14, samples: 900, days: 3.1, since: "2026-07-11T09:00:00Z", byHour: [] },
+    projection: { ...l2().projection, learnedHours: 4 } });
+  const line = panel._coolingLearnedLine(some);
+  assert(line.includes("14 of 24 hours") && line.includes("3.1 days") && line.includes("2026-07-11"), line);
+  assert(panel._coolingForecastStrip(some).includes("per-hour learned offsets on 4 of 6 hours"));
+  assert(!panel._coolingForecastStrip(l2()).includes("per-hour learned"));
+  assertEqual(panel._coolingLearnedLine(status()), "");
+  panel._settingsSectionOpen = () => true;
+  panel._awcEntitySelect = () => "";
+  panel._cooling.status = some;
+  assert(panel._coolingSettings().includes('data-action="cooling-learning-reset"'));
+});
+
 await runTests();

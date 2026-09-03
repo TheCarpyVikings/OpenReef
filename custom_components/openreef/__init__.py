@@ -165,6 +165,8 @@ from .const import (
     COOLING_FORECAST_TTL_S,
     COOLING_LOOKAHEAD_MIN_H,
     COOLING_LOOKAHEAD_MAX_H,
+    COOLING_LEARNING_FILE,
+    COOLING_LEARNING_SAVE_S,
     SPAWNING_TARGET_TEMP_ENTITY,
     SPAWNING_TEMP_DRIFT_ALERT_C,
     SPAWNING_TEMP_PLAUSIBLE_MAX_C,
@@ -17657,6 +17659,72 @@ def _cooling_outdoor_now(hass: HomeAssistant, weather_entity: str) -> dict[str, 
     return out
 
 
+def _cooling_learning_path(hass: HomeAssistant) -> Path:
+    return Path(hass.config.path(COOLING_LEARNING_FILE))
+
+
+async def _async_cooling_learning_load(hass: HomeAssistant, runtime: dict[str, Any]) -> None:
+    """Read the per-hour ledger from the config dir once per schedule. A
+    missing or corrupt file is an empty ledger, never an error."""
+    if "learning" in runtime:
+        return
+    path = _cooling_learning_path(hass)
+
+    def _read() -> dict[str, Any]:
+        import json
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    data = await hass.async_add_executor_job(_read)
+    by_hour = data.get("byHour") if isinstance(data.get("byHour"), dict) else {}
+    runtime["learning"] = {"byHour": by_hour, "since": data.get("since") or "", "dirty": False,
+                           "savedAt": datetime.now(timezone.utc).timestamp()}
+
+
+async def _async_cooling_learning_save(hass: HomeAssistant, runtime: dict[str, Any], force: bool = False) -> None:
+    """Write the ledger when it changed — at most every COOLING_LEARNING_SAVE_S,
+    or now on unload. Best-effort: a full disk must not break the tick."""
+    learning = runtime.get("learning")
+    if not isinstance(learning, dict) or not learning.get("dirty"):
+        return
+    now_ts = datetime.now(timezone.utc).timestamp()
+    if not force and now_ts - float(learning.get("savedAt", 0)) < COOLING_LEARNING_SAVE_S:
+        return
+    path = _cooling_learning_path(hass)
+    payload = {"version": 1, "since": learning.get("since") or "", "byHour": learning.get("byHour") or {}}
+
+    def _write() -> None:
+        import json
+        tmp = path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        tmp.replace(path)
+
+    try:
+        await hass.async_add_executor_job(_write)
+        learning["dirty"] = False
+        learning["savedAt"] = now_ts
+    except OSError as err:
+        _LOGGER.warning("Cooling headroom: could not save the learned offsets: %s", err)
+
+
+def _cooling_learn(runtime: dict[str, Any], now_local: datetime, room_c: float | None, dew_c: float | None,
+                   out_c: float | None, out_dew_c: float | None) -> None:
+    """Fold this tick's indoor-minus-outdoor difference into the hour's slot."""
+    learning = runtime.get("learning")
+    if not isinstance(learning, dict) or None in (room_c, dew_c, out_c, out_dew_c):
+        return
+    learning["byHour"] = cooling_engine.learn_slot(
+        learning.get("byHour"), now_local.hour, float(room_c) - float(out_c), float(dew_c) - float(out_dew_c))
+    learning["dirty"] = True
+    if not learning.get("since"):
+        learning["since"] = now_local.isoformat()
+
+
 async def _async_cooling_forecast(
     hass: HomeAssistant, config: dict[str, Any], runtime: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -17758,9 +17826,11 @@ def cooling_snapshot(
     hours = cache.get("hours") if isinstance(cache, dict) else None
     if isinstance(cache, dict) and cache.get("error"):
         issues["forecast"] = cache["error"]
+    learning = runtime.get("learning") if isinstance(runtime, dict) else None
+    by_hour = learning.get("byHour") if isinstance(learning, dict) else None
     projection = cooling_engine.project(
         hours or [], now_local, cfg["lookaheadHours"], water_c, target_c, offsets,
-        cfg["fanGateC"], cfg["referenceVpdKpa"], cfg["bands"]) if hours else None
+        cfg["fanGateC"], cfg["referenceVpdKpa"], cfg["bands"], by_hour) if hours else None
     dehum = cfg["dehumidifier"]
     vent_cfg = cfg["vent"]
     advice = cooling_engine.vent_advice(room_c, dew_now, outdoor["outC"], outdoor["outDewC"], vent_cfg["dewGapC"])
@@ -17774,6 +17844,8 @@ def cooling_snapshot(
     snap.update({
         "weather": {"entity": weather, **{k: outdoor[k] for k in ("outC", "outRh", "outDewC", "available")}},
         "offsets": offsets,
+        "learned": {**cooling_engine.learning_summary(by_hour),
+                    "since": (learning.get("since") if isinstance(learning, dict) else "") or ""},
         "projection": projection,
         "vent": advice,
         "ventDecision": decision,
@@ -17971,8 +18043,12 @@ async def _async_cooling_tick_body(
     runtime: dict[str, Any], now_local: datetime,
 ) -> None:
     await _async_cooling_forecast(hass, config, runtime)
+    await _async_cooling_learning_load(hass, runtime)
     snap = cooling_snapshot(hass, config, now_local, runtime)
     runtime["snapshot"] = snap
+    _cooling_learn(runtime, now_local, snap["roomC"], snap["result"]["dewC"] if snap["result"] else None,
+                   snap["weather"]["outC"], snap["weather"]["outDewC"])
+    await _async_cooling_learning_save(hass, runtime)
     result = snap["result"]
     previous_band = runtime.get("warnBand")
     activity: list[tuple[str, str]] = []
@@ -18206,6 +18282,30 @@ async def websocket_cooling_dehumidifier(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     await _async_cooling_manual(hass, connection, msg, "dehumidifier")
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cooling_learning",
+    vol.Required("action"): vol.In(["reset"]),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cooling_learning(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Forget the per-hour learned offsets (the sensor moved, the room changed)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(COOLING_RUNTIME, {})
+    runtime["learning"] = {"byHour": {}, "since": "", "dirty": True, "savedAt": 0}
+    runtime.pop("offsets", None)
+    await _async_cooling_learning_save(hass, runtime, force=True)
+    config = _config_from_entry(entry)
+    _append_activity(config, "Cooling headroom: learned per-hour offsets forgotten — learning again from now", "info")
+    await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"success": True})
 
 
 @websocket_api.websocket_command({
@@ -19606,6 +19706,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cooling_simulate)
     websocket_api.async_register_command(hass, websocket_cooling_dehumidifier)
     websocket_api.async_register_command(hass, websocket_cooling_vent)
+    websocket_api.async_register_command(hass, websocket_cooling_learning)
     websocket_api.async_register_command(hass, websocket_spawning_execution_resume)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)
@@ -19826,6 +19927,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_spawning_tick(hass)
     hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
     _clear_cooling_tick(hass)
+    _cooling_rt = hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME)
+    if isinstance(_cooling_rt, dict):
+        await _async_cooling_learning_save(hass, _cooling_rt, force=True)
     hass.data.setdefault(DOMAIN, {}).pop(COOLING_RUNTIME, None)
     beta_feedback.async_stop(hass)  # BETA-FEEDBACK: remove after beta
     _store = hass.data.setdefault(DOMAIN, {})

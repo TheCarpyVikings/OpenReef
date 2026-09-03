@@ -1290,6 +1290,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cooling-refresh") this._loadCoolingStatus(true);
       if (action === "cooling-dehum") this._coolingActuator("dehumidifier", id);
       if (action === "cooling-vent") this._coolingActuator("vent", id);
+      if (action === "cooling-learning-reset") this._coolingLearningReset();
       if (action === "spawn-exec-pargate") this._spawnExecToggleParGate();
       if (action === "icp-subview") {
         this._icp.subview = id || "dashboard";
@@ -24788,9 +24789,27 @@ const rigSteps = [
       <div class="cooling-strip-wrap">
         <p class="eyebrow">${this._escape(proj.dayKindLabel || "")} · next ${proj.hours.length} h</p>
         <div class="cooling-strip">${cells}</div>
-        <small class="hint">Fan effect % per hour, room ${Number(proj.offsets?.offsetT ?? 0).toFixed(1)} °C over and dew point ${Number(proj.offsets?.offsetDew ?? 0).toFixed(1)} °C over the forecast (learned from the live difference). Greyed hours: fans not needed. Marked hours: needed and losing.</small>
+        <small class="hint">Fan effect % per hour, room ${Number(proj.offsets?.offsetT ?? 0).toFixed(1)} °C over and dew point ${Number(proj.offsets?.offsetDew ?? 0).toFixed(1)} °C over the forecast (the live difference)${Number(proj.learnedHours) > 0 ? `, per-hour learned offsets on ${proj.learnedHours} of ${proj.hours.length} hours` : ""}. Greyed hours: fans not needed. Marked hours: needed and losing.</small>
         ${purge}
       </div>`;
+  }
+
+  // One line on the learned per-hour offsets: coverage and the data behind it.
+  _coolingLearnedLine(status) {
+    const l = status?.learned;
+    if (!l || !Number.isFinite(Number(l.hoursLearned))) return "";
+    if (!l.hoursLearned) return `Per-hour offsets: learning — ${Number(l.days || 0).toFixed(1)} days of readings so far, none trusted yet (each hour needs half an hour of readings).`;
+    return `Per-hour offsets learned for ${l.hoursLearned} of 24 hours from ${Number(l.days || 0).toFixed(1)} days of readings${l.since ? ` since ${this._coolingHhmm(l.since)} on ${String(l.since).slice(0, 10)}` : ""}; the projection uses them where they exist and the live pair elsewhere.`;
+  }
+
+  async _coolingLearningReset() {
+    try {
+      await this._callWS({ type: "openreef/cooling_learning", action: "reset" });
+      this._message = "Learned offsets forgotten — learning again from now.";
+    } catch (err) {
+      this._error = err?.message || "Could not reset the learned offsets";
+    }
+    this._loadCoolingStatus(true);
   }
 
   _coolingWhatIfTable(status) {
@@ -24872,6 +24891,7 @@ const rigSteps = [
     const readout = !cfg.enabled || !status ? "" : `
       ${this._coolingForecastStrip(status)}
       ${weatherBound && !status.projection ? `<small class="hint">${this._escape(status.issues?.forecast || status.issues?.weather || "Waiting for the first forecast read (within five minutes of saving).")}</small>` : ""}
+      ${weatherBound && this._coolingLearnedLine(status) ? `<p class="hint">${this._escape(this._coolingLearnedLine(status))} <button class="secondary compact-button" data-action="cooling-learning-reset">Forget learned offsets</button></p>` : ""}
       ${status.vent?.known ? `<p class="hint">${status.vent.advised ? "🪟 " : ""}<strong>Vent:</strong> ${this._escape(status.vent.reason)}${status.weather?.outC != null ? ` · outdoor ${Number(status.weather.outC).toFixed(1)} °C at ${status.weather.outRh} %` : ""}</p>` : ""}
       ${planLine ? `<p class="hint"><strong>Plan:</strong> ${this._escape(planLine)}</p>` : status.plan ? `<p class="hint"><strong>Plan:</strong> ${this._escape(status.plan.reason)}</p>` : ""}
       ${dehum.switchEntity ? `

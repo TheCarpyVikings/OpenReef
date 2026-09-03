@@ -323,23 +323,30 @@ def smooth_offsets(previous: dict[str, Any] | None, room_c: float | None, dew_c:
 def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, water_c: float,
             target_c: float, offsets: dict[str, float], gate_c: float,
             reference_vpd_kpa: float = REFERENCE_VPD_KPA,
-            bands: dict[str, Any] | None = None) -> dict[str, Any] | None:
+            bands: dict[str, Any] | None = None,
+            offsets_by_hour: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Each forecast hour, indoors: room = outdoor + offsetT, dew = outdoor dew
-    + offsetDew, then the same evaluate() the live reading gets. Returns None
-    when there is nothing inside the window."""
+    + offsetDew — the learned slot for that hour of day when it has enough
+    samples, else the global smoothed pair — then the same evaluate() the live
+    reading gets. Returns None when there is nothing inside the window."""
     if not hours:
         return None
     start = now - timedelta(hours=1)
     end = now + timedelta(hours=float(lookahead_h))
     off_t = float(offsets.get("offsetT", DEFAULT_OFFSET_T_C))
     off_dew = float(offsets.get("offsetDew", DEFAULT_OFFSET_DEW_C))
+    tz = now.tzinfo
     rows: list[dict[str, Any]] = []
+    learned_rows = 0
     for h in hours:
         at = h["at"]
         if at < start or at > end:
             continue
-        room = float(h["outC"]) + off_t
-        dew = min(float(h["outDewC"]) + off_dew, room - 0.1)   # air cannot be past saturation
+        local_hour = (at.astimezone(tz) if tz else at).hour
+        slot_t, slot_dew, learned = offsets_for_hour(offsets_by_hour, local_hour, offsets)
+        learned_rows += 1 if learned else 0
+        room = float(h["outC"]) + (slot_t if learned else off_t)
+        dew = min(float(h["outDewC"]) + (slot_dew if learned else off_dew), room - 0.1)   # air cannot be past saturation
         rh = rh_from_dew(room, dew)
         r = evaluate(water_c, room, rh, reference_vpd_kpa, bands)
         needed = fan_needed(room, None, target_c, gate_c)
@@ -349,7 +356,7 @@ def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, wate
             "at": at.isoformat(), "outC": h["outC"], "outDewC": h["outDewC"],
             "roomC": round(room, 1), "rh": round(rh), "dewC": round(dew, 1),
             "index": r["index"], "band": r["band"], "fanNeeded": needed,
-            "affected": affected, "unrescuable": unrescuable,
+            "affected": affected, "unrescuable": unrescuable, "learned": learned,
         })
     if not rows:
         return None
@@ -377,6 +384,7 @@ def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, wate
         "dayKindLabel": DAY_KIND_COPY[kind],
         "purgeWindow": {"from": purge[0], "to": purge[-1], "outC": coolest["outC"]} if purge else None,
         "offsets": {"offsetT": round(off_t, 2), "offsetDew": round(off_dew, 2)},
+        "learnedHours": learned_rows,
     }
 
 
@@ -518,3 +526,77 @@ def vent_decision(advice: dict[str, Any], fan_needed: bool, projection: dict[str
         return {"shouldRun": False, "kind": "blocked", "wants": kind,
                 "reason": f"{reason} — but the window is closed"}
     return {"shouldRun": True, "kind": kind, "wants": kind, "reason": reason}
+
+
+# --------------------------------------------------------------------------- #
+# Learned per-hour offsets — indoor-minus-outdoor by hour of day, built from
+# OpenReef's own five-minute readings and persisted across restarts. The
+# forecast projection uses the slot for each hour once it has enough samples;
+# the global smoothed pair stays the fallback for hours not yet learned.
+# --------------------------------------------------------------------------- #
+
+LEARN_MIN_SAMPLES = 6          # half an hour of ticks before a slot is trusted
+LEARN_MAX_SAMPLES = 84         # capped-count running mean ≈ a 7-day memory at 12 ticks/hour
+
+
+def learn_slot(table: dict[str, Any] | None, hour: int, delta_t: float, delta_dew: float) -> dict[str, Any]:
+    """Fold one reading into hour ``hour`` (0–23). Running mean while the count
+    grows; once capped, an EMA with weight 1/LEARN_MAX_SAMPLES — recent days
+    outweigh old ones without ever forgetting a whole season at once."""
+    table = dict(table) if isinstance(table, dict) else {}
+    key = str(int(hour) % 24)
+    slot = table.get(key) if isinstance(table.get(key), dict) else {}
+    try:
+        n = int(slot.get("n", 0))
+        t = float(slot.get("t", 0.0))
+        dew = float(slot.get("dew", 0.0))
+    except (TypeError, ValueError):
+        n, t, dew = 0, 0.0, 0.0
+    dt_ = min(OFFSET_T_RANGE[1], max(OFFSET_T_RANGE[0], float(delta_t)))
+    dd = min(OFFSET_DEW_RANGE[1], max(OFFSET_DEW_RANGE[0], float(delta_dew)))
+    n_eff = min(n, LEARN_MAX_SAMPLES - 1)
+    t = (t * n_eff + dt_) / (n_eff + 1)
+    dew = (dew * n_eff + dd) / (n_eff + 1)
+    # Four decimals: the capped EMA moves by 1/84 of the difference per tick, so
+    # two-decimal storage would stall it a quarter of a degree off.
+    table[key] = {"n": min(n + 1, LEARN_MAX_SAMPLES), "t": round(t, 4), "dew": round(dew, 4)}
+    return table
+
+
+def offsets_for_hour(table: dict[str, Any] | None, hour: int,
+                     fallback: dict[str, float]) -> tuple[float, float, bool]:
+    """(offsetT, offsetDew, learned) for an hour of day."""
+    slot = table.get(str(int(hour) % 24)) if isinstance(table, dict) else None
+    if isinstance(slot, dict):
+        try:
+            if int(slot.get("n", 0)) >= LEARN_MIN_SAMPLES:
+                return float(slot["t"]), float(slot["dew"]), True
+        except (TypeError, ValueError, KeyError):
+            pass
+    return (float(fallback.get("offsetT", DEFAULT_OFFSET_T_C)),
+            float(fallback.get("offsetDew", DEFAULT_OFFSET_DEW_C)), False)
+
+
+def learning_summary(table: dict[str, Any] | None) -> dict[str, Any]:
+    """What the panel says about the ledger: how many hours are trusted, how
+    much data sits behind it, and the per-hour rows for the strip."""
+    rows = []
+    learned = 0
+    samples = 0
+    for h in range(24):
+        slot = table.get(str(h)) if isinstance(table, dict) else None
+        n = 0
+        t = dew = None
+        if isinstance(slot, dict):
+            try:
+                n = int(slot.get("n", 0))
+                t = float(slot.get("t"))
+                dew = float(slot.get("dew"))
+            except (TypeError, ValueError):
+                n, t, dew = 0, None, None
+        ok = n >= LEARN_MIN_SAMPLES
+        learned += 1 if ok else 0
+        samples += n
+        rows.append({"h": h, "n": n, "t": t, "dew": dew, "learned": ok})
+    return {"hoursLearned": learned, "samples": samples,
+            "days": round(samples / (12.0 * 24.0), 1), "byHour": rows}

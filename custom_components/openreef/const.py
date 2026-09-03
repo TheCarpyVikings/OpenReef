@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.121"
+INTEGRATION_VERSION = "0.7.122"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -826,6 +826,8 @@ COOLING_NOTIFY_COOLDOWN_S = 6 * 3600         # one warning per band per six hour
 COOLING_FORECAST_TTL_S = 30 * 60             # weather.get_forecasts re-read cadence
 COOLING_LOOKAHEAD_MIN_H = 6
 COOLING_LOOKAHEAD_MAX_H = 48
+COOLING_LEARNING_FILE = "openreef_cooling_learning.json"   # per-hour learned offsets, in the HA config dir
+COOLING_LEARNING_SAVE_S = 30 * 60                            # write the ledger at most this often
 SPAWNING_TEMP_DRIFT_ALERT_C = 1.0         # |tank − RT| beyond this ⇒ deduped drift alert
 
 # Lighting schedule — gates light-dependent alerts (PAR especially) to the hours
