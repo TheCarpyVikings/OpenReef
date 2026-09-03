@@ -5,7 +5,7 @@ even when the room is cooler. The dehumidifier currently runs off a dumb humidis
 a **"fan cooling will be affected" warning** and a **dehumidifier trigger that only fires when
 it will actually help**, projecting 24 h ahead from room temp, room humidity and the weather.
 
-Research + brainstorm 2026-09-03 on 0.7.118; **Layer 1 built as 0.7.119 and Layer 2 as 0.7.120 the same day** (§9, §10). Decisions locked in §7; the window fan in §8.
+Research + brainstorm 2026-09-03 on 0.7.118; **Layers 1, 2 and 3 built as 0.7.119 / 0.7.120 / 0.7.121 the same day** (§9–§11). Decisions locked in §7; the window fan in §8.
 
 ---
 
@@ -460,3 +460,49 @@ few days and compare the notifications with what the room does, then Auto + arme
 
 Next (Layer 3): `ventEntity` for the intake fan on a plug with the dew-point rule, mutual
 exclusion with the dehumidifier, a window contact sensor, and the night-purge schedule.
+
+## 11. Layer 3 — shipped as 0.7.121 (2026-09-03)
+
+The intake fan (§8) as an actuator, on the same plug-reconcile the dehumidifier uses.
+
+**Vent rule** (`cooling.vent_decision`): only while outdoor air is drier by `dewGapC` (default
+2 °C) and no warmer than room + 1, and only for a reason —
+
+| kind | when | copy |
+|---|---|---|
+| `cool` | the room needs cooling now (fan gate) | "the room needs cooling and outdoor air is drier (…)" |
+| `predry` | not needed yet, but a losing hour is in the lookahead | "pre-drying the room with outdoor air — headroom drops to X % from HH:MM" |
+| `purge` | `nightPurge` on, the lookahead is not a quiet day, now is inside the coolest-hours window | "night purge — the coolest outdoor air (X °C) until HH:MM, ahead of a … day" |
+| `blocked` | any of the above, but a bound window sensor reads closed | "… — but the window is closed" |
+| `none` | outdoor air wetter / warmer, or no reason | the vent-advice reason ("keep the windows shut") |
+
+Winter needs no special case: a cool room with nothing coming has no reason.
+
+**Mutual exclusion**: the room counts as *vented* when OpenReef is running the intake fan, or a
+bound window sensor reads open while venting is advised (the keeper is venting by hand). A
+vented room turns the dehumidifier plan into `vented` — off, "drying air you blow out of the
+window is waste". The tick reconciles the fan first, then re-derives the plan, then the
+dehumidifier. No window sensor + auto → assumes the window is left ajar (Reece's habit; §7).
+
+**Config** `coolingHeadroom.vent`: `mode` off/advise/auto (default advise), `armed`,
+`switchEntity`, `windowEntity` (binary_sensor, on = open), `dewGapC`, `nightPurge`,
+`minOnMinutes`/`minOffMinutes` (10/10 — a fan, not a compressor; no max-run cap),
+`overridePolicy`. Advise: one notification per kind change ("Vent the room", "Intake fan
+running", "Open the window — venting would help"); the Log records every change, including
+"close up" when the outdoor air turns wet. WS `openreef/cooling_vent` run/stop/resume; the
+dehumidifier and vent share one manual handler and one reconcile (`_COOLING_ROLES`).
+
+**Panel**: Settings → Cooling headroom → *Intake fan (vent)* block (mode, plug, window sensor,
+gap, min on/off, override, night purge, armed) with the fan row, window state and controls;
+the Overview row and Pulse card put the vent verdict first ("Vent the room now", "Venting the
+room", "Night purge running", "Open the window — venting would help"), then the dehumidifier.
+
+Tests: `tests/test_cooling.py` 45, `tests/test_panel_cooling.mjs` 18.
+
+**Setup for Reece**: put the circulating fan on a smart plug and bind it; optional £8 Zigbee
+contact on the intake window; leave Advise on with the dehumidifier for a few days, then arm
+both. Watch for the muggy-evening "close up" line — that is the case a humidistat gets wrong.
+
+Arc complete for now. Later candidates: an outdoor temp/humidity sensor to replace the forecast
+for the live vent rule; learned per-hour offsets from recorder history; a chip on the diagram
+once the fans are HA entities.

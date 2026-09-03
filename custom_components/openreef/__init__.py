@@ -977,6 +977,9 @@ def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
     d_defaults = defaults["dehumidifier"]
     raw_d = raw.get("dehumidifier") if isinstance(raw.get("dehumidifier"), dict) else {}
     mode_d = str(raw_d.get("mode", d_defaults["mode"]))
+    v_defaults = defaults["vent"]
+    raw_v = raw.get("vent") if isinstance(raw.get("vent"), dict) else {}
+    mode_v = str(raw_v.get("mode", v_defaults["mode"]))
     return {
         "enabled": bool(raw.get("enabled", False)),
         "waterTempEntity": _normalise_entity_id(raw.get("waterTempEntity")) or "",
@@ -1000,6 +1003,17 @@ def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
             "minOffMinutes": _awc_num(raw_d.get("minOffMinutes"), d_defaults["minOffMinutes"], 5, 120),
             "maxRunHours": _awc_num(raw_d.get("maxRunHours"), d_defaults["maxRunHours"], 1, 24),
             "overridePolicy": "reassert" if raw_d.get("overridePolicy") == "reassert" else "hold",
+        },
+        "vent": {
+            "mode": mode_v if mode_v in ("off", "advise", "auto") else v_defaults["mode"],
+            "armed": bool(raw_v.get("armed", False)),
+            "switchEntity": _normalise_entity_id(raw_v.get("switchEntity")) or "",
+            "windowEntity": _normalise_entity_id(raw_v.get("windowEntity")) or "",
+            "dewGapC": _awc_num(raw_v.get("dewGapC"), v_defaults["dewGapC"], 0.5, 6.0),
+            "nightPurge": bool(raw_v.get("nightPurge", True)),
+            "minOnMinutes": _awc_num(raw_v.get("minOnMinutes"), v_defaults["minOnMinutes"], 5, 120),
+            "minOffMinutes": _awc_num(raw_v.get("minOffMinutes"), v_defaults["minOffMinutes"], 5, 120),
+            "overridePolicy": "reassert" if raw_v.get("overridePolicy") == "reassert" else "hold",
         },
     }
 
@@ -17748,23 +17762,50 @@ def cooling_snapshot(
         hours or [], now_local, cfg["lookaheadHours"], water_c, target_c, offsets,
         cfg["fanGateC"], cfg["referenceVpdKpa"], cfg["bands"]) if hours else None
     dehum = cfg["dehumidifier"]
-    plan = cooling_engine.dehumidifier_plan(result, needed, projection, now_local, dehum["leadHours"], target_c)
+    vent_cfg = cfg["vent"]
+    advice = cooling_engine.vent_advice(room_c, dew_now, outdoor["outC"], outdoor["outDewC"], vent_cfg["dewGapC"])
+    window_open = _cooling_window_open(hass, vent_cfg["windowEntity"], issues)
+    decision = cooling_engine.vent_decision(advice, needed, projection, now_local, vent_cfg["nightPurge"], window_open)
+    vent_fan = _cooling_actuator_state(hass, vent_cfg)
+    # The room counts as vented when we are running the intake fan, or the
+    # window is known open while venting is advised (the keeper is venting).
+    vent_active = bool(vent_fan["controlling"] and vent_fan["state"] == "on") or bool(window_open and advice.get("advised"))
+    plan = cooling_engine.dehumidifier_plan(result, needed, projection, now_local, dehum["leadHours"], target_c, vent_active)
     snap.update({
         "weather": {"entity": weather, **{k: outdoor[k] for k in ("outC", "outRh", "outDewC", "available")}},
         "offsets": offsets,
         "projection": projection,
-        "vent": cooling_engine.vent_advice(room_c, dew_now, outdoor["outC"], outdoor["outDewC"]),
+        "vent": advice,
+        "ventDecision": decision,
+        "ventActive": vent_active,
+        "window": {"entity": vent_cfg["windowEntity"], "open": window_open},
+        "ventFan": vent_fan,
         "plan": plan,
-        "dehumidifier": {
-            "mode": dehum["mode"], "armed": bool(dehum["armed"]), "switchEntity": dehum["switchEntity"],
-            "controlling": dehum["mode"] == "auto" and bool(dehum["armed"]) and bool(dehum["switchEntity"]),
-            "state": None,
-        },
+        "dehumidifier": _cooling_actuator_state(hass, dehum),
     })
-    if dehum["switchEntity"]:
-        st = hass.states.get(dehum["switchEntity"])
-        snap["dehumidifier"]["state"] = st.state if st else None
     return snap
+
+
+def _cooling_actuator_state(hass: HomeAssistant, block: dict[str, Any]) -> dict[str, Any]:
+    entity = block.get("switchEntity") or ""
+    st = hass.states.get(entity) if entity else None
+    return {
+        "mode": block["mode"], "armed": bool(block["armed"]), "switchEntity": entity,
+        "controlling": block["mode"] == "auto" and bool(block["armed"]) and bool(entity),
+        "state": st.state if st else None,
+    }
+
+
+def _cooling_window_open(hass: HomeAssistant, entity: str, issues: dict[str, str]) -> bool | None:
+    """Window contact: on = open. None when unbound or unavailable (never
+    blocks — an absent sensor means "the keeper leaves it ajar", by decision)."""
+    if not entity:
+        return None
+    st = hass.states.get(entity)
+    if st is None or st.state in UNAVAILABLE_STATES:
+        issues["window"] = f"window sensor ({entity}) is unavailable"
+        return None
+    return st.state == "on"
 
 
 async def _async_cooling_notify_once(
@@ -17798,35 +17839,52 @@ async def _async_cooling_set_plug(hass: HomeAssistant, entity: str, on: bool) ->
         return False
 
 
-async def _async_cooling_dehumidifier_reconcile(
+_COOLING_ROLES = {
+    # role: (config block, runtime key, label, notification key prefix, has max-run cap)
+    "dehumidifier": ("dehumidifier", "dehum", "Dehumidifier", "", True),
+    "vent": ("vent", "vent", "Intake fan", "vent_", False),
+}
+
+
+def _cooling_desired(snap: dict[str, Any], role: str) -> tuple[bool, str]:
+    if role == "vent":
+        d = snap.get("ventDecision") or {}
+        return bool(d.get("shouldRun")), str(d.get("reason", ""))
+    plan = snap.get("plan") or {}
+    return bool(plan.get("shouldRun")), str(plan.get("reason", ""))
+
+
+async def _async_cooling_actuator_reconcile(
     hass: HomeAssistant, config: dict[str, Any], snap: dict[str, Any], runtime: dict[str, Any],
-    now_local: datetime, activity: list[tuple[str, str]],
+    now_local: datetime, activity: list[tuple[str, str]], role: str,
 ) -> None:
-    """Auto mode: hold the plug to the plan, with the compressor's short-cycle
-    guard, a max-run cap, and the manual-override hold. Efficiency, never
-    safety — nothing here can hurt the tank, and leaving auto turns it OFF."""
-    dehum = _cooling_cfg(config)["dehumidifier"]
-    state = runtime.setdefault("dehum", {})
-    entity = dehum["switchEntity"]
-    controlling = dehum["mode"] == "auto" and bool(dehum["armed"]) and bool(entity)
+    """Auto mode for one plug (the dehumidifier or the intake fan): hold it to
+    its plan with the short-cycle guard, the manual-override hold, and (for
+    the compressor) a max-run cap. Efficiency, never safety — nothing here can
+    hurt the tank, and leaving auto turns the plug OFF once."""
+    block_key, state_key, label, prefix, has_cap = _COOLING_ROLES[role]
+    block = _cooling_cfg(config)[block_key]
+    state = runtime.setdefault(state_key, {})
+    entity = block["switchEntity"]
+    controlling = block["mode"] == "auto" and bool(block["armed"]) and bool(entity)
     issues = snap["issues"]
     if not controlling:
         # Leaving auto (mode change, disarm, unbind) fails OFF once, then lets go.
         if state.get("asserted") == "on" and entity:
             if await _async_cooling_set_plug(hass, entity, False):
-                activity.append(("Dehumidifier switched off — OpenReef is no longer controlling it", "info"))
+                activity.append((f"{label} switched off — OpenReef is no longer controlling it", "info"))
         state.clear()
         return
     st = hass.states.get(entity)
     if st is None or st.state in UNAVAILABLE_STATES:
-        issues["dehumidifier"] = f"dehumidifier plug ({entity}) is unavailable"
+        issues[role] = f"{label.lower()} plug ({entity}) is unavailable"
         await _async_cooling_notify_once(
-            hass, config, "plug_unavailable", COOLING_NOTIFY_COOLDOWN_S,
-            "Dehumidifier plug unreachable",
-            f"The dehumidifier plug ({entity}) is unavailable — OpenReef cannot switch it.")
+            hass, config, f"{prefix}plug_unavailable", COOLING_NOTIFY_COOLDOWN_S,
+            f"{label} plug unreachable",
+            f"The {label.lower()} plug ({entity}) is unavailable — OpenReef cannot switch it.")
         return
     actual = st.state == "on"
-    desired = bool(snap["plan"]["shouldRun"])
+    desired, reason = _cooling_desired(snap, role)
     now = now_local.astimezone(timezone.utc) if now_local.tzinfo else now_local.replace(tzinfo=timezone.utc)
 
     def _since(key: str) -> float:
@@ -17840,10 +17898,10 @@ async def _async_cooling_dehumidifier_reconcile(
     asserted = state.get("asserted")
     override = state.get("override")
     if asserted in ("on", "off") and actual != (asserted == "on") and not override:
-        if dehum["overridePolicy"] == "hold":
+        if block["overridePolicy"] == "hold":
             state["override"] = {"since": now.isoformat(), "state": "on" if actual else "off",
                                  "plannedRun": desired}
-            activity.append((f"Dehumidifier switched {'on' if actual else 'off'} by hand — holding until the plan changes", "info"))
+            activity.append((f"{label} switched {'on' if actual else 'off'} by hand — holding until the plan changes", "info"))
             override = state["override"]
         else:
             state.pop("asserted", None)  # reassert below
@@ -17854,17 +17912,16 @@ async def _async_cooling_dehumidifier_reconcile(
             state.pop("asserted", None)
         else:
             return
-    # Max-run cap while we hold it on.
-    if actual and state.get("asserted") == "on" and _since("lastOn") > float(dehum["maxRunHours"]) * 3600:
+    # Max-run cap while we hold the compressor on.
+    if has_cap and actual and state.get("asserted") == "on" and _since("lastOn") > float(block["maxRunHours"]) * 3600:
         if await _async_cooling_set_plug(hass, entity, False):
             state.update({"asserted": "off", "lastOff": now.isoformat()})
-            activity.append((f"Dehumidifier off after {dehum['maxRunHours']:.0f} h — check the bucket", "warning"))
+            activity.append((f"{label} off after {block['maxRunHours']:.0f} h — check the bucket", "warning"))
             await _async_cooling_notify_once(
-                hass, config, "max_run", COOLING_NOTIFY_COOLDOWN_S,
-                "Dehumidifier ran its maximum",
-                f"OpenReef switched the dehumidifier off after {dehum['maxRunHours']:.0f} h. "
+                hass, config, f"{prefix}max_run", COOLING_NOTIFY_COOLDOWN_S,
+                f"{label} ran its maximum",
+                f"OpenReef switched the {label.lower()} off after {block['maxRunHours']:.0f} h. "
                 "Empty the bucket if it has one; it will restart when the plan still needs it.")
-            state["capUntil"] = (now + timedelta(minutes=float(dehum["minOffMinutes"]))).isoformat()
         return
     if desired == actual:
         # Already where the plan wants it. Count a running unit's time from
@@ -17876,14 +17933,13 @@ async def _async_cooling_dehumidifier_reconcile(
                 state.setdefault("lastOn", now.isoformat())
         return
     # Short-cycle guard.
-    if desired and _since("lastOff") < float(dehum["minOffMinutes"]) * 60:
+    if desired and _since("lastOff") < float(block["minOffMinutes"]) * 60:
         return
-    if not desired and _since("lastOn") < float(dehum["minOnMinutes"]) * 60:
+    if not desired and _since("lastOn") < float(block["minOnMinutes"]) * 60:
         return
     if await _async_cooling_set_plug(hass, entity, desired):
         state.update({"asserted": "on" if desired else "off", ("lastOn" if desired else "lastOff"): now.isoformat()})
-        reason = snap["plan"]["reason"]
-        activity.append((f"Dehumidifier switched {'on' if desired else 'off'} — {reason}", "info"))
+        activity.append((f"{label} switched {'on' if desired else 'off'} — {reason}", "info"))
 
 
 async def _async_cooling_tick(
@@ -17966,7 +18022,7 @@ async def _async_cooling_tick_body(
                     hass, config, f"plan_{plan['kind']}", COOLING_NOTIFY_COOLDOWN_S, title, message)
             activity.append((f"Dehumidifier: {plan['reason']}" + (" — vent instead" if vent.get("advised") else ""),
                              "warning" if plan["kind"] in ("now", "unrescuable") else "info"))
-    elif plan["kind"] == "none" and runtime.get("planKey"):
+    elif plan["kind"] in ("none", "vented") and runtime.get("planKey"):
         runtime.pop("planKey", None)
     if band_note and cfg["notify"]:
         band, title, message = band_note
@@ -17977,7 +18033,42 @@ async def _async_cooling_tick_body(
         else:
             await _async_cooling_notify_once(hass, config, band, COOLING_NOTIFY_COOLDOWN_S, title, message)
 
-    await _async_cooling_dehumidifier_reconcile(hass, config, snap, runtime, now_local, activity)
+    # Layer 3 — the intake fan. Advise says open up / close up once per
+    # change; auto runs the plug. It goes first: a vented room takes the
+    # dehumidifier's plan away (drying air you blow out of the window is waste).
+    vent_cfg = cfg["vent"]
+    decision = snap["ventDecision"]
+    vent_key = decision["kind"]
+    if vent_cfg["mode"] != "off" and runtime.get("ventKey") != vent_key:
+        previous_vent = runtime.get("ventKey")
+        runtime["ventKey"] = vent_key
+        if vent_key in cooling_engine.VENT_RUN_KINDS or vent_key == "blocked":
+            if vent_key == "blocked":
+                title = "Open the window — venting would help"
+                message = f"{decision['reason'].capitalize()}."
+            elif vent_cfg["mode"] == "auto" and snap["ventFan"]["controlling"]:
+                title = "Intake fan running"
+                message = f"OpenReef is running the intake fan: {decision['reason']}. Keep the window a couple of inches open."
+            else:
+                title = "Vent the room"
+                message = f"{decision['reason'].capitalize()}. Open the window a couple of inches and run the intake fan."
+            if cfg["notify"]:
+                await _async_cooling_notify_once(hass, config, f"vent_{vent_key}", COOLING_NOTIFY_COOLDOWN_S, title, message)
+            activity.append((f"Vent: {decision['reason']}", "info"))
+        elif previous_vent in cooling_engine.VENT_RUN_KINDS:
+            activity.append((f"Vent: close up — {decision['reason']}", "info"))
+    await _async_cooling_actuator_reconcile(hass, config, snap, runtime, now_local, activity, "vent")
+    # The fan may just have started: a vented room means no dehumidifier.
+    fan_state = hass.states.get(vent_cfg["switchEntity"]) if vent_cfg["switchEntity"] else None
+    fan_on = bool(fan_state and fan_state.state == "on")
+    snap["ventFan"]["state"] = fan_state.state if fan_state else None
+    vent_active = bool(snap["ventFan"]["controlling"] and fan_on) or bool(snap["window"]["open"] and snap["vent"].get("advised"))
+    if vent_active != snap["ventActive"]:
+        snap["ventActive"] = vent_active
+        snap["plan"] = cooling_engine.dehumidifier_plan(
+            snap["result"], snap["fanNeeded"], snap["projection"], now_local,
+            cfg["dehumidifier"]["leadHours"], snap["targetC"], vent_active)
+    await _async_cooling_actuator_reconcile(hass, config, snap, runtime, now_local, activity, "dehumidifier")
     if activity:
         for message, kind in activity:
             _append_activity(config, message, kind)
@@ -18031,9 +18122,10 @@ def websocket_cooling_status(
     runtime = hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME) or {}
     snap = cooling_snapshot(hass, config, dt_util.now(), runtime)
     snap["warnBand"] = runtime.get("warnBand")
-    dehum_state = runtime.get("dehum") or {}
-    snap["dehumidifier"]["override"] = dehum_state.get("override")
-    snap["dehumidifier"]["asserted"] = dehum_state.get("asserted")
+    for key, block in (("dehum", "dehumidifier"), ("vent", "ventFan")):
+        rt_state = runtime.get(key) or {}
+        snap[block]["override"] = rt_state.get("override")
+        snap[block]["asserted"] = rt_state.get("asserted")
     connection.send_result(msg["id"], snap)
 
 
@@ -18066,29 +18158,24 @@ def websocket_cooling_simulate(
     )
 
 
-@websocket_api.websocket_command({
-    vol.Required("type"): "openreef/cooling_dehumidifier",
-    vol.Required("action"): vol.In(["run", "stop", "resume"]),
-})
-@websocket_api.require_admin
-@websocket_api.async_response
-async def websocket_cooling_dehumidifier(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+async def _async_cooling_manual(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any], role: str
 ) -> None:
     """Manual run/stop (held as an override until the plan flips) and resume
-    (clear the hold — the next tick re-asserts the plan)."""
+    (clear the hold — the next tick re-asserts the plan) for one plug."""
+    block_key, state_key, label, _prefix, _cap = _COOLING_ROLES[role]
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    dehum = _cooling_cfg(config)["dehumidifier"]
-    entity = dehum["switchEntity"]
+    block = _cooling_cfg(config)[block_key]
+    entity = block["switchEntity"]
     if not entity:
-        connection.send_error(msg["id"], "not_bound", "No dehumidifier plug is bound")
+        connection.send_error(msg["id"], "not_bound", f"No {label.lower()} plug is bound")
         return
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(COOLING_RUNTIME, {})
-    state = runtime.setdefault("dehum", {})
+    state = runtime.setdefault(state_key, {})
     action = msg["action"]
     if action == "resume":
         state.pop("override", None)
@@ -18100,13 +18187,37 @@ async def websocket_cooling_dehumidifier(
         connection.send_error(msg["id"], "switch_failed", f"Could not switch {entity}")
         return
     now = datetime.now(timezone.utc)
-    planned = bool(((runtime.get("snapshot") or {}).get("plan") or {}).get("shouldRun"))
+    planned, _reason = _cooling_desired(runtime.get("snapshot") or {}, role)
     state.update({"asserted": "on" if on else "off", ("lastOn" if on else "lastOff"): now.isoformat()})
-    if dehum["mode"] == "auto" and on != planned:
+    if block["mode"] == "auto" and on != planned:
         state["override"] = {"since": now.isoformat(), "state": "on" if on else "off", "plannedRun": planned}
-    _append_activity(config, f"Dehumidifier switched {'on' if on else 'off'} by hand from the panel", "info")
+    _append_activity(config, f"{label} switched {'on' if on else 'off'} by hand from the panel", "info")
     await _async_save_config(hass, entry, config)
     connection.send_result(msg["id"], {"success": True, "state": "on" if on else "off"})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cooling_dehumidifier",
+    vol.Required("action"): vol.In(["run", "stop", "resume"]),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cooling_dehumidifier(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    await _async_cooling_manual(hass, connection, msg, "dehumidifier")
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cooling_vent",
+    vol.Required("action"): vol.In(["run", "stop", "resume"]),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cooling_vent(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    await _async_cooling_manual(hass, connection, msg, "vent")
 
 
 def _clear_spawning_tick(hass: HomeAssistant) -> None:
@@ -19494,6 +19605,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cooling_status)
     websocket_api.async_register_command(hass, websocket_cooling_simulate)
     websocket_api.async_register_command(hass, websocket_cooling_dehumidifier)
+    websocket_api.async_register_command(hass, websocket_cooling_vent)
     websocket_api.async_register_command(hass, websocket_spawning_execution_resume)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)

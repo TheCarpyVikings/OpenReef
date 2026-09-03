@@ -444,6 +444,8 @@ def _weather_state(temp=20.0, rh=60.0, unit="°C"):
 
 
 def _l2_entry(mode="advise", armed=False, plug="switch.dehum", **over):
+    # Layer 2 fixtures keep the intake fan off so its advice can't leak in.
+    over.setdefault("vent", {"mode": "off"})
     return _entry(weatherEntity="weather.home", lookaheadHours=24,
                   dehumidifier={"mode": mode, "armed": armed, "switchEntity": plug,
                                 "leadHours": 3, "minOnMinutes": 20, "minOffMinutes": 10, "maxRunHours": 8},
@@ -618,6 +620,188 @@ def test_ws_dehumidifier_actions():
     unbound = _entry()
     hass2 = _hass(unbound)
     run(integration.websocket_cooling_dehumidifier(hass2, conn, {"id": 4, "type": "x", "action": "run"}))
+    assert conn.error_codes[-1] == "not_bound"
+
+
+
+# --------------------------------------------------------------------------- #
+# Layer 3 — the intake fan
+# --------------------------------------------------------------------------- #
+
+def _calls(hass, service, entity):
+    return [c for c in hass.services.calls
+            if c.domain == "switch" and c.service == service and entity in c.data.values()]
+
+
+def _l3_entry(vent_mode="auto", armed=True, fan="switch.vent", window="", night_purge=True,
+              dehum_mode="auto", dehum_armed=True):
+    return _l2_entry(mode=dehum_mode, armed=dehum_armed,
+                     vent={"mode": vent_mode, "armed": armed, "switchEntity": fan, "windowEntity": window,
+                           "dewGapC": 2.0, "nightPurge": night_purge, "minOnMinutes": 10, "minOffMinutes": 10})
+
+
+def _l3_hass(entry, room=23.0, rh=60.0, out=(20.0, 60.0), fan="off", window=None, forecast=None):
+    # Indoors 23 °C / 60 % → dew 14.8; outdoors 20 °C / 60 % → dew 12.0: a 2.8 °C gap, vent advised.
+    hass = _l2_hass(entry, room=room, rh=rh, out=out, forecast=forecast)
+    hass.states.set("switch.vent", fan)
+    if window is not None:
+        hass.states.set("binary_sensor.window", window)
+    return hass
+
+
+def _advice(advised=True, gap=2.8):
+    return {"advised": advised, "known": True, "reason": "r", "outdoorC": 20.0, "outdoorDewC": 12.0, "gapC": gap}
+
+
+def test_vent_decision_kinds():
+    proj_hit = {"firstAffectedAt": (NOW + timedelta(hours=5)).isoformat(), "worst": {"index": 0.2},
+                "dayKind": "humid-heat", "purgeWindow": None}
+    assert cooling.vent_decision(_advice(), True, None, NOW, True, None)["kind"] == "cool"
+    predry = cooling.vent_decision(_advice(), False, proj_hit, NOW, True, None)
+    assert predry["kind"] == "predry" and predry["shouldRun"] and "20 %" in predry["reason"]
+    purge_proj = {"firstAffectedAt": None, "worst": None, "dayKind": "dry-heat",
+                  "purgeWindow": {"from": (NOW - timedelta(hours=1)).isoformat(), "to": (NOW + timedelta(hours=2)).isoformat(), "outC": 12}}
+    purge = cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None)
+    assert purge["kind"] == "purge" and purge["shouldRun"]
+    assert cooling.vent_decision(_advice(), False, purge_proj, NOW, False, None)["kind"] == "none"    # purge off
+    assert cooling.vent_decision(_advice(), False, dict(purge_proj, dayKind="quiet"), NOW, True, None)["kind"] == "none"
+    assert cooling.vent_decision(_advice(), False, purge_proj, NOW + timedelta(hours=6), True, None)["kind"] == "none"  # outside the window
+    blocked = cooling.vent_decision(_advice(), True, None, NOW, True, False)
+    assert blocked["kind"] == "blocked" and not blocked["shouldRun"] and blocked["wants"] == "cool"
+    assert cooling.vent_decision(_advice(), True, None, NOW, True, True)["shouldRun"]                # window open
+    wet = cooling.vent_decision(_advice(advised=False), True, None, NOW, True, None)
+    assert wet["kind"] == "none" and not wet["shouldRun"]
+    assert cooling.vent_decision({"known": False, "reason": "no outdoor reading"}, True, None, NOW, True, None)["kind"] == "none"
+
+
+def test_vent_gap_is_configurable_and_plan_yields_to_venting():
+    assert cooling.vent_advice(28.0, 22.0, 18.0, 20.5, gap_c=2.0)["advised"] is False   # 1.5 °C gap
+    assert cooling.vent_advice(28.0, 22.0, 18.0, 20.5, gap_c=1.0)["advised"] is True
+    live = cooling.evaluate(26, 28, 75)
+    vented = cooling.dehumidifier_plan(live, True, None, NOW, 3, 25.5, vent_active=True)
+    assert vented["kind"] == "vented" and not vented["shouldRun"]
+    assert cooling.dehumidifier_plan(cooling.evaluate(26, 20, 50), False, None, NOW, 3, 25.5, vent_active=True)["kind"] == "none"
+
+
+def test_normaliser_vent_block():
+    cfg = normalise({"coolingHeadroom": {"vent": {"mode": "x", "armed": 1, "switchEntity": "switch.fan",
+                                                  "windowEntity": "binary_sensor.win", "dewGapC": 99, "nightPurge": 0,
+                                                  "minOnMinutes": 1}}})["coolingHeadroom"]["vent"]
+    assert cfg["mode"] == "advise" and cfg["armed"] is True and cfg["switchEntity"] == "switch.fan"
+    assert cfg["windowEntity"] == "binary_sensor.win" and cfg["dewGapC"] == 6.0 and cfg["nightPurge"] is False
+    assert cfg["minOnMinutes"] == 5 and cfg["overridePolicy"] == "hold"
+    assert normalise(None)["coolingHeadroom"]["vent"]["mode"] == "advise"
+
+
+def test_tick_vent_auto_pre_dries_and_takes_the_dehumidifier_plan_away():
+    now = datetime.now(timezone.utc)
+    entry = _l3_entry()
+    hass = _l3_hass(entry, forecast=_humid_afternoon(now))
+    run(integration._async_cooling_tick(hass, entry, now))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["vent"]["advised"] and snap["ventDecision"]["kind"] == "predry"
+    assert len(_calls(hass, "turn_on", "switch.vent")) == 1 and hass.states.get("switch.vent").state == "on"
+    assert snap["ventActive"] is True and snap["plan"]["kind"] == "scheduled"   # not yet wanted → not "vented" yet
+    # The dehumidifier's lead window opens, but the room is being vented: it stays off.
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["plan"]["kind"] == "vented"
+    assert not _calls(hass, "turn_on", "switch.dehum")
+    assert len(_calls(hass, "turn_on", "switch.vent")) == 1                       # reconciled, no spam
+    msgs = [a["message"] for a in entry.options[CONF_SETTINGS]["activity"]]
+    assert any(m.startswith("Vent: pre-drying") for m in msgs)
+    assert any("Intake fan switched on" in m for m in msgs)
+
+
+def test_tick_vent_window_closed_blocks_the_fan_and_leaves_the_dehumidifier_alone():
+    now = datetime.now(timezone.utc)
+    entry = _l3_entry(window="binary_sensor.window")
+    hass = _l3_hass(entry, window="off", forecast=_humid_afternoon(now))
+    run(integration._async_cooling_tick(hass, entry, now))
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=5)))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["ventDecision"]["kind"] == "blocked" and snap["window"]["open"] is False
+    assert not _calls(hass, "turn_on", "switch.vent")
+    blocked = [n for n in _notes(hass) if "vent_blocked" in str(n.data.get("notification_id"))]
+    assert len(blocked) == 1 and "Open the window" in blocked[0].data.get("title", "")
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))
+    assert len(_calls(hass, "turn_on", "switch.dehum")) == 1                      # not vented → dehumidify
+    # Window opens: the fan runs and the dehumidifier lets go (after its min-on).
+    hass.states.set("binary_sensor.window", "on")
+    runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
+    runtime["dehum"]["lastOn"] = (now - timedelta(hours=1)).isoformat()
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3, minutes=5)))
+    assert len(_calls(hass, "turn_on", "switch.vent")) == 1
+    assert len(_calls(hass, "turn_off", "switch.dehum")) == 1
+
+
+def test_tick_open_window_in_advise_mode_counts_as_vented():
+    now = datetime.now(timezone.utc)
+    entry = _l3_entry(vent_mode="advise", armed=False, window="binary_sensor.window")
+    hass = _l3_hass(entry, window="on", forecast=_humid_afternoon(now))
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["ventActive"] is True and snap["plan"]["kind"] == "vented"
+    assert not _calls(hass, "turn_on", "switch.dehum") and not _calls(hass, "turn_on", "switch.vent")
+    vent_notes = [n for n in _notes(hass) if "vent_predry" in str(n.data.get("notification_id"))]
+    assert len(vent_notes) == 1 and "Vent the room" in vent_notes[0].data.get("title", "")
+
+
+def test_tick_vent_closes_up_when_outdoor_air_turns_wet():
+    now = datetime.now(timezone.utc)
+    entry = _l3_entry()
+    hass = _l3_hass(entry, forecast=_humid_afternoon(now))
+    run(integration._async_cooling_tick(hass, entry, now))
+    assert hass.states.get("switch.vent").state == "on"
+    hass.states.set("weather.home", _weather_state(20.0, 95.0))                   # muggy: dew 19.2 > indoors
+    runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
+    runtime["vent"]["lastOn"] = (now - timedelta(hours=1)).isoformat()
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=30)))
+    snap = runtime["snapshot"]
+    assert not snap["vent"]["advised"] and snap["ventDecision"]["kind"] == "none"
+    assert len(_calls(hass, "turn_off", "switch.vent")) == 1
+    assert any("Vent: close up" in a["message"] for a in entry.options[CONF_SETTINGS]["activity"])
+
+
+def test_tick_night_purge_runs_through_the_coolest_hours_before_a_hot_dry_day():
+    now = datetime.now(timezone.utc)
+    # Cool dry night now (12 °C / 70 %, dew 6.7) in a 22 °C / 55 % room (dew 12.6): advised, not needed.
+    # Tomorrow: 26 °C at 35 % from +6 h — dry-heat, nothing to pre-dry for.
+    forecast = _fc(14, base=now, out_c=lambda i: 12 if i < 6 else 26, out_rh=lambda i: 70 if i < 6 else 35)
+    entry = _l3_entry()
+    hass = _l3_hass(entry, room=22.0, rh=55.0, out=(12.0, 70.0), forecast=forecast)
+    run(integration._async_cooling_tick(hass, entry, now))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["projection"]["dayKind"] == "dry-heat"
+    assert snap["ventDecision"]["kind"] == "purge" and hass.states.get("switch.vent").state == "on"
+    entry2 = _l3_entry(night_purge=False)
+    hass2 = _l3_hass(entry2, room=22.0, rh=55.0, out=(12.0, 70.0), forecast=forecast)
+    run(integration._async_cooling_tick(hass2, entry2, now))
+    assert hass2.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]["ventDecision"]["kind"] == "none"
+    assert not _calls(hass2, "turn_on", "switch.vent")
+
+
+def test_leaving_vent_auto_fails_off_and_ws_vent_actions():
+    now = datetime.now(timezone.utc)
+    entry = _l3_entry()
+    hass = _l3_hass(entry, forecast=_humid_afternoon(now))
+    run(integration._async_cooling_tick(hass, entry, now))
+    assert hass.states.get("switch.vent").state == "on"
+    entry.options[CONF_SETTINGS]["coolingHeadroom"]["vent"]["mode"] = "advise"
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=5)))
+    assert len(_calls(hass, "turn_off", "switch.vent")) == 1
+    runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
+    assert runtime["vent"] == {}
+    conn = FakeConnection()
+    run(integration.websocket_cooling_vent(hass, conn, {"id": 1, "type": "x", "action": "run"}))
+    assert conn.results[-1].payload["state"] == "on" and hass.states.get("switch.vent").state == "on"
+    run(integration.websocket_cooling_vent(hass, conn, {"id": 2, "type": "x", "action": "stop"}))
+    assert hass.states.get("switch.vent").state == "off"
+    integration.websocket_cooling_status(hass, conn, {"id": 3, "type": "openreef/cooling_status"})
+    payload = conn.results[-1].payload
+    assert payload["ventFan"]["asserted"] == "off" and payload["ventDecision"]["kind"] == "predry"
+    unbound = _l3_entry(fan="")
+    run(integration.websocket_cooling_vent(_l3_hass(unbound), conn, {"id": 4, "type": "x", "action": "run"}))
     assert conn.error_codes[-1] == "not_bound"
 
 

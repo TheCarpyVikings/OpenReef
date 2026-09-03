@@ -381,13 +381,17 @@ def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, wate
 
 
 def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
-                out_dew_c: float | None) -> dict[str, Any]:
+                out_dew_c: float | None, gap_c: float = VENT_DEW_GAP_C) -> dict[str, Any]:
     """Right now: is the air outside drier (and no warmer) than the air inside?
     If so, the intake fan beats the dehumidifier for free."""
     if None in (room_c, dew_c, out_c, out_dew_c):
         return {"advised": False, "known": False, "reason": "no outdoor reading"}
     gap = float(dew_c) - float(out_dew_c)
-    drier = gap >= VENT_DEW_GAP_C
+    try:
+        need = float(gap_c)
+    except (TypeError, ValueError):
+        need = VENT_DEW_GAP_C
+    drier = gap >= need
     cool_enough = float(out_c) <= float(room_c) + VENT_TEMP_SLACK_C
     advised = drier and cool_enough
     if advised:
@@ -408,13 +412,25 @@ def _hhmm(iso: str | None) -> str:
 
 
 def dehumidifier_plan(live: dict[str, Any] | None, live_needed: bool, projection: dict[str, Any] | None,
-                      now: datetime, lead_h: float, target_c: float) -> dict[str, Any]:
+                      now: datetime, lead_h: float, target_c: float,
+                      vent_active: bool = False) -> dict[str, Any]:
     """Should the dehumidifier be running right now, and why. Stateless: the
     actuator layer adds the short-cycle timing and the manual-override hold.
 
     kinds: now (fans already down), ahead (inside the lead window of a
     projected hit), scheduled (a hit is coming, not yet time), unrescuable
-    (chiller day — its heat would land in the peak), none."""
+    (chiller day — its heat would land in the peak), vented (the room is being
+    vented with drier outdoor air — drying air you blow out of the window is
+    waste), none."""
+    plan = _dehumidifier_plan_raw(live, live_needed, projection, now, lead_h, target_c)
+    if vent_active and plan["shouldRun"]:
+        return {"shouldRun": False, "kind": "vented", "startAt": plan.get("startAt"), "until": plan.get("until"),
+                "reason": "venting instead — outdoor air is drier than indoors, so the dehumidifier stays off"}
+    return plan
+
+
+def _dehumidifier_plan_raw(live: dict[str, Any] | None, live_needed: bool, projection: dict[str, Any] | None,
+                           now: datetime, lead_h: float, target_c: float) -> dict[str, Any]:
     if live and live_needed and live.get("band") in WARN_BANDS:
         room = float(live.get("roomC", 0))
         if room >= target_c + UNRESCUABLE_OVER_TARGET_C and float(live.get("index", 0)) < UNRESCUABLE_INDEX:
@@ -443,3 +459,62 @@ def dehumidifier_plan(live: dict[str, Any] | None, live_needed: bool, projection
     span = f"the next {len(hours)} h" if hours else "the forecast"
     return {"shouldRun": False, "kind": "none", "startAt": None, "until": None,
             "reason": f"no hour in {span} where the fans are needed and losing"}
+
+
+# --------------------------------------------------------------------------- #
+# Layer 3 — the intake fan: when venting is worth running, and the night purge
+# --------------------------------------------------------------------------- #
+
+VENT_RUN_KINDS = ("cool", "predry", "purge")
+
+
+def in_purge_window(projection: dict[str, Any] | None, now: datetime) -> bool:
+    window = projection.get("purgeWindow") if projection else None
+    if not window:
+        return False
+    start = _parse_when(window.get("from"))
+    end = _parse_when(window.get("to"))
+    if start is None or end is None:
+        return False
+    return start <= now <= end + timedelta(hours=1)
+
+
+def vent_decision(advice: dict[str, Any], fan_needed: bool, projection: dict[str, Any] | None,
+                  now: datetime, night_purge: bool, window_open: bool | None) -> dict[str, Any]:
+    """Should the intake fan be pulling outdoor air in right now, and why.
+
+    Only ever while the outdoor air is drier and no warmer (``advice``), and
+    only for a reason: cool (the room needs cooling now), predry (a losing
+    hour is coming — dry the room for free first), purge (night purge: the
+    coolest outdoor hours ahead of a day that needs the fans). A bound window
+    sensor reading closed blocks it (kind ``blocked``) — the panel and the
+    notification say "open the window" instead of running a fan against glass.
+    Winter takes care of itself: a cool room with nothing coming has no reason."""
+    if not advice.get("known"):
+        return {"shouldRun": False, "kind": "none", "wants": None, "reason": advice.get("reason", "no outdoor reading")}
+    kind = None
+    reason = ""
+    if advice.get("advised"):
+        if fan_needed:
+            kind = "cool"
+            reason = (f"the room needs cooling and outdoor air is drier ({advice['outdoorC']:.1f} °C, "
+                      f"dew point {advice['outdoorDewC']:.1f} °C, {advice['gapC']:.1f} °C below indoors)")
+        elif projection and projection.get("firstAffectedAt"):
+            worst = projection.get("worst") or {}
+            pct = round(float(worst.get("index", 0)) * 100)
+            kind = "predry"
+            reason = (f"pre-drying the room with outdoor air (dew point {advice['outdoorDewC']:.1f} °C) — "
+                      f"headroom drops to {pct} % from {_hhmm(projection['firstAffectedAt'])}")
+        elif night_purge and projection and projection.get("dayKind") != "quiet" and in_purge_window(projection, now):
+            window = projection.get("purgeWindow") or {}
+            kind = "purge"
+            reason = (f"night purge — the coolest outdoor air ({advice['outdoorC']:.1f} °C) until "
+                      f"{_hhmm(window.get('to'))}, ahead of a {projection.get('dayKind')} day")
+    if kind is None:
+        return {"shouldRun": False, "kind": "none", "wants": None,
+                "reason": advice.get("reason", "") if not advice.get("advised")
+                else "outdoor air is drier, but the room doesn't need it right now"}
+    if window_open is False:
+        return {"shouldRun": False, "kind": "blocked", "wants": kind,
+                "reason": f"{reason} — but the window is closed"}
+    return {"shouldRun": True, "kind": kind, "wants": kind, "reason": reason}

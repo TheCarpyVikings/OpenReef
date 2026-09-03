@@ -1288,7 +1288,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "spawn-exec-resume") this._spawnExecResume();
       if (action === "spawn-exec-refresh") this._loadSpawnExecStatus(true);
       if (action === "cooling-refresh") this._loadCoolingStatus(true);
-      if (action === "cooling-dehum") this._coolingDehumidifier(id);
+      if (action === "cooling-dehum") this._coolingActuator("dehumidifier", id);
+      if (action === "cooling-vent") this._coolingActuator("vent", id);
       if (action === "spawn-exec-pargate") this._spawnExecToggleParGate();
       if (action === "icp-subview") {
         this._icp.subview = id || "dashboard";
@@ -2688,10 +2689,11 @@ class OpenReefPanel extends HTMLElement {
           : target.type === "number" ? Number(value) : value;
         if ((field === "enabled" || field === "targetMode" || field === "weatherEntity") && event.type === "change") this._render();
       }
-      if (scope === "cooling-dehum") {
+      if (scope === "cooling-dehum" || scope === "cooling-vent") {
         const cool = this._config.coolingHeadroom = this._config.coolingHeadroom || {};
-        const dehum = cool.dehumidifier = cool.dehumidifier || {};
-        dehum[field] = target.type === "checkbox" ? value
+        const key = scope === "cooling-vent" ? "vent" : "dehumidifier";
+        const block = cool[key] = cool[key] || {};
+        block[field] = target.type === "checkbox" ? value
           : target.type === "number" ? Number(value) : value;
         if ((field === "mode" || field === "armed") && event.type === "change") this._render();
       }
@@ -24667,7 +24669,21 @@ const rigSteps = [
       worstPct, firstAffectedAt: projection?.firstAffectedAt || null,
       plan, planActive: Boolean(plan && (plan.kind === "now" || plan.kind === "ahead")),
       ventAdvised: Boolean(vent && vent.advised), ventReason: vent?.reason || "",
+      ventDecision: status.ventDecision || null,
+      ventRunning: Boolean(status.ventDecision?.shouldRun),
+      ventBlocked: status.ventDecision?.kind === "blocked",
+      ventFanOn: status.ventFan?.state === "on",
+      ventControlling: Boolean(status.ventFan?.controlling),
     };
+  }
+
+  _coolingVentLine(sum) {
+    const d = sum?.ventDecision;
+    if (!d) return "";
+    if (d.kind === "blocked") return `Open the window — ${d.reason}`;
+    if (d.kind === "purge") return `${sum.ventControlling && sum.ventFanOn ? "Night purge running" : "Night purge — run the intake fan"}: ${d.reason}`;
+    if (d.kind === "cool" || d.kind === "predry") return `${sum.ventControlling && sum.ventFanOn ? "Venting" : "Vent the room"}: ${d.reason}`;
+    return "";
   }
 
   _coolingHhmm(iso) {
@@ -24683,17 +24699,19 @@ const rigSteps = [
     if (plan.kind === "now" || plan.kind === "ahead") return `Dehumidify now — ${plan.reason}`;
     if (plan.kind === "scheduled") return `Dehumidifier: ${plan.reason}`;
     if (plan.kind === "unrescuable") return `Chiller day — ${plan.reason}`;
+    if (plan.kind === "vented") return `Dehumidifier off — ${plan.reason}`;
     return "";
   }
 
-  async _coolingDehumidifier(action) {
+  async _coolingActuator(role, action) {
     if (!["run", "stop", "resume"].includes(action)) return;
+    const label = role === "vent" ? "intake fan" : "dehumidifier";
     try {
-      await this._callWS({ type: "openreef/cooling_dehumidifier", action });
-      this._message = action === "resume" ? "Hold cleared — the plan has the dehumidifier again."
-        : `Dehumidifier switched ${action === "run" ? "on" : "off"}.`;
+      await this._callWS({ type: role === "vent" ? "openreef/cooling_vent" : "openreef/cooling_dehumidifier", action });
+      this._message = action === "resume" ? `Hold cleared — the plan has the ${label} again.`
+        : `${label[0].toUpperCase()}${label.slice(1)} switched ${action === "run" ? "on" : "off"}.`;
     } catch (err) {
-      this._error = err?.message || "Could not switch the dehumidifier";
+      this._error = err?.message || `Could not switch the ${label}`;
     }
     this._loadCoolingStatus(true);
   }
@@ -24705,7 +24723,8 @@ const rigSteps = [
     const pill = sum ? sum.pill : "unknown";
     const value = sum && sum.pct != null ? `${sum.pct} % fan effect` : sum ? sum.label : "Loading…";
     let detail = sum ? (sum.needed ? sum.detail : `${sum.detail} · fans not needed right now`) : "";
-    if (sum && sum.planActive) detail += ` · ${this._coolingPlanLine(sum)}`;
+    if (sum && (sum.ventRunning || sum.ventBlocked)) detail += ` · ${this._coolingVentLine(sum)}`;
+    else if (sum && sum.planActive) detail += ` · ${this._coolingPlanLine(sum)}`;
     else if (sum && sum.plan?.kind === "scheduled") detail += ` · drops to ${sum.worstPct} % from ${this._coolingHhmm(sum.firstAffectedAt)}`;
     return `
       <button class="row row-link" data-action="tab" data-id="settings" aria-label="Cooling headroom — Open settings">
@@ -24730,6 +24749,15 @@ const rigSteps = [
     }
     if (sum.plan?.kind === "unrescuable") {
       return { key: "cooling", kicker: "Cooling headroom", title: "Chiller day", detail: sum.plan.reason, status: "critical" };
+    }
+    if (sum.ventBlocked) {
+      return { key: "cooling", kicker: "Cooling headroom", title: "Open the window — venting would help", detail: sum.ventDecision.reason, status: "warning" };
+    }
+    if (sum.ventRunning && sum.ventDecision.kind === "purge") {
+      return { key: "cooling", kicker: "Cooling headroom", title: sum.ventControlling && sum.ventFanOn ? "Night purge running" : "Night purge — run the intake fan", detail: sum.ventDecision.reason, status: "ok" };
+    }
+    if (sum.ventRunning) {
+      return { key: "cooling", kicker: "Cooling headroom", title: sum.ventControlling && sum.ventFanOn ? "Venting the room" : "Vent the room now", detail: sum.ventDecision.reason, status: sum.needed ? "warning" : "ok" };
     }
     if (sum.planActive) {
       return { key: "cooling", kicker: "Cooling headroom", title: sum.ventAdvised ? "Vent the room now" : "Dehumidify now", detail: sum.ventAdvised ? sum.ventReason : sum.plan.reason, status: "warning" };
@@ -24820,6 +24848,7 @@ const rigSteps = [
       </label>
       ${live}
       ${this._coolingLayer2Settings(cfg, status, sum)}
+      ${this._coolingLayer3Settings(cfg, status, sum)}
       <small class="hint">Where the humidity sensor sits matters more here than anywhere: high up and away from the tank reads the room the fans breathe, not the sump's plume.</small>`;
     return this._settingsPanel(
       "cooling",
@@ -24884,6 +24913,63 @@ const rigSteps = [
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="cooling-dehum" data-field="armed" ${dehum.armed ? "checked" : ""} ${dehum.switchEntity ? "" : "disabled"}>
         <span><strong>Armed — OpenReef switches the dehumidifier</strong><small>Needs a plug. Compressor guards: min on/off, max run then a bucket nudge. Leaving auto switches it off once and lets go.</small></span>
+      </label>` : ""}
+      ${readout}`;
+  }
+
+  // Layer 3: the intake fan — vent rule, window sensor, night purge.
+  _coolingLayer3Settings(cfg, status, sum) {
+    const vent = cfg.vent || {};
+    const mode = ["off", "advise", "auto"].includes(vent.mode) ? vent.mode : "advise";
+    const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    const vs = status?.ventFan || {};
+    const pill = (state) => !state || state === "unavailable" || state === "unknown"
+      ? `<span class="pill warning">unavailable</span>`
+      : `<span class="pill ${state === "on" ? "ok" : "unknown"}">${state === "on" ? "ON" : "OFF"}</span>`;
+    const windowText = !status?.window?.entity ? "" : status.window.open == null ? "window sensor unavailable" : status.window.open ? "window open" : "window closed";
+    const ventLine = sum ? this._coolingVentLine(sum) : "";
+    const readout = !cfg.enabled || !status ? "" : `
+      ${ventLine ? `<p class="hint"><strong>Intake fan:</strong> ${this._escape(ventLine)}</p>` : status.ventDecision ? `<p class="hint"><strong>Intake fan:</strong> off — ${this._escape(status.ventDecision.reason)}</p>` : ""}
+      ${vent.switchEntity ? `
+      <div class="spawn-channel-row">
+        <strong>Intake fan</strong>
+        ${pill(vs.state)}
+        <small class="hint">${vs.controlling ? "OpenReef is driving the plug" : mode === "auto" ? "auto, but not armed — advice only" : mode === "off" ? "off — no advice, no control" : "advise mode — OpenReef tells you, you switch"}${vs.override ? ` · held ${vs.override.state} by hand since ${this._coolingHhmm(vs.override.since)}` : ""}${windowText ? ` · ${windowText}` : ""}</small>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="cooling-vent" data-id="run">Run now</button>
+          <button class="secondary compact-button" data-action="cooling-vent" data-id="stop">Stop</button>
+          ${vs.override ? `<button class="secondary compact-button" data-action="cooling-vent" data-id="resume">Give it back to the plan</button>` : ""}
+        </div>
+      </div>` : windowText ? `<small class="hint">${this._escape(windowText)}</small>` : ""}`;
+    return `
+      <div class="awc-section-title"><p class="eyebrow">Intake fan (vent)</p></div>
+      <small class="hint">The circulating fan in front of a slightly-open window is free dehumidification and cooling whenever outdoor air is drier and no warmer — usually most of a UK summer. OpenReef runs it (or tells you to) only for a reason: the room needs cooling now, a losing hour is coming and the room can be pre-dried, or the night purge through the coolest hours before a hot day. Never at the same time as the dehumidifier. On a muggy evening it says close up.</small>
+      <div class="grid two">
+        <label><span>Intake fan</span>
+          <select data-scope="cooling-vent" data-field="mode">
+            <option value="off" ${mode === "off" ? "selected" : ""}>Off</option>
+            <option value="advise" ${mode === "advise" ? "selected" : ""}>Advise — tell me when</option>
+            <option value="auto" ${mode === "auto" ? "selected" : ""}>Auto — switch the plug</option>
+          </select></label>
+        <label><span>Intake fan plug</span>${this._awcEntitySelect("cooling-vent", "", "switchEntity", vent.switchEntity || "", "switch")}</label>
+        <label><span>Window contact sensor <small>optional — on = open; auto never runs the fan against a closed window</small></span>${this._awcEntitySelect("cooling-vent", "", "windowEntity", vent.windowEntity || "", "binary_sensor")}</label>
+        <label><span>Vent when outdoor dew point is at least this much lower (°C)</span><input type="number" min="0.5" max="6" step="0.5" value="${num(vent.dewGapC, 2)}" data-scope="cooling-vent" data-field="dewGapC" /></label>
+        <label><span>Min on (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(vent.minOnMinutes, 10)}" data-scope="cooling-vent" data-field="minOnMinutes" /></label>
+        <label><span>Min off (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(vent.minOffMinutes, 10)}" data-scope="cooling-vent" data-field="minOffMinutes" /></label>
+        <label><span>If you switch it by hand</span>
+          <select data-scope="cooling-vent" data-field="overridePolicy">
+            <option value="hold" ${vent.overridePolicy !== "reassert" ? "selected" : ""}>Hold until the plan changes</option>
+            <option value="reassert" ${vent.overridePolicy === "reassert" ? "selected" : ""}>Re-assert the plan within a tick</option>
+          </select></label>
+      </div>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="cooling-vent" data-field="nightPurge" ${vent.nightPurge === false ? "" : "checked"}>
+        <span><strong>Night purge</strong><small>Ahead of a day that needs the fans, run the intake fan through the coolest forecast hours so the room's walls, floor and water start the afternoon cool.</small></span>
+      </label>
+      ${mode === "auto" ? `
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="cooling-vent" data-field="armed" ${vent.armed ? "checked" : ""} ${vent.switchEntity ? "" : "disabled"}>
+        <span><strong>Armed — OpenReef switches the intake fan</strong><small>Needs a plug. Without a window sensor it assumes you leave the window ajar. Leaving auto switches it off once and lets go.</small></span>
       </label>` : ""}
       ${readout}`;
   }

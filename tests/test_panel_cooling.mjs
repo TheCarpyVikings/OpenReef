@@ -208,4 +208,69 @@ test("layer 2 settings render the weather/dehumidifier fields, the plan, vent an
   assert(!advise._coolingSettings().includes('data-field="armed"'), "no armed toggle outside auto");
 });
 
+
+// --- Layer 3: the intake fan ------------------------------------------------
+
+function l3(decision, over = {}) {
+  return l2({
+    ventDecision: decision,
+    ventFan: { mode: "auto", armed: true, switchEntity: "switch.vent", controlling: true, state: "off" },
+    window: { entity: "binary_sensor.window", open: true },
+    ventActive: false,
+    ...over,
+  });
+}
+
+test("blocked by a closed window: warning card and row say open the window", async () => {
+  const st = l3({ shouldRun: false, kind: "blocked", wants: "cool", reason: "the room needs cooling and outdoor air is drier — but the window is closed" },
+    { window: { entity: "binary_sensor.window", open: false } });
+  const panel = await prep({ enabled: true }, st);
+  const card = panel._coolingInsightCard();
+  assertEqual(card.status, "warning");
+  assert(card.title.startsWith("Open the window"), card.title);
+  assert(panel._coolingMissionRow().includes("Open the window"));
+});
+
+test("night purge: running vs advised wording follows who is driving the fan", async () => {
+  const purge = { shouldRun: true, kind: "purge", wants: "purge", reason: "night purge — the coolest outdoor air (12.0 °C) until 06:00, ahead of a dry-heat day" };
+  const running = await prep({ enabled: true }, l3(purge, { ventFan: { mode: "auto", armed: true, switchEntity: "switch.vent", controlling: true, state: "on" } }));
+  assertEqual(running._coolingInsightCard().title, "Night purge running");
+  assertEqual(running._coolingInsightCard().status, "ok");
+  const advised = await prep({ enabled: true }, l3(purge, { ventFan: { mode: "advise", armed: false, switchEntity: "", controlling: false, state: null } }));
+  assertEqual(advised._coolingInsightCard().title, "Night purge — run the intake fan");
+  assert(advised._coolingMissionRow().includes("Night purge — run the intake fan"));
+});
+
+test("vent wins over the dehumidifier plan on every surface", async () => {
+  const cool = { shouldRun: true, kind: "cool", wants: "cool", reason: "the room needs cooling and outdoor air is drier (18.0 °C, dew point 10.0 °C, 8.0 °C below indoors)" };
+  const st = l3(cool, { fanNeeded: true, plan: { shouldRun: false, kind: "vented", startAt: null, until: null, reason: "venting instead — outdoor air is drier than indoors, so the dehumidifier stays off" } });
+  const panel = await prep({ enabled: true }, st);
+  const sum = panel._coolingSummary();
+  assertEqual(sum.ventRunning, true);
+  assertEqual(sum.planActive, false);
+  assertEqual(panel._coolingInsightCard().title, "Vent the room now");
+  assertEqual(panel._coolingInsightCard().status, "warning");
+  assert(panel._coolingPlanLine(sum).startsWith("Dehumidifier off — venting instead"));
+  assert(panel._coolingMissionRow().includes("Vent the room:"));
+});
+
+test("layer 3 settings render the vent fields, window state and controls", async () => {
+  const cfg = { enabled: true, weatherEntity: "weather.home", vent: { mode: "auto", armed: true, switchEntity: "switch.vent", windowEntity: "binary_sensor.window", nightPurge: true } };
+  const st = l3({ shouldRun: false, kind: "none", wants: null, reason: "outdoor air is as wet as indoors (dew point 19.0 °C) — keep the windows shut" },
+    { ventFan: { mode: "auto", armed: true, switchEntity: "switch.vent", controlling: true, state: "off", override: { state: "on", since: "2026-07-14T12:00:00Z" } }, window: { entity: "binary_sensor.window", open: false } });
+  const panel = await prep(cfg, st);
+  panel._settingsSectionOpen = () => true;
+  panel._awcEntitySelect = (scope, _id, field, value) => `<input data-scope="${scope}" data-field="${field}" value="${value}">`;
+  const html = panel._coolingSettings();
+  assert(html.includes('data-scope="cooling-vent" data-field="mode"') && html.includes('data-field="windowEntity"'));
+  assert(html.includes('data-field="nightPurge"') && html.includes('data-scope="cooling-vent" data-field="armed"'));
+  assert(html.includes("window closed"));
+  assert(html.includes("keep the windows shut"));
+  assert(html.includes('data-action="cooling-vent" data-id="resume"'), "resume while held");
+  const off = await prep({ enabled: true, vent: { mode: "off" } }, l3({ shouldRun: false, kind: "none", reason: "" }));
+  off._settingsSectionOpen = () => true;
+  off._awcEntitySelect = () => "";
+  assert(!off._coolingSettings().includes('data-scope="cooling-vent" data-field="armed"'));
+});
+
 await runTests();
