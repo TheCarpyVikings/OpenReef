@@ -18168,20 +18168,37 @@ async def _async_schedule_cooling_tick(
     if not _cooling_cfg(config)["enabled"]:
         hass.data.setdefault(DOMAIN, {}).pop(COOLING_RUNTIME, None)
         return
-    # First enable: read now rather than in five minutes. Every later reschedule
-    # (each config save re-runs the schedulers) leaves the cadence alone.
-    if not (hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME) or {}).get("snapshot"):
-        await _async_cooling_tick(hass, entry, dt_util.now())
-
     async def _handle(now: datetime) -> None:
         latest_entry = _first_entry(hass)
         if latest_entry is None or latest_entry.entry_id != entry.entry_id:
             return
         await _async_cooling_tick(hass, latest_entry, dt_util.now())
 
-    hass.data.setdefault(DOMAIN, {})[COOLING_TICK_UNSUB] = async_track_time_interval(
-        hass, _handle, timedelta(seconds=COOLING_TICK_SECONDS)
-    )
+    def _arm() -> None:
+        hass.data.setdefault(DOMAIN, {})[COOLING_TICK_UNSUB] = async_track_time_interval(
+            hass, _handle, timedelta(seconds=COOLING_TICK_SECONDS)
+        )
+
+    # First enable: read now rather than in five minutes. Every later reschedule
+    # (each config save re-runs the schedulers) leaves the cadence alone. While
+    # HA is still booting the weather integration may not be up — a blocking
+    # get_forecasts there stalls our setup — so the first read waits for the
+    # started event (the unsub sits in the same slot, so a clear cancels it).
+    first = not (hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME) or {}).get("snapshot")
+    if first and not getattr(hass, "is_running", True):
+        async def _started(_event: Any) -> None:
+            latest_entry = _first_entry(hass)
+            if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+                return
+            await _async_cooling_tick(hass, latest_entry, dt_util.now())
+            _arm()
+
+        hass.data.setdefault(DOMAIN, {})[COOLING_TICK_UNSUB] = hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED, _started)
+        return
+    if first:
+        await _async_cooling_tick(hass, entry, dt_util.now())
+    _arm()
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/cooling_status"})

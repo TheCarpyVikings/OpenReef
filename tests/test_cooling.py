@@ -925,6 +925,28 @@ def test_purge_window_is_contiguous_around_the_coolest_hour_and_capped():
     assert window["from"] == NOW.isoformat() and window["to"] == (NOW + timedelta(hours=5)).isoformat()
 
 
+
+def test_schedule_defers_the_first_read_until_ha_has_started():
+    now = datetime.now(timezone.utc)
+    entry = _l2_entry()
+    hass = _l2_hass(entry, forecast=_humid_afternoon(now))
+    hass.is_running = False
+    run(integration._async_schedule_cooling_tick(hass, entry))
+    assert not [c for c in hass.services.calls if c.service == "get_forecasts"]   # nothing while booting
+    assert integration.COOLING_TICK_UNSUB in hass.data[integration.DOMAIN]
+    hass.is_running = True
+    started = [l for l in hass.bus.listeners if l.event_type == integration.EVENT_HOMEASSISTANT_STARTED]
+    assert len(started) == 1
+    run(started[0].callback(None))                                                # HA fires "started"
+    assert len([c for c in hass.services.calls if c.service == "get_forecasts"]) == 1
+    assert hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]["projection"] is not None
+    # Already running: the first read happens inline.
+    entry2 = _l2_entry()
+    hass2 = _l2_hass(entry2, forecast=_humid_afternoon(now))
+    run(integration._async_schedule_cooling_tick(hass2, entry2))
+    assert len([c for c in hass2.services.calls if c.service == "get_forecasts"]) == 1
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

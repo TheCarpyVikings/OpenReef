@@ -545,3 +545,11 @@ coolest, and the window took the first and last of them. It is now a contiguous 
 coolest hour, growing toward the cooler neighbour, capped at 8 h (`PURGE_BAND_C`,
 `PURGE_MAX_HOURS`). The strip's header also says "next 24 h" (the configured lookahead) rather
 than counting the extra past hour.
+
+### 12.2 Startup (0.7.124, 2026-09-03)
+
+After every update the strip showed "waiting for the first forecast read" for a while: the
+first tick ran inside setup while HA was still booting, and a blocking `get_forecasts` there
+either stalls OpenReef's setup or comes back empty. The first read now waits for the
+`homeassistant_started` event when HA is not yet running (the listener's unsub sits in the tick
+slot, so a clear cancels it); the five-minute cadence arms after that first read.
