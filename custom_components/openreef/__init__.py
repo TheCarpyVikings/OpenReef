@@ -100,11 +100,13 @@ from .const import (
     INTEGRATION_VERSION,
     MAINTENANCE_AWC_TASK_ID,
     MAINTENANCE_COMPLETIONS_MAX,
+    MAINTENANCE_CULTURE_TASK_PREFIX,
     MAINTENANCE_HAND_FEED_TASK_ID,
     MAINTENANCE_HATCH_HARVEST_TASK_ID,
     MAINTENANCE_HATCH_START_TASK_ID,
     MAINTENANCE_REMINDER_DEFAULT_TIME,
     MAINTENANCE_SOURCE_AWC,
+    MAINTENANCE_SOURCE_CULTURES,
     MAINTENANCE_SOURCE_HATCHERY,
     MAINTENANCE_TASK_CADENCE_HOURS_MAX,
     MAINTENANCE_TASK_CADENCE_MAX,
@@ -203,6 +205,7 @@ from . import dosing as dosing_engine
 from . import guardian as guardian_engine
 from . import icp
 from . import mixing as mixing_engine
+from . import cultures as cultures_engine
 from . import nps as nps_engine
 from . import spawning
 from . import vision
@@ -949,6 +952,84 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
     dosing["channels"] = channels
 
 
+def _normalise_cultures(raw: Any) -> dict[str, Any]:
+    """Live cultures (v1): up to CULTURE_JARS_MAX keeper-created jars, each a
+    species preset + volume + feed + cadence overrides + server-written state
+    and history; one rotifer fridge bottle. Junk-tolerant like every other
+    normaliser — an unknown species falls back to rotifers, cadence fields
+    outside their caps clamp, a state stamp that is not a string is dropped."""
+    raw = raw if isinstance(raw, dict) else {}
+    raw_jars = raw.get("jars") if isinstance(raw.get("jars"), dict) else {}
+    jars: dict[str, Any] = {}
+    valid_species = set(cultures_engine.species_ids())
+    cadence_caps = {
+        "feedIntervalH": (1, 24 * 7), "harvestIntervalDays": (0.5, 30), "harvestPct": (5, 60),
+        "restartIntervalDays": (0, 90), "waterChangeIntervalDays": (0, 90), "waterChangePct": (0, 100),
+    }
+    for raw_id in sorted(raw_jars):
+        raw_jar = raw_jars[raw_id]
+        jid = _awc_str(raw_id, 24)
+        if not jid or not isinstance(raw_jar, dict):
+            continue
+        if len(jars) >= cultures_engine.CULTURE_JARS_MAX:
+            break
+        species = (str(raw_jar.get("species")) if str(raw_jar.get("species")) in valid_species
+                   else "rotifer_L")
+        preset = cultures_engine.species_preset(species)
+        raw_state = raw_jar.get("state") if isinstance(raw_jar.get("state"), dict) else {}
+        raw_feed = raw_jar.get("feed") if isinstance(raw_jar.get("feed"), dict) else {}
+        raw_cad = raw_jar.get("cadence") if isinstance(raw_jar.get("cadence"), dict) else {}
+        tint = str(raw_state.get("lastTint") or "")
+        history = []
+        for item in (raw_jar.get("history") if isinstance(raw_jar.get("history"), list) else []):
+            if not isinstance(item, dict):
+                continue
+            history.append({
+                "event": _awc_str(item.get("event"), 24),
+                "at": _awc_str(item.get("at"), 40),
+                "ml": _awc_num(item.get("ml"), 0, 0, 100000),
+                "tint": str(item.get("tint")) if str(item.get("tint")) in cultures_engine.TINTS else "",
+                "from": _awc_str(item.get("from"), 24),
+            })
+        jars[jid] = {
+            "name": _awc_str(raw_jar.get("name"), 40) or f"Culture {len(jars) + 1}",
+            "species": species,
+            "volumeL": _awc_num(raw_jar.get("volumeL"), 2.5, 0.2, 50),
+            "salinityPpt": _awc_num(raw_jar.get("salinityPpt"), preset["salinityPpt"], 5, 45),
+            "feed": {
+                "productId": _awc_str(raw_feed.get("productId"), 40),
+                "doseMl": _awc_num(raw_feed.get("doseMl"), 5, 0.5, 200),
+            },
+            "cadence": {
+                key: _awc_num(raw_cad.get(key), preset[key], lo, hi)
+                for key, (lo, hi) in cadence_caps.items()
+            },
+            "state": {
+                "startedAt": _awc_str(raw_state.get("startedAt"), 40),
+                "lastRestartAt": _awc_str(raw_state.get("lastRestartAt"), 40),
+                "lastFedAt": _awc_str(raw_state.get("lastFedAt"), 40),
+                "lastHarvestAt": _awc_str(raw_state.get("lastHarvestAt"), 40),
+                "lastWaterChangeAt": _awc_str(raw_state.get("lastWaterChangeAt"), 40),
+                "lastTint": tint if tint in cultures_engine.TINTS else "",
+                "crashedAt": _awc_str(raw_state.get("crashedAt"), 40),
+                "seededFrom": _awc_str(raw_state.get("seededFrom"), 24),
+            },
+            "history": history[:60],
+        }
+    raw_bottle = raw.get("bottle") if isinstance(raw.get("bottle"), dict) else {}
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "tempEntity": _awc_str(raw.get("tempEntity"), 80),
+        "jars": jars,
+        "bottle": {
+            "volumeMl": _awc_num(raw_bottle.get("volumeMl"), 1000, 0, 20000),
+            "remainingMl": _awc_num(raw_bottle.get("remainingMl"), 0, 0, 20000),
+            "filledAt": _awc_str(raw_bottle.get("filledAt"), 40),
+            "doseMl": _awc_num(raw_bottle.get("doseMl"), 20, 0.5, 1000),
+        },
+    }
+
+
 def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, Any]:
     """Hatchery v2 (doc §9): vessels with per-BATCH egg/hours stamps, the brine
     dosing-container ledger, hatch history, hand-feed defaults, temp sensor.
@@ -1153,6 +1234,8 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
         },
         # Hatchery (v2): vessels, brine ledger, history — see _normalise_hatchery.
         "hatchery": _normalise_hatchery(raw_hatchery, bool(nps_cfg.get("enabled", False))),
+        # Live cultures (v1): rotifer / copepod jars — see _normalise_cultures.
+        "cultures": _normalise_cultures(nps_cfg.get("cultures")),
         # Feed truce (Stage C): plankton-hostile equipment pauses. The state
         # tracks exactly which entities the truce itself turned off — restore
         # never touches equipment the keeper had off already.
@@ -2839,7 +2922,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             # Only automatic entries carry a source; a hand-logged completion has none,
             # which is what lets the panel tell the two apart in history and the chart.
             if item.get("source") in (MAINTENANCE_SOURCE_AWC, MAINTENANCE_SOURCE_HATCHERY,
-                                      MAINTENANCE_SOURCE_MIXING):
+                                      MAINTENANCE_SOURCE_MIXING, MAINTENANCE_SOURCE_CULTURES):
                 safe_entry["source"] = item["source"]
             volume = item.get("volume")
             if isinstance(volume, (int, float)) and not isinstance(volume, bool):
@@ -7447,6 +7530,32 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                         dst_enrich["state"] = deepcopy(src_enrich["state"])
                     if isinstance(src_hatchery.get("history"), list):
                         dst_hatchery["history"] = deepcopy(src_hatchery["history"])
+
+            # Live cultures: per-jar state stamps + history and the bottle's
+            # level/stamp are written only by the cultures WS actions. Names,
+            # species, volumes, feed and cadence stay the client's; a jar the
+            # client removed stays removed.
+            src_cultures = stored_nps.get("cultures")
+            dst_cultures = incoming_nps.get("cultures")
+            if isinstance(src_cultures, dict):
+                if not isinstance(dst_cultures, dict):
+                    incoming_nps["cultures"] = deepcopy(src_cultures)
+                else:
+                    src_jars = (src_cultures.get("jars")
+                                if isinstance(src_cultures.get("jars"), dict) else {})
+                    dst_jars = dst_cultures.get("jars")
+                    if isinstance(dst_jars, dict):
+                        for jid, dst_jar in dst_jars.items():
+                            src_jar = src_jars.get(jid)
+                            if not (isinstance(src_jar, dict) and isinstance(dst_jar, dict)):
+                                continue
+                            if isinstance(src_jar.get("state"), dict):
+                                dst_jar["state"] = deepcopy(src_jar["state"])
+                            if isinstance(src_jar.get("history"), list):
+                                dst_jar["history"] = deepcopy(src_jar["history"])
+                    _copy_runtime_fields(
+                        src_cultures.get("bottle"), dst_cultures.get("bottle"),
+                        ("remainingMl", "filledAt"))
 
     stored_products = ((stored.get("consumables") or {}).get("products")
                        if isinstance(stored.get("consumables"), dict) else None)
@@ -13932,6 +14041,545 @@ async def websocket_nps_hand_feed(
     _awc_send(connection, msg, hass, config)
 
 
+# --------------------------------------------------------------------------- #
+# Live cultures (v1) — rotifer / copepod jars on day-scale clocks.
+# Doc: docs/live-cultures-brainstorm.md §7. Advisory throughout: the engine
+# says what is due, the keeper does it and taps; the ledgers keep count.
+# --------------------------------------------------------------------------- #
+def _nps_cultures_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    """Migration-safe view: run the block through the normaliser and write it
+    back so every caller sees jars/bottle in the current shape."""
+    nps_cfg = config.setdefault("nps", {})
+    nps_cfg["cultures"] = _normalise_cultures(nps_cfg.get("cultures"))
+    return nps_cfg["cultures"]
+
+
+def _cultures_task_id(jar_id: str, chore: str) -> str:
+    return f"{MAINTENANCE_CULTURE_TASK_PREFIX}{jar_id}_{chore}"
+
+
+def _cultures_log_completion(config: dict[str, Any], jar_id: str, chore: str,
+                             now: datetime, note: str) -> None:
+    """Mark the per-jar chore done (if the keeper added the reminder) — the
+    hatchery bridge's pattern: only touches tasks that exist, clears the
+    snooze in lockstep with the panel's _completeTask."""
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    task_id = _cultures_task_id(jar_id, chore)
+    if not isinstance(tasks, dict) or not isinstance(tasks.get(task_id), dict):
+        return
+    completions = maintenance.setdefault("completions", {})
+    if not isinstance(completions, dict):
+        completions = {}
+        maintenance["completions"] = completions
+    entries = completions.setdefault(task_id, [])
+    if not isinstance(entries, list):
+        entries = []
+        completions[task_id] = entries
+    stamp = now.isoformat()
+    entries.insert(0, {
+        "id": f"{task_id}:culture:{stamp}",
+        "timestamp": stamp,
+        "notes": note[:500],
+        "source": MAINTENANCE_SOURCE_CULTURES,
+    })
+    del entries[MAINTENANCE_COMPLETIONS_MAX:]
+    tasks[task_id]["snoozedUntil"] = None
+
+
+def _cultures_jar_for_msg(
+    connection: websocket_api.ActiveConnection, msg: dict[str, Any], cultures: dict[str, Any]
+) -> tuple[str, dict[str, Any]] | None:
+    jar_id = str(msg.get("jar_id") or "")
+    jar = cultures["jars"].get(jar_id)
+    if not isinstance(jar, dict):
+        connection.send_error(msg["id"], "unknown_jar", f"No culture jar '{jar_id}'")
+        return None
+    return jar_id, jar
+
+
+def _cultures_history(jar: dict[str, Any], event: str, now: datetime, **fields: Any) -> None:
+    history = jar.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        jar["history"] = history
+    row = {"event": event, "at": now.isoformat(), "ml": 0, "tint": "", "from": ""}
+    row.update({k: v for k, v in fields.items() if v is not None})
+    history.insert(0, row)
+    del history[60:]
+
+
+def _cultures_temp_c(hass: HomeAssistant, config: dict[str, Any], cultures: dict[str, Any]) -> float | None:
+    """The room the jars sit in: the cultures' own sensor, else the hatchery's
+    (same bench, usually) — advisory only, never moves a clock."""
+    hatchery = (config.get("nps") or {}).get("hatchery") or {}
+    for entity_id in (cultures.get("tempEntity"), hatchery.get("tempEntity")):
+        if not entity_id:
+            continue
+        state = hass.states.get(str(entity_id))
+        try:
+            return float(state.state) if state is not None else None
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any]) -> None:
+    """One feed = one dose off the linked phyto bottle (the shelf keeps count)."""
+    feed = jar.get("feed") if isinstance(jar.get("feed"), dict) else {}
+    product_id = str(feed.get("productId") or "")
+    if not product_id:
+        return
+    products = (config.get("consumables") or {}).get("products") or {}
+    product = products.get(product_id)
+    if isinstance(product, dict):
+        _consumable_debit(product, _awc_num(feed.get("doseMl"), 5, 0.5, 200), "dose")
+
+
+def _cultures_seed_jar(config: dict[str, Any], jar: dict[str, Any], now: datetime,
+                       seeded_from: str) -> None:
+    state = jar["state"]
+    state.update({
+        "startedAt": now.isoformat(), "lastRestartAt": now.isoformat(),
+        "lastFedAt": now.isoformat(), "lastHarvestAt": "", "lastWaterChangeAt": "",
+        "lastTint": "green", "crashedAt": "", "seededFrom": seeded_from,
+    })
+    _cultures_history(jar, "seeded", now, **({"from": seeded_from} if seeded_from else {}))
+
+
+def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
+    """The Cultures tab's whole state, backend computed (the lockstep rule):
+    per-jar clocks + advice, the bottle's clock, the room against each
+    species band, and the presets the settings picker offers."""
+    now = datetime.now(timezone.utc)
+    cultures = _nps_cultures_cfg(config)
+    products = (config.get("consumables") or {}).get("products") or {}
+    temp_c = _cultures_temp_c(hass, config, cultures)
+    jars_payload = []
+    due_count = 0
+    producing_by_species: dict[str, list[str]] = {}
+    for jid in sorted(cultures["jars"]):
+        jar = cultures["jars"][jid]
+        st = cultures_engine.culture_state(jar, now)
+        if st["status"] == "producing":
+            producing_by_species.setdefault(jar["species"], []).append(jid)
+    for jid in sorted(cultures["jars"]):
+        jar = cultures["jars"][jid]
+        preset = cultures_engine.species_preset(jar["species"])
+        st = cultures_engine.culture_state(jar, now)
+        cad = st["cadence"]
+        due = [key for key in ("feed", "harvest", "restart", "waterChange")
+               if st[key].get("due")]
+        due_count += len(due)
+        feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"])
+        product = products.get(jar["feed"]["productId"]) if jar["feed"]["productId"] else None
+        jars_payload.append({
+            "id": jid, "name": jar["name"], "species": jar["species"],
+            "speciesName": preset["name"], "kind": preset["kind"], "latin": preset["latin"],
+            "volumeL": jar["volumeL"], "salinityPpt": jar["salinityPpt"],
+            "sieveUm": preset["sieveUm"], "note": preset["note"],
+            "feed": {
+                "productId": jar["feed"]["productId"],
+                "productName": product.get("name") if isinstance(product, dict) else None,
+                "doseMl": jar["feed"]["doseMl"],
+            },
+            "cadence": cad,
+            "state": {k: v for k, v in st.items() if k != "cadence"},
+            "tint": jar["state"]["lastTint"],
+            "due": due,
+            "feedAdvice": feed_advice,
+            "temp": cultures_engine.temperature_advice(temp_c, jar["species"]),
+            "harvestGuide": cultures_engine.refill_guide(
+                jar["volumeL"], cad["harvestPct"], jar["salinityPpt"]),
+            "restartGuide": cultures_engine.refill_guide(jar["volumeL"], 100, jar["salinityPpt"]),
+            "waterChangeGuide": cultures_engine.refill_guide(
+                jar["volumeL"], cad["waterChangePct"], jar["salinityPpt"]),
+            "hasBottle": awc_engine._f(preset["bottleShelfDays"]) > 0,
+            "seededFrom": jar["state"]["seededFrom"],
+            # A crashed jar wants reseeding from a producing sibling of the
+            # same species; a producing one can be split into an idle jar.
+            "reseedFrom": [j for j in producing_by_species.get(jar["species"], []) if j != jid],
+            "history": list(jar["history"][:12]),
+        })
+    rotifer_shelf_days = cultures_engine.species_preset("rotifer_L")["bottleShelfDays"]
+    bottle = cultures["bottle"]
+    idle = [j["id"] for j in jars_payload if j["state"]["status"] in ("none", "crashed")]
+    return {
+        "enabled": bool(cultures["enabled"]),
+        "jars": jars_payload,
+        "dueCount": due_count,
+        "idleJars": idle,
+        "canAddJar": len(cultures["jars"]) < cultures_engine.CULTURE_JARS_MAX,
+        "bottle": {
+            **cultures_engine.bottle_state(bottle, rotifer_shelf_days, now),
+            "volumeMl": bottle["volumeMl"], "doseMl": bottle["doseMl"],
+            "shelfDays": rotifer_shelf_days,
+        },
+        "tempC": round(temp_c, 1) if temp_c is not None else None,
+        "species": [dict(s) for s in cultures_engine.SPECIES],
+        "tints": list(cultures_engine.TINTS),
+        "maxJars": cultures_engine.CULTURE_JARS_MAX,
+    }
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/cultures_summary"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_summary(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    connection.send_result(msg["id"], _cultures_summary_payload(hass, _config_from_entry(entry)))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_seed",
+    vol.Required("jar_id"): str,
+    vol.Optional("from_jar_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_seed(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """A starter (or a sibling's harvest) just went into the jar: stamp every
+    clock from now. A running jar refuses — crash or restart it instead."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    now = datetime.now(timezone.utc)
+    status = cultures_engine.culture_state(jar, now)["status"]
+    if status not in ("none", "crashed"):
+        connection.send_error(msg["id"], "jar_busy", f"{jar['name']} is already running")
+        return
+    seeded_from = str(msg.get("from_jar_id") or "")
+    if seeded_from and seeded_from not in cultures["jars"]:
+        connection.send_error(msg["id"], "unknown_jar", f"No culture jar '{seeded_from}'")
+        return
+    _cultures_seed_jar(config, jar, now, seeded_from)
+    source_name = cultures["jars"][seeded_from]["name"] if seeded_from else ""
+    _append_activity(
+        config,
+        f"{jar['name']} seeded" + (f" from {source_name}" if source_name else " from a starter")
+        + " — the culture clocks are running", "control")
+    _mixing_hatchery_debit(hass, config, jar["volumeL"], f"seeding {jar['name']}")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_log",
+    vol.Required("jar_id"): str,
+    vol.Optional("tint"): str,
+    vol.Optional("fed"): bool,
+    vol.Optional("harvested"): bool,
+    vol.Optional("ml"): vol.Any(int, float),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_log(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The daily tap: the tint you saw, whether you fed, whether you harvested.
+    A feed debits the phyto bottle; a rotifer harvest fills the fridge bottle
+    (oldest stamp wins — a top-up never resets the clock) and its refill comes
+    out of the mixing vessel; both log their reminders done."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    now = datetime.now(timezone.utc)
+    st = cultures_engine.culture_state(jar, now)
+    if st["status"] in ("none", "crashed"):
+        connection.send_error(msg["id"], "jar_idle", f"{jar['name']} is not running — seed it first")
+        return
+    tint = str(msg.get("tint") or "")
+    fed = bool(msg.get("fed"))
+    harvested = bool(msg.get("harvested"))
+    if not (fed or harvested or tint in cultures_engine.TINTS):
+        connection.send_error(msg["id"], "nothing_to_log", "Log a tint, a feed or a harvest")
+        return
+    state = jar["state"]
+    preset = cultures_engine.species_preset(jar["species"])
+    notes = []
+    if tint in cultures_engine.TINTS:
+        state["lastTint"] = tint
+        notes.append(f"water {tint}")
+    if fed:
+        state["lastFedAt"] = now.isoformat()
+        _cultures_feed_debit(config, jar)
+        _cultures_log_completion(config, jar_id, "feed", now,
+                                 "Logged automatically — fed from the Cultures tab")
+        notes.append("fed")
+    harvest_ml = 0.0
+    if harvested:
+        if st["status"] == "establishing":
+            connection.send_error(
+                msg["id"], "establishing",
+                f"{jar['name']} is still establishing — first harvest in ~{st['harvest']['hoursUntil']} h")
+            return
+        guide = cultures_engine.refill_guide(jar["volumeL"], st["cadence"]["harvestPct"],
+                                             jar["salinityPpt"])
+        harvest_ml = _awc_num(msg.get("ml"), guide["totalMl"], 1, 50000)
+        state["lastHarvestAt"] = now.isoformat()
+        if awc_engine._f(preset["bottleShelfDays"]) > 0:
+            bottle = cultures["bottle"]
+            was_empty = awc_engine._f(bottle["remainingMl"]) <= 0
+            cap = awc_engine._f(bottle["volumeMl"])
+            new_ml = awc_engine._f(bottle["remainingMl"]) + harvest_ml
+            bottle["remainingMl"] = round(min(new_ml, cap) if cap > 0 else new_ml, 1)
+            if was_empty or not bottle["filledAt"]:
+                bottle["filledAt"] = now.isoformat()
+            if cap > 0 and new_ml > cap:
+                _append_activity(config, f"Rotifer bottle full — {round(new_ml - cap)} ml over the top",
+                                 "warning")
+        _cultures_log_completion(config, jar_id, "harvest", now,
+                                 f"Logged automatically — {round(harvest_ml)} ml harvested on the Cultures tab")
+        # The refill is fresh 35 ppt out of the mixing vessel (doc §3.1).
+        _mixing_hatchery_debit(hass, config, harvest_ml / 1000.0, f"refilling {jar['name']}")
+        notes.append(f"harvested {round(harvest_ml)} ml")
+    _cultures_history(jar, "harvest" if harvested else ("feed" if fed else "tint"), now,
+                      ml=round(harvest_ml, 1) if harvested else 0,
+                      tint=state["lastTint"] if tint in cultures_engine.TINTS else None)
+    _append_activity(config, f"{jar['name']}: " + ", ".join(notes), "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_restart",
+    vol.Required("jar_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_restart(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Sieve-and-restart: the whole jar through the mesh into a clean one
+    with fresh water — the restart clock rewinds, the age does not."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    now = datetime.now(timezone.utc)
+    if cultures_engine.culture_state(jar, now)["status"] in ("none", "crashed"):
+        connection.send_error(msg["id"], "jar_idle", f"{jar['name']} is not running — seed it first")
+        return
+    jar["state"]["lastRestartAt"] = now.isoformat()
+    jar["state"]["lastFedAt"] = now.isoformat()
+    jar["state"]["lastTint"] = "green"
+    _cultures_feed_debit(config, jar)
+    _cultures_history(jar, "restart", now, ml=round(jar["volumeL"] * 1000))
+    _cultures_log_completion(config, jar_id, "restart", now,
+                             "Logged automatically — sieved into a clean jar from the Cultures tab")
+    _append_activity(config, f"{jar['name']} restarted in a clean jar — the fortnight clock rewinds",
+                     "control")
+    _mixing_hatchery_debit(hass, config, jar["volumeL"], f"restarting {jar['name']}")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_water_change",
+    vol.Required("jar_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_water_change(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The copepod jar's partial water change (rotifers never need one — the
+    harvest is the change)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    now = datetime.now(timezone.utc)
+    st = cultures_engine.culture_state(jar, now)
+    if st["status"] in ("none", "crashed"):
+        connection.send_error(msg["id"], "jar_idle", f"{jar['name']} is not running — seed it first")
+        return
+    pct = st["cadence"]["waterChangePct"]
+    if pct <= 0:
+        connection.send_error(msg["id"], "no_water_change",
+                              f"{jar['name']} has no water-change chore — its harvest is the change")
+        return
+    guide = cultures_engine.refill_guide(jar["volumeL"], pct, jar["salinityPpt"])
+    jar["state"]["lastWaterChangeAt"] = now.isoformat()
+    _cultures_history(jar, "water_change", now, ml=guide["totalMl"])
+    _cultures_log_completion(config, jar_id, "water_change", now,
+                             f"Logged automatically — {guide['totalMl']} ml changed on the Cultures tab")
+    _append_activity(config, f"{jar['name']}: {guide['totalMl']} ml water change", "control")
+    _mixing_hatchery_debit(hass, config, guide["totalMl"] / 1000.0, f"changing water in {jar['name']}")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_split",
+    vol.Required("jar_id"): str,
+    vol.Optional("into_jar_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_split(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Split into B: a producing jar seeds an idle (or crashed) one — or a
+    brand-new jar of the same species — so a crash never zeroes the keeper.
+    The source keeps its clocks; the new jar starts its own, which is exactly
+    the stagger the backup needs."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    now = datetime.now(timezone.utc)
+    st = cultures_engine.culture_state(jar, now)
+    if st["status"] != "producing":
+        connection.send_error(msg["id"], "not_producing",
+                              f"{jar['name']} is not producing yet — let it establish first")
+        return
+    jars = cultures["jars"]
+    into_id = str(msg.get("into_jar_id") or "")
+    if into_id and into_id not in jars:
+        connection.send_error(msg["id"], "unknown_jar", f"No culture jar '{into_id}'")
+        return
+    if not into_id:
+        into_id = next((jid for jid in sorted(jars) if jid != jar_id
+                        and cultures_engine.culture_state(jars[jid], now)["status"] in ("none", "crashed")
+                        and jars[jid]["species"] == jar["species"]), "")
+    if not into_id:
+        if len(jars) >= cultures_engine.CULTURE_JARS_MAX:
+            connection.send_error(msg["id"], "jars_full",
+                                  f"All {cultures_engine.CULTURE_JARS_MAX} jars are in use")
+            return
+        into_id = next(f"c{n}" for n in range(1, cultures_engine.CULTURE_JARS_MAX + 2)
+                       if f"c{n}" not in jars)
+        base = jar["name"]
+        new_name = (base[:-2] + " B") if base.endswith(" A") else f"{base} B"
+        jars[into_id] = {
+            "name": new_name[:40], "species": jar["species"], "volumeL": jar["volumeL"],
+            "salinityPpt": jar["salinityPpt"], "feed": dict(jar["feed"]),
+            "cadence": dict(jar["cadence"]), "state": {}, "history": [],
+        }
+        cultures = _nps_cultures_cfg(config)
+        jars = cultures["jars"]
+        jar = jars[jar_id]
+    target = jars[into_id]
+    if cultures_engine.culture_state(target, now)["status"] not in ("none", "crashed"):
+        connection.send_error(msg["id"], "jar_busy", f"{target['name']} is already running")
+        return
+    _cultures_seed_jar(config, target, now, jar_id)
+    _cultures_history(jar, "split", now, **{"from": into_id})
+    _append_activity(config, f"{jar['name']} split into {target['name']} — a backup out of phase",
+                     "control")
+    _mixing_hatchery_debit(hass, config, target["volumeL"], f"splitting into {target['name']}")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_crash",
+    vol.Required("jar_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_crash(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """It crashed. Honest stamp, honest journal — the payload then offers a
+    reseed from any producing sibling."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    now = datetime.now(timezone.utc)
+    if cultures_engine.culture_state(jar, now)["status"] in ("none", "crashed"):
+        connection.send_error(msg["id"], "jar_idle", f"{jar['name']} is not running")
+        return
+    jar["state"]["crashedAt"] = now.isoformat()
+    _cultures_history(jar, "crashed", now, tint=jar["state"]["lastTint"] or None)
+    _append_activity(config, f"{jar['name']} crashed — reseed from a sibling or a fresh starter",
+                     "warning")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_bottle",
+    vol.Required("action"): vol.In(("fed", "empty")),
+    vol.Optional("ml"): vol.Any(int, float),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_bottle(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The rotifer fridge bottle: 'fed' debits a dose by hand, 'empty' tips
+    a stale one out and clears its clock."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    bottle = cultures["bottle"]
+    if msg["action"] == "empty":
+        bottle["remainingMl"] = 0
+        bottle["filledAt"] = ""
+        _append_activity(config, "Rotifer bottle emptied", "control")
+    else:
+        ml = _awc_num(msg.get("ml"), bottle["doseMl"], 0.5, 5000)
+        bottle["remainingMl"] = round(max(0.0, awc_engine._f(bottle["remainingMl"]) - ml), 1)
+        if bottle["remainingMl"] <= 0:
+            bottle["filledAt"] = ""
+        _append_activity(config, f"Fed {round(ml)} ml of rotifers from the bottle", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/nps_summary"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -18254,6 +18902,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_nps_hatch_clock)
     websocket_api.async_register_command(hass, websocket_nps_reservoir_discard)
     websocket_api.async_register_command(hass, websocket_nps_hand_feed)
+    websocket_api.async_register_command(hass, websocket_cultures_summary)
+    websocket_api.async_register_command(hass, websocket_cultures_seed)
+    websocket_api.async_register_command(hass, websocket_cultures_log)
+    websocket_api.async_register_command(hass, websocket_cultures_restart)
+    websocket_api.async_register_command(hass, websocket_cultures_water_change)
+    websocket_api.async_register_command(hass, websocket_cultures_split)
+    websocket_api.async_register_command(hass, websocket_cultures_crash)
+    websocket_api.async_register_command(hass, websocket_cultures_bottle)
     websocket_api.async_register_command(hass, websocket_nps_hatch_enrich)
     websocket_api.async_register_command(hass, websocket_nps_enrich_loaded)
     websocket_api.async_register_command(hass, websocket_nps_enrich_dose)

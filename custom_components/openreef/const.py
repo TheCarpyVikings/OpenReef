@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.116"
+INTEGRATION_VERSION = "0.7.117"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -264,6 +264,12 @@ MAINTENANCE_SOURCE_HATCHERY = "hatchery"
 MAINTENANCE_HATCH_START_TASK_ID = "brine_hatch_start"
 MAINTENANCE_HATCH_HARVEST_TASK_ID = "brine_hatch_harvest"
 MAINTENANCE_HAND_FEED_TASK_ID = "brine_hand_feed"
+
+# Culture-driven completions (rotifer / copepod jars): the daily tap, a
+# restart or a water change on the Cultures tab logs the matching per-jar
+# chore done. Task ids are culture_<jarId>_<chore> (seeded by a panel button).
+MAINTENANCE_SOURCE_CULTURES = "cultures"
+MAINTENANCE_CULTURE_TASK_PREFIX = "culture_"
 
 # Mixing-station-driven completions: a logged salinity test (first pass or a
 # retest) marks the keeper-added retest chore done, so its due clock always
@@ -1493,6 +1499,16 @@ DEFAULT_CORE_CONFIG = {
             "eggType": "standard",
             "hatchHours": 24,
             "state": {},
+        },
+        # Live cultures (v1): rotifer / copepod jars — standing populations on
+        # day-scale clocks (feed / harvest / restart / water change), a rotifer
+        # fridge bottle, species presets in cultures.py. The normaliser owns
+        # the per-jar schema; jars are keeper-created like hatchery vessels.
+        "cultures": {
+            "enabled": False,
+            "tempEntity": "",
+            "jars": {},
+            "bottle": {"volumeMl": 1000, "remainingMl": 0, "filledAt": "", "doseMl": 20},
         },
     },
     # Consumables — the system-wide bottle tracker (foods, phyto, bacteria,

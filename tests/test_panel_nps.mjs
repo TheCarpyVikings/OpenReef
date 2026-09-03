@@ -114,7 +114,7 @@ test("the tab renders the informative sections without placeholder leaks", async
   try {
     const panel = await npsPanel();
     const html = panel._npsTab();
-    for (const marker of ["Feeding station", "Food pumps", "Hatchery", "Food shelf",
+    for (const marker of ["Feeding station", "Food pumps", "Brine hatchery", "Food shelf",
       "Feed exchange", "Water exchange"]) {
       assert(html.includes(marker), `missing section: ${marker}`);
     }
@@ -411,7 +411,7 @@ test("the hatchery card walks its lifecycle: empty, incubating, ready, overdue",
     panel._config.nps.feedExchange.enabled = false;
     panel._config.nps.feedExchange.channelId = "";
     const ungated = withHatch({ status: "none" });
-    assert(ungated.includes("Hatchery"), "hatchery hidden when the exchange is off");
+    assert(ungated.includes("Brine hatchery"), "hatchery hidden when the exchange is off");
     assert(ungated.includes("Start hatch"), "hatchery unusable when the exchange is off");
   } finally { restore(); }
 });
@@ -663,7 +663,7 @@ test("the rig blueprint lives on the Hatchery tab; NPS keeps a compact door", as
     panel._nps.summary.hatchery = v2HatcherySummary();
     // NPS tab: compact strip, a door to the Hatchery, and NO blueprint.
     let html = panel._npsTab();
-    assert(html.includes("Open Hatchery"), "the door to the Hatchery tab is missing from NPS");
+    assert(html.includes("Open Brine hatchery"), "the door to the Brine hatchery tab is missing from NPS");
     assert(!html.includes("120 µm mesh"), "the blueprint must live on the Hatchery tab only");
     // Hatchery tab: the rig is the hero, always open.
     html = panel._hatcheryTab();
