@@ -1287,6 +1287,8 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "spawn-exec-resume") this._spawnExecResume();
       if (action === "spawn-exec-refresh") this._loadSpawnExecStatus(true);
+      if (action === "cooling-refresh") this._loadCoolingStatus(true);
+      if (action === "cooling-dehum") this._coolingDehumidifier(id);
       if (action === "spawn-exec-pargate") this._spawnExecToggleParGate();
       if (action === "icp-subview") {
         this._icp.subview = id || "dashboard";
@@ -2684,7 +2686,14 @@ class OpenReefPanel extends HTMLElement {
         const cool = this._config.coolingHeadroom = this._config.coolingHeadroom || {};
         cool[field] = target.type === "checkbox" ? value
           : target.type === "number" ? Number(value) : value;
-        if ((field === "enabled" || field === "targetMode") && event.type === "change") this._render();
+        if ((field === "enabled" || field === "targetMode" || field === "weatherEntity") && event.type === "change") this._render();
+      }
+      if (scope === "cooling-dehum") {
+        const cool = this._config.coolingHeadroom = this._config.coolingHeadroom || {};
+        const dehum = cool.dehumidifier = cool.dehumidifier || {};
+        dehum[field] = target.type === "checkbox" ? value
+          : target.type === "number" ? Number(value) : value;
+        if ((field === "mode" || field === "armed") && event.type === "change") this._render();
       }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
@@ -24646,11 +24655,47 @@ const rigSteps = [
     }
     const pct = Math.round(Number(result.index || 0) * 100);
     const detail = `dew point ${Number(result.dewC).toFixed(1)} °C vs tank ${Number(result.waterC).toFixed(1)} °C · room ${Number(result.roomC).toFixed(1)} °C at ${Math.round(Number(result.rh))} %`;
+    const projection = status.projection || null;
+    const plan = status.plan || null;
+    const vent = status.vent || null;
+    const worstPct = projection?.worst ? Math.round(Number(projection.worst.index) * 100) : null;
     return {
       band: result.band, pill: this._coolingPillClass(result.band), label: result.title,
       pct, needed: Boolean(status.fanNeeded), warn: Boolean(status.warn), detail,
       status: result.status, netFan: result.netFan,
+      dayKind: projection?.dayKind || "", dayKindLabel: projection?.dayKindLabel || "",
+      worstPct, firstAffectedAt: projection?.firstAffectedAt || null,
+      plan, planActive: Boolean(plan && (plan.kind === "now" || plan.kind === "ahead")),
+      ventAdvised: Boolean(vent && vent.advised), ventReason: vent?.reason || "",
     };
+  }
+
+  _coolingHhmm(iso) {
+    if (!iso) return "?";
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "?" : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  // The plan line every surface shares: what the dehumidifier should do and why.
+  _coolingPlanLine(sum) {
+    const plan = sum?.plan;
+    if (!plan) return "";
+    if (plan.kind === "now" || plan.kind === "ahead") return `Dehumidify now — ${plan.reason}`;
+    if (plan.kind === "scheduled") return `Dehumidifier: ${plan.reason}`;
+    if (plan.kind === "unrescuable") return `Chiller day — ${plan.reason}`;
+    return "";
+  }
+
+  async _coolingDehumidifier(action) {
+    if (!["run", "stop", "resume"].includes(action)) return;
+    try {
+      await this._callWS({ type: "openreef/cooling_dehumidifier", action });
+      this._message = action === "resume" ? "Hold cleared — the plan has the dehumidifier again."
+        : `Dehumidifier switched ${action === "run" ? "on" : "off"}.`;
+    } catch (err) {
+      this._error = err?.message || "Could not switch the dehumidifier";
+    }
+    this._loadCoolingStatus(true);
   }
 
   _coolingMissionRow() {
@@ -24659,7 +24704,9 @@ const rigSteps = [
     const sum = this._coolingSummary();
     const pill = sum ? sum.pill : "unknown";
     const value = sum && sum.pct != null ? `${sum.pct} % fan effect` : sum ? sum.label : "Loading…";
-    const detail = sum ? (sum.needed ? sum.detail : `${sum.detail} · fans not needed right now`) : "";
+    let detail = sum ? (sum.needed ? sum.detail : `${sum.detail} · fans not needed right now`) : "";
+    if (sum && sum.planActive) detail += ` · ${this._coolingPlanLine(sum)}`;
+    else if (sum && sum.plan?.kind === "scheduled") detail += ` · drops to ${sum.worstPct} % from ${this._coolingHhmm(sum.firstAffectedAt)}`;
     return `
       <button class="row row-link" data-action="tab" data-id="settings" aria-label="Cooling headroom — Open settings">
         <div>
@@ -24681,10 +24728,41 @@ const rigSteps = [
     if (sum.warn) {
       return { key: "cooling", kicker: "Cooling headroom", title: sum.label, detail: sum.detail, status: sum.status || "warning" };
     }
+    if (sum.plan?.kind === "unrescuable") {
+      return { key: "cooling", kicker: "Cooling headroom", title: "Chiller day", detail: sum.plan.reason, status: "critical" };
+    }
+    if (sum.planActive) {
+      return { key: "cooling", kicker: "Cooling headroom", title: sum.ventAdvised ? "Vent the room now" : "Dehumidify now", detail: sum.ventAdvised ? sum.ventReason : sum.plan.reason, status: "warning" };
+    }
+    if (sum.plan?.kind === "scheduled") {
+      return { key: "cooling", kicker: "Cooling headroom", title: `Humid-heat day — dehumidifier by ${this._coolingHhmm(sum.plan.startAt)}`, detail: `${sum.plan.reason} · now ${sum.pct} %`, status: "ok" };
+    }
     if (!sum.needed && (sum.band === "weak" || sum.band === "dead" || sum.band === "reversed")) {
       return { key: "cooling", kicker: "Cooling headroom", title: "Humid, but the fans aren't needed", detail: `${sum.detail} · the room is below the cooling gate`, status: "ok" };
     }
-    return { key: "cooling", kicker: "Cooling headroom", title: `${sum.label} — ${sum.pct} %`, detail: sum.detail, status: "ok" };
+    const kind = sum.dayKindLabel ? ` · ${sum.dayKindLabel}` : "";
+    return { key: "cooling", kicker: "Cooling headroom", title: `${sum.label} — ${sum.pct} %`, detail: `${sum.detail}${kind}`, status: "ok" };
+  }
+
+  // The 24 h strip: one cell per forecast hour, coloured by band; affected
+  // hours (fans needed AND losing) get a marker. Pure render of the backend rows.
+  _coolingForecastStrip(status) {
+    const proj = status?.projection;
+    if (!proj || !Array.isArray(proj.hours) || !proj.hours.length) return "";
+    const cells = proj.hours.map((h) => `
+      <div class="cooling-hour ${this._escape(h.band)} ${h.affected ? "affected" : ""} ${h.fanNeeded ? "" : "idle"}" title="${this._escape(`${this._coolingHhmm(h.at)} · room ${h.roomC} °C at ${h.rh} % · dew ${h.dewC} °C · outdoor ${h.outC} °C / dew ${h.outDewC} °C`)}">
+        <small>${this._coolingHhmm(h.at)}</small>
+        <strong>${Math.round(Number(h.index) * 100)}</strong>
+        <span>${Number(h.roomC).toFixed(0)}°</span>
+      </div>`).join("");
+    const purge = proj.purgeWindow ? `<small class="hint">Coolest outdoor air ${this._coolingHhmm(proj.purgeWindow.from)}–${this._coolingHhmm(proj.purgeWindow.to)} (${Number(proj.purgeWindow.outC).toFixed(0)} °C) — the night-purge window for the intake fan.</small>` : "";
+    return `
+      <div class="cooling-strip-wrap">
+        <p class="eyebrow">${this._escape(proj.dayKindLabel || "")} · next ${proj.hours.length} h</p>
+        <div class="cooling-strip">${cells}</div>
+        <small class="hint">Fan effect % per hour, room ${Number(proj.offsets?.offsetT ?? 0).toFixed(1)} °C over and dew point ${Number(proj.offsets?.offsetDew ?? 0).toFixed(1)} °C over the forecast (learned from the live difference). Greyed hours: fans not needed. Marked hours: needed and losing.</small>
+        ${purge}
+      </div>`;
   }
 
   _coolingWhatIfTable(status) {
@@ -24741,13 +24819,73 @@ const rigSteps = [
         <span><strong>Notify when the fans lose it</strong><small>One notification per band per six hours; the Log tab records every transition either way.</small></span>
       </label>
       ${live}
-      <small class="hint">Where the humidity sensor sits matters more here than anywhere: high up and away from the tank reads the room the fans breathe, not the sump's plume. Next: the 24-hour forecast and the dehumidifier trigger.</small>`;
+      ${this._coolingLayer2Settings(cfg, status, sum)}
+      <small class="hint">Where the humidity sensor sits matters more here than anywhere: high up and away from the tank reads the room the fans breathe, not the sump's plume.</small>`;
     return this._settingsPanel(
       "cooling",
       "Cooling headroom",
       "Will evaporative cooling work today? Dew point against the tank, not humidity.",
       content,
     );
+  }
+
+  // Layer 2: the forecast, the day kind, vent advice and the dehumidifier.
+  _coolingLayer2Settings(cfg, status, sum) {
+    const dehum = cfg.dehumidifier || {};
+    const mode = ["off", "advise", "auto"].includes(dehum.mode) ? dehum.mode : "advise";
+    const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    const weatherBound = Boolean(cfg.weatherEntity);
+    const ds = status?.dehumidifier || {};
+    const pill = (state) => !state || state === "unavailable" || state === "unknown"
+      ? `<span class="pill warning">unavailable</span>`
+      : `<span class="pill ${state === "on" ? "ok" : "unknown"}">${state === "on" ? "ON" : "OFF"}</span>`;
+    const planLine = sum ? this._coolingPlanLine(sum) : "";
+    const readout = !cfg.enabled || !status ? "" : `
+      ${this._coolingForecastStrip(status)}
+      ${weatherBound && !status.projection ? `<small class="hint">${this._escape(status.issues?.forecast || status.issues?.weather || "Waiting for the first forecast read (within five minutes of saving).")}</small>` : ""}
+      ${status.vent?.known ? `<p class="hint">${status.vent.advised ? "🪟 " : ""}<strong>Vent:</strong> ${this._escape(status.vent.reason)}${status.weather?.outC != null ? ` · outdoor ${Number(status.weather.outC).toFixed(1)} °C at ${status.weather.outRh} %` : ""}</p>` : ""}
+      ${planLine ? `<p class="hint"><strong>Plan:</strong> ${this._escape(planLine)}</p>` : status.plan ? `<p class="hint"><strong>Plan:</strong> ${this._escape(status.plan.reason)}</p>` : ""}
+      ${dehum.switchEntity ? `
+      <div class="spawn-channel-row">
+        <strong>Dehumidifier</strong>
+        ${pill(ds.state)}
+        <small class="hint">${ds.controlling ? "OpenReef is driving the plug" : mode === "auto" ? "auto, but not armed — advice only" : mode === "off" ? "off — no advice, no control" : "advise mode — OpenReef tells you, you switch"}${ds.override ? ` · held ${ds.override.state} by hand since ${this._coolingHhmm(ds.override.since)}` : ""}</small>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="cooling-dehum" data-id="run">Run now</button>
+          <button class="secondary compact-button" data-action="cooling-dehum" data-id="stop">Stop</button>
+          ${ds.override ? `<button class="secondary compact-button" data-action="cooling-dehum" data-id="resume">Give it back to the plan</button>` : ""}
+          <button class="secondary compact-button" data-action="cooling-refresh">Refresh</button>
+        </div>
+      </div>` : ""}`;
+    return `
+      <div class="awc-section-title"><p class="eyebrow">Forecast + dehumidifier</p></div>
+      <small class="hint">Bind a weather entity and OpenReef projects the next day hour by hour — room temperature and dew point follow the outdoor forecast plus the live indoor offset — and tells you when the fans will lose it and when to start the dehumidifier so its heat lands before the peak, not in it. If outdoor air is drier, it says vent instead. Advise tells you; auto switches a plug. Efficiency, never safety: it fails off and the fan/guard stay the backstop.</small>
+      <div class="grid two">
+        <label><span>Weather entity <small>hourly forecast — HA's built-in weather.home works</small></span>${this._awcEntitySelect("cooling", "", "weatherEntity", cfg.weatherEntity || "", "weather")}</label>
+        <label><span>Look ahead (hours)</span><input type="number" min="6" max="48" step="1" value="${num(cfg.lookaheadHours, 24)}" data-scope="cooling" data-field="lookaheadHours" /></label>
+        <label><span>Dehumidifier</span>
+          <select data-scope="cooling-dehum" data-field="mode">
+            <option value="off" ${mode === "off" ? "selected" : ""}>Off</option>
+            <option value="advise" ${mode === "advise" ? "selected" : ""}>Advise — tell me when</option>
+            <option value="auto" ${mode === "auto" ? "selected" : ""}>Auto — switch the plug</option>
+          </select></label>
+        <label><span>Dehumidifier plug <small>a dumb unit's own humidistat must sit at its lowest / continuous</small></span>${this._awcEntitySelect("cooling-dehum", "", "switchEntity", dehum.switchEntity || "", "switch")}</label>
+        <label><span>Start ahead (hours)</span><input type="number" min="0" max="12" step="0.5" value="${num(dehum.leadHours, 3)}" data-scope="cooling-dehum" data-field="leadHours" /></label>
+        <label><span>Max run (hours)</span><input type="number" min="1" max="24" step="1" value="${num(dehum.maxRunHours, 8)}" data-scope="cooling-dehum" data-field="maxRunHours" /></label>
+        <label><span>Min on (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(dehum.minOnMinutes, 20)}" data-scope="cooling-dehum" data-field="minOnMinutes" /></label>
+        <label><span>Min off (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(dehum.minOffMinutes, 10)}" data-scope="cooling-dehum" data-field="minOffMinutes" /></label>
+        <label><span>If you switch it by hand</span>
+          <select data-scope="cooling-dehum" data-field="overridePolicy">
+            <option value="hold" ${dehum.overridePolicy !== "reassert" ? "selected" : ""}>Hold until the plan changes</option>
+            <option value="reassert" ${dehum.overridePolicy === "reassert" ? "selected" : ""}>Re-assert the plan within a tick</option>
+          </select></label>
+      </div>
+      ${mode === "auto" ? `
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="cooling-dehum" data-field="armed" ${dehum.armed ? "checked" : ""} ${dehum.switchEntity ? "" : "disabled"}>
+        <span><strong>Armed — OpenReef switches the dehumidifier</strong><small>Needs a plug. Compressor guards: min on/off, max run then a bucket nudge. Leaving auto switches it off once and lets go.</small></span>
+      </label>` : ""}
+      ${readout}`;
   }
 
   // Hatchery settings — its own section (0.7.71): breeders configure a
@@ -28378,6 +28516,18 @@ const rigSteps = [
         .cooling-cell.thin { color: #facc15; font-weight: 600; }
         .cooling-cell.weak { color: #fb923c; font-weight: 600; }
         .cooling-cell.dead, .cooling-cell.reversed { color: #f87171; font-weight: 600; }
+        .cooling-strip-wrap { display: grid; gap: 6px; }
+        .cooling-strip { display: flex; gap: 3px; overflow-x: auto; padding-bottom: 4px; }
+        .cooling-hour { flex: 0 0 44px; display: grid; gap: 1px; text-align: center; border-radius: 6px; padding: 5px 2px; border: 1px solid #24364a; background: #0b1724; }
+        .cooling-hour small { color: #9fb2c7; font-size: 10px; }
+        .cooling-hour strong { font-size: 14px; line-height: 1.1; }
+        .cooling-hour span { color: #9fb2c7; font-size: 11px; }
+        .cooling-hour.good strong { color: #4ade80; }
+        .cooling-hour.thin strong { color: #facc15; }
+        .cooling-hour.weak strong { color: #fb923c; }
+        .cooling-hour.dead strong, .cooling-hour.reversed strong { color: #f87171; }
+        .cooling-hour.idle { opacity: .45; }
+        .cooling-hour.affected { border-color: #f87171; box-shadow: inset 0 -3px 0 #f87171; }
         .icp-subnav, .icp-choice-row, .icp-symbol-row, .icp-lab-legend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
         .icp-subnav { margin-top: -6px; }
         .icp-subnav button, .icp-choice-row button, .icp-symbol-row button { border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #dcecff; min-height: 36px; padding: 8px 12px; }

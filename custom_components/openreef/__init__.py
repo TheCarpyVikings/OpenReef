@@ -162,6 +162,9 @@ from .const import (
     COOLING_TICK_SECONDS,
     COOLING_STALE_MINUTES,
     COOLING_NOTIFY_COOLDOWN_S,
+    COOLING_FORECAST_TTL_S,
+    COOLING_LOOKAHEAD_MIN_H,
+    COOLING_LOOKAHEAD_MAX_H,
     SPAWNING_TARGET_TEMP_ENTITY,
     SPAWNING_TEMP_DRIFT_ALERT_C,
     SPAWNING_TEMP_PLAUSIBLE_MAX_C,
@@ -971,6 +974,9 @@ def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
     bands["thin"] = max(bands["thin"], bands["weak"] + 0.01)
     bands["good"] = max(bands["good"], bands["thin"] + 0.01)
     mode = str(raw.get("targetMode", defaults["targetMode"]))
+    d_defaults = defaults["dehumidifier"]
+    raw_d = raw.get("dehumidifier") if isinstance(raw.get("dehumidifier"), dict) else {}
+    mode_d = str(raw_d.get("mode", d_defaults["mode"]))
     return {
         "enabled": bool(raw.get("enabled", False)),
         "waterTempEntity": _normalise_entity_id(raw.get("waterTempEntity")) or "",
@@ -982,6 +988,19 @@ def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
         "referenceVpdKpa": _awc_num(raw.get("referenceVpdKpa"), defaults["referenceVpdKpa"], 0.5, 4.0),
         "bands": {k: round(v, 3) for k, v in bands.items()},
         "notify": bool(raw.get("notify", True)),
+        "weatherEntity": _normalise_entity_id(raw.get("weatherEntity")) or "",
+        "lookaheadHours": _awc_num(raw.get("lookaheadHours"), defaults["lookaheadHours"],
+                                   COOLING_LOOKAHEAD_MIN_H, COOLING_LOOKAHEAD_MAX_H),
+        "dehumidifier": {
+            "mode": mode_d if mode_d in ("off", "advise", "auto") else d_defaults["mode"],
+            "armed": bool(raw_d.get("armed", False)),
+            "switchEntity": _normalise_entity_id(raw_d.get("switchEntity")) or "",
+            "leadHours": _awc_num(raw_d.get("leadHours"), d_defaults["leadHours"], 0, 12),
+            "minOnMinutes": _awc_num(raw_d.get("minOnMinutes"), d_defaults["minOnMinutes"], 5, 120),
+            "minOffMinutes": _awc_num(raw_d.get("minOffMinutes"), d_defaults["minOffMinutes"], 5, 120),
+            "maxRunHours": _awc_num(raw_d.get("maxRunHours"), d_defaults["maxRunHours"], 1, 24),
+            "overridePolicy": "reassert" if raw_d.get("overridePolicy") == "reassert" else "hold",
+        },
     }
 
 
@@ -17593,9 +17612,82 @@ def _cooling_target(config: dict[str, Any], now_local: datetime) -> tuple[float,
     return float(cfg["targetTempC"]), "fixed"
 
 
-def cooling_snapshot(hass: HomeAssistant, config: dict[str, Any], now_local: datetime) -> dict[str, Any]:
+def _cooling_outdoor_now(hass: HomeAssistant, weather_entity: str) -> dict[str, Any]:
+    """The weather entity's current conditions: outdoor °C, %, dew point °C
+    (computed when the integration omits it). All None when unbound/unavailable."""
+    out: dict[str, Any] = {"outC": None, "outRh": None, "outDewC": None, "unit": "°C", "available": False}
+    if not weather_entity:
+        return out
+    st = hass.states.get(weather_entity)
+    if st is None or st.state in UNAVAILABLE_STATES:
+        return out
+    unit = str(st.attributes.get("temperature_unit") or "°C")
+    out["unit"] = unit
+    out["available"] = True
+    temp = cooling_engine._to_c(st.attributes.get("temperature"), unit)
+    dew = (cooling_engine._to_c(st.attributes.get("dew_point"), unit)
+           if st.attributes.get("dew_point") is not None else None)
+    rh = None
+    try:
+        if st.attributes.get("humidity") is not None:
+            rh = float(st.attributes["humidity"])
+    except (TypeError, ValueError):
+        rh = None
+    if temp is not None and dew is None and rh is not None:
+        dew = cooling_engine.dew_point_c(temp, rh)
+    if temp is not None and rh is None and dew is not None:
+        rh = cooling_engine.rh_from_dew(temp, dew)
+    out.update({"outC": None if temp is None else round(temp, 1),
+                "outRh": None if rh is None else round(rh),
+                "outDewC": None if dew is None else round(dew, 1)})
+    return out
+
+
+async def _async_cooling_forecast(
+    hass: HomeAssistant, config: dict[str, Any], runtime: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Hourly forecast via weather.get_forecasts, cached in the runtime for
+    COOLING_FORECAST_TTL_S. Never raises: no entity / no response / a broken
+    integration all leave the cache empty with an error string the panel shows."""
+    cfg = _cooling_cfg(config)
+    entity = cfg["weatherEntity"]
+    cache = runtime.setdefault("forecast", {})
+    if not entity:
+        cache.clear()
+        return []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    if cache.get("entity") == entity and cache.get("hours") and now_ts - float(cache.get("at", 0)) < COOLING_FORECAST_TTL_S:
+        return cache["hours"]
+    outdoor = _cooling_outdoor_now(hass, entity)
+    hours: list[dict[str, Any]] = []
+    error = ""
+    try:
+        response = await hass.services.async_call(
+            "weather", "get_forecasts", {"type": "hourly"},
+            target={"entity_id": entity}, blocking=True, return_response=True,
+        )
+        payload = response.get(entity) if isinstance(response, dict) else None
+        if not isinstance(payload, dict) and isinstance(response, dict) and len(response) == 1:
+            payload = next(iter(response.values()))
+        items = payload.get("forecast") if isinstance(payload, dict) else None
+        hours = cooling_engine.parse_forecast(items, outdoor["unit"])
+        if not hours:
+            error = f"{entity} returned no usable hourly forecast"
+    except Exception as err:  # noqa: BLE001 — a dead weather integration must not break the tick
+        error = f"could not read the forecast from {entity}: {err}"
+        _LOGGER.warning("Cooling headroom: %s", error)
+    cache.update({"entity": entity, "at": now_ts, "hours": hours, "error": error})
+    return hours
+
+
+def cooling_snapshot(
+    hass: HomeAssistant, config: dict[str, Any], now_local: datetime,
+    runtime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Everything the panel shows, computed once. Never raises: a missing
-    sensor is an ``issues`` entry and a null result, not an exception."""
+    sensor is an ``issues`` entry and a null result, not an exception. With a
+    runtime (the tick's, or the WS reading it) the cached forecast becomes the
+    24 h projection, the day kind, vent advice and the dehumidifier plan."""
     cfg = _cooling_cfg(config)
     entities = _cooling_entities(config)
     target_c, target_source = _cooling_target(config, now_local)
@@ -17619,7 +17711,7 @@ def cooling_snapshot(hass: HomeAssistant, config: dict[str, Any], now_local: dat
         result = cooling_engine.evaluate(water_c, room_c, rh, cfg["referenceVpdKpa"], cfg["bands"])
     needed = cooling_engine.fan_needed(room_c, water_c if water_source == "sensor" else None,
                                        target_c, cfg["fanGateC"])
-    return {
+    snap: dict[str, Any] = {
         "at": now_local.isoformat(),
         "enabled": bool(cfg["enabled"]),
         "entities": entities,
@@ -17636,6 +17728,43 @@ def cooling_snapshot(hass: HomeAssistant, config: dict[str, Any], now_local: dat
         "bands": dict(cfg["bands"]),
         "whatIf": cooling_engine.what_if_table(water_c, cfg["referenceVpdKpa"], cfg["bands"]),
     }
+
+    # --- Layer 2: outdoors, the projection, the plan --------------------------
+    weather = cfg["weatherEntity"]
+    outdoor = _cooling_outdoor_now(hass, weather)
+    if weather and not outdoor["available"]:
+        issues["weather"] = f"weather entity ({weather}) is unavailable"
+    dew_now = result["dewC"] if result else None
+    offsets = cooling_engine.smooth_offsets(
+        runtime.get("offsets") if isinstance(runtime, dict) else None,
+        room_c, dew_now, outdoor["outC"], outdoor["outDewC"])
+    if isinstance(runtime, dict) and room_c is not None and outdoor["outC"] is not None:
+        runtime["offsets"] = offsets
+    cache = runtime.get("forecast") if isinstance(runtime, dict) else None
+    hours = cache.get("hours") if isinstance(cache, dict) else None
+    if isinstance(cache, dict) and cache.get("error"):
+        issues["forecast"] = cache["error"]
+    projection = cooling_engine.project(
+        hours or [], now_local, cfg["lookaheadHours"], water_c, target_c, offsets,
+        cfg["fanGateC"], cfg["referenceVpdKpa"], cfg["bands"]) if hours else None
+    dehum = cfg["dehumidifier"]
+    plan = cooling_engine.dehumidifier_plan(result, needed, projection, now_local, dehum["leadHours"], target_c)
+    snap.update({
+        "weather": {"entity": weather, **{k: outdoor[k] for k in ("outC", "outRh", "outDewC", "available")}},
+        "offsets": offsets,
+        "projection": projection,
+        "vent": cooling_engine.vent_advice(room_c, dew_now, outdoor["outC"], outdoor["outDewC"]),
+        "plan": plan,
+        "dehumidifier": {
+            "mode": dehum["mode"], "armed": bool(dehum["armed"]), "switchEntity": dehum["switchEntity"],
+            "controlling": dehum["mode"] == "auto" and bool(dehum["armed"]) and bool(dehum["switchEntity"]),
+            "state": None,
+        },
+    })
+    if dehum["switchEntity"]:
+        st = hass.states.get(dehum["switchEntity"])
+        snap["dehumidifier"]["state"] = st.state if st else None
+    return snap
 
 
 async def _async_cooling_notify_once(
@@ -17657,11 +17786,112 @@ async def _async_cooling_notify_once(
     return True
 
 
+async def _async_cooling_set_plug(hass: HomeAssistant, entity: str, on: bool) -> bool:
+    try:
+        await hass.services.async_call(
+            "switch", "turn_on" if on else "turn_off",
+            {ATTR_ENTITY_ID: entity}, blocking=True, context=None,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a dead plug must not kill the tick
+        _LOGGER.exception("Cooling headroom could not switch %s", entity)
+        return False
+
+
+async def _async_cooling_dehumidifier_reconcile(
+    hass: HomeAssistant, config: dict[str, Any], snap: dict[str, Any], runtime: dict[str, Any],
+    now_local: datetime, activity: list[tuple[str, str]],
+) -> None:
+    """Auto mode: hold the plug to the plan, with the compressor's short-cycle
+    guard, a max-run cap, and the manual-override hold. Efficiency, never
+    safety — nothing here can hurt the tank, and leaving auto turns it OFF."""
+    dehum = _cooling_cfg(config)["dehumidifier"]
+    state = runtime.setdefault("dehum", {})
+    entity = dehum["switchEntity"]
+    controlling = dehum["mode"] == "auto" and bool(dehum["armed"]) and bool(entity)
+    issues = snap["issues"]
+    if not controlling:
+        # Leaving auto (mode change, disarm, unbind) fails OFF once, then lets go.
+        if state.get("asserted") == "on" and entity:
+            if await _async_cooling_set_plug(hass, entity, False):
+                activity.append(("Dehumidifier switched off — OpenReef is no longer controlling it", "info"))
+        state.clear()
+        return
+    st = hass.states.get(entity)
+    if st is None or st.state in UNAVAILABLE_STATES:
+        issues["dehumidifier"] = f"dehumidifier plug ({entity}) is unavailable"
+        await _async_cooling_notify_once(
+            hass, config, "plug_unavailable", COOLING_NOTIFY_COOLDOWN_S,
+            "Dehumidifier plug unreachable",
+            f"The dehumidifier plug ({entity}) is unavailable — OpenReef cannot switch it.")
+        return
+    actual = st.state == "on"
+    desired = bool(snap["plan"]["shouldRun"])
+    now = now_local.astimezone(timezone.utc) if now_local.tzinfo else now_local.replace(tzinfo=timezone.utc)
+
+    def _since(key: str) -> float:
+        stamp = state.get(key)
+        try:
+            return (now - datetime.fromisoformat(stamp)).total_seconds() if stamp else 1e9
+        except (TypeError, ValueError):
+            return 1e9
+
+    # Manual override: the plug disagrees with what we last asserted → a human.
+    asserted = state.get("asserted")
+    override = state.get("override")
+    if asserted in ("on", "off") and actual != (asserted == "on") and not override:
+        if dehum["overridePolicy"] == "hold":
+            state["override"] = {"since": now.isoformat(), "state": "on" if actual else "off",
+                                 "plannedRun": desired}
+            activity.append((f"Dehumidifier switched {'on' if actual else 'off'} by hand — holding until the plan changes", "info"))
+            override = state["override"]
+        else:
+            state.pop("asserted", None)  # reassert below
+    if override:
+        # Release the hold once the plan flips relative to when the hold began.
+        if bool(override.get("plannedRun")) != desired:
+            state.pop("override", None)
+            state.pop("asserted", None)
+        else:
+            return
+    # Max-run cap while we hold it on.
+    if actual and state.get("asserted") == "on" and _since("lastOn") > float(dehum["maxRunHours"]) * 3600:
+        if await _async_cooling_set_plug(hass, entity, False):
+            state.update({"asserted": "off", "lastOff": now.isoformat()})
+            activity.append((f"Dehumidifier off after {dehum['maxRunHours']:.0f} h — check the bucket", "warning"))
+            await _async_cooling_notify_once(
+                hass, config, "max_run", COOLING_NOTIFY_COOLDOWN_S,
+                "Dehumidifier ran its maximum",
+                f"OpenReef switched the dehumidifier off after {dehum['maxRunHours']:.0f} h. "
+                "Empty the bucket if it has one; it will restart when the plan still needs it.")
+            state["capUntil"] = (now + timedelta(minutes=float(dehum["minOffMinutes"]))).isoformat()
+        return
+    if desired == actual:
+        # Already where the plan wants it. Count a running unit's time from
+        # when we first saw it on (the max-run cap); an idle one is free to
+        # start — no fake "last off" stamp.
+        if state.get("asserted") != ("on" if actual else "off"):
+            state["asserted"] = "on" if actual else "off"
+            if actual:
+                state.setdefault("lastOn", now.isoformat())
+        return
+    # Short-cycle guard.
+    if desired and _since("lastOff") < float(dehum["minOffMinutes"]) * 60:
+        return
+    if not desired and _since("lastOn") < float(dehum["minOnMinutes"]) * 60:
+        return
+    if await _async_cooling_set_plug(hass, entity, desired):
+        state.update({"asserted": "on" if desired else "off", ("lastOn" if desired else "lastOff"): now.isoformat()})
+        reason = snap["plan"]["reason"]
+        activity.append((f"Dehumidifier switched {'on' if desired else 'off'} — {reason}", "info"))
+
+
 async def _async_cooling_tick(
     hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime
 ) -> None:
-    """Refresh the snapshot; warn (once per band per cooldown) only while
-    cooling is actually needed; log the transitions into and out of trouble."""
+    """Refresh the forecast (cached) and the snapshot; warn (once per band per
+    cooldown) only while cooling is needed; advise or drive the dehumidifier;
+    log every transition."""
     config = _config_from_entry(entry)
     cfg = _cooling_cfg(config)
     store = hass.data.setdefault(DOMAIN, {})
@@ -17669,32 +17899,88 @@ async def _async_cooling_tick(
         store.pop(COOLING_RUNTIME, None)
         return
     runtime = store.setdefault(COOLING_RUNTIME, {})
-    snap = cooling_snapshot(hass, config, now_local)
+    # A tick that logs activity saves the config, and a save re-runs the
+    # schedulers — which must not tick again from inside this tick.
+    if runtime.get("ticking"):
+        return
+    runtime["ticking"] = True
+    try:
+        await _async_cooling_tick_body(hass, entry, config, cfg, runtime, now_local)
+    finally:
+        runtime.pop("ticking", None)
+
+
+async def _async_cooling_tick_body(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], cfg: dict[str, Any],
+    runtime: dict[str, Any], now_local: datetime,
+) -> None:
+    await _async_cooling_forecast(hass, config, runtime)
+    snap = cooling_snapshot(hass, config, now_local, runtime)
     runtime["snapshot"] = snap
     result = snap["result"]
     previous_band = runtime.get("warnBand")
+    activity: list[tuple[str, str]] = []
+    band_note: tuple[str, str, str] | None = None
     if snap["warn"]:
         band = result["band"]
         title, message = cooling_engine.warning_copy(result, snap["targetC"])
-        if cfg["notify"]:
-            await _async_cooling_notify_once(hass, config, band, COOLING_NOTIFY_COOLDOWN_S, title, message)
+        band_note = (band, title, message)
         if band != previous_band:
             runtime["warnBand"] = band
-            _append_activity(
-                config,
+            activity.append((
                 f"Cooling headroom: {title.lower()} — room {result['roomC']:.1f} °C at "
                 f"{result['rh']:.0f} %, dew point {result['dewC']:.1f} °C vs tank {result['waterC']:.1f} °C",
-                "warning" if result["status"] == "warning" else "critical",
-            )
-            await _async_save_config(hass, entry, config)
+                "warning" if result["status"] == "warning" else "critical"))
     elif previous_band and result and result["band"] in ("good", "thin"):
         runtime.pop("warnBand", None)
-        _append_activity(
-            config,
+        activity.append((
             f"Cooling headroom: fans have headroom again — {round(result['index'] * 100)} % "
-            f"(room {result['roomC']:.1f} °C at {result['rh']:.0f} %)",
-            "info",
-        )
+            f"(room {result['roomC']:.1f} °C at {result['rh']:.0f} %)", "info"))
+
+    # Layer 2 — the plan. Advise mode tells the keeper once per plan; auto drives.
+    # A plan that is news right now folds the band warning into one message —
+    # the keeper hears "the fans are gone, do X" once, not twice.
+    plan = snap["plan"]
+    dehum = cfg["dehumidifier"]
+    plan_key = plan["kind"] if plan["kind"] in ("now", "unrescuable") else f"{plan['kind']}:{plan.get('startAt') or ''}"
+    plan_sent = False
+    if dehum["mode"] != "off" and plan["kind"] in ("now", "ahead", "scheduled", "unrescuable"):
+        if runtime.get("planKey") != plan_key:
+            runtime["planKey"] = plan_key
+            vent = snap["vent"]
+            if plan["kind"] == "unrescuable":
+                title = "Chiller day — the dehumidifier cannot save this afternoon"
+                message = f"{plan['reason'].capitalize()}. Drop the room load, open up early, or plan a chiller."
+            elif dehum["mode"] == "auto" and snap["dehumidifier"]["controlling"]:
+                title = "Dehumidifier plan"
+                message = f"OpenReef will run the dehumidifier: {plan['reason']}."
+            else:
+                title = "Start the dehumidifier"
+                message = f"{plan['reason'].capitalize()}."
+            if vent.get("advised"):
+                message += f" Better still, {vent['reason']}."
+            if band_note:
+                message = f"{band_note[2]} {message}"
+            if cfg["notify"] and plan["kind"] != "scheduled":
+                plan_sent = await _async_cooling_notify_once(
+                    hass, config, f"plan_{plan['kind']}", COOLING_NOTIFY_COOLDOWN_S, title, message)
+            activity.append((f"Dehumidifier: {plan['reason']}" + (" — vent instead" if vent.get("advised") else ""),
+                             "warning" if plan["kind"] in ("now", "unrescuable") else "info"))
+    elif plan["kind"] == "none" and runtime.get("planKey"):
+        runtime.pop("planKey", None)
+    if band_note and cfg["notify"]:
+        band, title, message = band_note
+        if plan_sent:
+            # Folded into the plan message above; stamp the band's cooldown so
+            # the next tick doesn't repeat it on its own.
+            runtime.setdefault("notified", {})[band] = datetime.now(timezone.utc).isoformat()
+        else:
+            await _async_cooling_notify_once(hass, config, band, COOLING_NOTIFY_COOLDOWN_S, title, message)
+
+    await _async_cooling_dehumidifier_reconcile(hass, config, snap, runtime, now_local, activity)
+    if activity:
+        for message, kind in activity:
+            _append_activity(config, message, kind)
         await _async_save_config(hass, entry, config)
 
 
@@ -17715,7 +18001,10 @@ async def _async_schedule_cooling_tick(
     if not _cooling_cfg(config)["enabled"]:
         hass.data.setdefault(DOMAIN, {}).pop(COOLING_RUNTIME, None)
         return
-    await _async_cooling_tick(hass, entry, dt_util.now())
+    # First enable: read now rather than in five minutes. Every later reschedule
+    # (each config save re-runs the schedulers) leaves the cadence alone.
+    if not (hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME) or {}).get("snapshot"):
+        await _async_cooling_tick(hass, entry, dt_util.now())
 
     async def _handle(now: datetime) -> None:
         latest_entry = _first_entry(hass)
@@ -17739,9 +18028,12 @@ def websocket_cooling_status(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    snap = cooling_snapshot(hass, config, dt_util.now())
     runtime = hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME) or {}
+    snap = cooling_snapshot(hass, config, dt_util.now(), runtime)
     snap["warnBand"] = runtime.get("warnBand")
+    dehum_state = runtime.get("dehum") or {}
+    snap["dehumidifier"]["override"] = dehum_state.get("override")
+    snap["dehumidifier"]["asserted"] = dehum_state.get("asserted")
     connection.send_result(msg["id"], snap)
 
 
@@ -17772,6 +18064,49 @@ def websocket_cooling_simulate(
     connection.send_result(
         msg["id"], cooling_engine.evaluate(water, room, rh, cfg["referenceVpdKpa"], cfg["bands"])
     )
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cooling_dehumidifier",
+    vol.Required("action"): vol.In(["run", "stop", "resume"]),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cooling_dehumidifier(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Manual run/stop (held as an override until the plan flips) and resume
+    (clear the hold — the next tick re-asserts the plan)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    dehum = _cooling_cfg(config)["dehumidifier"]
+    entity = dehum["switchEntity"]
+    if not entity:
+        connection.send_error(msg["id"], "not_bound", "No dehumidifier plug is bound")
+        return
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(COOLING_RUNTIME, {})
+    state = runtime.setdefault("dehum", {})
+    action = msg["action"]
+    if action == "resume":
+        state.pop("override", None)
+        state.pop("asserted", None)
+        connection.send_result(msg["id"], {"success": True})
+        return
+    on = action == "run"
+    if not await _async_cooling_set_plug(hass, entity, on):
+        connection.send_error(msg["id"], "switch_failed", f"Could not switch {entity}")
+        return
+    now = datetime.now(timezone.utc)
+    planned = bool(((runtime.get("snapshot") or {}).get("plan") or {}).get("shouldRun"))
+    state.update({"asserted": "on" if on else "off", ("lastOn" if on else "lastOff"): now.isoformat()})
+    if dehum["mode"] == "auto" and on != planned:
+        state["override"] = {"since": now.isoformat(), "state": "on" if on else "off", "plannedRun": planned}
+    _append_activity(config, f"Dehumidifier switched {'on' if on else 'off'} by hand from the panel", "info")
+    await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"success": True, "state": "on" if on else "off"})
 
 
 def _clear_spawning_tick(hass: HomeAssistant) -> None:
@@ -19158,6 +19493,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_spawning_execution_status)
     websocket_api.async_register_command(hass, websocket_cooling_status)
     websocket_api.async_register_command(hass, websocket_cooling_simulate)
+    websocket_api.async_register_command(hass, websocket_cooling_dehumidifier)
     websocket_api.async_register_command(hass, websocket_spawning_execution_resume)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)

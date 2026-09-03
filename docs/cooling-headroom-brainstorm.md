@@ -5,7 +5,7 @@ even when the room is cooler. The dehumidifier currently runs off a dumb humidis
 a **"fan cooling will be affected" warning** and a **dehumidifier trigger that only fires when
 it will actually help**, projecting 24 h ahead from room temp, room humidity and the weather.
 
-Research + brainstorm 2026-09-03 on 0.7.118; **Layer 1 built as 0.7.119 the same day** (§9). Decisions locked in §7; the window fan in §8.
+Research + brainstorm 2026-09-03 on 0.7.118; **Layer 1 built as 0.7.119 and Layer 2 as 0.7.120 the same day** (§9, §10). Decisions locked in §7; the window fan in §8.
 
 ---
 
@@ -412,3 +412,51 @@ Built exactly as §3 Layer 1, plus the locked decisions:
 
 Not in Layer 1 by design: no actuator is touched, no weather, no dehumidifier, no diagram chip
 (the fan is not an HA entity on this rig). Next: Layer 2.
+
+## 10. Layer 2 — shipped as 0.7.120 (2026-09-03)
+
+Reece confirmed Layer 1 live (room 26.8 °C at 57 %, tank 24.9 °C → dew point 17.7 °C, 60 % fan
+effect) and that HA has `weather.home` (the built-in Met.no forecast: hourly, with temperature
+and humidity). That entity is fine — Met Office would only be marginally more local.
+
+**Projection** (`cooling.parse_forecast` / `project`): `weather.get_forecasts` hourly, read every
+30 min and cached in the runtime. Each hour indoors = outdoor + a learned offset (room °C and
+dew point °C separately), the offsets being an EMA of the live indoor-minus-outdoor difference
+(defaults +2 / +3 until both sides read; clamped −3…+12). Each projected hour runs the same
+`evaluate()` as the live reading, plus the fan-needed gate. Out of that: the worst needed hour,
+the first/last **affected** hour (needed AND weak/dead/reversed), the **day kind** (quiet /
+dry-heat / humid-heat / chiller — chiller when any affected hour is ≥ 4 °C over target with an
+index under 10 %), and the **night-purge window** (the coolest outdoor hours) for the intake fan.
+
+**Vent advice** (`vent_advice`, live only): outdoor dew point ≥ 2 °C below indoors and outdoor
+no warmer than room + 1 → "vent (intake fan + window) instead of dehumidifying". Advice only in
+this release; the `ventEntity` actuator is Layer 3.
+
+**Plan** (`dehumidifier_plan`, stateless): *now* (live needed and losing) · *unrescuable* (live
+losing but ≥ 4 °C over target at < 10 % — chiller day, don't start: its heat lands in the peak) ·
+*ahead* (inside `leadHours` of the first affected hour, until an hour after the last) ·
+*scheduled* (a hit is coming, not yet time) · *none*.
+
+**Dehumidifier modes**: `off` · `advise` (default — a notification when a plan becomes active,
+the scheduled one logged only; vent advice appended when it applies; a band warning that lands
+in the same tick folds into the one message) · `auto` (armed + a switch entity): the tick holds
+the plug to the plan with compressor guards (`minOnMinutes` 20, `minOffMinutes` 10, `maxRunHours`
+8 then off + a "check the bucket" nudge), a manual-override hold (hand on the plug → held until
+the plan flips; `reassert` policy available), unavailable-plug alert, and **leaving auto fails
+OFF** once. Manual Run / Stop / "give it back to the plan" from Settings via
+`openreef/cooling_dehumidifier`. Runtime stays in `hass.data`; the tick's own save no longer
+re-enters the tick (the scheduler only runs an immediate read on first enable).
+
+**Panel**: the 24 h strip (one cell per hour, coloured by band, greyed when the fans aren't
+needed, marked when affected), the day-kind line, vent and plan lines, the dehumidifier row
+with state + controls; the Overview row and Pulse card carry the plan ("Humid-heat day —
+dehumidifier by 11:00", "Dehumidify now", "Vent the room now", "Chiller day").
+
+Tests: `tests/test_cooling.py` 36, `tests/test_panel_cooling.mjs` 14.
+
+**Setup for Reece**: Settings → Cooling headroom → weather entity `weather.home`; dehumidifier
+plug on the smart plug with the unit's humidistat at its lowest / continuous; leave Advise for a
+few days and compare the notifications with what the room does, then Auto + armed.
+
+Next (Layer 3): `ventEntity` for the intake fan on a plug with the dew-point rule, mutual
+exclusion with the dehumidifier, a window contact sensor, and the night-purge schedule.

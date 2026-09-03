@@ -204,3 +204,242 @@ def warning_copy(result: dict[str, Any], target_c: float | None) -> tuple[str, s
         f"{where} The fans are working at about {pct} % of a dry day. Dehumidifying now buys "
         "headroom before the afternoon.",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Layer 2 — the 24 h projection, the day kind, vent advice, the dehumidifier plan
+# --------------------------------------------------------------------------- #
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+# Indoor-vs-outdoor offsets when nothing has been measured yet: a tank room
+# runs warmer and wetter than the street. Replaced by the live difference
+# (smoothed) as soon as both sides read.
+DEFAULT_OFFSET_T_C = 2.0
+DEFAULT_OFFSET_DEW_C = 3.0
+OFFSET_T_RANGE = (-3.0, 12.0)
+OFFSET_DEW_RANGE = (-3.0, 12.0)
+OFFSET_ALPHA = 0.3                  # EMA weight of the newest live difference
+
+# "Unrescuable": the fans are already gone AND the room is far over target —
+# a dehumidifier's own heat would land in the peak. Chiller day, not a job.
+UNRESCUABLE_OVER_TARGET_C = 4.0
+UNRESCUABLE_INDEX = 0.10
+
+VENT_DEW_GAP_C = 2.0                # vent only while outdoor dew ≤ indoor dew − this
+VENT_TEMP_SLACK_C = 1.0             # …and outdoor air is no warmer than room + this
+
+DAY_KINDS = ("quiet", "dry-heat", "humid-heat", "chiller")
+DAY_KIND_COPY = {
+    "quiet": "Quiet day — the fans aren't needed",
+    "dry-heat": "Dry-heat day — the fans will cope",
+    "humid-heat": "Humid-heat day — dehumidify ahead of the afternoon",
+    "chiller": "Chiller day — neither fans nor dehumidifier will hold it",
+}
+
+
+def rh_from_dew(temp_c: float, dew_c: float) -> float:
+    """Relative humidity % from dry-bulb and dew point (clamped 1–100)."""
+    rh = 100.0 * saturation_vapour_pressure_kpa(dew_c) / saturation_vapour_pressure_kpa(temp_c)
+    return min(100.0, max(1.0, rh))
+
+
+def _parse_when(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _to_c(value: Any, unit: str) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return (v - 32.0) * 5.0 / 9.0 if "F" in str(unit).upper() else v
+
+
+def parse_forecast(items: Any, temp_unit: str = "°C") -> list[dict[str, Any]]:
+    """HA hourly forecast entries → [{at, outC, outRh, outDewC}], tolerant of
+    fields an integration omits: a missing dew point is computed from the
+    humidity, a missing humidity from the dew point; an hour with neither, or
+    no temperature, is dropped. Sorted by time."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        at = _parse_when(item.get("datetime"))
+        temp = _to_c(item.get("temperature"), temp_unit)
+        if at is None or temp is None:
+            continue
+        rh = None
+        try:
+            if item.get("humidity") is not None:
+                rh = float(item["humidity"])
+        except (TypeError, ValueError):
+            rh = None
+        dew = _to_c(item.get("dew_point"), temp_unit) if item.get("dew_point") is not None else None
+        if dew is None and rh is None:
+            continue
+        if dew is None:
+            dew = dew_point_c(temp, rh)
+        if rh is None:
+            rh = rh_from_dew(temp, dew)
+        out.append({"at": at, "outC": round(temp, 2), "outRh": round(min(100.0, max(1.0, rh)), 1),
+                    "outDewC": round(dew, 2)})
+    out.sort(key=lambda h: h["at"])
+    return out
+
+
+def smooth_offsets(previous: dict[str, Any] | None, room_c: float | None, dew_c: float | None,
+                   out_c: float | None, out_dew_c: float | None) -> dict[str, float]:
+    """Indoor-minus-outdoor offsets, exponentially smoothed across ticks.
+    Falls back to the previous (or default) pair when either side is missing."""
+    prev_t = DEFAULT_OFFSET_T_C
+    prev_dew = DEFAULT_OFFSET_DEW_C
+    if isinstance(previous, dict):
+        try:
+            prev_t = float(previous.get("offsetT", prev_t))
+            prev_dew = float(previous.get("offsetDew", prev_dew))
+        except (TypeError, ValueError):
+            pass
+    if room_c is not None and out_c is not None:
+        prev_t = (1 - OFFSET_ALPHA) * prev_t + OFFSET_ALPHA * (float(room_c) - float(out_c))
+    if dew_c is not None and out_dew_c is not None:
+        prev_dew = (1 - OFFSET_ALPHA) * prev_dew + OFFSET_ALPHA * (float(dew_c) - float(out_dew_c))
+    prev_t = min(OFFSET_T_RANGE[1], max(OFFSET_T_RANGE[0], prev_t))
+    prev_dew = min(OFFSET_DEW_RANGE[1], max(OFFSET_DEW_RANGE[0], prev_dew))
+    return {"offsetT": round(prev_t, 2), "offsetDew": round(prev_dew, 2)}
+
+
+def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, water_c: float,
+            target_c: float, offsets: dict[str, float], gate_c: float,
+            reference_vpd_kpa: float = REFERENCE_VPD_KPA,
+            bands: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Each forecast hour, indoors: room = outdoor + offsetT, dew = outdoor dew
+    + offsetDew, then the same evaluate() the live reading gets. Returns None
+    when there is nothing inside the window."""
+    if not hours:
+        return None
+    start = now - timedelta(hours=1)
+    end = now + timedelta(hours=float(lookahead_h))
+    off_t = float(offsets.get("offsetT", DEFAULT_OFFSET_T_C))
+    off_dew = float(offsets.get("offsetDew", DEFAULT_OFFSET_DEW_C))
+    rows: list[dict[str, Any]] = []
+    for h in hours:
+        at = h["at"]
+        if at < start or at > end:
+            continue
+        room = float(h["outC"]) + off_t
+        dew = min(float(h["outDewC"]) + off_dew, room - 0.1)   # air cannot be past saturation
+        rh = rh_from_dew(room, dew)
+        r = evaluate(water_c, room, rh, reference_vpd_kpa, bands)
+        needed = fan_needed(room, None, target_c, gate_c)
+        affected = needed and r["band"] in WARN_BANDS
+        unrescuable = affected and room >= target_c + UNRESCUABLE_OVER_TARGET_C and r["index"] < UNRESCUABLE_INDEX
+        rows.append({
+            "at": at.isoformat(), "outC": h["outC"], "outDewC": h["outDewC"],
+            "roomC": round(room, 1), "rh": round(rh), "dewC": round(dew, 1),
+            "index": r["index"], "band": r["band"], "fanNeeded": needed,
+            "affected": affected, "unrescuable": unrescuable,
+        })
+    if not rows:
+        return None
+    needed_rows = [r for r in rows if r["fanNeeded"]]
+    affected_rows = [r for r in rows if r["affected"]]
+    worst = min(needed_rows, key=lambda r: r["index"]) if needed_rows else None
+    if any(r["unrescuable"] for r in rows):
+        kind = "chiller"
+    elif affected_rows:
+        kind = "humid-heat"
+    elif needed_rows:
+        kind = "dry-heat"
+    else:
+        kind = "quiet"
+    coolest = min(rows, key=lambda r: r["outC"])
+    purge = [r["at"] for r in rows if r["outC"] <= coolest["outC"] + 2.0]
+    return {
+        "hours": rows,
+        "worst": {"at": worst["at"], "index": worst["index"], "band": worst["band"]} if worst else None,
+        "firstAffectedAt": affected_rows[0]["at"] if affected_rows else None,
+        "lastAffectedAt": affected_rows[-1]["at"] if affected_rows else None,
+        "affectedHours": len(affected_rows),
+        "neededHours": len(needed_rows),
+        "dayKind": kind,
+        "dayKindLabel": DAY_KIND_COPY[kind],
+        "purgeWindow": {"from": purge[0], "to": purge[-1], "outC": coolest["outC"]} if purge else None,
+        "offsets": {"offsetT": round(off_t, 2), "offsetDew": round(off_dew, 2)},
+    }
+
+
+def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
+                out_dew_c: float | None) -> dict[str, Any]:
+    """Right now: is the air outside drier (and no warmer) than the air inside?
+    If so, the intake fan beats the dehumidifier for free."""
+    if None in (room_c, dew_c, out_c, out_dew_c):
+        return {"advised": False, "known": False, "reason": "no outdoor reading"}
+    gap = float(dew_c) - float(out_dew_c)
+    drier = gap >= VENT_DEW_GAP_C
+    cool_enough = float(out_c) <= float(room_c) + VENT_TEMP_SLACK_C
+    advised = drier and cool_enough
+    if advised:
+        reason = (f"outdoor dew point {out_dew_c:.1f} °C is {gap:.1f} °C below indoors — "
+                  "vent (intake fan + window) instead of dehumidifying")
+    elif not drier:
+        reason = f"outdoor air is as wet as indoors (dew point {out_dew_c:.1f} °C) — keep the windows shut"
+    else:
+        reason = f"outdoor air is drier but warmer ({out_c:.1f} °C) — vent later, when it cools"
+    return {"advised": advised, "known": True, "reason": reason,
+            "outdoorC": round(float(out_c), 1), "outdoorDewC": round(float(out_dew_c), 1),
+            "gapC": round(gap, 1)}
+
+
+def _hhmm(iso: str | None) -> str:
+    dt = _parse_when(iso)
+    return dt.astimezone().strftime("%H:%M") if dt else "?"
+
+
+def dehumidifier_plan(live: dict[str, Any] | None, live_needed: bool, projection: dict[str, Any] | None,
+                      now: datetime, lead_h: float, target_c: float) -> dict[str, Any]:
+    """Should the dehumidifier be running right now, and why. Stateless: the
+    actuator layer adds the short-cycle timing and the manual-override hold.
+
+    kinds: now (fans already down), ahead (inside the lead window of a
+    projected hit), scheduled (a hit is coming, not yet time), unrescuable
+    (chiller day — its heat would land in the peak), none."""
+    if live and live_needed and live.get("band") in WARN_BANDS:
+        room = float(live.get("roomC", 0))
+        if room >= target_c + UNRESCUABLE_OVER_TARGET_C and float(live.get("index", 0)) < UNRESCUABLE_INDEX:
+            return {"shouldRun": False, "kind": "unrescuable", "startAt": None, "until": None,
+                    "reason": (f"room {room:.1f} °C at {live.get('rh', 0):.0f} % — a dehumidifier cannot "
+                               "rescue this afternoon; this is a chiller day")}
+        pct = round(float(live.get("index", 0)) * 100)
+        until = projection.get("lastAffectedAt") if projection else None
+        return {"shouldRun": True, "kind": "now", "startAt": now.isoformat(), "until": until,
+                "reason": f"the fans are down to {pct} % right now"}
+    if projection and projection.get("firstAffectedAt"):
+        first = _parse_when(projection["firstAffectedAt"])
+        last = _parse_when(projection.get("lastAffectedAt")) or first
+        start = first - timedelta(hours=float(lead_h))
+        until = last + timedelta(hours=1)
+        worst = projection.get("worst") or {}
+        pct = round(float(worst.get("index", 0)) * 100)
+        if start <= now <= until:
+            return {"shouldRun": True, "kind": "ahead", "startAt": start.isoformat(), "until": until.isoformat(),
+                    "reason": f"fan headroom drops to {pct} % from {_hhmm(projection['firstAffectedAt'])}"}
+        if now < start:
+            return {"shouldRun": False, "kind": "scheduled", "startAt": start.isoformat(), "until": until.isoformat(),
+                    "reason": (f"start by {_hhmm(start.isoformat())} — headroom drops to {pct} % "
+                               f"from {_hhmm(projection['firstAffectedAt'])}")}
+    hours = projection.get("hours") if projection else None
+    span = f"the next {len(hours)} h" if hours else "the forecast"
+    return {"shouldRun": False, "kind": "none", "startAt": None, "until": None,
+            "reason": f"no hour in {span} where the fans are needed and losing"}

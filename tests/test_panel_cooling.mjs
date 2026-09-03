@@ -121,4 +121,91 @@ test("status load is cached and never runs while disabled", async () => {
   assertEqual(calls, 1);
 });
 
+
+// --- Layer 2: the projection, the plan, the dehumidifier controls -----------
+
+function l2(over = {}) {
+  const at = (h) => new Date(Date.UTC(2026, 6, 14, 12 + h)).toISOString();
+  const hours = [0, 1, 2, 3, 4, 5].map((h) => ({
+    at: at(h), outC: h < 4 ? 20 : 27, outDewC: h < 4 ? 12 : 21, roomC: h < 4 ? 23 : 30, rh: h < 4 ? 55 : 74,
+    dewC: h < 4 ? 14 : 25, index: h < 4 ? 0.9 : 0.12, band: h < 4 ? "good" : "dead",
+    fanNeeded: h >= 2, affected: h >= 4, unrescuable: false,
+  }));
+  return status({
+    warn: false, fanNeeded: false,
+    result: { ...status().result, index: 0.9, band: "good", status: "ok", title: "Fans have full headroom" },
+    weather: { entity: "weather.home", outC: 20, outRh: 60, outDewC: 12, available: true },
+    offsets: { offsetT: 3, offsetDew: 2 },
+    projection: { hours, worst: { at: at(4), index: 0.12, band: "dead" }, firstAffectedAt: at(4), lastAffectedAt: at(5),
+      affectedHours: 2, neededHours: 4, dayKind: "humid-heat", dayKindLabel: "Humid-heat day — dehumidify ahead of the afternoon",
+      purgeWindow: { from: at(0), to: at(1), outC: 20 }, offsets: { offsetT: 3, offsetDew: 2 } },
+    vent: { advised: true, known: true, reason: "outdoor dew point 12.0 °C is 5.6 °C below indoors — vent (intake fan + window) instead of dehumidifying", outdoorC: 20, outdoorDewC: 12, gapC: 5.6 },
+    plan: { shouldRun: false, kind: "scheduled", startAt: at(1), until: at(6), reason: "start by 13:00 — headroom drops to 12 % from 16:00" },
+    dehumidifier: { mode: "advise", armed: false, switchEntity: "switch.dehum", controlling: false, state: "off" },
+    ...over,
+  });
+}
+
+test("scheduled plan: ok card names the start time; row carries the drop", async () => {
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home", dehumidifier: { mode: "advise", switchEntity: "switch.dehum" } }, l2());
+  const sum = panel._coolingSummary();
+  assertEqual(sum.dayKind, "humid-heat");
+  assertEqual(sum.worstPct, 12);
+  assertEqual(sum.planActive, false);
+  const card = panel._coolingInsightCard();
+  assertEqual(card.status, "ok");
+  assert(card.title.startsWith("Humid-heat day — dehumidifier by "), card.title);
+  assert(panel._coolingMissionRow().includes("drops to 12 % from"));
+});
+
+test("active plan: warning card; vent advice takes the title when outdoor air is drier", async () => {
+  const st = l2({ plan: { shouldRun: true, kind: "ahead", startAt: "x", until: "y", reason: "fan headroom drops to 12 % from 16:00" } });
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, st);
+  const card = panel._coolingInsightCard();
+  assertEqual(card.status, "warning");
+  assertEqual(card.title, "Vent the room now");
+  const noVent = l2({ plan: st.plan, vent: { advised: false, known: true, reason: "outdoor air is as wet as indoors" } });
+  const panel2 = await prep({ enabled: true, weatherEntity: "weather.home" }, noVent);
+  assertEqual(panel2._coolingInsightCard().title, "Dehumidify now");
+  assert(panel2._coolingMissionRow().includes("Dehumidify now"));
+});
+
+test("chiller day is a critical card", async () => {
+  const st = l2({ plan: { shouldRun: false, kind: "unrescuable", startAt: null, until: null, reason: "room 31.0 °C at 85 % — a dehumidifier cannot rescue this afternoon; this is a chiller day" } });
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, st);
+  const card = panel._coolingInsightCard();
+  assertEqual(card.status, "critical");
+  assertEqual(card.title, "Chiller day");
+});
+
+test("forecast strip renders every hour with band, idle and affected markers", async () => {
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, l2());
+  const html = panel._coolingForecastStrip(l2());
+  assertEqual((html.match(/class="cooling-hour /g) || []).length, 6);
+  assertEqual((html.match(/affected/g) || []).length, 2);
+  assertEqual((html.match(/ idle/g) || []).length, 2);
+  assert(html.includes("Humid-heat day"));
+  assert(html.includes("night-purge window"));
+  assertEqual(panel._coolingForecastStrip(status()), "");
+});
+
+test("layer 2 settings render the weather/dehumidifier fields, the plan, vent and controls", async () => {
+  const cfg = { enabled: true, weatherEntity: "weather.home", dehumidifier: { mode: "auto", armed: true, switchEntity: "switch.dehum" } };
+  const st = l2({ dehumidifier: { mode: "auto", armed: true, switchEntity: "switch.dehum", controlling: true, state: "on", override: { state: "off", since: "2026-07-14T12:00:00Z" } } });
+  const panel = await prep(cfg, st);
+  panel._settingsSectionOpen = () => true;
+  panel._awcEntitySelect = (scope, _id, field, value) => `<input data-scope="${scope}" data-field="${field}" value="${value}">`;
+  const html = panel._coolingSettings();
+  assert(html.includes('data-field="weatherEntity"') && html.includes('data-scope="cooling-dehum" data-field="mode"'));
+  assert(html.includes('data-field="armed"'), "armed toggle appears in auto mode");
+  assert(html.includes("OpenReef is driving the plug"));
+  assert(html.includes("Give it back to the plan"), "resume button while held");
+  assert(html.includes("<strong>Vent:</strong>") && html.includes("<strong>Plan:</strong>"));
+  assert(html.includes("cooling-strip"));
+  const advise = await prep({ enabled: true, dehumidifier: { mode: "advise" } }, l2());
+  advise._settingsSectionOpen = () => true;
+  advise._awcEntitySelect = () => "";
+  assert(!advise._coolingSettings().includes('data-field="armed"'), "no armed toggle outside auto");
+});
+
 await runTests();

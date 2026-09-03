@@ -52,12 +52,19 @@ class _FakeServices:
         # tuples to make matching calls raise HomeAssistantError — the
         # ESP-unreachable / rejected-write test hook.
         self.fail_on = set()
+        # Response injection for return_response calls (weather.get_forecasts):
+        # (domain, service) → payload, or a callable(data, kwargs) → payload.
+        self.responses = {}
 
     async def async_call(self, domain, service, data=None, **kwargs):
         data = dict(data or {})
         self.calls.append(
             SimpleNamespace(domain=domain, service=service, data=data, kwargs=kwargs)
         )
+        if (domain, service) in self.responses:
+            await asyncio.sleep(0)
+            resp = self.responses[(domain, service)]
+            return resp(data, kwargs) if callable(resp) else resp
         # Yield to the event loop like a real (blocking=True) service call: without
         # this, asyncio.gather races never interleave, so lock-contention tests
         # exercised nothing (a task could hold a lock across "awaits" atomically).

@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.119"
+INTEGRATION_VERSION = "0.7.120"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -823,6 +823,9 @@ COOLING_RUNTIME = "cooling_runtime"          # hass.data: last snapshot, notify 
 COOLING_TICK_SECONDS = 300                   # room air moves slowly; five minutes is plenty
 COOLING_STALE_MINUTES = 30                   # sensor silence beyond this ⇒ "unknown", never a warning
 COOLING_NOTIFY_COOLDOWN_S = 6 * 3600         # one warning per band per six hours
+COOLING_FORECAST_TTL_S = 30 * 60             # weather.get_forecasts re-read cadence
+COOLING_LOOKAHEAD_MIN_H = 6
+COOLING_LOOKAHEAD_MAX_H = 48
 SPAWNING_TEMP_DRIFT_ALERT_C = 1.0         # |tank − RT| beyond this ⇒ deduped drift alert
 
 # Lighting schedule — gates light-dependent alerts (PAR especially) to the hours
@@ -1584,6 +1587,22 @@ DEFAULT_CORE_CONFIG = {
         "referenceVpdKpa": 1.85,         # 28 °C / 40 % over a 26 °C tank = 100 %
         "bands": {"good": 0.70, "thin": 0.40, "weak": 0.15},
         "notify": True,
+        # Layer 2: the 24 h projection off an HA weather entity's hourly
+        # forecast, and the dehumidifier it drives. mode advise = tell me when;
+        # auto = switch the plug (armed + switchEntity required). Efficiency,
+        # never safety: fails OFF, and the fan/guard stay the backstop.
+        "weatherEntity": "",
+        "lookaheadHours": 24,
+        "dehumidifier": {
+            "mode": "advise",            # off | advise | auto
+            "armed": False,
+            "switchEntity": "",
+            "leadHours": 3,              # start this far ahead of the first affected hour
+            "minOnMinutes": 20,          # compressor short-cycle guard
+            "minOffMinutes": 10,
+            "maxRunHours": 8,            # then off + a "check the bucket" nudge
+            "overridePolicy": "hold",    # hold (until the plan flips) | reassert
+        },
     },
     # Automatic Water Change — volume-primary (calibrated pump-math) with float/cutoff
     # sensors as arbiters. Two pumps (drain + fill), single tank, premixed saltwater.
