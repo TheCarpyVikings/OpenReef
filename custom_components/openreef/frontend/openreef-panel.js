@@ -10362,9 +10362,18 @@ class OpenReefPanel extends HTMLElement {
     const when = next.startAt
       ? `${this._formatActivityTime(next.startAt)} (~${this._escape(String(next.hoursUntil))} h from now)`
       : "";
+    // What sets the deadline (0.7.118): the incoming harvest (named), or the
+    // brine on hand — which may be the feeding bottle rather than the container.
+    const hatchSum = this._nps?.summary?.hatchery || {};
+    const chainName = (Array.isArray(hatchSum.vessels)
+      ? hatchSum.vessels.find((v) => v.id === next.chainVessel) : null)?.name;
+    const bottleOnly = (Number(hatchSum.fridgeBottle?.remainingMl) || 0) > 0
+      && !((Number(hatchSum.reservoir?.remainingMl) || 0) > 0);
     const why = next.driver === "depletion"
-      ? "the reservoir runs dry"
-      : "the loaded brine fades";
+      ? (bottleOnly ? "the feeding bottle runs dry" : "the reservoir runs dry")
+      : next.driver === "chain"
+        ? `the incoming harvest${chainName ? ` (${this._escape(chainName)})` : ""} fades`
+        : bottleOnly ? "the feeding bottle's brine fades" : "the loaded brine fades";
     const fridgeHint = "a second hatcher helps — or tap ❄ Refrigerate on the loaded brine: it drains into a feeding bottle in the fridge (the clock slows to the 48 h rate from that moment) and the container is free for the next hatch";
     const overlapNote = next.overlap
       ? (Number(next.shelfHours) >= Number(next.hatchHours)
@@ -10372,7 +10381,7 @@ class OpenReefPanel extends HTMLElement {
         : ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch outlives the brine's ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`)
       : "";
     if (next.status === "chained") {
-      return `🔗 Next hatch: start ${when} — keeps the chain unbroken (a fresh batch lands as this one fades).${overlapNote}`;
+      return `🔗 Next hatch: start ${when} — keeps the chain unbroken (a fresh batch lands before ${why}).${overlapNote}`;
     }
     if (next.status === "wait") {
       return `🥚 Next hatch: start ${when} — timed so a ${this._escape(String(next.hatchHours))} h batch is ready before ${why}.${overlapNote}`;
@@ -10381,7 +10390,7 @@ class OpenReefPanel extends HTMLElement {
       return `<span style="color:var(--warning-color,#f5a524)">⏰ Start the next hatch now — a ${this._escape(String(next.hatchHours))} h batch only lands before ${why} if the cysts go in today.</span>${overlapNote}`;
     }
     if (next.status === "overdue") {
-      return `<span style="color:var(--warning-color,#f5a524)">⏰ Past time — ${why === "the reservoir runs dry" ? "the reservoir is running dry" : "the loaded brine is going stale"}; start the next hatch as soon as you can.</span>${overlapNote}`;
+      return `<span style="color:var(--warning-color,#f5a524)">⏰ Past time — ${next.driver === "depletion" ? (bottleOnly ? "the feeding bottle is running dry" : "the reservoir is running dry") : bottleOnly ? "the feeding bottle's brine is going stale" : "the loaded brine is going stale"}; start the next hatch as soon as you can.</span>${overlapNote}`;
     }
     return "";
   }
@@ -11658,6 +11667,8 @@ class OpenReefPanel extends HTMLElement {
     // after a soak is the HUFA boost retro-converting, which is a different
     // number with a different honest ending.
     const bankedH = Number(st.summary?.hatchery?.reservoir?.fridgeSavedH) || 0;
+    const bottleSum = st.summary?.hatchery?.fridgeBottle || {};
+    const bottleSumMl = Math.max(0, Number(bottleSum.remainingMl) || 0);
     const primeHold = bankedH > 0 ? "at room temp, with the bottle's cold hours banked" : "at room temp";
     const primeLine = prime.status === "gutloaded"
       ? `🦐 Gut-loaded — this batch has been FED, so it is not running on yolk any more. The HUFA boost holds ~${this._escape(String(prime.primeLeftHours))} h (${this._escape(String(prime.windowHours))} h ${primeHold}, counted from the end of the soak).`
@@ -11667,7 +11678,9 @@ class OpenReefPanel extends HTMLElement {
           ? `🦐 Hatch is in its nutritional prime — ~${this._escape(String(prime.primeLeftHours))} h left (unenriched nauplii lose 30–50% of their calories by 48 h).`
           : prime.status === "fading"
             ? `🦐 Hatch is ${this._escape(String(prime.ageHours))} h old and was never enriched — past the 24 h yolk window. Feed it out, enrich it, or hatch fresh.`
-            : `🦐 No hatch loaded yet — tap "Hatched &amp; loaded" once the reservoir is filled.`;
+            : bottleSumMl > 0
+              ? `🦐 Container is empty — the feeding bottle holds the live food (${this._escape(String(Math.round(bottleSumMl)))} ml${bottleSum.lastLoadEnriched ? ", enriched" : ""}${bottleSum.freshness?.hoursLeft != null ? `, ~${this._escape(String(bottleSum.freshness.hoursLeft))} h left` : ""}). The next harvest reloads the container.`
+              : `🦐 No hatch loaded yet — tap "Hatched &amp; loaded" once the reservoir is filled.`;
     const freshLine = fresh.status === "stale"
       ? `<span style="color:var(--error-color,#e5484d)">${fxCfg.channelId
           ? "Brine is past its shelf life — dosing is blocked until you refresh."
@@ -12427,6 +12440,7 @@ const rigSteps = [
     // same brine, drained out and kept cold.
     const heroBottle = hatch.fridgeBottle || {};
     const heroBottleMl = Math.max(0, Number(heroBottle.remainingMl) || 0);
+    const heroBottleOnly = heroBottleMl > 0 && !((Number(res.remainingMl) || 0) > 0);
     const contCard = this._missionSummaryCard("Container",
       contPct == null ? "unset" : `${Math.round(Number(res.remainingMl) || 0)} ml`,
       contPct == null ? "set the volume in Hatch settings"
@@ -12440,7 +12454,9 @@ const rigSteps = [
         : next.status === "start_now" ? "now"
           : next.status === "overdue" ? "past due" : "—",
       next.status === "no_brine" || !next.status ? "nothing in play — start when ready"
-        : next.driver === "depletion" ? "before the container runs dry" : "before the loaded brine fades",
+        : next.driver === "chain" ? "before the incoming harvest fades"
+          : next.driver === "depletion" ? (heroBottleOnly ? "before the bottle runs dry" : "before the container runs dry")
+            : heroBottleOnly ? "before the bottle's brine fades" : "before the loaded brine fades",
       next.status === "start_now" || next.status === "overdue" ? "warning" : "ok", "hatchery");
     const learned = hatch.learned || {};
     const temp = hatch.temp || {};

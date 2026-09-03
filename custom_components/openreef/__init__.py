@@ -13137,8 +13137,8 @@ def _nps_chain_batches(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Every batch of brine ON THE WAY, for the next-hatch chain: incubating
     vessels on their stamped clocks. Brine mid-soak is already IN the ledger —
     the container freshness/depletion covers it."""
-    return [{"startedAt": started.isoformat(), "hatchHours": batch_h}
-            for _vid, started, batch_h in _nps_running_batches(config)]
+    return [{"startedAt": started.isoformat(), "hatchHours": batch_h, "id": vid}
+            for vid, started, batch_h in _nps_running_batches(config)]
 
 
 def _nps_container_load(

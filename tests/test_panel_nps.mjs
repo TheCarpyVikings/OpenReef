@@ -1178,5 +1178,44 @@ test("the temperature line measures the stretch against the rated hours and defe
   } finally { restore(); }
 });
 
+test("next-hatch wording names what sets the deadline, and an empty container defers to the bottle", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // Reece's screen: Hatchery 1 mid-run, container empty, enriched bottle.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      hatchHours: 38,
+      state: { status: "incubating", hoursElapsed: 25.9, hoursLeft: 12.1, percent: 68 },
+      reservoir: { canonical: "hatchery", volumeMl: 750, remainingMl: 0, loadVolumeMl: 0,
+        fridgeSavedH: 0, shelfHours: 24, plainShelfHours: 24, mixedAt: "", freshness: null },
+      fridgeBottle: { remainingMl: 500, mixedAt: new Date(Date.parse(NOW) - 2 * 3600000).toISOString(),
+        refrigeratedAt: new Date(Date.parse(NOW) - 2 * 3600000).toISOString(), lastLoadEnriched: true,
+        shelfHours: 50, freshness: { status: "fresh", hoursLeft: 46, ageHours: 2 } },
+      nextHatch: { status: "start_now", startAt: NOW, hoursUntil: 0, readyBy: NOW, driver: "chain",
+        chainVessel: "v1", hatchHours: 38, shelfHours: 50, overlap: true, busyCount: 1 },
+    });
+    panel._nps.summary.feedExchange.prime = { status: "unknown" };
+    let html = panel._hatcheryPanel();
+    assert(html.includes("before the incoming harvest (Hatchery 1) fades"), "the deadline is the incoming harvest, by name");
+    assert(!html.includes("before the loaded brine fades"), "nothing is loaded — that wording contradicts the empty container");
+    assert(html.includes("Container is empty — the feeding bottle holds the live food (500 ml, enriched, ~46 h left)"),
+      "the prime line must not say 'no hatch loaded' beside a full bottle");
+    assert(!html.includes("No hatch loaded yet"), "the old line is gone while the bottle holds brine");
+    let tab = panel._hatcheryTab();
+    assert(tab.includes("before the incoming harvest fades"), "the hero card names the driver too");
+    // Chained on the bottle's fade: the line says so.
+    panel._nps.summary.hatchery.nextHatch = { status: "chained", startAt: new Date(Date.parse(NOW) + 7 * 3600000).toISOString(),
+      hoursUntil: 7, driver: "freshness", chainVessel: "v1", hatchHours: 38, shelfHours: 50, overlap: false, busyCount: 1 };
+    html = panel._hatcheryPanel();
+    assert(html.includes("a fresh batch lands before the feeding bottle's brine fades"), "chained on the bottle");
+    tab = panel._hatcheryTab();
+    assert(/before the bottle(&#039;|')s brine fades/.test(tab), "hero card: the bottle, not 'the loaded brine'");
+    // Depletion of the bottle.
+    panel._nps.summary.hatchery.nextHatch.driver = "depletion";
+    assert(panel._hatcheryPanel().includes("the feeding bottle runs dry"), "depletion names the bottle");
+    assert(panel._hatcheryTab().includes("before the bottle runs dry"), "hero card too");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

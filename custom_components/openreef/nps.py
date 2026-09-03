@@ -485,12 +485,18 @@ def next_hatch_suggestion(
     "wait" can never be the answer.
 
     ``started_iso`` accepts one stamp, a LIST of stamps, or a list of
-    ``{"startedAt", "hatchHours"}`` dicts (hatchery v2: several vessels, each
-    batch on its OWN stamped clock — a 36 h batch mid-run stays a 36 h batch
-    even after the default drops to 24). The chain anchors on the batch that
-    LOADS last — every load resets the container's clock, so the last batch to
-    land is the one whose fade the next start must beat. ``busyCount`` reports
-    how many batches are on the go.
+    ``{"startedAt", "hatchHours", "id"}`` dicts (hatchery v2: several vessels,
+    each batch on its OWN stamped clock — a 36 h batch mid-run stays a 36 h
+    batch even after the default drops to 24). The chain anchors on the batch
+    that LOADS last — every load resets the container's clock, so the last
+    batch to land is the one whose fade the next start must beat — but brine
+    ALREADY on hand (the container, the feeding bottle) covers the gap too
+    (0.7.118): the next batch must land before the LATER of the incoming
+    load fading and the supply on hand giving out (its fade, or its
+    depletion at the feed rate). ``driver`` says which: ``chain`` (the
+    incoming harvest), ``freshness`` or ``depletion`` (the supply on hand).
+    ``busyCount`` reports how many batches are on the go; ``chainVessel``
+    names the anchor batch's vessel when the dicts carry ``id``.
     """
     hours = _f(hatch_hours)
     if hours <= 0:
@@ -506,20 +512,22 @@ def next_hatch_suggestion(
         chain_shelf_h = shelf_h
     lead_h = hours + HATCH_HARVEST_BUFFER_H
     raw_starts = started_iso if isinstance(started_iso, (list, tuple)) else [started_iso]
-    running: list[tuple[datetime, float]] = []
+    running: list[tuple[datetime, float, str]] = []
     for item in raw_starts:
         if isinstance(item, dict):
             stamp, batch_h = _parse_iso(item.get("startedAt")), _f(item.get("hatchHours"))
+            vessel_id = str(item.get("id") or "")
         else:
-            stamp, batch_h = _parse_iso(item), 0.0
+            stamp, batch_h, vessel_id = _parse_iso(item), 0.0, ""
         if stamp is not None:
-            running.append((stamp, batch_h if batch_h > 0 else hours))
+            running.append((stamp, batch_h if batch_h > 0 else hours, vessel_id))
     base: dict[str, Any] = {
         "status": "no_brine", "startAt": None, "hoursUntil": None,
         "readyBy": None, "driver": None,
         "hatchHours": round(hours, 1), "shelfHours": round(shelf_h, 1),
         "overlap": shelf_h < lead_h,
         "busyCount": len(running),
+        "chainVessel": None,
     }
 
     def _finish(status: str, start_at: datetime | None, ready_by: datetime | None,
@@ -534,32 +542,43 @@ def next_hatch_suggestion(
             out["hoursUntil"] = round(max(0.0, (start_at - now).total_seconds() / 3600.0), 1)
         return out
 
+    # Brine on hand (container and/or feeding bottle) gives out at the
+    # EARLIER of its fade and its depletion at the feed rate.
+    loaded = _parse_iso(loaded_iso)
+    supply_end: datetime | None = None
+    supply_driver = "freshness"
+    if loaded is not None:
+        supply_end = loaded + timedelta(hours=shelf_h)
+        remaining = _f(remaining_ml, -1.0)
+        rate = _f(ml_per_day)
+        if remaining >= 0 and rate > 0:
+            deplete_by = now + timedelta(hours=remaining / rate * 24.0)
+            if deplete_by < supply_end:
+                supply_end, supply_driver = deplete_by, "depletion"
+
     if running:
         # Batches are on the go: the next start keeps the chain unbroken. The
         # anchor is when the LAST batch loads (its own stamped clock, floored
         # at now — a ripe batch loads about now); its brine fades shelf_h
-        # later, and the following batch needs lead_h of runway.
-        anchor = max(
-            max(stamp + timedelta(hours=batch_h), now)
-            for stamp, batch_h in running
+        # later, and the following batch needs lead_h of runway. Brine
+        # already on hand that outlives that load moves the deadline out.
+        anchor_dt, _h, anchor_id = max(
+            ((max(stamp + timedelta(hours=batch_h), now), batch_h, vid)
+             for stamp, batch_h, vid in running),
+            key=lambda item: item[0],
         )
-        ready_by = anchor + timedelta(hours=HATCH_HARVEST_BUFFER_H + chain_shelf_h)
+        base["chainVessel"] = anchor_id or None
+        ready_by, driver = anchor_dt + timedelta(hours=HATCH_HARVEST_BUFFER_H + chain_shelf_h), "chain"
+        if supply_end is not None and supply_end > ready_by:
+            ready_by, driver = supply_end, supply_driver
         start_at = ready_by - timedelta(hours=lead_h)
         if start_at <= now:
-            return _finish("start_now", now, ready_by, "freshness")
-        return _finish("chained", start_at, ready_by, "freshness")
+            return _finish("start_now", now, ready_by, driver)
+        return _finish("chained", start_at, ready_by, driver)
 
-    loaded = _parse_iso(loaded_iso)
-    if loaded is None:
+    if loaded is None or supply_end is None:
         return _finish("no_brine", None, None, None)
-    fresh_by = loaded + timedelta(hours=shelf_h)
-    ready_by, driver = fresh_by, "freshness"
-    remaining = _f(remaining_ml, -1.0)
-    rate = _f(ml_per_day)
-    if remaining >= 0 and rate > 0:
-        deplete_by = now + timedelta(hours=remaining / rate * 24.0)
-        if deplete_by < ready_by:
-            ready_by, driver = deplete_by, "depletion"
+    ready_by, driver = supply_end, supply_driver
     start_at = ready_by - timedelta(hours=lead_h)
     if ready_by <= now:
         return _finish("overdue", now, ready_by, driver)

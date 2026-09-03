@@ -816,3 +816,24 @@ mid-file, so every test added below it (the whole 0.7.115 fridge set, and
 end. And the mixing vessel ledger rounded `estimatedLitres` to 1 dp on
 every save, so 0.7.113's 0.75 L backflush was logged as 0.75 and stored as
 0.8 — the ledger keeps 2 dp now.
+
+### 12.7 The chain counts the brine on hand (2026-09-03, 0.7.118)
+
+Reece's screen: Hatchery 1 at 25.9/38 h, container empty, an enriched
+feeding bottle with 46 h left — and the page said "start the next hatch
+now, before the loaded brine fades" beside "no hatch loaded yet".
+
+The chain branch of `next_hatch_suggestion` ignored `loaded_iso` entirely:
+with a batch running it planned only on that batch's load (+12.1 h, plain
+24 h shelf, fades +37.1 h; a 38 h batch needs 39 h of runway → now). By
+coincidence that was the right answer here — 500 ml fed at 250 ml twice a
+day is gone by +24 h, before the incoming load fades — but the reasoning
+skipped the bottle and the wording contradicted the tile beside it.
+
+Now the deadline is the LATER of the incoming load fading and the supply
+on hand giving out (its fade or its depletion at the feed rate — the same
+rule the no-running branch always used). `driver` says which: `chain`
+(the incoming harvest — `chainVessel` names it), `freshness` or
+`depletion` (the supply on hand, which the panel calls the feeding bottle
+when the container is empty). The prime line, when the container is empty
+and the bottle holds brine, says so instead of "no hatch loaded yet".

@@ -937,8 +937,62 @@ def test_next_hatch_suggestion_chained_while_incubating():
     # 6 h into a 36 h hatch with 48 h shelf: the next start keeps the chain
     # unbroken at started + shelf -> 42 h from now.
     s = nps.next_hatch_suggestion(NOW, 36, "", 48, None, None, _iso(NOW - timedelta(hours=6)))
+    assert s["status"] == "chained" and s["driver"] == "chain"
+    assert s["hoursUntil"] == 42.0 and s["chainVessel"] is None
+
+
+def test_next_hatch_chain_counts_the_brine_on_hand():
+    # Reece's live case (0.7.118): Hatchery 1 is 25.9 h into a 38 h batch,
+    # the container is empty, and a feeding bottle in the fridge has 46 h
+    # left. The old chain ignored the bottle: that load lands at +12.1 h and
+    # (plain 24 h shelf) fades at +37.1 h, a 38 h batch needs 39 h of runway
+    # -> "start now". With no feed rate the bottle outlives that load, so
+    # the honest deadline is the bottle's fade at +46 h: start in ~7 h.
+    batch = [{"startedAt": _iso(NOW - timedelta(hours=25.9)), "hatchHours": 38, "id": "v1"}]
+    bottle_loaded = _iso(NOW - timedelta(hours=2))
+    s = nps.next_hatch_suggestion(NOW, 38, bottle_loaded, 48, None, None, batch,
+                                  chain_shelf_hours=24)
     assert s["status"] == "chained" and s["driver"] == "freshness"
-    assert s["hoursUntil"] == 42.0
+    assert abs(s["hoursUntil"] - 7.0) < 0.05 and s["chainVessel"] == "v1"
+    # At 500 ml fed out at 500 ml/day the bottle is GONE at +24 h, before the
+    # incoming load fades: the incoming harvest is the deadline -> start now.
+    s = nps.next_hatch_suggestion(NOW, 38, bottle_loaded, 48, 500, 500, batch,
+                                  chain_shelf_hours=24)
+    assert s["status"] == "start_now" and s["driver"] == "chain"
+    assert s["chainVessel"] == "v1"
+    # A bottle big enough to feed past the incoming load's fade pushes the
+    # deadline to ITS depletion.
+    s = nps.next_hatch_suggestion(NOW, 38, bottle_loaded, 48, 900, 500, batch,
+                                  chain_shelf_hours=24)
+    assert s["driver"] == "depletion" and abs(s["hoursUntil"] - (43.2 - 39.0)) < 0.05
+    # Nothing on hand: the chain alone, as before.
+    s = nps.next_hatch_suggestion(NOW, 38, "", 24, None, None, batch, chain_shelf_hours=24)
+    assert s["status"] == "start_now" and s["driver"] == "chain"
+
+
+def test_ws_summary_next_hatch_sees_the_bottle_and_names_the_vessel():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 0, "loadVolumeMl": 0})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["hatchHours"] = 38
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=25.9)).isoformat(), "hatchHours": 38}
+    cfg["nps"]["hatchery"]["fridgeBottle"] = {
+        "remainingMl": 500, "mixedAt": (now - timedelta(hours=2)).isoformat(),
+        "refrigeratedAt": (now - timedelta(hours=2)).isoformat(), "lastLoadEnriched": True,
+        "enrichedAt": (now - timedelta(hours=2)).isoformat()}
+    cfg["nps"]["hatchery"]["handFeed"] = {"defaultDoseMl": 30, "feedsPerDay": 2}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    nxt = hatchery["nextHatch"]
+    assert nxt["chainVessel"] == "v1"
+    # 60 ml/day out of 500 ml: the bottle outlives the incoming load (its
+    # boost window, 2 h soak offset + 48 h cold = 50 h) -> chained on the bottle.
+    assert nxt["status"] == "chained" and nxt["driver"] == "freshness"
+    assert hatchery["reservoir"]["freshness"] is None
+    assert hatchery["fridgeBottle"]["remainingMl"] == 500
 
 
 def test_next_hatch_multi_vessel_chains_on_latest():
