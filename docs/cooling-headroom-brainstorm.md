@@ -536,3 +536,12 @@ reset; the sensor moved, the room changed). The strip's hint says on how many of
 hours the learned slots were used.
 
 Tests: `tests/test_cooling.py` 50, `tests/test_panel_cooling.mjs` 19.
+
+### 12.1 First live forecast (0.7.123, 2026-09-03)
+
+Reece's first strip: a flat 19–21 °C night, a mild tomorrow, dry-heat day, no plan — all
+correct — but the night-purge window read "21:00–18:00": every hour was within 2 °C of the
+coolest, and the window took the first and last of them. It is now a contiguous run around the
+coolest hour, growing toward the cooler neighbour, capped at 8 h (`PURGE_BAND_C`,
+`PURGE_MAX_HOURS`). The strip's header also says "next 24 h" (the configured lookahead) rather
+than counting the extra past hour.

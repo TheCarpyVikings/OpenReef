@@ -227,6 +227,8 @@ UNRESCUABLE_OVER_TARGET_C = 4.0
 UNRESCUABLE_INDEX = 0.10
 
 VENT_DEW_GAP_C = 2.0                # vent only while outdoor dew ≤ indoor dew − this
+PURGE_BAND_C = 2.0                  # night-purge hours sit within this of the coolest hour
+PURGE_MAX_HOURS = 8                 # …and never longer than a night
 VENT_TEMP_SLACK_C = 1.0             # …and outdoor air is no warmer than room + this
 
 DAY_KINDS = ("quiet", "dry-heat", "humid-heat", "chiller")
@@ -371,8 +373,24 @@ def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, wate
         kind = "dry-heat"
     else:
         kind = "quiet"
-    coolest = min(rows, key=lambda r: r["outC"])
-    purge = [r["at"] for r in rows if r["outC"] <= coolest["outC"] + 2.0]
+    # Night-purge window: a contiguous run around the coolest hour, growing
+    # toward the cooler neighbour while it stays within PURGE_BAND_C of the
+    # minimum, capped at PURGE_MAX_HOURS. (Taking every hour within the band
+    # made a flat forecast's window span the whole day.)
+    coolest_i = min(range(len(rows)), key=lambda i: rows[i]["outC"])
+    coolest = rows[coolest_i]
+    limit = float(coolest["outC"]) + PURGE_BAND_C
+    lo = hi = coolest_i
+    while hi - lo + 1 < PURGE_MAX_HOURS:
+        can_l = lo - 1 >= 0 and float(rows[lo - 1]["outC"]) <= limit
+        can_r = hi + 1 < len(rows) and float(rows[hi + 1]["outC"]) <= limit
+        if not can_l and not can_r:
+            break
+        if can_l and (not can_r or float(rows[lo - 1]["outC"]) <= float(rows[hi + 1]["outC"])):
+            lo -= 1
+        else:
+            hi += 1
+    purge = [r["at"] for r in rows[lo:hi + 1]]
     return {
         "hours": rows,
         "worst": {"at": worst["at"], "index": worst["index"], "band": worst["band"]} if worst else None,

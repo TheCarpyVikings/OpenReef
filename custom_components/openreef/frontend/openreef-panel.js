@@ -24787,7 +24787,7 @@ const rigSteps = [
     const purge = proj.purgeWindow ? `<small class="hint">Coolest outdoor air ${this._coolingHhmm(proj.purgeWindow.from)}–${this._coolingHhmm(proj.purgeWindow.to)} (${Number(proj.purgeWindow.outC).toFixed(0)} °C) — the night-purge window for the intake fan.</small>` : "";
     return `
       <div class="cooling-strip-wrap">
-        <p class="eyebrow">${this._escape(proj.dayKindLabel || "")} · next ${proj.hours.length} h</p>
+        <p class="eyebrow">${this._escape(proj.dayKindLabel || "")} · next ${Number.isFinite(Number(this._coolingCfg().lookaheadHours)) ? Number(this._coolingCfg().lookaheadHours) : proj.hours.length} h</p>
         <div class="cooling-strip">${cells}</div>
         <small class="hint">Fan effect % per hour, room ${Number(proj.offsets?.offsetT ?? 0).toFixed(1)} °C over and dew point ${Number(proj.offsets?.offsetDew ?? 0).toFixed(1)} °C over the forecast (the live difference)${Number(proj.learnedHours) > 0 ? `, per-hour learned offsets on ${proj.learnedHours} of ${proj.hours.length} hours` : ""}. Greyed hours: fans not needed. Marked hours: needed and losing.</small>
         ${purge}

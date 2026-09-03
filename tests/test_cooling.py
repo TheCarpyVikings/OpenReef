@@ -906,6 +906,25 @@ def test_learning_needs_both_sides_and_reset_ws_forgets():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+def test_purge_window_is_contiguous_around_the_coolest_hour_and_capped():
+    # A flat night (19–21 °C for 25 h): every hour is within the band — the
+    # window must still be one run of at most PURGE_MAX_HOURS around the minimum.
+    flat = cooling.parse_forecast(_fc(25, out_c=lambda i: 19 if i == 9 else 20 + (i % 2), out_rh=80))
+    proj = cooling.project(flat, NOW, 24, 25.5, 25.5, {"offsetT": 2.6, "offsetDew": 1.6}, 1.0)
+    window = proj["purgeWindow"]
+    start = cooling._parse_when(window["from"])
+    end = cooling._parse_when(window["to"])
+    hours = int((end - start).total_seconds() // 3600) + 1
+    assert hours == cooling.PURGE_MAX_HOURS and window["outC"] == 19.0
+    assert start <= NOW + timedelta(hours=9) <= end
+    # A real dip: 12 °C for six hours then 26 °C — the window is exactly those six.
+    dip = cooling.parse_forecast(_fc(14, out_c=lambda i: 12 if i < 6 else 26, out_rh=70))
+    proj = cooling.project(dip, NOW, 24, 25.5, 25.5, {"offsetT": 3.0, "offsetDew": 3.0}, 1.0)
+    window = proj["purgeWindow"]
+    assert window["from"] == NOW.isoformat() and window["to"] == (NOW + timedelta(hours=5)).isoformat()
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0
