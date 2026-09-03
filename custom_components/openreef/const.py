@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.118"
+INTEGRATION_VERSION = "0.7.119"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -814,6 +814,15 @@ SPAWNING_TEMP_TOLERANCE_C = 0.2           # Rich Ross / Craggs ±0.2° — the A
 SPAWNING_TEMP_STALE_MINUTES = 15          # sensor silence beyond this ⇒ everything fails OFF
 SPAWNING_TEMP_PLAUSIBLE_MIN_C = 15.0      # outside this band the probe is not in the water
 SPAWNING_TEMP_PLAUSIBLE_MAX_C = 32.0
+
+# Cooling headroom (Layer 1) — humidity-aware fan cooling. The maths live in
+# cooling.py; the tick/WS glue in __init__.py. Runtime lives ONLY in hass.data
+# (no server-written config fields), so it needs no stale-save merge guard.
+COOLING_TICK_UNSUB = "cooling_tick_unsub"
+COOLING_RUNTIME = "cooling_runtime"          # hass.data: last snapshot, notify cooldowns, last warn band
+COOLING_TICK_SECONDS = 300                   # room air moves slowly; five minutes is plenty
+COOLING_STALE_MINUTES = 30                   # sensor silence beyond this ⇒ "unknown", never a warning
+COOLING_NOTIFY_COOLDOWN_S = 6 * 3600         # one warning per band per six hours
 SPAWNING_TEMP_DRIFT_ALERT_C = 1.0         # |tank − RT| beyond this ⇒ deduped drift alert
 
 # Lighting schedule — gates light-dependent alerts (PAR especially) to the hours
@@ -1559,6 +1568,22 @@ DEFAULT_CORE_CONFIG = {
                 "minC": 22.0,                # hard clamp: never command cooling at/below this
             },
         },
+    },
+    # Cooling headroom (Layer 1): is evaporative cooling going to work today?
+    # Entities default to the mapped room_temp / humidity / tank temp sensors;
+    # the overrides exist for a second, room-level sensor. targetMode
+    # "spawning" follows the seasonal target when the program is valid.
+    "coolingHeadroom": {
+        "enabled": False,
+        "waterTempEntity": "",
+        "roomTempEntity": "",
+        "humidityEntity": "",
+        "targetMode": "fixed",           # fixed | spawning
+        "targetTempC": 25.5,
+        "fanGateC": 1.0,                 # cooling is "needed" once room ≥ target − gate
+        "referenceVpdKpa": 1.85,         # 28 °C / 40 % over a 26 °C tank = 100 %
+        "bands": {"good": 0.70, "thin": 0.40, "weak": 0.15},
+        "notify": True,
     },
     # Automatic Water Change — volume-primary (calibrated pump-math) with float/cutoff
     # sensors as arbiters. Two pumps (drain + fill), single tank, premixed saltwater.

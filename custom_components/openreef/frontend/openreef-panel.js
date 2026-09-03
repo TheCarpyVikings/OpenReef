@@ -67,6 +67,7 @@ class OpenReefPanel extends HTMLElement {
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
     this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false };
     this._cultures = { summary: null, at: 0, loading: false, error: "", message: "" };
+    this._cooling = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
@@ -521,6 +522,8 @@ class OpenReefPanel extends HTMLElement {
       // The spawning execution strip is computed backend-side from the saved
       // program — a save (new reef/offset/noon) must refresh it immediately.
       if (this._activeTab === "spawning") this._loadSpawnExecStatus(true);
+      // Cooling headroom is computed backend-side from the saved bindings/target.
+      if (this._coolingEnabled()) this._loadCoolingStatus(true);
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not save OpenReef";
     } finally {
@@ -2676,6 +2679,12 @@ class OpenReefPanel extends HTMLElement {
         temp[field] = target.type === "checkbox" ? value
           : target.type === "number" ? Number(value) : value;
         if ((field === "enabled" || field === "acknowledged") && event.type === "change") this._render();
+      }
+      if (scope === "cooling") {
+        const cool = this._config.coolingHeadroom = this._config.coolingHeadroom || {};
+        cool[field] = target.type === "checkbox" ? value
+          : target.type === "number" ? Number(value) : value;
+        if ((field === "enabled" || field === "targetMode") && event.type === "change") this._render();
       }
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
@@ -16678,6 +16687,11 @@ const rigSteps = [
     };
     const statusRank = { critical: 2, warning: 1 };
 
+    // Cooling headroom (Layer 1): will the fans work today? Backend-computed
+    // (dew point vs tank); the card reads the cached status only.
+    const cooling = this._coolingInsightCard();
+    if (cooling) push(cooling.key, cooling.kicker, cooling.title, cooling.detail, cooling.status);
+
     // Reef health: the top deduction, or the clean sheet.
     try {
       const health = this._reefHealthScore();
@@ -21533,7 +21547,7 @@ const rigSteps = [
       </div>
     ` : `<p class="muted">No OpenReef activity has been recorded yet.</p>`;
     const tankCols = [
-      cards.live ? `<div class="mission-detail-col"><h4>Core Sensors</h4>${sensors.length ? sensors.map(([id, sensor]) => this._sensorRow(id, sensor)).join("") : this._emptyState("No sensors enabled", "Enable the sensor types you own in Settings. Disabled sensors stay out of Mission Control.", "settings", "Choose sensors")}</div>` : "",
+      cards.live ? `<div class="mission-detail-col"><h4>Core Sensors</h4>${sensors.length ? sensors.map(([id, sensor]) => this._sensorRow(id, sensor)).join("") + this._coolingMissionRow() : this._emptyState("No sensors enabled", "Enable the sensor types you own in Settings. Disabled sensors stay out of Mission Control.", "settings", "Choose sensors")}</div>` : "",
       cards.controls ? `<div class="mission-detail-col"><h4>Armed Equipment</h4>${this._armedEquipmentRows()}</div>` : "",
       cards.energy ? `<div class="mission-detail-col"><h4>Energy</h4>${this._missionEnergyRows()}</div>` : "",
     ].filter(Boolean);
@@ -24552,6 +24566,7 @@ const rigSteps = [
         ${this._guideSettings()}
         ${this._missionSettings()}
         ${this._sensorSettings()}
+        ${this._coolingSettings()}
         ${this._manualTestSettings()}
         ${this._maintenanceSettings()}
         ${this._dosingSettings()}
@@ -24578,6 +24593,161 @@ const rigSteps = [
         ${this._backupRestoreSettings()}
       </section>
     `;
+  }
+
+  // --- Cooling headroom (Layer 1) ------------------------------------------
+  // Will evaporative cooling work today? A fan over the tank is limited by the
+  // room's DEW POINT against the water, not by humidity. The backend owns every
+  // number (openreef/cooling_status); the panel renders and never recomputes.
+  // Doc: docs/cooling-headroom-brainstorm.md.
+
+  _coolingCfg() {
+    return this._config.coolingHeadroom || {};
+  }
+
+  _coolingEnabled() {
+    return Boolean(this._coolingCfg().enabled);
+  }
+
+  async _loadCoolingStatus(force = false) {
+    const st = this._cooling;
+    if (!st || !this._coolingEnabled() || st.loading) return;
+    if (!force && st.status && Date.now() - st.at < 60000) return;
+    st.loading = true;
+    try {
+      st.status = await this._callWS({ type: "openreef/cooling_status" });
+      st.error = "";
+    } catch (err) {
+      st.error = err?.message || "Could not load cooling headroom";
+    } finally {
+      st.at = Date.now();
+      st.loading = false;
+      this._render();
+    }
+  }
+
+  // Pill class per band: neutral while the fans are fine, louder as they fail.
+  _coolingPillClass(band) {
+    if (band === "reversed") return "critical";
+    if (band === "weak" || band === "dead") return "warning";
+    if (band === "good") return "ok";
+    return "unknown";
+  }
+
+  // One digest from a status payload — the row, the card and the settings
+  // readout all read this, so they can never disagree with each other.
+  _coolingSummary(status = this._cooling?.status) {
+    if (!status || typeof status !== "object") return null;
+    const result = status.result;
+    const issues = Object.values(status.issues || {});
+    if (!result) {
+      return { band: "", pill: "unknown", label: "Not reporting", pct: null, needed: false,
+        detail: issues[0] || "Map a room temperature and a humidity sensor.", warn: false };
+    }
+    const pct = Math.round(Number(result.index || 0) * 100);
+    const detail = `dew point ${Number(result.dewC).toFixed(1)} °C vs tank ${Number(result.waterC).toFixed(1)} °C · room ${Number(result.roomC).toFixed(1)} °C at ${Math.round(Number(result.rh))} %`;
+    return {
+      band: result.band, pill: this._coolingPillClass(result.band), label: result.title,
+      pct, needed: Boolean(status.fanNeeded), warn: Boolean(status.warn), detail,
+      status: result.status, netFan: result.netFan,
+    };
+  }
+
+  _coolingMissionRow() {
+    if (!this._coolingEnabled()) return "";
+    this._loadCoolingStatus();
+    const sum = this._coolingSummary();
+    const pill = sum ? sum.pill : "unknown";
+    const value = sum && sum.pct != null ? `${sum.pct} % fan effect` : sum ? sum.label : "Loading…";
+    const detail = sum ? (sum.needed ? sum.detail : `${sum.detail} · fans not needed right now`) : "";
+    return `
+      <button class="row row-link" data-action="tab" data-id="settings" aria-label="Cooling headroom — Open settings">
+        <div>
+          <strong>Cooling headroom</strong>
+          ${detail ? `<span>${this._escape(detail)}</span>` : ""}
+        </div>
+        <div class="row-link-aside">
+          <span class="pill ${pill}">${this._escape(value)}</span>
+          <span class="row-go" aria-hidden="true">›</span>
+        </div>
+      </button>`;
+  }
+
+  _coolingInsightCard() {
+    if (!this._coolingEnabled()) return null;
+    this._loadCoolingStatus();
+    const sum = this._coolingSummary();
+    if (!sum || sum.pct == null) return null;
+    if (sum.warn) {
+      return { key: "cooling", kicker: "Cooling headroom", title: sum.label, detail: sum.detail, status: sum.status || "warning" };
+    }
+    if (!sum.needed && (sum.band === "weak" || sum.band === "dead" || sum.band === "reversed")) {
+      return { key: "cooling", kicker: "Cooling headroom", title: "Humid, but the fans aren't needed", detail: `${sum.detail} · the room is below the cooling gate`, status: "ok" };
+    }
+    return { key: "cooling", kicker: "Cooling headroom", title: `${sum.label} — ${sum.pct} %`, detail: sum.detail, status: "ok" };
+  }
+
+  _coolingWhatIfTable(status) {
+    const table = status?.whatIf;
+    if (!table || !Array.isArray(table.rows)) return "";
+    const head = table.humidities.map((rh) => `<th>${Math.round(rh)} % RH</th>`).join("");
+    const rows = table.rows.map((row) => `
+      <tr><th>Room ${Number(row.roomC).toFixed(0)} °C</th>${row.cells.map((c) => `<td class="cooling-cell ${this._escape(c.band)}">${Math.round(Number(c.index) * 100)} %</td>`).join("")}</tr>`).join("");
+    return `
+      <div class="cooling-grid-wrap">
+        <table class="cooling-grid"><thead><tr><th></th>${head}</tr></thead><tbody>${rows}</tbody></table>
+        <small class="hint">What the fans are worth on today's tank (${Number(status.waterC).toFixed(1)} °C). 100 % = a 28 °C / 40 % dry day. 0 % = the room's dew point has reached the water — nothing evaporates.</small>
+      </div>`;
+  }
+
+  _coolingSettings() {
+    const cfg = this._coolingCfg();
+    const enabled = Boolean(cfg.enabled);
+    if (enabled) this._loadCoolingStatus();
+    const status = this._cooling?.status;
+    const sum = this._coolingSummary(status);
+    const spawningOn = Boolean(this._config.spawningProgram?.enabled);
+    const targetMode = cfg.targetMode === "spawning" ? "spawning" : "fixed";
+    const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+    const issues = Object.values(status?.issues || {});
+    const live = !enabled ? "" : !status ? `<p class="hint">${this._cooling?.error ? this._escape(this._cooling.error) : "Loading the live reading…"}</p>` : `
+      <div class="spawn-channel-row">
+        <strong>${sum && sum.pct != null ? `${sum.pct} % fan effect` : "No reading"}</strong>
+        <span class="pill ${sum ? sum.pill : "unknown"}">${this._escape(sum ? sum.label : "Not reporting")}</span>
+        <small class="hint">${this._escape(sum ? sum.detail : "")}${status.fanNeeded ? "" : " · fans not needed right now"}</small>
+        <small class="hint">Target ${Number(status.targetC).toFixed(1)} °C (${status.targetSource === "spawning" ? "seasonal program" : "fixed"})${status.waterSource === "target" ? " · no tank probe, using the target as the water temperature" : ""}</small>
+      </div>
+      ${issues.length ? `<ul class="hint">${issues.map((i) => `<li>${this._escape(i)}</li>`).join("")}</ul>` : ""}
+      ${this._coolingWhatIfTable(status)}`;
+    const content = `
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="cooling" data-field="enabled" ${enabled ? "checked" : ""}>
+        <span><strong>Watch evaporative cooling headroom</strong><small>A fan over the tank only works while the room's dew point sits well below the water. OpenReef scores that every five minutes and warns — only when cooling is actually needed — before a hot, humid afternoon beats the fans. Advisory: nothing is switched.</small></span>
+      </label>
+      <div class="grid two">
+        <label><span>Tank target</span>
+          <select data-scope="cooling" data-field="targetMode">
+            <option value="fixed" ${targetMode === "fixed" ? "selected" : ""}>Fixed temperature</option>
+            <option value="spawning" ${targetMode === "spawning" ? "selected" : ""} ${spawningOn ? "" : "disabled"}>Follow the seasonal spawning target${spawningOn ? "" : " (program off)"}</option>
+          </select></label>
+        <label><span>Target temperature (°C)</span><input type="number" min="18" max="32" step="0.1" value="${num(cfg.targetTempC, 25.5)}" data-scope="cooling" data-field="targetTempC" ${targetMode === "spawning" && spawningOn ? "disabled" : ""} /></label>
+        <label><span>Room temperature sensor <small>blank = the mapped room sensor</small></span>${this._awcEntitySelect("cooling", "", "roomTempEntity", cfg.roomTempEntity || "", "sensor")}</label>
+        <label><span>Room humidity sensor <small>blank = the mapped humidity sensor</small></span>${this._awcEntitySelect("cooling", "", "humidityEntity", cfg.humidityEntity || "", "sensor")}</label>
+        <label><span>Tank temperature sensor <small>blank = the mapped tank probe; none = the target</small></span>${this._awcEntitySelect("cooling", "", "waterTempEntity", cfg.waterTempEntity || "", "sensor")}</label>
+        <label><span>Cooling gate (°C below target)</span><input type="number" min="0" max="5" step="0.1" value="${num(cfg.fanGateC, 1)}" data-scope="cooling" data-field="fanGateC" /><small class="hint">Warnings only fire once the room is within this of the target — a humid but cool day stays silent.</small></label>
+      </div>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="cooling" data-field="notify" ${cfg.notify === false ? "" : "checked"}>
+        <span><strong>Notify when the fans lose it</strong><small>One notification per band per six hours; the Log tab records every transition either way.</small></span>
+      </label>
+      ${live}
+      <small class="hint">Where the humidity sensor sits matters more here than anywhere: high up and away from the tank reads the room the fans breathe, not the sump's plume. Next: the 24-hour forecast and the dehumidifier trigger.</small>`;
+    return this._settingsPanel(
+      "cooling",
+      "Cooling headroom",
+      "Will evaporative cooling work today? Dew point against the tank, not humidity.",
+      content,
+    );
   }
 
   // Hatchery settings — its own section (0.7.71): breeders configure a
@@ -28200,6 +28370,14 @@ const rigSteps = [
         .metric-card { border: 1px solid #24364a; border-radius: 8px; background: #0b1724; padding: 14px; display: grid; gap: 6px; min-height: 92px; }
         .metric-card strong { color: #67e8f9; font-size: 24px; line-height: 1.1; overflow-wrap: anywhere; }
         .metric-card small { color: #9fb2c7; }
+        .cooling-grid-wrap { display: grid; gap: 6px; overflow-x: auto; }
+        .cooling-grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .cooling-grid th, .cooling-grid td { padding: 6px 8px; text-align: center; border: 1px solid #24364a; color: #cfe0f0; }
+        .cooling-grid tbody th { text-align: left; font-weight: 600; }
+        .cooling-cell.good { color: #4ade80; font-weight: 600; }
+        .cooling-cell.thin { color: #facc15; font-weight: 600; }
+        .cooling-cell.weak { color: #fb923c; font-weight: 600; }
+        .cooling-cell.dead, .cooling-cell.reversed { color: #f87171; font-weight: 600; }
         .icp-subnav, .icp-choice-row, .icp-symbol-row, .icp-lab-legend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
         .icp-subnav { margin-top: -6px; }
         .icp-subnav button, .icp-choice-row button, .icp-symbol-row button { border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #dcecff; min-height: 36px; padding: 8px 12px; }

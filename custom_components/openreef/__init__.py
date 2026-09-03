@@ -157,6 +157,11 @@ from .const import (
     SPAWNING_DEFAULT_SOLAR_NOON_HOUR,
     SPAWNING_OFFSET_MONTHS_MAX,
     SPAWNING_RUNTIME,
+    COOLING_RUNTIME,
+    COOLING_TICK_UNSUB,
+    COOLING_TICK_SECONDS,
+    COOLING_STALE_MINUTES,
+    COOLING_NOTIFY_COOLDOWN_S,
     SPAWNING_TARGET_TEMP_ENTITY,
     SPAWNING_TEMP_DRIFT_ALERT_C,
     SPAWNING_TEMP_PLAUSIBLE_MAX_C,
@@ -206,6 +211,7 @@ from . import guardian as guardian_engine
 from . import icp
 from . import mixing as mixing_engine
 from . import cultures as cultures_engine
+from . import cooling as cooling_engine
 from . import nps as nps_engine
 from . import spawning
 from . import vision
@@ -950,6 +956,33 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
             ][:DOSING_EVENTS_MAX],
         }
     dosing["channels"] = channels
+
+
+def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
+    """Cooling headroom (Layer 1): junk-tolerant, every field clamped. Entity
+    overrides are optional — empty means "inherit the mapped sensor"."""
+    defaults = DEFAULT_CORE_CONFIG["coolingHeadroom"]
+    raw = raw if isinstance(raw, dict) else {}
+    raw_bands = raw.get("bands") if isinstance(raw.get("bands"), dict) else {}
+    bands = {}
+    for key, default in defaults["bands"].items():
+        bands[key] = _awc_num(raw_bands.get(key), default, 0.01, 1.0)
+    # Ordered edges whatever the client posted: weak < thin < good.
+    bands["thin"] = max(bands["thin"], bands["weak"] + 0.01)
+    bands["good"] = max(bands["good"], bands["thin"] + 0.01)
+    mode = str(raw.get("targetMode", defaults["targetMode"]))
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "waterTempEntity": _normalise_entity_id(raw.get("waterTempEntity")) or "",
+        "roomTempEntity": _normalise_entity_id(raw.get("roomTempEntity")) or "",
+        "humidityEntity": _normalise_entity_id(raw.get("humidityEntity")) or "",
+        "targetMode": mode if mode in ("fixed", "spawning") else defaults["targetMode"],
+        "targetTempC": _awc_num(raw.get("targetTempC"), defaults["targetTempC"], 18.0, 32.0),
+        "fanGateC": _awc_num(raw.get("fanGateC"), defaults["fanGateC"], 0.0, 5.0),
+        "referenceVpdKpa": _awc_num(raw.get("referenceVpdKpa"), defaults["referenceVpdKpa"], 0.5, 4.0),
+        "bands": {k: round(v, 3) for k, v in bands.items()},
+        "notify": bool(raw.get("notify", True)),
+    }
 
 
 def _normalise_cultures(raw: Any) -> dict[str, Any]:
@@ -3209,6 +3242,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         except (TypeError, ValueError):
             ls_grace = LIGHTING_SCHEDULE_DEFAULT_GRACE_MIN
         lighting_cfg["rampGraceMinutes"] = max(0, min(ls_grace, LIGHTING_SCHEDULE_GRACE_MAX))
+
+    config["coolingHeadroom"] = _normalise_cooling_headroom(config.get("coolingHeadroom"))
 
     spawning_cfg = config.setdefault("spawningProgram", {})
     if not isinstance(spawning_cfg, dict):
@@ -5825,6 +5860,7 @@ async def _async_save_config(
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
     await _async_schedule_spawning_tick(hass, entry, normalised)
+    await _async_schedule_cooling_tick(hass, entry, normalised)
     # The circulation chain re-arms from its persisted stamps on every save —
     # that save-driven re-arm IS how its burst legs chain (see the scheduler).
     await _async_schedule_mixing_circulation(hass, entry, normalised)
@@ -17472,6 +17508,272 @@ def _spawning_execution_enabled(execution: dict[str, Any]) -> bool:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Cooling headroom (Layer 1) — docs/cooling-headroom-brainstorm.md.
+# Is evaporative cooling going to work today? A fan over a reef tank is limited
+# by the room's DEW POINT against the water temperature, not by humidity. The
+# maths live in cooling.py; this is the sensor glue, the five-minute tick, the
+# gated once-per-cooldown warning and the status WS. Runtime lives only in
+# hass.data — nothing here is written into the saved config, so no merge guard.
+# Advisory throughout: no actuator is touched (the fan hangs off the guard's
+# cool socket by choice; the dehumidifier trigger is Layer 2).
+# --------------------------------------------------------------------------- #
+
+def _cooling_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    config["coolingHeadroom"] = _normalise_cooling_headroom(config.get("coolingHeadroom"))
+    return config["coolingHeadroom"]
+
+
+def _cooling_entities(config: dict[str, Any]) -> dict[str, str]:
+    """Explicit overrides first, then the mapped sensors, then (for water) the
+    spawning temperature-control probe. Empty string = nothing bound."""
+    cfg = _cooling_cfg(config)
+    sensors = config.get("sensors") if isinstance(config.get("sensors"), dict) else {}
+
+    def mapped(sensor_id: str) -> str:
+        sensor = sensors.get(sensor_id)
+        if isinstance(sensor, dict) and sensor.get("enabled") and sensor.get("entity_id"):
+            return str(sensor["entity_id"])
+        return ""
+
+    sp_temp = _spawning_execution_cfg(config).get("temp")
+    sp_probe = sp_temp.get("sensorEntity") if isinstance(sp_temp, dict) else None
+    return {
+        "water": cfg["waterTempEntity"] or mapped("temp") or (str(sp_probe) if sp_probe else ""),
+        "room": cfg["roomTempEntity"] or mapped("room_temp"),
+        "humidity": cfg["humidityEntity"] or mapped("humidity"),
+    }
+
+
+def _cooling_read(hass: HomeAssistant, entity_id: str, kind: str) -> tuple[float | None, str]:
+    """One sensor, the Stage C way: unavailable / non-numeric / stale /
+    implausible all come back as (None, reason). °F converts to °C."""
+    if not entity_id:
+        return None, f"no {kind} sensor is mapped"
+    st = hass.states.get(entity_id)
+    if st is None or st.state in UNAVAILABLE_STATES:
+        return None, f"{kind} sensor ({entity_id}) is unavailable"
+    try:
+        value = float(st.state)
+    except (TypeError, ValueError):
+        return None, f"{kind} sensor ({entity_id}) is not numeric"
+    unit = str(st.attributes.get("unit_of_measurement", "")).upper()
+    if kind != "humidity" and "F" in unit:
+        value = (value - 32.0) * 5.0 / 9.0
+    last = getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
+    if isinstance(last, datetime):
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if (dt_util.utcnow() - last).total_seconds() > COOLING_STALE_MINUTES * 60:
+            return None, f"{kind} sensor ({entity_id}) has been silent too long"
+    if kind == "humidity":
+        if not 0.0 < value <= 100.0:
+            return None, f"humidity reading {value:.0f} % is implausible"
+    elif kind == "water":
+        if not cooling_engine.WATER_TEMP_MIN_C <= value <= cooling_engine.WATER_TEMP_MAX_C:
+            return None, f"tank temperature {value:.1f} °C is implausible — probe out of the water?"
+    elif not cooling_engine.ROOM_TEMP_MIN_C <= value <= cooling_engine.ROOM_TEMP_MAX_C:
+        return None, f"room temperature {value:.1f} °C is implausible"
+    return value, ""
+
+
+def _cooling_target(config: dict[str, Any], now_local: datetime) -> tuple[float, str]:
+    """The temperature the fans are holding the tank at: the seasonal spawning
+    target when asked for and valid, else the configured number."""
+    cfg = _cooling_cfg(config)
+    if cfg["targetMode"] == "spawning":
+        sp_cfg = config.get("spawningProgram")
+        if isinstance(sp_cfg, dict) and sp_cfg.get("enabled"):
+            try:
+                state = spawning.execution_desired_state(sp_cfg, now_local)
+            except Exception:  # noqa: BLE001 — a broken preset must not break the index
+                state = None
+            if state and state.get("valid"):
+                return float(state["targetTempC"]), "spawning"
+    return float(cfg["targetTempC"]), "fixed"
+
+
+def cooling_snapshot(hass: HomeAssistant, config: dict[str, Any], now_local: datetime) -> dict[str, Any]:
+    """Everything the panel shows, computed once. Never raises: a missing
+    sensor is an ``issues`` entry and a null result, not an exception."""
+    cfg = _cooling_cfg(config)
+    entities = _cooling_entities(config)
+    target_c, target_source = _cooling_target(config, now_local)
+    issues: dict[str, str] = {}
+    room_c, reason = _cooling_read(hass, entities["room"], "room")
+    if reason:
+        issues["room"] = reason
+    rh, reason = _cooling_read(hass, entities["humidity"], "humidity")
+    if reason:
+        issues["humidity"] = reason
+    water_c, reason = _cooling_read(hass, entities["water"], "water")
+    water_source = "sensor"
+    if water_c is None:
+        # The fans hold the tank at the target; that IS the surface the air
+        # meets. Only a missing/broken probe is worth mentioning.
+        if entities["water"]:
+            issues["water"] = reason
+        water_c, water_source = target_c, "target"
+    result = None
+    if room_c is not None and rh is not None:
+        result = cooling_engine.evaluate(water_c, room_c, rh, cfg["referenceVpdKpa"], cfg["bands"])
+    needed = cooling_engine.fan_needed(room_c, water_c if water_source == "sensor" else None,
+                                       target_c, cfg["fanGateC"])
+    return {
+        "at": now_local.isoformat(),
+        "enabled": bool(cfg["enabled"]),
+        "entities": entities,
+        "targetC": round(target_c, 2),
+        "targetSource": target_source,
+        "waterSource": water_source,
+        "roomC": None if room_c is None else round(room_c, 2),
+        "rh": None if rh is None else round(rh, 1),
+        "waterC": round(water_c, 2),
+        "result": result,
+        "fanNeeded": needed,
+        "warn": bool(result and needed and result["band"] in cooling_engine.WARN_BANDS),
+        "issues": issues,
+        "bands": dict(cfg["bands"]),
+        "whatIf": cooling_engine.what_if_table(water_c, cfg["referenceVpdKpa"], cfg["bands"]),
+    }
+
+
+async def _async_cooling_notify_once(
+    hass: HomeAssistant, config: dict[str, Any], key: str, cooldown_s: int, title: str, message: str
+) -> bool:
+    """Cooldown-deduped, keyed by band so a worsening day escalates once."""
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(COOLING_RUNTIME, {})
+    notified = runtime.setdefault("notified", {})
+    now = datetime.now(timezone.utc)
+    previous = notified.get(key)
+    if previous is not None:
+        try:
+            if (now - datetime.fromisoformat(previous)).total_seconds() < cooldown_s:
+                return False
+        except (ValueError, TypeError):
+            pass
+    notified[key] = now.isoformat()
+    await _async_send_mode_notification(hass, config, f"openreef_cooling_{key}", title, message)
+    return True
+
+
+async def _async_cooling_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime
+) -> None:
+    """Refresh the snapshot; warn (once per band per cooldown) only while
+    cooling is actually needed; log the transitions into and out of trouble."""
+    config = _config_from_entry(entry)
+    cfg = _cooling_cfg(config)
+    store = hass.data.setdefault(DOMAIN, {})
+    if not cfg["enabled"]:
+        store.pop(COOLING_RUNTIME, None)
+        return
+    runtime = store.setdefault(COOLING_RUNTIME, {})
+    snap = cooling_snapshot(hass, config, now_local)
+    runtime["snapshot"] = snap
+    result = snap["result"]
+    previous_band = runtime.get("warnBand")
+    if snap["warn"]:
+        band = result["band"]
+        title, message = cooling_engine.warning_copy(result, snap["targetC"])
+        if cfg["notify"]:
+            await _async_cooling_notify_once(hass, config, band, COOLING_NOTIFY_COOLDOWN_S, title, message)
+        if band != previous_band:
+            runtime["warnBand"] = band
+            _append_activity(
+                config,
+                f"Cooling headroom: {title.lower()} — room {result['roomC']:.1f} °C at "
+                f"{result['rh']:.0f} %, dew point {result['dewC']:.1f} °C vs tank {result['waterC']:.1f} °C",
+                "warning" if result["status"] == "warning" else "critical",
+            )
+            await _async_save_config(hass, entry, config)
+    elif previous_band and result and result["band"] in ("good", "thin"):
+        runtime.pop("warnBand", None)
+        _append_activity(
+            config,
+            f"Cooling headroom: fans have headroom again — {round(result['index'] * 100)} % "
+            f"(room {result['roomC']:.1f} °C at {result['rh']:.0f} %)",
+            "info",
+        )
+        await _async_save_config(hass, entry, config)
+
+
+def _clear_cooling_tick(hass: HomeAssistant) -> None:
+    store = hass.data.setdefault(DOMAIN, {})
+    unsub = store.pop(COOLING_TICK_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_schedule_cooling_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry | None, config: dict[str, Any] | None = None
+) -> None:
+    _clear_cooling_tick(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    if not _cooling_cfg(config)["enabled"]:
+        hass.data.setdefault(DOMAIN, {}).pop(COOLING_RUNTIME, None)
+        return
+    await _async_cooling_tick(hass, entry, dt_util.now())
+
+    async def _handle(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        await _async_cooling_tick(hass, latest_entry, dt_util.now())
+
+    hass.data.setdefault(DOMAIN, {})[COOLING_TICK_UNSUB] = async_track_time_interval(
+        hass, _handle, timedelta(seconds=COOLING_TICK_SECONDS)
+    )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/cooling_status"})
+@callback
+def websocket_cooling_status(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Fresh snapshot for the panel (Overview row, Pulse card, Settings readout)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    snap = cooling_snapshot(hass, config, dt_util.now())
+    runtime = hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME) or {}
+    snap["warnBand"] = runtime.get("warnBand")
+    connection.send_result(msg["id"], snap)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cooling_simulate",
+    vol.Required("roomC"): vol.Coerce(float),
+    vol.Required("rh"): vol.Coerce(float),
+    vol.Optional("waterC"): vol.Coerce(float),
+})
+@callback
+def websocket_cooling_simulate(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """What-if: the index for any room temp / humidity, on the configured
+    (or a given) water temperature. Pure maths, nothing stored."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cfg = _cooling_cfg(config)
+    water = msg.get("waterC")
+    if water is None:
+        water = _cooling_target(config, dt_util.now())[0]
+    room = max(cooling_engine.ROOM_TEMP_MIN_C, min(float(msg["roomC"]), cooling_engine.ROOM_TEMP_MAX_C))
+    rh = max(1.0, min(float(msg["rh"]), 100.0))
+    water = max(cooling_engine.WATER_TEMP_MIN_C, min(float(water), cooling_engine.WATER_TEMP_MAX_C))
+    connection.send_result(
+        msg["id"], cooling_engine.evaluate(water, room, rh, cfg["referenceVpdKpa"], cfg["bands"])
+    )
+
+
 def _clear_spawning_tick(hass: HomeAssistant) -> None:
     store = hass.data.setdefault(DOMAIN, {})
     unsub = store.pop(SPAWNING_TICK_UNSUB, None)
@@ -18854,6 +19156,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_delete_feed_session)
     websocket_api.async_register_command(hass, websocket_list_reef_presets)
     websocket_api.async_register_command(hass, websocket_spawning_execution_status)
+    websocket_api.async_register_command(hass, websocket_cooling_status)
+    websocket_api.async_register_command(hass, websocket_cooling_simulate)
     websocket_api.async_register_command(hass, websocket_spawning_execution_resume)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)
@@ -19043,6 +19347,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_awc_scheduler(hass, entry, normalised)
     await _async_schedule_dosing_tick(hass, entry, normalised)
     await _async_schedule_spawning_tick(hass, entry, normalised)
+    await _async_schedule_cooling_tick(hass, entry, normalised)
     await _async_setup_dosing_mirror(hass, entry, normalised)
     if _dosing_channels(normalised):
         _async_kick_dosing_sync(hass, entry)
@@ -19072,6 +19377,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_dosing(hass)
     _clear_spawning_tick(hass)
     hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
+    _clear_cooling_tick(hass)
+    hass.data.setdefault(DOMAIN, {}).pop(COOLING_RUNTIME, None)
     beta_feedback.async_stop(hass)  # BETA-FEEDBACK: remove after beta
     _store = hass.data.setdefault(DOMAIN, {})
     _awc_restore = _store.pop(AWC_ATO_RESTORE_UNSUB, None)
