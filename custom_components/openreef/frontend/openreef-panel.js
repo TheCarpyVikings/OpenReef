@@ -22990,6 +22990,10 @@ const rigSteps = [
           else if (state.status === "warning") issues.push(["warning", `${task.label} due`, state.detail, "maintenance"]);
         });
     }
+    // Bottles running low, empty or expired (V3 slice, 2026-09-05): the food
+    // shelf's own backend flags, so this list, the daily digest and the NPS
+    // status card count the same bottles.
+    issues.push(...this._missionShelfIssues());
     if (disarmedMapped.length) {
       issues.push(["info", "Mapped controls are still disarmed", `${disarmedMapped.length} device(s) need arming in Settings before they can be controlled.`, "settings"]);
     }
@@ -22998,6 +23002,29 @@ const rigSteps = [
     }
 
     return issues.map(([severity, title, detail, tab]) => ({ severity, title, detail, tab }));
+  }
+
+  // The shelf's bottles that need a hand: [severity, title, detail, tab] rows
+  // read off the backend summary (never re-derived here). The summary is asked
+  // for once per page life if nothing has loaded it yet; a failed ask is not
+  // retried from here — the NPS tab owns its own retries.
+  _missionShelfIssues() {
+    const st = this._nps;
+    if (!st) return [];
+    if (st.summary === null && !st.loading && !st.demo && !st.at) {
+      try { Promise.resolve(this._npsLoadSummary()).catch(() => {}); } catch { /* fills in on the next render */ }
+    }
+    const states = st.summary?.shelf?.products || {};
+    const products = this._config?.consumables?.products || {};
+    const rows = [];
+    Object.entries(states).forEach(([pid, s]) => {
+      if (!s || typeof s !== "object") return;
+      const name = products[pid]?.name || pid;
+      if (s.empty) rows.push(["critical", `${name} is empty`, "Refill or replace the bottle before its next dose.", "nps"]);
+      else if (s.expiry?.status === "expired") rows.push(["critical", `${name} has expired`, "Past its opened shelf life — replace it before the next dose.", "nps"]);
+      else if (s.low) rows.push(["warning", `${name} running low`, `${s.percent != null ? `${Math.round(s.percent)}% left` : "Nearly out"}${s.daysUntilEmpty != null ? ` · ≈${s.daysUntilEmpty} days at the current rate` : ""} — time to reorder.`, "nps"]);
+    });
+    return rows;
   }
 
   _missionIssueList(sensors, equipment, sensorAlerts, missing, armedUnavailable, interlocks = []) {
@@ -26876,6 +26903,38 @@ const rigSteps = [
     return gaps.slice(-limit);
   }
 
+  // The on-schedule streak (V3 slice, 2026-09-05): how many of the most recent
+  // intervals landed inside the target cadence, and the best run on record.
+  // Same half-day (day clocks) / hour (hour clocks) grace as the drift label,
+  // so "on schedule" means one thing on the card. Skipped entries make no
+  // interval, so they neither extend nor break a run.
+  _maintenanceStreak(id, task) {
+    const hourly = task.cadenceHours > 0;
+    const targetDays = hourly ? task.cadenceHours / 24 : task.cadenceDays;
+    const grace = hourly ? 0.05 : 0.5;
+    const gaps = this._maintenanceIntervals(id, 100000);
+    let run = 0;
+    let best = 0;
+    gaps.forEach((gap) => {
+      if (gap.days <= targetDays + grace) {
+        run += 1;
+        best = Math.max(best, run);
+      } else {
+        run = 0;
+      }
+    });
+    return { current: run, best, total: gaps.length };
+  }
+
+  _maintenanceStreakLabel(streak) {
+    if (!streak || !streak.total) return "";
+    if (streak.current === 0) {
+      return `Last one ran late — the streak restarts with the next on-time completion${streak.best ? ` · best run ${streak.best}` : ""}`;
+    }
+    if (streak.best === streak.current) return `On schedule ${streak.current} in a row${streak.current >= 3 ? " — your best run" : ""}`;
+    return `On schedule ${streak.current} in a row · best run ${streak.best}`;
+  }
+
   // Mini bar chart of actual gap-between-completions vs the task's target cadence.
   // Bars are coloured on the same thresholds the due-state uses, so the chart and
   // the task pill always tell the same story.
@@ -26929,6 +26988,7 @@ const rigSteps = [
           : hourly
             ? `${this._format(driftAbs * 24, 1)} h ${drift > 0 ? "late" : "early"} on average`
             : `${this._format(driftAbs, 1)} day${driftAbs >= 1.95 ? "s" : ""} ${drift > 0 ? "late" : "early"} on average`;
+        const streak = this._maintenanceStreakLabel(this._maintenanceStreak(id, task));
         return `
           <article class="metric-card maint-cadence-card">
             <div class="maint-cadence-head">
@@ -26937,6 +26997,7 @@ const rigSteps = [
             </div>
             ${this._maintenanceIntervalChart(id, gaps, task)}
             <small>${this._escape(`Target ${this._maintenanceCadenceLabel(task)} · ${gaps.length} interval${gaps.length === 1 ? "" : "s"} · ${driftLabel}`)}</small>
+            ${streak ? `<small class="maint-streak">${this._escape(streak)}</small>` : ""}
           </article>`;
       });
     if (!cards.length) return "";
@@ -27135,6 +27196,7 @@ const rigSteps = [
         </div>
         <small>${this._escape(latest ? `Last done ${this._formatActivityTime(latest.timestamp)}` : "Never logged")}</small>
         <p>${this._escape(state.detail)}</p>
+        ${task.notes ? `<p class="hint maintenance-notes">${this._escape(task.notes)}</p>` : ""}
         <div class="mini-grid">
           <label class="maintenance-when">Completed<input id="or-done-at-${this._escape(id)}" data-maint-draft="doneAt" data-id="${this._escape(id)}" type="datetime-local" value="${this._escape(draft.doneAt || this._nowLocalInputValue())}" max="${this._escape(this._nowLocalInputValue())}"></label>
           ${task.logsVolume ? `
@@ -27189,12 +27251,12 @@ const rigSteps = [
           <div class="section-head"><div><p class="eyebrow">Reminders</p><h3>HA-native nudges — free, unlimited, no app paywall</h3></div></div>
           <label class="toggle-card">
             <input type="checkbox" data-scope="maintenance-reminders" data-field="enabled" ${reminders.enabled === false ? "" : "checked"}>
-            <span><strong>Remind me when tasks are due</strong><small>One daily check fires an in-Home-Assistant notification (plus an optional phone push) for anything due or overdue — never a second-by-second nag.</small></span>
+            <span><strong>Remind me when tasks are due</strong><small>One daily check fires an in-Home-Assistant notification (plus an optional push to any notify service) for anything due or overdue, and names any bottle running low — never a second-by-second nag.</small></span>
           </label>
           ${reminders.enabled === false ? "" : `
             <div class="mini-grid">
               <label>Daily check time<input type="time" data-scope="maintenance-reminders" data-field="time" value="${this._escape(reminders.time || "09:00")}"></label>
-              <label>Phone push target<input data-scope="maintenance-reminders" data-field="notifyTarget" value="${this._escape(reminders.notifyTarget || "")}" placeholder="e.g. mobile_app_pixel"></label>
+              <label>Push target — any notify service<input data-scope="maintenance-reminders" data-field="notifyTarget" value="${this._escape(reminders.notifyTarget || "")}" placeholder="mobile_app_pixel, or a notify group"><small>The name after <code>notify.</code> — a phone, a notify group, Telegram, anything Home Assistant can notify. Blank = in-HA notifications only.</small></label>
             </div>
             <label class="toggle-card">
               <input type="checkbox" data-scope="maintenance-reminders" data-field="persistent" ${reminders.persistent === false ? "" : "checked"}>
@@ -28576,8 +28638,8 @@ const rigSteps = [
               <input type="number" min="1" max="1440" step="1" data-scope="alert-escalation" data-field="repeatMinutes" value="${this._escape(String(escalation.repeatMinutes || 30))}">
             </label>
             <label>Notify target
-              <input data-scope="alert-escalation" data-field="notifyTarget" value="${this._escape(escalation.notifyTarget || "")}" placeholder="mobile_app_yourphone">
-              <small>Enter the service name after <code>notify.</code>.</small>
+              <input data-scope="alert-escalation" data-field="notifyTarget" value="${this._escape(escalation.notifyTarget || "")}" placeholder="mobile_app_yourphone, or a notify group">
+              <small>The name after <code>notify.</code> — any notify service: a phone, a notify group, Telegram.</small>
             </label>
             <label>Siren entity
               <input data-scope="alert-escalation" data-field="sirenEntityId" value="${this._escape(escalation.sirenEntityId || "")}" placeholder="siren.reef_alarm">
@@ -28852,7 +28914,8 @@ const rigSteps = [
               <input type="number" min="2" max="336" step="1" data-scope="watchdog" data-field="missedAfterHours" value="${this._escape(String(watchdog.missedAfterHours || 30))}">
             </label>
             <label>All-clear notify target
-              <input data-scope="watchdog" data-field="notifyTarget" value="${this._escape(watchdog.notifyTarget || "")}" placeholder="mobile_app_yourphone">
+              <input data-scope="watchdog" data-field="notifyTarget" value="${this._escape(watchdog.notifyTarget || "")}" placeholder="mobile_app_yourphone, or a notify group">
+              <small>The name after <code>notify.</code> — any notify service.</small>
             </label>
           </div>
         </details>

@@ -258,4 +258,63 @@ test("test_history_says_so_when_the_row_cap_bites", async () => {
   }
 });
 
+// --- V3 slice (2026-09-05): notes on the card, the push-target copy, the streak ---
+
+test("test_task_notes_are_the_how_line_on_the_card", async () => {
+  const restore = freezeTime(CASES.now);
+  try {
+    const panel = await makePanel(configForCase({
+      task: { notes: "Rinse in tank water, never tap." },
+      completions: [{ timestamp: new Date(Date.parse(CASES.now) - 2 * 86400000).toISOString() }],
+    }));
+    const card = panel._maintenanceTaskCard("subject");
+    assert(card.includes('<p class="hint maintenance-notes">Rinse in tank water, never tap.</p>'), `the notes must show on the card: ${card.slice(0, 900)}`);
+    const bare = await makePanel(configForCase({}));
+    assert(!bare._maintenanceTaskCard("subject").includes("maintenance-notes"), "no notes, no line");
+    // The push target says what it accepts.
+    const settings = panel._maintenanceSettings(true);
+    assert(settings.includes("Push target — any notify service") && settings.includes('placeholder="mobile_app_pixel, or a notify group"'), "the target field must say any notify service works");
+    assert(settings.includes("a phone, a notify group, Telegram"), "and name the kinds of target");
+  } finally {
+    restore();
+  }
+});
+
+test("test_the_streak_counts_consecutive_on_schedule_intervals", async () => {
+  const restore = freezeTime(CASES.now);
+  try {
+    const day = (n) => new Date(Date.parse(CASES.now) - n * 86400000).toISOString();
+    const stamps = (days) => days.map((n) => ({ timestamp: day(n) }));
+    // Oldest→newest gaps: 7, 7, 7 (on time), 9 (late), 7, 7 (on time) → run 2, best 3.
+    const panel = await makePanel(configForCase({ completions: stamps([44, 37, 30, 23, 14, 7, 0]) }));
+    const streak = panel._maintenanceStreak("subject", panel._maintenanceTask("subject"));
+    assertEqual(streak.current, 2, "the current run stops at the late gap");
+    assertEqual(streak.best, 3, "the best run is remembered");
+    assertEqual(streak.total, 6, "six intervals between seven completions");
+    const html = panel._maintenanceCadenceCard();
+    assert(html.includes('<small class="maint-streak">On schedule 2 in a row · best run 3</small>'), `the cadence card carries the streak: ${html.slice(html.indexOf("maint-streak") - 40, html.indexOf("maint-streak") + 120)}`);
+    // A late latest interval resets the run and says so, keeping the best.
+    const late = await makePanel(configForCase({ completions: stamps([30, 23, 16, 0]) }));   // gaps 7, 7, 16
+    assert(late._maintenanceCadenceCard().includes("Last one ran late — the streak restarts with the next on-time completion · best run 2"), late._maintenanceCadenceCard());
+    // The whole record on schedule is "your best run" from three up, and one interval says so plainly.
+    const perfect = await makePanel(configForCase({ completions: stamps([21, 14, 7, 0]) }));
+    assert(perfect._maintenanceCadenceCard().includes("On schedule 3 in a row — your best run"));
+    const one = await makePanel(configForCase({ completions: stamps([7, 0]) }));
+    assert(one._maintenanceCadenceCard().includes(">On schedule 1 in a row</small>"));
+    // Half a day of grace on a day clock: 7.3 days is on schedule, 7.6 is not.
+    const grace = await makePanel(configForCase({ completions: stamps([7.3, 0]) }));
+    assertEqual(grace._maintenanceStreak("subject", grace._maintenanceTask("subject")).current, 1);
+    const over = await makePanel(configForCase({ completions: stamps([7.6, 0]) }));
+    assertEqual(over._maintenanceStreak("subject", over._maintenanceTask("subject")).current, 0);
+    // Skipped entries make no interval: they neither extend nor break the run.
+    const skipped = await makePanel(configForCase({ completions: [...stamps([14, 7]), { timestamp: day(3), skipped: true }, ...stamps([0])] }));
+    assertEqual(skipped._maintenanceStreak("subject", skipped._maintenanceTask("subject")).current, 2);
+    // Nothing logged twice: no streak line at all.
+    const none = await makePanel(configForCase({ completions: stamps([0]) }));
+    assertEqual(none._maintenanceStreakLabel(none._maintenanceStreak("subject", none._maintenanceTask("subject"))), "");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

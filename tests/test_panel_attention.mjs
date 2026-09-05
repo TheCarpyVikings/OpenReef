@@ -826,4 +826,48 @@ test("test_the_headline_and_the_counter_are_read_off_the_same_list", async () =>
   }
 });
 
+// --- the shelf's bottles (V3 slice, 2026-09-05) ---------------------------------
+
+test("test_low_empty_and_expired_bottles_are_rows_read_off_the_shelfs_own_flags", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await mission(greenTank({
+      consumables: { products: { rj: { name: "Reef Juice" }, sel: { name: "Selcon" }, ok: { name: "Phyto" }, emp: { name: "Oyster-Feast" } } },
+    }));
+    // The harness skips the constructor, so seed the NPS state the real panel starts with.
+    panel._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "" };
+    // Nothing loaded yet: nothing is invented client-side, and the page asks the backend once.
+    let asked = 0;
+    panel._npsLoadSummary = async () => { asked += 1; };
+    assertEqual(rows(panel).filter((row) => row.tab === "nps").length, 0, "no summary, no rows");
+    rows(panel);
+    assertEqual(asked, 2, "every render asks until the first answer lands (at stays 0 until then)");
+    panel._nps.at = Date.now();
+    rows(panel);
+    assertEqual(asked, 2, "once asked, Mission Control leaves the retries to the NPS tab");
+    panel._nps.summary = { shelf: { products: {
+      rj: { low: true, empty: false, percent: 8, daysUntilEmpty: 3, expiry: { status: "fresh" } },
+      sel: { low: false, empty: false, percent: 60, daysUntilEmpty: 20, expiry: { status: "expired" } },
+      ok: { low: false, empty: false, percent: 90, daysUntilEmpty: 40, expiry: { status: "fresh" } },
+      emp: { low: true, empty: true, percent: 0, daysUntilEmpty: 0, expiry: { status: "fresh" } },
+    } } };
+    const shelfRows = rows(panel).filter((row) => row.tab === "nps");
+    assertEqual(shelfRows.length, 3, `one row per bottle that needs a hand: ${JSON.stringify(shelfRows)}`);
+    assertEqual(titled(shelfRows, "Reef Juice running low")[0].severity, "warning", "low is a warning");
+    assertEqual(titled(shelfRows, "Reef Juice")[0].detail, "8% left · ≈3 days at the current rate — time to reorder.");
+    assertEqual(titled(shelfRows, "Selcon has expired")[0].severity, "critical", "expired is critical");
+    assertEqual(titled(shelfRows, "Oyster-Feast is empty")[0].severity, "critical", "empty is critical, and wins over low");
+    assertEqual(titled(shelfRows, "Phyto").length, 0, "a healthy bottle is not attention");
+    // The pill and the hero count them like anything else, from the same list.
+    const html = panel._mission();
+    const shown = attention(html);
+    assertEqual(shown.text, "3 to check");
+    assertEqual(shown.tone, "critical");
+    assertEqual(shown.rows.filter((row) => row.tab === "nps").length, 3);
+    assertClean(html, "mission with shelf rows");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

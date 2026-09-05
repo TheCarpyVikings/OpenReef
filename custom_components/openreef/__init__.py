@@ -4701,6 +4701,9 @@ def _maintenance_due_items(
                 "severity": state,
                 "title": title,
                 "message": message,
+                # The keeper's how-line (V3 slice, 2026-09-05): shown under the
+                # notification and on the task card, never invented.
+                "notes": str(task.get("notes") or "")[:300],
             }
         )
     return items
@@ -4834,7 +4837,7 @@ async def _async_sync_alert_notifications(
             {
                 "notification_id": f"openreef_maintenance_{item['id']}",
                 "title": f"OpenReef: {item['title']}",
-                "message": item["message"],
+                "message": f"{item['message']}\n{item['notes']}" if item.get("notes") else item["message"],
             },
             blocking=False,
         )
@@ -5241,6 +5244,42 @@ def _maintenance_reminder_time(config: dict[str, Any]) -> tuple[int, int]:
     return int(hour), int(minute)
 
 
+def _maintenance_shelf_nags(config: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """Bottles running low, empty or expired — the food shelf's own flags
+    (nps.shelf_summary), so the daily digest, the Attention list and the NPS
+    status card count the same bottles. One nag per bottle: {id, label,
+    detail, severity}. A bottle with no size set can never be low."""
+    consumables = config.get("consumables") if isinstance(config.get("consumables"), dict) else {}
+    products = consumables.get("products") if isinstance(consumables.get("products"), dict) else {}
+    if not products:
+        return []
+    try:
+        tz = dt_util.as_local(now).tzinfo
+    except (TypeError, ValueError, AttributeError):
+        tz = None
+    summary = nps_engine.shelf_summary(products, now, _awc_effective_tank_l(config), tz)
+    nags: list[dict[str, Any]] = []
+    for pid, state in summary.get("products", {}).items():
+        product = products.get(pid) if isinstance(products.get(pid), dict) else {}
+        label = str(product.get("name") or pid)
+        expiry = state.get("expiry") if isinstance(state.get("expiry"), dict) else {}
+        if state.get("empty"):
+            detail, severity = "empty", "critical"
+        elif expiry.get("status") == "expired":
+            detail, severity = "expired", "critical"
+        elif state.get("low"):
+            pct = state.get("percent")
+            days = state.get("daysUntilEmpty")
+            detail = f"{pct:.0f}% left" if isinstance(pct, (int, float)) else "running low"
+            if isinstance(days, (int, float)):
+                detail += f", ≈{days:g} days"
+            severity = "warning"
+        else:
+            continue
+        nags.append({"id": f"shelf:{pid}", "label": label, "detail": detail, "severity": severity})
+    return nags
+
+
 async def _async_fire_maintenance_reminder(
     hass: HomeAssistant, entry: OpenReefConfigEntry, now: datetime
 ) -> None:
@@ -5262,15 +5301,21 @@ async def _async_fire_maintenance_reminder(
         if isinstance(tasks.get(item["id"]), dict)
         and tasks[item["id"]].get("notify", True)
     ]
+    # Bottles running low, empty or expired ride the same daily digest (V3
+    # slice, 2026-09-05): one line a day, never a push of their own.
+    shelf_nags = _maintenance_shelf_nags(latest_config, now)
     last_store = hass.data.setdefault(DOMAIN, {}).setdefault(
         MAINTENANCE_REMINDER_LAST, {}
     )
     previous_ids = last_store.get(entry.entry_id, set())
-    current_ids = {item["id"] for item in push_items}
+    current_ids = {item["id"] for item in push_items} | {nag["id"] for nag in shelf_nags}
     last_store[entry.entry_id] = current_ids
-    if not push_items:
+    if not push_items and not shelf_nags:
         return
     labels = ", ".join(item["label"] for item in push_items)
+    shelf_line = ", ".join(f"{nag['label']} ({nag['detail']})" for nag in shelf_nags[:6])
+    if len(shelf_nags) > 6:
+        shelf_line += f" +{len(shelf_nags) - 6}"
     # One digest phone push per daily tick while tasks are due (the intended nag).
     target = str(reminders.get("notifyTarget", "")).strip()
     # The cultures' one-question pushes ride the same tick (V2 Stage B): one
@@ -5283,13 +5328,21 @@ async def _async_fire_maintenance_reminder(
         _LOGGER.warning("Cultures: the daily question could not be sent: %s", err)
     if target:
         overdue = sum(1 for item in push_items if item["severity"] == "critical")
-        summary = f"{len(push_items)} reef task{'s' if len(push_items) != 1 else ''} due"
-        if overdue:
-            summary += f" ({overdue} overdue)"
+        bits = []
+        if push_items:
+            summary = f"{len(push_items)} reef task{'s' if len(push_items) != 1 else ''} due"
+            if overdue:
+                summary += f" ({overdue} overdue)"
+            bits.append(summary)
+        if shelf_nags:
+            bits.append(f"{len(shelf_nags)} bottle{'s' if len(shelf_nags) != 1 else ''} to check")
+        message = labels
+        if shelf_line:
+            message = f"{labels} · Bottles: {shelf_line}" if labels else f"Bottles: {shelf_line}"
         await hass.services.async_call(
             "notify",
             target,
-            {"title": f"OpenReef: {summary}", "message": labels},
+            {"title": f"OpenReef: {', '.join(bits)}", "message": message},
             blocking=False,
         )
     # Only log to the activity feed when the due set grows, so a long-overdue task
@@ -5299,7 +5352,13 @@ async def _async_fire_maintenance_reminder(
         new_labels = ", ".join(
             item["label"] for item in push_items if item["id"] in new_ids
         )
-        _append_activity(latest_config, f"Maintenance due: {new_labels}", "info")
+        if new_labels:
+            _append_activity(latest_config, f"Maintenance due: {new_labels}", "info")
+        new_bottles = ", ".join(
+            f"{nag['label']} ({nag['detail']})" for nag in shelf_nags if nag["id"] in new_ids
+        )
+        if new_bottles:
+            _append_activity(latest_config, f"Bottles to check: {new_bottles}", "info")
         options = dict(entry.options)
         options[CONF_SETTINGS] = _normalise_core_config(latest_config)
         hass.config_entries.async_update_entry(entry, options=options)

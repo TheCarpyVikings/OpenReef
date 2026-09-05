@@ -530,6 +530,95 @@ def test_due_contract_matches_the_shared_fixture():
 
 # --- tiny standalone runner -------------------------------------------------
 
+
+# --- V3 slice (2026-09-05): the shelf's bottles ride the daily digest; the
+# task's notes ride the notification ---------------------------------------
+
+def _bottle(name, bottle=250.0, remaining=20.0, **over):
+    base = {"name": name, "category": "phyto", "bottleMl": bottle, "remainingMl": remaining,
+            "history": [{"at": (NOW - timedelta(days=d)).isoformat(), "ml": 5.0, "kind": "dose"} for d in (1, 2, 3)]}
+    base.update(over)
+    return base
+
+
+def _shelf_cfg(products, tasks=None, completions=None, target="mobile_app_pixel"):
+    cfg = _cfg(tasks if tasks is not None else {"wc": _interval(label="Water change")},
+               completions or {},
+               reminders={"enabled": True, "time": "09:00", "notifyTarget": target, "persistent": True})
+    cfg["consumables"] = {"products": products}
+    return cfg
+
+
+def test_shelf_nags_read_the_shelfs_own_flags():
+    cfg = _shelf_cfg({
+        "rj": _bottle("Reef Juice", remaining=20.0),                      # 8% < the 10% auto threshold
+        "sel": _bottle("Selcon", remaining=200.0),                        # fine
+        "emp": _bottle("Oyster-Feast", remaining=0.0),                    # empty
+        "old": _bottle("Amino", remaining=200.0, shelfLifeDaysOpened=90,
+                       openedAt=(NOW - timedelta(days=400)).isoformat()),  # expired
+        "nosize": {"name": "Loose", "bottleMl": 0, "remainingMl": 0},     # no size: never low
+    })
+    nags = {n["id"]: n for n in integration._maintenance_shelf_nags(cfg, NOW)}
+    assert set(nags) == {"shelf:rj", "shelf:emp", "shelf:old"}, set(nags)
+    assert nags["shelf:rj"]["severity"] == "warning" and nags["shelf:rj"]["label"] == "Reef Juice"
+    assert nags["shelf:rj"]["detail"].startswith("8% left, ≈"), nags["shelf:rj"]["detail"]
+    assert nags["shelf:emp"] == {"id": "shelf:emp", "label": "Oyster-Feast", "detail": "empty", "severity": "critical"}
+    assert nags["shelf:old"]["detail"] == "expired" and nags["shelf:old"]["severity"] == "critical"
+    assert integration._maintenance_shelf_nags(_cfg({"wc": _interval()}), NOW) == []
+
+
+def test_reminder_digest_names_the_low_bottles():
+    cfg = _shelf_cfg({"rj": _bottle("Reef Juice", remaining=20.0), "emp": _bottle("Oyster-Feast", remaining=0.0)},
+                     completions={"wc": [{"timestamp": _ago(20)}]})
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry])
+    run(fire(hass, entry, NOW))
+    push = next(c for c in hass.services.calls if c.domain == "notify")
+    assert push.data["title"] == "OpenReef: 1 reef task due (1 overdue), 2 bottles to check", push.data["title"]
+    assert push.data["message"].startswith("Water change · Bottles: ") and "Oyster-Feast (empty)" in push.data["message"]
+    assert "Reef Juice (8% left, ≈" in push.data["message"], push.data["message"]
+    # The activity feed gets one line per kind, only when the set grows.
+    saved = entry.options[CONF_SETTINGS]
+    messages = [item["message"] for item in saved.get("activity", [])]
+    assert any(m == "Maintenance due: Water change" for m in messages), messages
+    assert any(m.startswith("Bottles to check: Reef Juice (8% left") and "Oyster-Feast (empty)" in m for m in messages), messages
+    # A second tick the same day: pushes again (the intended nag), logs nothing new.
+    before = len(hass.services.calls)
+    run(fire(hass, entry, NOW))
+    assert sum(1 for c in hass.services.calls[before:] if c.domain == "notify") == 1
+    assert len([m for m in (item["message"] for item in entry.options[CONF_SETTINGS].get("activity", [])) if m.startswith("Bottles")]) == 1
+
+
+def test_reminder_pushes_the_bottles_even_with_no_task_due():
+    cfg = _shelf_cfg({"rj": _bottle("Reef Juice", remaining=20.0)}, completions={"wc": [{"timestamp": _ago(1)}]})
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry])
+    run(fire(hass, entry, NOW))
+    push = next(c for c in hass.services.calls if c.domain == "notify")
+    assert push.data["title"] == "OpenReef: 1 bottle to check" and push.data["message"].startswith("Bottles: Reef Juice (8% left")
+    # Nothing due and nothing low: silent, as before.
+    quiet = _shelf_cfg({"sel": _bottle("Selcon", remaining=200.0)}, completions={"wc": [{"timestamp": _ago(1)}]})
+    entry2 = FakeEntry(options={CONF_SETTINGS: quiet})
+    hass2 = FakeHass(entries=[entry2])
+    run(fire(hass2, entry2, NOW))
+    assert not any(c.domain == "notify" for c in hass2.services.calls)
+
+
+def test_due_items_carry_the_notes_and_the_notification_shows_them():
+    cfg = _cfg({"sock": _interval(label="Filter sock", notes="Rinse in tank water, never tap.")},
+               {"sock": [{"timestamp": _ago(10)}]})
+    item = due(cfg, NOW)[0]
+    assert item["notes"] == "Rinse in tank water, never tap." and item["message"] == "Filter sock is due for maintenance."
+    assert due(_cfg({"t": _interval()}, {"t": [{"timestamp": _ago(10)}]}), NOW)[0]["notes"] == ""
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry])
+    run(fire(hass, entry, NOW))
+    # The in-HA notification path reads the wall clock (so "due" or "overdue"
+    # by the day it runs); the how-line rides under it either way.
+    created = next(c for c in hass.services.calls if c.domain == "persistent_notification" and c.service == "create")
+    assert created.data["message"].startswith("Filter sock is ") and created.data["message"].endswith("\nRinse in tank water, never tap."), created.data["message"]
+    assert created.data["title"].startswith("OpenReef: Filter sock ")
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()
