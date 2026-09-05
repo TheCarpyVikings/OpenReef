@@ -1059,9 +1059,16 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "tint": str(item.get("tint")) if str(item.get("tint")) in cultures_engine.TINTS else "",
                 "from": _awc_str(item.get("from"), 24),
             })
+        vessel_kind = str(raw_jar.get("vesselKind") or "")
         jars[jid] = {
             "name": _awc_str(raw_jar.get("name"), 40) or f"Culture {len(jars) + 1}",
             "species": species,
+            # V2: the rotifers live in the hatchery's inverted-bottle cone, the
+            # pods in a flat tub (they crawl). The drawing and the purge step
+            # follow the vessel, not the species.
+            "vesselKind": (vessel_kind if vessel_kind in cultures_engine.VESSEL_KINDS
+                           else preset["vesselKind"]),
+            "purgeMl": _awc_num(raw_jar.get("purgeMl"), preset["purgeMl"], 0, 500),
             "volumeL": _awc_num(raw_jar.get("volumeL"), 2.5, 0.2, 50),
             "salinityPpt": _awc_num(raw_jar.get("salinityPpt"), preset["salinityPpt"], 5, 45),
             "feed": {
@@ -14250,7 +14257,11 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "id": jid, "name": jar["name"], "species": jar["species"],
             "speciesName": preset["name"], "kind": preset["kind"], "latin": preset["latin"],
             "volumeL": jar["volumeL"], "salinityPpt": jar["salinityPpt"],
-            "sieveUm": preset["sieveUm"], "note": preset["note"],
+            "vesselKind": jar["vesselKind"], "purgeMl": jar["purgeMl"],
+            "sieveUm": preset["sieveUm"], "adultSieveUm": preset["adultSieveUm"],
+            "tintTarget": preset["tintTarget"], "feedProduct": preset["feedProduct"],
+            "firstHarvestDays": preset["firstHarvestDays"],
+            "note": preset["note"],
             "feed": {
                 "productId": jar["feed"]["productId"],
                 "productName": product.get("name") if isinstance(product, dict) else None,
@@ -14277,17 +14288,19 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     rotifer_shelf_days = cultures_engine.species_preset("rotifer_L")["bottleShelfDays"]
     bottle = cultures["bottle"]
     idle = [j["id"] for j in jars_payload if j["state"]["status"] in ("none", "crashed")]
+    bottle_payload = {
+        **cultures_engine.bottle_state(bottle, rotifer_shelf_days, now),
+        "volumeMl": bottle["volumeMl"], "doseMl": bottle["doseMl"],
+        "shelfDays": rotifer_shelf_days,
+    }
     return {
         "enabled": bool(cultures["enabled"]),
         "jars": jars_payload,
+        "rig": cultures_engine.rig_state(jars_payload, bottle_payload),
         "dueCount": due_count,
         "idleJars": idle,
         "canAddJar": len(cultures["jars"]) < cultures_engine.CULTURE_JARS_MAX,
-        "bottle": {
-            **cultures_engine.bottle_state(bottle, rotifer_shelf_days, now),
-            "volumeMl": bottle["volumeMl"], "doseMl": bottle["doseMl"],
-            "shelfDays": rotifer_shelf_days,
-        },
+        "bottle": bottle_payload,
         "tempC": round(temp_c, 1) if temp_c is not None else None,
         "species": [dict(s) for s in cultures_engine.SPECIES],
         "tints": list(cultures_engine.TINTS),

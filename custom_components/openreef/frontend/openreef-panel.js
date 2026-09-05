@@ -1838,6 +1838,7 @@ class OpenReefPanel extends HTMLElement {
         id ? { type: "openreef/nps_hatch_cancel", vessel_id: id } : { type: "openreef/nps_hatch_cancel" },
         "Hatch cancelled — the hatcher stands down.");
       if (action === "cultures-refresh") this._culturesLoadSummary(true);
+      if (action === "cultures-rig-play") this._culturesRigPlay();
       if (action === "cultures-seed") this._culturesCall(
         target.dataset.from ? { type: "openreef/cultures_seed", jar_id: id, from_jar_id: target.dataset.from }
           : { type: "openreef/cultures_seed", jar_id: id },
@@ -2594,9 +2595,15 @@ class OpenReefPanel extends HTMLElement {
           // would silently run a copepod jar on rotifer clocks.
           jar.cadence = {};
           const preset = this._culturesPresetFallback(value);
-          if (preset) jar.salinityPpt = preset.salinityPpt;
+          if (preset) {
+            jar.salinityPpt = preset.salinityPpt;
+            jar.vesselKind = preset.vesselKind || "jar";
+            jar.purgeMl = preset.purgeMl || 0;
+          }
         } else if (field === "volumeL" || field === "salinityPpt") {
           jar[field] = Number(value) || jar[field];
+        } else if (field === "purgeMl") {
+          jar.purgeMl = Math.max(0, Math.min(500, Number(value) || 0));
         } else {
           jar[field] = value;
         }
@@ -11961,12 +11968,15 @@ const rigSteps = [
     const fromSummary = (this._cultures?.summary?.species || []).find((s) => s.id === speciesId);
     if (fromSummary) return fromSummary;
     return ({
-      rotifer_L: { id: "rotifer_L", name: "Rotifers (L-type)", kind: "rotifer", salinityPpt: 35,
+      // V2 numbers (doc §8.2): rotifers in the cone at Reefphyto's 1.020, pods in a tub.
+      rotifer_L: { id: "rotifer_L", name: "Rotifers (L-type)", kind: "rotifer", vesselKind: "cone", salinityPpt: 27,
                    feedIntervalH: 12, harvestIntervalDays: 1, harvestPct: 25, restartIntervalDays: 14,
-                   waterChangeIntervalDays: 0, waterChangePct: 0, sieveUm: 53 },
-      tigriopus: { id: "tigriopus", name: "Tigriopus copepods", kind: "copepod", salinityPpt: 35,
-                   feedIntervalH: 60, harvestIntervalDays: 7, harvestPct: 20, restartIntervalDays: 0,
-                   waterChangeIntervalDays: 21, waterChangePct: 35, sieveUm: 53 },
+                   waterChangeIntervalDays: 0, waterChangePct: 0, sieveUm: 50, adultSieveUm: 0, purgeMl: 50,
+                   firstHarvestDays: 6, tintTarget: "leafy green — spinach, not pea soup" },
+      tigriopus: { id: "tigriopus", name: "Tigriopus copepods", kind: "copepod", vesselKind: "tub", salinityPpt: 35,
+                   feedIntervalH: 24, harvestIntervalDays: 10, harvestPct: 25, restartIntervalDays: 0,
+                   waterChangeIntervalDays: 0, waterChangePct: 50, sieveUm: 50, adultSieveUm: 300, purgeMl: 0,
+                   firstHarvestDays: 28, tintTarget: "Granny Smith apple skin" },
     })[speciesId] || null;
   }
 
@@ -12036,6 +12046,15 @@ const rigSteps = [
       return;
     }
     delete jars[jarId];
+    // The jar's reminders go with it (the v1 orphan): every culture_<id>_*
+    // task and its completions, in the same save.
+    const maintenance = this._config.maintenance || {};
+    const prefix = `culture_${jarId}_`;
+    for (const bucket of ["tasks", "completions"]) {
+      const map = maintenance[bucket];
+      if (!map || typeof map !== "object") continue;
+      Object.keys(map).filter((k) => k.startsWith(prefix)).forEach((k) => { delete map[k]; });
+    }
     this._setDirty(true);
     this._render();
   }
@@ -12123,6 +12142,234 @@ const rigSteps = [
 
   // A jar drawn as the keeper sees it: the fill IS the tint (green = fed,
   // clear = hungry), the stroke is the status, bubbles while it lives.
+  // --- The cultures rig (V2, doc §8.4): a sibling of the hatchery drawing ----
+  // Everything the drawing shows comes from cultures_summary.rig (the lockstep
+  // rule); the ▶ walkthrough is the one client-side exception — it tells one
+  // cone's day through the same drawing.
+  _culturesRigState() {
+    if (this._culturesRigPreview) return this._culturesRigPreview;
+    const rig = this._cultures?.summary?.rig;
+    if (rig && typeof rig === "object") return rig;
+    return { stage: "idle", caption: "IDLE — seed the cone and the rig comes alive", cones: [], tub: null,
+      jug: { harvestMl: 0, mixMl: 0, rodiMl: 0, ppt: 27, purgeMl: 50, sieveUm: 50 }, bottle: { ml: 0, pct: 0, status: "empty" } };
+  }
+
+  _culturesRigPreviewStages() {
+    const cone = (over) => ({ id: "demo", name: "Rotifers A", kind: "cone", status: "producing", tint: "clearing", pct: 60,
+      airOn: false, purgeHot: false, harvestHot: false, refillHot: false, feedHot: false, restartHot: false, tempStatus: "ok", ...over });
+    const tub = (over) => ({ id: "demo-tub", name: "Pods", kind: "tub", status: "producing", tint: "green", pct: 100,
+      airOn: true, purgeHot: false, harvestHot: false, refillHot: false, feedHot: false, restartHot: false, tempStatus: "ok", ...over });
+    const jug = { harvestMl: 625, mixMl: 480, rodiMl: 145, ppt: 27, purgeMl: 50, sieveUm: 50 };
+    const bottle = (ml, status) => ({ ml, pct: Math.round(ml / 10), status });
+    const S = (stage, caption, c, b, t) => ({ stage, caption, cones: [cone(c || {})], tub: tub(t || {}), jug, bottle: b || bottle(0, "empty"), bottleHot: false });
+    return [
+      S("look", "1 · LOOK — the tint says it: leafy green (fed), clearing (on schedule), clear (hungry)", { airOn: true }),
+      S("settle", "2 · SETTLE — air OFF, 15–30 min: crud and dead rotifers sink to the tip, the live ones stay up", { airOn: false }),
+      S("purge", "3 · PURGE — crack ①, mesh half OFF: the first ~50 ml of tip crud straight to waste", { purgeHot: true }),
+      S("harvest", "4 · HARVEST — mesh half ON, ① part-open: 625 ml through the 50 µm net · water to waste, every rotifer stays on the net", { harvestHot: true, pct: 45 }),
+      { ...S("bottle", "5 · BOTTLE — rinse the net into the fridge bottle (or enrich this crop first) · the 5-day clock starts", { pct: 45 }, bottle(625, "fresh")), bottleHot: true },
+      S("refill", "6 · REFILL — the same 625 ml back in as fresh 1.020: 480 ml mix + 145 ml RODI per the jug", { refillHot: true, pct: 60 }, bottle(625, "fresh")),
+      S("feed", "7 · FEED — air ON · concentrate to leafy green, little and often · tap Harvested + fed", { feedHot: true, airOn: true, tint: "green" }, bottle(625, "fresh")),
+      S("restart", "FORTNIGHTLY · RESTART — settle, purge, then the WHOLE cone through the net into a clean one · the split into B rides this step", { purgeHot: true, harvestHot: true, refillHot: true, restartHot: true, pct: 100 }, bottle(625, "fresh")),
+      S("tub", "THE TUB — pods crawl, so a flat tub: air on, feed to Granny Smith · after week 4, 25 % through 300 µm every 7–10 days", {}, bottle(625, "fresh"), { harvestHot: true }),
+    ];
+  }
+
+  _culturesRigPlay() {
+    if (this._culturesRigTimer) { clearTimeout(this._culturesRigTimer); this._culturesRigTimer = null; }
+    if (this._culturesRigPreview) {          // second tap stops the walkthrough
+      this._culturesRigPreview = null;
+      this._render();
+      return;
+    }
+    const stages = this._culturesRigPreviewStages();
+    const step = (i) => {
+      if (i >= stages.length) {
+        this._culturesRigPreview = null;
+        this._culturesRigTimer = null;
+        this._render();
+        return;
+      }
+      this._culturesRigPreview = stages[i];
+      this._render();
+      this._culturesRigTimer = setTimeout(() => step(i + 1), 4600);
+    };
+    step(0);
+  }
+
+  _culturesRigSvg(rig) {
+    rig = rig || this._culturesRigState();
+    const hot = (on) => (on ? "#f5a524" : "#cfd8dc");
+    const valve = (x, y, isHot) => `<polygon points="${x - 8},${y - 8} ${x - 8},${y + 8} ${x + 8},${y}" fill="#131c24" stroke="${hot(isHot)}" stroke-width="2"></polygon><polygon points="${x + 8},${y - 8} ${x + 8},${y + 8} ${x - 8},${y}" fill="#131c24" stroke="${hot(isHot)}" stroke-width="2"></polygon>`;
+    const sm = (x, y, text, anchor = "start", fill = "#8798a4") => `<text x="${x}" y="${y}" text-anchor="${anchor}" font-size="11" fill="${fill}" font-family="monospace">${text}</text>`;
+    const pipe = (d) => `<path d="${d}" fill="none" stroke="#546e7a" stroke-width="3" stroke-linejoin="round"></path>`;
+    const flow = (d, colour) => `<path d="${d}" fill="none" stroke="${colour}" stroke-width="2" class="awc-flow"></path>`;
+    const tintFill = { green: "#43a047", clearing: "#9ccc65", clear: "#b0bec5" };
+    const strokeFor = (v) => (v.tempStatus === "critical" || v.tempStatus === "hot" || v.status === "crashed") ? "#e5484d"
+      : v.status === "establishing" ? "#f5a524" : v.status === "producing" ? "#26a69a" : "#78909c";
+    const idle = { name: "", kind: "cone", status: "none", tint: "", pct: 0, airOn: false, purgeHot: false, harvestHot: false, refillHot: false, feedHot: false, restartHot: false, tempStatus: "unknown" };
+    const cones = (rig.cones && rig.cones.length ? rig.cones : [idle]).slice(0, 4);
+    const n = cones.length;
+    const cs = n <= 1 ? 1 : n === 2 ? 0.85 : n === 3 ? 0.7 : 0.6;
+    const cx = (i) => (n <= 1 ? 160 : n === 2 ? 138 + i * 118 : n === 3 ? 122 + i * 92 : 112 + i * 76);
+    const outX = (i) => Math.round(cx(i) - 14 * cs);
+    const outY = Math.round(334 - 6 * cs);
+    const stubX = (i) => Math.round(cx(i) + 16 * cs);
+    const anyAir = cones.some((c) => c.airOn);
+    const lead = cones[0];
+    const coneSvg = (c, i) => {
+      const tx = (cx(i) - 160 * cs).toFixed(1);
+      const ty = (334 * (1 - cs)).toFixed(1);
+      const label = this._escape((c.name || `Rotifers ${i + 1}`).toUpperCase());
+      const fill = tintFill[c.tint] || "#26a69a";
+      const opacity = c.status === "none" ? 0 : c.tint === "clear" ? 0.16 : c.tint === "clearing" ? 0.3 : 0.42;
+      const topY = 98 + Math.round(142 * (1 - Math.max(0, Math.min(100, Number(c.pct) || 0)) / 100));
+      const body = c.kind === "jar"
+        ? `<rect x="110" y="70" width="100" height="250" rx="6" fill="#101a22" stroke="${strokeFor(c)}" stroke-width="2.5" ${c.status === "none" ? 'stroke-dasharray="6 4"' : ""}></rect>`
+        : `<rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="${strokeFor(c)}" stroke-width="2.5" ${c.status === "none" ? 'stroke-dasharray="6 4"' : ""}></rect>
+           <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" fill-opacity="0" stroke="${strokeFor(c)}" stroke-width="2.5" ${c.status === "none" ? 'stroke-dasharray="6 4"' : ""}></polygon>`;
+      const liquid = opacity > 0 ? (c.kind === "jar"
+        ? `<rect x="114" y="${Math.max(98, topY)}" width="92" height="${316 - Math.max(98, topY)}" fill="${fill}" opacity="${opacity}"></rect>`
+        : `<clipPath id="culCone${i}"><polygon points="114,98 206,98 206,240 172,318 148,318 114,240"></polygon></clipPath>
+           <rect x="114" y="${topY}" width="92" height="${320 - topY}" fill="${fill}" opacity="${opacity}" clip-path="url(#culCone${i})"></rect>`) : "";
+      return `
+        <g transform="translate(${tx} ${ty}) scale(${cs})">
+          ${body}
+          <line x1="114" y1="96" x2="206" y2="96" stroke="#37474f" stroke-width="2"></line>
+          ${liquid}
+          ${c.airOn ? `
+            <circle cx="150" cy="220" r="2.4" fill="#b0bec5" opacity="0.8" class="nps-bub"></circle>
+            <circle cx="168" cy="180" r="1.8" fill="#b0bec5" opacity="0.7" class="nps-bub"></circle>
+            <circle cx="182" cy="250" r="2" fill="#b0bec5" opacity="0.6" class="nps-bub"></circle>` : ""}
+          ${(c.purgeHot || c.restartHot) && c.kind !== "jar" ? `<circle cx="156" cy="312" r="1.8" fill="#4e342e"></circle><circle cx="162" cy="314" r="1.6" fill="#4e342e"></circle><circle cx="167" cy="312" r="1.8" fill="#4e342e"></circle>` : ""}
+          <rect x="146" y="320" width="28" height="14" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+          <text x="160" y="150" text-anchor="middle" transform="rotate(-90 160 150)" font-size="13" fill="#cfd8dc" font-family="monospace">${label}</text>
+          ${c.status !== "none" ? `<text x="160" y="58" text-anchor="middle" font-size="${n > 1 ? 13 : 11}" fill="${fill}" font-family="monospace">${this._escape(c.tint || c.status)}</text>` : `<text x="160" y="58" text-anchor="middle" font-size="11" fill="#78909c" font-family="monospace">empty</text>`}
+        </g>`;
+    };
+    // Air: pump → manifold at y=340 → a stub up into every cone tip; a second
+    // branch runs down to the tub.
+    const airMain = `M 422 152 V 340 H ${stubX(0) + 20}`;
+    const airStubs = cones.map((c, i) => pipe(`M ${stubX(i) + 20} 340 L ${stubX(i)} 334`)
+      + (c.airOn ? flow(`M ${stubX(i) + 20} 340 L ${stubX(i)} 334`, "#4dd0e1") : "")).join("");
+    // The tip run: cone 0 to the left, down to the shared manifold at y=600,
+    // then to the net at x=380; extra cones drop straight onto the manifold.
+    const tipMain = `M ${outX(0)} ${outY} H 70 V 600 H 380 V 628`;
+    const valve1X = Math.max(86, outX(0) - 42);
+    const tipHot = lead.purgeHot || lead.harvestHot;
+    const tipColour = lead.harvestHot ? "#66bb6a" : "#8d6e63";
+    const extraDrops = cones.slice(1).map((c, j) => {
+      const i = j + 1;
+      const on = c.purgeHot || c.harvestHot;
+      return pipe(`M ${outX(i)} ${outY} V 600`) + (on ? flow(`M ${outX(i)} ${outY} V 600`, c.harvestHot ? "#66bb6a" : "#8d6e63") : "")
+        + `<g transform="rotate(90 ${outX(i)} 380)">${valve(outX(i), 380, on)}</g>`
+        + `<text x="${outX(i) + 16}" y="384" font-size="13" fill="${hot(on)}" font-family="monospace">①</text>`;
+    }).join("");
+    const tub = rig.tub;
+    const tubFill = tub ? (tintFill[tub.tint] || "#26a69a") : "";
+    const tubOpacity = !tub || tub.status === "none" ? 0 : tub.tint === "clear" ? 0.16 : tub.tint === "clearing" ? 0.3 : 0.42;
+    const bottle = rig.bottle || { ml: 0, pct: 0, status: "empty" };
+    const bottleStroke = bottle.status === "stale" ? "#e5484d" : bottle.status === "aging" ? "#f5a524" : bottle.status === "fresh" ? "#4fc3f7" : "#546e7a";
+    const bottleH = Math.round(96 * Math.max(0, Math.min(100, Number(bottle.pct) || 0)) / 100);
+    const toBottle = "M 418 640 C 560 640 640 400 760 330";
+    const bottleHot = !!(rig.bottleHot || lead.harvestHot);
+    const refillArc = `M 350 214 C 300 150 250 110 ${Math.round(cx(0) + 20)} 76`;
+    const feedX = Math.round(cx(0) - 62), feedY = 96;
+    const jug = rig.jug || {};
+    return `
+      <svg viewBox="0 0 940 760" style="width:100%;max-width:760px;display:block;margin:0 auto;" role="img" aria-label="Cultures rig — live">
+        <text x="20" y="34" font-size="13" fill="#26a69a" font-family="monospace" letter-spacing="0.08em">${this._escape(rig.caption || "")}</text>
+        ${cones.map(coneSvg).join("")}
+        <rect x="380" y="100" width="84" height="52" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
+        <text x="422" y="131" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">AIR PUMP</text>
+        ${pipe(airMain)}${anyAir ? flow(airMain, "#4dd0e1") : ""}${airStubs}
+        ${sm(n > 1 ? 416 : 300, n > 1 ? 356 : 334, anyAir ? "air ON · 1–2 bubbles/s, open line to the tip" : "air off — settle", n > 1 ? "end" : "middle")}
+        <rect x="${feedX}" y="${feedY}" width="22" height="36" rx="4" fill="#101a22" stroke="${lead.feedHot ? "#43a047" : "#546e7a"}" stroke-width="2"></rect>
+        <rect x="${feedX + 6}" y="${feedY - 8}" width="10" height="9" rx="2" fill="#546e7a"></rect>
+        <rect x="${feedX + 3}" y="${feedY + 14}" width="16" height="19" rx="2" fill="#43a047" opacity="${lead.feedHot ? 0.7 : 0.35}"></rect>
+        ${lead.feedHot ? `<path d="M ${feedX + 11} ${feedY + 40} v 14" stroke="#43a047" stroke-width="2" class="awc-flow"></path>` : ""}
+        ${sm(feedX - 6, feedY + 68, "FEED", "start", lead.feedHot ? "#43a047" : "#8798a4")}
+        ${sm(feedX - 6, feedY + 82, "concentrate →", "start", lead.feedHot ? "#43a047" : "#8798a4")}
+        ${sm(feedX - 6, feedY + 96, "leafy green", "start", lead.feedHot ? "#43a047" : "#8798a4")}
+        <path d="${refillArc}" fill="none" stroke="${lead.refillHot ? "#26a69a" : "#54707d"}" stroke-width="1.6" stroke-dasharray="5 4"${lead.refillHot ? ' class="awc-flow"' : ""}></path>
+        <polygon points="${Math.round(cx(0) + 20)},76 ${Math.round(cx(0) + 30)},72 ${Math.round(cx(0) + 26)},84" fill="${lead.refillHot ? "#26a69a" : "#54707d"}"></polygon>
+        <polygon points="330,214 370,214 366,262 334,262" fill="#101a22" stroke="${lead.refillHot ? "#26a69a" : "#78909c"}" stroke-width="2.2"></polygon>
+        ${sm(350, 242, "JUG", "middle", lead.refillHot ? "#26a69a" : "#cfd8dc")}
+        ${sm(380, 232, `harvest ${Math.round(Number(jug.harvestMl) || 0)} ml → refill ${Math.round(Number(jug.mixMl) || 0)} ml mix`, "start", lead.refillHot ? "#26a69a" : "#8798a4")}
+        ${sm(380, 246, `${Number(jug.rodiMl) > 0 ? `+ ${Math.round(Number(jug.rodiMl))} ml RODI · ` : ""}@ ${Number(jug.ppt) || 27} ppt · purge ~${Math.round(Number(jug.purgeMl) || 0)} ml first`, "start", lead.refillHot ? "#26a69a" : "#8798a4")}
+        ${pipe(tipMain)}${tipHot ? flow(tipMain, tipColour) : ""}
+        ${valve(valve1X, outY, tipHot)}<text x="${valve1X}" y="${outY - 20}" text-anchor="middle" font-size="13" fill="${hot(tipHot)}" font-family="monospace">①</text>
+        ${extraDrops}
+        ${sm(n > 1 ? 344 : 240, 592, lead.purgeHot && !lead.harvestHot ? "purge — the settled tip crud, mesh half OFF" : "tip run — settle first, purge, then harvest")}
+        <rect x="352" y="628" width="56" height="14" rx="4" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
+        <rect x="344" y="642" width="72" height="9" rx="3" fill="#131c24" stroke="#42a5f5" stroke-width="2"></rect>
+        <line x1="352" y1="646" x2="408" y2="646" stroke="#42a5f5" stroke-width="1.2" stroke-dasharray="2.5 2.5"></line>
+        <rect x="344" y="651" width="72" height="9" rx="3" fill="#131c24" stroke="#42a5f5" stroke-width="2"></rect>
+        <rect x="352" y="660" width="56" height="12" rx="4" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
+        ${lead.harvestHot ? `<circle cx="368" cy="646" r="2" fill="#66bb6a"></circle><circle cx="381" cy="645" r="2.2" fill="#66bb6a"></circle><circle cx="394" cy="646" r="2" fill="#66bb6a"></circle>` : ""}
+        ${sm(424, 640, `clear union · ${Number(jug.sieveUm) || 50} µm net`)}
+        ${sm(424, 654, "a rotifer is 90–360 µm — water passes,")}
+        ${sm(424, 668, "nothing else does · drain part-open, gently")}
+        ${pipe("M 380 672 V 692")}${tipHot ? flow("M 380 672 V 692", "#4e6572") : ""}
+        ${sm(392, 688, "culture water — never the tank")}
+        <polygon points="346,696 414,696 405,736 355,736" fill="#101a22" stroke="#8d6e63" stroke-width="2.2"></polygon>
+        ${sm(380, 720, "waste", "middle", "#8d6e63")}
+        <path d="${toBottle}" fill="none" stroke="${bottleHot ? "#4fc3f7" : "#54707d"}" stroke-width="1.6" stroke-dasharray="5 4"${bottleHot ? ' class="awc-flow"' : ""}></path>
+        ${sm(560, 604, "rinse the net into the bottle", "start", bottleHot ? "#4fc3f7" : "#8798a4")}
+        ${sm(560, 618, "(or enrich this crop first)", "start", bottleHot ? "#4fc3f7" : "#8798a4")}
+        <rect x="748" y="206" width="24" height="12" rx="3" fill="#546e7a"></rect>
+        <path d="M 744 218 H 776 V 230 Q 786 236 786 246 V 316 Q 786 324 778 324 H 742 Q 734 324 734 316 V 246 Q 734 236 744 230 Z" fill="#101a22" stroke="${bottleStroke}" stroke-width="2.5" ${bottle.ml > 0 ? "" : 'stroke-dasharray="5 4"'}></path>
+        ${bottle.ml > 0 ? `<clipPath id="culRigBottle"><path d="M 744 218 H 776 V 230 Q 786 236 786 246 V 316 Q 786 324 778 324 H 742 Q 734 324 734 316 V 246 Q 734 236 744 230 Z"></path></clipPath>
+        <rect x="734" y="${324 - bottleH}" width="52" height="${bottleH}" fill="#4fc3f7" opacity="0.3" clip-path="url(#culRigBottle)"></rect>` : ""}
+        <text x="760" y="278" text-anchor="middle" font-size="14">❄</text>
+        ${sm(760, 344, "FRIDGE BOTTLE", "middle", "#cfd8dc")}
+        ${sm(760, 358, bottle.ml > 0 ? `${Math.round(bottle.ml)} ml · ${this._escape(bottle.status)}` : "empty · fills from the harvest", "middle", bottleStroke)}
+        ${tub ? `
+        ${pipe("M 422 340 V 430 H 560 V 452")}${tub.airOn ? flow("M 422 340 V 430 H 560 V 452", "#4dd0e1") : ""}
+        <rect x="540" y="452" width="220" height="92" rx="6" fill="#101a22" stroke="${strokeFor(tub)}" stroke-width="2.5" ${tub.status === "none" ? 'stroke-dasharray="6 4"' : ""}></rect>
+        <line x1="544" y1="470" x2="756" y2="470" stroke="#37474f" stroke-width="2"></line>
+        ${tubOpacity > 0 ? `<rect x="544" y="472" width="212" height="68" fill="${tubFill}" opacity="${tubOpacity}"></rect>` : ""}
+        ${tub.airOn ? `<circle cx="560" cy="530" r="2" fill="#b0bec5" opacity="0.7" class="nps-bub"></circle><circle cx="572" cy="520" r="1.6" fill="#b0bec5" opacity="0.6" class="nps-bub"></circle>` : ""}
+        <text x="650" y="512" text-anchor="middle" font-size="13" fill="#cfd8dc" font-family="monospace">${this._escape((tub.name || "Pods").toUpperCase())} · TUB</text>
+        ${sm(650, 530, tub.status === "none" ? "empty" : tub.status === "establishing" ? `establishing · day ${tub.establishDays ?? 0} of ${tub.firstHarvestDays ?? 28}` : `${tub.tint || tub.status} · flat, wide, no tap — they crawl`, "middle", tub.status === "none" ? "#78909c" : tubFill)}
+        <path d="M 760 498 H 800 V 430" fill="none" stroke="${tub.harvestHot ? "#66bb6a" : "#54707d"}" stroke-width="1.6" stroke-dasharray="5 4"${tub.harvestHot ? ' class="awc-flow"' : ""}></path>
+        ${sm(806, 460, "300 µm net → refugium,", "start", tub.harvestHot ? "#66bb6a" : "#8798a4")}
+        ${sm(806, 474, "after lights-out · 25 %,", "start", tub.harvestHot ? "#66bb6a" : "#8798a4")}
+        ${sm(806, 488, "7–10 days apart", "start", tub.harvestHot ? "#66bb6a" : "#8798a4")}` : ""}
+      </svg>`;
+  }
+
+  _culturesRigPanel() {
+    const rig = this._culturesRigState();
+    const rigSteps = [
+      ["Look", "the tint is the health tap: leafy green = fed, clearing = on schedule, clear = hungry. Foam, milk or smell is a crash sign."],
+      ["Settle", "air OFF for 15–30 min — crud and dead rotifers sink to the cone tip, the live ones stay up."],
+      ["Purge: crack ①", "mesh half OFF — the first ~50 ml of tip crud runs straight to waste. Mesh half back ON."],
+      ["Harvest: ① part-open", "25 % of the cone through the 50 µm net — the water to waste (never the tank), every rotifer stays on the net."],
+      ["Bottle (or enrich)", "rinse the net into the fridge bottle; its 5-day clock starts. A crop for the corals can take 1–5 drops of enrichment for 6 h first."],
+      ["Refill", "the same volume back in as fresh 1.020 — mix + RODI per the jug, from the mixing vessel."],
+      ["Feed", "air ON · concentrate to leafy green, little and often. Tap \"Harvested + fed\" with the tint."],
+      ["Fortnightly restart", "settle, purge, then the WHOLE cone through the net into a clean one — the split into B rides this step."],
+      ["The tub", "pods crawl: a flat tub, open airline, loose lid. Feed to Granny Smith; after week 4, 25 % through 300 µm every 7–10 days, put the volume back as fresh water."],
+    ];
+    const coneCount = Math.max(1, Math.min(4, (rig.cones || []).length || 1));
+    const shape = `${coneCount === 1 ? "One cone" : `${{ 2: "Two", 3: "Three", 4: "Four" }[coneCount]} cones`} on the hatchery's air, one valve each, the 50 µm net in the union, the fridge bottle${rig.tub ? ", and the pods' tub" : ""} — nothing else.`;
+    return `
+      <article class="panel stack">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:260px;">
+            <p class="eyebrow" style="margin:0;">The rig — live</p>
+            <small class="muted">${shape} The drawing follows whatever the cultures are doing; the rotifers live in the same inverted-bottle cone as the brine hatch.</small>
+          </div>
+          <button class="secondary compact-button" data-action="cultures-rig-play">${this._culturesRigPreview ? "■ Stop" : "▶ Play the day"}</button>
+        </div>
+        ${this._culturesRigSvg(rig)}
+        <div class="grid two compact">
+          ${rigSteps.map(([title, detail], i) => `<small><strong>${i + 1}. ${title}</strong> — ${detail}</small>`).join("")}
+        </div>
+      </article>`;
+  }
+
   _culturesJarSvg(jar) {
     const status = jar?.state?.status || "none";
     const tint = jar?.tint || "";
@@ -12205,15 +12452,17 @@ const rigSteps = [
         jars.length === 1 && producing ? "split into B when it's dense" : ""].filter(Boolean).join(" · ") || "the rack is steady"
         : "up to 4 jars",
       crashed ? "warning" : "ok", "settings", { section: "cultures", scroll: "or-section-cultures" });
+    const tempRank = { critical: 4, hot: 3, warm: 2, cool: 1, ok: 0 };
     const worstTemp = jars.map((j) => j.temp).filter((t) => t && t.available)
-      .sort((a, b) => ({ hot: 3, warm: 2, cool: 1, ok: 0 })[b.status] - ({ hot: 3, warm: 2, cool: 1, ok: 0 })[a.status])[0];
+      .sort((a, b) => (tempRank[b.status] || 0) - (tempRank[a.status] || 0))[0];
     const tempCard = this._missionSummaryCard("Room",
       sum.tempC != null ? `${sum.tempC} °C` : "—",
       !worstTemp ? "link a temperature sensor in Culture settings"
-        : worstTemp.status === "hot" ? "over the hard line — cool the jars NOW"
-          : worstTemp.status === "warm" ? "warm for the pods — watch it"
-            : worstTemp.status === "cool" ? "cool — the jars will run slow" : "inside every species' band",
-      !worstTemp ? "unknown" : worstTemp.status === "hot" ? "critical" : worstTemp.status === "warm" || worstTemp.status === "cool" ? "warning" : "ok",
+        : worstTemp.status === "critical" ? "over the critical line — move the cultures NOW"
+          : worstTemp.status === "hot" ? (worstTemp.act ? "act now — extra air, shade, feed lightly, water change" : "over the hard line — extra air, shade, feed lightly")
+            : worstTemp.status === "warm" ? "warm for the pods — watch it"
+              : worstTemp.status === "cool" ? "cool — the jars will run slow" : "inside every species' band",
+      !worstTemp ? "unknown" : worstTemp.status === "critical" || worstTemp.status === "hot" ? "critical" : worstTemp.status === "warm" || worstTemp.status === "cool" ? "warning" : "ok",
       "settings", { section: "cultures", scroll: "or-section-cultures" });
     const summaryCards = `<div class="summary-grid">${dueCard}${bottleCard}${jarsCard}${tempCard}</div>`;
 
@@ -12230,16 +12479,19 @@ const rigSteps = [
         crashed: `<span style="color:var(--error-color,#e5484d)">crashed</span> at day ${this._escape(String(Math.round(s.ageDays || 0)))}`,
       })[status] || "empty — seed it";
       const tintSelect = running ? `
-        <label style="display:flex;gap:6px;align-items:center;font-size:12px;">Water
+        <label style="display:flex;gap:6px;align-items:center;font-size:12px;" title="${this._escape(j.tintTarget ? `Aim for ${j.tintTarget}` : "")}">Water
           <select data-cultures-tint="${this._escape(j.id)}" style="font-size:12px;">
             ${(sum.tints || ["green", "clearing", "clear"]).map((t) => `<option value="${this._escape(t)}" ${t === (j.tint || "") ? "selected" : ""}>${this._escape(t)}</option>`).join("")}
           </select></label>` : "";
       const advice = running ? `<small class="muted">${this._escape(j.feedAdvice?.reason || "")}${j.feedAdvice?.action === "feed_now" ? " → feed" : j.feedAdvice?.action === "skip" ? " → skip" : ""}</small>` : "";
       const guide = running && status === "producing"
-        ? `<small class="muted" title="The measured jug: what comes out through the ${this._escape(String(j.sieveUm))} µm mesh goes to waste, the same volume of fresh saltwater goes back">harvest ${this._escape(String(j.harvestGuide?.totalMl || 0))} ml · refill ${this._escape(String(j.harvestGuide?.mixMl || 0))} ml @ ${this._escape(String(j.harvestGuide?.targetPpt || 35))} ppt${j.harvestGuide?.rodiMl ? ` + ${this._escape(String(j.harvestGuide.rodiMl))} ml RODI` : ""}</small>`
+        ? `<small class="muted" title="The measured jug: what comes out through the ${this._escape(String(j.sieveUm))} µm mesh goes to waste, the same volume of fresh saltwater goes back">${j.vesselKind === "cone" && Number(j.purgeMl) > 0 ? `purge ${this._escape(String(Math.round(j.purgeMl)))} ml · ` : ""}harvest ${this._escape(String(j.harvestGuide?.totalMl || 0))} ml · refill ${this._escape(String(j.harvestGuide?.mixMl || 0))} ml @ ${this._escape(String(j.harvestGuide?.targetPpt || 35))} ppt${j.harvestGuide?.rodiMl ? ` + ${this._escape(String(j.harvestGuide.rodiMl))} ml RODI` : ""}</small>`
         : "";
       const tempLine = j.temp?.available && j.temp.status !== "ok"
-        ? `<small style="color:${j.temp.status === "hot" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}">🌡️ ${this._escape(String(j.temp.tempC))} °C — ${j.temp.status === "hot" ? `over the ${this._escape(String(j.temp.hardMaxC))} °C hard line. This is the heatwave that kills a culture: move the jar, fan it, chill the room.` : j.temp.status === "warm" ? `above the ${this._escape(String(j.temp.maxC))} °C band — keep an eye on it` : `below the ${this._escape(String(j.temp.minC))} °C band — everything runs slow`}</small>`
+        ? `<small style="color:${j.temp.status === "hot" || j.temp.status === "critical" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}">🌡️ ${this._escape(String(j.temp.tempC))} °C — ${
+          j.temp.status === "critical" ? `over the ${this._escape(String(j.temp.criticalC ?? j.temp.hardMaxC))} °C critical line — cool the room or move the culture NOW.`
+            : j.temp.status === "hot" ? `${j.temp.act ? `over the ${this._escape(String(j.temp.actC ?? j.temp.hardMaxC))} °C act line` : `over the ${this._escape(String(j.temp.hardMaxC))} °C hard line`}. Heat kills a culture through oxygen and ammonia, not the animal: extra air, shade, feed lightly, have a 50 % change ready.`
+              : j.temp.status === "warm" ? `above the ${this._escape(String(j.temp.maxC))} °C band — keep an eye on it` : `below the ${this._escape(String(j.temp.minC))} °C band — everything runs slow`}</small>`
         : "";
       const reseed = status === "crashed" || status === "none"
         ? (j.reseedFrom || []).map((from) => {
@@ -12252,7 +12504,7 @@ const rigSteps = [
         running ? `<button class="secondary compact-button" data-action="cultures-fed" data-id="${this._escape(j.id)}" title="Logs the tint and one feed — debits the phyto bottle">Fed</button>` : "",
         status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="cultures-harvested" data-id="${this._escape(j.id)}" title="Logs the tint, a feed and today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}">Harvested + fed</button>` : "",
         running && s.restart?.available ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-restart" data-id="${this._escape(j.id)}" title="Sieve the whole jar into a clean one with fresh water">Restarted</button>` : "",
-        running && s.waterChange?.available ? `<button class="${due.includes("waterChange") ? "primary" : "secondary"} compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}">Water changed</button>` : "",
+        running && (s.waterChange?.available || s.waterChangeOnDemand) ? `<button class="${due.includes("waterChange") ? "primary" : "secondary"} compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? `On a sign — drift, any ammonia, cloudy water: ${this._escape(String(j.waterChangeGuide?.totalMl || 0))} ml out, fresh in` : "The scheduled change"}">Water changed</button>` : "",
         status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a backup out of phase, so a crash never zeroes you">Split into B</button>` : "",
         running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${this._escape(j.id)}">Crashed</button>` : "",
       ].filter(Boolean).join("");
@@ -12345,12 +12597,28 @@ const rigSteps = [
         </div>
       </article>` : "";
 
+    // --- The day the parcel lands (only while nothing has ever been seeded) --
+    const virgin = jars.length > 0 && jars.every((j) => (j.state?.status || "none") === "none" && !(j.history || []).length);
+    const rotPreset = (sum.species || []).find((x) => x.id === "rotifer_L") || this._culturesPresetFallback("rotifer_L") || {};
+    const podPreset = (sum.species || []).find((x) => x.id === "tigriopus") || this._culturesPresetFallback("tigriopus") || {};
+    const welcome = virgin ? `
+      <article class="panel stack" style="border-color:rgba(38,166,154,0.4);">
+        <p class="eyebrow" style="margin:0;">The day the parcel lands</p>
+        <small><strong>1. Rotifers into the cone.</strong> Fresh water at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt (SG ~1.020 — the jug says how much RODI to cut the 35 ppt mix with), room temperature, air ON to the tip at 1–2 bubbles/s. Float the pouch 15 min, add cone water to it in steps, pour in. Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, sooner only if the water is visibly dense.</small>
+        <small><strong>2. Pods into the tub.</strong> A flat 4 L tub half to two-thirds full of 35 ppt, open airline at 1–3 bubbles/s, loose lid, out of the sun. Pour in on delivery day, feed the Copepod Feed at half rate for a week. Tap <em>Seed</em>: a generation is a month, so the first harvest waits until day ${this._escape(String(podPreset.firstHarvestDays || 28))}.</small>
+        <small><strong>3. The shelf.</strong> Reef Juice is for the tank, not the jars — add it, the concentrate, the Copepod Feed and the enrichment from the Reefphyto presets in NPS settings, then link each jar's feed bottle below. The unused starter keeps in the fridge, cap loose, five days.</small>
+        <small><strong>4. Reminders.</strong> Once seeded, <em>Sync culture reminders</em> puts every chore on the phone, anchored on the real stamps.</small>
+      </article>` : "";
+    const rigPanel = st.summary && jars.length ? this._culturesRigPanel() : "";
+
     return `
       <section class="stack">
         ${head}
         ${notices}
         ${summaryCards}
+        ${welcome}
         ${strip}
+        ${rigPanel}
         ${notes}
         ${journal}
       </section>`;
@@ -12376,14 +12644,21 @@ const rigSteps = [
             <label>Species<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="species" ${running ? "disabled" : ""}>
               ${speciesList.map((s) => `<option value="${this._escape(s.id)}" ${(jar?.species || "rotifer_L") === s.id ? "selected" : ""}>${this._escape(s.name)}</option>`).join("")}
             </select></label>
-            <label>Water in the jar (L)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
-            <label>Salinity (ppt)<input type="number" min="5" max="45" step="1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="salinityPpt" value="${this._escape(String(jar?.salinityPpt ?? 35))}"></label>
+            <label>Vessel<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="vesselKind">
+              ${[["cone", "Cone — the hatchery's inverted bottle"], ["tub", "Tub — flat and wide (pods)"], ["jar", "Jar"]].map(([v, l]) => `<option value="${v}" ${(jar?.vesselKind || preset.vesselKind || "jar") === v ? "selected" : ""}>${l}</option>`).join("")}
+            </select></label>
+            <label>Water in the vessel (L)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
+            <label>Salinity (ppt)<input type="number" min="5" max="45" step="1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="salinityPpt" value="${this._escape(String(jar?.salinityPpt ?? preset.salinityPpt ?? 35))}"></label>
+            ${(jar?.vesselKind || preset.vesselKind) === "cone" ? `<label>Purge before harvest (ml)<input type="number" min="0" max="500" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="purgeMl" value="${this._escape(String(jar?.purgeMl ?? preset.purgeMl ?? 50))}"></label>` : ""}
             <label>Feed bottle<select data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="productId">
               <option value="">Not linked</option>
               ${Object.entries(products).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(jar?.feed?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}
             </select></label>
             <label>Feed dose (ml)<input type="number" min="0.5" max="200" step="0.5" data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="doseMl" value="${this._escape(String(jar?.feed?.doseMl ?? 5))}"></label>
           </div>
+          <small class="awc-hint">${preset.kind === "copepod"
+            ? "Pods crawl — a flat tub, never a cone. 35 ppt is their optimum (Reefphyto)."
+            : "Salinity — Reefphyto cultures rotifers at 1.020 (27 ppt): about 2.5× the offspring of 35 ppt. 35 ppt = a matched backflush and longer-lived animals, lower yield. The cone is the hatchery's: settle, bleed the tip, harvest from the valve."}</small>
           <small class="awc-hint">Cadence — the preset is the research number; change it only if your jar tells you to.</small>
           <div class="mini-grid">
             ${numberField(jid, "feedIntervalH", "Look / feed every (h)", cad.feedIntervalH, 1, 168, 1, "Rotifers twice a day; pods every 2–3 days")}
@@ -16863,10 +17138,11 @@ const rigSteps = [
         this._culturesLoadSummary();
         const jars = Array.isArray(this._cultures?.summary?.jars) ? this._cultures.summary.jars : [];
         const chore = { feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change" };
-        const hot = jars.filter((j) => j.temp?.status === "hot");
+        const hot = jars.filter((j) => j.temp?.status === "hot" || j.temp?.status === "critical");
         if (hot.length) {
+          const critical = hot.some((j) => j.temp.status === "critical");
           push("cultures-heat", "Cultures", `${hot.map((j) => j.name).join(" + ")}: room over the hard line`,
-            `${hot[0].temp.tempC} °C — this is the heatwave that kills a culture. Move the jars, fan them, chill the room.`, "critical");
+            `${hot[0].temp.tempC} °C — heat kills a culture through oxygen and ammonia: extra air, shade, feed lightly${critical ? ". Over the critical line: move the cultures NOW." : ", a 50 % change ready."}`, "critical");
         }
         const due = jars.filter((j) => (j.due || []).length);
         if (due.length) {

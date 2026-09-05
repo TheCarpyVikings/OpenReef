@@ -28,6 +28,8 @@ from .awc import _f, _parse_iso
 
 CULTURE_JARS_MAX = 4
 TINTS: tuple[str, ...] = ("green", "clearing", "clear")
+VESSEL_KINDS: tuple[str, ...] = ("cone", "tub", "jar")
+RIG_CONES_MAX = 4
 
 # Species presets. tempMin/MaxC = the productive band; tempHardMaxC = the
 # line above which the copy stops advising and starts warning (Reece's
@@ -43,34 +45,54 @@ TINTS: tuple[str, ...] = ("green", "clearing", "clear")
 SPECIES: tuple[dict[str, Any], ...] = (
     {"id": "rotifer_L", "name": "Rotifers (L-type)", "kind": "rotifer",
      "latin": "Brachionus plicatilis",
+     # V2 (doc §8.2): Reefphyto cultures at SG 1.019–1.021; FAO says optimal
+     # reproduction only below 35 ppt; 35 ppt is a longer-lived, lower-yield jar.
+     "vesselKind": "cone",
      "tempMinC": 18.0, "tempMaxC": 26.0, "tempHardMaxC": 30.0,
-     "salinityPpt": 35.0,
+     "tempActC": 30.0, "tempCriticalC": 33.0,
+     "salinityPpt": 27.0,
      "feedIntervalH": 12.0,
      "harvestIntervalDays": 1.0, "harvestPct": 25.0,
      "restartIntervalDays": 14.0,
      "waterChangeIntervalDays": 0.0, "waterChangePct": 0.0,
-     "firstHarvestDays": 3.0, "splitMinAgeDays": 10.0,
-     "sieveUm": 53, "bottleShelfDays": 3.0,
-     "note": "Room temperature, no light, an open airline at ~1 bubble/s (no airstone — "
-             "fine foam strips rotifers). Keep the water lightly green: clear means feed. "
-             "Harvest 25% a day through 53 µm — the water you take out IS the water change. "
-             "Sieve the whole jar into a clean one every fortnight; that is what stops the "
-             "week-4 crash."},
+     "firstHarvestDays": 6.0, "splitMinAgeDays": 14.0,
+     "sieveUm": 50, "adultSieveUm": 0, "bottleShelfDays": 5.0,
+     "purgeMl": 50.0,
+     "tintTarget": "leafy green — spinach, not pea soup",
+     "feedProduct": "Rotifer Feed Concentrate",
+     "enrichSoakH": 6.0, "enrichDrops": "1–5", "boostWarmH": 8.0, "boostColdH": 24.0,
+     "note": "Room temperature, no light, an open rigid airline to the cone tip at 1–2 bubbles/s "
+             "(no airstone). Feed the concentrate to a leafy green, little and often: clear means "
+             "hungry, still green at feed time means skip. Before a harvest: air off, settle, bleed "
+             "the tip to waste, then 25 % a day through the 50 µm net — the water you take out IS "
+             "the water change; refill with matched water. Sieve the whole cone into a clean one "
+             "every fortnight, sooner on foam, milk or smell."},
     {"id": "tigriopus", "name": "Tigriopus copepods", "kind": "copepod",
      "latin": "Tigriopus californicus",
-     "tempMinC": 20.0, "tempMaxC": 25.0, "tempHardMaxC": 28.0,
+     # V2: Reefphyto's copepod guide (35 ppt optimal, 22–26 °C, first harvest
+     # 4–6 weeks, ≤25–30 % with 7–10 days between). Heat does not kill the
+     # animal below ~34 °C — a hot flat kills through oxygen and ammonia, so
+     # the tiers are warn 28 / act 30 / critical 32 and the copy says why.
+     "vesselKind": "tub",
+     "tempMinC": 18.0, "tempMaxC": 26.0, "tempHardMaxC": 28.0,
+     "tempActC": 30.0, "tempCriticalC": 32.0,
      "salinityPpt": 35.0,
-     "feedIntervalH": 60.0,
-     "harvestIntervalDays": 7.0, "harvestPct": 20.0,
+     "feedIntervalH": 24.0,
+     "harvestIntervalDays": 10.0, "harvestPct": 25.0,
      "restartIntervalDays": 0.0,
-     "waterChangeIntervalDays": 21.0, "waterChangePct": 35.0,
-     "firstHarvestDays": 7.0, "splitMinAgeDays": 21.0,
-     "sieveUm": 53, "bottleShelfDays": 0.0,
-     "note": "Reef salinity, steady room temperature, gentle air. Phyto every 2–3 days — "
-             "just enough to tint the water. Wait a week before the first harvest, then "
-             "~20% a week (53 µm keeps the nauplii, 150 µm the adults). A generation is "
-             "about a month, so patience beats fiddling. Hard warning above 28 °C: a hot "
-             "spell is what kills this culture."},
+     "waterChangeIntervalDays": 0.0, "waterChangePct": 50.0,
+     "firstHarvestDays": 28.0, "splitMinAgeDays": 35.0,
+     "sieveUm": 50, "adultSieveUm": 300, "bottleShelfDays": 0.0,
+     "purgeMl": 0.0,
+     "tintTarget": "Granny Smith apple skin",
+     "feedProduct": "Copepod Feed",
+     "enrichSoakH": 0.0, "enrichDrops": "", "boostWarmH": 0.0, "boostColdH": 0.0,
+     "note": "A flat tub, not a cone — they crawl. 35 ppt, 22–26 °C, open airline at 1–3 bubbles/s, "
+             "loose lid, no light. Feed the Copepod Feed to a Granny Smith green, half rate in week "
+             "one. A generation is a month: first harvest at four to six weeks, then no more than "
+             "25–30 % with 7–10 days between (50 µm keeps the nauplii, 300 µm the adults); put the "
+             "harvested volume back as fresh water. Any ammonia = a 50 % change now. Warn at 28 °C: "
+             "heat kills through oxygen and ammonia, not the animal — extra air, shade, feed lightly."},
 )
 _SPECIES_BY_ID = {s["id"]: s for s in SPECIES}
 CADENCE_FIELDS: tuple[str, ...] = (
@@ -178,6 +200,9 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     if cad["waterChangeIntervalDays"] > 0:
         out["waterChange"] = _due(state.get("lastWaterChangeAt"), state.get("startedAt"),
                                   timedelta(days=cad["waterChangeIntervalDays"]), now)
+    # A species with a percentage but no interval changes water on a SIGN
+    # (drift, ammonia, cloudy water) — no clock, but the ceremony exists.
+    out["waterChangeOnDemand"] = (cad["waterChangeIntervalDays"] <= 0 < cad["waterChangePct"])
     out["splitEligible"] = (age_days >= _f(species["splitMinAgeDays"])
                             and str(state.get("lastTint") or "") != "clear")
     # The next chore the keeper should expect (soonest "at"), due ones first.
@@ -214,15 +239,23 @@ def feed_advice(tint: Any, feed_clock: dict[str, Any]) -> dict[str, Any]:
 
 def temperature_advice(temp_c: Any, species_id: Any) -> dict[str, Any]:
     """Advisory only: where the room sits against the species band. ``hot`` is
-    the hard line — the heatwave that killed the last Tigriopus culture."""
+    the warning line, ``critical`` the line above which the copy stops
+    advising and tells the keeper to move the culture; ``act`` flags the
+    middle tier (doc §8.2: warn 28 / act 30 / critical 32 for Tigriopus —
+    heat kills a jar through oxygen and ammonia long before it kills the
+    animal, so the tiers are about the water, not the species' CTmax)."""
     species = species_preset(species_id)
+    base = {"minC": species["tempMinC"], "maxC": species["tempMaxC"],
+            "hardMaxC": species["tempHardMaxC"],
+            "actC": species.get("tempActC", species["tempHardMaxC"]),
+            "criticalC": species.get("tempCriticalC", species["tempHardMaxC"])}
     try:
         t = float(temp_c)
     except (TypeError, ValueError):
-        return {"available": False, "status": "unknown", "tempC": None,
-                "minC": species["tempMinC"], "maxC": species["tempMaxC"],
-                "hardMaxC": species["tempHardMaxC"]}
-    if t >= _f(species["tempHardMaxC"]):
+        return {"available": False, "status": "unknown", "tempC": None, "act": False, **base}
+    if t >= _f(base["criticalC"]):
+        status = "critical"
+    elif t >= _f(species["tempHardMaxC"]):
         status = "hot"
     elif t > _f(species["tempMaxC"]):
         status = "warm"
@@ -231,8 +264,7 @@ def temperature_advice(temp_c: Any, species_id: Any) -> dict[str, Any]:
     else:
         status = "ok"
     return {"available": True, "status": status, "tempC": round(t, 1),
-            "minC": species["tempMinC"], "maxC": species["tempMaxC"],
-            "hardMaxC": species["tempHardMaxC"]}
+            "act": t >= _f(base["actC"]), **base}
 
 
 def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: float = 35.0) -> dict[str, Any]:
@@ -278,3 +310,111 @@ def stagger_days(jar_a: dict[str, Any], jar_b: dict[str, Any], now: datetime) ->
     if a["daysSinceRestart"] is None or b["daysSinceRestart"] is None:
         return None
     return round(abs(a["daysSinceRestart"] - b["daysSinceRestart"]), 1)
+
+
+def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
+    """The live rig drawing's inputs (doc §8.4), computed from the summary's
+    per-jar payloads so the panel only draws: rotifer cones (and plain jars)
+    on the left band, one copepod tub, the measured jug, the fridge bottle
+    and a caption that names the stage — heat first, then chores, then the
+    quiet states. Pure: no clock, no I/O."""
+    jars = [j for j in (jars if isinstance(jars, list) else []) if isinstance(j, dict)]
+    bottle = bottle if isinstance(bottle, dict) else {}
+    cones: list[dict[str, Any]] = []
+    tub: dict[str, Any] | None = None
+
+    def _vessel(j: dict[str, Any]) -> dict[str, Any]:
+        st = j.get("state") if isinstance(j.get("state"), dict) else {}
+        status = str(st.get("status") or "none")
+        running = status in ("establishing", "producing")
+        due = set(j.get("due") or [])
+        first = max(1.0, _f(j.get("firstHarvestDays"), 6.0))
+        if st.get("percent") is not None:
+            pct = _f(st.get("percent"))
+        elif status == "producing":
+            pct = 100.0
+        elif status == "establishing":
+            pct = min(100.0, 100.0 * _f(st.get("ageDays")) / first)
+        else:
+            pct = 0.0
+        advice = j.get("feedAdvice") if isinstance(j.get("feedAdvice"), dict) else {}
+        temp = j.get("temp") if isinstance(j.get("temp"), dict) else {}
+        return {
+            "id": str(j.get("id") or ""), "name": str(j.get("name") or ""),
+            "kind": str(j.get("vesselKind") or "jar"), "status": status,
+            "tint": str(j.get("tint") or "") if running else "",
+            "pct": round(pct),
+            "airOn": running,
+            "purgeHot": "harvest" in due or "restart" in due,
+            "harvestHot": "harvest" in due,
+            "refillHot": "harvest" in due or "restart" in due,
+            "feedHot": running and advice.get("action") == "feed_now",
+            "restartHot": "restart" in due,
+            "tempStatus": str(temp.get("status") or "unknown"),
+            "establishDays": round(_f(st.get("ageDays"))) if status == "establishing" else None,
+            "firstHarvestDays": round(first),
+        }
+
+    for j in jars:
+        v = _vessel(j)
+        if v["kind"] == "tub":
+            if tub is None:
+                tub = v
+        elif len(cones) < RIG_CONES_MAX:
+            cones.append(v)
+    first_cone = next((j for j in jars if str(j.get("vesselKind") or "jar") != "tub"), None)
+    guide = (first_cone.get("harvestGuide") if first_cone and isinstance(first_cone.get("harvestGuide"), dict)
+             else {}) or {}
+    jug = {
+        "harvestMl": round(_f(guide.get("totalMl"))), "mixMl": round(_f(guide.get("mixMl"))),
+        "rodiMl": round(_f(guide.get("rodiMl"))), "ppt": _f(guide.get("targetPpt"), 35.0),
+        "purgeMl": round(_f(first_cone.get("purgeMl"))) if first_cone else 0,
+        "sieveUm": int(_f(first_cone.get("sieveUm"), 50)) if first_cone else 50,
+    }
+    remaining = max(0.0, _f(bottle.get("remainingMl")))
+    volume = max(1.0, _f(bottle.get("volumeMl"), 1000.0))
+    bottle_out = {"ml": round(remaining), "pct": round(min(100.0, 100.0 * remaining / volume)),
+                  "status": str(bottle.get("status") or "empty")}
+
+    vessels = cones + ([tub] if tub else [])
+    caption = "IDLE — seed the cone and the rig comes alive"
+    stage = "idle"
+    by_temp = {"critical": 3, "hot": 2}
+    hot = sorted((v for v in vessels if v["tempStatus"] in by_temp),
+                 key=lambda v: -by_temp[v["tempStatus"]])
+    if hot:
+        v = hot[0]
+        temp = next((j.get("temp") for j in jars if j.get("id") == v["id"]), None) or {}
+        t = temp.get("tempC")
+        if v["tempStatus"] == "critical":
+            stage, caption = "heat", (f"ROOM {t} °C — over {v['name']}'s critical line: "
+                                      "cool the room or move the culture NOW")
+        else:
+            stage, caption = "heat", (f"ROOM {t} °C — over {v['name']}'s {temp.get('hardMaxC')} °C line: "
+                                      "extra air, shade, feed lightly, a 50 % change ready")
+    elif any(v["restartHot"] for v in cones):
+        stage, caption = "restart", ("RESTART DUE — air off, settle, bleed the tip, the whole cone "
+                                     "through the net into a clean one")
+    elif any(v["harvestHot"] for v in cones):
+        stage = "harvest"
+        refill = (f"{jug['mixMl']} ml mix + {jug['rodiMl']} ml RODI" if jug["rodiMl"]
+                  else f"{jug['mixMl']} ml fresh")
+        caption = (f"HARVEST — air off, settle 20 min, bleed ~{jug['purgeMl']} ml off the tip, then "
+                   f"{jug['harvestMl']} ml through the {jug['sieveUm']} µm net · refill {refill}")
+    elif tub and tub["harvestHot"]:
+        stage, caption = "tub_harvest", ("POD HARVEST — 25 % through 300 µm for adults, 50 µm "
+                                         "for nauplii · put the volume back as fresh water")
+    elif any(v["feedHot"] for v in vessels):
+        v = next(v for v in vessels if v["feedHot"])
+        target = next((j.get("tintTarget") for j in jars if j.get("id") == v["id"]), "") or "a light green"
+        stage, caption = "feed", f"FEED — {v['name']} to {target}, little and often"
+    elif any(v["status"] == "establishing" for v in vessels):
+        v = next(v for v in vessels if v["status"] == "establishing")
+        stage, caption = "establishing", (f"ESTABLISHING — {v['name']} day {v['establishDays']} of "
+                                          f"{v['firstHarvestDays']} · feed by the tint, no harvest yet")
+    elif any(v["status"] == "producing" for v in vessels):
+        stage, caption = "steady", "STEADY — nothing due · look at the water"
+    elif any(v["status"] == "crashed" for v in vessels):
+        stage, caption = "crashed", "CRASHED — reseed from the other jar, or from a fresh starter"
+    return {"stage": stage, "caption": caption, "cones": cones, "tub": tub, "jug": jug,
+            "bottle": bottle_out}

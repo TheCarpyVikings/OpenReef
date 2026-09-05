@@ -31,6 +31,7 @@ _ha_stubs.install()
 sys.path.insert(0, os.path.join(_ROOT, "custom_components"))
 import openreef as integration  # noqa: E402
 from openreef import cultures  # noqa: E402
+from openreef import nps as nps_engine  # noqa: E402
 
 from _fake_ha import FakeConnection, FakeEntry, FakeHass, run  # noqa: E402
 
@@ -85,8 +86,12 @@ def test_species_presets_carry_the_research_numbers():
     pod = cultures.species_preset("tigriopus")
     assert rot["harvestIntervalDays"] == 1 and rot["restartIntervalDays"] == 14
     assert rot["waterChangeIntervalDays"] == 0, "the rotifer harvest IS the water change"
-    assert pod["harvestIntervalDays"] == 7 and pod["waterChangeIntervalDays"] > 0
-    assert pod["tempHardMaxC"] == 28, "the heatwave line"
+    assert pod["harvestIntervalDays"] == 10 and pod["waterChangeIntervalDays"] == 0
+    assert pod["waterChangePct"] == 50, "pods change water on a sign, not a clock"
+    assert pod["tempHardMaxC"] == 28 and pod["tempActC"] == 30 and pod["tempCriticalC"] == 32, "the heat tiers"
+    assert rot["vesselKind"] == "cone" and pod["vesselKind"] == "tub", "rotifers in the cone, pods in a tub"
+    assert rot["salinityPpt"] == 27 and rot["firstHarvestDays"] == 6 and rot["sieveUm"] == 50
+    assert rot["bottleShelfDays"] == 5 and rot["purgeMl"] == 50 and pod["firstHarvestDays"] == 28
     assert cultures.species_preset("nonsense")["id"] == "rotifer_L"
     assert set(cultures.species_ids()) == {"rotifer_L", "tigriopus"}
 
@@ -115,7 +120,7 @@ def test_culture_state_establishing_holds_the_harvest_back():
     st = cultures.culture_state(_jar(started_ago_days=1, now=NOW), NOW)
     assert st["status"] == "establishing"
     assert st["harvest"]["available"] and not st["harvest"]["due"]
-    assert abs(st["harvest"]["hoursUntil"] - 48.0) < 0.1, "first harvest at day 3"
+    assert abs(st["harvest"]["hoursUntil"] - 120.0) < 0.1, "first harvest at day 6 (Reefphyto: 5–7)"
     assert st["feed"]["due"], "seeded 24 h ago on a 12 h feed clock"
     assert st["percent"] == 7, "1 of 14 days into the restart cycle"
     assert not st["splitEligible"]
@@ -132,7 +137,9 @@ def test_culture_state_producing_clocks_and_next_chore():
     assert abs(st["restart"]["hoursUntil"] - 48.0) < 0.1
     assert not st["waterChange"]["available"], "rotifers have no separate water change"
     assert st["nextChore"]["key"] == "harvest" and st["nextChore"]["due"]
-    assert st["splitEligible"], "12 days old and not starving"
+    assert not st["splitEligible"], "12 days old — the split rides the first restart at 14"
+    older = _jar(started_ago_days=15, lastRestartAt=_iso(NOW - timedelta(days=1)), now=NOW)
+    assert cultures.culture_state(older, NOW)["splitEligible"], "15 days old and not starving"
 
 
 def test_culture_state_restart_anchor_moves_with_a_restart():
@@ -145,13 +152,15 @@ def test_culture_state_restart_anchor_moves_with_a_restart():
 
 
 def test_copepod_clocks_are_the_slow_lane():
-    jar = _jar(species="tigriopus", started_ago_days=10, lastFedAt=_iso(NOW - timedelta(days=3)), now=NOW)
+    young = cultures.culture_state(_jar(species="tigriopus", started_ago_days=10, now=NOW), NOW)
+    assert young["status"] == "establishing", "a generation is a month — day 10 is still establishing"
+    jar = _jar(species="tigriopus", started_ago_days=30, lastFedAt=_iso(NOW - timedelta(days=3)), now=NOW)
     st = cultures.culture_state(jar, NOW)
     assert st["status"] == "producing"
-    assert st["feed"]["due"], "3 days on a 60 h clock"
-    assert st["harvest"]["due"], "first harvest at day 7, never done since"
+    assert st["feed"]["due"], "3 days on a 24 h clock"
+    assert st["harvest"]["due"], "first harvest at day 28, never done since"
     assert not st["restart"]["available"], "copepods never sieve-restart"
-    assert st["waterChange"]["available"] and not st["waterChange"]["due"]
+    assert not st["waterChange"]["available"] and st["waterChangeOnDemand"], "water changes on a sign"
     assert st["percent"] is None
 
 
@@ -169,7 +178,11 @@ def test_temperature_advice_has_a_hard_line():
     assert cultures.temperature_advice(None, "tigriopus")["available"] is False
     assert cultures.temperature_advice(23, "tigriopus")["status"] == "ok"
     assert cultures.temperature_advice(26.5, "tigriopus")["status"] == "warm"
-    assert cultures.temperature_advice(28.0, "tigriopus")["status"] == "hot"
+    hot = cultures.temperature_advice(28.0, "tigriopus")
+    assert hot["status"] == "hot" and not hot["act"], "28 °C warns"
+    assert cultures.temperature_advice(30.0, "tigriopus")["act"], "30 °C: act now"
+    assert cultures.temperature_advice(32.0, "tigriopus")["status"] == "critical"
+    assert cultures.temperature_advice(31.0, "rotifer_L")["status"] == "hot"
     assert cultures.temperature_advice(16, "rotifer_L")["status"] == "cool"
     assert cultures.temperature_advice("junk", "rotifer_L")["status"] == "unknown"
 
@@ -225,8 +238,9 @@ def test_normalise_cultures_caps_the_jar_count_and_seeds_species_cadence():
     raw = {"jars": {f"c{n}": {"species": "tigriopus"} for n in range(1, 7)}}
     out = integration._normalise_cultures(raw)
     assert len(out["jars"]) == cultures.CULTURE_JARS_MAX
-    assert out["jars"]["c1"]["cadence"]["harvestIntervalDays"] == 7
+    assert out["jars"]["c1"]["cadence"]["harvestIntervalDays"] == 10
     assert out["jars"]["c1"]["salinityPpt"] == 35
+    assert out["jars"]["c1"]["vesselKind"] == "tub" and out["jars"]["c1"]["purgeMl"] == 0
     assert out["jars"]["c1"]["name"] == "Culture 1"
 
 
@@ -298,7 +312,7 @@ def test_ws_log_harvest_fills_the_bottle_oldest_wins_and_refuses_establishing():
 
 
 def test_ws_copepod_harvest_never_touches_the_rotifer_bottle():
-    entry = _entry(jars={"c1": _jar(species="tigriopus", started_ago_days=10)})
+    entry = _entry(jars={"c1": _jar(species="tigriopus", started_ago_days=30)})
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "harvested": True}))
@@ -328,7 +342,7 @@ def test_ws_water_change_is_copepod_only():
     run(integration.websocket_cultures_water_change(hass, conn, {"id": 2, "jar_id": "c2"}))
     jar = _cultures(entry)["jars"]["c2"]
     assert jar["state"]["lastWaterChangeAt"]
-    assert jar["history"][0]["event"] == "water_change" and jar["history"][0]["ml"] == 875
+    assert jar["history"][0]["event"] == "water_change" and jar["history"][0]["ml"] == 1250, "50 % of 2.5 L on a sign"
 
 
 def test_ws_split_creates_b_from_a_producing_jar_and_refuses_otherwise():
@@ -354,7 +368,7 @@ def test_ws_split_creates_b_from_a_producing_jar_and_refuses_otherwise():
 
 
 def test_ws_split_refuses_when_every_jar_is_used():
-    jars = {f"c{n}": _jar(started_ago_days=12) for n in range(1, 5)}
+    jars = {f"c{n}": _jar(started_ago_days=16) for n in range(1, 5)}
     entry = _entry(jars=jars)
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
@@ -492,6 +506,81 @@ def test_cultures_runtime_survives_the_real_save_handler():
     assert cult["jars"]["c1"]["state"]["startedAt"] == _iso(REAL - timedelta(days=5))
     assert cult["bottle"]["remainingMl"] == 300
     assert cult["jars"]["c1"]["name"] == "Renamed"
+
+
+
+# --------------------------------------------------------------------------- #
+# V2 Stage A (0.7.125): the vessel, the purge, the rig payload, the shelf
+# --------------------------------------------------------------------------- #
+def test_normalise_cultures_vessel_kind_and_purge_follow_the_preset():
+    out = integration._normalise_cultures({"jars": {
+        "c1": {"species": "rotifer_L"},
+        "c2": {"species": "rotifer_L", "vesselKind": "jar", "purgeMl": 999},
+        "c3": {"species": "tigriopus", "vesselKind": "cone"},
+        "c4": {"species": "tigriopus", "vesselKind": "bathtub", "purgeMl": "junk"},
+    }})
+    assert out["jars"]["c1"]["vesselKind"] == "cone" and out["jars"]["c1"]["purgeMl"] == 50
+    assert out["jars"]["c2"]["vesselKind"] == "jar" and out["jars"]["c2"]["purgeMl"] == 500, "purge clamps at 500 ml"
+    assert out["jars"]["c3"]["vesselKind"] == "cone", "a keeper may put pods in a cone; the copy will argue"
+    assert out["jars"]["c4"]["vesselKind"] == "tub" and out["jars"]["c4"]["purgeMl"] == 0
+
+
+def test_rig_state_reads_the_stage_heat_first():
+    def jar(**over):
+        base = {"id": "c1", "name": "Rotifers A", "vesselKind": "cone", "tint": "clearing", "due": [],
+                "firstHarvestDays": 6, "purgeMl": 50, "sieveUm": 50,
+                "state": {"status": "producing", "percent": 40, "ageDays": 8},
+                "feedAdvice": {"action": "wait"}, "temp": {"status": "ok", "tempC": 23, "hardMaxC": 30},
+                "harvestGuide": {"totalMl": 625, "mixMl": 480, "rodiMl": 145, "targetPpt": 27},
+                "tintTarget": "leafy green"}
+        base.update(over)
+        return base
+    bottle = {"remainingMl": 250, "volumeMl": 1000, "status": "fresh"}
+    quiet = cultures.rig_state([jar()], bottle)
+    assert quiet["stage"] == "steady" and quiet["cones"][0]["pct"] == 40 and quiet["tub"] is None
+    assert quiet["jug"] == {"harvestMl": 625, "mixMl": 480, "rodiMl": 145, "ppt": 27, "purgeMl": 50, "sieveUm": 50}
+    assert quiet["bottle"] == {"ml": 250, "pct": 25, "status": "fresh"}
+    harvest = cultures.rig_state([jar(due=["harvest"])], bottle)
+    assert harvest["stage"] == "harvest" and harvest["cones"][0]["harvestHot"] and harvest["cones"][0]["purgeHot"]
+    assert "625 ml through the 50 µm net" in harvest["caption"] and "145 ml RODI" in harvest["caption"]
+    feed = cultures.rig_state([jar(feedAdvice={"action": "feed_now"})], bottle)
+    assert feed["stage"] == "feed" and "leafy green" in feed["caption"]
+    heat = cultures.rig_state([jar(due=["harvest"], temp={"status": "hot", "tempC": 29, "hardMaxC": 28})], bottle)
+    assert heat["stage"] == "heat" and "extra air" in heat["caption"], "heat outranks a due harvest"
+    tub = cultures.rig_state([jar(), jar(id="c2", name="Pods", vesselKind="tub",
+                                            state={"status": "establishing", "percent": None, "ageDays": 9},
+                                            firstHarvestDays=28)], bottle)
+    assert tub["tub"]["name"] == "Pods" and tub["tub"]["pct"] == 32 and tub["tub"]["establishDays"] == 9
+    assert tub["stage"] == "establishing", "a jar still establishing is the more useful line than 'steady'"
+    empty = cultures.rig_state([jar(state={"status": "none"}, tint="")], {})
+    assert empty["stage"] == "idle" and empty["cones"][0]["tint"] == "" and not empty["cones"][0]["airOn"]
+    assert len(cultures.rig_state([jar(id=f"c{n}") for n in range(6)], {})["cones"]) == cultures.RIG_CONES_MAX
+
+
+def test_summary_carries_the_rig_and_the_vessel_fields():
+    entry = _entry(jars={"c1": _jar(started_ago_days=12, lastFedAt=_iso(REAL - timedelta(hours=20)),
+                                    lastHarvestAt=_iso(REAL - timedelta(hours=30))),
+                         "c2": _jar(species="tigriopus", started_ago_days=3)})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    p = conn.results[-1].payload
+    by_id = {j["id"]: j for j in p["jars"]}
+    assert by_id["c1"]["vesselKind"] == "cone" and by_id["c1"]["purgeMl"] == 50 and by_id["c1"]["sieveUm"] == 50
+    assert by_id["c2"]["vesselKind"] == "tub" and by_id["c2"]["adultSieveUm"] == 300
+    assert by_id["c2"]["state"]["waterChangeOnDemand"] and by_id["c2"]["tintTarget"].startswith("Granny")
+    rig = p["rig"]
+    assert [c["id"] for c in rig["cones"]] == ["c1"] and rig["tub"]["id"] == "c2"
+    assert rig["stage"] == "harvest" and rig["cones"][0]["airOn"] and rig["jug"]["harvestMl"] == 625
+
+
+def test_reefphyto_products_are_on_the_shelf():
+    names = {item["name"]: item for item in nps_engine.PRODUCT_LIBRARY}
+    for name in ("Reef Juice (live phyto blend)", "Rotifer Feed Concentrate", "Copepod Feed",
+                 "Rotifer & Artemia Enrichment"):
+        assert name in names and names[name]["brand"] == "Reefphyto" and names[name]["refrigerated"]
+    assert "not designed as a culture feed" in names["Reef Juice (live phyto blend)"]["notes"]
+    assert names["Rotifer & Artemia Enrichment"]["category"] == "other", "drops, not a feed-plan food"
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

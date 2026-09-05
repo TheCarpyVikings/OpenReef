@@ -48,6 +48,30 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
      "particleUmMin": 0, "particleUmMax": 0,
      "notes": "HUFA/B12 enrichment emulsion for the hatchery's enrichment soak — "
               "shake well; use less if the water does not clear."},
+    # Reefphyto (UK) — the cultures arc's shelf (docs/live-cultures-brainstorm.md §8.1),
+    # numbers read from the product pages 2026-09-05.
+    {"name": "Reef Juice (live phyto blend)", "brand": "Reefphyto", "category": "phyto",
+     "bottleMl": 250, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
+     "particleUmMin": 1, "particleUmMax": 20,
+     "notes": "Tank dose only — Reefphyto: 'not designed as a culture feed'. 1 ml per 27 / 18 / 9 L "
+              "a day for light / medium / heavy stocking (their blog: 2–3× a week is right for "
+              "most reefs). Into flow at dusk, skimmer + UV off 30–60 min. Gentle shake, never freeze."},
+    {"name": "Rotifer Feed Concentrate", "brand": "Reefphyto", "category": "phyto",
+     "bottleMl": 50, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
+     "particleUmMin": 1, "particleUmMax": 12,
+     "notes": "The rotifer cone's food: Nannochloropsis oculata + Tetraselmis suecica only. Dose to "
+              "a leafy green, little and often; top up when the water clears. Not a copepod feed."},
+    {"name": "Copepod Feed", "brand": "Reefphyto", "category": "phyto",
+     "bottleMl": 50, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
+     "particleUmMin": 1, "particleUmMax": 20,
+     "notes": "The Tigriopus tub's food — feed to a Granny Smith apple-skin green, half rate in "
+              "week one, again when it clears."},
+    {"name": "Rotifer & Artemia Enrichment", "brand": "Reefphyto", "category": "other",
+     "bottleMl": 100, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
+     "particleUmMin": 0, "particleUmMax": 0,
+     "notes": "Live Nannochloropsis (EPA) + Isochrysis (DHA) — an algae enrichment, not an "
+              "emulsion. 1–5 drops per portion of rotifers or nauplii, 6 h (their pages say 2–4 "
+              "or 6–12), rinse before feeding."},
     {"name": "Live phytoplankton blend", "brand": "AlgaeBarn OceanMagik", "category": "phyto",
      "bottleMl": 946, "shelfLifeDaysOpened": 28, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 1, "particleUmMax": 10},
