@@ -108,6 +108,7 @@ from .const import (
     MAINTENANCE_SOURCE_AWC,
     MAINTENANCE_SOURCE_CULTURES,
     MAINTENANCE_SOURCE_HATCHERY,
+    NOTIFY_ACTION_UNSUB,
     MAINTENANCE_TASK_CADENCE_HOURS_MAX,
     MAINTENANCE_TASK_CADENCE_MAX,
     MAINTENANCE_TASK_CADENCE_MIN,
@@ -1052,12 +1053,20 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
         for item in (raw_jar.get("history") if isinstance(raw_jar.get("history"), list) else []):
             if not isinstance(item, dict):
                 continue
+            temp_c = item.get("tempC")
             history.append({
                 "event": _awc_str(item.get("event"), 24),
                 "at": _awc_str(item.get("at"), 40),
                 "ml": _awc_num(item.get("ml"), 0, 0, 100000),
                 "tint": str(item.get("tint")) if str(item.get("tint")) in cultures_engine.TINTS else "",
                 "from": _awc_str(item.get("from"), 24),
+                # V2 journal (doc §8.5): a crash sign, an egg-ratio spot check
+                # (0 = not counted), the room at the tap (None = no sensor).
+                "sign": str(item.get("sign")) if str(item.get("sign")) in cultures_engine.SIGNS else "",
+                "eggRatio": _awc_num(item.get("eggRatio"), 0, 0, 100),
+                "tempC": (round(float(temp_c), 1)
+                          if isinstance(temp_c, (int, float)) and not isinstance(temp_c, bool)
+                          and -50 <= float(temp_c) <= 60 else None),
             })
         vessel_kind = str(raw_jar.get("vesselKind") or "")
         jars[jid] = {
@@ -1088,6 +1097,9 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "lastTint": tint if tint in cultures_engine.TINTS else "",
                 "crashedAt": _awc_str(raw_state.get("crashedAt"), 40),
                 "seededFrom": _awc_str(raw_state.get("seededFrom"), 24),
+                "lastSignAt": _awc_str(raw_state.get("lastSignAt"), 40),
+                "lastSign": (str(raw_state.get("lastSign"))
+                             if str(raw_state.get("lastSign")) in cultures_engine.SIGNS else ""),
             },
             "history": history[:60],
         }
@@ -5130,6 +5142,12 @@ async def _async_fire_maintenance_reminder(
     labels = ", ".join(item["label"] for item in push_items)
     # One digest phone push per daily tick while tasks are due (the intended nag).
     target = str(reminders.get("notifyTarget", "")).strip()
+    # The cultures' one-question pushes ride the same tick (V2 Stage B): one
+    # per jar with a chore due, buttons for the very taps the tab offers.
+    try:
+        await _async_cultures_push_due(hass, latest_config, target)
+    except Exception as err:  # noqa: BLE001 - never let a push break the digest
+        _LOGGER.warning("Cultures: the daily question could not be sent: %s", err)
     if target:
         overdue = sum(1 for item in push_items if item["severity"] == "critical")
         summary = f"{len(push_items)} reef task{'s' if len(push_items) != 1 else ''} due"
@@ -5892,6 +5910,7 @@ async def _async_save_config(
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_equipment_timers(hass, entry, normalised)
     await _async_schedule_max_off_timers(hass, entry, normalised)
+    _register_notification_actions(hass)
     await _async_schedule_mode_schedule(hass, entry, normalised)
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
@@ -12045,8 +12064,11 @@ async def _async_nps_hatch_ready_push(
         reminders = (config.get("maintenance") or {}).get("reminders") or {}
         target = str(reminders.get("notifyTarget", "")).strip() if isinstance(reminders, dict) else ""
         if target:
-            await hass.services.async_call(
-                "notify", target, {"title": title, "message": message}, blocking=False)
+            await _async_push_actionable(
+                hass, target, title, message,
+                [{"action": f"OPENREEF_HATCH_LOADED:{vid}", "title": "Hatched & loaded"},
+                 {"action": "OPENREEF_LATER", "title": "Later"}],
+                tag=f"openreef_hatch_ready_{vid}")
         _append_activity(config, f"Brine ready to harvest in {name}", "info")
     # Enrichment clocks (doc §10): soak done + optional T+10 top-up, each once.
     enrichment = hatchery.get("enrichment") if isinstance(hatchery.get("enrichment"), dict) else {}
@@ -13654,14 +13676,23 @@ async def websocket_nps_hatch_cancel(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
+    error = _nps_hatch_cancel_apply(hass, config, str(msg.get("vessel_id") or ""),
+                                    bool(msg.get("harvested")), datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
+        return
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], requested: str,
+                            harvested: bool, now: datetime) -> tuple[str, str] | None:
+    """The 'Hatched & loaded' / cancel core, shared by the tab and the phone
+    push's button (V2 Stage B). Returns (code, message) on refusal."""
     hatchery = _nps_hatchery_v2(config)
     vessels = hatchery["vessels"]
-    now = datetime.now(timezone.utc)
-    harvested = bool(msg.get("harvested"))
-    requested = str(msg.get("vessel_id") or "")
     if requested and requested not in vessels:
-        connection.send_error(msg["id"], "unknown_vessel", f"No hatchery '{requested}'")
-        return
+        return "unknown_vessel", f"No hatchery '{requested}'"
     running = _nps_running_batches(config)
     target_id = requested
     if not target_id and running:
@@ -13677,8 +13708,7 @@ async def websocket_nps_hatch_cancel(
         before_ml = _awc_num(_nps_canonical_reservoir(config).get("remainingMl"), 0, 0, 1e9)
         error = _nps_container_load(config, hatchery, now, enriched=False)
         if error is not None:
-            connection.send_error(msg["id"], error[0], error[1])
-            return
+            return error
         # The backflush: the nauplii ride home on fresh 35 ppt, and every ml
         # the container gained is saltwater out of the mix vessel (doc §30).
         after_ml = _awc_num(_nps_canonical_reservoir(config).get("remainingMl"), 0, 0, 1e9)
@@ -13706,8 +13736,7 @@ async def websocket_nps_hatch_cancel(
     if harvested:
         name = vessels.get(target_id, {}).get("name") or "the hatchery"
         _append_activity(config, f"Brine harvested from {name} — container loaded", "control")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    return None
 
 
 @websocket_api.websocket_command({
@@ -14183,7 +14212,8 @@ def _cultures_history(jar: dict[str, Any], event: str, now: datetime, **fields: 
     if not isinstance(history, list):
         history = []
         jar["history"] = history
-    row = {"event": event, "at": now.isoformat(), "ml": 0, "tint": "", "from": ""}
+    row = {"event": event, "at": now.isoformat(), "ml": 0, "tint": "", "from": "",
+           "sign": "", "eggRatio": 0, "tempC": None}
     row.update({k: v for k, v in fields.items() if v is not None})
     history.insert(0, row)
     del history[60:]
@@ -14223,6 +14253,7 @@ def _cultures_seed_jar(config: dict[str, Any], jar: dict[str, Any], now: datetim
         "startedAt": now.isoformat(), "lastRestartAt": now.isoformat(),
         "lastFedAt": now.isoformat(), "lastHarvestAt": "", "lastWaterChangeAt": "",
         "lastTint": "green", "crashedAt": "", "seededFrom": seeded_from,
+        "lastSignAt": "", "lastSign": "",
     })
     _cultures_history(jar, "seeded", now, **({"from": seeded_from} if seeded_from else {}))
 
@@ -14251,7 +14282,12 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         due = [key for key in ("feed", "harvest", "restart", "waterChange")
                if st[key].get("due")]
         due_count += len(due)
-        feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"])
+        feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"], st["harvest"],
+                                                  cad["harvestIntervalDays"] * 24.0)
+        temp_advice = cultures_engine.temperature_advice(temp_c, jar["species"])
+        sibling_histories = [cultures["jars"][o]["history"] for o in cultures["jars"]
+                             if cultures["jars"][o]["species"] == jar["species"]]
+        learned = cultures_engine.learned_cadences(jar, sibling_histories, now)
         product = products.get(jar["feed"]["productId"]) if jar["feed"]["productId"] else None
         jars_payload.append({
             "id": jid, "name": jar["name"], "species": jar["species"],
@@ -14272,7 +14308,10 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "tint": jar["state"]["lastTint"],
             "due": due,
             "feedAdvice": feed_advice,
-            "temp": cultures_engine.temperature_advice(temp_c, jar["species"]),
+            "temp": temp_advice,
+            "learned": learned,
+            "risk": cultures_engine.risk_line(jar, st, temp_advice, now),
+            "lastSign": jar["state"]["lastSign"],
             "harvestGuide": cultures_engine.refill_guide(
                 jar["volumeL"], cad["harvestPct"], jar["salinityPpt"]),
             "restartGuide": cultures_engine.refill_guide(jar["volumeL"], 100, jar["salinityPpt"]),
@@ -14304,6 +14343,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         "tempC": round(temp_c, 1) if temp_c is not None else None,
         "species": [dict(s) for s in cultures_engine.SPECIES],
         "tints": list(cultures_engine.TINTS),
+        "signs": [{"id": sid, "label": cultures_engine.SIGN_WORDS[sid]} for sid in cultures_engine.SIGNS],
         "maxJars": cultures_engine.CULTURE_JARS_MAX,
     }
 
@@ -14370,59 +14410,81 @@ async def websocket_cultures_seed(
     vol.Optional("fed"): bool,
     vol.Optional("harvested"): bool,
     vol.Optional("ml"): vol.Any(int, float),
+    vol.Optional("sign"): str,
+    vol.Optional("egg_ratio"): vol.Any(int, float),
 })
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_cultures_log(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """The daily tap: the tint you saw, whether you fed, whether you harvested.
-    A feed debits the phyto bottle; a rotifer harvest fills the fridge bottle
-    (oldest stamp wins — a top-up never resets the clock) and its refill comes
-    out of the mixing vessel; both log their reminders done."""
+    """The daily tap: the tint you saw, whether you fed, whether you harvested,
+    a crash sign, an egg-ratio spot check. The maths and ledgers live in
+    ``_cultures_log_apply`` so a phone notification button can do the same
+    tap (V2 Stage B)."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    cultures = _nps_cultures_cfg(config)
-    found = _cultures_jar_for_msg(connection, msg, cultures)
-    if found is None:
+    error = _cultures_log_apply(
+        hass, config, str(msg.get("jar_id") or ""),
+        tint=str(msg.get("tint") or ""), fed=bool(msg.get("fed")), harvested=bool(msg.get("harvested")),
+        ml=msg.get("ml"), sign=str(msg.get("sign") or ""), egg_ratio=msg.get("egg_ratio"),
+        source="the Cultures tab")
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
         return
-    jar_id, jar = found
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str, *,
+                        tint: str = "", fed: bool = False, harvested: bool = False,
+                        ml: Any = None, sign: str = "", egg_ratio: Any = None,
+                        source: str = "the Cultures tab") -> tuple[str, str] | None:
+    """One tap, every ledger: a feed debits the phyto bottle; a rotifer harvest
+    fills the fridge bottle (oldest stamp wins — a top-up never resets the
+    clock) and its refill comes out of the mixing vessel; a sign stamps the
+    jar so the restart (or the pods' water change) comes forward; each chore
+    logs its reminder done. Returns (code, message) on refusal."""
+    cultures = _nps_cultures_cfg(config)
+    jar = cultures["jars"].get(jar_id)
+    if not isinstance(jar, dict):
+        return "unknown_jar", f"No culture jar '{jar_id}'"
     now = datetime.now(timezone.utc)
     st = cultures_engine.culture_state(jar, now)
     if st["status"] in ("none", "crashed"):
-        connection.send_error(msg["id"], "jar_idle", f"{jar['name']} is not running — seed it first")
-        return
-    tint = str(msg.get("tint") or "")
-    fed = bool(msg.get("fed"))
-    harvested = bool(msg.get("harvested"))
-    if not (fed or harvested or tint in cultures_engine.TINTS):
-        connection.send_error(msg["id"], "nothing_to_log", "Log a tint, a feed or a harvest")
-        return
+        return "jar_idle", f"{jar['name']} is not running — seed it first"
+    sign = sign if sign in cultures_engine.SIGNS else ""
+    egg = _awc_num(egg_ratio, 0, 0, 100) if isinstance(egg_ratio, (int, float)) and not isinstance(egg_ratio, bool) else 0
+    if not (fed or harvested or sign or egg or tint in cultures_engine.TINTS):
+        return "nothing_to_log", "Log a tint, a feed, a harvest, a sign or an egg count"
     state = jar["state"]
     preset = cultures_engine.species_preset(jar["species"])
     notes = []
     if tint in cultures_engine.TINTS:
         state["lastTint"] = tint
         notes.append(f"water {tint}")
+    if sign:
+        state["lastSignAt"] = now.isoformat()
+        state["lastSign"] = sign
+        notes.append(cultures_engine.SIGN_WORDS.get(sign, sign))
+    if egg:
+        notes.append(f"{egg:g} % carrying eggs")
     if fed:
         state["lastFedAt"] = now.isoformat()
         _cultures_feed_debit(config, jar)
-        _cultures_log_completion(config, jar_id, "feed", now,
-                                 "Logged automatically — fed from the Cultures tab")
+        _cultures_log_completion(config, jar_id, "feed", now, f"Logged automatically — fed from {source}")
         notes.append("fed")
     harvest_ml = 0.0
     if harvested:
         if st["status"] == "establishing":
-            connection.send_error(
-                msg["id"], "establishing",
-                f"{jar['name']} is still establishing — first harvest in ~{st['harvest']['hoursUntil']} h")
-            return
+            return ("establishing",
+                    f"{jar['name']} is still establishing — first harvest in ~{st['harvest']['hoursUntil']} h")
         guide = cultures_engine.refill_guide(jar["volumeL"], st["cadence"]["harvestPct"],
                                              jar["salinityPpt"])
-        harvest_ml = _awc_num(msg.get("ml"), guide["totalMl"], 1, 50000)
+        harvest_ml = _awc_num(ml, guide["totalMl"], 1, 50000)
         state["lastHarvestAt"] = now.isoformat()
         if awc_engine._f(preset["bottleShelfDays"]) > 0:
             bottle = cultures["bottle"]
@@ -14436,16 +14498,46 @@ async def websocket_cultures_log(
                 _append_activity(config, f"Rotifer bottle full — {round(new_ml - cap)} ml over the top",
                                  "warning")
         _cultures_log_completion(config, jar_id, "harvest", now,
-                                 f"Logged automatically — {round(harvest_ml)} ml harvested on the Cultures tab")
-        # The refill is fresh 35 ppt out of the mixing vessel (doc §3.1).
+                                 f"Logged automatically — {round(harvest_ml)} ml harvested from {source}")
+        # The refill is fresh water out of the mixing vessel (doc §3.1).
         _mixing_hatchery_debit(hass, config, harvest_ml / 1000.0, f"refilling {jar['name']}")
         notes.append(f"harvested {round(harvest_ml)} ml")
-    _cultures_history(jar, "harvest" if harvested else ("feed" if fed else "tint"), now,
+    event = ("harvest" if harvested else "feed" if fed else "sign" if sign else "tint")
+    _cultures_history(jar, event, now,
                       ml=round(harvest_ml, 1) if harvested else 0,
-                      tint=state["lastTint"] if tint in cultures_engine.TINTS else None)
+                      tint=state["lastTint"] if tint in cultures_engine.TINTS else None,
+                      sign=sign or None, eggRatio=egg or None,
+                      tempC=_cultures_temp_c(hass, config, cultures))
     _append_activity(config, f"{jar['name']}: " + ", ".join(notes), "control")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    return None
+
+
+def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str,
+                            source: str = "the Cultures tab") -> tuple[str, str] | None:
+    """Sieve-and-restart: the whole jar through the mesh into a clean one with
+    fresh water — the restart clock rewinds, the age does not, the sign that
+    brought it forward is answered."""
+    cultures = _nps_cultures_cfg(config)
+    jar = cultures["jars"].get(jar_id)
+    if not isinstance(jar, dict):
+        return "unknown_jar", f"No culture jar '{jar_id}'"
+    now = datetime.now(timezone.utc)
+    if cultures_engine.culture_state(jar, now)["status"] in ("none", "crashed"):
+        return "jar_idle", f"{jar['name']} is not running — seed it first"
+    jar["state"]["lastRestartAt"] = now.isoformat()
+    jar["state"]["lastFedAt"] = now.isoformat()
+    jar["state"]["lastTint"] = "green"
+    jar["state"]["lastSignAt"] = ""
+    jar["state"]["lastSign"] = ""
+    _cultures_feed_debit(config, jar)
+    _cultures_history(jar, "restart", now, ml=round(jar["volumeL"] * 1000),
+                      tempC=_cultures_temp_c(hass, config, cultures))
+    _cultures_log_completion(config, jar_id, "restart", now,
+                             f"Logged automatically — sieved into a clean jar from {source}")
+    _append_activity(config, f"{jar['name']} restarted in a clean jar — the fortnight clock rewinds",
+                     "control")
+    _mixing_hatchery_debit(hass, config, jar["volumeL"], f"restarting {jar['name']}")
+    return None
 
 
 @websocket_api.websocket_command({
@@ -14457,32 +14549,16 @@ async def websocket_cultures_log(
 async def websocket_cultures_restart(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Sieve-and-restart: the whole jar through the mesh into a clean one
-    with fresh water — the restart clock rewinds, the age does not."""
+    """Sieve-and-restart (see ``_cultures_restart_apply``)."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    cultures = _nps_cultures_cfg(config)
-    found = _cultures_jar_for_msg(connection, msg, cultures)
-    if found is None:
+    error = _cultures_restart_apply(hass, config, str(msg.get("jar_id") or ""))
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
         return
-    jar_id, jar = found
-    now = datetime.now(timezone.utc)
-    if cultures_engine.culture_state(jar, now)["status"] in ("none", "crashed"):
-        connection.send_error(msg["id"], "jar_idle", f"{jar['name']} is not running — seed it first")
-        return
-    jar["state"]["lastRestartAt"] = now.isoformat()
-    jar["state"]["lastFedAt"] = now.isoformat()
-    jar["state"]["lastTint"] = "green"
-    _cultures_feed_debit(config, jar)
-    _cultures_history(jar, "restart", now, ml=round(jar["volumeL"] * 1000))
-    _cultures_log_completion(config, jar_id, "restart", now,
-                             "Logged automatically — sieved into a clean jar from the Cultures tab")
-    _append_activity(config, f"{jar['name']} restarted in a clean jar — the fortnight clock rewinds",
-                     "control")
-    _mixing_hatchery_debit(hass, config, jar["volumeL"], f"restarting {jar['name']}")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -14520,6 +14596,9 @@ async def websocket_cultures_water_change(
         return
     guide = cultures_engine.refill_guide(jar["volumeL"], pct, jar["salinityPpt"])
     jar["state"]["lastWaterChangeAt"] = now.isoformat()
+    if cultures_engine.cadence_for(jar["species"], jar.get("cadence"))["restartIntervalDays"] <= 0:
+        jar["state"]["lastSignAt"] = ""      # the pods' sign is answered by the change
+        jar["state"]["lastSign"] = ""
     _cultures_history(jar, "water_change", now, ml=guide["totalMl"])
     _cultures_log_completion(config, jar_id, "water_change", now,
                              f"Logged automatically — {guide['totalMl']} ml changed on the Cultures tab")
@@ -14629,6 +14708,191 @@ async def websocket_cultures_crash(
                      "warning")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_apply_learned",
+    vol.Required("jar_id"): str,
+    vol.Required("field"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_apply_learned(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The Apply chip (doc §8.5): the learned number becomes the jar's cadence
+    override — never automatically — and the jar's reminder is re-timed with
+    it, the hatchery's ``_nps_hatch_retime_reminders`` idea one jar at a time."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    field = str(msg.get("field") or "")
+    if field not in ("feedIntervalH", "restartIntervalDays"):
+        connection.send_error(msg["id"], "unknown_field", f"'{field}' is not a learned cadence")
+        return
+    now = datetime.now(timezone.utc)
+    siblings = [cultures["jars"][o]["history"] for o in cultures["jars"]
+                if cultures["jars"][o]["species"] == jar["species"]]
+    value = cultures_engine.learned_cadences(jar, siblings, now)["suggest"].get(field)
+    if value is None:
+        connection.send_error(msg["id"], "not_learned", "The journal has not learned that number yet")
+        return
+    jar.setdefault("cadence", {})[field] = float(value)
+    tasks = ((config.get("maintenance") or {}).get("tasks") or {})
+    chore = "feed" if field == "feedIntervalH" else "restart"
+    task = tasks.get(_cultures_task_id(jar_id, chore))
+    if isinstance(task, dict):
+        if chore == "feed":
+            task["cadenceHours"] = float(value)
+            task["criticalAfterHours"] = float(value)
+        else:
+            task["cadenceDays"] = float(value)
+            task["criticalAfterDays"] = 2
+    _append_activity(config, (f"{jar['name']}: {chore} cadence set from the journal — "
+                              f"{value:g} {'h' if chore == 'feed' else 'days'}"), "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+# --------------------------------------------------------------------------- #
+# Actionable phone pushes (V2 Stage B, doc §8.11 Q9): the hatchery and the
+# cultures send the SAME shape — a title, a message and up to three mobile-app
+# action buttons — and one bus listener answers the taps.
+# --------------------------------------------------------------------------- #
+NOTIFY_ACTION_PREFIX = "OPENREEF_"
+
+
+async def _async_push_actionable(hass: HomeAssistant, target: str, title: str, message: str,
+                                 actions: list[dict[str, str]] | None = None,
+                                 tag: str = "") -> None:
+    """One notify call with ``data.actions`` (the Home Assistant companion app
+    renders them as buttons); a target that rejects the data block gets the
+    plain title + message instead, so a Telegram or e-mail target still hears."""
+    target = str(target or "").strip()
+    if not target:
+        return
+    payload: dict[str, Any] = {"title": title, "message": message}
+    buttons = [{"action": str(a.get("action") or ""), "title": str(a.get("title") or "")}
+               for a in (actions or []) if a.get("action") and a.get("title")][:3]
+    if buttons:
+        payload["data"] = {"actions": buttons}
+        if tag:
+            payload["data"]["tag"] = tag
+    try:
+        await hass.services.async_call("notify", target, payload, blocking=False)
+    except Exception as err:  # noqa: BLE001 - a picky notify target must not lose the push
+        _LOGGER.debug("Actionable push refused by %s (%s) — sending it plain", target, err)
+        await hass.services.async_call("notify", target,
+                                       {"title": title, "message": message}, blocking=False)
+
+
+def _cultures_push_plan(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """The one-question day (doc §8.8 #5): one push per jar with something
+    due, its buttons being the very taps the tab offers. Pure — testable."""
+    plan = []
+    chore_word = {"feed": "feed", "harvest": "harvest", "restart": "restart", "waterChange": "water change"}
+    for jar in summary.get("jars") or []:
+        st = jar.get("state") or {}
+        if st.get("status") not in ("establishing", "producing"):
+            continue
+        due = list(jar.get("due") or [])
+        if not due:
+            continue
+        jid = str(jar.get("id") or "")
+        name = str(jar.get("name") or jid)
+        actions: list[dict[str, str]] = []
+        if "restart" in due:
+            actions.append({"action": f"OPENREEF_CULTURE_RESTARTED:{jid}", "title": "Restarted"})
+        if "harvest" in due:
+            actions.append({"action": f"OPENREEF_CULTURE_HARVEST:{jid}", "title": "Harvested + fed"})
+        if "feed" in due and "harvest" not in due and len(actions) < 2:
+            actions.append({"action": f"OPENREEF_CULTURE_FED:{jid}", "title": "Fed"})
+        actions.append({"action": f"OPENREEF_CULTURE_LATER:{jid}", "title": "Later"})
+        advice = (jar.get("feedAdvice") or {}).get("reason") or ""
+        restart_reason = (st.get("restart") or {}).get("reason")
+        why = ("a crash sign since the last restart" if restart_reason == "sign"
+               else "the water is clearing slower and slower" if restart_reason == "slow"
+               else advice)
+        risk = jar.get("risk") or {}
+        if risk.get("level") == "act":
+            why = risk.get("reason") or why
+        plan.append({
+            "jarId": jid,
+            "title": f"OpenReef: {name} — {' + '.join(chore_word.get(d, d) for d in due)}?",
+            "message": (why[:1].upper() + why[1:]) if why else "Look at the water, then tap.",
+            "actions": actions[:3],
+            "tag": f"openreef_culture_{jid}",
+        })
+    return plan
+
+
+async def _async_cultures_push_due(hass: HomeAssistant, config: dict[str, Any], target: str) -> int:
+    """Send the day's culture questions (once per daily tick, with the digest)."""
+    if not target or not bool(((config.get("nps") or {}).get("cultures") or {}).get("enabled")):
+        return 0
+    plan = _cultures_push_plan(_cultures_summary_payload(hass, config))
+    for item in plan:
+        await _async_push_actionable(hass, target, item["title"], item["message"],
+                                     item["actions"], item["tag"])
+    return len(plan)
+
+
+async def _async_notification_action(hass: HomeAssistant, event: Any) -> None:
+    """A button tapped on a phone push: the same core the tab's buttons call.
+    Unknown or stale actions are ignored; a refusal is logged to the activity
+    feed so the keeper sees why the tap did nothing."""
+    data = getattr(event, "data", None) or {}
+    action = str(data.get("action") or "")
+    if not action.startswith(NOTIFY_ACTION_PREFIX):
+        return
+    entry = _first_entry(hass)
+    if entry is None:
+        return
+    kind, _sep, arg = action.partition(":")
+    if kind in ("OPENREEF_CULTURE_LATER", "OPENREEF_LATER"):
+        return
+    config = _config_from_entry(entry)
+    error: tuple[str, str] | None
+    if kind == "OPENREEF_CULTURE_HARVEST":
+        error = _cultures_log_apply(hass, config, arg, fed=True, harvested=True, source="the phone")
+    elif kind == "OPENREEF_CULTURE_FED":
+        error = _cultures_log_apply(hass, config, arg, fed=True, source="the phone")
+    elif kind == "OPENREEF_CULTURE_RESTARTED":
+        error = _cultures_restart_apply(hass, config, arg, source="the phone")
+    elif kind == "OPENREEF_HATCH_LOADED":
+        error = _nps_hatch_cancel_apply(hass, config, arg, True, datetime.now(timezone.utc))
+    else:
+        return
+    if error is not None:
+        _append_activity(config, f"Phone tap ignored — {error[1]}", "warning")
+    await _async_save_config(hass, entry, config)
+
+
+def _register_notification_actions(hass: HomeAssistant) -> None:
+    store = hass.data.setdefault(DOMAIN, {})
+    if store.get(NOTIFY_ACTION_UNSUB) is not None:
+        return
+    bus = getattr(hass, "bus", None)
+    if bus is None or not hasattr(bus, "async_listen"):
+        return
+
+    async def _on_action(event: Any) -> None:
+        await _async_notification_action(hass, event)
+
+    store[NOTIFY_ACTION_UNSUB] = bus.async_listen("mobile_app_notification_action", _on_action)
+
+
+def _clear_notification_actions(hass: HomeAssistant) -> None:
+    unsub = hass.data.get(DOMAIN, {}).pop(NOTIFY_ACTION_UNSUB, None)
+    if callable(unsub):
+        unsub()
 
 
 @websocket_api.websocket_command({
@@ -19947,6 +20211,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_delayed_equipment_calls(hass)
     _clear_wavemaker_reminders(hass)
     _clear_maintenance_reminders(hass)
+    _clear_notification_actions(hass)
     _clear_timelapse(hass)
     _clear_feedwatch(hass)
     _clear_vision(hass)

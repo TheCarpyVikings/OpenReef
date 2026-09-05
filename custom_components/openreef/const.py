@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.125"
+INTEGRATION_VERSION = "0.7.126"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -270,6 +270,8 @@ MAINTENANCE_HAND_FEED_TASK_ID = "brine_hand_feed"
 # chore done. Task ids are culture_<jarId>_<chore> (seeded by a panel button).
 MAINTENANCE_SOURCE_CULTURES = "cultures"
 MAINTENANCE_CULTURE_TASK_PREFIX = "culture_"
+# Phone notification actions (V2 Stage B): the bus listener's unsub handle.
+NOTIFY_ACTION_UNSUB = "notify_action_unsub"
 
 # Mixing-station-driven completions: a logged salinity test (first pass or a
 # retest) marks the keeper-added retest chore done, so its due clock always

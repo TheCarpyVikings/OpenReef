@@ -1839,6 +1839,8 @@ class OpenReefPanel extends HTMLElement {
         "Hatch cancelled — the hatcher stands down.");
       if (action === "cultures-refresh") this._culturesLoadSummary(true);
       if (action === "cultures-rig-play") this._culturesRigPlay();
+      if (action === "cultures-sign") this._culturesSign(id, target.dataset.sign || "");
+      if (action === "cultures-apply-learned") this._culturesApplyLearned(id, target.dataset.field || "");
       if (action === "cultures-seed") this._culturesCall(
         target.dataset.from ? { type: "openreef/cultures_seed", jar_id: id, from_jar_id: target.dataset.from }
           : { type: "openreef/cultures_seed", jar_id: id },
@@ -12017,8 +12019,25 @@ const rigSteps = [
     if (tint) msg.tint = tint;
     if (fed) msg.fed = true;
     if (harvested) msg.harvested = true;
+    const egg = this.shadowRoot?.querySelector(`[data-cultures-egg="${jarId}"]`);
+    const eggRatio = egg && egg.value !== "" ? Number(egg.value) : 0;
+    if (eggRatio > 0) msg.egg_ratio = Math.min(100, eggRatio);
     this._culturesCall(msg, harvested ? "Harvest logged — the bottle and the reminders keep count."
       : fed ? "Feed logged — the phyto bottle keeps count." : "Tint logged.");
+  }
+
+  // A crash sign (V2 Stage B): foam, milky water, a smell, pods at the
+  // surface — the restart (or the pods' water change) comes forward NOW.
+  _culturesSign(jarId, sign) {
+    if (!sign) return;
+    this._culturesCall({ type: "openreef/cultures_log", jar_id: jarId, sign },
+      "Sign logged — the restart clock has come forward.");
+  }
+
+  _culturesApplyLearned(jarId, field) {
+    if (!field) return;
+    this._culturesCall({ type: "openreef/cultures_apply_learned", jar_id: jarId, field },
+      "Cadence set from the journal — the reminder follows it.");
   }
 
   _culturesAddJar() {
@@ -12432,11 +12451,13 @@ const rigSteps = [
 
     // --- The mission row -----------------------------------------------------
     const dueJars = jars.filter((j) => (j.due || []).length);
+    const actJars = jars.filter((j) => j.risk?.level === "act");
     const dueCard = this._missionSummaryCard("Due now",
       dueJars.length ? `${sum.dueCount} chore${sum.dueCount === 1 ? "" : "s"}` : jars.length ? "all quiet" : "—",
-      dueJars.length ? dueJars.map((j) => `${j.name}: ${j.due.map((d) => chore[d]).join(" + ")}`).join(" · ")
-        : jars.length ? "nothing needs you yet" : "add a jar in Culture settings",
-      dueJars.length ? "warning" : jars.length ? "ok" : "unknown", "cultures");
+      actJars.length ? `${actJars[0].name}: ${actJars[0].risk.reason}`
+        : dueJars.length ? dueJars.map((j) => `${j.name}: ${j.due.map((d) => chore[d]).join(" + ")}`).join(" · ")
+          : jars.length ? "nothing needs you yet" : "add a jar in Culture settings",
+      actJars.length ? "critical" : dueJars.length ? "warning" : jars.length ? "ok" : "unknown", "cultures");
     const bottleCard = this._missionSummaryCard("Rotifer bottle",
       bottle.status === "empty" || !bottle.status ? "empty" : `${Math.round(bottle.remainingMl || 0)} ml`,
       bottle.status === "stale" ? "stale — tip it out" : bottle.status === "aging" ? `~${bottle.hoursLeft} h left — use it up`
@@ -12472,7 +12493,11 @@ const rigSteps = [
       const status = s.status || "none";
       const running = status === "producing" || status === "establishing";
       const due = j.due || [];
-      const chips = due.map((d) => `<span class="pill warning" style="font-size:11px;">${this._escape(chore[d])} due</span>`).join(" ");
+      const reasonWord = { sign: "a crash sign", slow: "clearing slowly", cap: "" };
+      const chips = due.map((d) => {
+        const reason = d === "restart" ? reasonWord[s.restart?.reason] : d === "waterChange" && s.waterChange?.reason === "sign" ? "a crash sign" : "";
+        return `<span class="pill warning" style="font-size:11px;">${this._escape(chore[d])} due${reason ? ` · ${this._escape(reason)}` : ""}</span>`;
+      }).join(" ");
       const statusLine = ({
         producing: `<strong>producing</strong> · day ${this._escape(String(Math.round(s.ageDays || 0)))}`,
         establishing: `establishing · first harvest in ~${this._escape(String(Math.round((s.harvest?.hoursUntil || 0) / 24 * 10) / 10))} d`,
@@ -12483,7 +12508,28 @@ const rigSteps = [
           <select data-cultures-tint="${this._escape(j.id)}" style="font-size:12px;">
             ${(sum.tints || ["green", "clearing", "clear"]).map((t) => `<option value="${this._escape(t)}" ${t === (j.tint || "") ? "selected" : ""}>${this._escape(t)}</option>`).join("")}
           </select></label>` : "";
-      const advice = running ? `<small class="muted">${this._escape(j.feedAdvice?.reason || "")}${j.feedAdvice?.action === "feed_now" ? " → feed" : j.feedAdvice?.action === "skip" ? " → skip" : ""}</small>` : "";
+      const advice = running ? `<small class="${j.feedAdvice?.action === "harvest_first" ? "" : "muted"}" ${j.feedAdvice?.action === "harvest_first" ? 'style="color:var(--error-color,#e5484d)"' : ""}>${this._escape(j.feedAdvice?.reason || "")}${j.feedAdvice?.action === "feed_now" ? " → feed" : j.feedAdvice?.action === "skip" ? " → skip" : j.feedAdvice?.action === "harvest_first" ? " → harvest" : ""}</small>` : "";
+      // The risk line (V2 Stage B): one sentence with the cause, never a score.
+      const risk = running && j.risk && j.risk.level !== "ok"
+        ? `<small style="color:${j.risk.level === "act" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-risk="${this._escape(j.risk.level)}">${j.risk.level === "act" ? "⚠ " : "👀 "}${this._escape(j.risk.reason || "")}</small>`
+        : "";
+      const signs = running ? `
+        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;align-items:center;" title="A crash sign brings the ${j.kind === "copepod" ? "water change" : "restart"} forward — tap the one you see">
+          <small class="muted">Sign:</small>
+          ${(sum.signs || []).map((sg) => `<button class="secondary compact-button" style="font-size:11px;padding:2px 6px;${j.lastSign === sg.id ? "border-color:var(--error-color,#e5484d);" : ""}" data-action="cultures-sign" data-id="${this._escape(j.id)}" data-sign="${this._escape(sg.id)}">${this._escape(sg.id)}</button>`).join("")}
+          <input type="number" min="0" max="100" step="1" placeholder="% eggs" data-cultures-egg="${this._escape(j.id)}" style="width:64px;font-size:11px;" title="Optional egg-ratio spot check: the share of females carrying eggs in a 1 ml sample. ≥ 30 % is healthy, < 15 % means a collapse is near.">
+        </div>` : "";
+      const learned = j.learned || {};
+      const learnedLines = running ? [
+        learned.suggest?.feedIntervalH != null && learned.clearingH?.available
+          ? `<small class="muted">Your ${j.vesselKind === "cone" ? "cone" : "jar"} clears in ~${this._escape(String(learned.clearingH.hours))} h (${this._escape(String(learned.clearingH.samples))} feeds) — feed every ${this._escape(String(learned.suggest.feedIntervalH))} h? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="feedIntervalH">Apply</button></small>` : "",
+        learned.suggest?.restartIntervalDays != null && learned.runLengthDays?.available
+          ? `<small class="muted">It runs ~${this._escape(String(learned.runLengthDays.days))} days before it turns (${this._escape(String(learned.runLengthDays.samples))} runs) — restart at ${this._escape(String(learned.suggest.restartIntervalDays))}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="restartIntervalDays">Apply</button></small>` : "",
+        status === "establishing" && learned.firstHarvestDays?.available
+          ? `<small class="muted">Your last ${this._escape(String(learned.firstHarvestDays.samples))} seeds took ~${this._escape(String(learned.firstHarvestDays.days))} days to the first harvest.</small>` : "",
+        status === "producing" && learned.yieldMlDay != null
+          ? `<small class="muted">~${this._escape(String(learned.yieldMlDay))} ml a day harvested lately.</small>` : "",
+      ].filter(Boolean).join("") : "";
       const guide = running && status === "producing"
         ? `<small class="muted" title="The measured jug: what comes out through the ${this._escape(String(j.sieveUm))} µm mesh goes to waste, the same volume of fresh saltwater goes back">${j.vesselKind === "cone" && Number(j.purgeMl) > 0 ? `purge ${this._escape(String(Math.round(j.purgeMl)))} ml · ` : ""}harvest ${this._escape(String(j.harvestGuide?.totalMl || 0))} ml · refill ${this._escape(String(j.harvestGuide?.mixMl || 0))} ml @ ${this._escape(String(j.harvestGuide?.targetPpt || 35))} ppt${j.harvestGuide?.rodiMl ? ` + ${this._escape(String(j.harvestGuide.rodiMl))} ml RODI` : ""}</small>`
         : "";
@@ -12517,7 +12563,10 @@ const rigSteps = [
           ${chips ? `<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;">${chips}</div>` : ""}
           ${tintSelect}
           ${advice}
+          ${risk}
           ${guide}
+          ${learnedLines}
+          ${signs}
           ${tempLine}
           <div class="button-row" style="flex-wrap:wrap;justify-content:center;">${buttons}</div>
         </div>`;
@@ -12550,7 +12599,7 @@ const rigSteps = [
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
           <p class="eyebrow" style="margin:0;">The rack</p>
           <div class="button-row">
-            <button class="secondary compact-button" data-action="cultures-add-reminders" title="Per-jar feed / harvest / restart / water-change reminders in Maintenance, anchored on each jar's real stamps">Sync culture reminders</button>
+            <button class="secondary compact-button" data-action="cultures-add-reminders" title="Per-jar feed / harvest / restart / water-change reminders in Maintenance, anchored on each jar's real stamps — and the daily question on your phone, with buttons">Sync culture reminders</button>
           </div>
         </div>
         <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;justify-content:center;">${tiles}${bottleTile}</div>
@@ -12573,7 +12622,8 @@ const rigSteps = [
       </article>` : "";
     const events = jars.flatMap((j) => (j.history || []).map((h) => ({ ...h, jar: j.name })))
       .filter((h) => h.at).sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 12);
-    const eventLabel = { seeded: "seeded", feed: "fed", tint: "looked", harvest: "harvested", restart: "restarted", water_change: "water change", split: "split", crashed: "crashed" };
+    const eventLabel = { seeded: "seeded", feed: "fed", tint: "looked", harvest: "harvested", restart: "restarted", water_change: "water change", split: "split", crashed: "crashed", sign: "sign" };
+    const signWord = Object.fromEntries((sum.signs || []).map((sg) => [sg.id, sg.label]));
     const journal = events.length ? `
       <article class="panel stack">
         <p class="eyebrow" style="margin:0;">Culture journal</p>
@@ -12585,6 +12635,9 @@ const rigSteps = [
               <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">What</th>
               <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">ml</th>
               <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Water</th>
+              <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Sign</th>
+              <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Eggs</th>
+              <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">°C</th>
             </tr></thead>
             <tbody>${events.map((h) => `<tr>
               <td style="padding:6px 10px;white-space:nowrap;">${this._escape(this._formatActivityTime(h.at))}</td>
@@ -12592,6 +12645,9 @@ const rigSteps = [
               <td style="padding:6px 10px;">${this._escape(eventLabel[h.event] || h.event)}${h.from ? ` (${this._escape((jars.find((x) => x.id === h.from) || {}).name || h.from)})` : ""}</td>
               <td style="padding:6px 10px;text-align:right;">${h.ml ? this._escape(String(Math.round(h.ml))) : ""}</td>
               <td style="padding:6px 10px;">${this._escape(h.tint || "")}</td>
+              <td style="padding:6px 10px;color:var(--error-color,#e5484d);">${this._escape(h.sign ? (signWord[h.sign] || h.sign) : "")}</td>
+              <td style="padding:6px 10px;text-align:right;">${h.eggRatio ? `${this._escape(String(Math.round(h.eggRatio)))} %` : ""}</td>
+              <td style="padding:6px 10px;text-align:right;">${h.tempC != null ? this._escape(String(h.tempC)) : ""}</td>
             </tr>`).join("")}</tbody>
           </table>
         </div>
@@ -17148,6 +17204,11 @@ const rigSteps = [
         if (due.length) {
           push("cultures-due", "Cultures", due.map((j) => `${j.name}: ${j.due.map((d) => chore[d]).join(" + ")}`).join(" · "),
             "Look at the water, then tap it on the Cultures tab.", "warning");
+        }
+        const risky = jars.filter((j) => j.risk?.level === "act" && !/^room /.test(j.risk.reason || ""));
+        if (risky.length) {
+          push("cultures-risk", "Cultures", `${risky[0].name}: ${risky[0].risk.reason}`,
+            risky.length > 1 ? `${risky.length} jars need a hand today.` : "Built from your own taps — the cause, not a score.", "warning");
         }
         const stale = this._cultures?.summary?.bottle?.status === "stale";
         if (stale) push("cultures-bottle", "Cultures", "Rotifer bottle is stale", "Tip it out — the next harvest refills it.", "warning");

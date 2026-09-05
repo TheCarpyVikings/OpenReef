@@ -60,8 +60,11 @@ function jarSummary(over = {}) {
     restartGuide: { totalMl: 2500, mixMl: 2500, rodiMl: 0, targetPpt: 35 },
     waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 35 },
     hasBottle: true, seededFrom: "", reseedFrom: [],
-    history: [{ event: "harvest", at: iso(30), ml: 625, tint: "green", from: "" },
-              { event: "seeded", at: iso(12 * 24), ml: 0, tint: "", from: "" }],
+    learned: { clearingH: { available: false, hours: null, samples: 0 }, firstHarvestDays: { available: false, days: null, samples: 0 },
+               runLengthDays: { available: false, days: null, samples: 0 }, yieldMlDay: null, suggest: { feedIntervalH: null, restartIntervalDays: null } },
+    risk: { level: "ok", reason: "steady — nothing to worry about" }, lastSign: "",
+    history: [{ event: "harvest", at: iso(30), ml: 625, tint: "green", from: "", sign: "", eggRatio: 0, tempC: 23.4 },
+              { event: "seeded", at: iso(12 * 24), ml: 0, tint: "", from: "", sign: "", eggRatio: 0, tempC: null }],
     ...over,
   };
 }
@@ -121,7 +124,9 @@ function summaryFixture(jars) {
       { id: "rotifer_L", name: "Rotifers (L-type)", kind: "rotifer", vesselKind: "cone", salinityPpt: 27, feedIntervalH: 12, harvestIntervalDays: 1, harvestPct: 25, restartIntervalDays: 14, waterChangeIntervalDays: 0, waterChangePct: 0, sieveUm: 50, adultSieveUm: 0, purgeMl: 50, firstHarvestDays: 6, tintTarget: "leafy green — spinach, not pea soup" },
       { id: "tigriopus", name: "Tigriopus copepods", kind: "copepod", vesselKind: "tub", salinityPpt: 35, feedIntervalH: 24, harvestIntervalDays: 10, harvestPct: 25, restartIntervalDays: 0, waterChangeIntervalDays: 0, waterChangePct: 50, sieveUm: 50, adultSieveUm: 300, purgeMl: 0, firstHarvestDays: 28, tintTarget: "Granny Smith apple skin" },
     ],
-    tints: ["green", "clearing", "clear"], maxJars: 4,
+    tints: ["green", "clearing", "clear"],
+    signs: [{ id: "foam", label: "foam on the surface" }, { id: "milky", label: "milky water" }, { id: "smell", label: "a smell" }, { id: "surface", label: "clustering at the surface" }],
+    maxJars: 4,
   };
 }
 
@@ -415,6 +420,76 @@ test("the arrival walkthrough shows only while nothing has ever been seeded", as
     panel = await culturesPanel();
     html = panel._culturesTab();
     assert(!html.includes("The day the parcel lands"), "a seeded rack must not show the walkthrough");
+  } finally { restore(); }
+});
+
+
+test("the tile carries the risk line, the sign taps and the egg-ratio check; the taps call the right WS", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const risky = jarSummary({
+      risk: { level: "act", reason: "two harvests missed — the ammonia is climbing, harvest before you feed" },
+      feedAdvice: { action: "harvest_first", reason: "two harvests missed — harvest before you feed, the ammonia is climbing" },
+      lastSign: "foam",
+      state: { ...jarSummary().state, restart: { ...clock(true, 0), reason: "sign" } }, due: ["feed", "harvest", "restart"],
+    });
+    const panel = await culturesPanel({}, summaryFixture([risky]));
+    const html = panel._culturesTab();
+    assert(html.includes('data-culture-risk="act"') && html.includes("⚠ two harvests missed"), "the risk line is missing");
+    assert(html.includes("→ harvest"), "harvest debt must turn the feed advice into harvest first");
+    assert(html.includes("restart due · a crash sign"), "the restart chip must say why it came forward");
+    ["foam", "milky", "smell", "surface"].forEach((sg) => assert(html.includes(`data-action="cultures-sign" data-id="c1" data-sign="${sg}"`), `${sg} tap missing`));
+    assert(html.includes('data-cultures-egg="c1"'), "the egg-ratio input is missing");
+    assert(html.includes("Rotifers A: two harvests missed"), "the Due-now card must carry the act reason");
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return {}; };
+    panel._culturesLoadSummary = async () => {};
+    panel._culturesSign("c1", "milky");
+    panel._culturesApplyLearned("c1", "feedIntervalH");
+    await new Promise((r) => setTimeout(r, 0));
+    assert(calls[0].type === "openreef/cultures_log" && calls[0].sign === "milky" && calls[0].jar_id === "c1", "the sign tap must log the sign");
+    assert(calls[1].type === "openreef/cultures_apply_learned" && calls[1].field === "feedIntervalH", "Apply must call cultures_apply_learned");
+    noPlaceholders(html, "risky tile");
+  } finally { restore(); }
+});
+
+test("the learned chips appear only when the journal has taught something", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const taught = jarSummary({ learned: {
+      clearingH: { available: true, hours: 9.3, samples: 3 }, firstHarvestDays: { available: true, days: 5.5, samples: 2 },
+      runLengthDays: { available: true, days: 11, samples: 3 }, yieldMlDay: 610,
+      suggest: { feedIntervalH: 8, restartIntervalDays: 10 } } });
+    let panel = await culturesPanel({}, summaryFixture([taught]));
+    let html = panel._culturesTab();
+    assert(html.includes("clears in ~9.3 h (3 feeds) — feed every 8 h?") && html.includes('data-field="feedIntervalH">Apply'), "the feed chip is missing");
+    assert(html.includes("runs ~11 days before it turns (3 runs) — restart at 10?") && html.includes('data-field="restartIntervalDays">Apply'), "the restart chip is missing");
+    assert(html.includes("~610 ml a day harvested lately"), "the yield line is missing");
+    assert(!html.includes("seeds took"), "a producing jar does not show the first-harvest line");
+    panel = await culturesPanel();
+    html = panel._culturesTab();
+    assert(!html.includes("Apply</button>"), "nothing learned, no chips");
+    const establishing = jarSummary({ state: { ...jarSummary().state, status: "establishing", ageDays: 2, percent: 14 }, due: [],
+      learned: { ...taught.learned, suggest: { feedIntervalH: null, restartIntervalDays: null } } });
+    html = (await culturesPanel({}, summaryFixture([establishing])))._culturesTab();
+    assert(html.includes("Your last 2 seeds took ~5.5 days"), "an establishing jar shows what earlier seeds took");
+  } finally { restore(); }
+});
+
+test("the journal shows signs, egg counts and the room, and the Pulse carries the risk line", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const jar = jarSummary({ risk: { level: "act", reason: "foam on the surface since the last restart" },
+      history: [{ event: "sign", at: iso(2), ml: 0, tint: "", from: "", sign: "foam", eggRatio: 18, tempC: 24.1 },
+                { event: "harvest", at: iso(30), ml: 625, tint: "green", from: "", sign: "", eggRatio: 0, tempC: 23.4 }] });
+    const panel = await culturesPanel({}, summaryFixture([jar]));
+    const html = panel._culturesTab();
+    assert(html.includes(">Sign<") && html.includes(">Eggs<") && html.includes(">°C<"), "journal columns missing");
+    assert(html.includes("foam on the surface") && html.includes("18 %") && html.includes(">24.1<"), "journal row values missing");
+    panel._culturesLoadSummary = async () => {};
+    const cards = panel._pulseInsightCards();
+    const titles = cards.map((c) => `${c.kicker}: ${c.title}`).join(" | ");
+    assert(titles.includes("Cultures: Rotifers A: foam on the surface since the last restart"), `risk card missing: ${titles}`);
   } finally { restore(); }
 });
 

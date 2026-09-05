@@ -74,6 +74,10 @@ def _entry(jars=None, bottle=None, products=None, temp_entity="", maintenance=No
     return FakeEntry(options={CONF_SETTINGS: cfg})
 
 
+def _config(entry):
+    return integration._config_from_entry(entry)
+
+
 def _cultures(entry):
     return entry.options[CONF_SETTINGS]["nps"]["cultures"]
 
@@ -230,7 +234,8 @@ def test_normalise_cultures_defaults_and_junk():
     assert jar["species"] == "rotifer_L" and jar["volumeL"] == 50 and len(jar["name"]) == 40
     assert jar["cadence"]["harvestPct"] == 60 and jar["cadence"]["restartIntervalDays"] == 14
     assert jar["state"]["lastTint"] == "" and jar["state"]["startedAt"] == ""
-    assert jar["history"] == [{"event": "seeded", "at": "", "ml": 0, "tint": "", "from": ""}]
+    assert jar["history"] == [{"event": "seeded", "at": "", "ml": 0, "tint": "", "from": "",
+                               "sign": "", "eggRatio": 0, "tempC": None}]
     assert out["bottle"]["remainingMl"] == 0
 
 
@@ -581,6 +586,209 @@ def test_reefphyto_products_are_on_the_shelf():
         assert name in names and names[name]["brand"] == "Reefphyto" and names[name]["refrigerated"]
     assert "not designed as a culture feed" in names["Reef Juice (live phyto blend)"]["notes"]
     assert names["Rotifer & Artemia Enrichment"]["category"] == "other", "drops, not a feed-plan food"
+
+
+
+# --------------------------------------------------------------------------- #
+# V2 Stage B (0.7.126): the journal that learns, signs, risk, phone actions
+# --------------------------------------------------------------------------- #
+def _row(event, hours_ago, now=None, **fields):
+    base = now or NOW
+    row = {"event": event, "at": _iso(base - timedelta(hours=hours_ago)), "ml": 0, "tint": "", "from": "",
+           "sign": "", "eggRatio": 0, "tempC": None}
+    row.update(fields)
+    return row
+
+
+def test_clearing_samples_measure_feed_to_clear():
+    history = [  # newest first, as stored
+        _row("tint", 2, tint="clear"), _row("feed", 12, tint="clearing"),   # 10 h
+        _row("feed", 20, tint="green"),                                       # fed again before clearing: void
+        _row("harvest", 40, tint="clear"), _row("feed", 49, tint="clearing"),  # 9 h (the harvest row's tint closes it)
+        _row("seeded", 200),
+    ]
+    assert cultures.clearing_samples(history) == [10.0, 9.0]
+    assert cultures.clearing_samples([]) == [] and cultures.clearing_samples("junk") == []
+
+
+def test_learned_cadences_follow_the_hatch_clock_contract():
+    jar = _jar(started_ago_days=20, now=NOW)
+    jar["history"] = [
+        _row("tint", 1, tint="clear"), _row("feed", 10, tint="clearing"),
+        _row("tint", 30, tint="clear"), _row("feed", 38, tint="clearing"),
+        _row("restart", 48), _row("seeded", 20 * 24),
+    ]
+    learned = cultures.learned_cadences(jar, [jar["history"]], NOW)
+    assert learned["clearingH"] == {"available": True, "hours": 8.5, "samples": 2}
+    assert learned["suggest"]["feedIntervalH"] == 8.0, "feed a little before it clears"
+    assert not learned["runLengthDays"]["available"], "one run is not a pattern"
+    assert learned["yieldMlDay"] is None
+    # First harvest learns across the species' jars; run length from restarts and crashes.
+    sib = [_row("harvest", 10 * 24, ml=600), _row("seeded", 15 * 24)]
+    mine = [_row("harvest", 1, ml=625), _row("harvest", 25, ml=625), _row("harvest", 49, ml=625),
+            _row("restart", 60), _row("restart", 60 + 11 * 24), _row("restart", 60 + 23 * 24), _row("seeded", 60 + 33 * 24)]
+    jar["history"] = mine
+    learned = cultures.learned_cadences(jar, [mine, sib], NOW)
+    assert learned["runLengthDays"] == {"available": True, "days": 11.0, "samples": 3}
+    assert learned["suggest"]["restartIntervalDays"] == 10.0, "restart a day before it usually turns"
+    assert learned["yieldMlDay"] == 918, "1875 ml over the 49 h span of the window"
+    assert learned["firstHarvestDays"]["samples"] == 2 and learned["firstHarvestDays"]["available"], "one sample per seed, across the species' jars"
+    assert cultures.first_harvest_samples([sib, [_row("harvest", 3 * 24), _row("seeded", 9 * 24)]]) == [6.0, 5.0]
+
+
+def test_restart_comes_forward_on_a_sign_or_slow_clearing():
+    jar = _jar(started_ago_days=5, lastSignAt=_iso(NOW - timedelta(hours=1)), lastSign="foam", now=NOW)
+    st = cultures.culture_state(jar, NOW)
+    assert st["restart"]["due"] and st["restart"]["reason"] == "sign"
+    assert "restart" in [k for k in ("feed", "harvest", "restart") if st[k]["due"]]
+    # A sign answered by a restart is history.
+    jar["state"]["lastRestartAt"] = _iso(NOW - timedelta(minutes=10))
+    assert cultures.culture_state(jar, NOW)["restart"]["reason"] is None
+    # Slow clearing: the last two samples 1.5× the earlier baseline.
+    slow = _jar(started_ago_days=8, now=NOW)
+    slow["history"] = [
+        _row("tint", 1, tint="clear"), _row("feed", 19, tint="clearing"),      # 18 h
+        _row("tint", 25, tint="clear"), _row("feed", 41, tint="clearing"),     # 16 h
+        _row("tint", 50, tint="clear"), _row("feed", 58, tint="clearing"),     # 8 h
+        _row("tint", 70, tint="clear"), _row("feed", 79, tint="clearing"),     # 9 h
+        _row("tint", 90, tint="clear"), _row("feed", 100, tint="clearing"),    # 10 h
+    ]
+    st = cultures.culture_state(slow, NOW)
+    assert st["clearingSlow"] and st["restart"]["reason"] == "slow"
+    # Pods have no restart: a sign is a water change due now.
+    pod = _jar(species="tigriopus", started_ago_days=40, lastSignAt=_iso(NOW - timedelta(hours=2)), lastSign="surface", now=NOW)
+    st = cultures.culture_state(pod, NOW)
+    assert not st["restart"]["available"] and st["waterChange"]["due"] and st["waterChange"]["reason"] == "sign"
+    pod["state"]["lastWaterChangeAt"] = _iso(NOW - timedelta(hours=1))
+    assert not cultures.culture_state(pod, NOW)["waterChange"]["due"]
+
+
+def test_feed_advice_puts_harvest_debt_first():
+    debt = {"due": True, "hoursOverdue": 26.0}
+    assert cultures.feed_advice("clear", {"due": True}, debt, 24.0)["action"] == "harvest_first"
+    assert cultures.feed_advice("clear", {"due": True}, {"due": True, "hoursOverdue": 5.0}, 24.0)["action"] == "feed_now"
+
+
+def test_risk_line_explains_itself():
+    ok = _jar(started_ago_days=10, lastHarvestAt=_iso(NOW - timedelta(hours=5)), lastFedAt=_iso(NOW - timedelta(hours=1)), now=NOW)
+    st = cultures.culture_state(ok, NOW)
+    temp = cultures.temperature_advice(23, "rotifer_L")
+    assert cultures.risk_line(ok, st, temp, NOW) == {"level": "ok", "reason": "steady — nothing to worry about"}
+    debt = _jar(started_ago_days=10, lastHarvestAt=_iso(NOW - timedelta(hours=60)), now=NOW)
+    risk = cultures.risk_line(debt, cultures.culture_state(debt, NOW), temp, NOW)
+    assert risk["level"] == "act" and "two harvests missed" in risk["reason"]
+    late = _jar(started_ago_days=10, lastHarvestAt=_iso(NOW - timedelta(hours=30)), now=NOW)
+    late["history"] = [_row("feed", 3, tint="green")]
+    risk = cultures.risk_line(late, cultures.culture_state(late, NOW), temp, NOW)
+    assert risk["level"] == "watch" and "harvest overdue" in risk["reason"] and "fed on green" in risk["reason"]
+    signed = _jar(started_ago_days=10, lastHarvestAt=_iso(NOW - timedelta(hours=5)),
+                  lastSignAt=_iso(NOW - timedelta(hours=1)), lastSign="milky", now=NOW)
+    risk = cultures.risk_line(signed, cultures.culture_state(signed, NOW), temp, NOW)
+    assert risk["level"] == "act" and "milky water since the last restart" in risk["reason"]
+    hot = cultures.temperature_advice(30.5, "tigriopus")
+    pod = _jar(species="tigriopus", started_ago_days=40, lastHarvestAt=_iso(NOW - timedelta(days=2)), now=NOW)
+    assert cultures.risk_line(pod, cultures.culture_state(pod, NOW), hot, NOW)["level"] == "act"
+    assert cultures.risk_line(_jar(now=NOW), cultures.culture_state(_jar(now=NOW), NOW), temp, NOW) == {"level": "ok", "reason": ""}
+
+
+def test_ws_log_sign_and_egg_ratio_write_the_journal():
+    entry = _entry(jars={"c1": _jar(started_ago_days=10, lastHarvestAt=_iso(REAL - timedelta(hours=5)))},
+                   temp_entity="sensor.bench")
+    hass = FakeHass(entries=[entry], states={"sensor.bench": "24.2"})
+    conn = FakeConnection()
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "sign": "foam", "egg_ratio": 22}))
+    assert not conn.errors
+    jar = _cultures(entry)["jars"]["c1"]
+    assert jar["state"]["lastSign"] == "foam" and jar["state"]["lastSignAt"]
+    assert jar["history"][0]["event"] == "sign" and jar["history"][0]["sign"] == "foam"
+    assert jar["history"][0]["eggRatio"] == 22 and jar["history"][0]["tempC"] == 24.2
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 2}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["state"]["restart"]["reason"] == "sign" and "restart" in j["due"]
+    assert j["risk"]["level"] == "act" and "foam" in j["risk"]["reason"]
+    assert [x["id"] for x in conn.results[-1].payload["signs"]] == ["foam", "milky", "smell", "surface"]
+    assert "learned" in j and j["learned"]["suggest"]["feedIntervalH"] is None
+    run(integration.websocket_cultures_log(hass, conn, {"id": 3, "jar_id": "c1", "sign": "bogus"}))
+    assert conn.errors[-1].code == "nothing_to_log", "an unknown sign is not a log"
+    run(integration.websocket_cultures_restart(hass, conn, {"id": 4, "jar_id": "c1"}))
+    jar = _cultures(entry)["jars"]["c1"]
+    assert jar["state"]["lastSign"] == "" and jar["state"]["lastSignAt"] == "", "a restart answers the sign"
+
+
+def test_ws_apply_learned_sets_the_cadence_and_retimes_the_reminder():
+    jar = _jar(started_ago_days=20, lastHarvestAt=_iso(REAL - timedelta(hours=5)))
+    jar["history"] = [_row("tint", 1, REAL, tint="clear"), _row("feed", 10, REAL, tint="clearing"),
+                      _row("tint", 30, REAL, tint="clear"), _row("feed", 38, REAL, tint="clearing")]
+    maintenance = {"tasks": {"culture_c1_feed": {"label": "A: feed", "cadenceHours": 12, "criticalAfterHours": 12}},
+                   "completions": {}}
+    entry = _entry(jars={"c1": jar}, maintenance=maintenance)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 1, "jar_id": "c1", "field": "restartIntervalDays"}))
+    assert conn.errors[-1].code == "not_learned"
+    run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 2, "jar_id": "c1", "field": "feedIntervalH"}))
+    assert not [e for e in conn.errors if e.code != "not_learned"]
+    cfg = entry.options[CONF_SETTINGS]
+    assert cfg["nps"]["cultures"]["jars"]["c1"]["cadence"]["feedIntervalH"] == 8.0
+    assert cfg["maintenance"]["tasks"]["culture_c1_feed"]["cadenceHours"] == 8.0
+    run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 3, "jar_id": "c1", "field": "harvestPct"}))
+    assert conn.errors[-1].code == "unknown_field"
+
+
+def test_push_plan_is_one_question_per_jar():
+    summary = {"jars": [
+        {"id": "c1", "name": "Rotifers A", "state": {"status": "producing", "restart": {"reason": None}},
+         "due": ["feed", "harvest"], "feedAdvice": {"reason": "clearing — feed on schedule"}, "risk": {"level": "ok"}},
+        {"id": "c2", "name": "Pods", "state": {"status": "establishing", "restart": {}}, "due": ["feed"],
+         "feedAdvice": {"reason": "no tint logged yet"}, "risk": {"level": "ok"}},
+        {"id": "c3", "name": "B", "state": {"status": "producing", "restart": {"reason": "sign"}}, "due": ["restart", "harvest"],
+         "feedAdvice": {"reason": ""}, "risk": {"level": "act", "reason": "foam on the surface since the last restart"}},
+        {"id": "c4", "name": "Quiet", "state": {"status": "producing"}, "due": [], "feedAdvice": {}, "risk": {}},
+        {"id": "c5", "name": "Empty", "state": {"status": "none"}, "due": ["feed"], "feedAdvice": {}, "risk": {}},
+    ]}
+    plan = integration._cultures_push_plan(summary)
+    assert [p["jarId"] for p in plan] == ["c1", "c2", "c3"]
+    assert plan[0]["title"] == "OpenReef: Rotifers A — feed + harvest?"
+    assert [a["title"] for a in plan[0]["actions"]] == ["Harvested + fed", "Later"]
+    assert plan[0]["actions"][0]["action"] == "OPENREEF_CULTURE_HARVEST:c1" and plan[0]["message"].startswith("Clearing")
+    assert [a["title"] for a in plan[1]["actions"]] == ["Fed", "Later"]
+    assert [a["title"] for a in plan[2]["actions"]] == ["Restarted", "Harvested + fed", "Later"]
+    assert plan[2]["message"].startswith("Foam on the surface")
+
+
+def test_actionable_push_and_the_phone_tap():
+    entry = _entry(jars={"c1": _jar(started_ago_days=10, lastHarvestAt=_iso(REAL - timedelta(hours=30)))},
+                   maintenance={"tasks": {}, "completions": {}, "reminders": {"enabled": True, "notifyTarget": "mobile_app_phone"}})
+    hass = FakeHass(entries=[entry])
+    run(integration._async_push_actionable(hass, "mobile_app_phone", "T", "M",
+                                           [{"action": "OPENREEF_CULTURE_HARVEST:c1", "title": "Harvested + fed"},
+                                            {"action": "X", "title": "1"}, {"action": "Y", "title": "2"}, {"action": "Z", "title": "3"}],
+                                           tag="t"))
+    call = hass.services.calls[-1]
+    assert call.domain == "notify" and call.service == "mobile_app_phone"
+    assert len(call.data["data"]["actions"]) == 3 and call.data["data"]["tag"] == "t"
+    run(integration._async_push_actionable(hass, "", "T", "M", []))
+    assert hass.services.calls[-1] is call, "no target, no push"
+    run(integration._async_push_actionable(hass, "mobile_app_phone", "T", "M", []))
+    assert "data" not in hass.services.calls[-1].data, "no buttons, no data block"
+    # The daily tick sends the jar's question.
+    n = run(integration._async_cultures_push_due(hass, _config(entry), "mobile_app_phone"))
+    assert n == 1 and hass.services.calls[-1].data["title"].startswith("OpenReef: Rotifers A")
+    # A tap on the button does the tap.
+    class Ev:
+        def __init__(self, action):
+            self.data = {"action": action}
+    run(integration._async_notification_action(hass, Ev("OPENREEF_CULTURE_HARVEST:c1")))
+    jar = _cultures(entry)["jars"]["c1"]
+    assert jar["history"][0]["event"] == "harvest" and jar["history"][0]["ml"] == 625
+    assert _cultures(entry)["bottle"]["remainingMl"] == 625
+    rows = len(_cultures(entry)["jars"]["c1"]["history"])
+    run(integration._async_notification_action(hass, Ev("OPENREEF_CULTURE_LATER:c1")))
+    run(integration._async_notification_action(hass, Ev("SOMETHING_ELSE")))
+    assert len(_cultures(entry)["jars"]["c1"]["history"]) == rows, "later and foreign actions do nothing"
+    run(integration._async_notification_action(hass, Ev("OPENREEF_CULTURE_FED:nope")))
+    activity = entry.options[CONF_SETTINGS].get("activity") or []
+    assert any("Phone tap ignored" in str(a.get("message", "")) for a in activity)
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

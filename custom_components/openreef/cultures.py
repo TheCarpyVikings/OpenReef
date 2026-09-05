@@ -29,6 +29,14 @@ from .awc import _f, _parse_iso
 CULTURE_JARS_MAX = 4
 TINTS: tuple[str, ...] = ("green", "clearing", "clear")
 VESSEL_KINDS: tuple[str, ...] = ("cone", "tub", "jar")
+# Crash signs the keeper can tap (doc §8.5): each one is a restart (rotifers)
+# or a water change (pods) due NOW, whatever the calendar says.
+SIGNS: tuple[str, ...] = ("foam", "milky", "smell", "surface")
+SIGN_WORDS = {"foam": "foam on the surface", "milky": "milky water", "smell": "a smell",
+              "surface": "clustering at the surface"}
+LEARN_SAMPLES = 3          # rolling window, the hatch clock's contract
+SLOW_FACTOR = 1.5          # clearing this much slower than usual, twice running = tiring
+FEED_EVENTS: tuple[str, ...] = ("feed", "harvest", "seeded", "restart")
 RIG_CONES_MAX = 4
 
 # Species presets. tempMin/MaxC = the productive band; tempHardMaxC = the
@@ -196,10 +204,33 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     if cad["restartIntervalDays"] > 0:
         out["restart"] = _due(restart_anchor.isoformat(), None,
                               timedelta(days=cad["restartIntervalDays"]), now)
+        out["restart"]["reason"] = "cap" if out["restart"]["due"] else None
         out["percent"] = round(min(100.0, 100.0 * since_restart / cad["restartIntervalDays"]))
     if cad["waterChangeIntervalDays"] > 0:
         out["waterChange"] = _due(state.get("lastWaterChangeAt"), state.get("startedAt"),
                                   timedelta(days=cad["waterChangeIntervalDays"]), now)
+    # Restart on a SIGN, not a date (doc §8.5): a crash-sign tap since the last
+    # restart, or the water clearing much slower than it used to two feeds
+    # running, brings the restart forward. A species without a restart (pods)
+    # turns the sign into a water change instead.
+    sign_at = _parse_iso(state.get("lastSignAt"))
+    signed = sign_at is not None and sign_at >= restart_anchor
+    wc_anchor = _parse_iso(state.get("lastWaterChangeAt")) or started
+    slow = False
+    samples = clearing_samples(jar.get("history"))
+    if len(samples) >= 4:
+        baseline = sum(samples[2:5]) / len(samples[2:5])
+        slow = baseline > 0 and samples[0] > SLOW_FACTOR * baseline and samples[1] > SLOW_FACTOR * baseline
+    out["clearingSlow"] = slow
+    if cad["restartIntervalDays"] > 0 and (signed or slow):
+        out["restart"].update({"available": True, "due": True, "hoursUntil": 0.0,
+                               "at": (sign_at if signed else now).isoformat(),
+                               "reason": "sign" if signed else "slow"})
+    elif cad["restartIntervalDays"] <= 0 and cad["waterChangePct"] > 0 and sign_at is not None \
+            and sign_at >= wc_anchor:
+        out["waterChange"] = {"available": True, "due": True, "at": sign_at.isoformat(),
+                              "hoursUntil": 0.0, "hoursOverdue": round(max(0.0, (now - sign_at).total_seconds() / 3600.0), 1),
+                              "reason": "sign"}
     # A species with a percentage but no interval changes water on a SIGN
     # (drift, ammonia, cloudy water) — no clock, but the ceremony exists.
     out["waterChangeOnDemand"] = (cad["waterChangeIntervalDays"] <= 0 < cad["waterChangePct"])
@@ -219,13 +250,19 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     return out
 
 
-def feed_advice(tint: Any, feed_clock: dict[str, Any]) -> dict[str, Any]:
+def feed_advice(tint: Any, feed_clock: dict[str, Any], harvest_clock: Any = None,
+                harvest_interval_h: Any = None) -> dict[str, Any]:
     """What the tint says, married to the feed clock. Clear water = the jar
     ate everything = feed now, whatever the clock. Green at feed time = it is
     still full of food = skip this one (overfeeding drives ammonia). Clearing
-    = feed on schedule."""
+    = feed on schedule. Harvest DEBT outranks all of it (doc §8.8): two
+    missed harvests means the ammonia is already climbing — harvest first."""
     tint = str(tint or "")
     due = bool(feed_clock.get("due"))
+    if isinstance(harvest_clock, dict) and harvest_clock.get("due") and _f(harvest_interval_h) > 0 \
+            and _f(harvest_clock.get("hoursOverdue")) >= _f(harvest_interval_h):
+        return {"action": "harvest_first",
+                "reason": "two harvests missed — harvest before you feed, the ammonia is climbing"}
     if tint == "clear":
         return {"action": "feed_now", "reason": "clear water — the jar is hungry"}
     if tint == "green":
@@ -418,3 +455,166 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
         stage, caption = "crashed", "CRASHED — reseed from the other jar, or from a fresh starter"
     return {"stage": stage, "caption": caption, "cones": cones, "tub": tub, "jug": jug,
             "bottle": bottle_out}
+
+
+# --------------------------------------------------------------------------- #
+# V2 Stage B — the journal that learns (doc §8.5)
+# --------------------------------------------------------------------------- #
+def _chronological(history: Any) -> list[tuple[datetime, dict[str, Any]]]:
+    rows = []
+    for row in (history if isinstance(history, list) else []):
+        if not isinstance(row, dict):
+            continue
+        at = _parse_iso(row.get("at"))
+        if at is not None:
+            rows.append((at, row))
+    rows.sort(key=lambda item: item[0])
+    return rows
+
+
+def clearing_samples(history: Any) -> list[float]:
+    """Hours from a feed to the next tap that found the water CLEAR — how fast
+    the jar eats. A later feed before it cleared voids that sample (the jar
+    never got there). Newest first, capped at a week per sample."""
+    samples: list[float] = []
+    fed_at: datetime | None = None
+    for at, row in _chronological(history):
+        if row.get("tint") == "clear" and fed_at is not None:
+            hours = (at - fed_at).total_seconds() / 3600.0
+            if 0 < hours <= 7 * 24:
+                samples.append(round(hours, 1))
+            fed_at = None
+        if row.get("event") in FEED_EVENTS:
+            fed_at = at
+    samples.reverse()
+    return samples
+
+
+def first_harvest_samples(histories: Any) -> list[float]:
+    """Days from a seed to that seed's first harvest, across every jar of the
+    species (one jar rarely reseeds often enough to learn alone)."""
+    samples: list[tuple[datetime, float]] = []
+    for history in (histories if isinstance(histories, list) else []):
+        seed_at: datetime | None = None
+        for at, row in _chronological(history):
+            event = row.get("event")
+            if event == "seeded":
+                seed_at = at
+            elif event == "harvest" and seed_at is not None:
+                days = (at - seed_at).total_seconds() / 86400.0
+                if 0 < days <= 60:
+                    samples.append((at, round(days, 1)))
+                seed_at = None
+    samples.sort(key=lambda item: item[0], reverse=True)
+    return [days for _at, days in samples]
+
+
+def run_length_samples(history: Any) -> list[float]:
+    """Days a jar ran between seed/restart and the next restart or crash —
+    what the fortnight cap should really be for THIS jar. Newest first."""
+    samples: list[float] = []
+    anchor: datetime | None = None
+    for at, row in _chronological(history):
+        event = row.get("event")
+        if event in ("restart", "crashed") and anchor is not None:
+            days = (at - anchor).total_seconds() / 86400.0
+            if 0 < days <= 90:
+                samples.append(round(days, 1))
+        if event in ("seeded", "restart"):
+            anchor = at
+        elif event == "crashed":
+            anchor = None
+    samples.reverse()
+    return samples
+
+
+def yield_ml_per_day(history: Any, now: datetime, window_days: float = 14.0) -> float | None:
+    """Harvested ml per day over the recent window — the NPS runway's demand
+    figure. None until something has been harvested."""
+    total = 0.0
+    oldest: datetime | None = None
+    for at, row in _chronological(history):
+        if row.get("event") != "harvest":
+            continue
+        age_days = (now - at).total_seconds() / 86400.0
+        if age_days < 0 or age_days > window_days:
+            continue
+        total += max(0.0, _f(row.get("ml")))
+        oldest = at if oldest is None or at < oldest else oldest
+    if oldest is None or total <= 0:
+        return None
+    span = max(1.0, (now - oldest).total_seconds() / 86400.0)
+    return round(total / span)
+
+
+def _rolling(samples: list[float], key: str) -> dict[str, Any]:
+    """The hatch clock's contract: the last three ACTUALS, two before it says
+    anything, advisory-with-Apply."""
+    recent = samples[:LEARN_SAMPLES]
+    if len(recent) < 2:
+        return {"available": False, key: None, "samples": len(recent)}
+    return {"available": True, key: round(sum(recent) / len(recent), 1), "samples": len(recent)}
+
+
+def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime) -> dict[str, Any]:
+    """Everything the journal can teach about this jar, plus the two numbers
+    it would change if the keeper taps Apply: feed a little before the water
+    clears, restart a day before the run usually turns."""
+    history = jar.get("history") if isinstance(jar.get("history"), list) else []
+    cad = cadence_for(jar.get("species"), jar.get("cadence"))
+    clearing = _rolling(clearing_samples(history), "hours")
+    first = _rolling(first_harvest_samples(sibling_histories), "days")
+    run = _rolling(run_length_samples(history), "days")
+    suggest: dict[str, Any] = {"feedIntervalH": None, "restartIntervalDays": None}
+    if clearing["available"]:
+        hours = max(2.0, min(72.0, round(clearing["hours"] * 0.9)))
+        if abs(hours - cad["feedIntervalH"]) >= 1:
+            suggest["feedIntervalH"] = hours
+    if run["available"] and cad["restartIntervalDays"] > 0:
+        days = max(3.0, round(run["days"] - 1))
+        if abs(days - cad["restartIntervalDays"]) >= 1:
+            suggest["restartIntervalDays"] = days
+    return {"clearingH": clearing, "firstHarvestDays": first, "runLengthDays": run,
+            "yieldMlDay": yield_ml_per_day(history, now), "suggest": suggest}
+
+
+def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The hatchery nose, made explainable (doc §8.8): one sentence with the
+    cause, built only from stamps — never a score. ``act`` = do something
+    today, ``watch`` = look harder, ``ok`` = leave it alone."""
+    if st.get("status") not in ("establishing", "producing"):
+        return {"level": "ok", "reason": ""}
+    state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
+    cad = st.get("cadence") if isinstance(st.get("cadence"), dict) else cadence_for(jar.get("species"), jar.get("cadence"))
+    act: list[str] = []
+    watch: list[str] = []
+    t_status = str((temp or {}).get("status") or "")
+    if t_status == "critical" or (t_status == "hot" and (temp or {}).get("act")):
+        act.append(f"room {temp.get('tempC')} °C — over the act line (oxygen and ammonia, not the animal)")
+    elif t_status == "hot":
+        watch.append(f"room {temp.get('tempC')} °C — over the warning line")
+    harvest = st.get("harvest") or {}
+    interval_h = _f(cad.get("harvestIntervalDays")) * 24.0
+    if harvest.get("due") and st.get("status") == "producing":
+        if interval_h > 0 and _f(harvest.get("hoursOverdue")) >= interval_h:
+            act.append("two harvests missed — the ammonia is climbing, harvest before you feed")
+        else:
+            watch.append("harvest overdue")
+    sign = str(state.get("lastSign") or "")
+    restart = st.get("restart") or {}
+    water = st.get("waterChange") or {}
+    if sign and (restart.get("reason") == "sign" or water.get("reason") == "sign"):
+        act.append(f"{SIGN_WORDS.get(sign, sign)} since the last "
+                   f"{'restart' if restart.get('reason') == 'sign' else 'water change'}")
+    if st.get("clearingSlow"):
+        watch.append("clearing is slowing — the culture is tiring")
+    for at, row in _chronological(jar.get("history")):
+        if row.get("event") in ("feed", "harvest") and row.get("tint") == "green" \
+                and 0 <= (now - at).total_seconds() <= 86400:
+            watch.append("fed on green water — that is how ammonia starts")
+            break
+    if act:
+        return {"level": "act", "reason": "; ".join(act)}
+    if watch:
+        return {"level": "watch", "reason": "; ".join(watch)}
+    return {"level": "ok", "reason": "steady — nothing to worry about"}
