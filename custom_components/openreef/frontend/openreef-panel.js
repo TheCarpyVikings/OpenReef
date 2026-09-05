@@ -11594,7 +11594,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _npsTimelineColor(ev) {
-    if (ev.how === "system") return "#42a5f5";
+    if (ev.how === "system") return String(ev.source || "").startsWith("truce:") ? "#9575cd" : "#42a5f5";
     if (ev.how === "pump") {
       const cid = String(ev.source || "").replace(/^channel:/, "");
       const idx = this._npsFoodChannelIds().indexOf(cid);
@@ -11606,7 +11606,7 @@ class OpenReefPanel extends HTMLElement {
 
   _npsTimelineStatusLabel(status) {
     return { planned: "planned", expected: "expected", due: "due now", late: "running late",
-      missed: "missed", skipped: "skipped today", blocked: "blocked", done: "done", ghost: "not today" }[status] || status;
+      missed: "missed", skipped: "skipped today", blocked: "blocked", done: "done", ghost: "not today", running: "running now" }[status] || status;
   }
 
   _npsTimelineSvg(opts = {}) {
@@ -11627,13 +11627,21 @@ class OpenReefPanel extends HTMLElement {
     const chips = [];
     const marks = tl.events.map((ev) => {
       const color = this._npsTimelineColor(ev);
-      const label = `${ev.name}${ev.ml != null ? ` · ${ev.actualMl ?? ev.ml} ml` : ""} · ${this._npsTimelineStatusLabel(ev.status)}${ev.at != null ? ` · ${hm(ev.doneAt ?? ev.at)}` : " · any time today"}`;
+      const when = ev.kind === "band" && Array.isArray(ev.band) ? ` · ${hm(ev.band[0])} → ${ev.band[1] >= 1440 ? "midnight" : hm(ev.band[1] % 1440)}`
+        : ev.at != null ? ` · ${hm(ev.doneAt ?? ev.at)}` : " · any time today";
+      const label = `${ev.name}${ev.ml != null ? ` · ${ev.actualMl ?? ev.ml} ml` : ""} · ${this._npsTimelineStatusLabel(ev.status)}${when}`;
       if (ev.kind === "band" && Array.isArray(ev.band)) {
         const [a0, b0] = ev.band;
-        const y = ev.how === "system" ? sysY - 2 : pumpY - 3;
-        const h = ev.how === "system" ? 4 : 6;
+        // Feed-truce bands (doc §13.17) sit under the water-change row, a
+        // thin row per profile: ran = solid, running = bright, expected = faint.
+        const truce = ev.how === "system" && String(ev.source || "").startsWith("truce:");
+        const row = truce && !compact ? Math.max(0, ["uv", "ozone", "skimmer"].indexOf(String(ev.source).slice(6))) : 0;
+        const y = truce ? sysY + 3 + row * 3.5 : ev.how === "system" ? sysY - 2 : pumpY - 3;
+        const h = truce ? 3 : ev.how === "system" ? 4 : 6;
+        const alpha = truce ? (ev.status === "running" ? 0.95 : ev.status === "planned" ? 0.28 : 0.6) : 0.5;
+        const cls = `nps-tl-ev${truce && ev.status === "running" ? " nps-tl-run" : ""}${open === ev.id ? " nps-tl-sel" : ""}`;
         const segs = b0 > a0 ? [[a0, b0]] : [[a0, 1440], [0, b0]];
-        return segs.map(([a, b]) => `<rect x="${X(a)}" y="${y}" width="${Math.max(1, X(b) - X(a))}" height="${h}" rx="2" fill="${color}" opacity="0.5" class="nps-tl-ev" ${act(ev)}><title>${esc(label)}</title></rect>`).join("");
+        return segs.map(([a, b]) => `<rect x="${X(a)}" y="${y}" width="${Math.max(1, X(b) - X(a))}" height="${h}" rx="2" fill="${color}" opacity="${alpha}" class="${cls}" ${act(ev)}><title>${esc(label)}</title></rect>`).join("");
       }
       if (ev.at == null) { chips.push(ev); return ""; }
       // A dose that satisfied a slot sits ON the slot (the card says when it
@@ -11669,11 +11677,13 @@ class OpenReefPanel extends HTMLElement {
       ? `<rect x="${L}" y="6" width="${Math.max(0, X(tl.night.onMin) - L)}" height="${axisY - 6}" fill="#0d1b2a" opacity="0.45"></rect>
          <rect x="${X(tl.night.offMin)}" y="6" width="${Math.max(0, R - X(tl.night.offMin))}" height="${axisY - 6}" fill="#0d1b2a" opacity="0.45"></rect>`
       : "";
+    const hasTruce = tl.events.some((e) => e.kind === "band" && String(e.source || "").startsWith("truce:"));
     const lanes = compact
       ? `<text x="4" y="${pumpY + 4}" font-size="9" fill="#90a4ae">⚙︎✋</text>`
       : `<text x="6" y="${pumpY + 4}" font-size="10" fill="#90a4ae"><title>Food pumps — the firmware owns the exact clock</title>⚙︎</text>
          <text x="6" y="${handY + 4}" font-size="10" fill="#90a4ae"><title>By hand — bottles, brine, harvests</title>✋</text>
-         <text x="6" y="${sysY + 3}" font-size="9" fill="#78909c"><title>Water exchange</title>≋</text>`;
+         <text x="6" y="${sysY + 3}" font-size="9" fill="#78909c"><title>Water exchange</title>≋</text>${hasTruce ? `
+         <text x="6" y="${sysY + 12}" font-size="7" fill="#78909c"><title>Feed truce — UV / ozone / skimmer paused after food doses</title>⏸</text>` : ""}`;
     const svg = `
       <svg viewBox="0 0 420 ${H}" style="width:100%;display:block;" role="img" aria-label="Today's feed timeline">
         ${night}
@@ -11696,7 +11706,7 @@ class OpenReefPanel extends HTMLElement {
       <div class="nps-tl-next">
         ${tl.next.map((n) => `<span class="pill nps-tl-pill ${esc(n.status)}">${n.how === "pump" ? "⚙︎" : "✋"} ${esc(n.name)}${n.ml != null ? ` ${esc(n.ml)} ml` : ""} · ${n.minutesUntil > 0 ? `in ${n.minutesUntil >= 60 ? `${Math.floor(n.minutesUntil / 60)} h ${n.minutesUntil % 60} min` : `${n.minutesUntil} min`}` : esc(this._npsTimelineStatusLabel(n.status))}</span>`).join("")}
       </div>` : "";
-    const legend = compact ? "" : `<small class="nps-tl-legend">⚙︎ pumps · ✋ by hand · hollow = planned · solid = done · amber = late · red = missed · dotted = skipped · tap a mark for its dose card</small>`;
+    const legend = compact ? "" : `<small class="nps-tl-legend">⚙︎ pumps · ✋ by hand · hollow = planned · solid = done · amber = late · red = missed · dotted = skipped${hasTruce ? " · lilac under the water row = feed truce (bright = running, faint = expected)" : ""} · tap a mark for its dose card</small>`;
     const card = !readOnly && open ? this._npsTimelineEventCard(open, tl) : "";
     return `
       <div class="nps-tl">
@@ -11718,14 +11728,18 @@ class OpenReefPanel extends HTMLElement {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const hm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
     const color = this._npsTimelineColor(ev);
-    const howLabel = ev.how === "pump" ? "⚙︎ food pump" : ev.how === "system" ? "≋ water exchange" : "✋ by hand";
+    const isTruce = String(ev.source || "").startsWith("truce:");
+    const howLabel = ev.how === "pump" ? "⚙︎ food pump" : ev.how === "system" ? (isTruce ? "⏸ feed truce" : "≋ water exchange") : "✋ by hand";
     const status = this._npsTimelineStatusLabel(ev.status);
     const lines = [];
-    if (ev.kind === "band" && Array.isArray(ev.band)) lines.push(`${hm(ev.band[0])} → ${hm(ev.band[1] % 1440)}${ev.ml != null ? ` · ${esc(ev.ml)} ml over the window` : ""}`);
+    if (ev.kind === "band" && Array.isArray(ev.band)) lines.push(`${hm(ev.band[0])} → ${ev.band[1] >= 1440 ? "midnight" : hm(ev.band[1] % 1440)}${ev.ml != null ? ` · ${esc(ev.ml)} ml over the window` : ""}`);
     else if (ev.status === "done") lines.push(`Done at ${hm(ev.doneAt ?? ev.at)}${ev.at != null && ev.doneAt != null && ev.doneAt !== ev.at ? ` (planned ${hm(ev.at)})` : ""}${ev.actualMl != null ? ` · ${esc(ev.actualMl)} ml` : ev.ml != null ? ` · ${esc(ev.ml)} ml` : ""}`);
     else if (ev.status === "ghost") lines.push(`Not today — next ${esc(ev.nextDate || "")}${ev.at != null ? ` at ${hm(ev.at)}` : ""}${ev.ml != null ? ` · ${esc(ev.ml)} ml` : ""}`);
     else lines.push(`${ev.at != null ? `Planned ${hm(ev.at)}` : "Any time today"}${ev.ml != null ? ` · ${esc(ev.ml)} ml` : ""}`);
     if (ev.note) lines.push(esc(ev.note));
+    // What the truce will do after a pump dose (doc §13.17) — only said when
+    // something armed answers to it.
+    if (ev.truce) lines.push(`Feed truce after this dose: ${esc(ev.truce)}`);
     const shelf = this._nps?.summary?.shelf?.products?.[ev.productId] || null;
     if (shelf && shelf.bottleMl) {
       const bits = [`${esc(shelf.remainingMl)} of ${esc(shelf.bottleMl)} ml${shelf.percent != null ? ` (${esc(Math.round(shelf.percent))}%)` : ""}`];
@@ -11808,7 +11822,7 @@ class OpenReefPanel extends HTMLElement {
     const now = new Date();
     const nowMin = now.getHours() * 60 + now.getMinutes();
     const ev = (fields) => ({ id: "", at: null, how: "hand", source: "", name: "", productId: "", ml: null, actualMl: null,
-      status: "planned", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null, ...fields });
+      status: "planned", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null, truce: "", ...fields });
     const events = [];
     const pump = (cid, name, pid, n, ws, we, ml, note) => {
       const span = we > ws ? we - ws : 1440 - ws + we;
@@ -11845,6 +11859,32 @@ class OpenReefPanel extends HTMLElement {
       note: "any time today" }));
     [2 * 60, 22 * 60].forEach((at, i) => events.push(ev({ id: `awc:${i}`, at, how: "system", source: "awc", name: "Water change",
       status: at > nowMin ? "planned" : "expected", note: "the Water Change tab owns the reservoirs" })));
+    // The feed truce (doc §13.17): the last pump dose's pause (still running
+    // if it is holding), and the faint pauses today's remaining doses will start.
+    const hmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+    events.forEach((e) => { if (e.how === "pump" && e.kind === "dose") e.truce = "UV 2 h · skimmer 45 min"; });
+    const merge = (spans) => spans.sort((p, q) => p[0] - q[0]).reduce((acc, s) => {
+      if (acc.length && s[0] <= acc[acc.length - 1][1]) acc[acc.length - 1][1] = Math.max(acc[acc.length - 1][1], s[1]);
+      else acc.push([...s]);
+      return acc;
+    }, []);
+    const lastPump = events.filter((e) => e.how === "pump" && e.status === "done").sort((a, b) => b.at - a.at)[0];
+    const future = events.filter((e) => e.how === "pump" && e.kind === "dose" && e.status === "planned").map((e) => e.at);
+    [["uv", "UV sterilizer", 120], ["skimmer", "Skimmer", 45]].forEach(([profile, label, minutes]) => {
+      const name = `Feed truce — ${label}`;
+      let runningEnd = null;
+      if (lastPump) {
+        const a = lastPump.at, b = Math.min(1440, a + minutes);
+        const running = b > nowMin;
+        if (running) runningEnd = b;
+        events.push(ev({ id: `truce:${profile}:${running ? "run" : "h0"}`, how: "system", source: `truce:${profile}`, name, kind: "band", band: [a, b],
+          status: running ? "running" : "done",
+          note: running ? `off since ${hmm(a)} — back on at ${hmm(b)}, ${b - nowMin} min to go` : "paused after a food dose, then switched back on" }));
+      }
+      merge(future.map((t) => [runningEnd == null ? t : Math.max(t, runningEnd), Math.min(1440, t + minutes)]).filter(([a, b]) => b > a))
+        .forEach((band, i) => events.push(ev({ id: `truce:${profile}:p${i}`, how: "system", source: `truce:${profile}`, name, kind: "band", band,
+          status: "planned", note: `after the next pump doses — ${minutes >= 60 ? `${minutes / 60} h` : `${minutes} min`} each` })));
+    });
     const feeds = events.filter((e) => e.how !== "system" && e.status !== "ghost");
     const upcoming = events.filter((e) => e.kind === "dose" && e.how !== "system" && ["planned", "due", "late"].includes(e.status))
       .sort((a, b) => ((a.at == null || a.at <= nowMin) ? 0 : 1) - ((b.at == null || b.at <= nowMin) ? 0 : 1) || (a.at ?? -1) - (b.at ?? -1));

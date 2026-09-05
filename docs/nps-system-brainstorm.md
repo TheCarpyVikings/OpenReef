@@ -838,7 +838,7 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
-## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.136 (2026-09-05)** — see §13.10–§13.16
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.137 (2026-09-05)** — see §13.10–§13.17
 
 ### 13.1 What v1 is, honestly
 
@@ -1000,3 +1000,14 @@ Reece: *"add an undo button for the completed feeds so I can fix my timeline."* 
 
 Tests: `test_nps.py` 139 (1 new + the old undo test rewritten for the day window and tombstones), `test_panel_nps.mjs` 48 (undo by ledger).
 
+### 13.17 0.7.137 — the feed truce on the system lane (the last §13.10 leftover)
+
+Reece: *"Truce windows on the strip's system lane — do this please."*
+
+- **What the lane shows**: one thin lilac row per armed profile (UV, ozone, skimmer) under the water-change row, in three weights. **Ran** (solid): a pause the truce actually held, read from its own history. **Running** (bright): the pause holding now, drawn to its `restoreAt`. **Expected** (faint): the pause each of today's remaining pump doses will start, merged where the windows overlap — eight 90-minute phyto doses under a two-hour UV window are one band; hourly doses under a 45-minute skimmer window stay four.
+- **The past is the truth, not a projection**: `_async_nps_truce_engage` stamps `pausedAt` once per pause (a repeat dose extends the window; it does not restart the band) and `_async_nps_truce_tick` files `{at, until}` into a per-profile `history` when the equipment comes back (`TRUCE_HISTORY_MAX = 24`, newest kept). A pre-0.7.137 pause with no stamp is filed from its window (`restoreAt − minutes`). Both live under `nps.truce.state`, server-written, which `_nps_preserve_runtime` already carries whole through a stale save — so no new guard.
+- **Only pump doses project a pause.** The dosing tick is the only thing that engages the truce, so hand feeds promise nothing on the strip. Honest, and also the gap: a hand-logged brine feed does not pause the skimmer today. Wiring the hand-feed commands into the engage hook is a one-line call per command, but it is a behaviour change (equipment switches off when you tap Fed) — Reece's call, not a silent addition.
+- **Cards**: a band's card reads "⏸ feed truce", the window (a pause that outlives the day ends at "midnight"), and the note — *off since 11:00 — back on at 13:00, 1 h to go*, or *any minute now* when the restore is overdue and the minutely tick is the backstop. Every pump dose card carries *Feed truce after this dose: UV 2 h · skimmer 45 min*, only when something armed answers to it (`truce` field on the event).
+- Bands are never feeds: they neither count, nor queue, nor undo. Compact strips (Pulse, the Feeding hub) stack the profiles on one row; the legend line and the ⏸ lane glyph appear only on a day that has a band. `TIMELINE_STATUSES` gains `running`.
+
+Engine: `feed_timeline(..., truce=)` fed by `_nps_truce_timeline_cfg(config)` — per profile its minutes, whether anything armed answers (and the equipment labels), the running stamps and the history. Tests: `test_nps.py` 143 (4 new — bands ran/running/expected, clamp-to-today and merge, the stamps through engage/tick/normaliser/guard, the summary wiring), `test_panel_nps.mjs` 49 (1 new — rows, weights, compact, cards, demo).

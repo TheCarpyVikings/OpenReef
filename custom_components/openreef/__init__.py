@@ -1358,9 +1358,17 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
     for profile in ("uv", "ozone", "skimmer"):
         raw_p = raw_truce_state.get(profile) if isinstance(raw_truce_state.get(profile), dict) else {}
         raw_off = raw_p.get("turnedOff") if isinstance(raw_p.get("turnedOff"), list) else []
+        raw_hist = raw_p.get("history") if isinstance(raw_p.get("history"), list) else []
+        history = [{"at": _awc_str(h.get("at"), 40), "until": _awc_str(h.get("until"), 40)}
+                   for h in raw_hist if isinstance(h, dict)]
         truce_state[profile] = {
             "restoreAt": _awc_str(raw_p.get("restoreAt"), 40),
             "turnedOff": [str(e)[:120] for e in raw_off if isinstance(e, str)][:20],
+            # When the running pause began, and the pauses it has run (doc
+            # §13.17) — the strip's truce bands read these. Server-written
+            # only; the whole state block rides the stale-save guard.
+            "pausedAt": _awc_str(raw_p.get("pausedAt"), 40),
+            "history": [h for h in history if h["at"] and h["until"]][-nps_engine.TRUCE_HISTORY_MAX:],
         }
     raw_species = nps_cfg.get("species") if isinstance(nps_cfg.get("species"), list) else []
     valid_species = set(nps_engine.species_ids())
@@ -11622,6 +11630,28 @@ _NPS_TRUCE_PROFILES = (
 )
 
 
+def _nps_truce_timeline_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    """The feed truce as the strip needs it (doc §13.17): per profile its
+    window, whether anything armed answers to it (and what that is called),
+    the running pause and the pauses it has run today."""
+    truce = (config.get("nps") or {}).get("truce") or {}
+    state = truce.get("state") if isinstance(truce.get("state"), dict) else {}
+    profiles: dict[str, Any] = {}
+    for profile, minutes_key in _NPS_TRUCE_PROFILES:
+        targets = _armed_equipment_by_profile(config, profile)
+        pstate = state.get(profile) if isinstance(state.get(profile), dict) else {}
+        profiles[profile] = {
+            "minutes": _awc_num(truce.get(minutes_key), 0, 0, 720),
+            "armed": bool(targets),
+            "names": [_equipment_label(eid, mapped) for eid, mapped in targets][:4],
+            "pausedAt": str(pstate.get("pausedAt") or ""),
+            "restoreAt": str(pstate.get("restoreAt") or ""),
+            "active": bool(pstate.get("turnedOff")),
+            "history": [dict(h) for h in (pstate.get("history") or []) if isinstance(h, dict)],
+        }
+    return {"enabled": bool(truce.get("enabled")), "profiles": profiles}
+
+
 async def _async_nps_truce_engage(
     hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any = None
 ) -> None:
@@ -11646,6 +11676,7 @@ async def _async_nps_truce_engage(
             continue
         pstate = state.setdefault(profile, {})
         turned_off = [e for e in (pstate.get("turnedOff") or []) if isinstance(e, str)]
+        was_paused = bool(turned_off)
         for _equipment_id, mapped in targets:
             switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
             if not switch_entity:
@@ -11664,6 +11695,11 @@ async def _async_nps_truce_engage(
             changed = True
         if turned_off:
             pstate["turnedOff"] = turned_off
+            # A new pause is stamped once; a repeat dose extends it (the band
+            # on the strip runs from the first dose, not the last).
+            if not was_paused:
+                pstate["pausedAt"] = now.isoformat()
+                changed = True
             restore_at = now + timedelta(minutes=minutes)
             existing = _parse_datetime(pstate.get("restoreAt"))
             if existing is None or restore_at > existing:
@@ -11689,7 +11725,7 @@ async def _async_nps_truce_tick(
     state = truce.get("state") or {}
     now = datetime.now(timezone.utc)
     changed = False
-    for profile, _minutes_key in _NPS_TRUCE_PROFILES:
+    for profile, minutes_key in _NPS_TRUCE_PROFILES:
         pstate = state.get(profile) or {}
         turned_off = [e for e in (pstate.get("turnedOff") or []) if isinstance(e, str)]
         if not turned_off:
@@ -11709,6 +11745,17 @@ async def _async_nps_truce_tick(
         pstate["turnedOff"] = remaining
         changed = True
         if not remaining:
+            # The pause is over: file it (doc §13.17) so the strip can draw
+            # what really happened, then clear the running stamps.
+            started = str(pstate.get("pausedAt") or "")
+            if not started and restore_at is not None:
+                minutes = _awc_num(truce.get(minutes_key), 0, 0, 720)
+                started = (restore_at - timedelta(minutes=minutes)).isoformat()
+            if started:
+                history = [h for h in (pstate.get("history") or []) if isinstance(h, dict)]
+                history.append({"at": started, "until": now.isoformat()})
+                pstate["history"] = history[-nps_engine.TRUCE_HISTORY_MAX:]
+            pstate["pausedAt"] = ""
             pstate["restoreAt"] = ""
             wet = " — expect it to run wet for a while (that's the export working)" \
                 if profile == "skimmer" else ""
@@ -15841,7 +15888,8 @@ async def websocket_nps_summary(
         fx_channel_id=str(fx.get("channelId") or ""), fx_enabled=bool(fx.get("enabled")),
         culture_bottle_species={sid for sid in cultures_engine.species_ids()
                                 if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0},
-        quiet_product_ids=quiet_products)
+        quiet_product_ids=quiet_products,
+        truce=_nps_truce_timeline_cfg(config))
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
         "shelf": nps_engine.shelf_summary(products, now_utc, _awc_effective_tank_l(config), tz),

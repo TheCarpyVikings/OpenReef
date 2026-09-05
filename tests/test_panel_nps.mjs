@@ -97,14 +97,14 @@ function summaryFixture() {
 // chip, a ghost, an extra, and the water change on the system row.
 function timelineFixture() {
   const ev = (fields) => ({ id: "", at: null, how: "hand", source: "", name: "", productId: "", ml: null, actualMl: null,
-    status: "planned", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null, ...fields });
+    status: "planned", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null, truce: "", ...fields });
   return {
     date: "2026-08-13", nowMin: 720, night: { onMin: 540, offMin: 1260 },
     events: [
-      ev({ id: "channel:brine:0", at: 570, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "expected" }),
-      ev({ id: "channel:brine:1", at: 750, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "planned" }),
-      ev({ id: "channel:brine:2", at: 930, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "planned" }),
-      ev({ id: "channel:brine:3", at: 1110, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "blocked", note: "paused by a guard" }),
+      ev({ id: "channel:brine:0", at: 570, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, truce: "UV 2 h · skimmer 45 min", status: "expected" }),
+      ev({ id: "channel:brine:1", at: 750, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, truce: "UV 2 h · skimmer 45 min", status: "planned" }),
+      ev({ id: "channel:brine:2", at: 930, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, truce: "UV 2 h · skimmer 45 min", status: "planned" }),
+      ev({ id: "channel:brine:3", at: 1110, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, truce: "UV 2 h · skimmer 45 min", status: "blocked", note: "paused by a guard" }),
       ev({ id: "channel:drip:band", how: "pump", source: "channel:drip", name: "Drip", ml: 50, kind: "band", band: [1320, 360] }),
       ev({ id: "shelf:phyto:0", at: 480, source: "shelf:phyto", name: "Phyto", productId: "phyto", ml: 2, actualMl: 2, status: "done", doneAt: 492 }),
       ev({ id: "shelf:phyto:1", at: 710, source: "shelf:phyto", name: "Phyto", productId: "phyto", ml: 2, status: "due" }),
@@ -116,6 +116,10 @@ function timelineFixture() {
       ev({ id: "shelf:chips:0", source: "shelf:chips", name: "Zoo", productId: "chips", ml: 5, status: "due" }),
       ev({ id: "awc:0", at: 120, how: "system", source: "awc", name: "Water change", status: "expected" }),
       ev({ id: "awc:1", at: 1320, how: "system", source: "awc", name: "Water change", status: "planned" }),
+      // The feed truce (doc §13.17): a pause that ran, one running, one expected.
+      ev({ id: "truce:skimmer:h0", how: "system", source: "truce:skimmer", name: "Feed truce — Skimmer", kind: "band", band: [540, 585], status: "done", note: "paused after a food dose, then switched back on" }),
+      ev({ id: "truce:uv:run", how: "system", source: "truce:uv", name: "Feed truce — UV sterilizer", kind: "band", band: [660, 780], status: "running", note: "off since 11:00 — back on at 13:00, 1 h to go" }),
+      ev({ id: "truce:skimmer:p0", how: "system", source: "truce:skimmer", name: "Feed truce — Skimmer", kind: "band", band: [750, 795], status: "planned", note: "after the 12:30 dose — 45 min each" }),
     ],
     next: [
       { id: "shelf:phyto:1", name: "Phyto", how: "hand", at: 710, ml: 2, minutesUntil: 0, status: "due" },
@@ -1535,6 +1539,45 @@ test("the hand-dose plan: the shelf card, the Dosed tap, the settings fields, th
     const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
     assert(titles.includes("Food shelf: Reef Juice: dose due"), `Pulse line missing: ${titles}`);
   } finally { restore(); }
+});
+
+test("the feed truce draws under the water row and speaks on the cards", async () => {
+  const panel = await npsPanel();
+  const html = panel._npsTimelineSvg();
+  // Three thin bands in the truce colour: ran (solid), running (bright), expected (faint) — a row per profile.
+  assert((html.match(/height="3" rx="2" fill="#9575cd"/g) || []).length === 3, "three truce bands in the truce colour");
+  assert(html.includes('opacity="0.95" class="nps-tl-ev nps-tl-run"'), "the running band is bright");
+  assert(html.includes('opacity="0.28" class="nps-tl-ev"'), "the expected band is faint");
+  assert(html.includes('opacity="0.6" class="nps-tl-ev"'), "the ran band is solid");
+  assert(html.includes(' y="79" ') && html.includes(' y="86" '), "UV and the skimmer take their own rows under the water row");
+  assert(html.includes("⏸</text>") && html.includes("lilac under the water row = feed truce"), "the lane glyph and the legend name the truce");
+  assert(html.includes("Feed truce — UV sterilizer · running now · 11:00 → 13:00"), "the band's hover title reads the window");
+  // Nothing about the truce is a feed: the water-change ticks and the pump band are untouched.
+  assert((html.match(/y="71" width="2.5" height="6"/g) || []).length === 2 && (html.match(/height="6" rx="2" fill="#/g) || []).length === 2, "the rest of the system row stands");
+  // Compact (Pulse / hub): every band on one thin row, no legend, no glyph.
+  const compact = panel._npsTimelineSvg({ compact: true, readOnly: true });
+  assert((compact.match(/ y="43" width="[\d.]+" height="3"/g) || []).length === 3, "compact stacks the bands on one row");
+  assert(!compact.includes("⏸</text>") && !compact.includes("nps-tl-legend"), "compact stays quiet");
+  // The band's card, and the pump card's consequence line.
+  panel._nps.timelineOpen = "truce:uv:run";
+  const card = panel._npsTimelineSvg();
+  assert(card.includes("⏸ feed truce") && card.includes("running now") && card.includes("11:00 → 13:00") && card.includes("1 h to go"), `the truce card: ${card.slice(card.indexOf("nps-tl-card"), card.indexOf("nps-tl-card") + 600)}`);
+  assert(card.includes('style="border-left:4px solid #9575cd;"'), "the card wears the truce colour");
+  panel._nps.timelineOpen = "channel:brine:1";
+  assert(panel._npsTimelineSvg().includes("Feed truce after this dose: UV 2 h · skimmer 45 min"), "the pump card says what the truce will do");
+  panel._nps.timelineOpen = "shelf:phyto:1";
+  assert(!panel._npsTimelineSvg().includes("Feed truce after"), "a hand dose promises no truce — only the dosing tick engages it");
+  // A day without a truce draws no glyph and no legend line.
+  panel._nps.summary.timeline.events = panel._nps.summary.timeline.events.filter((e) => !String(e.source).startsWith("truce:"));
+  panel._nps.timelineOpen = "";
+  const plain = panel._npsTimelineSvg();
+  assert(!plain.includes("⏸</text>") && !plain.includes("= feed truce"), "no truce, no mention");
+  // The demo day carries the truce too.
+  const demo = panel._npsDemoTimeline();
+  const bands = demo.events.filter((e) => String(e.source).startsWith("truce:"));
+  assert(bands.length >= 2 && bands.every((e) => e.how === "system" && e.kind === "band" && e.band[1] > e.band[0] && e.band[1] <= 1440), `demo truce bands: ${JSON.stringify(bands.map((b) => b.band))}`);
+  assert(demo.events.filter((e) => e.how === "pump" && e.kind === "dose").every((e) => e.truce === "UV 2 h · skimmer 45 min"), "demo pump ticks carry the consequence");
+  assert(demo.counts.feeds === demo.events.filter((e) => e.how !== "system" && e.status !== "ghost").length, "bands never count as feeds");
 });
 
 // Keep this LAST: a test defined below the runner is a test that never runs.

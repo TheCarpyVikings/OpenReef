@@ -3016,6 +3016,176 @@ def test_undo_any_of_todays_feeds_from_the_strip():
     assert c.error_codes == ["nothing_to_undo"], "already undone"
 
 
+# --------------------------------------------------------------------------- #
+# 0.7.137 — the feed truce on the strip's system lane (doc §13.17)
+# --------------------------------------------------------------------------- #
+def _truce_profiles(**over):
+    base = {
+        "uv": {"minutes": 120, "armed": True, "names": ["UV sterilizer"], "pausedAt": "", "restoreAt": "",
+               "active": False, "history": []},
+        "skimmer": {"minutes": 45, "armed": True, "names": ["Skimmer"], "pausedAt": "", "restoreAt": "",
+                    "active": False, "history": []},
+        "ozone": {"minutes": 120, "armed": False, "names": [], "pausedAt": "", "restoreAt": "",
+                  "active": False, "history": []},
+    }
+    for key, fields in over.items():
+        base[key] = {**base[key], **fields}
+    return base
+
+
+def _truce_channel(doses, start, end, last=None):
+    ch = {"name": "Phyto pump", "chemical": "food", "enabled": True,
+          "schedule": {"enabled": True, "mlPerDay": 4, "dosesPerDay": doses, "windowStart": start, "windowEnd": end}}
+    if last:
+        ch["state"] = {"lastDoseAt": last}
+    return ch
+
+
+def test_timeline_truce_bands_ran_running_and_projected():
+    """The truce's own history is the ran band, its live state the running
+    one, and today's remaining pump doses the faint expected ones — all on
+    the system lane, none of them a feed."""
+    now = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    channels = {"phyto": _truce_channel(2, "08:00", "20:00", last="2026-08-13T11:00:00+00:00")}   # 11:00 done, 17:00 planned
+    truce = {"enabled": True, "profiles": _truce_profiles(
+        uv={"pausedAt": "2026-08-13T11:00:00+00:00", "restoreAt": "2026-08-13T13:00:00+00:00", "active": True},
+        skimmer={"history": [{"at": "2026-08-13T09:00:00+00:00", "until": "2026-08-13T09:45:00+00:00"},
+                             {"at": "2026-08-12T22:00:00+00:00", "until": "2026-08-12T22:45:00+00:00"}]})}
+    tl = _tl(now, channels=channels, truce=truce)
+    bands = [e for e in tl["events"] if e["kind"] == "band" and e["source"].startswith("truce:")]
+    by = {e["id"]: e for e in bands}
+    ran = by["truce:skimmer:h0"]
+    assert ran["band"] == [540, 585] and ran["status"] == "done" and ran["how"] == "system" and ran["name"] == "Feed truce — Skimmer"
+    assert "truce:skimmer:h1" not in by, "yesterday's pause is not today's"
+    run_ = by["truce:uv:run"]
+    assert run_["band"] == [660, 780] and run_["status"] == "running" and run_["name"] == "Feed truce — UV sterilizer"
+    assert run_["note"] == "off since 11:00 — back on at 13:00, 1 h to go", run_["note"]
+    assert by["truce:uv:p0"]["band"] == [1020, 1140] and by["truce:uv:p0"]["status"] == "planned"
+    assert by["truce:skimmer:p0"]["band"] == [1020, 1065]
+    assert by["truce:skimmer:p0"]["note"] == "after the 17:00 dose — 45 min each", by["truce:skimmer:p0"]["note"]
+    assert not [e for e in bands if e["source"] == "truce:ozone"], "an unarmed profile draws nothing"
+    pump = _by_id(tl, "channel:phyto:")
+    assert pump and all(e["truce"] == "UV 2 h · skimmer 45 min" for e in pump), [e["truce"] for e in pump]
+    assert all(s in nps.TIMELINE_STATUSES for s in (e["status"] for e in tl["events"]))
+    # Bands are not feeds: they neither count nor queue, and they sort last.
+    assert tl["counts"]["feeds"] == 2 and all(not n["id"].startswith("truce:") for n in tl["next"])
+    assert tl["events"][-1]["kind"] == "band"
+    # Off, or nothing armed: no bands and no consequence line.
+    off = _tl(now, channels=channels, truce={**truce, "enabled": False})
+    assert not [e for e in off["events"] if e["source"].startswith("truce:")]
+    assert all(e["truce"] == "" for e in _by_id(off, "channel:phyto:"))
+    unarmed = _tl(now, channels=channels, truce={"enabled": True, "profiles": _truce_profiles(
+        uv={"armed": False}, skimmer={"armed": False})})
+    assert not [e for e in unarmed["events"] if e["source"].startswith("truce:")]
+    assert all(e["truce"] == "" for e in _by_id(unarmed, "channel:phyto:"))
+    # Hand doses never project a pause — only the dosing tick engages the truce.
+    hand_only = _tl(now, products={"rj": _product(doseEveryHours=6, doseFirstAt="08:00")}, truce=truce)
+    assert not [e for e in hand_only["events"] if e["id"].startswith("truce:") and e["status"] == "planned"]
+
+
+def test_timeline_truce_spans_clamp_to_today_and_merge():
+    # A pause that began last night shows from 00:00; one that outlives the
+    # day runs to midnight; a window over back-to-back doses is one band.
+    late = datetime(2026, 8, 13, 22, 0, tzinfo=timezone.utc)
+    channels = {"phyto": _truce_channel(2, "22:00", "00:00")}   # 22:30 and 23:30, both planned
+    truce = {"enabled": True, "profiles": _truce_profiles(
+        uv={"history": [{"at": "2026-08-12T23:30:00+00:00", "until": "2026-08-13T00:15:00+00:00"}]},
+        skimmer={"minutes": 150, "pausedAt": "2026-08-13T21:50:00+00:00", "restoreAt": "2026-08-14T00:20:00+00:00", "active": True})}
+    tl = _tl(late, channels=channels, truce=truce)
+    by = {e["id"]: e for e in tl["events"] if e["source"].startswith("truce:")}
+    assert by["truce:uv:h0"]["band"] == [0, 15]
+    assert by["truce:skimmer:run"]["band"] == [1310, 1440]
+    assert by["truce:skimmer:run"]["note"] == "off since 21:50 — back on after midnight"
+    assert by["truce:uv:p0"]["band"] == [1350, 1440] and "after the 22:30, 23:30 doses" in by["truce:uv:p0"]["note"]
+    assert "truce:skimmer:p0" not in by, "nothing to project past a pause that already runs to midnight"
+    # Four doses an hour apart under a two-hour UV window: one band, clipped
+    # to the end of the pause that is running now.
+    noon = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    tl = _tl(noon, channels={"phyto": _truce_channel(4, "12:00", "16:00")},
+             truce={"enabled": True, "profiles": _truce_profiles(
+                 uv={"pausedAt": "2026-08-13T11:00:00+00:00", "restoreAt": "2026-08-13T13:00:00+00:00", "active": True})})
+    uv = [e for e in tl["events"] if e["source"] == "truce:uv"]
+    assert [e["id"] for e in uv] == ["truce:uv:run", "truce:uv:p0"], [e["id"] for e in uv]
+    assert uv[1]["band"] == [780, 1050] and uv[1]["note"] == "after the 12:30, 13:30, 14:30 +1 doses — 2 h each", uv[1]["note"]
+    # ...while the skimmer's 45 minutes do not reach the next dose: four bands.
+    skim = [e for e in tl["events"] if e["source"] == "truce:skimmer"]
+    assert [e["band"] for e in skim] == [[750, 795], [810, 855], [870, 915], [930, 975]], [e["band"] for e in skim]
+    assert skim[0]["note"] == "after the 12:30 dose — 45 min each" and skim[0]["id"] == "truce:skimmer:p0"
+    # A running pause whose restore is overdue (the tick is the backstop) says so.
+    overdue = _tl(noon, channels={}, truce={"enabled": True, "profiles": _truce_profiles(
+        uv={"pausedAt": "2026-08-13T09:00:00+00:00", "restoreAt": "2026-08-13T11:00:00+00:00", "active": True})})
+    assert overdue["events"][0]["note"] == "off since 09:00 — back on at 11:00 — any minute now"
+    # A legacy running pause with no pausedAt starts where its window says.
+    legacy = _tl(noon, channels={}, truce={"enabled": True, "profiles": _truce_profiles(
+        uv={"restoreAt": "2026-08-13T13:00:00+00:00", "active": True})})
+    assert legacy["events"][0]["band"] == [660, 780]
+
+
+def test_truce_engage_stamps_paused_at_and_the_tick_files_the_pause():
+    entry = _truce_entry()
+    hass = FakeHass(states={"switch.uv": "on", "switch.uv2": "on", "switch.skimmer": "on"}, entries=[entry])
+    run(integration._async_nps_truce_engage(hass, entry))
+    state = _truce_state(entry)
+    first = state["uv"]["pausedAt"]
+    assert first and state["skimmer"]["pausedAt"]
+    # The keeper flips the UV back on; the next dose claims it again — the
+    # pause extends, the band keeps its start.
+    hass.states.set("switch.uv", "on")
+    run(integration._async_nps_truce_engage(hass, entry))
+    assert _truce_state(entry)["uv"]["pausedAt"] == first
+    # The window passes: the pause is filed, the running stamps clear.
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    for profile in ("uv", "skimmer"):
+        _truce_state(entry)[profile]["restoreAt"] = past
+    run(integration._async_nps_truce_tick(hass, entry))
+    state = _truce_state(entry)
+    assert state["uv"]["turnedOff"] == [] and state["uv"]["pausedAt"] == "" and state["uv"]["restoreAt"] == ""
+    assert len(state["uv"]["history"]) == 1 and state["uv"]["history"][0]["at"] == first and state["uv"]["history"][0]["until"]
+    assert state["skimmer"]["history"][0]["at"] == state["skimmer"]["history"][0]["at"] and hass.states.get("switch.skimmer").state == "on"
+    # A pre-0.7.137 pause (no pausedAt) is filed from its window.
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["truce"]["state"]["uv"] = {"restoreAt": past, "turnedOff": ["switch.uv"], "pausedAt": "", "history": []}
+    hass.states.set("switch.uv", "off")
+    run(integration._async_nps_truce_tick(hass, entry))
+    filed = _truce_state(entry)["uv"]["history"][-1]
+    assert filed["until"] and datetime.fromisoformat(filed["at"]) == datetime.fromisoformat(past) - timedelta(minutes=120)
+    # The normaliser keeps the stamps, drops junk and caps the log (newest kept).
+    cfg["nps"]["truce"]["state"]["uv"] = {
+        "restoreAt": "", "turnedOff": [], "pausedAt": "2026-08-13T11:00:00+00:00",
+        "history": [{"at": f"2026-08-{d:02d}T10:00:00+00:00", "until": f"2026-08-{d:02d}T12:00:00+00:00"} for d in range(1, 31)]
+        + [{"junk": 1}, {"at": "x", "until": ""}]}
+    cfg.setdefault("dosing", {"channels": {}})
+    integration._normalise_nps_config(cfg)
+    uv = cfg["nps"]["truce"]["state"]["uv"]
+    assert uv["pausedAt"] == "2026-08-13T11:00:00+00:00"
+    assert len(uv["history"]) == nps.TRUCE_HISTORY_MAX and uv["history"][-1]["at"].startswith("2026-08-30")
+    # The stale-save guard carries the whole state block, history included.
+    stored = {"nps": {"truce": {"enabled": True, "state": cfg["nps"]["truce"]["state"]}}}
+    incoming = {"nps": {"truce": {"enabled": True, "state": {}}}}
+    integration._nps_preserve_runtime(stored, incoming)
+    assert len(incoming["nps"]["truce"]["state"]["uv"]["history"]) == nps.TRUCE_HISTORY_MAX
+
+
+def test_ws_nps_summary_carries_the_truce_bands():
+    local_now = integration.dt_util.as_local(datetime.now(timezone.utc))
+    start = local_now.replace(hour=12, minute=0, second=0, microsecond=0)
+    entry = _truce_entry(truce_state={"skimmer": {"restoreAt": "", "turnedOff": [], "pausedAt": "",
+                                                  "history": [{"at": start.isoformat(),
+                                                               "until": (start + timedelta(minutes=45)).isoformat()}]}})
+    entry.options[CONF_SETTINGS]["consumables"] = {"products": {}}
+    cfg = integration._nps_truce_timeline_cfg(entry.options[CONF_SETTINGS])
+    assert cfg["enabled"] and cfg["profiles"]["uv"]["armed"] and cfg["profiles"]["uv"]["names"] == ["uv1"]
+    assert cfg["profiles"]["skimmer"]["minutes"] == 45 and len(cfg["profiles"]["skimmer"]["history"]) == 1
+    assert not cfg["profiles"]["ozone"]["armed"] and cfg["profiles"]["ozone"]["names"] == []
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.errors
+    tl = conn.results[-1].payload["timeline"]
+    band = next(e for e in tl["events"] if e["id"] == "truce:skimmer:h0")
+    assert band["band"] == [720, 765] and band["status"] == "done" and band["name"] == "Feed truce — skim1"
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

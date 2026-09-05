@@ -1252,7 +1252,64 @@ def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None,
 
 TIMELINE_NEXT_MAX = 3
 TIMELINE_STATUSES: tuple[str, ...] = (
-    "planned", "expected", "due", "late", "missed", "skipped", "blocked", "done", "ghost")
+    "planned", "expected", "due", "late", "missed", "skipped", "blocked", "done", "ghost",
+    # A feed-truce band that is holding equipment off right now (doc §13.17).
+    "running")
+
+# The feed truce on the strip (doc §13.17): the pauses the truce actually ran
+# (its per-profile history), the one running now, and the ones today's
+# remaining pump doses will start — thin bands under the water-change row.
+TRUCE_PROFILES: tuple[str, ...] = ("uv", "ozone", "skimmer")
+TRUCE_PROFILE_LABELS = {"uv": "UV sterilizer", "ozone": "Ozone", "skimmer": "Skimmer"}
+TRUCE_PROFILE_SHORT = {"uv": "UV", "ozone": "ozone", "skimmer": "skimmer"}
+TRUCE_HISTORY_MAX = 24   # pauses kept per profile — a heavy feeding day, with room
+
+
+def _minutes_text(minutes: float) -> str:
+    """45 -> '45 min', 120 -> '2 h', 90 -> '1 h 30'."""
+    m = int(round(_f(minutes)))
+    if m >= 60 and m % 60 == 0:
+        return f"{m // 60} h"
+    if m > 60:
+        return f"{m // 60} h {m % 60:02d}"
+    return f"{m} min"
+
+
+def _tl_hm(minute: int) -> str:
+    minute = int(minute)
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def _span_today(start_iso: Any, end_iso: Any, today, tz: Any) -> list[int] | None:
+    """The part of [start, end] that falls on ``today``, as strip minutes —
+    a pause that began last night shows from 00:00, one that outlives the
+    day runs to 24:00. None when nothing of it is today's."""
+    start, end = _parse_iso(start_iso), _parse_iso(end_iso)
+    if start is None or end is None or end <= start:
+        return None
+    try:
+        s_local = start.astimezone(tz) if tz is not None else start
+        e_local = end.astimezone(tz) if tz is not None else end
+    except (TypeError, ValueError):
+        return None
+    s_day, e_day = s_local.date(), e_local.date()
+    if s_day > today or e_day < today:
+        return None
+    a = 0 if s_day < today else s_local.hour * 60 + s_local.minute
+    b = 1440 if e_day > today else e_local.hour * 60 + e_local.minute
+    return [a, b] if b > a else None
+
+
+def _merge_spans(spans: list[list[int]]) -> list[list[int]]:
+    """Coalesce overlapping or touching [a, b] spans — eight 90-minute phyto
+    doses under a two-hour UV window are one band, not eight."""
+    merged: list[list[int]] = []
+    for a, b in sorted(spans):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged
 
 
 def _local_minute(iso: Any, today, tz: Any) -> tuple[int | None, Any]:
@@ -1277,7 +1334,10 @@ def _event(**fields: Any) -> dict[str, Any]:
             "note": "", "kind": "dose", "band": None, "unplanned": False, "nextDate": None,
             # The logged row behind a done mark (its ISO stamp) and whether
             # the keeper can take it back from the card (doc §13.16).
-            "doneStamp": None, "undoable": False}
+            "doneStamp": None, "undoable": False,
+            # What the feed truce will do after this pump dose (doc §13.17):
+            # "UV 2 h · skimmer 45 min" — empty when nothing is armed.
+            "truce": ""}
     base.update(fields)
     return base
 
@@ -1377,7 +1437,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                   lighting: dict[str, Any] | None = None, tank_l: Any = None,
                   fx_channel_id: str = "", fx_enabled: bool = False,
                   culture_bottle_species: Any = None,
-                  quiet_product_ids: Any = None) -> dict[str, Any]:
+                  quiet_product_ids: Any = None,
+                  truce: dict[str, Any] | None = None) -> dict[str, Any]:
     """Today's feed strip. ``now_local`` must be tz-aware in the keeper's zone;
     every stamp is bucketed by that local day. Returns the events (sorted,
     any-time chips last), the night window, the next few, the counts and the
@@ -1620,6 +1681,70 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                     events.append(ev(id=f"awc:{i}", at=minute, how="system", source="awc", name="Water change",
                                      status="planned" if minute > now_min else "expected",
                                      note="the Water Change tab owns the reservoirs"))
+
+    # --- The feed truce (doc §13.17): what it did today, what it is doing
+    # now, what today's remaining pump doses will make it do — one thin band
+    # per armed profile under the water-change row. Only pump doses engage
+    # it (the dosing tick's hook), so only pump ticks project a pause.
+    truce = truce if isinstance(truce, dict) else {}
+    profiles = truce.get("profiles") if isinstance(truce.get("profiles"), dict) else {}
+    if truce.get("enabled") and profiles:
+        armed = [(profile, profiles[profile]) for profile in TRUCE_PROFILES
+                 if isinstance(profiles.get(profile), dict) and profiles[profile].get("armed")
+                 and _f(profiles[profile].get("minutes")) > 0]
+        if armed:
+            consequence = " · ".join(
+                f"{TRUCE_PROFILE_SHORT[profile]} {_minutes_text(prof['minutes'])}" for profile, prof in armed)
+            for e in events:
+                if e["how"] == "pump" and e["kind"] == "dose":
+                    e["truce"] = consequence
+        planned_ticks = sorted(e["at"] for e in events
+                               if e["how"] == "pump" and e["kind"] == "dose"
+                               and e["status"] == "planned" and e["at"] is not None)
+        for profile, prof in armed:
+            minutes = _f(prof.get("minutes"))
+            names = [str(n) for n in (prof.get("names") if isinstance(prof.get("names"), list) else []) if str(n)]
+            name = "Feed truce — " + (", ".join(names[:3]) if names else TRUCE_PROFILE_LABELS[profile])
+            source = f"truce:{profile}"
+            history = prof.get("history") if isinstance(prof.get("history"), list) else []
+            for i, item in enumerate(history):
+                if not isinstance(item, dict):
+                    continue
+                span = _span_today(item.get("at"), item.get("until"), today, tz)
+                if span:
+                    events.append(ev(id=f"{source}:h{i}", how="system", source=source, name=name, kind="band",
+                                     band=span, status="done",
+                                     note="paused after a food dose, then switched back on"))
+            running_end = None
+            if prof.get("active"):
+                restore = _parse_iso(prof.get("restoreAt"))
+                started = prof.get("pausedAt") or (
+                    (restore - timedelta(minutes=minutes)).isoformat() if restore is not None else None)
+                until = restore.isoformat() if restore is not None else now_local.isoformat()
+                span = _span_today(started, until, today, tz)
+                if span:
+                    running_end = span[1]
+                    if span[1] >= 1440:
+                        back = "back on after midnight"
+                    elif span[1] <= now_min:
+                        back = f"back on at {_tl_hm(span[1])} — any minute now"
+                    else:
+                        back = f"back on at {_tl_hm(span[1])}, {_minutes_text(span[1] - now_min)} to go"
+                    events.append(ev(id=f"{source}:run", how="system", source=source, name=name, kind="band",
+                                     band=span, status="running",
+                                     note=f"off since {_tl_hm(span[0])} — {back}"))
+            spans = []
+            for t in planned_ticks:
+                a = t if running_end is None else max(t, running_end)
+                b = min(1440, t + int(round(minutes)))
+                if b > a:
+                    spans.append([a, b])
+            for i, span in enumerate(_merge_spans(spans)):
+                after = [t for t in planned_ticks if t < span[1] and t + minutes > span[0]]
+                times = ", ".join(_tl_hm(t) for t in after[:3]) + (f" +{len(after) - 3}" if len(after) > 3 else "")
+                events.append(ev(id=f"{source}:p{i}", how="system", source=source, name=name, kind="band",
+                                 band=span, status="planned",
+                                 note=f"after the {times} dose{'s' if len(after) != 1 else ''} — {_minutes_text(minutes)} each"))
 
     # --- Night, next, counts, the honesty line.
     night = None
