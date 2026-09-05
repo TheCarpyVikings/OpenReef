@@ -2763,6 +2763,31 @@ def test_normalise_drops_a_feed_exchange_link_to_a_channel_that_is_gone():
     assert bare["nps"]["feedExchange"]["channelId"] == ""
 
 
+
+def test_feed_timeline_keeps_soak_and_jar_bottles_off_the_strip():
+    """Selcon into the soak and phyto into a jar are logged as bottle doses,
+    but they are not tank feeds (Reece's strip showed a Selcon dot)."""
+    tz = timezone.utc
+    now = datetime(2026, 8, 13, 14, 20, tzinfo=tz)
+    row = [{"at": _iso(datetime(2026, 8, 13, 1, 19, tzinfo=tz)), "ml": 0.5, "kind": "dose"}]
+    products = {"selcon": _product(name="Selcon", history=row),
+                "jarphyto": _product(name="Jar phyto", history=row, doseMl=2, doseEveryDays=1, doseFirstAt="09:00")}
+    loud = _tl(now, products=products)
+    assert _by_id(loud, "shelf:selcon:") and _by_id(loud, "shelf:jarphyto:")[0]["status"] == "done", "without the link they are just doses"
+    quiet = _tl(now, products=products, quiet_product_ids={"selcon", "jarphyto"})
+    assert not _by_id(quiet, "shelf:selcon:"), "the soak bottle stays off the strip"
+    jar = _by_id(quiet, "shelf:jarphyto:")
+    assert [e["id"] for e in jar] == ["shelf:jarphyto:0"] and jar[0]["status"] == "late", "a keeper-set tank cadence still lands its slot; the jar dose is not its done mark"
+    # The summary wires the links up.
+    entry = _entry({"selcon": _product(name="Selcon", history=[{"at": _iso(datetime.now(timezone.utc)), "ml": 0.5, "kind": "dose"}])})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = {"enabled": True, "enrichment": {"productId": "selcon"}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    assert not any(e["productId"] == "selcon" for e in conn.results[-1].payload["timeline"]["events"])
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

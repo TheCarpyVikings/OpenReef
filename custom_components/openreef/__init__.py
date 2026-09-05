@@ -15693,6 +15693,11 @@ async def websocket_nps_summary(
     # the brine done-marks (0.7.131 — no longer the reminder's completions).
     brine_feeds: list[dict[str, Any]] = [dict(item) for item in hatchery_cfg["handFeeds"]]
     cultures_cfg = _nps_cultures_cfg(config)
+    # Bottles that feed the soak or a culture jar, not the tank (0.7.133).
+    quiet_products = {hatchery_cfg["enrichment"]["productId"], cultures_cfg["enrichment"]["productId"]}
+    quiet_products.update(str((jar.get("feed") or {}).get("productId") or "")
+                          for jar in cultures_cfg["jars"].values() if isinstance(jar, dict))
+    quiet_products.discard("")
     timeline = nps_engine.feed_timeline(
         now_local, products=products, channels=channels,
         awc=_awc_cfg(config) or {}, cultures=cultures_cfg if cultures_cfg.get("enabled") else None,
@@ -15701,7 +15706,8 @@ async def websocket_nps_summary(
         tank_l=_awc_effective_tank_l(config),
         fx_channel_id=str(fx.get("channelId") or ""), fx_enabled=bool(fx.get("enabled")),
         culture_bottle_species={sid for sid in cultures_engine.species_ids()
-                                if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0})
+                                if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0},
+        quiet_product_ids=quiet_products)
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
         "shelf": nps_engine.shelf_summary(products, now_utc, _awc_effective_tank_l(config), tz),

@@ -838,7 +838,7 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
-## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.132 (2026-09-05)** — see §13.10–§13.12
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.133 (2026-09-05)** — see §13.10–§13.13
 
 ### 13.1 What v1 is, honestly
 
@@ -967,4 +967,8 @@ Tests: `test_nps.py` 133 green (2 new); `test_panel_nps.mjs` 47 green (undo asse
 ### 13.12 The 0.7.132 fix — the hand-feed reminder that never appeared
 
 Reece, live: no pump configured, **Sync hatchery reminders** tapped, still no "Feed live brine" reminder. The seeder gated the hand-feed task on `feedExchange.channelId` being *empty* — but a channel id that points at a channel that no longer exists (a deleted or never-finished pump) is a non-empty string, so the panel believed a pump was bound and skipped the reminder, while the settings select sat on its placeholder because nothing matched. Two fixes: the seeder now asks whether the linked channel *exists* as a food channel, and its message names what it seeded ("Feed live brine every 8 h." / "No hand-feed reminder — X is linked as the exchange pump."); and `_normalise_nps_config` clears a link to a channel that is gone (and the exchange's enabled flag with it), so the stale id cannot linger anywhere. Tests: `test_nps.py` 134 (1 new), `test_panel_nps.mjs` 48 (1 new).
+
+### 13.13 0.7.133 — the brine chip feeds itself, and soak/jar bottles leave the strip
+
+Reece, live again: the brine chip's card only said *"tap Fed on the hatchery card"*. Now the card carries the Fed buttons itself — **Fed N ml** from the container, from the fridge bottle, or both when both hold brine (the hatchery card's own commands, so the ledger, the reminder and the mark move together); no brine on hand says so. And the Selcon dot on his strip was the enrichment debit: bottles linked as the hatchery/cultures enrichment or as a jar's feed are `quiet_product_ids` — their logged doses feed the soak or a jar, not the tank, so they never appear as extras (a keeper-set tank cadence still lands its planned slots). Tests: `test_nps.py` 135 (1 new), `test_panel_nps.mjs` 48 (brine-card assertions).
 

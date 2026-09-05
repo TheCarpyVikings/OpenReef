@@ -1296,7 +1296,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                   brine_feeds: list[dict[str, Any]] | None = None,
                   lighting: dict[str, Any] | None = None, tank_l: Any = None,
                   fx_channel_id: str = "", fx_enabled: bool = False,
-                  culture_bottle_species: Any = None) -> dict[str, Any]:
+                  culture_bottle_species: Any = None,
+                  quiet_product_ids: Any = None) -> dict[str, Any]:
     """Today's feed strip. ``now_local`` must be tz-aware in the keeper's zone;
     every stamp is bucketed by that local day. Returns the events (sorted,
     any-time chips last), the night window, the next few, the counts and the
@@ -1306,6 +1307,10 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
     now_min = now_local.hour * 60 + now_local.minute
     events: list[dict[str, Any]] = []
     bottle_species = set(culture_bottle_species or ())
+    # Bottles whose logged doses feed something OTHER than the tank (the
+    # enrichment soak, a culture jar): their history is not a tank feed, so
+    # no extras — a keeper-set tank cadence still lands its planned slots.
+    quiet = {str(pid) for pid in (quiet_product_ids or ())}
 
     def ev(**fields: Any) -> dict[str, Any]:
         base = {"id": "", "at": None, "how": "hand", "source": "", "name": "", "productId": "",
@@ -1382,6 +1387,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             minute, _ = _local_minute(item.get("at"), today, tz)
             if minute is not None:
                 done.append({"at": minute, "ml": round(_f(item.get("ml")), 2)})
+        if pid in quiet:
+            done = []
         if not cad["unit"]:
             # No cadence: anything logged today still shows — the strip is the day's truth.
             events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,

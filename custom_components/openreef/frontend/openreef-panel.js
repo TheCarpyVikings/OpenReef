@@ -11736,7 +11736,18 @@ class OpenReefPanel extends HTMLElement {
     if (cid && ev.kind === "dose" && ev.ml != null) {
       actions.push(`<button class="secondary compact-button" data-action="nps-timeline-dosenow" data-id="${esc(cid)}" data-ml="${esc(ev.ml)}" title="The firmware's guard chain has the final say">Dose ${esc(ev.ml)} ml now</button>`);
     }
-    if (ev.source === "brine" && ev.status !== "done") lines.push("Tap Fed on the Brine hatchery card — it debits the container and fills this mark.");
+    // A brine chip logs its own feed (0.7.133): from the container, from the
+    // fridge bottle, or both when both hold brine — the hatchery card's own
+    // commands, so the ledger, the reminder and this mark all move together.
+    if (ev.source === "brine" && ev.status !== "done") {
+      const hatch = this._nps?.summary?.hatchery || {};
+      const inContainer = Number(hatch.reservoir?.remainingMl) > 0;
+      const inBottle = Number(hatch.fridgeBottle?.remainingMl) > 0;
+      const dose = ev.ml != null ? `${esc(ev.ml)} ml` : "the dose";
+      if (inContainer) actions.push(`<button class="primary compact-button" data-action="nps-hand-feed" title="Debits the brine container and fills this mark">Fed ${dose}${inBottle ? " from the container" : ""}</button>`);
+      if (inBottle) actions.push(`<button class="${inContainer ? "secondary" : "primary"} compact-button" data-action="nps-fridge-feed" title="Debits the fridge bottle and fills this mark">Fed ${dose} from the fridge bottle</button>`);
+      if (!inContainer && !inBottle) lines.push("No brine on hand — harvest and load the container first.");
+    }
     if (String(ev.source || "").startsWith("culture:")) actions.push(`<button class="secondary compact-button" data-action="tab" data-id="cultures">Open Cultures</button>`);
     if (ev.source === "awc") actions.push(`<button class="secondary compact-button" data-action="tab" data-id="awc">Open Water Change</button>`);
     actions.push(`<button class="secondary compact-button" data-action="nps-timeline-close">Close</button>`);

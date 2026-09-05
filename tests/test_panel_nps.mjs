@@ -300,6 +300,22 @@ test("tapping a mark opens its dose card with the right actions, and the actions
     panel._nps.timelineOpen = "shelf:ghost:ghost";
     html = panel._npsTimelineSvg();
     assert(html.includes("Not today — next 2026-08-14 at 20:00") && !html.includes("nps-timeline-log"), "ghost card");
+    // A brine chip logs its own feed — from whatever holds brine.
+    panel._nps.summary.timeline.events.push({ id: "brine:0", at: null, how: "hand", source: "brine", name: "Live brine", productId: "", ml: 250,
+      actualMl: null, status: "due", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null });
+    panel._nps.summary.hatchery = { reservoir: { remainingMl: 400 }, fridgeBottle: { remainingMl: 0 } };
+    panel._nps.timelineOpen = "brine:0";
+    html = panel._npsTimelineSvg();
+    assert(html.includes('class="primary compact-button" data-action="nps-hand-feed"') && html.includes("Fed 250 ml</button>") && !html.includes("nps-fridge-feed"), `brine card: ${html}`);
+    panel._nps.summary.hatchery = { reservoir: { remainingMl: 0 }, fridgeBottle: { remainingMl: 120 } };
+    html = panel._npsTimelineSvg();
+    assert(html.includes('class="primary compact-button" data-action="nps-fridge-feed"') && html.includes("from the fridge bottle") && !html.includes("nps-hand-feed"), "bottle only");
+    panel._nps.summary.hatchery = { reservoir: { remainingMl: 400 }, fridgeBottle: { remainingMl: 120 } };
+    html = panel._npsTimelineSvg();
+    assert(html.includes("Fed 250 ml from the container") && html.includes("Fed 250 ml from the fridge bottle"), "both");
+    panel._nps.summary.hatchery = { reservoir: { remainingMl: 0 }, fridgeBottle: { remainingMl: 0 } };
+    html = panel._npsTimelineSvg();
+    assert(html.includes("No brine on hand") && !html.includes("nps-hand-feed"), "nothing to feed from");
     // The water change: a deep link.
     panel._nps.timelineOpen = "awc:1";
     assert(panel._npsTimelineSvg().includes('data-action="tab" data-id="awc"'), "awc card links out");
