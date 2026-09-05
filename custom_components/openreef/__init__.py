@@ -1100,6 +1100,8 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "lastSignAt": _awc_str(raw_state.get("lastSignAt"), 40),
                 "lastSign": (str(raw_state.get("lastSign"))
                              if str(raw_state.get("lastSign")) in cultures_engine.SIGNS else ""),
+                # Lineage (Stage D): 1 = from a starter, +1 per split/reseed; 0 = unknown.
+                "generation": int(_awc_num(raw_state.get("generation"), 0, 0, 999)),
             },
             "history": history[:60],
         }
@@ -1117,6 +1119,14 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
     raw_enrich_state = raw_enrich.get("state") if isinstance(raw_enrich.get("state"), dict) else {}
     raw_phyto = raw.get("phytoDose") if isinstance(raw.get("phytoDose"), dict) else {}
     stocking = str(raw_phyto.get("stocking") or "medium")
+    # Continuity (Stage D): per species, since when the rack has never been
+    # without a running jar; and the heat guard's once-a-day push stamps.
+    raw_cont = raw.get("continuity") if isinstance(raw.get("continuity"), dict) else {}
+    continuity = {sid: {"since": _awc_str((raw_cont.get(sid) or {}).get("since") if isinstance(raw_cont.get(sid), dict) else "", 40)}
+                  for sid in cultures_engine.species_ids()}
+    raw_guard = raw.get("guard") if isinstance(raw.get("guard"), dict) else {}
+    raw_notified = raw_guard.get("notified") if isinstance(raw_guard.get("notified"), dict) else {}
+    guard = {"notified": {sid: _awc_str(raw_notified.get(sid), 40) for sid in cultures_engine.species_ids()}}
     return {
         "enabled": bool(raw.get("enabled", False)),
         "tempEntity": _awc_str(raw.get("tempEntity"), 80),
@@ -1151,6 +1161,8 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             "doseMl": _awc_num(raw_phyto.get("doseMl"), 0, 0, 500),
             "lastDosedAt": _awc_str(raw_phyto.get("lastDosedAt"), 40),
         },
+        "continuity": continuity,
+        "guard": guard,
     }
 
 
@@ -5186,6 +5198,8 @@ async def _async_fire_maintenance_reminder(
     # per jar with a chore due, buttons for the very taps the tab offers.
     try:
         await _async_cultures_push_due(hass, latest_config, target)
+        if await _async_cultures_heat_guard_push(hass, latest_config, target):
+            _persist_entry_config(hass, entry, latest_config)
     except Exception as err:  # noqa: BLE001 - never let a push break the digest
         _LOGGER.warning("Cultures: the daily question could not be sent: %s", err)
     if target:
@@ -7706,6 +7720,9 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                             dst_enrich["state"] = deepcopy(src_enrich["state"])
                     _copy_runtime_fields(
                         src_cultures.get("phytoDose"), dst_cultures.get("phytoDose"), ("lastDosedAt",))
+                    for key in ("continuity", "guard"):
+                        if isinstance(src_cultures.get(key), dict):
+                            dst_cultures[key] = deepcopy(src_cultures[key])
 
     stored_products = ((stored.get("consumables") or {}).get("products")
                        if isinstance(stored.get("consumables"), dict) else None)
@@ -14352,16 +14369,53 @@ def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any]) -> None:
         _consumable_debit(product, _awc_num(feed.get("doseMl"), 5, 0.5, 200), "dose")
 
 
+def _cultures_touch_continuity(cultures: dict[str, Any], now: datetime) -> None:
+    """Continuity days (doc §8.8 #11): the honest anti-leaderboard — since when
+    has the rack never been without a running jar of the species. Starts
+    when a species goes from none running to one, clears when the last one
+    crashes; a restart never touches it."""
+    continuity = cultures.setdefault("continuity", {})
+    for sid in cultures_engine.species_ids():
+        running = [j for j in cultures["jars"].values() if j.get("species") == sid
+                   and cultures_engine.culture_state(j, now)["status"] in ("establishing", "producing")]
+        entry = continuity.setdefault(sid, {"since": ""})
+        if running and not entry.get("since"):
+            starts = [_parse_datetime(j["state"].get("startedAt")) for j in running]
+            starts = [d for d in starts if d is not None]
+            entry["since"] = (min(starts) if starts else now).isoformat()
+        elif not running:
+            entry["since"] = ""
+
+
 def _cultures_seed_jar(config: dict[str, Any], jar: dict[str, Any], now: datetime,
                        seeded_from: str) -> None:
     state = jar["state"]
+    cultures = ((config.get("nps") or {}).get("cultures") or {})
+    parent = (cultures.get("jars") or {}).get(seeded_from) if seeded_from else None
+    parent_gen = int(_awc_num((parent or {}).get("state", {}).get("generation"), 0, 0, 999)) if isinstance(parent, dict) else 0
     state.update({
         "startedAt": now.isoformat(), "lastRestartAt": now.isoformat(),
         "lastFedAt": now.isoformat(), "lastHarvestAt": "", "lastWaterChangeAt": "",
         "lastTint": "green", "crashedAt": "", "seededFrom": seeded_from,
         "lastSignAt": "", "lastSign": "",
+        "generation": (parent_gen + 1) if seeded_from else 1,
     })
     _cultures_history(jar, "seeded", now, **({"from": seeded_from} if seeded_from else {}))
+    if isinstance(cultures.get("jars"), dict):
+        _cultures_touch_continuity(cultures, now)
+
+
+def _cultures_projection_hours(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """The cooling headroom's indoor projection (room °C per forecast hour,
+    learned offsets included) — the heat guard's only input. Empty when the
+    cooling arc is off or has no forecast yet: the guard then says so."""
+    try:
+        runtime = (hass.data.get(DOMAIN) or {}).get(COOLING_RUNTIME) or {}
+        projection = (runtime.get("snapshot") or {}).get("projection") or {}
+        hours = projection.get("hours")
+        return hours if isinstance(hours, list) else []
+    except (AttributeError, TypeError):
+        return []
 
 
 def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
@@ -14372,6 +14426,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     cultures = _nps_cultures_cfg(config)
     products = (config.get("consumables") or {}).get("products") or {}
     temp_c = _cultures_temp_c(hass, config, cultures)
+    projection_hours = _cultures_projection_hours(hass)
     jars_payload = []
     due_count = 0
     producing_by_species: dict[str, list[str]] = {}
@@ -14395,8 +14450,26 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
                              if cultures["jars"][o]["species"] == jar["species"]]
         learned = cultures_engine.learned_cadences(jar, sibling_histories, now)
         product = products.get(jar["feed"]["productId"]) if jar["feed"]["productId"] else None
+        parent = cultures["jars"].get(jar["state"].get("seededFrom") or "")
+        generation = int(_awc_num(jar["state"].get("generation"), 0, 0, 999))
+        if generation <= 0 and jar["state"].get("startedAt"):
+            generation = 2 if isinstance(parent, dict) else 1     # pre-Stage-D jars
+        siblings = [cultures["jars"][o] for o in sorted(cultures["jars"]) if o != jid
+                    and cultures["jars"][o]["species"] == jar["species"]
+                    and cultures_engine.culture_state(cultures["jars"][o], now)["status"] in ("establishing", "producing")]
         jars_payload.append({
             "id": jid, "name": jar["name"], "species": jar["species"],
+            "lineage": {
+                "generation": generation,
+                "fromName": parent.get("name") if isinstance(parent, dict) else "",
+                "line": (f"gen {generation} · from {parent.get('name')}" if isinstance(parent, dict)
+                         else f"gen {generation} · from the starter") if generation > 0 else "",
+            },
+            "tintStrip": cultures_engine.tint_strip(jar["history"], now),
+            "stagger": (cultures_engine.stagger_advice(jar, siblings[0], now)
+                        if siblings and st["status"] in ("establishing", "producing")
+                        else {"available": False, "days": None, "idealDays": None, "advice": ""}),
+            "guard": cultures_engine.heat_guard(projection_hours, jar["species"], now),
             "speciesName": preset["name"], "kind": preset["kind"], "latin": preset["latin"],
             "volumeL": jar["volumeL"], "salinityPpt": jar["salinityPpt"],
             "vesselKind": jar["vesselKind"], "purgeMl": jar["purgeMl"],
@@ -14473,6 +14546,24 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
                    {"available": False, "due": False, "at": None, "hoursUntil": None, "hoursOverdue": None})
     if phyto["cadenceDays"] > 0 and phyto["productId"] and not phyto["lastDosedAt"]:
         phyto_clock = {"available": True, "due": True, "at": now.isoformat(), "hoursUntil": 0.0, "hoursOverdue": 0.0}
+    # Never zero: per species, is there a second running jar? And the
+    # continuity days — the anti-leaderboard.
+    backup = []
+    for sid in cultures_engine.species_ids():
+        running = [j for j in jars_payload if j["species"] == sid and j["state"]["status"] in ("establishing", "producing")]
+        if not running:
+            continue
+        since = ((cultures.get("continuity") or {}).get(sid) or {}).get("since") or ""
+        if not since:
+            starts = [_parse_datetime(cultures["jars"][j["id"]]["state"].get("startedAt")) for j in running]
+            starts = [d for d in starts if d is not None]
+            since = min(starts).isoformat() if starts else ""
+        backup.append({
+            "species": sid, "speciesName": cultures_engine.species_preset(sid)["name"],
+            "running": len(running), "backedUp": len(running) >= 2,
+            "continuityDays": cultures_engine.continuity_days(since, now),
+            "guard": cultures_engine.heat_guard(projection_hours, sid, now),
+        })
     phyto_payload = {
         "productId": phyto["productId"],
         "productName": phyto_product.get("name") if isinstance(phyto_product, dict) else None,
@@ -14487,6 +14578,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         "enrichment": enrichment_payload,
         "nextHarvest": next_harvest,
         "phytoDose": phyto_payload,
+        "backup": backup,
+        "guardAvailable": bool(projection_hours),
         "dueCount": due_count,
         "idleJars": idle,
         "canAddJar": len(cultures["jars"]) < cultures_engine.CULTURE_JARS_MAX,
@@ -14670,7 +14763,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
 
 
 def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str,
-                            source: str = "the Cultures tab") -> tuple[str, str] | None:
+                            source: str = "the Cultures tab", split: bool = False) -> tuple[str, str] | None:
     """Sieve-and-restart: the whole jar through the mesh into a clean one with
     fresh water — the restart clock rewinds, the age does not, the sign that
     brought it forward is answered."""
@@ -14694,12 +14787,19 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
     _append_activity(config, f"{jar['name']} restarted in a clean jar — the fortnight clock rewinds",
                      "control")
     _mixing_hatchery_debit(hass, config, jar["volumeL"], f"restarting {jar['name']}")
+    if split:
+        # Never zero (doc §8.8 #4): the net is already in hand, so the restart
+        # seeds B from the crop — a backup out of phase with no extra ceremony.
+        error, _into = _cultures_split_apply(hass, config, jar_id, "", now)
+        if error is not None:
+            _append_activity(config, f"{jar['name']}: could not seed B from the restart — {error[1]}", "warning")
     return None
 
 
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/cultures_restart",
     vol.Required("jar_id"): str,
+    vol.Optional("split"): bool,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -14712,7 +14812,7 @@ async def websocket_cultures_restart(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    error = _cultures_restart_apply(hass, config, str(msg.get("jar_id") or ""))
+    error = _cultures_restart_apply(hass, config, str(msg.get("jar_id") or ""), split=bool(msg.get("split")))
     if error is not None:
         connection.send_error(msg["id"], error[0], error[1])
         return
@@ -14775,47 +14875,52 @@ async def websocket_cultures_water_change(
 async def websocket_cultures_split(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Split into B: a producing jar seeds an idle (or crashed) one — or a
-    brand-new jar of the same species — so a crash never zeroes the keeper.
-    The source keeps its clocks; the new jar starts its own, which is exactly
-    the stagger the backup needs."""
+    """Split into B (see ``_cultures_split_apply``)."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    cultures = _nps_cultures_cfg(config)
-    found = _cultures_jar_for_msg(connection, msg, cultures)
-    if found is None:
+    error, _into = _cultures_split_apply(hass, config, str(msg.get("jar_id") or ""),
+                                         str(msg.get("into_jar_id") or ""), datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
         return
-    jar_id, jar = found
-    now = datetime.now(timezone.utc)
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str, into_id: str,
+                          now: datetime) -> tuple[tuple[str, str] | None, str]:
+    """Split into B: a producing jar seeds an idle (or crashed) one — or a
+    brand-new jar of the same species — so a crash never zeroes the keeper.
+    The source keeps its clocks; the new jar starts its own, which is exactly
+    the stagger the backup needs. Returns ((code, message) | None, into_id)."""
+    cultures = _nps_cultures_cfg(config)
+    jars = cultures["jars"]
+    jar = jars.get(jar_id)
+    if not isinstance(jar, dict):
+        return ("unknown_jar", f"No culture jar '{jar_id}'"), ""
     st = cultures_engine.culture_state(jar, now)
     if st["status"] != "producing":
-        connection.send_error(msg["id"], "not_producing",
-                              f"{jar['name']} is not producing yet — let it establish first")
-        return
-    jars = cultures["jars"]
-    into_id = str(msg.get("into_jar_id") or "")
+        return ("not_producing", f"{jar['name']} is not producing yet — let it establish first"), ""
     if into_id and into_id not in jars:
-        connection.send_error(msg["id"], "unknown_jar", f"No culture jar '{into_id}'")
-        return
+        return ("unknown_jar", f"No culture jar '{into_id}'"), ""
     if not into_id:
         into_id = next((jid for jid in sorted(jars) if jid != jar_id
                         and cultures_engine.culture_state(jars[jid], now)["status"] in ("none", "crashed")
                         and jars[jid]["species"] == jar["species"]), "")
     if not into_id:
         if len(jars) >= cultures_engine.CULTURE_JARS_MAX:
-            connection.send_error(msg["id"], "jars_full",
-                                  f"All {cultures_engine.CULTURE_JARS_MAX} jars are in use")
-            return
+            return ("jars_full", f"All {cultures_engine.CULTURE_JARS_MAX} jars are in use"), ""
         into_id = next(f"c{n}" for n in range(1, cultures_engine.CULTURE_JARS_MAX + 2)
                        if f"c{n}" not in jars)
         base = jar["name"]
         new_name = (base[:-2] + " B") if base.endswith(" A") else f"{base} B"
         jars[into_id] = {
             "name": new_name[:40], "species": jar["species"], "volumeL": jar["volumeL"],
-            "salinityPpt": jar["salinityPpt"], "feed": dict(jar["feed"]),
+            "salinityPpt": jar["salinityPpt"], "vesselKind": jar.get("vesselKind", "jar"),
+            "purgeMl": jar.get("purgeMl", 0), "feed": dict(jar["feed"]),
             "cadence": dict(jar["cadence"]), "state": {}, "history": [],
         }
         cultures = _nps_cultures_cfg(config)
@@ -14823,15 +14928,13 @@ async def websocket_cultures_split(
         jar = jars[jar_id]
     target = jars[into_id]
     if cultures_engine.culture_state(target, now)["status"] not in ("none", "crashed"):
-        connection.send_error(msg["id"], "jar_busy", f"{target['name']} is already running")
-        return
+        return ("jar_busy", f"{target['name']} is already running"), into_id
     _cultures_seed_jar(config, target, now, jar_id)
     _cultures_history(jar, "split", now, **{"from": into_id})
     _append_activity(config, f"{jar['name']} split into {target['name']} — a backup out of phase",
                      "control")
     _mixing_hatchery_debit(hass, config, target["volumeL"], f"splitting into {target['name']}")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    return None, into_id
 
 
 @websocket_api.websocket_command({
@@ -14861,6 +14964,7 @@ async def websocket_cultures_crash(
         return
     jar["state"]["crashedAt"] = now.isoformat()
     _cultures_history(jar, "crashed", now, tint=jar["state"]["lastTint"] or None)
+    _cultures_touch_continuity(cultures, now)
     _append_activity(config, f"{jar['name']} crashed — reseed from a sibling or a fresh starter",
                      "warning")
     config = await _async_save_config(hass, entry, config)
@@ -14999,6 +15103,39 @@ async def _async_cultures_push_due(hass: HomeAssistant, config: dict[str, Any], 
         await _async_push_actionable(hass, target, item["title"], item["message"],
                                      item["actions"], item["tag"])
     return len(plan)
+
+
+async def _async_cultures_heat_guard_push(hass: HomeAssistant, config: dict[str, Any], target: str,
+                                          now: datetime | None = None) -> int:
+    """The heatwave guard's push (doc §8.8 #2): once a day per species with a
+    running jar, when the cooling headroom's projection crosses the species'
+    warning line inside the next day — the day-ahead warning the last
+    Tigriopus culture never got. Stamps ``cultures.guard.notified``."""
+    if not target or not bool(((config.get("nps") or {}).get("cultures") or {}).get("enabled")):
+        return 0
+    now = now or datetime.now(timezone.utc)
+    summary = _cultures_summary_payload(hass, config)
+    # AFTER the summary: it re-normalises the block in place, and the stamp
+    # must land in the dict the save will read.
+    cultures = _nps_cultures_cfg(config)
+    sent = 0
+    for item in summary.get("backup") or []:
+        guard = item.get("guard") or {}
+        if guard.get("status") != "warn":
+            continue
+        sid = item["species"]
+        last = _parse_datetime(cultures["guard"]["notified"].get(sid))
+        if last is not None and (now - last).total_seconds() < 20 * 3600:
+            continue
+        await _async_push_actionable(
+            hass, target, f"OpenReef: heat ahead for the {item['speciesName']}",
+            (lambda line: line[:1].upper() + line[1:])(guard.get("line") or "")
+            + ". Heat kills a culture through oxygen and ammonia, not the animal.",
+            [], tag=f"openreef_culture_guard_{sid}")
+        cultures["guard"]["notified"][sid] = now.isoformat()
+        _append_activity(config, f"Heat guard: {item['speciesName']} — {guard.get('line')}", "warning")
+        sent += 1
+    return sent
 
 
 async def _async_notification_action(hass: HomeAssistant, event: Any) -> None:

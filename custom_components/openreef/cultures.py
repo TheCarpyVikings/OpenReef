@@ -50,6 +50,8 @@ STOCKINGS: tuple[str, ...] = ("light", "medium", "heavy")
 # Reefphyto's Reef Juice page: 1 ml per 27 / 18 / 9 L a day.
 PHYTO_L_PER_ML = {"light": 27.0, "medium": 18.0, "heavy": 9.0}
 BOTTLE_EVENTS: tuple[str, ...] = ("filled", "fed_tank", "enriched", "emptied")
+GUARD_LOOKAHEAD_H = 24.0       # the heatwave guard looks one day ahead (doc §8.8 #2)
+TINT_STRIP_DAYS = 14
 RIG_CONES_MAX = 4
 
 # Species presets. tempMin/MaxC = the productive band; tempHardMaxC = the
@@ -729,3 +731,89 @@ def phyto_dose_guide(tank_l: Any, stocking: Any) -> dict[str, Any]:
     per = PHYTO_L_PER_ML[band]
     return {"available": litres > 0, "ml": round(litres / per, 1) if litres > 0 else None,
             "stocking": band, "perLitres": per}
+
+
+# --------------------------------------------------------------------------- #
+# V2 Stage D — never zero, and the guard (doc §8.8)
+# --------------------------------------------------------------------------- #
+def heat_guard(projection_hours: Any, species_id: Any, now: datetime,
+               lookahead_h: float = GUARD_LOOKAHEAD_H) -> dict[str, Any]:
+    """The heatwave guard: the cooling headroom's indoor projection (room °C
+    per forecast hour, learned offsets included) against the species band.
+    ``warn`` when the room is projected past the warning line inside the
+    window (with WHEN), ``watch`` past the productive band, ``clear``
+    otherwise; ``available`` False with no projection — never a guess."""
+    species = species_preset(species_id)
+    rows = []
+    for row in (projection_hours if isinstance(projection_hours, list) else []):
+        if not isinstance(row, dict):
+            continue
+        at = _parse_iso(row.get("at"))
+        room = row.get("roomC")
+        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool):
+            continue
+        hours = (at - now).total_seconds() / 3600.0
+        if -1.0 <= hours <= lookahead_h:
+            rows.append((at, float(room), hours))
+    if not rows:
+        return {"available": False, "status": "unknown", "peakC": None, "peakAt": None,
+                "crossAt": None, "hoursUntil": None, "line": ""}
+    peak_at, peak_c, _h = max(rows, key=lambda r: r[1])
+    hard = _f(species["tempHardMaxC"])
+    band = _f(species["tempMaxC"])
+    cross = next((r for r in rows if r[1] >= hard), None)
+    if cross is not None:
+        at, room, hours = cross
+        return {"available": True, "status": "warn", "peakC": round(peak_c, 1),
+                "peakAt": peak_at.isoformat(), "crossAt": at.isoformat(),
+                "hoursUntil": round(max(0.0, hours), 1),
+                "line": (f"room passes {hard:g} °C in ~{max(0.0, hours):.0f} h (peak {peak_c:.1f} °C) — "
+                         "extra air, shade, feed lightly, a 50 % change ready")}
+    if peak_c > band:
+        return {"available": True, "status": "watch", "peakC": round(peak_c, 1),
+                "peakAt": peak_at.isoformat(), "crossAt": None, "hoursUntil": None,
+                "line": f"room peaks at {peak_c:.1f} °C — above the {band:g} °C band, keep an eye on it"}
+    return {"available": True, "status": "clear", "peakC": round(peak_c, 1),
+            "peakAt": peak_at.isoformat(), "crossAt": None, "hoursUntil": None,
+            "line": f"room peaks at {peak_c:.1f} °C — inside the band"}
+
+
+def stagger_advice(jar_a: dict[str, Any], jar_b: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Two jars are only a backup when they never restart together: the ideal
+    gap is half the restart interval; more than two days off it earns a line."""
+    days = stagger_days(jar_a, jar_b, now)
+    cad = cadence_for(jar_a.get("species"), jar_a.get("cadence"))
+    interval = _f(cad.get("restartIntervalDays"))
+    if days is None or interval <= 0:
+        return {"available": False, "days": None, "idealDays": None, "advice": ""}
+    ideal = round(interval / 2.0, 1)
+    gap = days % interval if interval > 0 else days
+    off = abs(gap - ideal)
+    if off <= 2.0:
+        advice = f"restart cycles {gap:.0f} days apart — a proper backup"
+    else:
+        advice = (f"restart cycles only {gap:.0f} days apart (ideal {ideal:g}) — hold one restart "
+                  f"{off:.0f} day{'s' if off >= 1.5 else ''} to spread them")
+    return {"available": True, "days": round(gap, 1), "idealDays": ideal, "advice": advice}
+
+
+def tint_strip(history: Any, now: datetime, days: int = TINT_STRIP_DAYS) -> list[str]:
+    """The last N days as one tint each (the latest tap that day), oldest
+    first, "" for a day with no look — the culture card's strip."""
+    by_day: dict[str, str] = {}
+    for at, row in _chronological(history):
+        tint = str(row.get("tint") or "")
+        if tint not in TINTS:
+            continue
+        by_day[at.date().isoformat()] = tint
+    out = []
+    for back in range(days - 1, -1, -1):
+        out.append(by_day.get((now - timedelta(days=back)).date().isoformat(), ""))
+    return out
+
+
+def continuity_days(since_iso: Any, now: datetime) -> float | None:
+    since = _parse_iso(since_iso)
+    if since is None:
+        return None
+    return round(max(0.0, (now - since).total_seconds() / 86400.0), 1)

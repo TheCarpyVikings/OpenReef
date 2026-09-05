@@ -944,6 +944,136 @@ def test_stage_c_runtime_survives_a_stale_save():
     assert incoming["nps"]["hatchery"]["cysts"]["openedAt"]
 
 
+
+# --------------------------------------------------------------------------- #
+# V2 Stage D (0.7.128): never zero, lineage, the heat guard, the card
+# --------------------------------------------------------------------------- #
+def _projection(peaks):
+    """Fake cooling projection rows: (hours_from_now, roomC) pairs."""
+    return [{"at": _iso(NOW + timedelta(hours=h)), "roomC": c} for h, c in peaks]
+
+
+def test_heat_guard_reads_the_forecast_against_the_species_band():
+    assert cultures.heat_guard([], "tigriopus", NOW)["available"] is False
+    assert cultures.heat_guard("junk", "tigriopus", NOW)["status"] == "unknown"
+    clear = cultures.heat_guard(_projection([(1, 22.0), (6, 24.5), (12, 23.0)]), "tigriopus", NOW)
+    assert clear["status"] == "clear" and clear["peakC"] == 24.5
+    watch = cultures.heat_guard(_projection([(1, 22.0), (8, 27.2), (12, 25.0)]), "tigriopus", NOW)
+    assert watch["status"] == "watch" and "above the 26 °C band" in watch["line"]
+    warn = cultures.heat_guard(_projection([(1, 24.0), (5, 27.0), (9, 28.4), (15, 30.1), (30, 33.0)]), "tigriopus", NOW)
+    assert warn["status"] == "warn" and warn["hoursUntil"] == 9.0 and warn["peakC"] == 30.1, "the 30 h row is outside the day"
+    assert "passes 28 °C in ~9 h" in warn["line"] and "extra air" in warn["line"]
+    # Rotifers warn later — their line is 30 °C.
+    assert cultures.heat_guard(_projection([(9, 28.4), (15, 29.5)]), "rotifer_L", NOW)["status"] == "watch"
+    assert cultures.heat_guard(_projection([(9, 28.4), (15, 30.5)]), "rotifer_L", NOW)["status"] == "warn"
+
+
+def test_stagger_tint_strip_and_continuity():
+    a = _jar(started_ago_days=20, lastRestartAt=_iso(NOW - timedelta(days=9)), now=NOW)
+    b = _jar(started_ago_days=12, lastRestartAt=_iso(NOW - timedelta(days=2)), now=NOW)
+    good = cultures.stagger_advice(a, b, NOW)
+    assert good["available"] and good["days"] == 7.0 and good["idealDays"] == 7.0 and "a proper backup" in good["advice"]
+    b["state"]["lastRestartAt"] = _iso(NOW - timedelta(days=8))
+    close = cultures.stagger_advice(a, b, NOW)
+    assert close["days"] == 1.0 and "hold one restart" in close["advice"]
+    pod_a = _jar(species="tigriopus", started_ago_days=40, now=NOW)
+    assert cultures.stagger_advice(pod_a, pod_a, NOW)["available"] is False, "no restart, no stagger"
+    history = [_row("tint", 2, tint="clear"), _row("feed", 20, tint="green"), _row("harvest", 30, tint="clearing"),
+               _row("feed", 3 * 24 + 1, tint="green"), _row("seeded", 20 * 24)]
+    strip = cultures.tint_strip(history, NOW)
+    assert len(strip) == 14 and strip[-1] == "clear" and strip[-2] == "green" and strip[-3] == "" and strip[-4] == "green" and strip[0] == "", "the latest tap of each day wins; a day with no look is blank"
+    assert cultures.continuity_days(_iso(NOW - timedelta(days=41, hours=12)), NOW) == 41.5
+    assert cultures.continuity_days("", NOW) is None
+
+
+def test_ws_seed_and_split_write_the_lineage_and_continuity():
+    entry = _entry(jars={"c1": _jar(), "c2": _jar()})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_seed(hass, conn, {"id": 1, "jar_id": "c1"}))
+    cult = _cultures(entry)
+    assert cult["jars"]["c1"]["state"]["generation"] == 1
+    assert cult["continuity"]["rotifer_L"]["since"] == cult["jars"]["c1"]["state"]["startedAt"]
+    assert cult["continuity"]["tigriopus"]["since"] == ""
+    # Make c1 producing, then split into the idle c2: gen 2, continuity untouched.
+    cult["jars"]["c1"]["state"]["startedAt"] = _iso(REAL - timedelta(days=15))
+    cult["jars"]["c1"]["state"]["lastRestartAt"] = _iso(REAL - timedelta(days=1))
+    cult["continuity"]["rotifer_L"]["since"] = _iso(REAL - timedelta(days=15))
+    entry.options = {**entry.options, CONF_SETTINGS: _config(entry)}
+    run(integration.websocket_cultures_split(hass, conn, {"id": 2, "jar_id": "c1"}))
+    assert not conn.errors
+    cult = _cultures(entry)
+    assert cult["jars"]["c2"]["state"]["generation"] == 2 and cult["jars"]["c2"]["state"]["seededFrom"] == "c1"
+    assert cult["continuity"]["rotifer_L"]["since"] == _iso(REAL - timedelta(days=15))
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+    p = conn.results[-1].payload
+    by_id = {j["id"]: j for j in p["jars"]}
+    assert by_id["c1"]["lineage"]["line"] == "gen 1 · from the starter"
+    assert by_id["c2"]["lineage"] == {"generation": 2, "fromName": "Rotifers A", "line": "gen 2 · from Rotifers A"}
+    assert by_id["c1"]["stagger"]["available"] and by_id["c1"]["stagger"]["days"] == 1.0
+    assert len(by_id["c1"]["tintStrip"]) == 14
+    backup = {b["species"]: b for b in p["backup"]}
+    assert backup["rotifer_L"]["running"] == 2 and backup["rotifer_L"]["backedUp"] and backup["rotifer_L"]["continuityDays"] == 15.0
+    assert "tigriopus" not in backup and p["guardAvailable"] is False
+    assert by_id["c1"]["guard"]["available"] is False, "no cooling projection — the guard says so"
+    # The last crash of a species clears its continuity.
+    run(integration.websocket_cultures_crash(hass, conn, {"id": 4, "jar_id": "c2"}))
+    run(integration.websocket_cultures_crash(hass, conn, {"id": 5, "jar_id": "c1"}))
+    assert _cultures(entry)["continuity"]["rotifer_L"]["since"] == ""
+
+
+def test_ws_restart_can_seed_b_from_the_same_crop():
+    entry = _entry(jars={"c1": _jar(started_ago_days=15, lastRestartAt=_iso(REAL - timedelta(days=14)))})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_restart(hass, conn, {"id": 1, "jar_id": "c1", "split": True}))
+    assert not conn.errors
+    cult = _cultures(entry)
+    assert "c2" in cult["jars"] and cult["jars"]["c2"]["name"] == "Rotifers B"
+    assert cult["jars"]["c2"]["state"]["seededFrom"] == "c1" and cult["jars"]["c2"]["vesselKind"] == "cone"
+    assert cult["jars"]["c1"]["history"][0]["event"] == "split" and cult["jars"]["c1"]["history"][1]["event"] == "restart"
+    # A plain restart never splits; an establishing jar cannot split and says so in the feed.
+    entry = _entry(jars={"c1": _jar(started_ago_days=2)})
+    hass = FakeHass(entries=[entry])
+    run(integration.websocket_cultures_restart(hass, conn, {"id": 2, "jar_id": "c1", "split": True}))
+    assert "c2" not in _cultures(entry)["jars"]
+    activity = entry.options[CONF_SETTINGS].get("activity") or []
+    assert any("could not seed B" in str(a.get("message", "")) for a in activity)
+
+
+def test_heat_guard_push_fires_once_a_day_from_the_cooling_projection():
+    entry = _entry(jars={"c1": _jar(started_ago_days=10), "c2": _jar(species="tigriopus", started_ago_days=40)},
+                   maintenance={"tasks": {}, "completions": {}, "reminders": {"enabled": True, "notifyTarget": "mobile_app_phone"}})
+    hass = FakeHass(entries=[entry])
+    hass.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": [
+        {"at": _iso(REAL + timedelta(hours=2)), "roomC": 25.0}, {"at": _iso(REAL + timedelta(hours=8)), "roomC": 28.6},
+        {"at": _iso(REAL + timedelta(hours=14)), "roomC": 27.0}]}}}
+    config = _config(entry)
+    sent = run(integration._async_cultures_heat_guard_push(hass, config, "mobile_app_phone"))
+    assert sent == 1, "the pods warn at 28, the rotifers do not"
+    call = hass.services.calls[-1]
+    assert call.data["title"] == "OpenReef: heat ahead for the Tigriopus copepods" and "passes 28 °C in ~8 h" in call.data["message"]
+    assert config["nps"]["cultures"]["guard"]["notified"]["tigriopus"]
+    assert run(integration._async_cultures_heat_guard_push(hass, config, "mobile_app_phone")) == 0, "once a day"
+    conn = FakeConnection()
+    entry.options = {**entry.options, CONF_SETTINGS: config}
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    p = conn.results[-1].payload
+    assert p["guardAvailable"]
+    by_id = {j["id"]: j for j in p["jars"]}
+    assert by_id["c2"]["guard"]["status"] == "warn" and by_id["c1"]["guard"]["status"] == "watch"
+    assert {b["species"]: b["guard"]["status"] for b in p["backup"]} == {"rotifer_L": "watch", "tigriopus": "warn"}
+    # The stamps and the continuity survive a stale save.
+    stored = {"nps": {"cultures": {"enabled": True, "jars": {}, "continuity": {"rotifer_L": {"since": _iso(REAL)}},
+                                   "guard": {"notified": {"tigriopus": _iso(REAL)}}}}}
+    incoming = copy.deepcopy(stored)
+    incoming["nps"]["cultures"]["continuity"] = {"rotifer_L": {"since": ""}}
+    incoming["nps"]["cultures"]["guard"] = {"notified": {}}
+    integration._nps_preserve_runtime(stored, incoming)
+    assert incoming["nps"]["cultures"]["continuity"]["rotifer_L"]["since"] == _iso(REAL)
+    assert incoming["nps"]["cultures"]["guard"]["notified"]["tigriopus"] == _iso(REAL)
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

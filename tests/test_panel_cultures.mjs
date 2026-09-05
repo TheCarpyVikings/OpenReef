@@ -63,6 +63,10 @@ function jarSummary(over = {}) {
     learned: { clearingH: { available: false, hours: null, samples: 0 }, firstHarvestDays: { available: false, days: null, samples: 0 },
                runLengthDays: { available: false, days: null, samples: 0 }, yieldMlDay: null, suggest: { feedIntervalH: null, restartIntervalDays: null } },
     risk: { level: "ok", reason: "steady — nothing to worry about" }, lastSign: "",
+    lineage: { generation: 1, fromName: "", line: "gen 1 · from the starter" },
+    tintStrip: ["", "", "", "", "", "", "", "", "green", "green", "clearing", "green", "clearing", "clearing"],
+    stagger: { available: false, days: null, idealDays: null, advice: "" },
+    guard: { available: false, status: "unknown", peakC: null, peakAt: null, crossAt: null, hoursUntil: null, line: "" },
     history: [{ event: "harvest", at: iso(30), ml: 625, tint: "green", from: "", sign: "", eggRatio: 0, tempC: 23.4 },
               { event: "seeded", at: iso(12 * 24), ml: 0, tint: "", from: "", sign: "", eggRatio: 0, tempC: null }],
     ...over,
@@ -125,6 +129,11 @@ function summaryFixture(jars) {
     phytoDose: { productId: "", productName: null, cadenceDays: 1, stocking: "medium", doseMl: 2.9,
                  guide: { available: true, ml: 2.9, stocking: "medium", perLitres: 18 }, lastDosedAt: "", clock: { available: false, due: false } },
     tempC: 23.5,
+    backup: list.filter((j) => j.state.status === "producing" || j.state.status === "establishing").length
+      ? [{ species: "rotifer_L", speciesName: "Rotifers (L-type)", running: list.filter((j) => j.species === "rotifer_L" && (j.state.status === "producing" || j.state.status === "establishing")).length,
+           backedUp: list.filter((j) => j.species === "rotifer_L" && (j.state.status === "producing" || j.state.status === "establishing")).length >= 2,
+           continuityDays: 12, guard: { available: false, status: "unknown", line: "" } }] : [],
+    guardAvailable: false,
     rig: rigFixture(list),
     species: [
       { id: "rotifer_L", name: "Rotifers (L-type)", kind: "rotifer", vesselKind: "cone", salinityPpt: 27, feedIntervalH: 12, harvestIntervalDays: 1, harvestPct: 25, restartIntervalDays: 14, waterChangeIntervalDays: 0, waterChangePct: 0, sieveUm: 50, adultSieveUm: 0, purgeMl: 50, firstHarvestDays: 6, tintTarget: "leafy green — spinach, not pea soup" },
@@ -581,6 +590,75 @@ test("the journal merges the bottle's rows, the hub card reads the bottle, the h
     panel._culturesLoadSummary = async () => {};
     const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
     assert(titles.includes("Brine hatchery: Cysts pouch opened 22 days ago"), `cysts Pulse line missing: ${titles}`);
+  } finally { restore(); }
+});
+
+
+test("never zero: the Jars card says backup or not, and the restart seeds B by default when there is none", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    let panel = await culturesPanel();
+    let html = panel._culturesTab();
+    assert(html.includes("no backup") && html.includes("split at the next restart") && html.includes("12 days without a gap"), "the Jars card must say there is no backup and count continuity");
+    assert(html.includes('data-cultures-split="c1" checked'), "with no backup the restart ticks 'seed B' by default");
+    assert(html.includes("gen 1 · from the starter"), "the lineage line is missing");
+    assert(html.includes('data-action="cultures-share-card" data-id="c1"'), "the share-card button is missing");
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return {}; };
+    panel._culturesLoadSummary = async () => {};
+    panel._culturesRestart("c1");
+    await new Promise((r) => setTimeout(r, 0));
+    assert(calls[0].type === "openreef/cultures_restart" && calls[0].split === false, "no DOM tick in the harness → split false, never a silent split");
+    // Two running rotifer jars: backed up, stagger advice on the tile, no default split tick.
+    const b = jarSummary({ id: "c2", name: "Rotifers B", lineage: { generation: 2, fromName: "Rotifers A", line: "gen 2 · from Rotifers A" },
+      stagger: { available: true, days: 1, idealDays: 7, advice: "restart cycles only 1 days apart (ideal 7) — hold one restart 6 days to spread them" } });
+    const two = summaryFixture([jarSummary({ stagger: { available: true, days: 1, idealDays: 7, advice: "restart cycles only 1 days apart (ideal 7) — hold one restart 6 days to spread them" } }), b]);
+    panel = await culturesPanel({}, two);
+    html = panel._culturesTab();
+    assert(html.includes("backed up") && html.includes("rotifers (l-type): 2 running"), "two running jars are a backup");
+    assert(html.includes("gen 2 · from Rotifers A · restart cycles only 1 days apart"), "the stagger advice rides the lineage line");
+    assert(html.includes('data-cultures-split="c1" >') || html.includes('data-cultures-split="c1">'), "with a backup the split tick is off by default");
+    noPlaceholders(html, "backup rack");
+  } finally { restore(); }
+});
+
+test("the heat guard reads the day ahead onto the tile, the Room card and the Pulse", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const warn = { available: true, status: "warn", peakC: 30.1, peakAt: iso(-15), crossAt: iso(-9), hoursUntil: 9,
+      line: "room passes 28 °C in ~9 h (peak 30.1 °C) — extra air, shade, feed lightly, a 50 % change ready" };
+    const pod = { ...summaryFixture().jars[1], state: { ...summaryFixture().jars[1].state, status: "producing", ageDays: 40 }, tint: "green", guard: warn };
+    const summary = summaryFixture([jarSummary(), pod]);
+    summary.backup = [
+      { species: "rotifer_L", speciesName: "Rotifers (L-type)", running: 1, backedUp: false, continuityDays: 12, guard: { available: true, status: "watch", line: "room peaks at 28.4 °C — above the 26 °C band, keep an eye on it" } },
+      { species: "tigriopus", speciesName: "Tigriopus copepods", running: 1, backedUp: false, continuityDays: 40, guard: warn },
+    ];
+    summary.guardAvailable = true;
+    const panel = await culturesPanel({}, summary);
+    const html = panel._culturesTab();
+    assert(html.includes('data-culture-guard="warn"') && html.includes("🌡️ tomorrow: room passes 28 °C in ~9 h"), "the pods' tile must carry the day-ahead warning");
+    assert(html.includes("tomorrow: room passes 28 °C"), "the Room card must escalate to the guard when the room is fine today");
+    panel._culturesLoadSummary = async () => {};
+    const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
+    assert(titles.includes("Cultures: Heat ahead for the tigriopus copepods"), `guard Pulse line missing: ${titles}`);
+    noPlaceholders(html, "guard");
+  } finally { restore(); }
+});
+
+test("the culture card draws the story: name, species, day, generation, the ring and the tint strip", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel();
+    const sum = panel._cultures.summary;
+    const svg = panel._culturesCardSvg(sum.jars[0], sum);
+    assert(svg.startsWith("\n      <svg xmlns=") && svg.includes("Rotifers A") && svg.includes("Brachionus plicatilis"), "the card header is wrong");
+    assert(svg.includes("day 12 · producing · gen 1 · from the starter") && svg.includes("12 days without a gap"), "the story lines are missing");
+    assert(svg.includes(">86%<") && svg.includes("restart cycle"), "the restart ring is missing");
+    assert((svg.match(/<rect x="\d+" y="160"/g) || []).length === 14, "the strip must be 14 days");
+    assert(svg.includes('fill="#43a047"') && svg.includes('fill="#9ccc65"') && svg.includes('fill="#1c262e"'), "the strip colours must follow the tints and blanks");
+    assert(svg.includes("built with OpenReef"), "the card is unsigned");
+    const crashed = panel._culturesCardSvg({ ...sum.jars[0], state: { ...sum.jars[0].state, status: "crashed", percent: null } }, sum);
+    assert(crashed.includes(">crashed · gen 1") && crashed.includes(">—<"), "a crashed jar's card says so");
   } finally { restore(); }
 });
 

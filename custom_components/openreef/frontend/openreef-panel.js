@@ -1851,8 +1851,8 @@ class OpenReefPanel extends HTMLElement {
         "Seeded — the culture clocks are running. Let it establish before the first harvest.");
       if (action === "cultures-fed") this._culturesLog(id, true, false);
       if (action === "cultures-harvested") this._culturesLog(id, true, true);
-      if (action === "cultures-restart") this._culturesCall({ type: "openreef/cultures_restart", jar_id: id },
-        "Restart logged — the fortnight clock rewinds, the age does not.");
+      if (action === "cultures-restart") this._culturesRestart(id);
+      if (action === "cultures-share-card") this._culturesShareCard(id);
       if (action === "cultures-water-change") this._culturesCall({ type: "openreef/cultures_water_change", jar_id: id },
         "Water change logged.");
       if (action === "cultures-split") this._culturesCall({ type: "openreef/cultures_split", jar_id: id },
@@ -12053,6 +12053,81 @@ const rigSteps = [
       "Cadence set from the journal — the reminder follows it.");
   }
 
+  // Restart — and, by default when the rack has no backup, seed B from the
+  // same crop (never zero, doc §8.8 #4): the net is already in hand.
+  _culturesRestart(jarId) {
+    const box = this.shadowRoot?.querySelector(`[data-cultures-split="${jarId}"]`);
+    const split = !!(box && box.checked);
+    this._culturesCall({ type: "openreef/cultures_restart", jar_id: jarId, split },
+      split ? "Restarted — and B is seeded from the same crop, out of phase." : "Restart logged — the fortnight clock rewinds.");
+  }
+
+  // The culture card (doc §8.8 #9): the jar as a thing with a history you
+  // can post — species, age, generation, the restart ring, a 14-day tint
+  // strip, continuity days. SVG here; _culturesShareCard rasterises it.
+  _culturesCardSvg(jar, sum) {
+    const s = jar?.state || {};
+    const tintFill = { green: "#43a047", clearing: "#9ccc65", clear: "#b0bec5" };
+    const strip = Array.isArray(jar?.tintStrip) ? jar.tintStrip : Array(14).fill("");
+    const pct = Math.max(0, Math.min(100, Number(s.percent) || 0));
+    const r = 34, c = 2 * Math.PI * r;
+    const species = (sum?.backup || []).find((b) => b.species === jar?.species) || {};
+    const cont = species.continuityDays != null ? `${Math.round(species.continuityDays)} days without a gap` : "";
+    const line1 = s.status === "producing" ? `day ${Math.round(s.ageDays || 0)} · producing` : s.status === "establishing" ? `day ${Math.round(s.ageDays || 0)} · establishing` : s.status === "crashed" ? "crashed" : "empty";
+    const tank = (this._config?.tank && this._config.tank.name) || "";
+    return `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 270" width="480" height="270" role="img" aria-label="${this._escape(jar?.name || "Culture")} — culture card">
+        <rect x="0" y="0" width="480" height="270" rx="16" fill="#0f171d"></rect>
+        <text x="24" y="40" font-size="20" font-weight="700" fill="#e0f2f1" font-family="system-ui, sans-serif">${this._escape(jar?.name || "Culture")}</text>
+        <text x="24" y="62" font-size="13" fill="#8798a4" font-family="system-ui, sans-serif">${this._escape(jar?.speciesName || "")} <tspan font-style="italic">${this._escape(jar?.latin || "")}</tspan></text>
+        <text x="24" y="92" font-size="14" fill="#cfd8dc" font-family="system-ui, sans-serif">${this._escape(line1)}${jar?.lineage?.line ? ` · ${this._escape(jar.lineage.line)}` : ""}</text>
+        ${cont ? `<text x="24" y="114" font-size="13" fill="#26a69a" font-family="system-ui, sans-serif">${this._escape(cont)}</text>` : ""}
+        <g transform="translate(410 90)">
+          <circle r="${r}" fill="none" stroke="#263238" stroke-width="8"></circle>
+          <circle r="${r}" fill="none" stroke="${s.status === "crashed" ? "#e5484d" : "#26a69a"}" stroke-width="8" stroke-linecap="round"
+            stroke-dasharray="${(c * pct / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90)"></circle>
+          <text y="5" text-anchor="middle" font-size="14" fill="#e0f2f1" font-family="system-ui, sans-serif">${s.percent != null ? `${Math.round(pct)}%` : "—"}</text>
+          <text y="56" text-anchor="middle" font-size="10" fill="#8798a4" font-family="system-ui, sans-serif">restart cycle</text>
+        </g>
+        <text x="24" y="150" font-size="11" fill="#8798a4" font-family="system-ui, sans-serif" letter-spacing="0.08em">LAST 14 DAYS</text>
+        ${strip.map((t, i) => `<rect x="${24 + i * 30}" y="160" width="26" height="40" rx="5" fill="${t ? tintFill[t] : "#1c262e"}" ${t ? "" : 'stroke="#263238" stroke-width="1"'}></rect>`).join("")}
+        <text x="24" y="222" font-size="11" fill="#8798a4" font-family="system-ui, sans-serif">green · clearing · clear — the water, once a day</text>
+        <text x="24" y="250" font-size="12" fill="#546e7a" font-family="system-ui, sans-serif">${this._escape(tank ? `${tank} · ` : "")}built with OpenReef</text>
+      </svg>`;
+  }
+
+  async _culturesShareCard(jarId) {
+    const sum = this._cultures?.summary || {};
+    const jar = (sum.jars || []).find((j) => j.id === jarId);
+    if (!jar) return;
+    const svg = this._culturesCardSvg(jar, sum);
+    const blob = await new Promise((resolve) => {
+      try {
+        const img = new Image();
+        const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = 960; canvas.height = 540;
+          canvas.getContext("2d").drawImage(img, 0, 0, 960, 540);
+          URL.revokeObjectURL(url);
+          canvas.toBlob(resolve, "image/png");
+        };
+        img.onerror = () => resolve(null);
+        img.src = url;
+      } catch { resolve(null); }
+    });
+    if (!blob) { this._cultures.error = "Could not draw the card on this browser."; this._render(); return; }
+    const safe = String(jar.name || "culture").replace(/[^a-z0-9_-]+/gi, "_").replace(/^_+|_+$/g, "") || "culture";
+    const filename = `${safe}_culture_card_${new Date().toISOString().slice(0, 10)}.png`;
+    const file = new File([blob], filename, { type: "image/png" });
+    const text = `${jar.name} — ${jar.lineage?.line || jar.speciesName} · built with OpenReef`;
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: jar.name, text }); return; }
+      catch (err) { if (err && err.name === "AbortError") return; }
+    }
+    this._downloadBlob(blob, filename);
+  }
+
   async _npsCystsOpened() {
     try {
       await this._callWS({ type: "openreef/nps_cysts_opened" });
@@ -12510,23 +12585,31 @@ const rigSteps = [
     const producing = jars.filter((j) => j.state?.status === "producing").length;
     const establishing = jars.filter((j) => j.state?.status === "establishing").length;
     const crashed = jars.filter((j) => j.state?.status === "crashed").length;
+    const backup = Array.isArray(sum.backup) ? sum.backup : [];
+    const unbacked = backup.filter((b) => !b.backedUp);
     const jarsCard = this._missionSummaryCard("Jars",
-      jars.length ? `${producing} producing` : "none",
-      jars.length ? [establishing ? `${establishing} establishing` : "", crashed ? `${crashed} crashed` : "",
-        jars.length === 1 && producing ? "split into B when it's dense" : ""].filter(Boolean).join(" · ") || "the rack is steady"
+      !jars.length ? "none" : !backup.length ? `${producing} producing` : unbacked.length ? "no backup" : "backed up",
+      jars.length ? [
+        ...backup.map((b) => `${b.speciesName.toLowerCase()}: ${b.running} running${b.continuityDays != null ? `, ${Math.round(b.continuityDays)} days without a gap` : ""}`),
+        unbacked.length ? "split at the next restart — a crash never zeroes you then" : "",
+        crashed ? `${crashed} crashed` : ""].filter(Boolean).join(" · ") || "the rack is steady"
         : "up to 4 jars",
-      crashed ? "warning" : "ok", "settings", { section: "cultures", scroll: "or-section-cultures" });
+      crashed || unbacked.length ? "warning" : "ok", "settings", { section: "cultures", scroll: "or-section-cultures" });
     const tempRank = { critical: 4, hot: 3, warm: 2, cool: 1, ok: 0 };
     const worstTemp = jars.map((j) => j.temp).filter((t) => t && t.available)
       .sort((a, b) => (tempRank[b.status] || 0) - (tempRank[a.status] || 0))[0];
+    const worstGuard = (sum.backup || []).map((b) => b.guard).filter((g) => g && g.available)
+      .sort((a, b) => ({ warn: 2, watch: 1 })[b.status] - ({ warn: 2, watch: 1 })[a.status] || 0)[0];
     const tempCard = this._missionSummaryCard("Room",
       sum.tempC != null ? `${sum.tempC} °C` : "—",
-      !worstTemp ? "link a temperature sensor in Culture settings"
+      worstGuard && worstGuard.status === "warn" && (!worstTemp || worstTemp.status === "ok" || worstTemp.status === "cool") ? `tomorrow: ${worstGuard.line}`
+        : !worstTemp ? (sum.guardAvailable ? "no sensor — the guard reads the forecast" : "link a temperature sensor in Culture settings")
         : worstTemp.status === "critical" ? "over the critical line — move the cultures NOW"
           : worstTemp.status === "hot" ? (worstTemp.act ? "act now — extra air, shade, feed lightly, water change" : "over the hard line — extra air, shade, feed lightly")
             : worstTemp.status === "warm" ? "warm for the pods — watch it"
               : worstTemp.status === "cool" ? "cool — the jars will run slow" : "inside every species' band",
-      !worstTemp ? "unknown" : worstTemp.status === "critical" || worstTemp.status === "hot" ? "critical" : worstTemp.status === "warm" || worstTemp.status === "cool" ? "warning" : "ok",
+      worstGuard && worstGuard.status === "warn" && (!worstTemp || ["ok", "cool"].includes(worstTemp.status)) ? "warning"
+        : !worstTemp ? "unknown" : worstTemp.status === "critical" || worstTemp.status === "hot" ? "critical" : worstTemp.status === "warm" || worstTemp.status === "cool" ? "warning" : "ok",
       "settings", { section: "cultures", scroll: "or-section-cultures" });
     const summaryCards = `<div class="summary-grid">${dueCard}${bottleCard}${jarsCard}${tempCard}</div>`;
 
@@ -12564,6 +12647,15 @@ const rigSteps = [
           ${(sum.signs || []).map((sg) => `<button class="secondary compact-button" style="font-size:11px;padding:2px 6px;${j.lastSign === sg.id ? "border-color:var(--error-color,#e5484d);" : ""}" data-action="cultures-sign" data-id="${this._escape(j.id)}" data-sign="${this._escape(sg.id)}">${this._escape(sg.id)}</button>`).join("")}
           <input type="number" min="0" max="100" step="1" placeholder="% eggs" data-cultures-egg="${this._escape(j.id)}" style="width:64px;font-size:11px;" title="Optional egg-ratio spot check: the share of females carrying eggs in a 1 ml sample. ≥ 30 % is healthy, < 15 % means a collapse is near.">
         </div>` : "";
+      const lineageLine = running && j.lineage?.line ? `<small class="muted">${this._escape(j.lineage.line)}${j.stagger?.available ? ` · ${this._escape(j.stagger.advice)}` : ""}</small>` : "";
+      const guard = j.guard || {};
+      const guardLine = running && guard.available && guard.status !== "clear"
+        ? `<small style="color:${guard.status === "warn" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-guard="${this._escape(guard.status)}">${guard.status === "warn" ? "🌡️ tomorrow: " : "🌡️ "}${this._escape(guard.line)}</small>`
+        : "";
+      const needsBackup = status === "producing" && j.hasBottle && (sum.backup || []).some((b) => b.species === j.species && !b.backedUp) && (sum.canAddJar || (sum.idleJars || []).length);
+      const splitTick = running && s.restart?.available && j.hasBottle && (sum.canAddJar || (sum.idleJars || []).length)
+        ? `<label style="display:flex;gap:4px;align-items:center;font-size:11px;" title="The net is already in hand: the restart seeds B from the same crop, a backup out of phase"><input type="checkbox" data-cultures-split="${this._escape(j.id)}" ${needsBackup ? "checked" : ""}> seed B on restart</label>`
+        : "";
       const learned = j.learned || {};
       const learnedLines = running ? [
         learned.suggest?.feedIntervalH != null && learned.clearingH?.available
@@ -12598,6 +12690,7 @@ const rigSteps = [
         running && (s.waterChange?.available || s.waterChangeOnDemand) ? `<button class="${due.includes("waterChange") ? "primary" : "secondary"} compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? `On a sign — drift, any ammonia, cloudy water: ${this._escape(String(j.waterChangeGuide?.totalMl || 0))} ml out, fresh in` : "The scheduled change"}">Water changed</button>` : "",
         status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a backup out of phase, so a crash never zeroes you">Split into B</button>` : "",
         running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${this._escape(j.id)}">Crashed</button>` : "",
+        status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${this._escape(j.id)}" title="A picture of this jar's story — species, age, generation, the restart ring, the last 14 days of water">Share card</button>` : "",
       ].filter(Boolean).join("");
       return `
         <div class="stack" style="gap:4px;align-items:center;min-width:170px;max-width:260px;" data-culture="${this._escape(j.id)}">
@@ -12611,7 +12704,10 @@ const rigSteps = [
           ${risk}
           ${guide}
           ${learnedLines}
+          ${lineageLine}
+          ${guardLine}
           ${signs}
+          ${splitTick}
           ${tempLine}
           <div class="button-row" style="flex-wrap:wrap;justify-content:center;">${buttons}</div>
         </div>`;
@@ -17338,6 +17434,9 @@ const rigSteps = [
           push("cultures-next", "Cultures", nh.status === "now" ? "Harvest the cone now" : `Harvest the cone in ~${nh.hoursUntil} h`,
             nh.driver === "empty" ? "The bottle is empty." : nh.driver === "freshness" ? "The bottle is about to go stale." : nh.driver === "depletion" ? "The bottle is about to run dry." : "Its own clock says so.", "warning");
         }
+        (sum.backup || []).filter((b) => b.guard?.status === "warn").forEach((b) =>
+          push(`cultures-guard-${b.species}`, "Cultures", `Heat ahead for the ${b.speciesName.toLowerCase()}`,
+            `${b.guard.line}. Heat kills a culture through oxygen and ammonia, not the animal.`, "warning"));
         if (sum.phytoDose?.clock?.due) push("cultures-phyto", "Cultures", "Phyto dose due", `${sum.phytoDose.doseMl ?? ""} ml into the tank at dusk, skimmer off an hour.`, "warning");
         const cysts = this._nps?.summary?.hatchery?.cysts || {};
         if (cysts.available && cysts.status !== "fresh") {
