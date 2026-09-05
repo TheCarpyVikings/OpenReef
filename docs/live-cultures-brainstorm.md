@@ -243,13 +243,17 @@ maintenance engine (daily tick is fine — no 20-minute windows here). Card copy
   Culture settings (jars, species, feed bottle, cadence overrides, temp sensor, bottle); "Sync culture
   reminders" seeds per-jar tasks anchored on the jars' real stamps; Pulse insight lines (due chores,
   heat line, stale bottle).
-- **Left for later**: removing a jar leaves its maintenance tasks behind (delete them by hand or re-sync);
-  no demo-stage data for the Cultures tab; brackish mode UI (engine already computes the cut); the union
-  disc; egg-ratio capture; continuous reactor (shelved).
+- **Left for later** *(audited against the code 2026-09-06)*: removing a jar leaves its maintenance
+  tasks behind — **done 0.7.125** (the panel deletes every `culture_<id>_*` task and completion in the
+  same save); no demo-stage data for the Cultures tab — **still open** (the rig's play-the-stages
+  preview is the only staged view); brackish mode UI — **done 0.7.125** (per-jar salinity with the
+  1.020 recommendation, the jug shows the RODI cut); the union disc — **hardware, no code owed** (the
+  drawing already labels the 50 µm net); egg-ratio capture — **done 0.7.126**; continuous reactor —
+  shelved (hardware track). The open remainder of V2 is listed in §8.12.
 
 ---
 
-## 8. V2 — the culture joins the rig (2026-09-05) · STATUS: brainstorm, awaiting Reece's answers (§8.10)
+## 8. V2 — the culture joins the rig (2026-09-05) · STATUS: RELEASED 0.7.125–0.7.129 (2026-09-05) · what stayed open is in §8.12
 
 v1 (0.7.117) shipped a generic jar model with presets taken from a snippet-level sweep. V2 starts
 from three things that changed on 2026-09-04: Reece's Reefphyto order landed (invoice 55330), the
@@ -329,7 +333,7 @@ needs floor and surface area — **a cone is the wrong vessel for pods**; a flat
 | waterChange | 0 | 0 (the harvest is the change) | 35 % / 21 d | **harvest volume replaced each harvest + 50 % on a sign** (drift, ammonia, cloudy) | Reefphyto copepod guide |
 | splitMinAgeDays | 10 | **14** — the split rides the first restart | 21 | **35**, gated on "visibly dense" | §8.8 |
 | sieveUm | 53 | **50** (the net) | 53 | 50 all stages · 300 adults only | product page |
-| bottleShelfDays | 3 | **5** viability (7 fed) | 0 | **3** optional (max 7) | Reefphyto, Reed *(snippet)* |
+| bottleShelfDays | 3 | **5** viability (7 fed) | 0 | **3** optional (max 7) — *built as 0: a pod harvest goes straight to the tank, no bottle* | Reefphyto, Reed *(snippet)* |
 | enrich (new) | — | algae, 1–5 drops per portion, soakH **6** (2–12), rinse; boost warm **8 h**, cold **24 h** | — | not enriched | FAO §3.6, product page |
 
 ### 8.3 The method — rotifers in the cone, pods in the tub
@@ -422,6 +426,11 @@ feedHot}], tub: {name, tintFill, stroke, airOn, harvestHot} | null, jug: {harves
 ppt}, enrich: {pct} | null, bottle: {ml, pct, status}, caption }`. Viewbox 940 × 760; cones use the
 hatch-cone geometry pinned to y = 334 so the air manifold lines up; tub at (560, 560, 200 × 90).
 
+*As built (0.7.125):* `rig` = `{stage, caption, cones, tub, jug, bottle}` — no `enrich` key and no
+beaker in the drawing; the soak has its own tile beside the rig, and the drawing's only nod to it is
+the "(or enrich this crop first)" caption. `jug` carries `purgeMl` and `sieveUm` as well. A cone is
+drawn dashed only when its jar is configured and unseeded; a one-cone rack shows no ghost B (§8.12).
+
 ### 8.5 The culture journal and the learned cadences
 
 **Journal rows** (per jar, newest first, the hatch journal's honesty): `event` ∈ seeded / fed /
@@ -456,12 +465,13 @@ never a score.
 
 - **Feeding hub compact card** (`_culturesPanel(compact)` beside `_hatcheryPanel(compact)`): cone
   tint dot + "harvest due", bottle "N ml · fresh", tub "day 19 of 28", one "Open Cultures →".
-- **Consumables shelf:** four Reefphyto presets in `nps.py` PRODUCT_PRESETS — *Reef Juice* (phyto,
+- **Consumables shelf:** four Reefphyto presets in `nps.py` PRODUCT_LIBRARY — *Reef Juice* (phyto,
   250 ml, 90 d, refrigerated, stir daily), *Rotifer Feed Concentrate* (phyto, 50 ml, 90 d), *Rotifer
   & Artemia Enrichment* (phyto, 100 ml, 90 d — the hatchery's `enrichment.productId` and the jar's
   `enrich.productId` point at the same bottle), *Copepod Feed* (phyto, 30/50 ml). Jar feeds and the
   soak debit the shelf exactly as the hatchery does; the runway line says "concentrate: ~5 weeks at
-  your rate".
+  your rate" *(built as the shelf card's generic days-left — there is no concentrate line on the
+  Cultures tab)*.
 - **The eggs get a stamp:** `hatchery.cysts.openedAt` + the 3–4 week fridge window → a Pulse line,
   nothing more.
 - **Reef Juice on the reminder engine:** a "Dose Reef Juice" custom task, cadence 2–3 d, default dose
@@ -499,6 +509,27 @@ New/changed WS: `cultures_log` accepts `sign`, `egg_ratio`; `cultures_enrich {ja
 (`cultures.py`): `clearing_samples`, `learned_cadence`, `risk_line`, `next_harvest`, `restart_signal`,
 `bottle_boost_state` — pure, tested in `test_cultures.py`; panel cases in `test_panel_cultures.mjs`
 (rig svg per stage, journal rows, Apply chips, compact card, Pulse boost line).
+
+**As built (0.7.125–0.7.129, audited against the code 2026-09-06) — where the shipped shape differs
+from the plan above:**
+- The enrichment is ONE shared block, `nps.cultures.enrichment {productId (blank = the hatchery's
+  bottle), drops, soakH 2–12, boostWarmH, boostColdH, state {startedAt, portionMl, jarId}}` — not a
+  per-jar `enrich`; `state` is guarded.
+- `learned` is NOT stored: `cultures.learned_cadences` computes the rolling three from the journal on
+  every summary, and the Apply chip (`cultures_apply_learned {jar_id, field}`) is the only write. There
+  is no `state.riskAt` (the risk line is computed) and no `bottle.refrigeratedAt` (the cultures bottle
+  is always in the fridge); the bottle carries `enrichedAt`, `lastLoadEnriched`, `history[:30]`.
+- No `cultures_enrich` WS: `cultures_log {enrich: true}` sends the crop to the soak and
+  `cultures_enrich_done {bottled}` ends it. No `cultures_remove_jar` WS: the panel removes the jar and
+  its `culture_<id>_*` tasks and completions in the same `save_config`.
+- Engine names: `learned_cadences`, `bottle_boost`, `soak_state`, `next_harvest`, `heat_guard`,
+  `stagger_advice`, `tint_strip`, `continuity_days`; the restart reason (cap / sign / slow) lives
+  inside `culture_state` rather than a separate `restart_signal`.
+- Added beyond the plan: per-jar `vesselKind` + `purgeMl` (settings-owned), `state.generation`,
+  `cultures.continuity{species:{since}}` + `cultures.guard{notified}` (guarded), `hatchery.cysts.openedAt`
+  (guarded), the phone actions `OPENREEF_CULTURE_{HARVEST|FED|RESTARTED|LATER}:<jar>` and
+  `OPENREEF_HATCH_LOADED:<vessel>` handled by the same cores the tab's buttons call, and a source-level
+  test that every `websocket_*` handler is registered (three Stage B–C handlers were not until 0.7.129).
 
 ### 8.8 Suggestions — what would make it the go-to system (ranked)
 
@@ -557,18 +588,21 @@ is the #1 crash cause; a pump makes it automatic), and any volume leaderboard.
 
 ### 8.9 Staged build
 
-- **A — the numbers and the rig (0.7.125):** preset table §8.2 (incl. `vesselKind`), Reefphyto
+- **A — the numbers and the rig (0.7.125 · RELEASED 2026-09-05, 3f23125):** preset table §8.2 (incl. `vesselKind`), Reefphyto
   presets on the shelf, `_culturesRigSvg` + play-the-stages, the arrival walkthrough, orphan-task
   cleanup, 50 µm. Tests for every preset change.
-- **B — the journal that learns (0.7.126):** sign/egg-ratio/temp on the log, clearing clock, first
+- **B — the journal that learns (0.7.126 · RELEASED 2026-09-05, 7a81461):** sign/egg-ratio/temp on the log, clearing clock, first
   harvest and run-length learning with Apply chips, restart-on-a-sign, harvest debt/overfeed refusal,
   the risk line, the one-question notification.
-- **C — the DHA step and the tank (0.7.127):** rotifer enrichment soak on the shared bottle, the
+- **C — the DHA step and the tank (0.7.127 · RELEASED 2026-09-05, afc622e; the Reef Juice pieces moved to the shelf in 0.7.129):** rotifer enrichment soak on the shared bottle, the
   bottle's boost clock, hand-feed → NPS ledger, next-harvest suggestion, Reef Juice reminder + feed
   plan foods, the eggs' opened stamp, compact card + Pulse lines.
-- **D — never zero and the guard (0.7.128):** split rides the restart, lineage/stagger, heatwave
+- **D — never zero and the guard (0.7.128 · RELEASED 2026-09-05, 5a9eeae, tag v0.7.128):** split rides the restart, lineage/stagger, heatwave
   guard on the cooling forecast, continuity days, culture card.
-- **Later arcs:** culture doctor via Lagertha, demand-driven sizing, camera tint, seed swap.
+- **0.7.129 (RELEASED 2026-09-05, 2e0dd39, tag v0.7.129):** Reef Juice out of the cultures, onto the
+  shelf's hand-dose plan — the addendum under §8.11.
+- **Later arcs:** culture doctor via Lagertha, demand-driven sizing, camera tint, seed swap — none
+  started; the audited remainder is §8.12.
 
 ### 8.10 The grill — answer these and A starts
 
@@ -639,3 +673,38 @@ A 0.7.128 config migrates once in the NPS normaliser (plan fields onto the produ
 `cultures_enrich_done` and `nps_cysts_opened` were never registered in `async_setup_entry` (the
 fake HA's lenient stub hid it) — registered now, with a source-level test that every
 `websocket_*` handler is registered.
+
+### 8.12 What stayed open — audited against the code 2026-09-06
+
+Everything §8.9 scheduled is released (0.7.125–0.7.129; `tests/test_cultures.py` 55/55,
+`tests/test_panel_cultures.mjs` 23/23). This is the honest remainder, checked line by line against
+`cultures.py`, `__init__.py` and the panel.
+
+**Locked answers only partly delivered (§8.11):**
+- **#6 purge in the journal** — the cone's `purgeMl` setting exists (default 50, 0–500) and the rig
+  caption reads it, but no journal row records the purge, so the learned run length cannot yet say
+  whether more helps.
+- **#7 "B greyed until it exists"** — a cone is drawn dashed only when its jar is configured and
+  unseeded; a one-cone rack shows no ghost B on the manifold.
+- **#9 actionable pushes on both tabs** — the hatch-ready push (Hatched & loaded / Later) and the
+  cultures one-question push carry buttons; the hatchery's enrichment-soak notices and the daily
+  maintenance digest still go out as plain `notify`. The heat-guard push goes through the helper
+  with no buttons (by design — there is nothing to tap).
+- **#10 per-rack sensor for the guard** — `cultures.tempEntity` (falling back to the hatchery's
+  sensor) drives today's heat line, but the day-ahead `heat_guard` reads only the cooling headroom's
+  projection, with no rack offset.
+- **§8.8 #7 starter acclimation maths** — the arrival walkthrough says "add cone water in steps"
+  but does not compute the ±5 ppt steps from the starter's salinity to the cone's.
+- **Research item 7** — Darren's answer on the enrichment window (2–4 h vs 6–12 h) is still open;
+  `soakH` defaults to 6 (2–12) until then.
+
+**Never built (the "later arcs", untouched):** culture doctor via Lagertha (§8.8 #12); demand-driven
+sizing (#13 — `yield_ml_per_day` and the bottle's depletion driver exist, "when a second cone is
+worth it" does not); camera tint and the 1 ml count (#14); seed swap and benchmarking (#15);
+scan-the-product (#8, second half); demo-stage data for the Cultures tab (§7.1 — the rig's
+play-the-stages preview is the only staged view); the continuous reactor (shelved, hardware track).
+The union disc is a purchase, not code.
+
+**Unverified on real HA:** the companion-app action buttons, the heat guard against the live
+cooling projection, and the culture-card share from the iPad. That soak is the next step, not more
+code.
