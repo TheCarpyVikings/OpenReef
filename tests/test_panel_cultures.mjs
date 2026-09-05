@@ -117,7 +117,13 @@ function summaryFixture(jars) {
     enabled: true, jars: list, dueCount: list.reduce((n, j) => n + (j.due || []).length, 0),
     idleJars: list.filter((j) => j.state.status === "none" || j.state.status === "crashed").map((j) => j.id),
     canAddJar: list.length < 4,
-    bottle: { status: "fresh", remainingMl: 400, hoursLeft: 62, filledAt: iso(10), volumeMl: 1000, doseMl: 20, shelfDays: 5 },
+    bottle: { status: "fresh", remainingMl: 400, hoursLeft: 62, filledAt: iso(10), volumeMl: 1000, doseMl: 20, shelfDays: 5,
+              enriched: false, boost: { status: "none", hoursLeft: null }, usageMlDay: null, history: [] },
+    enrichment: { productId: "", productName: "Rotifer & Artemia Enrichment", drops: 3, soakH: 6, boostWarmH: 8, boostColdH: 24,
+                  soak: { status: "none", percent: null, hoursLeft: null, hoursElapsed: null }, portionMl: 0, jarId: "", jarName: null },
+    nextHarvest: { status: "wait", hoursUntil: 14, driver: "depletion" },
+    phytoDose: { productId: "", productName: null, cadenceDays: 1, stocking: "medium", doseMl: 2.9,
+                 guide: { available: true, ml: 2.9, stocking: "medium", perLitres: 18 }, lastDosedAt: "", clock: { available: false, due: false } },
     tempC: 23.5,
     rig: rigFixture(list),
     species: [
@@ -490,6 +496,91 @@ test("the journal shows signs, egg counts and the room, and the Pulse carries th
     const cards = panel._pulseInsightCards();
     const titles = cards.map((c) => `${c.kicker}: ${c.title}`).join(" | ");
     assert(titles.includes("Cultures: Rotifers A: foam on the surface since the last restart"), `risk card missing: ${titles}`);
+  } finally { restore(); }
+});
+
+
+test("the DHA step: the enrich tick, the soak tile, the boost line and the next-harvest line", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    let panel = await culturesPanel();
+    let html = panel._culturesTab();
+    assert(html.includes('data-cultures-enrich="c1"') && html.includes("enrich this crop"), "the enrich tick is missing on a producing rotifer jar");
+    assert(html.includes("harvest in ~14 h — before the bottle runs dry"), "the bottle card must carry the next-harvest line");
+    assert(!html.includes("data-culture-soak"), "no soak, no soak tile");
+    const soaking = summaryFixture();
+    soaking.enrichment = { ...soaking.enrichment, soak: { status: "soaking", percent: 40, hoursLeft: 3.6, hoursElapsed: 2.4 }, portionMl: 625, jarId: "c1", jarName: "Rotifers A" };
+    panel = await culturesPanel({}, soaking);
+    html = panel._culturesTab();
+    assert(html.includes("data-culture-soak") && html.includes("3 drops in · ~3.6 h to go") && html.includes("40%"), "the soaking tile is wrong");
+    assert(html.includes('data-cultures-enrich="c1" disabled'), "a second crop cannot join a running soak");
+    assert(html.includes('data-action="cultures-enrich-done"') && html.includes('data-action="cultures-enrich-plain"'), "soak buttons missing");
+    const done = summaryFixture();
+    done.enrichment = { ...done.enrichment, soak: { status: "done", percent: 100, hoursLeft: 6.5, hoursElapsed: 7.5 }, portionMl: 625, jarId: "c1", jarName: "Rotifers A" };
+    done.bottle = { ...done.bottle, enriched: true, boost: { status: "gutloaded", hoursLeft: 19.2 } };
+    done.nextHarvest = { status: "now", hoursUntil: 0, driver: "freshness" };
+    panel = await culturesPanel({}, done);
+    html = panel._culturesTab();
+    assert(html.includes("done — rinse on the net and bottle") && html.includes('class="primary compact-button" data-action="cultures-enrich-done"'), "a finished soak must lead with Rinsed & bottled");
+    assert(html.includes("gut-loaded · ~19.2 h of boost left") && html.includes("fridge · enriched"), "the boost line is missing on the bottle");
+    assert(html.includes("harvest now — before the bottle goes stale"), "the next-harvest line must escalate");
+    panel._culturesLoadSummary = async () => {};
+    const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
+    assert(titles.includes("Soak done — rinse and bottle the rotifers") && titles.includes("Harvest the cone now"), `Pulse lines missing: ${titles}`);
+    noPlaceholders(html, "soak done");
+  } finally { restore(); }
+});
+
+test("the tank's phyto: the panel, the dosed tap, the settings and the reminder", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    let panel = await culturesPanel();
+    let html = panel._culturesTab();
+    assert(html.includes("The tank's phyto") && html.includes("it is for the tank, never the jars"), "an unlinked phyto bottle must say where to link it");
+    const linked = summaryFixture();
+    linked.phytoDose = { productId: "rj", productName: "Reef Juice", cadenceDays: 1, stocking: "medium", doseMl: 2.9,
+      guide: { available: true, ml: 2.9, stocking: "medium", perLitres: 18 }, lastDosedAt: iso(30), clock: { available: true, due: true, hoursUntil: 0, hoursOverdue: 6 } };
+    const cfg = baseConfig();
+    cfg.nps.cultures.phytoDose = { productId: "rj", cadenceDays: 1, stocking: "medium", doseMl: 0, lastDosedAt: iso(30) };
+    cfg.consumables.products.rj = { name: "Reef Juice", bottleMl: 250, remainingMl: 200, history: [] };
+    panel = await culturesPanel(cfg, linked);
+    html = panel._culturesTab();
+    assert(html.includes("Reef Juice — <strong>2.9 ml</strong> (medium stocking: 1 ml per 18 L)") && html.includes("every day"), "the phyto line is wrong");
+    assert(html.includes("dose due") && html.includes('class="primary compact-button" data-action="cultures-phyto-dosed">Dosed 2.9 ml'), "the dosed tap must lead when due");
+    const settings = panel._culturesSettings();
+    assert(settings.includes('data-scope="nps-culture-phyto" data-field="productId"') && settings.includes('data-field="stocking"'), "phyto settings missing");
+    assert(settings.includes('data-scope="nps-culture-enrich" data-field="drops"') && settings.includes("The DHA step"), "enrichment settings missing");
+    panel._culturesSeedReminders();
+    const tasks = panel._config.maintenance.tasks;
+    assert(tasks.culture_phyto_dose && tasks.culture_phyto_dose.cadenceDays === 1, "the phyto reminder must be seeded on the cadence");
+    assert(panel._config.maintenance.completions.culture_phyto_dose?.[0]?.timestamp === iso(30), "anchored on the last dose");
+    panel._config.nps.cultures.phytoDose.cadenceDays = 0;
+    panel._culturesSeedReminders();
+    assert(!panel._config.maintenance.tasks.culture_phyto_dose, "a zero cadence removes the reminder");
+    panel._culturesLoadSummary = async () => {};
+    const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
+    assert(titles.includes("Cultures: Phyto dose due"), `phyto Pulse line missing: ${titles}`);
+    noPlaceholders(html, "phyto panel");
+  } finally { restore(); }
+});
+
+test("the journal merges the bottle's rows, the hub card reads the bottle, the hatchery stamps the cysts", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const summary = summaryFixture();
+    summary.bottle = { ...summary.bottle, history: [{ event: "fed_tank", at: iso(1), ml: 20 }, { event: "enriched", at: iso(5), ml: 625 }] };
+    const panel = await culturesPanel({}, summary);
+    const html = panel._culturesTab();
+    assert(html.includes("fed to the tank") && html.includes("enriched &amp; bottled") && html.includes(">Bottle<"), "the bottle's rows must show in the journal");
+    const hub = panel._hubCards ? panel._hubCards() : panel._feedingHub?.() || "";
+    const card = typeof hub === "string" ? hub : "";
+    if (card) assert(card.includes("bottle 400 ml") && card.includes("harvest in ~14 h"), "the hub card must read the bottle and the next harvest");
+    panel._nps.summary = { hatchery: { cysts: { available: true, openedAt: iso(22 * 24), days: 22, status: "aging" } } };
+    const hs = panel._hatcherySettings();
+    assert(hs.includes("opened 22 days ago") && hs.includes('data-action="nps-cysts-opened"'), "the cysts line is missing from hatchery settings");
+    panel._culturesLoadSummary = async () => {};
+    const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
+    assert(titles.includes("Brine hatchery: Cysts pouch opened 22 days ago"), `cysts Pulse line missing: ${titles}`);
   } finally { restore(); }
 });
 

@@ -37,6 +37,19 @@ SIGN_WORDS = {"foam": "foam on the surface", "milky": "milky water", "smell": "a
 LEARN_SAMPLES = 3          # rolling window, the hatch clock's contract
 SLOW_FACTOR = 1.5          # clearing this much slower than usual, twice running = tiring
 FEED_EVENTS: tuple[str, ...] = ("feed", "harvest", "seeded", "restart")
+# The DHA step (doc §8.3, Stage C): Reefphyto's algae enrichment, drops into a
+# portion of the crop, a short soak, then the fridge bottle runs a BOOST clock
+# on top of its viability clock — FAO: EFA constant ~7 h warm, 30 % DHA gone by
+# 12 h; the boost holds ~24 h cold (snippet-level, conservative).
+ENRICH_SOAK_H = 6.0
+ENRICH_DROPS = 3
+ENRICH_DROP_ML = 0.05
+BOOST_WARM_H = 8.0
+BOOST_COLD_H = 24.0
+STOCKINGS: tuple[str, ...] = ("light", "medium", "heavy")
+# Reefphyto's Reef Juice page: 1 ml per 27 / 18 / 9 L a day.
+PHYTO_L_PER_ML = {"light": 27.0, "medium": 18.0, "heavy": 9.0}
+BOTTLE_EVENTS: tuple[str, ...] = ("filled", "fed_tank", "enriched", "emptied")
 RIG_CONES_MAX = 4
 
 # Species presets. tempMin/MaxC = the productive band; tempHardMaxC = the
@@ -618,3 +631,101 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
     if watch:
         return {"level": "watch", "reason": "; ".join(watch)}
     return {"level": "ok", "reason": "steady — nothing to worry about"}
+
+
+# --------------------------------------------------------------------------- #
+# V2 Stage C — the DHA step and the tank (doc §8.3, §8.6)
+# --------------------------------------------------------------------------- #
+def soak_state(started_iso: Any, soak_h: Any, warm_h: Any, now: datetime) -> dict[str, Any]:
+    """Where the enrichment portion sits: ``none``, ``soaking`` (percent and
+    hours left), ``done`` (rinse and bottle — the warm boost window is
+    ticking) or ``fading`` (the warm window is spent; bottle it anyway, it is
+    still live food, just no longer enriched food)."""
+    started = _parse_iso(started_iso)
+    hours = _f(soak_h) if _f(soak_h) > 0 else ENRICH_SOAK_H
+    warm = _f(warm_h) if _f(warm_h) > 0 else BOOST_WARM_H
+    if started is None:
+        return {"status": "none", "percent": None, "hoursLeft": None, "hoursElapsed": None}
+    elapsed = max(0.0, (now - started).total_seconds() / 3600.0)
+    if elapsed < hours:
+        return {"status": "soaking", "percent": round(min(99.0, 100.0 * elapsed / hours)),
+                "hoursLeft": round(hours - elapsed, 1), "hoursElapsed": round(elapsed, 1)}
+    status = "done" if elapsed < hours + warm else "fading"
+    return {"status": status, "percent": 100, "hoursLeft": round(max(0.0, hours + warm - elapsed), 1),
+            "hoursElapsed": round(elapsed, 1)}
+
+
+def bottle_boost(bottle: dict[str, Any], cold_h: Any, now: datetime) -> dict[str, Any]:
+    """The gut-loaded window on the fridge bottle, counted from the END of the
+    soak (the hatchery's ``hatch_prime_state`` lesson): ``gutloaded`` while the
+    cold window holds, ``faded`` after — still live food, no longer enriched
+    food; ``none`` for an unenriched or empty bottle."""
+    if _f(bottle.get("remainingMl")) <= 0 or not bottle.get("lastLoadEnriched"):
+        return {"status": "none", "hoursLeft": None}
+    enriched = _parse_iso(bottle.get("enrichedAt"))
+    if enriched is None:
+        return {"status": "faded", "hoursLeft": 0.0}
+    cold = _f(cold_h) if _f(cold_h) > 0 else BOOST_COLD_H
+    left = cold - (now - enriched).total_seconds() / 3600.0
+    if left <= 0:
+        return {"status": "faded", "hoursLeft": 0.0}
+    return {"status": "gutloaded", "hoursLeft": round(left, 1)}
+
+
+def bottle_usage_ml_per_day(history: Any, now: datetime, window_days: float = 7.0) -> float | None:
+    """How fast the bottle is being fed out — ml a day over the recent window,
+    None until a feed has been logged (never a guess)."""
+    total = 0.0
+    oldest: datetime | None = None
+    for at, row in _chronological(history):
+        if row.get("event") != "fed_tank":
+            continue
+        age_days = (now - at).total_seconds() / 86400.0
+        if age_days < 0 or age_days > window_days:
+            continue
+        total += max(0.0, _f(row.get("ml")))
+        oldest = at if oldest is None or at < oldest else oldest
+    if oldest is None or total <= 0:
+        return None
+    return round(total / max(1.0, (now - oldest).total_seconds() / 86400.0), 1)
+
+
+def next_harvest(bottle_state: dict[str, Any], ml_per_day: Any, harvest_clock: Any,
+                 producing: bool) -> dict[str, Any]:
+    """When to harvest next — the daily-driver question, the hatch's
+    ``next_hatch_suggestion`` shape: before the bottle runs dry, before it
+    goes stale, or simply when the jar's own clock says so; whichever comes
+    first drives, and the copy names the driver."""
+    if not producing:
+        return {"status": "none", "hoursUntil": None, "driver": None}
+    status = str(bottle_state.get("status") or "empty")
+    clock = harvest_clock if isinstance(harvest_clock, dict) else {}
+    if status in ("empty", "stale"):
+        return {"status": "now", "hoursUntil": 0.0,
+                "driver": "empty" if status == "empty" else "freshness"}
+    candidates: list[tuple[float, str]] = []
+    left = bottle_state.get("hoursLeft")
+    if left is not None:
+        candidates.append((max(0.0, _f(left)), "freshness"))
+    rate = _f(ml_per_day)
+    if rate > 0:
+        candidates.append((max(0.0, _f(bottle_state.get("remainingMl")) / rate * 24.0), "depletion"))
+    if clock.get("available") and clock.get("at"):
+        candidates.append((0.0 if clock.get("due") else max(0.0, _f(clock.get("hoursUntil"))), "jar"))
+    if not candidates:
+        return {"status": "none", "hoursUntil": None, "driver": None}
+    hours, driver = min(candidates, key=lambda item: item[0])
+    if hours <= 0:
+        return {"status": "now", "hoursUntil": 0.0, "driver": driver}
+    return {"status": "wait", "hoursUntil": round(hours, 1), "driver": driver}
+
+
+def phyto_dose_guide(tank_l: Any, stocking: Any) -> dict[str, Any]:
+    """Reef Juice for the tank, from the product page's stocking bands."""
+    band = str(stocking or "medium")
+    if band not in PHYTO_L_PER_ML:
+        band = "medium"
+    litres = max(0.0, _f(tank_l))
+    per = PHYTO_L_PER_ML[band]
+    return {"available": litres > 0, "ml": round(litres / per, 1) if litres > 0 else None,
+            "stocking": band, "perLitres": per}

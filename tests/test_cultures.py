@@ -222,8 +222,11 @@ def test_stagger_days_between_siblings():
 # --------------------------------------------------------------------------- #
 def test_normalise_cultures_defaults_and_junk():
     out = integration._normalise_cultures(None)
-    assert out == {"enabled": False, "tempEntity": "", "jars": {},
-                   "bottle": {"volumeMl": 1000, "remainingMl": 0, "filledAt": "", "doseMl": 20}}
+    assert out["enabled"] is False and out["tempEntity"] == "" and out["jars"] == {}
+    assert {k: out["bottle"][k] for k in ("volumeMl", "remainingMl", "filledAt", "doseMl")} == {"volumeMl": 1000, "remainingMl": 0, "filledAt": "", "doseMl": 20}
+    assert out["bottle"]["history"] == [] and not out["bottle"]["lastLoadEnriched"]
+    assert out["enrichment"]["drops"] == 3 and out["enrichment"]["soakH"] == 6 and out["enrichment"]["state"]["startedAt"] == ""
+    assert out["phytoDose"] == {"productId": "", "cadenceDays": 1, "stocking": "medium", "doseMl": 0, "lastDosedAt": ""}
     out = integration._normalise_cultures({"enabled": 1, "jars": {
         "c1": {"name": "x" * 80, "species": "unicorn", "volumeL": 999, "cadence": {"harvestPct": 200},
                "state": {"lastTint": "purple", "startedAt": None}, "history": ["junk", {"event": "seeded"}]},
@@ -412,7 +415,10 @@ def test_ws_bottle_fed_and_empty():
     bottle["remainingMl"] = 50
     bottle["filledAt"] = _iso(REAL)
     run(integration.websocket_cultures_bottle(hass, conn, {"id": 3, "action": "empty"}))
-    assert _cultures(entry)["bottle"] == {"volumeMl": 1000, "remainingMl": 0, "filledAt": "", "doseMl": 20}
+    bottle = _cultures(entry)["bottle"]
+    assert {k: bottle[k] for k in ("volumeMl", "remainingMl", "filledAt", "doseMl")} == {"volumeMl": 1000, "remainingMl": 0, "filledAt": "", "doseMl": 20}
+    assert not bottle["lastLoadEnriched"] and bottle["enrichedAt"] == ""
+    assert [row["event"] for row in bottle["history"]] == ["emptied", "fed_tank", "fed_tank"], "the bottle keeps its own journal"
 
 
 def test_ws_summary_computes_everything_backend_side():
@@ -789,6 +795,153 @@ def test_actionable_push_and_the_phone_tap():
     run(integration._async_notification_action(hass, Ev("OPENREEF_CULTURE_FED:nope")))
     activity = entry.options[CONF_SETTINGS].get("activity") or []
     assert any("Phone tap ignored" in str(a.get("message", "")) for a in activity)
+
+
+
+# --------------------------------------------------------------------------- #
+# V2 Stage C (0.7.127): the DHA step, the boost clock, the tank
+# --------------------------------------------------------------------------- #
+def test_soak_and_boost_clocks():
+    assert cultures.soak_state("", 6, 8, NOW)["status"] == "none"
+    soaking = cultures.soak_state(_iso(NOW - timedelta(hours=2)), 6, 8, NOW)
+    assert soaking["status"] == "soaking" and soaking["percent"] == 33 and soaking["hoursLeft"] == 4.0
+    done = cultures.soak_state(_iso(NOW - timedelta(hours=7)), 6, 8, NOW)
+    assert done["status"] == "done" and done["hoursLeft"] == 7.0, "the warm boost window ticks from the soak's end"
+    assert cultures.soak_state(_iso(NOW - timedelta(hours=15)), 6, 8, NOW)["status"] == "fading"
+    bottle = {"remainingMl": 400, "lastLoadEnriched": True, "enrichedAt": _iso(NOW - timedelta(hours=20))}
+    assert cultures.bottle_boost(bottle, 24, NOW) == {"status": "gutloaded", "hoursLeft": 4.0}
+    bottle["enrichedAt"] = _iso(NOW - timedelta(hours=30))
+    assert cultures.bottle_boost(bottle, 24, NOW)["status"] == "faded"
+    assert cultures.bottle_boost({"remainingMl": 400, "lastLoadEnriched": False}, 24, NOW)["status"] == "none"
+    assert cultures.bottle_boost({"remainingMl": 0, "lastLoadEnriched": True, "enrichedAt": _iso(NOW)}, 24, NOW)["status"] == "none"
+    assert cultures.bottle_boost({"remainingMl": 10, "lastLoadEnriched": True, "enrichedAt": ""}, 24, NOW)["status"] == "faded", "fail-closed"
+
+
+def test_next_harvest_names_its_driver():
+    clock = {"available": True, "due": False, "at": _iso(NOW), "hoursUntil": 20.0}
+    fresh = {"status": "fresh", "remainingMl": 300, "hoursLeft": 60.0}
+    assert cultures.next_harvest(fresh, None, clock, False)["status"] == "none"
+    assert cultures.next_harvest({"status": "empty", "remainingMl": 0}, None, clock, True) == {"status": "now", "hoursUntil": 0.0, "driver": "empty"}
+    assert cultures.next_harvest({"status": "stale", "remainingMl": 100, "hoursLeft": 0}, None, clock, True)["driver"] == "freshness"
+    assert cultures.next_harvest(fresh, 600, clock, True) == {"status": "wait", "hoursUntil": 12.0, "driver": "depletion"}
+    assert cultures.next_harvest(fresh, 100, clock, True)["driver"] == "jar"
+    assert cultures.next_harvest({"status": "fresh", "remainingMl": 300, "hoursLeft": 5.0}, 100, clock, True)["driver"] == "freshness"
+    assert cultures.next_harvest(fresh, None, {**clock, "due": True}, True)["status"] == "now"
+    assert cultures.phyto_dose_guide(52, "medium") == {"available": True, "ml": 2.9, "stocking": "medium", "perLitres": 18.0}
+    assert cultures.phyto_dose_guide(0, "junk")["available"] is False and cultures.phyto_dose_guide(90, "heavy")["ml"] == 10.0
+    history = [{"event": "fed_tank", "at": _iso(NOW - timedelta(hours=2)), "ml": 20}, {"event": "fed_tank", "at": _iso(NOW - timedelta(hours=26)), "ml": 20},
+               {"event": "filled", "at": _iso(NOW - timedelta(hours=30)), "ml": 625}]
+    assert cultures.bottle_usage_ml_per_day(history, NOW) == 36.9 and cultures.bottle_usage_ml_per_day([], NOW) is None
+
+
+def test_ws_harvest_can_go_to_the_soak_and_then_the_bottle_carries_the_boost():
+    products = {"phyto": {"name": "Live phyto", "bottleMl": 500, "remainingMl": 300, "history": []},
+                "enrich": {"name": "Rotifer & Artemia Enrichment", "bottleMl": 100, "remainingMl": 50, "history": []}}
+    entry = _entry(jars={"c1": _jar(started_ago_days=10, lastHarvestAt=_iso(REAL - timedelta(hours=30)))}, products=products)
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["enrichment"] = {"productId": "enrich", "drops": 4, "soakH": 6}
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "harvested": True, "fed": True, "enrich": True}))
+    assert not conn.errors
+    cult = _cultures(entry)
+    assert cult["bottle"]["remainingMl"] == 0, "the crop went to the soak, not the bottle"
+    assert cult["enrichment"]["state"]["portionMl"] == 625 and cult["enrichment"]["state"]["jarId"] == "c1"
+    assert _config(entry)["consumables"]["products"]["enrich"]["remainingMl"] == 49.8, "four drops off the enrichment bottle"
+    run(integration.websocket_cultures_log(hass, conn, {"id": 2, "jar_id": "c1", "harvested": True, "enrich": True}))
+    assert conn.errors[-1].code == "enrich_busy"
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+    p = conn.results[-1].payload
+    assert p["enrichment"]["soak"]["status"] == "soaking" and p["enrichment"]["jarName"] == "Rotifers A"
+    assert p["enrichment"]["productName"] == "Rotifer & Artemia Enrichment"
+    assert p["nextHarvest"]["status"] == "now" and p["nextHarvest"]["driver"] == "empty"
+    run(integration.websocket_cultures_enrich_done(hass, conn, {"id": 4}))
+    cult = _cultures(entry)
+    assert cult["bottle"]["remainingMl"] == 625 and cult["bottle"]["lastLoadEnriched"] and cult["bottle"]["enrichedAt"]
+    assert cult["bottle"]["history"][0]["event"] == "enriched" and cult["enrichment"]["state"]["startedAt"] == ""
+    assert cult["jars"]["c1"]["history"][0]["event"] == "enriched"
+    run(integration.websocket_cultures_enrich_done(hass, conn, {"id": 5}))
+    assert conn.errors[-1].code == "no_soak"
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 6}))
+    p = conn.results[-1].payload
+    assert p["bottle"]["boost"]["status"] == "gutloaded" and p["bottle"]["enriched"]
+    assert p["nextHarvest"]["status"] == "wait" and p["nextHarvest"]["driver"] in ("depletion", "jar", "freshness")
+    # A plain harvest on top keeps the boost flag honest: the LAST load was not enriched.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 7, "jar_id": "c1", "harvested": True}))
+    assert _cultures(entry)["bottle"]["remainingMl"] == 1000 and _cultures(entry)["bottle"]["lastLoadEnriched"], "a top-up on an enriched bottle keeps the flag (the older batch rules)"
+
+
+def test_ws_enrich_plain_and_bottle_feed_log_the_tank():
+    entry = _entry(jars={"c1": _jar(started_ago_days=10, lastHarvestAt=_iso(REAL - timedelta(hours=30)))},
+                   maintenance={"tasks": {"brine_hand_feed": {"label": "Hand-feed the tank"}}, "completions": {}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "harvested": True, "enrich": True}))
+    run(integration.websocket_cultures_enrich_done(hass, conn, {"id": 2, "bottled": False}))
+    cult = _cultures(entry)
+    assert cult["bottle"]["remainingMl"] == 625 and not cult["bottle"]["lastLoadEnriched"]
+    assert cult["bottle"]["history"][0]["event"] == "filled" and cult["jars"]["c1"]["history"][0]["event"] == "bottled"
+    run(integration.websocket_cultures_bottle(hass, conn, {"id": 3, "action": "fed", "ml": 25}))
+    cult = _cultures(entry)
+    assert cult["bottle"]["remainingMl"] == 600 and cult["bottle"]["history"][0] ["event"] == "fed_tank"
+    comps = entry.options[CONF_SETTINGS]["maintenance"]["completions"]["brine_hand_feed"]
+    assert comps and "rotifers from the bottle" in comps[0]["notes"], "feeding rotifers IS hand-feeding the tank"
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 4}))
+    assert conn.results[-1].payload["bottle"]["usageMlDay"] == 25.0
+
+
+def test_ws_phyto_dosed_and_cysts_opened():
+    products = {"rj": {"name": "Reef Juice", "bottleMl": 250, "remainingMl": 200, "history": []}}
+    entry = _entry(jars={}, products=products,
+                   maintenance={"tasks": {"culture_phyto_dose": {"label": "Dose phyto", "cadenceDays": 1}}, "completions": {}})
+    cfg = _config(entry)
+    cfg["tank"] = {**(cfg.get("tank") or {}), "volumeLitres": 52}
+    cfg["nps"]["cultures"]["phytoDose"] = {"productId": "rj", "cadenceDays": 1, "stocking": "medium"}
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    ph = conn.results[-1].payload["phytoDose"]
+    assert ph["doseMl"] == 2.9 and ph["guide"]["perLitres"] == 18.0 and ph["clock"]["due"], "never dosed = due"
+    run(integration.websocket_cultures_phyto_dosed(hass, conn, {"id": 2}))
+    assert not conn.errors
+    cfg = _config(entry)
+    assert cfg["consumables"]["products"]["rj"]["remainingMl"] == 197.1
+    assert cfg["nps"]["cultures"]["phytoDose"]["lastDosedAt"]
+    assert cfg["maintenance"]["completions"]["culture_phyto_dose"][0]["source"] == "cultures"
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+    ph = conn.results[-1].payload["phytoDose"]
+    assert not ph["clock"]["due"] and abs(ph["clock"]["hoursUntil"] - 24.0) < 0.2
+    run(integration.websocket_nps_cysts_opened(hass, conn, {"id": 4}))
+    assert _config(entry)["nps"]["hatchery"]["cysts"]["openedAt"]
+    payload = integration._nps_cysts_payload({"cysts": {"openedAt": _iso(REAL - timedelta(days=22))}}, REAL)
+    assert payload["status"] == "aging" and payload["days"] == 22
+    assert integration._nps_cysts_payload({}, REAL)["available"] is False
+
+
+def test_stage_c_runtime_survives_a_stale_save():
+    stored = {"nps": {"cultures": {
+        "enabled": True, "jars": {},
+        "bottle": {"volumeMl": 1000, "remainingMl": 625, "filledAt": _iso(REAL), "doseMl": 20,
+                   "enrichedAt": _iso(REAL), "lastLoadEnriched": True,
+                   "history": [{"event": "enriched", "at": _iso(REAL), "ml": 625}]},
+        "enrichment": {"productId": "e", "drops": 3, "soakH": 6, "state": {"startedAt": _iso(REAL), "portionMl": 300, "jarId": "c1"}},
+        "phytoDose": {"productId": "rj", "cadenceDays": 1, "stocking": "medium", "doseMl": 0, "lastDosedAt": _iso(REAL)},
+    }, "hatchery": {"cysts": {"openedAt": _iso(REAL)}, "vessels": {}, "reservoir": {}, "fridgeBottle": {}, "enrichment": {"state": {}}}}}
+    incoming = copy.deepcopy(stored)
+    cult = incoming["nps"]["cultures"]
+    cult["bottle"] = {"volumeMl": 2000, "remainingMl": 0, "filledAt": "", "doseMl": 30, "enrichedAt": "", "lastLoadEnriched": False, "history": []}
+    cult["enrichment"] = {"productId": "other", "drops": 5, "soakH": 4, "state": {"startedAt": "", "portionMl": 0, "jarId": ""}}
+    cult["phytoDose"] = {"productId": "rj", "cadenceDays": 2, "stocking": "heavy", "doseMl": 0, "lastDosedAt": ""}
+    incoming["nps"]["hatchery"]["cysts"] = {"openedAt": ""}
+    integration._nps_preserve_runtime(stored, incoming)
+    cult = incoming["nps"]["cultures"]
+    assert cult["bottle"]["remainingMl"] == 625 and cult["bottle"]["lastLoadEnriched"] and cult["bottle"]["history"]
+    assert cult["bottle"]["volumeMl"] == 2000 and cult["bottle"]["doseMl"] == 30, "the keeper's settings stay"
+    assert cult["enrichment"]["state"]["portionMl"] == 300 and cult["enrichment"]["drops"] == 5
+    assert cult["phytoDose"]["lastDosedAt"] and cult["phytoDose"]["cadenceDays"] == 2 and cult["phytoDose"]["stocking"] == "heavy"
+    assert incoming["nps"]["hatchery"]["cysts"]["openedAt"]
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

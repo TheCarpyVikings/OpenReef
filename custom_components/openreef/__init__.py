@@ -1104,6 +1104,19 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             "history": history[:60],
         }
     raw_bottle = raw.get("bottle") if isinstance(raw.get("bottle"), dict) else {}
+    bottle_history = []
+    for item in (raw_bottle.get("history") if isinstance(raw_bottle.get("history"), list) else [])[:30]:
+        if not isinstance(item, dict) or str(item.get("event")) not in cultures_engine.BOTTLE_EVENTS:
+            continue
+        bottle_history.append({"event": str(item.get("event")), "at": _awc_str(item.get("at"), 40),
+                               "ml": _awc_num(item.get("ml"), 0, 0, 20000)})
+    # The DHA step (Stage C): drops into a portion of the crop, a short soak,
+    # then the bottle carries a boost clock. Blank productId = the hatchery's
+    # enrichment bottle (one Reefphyto bottle serves both).
+    raw_enrich = raw.get("enrichment") if isinstance(raw.get("enrichment"), dict) else {}
+    raw_enrich_state = raw_enrich.get("state") if isinstance(raw_enrich.get("state"), dict) else {}
+    raw_phyto = raw.get("phytoDose") if isinstance(raw.get("phytoDose"), dict) else {}
+    stocking = str(raw_phyto.get("stocking") or "medium")
     return {
         "enabled": bool(raw.get("enabled", False)),
         "tempEntity": _awc_str(raw.get("tempEntity"), 80),
@@ -1113,6 +1126,30 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             "remainingMl": _awc_num(raw_bottle.get("remainingMl"), 0, 0, 20000),
             "filledAt": _awc_str(raw_bottle.get("filledAt"), 40),
             "doseMl": _awc_num(raw_bottle.get("doseMl"), 20, 0.5, 1000),
+            "enrichedAt": _awc_str(raw_bottle.get("enrichedAt"), 40),
+            "lastLoadEnriched": bool(raw_bottle.get("lastLoadEnriched", False)),
+            "history": bottle_history,
+        },
+        "enrichment": {
+            "productId": _awc_str(raw_enrich.get("productId"), 40),
+            "drops": _awc_num(raw_enrich.get("drops"), cultures_engine.ENRICH_DROPS, 1, 10),
+            "soakH": _awc_num(raw_enrich.get("soakH"), cultures_engine.ENRICH_SOAK_H, 2, 12),
+            "boostWarmH": _awc_num(raw_enrich.get("boostWarmH"), cultures_engine.BOOST_WARM_H, 1, 48),
+            "boostColdH": _awc_num(raw_enrich.get("boostColdH"), cultures_engine.BOOST_COLD_H, 1, 96),
+            "state": {
+                "startedAt": _awc_str(raw_enrich_state.get("startedAt"), 40),
+                "portionMl": _awc_num(raw_enrich_state.get("portionMl"), 0, 0, 20000),
+                "jarId": _awc_str(raw_enrich_state.get("jarId"), 24),
+            },
+        },
+        # Reef Juice for the TANK (never the jars): a reminder on the keeper's
+        # cadence and a dose from the stocking band × the Profile tank volume.
+        "phytoDose": {
+            "productId": _awc_str(raw_phyto.get("productId"), 40),
+            "cadenceDays": _awc_num(raw_phyto.get("cadenceDays"), 1, 0, 14),
+            "stocking": stocking if stocking in cultures_engine.STOCKINGS else "medium",
+            "doseMl": _awc_num(raw_phyto.get("doseMl"), 0, 0, 500),
+            "lastDosedAt": _awc_str(raw_phyto.get("lastDosedAt"), 40),
         },
     }
 
@@ -1270,6 +1307,9 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
             "feedsPerDay": _awc_num(raw_hand.get("feedsPerDay"), 2, 1, 24),
         },
         "tempEntity": _awc_str(raw.get("tempEntity"), 80),
+        # The cysts pouch (doc §8.1): opened when, so the Pulse can say when the
+        # fridge weeks are running out (hatch rates fall after 3–4 weeks).
+        "cysts": {"openedAt": _awc_str(((raw.get("cysts") or {}) if isinstance(raw.get("cysts"), dict) else {}).get("openedAt"), 40)},
     }
 
 
@@ -7620,6 +7660,9 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                     # The feeding bottle is wholly server-written (0.7.116).
                     if isinstance(src_hatchery.get("fridgeBottle"), dict):
                         dst_hatchery["fridgeBottle"] = deepcopy(src_hatchery["fridgeBottle"])
+                    # The cysts pouch stamp is a tap, not a setting (Stage C).
+                    if isinstance(src_hatchery.get("cysts"), dict):
+                        dst_hatchery["cysts"] = deepcopy(src_hatchery["cysts"])
                     src_enrich = src_hatchery.get("enrichment")
                     dst_enrich = dst_hatchery.get("enrichment")
                     if (isinstance(src_enrich, dict) and isinstance(dst_enrich, dict)
@@ -7652,7 +7695,17 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                                 dst_jar["history"] = deepcopy(src_jar["history"])
                     _copy_runtime_fields(
                         src_cultures.get("bottle"), dst_cultures.get("bottle"),
-                        ("remainingMl", "filledAt"))
+                        ("remainingMl", "filledAt", "enrichedAt", "lastLoadEnriched", "history"))
+                    # The soak in progress and the phyto stamp are server-written.
+                    src_enrich = src_cultures.get("enrichment")
+                    dst_enrich = dst_cultures.get("enrichment")
+                    if isinstance(src_enrich, dict) and isinstance(src_enrich.get("state"), dict):
+                        if not isinstance(dst_enrich, dict):
+                            dst_cultures["enrichment"] = deepcopy(src_enrich)
+                        else:
+                            dst_enrich["state"] = deepcopy(src_enrich["state"])
+                    _copy_runtime_fields(
+                        src_cultures.get("phytoDose"), dst_cultures.get("phytoDose"), ("lastDosedAt",))
 
     stored_products = ((stored.get("consumables") or {}).get("products")
                        if isinstance(stored.get("consumables"), dict) else None)
@@ -13493,6 +13546,17 @@ def _nps_hatch_clock_follow(previous: Any, incoming: Any) -> None:
     _nps_hatch_retime_reminders(incoming, new_h, now)
 
 
+def _nps_cysts_payload(hatchery: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The pouch's fridge weeks: opened when, days since, and the 3–4 week
+    line after which hatch rates fall (doc §8.1)."""
+    opened = _parse_datetime(((hatchery.get("cysts") or {}) if isinstance(hatchery.get("cysts"), dict) else {}).get("openedAt"))
+    if opened is None:
+        return {"available": False, "openedAt": "", "days": None, "status": "unknown"}
+    days = max(0.0, (now - opened).total_seconds() / 86400.0)
+    return {"available": True, "openedAt": opened.isoformat(), "days": round(days),
+            "status": "old" if days >= 28 else "aging" if days >= 21 else "fresh"}
+
+
 def _nps_hatchery_v2(config: dict[str, Any]) -> dict[str, Any]:
     """Handlers may run against a config saved by an older version — run the
     hatchery block through the v2 normaliser (migration included) and write it
@@ -14219,6 +14283,48 @@ def _cultures_history(jar: dict[str, Any], event: str, now: datetime, **fields: 
     del history[60:]
 
 
+def _cultures_bottle_history(bottle: dict[str, Any], event: str, now: datetime, ml: float) -> None:
+    history = bottle.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        bottle["history"] = history
+    history.insert(0, {"event": event, "at": now.isoformat(), "ml": round(ml, 1)})
+    del history[30:]
+
+
+def _cultures_enrich_product(config: dict[str, Any], cultures: dict[str, Any]) -> dict[str, Any] | None:
+    """The enrichment bottle: the cultures' own link, else the hatchery's —
+    one Reefphyto bottle serves the brine soak and the rotifer soak."""
+    products = (config.get("consumables") or {}).get("products") or {}
+    for pid in (cultures.get("enrichment", {}).get("productId"),
+                ((config.get("nps") or {}).get("hatchery") or {}).get("enrichment", {}).get("productId")):
+        product = products.get(str(pid or ""))
+        if isinstance(product, dict):
+            return product
+    return None
+
+
+def _cultures_bottle_fill(bottle: dict[str, Any], ml: float, now: datetime, enriched: bool,
+                          config: dict[str, Any]) -> None:
+    """Pour a crop into the fridge bottle: oldest stamp wins for viability,
+    the boost stamp is the soak that just ended, the brim is the brim."""
+    was_empty = awc_engine._f(bottle["remainingMl"]) <= 0
+    cap = awc_engine._f(bottle["volumeMl"])
+    new_ml = awc_engine._f(bottle["remainingMl"]) + ml
+    bottle["remainingMl"] = round(min(new_ml, cap) if cap > 0 else new_ml, 1)
+    if was_empty or not bottle["filledAt"]:
+        bottle["filledAt"] = now.isoformat()
+    if enriched:
+        bottle["enrichedAt"] = now.isoformat()
+        bottle["lastLoadEnriched"] = True
+    elif was_empty:
+        bottle["enrichedAt"] = ""
+        bottle["lastLoadEnriched"] = False
+    if cap > 0 and new_ml > cap:
+        _append_activity(config, f"Rotifer bottle full — {round(new_ml - cap)} ml over the top", "warning")
+    _cultures_bottle_history(bottle, "enriched" if enriched else "filled", now, ml)
+
+
 def _cultures_temp_c(hass: HomeAssistant, config: dict[str, Any], cultures: dict[str, Any]) -> float | None:
     """The room the jars sit in: the cultures' own sensor, else the hatchery's
     (same bench, usually) — advisory only, never moves a clock."""
@@ -14327,15 +14433,60 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     rotifer_shelf_days = cultures_engine.species_preset("rotifer_L")["bottleShelfDays"]
     bottle = cultures["bottle"]
     idle = [j["id"] for j in jars_payload if j["state"]["status"] in ("none", "crashed")]
+    enrichment = cultures["enrichment"]
     bottle_payload = {
         **cultures_engine.bottle_state(bottle, rotifer_shelf_days, now),
         "volumeMl": bottle["volumeMl"], "doseMl": bottle["doseMl"],
         "shelfDays": rotifer_shelf_days,
+        "enriched": bool(bottle["lastLoadEnriched"]),
+        "boost": cultures_engine.bottle_boost(bottle, enrichment["boostColdH"], now),
+        "usageMlDay": cultures_engine.bottle_usage_ml_per_day(bottle["history"], now),
+        "history": list(bottle["history"][:8]),
+    }
+    enrich_product = _cultures_enrich_product(config, cultures)
+    soak_jar = cultures["jars"].get(str(enrichment["state"].get("jarId") or ""))
+    enrichment_payload = {
+        "productId": enrichment["productId"],
+        "productName": enrich_product.get("name") if isinstance(enrich_product, dict) else None,
+        "drops": enrichment["drops"], "soakH": enrichment["soakH"],
+        "boostWarmH": enrichment["boostWarmH"], "boostColdH": enrichment["boostColdH"],
+        "soak": cultures_engine.soak_state(enrichment["state"].get("startedAt"), enrichment["soakH"],
+                                           enrichment["boostWarmH"], now),
+        "portionMl": enrichment["state"].get("portionMl"),
+        "jarId": enrichment["state"].get("jarId"),
+        "jarName": soak_jar.get("name") if isinstance(soak_jar, dict) else None,
+    }
+    # The next-harvest question, on the FIRST producing rotifer jar's clock.
+    rot_producing = [j for j in jars_payload if j["hasBottle"] and j["state"]["status"] == "producing"]
+    usage = bottle_payload["usageMlDay"]
+    if usage is None:
+        hand = ((config.get("nps") or {}).get("hatchery") or {}).get("handFeed") or {}
+        usage = bottle["doseMl"] * _awc_num(hand.get("feedsPerDay"), 2, 1, 24) if bottle["remainingMl"] > 0 else None
+    next_harvest = cultures_engine.next_harvest(
+        bottle_payload, usage, rot_producing[0]["state"]["harvest"] if rot_producing else None,
+        bool(rot_producing))
+    phyto = cultures["phytoDose"]
+    phyto_product = products.get(phyto["productId"]) if phyto["productId"] else None
+    phyto_guide = cultures_engine.phyto_dose_guide(_awc_effective_tank_l(config), phyto["stocking"])
+    phyto_clock = (cultures_engine._due(phyto["lastDosedAt"], None, timedelta(days=phyto["cadenceDays"]), now)
+                   if phyto["cadenceDays"] > 0 and phyto["productId"] else
+                   {"available": False, "due": False, "at": None, "hoursUntil": None, "hoursOverdue": None})
+    if phyto["cadenceDays"] > 0 and phyto["productId"] and not phyto["lastDosedAt"]:
+        phyto_clock = {"available": True, "due": True, "at": now.isoformat(), "hoursUntil": 0.0, "hoursOverdue": 0.0}
+    phyto_payload = {
+        "productId": phyto["productId"],
+        "productName": phyto_product.get("name") if isinstance(phyto_product, dict) else None,
+        "cadenceDays": phyto["cadenceDays"], "stocking": phyto["stocking"],
+        "doseMl": phyto["doseMl"] if phyto["doseMl"] > 0 else phyto_guide["ml"],
+        "guide": phyto_guide, "lastDosedAt": phyto["lastDosedAt"], "clock": phyto_clock,
     }
     return {
         "enabled": bool(cultures["enabled"]),
         "jars": jars_payload,
         "rig": cultures_engine.rig_state(jars_payload, bottle_payload),
+        "enrichment": enrichment_payload,
+        "nextHarvest": next_harvest,
+        "phytoDose": phyto_payload,
         "dueCount": due_count,
         "idleJars": idle,
         "canAddJar": len(cultures["jars"]) < cultures_engine.CULTURE_JARS_MAX,
@@ -14412,6 +14563,7 @@ async def websocket_cultures_seed(
     vol.Optional("ml"): vol.Any(int, float),
     vol.Optional("sign"): str,
     vol.Optional("egg_ratio"): vol.Any(int, float),
+    vol.Optional("enrich"): bool,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -14431,7 +14583,7 @@ async def websocket_cultures_log(
         hass, config, str(msg.get("jar_id") or ""),
         tint=str(msg.get("tint") or ""), fed=bool(msg.get("fed")), harvested=bool(msg.get("harvested")),
         ml=msg.get("ml"), sign=str(msg.get("sign") or ""), egg_ratio=msg.get("egg_ratio"),
-        source="the Cultures tab")
+        enrich=bool(msg.get("enrich")), source="the Cultures tab")
     if error is not None:
         connection.send_error(msg["id"], error[0], error[1])
         return
@@ -14442,6 +14594,7 @@ async def websocket_cultures_log(
 def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str, *,
                         tint: str = "", fed: bool = False, harvested: bool = False,
                         ml: Any = None, sign: str = "", egg_ratio: Any = None,
+                        enrich: bool = False,
                         source: str = "the Cultures tab") -> tuple[str, str] | None:
     """One tap, every ledger: a feed debits the phyto bottle; a rotifer harvest
     fills the fridge bottle (oldest stamp wins — a top-up never resets the
@@ -14485,18 +14638,22 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         guide = cultures_engine.refill_guide(jar["volumeL"], st["cadence"]["harvestPct"],
                                              jar["salinityPpt"])
         harvest_ml = _awc_num(ml, guide["totalMl"], 1, 50000)
+        has_bottle = awc_engine._f(preset["bottleShelfDays"]) > 0
+        enrichment = cultures["enrichment"]
+        if enrich and has_bottle and enrichment["state"]["startedAt"]:
+            return "enrich_busy", "A portion is already soaking — rinse and bottle it first"
         state["lastHarvestAt"] = now.isoformat()
-        if awc_engine._f(preset["bottleShelfDays"]) > 0:
-            bottle = cultures["bottle"]
-            was_empty = awc_engine._f(bottle["remainingMl"]) <= 0
-            cap = awc_engine._f(bottle["volumeMl"])
-            new_ml = awc_engine._f(bottle["remainingMl"]) + harvest_ml
-            bottle["remainingMl"] = round(min(new_ml, cap) if cap > 0 else new_ml, 1)
-            if was_empty or not bottle["filledAt"]:
-                bottle["filledAt"] = now.isoformat()
-            if cap > 0 and new_ml > cap:
-                _append_activity(config, f"Rotifer bottle full — {round(new_ml - cap)} ml over the top",
-                                 "warning")
+        if has_bottle and enrich:
+            # The DHA step: the crop goes into the soak vessel, not the bottle;
+            # the drops come off the (shared) enrichment bottle now.
+            enrichment["state"] = {"startedAt": now.isoformat(), "portionMl": round(harvest_ml, 1),
+                                   "jarId": jar_id}
+            product = _cultures_enrich_product(config, cultures)
+            if isinstance(product, dict):
+                _consumable_debit(product, round(enrichment["drops"] * cultures_engine.ENRICH_DROP_ML, 2), "dose")
+            notes.append(f"{enrichment['drops']:g} drops of enrichment, {enrichment['soakH']:g} h soak")
+        elif has_bottle:
+            _cultures_bottle_fill(cultures["bottle"], harvest_ml, now, False, config)
         _cultures_log_completion(config, jar_id, "harvest", now,
                                  f"Logged automatically — {round(harvest_ml)} ml harvested from {source}")
         # The refill is fresh water out of the mixing vessel (doc §3.1).
@@ -14896,6 +15053,95 @@ def _clear_notification_actions(hass: HomeAssistant) -> None:
 
 
 @websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_enrich_done",
+    vol.Optional("bottled"): bool,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_enrich_done(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Soak over: rinse the net, the portion goes into the fridge bottle with
+    the boost stamp (bottled=True, the default) — or plain, when the keeper
+    gave up on the soak (bottled=False): still live food, just not enriched."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    state = cultures["enrichment"]["state"]
+    if not state.get("startedAt"):
+        connection.send_error(msg["id"], "no_soak", "Nothing is soaking")
+        return
+    now = datetime.now(timezone.utc)
+    enriched = bool(msg.get("bottled", True))
+    portion = awc_engine._f(state.get("portionMl"))
+    jar = cultures["jars"].get(str(state.get("jarId") or ""))
+    if portion > 0:
+        _cultures_bottle_fill(cultures["bottle"], portion, now, enriched, config)
+    if isinstance(jar, dict):
+        _cultures_history(jar, "enriched" if enriched else "bottled", now, ml=round(portion, 1))
+    cultures["enrichment"]["state"] = {"startedAt": "", "portionMl": 0, "jarId": ""}
+    _append_activity(config, (f"Enriched rotifers bottled — {round(portion)} ml, the boost clock runs from now"
+                              if enriched else f"Soak abandoned — {round(portion)} ml bottled plain"), "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_phyto_dosed",
+    vol.Optional("ml"): vol.Any(int, float),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_phyto_dosed(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Reef Juice into the TANK: debit the bottle, stamp the dose, log the
+    reminder done. Never a jar's feed."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    phyto = cultures["phytoDose"]
+    guide = cultures_engine.phyto_dose_guide(_awc_effective_tank_l(config), phyto["stocking"])
+    default_ml = phyto["doseMl"] if phyto["doseMl"] > 0 else (guide["ml"] or 0)
+    ml = _awc_num(msg.get("ml"), default_ml, 0.1, 500)
+    now = datetime.now(timezone.utc)
+    products = (config.get("consumables") or {}).get("products") or {}
+    product = products.get(phyto["productId"]) if phyto["productId"] else None
+    if isinstance(product, dict):
+        _consumable_debit(product, ml, "dose")
+    phyto["lastDosedAt"] = now.isoformat()
+    _cultures_log_completion(config, "phyto", "dose", now, f"Logged automatically — {ml:g} ml of phyto into the tank")
+    _append_activity(config, f"Phyto dosed to the tank — {ml:g} ml", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_cysts_opened"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_cysts_opened(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """A new pouch of cysts opened: the fridge weeks count from now."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    hatchery["cysts"] = {"openedAt": datetime.now(timezone.utc).isoformat()}
+    _append_activity(config, "Cysts pouch opened — keep it sealed, dry and cold; hatch rates fall after 3–4 weeks", "info")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
     vol.Required("type"): "openreef/cultures_bottle",
     vol.Required("action"): vol.In(("fed", "empty")),
     vol.Optional("ml"): vol.Any(int, float),
@@ -14914,15 +15160,33 @@ async def websocket_cultures_bottle(
     config = _config_from_entry(entry)
     cultures = _nps_cultures_cfg(config)
     bottle = cultures["bottle"]
+    now = datetime.now(timezone.utc)
     if msg["action"] == "empty":
+        _cultures_bottle_history(bottle, "emptied", now, awc_engine._f(bottle["remainingMl"]))
         bottle["remainingMl"] = 0
         bottle["filledAt"] = ""
+        bottle["enrichedAt"] = ""
+        bottle["lastLoadEnriched"] = False
         _append_activity(config, "Rotifer bottle emptied", "control")
     else:
         ml = _awc_num(msg.get("ml"), bottle["doseMl"], 0.5, 5000)
+        ml = min(ml, max(0.0, awc_engine._f(bottle["remainingMl"]))) or ml
         bottle["remainingMl"] = round(max(0.0, awc_engine._f(bottle["remainingMl"]) - ml), 1)
         if bottle["remainingMl"] <= 0:
             bottle["filledAt"] = ""
+            bottle["enrichedAt"] = ""
+            bottle["lastLoadEnriched"] = False
+        _cultures_bottle_history(bottle, "fed_tank", now, ml)
+        # Feeding rotifers IS hand-feeding the tank (doc §8.6): the NPS
+        # hand-feed reminder logs done, the feeding journal gets its row.
+        maintenance = config.get("maintenance")
+        if isinstance(maintenance, dict):
+            tasks = maintenance.get("tasks")
+            feed_task = tasks.get(MAINTENANCE_HAND_FEED_TASK_ID) if isinstance(tasks, dict) else None
+            if isinstance(feed_task, dict):
+                _nps_hatch_log_completion(maintenance, MAINTENANCE_HAND_FEED_TASK_ID, now,
+                                          f"Logged automatically — fed {ml:g} ml of rotifers from the bottle")
+                feed_task["snoozedUntil"] = None
         _append_activity(config, f"Fed {round(ml)} ml of rotifers from the bottle", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
@@ -15118,6 +15382,7 @@ async def websocket_nps_summary(
                     hatchery_cfg["enrichment"]["state"]["batchLoadedAt"]),
             },
             "handFeed": dict(hatchery_cfg["handFeed"]),
+            "cysts": _nps_cysts_payload(hatchery_cfg, datetime.now(timezone.utc)),
             "learned": nps_engine.learned_hatch_hours(
                 hatchery_cfg["history"], hatchery_cfg["eggType"]),
             "temp": temp_advice,
