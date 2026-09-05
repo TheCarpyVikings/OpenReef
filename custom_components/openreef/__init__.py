@@ -1333,6 +1333,11 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
     nps_cfg = config.get("nps")
     nps_cfg = nps_cfg if isinstance(nps_cfg, dict) else {}
     raw_fx = nps_cfg.get("feedExchange") if isinstance(nps_cfg.get("feedExchange"), dict) else {}
+    dosing_channels = ((config.get("dosing") or {}).get("channels")
+                       if isinstance((config.get("dosing") or {}).get("channels"), dict) else {})
+    fx_channel_id = _awc_str(raw_fx.get("channelId"), 64)
+    if fx_channel_id and fx_channel_id not in dosing_channels:
+        fx_channel_id = ""
     raw_fx_state = raw_fx.get("state") if isinstance(raw_fx.get("state"), dict) else {}
     raw_hatchery = nps_cfg.get("hatchery") if isinstance(nps_cfg.get("hatchery"), dict) else {}
     raw_truce = nps_cfg.get("truce") if isinstance(nps_cfg.get("truce"), dict) else {}
@@ -1355,8 +1360,11 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
         # matched drain; the state block is persisted runtime (an in-flight
         # drain must survive a restart for orphan recovery to stop the pump).
         "feedExchange": {
-            "enabled": bool(raw_fx.get("enabled", False)),
-            "channelId": _awc_str(raw_fx.get("channelId"), 64),
+            "enabled": bool(raw_fx.get("enabled", False)) and fx_channel_id != "",
+            # A channel that no longer exists is no link at all (0.7.132): a
+            # stale id made the panel think a pump was bound and skip the
+            # hand-feed reminder, while the settings select showed nothing.
+            "channelId": fx_channel_id,
             "minDrainMl": _awc_num(raw_fx.get("minDrainMl"), 150, 10, 5000),
             "maxOwedMl": _awc_num(raw_fx.get("maxOwedMl"), 2000, 100, 20000),
             "state": {

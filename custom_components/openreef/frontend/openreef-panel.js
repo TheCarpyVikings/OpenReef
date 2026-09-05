@@ -10947,10 +10947,17 @@ class OpenReefPanel extends HTMLElement {
       notes: "Harvest nauplii, rinse (never dose hatch water), resuspend in tank-salinity saltwater, load the reservoir, then tap 'Hatched & loaded' on the NPS tab.",
     }, hatchHours + 12);
     // Hand-feeders (no pump bound) also get the scheduled feed nag — one
-    // reminder per feeding, on the hatchery's hour clock.
-    if (!this._config?.nps?.feedExchange?.channelId) {
+    // reminder per feeding, on the hatchery's hour clock. "Bound" means a
+    // food channel that actually exists: a stale id left by a deleted pump
+    // (the settings select shows the placeholder for it) must not silently
+    // skip the reminder (Reece's live catch, 0.7.132).
+    const fxId = String(this._config?.nps?.feedExchange?.channelId || "");
+    const pumpBound = !!fxId && this._npsFoodChannelIds().includes(fxId);
+    let feedNote = "";
+    if (!pumpBound) {
       const hand = this._config?.nps?.hatchery?.handFeed || {};
       const feedEvery = Math.max(1, Math.round(24 / (Number(hand.feedsPerDay) || 2)));
+      feedNote = ` Feed live brine every ${feedEvery} h.`;
       tasks.brine_hand_feed = {
         ...(tasks.brine_hand_feed || {
           label: "Feed live brine", enabled: true, notify: true,
@@ -10959,6 +10966,8 @@ class OpenReefPanel extends HTMLElement {
         cadenceDays: 1, criticalAfterDays: 2,
         cadenceHours: feedEvery, criticalAfterHours: feedEvery * 2,
       };
+    } else {
+      feedNote = ` No hand-feed reminder — ${this._doserChannels()[fxId]?.name || fxId} is linked as the exchange pump.`;
     }
     // A hatch already running anchors both clocks: the start chore WAS done at
     // its hatchStartedAt (log the LATEST one, honestly back-dated), and the
@@ -10997,7 +11006,7 @@ class OpenReefPanel extends HTMLElement {
       }
     }
     this._setDirty(true);
-    this._nps.message = `Hatchery reminders synced to your ${hatchHours} h hatch — save to keep them.${anchorNote}`;
+    this._nps.message = `Hatchery reminders synced to your ${hatchHours} h hatch — save to keep them.${feedNote}${anchorNote}`;
     this._recordActivity("Synced brine hatchery reminders");
     this._render();
   }

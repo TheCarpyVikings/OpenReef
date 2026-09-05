@@ -426,6 +426,9 @@ def _fx_entry(owed=500.0, fx_over=None, awc_over=None):
         "nps": {"enabled": True, "feedExchange": fx},
         "automaticWaterChange": awc,
         "consumables": {"products": {}},
+        # The linked channel has to exist (0.7.132): a link to a channel that
+        # is gone is no link, and the normaliser says so.
+        "dosing": {"channels": {"brine": {"name": "Live brine", "chemical": "livefood", "enabled": True}}},
     }
     return FakeEntry(options={CONF_SETTINGS: cfg})
 
@@ -2739,6 +2742,25 @@ def test_ws_undo_dose_takes_back_a_mis_tap_within_the_window():
     conn2 = FakeConnection()
     run(integration.websocket_consumable_undo_dose(FakeHass(entries=[entry2]), conn2, {"id": 6, "product_id": "p"}))
     assert not conn2.errors and _saved_products(entry2)["p"]["remainingMl"] == 100.0 and _saved_products(entry2)["p"]["lastDosedAt"] == ""
+
+
+
+def test_normalise_drops_a_feed_exchange_link_to_a_channel_that_is_gone():
+    """Reece's live catch (0.7.132): a stale channelId left the settings select
+    on its placeholder while the panel believed a pump was bound — and never
+    seeded the hand-feed reminder."""
+    stale = integration._normalise_core_config({
+        "nps": {"enabled": True, "feedExchange": {"enabled": True, "channelId": "ghost_pump"}},
+        "dosing": {"channels": {}}})
+    fx = stale["nps"]["feedExchange"]
+    assert fx["channelId"] == "" and fx["enabled"] is False, fx
+    live = integration._normalise_core_config({
+        "nps": {"enabled": True, "feedExchange": {"enabled": True, "channelId": "brine"}},
+        "dosing": {"channels": {"brine": {"name": "Live brine", "chemical": "livefood"}}}})
+    assert live["nps"]["feedExchange"] == {**live["nps"]["feedExchange"], "channelId": "brine", "enabled": True}
+    # No dosing block at all (a hand-feeder's config) — same answer: no link.
+    bare = integration._normalise_core_config({"nps": {"enabled": True, "feedExchange": {"channelId": "brine"}}})
+    assert bare["nps"]["feedExchange"]["channelId"] == ""
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

@@ -838,7 +838,7 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
-## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130 (2026-09-05)** + **0.7.131 follow-up** — see §13.10–§13.11
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.132 (2026-09-05)** — see §13.10–§13.12
 
 ### 13.1 What v1 is, honestly
 
@@ -963,4 +963,8 @@ Reece's first question after the release: *"where does the hand-feed reminder li
 - **Undo (Q9, resolved)** — `hand_dose_undo()` names the last `dose` row if it is within `HAND_DOSE_UNDO_MIN` (10) minutes; the plan state carries it as `handDose.undo`. NEW `consumable_undo_dose` WS (registered): the row comes off the history, the ml goes back (never overfilling the bottle), `lastDosedAt` falls back to the dose before, the shelf completion the tap wrote is removed, an activity line says so. Pump debits and transfers are the machine's and are never undoable. The dose card shows **Undo N ml** on the done mark it would reverse, with the minutes left.
 
 Tests: `test_nps.py` 133 green (2 new); `test_panel_nps.mjs` 47 green (undo assertions added to the dose-card test).
+
+### 13.12 The 0.7.132 fix — the hand-feed reminder that never appeared
+
+Reece, live: no pump configured, **Sync hatchery reminders** tapped, still no "Feed live brine" reminder. The seeder gated the hand-feed task on `feedExchange.channelId` being *empty* — but a channel id that points at a channel that no longer exists (a deleted or never-finished pump) is a non-empty string, so the panel believed a pump was bound and skipped the reminder, while the settings select sat on its placeholder because nothing matched. Two fixes: the seeder now asks whether the linked channel *exists* as a food channel, and its message names what it seeded ("Feed live brine every 8 h." / "No hand-feed reminder — X is linked as the exchange pump."); and `_normalise_nps_config` clears a link to a channel that is gone (and the exchange's enabled flag with it), so the stale id cannot linger anywhere. Tests: `test_nps.py` 134 (1 new), `test_panel_nps.mjs` 48 (1 new).
 

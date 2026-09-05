@@ -1132,6 +1132,30 @@ test("hatchery reminders sync to the hatch clock and anchor to a running hatch",
   } finally { restore(); }
 });
 
+test("the hand-feed reminder follows a real pump link, not a stale id", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._setDirty = () => { panel._configDirty = true; };
+    panel._config.nps.hatchery = { eggType: "standard", hatchHours: 24, handFeed: { defaultDoseMl: 250, feedsPerDay: 3 } };
+    panel._config.maintenance = { enabled: true, tasks: {}, completions: {} };
+    // Reece's case: a channel id that points at nothing — the select shows the placeholder, no pump is bound.
+    panel._config.nps.feedExchange = { enabled: false, channelId: "ghost_pump" };
+    delete panel._config.dosing.channels.brine;
+    panel._npsSeedHatchReminders();
+    const task = panel._config.maintenance.tasks.brine_hand_feed;
+    assert(task && task.cadenceHours === 8 && task.label === "Feed live brine", `hand-feed reminder must be seeded: ${JSON.stringify(task)}`);
+    assert(panel._nps.message.includes("Feed live brine every 8 h."), `the message names it: ${panel._nps.message}`);
+    // A pump that exists and is linked: no hand-feed reminder, and the message says why.
+    panel._config.dosing.channels.brine = { name: "Brine pump", chemical: "livefood", enabled: true, schedule: {} };
+    panel._config.nps.feedExchange = { enabled: true, channelId: "brine" };
+    delete panel._config.maintenance.tasks.brine_hand_feed;
+    panel._npsSeedHatchReminders();
+    assert(!panel._config.maintenance.tasks.brine_hand_feed && panel._nps.message.includes("Brine pump is linked as the exchange pump"), panel._nps.message);
+  } finally { restore(); }
+});
+
 test("seeding without a running hatch sets the hour cadence but anchors nothing", async () => {
   const restore = freezeTime(NOW);
   try {
