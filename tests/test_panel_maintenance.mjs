@@ -317,4 +317,63 @@ test("test_the_streak_counts_consecutive_on_schedule_intervals", async () => {
   }
 });
 
+// --- V3 (2026-09-05): the checklist and the new-water record ------------------------
+
+test("test_the_checklist_ticks_for_the_visit_and_the_usual_steps_are_one_tap_away", async () => {
+  const restore = freezeTime(CASES.now);
+  try {
+    const panel = await makePanel(configForCase({ task: { steps: ["Return pump off", "Siphon", "Refill"] } }));
+    panel._render = () => {};
+    panel._setDirty = () => {};
+    const card = panel._maintenanceTaskCard("subject");
+    assert(card.includes('<ul class="maintenance-steps"') && (card.match(/data-action="maintenance-step"/g) || []).length === 3, "three steps, three boxes");
+    assert(card.includes("0 of 3 ticked"), "the tally starts at nothing");
+    panel._toggleMaintenanceStep("subject", 1);
+    const ticked = panel._maintenanceTaskCard("subject");
+    assert(ticked.includes('data-index="1" checked') && ticked.includes('<span class="done">Siphon</span>') && ticked.includes("1 of 3 ticked"), ticked);
+    panel._toggleMaintenanceStep("subject", 1);
+    assert(panel._maintenanceTaskCard("subject").includes("0 of 3 ticked"), "a second tap unticks");
+    // No steps: no list, no tally.
+    const bare = await makePanel(configForCase({}));
+    assert(!bare._maintenanceTaskCard("subject").includes("maintenance-steps"));
+    // Settings: one step per line, and the usual steps for a suggested chore.
+    const settings = panel._maintenanceSettings(true);
+    assert(settings.includes('data-field="stepsText"') && settings.includes("Return pump off\nSiphon\nRefill</textarea>"), "the textarea round-trips the lines");
+    const wc = await makePanel({ maintenance: { enabled: true, tasks: { water_change: { label: "Water change", enabled: true, cadenceDays: 7, criticalAfterDays: 14, scheduleMode: "interval", builtin: true } }, completions: {} } });
+    wc._render = () => {};
+    wc._setDirty = () => {};
+    assert(wc._maintenanceSettings(true).includes('data-action="maintenance-usual-steps" data-id="water_change"'), "a suggested chore without steps offers the usual ones");
+    wc._maintenanceUsualSteps("water_change");
+    const steps = wc._config.maintenance.tasks.water_change.steps;
+    assert(Array.isArray(steps) && steps.length === 5 && steps[0] === "Return pump and skimmer off", JSON.stringify(steps));
+    assert(!wc._maintenanceSettings(true).includes('data-action="maintenance-usual-steps"'), "once taken, the offer goes");
+    wc._maintenanceUsualSteps("no_such_task");
+  } finally {
+    restore();
+  }
+});
+
+test("test_the_new_water_record_has_its_inputs_and_shows_in_history", async () => {
+  const restore = freezeTime(CASES.now);
+  try {
+    const stamp = new Date(Date.parse(CASES.now) - 86400000).toISOString();
+    const panel = await makePanel(configForCase({
+      task: { logsVolume: true },
+      completions: [{ id: "a", timestamp: stamp, volume: 20, volumeUnit: "L", newWater: { ppt: 35.2, tempC: 25.3, brand: "NYOS Pure" } },
+                    { id: "b", timestamp: new Date(Date.parse(stamp) - 86400000).toISOString(), volume: 10, volumeUnit: "L" }],
+    }));
+    const card = panel._maintenanceTaskCard("subject");
+    assert(card.includes('data-maint-draft="ppt"') && card.includes('data-maint-draft="tempC"'), "a volume-logging task takes the new water's ppt and °C");
+    const plain = await makePanel(configForCase({}));
+    assert(!plain._maintenanceTaskCard("subject").includes('data-maint-draft="ppt"'), "other tasks do not");
+    const history = panel._renderCompletionWeeks("subject", panel._maintenanceCompletions("subject"));
+    assert(history.includes("New water: 35.2 ppt · 25.3 °C · NYOS Pure"), history);
+    assert((history.match(/New water:/g) || []).length === 1, "only the stamped row says so");
+    assertEqual(panel._maintenanceNewWaterText({ ppt: 35 }), "35 ppt");
+    assertEqual(panel._maintenanceNewWaterText(null), "");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

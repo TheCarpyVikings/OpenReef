@@ -3186,6 +3186,45 @@ def test_ws_nps_summary_carries_the_truce_bands():
     assert band["band"] == [720, 765] and band["status"] == "done" and band["name"] == "Feed truce — skim1"
 
 
+def test_hatch_ready_push_waits_for_quiet_hours_to_end():
+    """V3: a hatch that ripens in the night is not announced until the quiet
+    window ends; nothing is stamped meanwhile, and the late push says how
+    long it has been ready."""
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    now = datetime.now(timezone.utc)
+    local = integration.dt_util.as_local(now)
+    hm = lambda off: f"{((local.hour * 60 + local.minute + off) % 1440) // 60:02d}:{((local.hour * 60 + local.minute + off) % 1440) % 60:02d}"
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=26)).isoformat(),
+        "eggType": "standard", "hatchHours": 24, "readyNotifiedAt": "",
+    }
+    cfg["quietHours"] = {"enabled": True, "start": hm(-60), "end": hm(60)}
+    hass = FakeHass(entries=[entry])
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    ready = [c for c in hass.services.calls if c.domain == "persistent_notification" and c.service == "create"
+             and "hatch_ready" in (c.data or {}).get("notification_id", "")]
+    assert ready == [], "held through the quiet window"
+    assert not entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"]["readyNotifiedAt"]
+    entry.options[CONF_SETTINGS]["quietHours"] = {"enabled": True, "start": hm(60), "end": hm(120)}
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    ready = [c for c in hass.services.calls if c.domain == "persistent_notification" and c.service == "create"
+             and "hatch_ready" in (c.data or {}).get("notification_id", "")]
+    assert len(ready) == 1 and ready[0].data["message"].startswith("Ready since ")
+    assert "held through your quiet hours" in ready[0].data["message"]
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"]["readyNotifiedAt"]
+    # Announced within the hour and a half of ripening: no "held" preamble.
+    fresh = _v2_entry()
+    fresh.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=24, minutes=10)).isoformat(),
+        "eggType": "standard", "hatchHours": 24, "readyNotifiedAt": ""}
+    hass2 = FakeHass(entries=[fresh])
+    run(integration._async_nps_hatch_ready_push(hass2, fresh))
+    prompt = [c for c in hass2.services.calls if c.domain == "persistent_notification" and c.service == "create"
+              and "hatch_ready" in (c.data or {}).get("notification_id", "")]
+    assert len(prompt) == 1 and prompt[0].data["message"].startswith("The 24 h hatch is done.")
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

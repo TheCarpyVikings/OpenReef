@@ -106,6 +106,9 @@ from .const import (
     MAINTENANCE_HATCH_START_TASK_ID,
     MAINTENANCE_REMINDER_DEFAULT_TIME,
     MAINTENANCE_SOURCE_AWC,
+    MAINTENANCE_DUE_EVENT,
+    MAINTENANCE_DONE_EVENT,
+    CONSUMABLE_LOW_EVENT,
     MAINTENANCE_SOURCE_CULTURES,
     MAINTENANCE_SOURCE_SHELF,
     MAINTENANCE_SHELF_TASK_PREFIX,
@@ -398,6 +401,9 @@ RECORD_TASK_COMPLETION_SCHEMA = vol.Schema(
         vol.Optional("date"): cv.string,
         vol.Optional("volume"): vol.Coerce(float),
         vol.Optional("volume_unit"): cv.string,
+        vol.Optional("new_water_ppt"): vol.Coerce(float),
+        vol.Optional("new_water_temp_c"): vol.Coerce(float),
+        vol.Optional("new_water_brand"): cv.string,
     }
 )
 
@@ -1977,6 +1983,24 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "mixHours": round(_awc_num(raw_salt.get("mixHours"), 0, 0, MIXING_MIX_HOURS_MAX), 1),
         "customGPerL": round(_awc_num(raw_salt.get("customGPerL"), 0, 0, 100), 1),
     }
+    # Salt on hand (V3, 2026-09-05): a server-owned ledger — debited when a
+    # batch is salted, edited only through openreef/mixing_salt_stock — so
+    # the stale-save guard carries it whole (stored wins).
+    raw_stock = mix_cfg.get("saltStock") if isinstance(mix_cfg.get("saltStock"), dict) else {}
+    raw_stock_hist = raw_stock.get("history") if isinstance(raw_stock.get("history"), list) else []
+    mix_cfg["saltStock"] = {
+        "kg": round(_awc_num(raw_stock.get("kg"), 0, 0, mixing_engine.SALT_STOCK_MAX_KG), 2),
+        "bucketKg": round(_awc_num(raw_stock.get("bucketKg"), 0, 0, mixing_engine.SALT_BUCKET_MAX_KG), 2),
+        "updatedAt": _awc_str(raw_stock.get("updatedAt"), 40),
+        "history": [
+            {"at": _awc_str(h.get("at"), 40),
+             "kg": round(_awc_num(h.get("kg"), 0, 0, mixing_engine.SALT_STOCK_MAX_KG), 2),
+             "delta": round(_awc_num(h.get("delta"), 0, -mixing_engine.SALT_STOCK_MAX_KG,
+                                     mixing_engine.SALT_STOCK_MAX_KG), 3),
+             "note": _awc_str(h.get("note"), 80)}
+            for h in raw_stock_hist if isinstance(h, dict) and _awc_str(h.get("at"), 40)
+        ][-mixing_engine.SALT_STOCK_HISTORY_MAX:],
+    }
 
     raw_heat = mix_cfg.get("heat") if isinstance(mix_cfg.get("heat"), dict) else {}
     mix_cfg["heat"] = {
@@ -2754,6 +2778,16 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         else {}
     )
 
+    # Quiet hours (V3, 2026-09-05): a night window that holds the nudges —
+    # brine-ready, the heartbeat — never a critical alert or its escalation.
+    quiet = config.setdefault("quietHours", {})
+    if not isinstance(quiet, dict):
+        quiet = {}
+        config["quietHours"] = quiet
+    quiet["enabled"] = bool(quiet.get("enabled", False))
+    quiet["start"] = _normalise_schedule_time(quiet.get("start")) or "22:00"
+    quiet["end"] = _normalise_schedule_time(quiet.get("end")) or "07:00"
+
     escalation = config.setdefault("alertEscalation", {})
     if not isinstance(escalation, dict):
         escalation = {}
@@ -3101,6 +3135,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             ),
             "enabled": bool(raw.get("enabled", False)),
             "notes": str(raw.get("notes", ""))[:300],
+            # The checklist (V3, 2026-09-05): the keeper's steps, one tap each.
+            "steps": _maintenance_steps(raw.get("steps")),
             "builtin": bool(raw.get("builtin", task_id in MAINTENANCE_TASK_DEFAULTS)),
             "scheduleMode": schedule_mode,
             "scheduleDays": _ints_in_range(raw.get("scheduleDays"), 0, 6),
@@ -3146,6 +3182,11 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             if isinstance(volume, (int, float)) and not isinstance(volume, bool):
                 safe_entry["volume"] = round(float(volume), 2)
                 safe_entry["volumeUnit"] = "L" if item.get("volumeUnit") == "L" else "pct"
+            # The new water's record (V3, 2026-09-05): salinity, temperature
+            # and salt brand — stamped from the mixing station, or typed in.
+            new_water = _maintenance_new_water(item.get("newWater"))
+            if new_water:
+                safe_entry["newWater"] = new_water
             safe.append(safe_entry)
         if safe:
             completions[task_id] = safe
@@ -4660,6 +4701,85 @@ def _maintenance_task_state(
     return "ok"
 
 
+MAINTENANCE_TASK_STEPS_MAX = 12
+MAINTENANCE_TASK_STEP_LEN = 120
+
+
+def _maintenance_steps(raw: Any) -> list[str]:
+    """A task's checklist (V3): up to twelve short lines, junk dropped."""
+    if not isinstance(raw, list):
+        return []
+    return [str(step).strip()[:MAINTENANCE_TASK_STEP_LEN] for step in raw
+            if isinstance(step, str) and step.strip()][:MAINTENANCE_TASK_STEPS_MAX]
+
+
+def _maintenance_new_water(raw: Any) -> dict[str, Any]:
+    """The new water on a water-change record (V3): ppt, °C and the salt
+    brand, each optional, each within sane bounds."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    ppt = raw.get("ppt")
+    if isinstance(ppt, (int, float)) and not isinstance(ppt, bool) and 0 < float(ppt) <= 60:
+        out["ppt"] = round(float(ppt), 1)
+    temp = raw.get("tempC")
+    if isinstance(temp, (int, float)) and not isinstance(temp, bool) and -5 < float(temp) < 45:
+        out["tempC"] = round(float(temp), 1)
+    brand = raw.get("brand")
+    if isinstance(brand, str) and brand.strip():
+        out["brand"] = brand.strip()[:40]
+    return out
+
+
+def _fire_event(hass: Any, event_type: str, data: dict[str, Any]) -> None:
+    """Automation hook (V3): fire on the HA bus when there is one."""
+    bus = getattr(hass, "bus", None)
+    if bus is not None and hasattr(bus, "async_fire"):
+        bus.async_fire(event_type, data)
+
+
+def _maintenance_done_payload(entry_id: Any, task_id: str, task: Any, entry: dict[str, Any],
+                              source: str) -> dict[str, Any]:
+    task = task if isinstance(task, dict) else {}
+    return {
+        "entry_id": entry_id,
+        "task_id": task_id,
+        "label": str(task.get("label") or task_id),
+        "timestamp": str(entry.get("timestamp") or ""),
+        "notes": str(entry.get("notes") or ""),
+        "volume": entry.get("volume"),
+        "volumeUnit": entry.get("volumeUnit"),
+        "newWater": entry.get("newWater") or {},
+        "source": source,
+    }
+
+
+def _maintenance_fire_new_completions(hass: Any, stored: Any, incoming: dict[str, Any],
+                                      entry_id: Any) -> None:
+    """Automation hook (V3): every completion the panel just logged —
+    source-less, not a skip, unseen by the stored config — fires
+    openreef_maintenance_done with the entry's own fields."""
+    maintenance = incoming.get("maintenance") if isinstance(incoming, dict) else None
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks") if isinstance(maintenance.get("tasks"), dict) else {}
+    completions = maintenance.get("completions") if isinstance(maintenance.get("completions"), dict) else {}
+    stored_m = stored.get("maintenance") if isinstance(stored, dict) else {}
+    stored_c = (stored_m.get("completions")
+                if isinstance(stored_m, dict) and isinstance(stored_m.get("completions"), dict) else {})
+    for task_id, entries in completions.items():
+        if not isinstance(entries, list):
+            continue
+        prior = stored_c.get(task_id)
+        seen = {e.get("id") for e in (prior if isinstance(prior, list) else []) if isinstance(e, dict)}
+        for entry in entries:
+            if (not isinstance(entry, dict) or entry.get("id") in seen
+                    or entry.get("skipped") or entry.get("source")):
+                continue
+            _fire_event(hass, MAINTENANCE_DONE_EVENT,
+                        _maintenance_done_payload(entry_id, task_id, tasks.get(task_id), entry, "panel"))
+
+
 def _maintenance_due_items(
     config: dict[str, Any], now: datetime | None = None
 ) -> list[dict[str, str]]:
@@ -5066,7 +5186,8 @@ async def _async_run_watchdog(
     if watchdog.get("heartbeatEnabled", True):
         watchdog["lastHeartbeat"] = now.isoformat()
         target = str(watchdog.get("notifyTarget", "")).strip()
-        if target:
+        held = bool(target) and _quiet_hours_active(config, now)
+        if target and not held:
             await hass.services.async_call(
                 "notify",
                 target,
@@ -5076,7 +5197,7 @@ async def _async_run_watchdog(
                 },
                 blocking=False,
             )
-        _append_activity(config, "OpenReef heartbeat OK", "info")
+        _append_activity(config, "OpenReef heartbeat OK" + (" (push held — quiet hours)" if held else ""), "info")
 
     _trust_check_summary(hass, config, update=True)
     return _persist_entry_config(hass, entry, config)
@@ -5244,6 +5365,45 @@ def _maintenance_reminder_time(config: dict[str, Any]) -> tuple[int, int]:
     return int(hour), int(minute)
 
 
+def _quiet_hours_active(config: dict[str, Any], now: datetime | None = None) -> bool:
+    """Inside the keeper's quiet window (local time, wraps midnight)?"""
+    quiet = config.get("quietHours") if isinstance(config.get("quietHours"), dict) else {}
+    if not quiet.get("enabled"):
+        return False
+
+    def _minutes(value: Any) -> int | None:
+        text = _normalise_schedule_time(value)
+        if not text:
+            return None
+        hour, minute = text.split(":")
+        return int(hour) * 60 + int(minute)
+
+    start, end = _minutes(quiet.get("start")), _minutes(quiet.get("end"))
+    if start is None or end is None or start == end:
+        return False
+    local = dt_util.as_local(now or datetime.now(timezone.utc))
+    t = local.hour * 60 + local.minute
+    return (t >= start or t < end) if start > end else (start <= t < end)
+
+
+def _maintenance_salt_nag(config: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """The salt bucket (V3): one nag when the tracked stock is low or out."""
+    mixing = config.get("mixingStation") if isinstance(config.get("mixingStation"), dict) else {}
+    if not mixing.get("enabled"):
+        return []
+    state = _mixing_salt_stock_state(config, now)
+    if not state["tracked"] or not (state["low"] or state["empty"]):
+        return []
+    if state["empty"]:
+        detail = "out"
+    else:
+        detail = f"{state['kg']:g} kg left"
+        if state["batchesLeft"] is not None:
+            detail += f", ≈{state['batchesLeft']:g} batch{'es' if state['batchesLeft'] != 1 else ''}"
+    return [{"id": "salt", "label": "Salt", "detail": detail,
+             "severity": "critical" if state["empty"] else "warning"}]
+
+
 def _maintenance_shelf_nags(config: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     """Bottles running low, empty or expired — the food shelf's own flags
     (nps.shelf_summary), so the daily digest, the Attention list and the NPS
@@ -5304,13 +5464,15 @@ async def _async_fire_maintenance_reminder(
     # Bottles running low, empty or expired ride the same daily digest (V3
     # slice, 2026-09-05): one line a day, never a push of their own.
     shelf_nags = _maintenance_shelf_nags(latest_config, now)
+    salt_nags = _maintenance_salt_nag(latest_config, now)
     last_store = hass.data.setdefault(DOMAIN, {}).setdefault(
         MAINTENANCE_REMINDER_LAST, {}
     )
     previous_ids = last_store.get(entry.entry_id, set())
-    current_ids = {item["id"] for item in push_items} | {nag["id"] for nag in shelf_nags}
+    current_ids = ({item["id"] for item in push_items} | {nag["id"] for nag in shelf_nags}
+                   | {nag["id"] for nag in salt_nags})
     last_store[entry.entry_id] = current_ids
-    if not push_items and not shelf_nags:
+    if not push_items and not shelf_nags and not salt_nags:
         return
     labels = ", ".join(item["label"] for item in push_items)
     shelf_line = ", ".join(f"{nag['label']} ({nag['detail']})" for nag in shelf_nags[:6])
@@ -5336,9 +5498,14 @@ async def _async_fire_maintenance_reminder(
             bits.append(summary)
         if shelf_nags:
             bits.append(f"{len(shelf_nags)} bottle{'s' if len(shelf_nags) != 1 else ''} to check")
-        message = labels
+        if salt_nags:
+            bits.append("salt is out" if salt_nags[0]["severity"] == "critical" else "salt running low")
+        parts = [labels]
         if shelf_line:
-            message = f"{labels} · Bottles: {shelf_line}" if labels else f"Bottles: {shelf_line}"
+            parts.append(f"Bottles: {shelf_line}")
+        if salt_nags:
+            parts.append(f"Salt: {salt_nags[0]['detail']}")
+        message = " · ".join(part for part in parts if part)
         await hass.services.async_call(
             "notify",
             target,
@@ -5359,6 +5526,25 @@ async def _async_fire_maintenance_reminder(
         )
         if new_bottles:
             _append_activity(latest_config, f"Bottles to check: {new_bottles}", "info")
+        for nag in salt_nags:
+            if nag["id"] in new_ids:
+                _append_activity(latest_config,
+                                 f"Salt {'is out' if nag['severity'] == 'critical' else 'running low'}: {nag['detail']}",
+                                 "warning" if nag["severity"] == "critical" else "info")
+        # Automation hooks (V3): one event per task newly due, one per bottle
+        # (or the salt bucket) newly low — only on the day they first appear.
+        for item in push_items:
+            if item["id"] in new_ids:
+                _fire_event(hass, MAINTENANCE_DUE_EVENT, {"entry_id": entry.entry_id, "task_id": item["id"],
+                                                          "label": item["label"], "severity": item["severity"],
+                                                          "title": item["title"], "message": item["message"],
+                                                          "notes": item.get("notes", "")})
+        for nag in shelf_nags + salt_nags:
+            if nag["id"] in new_ids:
+                _fire_event(hass, CONSUMABLE_LOW_EVENT, {"entry_id": entry.entry_id,
+                                                         "product_id": nag["id"].split(":", 1)[-1],
+                                                         "label": nag["label"], "detail": nag["detail"],
+                                                         "severity": nag["severity"]})
         options = dict(entry.options)
         options[CONF_SETTINGS] = _normalise_core_config(latest_config)
         hass.config_entries.async_update_entry(entry, options=options)
@@ -7680,6 +7866,9 @@ def _mixing_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
 
     if isinstance(stored_mix.get("batch"), dict):
         incoming_mix["batch"] = deepcopy(stored_mix["batch"])
+    # Salt on hand (V3): written only by the salting debit and its own WS.
+    if isinstance(stored_mix.get("saltStock"), dict):
+        incoming_mix["saltStock"] = deepcopy(stored_mix["saltStock"])
 
     stored_rodi = stored_mix.get("rodi")
     if isinstance(stored_rodi, dict):
@@ -8027,6 +8216,9 @@ def _maintenance_log_awc_change(
     """
     if litres <= 0:
         return
+    # The new water's record (V3): the vessel's tested salinity and brand
+    # ride along when the fresh water came from the mixing station.
+    stamp = _mixing_new_water_stamp(None, config) if _mixing_fresh_from_vessel(config) else {}
     maintenance = config.get("maintenance")
     if not isinstance(maintenance, dict) or maintenance.get("logAwcChanges") is False:
         return
@@ -8069,16 +8261,21 @@ def _maintenance_log_awc_change(
         newest["timestamp"] = timestamp
         newest["notes"] = ("Automatic water changes today"
                            + (f" — last one partial: {reason}" if partial and reason else ""))[:500]
+        if stamp and not newest.get("newWater"):
+            newest["newWater"] = stamp
         return
 
-    entries.insert(0, {
+    new_entry = {
         "id": f"{task_id}:awc:{timestamp}",
         "timestamp": timestamp,
         "notes": note[:500],
         "volume": round(litres, 2),
         "volumeUnit": "L",
         "source": MAINTENANCE_SOURCE_AWC,
-    })
+    }
+    if stamp:
+        new_entry["newWater"] = stamp
+    entries.insert(0, new_entry)
     del entries[MAINTENANCE_COMPLETIONS_MAX:]
 
 
@@ -9657,10 +9854,21 @@ async def _handle_record_task_completion(
     if isinstance(volume, (int, float)) and not isinstance(volume, bool):
         completion["volume"] = round(float(volume), 2)
         completion["volumeUnit"] = "L" if call.data.get("volume_unit") == "L" else "pct"
+    # The new water's record (V3): typed figures win, the station fills the rest.
+    task_cfg = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+    typed = _maintenance_new_water({"ppt": call.data.get("new_water_ppt"),
+                                    "tempC": call.data.get("new_water_temp_c"),
+                                    "brand": call.data.get("new_water_brand")})
+    stamp = (_mixing_new_water_stamp(hass, config)
+             if task_cfg.get("logsVolume") and _mixing_maintenance_from_vessel(config) else {})
+    if typed or stamp:
+        completion["newWater"] = {**stamp, **typed}
     entries.insert(0, completion)
     _append_activity(
         config, f"Maintenance done: {tasks[task_id].get('label', task_id)}", "control"
     )
+    _fire_event(hass, MAINTENANCE_DONE_EVENT,
+                _maintenance_done_payload(entry.entry_id, task_id, task_cfg, completion, "service"))
     # Doc §28: this service writes straight into the stored config, so the
     # save-time diff never sees it — debit the vessel here instead. Same
     # rules: volume-logging task, source-less entry, flag + guard willing.
@@ -9739,6 +9947,8 @@ async def websocket_save_config(
     # never charges the same bucket twice. AWC-sourced rows carry ``source``
     # and are skipped: those litres are the AWC coupling's to account.
     _mixing_debit_manual_changes(hass, entry.options.get(CONF_SETTINGS), msg["config"])
+    # Automation hook (V3): the completions this save brought in.
+    _maintenance_fire_new_completions(hass, entry.options.get(CONF_SETTINGS), msg["config"], entry.entry_id)
     _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["config"])
     _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
     _nps_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
@@ -12315,11 +12525,18 @@ async def _async_nps_hatch_ready_push(
         hours = _awc_num(state.get("hatchHours"), 24, 8, 48)
         if (now - started).total_seconds() / 3600.0 < hours:
             continue
+        # Quiet hours (V3): a hatch that ripens at 3 a.m. waits for the window
+        # to end — nothing is stamped, so the next tick sends it.
+        if _quiet_hours_active(config, now):
+            continue
         state["readyNotifiedAt"] = now.isoformat()
         changed = True
         name = str(vessel.get("name") or vid)
         title = f"OpenReef: Brine ready to harvest — {name}"
-        message = (f"The {hours:g} h hatch is done. Rinse the nauplii (never dose "
+        ready_at = started + timedelta(hours=hours)
+        held = (f"Ready since {dt_util.as_local(ready_at).strftime('%H:%M')} — held through your quiet hours. "
+                if now - ready_at >= timedelta(minutes=90) else "")
+        message = (held + f"The {hours:g} h hatch is done. Rinse the nauplii (never dose "
                    "hatch water), resuspend at tank salinity, load the container, "
                    "then tap 'Hatched & loaded'. Harvesting promptly keeps the "
                    "yolk calories.")
@@ -16744,6 +16961,9 @@ def _mixing_debit_manual_changes(
         else {}
     )
     tank_l = _maintenance_tank_litres(incoming)
+    # The new water's record (V3): what the station knows about the batch
+    # going in — the keeper's own typed figures win over the stamp.
+    stamp = _mixing_new_water_stamp(hass, incoming)
     litres = 0.0
     for task_id, entries in completions.items():
         task = tasks.get(task_id)
@@ -16756,6 +16976,8 @@ def _mixing_debit_manual_changes(
         for entry in entries:
             if isinstance(entry, dict) and entry.get("id") not in seen:
                 litres += _mixing_manual_change_litres(entry, tank_l)
+                if stamp and not entry.get("source") and not entry.get("skipped"):
+                    entry["newWater"] = {**stamp, **_maintenance_new_water(entry.get("newWater"))}
     if litres > 0.05:
         _mixing_debit_batch(hass, incoming, round(litres, 1),
                             "the water change you logged")
@@ -16779,6 +17001,124 @@ def _mixing_next_stage(cfg: dict[str, Any], current: str) -> str | None:
     return stages[idx + 1] if idx + 1 < len(stages) else None
 
 
+def _mixing_salt_stock_write(stock: dict[str, Any], kg: float, note: str, *, absolute: bool) -> None:
+    """One ledger write: set the kilos (absolute) or move them (delta), never
+    below zero, with a history line the tab can show."""
+    before = _awc_num(stock.get("kg"), 0, 0, mixing_engine.SALT_STOCK_MAX_KG)
+    after = kg if absolute else before + kg
+    after = max(0.0, min(mixing_engine.SALT_STOCK_MAX_KG, after))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    stock["kg"] = round(after, 2)
+    stock["updatedAt"] = now_iso
+    history = [h for h in (stock.get("history") or []) if isinstance(h, dict)]
+    history.append({"at": now_iso, "kg": round(after, 2), "delta": round(after - before, 3),
+                    "note": str(note)[:80]})
+    stock["history"] = history[-mixing_engine.SALT_STOCK_HISTORY_MAX:]
+
+
+def _mixing_salt_stock_debit(config: dict[str, Any], litres: float) -> None:
+    """A batch was salted: the brand's dose for these litres leaves the
+    bucket. Only once the keeper has set a figure — an untracked bucket is
+    never invented into existence."""
+    cfg = _mixing_cfg(config)
+    stock = cfg.get("saltStock") if isinstance(cfg.get("saltStock"), dict) else None
+    if not stock or not stock.get("updatedAt"):
+        return
+    salt = cfg.get("salt") if isinstance(cfg.get("salt"), dict) else {}
+    dose = mixing_engine.salt_dose(salt.get("brand"), litres, salt.get("targetPpt"),
+                                   salt.get("customGPerL"))
+    grams = _awc_num(dose.get("grams"), 0, 0, 1e6) if dose.get("available") else 0.0
+    if grams <= 0:
+        return
+    _mixing_salt_stock_write(stock, -grams / 1000.0, f"salted {litres:g} L", absolute=False)
+
+
+def _maintenance_weekly_change_litres(config: dict[str, Any], now: datetime,
+                                      weeks: int = 8) -> float | None:
+    """Litres of water changed a week, averaged over the last ``weeks`` from
+    the Maintenance log — hand-logged and automatic alike. None until a
+    volume has been logged in the window."""
+    maintenance = config.get("maintenance") if isinstance(config.get("maintenance"), dict) else {}
+    tasks = maintenance.get("tasks") if isinstance(maintenance.get("tasks"), dict) else {}
+    completions = maintenance.get("completions") if isinstance(maintenance.get("completions"), dict) else {}
+    tank_l = _maintenance_tank_litres(config)
+    since = now - timedelta(days=7 * weeks)
+    total = 0.0
+    seen = False
+    for task_id, entries in completions.items():
+        task = tasks.get(task_id)
+        if not isinstance(task, dict) or not task.get("logsVolume") or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("skipped"):
+                continue
+            stamp = _parse_datetime(entry.get("timestamp"))
+            try:
+                if stamp is None or stamp < since:
+                    continue
+            except TypeError:
+                continue
+            litres = _mixing_manual_change_litres(entry, tank_l)
+            if litres > 0:
+                total += litres
+                seen = True
+    return round(total / weeks, 1) if seen else None
+
+
+def _mixing_salt_stock_state(config: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    cfg = _mixing_cfg(config)
+    now = now or datetime.now(timezone.utc)
+    vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+    mix_v = vessels.get("mix") if isinstance(vessels.get("mix"), dict) else {}
+    vessel_l = _awc_num(mix_v.get("volumeLitres"), 0, 0, MIXING_VESSEL_MAX_L)
+    return mixing_engine.salt_stock_state(cfg.get("salt"), cfg.get("saltStock"), vessel_l,
+                                          _maintenance_weekly_change_litres(config, now))
+
+
+def _mixing_summary_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """The engine's summary plus the salt-on-hand state, which needs the
+    Maintenance log for its weeks-left figure."""
+    summary = mixing_engine.summary(_mixing_cfg(config), datetime.now(timezone.utc))
+    summary["saltStock"] = _mixing_salt_stock_state(config)
+    return summary
+
+
+def _mixing_new_water_stamp(hass: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """What the mixing station knows about the water going in right now (V3):
+    the batch's tested salinity, the vessel's temperature (the heat sensor,
+    when bound) and the salt brand. Empty when the vessel holds no salt batch."""
+    cfg = _mixing_cfg(config)
+    if not cfg.get("enabled"):
+        return {}
+    vessels = cfg.get("vessels") if isinstance(cfg.get("vessels"), dict) else {}
+    mix_v = vessels.get("mix") if isinstance(vessels.get("mix"), dict) else {}
+    if mix_v.get("contents") != "salt":
+        return {}
+    out: dict[str, Any] = {}
+    batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
+    ppt = _awc_num(batch.get("loggedPpt"), 0, 0, 60)
+    if ppt > 0:
+        out["ppt"] = round(ppt, 1)
+    salt = cfg.get("salt") if isinstance(cfg.get("salt"), dict) else {}
+    if salt.get("brand") == "custom":
+        out["brand"] = "Custom salt"
+    else:
+        info = mixing_engine.brand_info(salt.get("brand"))
+        if info.get("id") and info.get("id") != "custom":
+            out["brand"] = str(info.get("label") or info["id"])[:40]
+    heat = cfg.get("heat") if isinstance(cfg.get("heat"), dict) else {}
+    ent = heat.get("tempSensorEntity")
+    if ent and hass is not None and getattr(hass, "states", None) is not None:
+        st = hass.states.get(ent)
+        try:
+            temp = float(st.state) if st is not None else None
+        except (TypeError, ValueError):
+            temp = None
+        if temp is not None and -5 < temp < 45:
+            out["tempC"] = round(temp, 1)
+    return out
+
+
 async def _async_mixing_enter_stage(
     hass: HomeAssistant, config: dict[str, Any], stage: str, context: Any
 ) -> None:
@@ -16798,6 +17138,8 @@ async def _async_mixing_enter_stage(
         mix_v = cfg.setdefault("vessels", {}).setdefault("mix", {})
         mix_v["contents"] = "salt"
         batch["litres"] = round(mixing_engine.mix_vessel_litres(cfg), 1)
+        # Salt on hand (V3): the guide's dose for this batch leaves the bucket.
+        _mixing_salt_stock_debit(config, batch["litres"])
     elif stage in ("ready", "idle"):
         await _async_mixing_stop_switches(hass, config, _mixing_run_stop_roles(cfg), context)
     batch["state"] = stage
@@ -17110,7 +17452,7 @@ def _mixing_send(connection: websocket_api.ActiveConnection, msg: dict[str, Any]
                  hass: HomeAssistant, config: dict[str, Any], **extra: Any) -> None:
     """Every mixing reply carries the fresh backend-computed summary so the tab
     never renders a stale clock after an action."""
-    summary = mixing_engine.summary(_mixing_cfg(config), datetime.now(timezone.utc))
+    summary = _mixing_summary_payload(config)
     _awc_send(connection, msg, hass, config, summary=summary, **extra)
 
 
@@ -17128,8 +17470,60 @@ async def websocket_mixing_summary(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    summary = mixing_engine.summary(_mixing_cfg(config), datetime.now(timezone.utc))
+    summary = _mixing_summary_payload(config)
     connection.send_result(msg["id"], {"success": True, "summary": summary})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/mixing_salt_stock",
+    vol.Required("action"): vol.In(("set", "bucket", "size")),
+    vol.Optional("kg"): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_salt_stock(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Salt on hand (V3): 'set' the kilos in the bucket, 'bucket' adds a
+    bucket's worth (the saved size, or the kg given), 'size' records how big
+    a bucket is. Fetch-fresh under the mixing lock — this ledger is
+    server-owned and never posted by a whole-config save."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    action = msg["action"]
+    kg = msg.get("kg")
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        stock = cfg.get("saltStock")
+        if not isinstance(stock, dict):
+            stock = {"kg": 0.0, "bucketKg": 0.0, "updatedAt": "", "history": []}
+            cfg["saltStock"] = stock
+        if action == "size":
+            if kg is None:
+                connection.send_error(msg["id"], "invalid", "How many kilos is a bucket?")
+                return
+            stock["bucketKg"] = round(float(kg), 2)
+            _append_activity(config, f"Mixing station: salt bucket size set to {float(kg):g} kg", "control")
+        elif action == "bucket":
+            add = float(kg) if kg is not None else _awc_num(stock.get("bucketKg"), 0, 0,
+                                                            mixing_engine.SALT_BUCKET_MAX_KG)
+            if add <= 0:
+                connection.send_error(msg["id"], "no_bucket_size",
+                                      "Set the bucket size first, or say how many kilos arrived.")
+                return
+            _mixing_salt_stock_write(stock, add, "new bucket", absolute=False)
+            _append_activity(config, f"Mixing station: new salt bucket — {stock['kg']:g} kg on hand", "control")
+        else:
+            if kg is None:
+                connection.send_error(msg["id"], "invalid", "How many kilos are in the bucket?")
+                return
+            _mixing_salt_stock_write(stock, float(kg), "set by hand", absolute=True)
+            _append_activity(config, f"Mixing station: salt on hand set to {stock['kg']:g} kg", "control")
+        config = await _async_save_config(hass, entry, config)
+    _mixing_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_start_mix"})
@@ -20926,6 +21320,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_reset_tube)
     websocket_api.async_register_command(hass, websocket_mixing_summary)
     websocket_api.async_register_command(hass, websocket_mixing_start_mix)
+    websocket_api.async_register_command(hass, websocket_mixing_salt_stock)
     websocket_api.async_register_command(hass, websocket_mixing_transfer)
     websocket_api.async_register_command(hass, websocket_mixing_advance)
     websocket_api.async_register_command(hass, websocket_mixing_log_salinity)

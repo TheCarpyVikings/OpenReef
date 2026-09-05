@@ -912,7 +912,9 @@ def test_awc_block_guard_refuses_without_a_tested_batch():
 
 def test_awc_block_guard_stands_aside_for_a_vouched_batch():
     install_scheduler(integration)
-    hass, entry = _awc_station_entry(guard="block", batch=_stored_batch())
+    # The guard reads the wall clock for the retest window, so the fixture's
+    # frozen NOW (2026-08-28) went stale on 2026-09-04 — test it "today".
+    hass, entry = _awc_station_entry(guard="block", batch=_stored_batch(testedAt=_iso(datetime.now(timezone.utc))))
     started, reasons = run(integration._async_awc_start(
         hass, entry, 10, "batch_sequential", True, None))
     assert started is True and not reasons
@@ -2015,6 +2017,159 @@ def test_restart_recovery_never_cuts_a_live_calibration():
     run(integration._async_mixing_recover_orphaned(hass2, entry2))
     assert ("turn_off", "switch.mix_booster") in _switch_calls(hass2, "switch.mix_booster")
 
+
+
+# ---------------------------------------------------------------- salt on hand (V3)
+
+def _salted(kg=10.0, bucket=6.7, **over):
+    """A station whose keeper has set the bucket: tracked, 40 L of RODI in the
+    vessel ready to salt, NYOS at 35 ppt (39 g/L → 1.56 kg for the batch)."""
+    cfg = {"saltStock": {"kg": kg, "bucketKg": bucket, "updatedAt": _iso(NOW), "history": []},
+           "vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40, "levelSensorEntity": ""},
+                       "mix": {"volumeLitres": 50, "estimatedLitres": 40, "contents": "rodi", "levelSensorEntity": ""}}}
+    cfg.update(over)
+    return cfg
+
+
+def test_salt_stock_state_reads_batches_and_weeks_off_the_brand_dose():
+    salt = {"brand": "nyos_pure", "targetPpt": 35.0, "customGPerL": 0}
+    untracked = mixing.salt_stock_state(salt, {"kg": 0, "bucketKg": 0, "updatedAt": ""}, 50)
+    assert untracked["tracked"] is False and untracked["low"] is False and "Not tracked" in untracked["text"]
+    state = mixing.salt_stock_state(salt, {"kg": 10, "bucketKg": 6.7, "updatedAt": _iso(NOW)}, 50, weekly_litres=10)
+    assert state["perBatchKg"] == 1.95 and state["batchesLeft"] == 5.1
+    assert state["kgPerWeek"] == 0.39 and state["weeksLeft"] == 25.6
+    assert state["low"] is False and state["text"].startswith("10 kg on hand · ≈5.1 batches of 50 L · ≈25.6 weeks")
+    low = mixing.salt_stock_state(salt, {"kg": 1.2, "bucketKg": 6.7, "updatedAt": _iso(NOW)}, 50)
+    assert low["low"] is True and low["text"].endswith("— time to order.") and low["weeksLeft"] is None
+    tenth = mixing.salt_stock_state(salt, {"kg": 0.6, "bucketKg": 6.7, "updatedAt": _iso(NOW)}, 0)
+    assert tenth["low"] is True and tenth["perBatchKg"] is None, "a tenth of a bucket is low even with no vessel size"
+    out = mixing.salt_stock_state(salt, {"kg": 0, "bucketKg": 6.7, "updatedAt": _iso(NOW)}, 50)
+    assert out["empty"] is True and out["low"] is False and out["text"].startswith("Out of salt")
+    custom = mixing.salt_stock_state({"brand": "custom", "targetPpt": 35}, {"kg": 5, "updatedAt": _iso(NOW)}, 50)
+    assert custom["perBatchKg"] is None and custom["batchesLeft"] is None and custom["low"] is False
+
+
+def test_salt_stock_ledger_is_normalised_debited_on_salting_and_guarded():
+    raw = _station_cfg(saltStock={"kg": "7.5", "bucketKg": 6.7, "updatedAt": _iso(NOW),
+                                  "history": [{"at": _iso(NOW), "kg": 7.5, "delta": 6.7, "note": "new bucket"}, "junk", {"kg": 1}]})
+    cfg = integration._normalise_core_config({"mixingStation": raw})["mixingStation"]
+    assert cfg["saltStock"] == {"kg": 7.5, "bucketKg": 6.7, "updatedAt": _iso(NOW),
+                                "history": [{"at": _iso(NOW), "kg": 7.5, "delta": 6.7, "note": "new bucket"}]}
+    assert integration._normalise_core_config({"mixingStation": _station_cfg()})["mixingStation"]["saltStock"] == {
+        "kg": 0.0, "bucketKg": 0.0, "updatedAt": "", "history": []}
+    # Entering 'salting' debits the guide's grams for the vessel's litres.
+    hass, entry = _station(_salted())
+    config = integration._config_from_entry(entry)
+    run(integration._async_mixing_enter_stage(hass, config, "salting", None))
+    stock = config["mixingStation"]["saltStock"]
+    assert stock["kg"] == 8.44 and stock["history"][-1]["note"] == "salted 40 L" and stock["history"][-1]["delta"] == -1.56
+    # An untracked bucket is never invented: no updatedAt, no debit.
+    hass2, entry2 = _station(_salted(updatedAt=""))
+    config2 = integration._config_from_entry(entry2)
+    config2["mixingStation"]["saltStock"]["updatedAt"] = ""
+    run(integration._async_mixing_enter_stage(hass2, config2, "salting", None))
+    assert config2["mixingStation"]["saltStock"]["kg"] == 10.0
+    # Never below zero.
+    hass3, entry3 = _station(_salted(kg=0.5))
+    config3 = integration._config_from_entry(entry3)
+    run(integration._async_mixing_enter_stage(hass3, config3, "salting", None))
+    assert config3["mixingStation"]["saltStock"]["kg"] == 0.0
+    # The stale-save guard: the stored ledger wins over whatever a client posts.
+    stored = {"mixingStation": {"saltStock": {"kg": 8.44, "bucketKg": 6.7, "updatedAt": _iso(NOW), "history": []}}}
+    incoming = {"mixingStation": {"saltStock": {"kg": 10.0, "bucketKg": 6.7, "updatedAt": "", "history": []}}}
+    integration._mixing_preserve_runtime(stored, incoming)
+    assert incoming["mixingStation"]["saltStock"]["kg"] == 8.44
+
+
+def test_salt_stock_ws_set_bucket_size_and_the_summary_runway():
+    hass, entry = _station()
+    conn = FakeConnection()
+    run(integration.websocket_mixing_salt_stock(hass, conn, {"id": 1, "action": "set", "kg": 10}))
+    assert not conn.errors, conn.errors
+    stock = conn.results[-1].payload["summary"]["saltStock"]
+    assert stock["tracked"] and stock["kg"] == 10 and stock["batchesLeft"] == 5.1 and stock["weeksLeft"] is None
+    run(integration.websocket_mixing_salt_stock(hass, conn, {"id": 2, "action": "size", "kg": 6.7}))
+    assert conn.results[-1].payload["summary"]["saltStock"]["bucketKg"] == 6.7
+    run(integration.websocket_mixing_salt_stock(hass, conn, {"id": 3, "action": "bucket"}))
+    stock = conn.results[-1].payload["summary"]["saltStock"]
+    assert stock["kg"] == 16.7 and _mix_state(entry)["saltStock"]["history"][-1]["note"] == "new bucket"
+    run(integration.websocket_mixing_salt_stock(hass, conn, {"id": 4, "action": "bucket", "kg": 3.3}))
+    assert conn.results[-1].payload["summary"]["saltStock"]["kg"] == 20.0
+    # No size and no kilos: an honest refusal, not a silent no-op.
+    hass2, entry2 = _station()
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_salt_stock(hass2, conn2, {"id": 5, "action": "bucket"}))
+    assert conn2.error_codes == ["no_bucket_size"]
+    # Weeks left come from the Maintenance log: 4 changes of 20 L in the last
+    # month = 10 L a week = 0.39 kg a week.
+    cfg = integration._config_from_entry(entry)
+    cfg["maintenance"] = {"seeded": True, "enabled": True,
+                          "tasks": {"water_change": {"label": "Water change", "cadenceDays": 7, "criticalAfterDays": 14,
+                                                     "enabled": True, "logsVolume": True}},
+                          "completions": {"water_change": [
+                              {"id": f"wc{i}", "timestamp": _iso(datetime.now(timezone.utc) - timedelta(days=7 * i + 1)),
+                               "volume": 20, "volumeUnit": "L"} for i in range(4)]
+                              + [{"id": "old", "timestamp": _iso(datetime.now(timezone.utc) - timedelta(days=90)), "volume": 200, "volumeUnit": "L"},
+                                 {"id": "skip", "timestamp": _iso(datetime.now(timezone.utc) - timedelta(days=2)), "volume": 999, "volumeUnit": "L", "skipped": True}]}}
+    assert integration._maintenance_weekly_change_litres(cfg, datetime.now(timezone.utc)) == 10.0
+    state = integration._mixing_salt_stock_state(cfg)
+    assert state["kgPerWeek"] == 0.39 and state["weeksLeft"] == round(20.0 / 0.39, 1)
+    # The digest's nag reads the same state.
+    assert integration._maintenance_salt_nag(cfg, datetime.now(timezone.utc)) == []
+    cfg["mixingStation"]["saltStock"]["kg"] = 1.2
+    nag = integration._maintenance_salt_nag(cfg, datetime.now(timezone.utc))
+    assert nag == [{"id": "salt", "label": "Salt", "detail": "1.2 kg left, ≈0.6 batches", "severity": "warning"}], nag
+    cfg["mixingStation"]["saltStock"]["kg"] = 0
+    assert integration._maintenance_salt_nag(cfg, datetime.now(timezone.utc))[0]["severity"] == "critical"
+    cfg["mixingStation"]["enabled"] = False
+    assert integration._maintenance_salt_nag(cfg, datetime.now(timezone.utc)) == []
+
+
+def test_manual_water_change_is_stamped_with_the_vessels_water():
+    """The new water's record (V3): a hand-logged change from the vessel
+    carries the batch's tested salinity, the heat sensor's reading and the
+    brand; typed figures win; AWC rows from the vessel carry ppt and brand."""
+    hass, entry = _station({"vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40, "levelSensorEntity": ""},
+                                        "mix": {"volumeLitres": 50, "estimatedLitres": 45, "contents": "salt", "levelSensorEntity": ""}},
+                            "batch": {"state": "ready", "type": "salt", "litres": 45, "loggedPpt": 35.2, "testedAt": _iso(NOW)},
+                            "heat": {"enabled": True, "targetC": 25.0, "tempSensorEntity": "sensor.mix_temp"}})
+    hass.states.set("sensor.mix_temp", "25.3")
+    stored = integration._config_from_entry(entry)
+    stored["maintenance"] = {"seeded": True, "enabled": True,
+                             "tasks": {"water_change": {"label": "Water change", "cadenceDays": 7, "criticalAfterDays": 14,
+                                                        "enabled": True, "logsVolume": True}},
+                             "completions": {"water_change": []}}
+    entry.options[CONF_SETTINGS] = integration._normalise_core_config(stored)
+    incoming = copy.deepcopy(entry.options[CONF_SETTINGS])
+    incoming["maintenance"]["completions"]["water_change"] = [
+        {"id": "wc:new", "timestamp": _iso(datetime.now(timezone.utc)), "notes": "", "volume": 10, "volumeUnit": "L"},
+        {"id": "wc:typed", "timestamp": _iso(datetime.now(timezone.utc) - timedelta(minutes=1)), "notes": "", "volume": 5,
+         "volumeUnit": "L", "newWater": {"ppt": 34.8}},
+    ]
+    conn = FakeConnection()
+    run(integration.websocket_save_config(hass, conn, {"id": 1, "config": incoming}))
+    assert not conn.errors, conn.errors
+    saved = {e["id"]: e for e in entry.options[CONF_SETTINGS]["maintenance"]["completions"]["water_change"]}
+    label = mixing.brand_info("nyos_pure")["label"]
+    assert saved["wc:new"]["newWater"] == {"ppt": 35.2, "brand": label, "tempC": 25.3}, saved["wc:new"]
+    assert saved["wc:typed"]["newWater"] == {"ppt": 34.8, "brand": label, "tempC": 25.3}, "typed ppt wins"
+    # The panel's completions fire the done event, with the stamp on board.
+    done = [e for e in hass.bus.events if e.event_type == integration.const.MAINTENANCE_DONE_EVENT]
+    assert len(done) == 2 and all(e.data["task_id"] == "water_change" and e.data["source"] == "panel" for e in done)
+    assert {e.data["newWater"]["ppt"] for e in done} == {35.2, 34.8}
+    # A re-save of the same rows is not a new completion: no done event (the
+    # config-updated event fires on every save and is not counted here).
+    done_before = sum(1 for e in hass.bus.events if e.event_type == integration.const.MAINTENANCE_DONE_EVENT)
+    run(integration.websocket_save_config(hass, FakeConnection(), {"id": 2, "config": copy.deepcopy(entry.options[CONF_SETTINGS])}))
+    assert sum(1 for e in hass.bus.events if e.event_type == integration.const.MAINTENANCE_DONE_EVENT) == done_before
+    # The AWC path: fresh water from the vessel carries ppt and brand (no sensor in hand).
+    cfg = integration._config_from_entry(entry)
+    integration._maintenance_log_awc_change(cfg, datetime.now(timezone.utc), 8.0, False, "")
+    awc_row = cfg["maintenance"]["completions"]["water_change"][0]
+    assert awc_row["source"] == "awc" and awc_row["newWater"] == {"ppt": 35.2, "brand": label}
+    # No salt in the vessel: nothing is stamped.
+    cfg["mixingStation"]["vessels"]["mix"]["contents"] = "rodi"
+    assert integration._mixing_new_water_stamp(hass, cfg) == {}
 
 if __name__ == "__main__":
     failures = 0

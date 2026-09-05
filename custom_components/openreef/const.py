@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.138"
+INTEGRATION_VERSION = "0.7.139"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -256,6 +256,13 @@ MAINTENANCE_TASK_CRITICAL_HOURS_MAX = 24 * 28
 # manual history under the cap above.
 MAINTENANCE_AWC_TASK_ID = "water_change"
 MAINTENANCE_SOURCE_AWC = "awc"
+
+# Outbound automation hooks (V3, 2026-09-05): fired on the daily reminder tick
+# for every task newly due and every bottle (or the salt bucket) newly low,
+# and whenever a completion is recorded — by the service or from the panel.
+MAINTENANCE_DUE_EVENT = f"{DOMAIN}_maintenance_due"
+MAINTENANCE_DONE_EVENT = f"{DOMAIN}_maintenance_done"
+CONSUMABLE_LOW_EVENT = f"{DOMAIN}_consumable_low"
 
 # Hatchery-driven completions: starting a hatch from the NPS tab logs the
 # "start" chore done; "Hatched & loaded" logs the harvest chore done. Tagged so

@@ -98,4 +98,18 @@ test("test_gating_is_off_unless_the_schedule_is_on", async () => {
     "with no lighting schedule there is nothing to gate on");
 });
 
+// --- quiet hours (V3, 2026-09-05) --------------------------------------------------
+
+test("test_quiet_hours_live_with_the_alert_settings_and_never_touch_escalation", async () => {
+  const seed = (panel) => { panel._settingsSections = {}; panel._healthSections = {}; return panel; };
+  const off = seed(await makePanel({ quietHours: { enabled: false, start: "22:00", end: "07:00" } }));
+  const html = off._alertsSettings(true);
+  assert(html.includes('data-scope="quiet-hours" data-field="enabled" >') || html.includes('data-scope="quiet-hours" data-field="enabled">'), "the toggle renders unchecked");
+  assert(html.includes("Off — nudges arrive whenever they are ready.") && !html.includes('data-scope="quiet-hours" data-field="start"'), "off hides the times");
+  assert(html.includes("Critical alerts and their escalation always get through"), "the copy promises what the code does");
+  const on = seed(await makePanel({ quietHours: { enabled: true, start: "23:30", end: "06:45" } }));
+  const onHtml = on._alertsSettings(true);
+  assert(onHtml.includes("23:30 → 06:45") && onHtml.includes('data-scope="quiet-hours" data-field="start" value="23:30"') && onHtml.includes('data-field="end" value="06:45"'), onHtml.slice(onHtml.indexOf("Quiet hours"), onHtml.indexOf("Quiet hours") + 900));
+});
+
 await runTests();

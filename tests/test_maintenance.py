@@ -619,6 +619,96 @@ def test_due_items_carry_the_notes_and_the_notification_shows_them():
     assert created.data["message"].startswith("Filter sock is ") and created.data["message"].endswith("\nRinse in tank water, never tap."), created.data["message"]
     assert created.data["title"].startswith("OpenReef: Filter sock ")
 
+
+# --- V3 (2026-09-05): the new-water record, the checklist, quiet hours, events
+
+def test_new_water_record_survives_the_normaliser_and_the_service():
+    cfg = _cfg({"wc": _interval(label="Water change", logsVolume=True)},
+               {"wc": [{"timestamp": _ago(1), "volume": 10, "volumeUnit": "L",
+                        "newWater": {"ppt": 35.14, "tempC": 25.26, "brand": "  NYOS Pure  "}},
+                       {"timestamp": _ago(2), "newWater": {"ppt": 0, "tempC": 99, "brand": ""}},
+                       {"timestamp": _ago(3), "newWater": "35"}]})
+    rows = integration._normalise_core_config(cfg)["maintenance"]["completions"]["wc"]
+    assert rows[0]["newWater"] == {"ppt": 35.1, "tempC": 25.3, "brand": "NYOS Pure"}
+    assert "newWater" not in rows[1] and "newWater" not in rows[2]
+    # The service takes the figures by hand and fires the done event.
+    entry = _entry()
+    hass = FakeHass(entries=[entry])
+    run(record(hass, _call({"task_id": "water_change", "volume": 12, "volume_unit": "L",
+                            "new_water_ppt": 35.0, "new_water_temp_c": 25.5})))
+    row = _saved(entry)["completions"]["water_change"][0]
+    assert row["newWater"] == {"ppt": 35.0, "tempC": 25.5}
+    done = [e for e in hass.bus.events if e.event_type == integration.const.MAINTENANCE_DONE_EVENT]
+    assert len(done) == 1 and done[0].data["source"] == "service" and done[0].data["volume"] == 12.0
+    assert done[0].data["label"] == "Water change" and done[0].data["newWater"] == {"ppt": 35.0, "tempC": 25.5}
+
+
+def test_task_checklist_is_kept_and_capped():
+    cfg = _cfg({"wc": _interval(steps=["  Return pump off ", "", 7, "Siphon" * 40] + [f"step {i}" for i in range(20)])})
+    steps = integration._normalise_core_config(cfg)["maintenance"]["tasks"]["wc"]["steps"]
+    assert steps[0] == "Return pump off" and steps[1] == ("Siphon" * 40)[:120]
+    assert len(steps) == 12 and "" not in steps
+    assert integration._normalise_core_config(_cfg({"wc": _interval()}))["maintenance"]["tasks"]["wc"]["steps"] == []
+
+
+def _local_hm(now, offset_min):
+    local = integration.dt_util.as_local(now)
+    t = (local.hour * 60 + local.minute + offset_min) % 1440
+    return f"{t // 60:02d}:{t % 60:02d}"
+
+
+def test_quiet_hours_window_wraps_midnight_and_holds_the_heartbeat():
+    now = datetime.now(timezone.utc)
+    active = {"quietHours": {"enabled": True, "start": _local_hm(now, -60), "end": _local_hm(now, 60)}}
+    assert integration._quiet_hours_active(active, now) is True
+    later = {"quietHours": {"enabled": True, "start": _local_hm(now, 60), "end": _local_hm(now, 120)}}
+    assert integration._quiet_hours_active(later, now) is False
+    complement = {"quietHours": {"enabled": True, "start": _local_hm(now, 60), "end": _local_hm(now, -60)}}
+    assert integration._quiet_hours_active(complement, now) is False, "a wrapping window that excludes now"
+    assert integration._quiet_hours_active({"quietHours": {"enabled": False, "start": "00:00", "end": "23:59"}}, now) is False
+    assert integration._quiet_hours_active({"quietHours": {"enabled": True, "start": "22:00", "end": "22:00"}}, now) is False
+    # 22:00 → 07:00 holds 03:00 local and frees 12:00 local.
+    local = integration.dt_util.as_local(now)
+    night = {"quietHours": {"enabled": True, "start": "22:00", "end": "07:00"}}
+    assert integration._quiet_hours_active(night, local.replace(hour=3, minute=0)) is True
+    assert integration._quiet_hours_active(night, local.replace(hour=12, minute=0)) is False
+    # The normaliser: defaults off, 22:00 → 07:00, junk times fall back.
+    quiet = integration._normalise_core_config({})["quietHours"]
+    assert quiet == {"enabled": False, "start": "22:00", "end": "07:00"}
+    quiet = integration._normalise_core_config({"quietHours": {"enabled": 1, "start": "23:30", "end": "junk"}})["quietHours"]
+    assert quiet == {"enabled": True, "start": "23:30", "end": "07:00"}
+    # The heartbeat push is held, the activity line says so, the check still runs.
+    cfg = {"watchdog": {"enabled": True, "heartbeatEnabled": True, "heartbeatEveryHours": 24,
+                        "missedAfterHours": 30, "notifyTarget": "mobile_app_pixel", "lastHeartbeat": ""},
+           **active}
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry])
+    out = run(integration._async_run_watchdog(hass, entry, force=True))
+    assert not any(c.domain == "notify" for c in hass.services.calls)
+    assert any(item["message"] == "OpenReef heartbeat OK (push held — quiet hours)" for item in out["activity"])
+    cfg2 = {**cfg, **later}
+    entry2 = FakeEntry(options={CONF_SETTINGS: cfg2})
+    hass2 = FakeHass(entries=[entry2])
+    run(integration._async_run_watchdog(hass2, entry2, force=True))
+    assert any(c.domain == "notify" and c.service == "mobile_app_pixel" for c in hass2.services.calls)
+
+
+def test_due_and_low_events_fire_once_on_the_daily_tick():
+    cfg = _shelf_cfg({"rj": _bottle("Reef Juice", remaining=20.0)}, completions={"wc": [{"timestamp": _ago(20)}]})
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry])
+    run(fire(hass, entry, NOW))
+    due = [e for e in hass.bus.events if e.event_type == integration.const.MAINTENANCE_DUE_EVENT]
+    low = [e for e in hass.bus.events if e.event_type == integration.const.CONSUMABLE_LOW_EVENT]
+    assert len(due) == 1 and due[0].data["task_id"] == "wc" and due[0].data["severity"] == "critical"
+    assert due[0].data["label"] == "Water change" and due[0].data["entry_id"] == entry.entry_id
+    assert len(low) == 1 and low[0].data["product_id"] == "rj" and low[0].data["label"] == "Reef Juice"
+    assert low[0].data["severity"] == "warning" and low[0].data["detail"].startswith("8% left")
+    # The next tick: the same set, so no events — the day they first appear is the hook.
+    before = len(hass.bus.events)
+    run(fire(hass, entry, NOW + timedelta(days=1)))
+    assert len(hass.bus.events) == before
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

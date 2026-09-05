@@ -870,4 +870,38 @@ test("test_low_empty_and_expired_bottles_are_rows_read_off_the_shelfs_own_flags"
   }
 });
 
+test("test_the_salt_bucket_is_an_attention_row_read_off_the_mixing_summary", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await mission(greenTank({ mixingStation: { enabled: true } }));
+    panel._nps = { summary: null, at: Date.now(), loading: false, demo: false };
+    // Nothing loaded: no row, and one ask for the summary.
+    let asked = 0;
+    panel._mixingLoadSummary = async () => { asked += 1; };
+    assertEqual(rows(panel).filter((row) => row.tab === "mixing").length, 0);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assertEqual(asked, 1, "Mission Control asks the station once");
+    panel._mixingSummaryAt = Date.now();
+    panel._mixingSummary = { saltStock: { tracked: true, kg: 1.2, bucketKg: 6.7, batchesLeft: 0.6, weeksLeft: 3, low: true, empty: false } };
+    const low = rows(panel).filter((row) => row.tab === "mixing");
+    assertEqual(low.length, 1, JSON.stringify(low));
+    assertEqual(low[0].severity, "warning");
+    assertEqual(low[0].title, "Salt running low");
+    assertEqual(low[0].detail, "1.2 kg left · ≈0.6 batches · ≈3 weeks at your rate — time to order.");
+    panel._mixingSummary = { saltStock: { tracked: true, kg: 0, bucketKg: 6.7, batchesLeft: 0, weeksLeft: null, low: false, empty: true } };
+    const out = rows(panel).filter((row) => row.tab === "mixing");
+    assertEqual(out[0].severity, "critical");
+    assertEqual(out[0].title, "Salt is out");
+    panel._mixingSummary = { saltStock: { tracked: false, kg: 0, low: false, empty: false } };
+    assertEqual(rows(panel).filter((row) => row.tab === "mixing").length, 0, "untracked is not attention");
+    // The station off: nothing asked, nothing shown.
+    const off = await mission(greenTank({ mixingStation: { enabled: false } }));
+    off._nps = { summary: null, at: Date.now(), loading: false, demo: false };
+    off._mixingSummary = { saltStock: { tracked: true, kg: 0, empty: true, low: false } };
+    assertEqual(rows(off).filter((row) => row.tab === "mixing").length, 0);
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

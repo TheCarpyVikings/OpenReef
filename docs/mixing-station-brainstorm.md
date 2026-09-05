@@ -624,3 +624,21 @@ batches — above all the single-vessel crowd filling an ATO reservoir from a T-
   (a bare `<button>` rendered as an unreadable white rectangle), level corrections
   get proper compact Set buttons, idle pump glyphs dim, and the diagram animates
   draws (store = feed line, external/calibration = a labelled T-off branch).
+
+## Salt on hand (V3 maintenance slice, 0.7.139 — 2026-09-05)
+
+The bucket as a ledger. `mixingStation.saltStock = {kg, bucketKg, updatedAt, history}` is
+**server-owned**: entering `salting` debits the dose guide's grams for the batch's litres
+(`_mixing_salt_stock_debit`, only once the keeper has set a figure — an untracked bucket is
+never invented), and the keeper sets/corrects it through `openreef/mixing_salt_stock`
+(`set` kg, `bucket` = add a bucket's worth, `size` = how big a bucket is). The whole-config
+stale-save guard copies the block stored-wins. `mixing.salt_stock_state()` gives kg, batches
+left at the vessel's full dose, weeks left at the water-change rate (litres a week from the
+Maintenance log, 8-week average, hand-logged and AWC alike), and low/empty (under one full
+batch, or under a tenth of a bucket). The tab's "Salt on hand" card, Mission Control's
+Attention list and the daily maintenance digest all read that one state.
+
+Also in 0.7.139: hand-logged water changes from the vessel (and AWC rows when the fresh
+water came from it) carry `newWater = {ppt, tempC, brand}` — the batch's tested salinity,
+the heat sensor's reading and the brand — with the keeper's typed figures winning.
+

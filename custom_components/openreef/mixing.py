@@ -723,3 +723,58 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
         "targetSg": sg_from_ppt(_f(salt_cfg.get("targetPpt"), REFERENCE_PPT)),
         "rodi": rodi_status(cfg, now),
     }
+
+
+# ---------------------------------------------------------------- salt on hand
+# V3 (2026-09-05): the bucket as a ledger. Every salted batch debits the dose
+# guide's grams; the keeper sets or corrects the kilos through the station's
+# own WS command. Runway = batches at the vessel's full dose, and weeks at the
+# keeper's water-change rate from the Maintenance log.
+SALT_STOCK_MAX_KG = 200.0
+SALT_BUCKET_MAX_KG = 50.0
+SALT_STOCK_HISTORY_MAX = 40
+SALT_STOCK_LOW_BUCKET_FRACTION = 0.1
+
+
+def salt_stock_state(salt_cfg: Any, stock: Any, vessel_litres: Any = 0,
+                     weekly_litres: Any = None) -> dict[str, Any]:
+    """Salt on hand: kilos left, how many full batches that is at the brand's
+    dose for the vessel, how many weeks at the water-change rate, and whether
+    it is time to order. Untracked until the keeper sets a figure — nothing
+    is invented."""
+    salt_cfg = salt_cfg if isinstance(salt_cfg, dict) else {}
+    stock = stock if isinstance(stock, dict) else {}
+    kg = max(0.0, _f(stock.get("kg")))
+    bucket = max(0.0, _f(stock.get("bucketKg")))
+    tracked = bool(stock.get("updatedAt"))
+    g_per_l = brand_g_per_l(salt_cfg.get("brand"), salt_cfg.get("customGPerL"))
+    ppt = _f(salt_cfg.get("targetPpt"), REFERENCE_PPT)
+    g_per_l_target = g_per_l * ppt / REFERENCE_PPT if g_per_l > 0 and ppt > 0 else 0.0
+    vessel = max(0.0, _f(vessel_litres))
+    per_batch_kg = (round(g_per_l_target * vessel / 1000.0, 2)
+                    if g_per_l_target > 0 and vessel > 0 else None)
+    batches_left = round(kg / per_batch_kg, 1) if per_batch_kg else None
+    weekly = _f(weekly_litres) if weekly_litres is not None else 0.0
+    kg_per_week = (round(g_per_l_target * weekly / 1000.0, 3)
+                   if g_per_l_target > 0 and weekly > 0 else None)
+    weeks_left = round(kg / kg_per_week, 1) if kg_per_week else None
+    empty = tracked and kg <= 0.0
+    low = tracked and not empty and (
+        (per_batch_kg is not None and kg < per_batch_kg)
+        or (bucket > 0 and kg <= bucket * SALT_STOCK_LOW_BUCKET_FRACTION))
+    if not tracked:
+        text = "Not tracked — set what is in the bucket and every salted batch debits it."
+    elif empty:
+        text = "Out of salt — no batch can be mixed until a bucket arrives."
+    else:
+        bits = [f"{kg:g} kg on hand"]
+        if batches_left is not None:
+            bits.append(f"≈{batches_left:g} batch{'es' if batches_left != 1 else ''} of {vessel:g} L")
+        if weeks_left is not None:
+            bits.append(f"≈{weeks_left:g} week{'s' if weeks_left != 1 else ''} at your water-change rate")
+        text = " · ".join(bits) + (" — time to order." if low else "")
+    return {"tracked": tracked, "kg": round(kg, 2), "bucketKg": round(bucket, 2),
+            "perBatchKg": per_batch_kg, "batchesLeft": batches_left,
+            "kgPerWeek": kg_per_week, "weeksLeft": weeks_left,
+            "low": low, "empty": empty, "updatedAt": str(stock.get("updatedAt") or ""),
+            "text": text}

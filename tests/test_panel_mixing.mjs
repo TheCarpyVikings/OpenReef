@@ -922,4 +922,26 @@ test("the dose guide tells the top-up story in plain words", async () => {
   noPlaceholders(rodiHtml, "dose guide");
 });
 
+// --- salt on hand (V3, 2026-09-05) -----------------------------------------------
+
+test("the salt card reads the backend's stock state and never invents a figure", async () => {
+  const untracked = { tracked: false, kg: 0, bucketKg: 0, perBatchKg: 1.95, batchesLeft: null, kgPerWeek: null, weeksLeft: null,
+    low: false, empty: false, updatedAt: "", text: "Not tracked — set what is in the bucket and every salted batch debits it." };
+  const panel = await mixingPanel({}, { ...summaryBlob(), saltStock: untracked });
+  const card = panel._mixingSaltStockCard(panel._mixingSummary);
+  assert(card.includes('id="or-mixing-salt"') && card.includes("<h3>Not tracked</h3>") && card.includes('class="pill unknown">set it<'), `untracked card: ${card.slice(0, 500)}`);
+  assert(card.includes('data-action="mixing-salt-bucket" disabled'), "no bucket size, no New bucket");
+  assert(card.includes("≈1.95 kg for a full vessel"), "the per-batch debit is explained");
+  noPlaceholders(card, "salt card");
+  assert(panel._mixingTab().includes('id="or-mixing-salt"'), "the tab carries the card");
+  const low = { ...untracked, tracked: true, kg: 1.2, bucketKg: 6.7, batchesLeft: 0.6, weeksLeft: 3, low: true, updatedAt: "2026-09-05T10:00:00+00:00",
+    text: "1.2 kg on hand · ≈0.6 batches of 50 L · ≈3 weeks at your water-change rate — time to order." };
+  const lowCard = panel._mixingSaltStockCard({ saltStock: low });
+  assert(lowCard.includes("<h3>1.2 kg</h3>") && lowCard.includes('class="pill warning">order soon<') && lowCard.includes("time to order."), lowCard);
+  assert(lowCard.includes("+ New bucket (6.7 kg)") && !lowCard.includes('data-action="mixing-salt-bucket" disabled'), "a saved bucket size arms New bucket");
+  const out = panel._mixingSaltStockCard({ saltStock: { ...low, kg: 0, empty: true, low: false, text: "Out of salt — no batch can be mixed until a bucket arrives." } });
+  assert(out.includes('class="pill critical">out<'), "empty is critical");
+  assert(panel._mixingSaltStockCard({}) === "", "no state, no card");
+});
+
 runTests();

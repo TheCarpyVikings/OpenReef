@@ -2,6 +2,23 @@
 // (const.py) — far more — and the charts read every one of them; this is a DOM
 // weight limit, and the list says so when it bites.
 const MAINTENANCE_HISTORY_ROWS = 100;
+// The usual steps for the suggested chores (V3, 2026-09-05): a starting
+// checklist the keeper can take or edit — one tap, then it is theirs.
+const MAINTENANCE_DEFAULT_STEPS = {
+  water_change: ["Return pump and skimmer off", "Siphon detritus while draining", "Check the new water matches temperature and salinity", "Refill slowly, away from corals", "Return pump and skimmer back on"],
+  clean_skimmer: ["Empty and rinse the cup", "Wipe the neck", "Check the air line and venturi", "Refit and let it settle before trusting the level"],
+  replace_filter_sock: ["Swap the sock or floss", "Rinse the holder", "Check the overflow runs quietly"],
+  blow_detritus: ["Return pump off", "Baste the rocks, top to bottom", "Let the socks catch it, then swap them"],
+  clean_glass: ["Check the magnet for trapped sand first", "Magnet-clean the front and sides", "Scrape the coralline"],
+  refill_dosing: ["Note the levels first", "Top up each container", "Reset the reservoir levels in OpenReef"],
+  inspect_ato: ["Check the float or sensor moves freely", "Rinse the reservoir", "Refill with RODI"],
+  replace_carbon: ["Rinse the new carbon in RODI until it runs clear", "Swap the media", "Restart the reactor slowly"],
+  replace_gfo: ["Rinse the new GFO in RODI", "Swap the media, never overpacked", "Set the tumble gentle — a slow roll, not a boil"],
+  calibrate_ph: ["Rinse the probe in RODI", "Calibrate in 7.0 then 10.0 at tank temperature", "Rinse and refit"],
+  calibrate_salinity: ["Zero with RODI at room temperature", "Check against a 35 ppt reference", "Rinse and dry the prism"],
+  clean_pumps: ["Pumps off and out", "Soak in citric acid or vinegar", "Scrub the impeller and its well", "Rinse well before refitting"],
+  replace_rodi: ["Water off, depressurise", "Swap the stages in order", "Flush the membrane ten minutes to drain", "Mark the stages changed in OpenReef"],
+};
 
 // The activity feed's stored depth — MUST match ACTIVITY_MAX_ENTRIES in
 // __init__.py (both writers clamp to it). The Log tab pages through it
@@ -1524,6 +1541,8 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
       if (action === "complete-task") this._completeTask(id);
+      if (action === "maintenance-step") this._toggleMaintenanceStep(target.dataset.id, Number(target.dataset.index));
+      if (action === "maintenance-usual-steps") this._maintenanceUsualSteps(target.dataset.id);
       if (action === "skip-task") this._skipTask(id);
       if (action === "snooze-task") this._snoozeTask(id, Number(target.dataset.days) || 3);
       if (action === "resume-task") this._resumeTask(id);
@@ -1683,6 +1702,9 @@ class OpenReefPanel extends HTMLElement {
         else this._loadTrend(id, this._trend?.range || "24h");
       }
       if (action === "mixing-start") this._mixingAction({ type: "openreef/mixing_start_mix" });
+      if (action === "mixing-salt-set") { const kg = parseFloat(this.shadowRoot.getElementById("or-salt-kg")?.value); if (Number.isFinite(kg) && kg >= 0) this._mixingAction({ type: "openreef/mixing_salt_stock", action: "set", kg }); }
+      if (action === "mixing-salt-bucket") this._mixingAction({ type: "openreef/mixing_salt_stock", action: "bucket" });
+      if (action === "mixing-salt-size") { const kg = parseFloat(this.shadowRoot.getElementById("or-salt-bucket-kg")?.value); if (Number.isFinite(kg) && kg >= 0) this._mixingAction({ type: "openreef/mixing_salt_stock", action: "size", kg }); }
       if (action === "mixing-advance") this._mixingAction({ type: "openreef/mixing_advance" });
       if (action === "mixing-transfer") {
         const moved = Number(this.shadowRoot.querySelector("[data-mixing-transfer]")?.value) || 0;
@@ -2136,6 +2158,10 @@ class OpenReefPanel extends HTMLElement {
         this._config.watchdog = this._config.watchdog || {};
         this._config.watchdog[field] = value;
       }
+      if (scope === "quiet-hours") {
+        this._config.quietHours = this._config.quietHours || {};
+        this._config.quietHours[field] = value;
+      }
       if (scope === "sensor-health") {
         this._config.sensorHealth = this._config.sensorHealth || {};
         this._config.sensorHealth[field] = value;
@@ -2368,7 +2394,10 @@ class OpenReefPanel extends HTMLElement {
         this._config.maintenance.tasks = this._config.maintenance.tasks || {};
         this._config.maintenance.tasks[id] = this._config.maintenance.tasks[id] || {};
         const task = this._config.maintenance.tasks[id];
-        if (field === "cadenceDays") {
+        if (field === "stepsText") {
+          // The checklist (V3): one step per line, up to twelve.
+          task.steps = String(value ?? "").split(/\r?\n/).map((step) => step.trim()).filter(Boolean).slice(0, 12);
+        } else if (field === "cadenceDays") {
           const cadenceDays = Math.max(1, Math.min(365, Number(value) || 1));
           task.cadenceDays = cadenceDays;
           const critical = Number(task.criticalAfterDays);
@@ -2731,7 +2760,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && ["brand", "unit"].includes(field)) || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-cultures" && field === "enabled") || (scope === "nps-culture-jar" && field === "species") || (scope === "nps-hatch-vessel" && field === "volumePreset") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl", "doseEveryUnit"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || (scope === "quiet-hours" && field === "enabled") || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && ["brand", "unit"].includes(field)) || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-cultures" && field === "enabled") || (scope === "nps-culture-jar" && field === "species") || (scope === "nps-hatch-vessel" && field === "volumePreset") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl", "doseEveryUnit"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -23010,11 +23039,10 @@ const rigSteps = [
   // retried from here — the NPS tab owns its own retries.
   _missionShelfIssues() {
     const st = this._nps;
-    if (!st) return [];
-    if (st.summary === null && !st.loading && !st.demo && !st.at) {
+    if (st && st.summary === null && !st.loading && !st.demo && !st.at) {
       try { Promise.resolve(this._npsLoadSummary()).catch(() => {}); } catch { /* fills in on the next render */ }
     }
-    const states = st.summary?.shelf?.products || {};
+    const states = st?.summary?.shelf?.products || {};
     const products = this._config?.consumables?.products || {};
     const rows = [];
     Object.entries(states).forEach(([pid, s]) => {
@@ -23024,6 +23052,16 @@ const rigSteps = [
       else if (s.expiry?.status === "expired") rows.push(["critical", `${name} has expired`, "Past its opened shelf life — replace it before the next dose.", "nps"]);
       else if (s.low) rows.push(["warning", `${name} running low`, `${s.percent != null ? `${Math.round(s.percent)}% left` : "Nearly out"}${s.daysUntilEmpty != null ? ` · ≈${s.daysUntilEmpty} days at the current rate` : ""} — time to reorder.`, "nps"]);
     });
+    // Salt on hand (V3): the mixing station's own stock state, asked for
+    // once per page life if the tab has not loaded it yet.
+    if (this._config?.mixingStation?.enabled) {
+      if (!this._mixingSummary && !this._mixingSummaryLoading && !this._mixingSummaryAt) {
+        setTimeout(() => this._mixingLoadSummary(true), 0);
+      }
+      const salt = this._mixingSummary?.saltStock;
+      if (salt?.tracked && salt.empty) rows.push(["critical", "Salt is out", "No batch can be mixed until a bucket arrives.", "mixing"]);
+      else if (salt?.tracked && salt.low) rows.push(["warning", "Salt running low", `${salt.kg} kg left${salt.batchesLeft != null ? ` · ≈${salt.batchesLeft} batches` : ""}${salt.weeksLeft != null ? ` · ≈${salt.weeksLeft} weeks at your rate` : ""} — time to order.`, "mixing"]);
+    }
     return rows;
   }
 
@@ -24819,7 +24857,37 @@ const rigSteps = [
       ${this._mixingVesselCard(mix, sum, batch, levels, status)}
       ${this._mixingFilterCard(rodi)}
       ${doseCard}
+      ${this._mixingSaltStockCard(sum)}
     </section>`;
+  }
+
+  // Salt on hand (V3, 2026-09-05): the bucket as a ledger — every salted
+  // batch debits the dose guide's grams, New bucket adds one, Set corrects it
+  // to what the scales say. Every figure is the backend's (salt_stock_state).
+  _mixingSaltStockCard(sum) {
+    const s = sum?.saltStock;
+    if (!s) return "";
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const status = !s.tracked ? "unknown" : s.empty ? "critical" : s.low ? "warning" : "ok";
+    const pill = !s.tracked ? "set it" : s.empty ? "out" : s.low ? "order soon" : "stocked";
+    const hasBucket = Number(s.bucketKg) > 0;
+    return `
+      <article class="setting-card subtle-card" id="or-mixing-salt">
+        <div class="section-head">
+          <div><p class="eyebrow">Salt on hand</p><h3>${!s.tracked ? "Not tracked" : `${esc(s.kg)} kg`}</h3><p class="muted">${esc(s.text)}</p></div>
+          <span class="pill ${status}">${pill}</span>
+        </div>
+        <div class="mini-grid">
+          <label>Kilos in the bucket<input id="or-salt-kg" type="number" min="0" max="200" step="0.1" placeholder="${esc(s.tracked ? s.kg : "e.g. 6.7")}"></label>
+          <label>Bucket size (kg)<input id="or-salt-bucket-kg" type="number" min="0" max="50" step="0.1" value="${esc(hasBucket ? s.bucketKg : "")}" placeholder="e.g. 6.7"></label>
+        </div>
+        <div class="button-row">
+          <button class="primary compact-button" data-action="mixing-salt-set" ${this._busy ? "disabled" : ""}>Set kilos</button>
+          <button class="secondary compact-button" data-action="mixing-salt-bucket" ${this._busy || !hasBucket ? "disabled" : ""} title="Adds one bucket's worth">+ New bucket${hasBucket ? ` (${esc(s.bucketKg)} kg)` : ""}</button>
+          <button class="secondary compact-button" data-action="mixing-salt-size" ${this._busy ? "disabled" : ""}>Save bucket size</button>
+        </div>
+        <small class="awc-hint">Each salted batch debits the dose guide's grams${s.perBatchKg != null ? ` (≈${esc(s.perBatchKg)} kg for a full vessel)` : ""}; correct it whenever the scales disagree.</small>
+      </article>`;
   }
 
   // The hero row: one glance-card per station element, left to right in the
@@ -26377,6 +26445,10 @@ const rigSteps = [
       criticalAfterHours,
       enabled: raw.enabled === true,
       notes: raw.notes || "",
+      // The checklist (V3): lockstep with the backend's clamps — twelve lines, 120 chars.
+      steps: Array.isArray(raw.steps)
+        ? raw.steps.filter((step) => typeof step === "string" && step.trim()).map((step) => step.trim().slice(0, 120)).slice(0, 12)
+        : [],
       builtin: raw.builtin === true,
       scheduleMode: raw.scheduleMode === "fixed" ? "fixed" : "interval",
       scheduleDays: toIntList(raw.scheduleDays, 0, 6),
@@ -27101,6 +27173,45 @@ const rigSteps = [
   // The list is capped for DOM weight, not for data — the store keeps far more (and
   // the charts read all of it), so when the cap bites, say so rather than letting the
   // history look like it simply stops.
+  // The checklist (V3, 2026-09-05): ticks live for the visit, not the record —
+  // Mark done clears them, and the completion is what counts.
+  _maintenanceCheckSet(id) {
+    if (!this._maintenanceChecks) this._maintenanceChecks = {};
+    if (!(this._maintenanceChecks[id] instanceof Set)) this._maintenanceChecks[id] = new Set();
+    return this._maintenanceChecks[id];
+  }
+
+  _maintenanceStepsHtml(id, task) {
+    const steps = Array.isArray(task.steps) ? task.steps : [];
+    if (!steps.length) return "";
+    const ticked = this._maintenanceCheckSet(id);
+    return `
+        <ul class="maintenance-steps" aria-label="Checklist">
+          ${steps.map((step, i) => `<li><label><input type="checkbox" data-action="maintenance-step" data-id="${this._escape(id)}" data-index="${i}" ${ticked.has(i) ? "checked" : ""}><span class="${ticked.has(i) ? "done" : ""}">${this._escape(step)}</span></label></li>`).join("")}
+        </ul>
+        <small class="hint">${ticked.size} of ${steps.length} ticked</small>`;
+  }
+
+  _toggleMaintenanceStep(id, index) {
+    const set = this._maintenanceCheckSet(id);
+    if (set.has(index)) set.delete(index); else set.add(index);
+    this._render();
+  }
+
+  _maintenanceUsualSteps(id) {
+    const steps = MAINTENANCE_DEFAULT_STEPS[id];
+    if (!steps) return;
+    this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
+    this._config.maintenance.tasks[id] = { ...(this._config.maintenance.tasks[id] || {}), steps: [...steps] };
+    this._setDirty(true);
+    this._render();
+  }
+
+  _maintenanceNewWaterText(nw) {
+    if (!nw || typeof nw !== "object") return "";
+    return [nw.ppt != null ? `${nw.ppt} ppt` : "", nw.tempC != null ? `${nw.tempC} °C` : "", nw.brand || ""].filter(Boolean).join(" · ");
+  }
+
   _renderCompletionWeeks(id, completions) {
     const shown = completions.slice(0, MAINTENANCE_HISTORY_ROWS);
     const hidden = completions.length - shown.length;
@@ -27129,6 +27240,7 @@ const rigSteps = [
                 <div>
                   <strong>${this._escape(this._formatActivityTime(entry.timestamp))}${this._escape(vol)}</strong>${entry.skipped ? ` <span class="pill warning">skipped</span>` : ""}${this._maintenanceIsAuto(entry) ? ` <span class="pill auto">auto</span>` : ""}
                   ${entry.notes ? `<small>${this._escape(entry.notes)}</small>` : ""}
+                  ${entry.newWater ? `<small>New water: ${this._escape(this._maintenanceNewWaterText(entry.newWater))}</small>` : ""}
                 </div>
                 <button class="danger-text compact-button" data-action="delete-completion" data-id="${this._escape(id)}" data-entry="${this._escape(entry.id)}">Delete</button>
               </div>`;
@@ -27197,11 +27309,14 @@ const rigSteps = [
         <small>${this._escape(latest ? `Last done ${this._formatActivityTime(latest.timestamp)}` : "Never logged")}</small>
         <p>${this._escape(state.detail)}</p>
         ${task.notes ? `<p class="hint maintenance-notes">${this._escape(task.notes)}</p>` : ""}
+        ${this._maintenanceStepsHtml(id, task)}
         <div class="mini-grid">
           <label class="maintenance-when">Completed<input id="or-done-at-${this._escape(id)}" data-maint-draft="doneAt" data-id="${this._escape(id)}" type="datetime-local" value="${this._escape(draft.doneAt || this._nowLocalInputValue())}" max="${this._escape(this._nowLocalInputValue())}"></label>
           ${task.logsVolume ? `
             <label>Volume logged<input id="or-vol-${this._escape(id)}" data-maint-draft="volume" data-id="${this._escape(id)}" type="number" min="0" step="1" placeholder="optional" value="${this._escape(draft.volume || "")}"></label>
             <label>Unit<select id="or-volunit-${this._escape(id)}" data-maint-draft="unit" data-id="${this._escape(id)}"><option value="pct" ${draft.unit === "L" ? "" : "selected"}>%</option><option value="L" ${draft.unit === "L" ? "selected" : ""}>litres</option></select></label>
+            <label>New water ppt<input id="or-ppt-${this._escape(id)}" data-maint-draft="ppt" data-id="${this._escape(id)}" type="number" min="0" max="60" step="0.1" placeholder="optional" value="${this._escape(draft.ppt || "")}"></label>
+            <label>New water °C<input id="or-temp-${this._escape(id)}" data-maint-draft="tempC" data-id="${this._escape(id)}" type="number" min="0" max="45" step="0.1" placeholder="optional" value="${this._escape(draft.tempC || "")}"></label>
             ${autoToday > 0 ? `<small class="hint maintenance-auto-note">OpenReef already logged ${this._escape(this._maintenanceVolNum(autoToday))} L automatically today — only add what you changed by hand.</small>` : ""}
           ` : ""}
         </div>
@@ -27262,6 +27377,7 @@ const rigSteps = [
               <input type="checkbox" data-scope="maintenance-reminders" data-field="persistent" ${reminders.persistent === false ? "" : "checked"}>
               <span><strong>Show in-HA persistent notifications</strong><small>A dashboard notification per due task that clears the moment you mark it done. Turn off for phone-push only.</small></span>
             </label>
+            <p class="muted">Automations can listen for <code>openreef_maintenance_due</code>, <code>openreef_maintenance_done</code> and <code>openreef_consumable_low</code> — fired on the daily check and whenever a task is logged done.</p>
             <p class="muted">Phone push calls a Home Assistant <code>notify.&lt;target&gt;</code> service — the companion app creates one like <code>notify.mobile_app_yourphone</code>, so enter <code>mobile_app_yourphone</code>. Leave it empty for in-HA notifications only.</p>
           `}
         </div>
@@ -27321,6 +27437,10 @@ const rigSteps = [
                     <div class="mini-grid">
                       <label>Notes<input data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="notes" value="${this._escape(task.notes)}" maxlength="300"></label>
                     </div>
+                    <label class="maintenance-steps-edit">Checklist — one step per line
+                      <textarea data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="stepsText" rows="3" maxlength="1500" placeholder="Return pump off&#10;Siphon the sand bed&#10;Match temperature and salinity">${this._escape((task.steps || []).join("\n"))}</textarea>
+                    </label>
+                    ${!(task.steps || []).length && MAINTENANCE_DEFAULT_STEPS[id] ? `<div class="button-row"><button class="secondary compact-button" data-action="maintenance-usual-steps" data-id="${this._escape(id)}">Add the usual steps</button></div>` : ""}
                     <label class="toggle-card">
                       <input type="checkbox" data-scope="maintenance-task" data-id="${this._escape(id)}" data-field="notify" ${task.notify ? "checked" : ""}>
                       <span><strong>Remind me about this task</strong><small>Include it in due/overdue notifications.</small></span>
@@ -27363,12 +27483,22 @@ const rigSteps = [
         entry.volumeUnit = unitSel?.value === "L" ? "L" : "pct";
         volumeNote = ` (${entry.volume}${entry.volumeUnit === "L" ? " L" : "%"})`;
       }
+      // The new water's record (V3): typed here, or stamped by the mixing
+      // station on save when the water came from the vessel.
+      const ppt = parseFloat(this.shadowRoot.getElementById(`or-ppt-${id}`)?.value);
+      const temp = parseFloat(this.shadowRoot.getElementById(`or-temp-${id}`)?.value);
+      const newWater = {};
+      if (Number.isFinite(ppt) && ppt > 0) newWater.ppt = Math.round(ppt * 10) / 10;
+      if (Number.isFinite(temp) && temp > 0) newWater.tempC = Math.round(temp * 10) / 10;
+      if (Object.keys(newWater).length) entry.newWater = newWater;
     }
     config.completions[id].unshift(entry);
     // Marking it done clears any active snooze.
     if (config.tasks[id]?.snoozedUntil) config.tasks[id] = { ...config.tasks[id], snoozedUntil: null };
-    // Logged — drop the draft so the form resets (empty volume, "now" again).
+    // Logged — drop the draft so the form resets (empty volume, "now" again),
+    // and the checklist ticks with it (the completion is what counts).
     delete this._maintenanceDrafts[id];
+    if (this._maintenanceChecks) delete this._maintenanceChecks[id];
     this._setDirty(true);
     this._recordActivity(`Maintenance done: ${task.label}${volumeNote}`, "control");
     this._render();
@@ -28552,6 +28682,7 @@ const rigSteps = [
       `;
     }).join("");
     const history = Array.isArray(alerts.history) ? alerts.history.slice(0, 10) : [];
+    const quiet = this._config.quietHours || {};
     return this._settingsPanel(
       "alerts",
       "Alerts",
@@ -28647,6 +28778,22 @@ const rigSteps = [
             <label>Light entity
               <input data-scope="alert-escalation" data-field="lightEntityId" value="${this._escape(escalation.lightEntityId || "")}" placeholder="light.reef_warning">
             </label>
+          </div>
+          <div class="section-head" style="margin-top:12px;">
+            <div>
+              <p class="eyebrow">Quiet hours</p>
+              <h4>Hold the nudges overnight.</h4>
+              <p class="muted">Brine-ready and heartbeat pushes wait for the window to end. Critical alerts and their escalation always get through; the daily maintenance check keeps its own time.</p>
+            </div>
+          </div>
+          <div class="grid three compact">
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="quiet-hours" data-field="enabled" ${quiet.enabled ? "checked" : ""}>
+              <span><strong>Quiet hours</strong><small>${quiet.enabled ? `${this._escape(quiet.start || "22:00")} → ${this._escape(quiet.end || "07:00")}` : "Off — nudges arrive whenever they are ready."}</small></span>
+            </label>
+            ${quiet.enabled ? `
+            <label>From<input type="time" data-scope="quiet-hours" data-field="start" value="${this._escape(quiet.start || "22:00")}"></label>
+            <label>Until<input type="time" data-scope="quiet-hours" data-field="end" value="${this._escape(quiet.end || "07:00")}"></label>` : ""}
           </div>
         </section>
         <div class="status-list">
@@ -29998,6 +30145,11 @@ const rigSteps = [
         .nps-tl-card { border: 1px solid #294055; border-radius: 10px; padding: 10px 12px; margin-top: 8px; background: #0f1b28; }
         .nps-tl-late { display: inline-flex; gap: 6px; align-items: center; }
         .nps-tl-late input[type="time"] { width: auto; min-width: 0; padding: 4px 6px; }
+        .maintenance-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; gap: 4px; }
+        .maintenance-steps label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; font-size: 13px; }
+        .maintenance-steps input[type="checkbox"] { margin-top: 2px; flex: 0 0 auto; }
+        .maintenance-steps .done { text-decoration: line-through; opacity: .6; }
+        .maintenance-steps-edit textarea { width: 100%; min-height: 72px; resize: vertical; font: inherit; }
         .pulse-feeds svg { width: 100%; }
         .pill.ok { background: #14532d; color: #bbf7d0; }
         .pill.warning { background: #713f12; color: #fde68a; }
