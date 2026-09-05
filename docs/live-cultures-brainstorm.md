@@ -246,3 +246,372 @@ maintenance engine (daily tick is fine — no 20-minute windows here). Card copy
 - **Left for later**: removing a jar leaves its maintenance tasks behind (delete them by hand or re-sync);
   no demo-stage data for the Cultures tab; brackish mode UI (engine already computes the cut); the union
   disc; egg-ratio capture; continuous reactor (shelved).
+
+---
+
+## 8. V2 — the culture joins the rig (2026-09-05) · STATUS: brainstorm, awaiting Reece's answers (§8.10)
+
+v1 (0.7.117) shipped a generic jar model with presets taken from a snippet-level sweep. V2 starts
+from three things that changed on 2026-09-04: Reece's Reefphyto order landed (invoice 55330), the
+rotifers will live in the **same inverted-bottle cone rig as the brine hatchery**, and the bar is
+"the go-to system for hobbyist culturing". Every number below was re-read from the page it names
+(Reefphyto's own guides and product pages, FAO's live-food manual §3.5/§3.6, one 2025 salinity
+study); the few snippet-only facts are marked *(snippet)*. Working notes and the salvaged agent
+output live in `~/.claude/projects/-home-reece-Workspaces-Ragnars-Reef/cultures-v2-salvage/`.
+
+### 8.1 What arrived, and what each product is for
+
+| Product (invoice 55330) | Role in the system | Verified facts |
+|---|---|---|
+| **Live Rotifers 500 ml** | seeds jar A (the cone) | L-type *B. plicatilis*, 90–360 µm, 200–1000/ml; unused starter keeps in the fridge, cap loose, ≤ 5 days; shipping SG not stated (guide cultures at 1.019–1.021 → assume ~1.020) |
+| **Rotifer Feed Concentrate 50 ml** | the rotifer jar's food | two-species live blend, *Nannochloropsis oculata* (1–5 µm, EPA) + *Tetraselmis suecica* (8–12 µm, protein/lipid) — nothing else; dose to a **leafy green** (spinach/kale); "little and often, two or three times through the day"; top up when it lightens; fridge; "not interchangeable with Copepod Feed" |
+| **Rotifer & Artemia Enrichment 100 ml** | the pre-feed-out DHA step, shared with the hatchery | two-species live blend, *Nannochloropsis* (EPA) + *Isochrysis galbana* (DHA) — an algae concentrate, **not an emulsion**; "1 to 5 drops directly to the culture vessel"; product page: "allow 6 to 12 hours"; culture guide: "two to four hours before harvesting", rinse before feeding; fridge, 3 months |
+| **Live Copepods 250 ml** | seeds the copepod tub | *Tigriopus californicus* only, 1–3 mm, shipped concentrated, add on delivery day; density not stated |
+| **Reef Juice 250 ml** | **tank dose only** — an NPS phyto consumable, never a culture feed | *Nannochloropsis + Phaeodactylum + Chlorella + Isochrysis*; product page: 1 ml per 27 / 18 / 9 L per day (light / medium / heavy stocking); dosing blog: "two to three additions per week is the right cadence for most reefs", daily "not necessary"; dose into flow at dusk/lights-off, skimmer + UV + ozone off 30–60 min; fridge 4–10 °C, gentle shake, never freeze, 3 months; overdose = hazy for more than a day. Page: "not designed as a culture feed" |
+| **Rotifer Sieve Net** | the harvest sieve | 50 µm *(snippet: one page says 54)* — the preset moves from 53 to 50 |
+| **Brine Shrimp Eggs 60 g** | the hatchery, unchanged | sealed, dry, ≤ 4 °C; fridge for 3–4 weeks of use, freezer beyond, out a day before use; hatch 1 g/L at 26–28 °C, 25 ppt, 18–36 h *(snippet: humidity is the killer — squeeze the air out of the opened pouch, let a cold pouch warm before opening)* |
+
+**Gap on the invoice:** Reefphyto's copepod guide feeds *Copepod Feed* and says the rotifer
+concentrate is not interchangeable. Nothing on the order feeds the pods (§8.10 Q1).
+
+### 8.2 Research digest, refreshed — what v1 got wrong
+
+**Rotifers.** Reefphyto's guide: SG 1.019–1.021 ("lower than reef tank salinity"), 18–25 °C
+(22–25 faster), first harvest **5–7 days** after setup once "visibly dense", harvest ≤ 25–30 % per
+harvest and the culture "will rebuild its population within 24 hours" so daily harvest is fine,
+replace the removed volume immediately with matched saltwater and feed, **every 14 days** transfer to
+a clean container (or 50 % change + wall clean), a backup culture keeps in the fridge at 4–8 °C
+"up to a week"; crashes = overfeeding (ammonia/nitrite) and skipping the fortnightly clean. FAO §3.5:
+tolerates 1–97 ppt but "optimal reproduction" only **below 35 ppt**, acclimate in ±5 ppt steps; at
+20 °C first spawn 1.9 d, spawn interval 5.3 h, lifespan 10 d (25 °C: 1.3 d / 4.0 h / 7 d); NH₃
+< 1 mg/L safe, pH > 7.5; a starter at 50/ml reaches 200/ml in 3 days, a mass culture doubles every
+2 days. The 2025 study (PMC12292424): 25.5 offspring/female at 5 ppt vs 9–10 at 30–35 ppt (≈ 62 %
+lower) — but lifespan 273 h at 35 ppt vs 134 h at 5 ppt. **35 ppt is a slower, longer-lived,
+lower-yield culture; 1.020 is the practical middle.** Cone rigs are standard aquaculture practice
+for rotifers *(salvaged sweep)*: the cone exists so detritus and dead rotifers collect at the tip —
+air off, settle 15–30 min, bleed the tip to waste, then harvest; open rigid airline to the tip at
+1–2 bubbles/s, no airstone; no light, loose cover.
+
+**Enrichment.** FAO §3.6: emulsion soaks are 200–300 rotifers/ml for 6 h, then harvest, rinse,
+concentrate; EFA "remain rather constant for at least 7 h" in clear water at 20 °C, "only a 30 %
+drop in DHA after 12 h"; a day's starvation at 25 °C costs up to 26 % body weight. *(snippet,
+paywalled: DHA in phospholipid stable 24 h at 10 °C; significant loss at 20 °C after 24 h; rotifers
+survive days at 4 °C.)* Reefphyto's product is an algae enrichment, dosed in drops, and its two
+pages disagree on the window (2–4 h vs 6–12 h).
+
+**Tigriopus.** Reefphyto's copepod guide: 4 L container or small aquarium, loose cover, **SG
+1.020–1.025 ("35 ppt optimal")**, **22–26 °C**, mix water ≥ 24 h ahead, open airline 1–3 bubbles/s,
+no light; feed *Copepod Feed* to "Granny Smith apple skin", feed again when it clears, half rate in
+week one; **first harvest 4–6 weeks** after setup, never more than 25–30 %, **7–10 days between
+harvests**; weekly test + debris removal; 50 % change when parameters drift; **any detectable ammonia
+= immediate 50 % change**; crash signs = cloudy/white water, declining numbers, pods clustered at the
+surface or not moving. Biology *(salvaged sweep, peer-reviewed)*: 6 naupliar + 6 copepodid stages,
+maturity 20–30 d at 20–25 °C, generation ~30 d, lifespan ~70 d, clutches 20–40; acute heat death
+only at ~34–36 °C (1 h) — **a 28–33 °C flat kills through chronic fecundity collapse plus low oxygen
+and ammonia, usually with overfeeding**, which is what the heatwave did to Reece's jar. Benthic:
+needs floor and surface area — **a cone is the wrong vessel for pods**; a flat tub is right.
+
+**The preset table (v1 → v2):**
+
+| Field | Rotifer v1 | Rotifer v2 | Tigriopus v1 | Tigriopus v2 | Basis |
+|---|---|---|---|---|---|
+| vesselKind (new) | jar | **cone** (the hatchery rig) | jar | **tub** (flat, wide, no tap) | Reefphyto guides, benthic habit |
+| salinityPpt | 35 | **27 (SG ≈ 1.020)**; 35 selectable "reef-matched, lower yield" | 35 | 35 | Reefphyto guides, FAO, PMC12292424 |
+| tempMin/Max °C | 18 / 26 | 18 / 26 (22–25 sweet spot in copy) | 20 / 25 | **18 / 26** | Reefphyto guides |
+| tempHardMaxC | 30 | 30 (unchanged) | 28 | **28 = warn, 30 = act now, 32 = critical**; copy says *why* (oxygen/ammonia, not the animal) | heat-shock papers, Reefphyto ">30 problematic" |
+| feedIntervalH | 12 | 12 (two feeds; copy: "little and often", three is better, 24 survives) | 60 | **24** (48 max), tint decides the amount | Reefphyto: rotifers 2–3×/day; pods daily |
+| feedProduct | any phyto | **Rotifer Feed Concentrate** | any phyto | **Copepod Feed** (not the concentrate) | product pages |
+| tint target | green | "leafy green (spinach)" | green | "Granny Smith apple skin" | Reefphyto guides |
+| harvestPct | 25 | 25 (cap 30) | 20 | **25** (cap 30) | Reefphyto |
+| harvestIntervalDays | 1 | 1 | 7 | **10** (7–10) | Reefphyto |
+| firstHarvestDays | 3 | **6** (5–7; 3 only for a split at harvest density) | 7 | **28** (21 earliest, 42 typical) | Reefphyto, life cycle |
+| restartIntervalDays | 14 | 14 **as a cap**, restart on a sign first (§8.5) | 0 | 0, decline-triggered restart from the backup | Reefphyto fortnightly clean |
+| waterChange | 0 | 0 (the harvest is the change) | 35 % / 21 d | **harvest volume replaced each harvest + 50 % on a sign** (drift, ammonia, cloudy) | Reefphyto copepod guide |
+| splitMinAgeDays | 10 | **14** — the split rides the first restart | 21 | **35**, gated on "visibly dense" | §8.8 |
+| sieveUm | 53 | **50** (the net) | 53 | 50 all stages · 300 adults only | product page |
+| bottleShelfDays | 3 | **5** viability (7 fed) | 0 | **3** optional (max 7) | Reefphyto, Reed *(snippet)* |
+| enrich (new) | — | algae, 1–5 drops per portion, soakH **6** (2–12), rinse; boost warm **8 h**, cold **24 h** | — | not enriched | FAO §3.6, product page |
+
+### 8.3 The method — rotifers in the cone, pods in the tub
+
+**The day the parcel lands (a walkthrough the panel should show once).**
+1. Rotifers: the cone holds 2.5 L of 1.020 water (the mixing station makes 35 ppt; the measured
+   jug says how much RODI to cut — `refill_guide` already computes it), room temperature, air ON to
+   the tip at 1–2 bubbles/s. Float the pouch 15 min, then add culture water to the pouch in steps
+   (FAO: ±5 ppt) if we go to 35; pour in. Feed the concentrate to leafy green. Tap **Seed**. First
+   harvest unlocks at day 6, earlier only if the water is visibly dense.
+2. Pods: the 4 L tub half to two-thirds full of 35 ppt, open airline 1–3 bubbles/s, loose cover,
+   out of the sun, indirect light. Pour in on delivery day. Feed at half rate for a week. Tap
+   **Seed**. First harvest unlocks at day 28 (the clock says "establishing — a generation is a month").
+3. Reef Juice goes in the fridge and onto the NPS shelf as a phyto consumable (§8.6).
+4. The enrichment goes on the shelf as the product both the hatchery soak and the rotifer soak
+   debit; the eggs get an `openedAt` stamp (§8.6).
+
+**The rotifer cone — the daily ceremony (the stages the drawing plays):**
+1. **Look** — tint tap: leafy green / clearing / clear. Clear before the next feed is due = hungry;
+   still green at feed time = skip (ammonia). Foam, milky-not-green, smell = a crash sign (§8.5).
+2. **Air off, settle** — 15–30 min; crud and dead rotifers sink to the tip, live ones stay up.
+3. **Purge the tip** — crack the valve, the first ~50 ml to waste (the crud bleed, exactly the
+   hatchery's move). Air back on.
+4. **Harvest** — the measured jug: 25 % (625 ml of 2.5 L) through the 50 µm net; the water goes to
+   waste (never the tank — culture water is ammonia), the rotifers on the net are the day's crop.
+5. **Refill** — the same 625 ml of fresh 1.020 (mix + RODI per the jug), debited from the mixing
+   vessel under the existing hatchery coupling toggle.
+6. **Feed** — concentrate to leafy green; the second (third) small feed later in the day is a
+   phone push, not a tab visit.
+7. **Bottle or enrich** — the crop either rinses into the fridge bottle (5-day clock) or goes into
+   the enrichment portion first (§8.3 enrichment) and then the bottle with a boost clock.
+8. Tap **Harvested + fed** with the tint. Everything above is one row in the journal.
+
+**Fortnightly (or on a sign) — the restart:** air off, settle, purge, then drain the *whole* cone
+through the net into a clean cone of fresh 1.020, feed, tap **Restarted**. With the net already in
+hand, the first restart is when the split happens: half the crop seeds jar B (§8.8 "never zero").
+
+**The copepod tub — the weekly rhythm:** look every day (a glance, not a tap — the tub is quiet by
+design), feed daily-to-every-other-day to Granny Smith, weekly parameter check + siphon the mulm,
+harvest 25 % through 50 µm (nauplii + adults) or 300 µm (adults only) once a generation has grown
+(day 28+), replace the harvested volume, 50 % change on a sign, never a calendar restart — the
+backup tub is the restart.
+
+**Enrichment (the DHA step, optional but honest):** the concentrate feeds EPA and protein, not DHA;
+NPS corals get DHA from the enrichment. Portion the day's crop into a 500 ml enrichment vessel of
+clean 1.020, 1–5 drops, 6 h (grill Q4 for the 2–4 h vs 6–12 h question), rinse on the net, then
+bottle. The bottle then runs the **boost clock**: gut-loaded for ~8 h warm or ~24 h cold from the
+end of the soak, viable for 5 days regardless — the hatchery's two-window model (`hatch_prime_state`)
+transfers as-is.
+
+**Feeding the tank:** rotifers from the bottle by hand (the NPS hand-feed ledger, a "Fed N ml"
+tap), pods by pouring a harvest into the refugium/display after lights-out. Reef Juice on its own
+schedule: 3 ml three times a week for 52 L (medium stocking), lights off, skimmer off 60 min — the
+existing maintenance reminder engine carries it, the consumables ledger counts it.
+
+### 8.4 The rig drawing — a sibling of the hatchery's
+
+Same idiom as `_npsHatchRigSvg`: dark vessels, monospace labels, circled valve numbers that go hot
+when a stage is live, `.awc-flow` animated runs, `.nps-bub` bubbles when air is on, and "the drawing
+follows the stage". New method `_culturesRigSvg(rig)` beside it, fed by a `rig` block that the
+backend emits in `cultures_summary` (lockstep rule):
+
+- **Rotifer cone(s)** left, scaled 1–4 like the hatch cones: fill polygon = culture density (the
+  restart-cycle percent), fill colour = tint (leafy green → pale → clear), stroke = status (steady
+  teal / establishing grey / crash-sign amber / crashed red / heat red). Air stub to the tip, hot when
+  `airOn`. Label `ROTIFERS A`.
+- **Valve ①** on the tip run: hot during *purge* (brown flow to the **waste** cup) and *harvest*
+  (green flow to the **sieve capsule** — the same blue union drawing as the 120 µm mesh, labelled
+  `50 µm net`).
+- **The measured jug** beside the cone: "harvest 625 ml → refill 625 ml @ 1.020 (480 mix + 145
+  RODI)" — the numbers from `harvestGuide`.
+- **Refill arc** from the **mixing vessel** stub (dashed, hot on the refill stage) into the cone.
+- **Feed bottle** (small, green) with a drop arrow — hot on the feed stage; caption carries the tint
+  target.
+- **Enrichment beaker** (purple, like the SOAK) between the net and the fridge bottle — visible only
+  when an enrichment is running, with its percent.
+- **Fridge bottle** right, blue-stroked, fill = remaining ml, caption "fresh · ~H h boost · D d
+  left" or "stale — tip it out"; "Fed N ml" and "Empty" live on its tile, not the drawing.
+- **Copepod tub** bottom right: a wide shallow rectangle, own air stub, fill = tint, stroke =
+  status, label `TIGRIOPUS · tub`, a 300 µm net icon on its harvest arrow. Never a tap.
+- **Caption line** (`rig.caption`): the stage in words — "settle 20 min — crud to the tip", "harvest
+  625 ml through the net", "feed to leafy green", "ROOM 29 °C — over the pod line: extra air, shade,
+  feed lightly". Heat lines are never comic.
+- **Play the stages**: purge → harvest → refill → feed → bottle, plus "restart" and "split" as the
+  long ceremonies. Same button and preview state machine as `nps-rig-play`.
+- Compact card / Pulse: the cone's tint dot and the bottle's clock only.
+
+`rig` payload: `{ cones: [{name, tintFill, pct, stroke, airOn, purgeHot, harvestHot, refillHot,
+feedHot}], tub: {name, tintFill, stroke, airOn, harvestHot} | null, jug: {harvestMl, mixMl, rodiMl,
+ppt}, enrich: {pct} | null, bottle: {ml, pct, status}, caption }`. Viewbox 940 × 760; cones use the
+hatch-cone geometry pinned to y = 334 so the air manifold lines up; tub at (560, 560, 200 × 90).
+
+### 8.5 The culture journal and the learned cadences
+
+**Journal rows** (per jar, newest first, the hatch journal's honesty): `event` ∈ seeded / fed /
+harvested / restarted / split / reseeded / water_change / enriched / fed_tank / crash_sign / crashed,
+`at`, `tint`, `ml` (harvest or feed), `sign` (foam / milky / smell / surface-cluster), `eggRatio`
+(optional spot check, %), `tempC` (the room at the tap), `from`/`into`. The table shows date · event ·
+tint · ml · the story line ("day 12 · restart cycle 85 % · clearing in 9 h"). One row per tap — the
+ceremony writes it.
+
+**Learned cadences (rolling three, advisory with Apply — the `learned_hatch_hours` contract):**
+- **Clearing clock → feed interval.** Every tint tap is stamped. The hours from a *fed/green* tap to
+  the next *clear* tap is one sample of how fast the jar eats; the rolling three become "your jar
+  clears in ~9 h — feed every 8 h" with an Apply chip on `feedIntervalH`. Faster clearing over a week
+  = the population is climbing; slower = decline (a crash-risk input).
+- **First harvest actual.** Seed → first *Harvested* stamp per species; after two samples, the
+  establishing clock advises "your last two took 5 days".
+- **Restart run length.** Seed/restart → next restart or crash; the rolling three cap
+  `restartIntervalDays` ("your cone runs 11 days before it turns — restart on day 10").
+- **Harvest yield.** ml/day actually taken, feeding the NPS runway and the next-harvest suggestion.
+- **Copepod first harvest and interval.** Same shape on the tub's slow clock.
+
+**Restart on a sign, not a date** (from the skeptic, adopted): the *Restarted* chore becomes due on
+the earliest of (a) a crash-sign tap, (b) clearing time stretching past 1.5× the learned clock two
+taps running, (c) the day cap (14, learned down). The copy says which one fired.
+
+**Crash-risk line** (the hatchery nose, explainable): a per-jar `risk` ∈ ok / watch / act built only
+from stamps — missed harvests since the last (harvest debt → ammonia), a feed logged while green
+(overfeed), clearing slowing, a sign tap, room over the band. Shown as one sentence with the cause,
+never a score.
+
+### 8.6 Folding into NPS — the hatchery's seams, reused
+
+- **Feeding hub compact card** (`_culturesPanel(compact)` beside `_hatcheryPanel(compact)`): cone
+  tint dot + "harvest due", bottle "N ml · fresh", tub "day 19 of 28", one "Open Cultures →".
+- **Consumables shelf:** four Reefphyto presets in `nps.py` PRODUCT_PRESETS — *Reef Juice* (phyto,
+  250 ml, 90 d, refrigerated, stir daily), *Rotifer Feed Concentrate* (phyto, 50 ml, 90 d), *Rotifer
+  & Artemia Enrichment* (phyto, 100 ml, 90 d — the hatchery's `enrichment.productId` and the jar's
+  `enrich.productId` point at the same bottle), *Copepod Feed* (phyto, 30/50 ml). Jar feeds and the
+  soak debit the shelf exactly as the hatchery does; the runway line says "concentrate: ~5 weeks at
+  your rate".
+- **The eggs get a stamp:** `hatchery.cysts.openedAt` + the 3–4 week fridge window → a Pulse line,
+  nothing more.
+- **Reef Juice on the reminder engine:** a "Dose Reef Juice" custom task, cadence 2–3 d, default dose
+  from the stocking band (`1 ml / 18 L × tank.volumeLitres`), completion debits the product. The NPS
+  feed plans gain `zooLive` foods "Live rotifers (bottle)" and "Live Tigriopus (harvest)" with
+  particle sizes 90–360 µm and 120–1200 µm so the species compiler can pick them.
+- **Hand-feed from the bottle:** `cultures_bottle {action: fed, ml}` already debits; V2 also logs the
+  NPS hand-feed reminder done (`_nps_log_hand_feed` with source `cultures`) and writes a `fed_tank`
+  journal row.
+- **Next-harvest suggestion:** `cultures.next_harvest(now, bottle, ml_per_day, jar_clock)` — the
+  `next_hatch_suggestion` shape: harvest before the bottle runs dry or goes stale, "in ~14 h" /
+  "now" / "past due", driver = depletion | freshness | jar.
+- **Pulse:** existing cultures block gains the boost clock ("rotifer bottle: gut-loaded, 3 h left")
+  and the risk line; the heat line stays critical.
+- **Mixing station:** refills and restarts already debit the vessel; the RODI cut shows in the jug.
+
+### 8.7 Config, WS and guard changes (concrete)
+
+`nps.cultures.jars.<id>` gains `vesselKind` (cone | tub | jar), `enrich {productId, dropsPerPortion,
+soakH, boostWarmH, boostColdH}`, `learned {clearingH: [..3], firstHarvestDays: [..3], runLengthDays:
+[..3], yieldMlDay}` *(server-written → `_nps_preserve_runtime`)*, `state.lastSignAt`,
+`state.lastSign`, `state.riskAt`; journal rows gain `sign`, `eggRatio`, `tempC`. `nps.cultures.bottle`
+gains `enrichedAt`, `refrigeratedAt`, `lastLoadEnriched` (the hatchery bottle's stamp shape, so
+`hatch_prime_state` runs it) *(runtime → guard)*. `nps.cultures.enrichment.state` mirrors the
+hatchery soak state (`startedAt`, `portionMl`, `firstDoseAt`) *(runtime → guard)*.
+`hatchery.cysts.openedAt` *(runtime → guard)*.
+
+New/changed WS: `cultures_log` accepts `sign`, `egg_ratio`; `cultures_enrich {jar_id, ml}` /
+`cultures_enrich_done` (soak start/finish on the portion, debit the shelf, stamp the bottle);
+`cultures_bottle {action: fed}` logs the NPS hand-feed; `cultures_apply_learned {jar_id, field}`
+(the Apply chip, never automatic); `cultures_summary` emits `rig`, `learned`, `risk`, `nextHarvest`,
+`bottle.boost`; `cultures_remove_jar` deletes its four maintenance tasks (the v1 orphan). Engine
+(`cultures.py`): `clearing_samples`, `learned_cadence`, `risk_line`, `next_harvest`, `restart_signal`,
+`bottle_boost_state` — pure, tested in `test_cultures.py`; panel cases in `test_panel_cultures.mjs`
+(rig svg per stage, journal rows, Apply chips, compact card, Pulse boost line).
+
+### 8.8 Suggestions — what would make it the go-to system (ranked)
+
+Three salvaged proposal sets (a hatchery scientist, a community builder, a skeptic) plus my own
+read of the codebase. Graded on: removes a chore or prevents a crash, stands on something shipped,
+nobody else has it.
+
+**The headline leapfrog — "the jar that says why".** Nobody at hobby level has *explainable*
+culture health: OpenReef already has the stamps (every tap), the room (cooling headroom's per-hour
+learned offsets and forecast), and the journal idiom. Put together: a crash-risk line built from
+harvest debt, overfeeding, clearing slowdown, sign taps and room temperature — and a **heatwave
+guard that warns a day ahead** ("room passes 28 °C tomorrow 15:00 — extra air, shade, feed lightly,
+50 % change ready"), which is the exact failure that killed the last pods. Demoable in two minutes on
+a stream, defensible, and it is mostly maths over data we already hold.
+
+1. **Restart on a sign + learned cap** (M) — §8.5. Kills the calendar guess, the first "learned
+   cadence" people will feel.
+2. **Heatwave guard, 24 h ahead** (M) — cooling headroom's forecast × species band → one push, with
+   actions. Stands on 0.7.120–122.
+3. **Harvest debt and the overfeed refusal** (S) — deterministic ammonia arithmetic on stamps: two
+   missed harvests = "harvest before you feed"; a feed logged on green = "skip". Pure engine, no
+   sensors.
+4. **Never zero: the split rides the first restart** (M) — the restart ceremony (net in hand) seeds
+   jar B by default; the mission headline becomes "backup: yes/no". Two-jar doctrine without a second
+   ceremony.
+5. **The one-question day** (M) — every culture push collapses to one actionable notification per
+   rig ("Harvest the cone? Harvested + fed / Snooze"), using the existing HA notification actions;
+   the tab is for looking, the phone is for tapping.
+6. **Clearing clock → feed-by-demand** (M) — §8.5; the concentrate's "little and often" tuned to
+   *this* jar.
+7. **Starter acclimation protocol** (S) — the arrival walkthrough (§8.3) with the salinity step
+   maths; a hatchery never pours a bag straight in.
+8. **Vendor presets + scan-the-product** (S/M) — Reefphyto presets on the shelf now; a barcode/QR
+   scan to add a bottle later.
+9. **Culture cards** (S) — the share-card idiom from Camera V2 applied to a jar: species, age,
+   restart ring, a 14-day tint strip, "gen 3 from the 500 ml starter". This is the thing people post.
+10. **Lineage and stagger planner** (S) — every seed/split/reseed writes a parent link and a
+    generation counter; the rack shows A and B out of phase.
+11. **Continuity days, the anti-leaderboard** (S) — one honest number per species: days since the
+    rack was last without a producing jar. Consistency, not volume.
+12. **Culture doctor** (M) — a ranked differential from the ledger ("cloudy + day 13 + two missed
+    harvests → ammonia; restart, feed at half"), answered by Lagertha when summoned.
+13. **Demand-driven production** (M) — size the harvest to the NPS feed plan (ml of bottle per feed ×
+    feeds/day) and say when a second cone is worth it.
+14. **Camera tint and the 1 ml count** (L, later arc) — a white card behind the cone and the ELP
+    camera give a tint reading; egg ratio from a phone macro is the v3 "Rotiferometer" move.
+15. **Seed swap + opt-in benchmarking** (L, later) — bag a 20 % starter with a printable lineage
+    label; anonymised "you vs the field" cadences.
+
+**Refused, on the skeptic's advice:** automating the harvest valve (a servo on culture water next to
+a reef is a leak and an ammonia risk for a 60-second chore), a phyto drip pump on the jar (overfeeding
+is the #1 crash cause; a pump makes it automatic), and any volume leaderboard.
+
+**Three quick wins (a day each):** the Reefphyto presets on the shelf; the four preset corrections
+(§8.2) plus the 50 µm net; the v1 orphan-task cleanup on jar removal.
+
+### 8.9 Staged build
+
+- **A — the numbers and the rig (0.7.125):** preset table §8.2 (incl. `vesselKind`), Reefphyto
+  presets on the shelf, `_culturesRigSvg` + play-the-stages, the arrival walkthrough, orphan-task
+  cleanup, 50 µm. Tests for every preset change.
+- **B — the journal that learns (0.7.126):** sign/egg-ratio/temp on the log, clearing clock, first
+  harvest and run-length learning with Apply chips, restart-on-a-sign, harvest debt/overfeed refusal,
+  the risk line, the one-question notification.
+- **C — the DHA step and the tank (0.7.127):** rotifer enrichment soak on the shared bottle, the
+  bottle's boost clock, hand-feed → NPS ledger, next-harvest suggestion, Reef Juice reminder + feed
+  plan foods, the eggs' opened stamp, compact card + Pulse lines.
+- **D — never zero and the guard (0.7.128):** split rides the restart, lineage/stagger, heatwave
+  guard on the cooling forecast, continuity days, culture card.
+- **Later arcs:** culture doctor via Lagertha, demand-driven sizing, camera tint, seed swap.
+
+### 8.10 The grill — answer these and A starts
+
+1. **Copepod feed.** Nothing on the invoice feeds the pods. Order Reefphyto *Copepod Feed* (their
+   guide's product), or feed the rotifer concentrate against the page's advice? *Default: order the
+   Copepod Feed; preset points at it.*
+2. **Rotifer salinity.** Follow Reefphyto at 1.020 (27 ppt, mixing-station cut, ~2.5× the fecundity
+   of 35 ppt) or keep 35 ppt for a matched backflush and longer-lived animals? *Default: 1.020; 35
+   stays selectable.*
+3. **Feeds per day.** Two small feeds (12 h) or three (8 h) for the cone? Reefphyto says two or
+   three; the learned clearing clock will tune it either way. *Default: 12 h.*
+4. **Enrichment window.** Ask Darren which of Reefphyto's two numbers (2–4 h vs 6–12 h) is right for
+   their algae product; until then, 6 h? *Default: 6 h, editable 2–12.*
+5. **Enrich by default?** Every crop through the DHA step, or only the crop destined for the corals
+   that week? *Default: optional, off; the bottle shows "not enriched" honestly.*
+6. **Purge volume.** How much do you bleed off the tip before harvest? Sources say "the settled
+   layer", no ml. *Default: 50 ml, a setting on the cone.*
+7. **Cone volume and count.** One 2.5 L cone for A now, B at the first restart on the same rig (a
+   second cone shares the air manifold like the hatch cones)? *Default: yes, B is drawn greyed until
+   it exists.*
+8. **Copepod tub temperature line.** Keep 28 °C as *warn* with 30 *act* and 32 *critical*, and the
+   copy that explains it is oxygen and ammonia? *Default: yes.*
+9. **One-question notifications.** Are you happy for culture pushes to become actionable HA
+   notifications (buttons), or keep them as plain reminders? *Default: actionable, with the plain
+   fallback for the wall.*
+10. **Heatwave guard.** Use the cooling-headroom forecast for the day-ahead warning even though the
+    jars sit in a different room from the humidity sensors? *Default: yes, with a per-rack sensor
+    override you already have.*
+11. **Reef Juice cadence.** Reefphyto's page says daily, its blog says 2–3× a week. *Default: 3 ml
+    three times a week for 52 L, lights off, skimmer off 60 min.*
+12. **Culture cards.** In D, or sooner because Culture Sunday could use it? *Default: D.*
+
+### 8.11 The grill — ANSWERED 2026-09-05, decisions LOCKED
+
+1. **Copepod feed:** Reece already has Reefphyto Copepod Feed → the tub preset points at it; add it to the shelf presets.
+2. **Rotifer salinity:** user-selectable per jar with the recommendation shown ("Reefphyto cultures at 1.020 — ~2.5× the fecundity of 35 ppt; 35 ppt = matched backflush, longer-lived, lower yield"). Default 1.020 (27 ppt), the jug shows the RODI cut.
+3. **Feeds:** 12 h.
+4. **Enrichment window:** 6 h default, editable 2–12 (Darren's answer can move the default later).
+5. **Enrich per harvest, opt-in each time** — the hatchery's pattern: "Harvested + fed" offers "Enrich this crop"; the bottle shows enriched/not.
+6. **Purge volume:** unsure → default 50 ml, a setting on the cone, and the journal logs it so the learned run length can say whether more helps.
+7. **Cones:** yes; **cone volume user-selectable** (Reece will run small for the 52 L) — `volumeL` already exists, the jug scales; B is drawn greyed on the shared manifold until it exists.
+8. **Tub heat tiers:** 28 warn / 30 act / 32 critical, copy explains oxygen and ammonia.
+9. **Actionable pushes: yes.** Checked: today the brine hatchery's pushes (hatch ready, soak dose due, and the maintenance daily digest) are plain `notify` title + message with **no action buttons**. V2 adds a shared `_async_push_actionable(...)` helper (HA mobile-app `data.actions`, with the plain fallback when the target is not a mobile app) and both the hatchery and the cultures use it — same behaviour on both tabs.
+10. **Heatwave guard:** yes, on the cooling-headroom forecast, per-rack sensor override.
+11. **Reef Juice cadence:** user-selectable (daily / 2–3× week); Reece runs daily. Default dose from the stocking band; the reminder follows the chosen cadence.
+12. **Culture cards:** Stage D.
+
+Stage A (0.7.125) is unblocked.
