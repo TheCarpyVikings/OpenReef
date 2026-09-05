@@ -1840,6 +1840,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-timeline-skip") this._npsCall({ type: "openreef/consumable_skip_dose", product_id: id },
         "Skipped — the cadence holds, the next slot stands.");
       if (action === "nps-timeline-dosenow") this._doserDoseNow(id, Number(target.dataset.ml));
+      if (action === "nps-timeline-undo") this._npsCall({ type: "openreef/consumable_undo_dose", product_id: id },
+        "Undone — the ml is back in the bottle and the clock fell back to the dose before.");
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded(id);
       if (action === "nps-hatch-start") this._npsCall(
@@ -11713,6 +11715,15 @@ class OpenReefPanel extends HTMLElement {
       actions.push(`<span class="nps-tl-late"><input type="time" data-nps-late="${esc(pid)}" aria-label="Dosed earlier at"><button class="secondary compact-button" data-action="nps-timeline-log-late" data-id="${esc(pid)}">Dosed earlier</button></span>`);
       if (ev.status !== "skipped") actions.push(`<button class="secondary compact-button" data-action="nps-timeline-skip" data-id="${esc(pid)}" title="Holds the cadence — the next slot stands, no ml moves">Skip today</button>`);
     }
+    // A done hand dose logged in the last few minutes can be taken back (Q9).
+    const undo = shelf?.handDose?.undo || null;
+    if (pid && ev.how === "hand" && ev.status === "done" && undo?.available) {
+      const undoMs = Date.parse(undo.at || "");
+      const undoMin = Number.isFinite(undoMs) ? new Date(undoMs).getHours() * 60 + new Date(undoMs).getMinutes() : null;
+      if (undoMin == null || ev.doneAt == null || undoMin === ev.doneAt) {
+        actions.push(`<button class="secondary compact-button" data-action="nps-timeline-undo" data-id="${esc(pid)}" title="Takes the last hand dose back — ${esc(undo.minutesLeft)} min left">Undo ${esc(undo.ml)} ml</button>`);
+      }
+    }
     if (cid && ev.kind === "dose" && ev.ml != null) {
       actions.push(`<button class="secondary compact-button" data-action="nps-timeline-dosenow" data-id="${esc(cid)}" data-ml="${esc(ev.ml)}" title="The firmware's guard chain has the final say">Dose ${esc(ev.ml)} ml now</button>`);
     }
@@ -12151,7 +12162,7 @@ class OpenReefPanel extends HTMLElement {
       ? `<span style="color:var(--error-color,#e5484d)">🛑 The container still holds brine past its shelf life — discard it before loading a fresh batch.</span> <button class="danger-text compact-button" data-action="nps-discard-brine">Discard old brine</button>`
       : "";
     const handFeedBtn = Number(reservoirSum.volumeMl) > 0
-      ? `<button class="secondary compact-button" data-action="nps-hand-feed" title="Debits the container and logs the hand-feed reminder done">Fed ${this._escape(String(hatch.handFeed?.defaultDoseMl ?? 30))} ml</button>`
+      ? `<button class="secondary compact-button" data-action="nps-hand-feed" title="Debits the container, stamps the feed on the strip, and logs the hand-feed reminder done if you have one">Fed ${this._escape(String(hatch.handFeed?.defaultDoseMl ?? 30))} ml</button>`
       : "";
     const hatchButtons = [
       handFeedBtn,
@@ -12205,7 +12216,7 @@ class OpenReefPanel extends HTMLElement {
         <small><strong>Feeding bottle</strong> · in the fridge</small>
         <small>${Math.round(bottleMl)} ml · ${bottleLife}${bottle.lastLoadEnriched ? " · enriched" : ""}</small>
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
-          <button class="secondary compact-button" data-action="nps-fridge-feed" title="Debits the bottle and logs the hand-feed reminder done">Fed ${this._escape(String(hatch.handFeed?.defaultDoseMl ?? 30))} ml</button>
+          <button class="secondary compact-button" data-action="nps-fridge-feed" title="Debits the bottle, stamps the feed on the strip, and logs the hand-feed reminder done if you have one">Fed ${this._escape(String(hatch.handFeed?.defaultDoseMl ?? 30))} ml</button>
           <button class="secondary compact-button" data-action="nps-fridge-return" title="Pour the bottle back into the container — the cold hours stay banked, the clock returns to the room rate from now.">Back in container</button>
           <button class="danger-text compact-button" data-action="nps-fridge-empty">Empty</button>
         </div>

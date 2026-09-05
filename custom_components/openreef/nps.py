@@ -287,6 +287,28 @@ def _anchored_slot(base: datetime, slots: list[int], unit: str, tz: Any) -> date
     return min(candidates, key=lambda c: abs((c - local).total_seconds()))
 
 
+def hand_dose_undo(product: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The last hand dose, if it was logged within the undo window: what the
+    Undo tap would reverse. History is time-ordered; only ``dose`` rows (the
+    keeper's taps) are undoable — pump debits and transfers are the machine's."""
+    history = product.get("history") if isinstance(product.get("history"), list) else []
+    for item in reversed(history):
+        if not isinstance(item, dict) or item.get("kind") != "dose":
+            continue
+        at = _parse_iso(item.get("at"))
+        if at is None:
+            break
+        try:
+            age_min = (now - at).total_seconds() / 60.0
+        except TypeError:
+            break
+        if 0 <= age_min <= HAND_DOSE_UNDO_MIN:
+            return {"available": True, "ml": round(_f(item.get("ml")), 2), "at": str(item.get("at")),
+                    "minutesLeft": round(HAND_DOSE_UNDO_MIN - age_min, 1)}
+        break
+    return {"available": False, "ml": None, "at": None, "minutesLeft": None}
+
+
 def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
                     tz: Any = None) -> dict[str, Any]:
     """The bottle's hand-dose plan: the size (the keeper's number, else the
@@ -324,9 +346,11 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
             delta_h = 0.0
         clock = {"available": True, "due": delta_h <= 0, "at": at.isoformat(),
                  "hoursUntil": round(max(0.0, delta_h), 1), "hoursOverdue": round(max(0.0, -delta_h), 1)}
+    undo = hand_dose_undo(product, now)
     return {
         "planned": bool(cadence["unit"] or explicit > 0),
         "ml": ml,
+        "undo": undo,
         "everyDays": every_days if cadence["unit"] != "hours" else 0.0,
         "everyHours": every_hours if cadence["unit"] == "hours" else 0.0,
         "firstAt": cadence["firstAt"],
@@ -466,6 +490,8 @@ HATCH_VESSEL_CAP = 4
 HATCH_CYST_G_PER_L = 2.0
 HATCH_TEMP_OPTIMUM_C = 28.0
 HATCH_HISTORY_MAX = 50
+HAND_FEED_LOG_MAX = 60        # stamped container/bottle feeds the strip reads (doc §13.10)
+HAND_DOSE_UNDO_MIN = 10       # a mis-tapped hand dose can be undone this long (doc §13.8 Q9)
 
 # Fridge storage nearly stops nauplii metabolism: 24 h shelf life at room temp,
 # 48 h refrigerated. Audit 2026-09-01 (doc §12): unfed nauplii lose ~20% dry

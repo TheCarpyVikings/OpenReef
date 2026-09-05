@@ -1309,6 +1309,15 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
             "defaultDoseMl": _awc_num(raw_hand.get("defaultDoseMl"), 30, 1, 1000),
             "feedsPerDay": _awc_num(raw_hand.get("feedsPerDay"), 2, 1, 24),
         },
+        # Every Fed tap, stamped (0.7.131): the strip's brine done-marks used
+        # to ride the hand-feed reminder's completions, which only exist once
+        # the keeper syncs the hatchery reminders. Server-written, newest first.
+        "handFeeds": [
+            {"at": _awc_str(item.get("at"), 40), "ml": _awc_num(item.get("ml"), 0, 0, 5000),
+             "from": "bottle" if item.get("from") == "bottle" else "container"}
+            for item in (raw.get("handFeeds") if isinstance(raw.get("handFeeds"), list) else [])[:nps_engine.HAND_FEED_LOG_MAX]
+            if isinstance(item, dict) and _awc_str(item.get("at"), 40)
+        ],
         "tempEntity": _awc_str(raw.get("tempEntity"), 80),
         # The cysts pouch (doc §8.1): opened when, so the Pulse can say when the
         # fridge weeks are running out (hatch rates fall after 3–4 weeks).
@@ -7708,6 +7717,18 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                     # The feeding bottle is wholly server-written (0.7.116).
                     if isinstance(src_hatchery.get("fridgeBottle"), dict):
                         dst_hatchery["fridgeBottle"] = deepcopy(src_hatchery["fridgeBottle"])
+                    # The hand-feed log (0.7.131): a tap on another tab must not
+                    # vanish under a stale save — union by stamp, newest first.
+                    src_feeds = src_hatchery.get("handFeeds")
+                    if isinstance(src_feeds, list) and src_feeds:
+                        dst_feeds = dst_hatchery.get("handFeeds")
+                        merged: dict[str, Any] = {}
+                        for item in (dst_feeds if isinstance(dst_feeds, list) else []) + src_feeds:
+                            if isinstance(item, dict) and item.get("at"):
+                                merged.setdefault(str(item["at"]), item)
+                        dst_hatchery["handFeeds"] = sorted(
+                            merged.values(), key=lambda item: str(item["at"]), reverse=True
+                        )[:nps_engine.HAND_FEED_LOG_MAX]
                     # The cysts pouch stamp is a tap, not a setting (Stage C).
                     if isinstance(src_hatchery.get("cysts"), dict):
                         dst_hatchery["cysts"] = deepcopy(src_hatchery["cysts"])
@@ -13244,6 +13265,63 @@ async def websocket_consumable_skip_dose(
 
 
 @websocket_api.websocket_command({
+    vol.Required("type"): "openreef/consumable_undo_dose",
+    vol.Required("product_id"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_consumable_undo_dose(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Undo a mis-tapped hand dose (doc §13.8 Q9): within the window, the last
+    ``dose`` row comes off the history, the ml goes back in the bottle, the
+    plan's clock falls back to the dose before it, and the reminder completion
+    the tap wrote is removed. Nothing else moves — pump debits are the
+    machine's and stay."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    product = _consumable_for_msg(connection, msg, config)
+    if product is None:
+        return
+    now = datetime.now(timezone.utc)
+    undo = nps_engine.hand_dose_undo(product, now)
+    if not undo["available"]:
+        connection.send_error(msg["id"], "nothing_to_undo",
+                              f"Nothing to undo — a hand dose can be taken back for {nps_engine.HAND_DOSE_UNDO_MIN} minutes")
+        return
+    history = product.get("history") if isinstance(product.get("history"), list) else []
+    index = next((i for i in range(len(history) - 1, -1, -1)
+                  if isinstance(history[i], dict) and history[i].get("kind") == "dose"
+                  and str(history[i].get("at")) == undo["at"]), None)
+    if index is None:
+        connection.send_error(msg["id"], "nothing_to_undo", "Nothing to undo")
+        return
+    del history[index]
+    bottle_ml = max(0.0, float(product.get("bottleMl") or 0.0))
+    remaining = max(0.0, float(product.get("remainingMl") or 0.0)) + undo["ml"]
+    product["remainingMl"] = round(min(remaining, bottle_ml) if bottle_ml > 0 else remaining, 2)
+    previous = [str(item.get("at")) for item in history
+                if isinstance(item, dict) and item.get("kind") == "dose" and item.get("at")]
+    product["lastDosedAt"] = max(previous) if previous else ""
+    task_id = _nps_shelf_task_id(str(msg["product_id"]))
+    maintenance = config.get("maintenance")
+    if isinstance(maintenance, dict) and isinstance(maintenance.get("completions"), dict):
+        entries = maintenance["completions"].get(task_id)
+        if isinstance(entries, list):
+            maintenance["completions"][task_id] = [
+                item for item in entries
+                if not (isinstance(item, dict) and str(item.get("timestamp")) == undo["at"]
+                        and item.get("source") == MAINTENANCE_SOURCE_SHELF)]
+    name = str(product.get("name") or "Bottle")
+    _append_activity(config, f"{name} hand dose undone — {undo['ml']:g} ml back in the bottle", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
     vol.Required("type"): "openreef/consumable_refill",
     vol.Required("product_id"): cv.string,
     vol.Optional("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
@@ -14211,7 +14289,17 @@ async def websocket_nps_enrich_second_dose(
 
 
 def _nps_log_hand_feed(config: dict[str, Any], now: datetime, ml: float, where: str) -> None:
-    """Log the hand-feed reminder done (if the user added it) and the activity row."""
+    """Stamp the feed on the hatchery's own log (the strip's done-mark), log
+    the hand-feed reminder done (if the user added it), write the activity row."""
+    hatchery = (config.get("nps") or {}).get("hatchery")
+    if isinstance(hatchery, dict):
+        log = hatchery.setdefault("handFeeds", [])
+        if not isinstance(log, list):
+            log = []
+            hatchery["handFeeds"] = log
+        log.insert(0, {"at": now.isoformat(), "ml": round(float(ml), 1),
+                       "from": "bottle" if "bottle" in where else "container"})
+        del log[nps_engine.HAND_FEED_LOG_MAX:]
     maintenance = config.get("maintenance")
     if isinstance(maintenance, dict):
         tasks = maintenance.get("tasks")
@@ -15593,17 +15681,9 @@ async def websocket_nps_summary(
     })
     now_local = dt_util.as_local(now_utc)
     tz = now_local.tzinfo
-    # The unified feed strip (doc §13): the hand-feed reminder's completions
-    # are the brine done-marks (the only stamped record of a container feed).
-    brine_feeds: list[dict[str, Any]] = []
-    maint = config.get("maintenance") if isinstance(config.get("maintenance"), dict) else {}
-    comps = (maint.get("completions") or {}).get(MAINTENANCE_HAND_FEED_TASK_ID)
-    for item in (comps if isinstance(comps, list) else [])[:40]:
-        if not isinstance(item, dict) or item.get("skipped"):
-            continue
-        found = re.search(r"(\d+(?:\.\d+)?) ml", str(item.get("notes") or ""))
-        brine_feeds.append({"at": item.get("timestamp"),
-                            "ml": float(found.group(1)) if found else hatchery_cfg["handFeed"]["defaultDoseMl"]})
+    # The unified feed strip (doc §13): the hatchery's own stamped feeds are
+    # the brine done-marks (0.7.131 — no longer the reminder's completions).
+    brine_feeds: list[dict[str, Any]] = [dict(item) for item in hatchery_cfg["handFeeds"]]
     cultures_cfg = _nps_cultures_cfg(config)
     timeline = nps_engine.feed_timeline(
         now_local, products=products, channels=channels,
@@ -20627,6 +20707,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_nps_enrich_second_dose)
     websocket_api.async_register_command(hass, websocket_consumable_log_dose)
     websocket_api.async_register_command(hass, websocket_consumable_skip_dose)
+    websocket_api.async_register_command(hass, websocket_consumable_undo_dose)
     websocket_api.async_register_command(hass, websocket_consumable_refill)
     websocket_api.async_register_command(hass, websocket_consumable_delete)
     websocket_api.async_register_command(hass, websocket_dosing_respread_missed)

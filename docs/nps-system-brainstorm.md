@@ -838,7 +838,7 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
-## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **BUILT 2026-09-05, Stages A–D** (uncommitted; release as 0.7.130) — see §13.10
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130 (2026-09-05)** + **0.7.131 follow-up** — see §13.10–§13.11
 
 ### 13.1 What v1 is, honestly
 
@@ -954,4 +954,13 @@ Under the strip, the next three events as chips with countdowns, mixed lanes: `�
 **Panel**: shelf editor = one number + days/hours unit + "First dose at"; `_npsApplyProductField` owns the unit switch; reminder sync makes an hours cadence a daily chore labelled "(N a day)"; shelf card reads the engine's `cadenceText`. `_npsTimelineSvg()` reads `summary.timeline`: two lanes (⚙︎ ticks / ✋ circles), system row, night, now-line, ladder overlays, midnight-wrapping bands, any-time chips, the queue, the honesty line, the legend; `compact`/`readOnly` for the wall. Dose card inline under the strip (`_npsTimelineEventCard`): Log now / Dosed earlier (time picker → `at`) / Skip today / Dose now (pump, via `_doserDoseNow(id, ml)` with the guard chain) / deep links. Placements: NPS hero, Feeding hub (`_npsFeedingStrip`, also for zero-pump keepers with a plan), Pulse wall (`_pulseFeedStripMarkup`, rides `showToday`, read-only). Demo view stages a mixed day (`_npsDemoTimeline`). Tests: `tests/test_panel_nps.mjs` 47 green (4 new); nav/pulse/mobile/cultures/maintenance/diagram/attention untouched and green.
 
 **Left, on purpose**: the 10-min **undo** (Q9 unsure — `history` + `lastDosedAt` rollback needs its own test; next slice); **truce windows** on the system row; brine done-marks exist only when the hand-feed reminder task exists (the only stamped record of a container feed — a `handFeedLog` would be a new server-written field and a new guard, not worth it until someone misses it); the rotifer bottle has done-marks but no planned chips (no cadence exists for it); the dose card is inline rather than a floating sheet (the 0.7.34 shadow-DOM fullscreen trap).
+
+### 13.11 The 0.7.131 follow-up — the brine feed log, and the undo (2026-09-05)
+
+Reece's first question after the release: *"where does the hand-feed reminder live?"* The brine done-marks rode the `brine_hand_feed` reminder's completions, which only exist once the keeper has tapped **Sync hatchery reminders** on the hatchery card — a hidden dependency nobody would find. Fixed at the source:
+
+- **`hatchery.handFeeds`** — every **Fed** tap (container *and* fridge bottle) stamps `{at, ml, from}` on the hatchery block, newest first, capped at `HAND_FEED_LOG_MAX` (60). Server-written; `_nps_preserve_runtime` unions it by stamp through a stale save. The strip reads it and nothing else; the reminder completion is still written when the task exists, but the mark no longer depends on it.
+- **Undo (Q9, resolved)** — `hand_dose_undo()` names the last `dose` row if it is within `HAND_DOSE_UNDO_MIN` (10) minutes; the plan state carries it as `handDose.undo`. NEW `consumable_undo_dose` WS (registered): the row comes off the history, the ml goes back (never overfilling the bottle), `lastDosedAt` falls back to the dose before, the shelf completion the tap wrote is removed, an activity line says so. Pump debits and transfers are the machine's and are never undoable. The dose card shows **Undo N ml** on the done mark it would reverse, with the minutes left.
+
+Tests: `test_nps.py` 133 green (2 new); `test_panel_nps.mjs` 47 green (undo assertions added to the dose-card test).
 

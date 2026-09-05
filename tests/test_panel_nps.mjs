@@ -282,10 +282,16 @@ test("tapping a mark opens its dose card with the right actions, and the actions
     assert(html.includes('data-nps-late="rj"') && html.includes('data-action="nps-timeline-log-late"'), "the dosed-earlier picker");
     assert(html.includes('data-action="nps-timeline-skip" data-id="rj"'), "skip today");
     assert(html.includes('r="9.5"'), "the selected mark wears a halo");
-    // A done dose: no actions but Close.
+    // A done dose: no actions but Close — unless the shelf says it can still be undone.
     panel._nps.timelineOpen = "shelf:phyto:0";
     html = panel._npsTimelineSvg();
-    assert(html.includes("Done at 08:12 (planned 08:00) · 2 ml") && !html.includes("nps-timeline-log") && html.includes("nps-timeline-close"), "done card is read-only");
+    assert(html.includes("Done at 08:12 (planned 08:00) · 2 ml") && !html.includes("nps-timeline-log") && html.includes("nps-timeline-close") && !html.includes("nps-timeline-undo"), "done card is read-only");
+    const undoAt = new Date(NOW); undoAt.setHours(8, 12, 0, 0);
+    panel._nps.summary.shelf.products.phyto.handDose = { undo: { available: true, ml: 2, at: undoAt.toISOString(), minutesLeft: 7.5 } };
+    html = panel._npsTimelineSvg();
+    assert(html.includes('data-action="nps-timeline-undo" data-id="phyto"') && html.includes("Undo 2 ml") && html.includes("7.5 min left"), `undo missing: ${html}`);
+    panel._nps.summary.shelf.products.phyto.handDose.undo.at = new Date(Date.parse(NOW) - 60000).toISOString();
+    assert(!panel._npsTimelineSvg().includes("nps-timeline-undo"), "the undo belongs to the mark it would reverse, not every done dose");
     // A pump tick: dose now with the planned ml.
     panel._nps.timelineOpen = "channel:brine:1";
     html = panel._npsTimelineSvg();

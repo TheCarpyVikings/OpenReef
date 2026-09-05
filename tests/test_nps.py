@@ -2643,10 +2643,9 @@ def test_ws_summary_carries_the_timeline():
                                        "schedule": {"enabled": True, "mlPerDay": 4, "mode": "doses", "dosesPerDay": 2,
                                                     "windowStart": "00:00", "windowEnd": "00:00"}}})
     cfg = entry.options[CONF_SETTINGS]
-    cfg["maintenance"] = {"tasks": {"brine_hand_feed": {"label": "Feed brine", "cadenceDays": 1}},
-                          "completions": {"brine_hand_feed": [{"id": "x", "timestamp": _iso(tz_now), "notes": "hand-fed 25 ml from the NPS tab", "source": "hatchery"}]}}
     cfg["nps"]["hatchery"] = {"enabled": True, "reservoir": {"volumeMl": 1000, "remainingMl": 400, "mixedAt": _iso(tz_now)},
-                              "handFeed": {"defaultDoseMl": 30, "feedsPerDay": 2}}
+                              "handFeed": {"defaultDoseMl": 30, "feedsPerDay": 2},
+                              "handFeeds": [{"at": _iso(tz_now), "ml": 25, "from": "container"}]}
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
@@ -2656,8 +2655,90 @@ def test_ws_summary_carries_the_timeline():
     ids = [e["id"] for e in tl["events"]]
     assert "channel:phyto:0" in ids and "shelf:rj:0" in ids and "brine:0" in ids, ids
     brine = [e for e in tl["events"] if e["source"] == "brine"]
-    assert any(e["status"] == "done" and e["actualMl"] == 25.0 for e in brine), "the completion note's ml is the done mark"
+    assert any(e["status"] == "done" and e["actualMl"] == 25.0 for e in brine), "the hatchery's own feed log is the done mark"
     assert all(s in nps.TIMELINE_STATUSES for s in (e["status"] for e in tl["events"]))
+
+
+
+def test_hand_feed_log_is_written_by_both_fed_buttons_and_survives_a_stale_save():
+    """0.7.131: the strip's brine done-marks no longer depend on the keeper
+    having synced the hatchery reminders — every Fed tap is stamped."""
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 300,
+                                 "mixedAt": datetime.now(timezone.utc).isoformat()})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["handFeed"] = {"defaultDoseMl": 30, "feedsPerDay": 2}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hand_feed(hass, conn, {"id": 1}))
+    assert not conn.errors
+    feeds = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["handFeeds"]
+    assert len(feeds) == 1 and feeds[0]["ml"] == 30 and feeds[0]["from"] == "container" and feeds[0]["at"], feeds
+    assert "brine_hand_feed" not in (entry.options[CONF_SETTINGS].get("maintenance") or {}).get("completions", {}), "no reminder, no completion — the log stands alone"
+    # The strip reads it.
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    brine = [e for e in conn.results[-1].payload["timeline"]["events"] if e["source"] == "brine"]
+    assert any(e["status"] == "done" and e["actualMl"] == 30.0 for e in brine), brine
+    # The fridge bottle's Fed writes the same log, tagged.
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["fridgeBottle"] = {"volumeMl": 250, "remainingMl": 200, "mixedAt": datetime.now(timezone.utc).isoformat(),
+                                             "filledAt": datetime.now(timezone.utc).isoformat()}
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 3, "action": "feed", "ml": 20}))
+    assert not conn.errors, conn.errors
+    feeds = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["handFeeds"]
+    assert feeds[0]["from"] == "bottle" and feeds[0]["ml"] == 20 and len(feeds) == 2, feeds
+    # A stale panel save (no log) must not lose either; a union keeps both, newest first.
+    stored = {"nps": {"hatchery": {"handFeeds": list(feeds)}}}
+    incoming = {"nps": {"hatchery": {"handFeeds": [{"at": "2020-01-01T00:00:00+00:00", "ml": 5, "from": "container"}]}}}
+    integration._nps_preserve_runtime(stored, incoming)
+    merged = incoming["nps"]["hatchery"]["handFeeds"]
+    assert [f["ml"] for f in merged] == [20, 30, 5], merged
+    # The normaliser caps and cleans it.
+    config = integration._normalise_core_config({"nps": {"enabled": True, "hatchery": {"handFeeds": [{"at": "x", "ml": 1}, {"ml": 2}, {"at": "y", "ml": -3, "from": "junk"}]}}})
+    assert config["nps"]["hatchery"]["handFeeds"] == [{"at": "x", "ml": 1, "from": "container"}, {"at": "y", "ml": 0, "from": "container"}]
+
+
+def test_ws_undo_dose_takes_back_a_mis_tap_within_the_window():
+    now = datetime.now(timezone.utc)
+    entry = _entry({"rj": _reef_juice(doseMl=3, doseFirstAt="20:00")})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["maintenance"] = {"tasks": {"nps_dose_rj": {"label": "Dose Reef Juice by hand", "cadenceDays": 1}}, "completions": {}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # Nothing logged yet: nothing to undo.
+    run(integration.websocket_consumable_undo_dose(hass, conn, {"id": 0, "product_id": "rj"}))
+    assert conn.error_codes == ["nothing_to_undo"]
+    conn = FakeConnection()
+    earlier = _iso(now - timedelta(hours=5))
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 1, "product_id": "rj", "at": earlier}))
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 2, "product_id": "rj"}))
+    assert not conn.errors
+    saved = _saved_products(entry)["rj"]
+    assert saved["remainingMl"] == 194.0 and len(saved["history"]) == 2 and saved["lastDosedAt"] != earlier
+    assert len(entry.options[CONF_SETTINGS]["maintenance"]["completions"]["nps_dose_rj"]) == 2
+    # The plan advertises the undo.
+    run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
+    undo = conn.results[-1].payload["shelf"]["products"]["rj"]["handDose"]["undo"]
+    assert undo["available"] and undo["ml"] == 3.0 and undo["at"] == saved["lastDosedAt"] and 9 <= undo["minutesLeft"] <= 10, undo
+    # Undo: the ml goes back, the row goes, the clock falls back to the earlier dose, the completion goes.
+    run(integration.websocket_consumable_undo_dose(hass, conn, {"id": 4, "product_id": "rj"}))
+    assert not conn.errors, conn.errors
+    saved = _saved_products(entry)["rj"]
+    assert saved["remainingMl"] == 197.0 and len(saved["history"]) == 1 and saved["history"][0]["at"] == earlier
+    assert saved["lastDosedAt"] == earlier
+    comps = entry.options[CONF_SETTINGS]["maintenance"]["completions"]["nps_dose_rj"]
+    assert len(comps) == 1 and comps[0]["timestamp"] == earlier
+    assert any(item.get("message") == "Reef Juice hand dose undone — 3 ml back in the bottle" for item in entry.options[CONF_SETTINGS]["activity"])
+    # The earlier dose is outside the window: nothing more to undo.
+    conn = FakeConnection()
+    run(integration.websocket_consumable_undo_dose(hass, conn, {"id": 5, "product_id": "rj"}))
+    assert conn.error_codes == ["nothing_to_undo"]
+    # A pump debit is never undoable, and the ml never overfills the bottle.
+    pumped = _product(bottleMl=100, remainingMl=99, history=[{"at": _iso(now), "ml": 5, "kind": "pump"}])
+    assert not nps.hand_dose_undo(pumped, now)["available"]
+    entry2 = _entry({"p": _product(bottleMl=100, remainingMl=99, doseMl=5, history=[{"at": _iso(now), "ml": 5, "kind": "dose"}], lastDosedAt=_iso(now))})
+    conn2 = FakeConnection()
+    run(integration.websocket_consumable_undo_dose(FakeHass(entries=[entry2]), conn2, {"id": 6, "product_id": "p"}))
+    assert not conn2.errors and _saved_products(entry2)["p"]["remainingMl"] == 100.0 and _saved_products(entry2)["p"]["lastDosedAt"] == ""
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.
