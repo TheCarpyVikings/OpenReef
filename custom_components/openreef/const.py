@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.128"
+INTEGRATION_VERSION = "0.7.129"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -270,6 +270,11 @@ MAINTENANCE_HAND_FEED_TASK_ID = "brine_hand_feed"
 # chore done. Task ids are culture_<jarId>_<chore> (seeded by a panel button).
 MAINTENANCE_SOURCE_CULTURES = "cultures"
 MAINTENANCE_CULTURE_TASK_PREFIX = "culture_"
+# Food-shelf-driven completions: a hand dose logged on the NPS tab marks the
+# bottle's hand-dose reminder done. Task ids are nps_dose_<productId>, seeded
+# by the panel when the keeper sets a cadence on the bottle (0.7.129).
+MAINTENANCE_SOURCE_SHELF = "shelf"
+MAINTENANCE_SHELF_TASK_PREFIX = "nps_dose_"
 # Phone notification actions (V2 Stage B): the bus listener's unsub handle.
 NOTIFY_ACTION_UNSUB = "notify_action_unsub"
 

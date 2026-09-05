@@ -1828,6 +1828,8 @@ class OpenReefPanel extends HTMLElement {
         "New bottle logged — ledger back to full, the expiry clock restarted.",
       );
       if (action === "nps-product-logdose") this._npsLogDose(id);
+      if (action === "nps-product-dosed") this._npsCall({ type: "openreef/consumable_log_dose", product_id: id },
+        "Dose logged — the bottle, the runway and the reminder all keep count.");
       if (action === "nps-product-delete") this._npsDeleteProduct(id);
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded(id);
@@ -1843,7 +1845,6 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-apply-learned") this._culturesApplyLearned(id, target.dataset.field || "");
       if (action === "cultures-enrich-done") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: true }, "Enriched rotifers bottled — the boost clock runs from now.");
       if (action === "cultures-enrich-plain") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: false }, "Bottled plain — still live food.");
-      if (action === "cultures-phyto-dosed") this._culturesCall({ type: "openreef/cultures_phyto_dosed" }, "Phyto dose logged — the bottle and the reminder keep count.");
       if (action === "nps-cysts-opened") this._npsCystsOpened();
       if (action === "cultures-seed") this._culturesCall(
         target.dataset.from ? { type: "openreef/cultures_seed", jar_id: id, from_jar_id: target.dataset.from }
@@ -2584,12 +2585,11 @@ class OpenReefPanel extends HTMLElement {
         const bottle = cultures.bottle = cultures.bottle || {};
         bottle[field] = Math.max(0, Number(value) || 0);
       }
-      if (scope === "nps-culture-enrich" || scope === "nps-culture-phyto") {
+      if (scope === "nps-culture-enrich") {
         const npsCfg = this._config.nps = this._config.nps || {};
         const cultures = npsCfg.cultures = npsCfg.cultures || {};
-        const key = scope === "nps-culture-enrich" ? "enrichment" : "phytoDose";
-        const block = cultures[key] = cultures[key] || {};
-        block[field] = ["productId", "stocking"].includes(field) ? value : Math.max(0, Number(value) || 0);
+        const block = cultures.enrichment = cultures.enrichment || {};
+        block[field] = field === "productId" ? value : Math.max(0, Number(value) || 0);
       }
       if (scope === "nps-culture-jar" || scope === "nps-culture-feed" || scope === "nps-culture-cadence") {
         const npsCfg = this._config.nps = this._config.nps || {};
@@ -2676,7 +2676,12 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "consumable") {
         const block = this._config.consumables = this._config.consumables || {};
         const products = block.products = block.products || {};
-        if (products[id]) products[id][field] = value;
+        if (products[id]) {
+          products[id][field] = ["doseMl", "doseEveryDays"].includes(field) ? Math.max(0, Number(value) || 0) : value;
+          // The hand-dose plan owns its reminder: a cadence seeds the shelf
+          // task, zero removes it (the cultures idiom, one bottle at a time).
+          if (["doseMl", "doseEveryDays", "name"].includes(field)) this._npsSyncDoseReminder(id);
+        }
       }
       if (target.dataset.spawnField) {
         // The compiler form fields are ALSO what the execution strip runs on —
@@ -10327,11 +10332,59 @@ class OpenReefPanel extends HTMLElement {
       notes: "",
       createdAt: now,
       history: [],
+      // The hand-dose plan: presets that carry a dose guide (Reef Juice's
+      // stocking bands) arrive with it and their cadence; the size stays 0
+      // so it follows the Profile tank volume until the keeper sets one.
+      doseMl: 0,
+      doseEveryDays: (preset && preset.doseEveryDays) || 0,
+      doseStocking: "medium",
+      doseGuide: (preset && preset.doseGuide && typeof preset.doseGuide === "object") ? { ...preset.doseGuide } : {},
+      doseNote: (preset && preset.doseNote) || "",
+      lastDosedAt: "",
     };
+    this._npsSyncDoseReminder(id);
     st.addOpen = false;
     this._setDirty(true);
     this._recordActivity(`Added consumable: ${name}`);
     this._render();
+  }
+
+  // The shelf's hand-dose reminder for one bottle: nps_dose_<pid> in
+  // Maintenance on the bottle's cadence, anchored on its last hand dose (the
+  // backend logs each dose as a completion, so the clock keeps itself). A
+  // zero cadence removes it. No maths here — the dose size is the backend's.
+  _npsSyncDoseReminder(pid) {
+    const product = this._config?.consumables?.products?.[pid];
+    const m = this._config.maintenance = this._config.maintenance || {};
+    const tasks = m.tasks = m.tasks || {};
+    const comps = m.completions = m.completions || {};
+    const taskId = `nps_dose_${pid}`;
+    const days = Number(product?.doseEveryDays) || 0;
+    if (!product || days <= 0) {
+      if (tasks[taskId]) delete tasks[taskId];
+      return;
+    }
+    const name = product.name || pid;
+    tasks[taskId] = {
+      ...(tasks[taskId] || { enabled: true, notify: true,
+        notes: `${product.doseNote ? `${product.doseNote} ` : ""}Tap Dosed on the NPS tab — the shelf keeps the size and the count.` }),
+      label: `Dose ${name} by hand`,
+      cadenceDays: days, criticalAfterDays: days + 2,
+    };
+    const ms = Date.parse(product.lastDosedAt || "");
+    if (Number.isFinite(ms) && ms <= Date.now()) {
+      if (!Array.isArray(comps[taskId])) comps[taskId] = [];
+      const already = comps[taskId].some((e) => !e?.skipped && this._maintenanceCompletionTime(e) >= ms);
+      if (!already) {
+        comps[taskId].unshift({
+          id: `${taskId}:shelf:${new Date(ms).toISOString()}`,
+          timestamp: new Date(ms).toISOString(),
+          notes: "Logged automatically — the shelf's own stamp",
+          source: "shelf",
+        });
+      }
+      tasks[taskId].snoozedUntil = null;
+    }
   }
 
   _npsFoodChannelIds() {
@@ -11549,8 +11602,25 @@ class OpenReefPanel extends HTMLElement {
     else if (s.low) chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">Low</span>`);
     if (expiry.status === "expired") chips.push(`<span class="pill" style="color:var(--error-color,#e5484d)">Expired</span>`);
     else if (expiry.status === "aging") chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">~${esc(expiry.daysLeft)}d left</span>`);
+    const plan = s.handDose || {};
+    const clock = plan.clock || {};
+    if (clock.due) chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">Dose due</span>`);
     if (product.refrigerated) chips.push(`<span class="pill">Fridge</span>`);
     if (product.stirDaily) chips.push(`<span class="pill">Stir daily</span>`);
+    // The hand-dose plan (0.7.129): the size (the keeper's, else the guide's
+    // from the tank volume), the cadence, the last dose — and one tap to log
+    // the planned dose. A guided bottle with no plan yet says what the guide
+    // would give, so the number is visible before Settings is opened.
+    const guide = plan.guide || {};
+    const everyDays = Number(plan.everyDays) || 0;
+    const planLine = plan.planned
+      ? `<small>Hand dose <strong>${plan.ml != null ? `${esc(plan.ml)} ml` : "— set the size in Settings"}</strong>${guide.available && !(Number(product.doseMl) > 0) ? ` (${esc(guide.stocking)} stocking: 1 ml per ${esc(guide.perLitres)} L)` : ""}${everyDays > 0 ? ` · every ${everyDays === 1 ? "day" : `${esc(everyDays)} days`}` : " · no reminder"}${plan.lastAt ? ` · last ${esc(this._formatActivityTime(plan.lastAt))}` : " · never dosed"}${plan.note ? `<br>${esc(plan.note)}` : ""}</small>`
+      : guide.available
+        ? `<small>Guide: <strong>${esc(guide.ml)} ml</strong> a day at ${esc(guide.stocking)} stocking (1 ml per ${esc(guide.perLitres)} L) — set a cadence in Settings and the shelf reminds you.</small>`
+        : "";
+    const dosedButton = plan.planned && plan.ml != null
+      ? `<button class="${clock.due ? "primary" : "secondary"} compact-button" data-action="nps-product-dosed" data-id="${eid}">Dosed ${esc(plan.ml)} ml</button>`
+      : "";
     const runway = s.daysUntilEmpty != null
       ? `≈${esc(s.daysUntilEmpty)} days of use left${s.usageMlPerDay ? ` (~${esc(s.usageMlPerDay)} ml/day)` : ""}`
       : "Log doses and the runway forecast switches on.";
@@ -11566,7 +11636,9 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${bar}
         <small>${s.bottleMl ? `${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml` : "Set the bottle size in Settings to start the ledger"} · ${runway}</small>
+        ${planLine}
         <div class="button-row">
+          ${dosedButton}
           <input type="number" min="0.1" step="0.1" placeholder="ml" style="width:72px;" data-nps-log="${eid}">
           <button class="secondary compact-button" data-action="nps-product-logdose" data-id="${eid}">Log dose</button>
           <button class="secondary compact-button" data-action="nps-product-newbottle" data-id="${eid}">New bottle</button>
@@ -11623,6 +11695,7 @@ class OpenReefPanel extends HTMLElement {
           <label>Particle max (µm)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="particleUmMax" value="${esc(product.particleUmMax)}"></label>
           <label>Notes<input data-scope="consumable" data-id="${eid}" data-field="notes" value="${esc(product.notes)}"></label>
         </div>
+        ${this._npsProductDosePlanFields(pid, product)}
         <label class="toggle-card compact-toggle">
           <input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="refrigerated" ${product.refrigerated ? "checked" : ""}>
           <span><strong>Refrigerated</strong><small>Lives in the fridge between doses.</small></span>
@@ -11631,6 +11704,30 @@ class OpenReefPanel extends HTMLElement {
           <input type="checkbox" data-scope="consumable" data-id="${eid}" data-field="stirDaily" ${product.stirDaily ? "checked" : ""}>
           <span><strong>Needs a daily stir/shake</strong><small>Settled phyto dies in days — agitation is part of the routine.</small></span>
         </label>
+      </div>`;
+  }
+
+  // The hand-dose plan (0.7.129): for a bottle dosed by hand — a size, a
+  // cadence for the reminder, and (when the preset carries a guide, like
+  // Reef Juice's stocking bands) the band the guide reads.
+  _npsProductDosePlanFields(pid, product) {
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const eid = esc(pid);
+    const guide = product.doseGuide && typeof product.doseGuide === "object" ? product.doseGuide : {};
+    const guided = ["light", "medium", "heavy"].some((b) => Number(guide[b]) > 0);
+    const guideLine = guided
+      ? `<small class="awc-hint">This preset carries a dose guide: 1 ml per ${["light", "medium", "heavy"].map((b) => esc(Number(guide[b]) || "—")).join(" / ")} L a day for light / medium / heavy stocking. Leave the size at 0 and the dose follows the Profile tank volume.</small>`
+      : `<small class="awc-hint">Dosed by hand? Give it a size and a cadence — the shelf card gets a one-tap Dosed button and Maintenance a reminder that the tap keeps.</small>`;
+    return `
+      <div class="awc-section-title" style="margin-top:8px;"><p class="eyebrow">Hand dose</p></div>
+      ${guideLine}
+      <div class="mini-grid">
+        <label>Dose (ml${guided ? ", 0 = from the guide" : ""})<input type="number" min="0" step="0.1" data-scope="consumable" data-id="${eid}" data-field="doseMl" value="${esc(product.doseMl ?? 0)}"></label>
+        <label>Dose every (days, 0 = no reminder)<input type="number" min="0" max="60" step="1" data-scope="consumable" data-id="${eid}" data-field="doseEveryDays" value="${esc(product.doseEveryDays ?? 0)}"></label>
+        ${guided ? `<label>Stocking<select data-scope="consumable" data-id="${eid}" data-field="doseStocking">
+          ${["light", "medium", "heavy"].map((v) => `<option value="${v}" ${(product.doseStocking || "medium") === v ? "selected" : ""}>${v}</option>`).join("")}
+        </select></label>` : ""}
+        <label>How<input data-scope="consumable" data-id="${eid}" data-field="doseNote" placeholder="e.g. at dusk, skimmer off an hour" value="${esc(product.doseNote)}"></label>
       </div>`;
   }
 
@@ -11670,10 +11767,10 @@ class OpenReefPanel extends HTMLElement {
     }
     const shelf = sum.shelf || {};
     if (shelf.count) {
-      const attention = (shelf.lowCount || 0) + (shelf.expiredCount || 0);
+      const attention = (shelf.lowCount || 0) + (shelf.expiredCount || 0) + (shelf.doseDueCount || 0);
       cards.push(this._missionSummaryCard("Food shelf",
         `${shelf.count} bottle${shelf.count === 1 ? "" : "s"}`,
-        attention ? `${shelf.lowCount || 0} low · ${shelf.expiredCount || 0} expired` : "All stocked and fresh",
+        attention ? [shelf.lowCount ? `${shelf.lowCount} low` : "", shelf.expiredCount ? `${shelf.expiredCount} expired` : "", shelf.doseDueCount ? `${shelf.doseDueCount} dose${shelf.doseDueCount === 1 ? "" : "s"} due` : ""].filter(Boolean).join(" · ") : "All stocked and fresh",
         attention ? "warning" : "ok", "settings", toSettings));
     }
     const budget = sum.budget || {};
@@ -12249,22 +12346,6 @@ const rigSteps = [
       }
       seeded.push(name);
     }
-    // Reef Juice for the tank (Stage C): on the keeper's cadence, anchored on
-    // the last dose; no bottle or a zero cadence removes the task.
-    const phyto = this._config?.nps?.cultures?.phytoDose || {};
-    const phytoDays = Number(phyto.cadenceDays) || 0;
-    const phytoId = "culture_phyto_dose";
-    if (phyto.productId && phytoDays > 0) {
-      tasks[phytoId] = {
-        ...(tasks[phytoId] || { label: "Dose phyto to the tank", enabled: true, notify: true,
-          notes: "Into the flow at dusk, skimmer and UV off for an hour. Into the tank, never the jars. Tap Dosed on the Cultures tab." }),
-        cadenceDays: phytoDays, criticalAfterDays: phytoDays + 2,
-      };
-      anchor(phytoId, phyto.lastDosedAt);
-      seeded.push("the tank's phyto");
-    } else if (tasks[phytoId]) {
-      delete tasks[phytoId];
-    }
     this._setDirty(true);
     this._cultures.message = seeded.length
       ? `Culture reminders synced for ${seeded.join(", ")} — save to keep them.`
@@ -12824,27 +12905,10 @@ const rigSteps = [
         <p class="eyebrow" style="margin:0;">The day the parcel lands</p>
         <small><strong>1. Rotifers into the cone.</strong> Fresh water at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt (SG ~1.020 — the jug says how much RODI to cut the 35 ppt mix with), room temperature, air ON to the tip at 1–2 bubbles/s. Float the pouch 15 min, add cone water to it in steps, pour in. Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, sooner only if the water is visibly dense.</small>
         <small><strong>2. Pods into the tub.</strong> A flat 4 L tub half to two-thirds full of 35 ppt, open airline at 1–3 bubbles/s, loose lid, out of the sun. Pour in on delivery day, feed the Copepod Feed at half rate for a week. Tap <em>Seed</em>: a generation is a month, so the first harvest waits until day ${this._escape(String(podPreset.firstHarvestDays || 28))}.</small>
-        <small><strong>3. The shelf.</strong> Reef Juice is for the tank, not the jars — add it, the concentrate, the Copepod Feed and the enrichment from the Reefphyto presets in NPS settings, then link each jar's feed bottle below. The unused starter keeps in the fridge, cap loose, five days.</small>
+        <small><strong>3. The shelf.</strong> Add the concentrate, the Copepod Feed and the enrichment from the Reefphyto presets in NPS settings, then link each jar's feed bottle below. Reef Juice is a tank dose, nothing to do with the jars — it lives on the NPS food shelf with its own dose and reminder. The unused starter keeps in the fridge, cap loose, five days.</small>
         <small><strong>4. Reminders.</strong> Once seeded, <em>Sync culture reminders</em> puts every chore on the phone, anchored on the real stamps.</small>
       </article>` : "";
     const rigPanel = st.summary && jars.length ? this._culturesRigPanel() : "";
-    // Reef Juice for the TANK — never the jars (Reefphyto: "not designed as a
-    // culture feed"). A reminder on the keeper's cadence, a dose from the
-    // stocking band × the Profile tank volume, one tap to log it.
-    const ph = sum.phytoDose || {};
-    const phClock = ph.clock || {};
-    const phytoPanel = st.summary ? `
-      <article class="panel stack" data-culture-phyto>
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <p class="eyebrow" style="margin:0;">The tank's phyto</p>
-          ${ph.productId ? `<span class="pill ${phClock.due ? "warning" : "ok"}">${phClock.due ? "dose due" : phClock.available && phClock.hoursUntil != null ? `next in ~${this._escape(String(phClock.hoursUntil))} h` : "no reminder"}</span>` : ""}
-        </div>
-        ${ph.productId ? `
-        <small>${this._escape(ph.productName || "Live phyto")} — <strong>${this._escape(String(ph.doseMl ?? "—"))} ml</strong>${ph.guide?.available ? ` (${this._escape(ph.stocking)} stocking: 1 ml per ${this._escape(String(ph.guide.perLitres))} L)` : ""}${Number(ph.cadenceDays) > 0 ? ` · every ${Number(ph.cadenceDays) === 1 ? "day" : `${this._escape(String(ph.cadenceDays))} days`}` : " · no reminder"}${ph.lastDosedAt ? ` · last ${this._escape(this._formatActivityTime(ph.lastDosedAt))}` : " · never dosed"}</small>
-        <small class="muted">Into the flow at dusk, skimmer and UV off for an hour. Into the tank, never the jars.</small>
-        <div class="button-row"><button class="${phClock.due ? "primary" : "secondary"} compact-button" data-action="cultures-phyto-dosed">Dosed ${this._escape(String(ph.doseMl ?? ""))} ml</button></div>`
-        : `<small class="muted">Link the tank's phyto bottle (Reef Juice) in <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="cultures" data-scroll="or-section-cultures">Culture settings</button> — it is for the tank, never the jars.</small>`}
-      </article>` : "";
 
     return `
       <section class="stack">
@@ -12853,7 +12917,6 @@ const rigSteps = [
         ${summaryCards}
         ${welcome}
         ${strip}
-        ${phytoPanel}
         ${rigPanel}
         ${notes}
         ${journal}
@@ -12927,18 +12990,6 @@ const rigSteps = [
         </select></label>
         <label>Drops per portion<input type="number" min="1" max="10" step="1" data-scope="nps-culture-enrich" data-field="drops" value="${this._escape(String(cultures.enrichment?.drops ?? 3))}"></label>
         <label>Soak (h)<input type="number" min="2" max="12" step="0.5" data-scope="nps-culture-enrich" data-field="soakH" value="${this._escape(String(cultures.enrichment?.soakH ?? 6))}" title="Reefphyto's product page says 6–12 h, its culture guide 2–4 h — ask Darren; 6 h is the default"></label>
-      </div>
-      <small class="awc-hint"><strong>The tank's phyto</strong> — Reef Juice is dosed to the tank, never the jars (Reefphyto: "not designed as a culture feed"). Pick the bottle, your cadence, and the stocking band; the dose comes from the Profile tank volume (1 ml per 27 / 18 / 9 L a day for light / medium / heavy) unless you set it.</small>
-      <div class="mini-grid">
-        <label>Phyto bottle (tank)<select data-scope="nps-culture-phyto" data-field="productId">
-          <option value="">Not linked</option>
-          ${Object.entries(products).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(cultures.phytoDose?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}
-        </select></label>
-        <label>Dose every (days, 0 = no reminder)<input type="number" min="0" max="14" step="0.5" data-scope="nps-culture-phyto" data-field="cadenceDays" value="${this._escape(String(cultures.phytoDose?.cadenceDays ?? 1))}"></label>
-        <label>Stocking<select data-scope="nps-culture-phyto" data-field="stocking">
-          ${["light", "medium", "heavy"].map((v) => `<option value="${v}" ${(cultures.phytoDose?.stocking || "medium") === v ? "selected" : ""}>${v}</option>`).join("")}
-        </select></label>
-        <label>Dose (ml, 0 = from the tank volume)<input type="number" min="0" max="500" step="0.5" data-scope="nps-culture-phyto" data-field="doseMl" value="${this._escape(String(cultures.phytoDose?.doseMl ?? 0))}"></label>
       </div>
       <small class="awc-hint">Falls back to the brine hatchery's sensor when blank. Advisory only — the clocks never move with temperature, the copy does: a jar over its species' hard line gets a real warning (the heatwave lesson).</small>
       <small class="awc-hint"><strong>Jars</strong> (up to 4). Start with ONE rotifer jar; when it is dense, "Split into B" on the Cultures tab seeds the second — a backup out of phase, so a crash never zeroes you.</small>
@@ -17394,6 +17445,16 @@ const rigSteps = [
         push("nps-hatch", "Brine hatchery", `${next.name}: ~${Math.max(1, Math.round(next.leftH))} h to harvest`,
           batches.length > 1 ? `${batches.length} batches incubating` : "The incubation clock is running.", "ok");
       }
+      // The shelf's hand-dose plans (0.7.129): a bottle past its cadence asks.
+      const shelfProducts = this._nps?.summary?.shelf?.products || {};
+      const cfgProducts = this._config?.consumables?.products || {};
+      Object.entries(shelfProducts).forEach(([pid, s]) => {
+        const plan = s?.handDose || {};
+        if (!plan.clock?.due) return;
+        const name = cfgProducts[pid]?.name || pid;
+        push(`nps-dose-${pid}`, "Food shelf", `${name}: dose due`,
+          `${plan.ml != null ? `${plan.ml} ml by hand` : "Set the size in Settings"}${plan.note ? ` — ${plan.note}` : ""} Tap Dosed on the NPS tab.`, "warning");
+      });
     } catch { /* no card */ }
 
     // Culture chores — backend-computed clocks (cultures.py); the summary is
@@ -17437,7 +17498,6 @@ const rigSteps = [
         (sum.backup || []).filter((b) => b.guard?.status === "warn").forEach((b) =>
           push(`cultures-guard-${b.species}`, "Cultures", `Heat ahead for the ${b.speciesName.toLowerCase()}`,
             `${b.guard.line}. Heat kills a culture through oxygen and ammonia, not the animal.`, "warning"));
-        if (sum.phytoDose?.clock?.due) push("cultures-phyto", "Cultures", "Phyto dose due", `${sum.phytoDose.doseMl ?? ""} ml into the tank at dusk, skimmer off an hour.`, "warning");
         const cysts = this._nps?.summary?.hatchery?.cysts || {};
         if (cysts.available && cysts.status !== "fresh") {
           push("hatch-cysts", "Brine hatchery", `Cysts pouch opened ${cysts.days} days ago`,

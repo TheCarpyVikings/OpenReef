@@ -465,7 +465,9 @@ never a score.
 - **The eggs get a stamp:** `hatchery.cysts.openedAt` + the 3–4 week fridge window → a Pulse line,
   nothing more.
 - **Reef Juice on the reminder engine:** a "Dose Reef Juice" custom task, cadence 2–3 d, default dose
-  from the stocking band (`1 ml / 18 L × tank.volumeLitres`), completion debits the product. The NPS
+  from the stocking band (`1 ml / 18 L × tank.volumeLitres`), completion debits the product.
+  *(Realised 0.7.129 as the shelf's own hand-dose plan — see the addendum under §8.11; nothing of it
+  lives in `nps.cultures`.)* The NPS
   feed plans gain `zooLive` foods "Live rotifers (bottle)" and "Live Tigriopus (harvest)" with
   particle sizes 90–360 µm and 120–1200 µm so the species compiler can pick them.
 - **Hand-feed from the bottle:** `cultures_bottle {action: fed, ml}` already debits; V2 also logs the
@@ -615,3 +617,25 @@ is the #1 crash cause; a pump makes it automatic), and any volume leaderboard.
 12. **Culture cards:** Stage D.
 
 Stage A (0.7.125) is unblocked.
+
+#### Addendum 2026-09-05 (0.7.129) — Reef Juice leaves the cultures for good
+
+Reece: "the 'reef juice' is nothing to do with the cultures. it is just a product to be dosed to the
+tank — it belongs in the automated NPS system (food shelf) instead." So the Stage C `phytoDose` block,
+its "The tank's phyto" panel, its settings, WS (`cultures_phyto_dosed`), reminder
+(`culture_phyto_dose`) and Pulse line are all gone from Cultures. In their place, **every shelf
+product carries a hand-dose plan**: `doseMl` (0 = from the guide), `doseEveryDays` (0 = no
+reminder), `doseStocking`, `doseGuide` (litres per ml a day per band — the Reef Juice preset ships
+`{light: 27, medium: 18, heavy: 9}`, `doseEveryDays: 1` and a dusk/skimmer-off note), `doseNote`,
+and the server-written `lastDosedAt` (in the stale-save guard beside `remainingMl`/`history`).
+`nps.hand_dose_state` computes the size, cadence and due clock; the NPS summary's `shelf.products[pid].handDose`
+carries it and `shelf.doseDueCount` counts it. The shelf card shows the plan and a one-tap **Dosed N ml**
+(`consumable_log_dose` without `ml` uses the plan, stamps the clock, logs the `nps_dose_<pid>`
+reminder done with source `shelf`, writes the activity line). The panel seeds/removes
+`nps_dose_<pid>` in Maintenance as the cadence is edited (and when a preset with a plan is added);
+deleting the bottle drops the task and its history. Pulse: "Food shelf · Reef Juice: dose due".
+A 0.7.128 config migrates once in the NPS normaliser (plan fields onto the product,
+`culture_phyto_dose` renamed). Found on the way: the Stage B–C handlers `cultures_apply_learned`,
+`cultures_enrich_done` and `nps_cysts_opened` were never registered in `async_setup_entry` (the
+fake HA's lenient stub hid it) — registered now, with a source-level test that every
+`websocket_*` handler is registered.

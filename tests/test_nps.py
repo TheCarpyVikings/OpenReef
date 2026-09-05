@@ -2243,6 +2243,141 @@ def test_next_hatch_chain_plans_on_the_plain_shelf():
         "vessels-needed is structural: the plain shelf, never the boost"
 
 
+# --------------------------------------------------------------------------- #
+# 0.7.129 — the hand-dose plan (Reef Juice moved off the cultures onto the shelf)
+# --------------------------------------------------------------------------- #
+def _reef_juice(**over):
+    product = _product(name="Reef Juice", brand="Reefphyto", bottleMl=250.0, remainingMl=200.0,
+                       doseGuide={"light": 27, "medium": 18, "heavy": 9}, doseStocking="medium",
+                       doseMl=0.0, doseEveryDays=1.0, doseNote="At dusk, skimmer off.", lastDosedAt="")
+    product.update(over)
+    return product
+
+
+def test_hand_dose_guide_reads_the_stocking_band_off_the_tank_volume():
+    rj = _reef_juice()
+    assert nps.hand_dose_guide(rj, 52) == {"available": True, "ml": 2.9, "stocking": "medium", "perLitres": 18.0}
+    assert nps.hand_dose_guide({**rj, "doseStocking": "heavy"}, 90)["ml"] == 10.0
+    assert nps.hand_dose_guide({**rj, "doseStocking": "junk"}, 90)["stocking"] == "medium"
+    assert nps.hand_dose_guide(rj, 0)["available"] is False and nps.hand_dose_guide(rj, 0)["ml"] is None
+    assert nps.hand_dose_guide(_product(), 100)["available"] is False, "a bottle without a guide is not guided"
+
+
+def test_hand_dose_state_size_cadence_and_clock():
+    never = nps.hand_dose_state(_reef_juice(), NOW, 52)
+    assert never["planned"] and never["ml"] == 2.9 and never["everyDays"] == 1.0
+    assert never["clock"]["due"] and never["clock"]["hoursOverdue"] == 0.0, "planned but never dosed = due now"
+    fresh = nps.hand_dose_state(_reef_juice(lastDosedAt=_iso(NOW - timedelta(hours=6))), NOW, 52)
+    assert not fresh["clock"]["due"] and fresh["clock"]["hoursUntil"] == 18.0
+    late = nps.hand_dose_state(_reef_juice(lastDosedAt=_iso(NOW - timedelta(hours=30))), NOW, 52)
+    assert late["clock"]["due"] and late["clock"]["hoursOverdue"] == 6.0
+    explicit = nps.hand_dose_state(_reef_juice(doseMl=5), NOW, 52)
+    assert explicit["ml"] == 5.0, "the keeper's size beats the guide"
+    off = nps.hand_dose_state(_reef_juice(doseEveryDays=0), NOW, 52)
+    assert off["planned"] is False and off["clock"]["available"] is False, "no size, no cadence = no plan"
+    plain = nps.hand_dose_state(_product(doseMl=3, doseEveryDays=2, lastDosedAt=_iso(NOW - timedelta(days=1))), NOW, None)
+    assert plain["planned"] and plain["ml"] == 3.0 and plain["clock"]["hoursUntil"] == 24.0
+    state = nps.consumable_state(_reef_juice(), NOW, 52)
+    assert state["handDose"]["ml"] == 2.9
+    shelf = nps.shelf_summary({"rj": _reef_juice(), "p": _product()}, NOW, 52)
+    assert shelf["doseDueCount"] == 1 and shelf["products"]["p"]["handDose"]["planned"] is False
+
+
+def test_normalise_hand_dose_plan_and_the_reef_juice_migration():
+    config = integration._normalise_core_config({
+        "consumables": {"products": {
+            "rj": {"name": "Reef Juice", "bottleMl": 250, "doseMl": "junk", "doseEveryDays": 999,
+                   "doseStocking": "purple", "doseGuide": {"light": 27, "medium": -1, "heavy": "x", "extra": 4},
+                   "doseNote": "n" * 300, "lastDosedAt": _iso(NOW)},
+            "plain": {"name": "Pods"},
+        }},
+    })
+    rj = config["consumables"]["products"]["rj"]
+    assert rj["doseMl"] == 0 and rj["doseEveryDays"] == 60 and rj["doseStocking"] == "medium"
+    assert rj["doseGuide"] == {"light": 27} and len(rj["doseNote"]) == 200 and rj["lastDosedAt"] == _iso(NOW)
+    plain = config["consumables"]["products"]["plain"]
+    assert plain["doseGuide"] == {} and plain["doseEveryDays"] == 0 and plain["lastDosedAt"] == ""
+    # A 0.7.128 config: the cultures block carried the plan and the panel had
+    # seeded culture_phyto_dose. Both land on the shelf, once.
+    legacy = integration._normalise_core_config({
+        "nps": {"cultures": {"phytoDose": {"productId": "rj", "cadenceDays": 2, "stocking": "heavy",
+                                            "doseMl": 0, "lastDosedAt": _iso(NOW - timedelta(days=1))}}},
+        "consumables": {"products": {"rj": {"name": "Reef Juice", "bottleMl": 250}}},
+        "maintenance": {"tasks": {"culture_phyto_dose": {"label": "Dose phyto", "cadenceDays": 2, "criticalAfterDays": 4}},
+                        "completions": {"culture_phyto_dose": [{"id": "x", "timestamp": _iso(NOW - timedelta(days=1)), "notes": ""}]}},
+    })
+    rj = legacy["consumables"]["products"]["rj"]
+    assert rj["doseEveryDays"] == 2 and rj["doseStocking"] == "heavy" and rj["lastDosedAt"] == _iso(NOW - timedelta(days=1))
+    assert rj["doseGuide"] == {"light": 27, "medium": 18, "heavy": 9} and rj["doseNote"]
+    assert "phytoDose" not in legacy["nps"]["cultures"]
+    assert "culture_phyto_dose" not in legacy["maintenance"]["tasks"] and legacy["maintenance"]["tasks"]["nps_dose_rj"]["cadenceDays"] == 2
+    assert legacy["maintenance"]["completions"]["nps_dose_rj"] and "culture_phyto_dose" not in legacy["maintenance"]["completions"]
+    # Migrated once: a stale client re-sending the legacy block cannot undo an edit.
+    again = integration._normalise_core_config({
+        "nps": {"cultures": {"phytoDose": {"productId": "rj", "cadenceDays": 2, "stocking": "heavy"}}},
+        "consumables": {"products": {"rj": {**rj, "doseEveryDays": 3, "doseStocking": "light"}}},
+    })
+    assert again["consumables"]["products"]["rj"]["doseEveryDays"] == 3 and again["consumables"]["products"]["rj"]["doseStocking"] == "light"
+
+
+def test_ws_log_dose_without_ml_uses_the_plan_and_keeps_the_reminder():
+    entry = _entry({"rj": _reef_juice()})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["tank"] = {"volumeLitres": 52}
+    cfg["maintenance"] = {"tasks": {"nps_dose_rj": {"label": "Dose Reef Juice by hand", "cadenceDays": 1, "snoozedUntil": "2099-01-01T00:00:00+00:00"}},
+                          "completions": {}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    plan = conn.results[-1].payload["shelf"]["products"]["rj"]["handDose"]
+    assert plan["ml"] == 2.9 and plan["clock"]["due"] and conn.results[-1].payload["shelf"]["doseDueCount"] == 1
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 2, "product_id": "rj"}))
+    assert not conn.errors
+    saved = _saved_products(entry)["rj"]
+    assert saved["remainingMl"] == 197.1 and saved["history"][-1] == {"at": saved["history"][-1]["at"], "ml": 2.9, "kind": "dose"}
+    assert saved["lastDosedAt"]
+    maintenance = entry.options[CONF_SETTINGS]["maintenance"]
+    assert maintenance["completions"]["nps_dose_rj"][0]["source"] == "shelf"
+    assert maintenance["tasks"]["nps_dose_rj"]["snoozedUntil"] is None, "the tap clears the snooze, like the panel"
+    assert any(item.get("message") == "Reef Juice dosed by hand — 2.9 ml" for item in entry.options[CONF_SETTINGS]["activity"])
+    run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
+    plan = conn.results[-1].payload["shelf"]["products"]["rj"]["handDose"]
+    assert not plan["clock"]["due"] and abs(plan["clock"]["hoursUntil"] - 24.0) < 0.2
+    # An explicit ml still stamps the plan; a plan-less bottle without ml is refused.
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 4, "product_id": "rj", "ml": 1}))
+    assert _saved_products(entry)["rj"]["remainingMl"] == 196.1
+    entry2 = _entry({"p": _product()})
+    hass2 = FakeHass(entries=[entry2])
+    conn2 = FakeConnection()
+    run(integration.websocket_consumable_log_dose(hass2, conn2, {"id": 5, "product_id": "p"}))
+    assert conn2.error_codes == ["no_dose_size"]
+
+
+def test_hand_dose_stamp_survives_a_stale_save_and_leaves_with_the_bottle():
+    stored = {"consumables": {"products": {"rj": _reef_juice(remainingMl=197.1, lastDosedAt=_iso(NOW),
+                                                             history=[{"at": _iso(NOW), "ml": 2.9, "kind": "dose"}])}}}
+    incoming = _deepcopy(stored)
+    incoming["consumables"]["products"]["rj"].update({"remainingMl": 200.0, "lastDosedAt": "", "history": [], "doseEveryDays": 3})
+    integration._nps_preserve_runtime(stored, incoming)
+    rj = incoming["consumables"]["products"]["rj"]
+    assert rj["lastDosedAt"] == _iso(NOW) and rj["remainingMl"] == 197.1 and rj["doseEveryDays"] == 3
+    entry = _entry({"rj": _reef_juice()})
+    entry.options[CONF_SETTINGS]["maintenance"] = {"tasks": {"nps_dose_rj": {"label": "x", "cadenceDays": 1}, "other": {"label": "y", "cadenceDays": 7}},
+                                                   "completions": {"nps_dose_rj": [{"id": "a", "timestamp": _iso(NOW)}]}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_consumable_delete(hass, conn, {"id": 1, "product_id": "rj"}))
+    assert not conn.errors
+    maintenance = entry.options[CONF_SETTINGS]["maintenance"]
+    assert "nps_dose_rj" not in maintenance["tasks"] and "nps_dose_rj" not in maintenance["completions"] and "other" in maintenance["tasks"]
+
+
+def test_the_reef_juice_preset_carries_its_plan():
+    rj = next(item for item in nps.PRODUCT_LIBRARY if item["name"].startswith("Reef Juice"))
+    assert rj["doseGuide"] == {"light": 27, "medium": 18, "heavy": 9} and rj["doseEveryDays"] == 1 and rj["doseNote"]
+    assert all("doseGuide" not in item for item in nps.PRODUCT_LIBRARY if not item["name"].startswith("Reef Juice"))
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

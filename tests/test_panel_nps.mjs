@@ -1217,5 +1217,68 @@ test("next-hatch wording names what sets the deadline, and an empty container de
   } finally { restore(); }
 });
 
+test("the hand-dose plan: the shelf card, the Dosed tap, the settings fields, the reminder, the Pulse line", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const products = panel._config.consumables.products;
+    products.rj = { name: "Reef Juice", brand: "Reefphyto", category: "phyto", bottleMl: 250, remainingMl: 200, lowThresholdMl: 0,
+      shelfLifeDaysOpened: 90, history: [], doseMl: 0, doseEveryDays: 1, doseStocking: "medium",
+      doseGuide: { light: 27, medium: 18, heavy: 9 }, doseNote: "At dusk, skimmer off an hour.", lastDosedAt: "" };
+    const due = { bottleMl: 250, remainingMl: 200, percent: 80, usageMlPerDay: null, daysUntilEmpty: null, low: false, empty: false,
+      expiry: { status: "fresh", daysLeft: 88 }, categoryLabel: "Phytoplankton",
+      handDose: { planned: true, ml: 2.9, everyDays: 1, stocking: "medium", guide: { available: true, ml: 2.9, stocking: "medium", perLitres: 18 },
+                  note: "At dusk, skimmer off an hour.", lastAt: "", clock: { available: true, due: true, hoursUntil: 0, hoursOverdue: 0 } } };
+    panel._nps.summary.shelf.products.rj = due;
+    panel._nps.summary.shelf.doseDueCount = 1;
+    let card = panel._npsProductCard("rj", products.rj, due);
+    assert(card.includes("Dose due") && card.includes("Hand dose <strong>2.9 ml</strong> (medium stocking: 1 ml per 18 L) · every day · never dosed"), `plan line wrong: ${card}`);
+    assert(card.includes('class="primary compact-button" data-action="nps-product-dosed" data-id="rj">Dosed 2.9 ml'), "the Dosed tap must lead when due");
+    assert(card.includes("At dusk, skimmer off an hour."), "the how-line rides the card");
+    noPlaceholders(card, "due card");
+    // Not due: the tap steps back, the last dose shows.
+    const fed = { ...due, handDose: { ...due.handDose, lastAt: new Date(Date.parse(NOW) - 6 * 3600000).toISOString(),
+      clock: { available: true, due: false, hoursUntil: 18, hoursOverdue: 0 } } };
+    card = panel._npsProductCard("rj", products.rj, fed);
+    assert(!card.includes("Dose due") && card.includes('class="secondary compact-button" data-action="nps-product-dosed"') && card.includes("· last "), "not-due card wrong");
+    // A guided bottle with no plan yet still shows the guide's number.
+    const guided = { ...due, handDose: { ...due.handDose, planned: false, everyDays: 0, clock: { available: false, due: false } } };
+    card = panel._npsProductCard("rj", { ...products.rj, doseEveryDays: 0 }, guided);
+    assert(card.includes("Guide: <strong>2.9 ml</strong> a day at medium stocking") && !card.includes("nps-product-dosed"), "guide-only card wrong");
+    // A plain bottle: no plan line at all, the old buttons untouched.
+    const plainCard = panel._npsProductCard("pods", products.pods, panel._nps.summary.shelf.products.pods);
+    assert(!plainCard.includes("Hand dose") && plainCard.includes("nps-product-logdose"), "plain bottles keep the classic card");
+    // Settings: the plan fields, the stocking select only for a guided bottle.
+    const editor = panel._npsProductSettingsCard("rj", products.rj);
+    assert(editor.includes('data-field="doseMl"') && editor.includes('data-field="doseEveryDays"') && editor.includes('data-field="doseStocking"') && editor.includes('data-field="doseNote"'), "plan fields missing");
+    assert(editor.includes("1 ml per 27 / 18 / 9 L a day"), "the guide hint is missing");
+    assert(!panel._npsProductSettingsCard("pods", products.pods).includes('data-field="doseStocking"'), "no stocking select without a guide");
+    // The reminder follows the cadence: seeded, anchored, removed at zero.
+    products.rj.lastDosedAt = new Date(Date.parse(NOW) - 6 * 3600000).toISOString();
+    panel._npsSyncDoseReminder("rj");
+    const tasks = panel._config.maintenance.tasks;
+    assert(tasks.nps_dose_rj && tasks.nps_dose_rj.cadenceDays === 1 && tasks.nps_dose_rj.label === "Dose Reef Juice by hand", "the reminder must be seeded on the cadence");
+    assert(tasks.nps_dose_rj.notes.startsWith("At dusk, skimmer off an hour. Tap Dosed"), "the how-line leads the notes");
+    assert(panel._config.maintenance.completions.nps_dose_rj?.[0]?.timestamp === products.rj.lastDosedAt, "anchored on the last dose");
+    products.rj.doseEveryDays = 0;
+    panel._npsSyncDoseReminder("rj");
+    assert(!panel._config.maintenance.tasks.nps_dose_rj, "a zero cadence removes the reminder");
+    // Adding the preset brings the plan and the reminder with it.
+    panel._nps.summary.library = [{ name: "Reef Juice (live phyto blend)", brand: "Reefphyto", category: "phyto", bottleMl: 250,
+      shelfLifeDaysOpened: 90, refrigerated: true, stirDaily: true, doseGuide: { light: 27, medium: 18, heavy: 9 }, doseEveryDays: 1, doseNote: "Dusk." }];
+    panel._setDirty = () => {};
+    panel._render = () => {};
+    panel._npsAddProduct("0");
+    const added = Object.entries(panel._config.consumables.products).find(([, p]) => p.name.startsWith("Reef Juice (live"));
+    assert(added && added[1].doseGuide.medium === 18 && added[1].doseEveryDays === 1 && added[1].doseNote === "Dusk.", "the preset's plan must ride along");
+    assert(panel._config.maintenance.tasks[`nps_dose_${added[0]}`]?.cadenceDays === 1, "adding the preset seeds its reminder");
+    // The status card and Pulse speak for the due bottle.
+    const cards = panel._npsStatusCards();
+    assert(cards.includes("1 dose due"), `status card missing the due dose: ${cards}`);
+    const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
+    assert(titles.includes("Food shelf: Reef Juice: dose due"), `Pulse line missing: ${titles}`);
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

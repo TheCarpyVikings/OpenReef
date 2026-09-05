@@ -55,7 +55,11 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
      "particleUmMin": 1, "particleUmMax": 20,
      "notes": "Tank dose only — Reefphyto: 'not designed as a culture feed'. 1 ml per 27 / 18 / 9 L "
               "a day for light / medium / heavy stocking (their blog: 2–3× a week is right for "
-              "most reefs). Into flow at dusk, skimmer + UV off 30–60 min. Gentle shake, never freeze."},
+              "most reefs). Into flow at dusk, skimmer + UV off 30–60 min. Gentle shake, never freeze.",
+     # The hand-dose plan (0.7.129): litres of tank per ml a day, per stocking
+     # band — the shelf turns it into a dose from the Profile tank volume.
+     "doseGuide": {"light": 27, "medium": 18, "heavy": 9}, "doseEveryDays": 1,
+     "doseNote": "Into the flow at dusk, skimmer and UV off for an hour."},
     {"name": "Rotifer Feed Concentrate", "brand": "Reefphyto", "category": "phyto",
      "bottleMl": 50, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 1, "particleUmMax": 12,
@@ -186,7 +190,61 @@ def expiry_state(product: dict[str, Any], now: datetime) -> dict[str, Any]:
             "ageDays": round(age_d, 1)}
 
 
-def consumable_state(product: dict[str, Any], now: datetime) -> dict[str, Any]:
+DOSE_STOCKINGS: tuple[str, ...] = ("light", "medium", "heavy")
+
+
+def hand_dose_guide(product: dict[str, Any], tank_l: Any) -> dict[str, Any]:
+    """A product that carries a dose guide (litres of tank per ml a day, per
+    stocking band — Reef Juice's label) turned into a dose for THIS tank.
+    Products without a guide are simply not guided: available False."""
+    guide = product.get("doseGuide") if isinstance(product.get("doseGuide"), dict) else {}
+    band = str(product.get("doseStocking") or "medium")
+    if band not in DOSE_STOCKINGS:
+        band = "medium"
+    per = _f(guide.get(band))
+    litres = max(0.0, _f(tank_l))
+    if per <= 0:
+        return {"available": False, "ml": None, "stocking": band, "perLitres": None}
+    return {"available": litres > 0, "ml": round(litres / per, 1) if litres > 0 else None,
+            "stocking": band, "perLitres": per}
+
+
+def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None) -> dict[str, Any]:
+    """The bottle's hand-dose plan: the size (the keeper's number, else the
+    guide's), the cadence, and a due clock off the last logged hand dose. A
+    planned bottle never dosed is due now — the reminder should say so, not
+    wait a cadence for a dose that never happened."""
+    guide = hand_dose_guide(product, tank_l)
+    explicit = max(0.0, _f(product.get("doseMl")))
+    every = max(0.0, _f(product.get("doseEveryDays")))
+    ml = round(explicit, 2) if explicit > 0 else guide["ml"]
+    last_iso = str(product.get("lastDosedAt") or "")
+    last = _parse_iso(last_iso)
+    if every <= 0:
+        clock = {"available": False, "due": False, "at": None, "hoursUntil": None, "hoursOverdue": None}
+    elif last is None:
+        clock = {"available": True, "due": True, "at": now.isoformat(), "hoursUntil": 0.0, "hoursOverdue": 0.0}
+    else:
+        at = last + timedelta(days=every)
+        try:
+            delta_h = (at - now).total_seconds() / 3600.0
+        except TypeError:
+            delta_h = 0.0
+        clock = {"available": True, "due": delta_h <= 0, "at": at.isoformat(),
+                 "hoursUntil": round(max(0.0, delta_h), 1), "hoursOverdue": round(max(0.0, -delta_h), 1)}
+    return {
+        "planned": bool(every > 0 or explicit > 0),
+        "ml": ml,
+        "everyDays": every,
+        "stocking": guide["stocking"],
+        "guide": guide,
+        "note": str(product.get("doseNote") or ""),
+        "lastAt": last_iso,
+        "clock": clock,
+    }
+
+
+def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None) -> dict[str, Any]:
     """Everything the food shelf shows for one bottle."""
     bottle = max(0.0, _f(product.get("bottleMl")))
     remaining = min(bottle, max(0.0, _f(product.get("remainingMl")))) if bottle else 0.0
@@ -208,6 +266,7 @@ def consumable_state(product: dict[str, Any], now: datetime) -> dict[str, Any]:
         "stirDaily": bool(product.get("stirDaily")),
         "refrigerated": bool(product.get("refrigerated")),
         "categoryLabel": category_label(product.get("category")),
+        "handDose": hand_dose_state(product, now, tank_l),
     }
 
 
@@ -1010,19 +1069,21 @@ def nutrient_budget(products: dict[str, Any], now: datetime,
     }
 
 
-def shelf_summary(products: dict[str, Any], now: datetime) -> dict[str, Any]:
+def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None) -> dict[str, Any]:
     """The whole food shelf: per-product states plus the attention counts the
     tab header and (later) notifications read."""
     states: dict[str, dict[str, Any]] = {}
-    low = expired = 0
+    low = expired = dose_due = 0
     for pid, product in products.items():
         if not isinstance(product, dict):
             continue
-        state = consumable_state(product, now)
+        state = consumable_state(product, now, tank_l)
         states[str(pid)] = state
         if state["low"] or state["empty"]:
             low += 1
         if state["expiry"]["status"] == "expired":
             expired += 1
+        if state["handDose"]["clock"]["due"]:
+            dose_due += 1
     return {"products": states, "lowCount": low, "expiredCount": expired,
-            "count": len(states)}
+            "doseDueCount": dose_due, "count": len(states)}

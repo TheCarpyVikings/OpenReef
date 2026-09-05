@@ -226,7 +226,7 @@ def test_normalise_cultures_defaults_and_junk():
     assert {k: out["bottle"][k] for k in ("volumeMl", "remainingMl", "filledAt", "doseMl")} == {"volumeMl": 1000, "remainingMl": 0, "filledAt": "", "doseMl": 20}
     assert out["bottle"]["history"] == [] and not out["bottle"]["lastLoadEnriched"]
     assert out["enrichment"]["drops"] == 3 and out["enrichment"]["soakH"] == 6 and out["enrichment"]["state"]["startedAt"] == ""
-    assert out["phytoDose"] == {"productId": "", "cadenceDays": 1, "stocking": "medium", "doseMl": 0, "lastDosedAt": ""}
+    assert "phytoDose" not in out, "the tank's phyto lives on the shelf product now (0.7.129)"
     out = integration._normalise_cultures({"enabled": 1, "jars": {
         "c1": {"name": "x" * 80, "species": "unicorn", "volumeL": 999, "cadence": {"harvestPct": 200},
                "state": {"lastTint": "purple", "startedAt": None}, "history": ["junk", {"event": "seeded"}]},
@@ -827,8 +827,6 @@ def test_next_harvest_names_its_driver():
     assert cultures.next_harvest(fresh, 100, clock, True)["driver"] == "jar"
     assert cultures.next_harvest({"status": "fresh", "remainingMl": 300, "hoursLeft": 5.0}, 100, clock, True)["driver"] == "freshness"
     assert cultures.next_harvest(fresh, None, {**clock, "due": True}, True)["status"] == "now"
-    assert cultures.phyto_dose_guide(52, "medium") == {"available": True, "ml": 2.9, "stocking": "medium", "perLitres": 18.0}
-    assert cultures.phyto_dose_guide(0, "junk")["available"] is False and cultures.phyto_dose_guide(90, "heavy")["ml"] == 10.0
     history = [{"event": "fed_tank", "at": _iso(NOW - timedelta(hours=2)), "ml": 20}, {"event": "fed_tank", "at": _iso(NOW - timedelta(hours=26)), "ml": 20},
                {"event": "filled", "at": _iso(NOW - timedelta(hours=30)), "ml": 625}]
     assert cultures.bottle_usage_ml_per_day(history, NOW) == 36.9 and cultures.bottle_usage_ml_per_day([], NOW) is None
@@ -891,28 +889,13 @@ def test_ws_enrich_plain_and_bottle_feed_log_the_tank():
     assert conn.results[-1].payload["bottle"]["usageMlDay"] == 25.0
 
 
-def test_ws_phyto_dosed_and_cysts_opened():
-    products = {"rj": {"name": "Reef Juice", "bottleMl": 250, "remainingMl": 200, "history": []}}
-    entry = _entry(jars={}, products=products,
-                   maintenance={"tasks": {"culture_phyto_dose": {"label": "Dose phyto", "cadenceDays": 1}}, "completions": {}})
-    cfg = _config(entry)
-    cfg["tank"] = {**(cfg.get("tank") or {}), "volumeLitres": 52}
-    cfg["nps"]["cultures"]["phytoDose"] = {"productId": "rj", "cadenceDays": 1, "stocking": "medium"}
-    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+def test_ws_cysts_opened_and_the_summary_has_no_phyto():
+    entry = _entry(jars={})
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
-    ph = conn.results[-1].payload["phytoDose"]
-    assert ph["doseMl"] == 2.9 and ph["guide"]["perLitres"] == 18.0 and ph["clock"]["due"], "never dosed = due"
-    run(integration.websocket_cultures_phyto_dosed(hass, conn, {"id": 2}))
-    assert not conn.errors
-    cfg = _config(entry)
-    assert cfg["consumables"]["products"]["rj"]["remainingMl"] == 197.1
-    assert cfg["nps"]["cultures"]["phytoDose"]["lastDosedAt"]
-    assert cfg["maintenance"]["completions"]["culture_phyto_dose"][0]["source"] == "cultures"
-    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
-    ph = conn.results[-1].payload["phytoDose"]
-    assert not ph["clock"]["due"] and abs(ph["clock"]["hoursUntil"] - 24.0) < 0.2
+    assert "phytoDose" not in conn.results[-1].payload, "Reef Juice is the shelf's business, not the jars'"
+    assert not hasattr(integration, "websocket_cultures_phyto_dosed")
     run(integration.websocket_nps_cysts_opened(hass, conn, {"id": 4}))
     assert _config(entry)["nps"]["hatchery"]["cysts"]["openedAt"]
     payload = integration._nps_cysts_payload({"cysts": {"openedAt": _iso(REAL - timedelta(days=22))}}, REAL)
@@ -927,20 +910,17 @@ def test_stage_c_runtime_survives_a_stale_save():
                    "enrichedAt": _iso(REAL), "lastLoadEnriched": True,
                    "history": [{"event": "enriched", "at": _iso(REAL), "ml": 625}]},
         "enrichment": {"productId": "e", "drops": 3, "soakH": 6, "state": {"startedAt": _iso(REAL), "portionMl": 300, "jarId": "c1"}},
-        "phytoDose": {"productId": "rj", "cadenceDays": 1, "stocking": "medium", "doseMl": 0, "lastDosedAt": _iso(REAL)},
     }, "hatchery": {"cysts": {"openedAt": _iso(REAL)}, "vessels": {}, "reservoir": {}, "fridgeBottle": {}, "enrichment": {"state": {}}}}}
     incoming = copy.deepcopy(stored)
     cult = incoming["nps"]["cultures"]
     cult["bottle"] = {"volumeMl": 2000, "remainingMl": 0, "filledAt": "", "doseMl": 30, "enrichedAt": "", "lastLoadEnriched": False, "history": []}
     cult["enrichment"] = {"productId": "other", "drops": 5, "soakH": 4, "state": {"startedAt": "", "portionMl": 0, "jarId": ""}}
-    cult["phytoDose"] = {"productId": "rj", "cadenceDays": 2, "stocking": "heavy", "doseMl": 0, "lastDosedAt": ""}
     incoming["nps"]["hatchery"]["cysts"] = {"openedAt": ""}
     integration._nps_preserve_runtime(stored, incoming)
     cult = incoming["nps"]["cultures"]
     assert cult["bottle"]["remainingMl"] == 625 and cult["bottle"]["lastLoadEnriched"] and cult["bottle"]["history"]
     assert cult["bottle"]["volumeMl"] == 2000 and cult["bottle"]["doseMl"] == 30, "the keeper's settings stay"
     assert cult["enrichment"]["state"]["portionMl"] == 300 and cult["enrichment"]["drops"] == 5
-    assert cult["phytoDose"]["lastDosedAt"] and cult["phytoDose"]["cadenceDays"] == 2 and cult["phytoDose"]["stocking"] == "heavy"
     assert incoming["nps"]["hatchery"]["cysts"]["openedAt"]
 
 
@@ -1072,6 +1052,20 @@ def test_heat_guard_push_fires_once_a_day_from_the_cooling_projection():
     integration._nps_preserve_runtime(stored, incoming)
     assert incoming["nps"]["cultures"]["continuity"]["rotifer_L"]["since"] == _iso(REAL)
     assert incoming["nps"]["cultures"]["guard"]["notified"]["tigriopus"] == _iso(REAL)
+
+
+def test_every_websocket_handler_is_registered():
+    """0.7.126–0.7.128 shipped three handlers the panel called that
+    async_setup_entry never registered (apply_learned, enrich_done,
+    cysts_opened) — the fake HA's lenient stub hid it. Read the source:
+    every ``async def websocket_*`` must appear in an async_register_command."""
+    import re
+    src = open(os.path.join(_ROOT, "custom_components", "openreef", "__init__.py"), encoding="utf-8").read()
+    handlers = set(re.findall(r"^async def (websocket_[a-z0-9_]+)\(", src, re.M))
+    registered = set(re.findall(r"async_register_command\(hass, (websocket_[a-z0-9_]+)\)", src))
+    assert handlers, "no handlers found — the regex is wrong"
+    missing = sorted(handlers - registered)
+    assert not missing, f"handlers the panel can never reach: {missing}"
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

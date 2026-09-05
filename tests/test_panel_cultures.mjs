@@ -126,8 +126,6 @@ function summaryFixture(jars) {
     enrichment: { productId: "", productName: "Rotifer & Artemia Enrichment", drops: 3, soakH: 6, boostWarmH: 8, boostColdH: 24,
                   soak: { status: "none", percent: null, hoursLeft: null, hoursElapsed: null }, portionMl: 0, jarId: "", jarName: null },
     nextHarvest: { status: "wait", hoursUntil: 14, driver: "depletion" },
-    phytoDose: { productId: "", productName: null, cadenceDays: 1, stocking: "medium", doseMl: 2.9,
-                 guide: { available: true, ml: 2.9, stocking: "medium", perLitres: 18 }, lastDosedAt: "", clock: { available: false, due: false } },
     tempC: 23.5,
     backup: list.filter((j) => j.state.status === "producing" || j.state.status === "establishing").length
       ? [{ species: "rotifer_L", speciesName: "Rotifers (L-type)", running: list.filter((j) => j.species === "rotifer_L" && (j.state.status === "producing" || j.state.status === "establishing")).length,
@@ -431,7 +429,7 @@ test("the arrival walkthrough shows only while nothing has ever been seeded", as
     let panel = await culturesPanel({}, fresh);
     let html = panel._culturesTab();
     assert(html.includes("The day the parcel lands") && html.includes("first harvest unlocks at day 6") && html.includes("waits until day 28"), "the walkthrough must quote the presets");
-    assert(html.includes("Reef Juice is for the tank, not the jars"), "the shelf step must keep Reef Juice out of the jars");
+    assert(html.includes("Reef Juice is a tank dose, nothing to do with the jars") && html.includes("it lives on the NPS food shelf with its own dose and reminder"), "the shelf step must send Reef Juice to the shelf");
     panel = await culturesPanel();
     html = panel._culturesTab();
     assert(!html.includes("The day the parcel lands"), "a seeded rack must not show the walkthrough");
@@ -540,36 +538,20 @@ test("the DHA step: the enrich tick, the soak tile, the boost line and the next-
   } finally { restore(); }
 });
 
-test("the tank's phyto: the panel, the dosed tap, the settings and the reminder", async () => {
+test("the tank's phyto is the shelf's business — nothing of it on the Cultures tab", async () => {
   const restore = freezeTime(NOW);
   try {
-    let panel = await culturesPanel();
-    let html = panel._culturesTab();
-    assert(html.includes("The tank's phyto") && html.includes("it is for the tank, never the jars"), "an unlinked phyto bottle must say where to link it");
-    const linked = summaryFixture();
-    linked.phytoDose = { productId: "rj", productName: "Reef Juice", cadenceDays: 1, stocking: "medium", doseMl: 2.9,
-      guide: { available: true, ml: 2.9, stocking: "medium", perLitres: 18 }, lastDosedAt: iso(30), clock: { available: true, due: true, hoursUntil: 0, hoursOverdue: 6 } };
-    const cfg = baseConfig();
-    cfg.nps.cultures.phytoDose = { productId: "rj", cadenceDays: 1, stocking: "medium", doseMl: 0, lastDosedAt: iso(30) };
-    cfg.consumables.products.rj = { name: "Reef Juice", bottleMl: 250, remainingMl: 200, history: [] };
-    panel = await culturesPanel(cfg, linked);
-    html = panel._culturesTab();
-    assert(html.includes("Reef Juice — <strong>2.9 ml</strong> (medium stocking: 1 ml per 18 L)") && html.includes("every day"), "the phyto line is wrong");
-    assert(html.includes("dose due") && html.includes('class="primary compact-button" data-action="cultures-phyto-dosed">Dosed 2.9 ml'), "the dosed tap must lead when due");
+    const panel = await culturesPanel();
+    const html = panel._culturesTab();
+    assert(!html.includes("The tank's phyto") && !html.includes("cultures-phyto-dosed"), "the phyto panel must be gone");
     const settings = panel._culturesSettings();
-    assert(settings.includes('data-scope="nps-culture-phyto" data-field="productId"') && settings.includes('data-field="stocking"'), "phyto settings missing");
-    assert(settings.includes('data-scope="nps-culture-enrich" data-field="drops"') && settings.includes("The DHA step"), "enrichment settings missing");
+    assert(!settings.includes('data-scope="nps-culture-phyto"') && settings.includes('data-scope="nps-culture-enrich" data-field="drops"'),
+      "phyto settings gone, enrichment settings stay");
     panel._culturesSeedReminders();
-    const tasks = panel._config.maintenance.tasks;
-    assert(tasks.culture_phyto_dose && tasks.culture_phyto_dose.cadenceDays === 1, "the phyto reminder must be seeded on the cadence");
-    assert(panel._config.maintenance.completions.culture_phyto_dose?.[0]?.timestamp === iso(30), "anchored on the last dose");
-    panel._config.nps.cultures.phytoDose.cadenceDays = 0;
-    panel._culturesSeedReminders();
-    assert(!panel._config.maintenance.tasks.culture_phyto_dose, "a zero cadence removes the reminder");
+    assert(!panel._config.maintenance.tasks.culture_phyto_dose, "the cultures seeding must not conjure the phyto task");
     panel._culturesLoadSummary = async () => {};
     const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
-    assert(titles.includes("Cultures: Phyto dose due"), `phyto Pulse line missing: ${titles}`);
-    noPlaceholders(html, "phyto panel");
+    assert(!titles.includes("Phyto dose due"), `the cultures Pulse line must be gone: ${titles}`);
   } finally { restore(); }
 });
 

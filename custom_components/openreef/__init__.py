@@ -107,6 +107,8 @@ from .const import (
     MAINTENANCE_REMINDER_DEFAULT_TIME,
     MAINTENANCE_SOURCE_AWC,
     MAINTENANCE_SOURCE_CULTURES,
+    MAINTENANCE_SOURCE_SHELF,
+    MAINTENANCE_SHELF_TASK_PREFIX,
     MAINTENANCE_SOURCE_HATCHERY,
     NOTIFY_ACTION_UNSUB,
     MAINTENANCE_TASK_CADENCE_HOURS_MAX,
@@ -1117,8 +1119,6 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
     # enrichment bottle (one Reefphyto bottle serves both).
     raw_enrich = raw.get("enrichment") if isinstance(raw.get("enrichment"), dict) else {}
     raw_enrich_state = raw_enrich.get("state") if isinstance(raw_enrich.get("state"), dict) else {}
-    raw_phyto = raw.get("phytoDose") if isinstance(raw.get("phytoDose"), dict) else {}
-    stocking = str(raw_phyto.get("stocking") or "medium")
     # Continuity (Stage D): per species, since when the rack has never been
     # without a running jar; and the heat guard's once-a-day push stamps.
     raw_cont = raw.get("continuity") if isinstance(raw.get("continuity"), dict) else {}
@@ -1151,15 +1151,6 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "portionMl": _awc_num(raw_enrich_state.get("portionMl"), 0, 0, 20000),
                 "jarId": _awc_str(raw_enrich_state.get("jarId"), 24),
             },
-        },
-        # Reef Juice for the TANK (never the jars): a reminder on the keeper's
-        # cadence and a dose from the stocking band × the Profile tank volume.
-        "phytoDose": {
-            "productId": _awc_str(raw_phyto.get("productId"), 40),
-            "cadenceDays": _awc_num(raw_phyto.get("cadenceDays"), 1, 0, 14),
-            "stocking": stocking if stocking in cultures_engine.STOCKINGS else "medium",
-            "doseMl": _awc_num(raw_phyto.get("doseMl"), 0, 0, 500),
-            "lastDosedAt": _awc_str(raw_phyto.get("lastDosedAt"), 40),
         },
         "continuity": continuity,
         "guard": guard,
@@ -1391,6 +1382,14 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
     raw_block = raw_block if isinstance(raw_block, dict) else {}
     raw_products = raw_block.get("products")
     raw_products = raw_products if isinstance(raw_products, dict) else {}
+    # 0.7.129: the tank's phyto moved off nps.cultures.phytoDose and onto the
+    # shelf product itself — Reef Juice is a tank dose, nothing to do with the
+    # jars. A config saved by 0.7.128 carries the old block once: its cadence,
+    # stocking, size and stamp land on the product, and the panel's old
+    # reminder is renamed to the shelf's. The cultures normaliser drops the block.
+    raw_cultures = nps_cfg.get("cultures") if isinstance(nps_cfg.get("cultures"), dict) else {}
+    legacy_phyto = raw_cultures.get("phytoDose") if isinstance(raw_cultures.get("phytoDose"), dict) else {}
+    legacy_pid = str(legacy_phyto.get("productId") or "")
     products: dict[str, Any] = {}
     for pid, raw in list(raw_products.items())[:CONSUMABLES_MAX_PRODUCTS]:
         if not isinstance(raw, dict):
@@ -1398,7 +1397,25 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
         pid = str(pid)[:64]
         if not pid:
             continue
+        if pid == legacy_pid and "doseEveryDays" not in raw:
+            raw = {
+                **raw,
+                "doseEveryDays": legacy_phyto.get("cadenceDays", 1),
+                "doseStocking": legacy_phyto.get("stocking"),
+                "doseMl": legacy_phyto.get("doseMl"),
+                "lastDosedAt": raw.get("lastDosedAt") or legacy_phyto.get("lastDosedAt"),
+                "doseGuide": raw.get("doseGuide") or {"light": 27, "medium": 18, "heavy": 9},
+                "doseNote": raw.get("doseNote") or "Into the flow at dusk, skimmer and UV off for an hour.",
+            }
+            _rename_maintenance_task(config, "culture_phyto_dose", _nps_shelf_task_id(pid))
         bottle_ml = _awc_num(raw.get("bottleMl"), 0, 0, CONSUMABLE_BOTTLE_MAX_ML)
+        raw_guide = raw.get("doseGuide") if isinstance(raw.get("doseGuide"), dict) else {}
+        dose_guide = {}
+        for band in nps_engine.DOSE_STOCKINGS:
+            per = _awc_num(raw_guide.get(band), 0, 0, 100000)
+            if per > 0:
+                dose_guide[band] = round(per, 2)
+        stocking = str(raw.get("doseStocking") or "medium")
         history = [
             {
                 "at": _awc_str(item.get("at"), 40),
@@ -1429,6 +1446,16 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             "notes": _awc_str(raw.get("notes"), 400),
             "createdAt": _awc_str(raw.get("createdAt"), 40),
             "history": history,
+            # The hand-dose plan (0.7.129): a size (0 = the guide's, from the
+            # Profile tank volume), a cadence (0 = no reminder), the stocking
+            # band the guide reads, the guide itself (litres per ml a day, per
+            # band — presets carry it), a one-line how, and the plan's clock.
+            "doseMl": round(_awc_num(raw.get("doseMl"), 0, 0, CONSUMABLE_BOTTLE_MAX_ML), 2),
+            "doseEveryDays": _awc_num(raw.get("doseEveryDays"), 0, 0, 60),
+            "doseStocking": stocking if stocking in nps_engine.DOSE_STOCKINGS else "medium",
+            "doseGuide": dose_guide,
+            "doseNote": _awc_str(raw.get("doseNote"), 200),
+            "lastDosedAt": _awc_str(raw.get("lastDosedAt"), 40),
         }
     config["consumables"] = {"products": products}
 
@@ -3061,7 +3088,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             # Only automatic entries carry a source; a hand-logged completion has none,
             # which is what lets the panel tell the two apart in history and the chart.
             if item.get("source") in (MAINTENANCE_SOURCE_AWC, MAINTENANCE_SOURCE_HATCHERY,
-                                      MAINTENANCE_SOURCE_MIXING, MAINTENANCE_SOURCE_CULTURES):
+                                      MAINTENANCE_SOURCE_MIXING, MAINTENANCE_SOURCE_CULTURES,
+                                      MAINTENANCE_SOURCE_SHELF):
                 safe_entry["source"] = item["source"]
             volume = item.get("volume")
             if isinstance(volume, (int, float)) and not isinstance(volume, bool):
@@ -7718,8 +7746,6 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                             dst_cultures["enrichment"] = deepcopy(src_enrich)
                         else:
                             dst_enrich["state"] = deepcopy(src_enrich["state"])
-                    _copy_runtime_fields(
-                        src_cultures.get("phytoDose"), dst_cultures.get("phytoDose"), ("lastDosedAt",))
                     for key in ("continuity", "guard"):
                         if isinstance(src_cultures.get(key), dict):
                             dst_cultures[key] = deepcopy(src_cultures[key])
@@ -7745,7 +7771,7 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
             if src_stamp is not None:
                 dst_stamp = _latest(dst)
                 if dst_stamp is None or src_stamp > dst_stamp:
-                    _copy_runtime_fields(src, dst, ("remainingMl", "history"))
+                    _copy_runtime_fields(src, dst, ("remainingMl", "history", "lastDosedAt"))
 
 
 def _merge_activity(stored: Any, incoming: dict[str, Any]) -> None:
@@ -13025,6 +13051,75 @@ def _consumable_debit(product: dict[str, Any], ml: float, kind: str) -> None:
         del history[:-CONSUMABLE_HISTORY_MAX]
 
 
+def _nps_shelf_task_id(product_id: str) -> str:
+    """The shelf's hand-dose reminder for one bottle (seeded by the panel when
+    the keeper sets a cadence; renamed from the 0.7.128 culture_phyto_dose)."""
+    return f"{MAINTENANCE_SHELF_TASK_PREFIX}{product_id}"
+
+
+def _rename_maintenance_task(config: dict[str, Any], old_id: str, new_id: str) -> None:
+    """Move a task and its completions under a new id (the migration idiom):
+    never clobbers a task the keeper already has under the new id."""
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    if isinstance(tasks, dict) and isinstance(tasks.get(old_id), dict):
+        task = tasks.pop(old_id)
+        if not isinstance(tasks.get(new_id), dict):
+            tasks[new_id] = task
+    completions = maintenance.get("completions")
+    if isinstance(completions, dict) and isinstance(completions.get(old_id), list):
+        entries = completions.pop(old_id)
+        if not isinstance(completions.get(new_id), list):
+            completions[new_id] = entries
+
+
+def _nps_shelf_log_completion(config: dict[str, Any], product_id: str, now: datetime,
+                              note: str) -> None:
+    """Mark the bottle's hand-dose reminder done (if the keeper set one) — the
+    cultures bridge's pattern: only touches a task that exists, clears the
+    snooze in lockstep with the panel's _completeTask."""
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    task_id = _nps_shelf_task_id(product_id)
+    if not isinstance(tasks, dict) or not isinstance(tasks.get(task_id), dict):
+        return
+    completions = maintenance.setdefault("completions", {})
+    if not isinstance(completions, dict):
+        completions = {}
+        maintenance["completions"] = completions
+    entries = completions.setdefault(task_id, [])
+    if not isinstance(entries, list):
+        entries = []
+        completions[task_id] = entries
+    stamp = now.isoformat()
+    entries.insert(0, {
+        "id": f"{task_id}:shelf:{stamp}",
+        "timestamp": stamp,
+        "notes": note[:500],
+        "source": MAINTENANCE_SOURCE_SHELF,
+    })
+    del entries[MAINTENANCE_COMPLETIONS_MAX:]
+    tasks[task_id]["snoozedUntil"] = None
+
+
+def _nps_shelf_drop_reminder(config: dict[str, Any], product_id: str) -> None:
+    """A deleted bottle takes its reminder and that reminder's history with it."""
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    task_id = _nps_shelf_task_id(product_id)
+    tasks = maintenance.get("tasks")
+    if isinstance(tasks, dict):
+        tasks.pop(task_id, None)
+    completions = maintenance.get("completions")
+    if isinstance(completions, dict):
+        completions.pop(task_id, None)
+
+
 def _consumable_for_msg(
     connection: websocket_api.ActiveConnection, msg: dict[str, Any], config: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -13039,7 +13134,7 @@ def _consumable_for_msg(
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/consumable_log_dose",
     vol.Required("product_id"): cv.string,
-    vol.Required("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
+    vol.Optional("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -13048,7 +13143,9 @@ async def websocket_consumable_log_dose(
 ) -> None:
     """Manual-dose logging — the food shelf is useful with zero pumps: tap
     'dosed 5 ml' and the bottle ledger plus the usage history (which powers the
-    days-left runway) both update."""
+    days-left runway) both update. No ml = the bottle's hand-dose plan (the
+    keeper's size, else the guide's from the tank volume). Every hand dose
+    stamps the plan's clock and marks the shelf reminder done, if it exists."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -13057,7 +13154,22 @@ async def websocket_consumable_log_dose(
     product = _consumable_for_msg(connection, msg, config)
     if product is None:
         return
-    _consumable_debit(product, float(msg["ml"]), "dose")
+    now = datetime.now(timezone.utc)
+    ml = msg.get("ml")
+    if ml is None:
+        plan = nps_engine.hand_dose_state(product, now, _awc_effective_tank_l(config))
+        ml = plan["ml"]
+        if not ml or float(ml) <= 0:
+            connection.send_error(msg["id"], "no_dose_size",
+                                  "Set this bottle's hand dose in Settings first")
+            return
+    ml = float(ml)
+    _consumable_debit(product, ml, "dose")
+    product["lastDosedAt"] = now.isoformat()
+    name = str(product.get("name") or "Bottle")
+    _nps_shelf_log_completion(config, str(msg["product_id"]), now,
+                              f"Logged automatically — {ml:g} ml of {name} by hand")
+    _append_activity(config, f"{name} dosed by hand — {ml:g} ml", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -14538,14 +14650,6 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     next_harvest = cultures_engine.next_harvest(
         bottle_payload, usage, rot_producing[0]["state"]["harvest"] if rot_producing else None,
         bool(rot_producing))
-    phyto = cultures["phytoDose"]
-    phyto_product = products.get(phyto["productId"]) if phyto["productId"] else None
-    phyto_guide = cultures_engine.phyto_dose_guide(_awc_effective_tank_l(config), phyto["stocking"])
-    phyto_clock = (cultures_engine._due(phyto["lastDosedAt"], None, timedelta(days=phyto["cadenceDays"]), now)
-                   if phyto["cadenceDays"] > 0 and phyto["productId"] else
-                   {"available": False, "due": False, "at": None, "hoursUntil": None, "hoursOverdue": None})
-    if phyto["cadenceDays"] > 0 and phyto["productId"] and not phyto["lastDosedAt"]:
-        phyto_clock = {"available": True, "due": True, "at": now.isoformat(), "hoursUntil": 0.0, "hoursOverdue": 0.0}
     # Never zero: per species, is there a second running jar? And the
     # continuity days — the anti-leaderboard.
     backup = []
@@ -14564,20 +14668,12 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "continuityDays": cultures_engine.continuity_days(since, now),
             "guard": cultures_engine.heat_guard(projection_hours, sid, now),
         })
-    phyto_payload = {
-        "productId": phyto["productId"],
-        "productName": phyto_product.get("name") if isinstance(phyto_product, dict) else None,
-        "cadenceDays": phyto["cadenceDays"], "stocking": phyto["stocking"],
-        "doseMl": phyto["doseMl"] if phyto["doseMl"] > 0 else phyto_guide["ml"],
-        "guide": phyto_guide, "lastDosedAt": phyto["lastDosedAt"], "clock": phyto_clock,
-    }
     return {
         "enabled": bool(cultures["enabled"]),
         "jars": jars_payload,
         "rig": cultures_engine.rig_state(jars_payload, bottle_payload),
         "enrichment": enrichment_payload,
         "nextHarvest": next_harvest,
-        "phytoDose": phyto_payload,
         "backup": backup,
         "guardAvailable": bool(projection_hours),
         "dueCount": due_count,
@@ -15226,39 +15322,6 @@ async def websocket_cultures_enrich_done(
     _awc_send(connection, msg, hass, config)
 
 
-@websocket_api.websocket_command({
-    vol.Required("type"): "openreef/cultures_phyto_dosed",
-    vol.Optional("ml"): vol.Any(int, float),
-})
-@websocket_api.require_admin
-@websocket_api.async_response
-async def websocket_cultures_phyto_dosed(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Reef Juice into the TANK: debit the bottle, stamp the dose, log the
-    reminder done. Never a jar's feed."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    cultures = _nps_cultures_cfg(config)
-    phyto = cultures["phytoDose"]
-    guide = cultures_engine.phyto_dose_guide(_awc_effective_tank_l(config), phyto["stocking"])
-    default_ml = phyto["doseMl"] if phyto["doseMl"] > 0 else (guide["ml"] or 0)
-    ml = _awc_num(msg.get("ml"), default_ml, 0.1, 500)
-    now = datetime.now(timezone.utc)
-    products = (config.get("consumables") or {}).get("products") or {}
-    product = products.get(phyto["productId"]) if phyto["productId"] else None
-    if isinstance(product, dict):
-        _consumable_debit(product, ml, "dose")
-    phyto["lastDosedAt"] = now.isoformat()
-    _cultures_log_completion(config, "phyto", "dose", now, f"Logged automatically — {ml:g} ml of phyto into the tank")
-    _append_activity(config, f"Phyto dosed to the tank — {ml:g} ml", "control")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
-
-
 @websocket_api.websocket_command({vol.Required("type"): "openreef/nps_cysts_opened"})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -15461,7 +15524,7 @@ async def websocket_nps_summary(
     })
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
-        "shelf": nps_engine.shelf_summary(products, now_utc),
+        "shelf": nps_engine.shelf_summary(products, now_utc, _awc_effective_tank_l(config)),
         "library": [dict(item) for item in nps_engine.PRODUCT_LIBRARY],
         "categories": {key: nps_engine.category_label(key) for key in CONSUMABLE_CATEGORIES},
         # Feed-exchange (Stage B): the hatchery card's whole state — backend
@@ -15563,6 +15626,7 @@ async def websocket_consumable_delete(
         connection.send_error(msg["id"], "unknown_product", "No such consumable product")
         return
     products.pop(msg["product_id"], None)
+    _nps_shelf_drop_reminder(config, str(msg["product_id"]))
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -20459,6 +20523,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cultures_split)
     websocket_api.async_register_command(hass, websocket_cultures_crash)
     websocket_api.async_register_command(hass, websocket_cultures_bottle)
+    websocket_api.async_register_command(hass, websocket_cultures_apply_learned)
+    websocket_api.async_register_command(hass, websocket_cultures_enrich_done)
+    websocket_api.async_register_command(hass, websocket_nps_cysts_opened)
     websocket_api.async_register_command(hass, websocket_nps_hatch_enrich)
     websocket_api.async_register_command(hass, websocket_nps_enrich_loaded)
     websocket_api.async_register_command(hass, websocket_nps_enrich_dose)

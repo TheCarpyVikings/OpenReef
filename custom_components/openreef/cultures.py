@@ -46,9 +46,6 @@ ENRICH_DROPS = 3
 ENRICH_DROP_ML = 0.05
 BOOST_WARM_H = 8.0
 BOOST_COLD_H = 24.0
-STOCKINGS: tuple[str, ...] = ("light", "medium", "heavy")
-# Reefphyto's Reef Juice page: 1 ml per 27 / 18 / 9 L a day.
-PHYTO_L_PER_ML = {"light": 27.0, "medium": 18.0, "heavy": 9.0}
 BOTTLE_EVENTS: tuple[str, ...] = ("filled", "fed_tank", "enriched", "emptied")
 GUARD_LOOKAHEAD_H = 24.0       # the heatwave guard looks one day ahead (doc §8.8 #2)
 TINT_STRIP_DAYS = 14
@@ -720,17 +717,6 @@ def next_harvest(bottle_state: dict[str, Any], ml_per_day: Any, harvest_clock: A
     if hours <= 0:
         return {"status": "now", "hoursUntil": 0.0, "driver": driver}
     return {"status": "wait", "hoursUntil": round(hours, 1), "driver": driver}
-
-
-def phyto_dose_guide(tank_l: Any, stocking: Any) -> dict[str, Any]:
-    """Reef Juice for the tank, from the product page's stocking bands."""
-    band = str(stocking or "medium")
-    if band not in PHYTO_L_PER_ML:
-        band = "medium"
-    litres = max(0.0, _f(tank_l))
-    per = PHYTO_L_PER_ML[band]
-    return {"available": litres > 0, "ml": round(litres / per, 1) if litres > 0 else None,
-            "stocking": band, "perLitres": per}
 
 
 # --------------------------------------------------------------------------- #
