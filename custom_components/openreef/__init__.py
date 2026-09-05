@@ -1113,7 +1113,8 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
         if not isinstance(item, dict) or str(item.get("event")) not in cultures_engine.BOTTLE_EVENTS:
             continue
         bottle_history.append({"event": str(item.get("event")), "at": _awc_str(item.get("at"), 40),
-                               "ml": _awc_num(item.get("ml"), 0, 0, 20000)})
+                               "ml": _awc_num(item.get("ml"), 0, 0, 20000),
+                               **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {})})
     # The DHA step (Stage C): drops into a portion of the crop, a short soak,
     # then the bottle carries a boost clock. Blank productId = the hatchery's
     # enrichment bottle (one Reefphyto bottle serves both).
@@ -1322,7 +1323,8 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
         # the keeper syncs the hatchery reminders. Server-written, newest first.
         "handFeeds": [
             {"at": _awc_str(item.get("at"), 40), "ml": _awc_num(item.get("ml"), 0, 0, 5000),
-             "from": "bottle" if item.get("from") == "bottle" else "container"}
+             "from": "bottle" if item.get("from") == "bottle" else "container",
+             **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {})}
             for item in (raw.get("handFeeds") if isinstance(raw.get("handFeeds"), list) else [])[:nps_engine.HAND_FEED_LOG_MAX]
             if isinstance(item, dict) and _awc_str(item.get("at"), 40)
         ],
@@ -1447,6 +1449,8 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 "ml": round(_awc_num(item.get("ml"), 0, 0, CONSUMABLE_BOTTLE_MAX_ML), 2),
                 "kind": item.get("kind")
                 if item.get("kind") in ("dose", "pump", "transfer", "refill") else "dose",
+                # The planned slot a hand dose satisfies (0.7.135), if it said.
+                **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
             }
             for item in (raw.get("history") if isinstance(raw.get("history"), list) else [])
             if isinstance(item, dict)
@@ -13080,7 +13084,7 @@ async def websocket_dosing_mark_refreshed(
 # --- Consumables (NPS food shelf) WebSocket API ---------------------------------------------
 
 def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
-                      at: datetime | None = None) -> None:
+                      at: datetime | None = None, slot: str = "") -> None:
     """The single choke point for bottle ledger movement (the _awc_debit_source
     pattern): decrement remainingMl and append the usage history the runway
     forecast reads. Never raises — a bad bottle must not break a dose flush."""
@@ -13094,11 +13098,14 @@ def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
     product["remainingMl"] = round(max(0.0, remaining - ml), 2)
     history = product.setdefault("history", [])
     if isinstance(history, list):
-        history.append({
+        row = {
             "at": (at or datetime.now(timezone.utc)).isoformat(),
             "ml": round(ml, 2),
             "kind": kind,
-        })
+        }
+        if slot:
+            row["slot"] = slot
+        history.append(row)
         if at is not None:
             history.sort(key=lambda item: str(item.get("at") or "") if isinstance(item, dict) else "")
         del history[:-CONSUMABLE_HISTORY_MAX]
@@ -13193,6 +13200,7 @@ def _consumable_for_msg(
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/consumable_log_dose",
     vol.Optional("at"): cv.string,
+    vol.Optional("slot"): cv.string,
     vol.Required("product_id"): cv.string,
     vol.Optional("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
 })
@@ -13234,12 +13242,13 @@ async def websocket_consumable_log_dose(
                                   "A late dose can only be logged within the last 24 hours")
             return
         at = stamped
-    _consumable_debit(product, ml, "dose", at)
+    slot = _normalise_schedule_time(msg.get("slot"))
+    _consumable_debit(product, ml, "dose", at, slot)
     previous = _parse_datetime(product.get("lastDosedAt"))
     if previous is None or at > previous:
         product["lastDosedAt"] = at.isoformat()
     name = str(product.get("name") or "Bottle")
-    when = "" if at == now else f" at {dt_util.as_local(at).strftime('%H:%M')}"
+    when = ("" if at == now else f" at {dt_util.as_local(at).strftime('%H:%M')}") + (f" (the {slot} dose)" if slot else "")
     _nps_shelf_log_completion(config, str(msg["product_id"]), at,
                               f"Logged automatically — {ml:g} ml of {name} by hand{when}")
     _append_activity(config, f"{name} dosed by hand — {ml:g} ml{when}", "control")
@@ -14307,17 +14316,23 @@ async def websocket_nps_enrich_second_dose(
     _awc_send(connection, msg, hass, config)
 
 
-def _nps_log_hand_feed(config: dict[str, Any], now: datetime, ml: float, where: str) -> None:
+def _nps_log_hand_feed(config: dict[str, Any], now: datetime, ml: float, where: str,
+                       slot: str = "") -> None:
     """Stamp the feed on the hatchery's own log (the strip's done-mark), log
-    the hand-feed reminder done (if the user added it), write the activity row."""
+    the hand-feed reminder done (if the user added it), write the activity row.
+    ``slot`` (HH:MM) = the planned feed this tap satisfies (0.7.135): a late
+    feed for the 11:00 slot is filed against 11:00, not the nearest open slot."""
     hatchery = (config.get("nps") or {}).get("hatchery")
     if isinstance(hatchery, dict):
         log = hatchery.setdefault("handFeeds", [])
         if not isinstance(log, list):
             log = []
             hatchery["handFeeds"] = log
-        log.insert(0, {"at": now.isoformat(), "ml": round(float(ml), 1),
-                       "from": "bottle" if "bottle" in where else "container"})
+        entry = {"at": now.isoformat(), "ml": round(float(ml), 1),
+                 "from": "bottle" if "bottle" in where else "container"}
+        if slot:
+            entry["slot"] = slot
+        log.insert(0, entry)
         del log[nps_engine.HAND_FEED_LOG_MAX:]
     maintenance = config.get("maintenance")
     if isinstance(maintenance, dict):
@@ -14328,7 +14343,7 @@ def _nps_log_hand_feed(config: dict[str, Any], now: datetime, ml: float, where: 
                 maintenance, MAINTENANCE_HAND_FEED_TASK_ID, now,
                 f"Logged automatically — hand-fed {ml:g} ml from the NPS tab")
             feed_task["snoozedUntil"] = None
-    _append_activity(config, f"Hand-fed {ml:g} ml of live brine{where}", "control")
+    _append_activity(config, f"Hand-fed {ml:g} ml of live brine{where}{f' (the {slot} feed)' if slot else ''}", "control")
 
 
 def _nps_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime) -> bool:
@@ -14342,6 +14357,7 @@ def _nps_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime) 
     vol.Required("type"): "openreef/nps_fridge_bottle",
     vol.Required("action"): vol.In(("fill", "return", "empty", "feed")),
     vol.Optional("ml"): vol.Any(int, float),
+    vol.Optional("slot"): cv.string,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -14423,7 +14439,8 @@ async def websocket_nps_fridge_bottle(
             return
         ml = _awc_num(msg.get("ml"), hatchery["handFeed"]["defaultDoseMl"], 0.5, 1000)
         bottle["remainingMl"] = round(max(0.0, bottle_ml - ml), 1)
-        _nps_log_hand_feed(config, now, ml, " from the fridge bottle")
+        _nps_log_hand_feed(config, now, ml, " from the fridge bottle",
+                           slot=_normalise_schedule_time(msg.get("slot")))
     elif action == "return":
         if not bottle_loaded:
             connection.send_error(msg["id"], "bottle_empty", "The feeding bottle is empty")
@@ -14492,6 +14509,7 @@ async def websocket_nps_reservoir_discard(
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/nps_hand_feed",
     vol.Optional("ml"): vol.Any(int, float),
+    vol.Optional("slot"): cv.string,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -14512,7 +14530,7 @@ async def websocket_nps_hand_feed(
     remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
     reservoir["remainingMl"] = round(max(0.0, remaining - ml), 1)
     now = datetime.now(timezone.utc)
-    _nps_log_hand_feed(config, now, ml, "")
+    _nps_log_hand_feed(config, now, ml, "", slot=_normalise_schedule_time(msg.get("slot")))
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -14588,12 +14606,16 @@ def _cultures_history(jar: dict[str, Any], event: str, now: datetime, **fields: 
     del history[60:]
 
 
-def _cultures_bottle_history(bottle: dict[str, Any], event: str, now: datetime, ml: float) -> None:
+def _cultures_bottle_history(bottle: dict[str, Any], event: str, now: datetime, ml: float,
+                             slot: str = "") -> None:
     history = bottle.setdefault("history", [])
     if not isinstance(history, list):
         history = []
         bottle["history"] = history
-    history.insert(0, {"event": event, "at": now.isoformat(), "ml": round(ml, 1)})
+    row = {"event": event, "at": now.isoformat(), "ml": round(ml, 1)}
+    if slot:
+        row["slot"] = slot
+    history.insert(0, row)
     del history[30:]
 
 
@@ -15521,6 +15543,7 @@ async def websocket_nps_cysts_opened(
     vol.Required("type"): "openreef/cultures_bottle",
     vol.Required("action"): vol.In(("fed", "empty")),
     vol.Optional("ml"): vol.Any(int, float),
+    vol.Optional("slot"): cv.string,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -15552,7 +15575,7 @@ async def websocket_cultures_bottle(
             bottle["filledAt"] = ""
             bottle["enrichedAt"] = ""
             bottle["lastLoadEnriched"] = False
-        _cultures_bottle_history(bottle, "fed_tank", now, ml)
+        _cultures_bottle_history(bottle, "fed_tank", now, ml, slot=_normalise_schedule_time(msg.get("slot")))
         # Feeding rotifers IS hand-feeding the tank (doc §8.6): the NPS
         # hand-feed reminder logs done, the feeding journal gets its row.
         maintenance = config.get("maintenance")

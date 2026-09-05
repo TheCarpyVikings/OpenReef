@@ -278,7 +278,7 @@ test("tapping a mark opens its dose card with the right actions, and the actions
     let html = panel._npsTimelineSvg();
     assert(html.includes("nps-tl-card") && html.includes("Reef Juice") && html.includes("running late") && html.includes("Planned 09:00 · 3 ml"), "the card names the dose");
     assert(html.includes("Bottle: 200 of 250 ml (80%) · ≈40 days left · ~5 d before it expires"), "the bottle story rides the card");
-    assert(html.includes('class="primary compact-button" data-action="nps-timeline-log" data-id="rj">Log 3 ml now'), "late = log leads");
+    assert(html.includes('class="primary compact-button" data-action="nps-timeline-log" data-id="rj" data-slot="09:00">Log 3 ml now — filed as the 09:00 dose'), `late = log leads, filed against its slot: ${html}`);
     assert(html.includes('data-nps-late="rj"') && html.includes('data-action="nps-timeline-log-late"'), "the dosed-earlier picker");
     assert(html.includes('data-action="nps-timeline-skip" data-id="rj"'), "skip today");
     assert(html.includes('r="9.5"'), "the selected mark wears a halo");
@@ -306,7 +306,22 @@ test("tapping a mark opens its dose card with the right actions, and the actions
     panel._nps.summary.hatchery = { reservoir: { remainingMl: 400 }, fridgeBottle: { remainingMl: 0 } };
     panel._nps.timelineOpen = "brine:0";
     html = panel._npsTimelineSvg();
-    assert(html.includes('class="primary compact-button" data-action="nps-hand-feed"') && html.includes("Fed 250 ml</button>") && !html.includes("nps-fridge-feed"), `brine card: ${html}`);
+    assert(html.includes('class="primary compact-button" data-action="nps-hand-feed"') && html.includes("Fed 250 ml</button>") && !html.includes("nps-fridge-feed") && !html.includes("data-slot"), `brine card: ${html}`);
+    // A timed, missed brine slot files the tap against its time.
+    panel._nps.summary.timeline.events.push({ id: "brine:1", at: 660, how: "hand", source: "brine", name: "Live brine", productId: "", ml: 250,
+      actualMl: null, status: "missed", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null });
+    panel._nps.timelineOpen = "brine:1";
+    html = panel._npsTimelineSvg();
+    assert(html.includes('data-action="nps-hand-feed" data-slot="11:00"') && html.includes("Fed 250 ml — filed as the 11:00 feed"), `missed brine slot: ${html}`);
+    // A matched dose is drawn ON its slot; the card says when it really happened.
+    panel._nps.summary.timeline.events.push({ id: "brine:2", at: 960, how: "hand", source: "brine", name: "Live brine", productId: "", ml: 250,
+      actualMl: 250, status: "done", doneAt: 1031, note: "", kind: "dose", band: null, unplanned: false, nextDate: null });
+    panel._nps.timelineOpen = "brine:2";
+    html = panel._npsTimelineSvg();
+    const x16 = 30 + 960 / 1440 * 382;
+    assert(html.includes(`<circle cx="${x16}" cy="54" r="5.5" fill="#ef6c00"`) && html.includes("Done at 17:11 (planned 16:00) · 250 ml"), `matched dose sits on its slot: ${html}`);
+    panel._nps.timelineOpen = "brine:0";
+    html = panel._npsTimelineSvg();
     panel._nps.summary.hatchery = { reservoir: { remainingMl: 0 }, fridgeBottle: { remainingMl: 120 } };
     html = panel._npsTimelineSvg();
     assert(html.includes('class="primary compact-button" data-action="nps-fridge-feed"') && html.includes("from the fridge bottle") && !html.includes("nps-hand-feed"), "bottle only");

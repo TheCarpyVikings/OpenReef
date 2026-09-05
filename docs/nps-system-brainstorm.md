@@ -838,7 +838,7 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
-## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.134 (2026-09-05)** — see §13.10–§13.14
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.135 (2026-09-05)** — see §13.10–§13.15
 
 ### 13.1 What v1 is, honestly
 
@@ -983,4 +983,8 @@ Reece: *"instead of every N hours, let me split a product's feeds over 24 h or j
 - **The clock and the ladder** no longer assume even spacing: the last dose *owns* its nearest slot and the next slot is simply the one after it; a slot goes *missed* once its successor slot is due today, and the day's last slot stays *late* until midnight. One `_timed_plan()` does matching + grading for shelf, brine, bottle and jar chips alike. Fixed on the way: unplanned extras built inside the matcher lacked the base event fields (an unplanned brine feed would have crashed the summary).
 
 Tests: `test_nps.py` 137 (2 new); `test_panel_nps.mjs` 48 (times-a-day editor assertions).
+
+### 13.15 0.7.135 — a tap on a slot's card files the feed against that slot
+
+Reece, live: with brine on 3 feeds 11:00–21:00 he tapped the missed 11:00 mark and hit **Fed 250 ml** at 17:11 — the feed landed on the 16:00 slot (nearest open) and a second tap became an extra. The matcher was right about the clock and wrong about the intent. Now every feed command (`nps_hand_feed`, `nps_fridge_bottle feed`, `consumable_log_dose`, `cultures_bottle fed`) takes an optional `slot` (HH:MM); the strip's card buttons carry the slot of the mark they were opened from (the hatchery card's plain Fed carries none), the row stores it, and `_match_done` files slotted feeds first, then goes greedy for the rest (an unknown or already-filled slot falls back to nearest). A matched feed is drawn **on its slot**; the card says when it really happened ("Done at 17:11 (planned 16:00)"). The button says what it will do: *Fed 250 ml — filed as the 11:00 feed*. The rotifer-bottle card gets its own Fed. Tests: `test_nps.py` 138 (1 new), `test_panel_nps.mjs` 48.
 

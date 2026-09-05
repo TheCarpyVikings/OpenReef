@@ -2858,6 +2858,52 @@ def test_feed_timeline_windows_for_the_shelf_the_brine_and_the_bottle():
     assert [e["unplanned"] for e in empty["events"] if e["source"] == "cultures-bottle"] == [True]
 
 
+def test_a_feed_that_names_its_slot_fills_that_slot():
+    """Reece, live: he tapped Fed on the missed 11:00 brine slot at 17:11 and
+    the feed landed on the 16:00 slot (nearest open) — the tap must file
+    against the slot it was made from."""
+    tz = timezone.utc
+    now = datetime(2026, 8, 13, 17, 20, tzinfo=tz)
+    hatchery = {"enabled": True, "reservoir": {"remainingMl": 400}, "fridgeBottle": {"remainingMl": 0},
+                "handFeed": {"defaultDoseMl": 250, "feedsPerDay": 3, "windowStart": "11:00", "windowEnd": "21:00"}}
+    fed = [{"at": _iso(datetime(2026, 8, 13, 17, 11, tzinfo=tz)), "ml": 250, "slot": "11:00"}]
+    tl = _tl(now, hatchery=hatchery, brine_feeds=fed)
+    assert [(e["at"], e["status"], e["doneAt"]) for e in _by_id(tl, "brine:")] == [(660, "done", 1031), (960, "late", None), (1260, "planned", None)]
+    # Without the slot the same feed takes the nearest open slot (16:00) — the old behaviour, still right for the hatchery card's plain Fed.
+    plain = _tl(now, hatchery=hatchery, brine_feeds=[{"at": fed[0]["at"], "ml": 250}])
+    assert [(e["at"], e["status"]) for e in _by_id(plain, "brine:")] == [(660, "missed"), (960, "done"), (1260, "planned")]
+    # A second slotted feed for a slot already filled falls back to greedy; a slot that isn't planned becomes an extra.
+    twice = _tl(now, hatchery=hatchery, brine_feeds=fed + [{"at": _iso(datetime(2026, 8, 13, 17, 15, tzinfo=tz)), "ml": 250, "slot": "11:00"}])
+    assert [(e["at"], e["status"]) for e in _by_id(twice, "brine:")] == [(660, "done"), (960, "done"), (1260, "planned")]
+    odd = _tl(now, hatchery=hatchery, brine_feeds=[{"at": fed[0]["at"], "ml": 250, "slot": "03:00"}])
+    assert [(e["at"], e["status"]) for e in _by_id(odd, "brine:")] == [(660, "missed"), (960, "done"), (1260, "planned")], "an unknown slot falls back to nearest"
+    # Shelf doses carry the slot the same way.
+    product = _product(name="RJ", doseMl=3, doseTimesPerDay=3, doseFirstAt="11:00", doseWindowEnd="21:00",
+                       history=[{"at": fed[0]["at"], "ml": 3, "kind": "dose", "slot": "11:00"}], lastDosedAt=fed[0]["at"])
+    shelf = _tl(now, products={"rj": product})
+    assert [(e["at"], e["status"]) for e in _by_id(shelf, "shelf:rj:")] == [(660, "done"), (960, "late"), (1260, "planned")]
+    # The commands store it: hand feed, fridge feed, shelf dose, rotifer bottle.
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 300, "mixedAt": datetime.now(timezone.utc).isoformat()})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["handFeed"] = {"defaultDoseMl": 30, "feedsPerDay": 3, "windowStart": "11:00", "windowEnd": "21:00"}
+    cfg["consumables"]["products"]["rj"] = _reef_juice(doseMl=3)
+    cfg["nps"]["cultures"] = {"enabled": True, "bottle": {"volumeMl": 1000, "remainingMl": 300, "doseMl": 40, "filledAt": datetime.now(timezone.utc).isoformat()}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hand_feed(hass, conn, {"id": 1, "slot": "11:00"}))
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 2, "product_id": "rj", "slot": "16:00"}))
+    run(integration.websocket_cultures_bottle(hass, conn, {"id": 3, "action": "fed", "slot": "21:00"}))
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["hatchery"]["handFeeds"][0]["slot"] == "11:00"
+    assert saved["consumables"]["products"]["rj"]["history"][-1]["slot"] == "16:00"
+    assert saved["nps"]["cultures"]["bottle"]["history"][0]["slot"] == "21:00"
+    assert any("(the 11:00 feed)" in item.get("message", "") for item in saved["activity"])
+    # Junk slots are dropped, not stored.
+    run(integration.websocket_nps_hand_feed(hass, conn, {"id": 4, "slot": "midnight-ish"}))
+    assert "slot" not in entry.options[CONF_SETTINGS]["nps"]["hatchery"]["handFeeds"][0]
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

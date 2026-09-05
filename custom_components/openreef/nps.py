@@ -1278,11 +1278,26 @@ def _event(**fields: Any) -> dict[str, Any]:
 
 def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
                 tolerance_min: float) -> list[dict[str, Any]]:
-    """Greedy: each logged dose takes the nearest unmatched planned slot within
-    tolerance (an any-time chip takes anything); the rest are extras. Mutates
-    the planned events in place, returns the unplanned extras."""
+    """A logged dose that names its slot (``slot`` minute, 0.7.135 — the tap
+    on that slot's card) takes that slot, whatever the clock said. Then,
+    greedy: each remaining dose takes the nearest unmatched planned slot
+    within tolerance (an any-time chip takes anything); the rest are extras.
+    Mutates the planned events in place, returns the unplanned extras."""
     extras: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
     for item in sorted(done, key=lambda d: d["at"]):
+        target = None
+        if item.get("slot") is not None:
+            target = next((ev for ev in planned if ev["at"] == item["slot"]
+                           and ev.get("doneAt") is None and ev["status"] not in ("skipped", "ghost")), None)
+        if target is None:
+            rest.append(item)
+            continue
+        target["status"] = "done"
+        target["doneAt"] = item["at"]
+        if item.get("ml") is not None:
+            target["actualMl"] = item["ml"]
+    for item in rest:
         best = None
         best_gap = None
         for ev in planned:
@@ -1438,7 +1453,7 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                 continue
             minute, _ = _local_minute(item.get("at"), today, tz)
             if minute is not None:
-                done.append({"at": minute, "ml": round(_f(item.get("ml")), 2)})
+                done.append({"at": minute, "ml": round(_f(item.get("ml")), 2), "slot": _hhmm_min(item.get("slot"))})
         if pid in quiet:
             done = []
         if not cad["unit"]:
@@ -1526,7 +1541,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             if isinstance(item, dict) and item.get("event") == "fed_tank":
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
-                    bottle_done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
+                    bottle_done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None,
+                                        "slot": _hhmm_min(item.get("slot"))})
         # The bottle's own plan (0.7.134): N feeds a day inside its window
         # while it holds rotifers; empty = nothing planned, done marks only.
         per_day = max(0, int(_f(bottle.get("feedsPerDay"))))
@@ -1567,7 +1583,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             if isinstance(item, dict):
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
-                    done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
+                    done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None,
+                                 "slot": _hhmm_min(item.get("slot"))})
         extras = _timed_plan(planned, done, now_min)
         for i, extra in enumerate(extras):
             extra.update({"id": f"brine:x{i}", "source": "brine", "name": "Live brine",

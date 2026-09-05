@@ -1834,7 +1834,7 @@ class OpenReefPanel extends HTMLElement {
       // The feed strip (doc §13): tap a mark for its dose card, act from it.
       if (action === "nps-timeline-event") { this._nps.timelineOpen = this._nps.timelineOpen === id ? "" : id; this._render(); }
       if (action === "nps-timeline-close") { this._nps.timelineOpen = ""; this._render(); }
-      if (action === "nps-timeline-log") this._npsCall({ type: "openreef/consumable_log_dose", product_id: id },
+      if (action === "nps-timeline-log") this._npsCall({ type: "openreef/consumable_log_dose", product_id: id, ...(target.dataset.slot ? { slot: target.dataset.slot } : {}) },
         "Dose logged — the mark fills in, the bottle and the reminder keep count.");
       if (action === "nps-timeline-log-late") this._npsTimelineLogLate(id);
       if (action === "nps-timeline-skip") this._npsCall({ type: "openreef/consumable_skip_dose", product_id: id },
@@ -1871,8 +1871,8 @@ class OpenReefPanel extends HTMLElement {
         "Split — jar B is seeded and out of phase. Save nothing; it is already on the rack.");
       if (action === "cultures-crash") this._culturesCall({ type: "openreef/cultures_crash", jar_id: id },
         "Logged. Reseed from a sibling or a fresh starter when you are ready.");
-      if (action === "cultures-bottle-fed") this._culturesCall({ type: "openreef/cultures_bottle", action: "fed" },
-        "Fed from the bottle — it keeps count.");
+      if (action === "cultures-bottle-fed") this._culturesCall({ type: "openreef/cultures_bottle", action: "fed", ...(target.dataset.slot ? { slot: target.dataset.slot } : {}) },
+        target.dataset.slot ? `Fed rotifers — filed as the ${target.dataset.slot} feed.` : "Fed from the bottle — it keeps count.");
       if (action === "cultures-bottle-empty") this._culturesCall({ type: "openreef/cultures_bottle", action: "empty" },
         "Bottle emptied.");
       if (action === "cultures-add-jar") this._culturesAddJar();
@@ -1882,8 +1882,8 @@ class OpenReefPanel extends HTMLElement {
         "Old brine discarded — the container is empty and ready for the fresh batch.");
       if (action === "nps-fridge-in") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "fill" },
         "Drained into the feeding bottle — its clock runs at the 48 h rate from now.");
-      if (action === "nps-fridge-feed") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "feed" },
-        "Fed from the bottle — logged.");
+      if (action === "nps-fridge-feed") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "feed", ...(target.dataset.slot ? { slot: target.dataset.slot } : {}) },
+        target.dataset.slot ? `Fed from the bottle — filed as the ${target.dataset.slot} feed.` : "Fed from the bottle — logged.");
       if (action === "nps-fridge-return") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "return" },
         "Bottle poured back into the container — the cold hours stay banked.");
       if (action === "nps-fridge-empty") this._npsCall({ type: "openreef/nps_fridge_bottle", action: "empty" },
@@ -1898,8 +1898,8 @@ class OpenReefPanel extends HTMLElement {
         "Dose logged and debited — the soak clock proper is running.");
       if (action === "nps-enrich-second-dose") this._npsCall({ type: "openreef/nps_enrich_second_dose" },
         "Top-up dosed and debited from the bottle.");
-      if (action === "nps-hand-feed") this._npsCall({ type: "openreef/nps_hand_feed" },
-        "Hand-feed logged — the container keeps count.");
+      if (action === "nps-hand-feed") this._npsCall({ type: "openreef/nps_hand_feed", ...(target.dataset.slot ? { slot: target.dataset.slot } : {}) },
+        target.dataset.slot ? `Fed — filed as the ${target.dataset.slot} feed.` : "Hand-feed logged — the container keeps count.");
       if (action === "nps-apply-learned-hours") {
         this._npsApplyLearnedHours(Number(target.dataset.hours));
       }
@@ -11627,7 +11627,9 @@ class OpenReefPanel extends HTMLElement {
         return segs.map(([a, b]) => `<rect x="${X(a)}" y="${y}" width="${Math.max(1, X(b) - X(a))}" height="${h}" rx="2" fill="${color}" opacity="0.5" class="nps-tl-ev" ${act(ev)}><title>${esc(label)}</title></rect>`).join("");
       }
       if (ev.at == null) { chips.push(ev); return ""; }
-      const x = X(ev.doneAt ?? ev.at);
+      // A dose that satisfied a slot sits ON the slot (the card says when it
+      // really happened); an extra sits where it happened.
+      const x = X(ev.at ?? ev.doneAt);
       if (ev.how === "system") {
         return `<g class="nps-tl-ev" ${act(ev)}><title>${esc(label)}</title><rect x="${x - 1.25}" y="${sysY - 5}" width="2.5" height="6" rx="1" fill="${color}" opacity="${ev.status === "expected" ? 0.5 : 1}"></rect></g>`;
       }
@@ -11726,9 +11728,13 @@ class OpenReefPanel extends HTMLElement {
     const actions = [];
     const pid = String(ev.source || "").startsWith("shelf:") ? String(ev.source).slice(6) : "";
     const cid = String(ev.source || "").startsWith("channel:") ? String(ev.source).slice(8) : "";
+    // A timed slot's buttons carry its time (0.7.135): the tap is filed
+    // against THIS slot — a missed 11:00 feed done at 17:00 fills 11:00.
+    const slotAttr = ev.at != null && ev.kind === "dose" ? ` data-slot="${hm(ev.at)}"` : "";
+    const filed = ev.at != null && (ev.status === "late" || ev.status === "missed") ? ` — filed as the ${hm(ev.at)} ${String(ev.source || "").startsWith("shelf:") ? "dose" : "feed"}` : "";
     if (pid && ev.how === "hand" && ev.kind === "dose" && ev.status !== "done" && ev.status !== "ghost") {
       const ml = ev.ml != null ? ev.ml : null;
-      actions.push(`<button class="${ev.status === "due" || ev.status === "late" ? "primary" : "secondary"} compact-button" data-action="nps-timeline-log" data-id="${esc(pid)}">${ml != null ? `Log ${esc(ml)} ml now` : "Log the dose"}</button>`);
+      actions.push(`<button class="${ev.status === "due" || ev.status === "late" || ev.status === "missed" ? "primary" : "secondary"} compact-button" data-action="nps-timeline-log" data-id="${esc(pid)}"${slotAttr}>${ml != null ? `Log ${esc(ml)} ml now` : "Log the dose"}${filed}</button>`);
       actions.push(`<span class="nps-tl-late"><input type="time" data-nps-late="${esc(pid)}" aria-label="Dosed earlier at"><button class="secondary compact-button" data-action="nps-timeline-log-late" data-id="${esc(pid)}">Dosed earlier</button></span>`);
       if (ev.status !== "skipped") actions.push(`<button class="secondary compact-button" data-action="nps-timeline-skip" data-id="${esc(pid)}" title="Holds the cadence — the next slot stands, no ml moves">Skip today</button>`);
     }
@@ -11752,9 +11758,12 @@ class OpenReefPanel extends HTMLElement {
       const inContainer = Number(hatch.reservoir?.remainingMl) > 0;
       const inBottle = Number(hatch.fridgeBottle?.remainingMl) > 0;
       const dose = ev.ml != null ? `${esc(ev.ml)} ml` : "the dose";
-      if (inContainer) actions.push(`<button class="primary compact-button" data-action="nps-hand-feed" title="Debits the brine container and fills this mark">Fed ${dose}${inBottle ? " from the container" : ""}</button>`);
-      if (inBottle) actions.push(`<button class="${inContainer ? "secondary" : "primary"} compact-button" data-action="nps-fridge-feed" title="Debits the fridge bottle and fills this mark">Fed ${dose} from the fridge bottle</button>`);
+      if (inContainer) actions.push(`<button class="primary compact-button" data-action="nps-hand-feed"${slotAttr} title="Debits the brine container and fills this mark">Fed ${dose}${inBottle ? " from the container" : ""}${filed}</button>`);
+      if (inBottle) actions.push(`<button class="${inContainer ? "secondary" : "primary"} compact-button" data-action="nps-fridge-feed"${slotAttr} title="Debits the fridge bottle and fills this mark">Fed ${dose} from the fridge bottle${filed}</button>`);
       if (!inContainer && !inBottle) lines.push("No brine on hand — harvest and load the container first.");
+    }
+    if (ev.source === "cultures-bottle" && ev.status !== "done" && ev.kind === "dose") {
+      actions.push(`<button class="primary compact-button" data-action="cultures-bottle-fed"${slotAttr} title="Debits the rotifer bottle and fills this mark">Fed ${ev.ml != null ? `${esc(ev.ml)} ml` : "rotifers"}${filed}</button>`);
     }
     if (String(ev.source || "").startsWith("culture:")) actions.push(`<button class="secondary compact-button" data-action="tab" data-id="cultures">Open Cultures</button>`);
     if (ev.source === "awc") actions.push(`<button class="secondary compact-button" data-action="tab" data-id="awc">Open Water Change</button>`);
@@ -12368,6 +12377,9 @@ const rigSteps = [
   }
 
   async _culturesCall(msg, okMessage) {
+    // The feed strip reads the bottle's rows too — a Fed from a strip card
+    // must fill its mark on the next paint.
+    if (msg && msg.type === "openreef/cultures_bottle") setTimeout(() => this._npsLoadSummary?.(true), 0);
     try {
       await this._callWS(msg);
       this._cultures.message = okMessage || "";
