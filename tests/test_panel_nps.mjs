@@ -357,6 +357,20 @@ test("the shelf editor's cadence unit and anchor drive the reminder, and the car
     assert(products.pods.doseEveryDays === 6 && products.pods.doseEveryHours === 0 && panel._config.maintenance.tasks.nps_dose_pods.cadenceDays === 6, "back to days");
     panel._npsApplyProductField("pods", "doseEveryN", 0);
     assert(!panel._config.maintenance.tasks.nps_dose_pods, "zero removes the reminder");
+    // Times a day: the number carries across (every 6 h -> 4 a day), the window fields appear, the reminder says "(N a day)".
+    products.pods.doseEveryHours = 6;
+    panel._npsApplyProductField("pods", "doseEveryUnit", "perDay");
+    assert(products.pods.doseTimesPerDay === 4 && products.pods.doseEveryHours === 0 && products.pods.doseEveryDays === 0, `unit -> perDay: ${JSON.stringify(products.pods)}`);
+    panel._npsApplyProductField("pods", "doseEveryN", 3);
+    panel._npsApplyProductField("pods", "doseFirstAt", "11:00");
+    panel._npsApplyProductField("pods", "doseWindowEnd", "21:00");
+    assert(products.pods.doseTimesPerDay === 3 && products.pods.doseWindowEnd === "21:00", "3 a day 11–21 stored");
+    assert(panel._config.maintenance.tasks.nps_dose_pods.label === "Dose GoldPods by hand (3 a day)" && panel._config.maintenance.tasks.nps_dose_pods.cadenceDays === 1, "perDay reminder");
+    const perDayEditor = panel._npsProductSettingsCard("pods", products.pods);
+    assert(perDayEditor.includes('value="perDay" selected') && perDayEditor.includes("Feeds a day") && perDayEditor.includes('data-field="doseWindowEnd" value="21:00"') && perDayEditor.includes("Feeding window from"), `perDay editor: ${perDayEditor}`);
+    panel._npsApplyProductField("pods", "doseEveryUnit", "hours");
+    assert(products.pods.doseEveryHours === 8 && products.pods.doseTimesPerDay === 0, "3 a day -> every 8 h");
+    assert(!panel._npsProductSettingsCard("pods", products.pods).includes('data-field="doseWindowEnd"'), "no window end outside times-a-day");
     // The editor shows hours selected with the 24 h cap; the card reads the engine's cadence text.
     products.pods.doseEveryHours = 6;
     const editor = panel._npsProductSettingsCard("pods", products.pods);

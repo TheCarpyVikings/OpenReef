@@ -235,56 +235,78 @@ def _min_hhmm(minute: int) -> str:
     return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
+def spread_slots(n: Any, window_start: Any, window_end: Any = None) -> list[int]:
+    """N feeds a day as minutes-of-day (doc §13.4, 0.7.134). No start = no
+    slots (any-time chips). Start only = spread evenly across 24 h from the
+    start. Start and end = spread evenly INSIDE the window, first feed at the
+    start and last at the end (3 feeds 11:00–21:00 = 11:00, 16:00, 21:00); a
+    window that wraps midnight is fine. One feed = the window start."""
+    count = max(0, int(_f(n)))
+    start = _hhmm_min(window_start)
+    if count <= 0 or start is None:
+        return []
+    end = _hhmm_min(window_end)
+    if end is None or end == start:
+        return sorted(int(round(start + k * 1440 / count)) % 1440 for k in range(count))
+    span = end - start if end > start else 1440 - start + end
+    if count == 1:
+        return [start]
+    return sorted(int(round(start + i * span / (count - 1))) % 1440 for i in range(count))
+
+
+def _window_text(start: Any, end: Any) -> str:
+    start_min, end_min = _hhmm_min(start), _hhmm_min(end)
+    if start_min is None:
+        return ""
+    if end_min is None or end_min == start_min:
+        return f" from {_min_hhmm(start_min)}"
+    return f", {_min_hhmm(start_min)}–{_min_hhmm(end_min)}"
+
+
 def hand_dose_slots(product: dict[str, Any]) -> dict[str, Any]:
-    """The bottle's daily slots, derived from its cadence (doc §13.4): every N
-    hours = floor(24/N) slots a day from the anchor time, restarting at the
-    anchor each day; every N days = one slot at the anchor on due days. No
-    anchor = the same count of "any time today" chips (slots empty)."""
+    """The bottle's daily slots, derived from its cadence (doc §13.4):
+    ``doseTimesPerDay`` = N feeds a day spread across the feeding window
+    (``doseFirstAt`` → ``doseWindowEnd``; no end = across 24 h; no start =
+    any-time chips); ``doseEveryHours`` = every N hours from the anchor;
+    ``doseEveryDays`` = one slot at the anchor on due days. Priority in that
+    order."""
+    per_day = max(0, int(_f(product.get("doseTimesPerDay"))))
     hours = max(0.0, _f(product.get("doseEveryHours")))
     days = max(0.0, _f(product.get("doseEveryDays")))
     anchor = _hhmm_min(product.get("doseFirstAt"))
+    first_at = _min_hhmm(anchor) if anchor is not None else ""
+    if per_day > 0:
+        slots = spread_slots(per_day, product.get("doseFirstAt"), product.get("doseWindowEnd"))
+        text = ("once a day" if per_day == 1 else f"{per_day} a day") + _window_text(product.get("doseFirstAt"), product.get("doseWindowEnd"))
+        return {"unit": "perDay", "n": float(per_day), "firstAt": first_at, "perDay": per_day,
+                "slots": slots, "text": text}
     if hours > 0:
         hours = min(HAND_DOSE_HOURS_MAX, hours)
-        per_day = max(1, int(24.0 // hours))
-        unit, n = "hours", hours
-    elif days > 0:
-        per_day = 1
-        unit, n = "days", days
-    else:
-        return {"unit": "", "n": 0.0, "firstAt": "", "perDay": 0, "slots": [], "text": ""}
-    slots: list[int] = []
-    if anchor is not None:
-        if unit == "hours":
-            slots = sorted(int(round(anchor + k * hours * 60)) % 1440 for k in range(per_day))
-        else:
-            slots = [anchor]
-    if unit == "hours":
-        text = f"every {hours:g} h"
-        if anchor is not None:
-            text += f" from {_min_hhmm(anchor)}"
-        if per_day > 1:
-            text += f" · {per_day} a day"
-    else:
-        text = "every day" if days == 1 else f"every {days:g} days"
-        if anchor is not None:
-            text += f" at {_min_hhmm(anchor)}"
-    return {"unit": unit, "n": n, "firstAt": _min_hhmm(anchor) if anchor is not None else "",
-            "perDay": per_day, "slots": slots, "text": text}
+        count = max(1, int(24.0 // hours))
+        slots = sorted(int(round(anchor + k * hours * 60)) % 1440 for k in range(count)) if anchor is not None else []
+        text = f"every {hours:g} h" + (f" from {first_at}" if first_at else "") + (f" · {count} a day" if count > 1 else "")
+        return {"unit": "hours", "n": hours, "firstAt": first_at, "perDay": count, "slots": slots, "text": text}
+    if days > 0:
+        text = ("every day" if days == 1 else f"every {days:g} days") + (f" at {first_at}" if first_at else "")
+        return {"unit": "days", "n": days, "firstAt": first_at, "perDay": 1,
+                "slots": [anchor] if anchor is not None else [], "text": text}
+    return {"unit": "", "n": 0.0, "firstAt": "", "perDay": 0, "slots": [], "text": ""}
 
 
 def _anchored_slot(base: datetime, slots: list[int], unit: str, tz: Any) -> datetime:
-    """Where the cadence's next slot actually falls (local wall clock). Hours:
-    the anchored slot nearest ``base`` (a dose ten minutes late still owns its
-    slot, so the next one is the next one, not the one after). Days: the anchor
-    time on ``base``'s date — the day cadence gates the day, the anchor places
-    the slot."""
+    """Days cadence: the anchor time on ``base``'s date — the day cadence
+    gates the day, the anchor places the slot. Hours / per-day: ``base`` is
+    the last dose (or skip); it OWNS the nearest slot, and the next slot is
+    the one after that — a dose ten minutes late still owns its slot, and an
+    uneven window (11:00, 16:00, 21:00) needs no spacing arithmetic."""
     local = base.astimezone(tz) if tz is not None else base
     day = local.replace(hour=0, minute=0, second=0, microsecond=0)
     ordered = sorted(slots)
     if unit == "days":
         return day + timedelta(minutes=ordered[0])
-    candidates = [day + timedelta(days=d, minutes=slot) for d in (-1, 0, 1) for slot in ordered]
-    return min(candidates, key=lambda c: abs((c - local).total_seconds()))
+    candidates = sorted(day + timedelta(days=d, minutes=slot) for d in (-1, 0, 1, 2) for slot in ordered)
+    owned = min(candidates, key=lambda c: abs((c - local).total_seconds()))
+    return next(c for c in candidates if c > owned)
 
 
 def hand_dose_undo(product: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -336,10 +358,12 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
     else:
         if cadence["unit"] == "hours":
             at = base + timedelta(hours=cadence["n"])
+        elif cadence["unit"] == "perDay":
+            at = base + timedelta(hours=24.0 / max(1.0, cadence["n"]))
         else:
             at = base + timedelta(days=cadence["n"])
         if cadence["slots"]:
-            at = _anchored_slot(at, cadence["slots"], cadence["unit"], tz)
+            at = _anchored_slot(base if cadence["unit"] != "days" else at, cadence["slots"], cadence["unit"], tz)
         try:
             delta_h = (at - now).total_seconds() / 3600.0
         except TypeError:
@@ -351,8 +375,10 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
         "planned": bool(cadence["unit"] or explicit > 0),
         "ml": ml,
         "undo": undo,
-        "everyDays": every_days if cadence["unit"] != "hours" else 0.0,
+        "everyDays": every_days if cadence["unit"] == "days" else 0.0,
         "everyHours": every_hours if cadence["unit"] == "hours" else 0.0,
+        "timesPerDay": cadence["perDay"] if cadence["unit"] == "perDay" else 0,
+        "windowEnd": str(product.get("doseWindowEnd") or "") if cadence["unit"] == "perDay" else "",
         "firstAt": cadence["firstAt"],
         "slotsPerDay": cadence["perDay"],
         "slots": [_min_hhmm(m) for m in cadence["slots"]],
@@ -1241,6 +1267,15 @@ def _local_minute(iso: Any, today, tz: Any) -> tuple[int | None, Any]:
     return local.hour * 60 + local.minute, day
 
 
+def _event(**fields: Any) -> dict[str, Any]:
+    """One strip event, every field present — extras and slots alike."""
+    base = {"id": "", "at": None, "how": "hand", "source": "", "name": "", "productId": "",
+            "ml": None, "actualMl": None, "status": "planned", "doneAt": None,
+            "note": "", "kind": "dose", "band": None, "unplanned": False, "nextDate": None}
+    base.update(fields)
+    return base
+
+
 def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
                 tolerance_min: float) -> list[dict[str, Any]]:
     """Greedy: each logged dose takes the nearest unmatched planned slot within
@@ -1262,7 +1297,8 @@ def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
             if best is None or gap < best_gap:
                 best, best_gap = ev, gap
         if best is None:
-            extras.append({**item, "status": "done", "doneAt": item["at"], "unplanned": True})
+            extras.append(_event(at=item["at"], ml=item.get("ml"), actualMl=item.get("ml"),
+                                 status="done", doneAt=item["at"], unplanned=True))
         else:
             best["status"] = "done"
             best["doneAt"] = item["at"]
@@ -1271,12 +1307,13 @@ def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
     return extras
 
 
-def _slot_status(at: int | None, now_min: int, *, unit: str, spacing_min: float,
+def _slot_status(at: int | None, now_min: int, *, successor_min: int | None,
                  carried: bool, skipped: bool) -> str:
     """The hand-slot ladder (doc §13.5, Q2 as locked): timed slots are due for
-    a short window, then late; an hours cadence goes missed once its successor
-    is due, a days cadence stays late until midnight — the shelf's overdue
-    clock takes over next morning. Any-time chips are simply due all day."""
+    a short window, then late; a slot goes missed once its successor slot is
+    due today (``successor_min``); with no successor today (a days cadence,
+    or the day's last slot) it stays late until midnight — the shelf's
+    overdue clock takes over next morning. Any-time chips are due all day."""
     if skipped:
         return "skipped"
     if at is None or carried:
@@ -1285,9 +1322,29 @@ def _slot_status(at: int | None, now_min: int, *, unit: str, spacing_min: float,
         return "planned"
     if now_min - at < HAND_DOSE_DUE_WINDOW_MIN:
         return "due"
-    if unit == "hours" and spacing_min > 0 and now_min >= at + spacing_min:
+    if successor_min is not None and now_min >= successor_min:
         return "missed"
     return "late"
+
+
+def _timed_plan(events: list[dict[str, Any]], done: list[dict[str, Any]], now_min: int, *,
+                carried: bool = False, skipped: bool = False) -> list[dict[str, Any]]:
+    """Match the day's logged doses onto the planned slots, then grade what is
+    left open. Timed slots take a dose within half the gap to their
+    neighbours; any-time chips take anything. Returns the unplanned extras."""
+    timed = sorted(e["at"] for e in events if e["at"] is not None)
+    gaps = [b - a for a, b in zip(timed, timed[1:])] if len(timed) > 1 else []
+    tolerance = min(gaps) / 2 if gaps else HAND_DOSE_ANYTIME_MATCH_MIN
+    extras = _match_done(events, done, tolerance)
+    first_open = True
+    for slot in events:
+        if slot["status"] == "done":
+            continue
+        successor = next((t for t in timed if slot["at"] is not None and t > slot["at"]), None)
+        slot["status"] = _slot_status(slot["at"], now_min, successor_min=successor,
+                                      carried=carried and first_open, skipped=skipped)
+        first_open = False
+    return extras
 
 
 def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: dict[str, Any],
@@ -1312,12 +1369,7 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
     # no extras — a keeper-set tank cadence still lands its planned slots.
     quiet = {str(pid) for pid in (quiet_product_ids or ())}
 
-    def ev(**fields: Any) -> dict[str, Any]:
-        base = {"id": "", "at": None, "how": "hand", "source": "", "name": "", "productId": "",
-                "ml": None, "actualMl": None, "status": "planned", "doneAt": None,
-                "note": "", "kind": "dose", "band": None, "unplanned": False, "nextDate": None}
-        base.update(fields)
-        return base
+    ev = _event
 
     # --- Pumps: schedules as slots (the firmware owns the exact clock, so past
     # ticks are "expected"; the tick nearest the run stamp is the exact "done").
@@ -1415,20 +1467,14 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         if not cad["slots"]:
             hand_hint = True
         planned = []
-        spacing = cad["n"] * 60 if cad["unit"] == "hours" else 1440
         for i, t in enumerate(slot_times):
             planned.append(ev(id=f"{source}:{i}", at=t, source=source, name=name, productId=pid, ml=ml,
                               note=note, status="planned"))
-        extras = _match_done(planned, done, spacing / 2 if cad["unit"] == "hours" else 1440)
-        first_open = True
-        for slot in planned:
-            if slot["status"] == "done":
-                continue
-            slot["status"] = _slot_status(slot["at"], now_min, unit=cad["unit"], spacing_min=spacing,
-                                          carried=carried and first_open, skipped=skipped_today)
-            if carried and first_open and slot["status"] == "due":
-                slot["note"] = (f"overdue since {clock_day.strftime('%a')} · " + note).strip(" ·")
-            first_open = False
+        extras = _timed_plan(planned, done, now_min, carried=carried, skipped=skipped_today)
+        if carried:
+            first = next((slot for slot in planned if slot["status"] == "due"), None)
+            if first is not None:
+                first["note"] = (f"overdue since {clock_day.strftime('%a')} · " + note).strip(" ·")
         for i, extra in enumerate(extras):
             extra.update({"id": f"{source}:x{i}", "source": source, "name": name, "productId": pid,
                           "actualMl": extra.get("ml"), "note": "extra dose — not on the plan"})
@@ -1467,21 +1513,37 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             if due_day <= today:
                 planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None,
                                   status="due", note="pods straight into the display — the jar's own clock"))
-        extras = _match_done(planned, done, 1440)
+        extras = _timed_plan(planned, done, now_min)
         for i, extra in enumerate(extras):
             extra.update({"id": f"{source}:x{i}", "source": source, "name": name,
                           "actualMl": extra.get("ml"), "note": "harvested into the display"})
         events.extend(planned)
         events.extend(extras)
     bottle = cultures.get("bottle") if isinstance(cultures.get("bottle"), dict) else {}
-    for i, item in enumerate(bottle.get("history") if isinstance(bottle.get("history"), list) else []):
-        if isinstance(item, dict) and item.get("event") == "fed_tank":
-            minute, _ = _local_minute(item.get("at"), today, tz)
-            if minute is not None:
-                events.append(ev(id=f"cultures-bottle:x{i}", at=minute, source="cultures-bottle",
-                                 name="Rotifers from the bottle", ml=round(_f(item.get("ml")), 1) or None,
-                                 actualMl=round(_f(item.get("ml")), 1) or None, status="done", doneAt=minute,
-                                 unplanned=True))
+    if bottle:
+        bottle_done = []
+        for item in (bottle.get("history") if isinstance(bottle.get("history"), list) else []):
+            if isinstance(item, dict) and item.get("event") == "fed_tank":
+                minute, _ = _local_minute(item.get("at"), today, tz)
+                if minute is not None:
+                    bottle_done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
+        # The bottle's own plan (0.7.134): N feeds a day inside its window
+        # while it holds rotifers; empty = nothing planned, done marks only.
+        per_day = max(0, int(_f(bottle.get("feedsPerDay"))))
+        slots = spread_slots(per_day, bottle.get("windowStart"), bottle.get("windowEnd"))
+        dose = round(_f(bottle.get("doseMl")), 1) or None
+        planned = []
+        if per_day > 0 and _f(bottle.get("remainingMl")) > 0:
+            times: list[int | None] = list(slots) if slots else [None] * per_day
+            planned = [ev(id=f"cultures-bottle:{i}", at=t, source="cultures-bottle", name="Rotifers from the bottle",
+                          ml=dose, status="planned", note="from the rotifer bottle — the Cultures tab's Fed button logs it")
+                       for i, t in enumerate(times)]
+        extras = _timed_plan(planned, bottle_done, now_min)
+        for i, extra in enumerate(extras):
+            extra.update({"id": f"cultures-bottle:x{i}", "source": "cultures-bottle", "name": "Rotifers from the bottle",
+                          "actualMl": extra.get("ml"), "note": "fed from the rotifer bottle"})
+        events.extend(planned)
+        events.extend(extras)
 
     # --- Hand-fed brine: the hatchery's feeds-a-day as any-time chips while
     # brine is on hand; the hand-feed reminder's completions are the done marks.
@@ -1493,16 +1555,20 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         hand = hatchery.get("handFeed") if isinstance(hatchery.get("handFeed"), dict) else {}
         per_day = max(0, int(_f(hand.get("feedsPerDay"))))
         dose = round(_f(hand.get("defaultDoseMl")), 1) or None
-        planned = [ev(id=f"brine:{i}", how="hand", source="brine", name="Live brine", ml=dose, status="due",
-                      note="from the brine container — the hatchery card's Fed button logs it")
-                   for i in range(per_day if on_hand else 0)]
+        # The feeding window (0.7.134): 3 feeds 11:00–21:00 = 11:00, 16:00,
+        # 21:00; no window = any-time chips, as before.
+        slots = spread_slots(per_day, hand.get("windowStart"), hand.get("windowEnd"))
+        times: list[int | None] = list(slots) if slots else [None] * per_day
+        planned = [ev(id=f"brine:{i}", at=t, how="hand", source="brine", name="Live brine", ml=dose, status="planned",
+                      note="from the brine container — Fed here or on the hatchery card logs it")
+                   for i, t in enumerate(times if on_hand else [])]
         done = []
         for item in (brine_feeds or []):
             if isinstance(item, dict):
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
                     done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
-        extras = _match_done(planned, done, 1440)
+        extras = _timed_plan(planned, done, now_min)
         for i, extra in enumerate(extras):
             extra.update({"id": f"brine:x{i}", "source": "brine", "name": "Live brine",
                           "actualMl": extra.get("ml"), "note": "hand-fed brine"})

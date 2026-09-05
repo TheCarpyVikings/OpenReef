@@ -1136,6 +1136,10 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             "remainingMl": _awc_num(raw_bottle.get("remainingMl"), 0, 0, 20000),
             "filledAt": _awc_str(raw_bottle.get("filledAt"), 40),
             "doseMl": _awc_num(raw_bottle.get("doseMl"), 20, 0.5, 1000),
+            # The bottle's own feed plan (0.7.134): 0 = no planned slots.
+            "feedsPerDay": int(_awc_num(raw_bottle.get("feedsPerDay"), 0, 0, 24)),
+            "windowStart": _normalise_schedule_time(raw_bottle.get("windowStart")),
+            "windowEnd": _normalise_schedule_time(raw_bottle.get("windowEnd")),
             "enrichedAt": _awc_str(raw_bottle.get("enrichedAt"), 40),
             "lastLoadEnriched": bool(raw_bottle.get("lastLoadEnriched", False)),
             "history": bottle_history,
@@ -1308,6 +1312,10 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
         "handFeed": {
             "defaultDoseMl": _awc_num(raw_hand.get("defaultDoseMl"), 30, 1, 1000),
             "feedsPerDay": _awc_num(raw_hand.get("feedsPerDay"), 2, 1, 24),
+            # The feeding window (0.7.134): blank = any time; start only =
+            # spread across 24 h; both = spread inside the window.
+            "windowStart": _normalise_schedule_time(raw_hand.get("windowStart")),
+            "windowEnd": _normalise_schedule_time(raw_hand.get("windowEnd")),
         },
         # Every Fed tap, stamped (0.7.131): the strip's brine done-marks used
         # to ride the hand-feed reminder's completions, which only exist once
@@ -1473,6 +1481,9 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             # time the keeper types; hours > 0 outranks days in the engine.
             "doseEveryHours": _awc_num(raw.get("doseEveryHours"), 0, 0, nps_engine.HAND_DOSE_HOURS_MAX),
             "doseFirstAt": _normalise_schedule_time(raw.get("doseFirstAt")),
+            # 0.7.134: N feeds a day inside a window (first dose → window end).
+            "doseTimesPerDay": int(_awc_num(raw.get("doseTimesPerDay"), 0, 0, 24)),
+            "doseWindowEnd": _normalise_schedule_time(raw.get("doseWindowEnd")),
             "doseStocking": stocking if stocking in nps_engine.DOSE_STOCKINGS else "medium",
             "doseGuide": dose_guide,
             "doseNote": _awc_str(raw.get("doseNote"), 200),

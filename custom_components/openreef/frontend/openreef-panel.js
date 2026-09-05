@@ -2594,7 +2594,7 @@ class OpenReefPanel extends HTMLElement {
         const npsCfg = this._config.nps = this._config.nps || {};
         const cultures = npsCfg.cultures = npsCfg.cultures || {};
         const bottle = cultures.bottle = cultures.bottle || {};
-        bottle[field] = Math.max(0, Number(value) || 0);
+        bottle[field] = ["windowStart", "windowEnd"].includes(field) ? String(value || "") : Math.max(0, Number(value) || 0);
       }
       if (scope === "nps-culture-enrich") {
         const npsCfg = this._config.nps = this._config.nps || {};
@@ -2667,7 +2667,7 @@ class OpenReefPanel extends HTMLElement {
         const hatchery = (this._config.nps = this._config.nps || {}).hatchery
           = this._config.nps.hatchery || {};
         const hand = hatchery.handFeed = hatchery.handFeed || {};
-        hand[field] = Math.max(1, Number(value) || 1);
+        hand[field] = ["windowStart", "windowEnd"].includes(field) ? String(value || "") : Math.max(1, Number(value) || 1);
       }
       if (scope === "nps-enrichment") {
         const hatchery = (this._config.nps = this._config.nps || {}).hatchery
@@ -2732,7 +2732,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && ["brand", "unit"].includes(field)) || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-cultures" && field === "enabled") || (scope === "nps-culture-jar" && field === "species") || (scope === "nps-hatch-vessel" && field === "volumePreset") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && ["brand", "unit"].includes(field)) || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-cultures" && field === "enabled") || (scope === "nps-culture-jar" && field === "species") || (scope === "nps-hatch-vessel" && field === "volumePreset") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl", "doseEveryUnit"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
         && event.type === "change"
       ) this._render();
     };
@@ -10385,20 +10385,27 @@ class OpenReefPanel extends HTMLElement {
   _npsApplyProductField(pid, field, value) {
     const product = this._config?.consumables?.products?.[pid];
     if (!product) return;
+    const unitOf = (p) => Number(p.doseTimesPerDay) > 0 ? "perDay" : Number(p.doseEveryHours) > 0 ? "hours" : "days";
     if (field === "doseEveryUnit") {
-      const n = Math.max(0, Number(product.doseEveryHours) || Number(product.doseEveryDays) || 0);
-      if (value === "hours") { product.doseEveryHours = Math.min(24, n || 12); product.doseEveryDays = 0; }
-      else { product.doseEveryDays = n || 1; product.doseEveryHours = 0; }
+      // Carry the number across the units: 3 a day ⇄ every 8 h; days keep their count.
+      const hours = Number(product.doseEveryHours) || 0, perDay = Number(product.doseTimesPerDay) || 0, days = Number(product.doseEveryDays) || 0;
+      const n = perDay || hours || days || 0;
+      product.doseEveryHours = 0; product.doseTimesPerDay = 0; product.doseEveryDays = 0;
+      if (value === "hours") product.doseEveryHours = Math.min(24, perDay ? Math.round(24 / perDay * 10) / 10 : (n || 12));
+      else if (value === "perDay") product.doseTimesPerDay = Math.min(24, hours ? Math.max(1, Math.round(24 / hours)) : Math.round(n || 2));
+      else product.doseEveryDays = Math.round(n) || 1;
     } else if (field === "doseEveryN") {
       const n = Math.max(0, Number(value) || 0);
-      if (Number(product.doseEveryHours) > 0) product.doseEveryHours = Math.min(24, n);
+      const unit = unitOf(product);
+      if (unit === "perDay") product.doseTimesPerDay = Math.min(24, Math.round(n));
+      else if (unit === "hours") product.doseEveryHours = Math.min(24, n);
       else product.doseEveryDays = n;
     } else {
-      product[field] = ["doseMl", "doseEveryDays", "doseEveryHours"].includes(field) ? Math.max(0, Number(value) || 0) : value;
+      product[field] = ["doseMl", "doseEveryDays", "doseEveryHours", "doseTimesPerDay"].includes(field) ? Math.max(0, Number(value) || 0) : value;
     }
     // The hand-dose plan owns its reminder: a cadence seeds the shelf task,
     // zero removes it (the cultures idiom, one bottle at a time).
-    if (["doseMl", "doseEveryDays", "doseEveryHours", "doseEveryUnit", "doseEveryN", "doseFirstAt", "name"].includes(field)) this._npsSyncDoseReminder(pid);
+    if (["doseMl", "doseEveryDays", "doseEveryHours", "doseTimesPerDay", "doseEveryUnit", "doseEveryN", "doseFirstAt", "doseWindowEnd", "name"].includes(field)) this._npsSyncDoseReminder(pid);
   }
 
   // The shelf's hand-dose reminder for one bottle: nps_dose_<pid> in
@@ -10412,15 +10419,16 @@ class OpenReefPanel extends HTMLElement {
     const comps = m.completions = m.completions || {};
     const taskId = `nps_dose_${pid}`;
     const hours = Number(product?.doseEveryHours) || 0;
-    // An hours cadence is a daily chore to Maintenance (it counts days); the
-    // engine's slot clock does the within-day work (doc §13.4).
-    const days = hours > 0 ? 1 : (Number(product?.doseEveryDays) || 0);
+    const timesPerDay = Number(product?.doseTimesPerDay) || 0;
+    // A within-day cadence is a daily chore to Maintenance (it counts days);
+    // the engine's slot clock does the within-day work (doc §13.4).
+    const days = timesPerDay > 0 || hours > 0 ? 1 : (Number(product?.doseEveryDays) || 0);
     if (!product || days <= 0) {
       if (tasks[taskId]) delete tasks[taskId];
       return;
     }
     const name = product.name || pid;
-    const perDay = hours > 0 ? Math.max(1, Math.floor(24 / hours)) : 1;
+    const perDay = timesPerDay > 0 ? timesPerDay : hours > 0 ? Math.max(1, Math.floor(24 / hours)) : 1;
     tasks[taskId] = {
       ...(tasks[taskId] || { enabled: true, notify: true,
         notes: `${product.doseNote ? `${product.doseNote} ` : ""}Tap Dosed on the NPS tab — the shelf keeps the size and the count.` }),
@@ -11766,7 +11774,7 @@ class OpenReefPanel extends HTMLElement {
   // get the day at a glance without opening the NPS tab.
   _npsFeedingStrip() {
     const products = this._config?.consumables?.products || {};
-    const planned = Object.values(products).some((p) => Number(p?.doseEveryDays) > 0 || Number(p?.doseEveryHours) > 0);
+    const planned = Object.values(products).some((p) => Number(p?.doseEveryDays) > 0 || Number(p?.doseEveryHours) > 0 || Number(p?.doseTimesPerDay) > 0);
     if (!this._config?.nps?.enabled && !planned) return "";
     if (!this._nps) return "";
     try { Promise.resolve(this._npsLoadSummary()).catch(() => {}); } catch { /* the strip waits */ }
@@ -11956,23 +11964,26 @@ class OpenReefPanel extends HTMLElement {
   _npsProductDosePlanFields(pid, product) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
+    const unit = Number(product.doseTimesPerDay) > 0 ? "perDay" : Number(product.doseEveryHours) > 0 ? "hours" : "days";
     const guide = product.doseGuide && typeof product.doseGuide === "object" ? product.doseGuide : {};
     const guided = ["light", "medium", "heavy"].some((b) => Number(guide[b]) > 0);
     const guideLine = guided
       ? `<small class="awc-hint">This preset carries a dose guide: 1 ml per ${["light", "medium", "heavy"].map((b) => esc(Number(guide[b]) || "—")).join(" / ")} L a day for light / medium / heavy stocking. Leave the size at 0 and the dose follows the Profile tank volume.</small>`
-      : `<small class="awc-hint">Dosed by hand? Give it a size and a cadence — the shelf card gets a one-tap Dosed button and Maintenance a reminder that the tap keeps.</small>`;
+      : `<small class="awc-hint">Dosed by hand? Give it a size and a cadence — the shelf card gets a one-tap Dosed button and Maintenance a reminder that the tap keeps. "Times a day" spreads the feeds across a window (3 a day, 11:00–21:00 = 11:00, 16:00, 21:00); leave the window end blank to spread them over the whole day.</small>`;
     return `
       <div class="awc-section-title" style="margin-top:8px;"><p class="eyebrow">Hand dose</p></div>
       ${guideLine}
       <div class="mini-grid">
         <label>Dose (ml${guided ? ", 0 = from the guide" : ""})<input type="number" min="0" step="0.1" data-scope="consumable" data-id="${eid}" data-field="doseMl" value="${esc(product.doseMl ?? 0)}"></label>
-        <label>Dose every (0 = no reminder)<span style="display:flex;gap:6px;align-items:center;">
-          <input type="number" min="0" max="${Number(product.doseEveryHours) > 0 ? 24 : 60}" step="${Number(product.doseEveryHours) > 0 ? 0.5 : 1}" style="flex:1;min-width:0;" data-scope="consumable" data-id="${eid}" data-field="doseEveryN" value="${esc(Number(product.doseEveryHours) > 0 ? product.doseEveryHours : (product.doseEveryDays ?? 0))}">
+        <label>${unit === "perDay" ? "Feeds a day" : "Dose every"} (0 = no reminder)<span style="display:flex;gap:6px;align-items:center;">
+          <input type="number" min="0" max="${unit === "days" ? 60 : 24}" step="${unit === "hours" ? 0.5 : 1}" style="flex:1;min-width:0;" data-scope="consumable" data-id="${eid}" data-field="doseEveryN" value="${esc(unit === "perDay" ? product.doseTimesPerDay : unit === "hours" ? product.doseEveryHours : (product.doseEveryDays ?? 0))}">
           <select data-scope="consumable" data-id="${eid}" data-field="doseEveryUnit" style="flex:0 0 auto;">
-            <option value="days" ${Number(product.doseEveryHours) > 0 ? "" : "selected"}>days</option>
-            <option value="hours" ${Number(product.doseEveryHours) > 0 ? "selected" : ""}>hours</option>
+            <option value="perDay" ${unit === "perDay" ? "selected" : ""}>times a day</option>
+            <option value="hours" ${unit === "hours" ? "selected" : ""}>hours</option>
+            <option value="days" ${unit === "days" ? "selected" : ""}>days</option>
           </select></span></label>
-        <label>First dose at (blank = any time)<input type="time" data-scope="consumable" data-id="${eid}" data-field="doseFirstAt" value="${esc(product.doseFirstAt || "")}"></label>
+        <label>${unit === "perDay" ? "Feeding window from" : "First dose at"} (blank = any time)<input type="time" data-scope="consumable" data-id="${eid}" data-field="doseFirstAt" value="${esc(product.doseFirstAt || "")}"></label>
+        ${unit === "perDay" ? `<label>Feeding window to (blank = spread over 24 h)<input type="time" data-scope="consumable" data-id="${eid}" data-field="doseWindowEnd" value="${esc(product.doseWindowEnd || "")}"></label>` : ""}
         ${guided ? `<label>Stocking<select data-scope="consumable" data-id="${eid}" data-field="doseStocking">
           ${["light", "medium", "heavy"].map((v) => `<option value="${v}" ${(product.doseStocking || "medium") === v ? "selected" : ""}>${v}</option>`).join("")}
         </select></label>` : ""}
@@ -13230,6 +13241,9 @@ const rigSteps = [
         <label>Room temperature sensor (optional)<input data-scope="nps-cultures" data-field="tempEntity" value="${this._escape(cultures.tempEntity || "")}" placeholder="sensor.bench_temperature"></label>
         <label>Rotifer bottle size (ml)<input type="number" min="0" max="20000" step="50" data-scope="nps-culture-bottle" data-field="volumeMl" value="${this._escape(String(cultures.bottle?.volumeMl ?? 1000))}"></label>
         <label>Bottle feed dose (ml)<input type="number" min="0.5" max="1000" step="0.5" data-scope="nps-culture-bottle" data-field="doseMl" value="${this._escape(String(cultures.bottle?.doseMl ?? 20))}"></label>
+        <label>Bottle feeds / day (0 = no plan)<input type="number" min="0" max="24" step="1" data-scope="nps-culture-bottle" data-field="feedsPerDay" value="${this._escape(String(cultures.bottle?.feedsPerDay ?? 0))}"></label>
+        <label>Feeding window from (blank = any time)<input type="time" data-scope="nps-culture-bottle" data-field="windowStart" value="${this._escape(String(cultures.bottle?.windowStart || ""))}"></label>
+        <label>Feeding window to (blank = spread over 24 h)<input type="time" data-scope="nps-culture-bottle" data-field="windowEnd" value="${this._escape(String(cultures.bottle?.windowEnd || ""))}"></label>
       </div>
       <small class="awc-hint"><strong>The DHA step</strong> — the concentrate feeds EPA and protein, not DHA; a crop bound for the corals takes a few drops of the algae enrichment in a small vessel first. Tick "enrich this crop" on the harvest; the bottle then carries a boost clock (~${this._escape(String(cultures.enrichment?.boostColdH ?? 24))} h cold) on top of its shelf life.</small>
       <div class="mini-grid">
@@ -17856,7 +17870,7 @@ const rigSteps = [
   _pulseFeedStripMarkup() {
     try {
       const products = this._config?.consumables?.products || {};
-      const planned = Object.values(products).some((p) => Number(p?.doseEveryDays) > 0 || Number(p?.doseEveryHours) > 0);
+      const planned = Object.values(products).some((p) => Number(p?.doseEveryDays) > 0 || Number(p?.doseEveryHours) > 0 || Number(p?.doseTimesPerDay) > 0);
       if (!this._config?.nps?.enabled && !planned) return "";
       if (!this._nps) return "";
       Promise.resolve(this._npsLoadSummary()).catch(() => {});
@@ -25930,6 +25944,8 @@ const rigSteps = [
         <label>Load volume (ml, 0 = fill)<input type="number" min="0" max="50000" data-scope="nps-hatch-reservoir" data-field="loadVolumeMl" value="${this._escape(String(npsCfg.hatchery?.reservoir?.loadVolumeMl ?? 0))}"></label>
         <label>Hand-feed dose (ml)<input type="number" min="1" max="1000" data-scope="nps-hand-feed" data-field="defaultDoseMl" value="${this._escape(String(npsCfg.hatchery?.handFeed?.defaultDoseMl ?? 30))}"></label>
         <label>Hand feeds / day<input type="number" min="1" max="24" data-scope="nps-hand-feed" data-field="feedsPerDay" value="${this._escape(String(npsCfg.hatchery?.handFeed?.feedsPerDay ?? 2))}"></label>
+        <label>Feeding window from (blank = any time)<input type="time" data-scope="nps-hand-feed" data-field="windowStart" value="${this._escape(String(npsCfg.hatchery?.handFeed?.windowStart || ""))}"></label>
+        <label>Feeding window to (blank = spread over 24 h)<input type="time" data-scope="nps-hand-feed" data-field="windowEnd" value="${this._escape(String(npsCfg.hatchery?.handFeed?.windowEnd || ""))}"></label>
       </div>
       <small class="awc-hint"><strong>The cysts pouch</strong> — ${this._nps?.summary?.hatchery?.cysts?.available ? `opened ${this._escape(String(this._nps.summary.hatchery.cysts.days))} days ago${this._nps.summary.hatchery.cysts.status === "old" ? " — past the 3–4 week line, expect a thinner hatch" : ""}` : "not stamped yet"}. Keep it sealed, dry and at or below 4 °C; hatch rates fall after 3–4 weeks in the fridge, so the Pulse says when the weeks are running out. <button class="secondary compact-button" data-action="nps-cysts-opened">Opened a new pouch</button></small>
       <small class="awc-hint"><strong>Fridge</strong> — per batch, not a setting, and a separate feeding bottle, not the container: the "❄ Refrigerate" button beside the brine advice on the Hatchery tab drains the container into the bottle and stamps WHEN it went cold. The bottle's clock then runs at the 48 h rate from that moment (2–4 °C near-stops nauplii metabolism), the warm hours already spent stay spent, and the container is free for the next hatch. Feed from the bottle by hand, pour it back, or empty it from its tile.</small>

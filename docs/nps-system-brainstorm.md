@@ -838,7 +838,7 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
-## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.133 (2026-09-05)** — see §13.10–§13.13
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.134 (2026-09-05)** — see §13.10–§13.14
 
 ### 13.1 What v1 is, honestly
 
@@ -971,4 +971,16 @@ Reece, live: no pump configured, **Sync hatchery reminders** tapped, still no "F
 ### 13.13 0.7.133 — the brine chip feeds itself, and soak/jar bottles leave the strip
 
 Reece, live again: the brine chip's card only said *"tap Fed on the hatchery card"*. Now the card carries the Fed buttons itself — **Fed N ml** from the container, from the fridge bottle, or both when both hold brine (the hatchery card's own commands, so the ledger, the reminder and the mark move together); no brine on hand says so. And the Selcon dot on his strip was the enrichment debit: bottles linked as the hatchery/cultures enrichment or as a jar's feed are `quiet_product_ids` — their logged doses feed the soak or a jar, not the tank, so they never appear as extras (a keeper-set tank cadence still lands its planned slots). Tests: `test_nps.py` 135 (1 new), `test_panel_nps.mjs` 48 (brine-card assertions).
+
+### 13.14 0.7.134 — feeding windows: "3 feeds, 11:00–21:00"
+
+Reece: *"instead of every N hours, let me split a product's feeds over 24 h or just day/night — e.g. 3 feeds of live brine between 11am and 9pm."* The slot model gains a third unit and a window:
+
+- **`spread_slots(n, start, end)`** — N feeds a day: no start = any-time chips; start only = spread evenly across 24 h from the start; start and end = spread evenly *inside* the window, first at the start, last at the end (3 feeds 11:00–21:00 = 11:00, 16:00, 21:00; wraps midnight; one feed = the start).
+- **Shelf bottles**: `doseTimesPerDay` + `doseWindowEnd` (the existing `doseFirstAt` is the window start). The editor's unit select is now *times a day / hours / days*; switching carries the number across (3 a day ⇄ every 8 h). Priority in the engine: times a day > hours > days.
+- **Hand-fed brine**: `hatchery.handFeed.windowStart/windowEnd` — the brine chips become timed marks inside the window.
+- **Rotifer bottle**: `cultures.bottle.feedsPerDay` (0 = no plan) + window — planned "Rotifers from the bottle" slots while the bottle holds rotifers; its `fed_tank` rows are the done marks.
+- **The clock and the ladder** no longer assume even spacing: the last dose *owns* its nearest slot and the next slot is simply the one after it; a slot goes *missed* once its successor slot is due today, and the day's last slot stays *late* until midnight. One `_timed_plan()` does matching + grading for shelf, brine, bottle and jar chips alike. Fixed on the way: unplanned extras built inside the matcher lacked the base event fields (an unplanned brine feed would have crashed the summary).
+
+Tests: `test_nps.py` 137 (2 new); `test_panel_nps.mjs` 48 (times-a-day editor assertions).
 

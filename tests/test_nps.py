@@ -2788,6 +2788,76 @@ def test_feed_timeline_keeps_soak_and_jar_bottles_off_the_strip():
     assert not any(e["productId"] == "selcon" for e in conn.results[-1].payload["timeline"]["events"])
 
 
+
+def test_spread_slots_and_the_times_a_day_unit():
+    assert nps.spread_slots(3, "11:00", "21:00") == [11 * 60, 16 * 60, 21 * 60], "3 feeds 11–21 = 11:00, 16:00, 21:00"
+    assert nps.spread_slots(2, "08:00", "20:00") == [8 * 60, 20 * 60]
+    assert nps.spread_slots(1, "11:00", "21:00") == [11 * 60], "one feed = the window start"
+    assert nps.spread_slots(3, "08:00") == [0, 8 * 60, 16 * 60], "no end = spread across 24 h from the start"
+    assert nps.spread_slots(3, "22:00", "04:00") == [60, 4 * 60, 22 * 60], "a window across midnight"
+    assert nps.spread_slots(3, "", "21:00") == [] and nps.spread_slots(0, "11:00", "21:00") == []
+    cad = nps.hand_dose_slots(_product(doseTimesPerDay=3, doseFirstAt="11:00", doseWindowEnd="21:00"))
+    assert cad["unit"] == "perDay" and cad["perDay"] == 3 and cad["slots"] == [660, 960, 1260] and cad["text"] == "3 a day, 11:00–21:00"
+    assert nps.hand_dose_slots(_product(doseTimesPerDay=2, doseFirstAt="09:00"))["text"] == "2 a day from 09:00"
+    assert nps.hand_dose_slots(_product(doseTimesPerDay=1))["text"] == "once a day" and nps.hand_dose_slots(_product(doseTimesPerDay=2))["slots"] == []
+    assert nps.hand_dose_slots(_product(doseTimesPerDay=3, doseEveryHours=6, doseEveryDays=1))["unit"] == "perDay", "times a day outranks the rest"
+    # The clock walks the uneven window: dosed 11:10 -> 16:00; dosed 21:05 -> tomorrow 11:00; dosed 13:31 (nearer 16:00) -> 21:00.
+    tz = timezone.utc
+    plan = lambda h, m: nps.hand_dose_state(_product(doseMl=250, doseTimesPerDay=3, doseFirstAt="11:00", doseWindowEnd="21:00",
+                                                     lastDosedAt=_iso(datetime(2026, 8, 13, h, m, tzinfo=tz))), NOW, None, tz)
+    assert plan(11, 10)["clock"]["at"] == _iso(datetime(2026, 8, 13, 16, 0, tzinfo=tz))
+    assert plan(21, 5)["clock"]["at"] == _iso(datetime(2026, 8, 14, 11, 0, tzinfo=tz))
+    assert plan(13, 31)["clock"]["at"] == _iso(datetime(2026, 8, 13, 21, 0, tzinfo=tz))
+    state = plan(11, 10)
+    assert state["timesPerDay"] == 3 and state["windowEnd"] == "21:00" and state["everyDays"] == 0.0 and state["cadenceText"] == "3 a day, 11:00–21:00"
+    # No anchor: plain arithmetic at 24/n.
+    chips = nps.hand_dose_state(_product(doseMl=1, doseTimesPerDay=4, lastDosedAt=_iso(NOW - timedelta(hours=2))), NOW, None, tz)
+    assert chips["clock"]["hoursUntil"] == 4.0
+    # The normaliser.
+    config = integration._normalise_core_config({"consumables": {"products": {"p": {"name": "P", "doseTimesPerDay": 99.7, "doseWindowEnd": "21:00", "doseFirstAt": "11:00"}}},
+                                                 "nps": {"enabled": True, "hatchery": {"handFeed": {"feedsPerDay": 3, "windowStart": "11:00", "windowEnd": "9pm"}},
+                                                         "cultures": {"bottle": {"feedsPerDay": 2, "windowStart": "10:00", "windowEnd": "18:00"}}}})
+    p = config["consumables"]["products"]["p"]
+    assert p["doseTimesPerDay"] == 24 and p["doseWindowEnd"] == "21:00"
+    hand = config["nps"]["hatchery"]["handFeed"]
+    assert hand["windowStart"] == "11:00" and hand["windowEnd"] == "", "junk end = spread across the day"
+    bottle = config["nps"]["cultures"]["bottle"]
+    assert bottle["feedsPerDay"] == 2 and bottle["windowStart"] == "10:00" and bottle["windowEnd"] == "18:00"
+
+
+def test_feed_timeline_windows_for_the_shelf_the_brine_and_the_bottle():
+    tz = timezone.utc
+    now = datetime(2026, 8, 13, 16, 40, tzinfo=tz)   # 16:40
+    # Shelf: 3 a day 11–21, 11:00 logged at 11:08; 16:00 is 40 min past -> late (its successor 21:00 isn't due); 21:00 planned.
+    products = {"rj": _product(name="Reef Juice", doseMl=3, doseTimesPerDay=3, doseFirstAt="11:00", doseWindowEnd="21:00",
+                               history=[{"at": _iso(datetime(2026, 8, 13, 11, 8, tzinfo=tz)), "ml": 3, "kind": "dose"}],
+                               lastDosedAt=_iso(datetime(2026, 8, 13, 11, 8, tzinfo=tz)))}
+    # Brine: 3 feeds 11–21 with one fed 11:02; the bottle: 2 a day 10–18, nothing fed yet, plus an unplanned pour at 07:00.
+    hatchery = {"enabled": True, "reservoir": {"remainingMl": 400}, "fridgeBottle": {"remainingMl": 0},
+                "handFeed": {"defaultDoseMl": 250, "feedsPerDay": 3, "windowStart": "11:00", "windowEnd": "21:00"}}
+    feeds = [{"at": _iso(datetime(2026, 8, 13, 11, 2, tzinfo=tz)), "ml": 250}]
+    cultures = {"enabled": True, "jars": {}, "bottle": {"remainingMl": 300, "doseMl": 40, "feedsPerDay": 2, "windowStart": "10:00", "windowEnd": "18:00",
+                                                       "history": [{"event": "fed_tank", "at": _iso(datetime(2026, 8, 13, 7, 0, tzinfo=tz)), "ml": 40}]}}
+    tl = _tl(now, products=products, hatchery=hatchery, brine_feeds=feeds, cultures=cultures, culture_bottle_species={"rotifer_L"})
+    rj = _by_id(tl, "shelf:rj:")
+    assert [(e["at"], e["status"]) for e in rj] == [(660, "done"), (960, "late"), (1260, "planned")], rj
+    brine = _by_id(tl, "brine:")
+    assert [(e["at"], e["status"]) for e in brine] == [(660, "done"), (960, "late"), (1260, "planned")] and brine[0]["doneAt"] == 662, brine
+    bottle = [e for e in tl["events"] if e["source"] == "cultures-bottle"]
+    # The 07:00 pour is within half the gap of the 10:00 slot, so it owns it.
+    assert [(e["at"], e["status"], e["doneAt"]) for e in bottle] == [(600, "done", 420), (1080, "planned", None)], bottle
+    assert bottle[0]["kind"] == "dose" and bottle[0]["name"] == "Rotifers from the bottle" and bottle[0]["ml"] == 40.0
+    # A window slot goes missed once its successor is due: at 18:10 the 16:00 Reef Juice slot is still late (21:00 not due) but the bottle's 10:00 was missed at 18:00.
+    later = _tl(datetime(2026, 8, 13, 21, 5, tzinfo=tz), products=products, hatchery=hatchery, brine_feeds=feeds)
+    assert [(e["at"], e["status"]) for e in _by_id(later, "shelf:rj:")] == [(660, "done"), (960, "missed"), (1260, "due")]
+    # No window on the brine = any-time chips, as before.
+    plain = _tl(now, hatchery={**hatchery, "handFeed": {"defaultDoseMl": 250, "feedsPerDay": 2}}, brine_feeds=feeds)
+    assert [e["at"] for e in _by_id(plain, "brine:")] == [None, None] and sorted(e["status"] for e in _by_id(plain, "brine:")) == ["done", "due"]
+    # An empty bottle plans nothing, its pours still show.
+    empty = _tl(now, cultures={**cultures, "bottle": {**cultures["bottle"], "remainingMl": 0}})
+    assert [e["unplanned"] for e in empty["events"] if e["source"] == "cultures-bottle"] == [True]
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0
