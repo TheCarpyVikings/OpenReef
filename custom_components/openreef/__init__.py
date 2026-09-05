@@ -1075,6 +1075,9 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "tempC": (round(float(temp_c), 1)
                           if isinstance(temp_c, (int, float)) and not isinstance(temp_c, bool)
                           and -50 <= float(temp_c) <= 60 else None),
+                # 0.7.140 (doc §8.11 #6): the tip bleed the harvest/restart was
+                # done at, so the run-length learning can weigh it.
+                "purgeMl": _awc_num(item.get("purgeMl"), 0, 0, 500),
             })
         vessel_kind = str(raw_jar.get("vesselKind") or "")
         jars[jid] = {
@@ -5506,12 +5509,15 @@ async def _async_fire_maintenance_reminder(
         if salt_nags:
             parts.append(f"Salt: {salt_nags[0]['detail']}")
         message = " · ".join(part for part in parts if part)
-        await hass.services.async_call(
-            "notify",
-            target,
-            {"title": f"OpenReef: {', '.join(bits)}", "message": message},
-            blocking=False,
-        )
+        # Buttons for the first two tasks, overdue first (doc §8.11 #9): the
+        # phone is for tapping. A bottles-only digest has nothing to tap.
+        ordered = sorted(push_items, key=lambda item: 0 if item["severity"] == "critical" else 1)
+        buttons = [{"action": f"OPENREEF_TASK_DONE:{item['id']}", "title": f"Done: {item['label'][:18]}"}
+                   for item in ordered[:2]]
+        await _async_push_actionable(
+            hass, target, f"OpenReef: {', '.join(bits)}", message,
+            buttons + [{"action": "OPENREEF_LATER", "title": "Later"}] if buttons else [],
+            tag="openreef_maintenance_digest")
     # Only log to the activity feed when the due set grows, so a long-overdue task
     # can't flood the (capped) history with a line every single day.
     new_ids = current_ids - previous_ids
@@ -9815,28 +9821,22 @@ async def _handle_record_manual_reading(
     await _async_save_config(hass, entry, config)
 
 
-async def _handle_record_task_completion(
-    hass: HomeAssistant, call: ServiceCall
-) -> None:
-    entry = _first_entry(hass)
-    if entry is None:
-        raise HomeAssistantError("OpenReef is not configured")
-
-    config = _config_from_entry(entry)
+def _maintenance_complete_apply(hass: Any, config: dict[str, Any], entry_id: Any, task_id: str, *,
+                                timestamp: Any = None, notes: Any = "", volume: Any = None,
+                                volume_unit: Any = None, new_water: Any = None,
+                                source: str = "service") -> tuple[str, str] | None:
+    """Log a maintenance task done straight into the stored config — the
+    completion entry, the activity line, the done event, the vessel debit.
+    Shared by the record_task_completion service and the digest push's
+    "Done" button (0.7.140); (code, message) on refusal."""
     maintenance = config.setdefault("maintenance", {})
     if not isinstance(maintenance, dict):
         maintenance = {}
         config["maintenance"] = maintenance
     tasks = maintenance.get("tasks", {})
-    task_id = call.data["task_id"]
     if not isinstance(tasks, dict) or task_id not in tasks:
-        raise ServiceValidationError(f"Unknown OpenReef maintenance task: {task_id}")
-
-    timestamp = (
-        call.data.get("timestamp")
-        or call.data.get("date")
-        or datetime.now(timezone.utc).isoformat()
-    )
+        return "unknown_task", f"Unknown OpenReef maintenance task: {task_id}"
+    timestamp = timestamp or datetime.now(timezone.utc).isoformat()
     completions = maintenance.setdefault("completions", {})
     if not isinstance(completions, dict):
         completions = {}
@@ -9845,40 +9845,61 @@ async def _handle_record_task_completion(
     if not isinstance(entries, list):
         entries = []
         completions[task_id] = entries
-    completion = {
+    completion: dict[str, Any] = {
         "id": f"{task_id}:{timestamp}:{len(entries)}",
         "timestamp": timestamp,
-        "notes": str(call.data.get("notes") or ""),
+        "notes": str(notes or ""),
     }
-    volume = call.data.get("volume")
     if isinstance(volume, (int, float)) and not isinstance(volume, bool):
         completion["volume"] = round(float(volume), 2)
-        completion["volumeUnit"] = "L" if call.data.get("volume_unit") == "L" else "pct"
+        completion["volumeUnit"] = "L" if volume_unit == "L" else "pct"
+    # A phone tap is the keeper's own completion — like the service's it
+    # carries no ``source`` (that field marks AUTOMATIC entries, and the
+    # history chart tells the two apart by it); the notes and the event say
+    # where the tap came from.
     # The new water's record (V3): typed figures win, the station fills the rest.
     task_cfg = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
-    typed = _maintenance_new_water({"ppt": call.data.get("new_water_ppt"),
-                                    "tempC": call.data.get("new_water_temp_c"),
-                                    "brand": call.data.get("new_water_brand")})
+    typed = _maintenance_new_water(new_water)
     stamp = (_mixing_new_water_stamp(hass, config)
              if task_cfg.get("logsVolume") and _mixing_maintenance_from_vessel(config) else {})
     if typed or stamp:
         completion["newWater"] = {**stamp, **typed}
     entries.insert(0, completion)
+    label = tasks[task_id].get("label", task_id) if isinstance(tasks[task_id], dict) else task_id
     _append_activity(
-        config, f"Maintenance done: {tasks[task_id].get('label', task_id)}", "control"
-    )
+        config, f"Maintenance done: {label}" + (" (from the phone)" if source == "phone" else ""),
+        "control")
     _fire_event(hass, MAINTENANCE_DONE_EVENT,
-                _maintenance_done_payload(entry.entry_id, task_id, task_cfg, completion, "service"))
-    # Doc §28: this service writes straight into the stored config, so the
+                _maintenance_done_payload(entry_id, task_id, task_cfg, completion, source))
+    # Doc §28: this path writes straight into the stored config, so the
     # save-time diff never sees it — debit the vessel here instead. Same
     # rules: volume-logging task, source-less entry, flag + guard willing.
-    task = tasks.get(task_id)
-    if (isinstance(task, dict) and task.get("logsVolume")
-            and _mixing_maintenance_from_vessel(config)):
+    if (task_cfg.get("logsVolume") and _mixing_maintenance_from_vessel(config)):
         litres = _mixing_manual_change_litres(completion, _maintenance_tank_litres(config))
         if litres > 0.05:
             _mixing_debit_batch(hass, config, round(litres, 1),
                                 "the water change you logged")
+    return None
+
+
+async def _handle_record_task_completion(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("OpenReef is not configured")
+
+    config = _config_from_entry(entry)
+    error = _maintenance_complete_apply(
+        hass, config, entry.entry_id, call.data["task_id"],
+        timestamp=call.data.get("timestamp") or call.data.get("date") or None,
+        notes=call.data.get("notes"), volume=call.data.get("volume"),
+        volume_unit=call.data.get("volume_unit"),
+        new_water={"ppt": call.data.get("new_water_ppt"), "tempC": call.data.get("new_water_temp_c"),
+                   "brand": call.data.get("new_water_brand")},
+        source="service")
+    if error is not None:
+        raise ServiceValidationError(error[1])
     await _async_save_config(hass, entry, config)
 
 
@@ -12581,7 +12602,9 @@ async def _async_nps_hatch_ready_push(
                 "openreef_enrich_dose",
                 "OpenReef: Add the enrichment dose",
                 "The batch has crossed instar II — add the Selcon and tap "
-                "'Add dose' on the NPS tab. The soak clock proper starts there."))
+                "'Add dose' on the NPS tab. The soak clock proper starts there.",
+                [{"action": "OPENREEF_ENRICH_DOSE", "title": "Dose added"},
+                 {"action": "OPENREEF_LATER", "title": "Later"}]))
         elif fed_h is not None and fed_h >= enrich_hours and not enrich_state.get("readyNotifiedAt"):
             enrich_state["readyNotifiedAt"] = now.isoformat()
             notices.append((
@@ -12589,7 +12612,9 @@ async def _async_nps_hatch_ready_push(
                 "OpenReef: Brine enrichment done — rinse & load",
                 "The soak is finished. Rinse on a fine screen (emulsion residue "
                 "breeds bacteria), load the container, then tap 'Enriched & "
-                "loaded'. Warm-held enriched brine loses half its boost in a day."))
+                "loaded'. Warm-held enriched brine loses half its boost in a day.",
+                [{"action": "OPENREEF_ENRICH_LOADED", "title": "Enriched & loaded"},
+                 {"action": "OPENREEF_LATER", "title": "Later"}]))
         elif (bool(enrichment.get("splitDose"))
               and fed_h is not None
               and fed_h >= nps_engine.ENRICH_SECOND_DOSE_H
@@ -12601,8 +12626,10 @@ async def _async_nps_hatch_ready_push(
                 "openreef_enrich_topup",
                 "OpenReef: Enrichment top-up due",
                 "The soak is 10 h past the first dose — add the second "
-                "enrichment dose and tap 'Log top-up' on the NPS tab."))
-        for notification_id, title, message in notices:
+                "enrichment dose and tap 'Log top-up' on the NPS tab.",
+                [{"action": "OPENREEF_ENRICH_TOPUP", "title": "Top-up added"},
+                 {"action": "OPENREEF_LATER", "title": "Later"}]))
+        for notification_id, title, message, actions in notices:
             changed = True
             await hass.services.async_call(
                 "persistent_notification", "create",
@@ -12611,8 +12638,9 @@ async def _async_nps_hatch_ready_push(
             reminders = (config.get("maintenance") or {}).get("reminders") or {}
             target = str(reminders.get("notifyTarget", "")).strip() if isinstance(reminders, dict) else ""
             if target:
-                await hass.services.async_call(
-                    "notify", target, {"title": title, "message": message}, blocking=False)
+                # Buttons on the hatchery's pushes too (doc §8.11 #9): the
+                # tap is the same core the NPS tab's button calls.
+                await _async_push_actionable(hass, target, title, message, actions, tag=notification_id)
             _append_activity(config, title.replace("OpenReef: ", ""), "info")
     if changed:
         _persist_entry_config(hass, entry, config)
@@ -14578,27 +14606,16 @@ async def websocket_nps_hatch_enrich(
     _awc_send(connection, msg, hass, config)
 
 
-@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_loaded"})
-@websocket_api.require_admin
-@websocket_api.async_response
-async def websocket_nps_enrich_loaded(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
+def _nps_enrich_loaded_apply(config: dict[str, Any], now: datetime) -> tuple[str, str] | None:
     """Soak done (container semantics): nothing moves — the gut-loaded brine
     is already in the holding vessel. Stamp the boost (its decay clock runs
     from HERE — DHA halves within a day warm) and stand the soak down. A
-    second mesh cycle before feed-out is the optional rinse."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
+    second mesh cycle before feed-out is the optional rinse. Shared by the
+    WS handler and the phone button; (code, message) on refusal."""
     hatchery = _nps_hatchery_v2(config)
     state = hatchery["enrichment"]["state"]
     if _parse_datetime(state.get("startedAt")) is None:
-        connection.send_error(msg["id"], "no_enrichment", "Nothing is enriching")
-        return
-    now = datetime.now(timezone.utc)
+        return "no_enrichment", "Nothing is enriching"
     hatchery["reservoir"]["lastLoadEnriched"] = True
     hatchery["reservoir"]["enrichedAt"] = now.isoformat()
     # The boost window starts HERE, warm: whatever the yolk clock had banked
@@ -14628,6 +14645,61 @@ async def websocket_nps_enrich_loaded(
         _append_activity(config, "Soak done — gut-loaded brine in the vessel; the boost "
                                  "clock runs from now (mesh-rinse before feed-out if you like)",
                          "control")
+    return None
+
+
+def _nps_enrich_dose_apply(config: dict[str, Any], now: datetime) -> tuple[str, str] | None:
+    """Log the FIRST enrichment dose (delayed protocols): the batch crossed
+    instar II, the Selcon goes in now — debit the bottle and anchor the soak
+    clock proper here."""
+    hatchery = _nps_hatchery_v2(config)
+    state = hatchery["enrichment"]["state"]
+    if not state.get("startedAt"):
+        return "no_enrichment", "Nothing is enriching"
+    if state.get("firstDoseAt"):
+        return "already_dosed", "The dose is already logged"
+    _nps_enrich_debit(config, hatchery["enrichment"])
+    state["firstDoseAt"] = now.isoformat()
+    _append_activity(config, "Enrichment dose added — the soak proper begins", "control")
+    return None
+
+
+def _nps_enrich_second_dose_apply(config: dict[str, Any], now: datetime) -> tuple[str, str] | None:
+    """Log the INVE-style top-up, 10 h after the FIRST dose: debits another
+    dose and stamps the soak so the reminder stands down."""
+    hatchery = _nps_hatchery_v2(config)
+    state = hatchery["enrichment"]["state"]
+    if not state.get("startedAt"):
+        return "no_enrichment", "Nothing is enriching"
+    if not state.get("firstDoseAt"):
+        return "no_first_dose", "Add the first dose before the top-up"
+    if state.get("secondDoseAt"):
+        return "already_dosed", "The top-up is already logged"
+    _nps_enrich_debit(config, hatchery["enrichment"])
+    state["secondDoseAt"] = now.isoformat()
+    _append_activity(config, "Enrichment top-up dosed", "control")
+    return None
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_loaded"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_enrich_loaded(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Soak done (container semantics): nothing moves — the gut-loaded brine
+    is already in the holding vessel. Stamp the boost (its decay clock runs
+    from HERE — DHA halves within a day warm) and stand the soak down. A
+    second mesh cycle before feed-out is the optional rinse."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    error = _nps_enrich_loaded_apply(config, datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], *error)
+        return
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -14670,17 +14742,10 @@ async def websocket_nps_enrich_dose(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    hatchery = _nps_hatchery_v2(config)
-    state = hatchery["enrichment"]["state"]
-    if not state.get("startedAt"):
-        connection.send_error(msg["id"], "no_enrichment", "Nothing is enriching")
+    error = _nps_enrich_dose_apply(config, datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], *error)
         return
-    if state.get("firstDoseAt"):
-        connection.send_error(msg["id"], "already_dosed", "The dose is already logged")
-        return
-    _nps_enrich_debit(config, hatchery["enrichment"])
-    state["firstDoseAt"] = datetime.now(timezone.utc).isoformat()
-    _append_activity(config, "Enrichment dose added — the soak proper begins", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -14698,21 +14763,10 @@ async def websocket_nps_enrich_second_dose(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
-    hatchery = _nps_hatchery_v2(config)
-    state = hatchery["enrichment"]["state"]
-    if not state.get("startedAt"):
-        connection.send_error(msg["id"], "no_enrichment", "Nothing is enriching")
+    error = _nps_enrich_second_dose_apply(config, datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], *error)
         return
-    if not state.get("firstDoseAt"):
-        connection.send_error(msg["id"], "no_first_dose",
-                              "Add the first dose before the top-up")
-        return
-    if state.get("secondDoseAt"):
-        connection.send_error(msg["id"], "already_dosed", "The top-up is already logged")
-        return
-    _nps_enrich_debit(config, hatchery["enrichment"])
-    state["secondDoseAt"] = datetime.now(timezone.utc).isoformat()
-    _append_activity(config, "Enrichment top-up dosed", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -15001,7 +15055,7 @@ def _cultures_history(jar: dict[str, Any], event: str, now: datetime, **fields: 
         history = []
         jar["history"] = history
     row = {"event": event, "at": now.isoformat(), "ml": 0, "tint": "", "from": "",
-           "sign": "", "eggRatio": 0, "tempC": None}
+           "sign": "", "eggRatio": 0, "tempC": None, "purgeMl": 0}
     row.update({k: v for k, v in fields.items() if v is not None})
     history.insert(0, row)
     del history[60:]
@@ -15138,6 +15192,9 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     products = (config.get("consumables") or {}).get("products") or {}
     temp_c = _cultures_temp_c(hass, config, cultures)
     projection_hours = _cultures_projection_hours(hass)
+    # The rack's own lead over the room (doc §8.11 #10): the guard shifts the
+    # forecast by it. None without a rack sensor or a projection row for now.
+    rack_offset = cultures_engine.rack_offset_c(projection_hours, temp_c, now)
     jars_payload = []
     due_count = 0
     producing_by_species: dict[str, list[str]] = {}
@@ -15180,7 +15237,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "stagger": (cultures_engine.stagger_advice(jar, siblings[0], now)
                         if siblings and st["status"] in ("establishing", "producing")
                         else {"available": False, "days": None, "idealDays": None, "advice": ""}),
-            "guard": cultures_engine.heat_guard(projection_hours, jar["species"], now),
+            "guard": cultures_engine.heat_guard(projection_hours, jar["species"], now,
+                                                offset_c=rack_offset or 0.0),
             "speciesName": preset["name"], "kind": preset["kind"], "latin": preset["latin"],
             "volumeL": jar["volumeL"], "salinityPpt": jar["salinityPpt"],
             "vesselKind": jar["vesselKind"], "purgeMl": jar["purgeMl"],
@@ -15265,8 +15323,13 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "species": sid, "speciesName": cultures_engine.species_preset(sid)["name"],
             "running": len(running), "backedUp": len(running) >= 2,
             "continuityDays": cultures_engine.continuity_days(since, now),
-            "guard": cultures_engine.heat_guard(projection_hours, sid, now),
+            "guard": cultures_engine.heat_guard(projection_hours, sid, now, offset_c=rack_offset or 0.0),
         })
+    # The day the parcel lands (doc §8.8 #7): the starter's acclimation into
+    # the first rotifer cone's water, in FAO's 5 ppt steps.
+    rot_target = next((cultures["jars"][j]["salinityPpt"] for j in sorted(cultures["jars"])
+                       if cultures["jars"][j]["species"] == "rotifer_L"),
+                      cultures_engine.species_preset("rotifer_L")["salinityPpt"])
     return {
         "enabled": bool(cultures["enabled"]),
         "jars": jars_payload,
@@ -15275,6 +15338,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         "nextHarvest": next_harvest,
         "backup": backup,
         "guardAvailable": bool(projection_hours),
+        "rackOffsetC": rack_offset,
+        "arrival": {"rotifer": cultures_engine.acclimation_plan(cultures_engine.STARTER_PPT, rot_target)},
         "dueCount": due_count,
         "idleJars": idle,
         "canAddJar": len(cultures["jars"]) < cultures_engine.CULTURE_JARS_MAX,
@@ -15448,11 +15513,13 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         _mixing_hatchery_debit(hass, config, harvest_ml / 1000.0, f"refilling {jar['name']}")
         notes.append(f"harvested {round(harvest_ml)} ml")
     event = ("harvest" if harvested else "feed" if fed else "sign" if sign else "tint")
+    purge = round(jar["purgeMl"]) if harvested and jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None
     _cultures_history(jar, event, now,
                       ml=round(harvest_ml, 1) if harvested else 0,
                       tint=state["lastTint"] if tint in cultures_engine.TINTS else None,
                       sign=sign or None, eggRatio=egg or None,
-                      tempC=_cultures_temp_c(hass, config, cultures))
+                      tempC=_cultures_temp_c(hass, config, cultures),
+                      purgeMl=purge)
     _append_activity(config, f"{jar['name']}: " + ", ".join(notes), "control")
     return None
 
@@ -15476,7 +15543,8 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
     jar["state"]["lastSign"] = ""
     _cultures_feed_debit(config, jar)
     _cultures_history(jar, "restart", now, ml=round(jar["volumeL"] * 1000),
-                      tempC=_cultures_temp_c(hass, config, cultures))
+                      tempC=_cultures_temp_c(hass, config, cultures),
+                      purgeMl=round(jar["purgeMl"]) if jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None)
     _cultures_log_completion(config, jar_id, "restart", now,
                              f"Logged automatically — sieved into a clean jar from {source}")
     _append_activity(config, f"{jar['name']} restarted in a clean jar — the fortnight clock rewinds",
@@ -15857,6 +15925,15 @@ async def _async_notification_action(hass: HomeAssistant, event: Any) -> None:
         error = _cultures_restart_apply(hass, config, arg, source="the phone")
     elif kind == "OPENREEF_HATCH_LOADED":
         error = _nps_hatch_cancel_apply(hass, config, arg, True, datetime.now(timezone.utc))
+    elif kind == "OPENREEF_ENRICH_LOADED":
+        error = _nps_enrich_loaded_apply(config, datetime.now(timezone.utc))
+    elif kind == "OPENREEF_ENRICH_DOSE":
+        error = _nps_enrich_dose_apply(config, datetime.now(timezone.utc))
+    elif kind == "OPENREEF_ENRICH_TOPUP":
+        error = _nps_enrich_second_dose_apply(config, datetime.now(timezone.utc))
+    elif kind == "OPENREEF_TASK_DONE":
+        error = _maintenance_complete_apply(hass, config, entry.entry_id, arg,
+                                            notes="Marked done from the phone", source="phone")
     else:
         return
     if error is not None:

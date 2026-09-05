@@ -709,6 +709,50 @@ def test_due_and_low_events_fire_once_on_the_daily_tick():
     run(fire(hass, entry, NOW + timedelta(days=1)))
     assert len(hass.bus.events) == before
 
+def test_reminder_push_carries_done_buttons_and_the_tap_logs_the_task():
+    # 0.7.140 (doc §8.11 #9): the digest offers Done for the first two tasks,
+    # overdue first; the tap logs the task through the service's own core.
+    cfg = _cfg(
+        {"wc": _interval(label="Water change"), "glass": _interval(label="Clean the glass", cadenceDays=3, criticalAfterDays=30),
+         "pump": _interval(label="Pump service", cadenceDays=2, criticalAfterDays=30)},
+        {"wc": [{"timestamp": _ago(20)}], "glass": [{"timestamp": _ago(5)}], "pump": [{"timestamp": _ago(3)}]},
+        reminders={"enabled": True, "time": "09:00", "notifyTarget": "mobile_app_pixel", "persistent": True},
+    )
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(entries=[entry])
+    run(fire(hass, entry, NOW))
+    push = [c for c in hass.services.calls if c.domain == "notify"][-1]
+    actions = push.data["data"]["actions"]
+    assert actions[0] == {"action": "OPENREEF_TASK_DONE:wc", "title": "Done: Water change"}, "the overdue task leads"
+    assert actions[1]["action"].startswith("OPENREEF_TASK_DONE:") and actions[1]["action"] != actions[0]["action"]
+    assert actions[2]["action"] == "OPENREEF_LATER" and len(actions) == 3
+    assert push.data["data"]["tag"] == "openreef_maintenance_digest"
+
+    class Ev:
+        def __init__(self, action):
+            self.data = {"action": action}
+
+    run(integration._async_notification_action(hass, Ev("OPENREEF_TASK_DONE:wc")))
+    entries = entry.options[CONF_SETTINGS]["maintenance"]["completions"]["wc"]
+    assert "source" not in entries[0], "a phone tap is the keeper's own completion, not an automatic one"
+    assert entries[0]["notes"] == "Marked done from the phone" and entries[0]["timestamp"]
+    done = [e for e in hass.bus.events if e.event_type == integration.MAINTENANCE_DONE_EVENT]
+    assert len(done) == 1 and done[0].data["source"] == "phone" and done[0].data["task_id"] == "wc"
+    activity = entry.options[CONF_SETTINGS].get("activity") or []
+    assert any("Maintenance done: Water change (from the phone)" in str(a.get("message", "")) for a in activity)
+    run(integration._async_notification_action(hass, Ev("OPENREEF_TASK_DONE:nope")))
+    activity = entry.options[CONF_SETTINGS].get("activity") or []
+    assert any("Phone tap ignored" in str(a.get("message", "")) for a in activity)
+    assert len(entry.options[CONF_SETTINGS]["maintenance"]["completions"]["wc"]) == 2, "the fixture's entry plus the tap, nothing from the bad tap"
+    # The service still refuses an unknown task the way it always did.
+    try:
+        run(record(hass, _call({"task_id": "nope"})))
+        raise AssertionError("an unknown task must be refused")
+    except integration.ServiceValidationError:
+        pass
+
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

@@ -3225,6 +3225,74 @@ def test_hatch_ready_push_waits_for_quiet_hours_to_end():
     assert len(prompt) == 1 and prompt[0].data["message"].startswith("The 24 h hatch is done.")
 
 
+
+def test_soak_pushes_carry_buttons_and_the_taps_do_the_thing():
+    # 0.7.140 (doc §8.11 #9): the hatchery's three soak notices get the same
+    # buttons the NPS tab offers, and a tap runs the same core.
+    entry = _enrich_entry(dose_delay_h=8)
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["maintenance"] = {"reminders": {"enabled": True, "notifyTarget": "mobile_app_phone"}}
+    cfg["nps"]["hatchery"] = integration._normalise_hatchery(cfg["nps"]["hatchery"], True)
+    cfg["nps"]["hatchery"]["enrichment"]["state"].update({
+        "startedAt": (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat(),
+        "enrichHours": 12, "doseDelayH": 8,
+    })
+    hass = FakeHass(entries=[entry])
+
+    class Ev:
+        def __init__(self, action):
+            self.data = {"action": action}
+
+    def pushes():
+        return [c for c in hass.services.calls if c.domain == "notify"]
+
+    def remaining():
+        return integration._config_from_entry(entry)["consumables"]["products"]["selcon"]["remainingMl"]
+
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    push = pushes()[-1]
+    assert push.data["data"]["actions"][0] == {"action": "OPENREEF_ENRICH_DOSE", "title": "Dose added"}
+    assert push.data["data"]["actions"][1]["action"] == "OPENREEF_LATER" and push.data["data"]["tag"] == "openreef_enrich_dose"
+    run(integration._async_notification_action(hass, Ev("OPENREEF_ENRICH_DOSE")))
+    state = integration._config_from_entry(entry)["nps"]["hatchery"]["enrichment"]["state"]
+    assert state["firstDoseAt"] and remaining() == 48, "the tap logs the first dose and debits the bottle"
+    run(integration._async_notification_action(hass, Ev("OPENREEF_ENRICH_DOSE")))
+    assert remaining() == 48, "a second tap is refused, not double-dosed"
+    activity = integration._config_from_entry(entry).get("activity") or []
+    assert any("Phone tap ignored" in str(a.get("message", "")) for a in activity)
+    # The top-up, 10 h past the first dose.
+    cfg = integration._config_from_entry(entry)
+    cfg["nps"]["hatchery"]["enrichment"]["state"]["firstDoseAt"] = (
+        datetime.now(timezone.utc) - timedelta(hours=10.5)).isoformat()
+    integration._persist_entry_config(hass, entry, cfg)
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    push = pushes()[-1]
+    assert push.data["data"]["actions"][0]["action"] == "OPENREEF_ENRICH_TOPUP" and push.data["data"]["tag"] == "openreef_enrich_topup"
+    run(integration._async_notification_action(hass, Ev("OPENREEF_ENRICH_TOPUP")))
+    state = integration._config_from_entry(entry)["nps"]["hatchery"]["enrichment"]["state"]
+    assert state["secondDoseAt"] and remaining() == 46
+    # The soak done: the tap stamps the boost and stands the soak down.
+    cfg = integration._config_from_entry(entry)
+    cfg["nps"]["hatchery"]["enrichment"]["state"]["firstDoseAt"] = (
+        datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+    integration._persist_entry_config(hass, entry, cfg)
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    push = pushes()[-1]
+    assert push.data["data"]["actions"][0] == {"action": "OPENREEF_ENRICH_LOADED", "title": "Enriched & loaded"}
+    run(integration._async_notification_action(hass, Ev("OPENREEF_ENRICH_LOADED")))
+    hatchery = integration._config_from_entry(entry)["nps"]["hatchery"]
+    assert hatchery["reservoir"]["lastLoadEnriched"] is True and hatchery["reservoir"]["enrichedAt"]
+    assert hatchery["enrichment"]["state"]["startedAt"] == "", "the soak stands down"
+    # The WS handlers still answer through the same cores, errors included.
+    conn = FakeConnection()
+    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 1}))
+    assert conn.errors and conn.errors[-1].code == "no_enrichment"
+    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 2}))
+    assert conn.errors[-1].code == "no_enrichment"
+    run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 3}))
+    assert conn.errors[-1].code == "no_enrichment"
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

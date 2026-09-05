@@ -50,6 +50,18 @@ BOTTLE_EVENTS: tuple[str, ...] = ("filled", "fed_tank", "enriched", "emptied")
 GUARD_LOOKAHEAD_H = 24.0       # the heatwave guard looks one day ahead (doc §8.8 #2)
 TINT_STRIP_DAYS = 14
 RIG_CONES_MAX = 4
+# 0.7.140 (doc §8.12): the purge is a journal fact, so the run-length learning
+# can say whether bleeding more off the tip buys a longer run; the guard
+# takes the rack's own offset over the room; the starter's acclimation is
+# arithmetic, not a shrug.
+PURGE_RUNS_MIN = 2             # runs at EACH purge volume before the note speaks
+RACK_OFFSET_MAX_C = 5.0        # a bench cannot run more than this over the room — clamp
+RACK_OFFSET_WINDOW_H = 1.5     # the projection row that counts as "now"
+STARTER_PPT = 27.0             # Reefphyto cultures at SG 1.019–1.021; shipping SG not
+                               # stated on the page, so the culture's is the honest guess
+ACCLIMATE_STEP_PPT = 5.0       # FAO §3.5: acclimate in ±5 ppt steps
+ACCLIMATE_WAIT_MIN = 15
+ACCLIMATE_STEPS_MAX = 4
 
 # Species presets. tempMin/MaxC = the productive band; tempHardMaxC = the
 # line above which the copy stops advising and starts warning (Reece's
@@ -411,6 +423,19 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
                 tub = v
         elif len(cones) < RIG_CONES_MAX:
             cones.append(v)
+    # "B is drawn greyed on the shared manifold until it exists" (doc §8.11
+    # #7): one running cone earns a ghost beside it — the never-zero doctrine
+    # in the drawing, not a jar in the config.
+    if len(cones) == 1 and cones[0]["status"] in ("establishing", "producing"):
+        lead_name = cones[0]["name"]
+        cones.append({
+            "id": "", "name": (lead_name[:-2] + " B") if lead_name.endswith(" A") else "B",
+            "kind": cones[0]["kind"], "status": "ghost", "tint": "", "pct": 0, "airOn": False,
+            "purgeHot": False, "harvestHot": False, "refillHot": False, "feedHot": False,
+            "restartHot": False, "tempStatus": "unknown", "establishDays": None,
+            "firstHarvestDays": cones[0]["firstHarvestDays"],
+            "note": "comes with the first restart",
+        })
     first_cone = next((j for j in jars if str(j.get("vesselKind") or "jar") != "tub"), None)
     guide = (first_cone.get("harvestGuide") if first_cone and isinstance(first_cone.get("harvestGuide"), dict)
              else {}) or {}
@@ -540,6 +565,59 @@ def run_length_samples(history: Any) -> list[float]:
     return samples
 
 
+def run_length_runs(history: Any) -> list[dict[str, Any]]:
+    """Every finished run with the purge it was bled at: the run's harvest
+    rows vote (most common purge wins), the restart row that ended it is the
+    fallback. Newest first. ``run_length_samples`` is the days-only view."""
+    runs: list[dict[str, Any]] = []
+    anchor: datetime | None = None
+    purges: list[float] = []
+    for at, row in _chronological(history):
+        event = row.get("event")
+        if event == "harvest" and anchor is not None:
+            purges.append(round(max(0.0, _f(row.get("purgeMl")))))
+        if event in ("restart", "crashed") and anchor is not None:
+            days = (at - anchor).total_seconds() / 86400.0
+            if 0 < days <= 90:
+                purge = (max(set(purges), key=purges.count) if purges
+                         else round(max(0.0, _f(row.get("purgeMl")))))
+                runs.append({"days": round(days, 1), "purgeMl": purge, "harvests": len(purges)})
+        if event in ("seeded", "restart"):
+            anchor = at
+            purges = []
+        elif event == "crashed":
+            anchor = None
+            purges = []
+    runs.reverse()
+    return runs
+
+
+def purge_note(runs: Any) -> dict[str, Any]:
+    """Does bleeding more off the tip buy a longer run? Only when the journal
+    has PURGE_RUNS_MIN runs at each of two purge volumes — before that the
+    honest answer is 'not enough runs yet', and the note stays silent."""
+    by_purge: dict[float, list[float]] = {}
+    for run in (runs if isinstance(runs, list) else []):
+        if not isinstance(run, dict):
+            continue
+        by_purge.setdefault(round(_f(run.get("purgeMl"))), []).append(_f(run.get("days")))
+    table = {ml: {"days": round(sum(v) / len(v), 1), "runs": len(v)}
+             for ml, v in by_purge.items() if len(v) >= PURGE_RUNS_MIN}
+    if len(table) < 2:
+        return {"available": False, "line": "", "byPurge": {str(int(k)): v for k, v in table.items()}}
+    low, high = min(table), max(table)
+    d_low, d_high = table[low]["days"], table[high]["days"]
+    if d_high - d_low >= 1.0:
+        verdict = f"the bigger purge buys ~{d_high - d_low:.0f} more days"
+    elif d_low - d_high >= 1.0:
+        verdict = "the bigger purge is not helping — bleed less"
+    else:
+        verdict = "no difference — keep the smaller purge"
+    line = (f"runs bled ~{high:.0f} ml lasted ~{d_high:g} d, ~{low:.0f} ml lasted ~{d_low:g} d "
+            f"({table[high]['runs']} + {table[low]['runs']} runs) — {verdict}")
+    return {"available": True, "line": line, "byPurge": {str(int(k)): v for k, v in table.items()}}
+
+
 def yield_ml_per_day(history: Any, now: datetime, window_days: float = 14.0) -> float | None:
     """Harvested ml per day over the recent window — the NPS runway's demand
     figure. None until something has been harvested."""
@@ -587,7 +665,8 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
         if abs(days - cad["restartIntervalDays"]) >= 1:
             suggest["restartIntervalDays"] = days
     return {"clearingH": clearing, "firstHarvestDays": first, "runLengthDays": run,
-            "yieldMlDay": yield_ml_per_day(history, now), "suggest": suggest}
+            "yieldMlDay": yield_ml_per_day(history, now), "suggest": suggest,
+            "purge": purge_note(run_length_runs(history))}
 
 
 def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -722,14 +801,44 @@ def next_harvest(bottle_state: dict[str, Any], ml_per_day: Any, harvest_clock: A
 # --------------------------------------------------------------------------- #
 # V2 Stage D — never zero, and the guard (doc §8.8)
 # --------------------------------------------------------------------------- #
+def rack_offset_c(projection_hours: Any, temp_c: Any, now: datetime,
+                  window_h: float = RACK_OFFSET_WINDOW_H) -> float | None:
+    """How far the rack's own sensor reads over (or under) the room the
+    projection describes, from the projection row nearest to now. None
+    without a sensor reading or a row inside the window; clamped to
+    ±RACK_OFFSET_MAX_C so a mis-linked sensor cannot invent a heatwave."""
+    if not isinstance(temp_c, (int, float)) or isinstance(temp_c, bool):
+        return None
+    nearest: tuple[float, float] | None = None
+    for row in (projection_hours if isinstance(projection_hours, list) else []):
+        if not isinstance(row, dict):
+            continue
+        at = _parse_iso(row.get("at"))
+        room = row.get("roomC")
+        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool):
+            continue
+        gap = abs((at - now).total_seconds()) / 3600.0
+        if gap <= window_h and (nearest is None or gap < nearest[0]):
+            nearest = (gap, float(room))
+    if nearest is None:
+        return None
+    offset = max(-RACK_OFFSET_MAX_C, min(RACK_OFFSET_MAX_C, float(temp_c) - nearest[1]))
+    return round(offset, 1)
+
+
 def heat_guard(projection_hours: Any, species_id: Any, now: datetime,
-               lookahead_h: float = GUARD_LOOKAHEAD_H) -> dict[str, Any]:
+               lookahead_h: float = GUARD_LOOKAHEAD_H, offset_c: Any = 0.0) -> dict[str, Any]:
     """The heatwave guard: the cooling headroom's indoor projection (room °C
     per forecast hour, learned offsets included) against the species band.
     ``warn`` when the room is projected past the warning line inside the
     window (with WHEN), ``watch`` past the productive band, ``clear``
-    otherwise; ``available`` False with no projection — never a guess."""
+    otherwise; ``available`` False with no projection — never a guess.
+    ``offset_c`` is the rack's measured lead over the room (rack_offset_c):
+    the forecast is shifted by it, and the line says so."""
     species = species_preset(species_id)
+    offset = _f(offset_c)
+    if not (-RACK_OFFSET_MAX_C <= offset <= RACK_OFFSET_MAX_C):
+        offset = 0.0
     rows = []
     for row in (projection_hours if isinstance(projection_hours, list) else []):
         if not isinstance(row, dict):
@@ -740,28 +849,31 @@ def heat_guard(projection_hours: Any, species_id: Any, now: datetime,
             continue
         hours = (at - now).total_seconds() / 3600.0
         if -1.0 <= hours <= lookahead_h:
-            rows.append((at, float(room), hours))
+            rows.append((at, float(room) + offset, hours))
+    base = {"offsetC": round(offset, 1) if abs(offset) >= 0.5 else 0.0}
     if not rows:
-        return {"available": False, "status": "unknown", "peakC": None, "peakAt": None,
+        return {**base, "available": False, "status": "unknown", "peakC": None, "peakAt": None,
                 "crossAt": None, "hoursUntil": None, "line": ""}
     peak_at, peak_c, _h = max(rows, key=lambda r: r[1])
     hard = _f(species["tempHardMaxC"])
     band = _f(species["tempMaxC"])
+    where = "the rack" if base["offsetC"] else "room"
+    rack_note = f", rack {offset:+.1f} °C over the room" if base["offsetC"] else ""
     cross = next((r for r in rows if r[1] >= hard), None)
     if cross is not None:
         at, room, hours = cross
-        return {"available": True, "status": "warn", "peakC": round(peak_c, 1),
+        return {**base, "available": True, "status": "warn", "peakC": round(peak_c, 1),
                 "peakAt": peak_at.isoformat(), "crossAt": at.isoformat(),
                 "hoursUntil": round(max(0.0, hours), 1),
-                "line": (f"room passes {hard:g} °C in ~{max(0.0, hours):.0f} h (peak {peak_c:.1f} °C) — "
+                "line": (f"{where} passes {hard:g} °C in ~{max(0.0, hours):.0f} h (peak {peak_c:.1f} °C{rack_note}) — "
                          "extra air, shade, feed lightly, a 50 % change ready")}
     if peak_c > band:
-        return {"available": True, "status": "watch", "peakC": round(peak_c, 1),
+        return {**base, "available": True, "status": "watch", "peakC": round(peak_c, 1),
                 "peakAt": peak_at.isoformat(), "crossAt": None, "hoursUntil": None,
-                "line": f"room peaks at {peak_c:.1f} °C — above the {band:g} °C band, keep an eye on it"}
-    return {"available": True, "status": "clear", "peakC": round(peak_c, 1),
+                "line": f"{where} peaks at {peak_c:.1f} °C{rack_note} — above the {band:g} °C band, keep an eye on it"}
+    return {**base, "available": True, "status": "clear", "peakC": round(peak_c, 1),
             "peakAt": peak_at.isoformat(), "crossAt": None, "hoursUntil": None,
-            "line": f"room peaks at {peak_c:.1f} °C — inside the band"}
+            "line": f"{where} peaks at {peak_c:.1f} °C{rack_note} — inside the band"}
 
 
 def stagger_advice(jar_a: dict[str, Any], jar_b: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -803,3 +915,47 @@ def continuity_days(since_iso: Any, now: datetime) -> float | None:
     if since is None:
         return None
     return round(max(0.0, (now - since).total_seconds() / 86400.0), 1)
+
+
+def acclimation_plan(from_ppt: Any, to_ppt: Any, pouch_ml: float = 500.0,
+                     max_step: float = ACCLIMATE_STEP_PPT, wait_min: int = ACCLIMATE_WAIT_MIN) -> dict[str, Any]:
+    """The arrival maths (doc §8.8 #7, FAO §3.5): the pouch is brought to the
+    cone's water in equal steps of at most ``max_step`` ppt. Each addition of
+    cone water is sized for exactly one step, then a wait; the last step is
+    the net into the cone itself. Inside the rule from the start = float and
+    pour. Additions are capped — a gap the cap cannot close says so instead
+    of pretending."""
+    start = _f(from_ppt, STARTER_PPT)
+    target = _f(to_ppt, STARTER_PPT)
+    pouch = max(50.0, _f(pouch_ml, 500.0))
+    gap = target - start
+    n = max(1, int(-(-abs(gap) // max_step)))          # ceil(gap / step)
+    delta = gap / n
+    steps: list[dict[str, Any]] = []
+    ppt = start
+    volume = pouch
+    for _k in range(1, n):                              # n-1 additions, the n-th is the pour
+        if len(steps) >= ACCLIMATE_STEPS_MAX:
+            break
+        remaining = target - ppt
+        if abs(remaining - delta) < 1e-9:
+            break
+        add = max(1, round(volume * delta / (remaining - delta)))
+        ppt = round((ppt * volume + target * add) / (volume + add), 1)
+        volume += add
+        steps.append({"addMl": add, "ppt": ppt, "waitMin": wait_min})
+    final = round(target - ppt, 1)
+    within = abs(final) <= max_step + 0.05
+    if not steps:
+        line = (f"the starter is at ~{start:g} ppt and the cone at {target:g}: float the pouch "
+                f"{wait_min} min and pour in — a {abs(final):g} ppt step is inside the 5 ppt rule")
+    else:
+        parts = [f"add {st['addMl']} ml of cone water, wait {st['waitMin']} min (~{st['ppt']:g} ppt)"
+                 for st in steps]
+        line = (f"the starter is at ~{start:g} ppt and the cone at {target:g}: float the pouch "
+                f"{wait_min} min, then " + "; ".join(parts)
+                + (f"; then net them into the cone — the last step is {abs(final):g} ppt" if within
+                   else f"; the last step would still be {abs(final):g} ppt — too big: use a larger "
+                        "pouch or drip the cone water in over an hour"))
+    return {"fromPpt": round(start, 1), "toPpt": round(target, 1), "pouchMl": round(pouch),
+            "steps": steps, "finalStepPpt": final, "withinRule": within, "line": line}

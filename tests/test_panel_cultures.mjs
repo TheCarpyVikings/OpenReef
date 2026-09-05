@@ -644,5 +644,111 @@ test("the culture card draws the story: name, species, day, generation, the ring
   } finally { restore(); }
 });
 
+
+// --------------------------------------------------------------------------- //
+// 0.7.140 — the §8.12 gaps: the ghost cone B, the bleed in the journal, the
+// arrival maths, the demo view.
+// --------------------------------------------------------------------------- //
+test("one running cone pencils B in: dashed, faint, named, and not counted as a cone", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const one = summaryFixture([jarSummary()]);
+    one.rig.cones.push({ id: "", name: "Rotifers B", kind: "cone", status: "ghost", tint: "", pct: 0, airOn: false, purgeHot: false,
+      harvestHot: false, refillHot: false, feedHot: false, restartHot: false, tempStatus: "unknown", establishDays: null, firstHarvestDays: 6,
+      note: "comes with the first restart" });
+    const panel = await culturesPanel({}, one);
+    const svg = panel._culturesRigSvg(one.rig);
+    assert(svg.includes("ROTIFERS B") && svg.includes("comes with the first restart"), "the ghost must be labelled and explained");
+    assert(svg.includes('data-cultures-ghost="1"') && svg.includes('opacity="0.45"'), "the ghost is drawn faint");
+    assert((svg.match(/stroke-dasharray="6 4"/g) || []).length >= 3, "the ghost's body and its drop are dashed");
+    assert(!svg.includes("CONE 2"), "no fallback name for the ghost");
+    const html = panel._culturesTab();
+    assert(html.includes("One cone on the hatchery") && html.includes("B is pencilled in beside A"), "the shape line counts real cones and explains B");
+    noPlaceholders(html, "cultures tab with a ghost cone");
+    const two = summaryFixture([jarSummary(), jarSummary({ id: "c2", name: "Rotifers B" })]);
+    const twoSvg = panel._culturesRigSvg(two.rig);
+    assert(!twoSvg.includes('data-cultures-ghost="1"'), "the fixture without a ghost draws none");
+  } finally { restore(); }
+});
+
+test("the journal shows the bleed and the learned purge line", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const jar = jarSummary({
+      history: [{ event: "harvest", at: iso(2), ml: 625, tint: "clearing", from: "", sign: "", eggRatio: 0, tempC: 24.1, purgeMl: 50 },
+                { event: "restart", at: iso(9 * 24), ml: 2500, tint: "green", from: "", sign: "", eggRatio: 0, tempC: 24.0, purgeMl: 100 },
+                { event: "feed", at: iso(14), ml: 0, tint: "green", from: "", sign: "", eggRatio: 0, tempC: null, purgeMl: 0 }],
+      learned: { ...jarSummary().learned, purge: { available: true, byPurge: { "50": { days: 11, runs: 2 }, "100": { days: 13, runs: 2 } },
+        line: "runs bled ~100 ml lasted ~13 d, ~50 ml lasted ~11 d (2 + 2 runs) — the bigger purge buys ~2 more days" } },
+    });
+    const panel = await culturesPanel({}, summaryFixture([jar]));
+    const html = panel._culturesTab();
+    assert(html.includes("harvested · bled 50 ml") && html.includes("restarted · bled 100 ml"), "the bleed rides the What column");
+    assert(!html.includes("fed · bled"), "a feed has no bleed");
+    assert(html.includes("Purge: runs bled ~100 ml lasted ~13 d") && html.includes("the bigger purge buys ~2 more days."), "the learned purge line is on the tile");
+    const quiet = await culturesPanel({}, summaryFixture([jarSummary()]));
+    assert(!quiet._culturesTab().includes("Purge: runs bled"), "no comparison, no line");
+    noPlaceholders(html, "cultures tab with purge rows");
+  } finally { restore(); }
+});
+
+test("the arrival walkthrough carries the acclimation maths, and a plain rule without them", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const virgin = () => summaryFixture([
+      jarSummary({ state: { ...jarSummary().state, status: "none", percent: null }, tint: "", due: [], history: [] }),
+      summaryFixture().jars[1],
+    ]);
+    const withPlan = virgin();
+    withPlan.arrival = { rotifer: { fromPpt: 27, toPpt: 35, pouchMl: 500, steps: [{ addMl: 500, ppt: 31, waitMin: 15 }], finalStepPpt: 4, withinRule: true,
+      line: "the starter is at ~27 ppt and the cone at 35: float the pouch 15 min, then add 500 ml of cone water, wait 15 min (~31 ppt); then net them into the cone — the last step is 4 ppt" } };
+    let panel = await culturesPanel({}, withPlan);
+    let html = panel._culturesTab();
+    assert(html.includes("The starter is at ~27 ppt and the cone at 35") && html.includes("add 500 ml of cone water, wait 15 min (~31 ppt)"), "the plan must be quoted, capitalised");
+    assert(html.includes("the last step is 4 ppt."), "the sentence ends with the final step");
+    assert(!html.includes("add cone water to it in steps"), "the plain rule gives way to the maths");
+    panel = await culturesPanel({}, virgin());
+    html = panel._culturesTab();
+    assert(html.includes("in steps of no more than 5 ppt"), "without a plan the rule itself is stated");
+    noPlaceholders(html, "walkthrough");
+  } finally { restore(); }
+});
+
+test("the demo view stages a rack, refuses every tap, and hands the real rack back on exit", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel();
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return {}; };
+    const real = panel._cultures.summary;
+    panel._culturesToggleDemo();
+    assert(panel._cultures.demo === true && panel._cultures.summary !== real, "the demo swaps the summary");
+    const sum = panel._cultures.summary;
+    assert(sum.jars.length === 3 && sum.jars.map((j) => j.name).join(",") === "Rotifers A,Rotifers B,Pods", "two cones and the tub");
+    assert(sum.enrichment.soak.status === "soaking" && sum.backup[1].guard.status === "warn" && sum.jars[0].learned.purge.available, "a soak, a warning, a journal that learned");
+    const html = panel._culturesTab();
+    assert(html.includes("Demo view — a staged rack") && html.includes("Exit demo"), "the banner and the exit button");
+    assert(html.includes("ROTIFERS A") && html.includes("ROTIFERS B") && html.includes("PODS · TUB"), "the rig draws the staged rack");
+    assert(html.includes("tomorrow") && html.includes("gut-loaded") && html.includes("Purge: runs bled"), "the guard, the boost and the learned purge show");
+    assert(html.includes("harvested · bled 50 ml"), "the journal carries the bleed");
+    noPlaceholders(html, "cultures demo view");
+    // Every tap is refused; nothing reaches the backend; nothing is saved.
+    await panel._culturesCall({ type: "openreef/cultures_log", jar_id: "a", fed: true });
+    assert(calls.length === 0 && panel._cultures.message.startsWith("Demo view — the buttons are for show"), "a tap in the demo is for show");
+    panel._culturesLog("a", true, true);
+    panel._culturesRestart("a");
+    await panel._culturesLoadSummary(true);
+    assert(calls.length === 0, "no refresh, no WS in the demo");
+    panel._culturesSeedReminders();
+    assert(!Object.keys(panel._config.maintenance.tasks || {}).length && panel._configDirty === false, "the staged jars never seed reminders on the real rack");
+    // Exit: the stash comes back and the real summary is asked for again.
+    panel._culturesToggleDemo();
+    assert(panel._cultures.demo === false && panel._cultures.summary === real, "exit restores the real summary");
+    await new Promise((r) => setTimeout(r, 0));
+    assert(calls.length === 1 && calls[0].type === "openreef/cultures_summary", "exit refreshes from the backend");
+    assert(panel._cultures.message.startsWith("Demo view closed"), "and says so");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

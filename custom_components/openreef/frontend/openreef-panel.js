@@ -83,7 +83,7 @@ class OpenReefPanel extends HTMLElement {
     };
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
     this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "" };
-    this._cultures = { summary: null, at: 0, loading: false, error: "", message: "" };
+    this._cultures = { summary: null, at: 0, loading: false, error: "", message: "", demo: false };
     this._cooling = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
@@ -1872,6 +1872,7 @@ class OpenReefPanel extends HTMLElement {
         id ? { type: "openreef/nps_hatch_cancel", vessel_id: id } : { type: "openreef/nps_hatch_cancel" },
         "Hatch cancelled — the hatcher stands down.");
       if (action === "cultures-refresh") this._culturesLoadSummary(true);
+      if (action === "cultures-demo-toggle") this._culturesToggleDemo();
       if (action === "cultures-rig-play") this._culturesRigPlay();
       if (action === "cultures-sign") this._culturesSign(id, target.dataset.sign || "");
       if (action === "cultures-apply-learned") this._culturesApplyLearned(id, target.dataset.field || "");
@@ -12437,8 +12438,169 @@ const rigSteps = [
     })[speciesId] || null;
   }
 
+  // Demo view (the last §7.1 leftover, 0.7.140): a staged rack for the
+  // stream — two cones out of phase, the tub, a soak running, tomorrow's heat
+  // warning, a journal that has learned. Only the summary is swapped; the
+  // config is never touched and every tap is refused while it shows.
+  _culturesToggleDemo() {
+    const st = this._cultures;
+    if (st.demo) {
+      const stash = this._culturesDemoStash || {};
+      st.summary = "summary" in stash ? stash.summary : null;
+      st.at = 0;
+      st.demo = false;
+      this._culturesDemoStash = null;
+      if (this._culturesRigTimer) { clearTimeout(this._culturesRigTimer); this._culturesRigTimer = null; }
+      this._culturesRigPreview = null;
+      st.message = "Demo view closed — back to your real rack.";
+      st.error = "";
+      this._render();
+      this._culturesLoadSummary(true);
+      return;
+    }
+    this._culturesDemoStash = { summary: st.summary };
+    st.summary = this._culturesDemoData().summary;
+    st.at = Date.now();
+    st.demo = true;
+    st.message = "";
+    st.error = "";
+    this._render();
+  }
+
+  _culturesDemoData() {
+    const now = Date.now();
+    const iso = (hoursAgo) => new Date(now - hoursAgo * 3600000).toISOString();
+    const clock = (due, hoursUntil, available = true) => ({
+      available, due, at: available ? iso(due ? 2 : -hoursUntil) : null, hoursUntil: due ? 0 : hoursUntil, hoursOverdue: due ? 2 : 0 });
+    const rot = this._culturesPresetFallback("rotifer_L") || {};
+    const pod = this._culturesPresetFallback("tigriopus") || {};
+    const guardWarn = { available: true, status: "warn", peakC: 29.1, peakAt: iso(-9), crossAt: iso(-8), hoursUntil: 8, offsetC: 1.2,
+      line: "the rack passes 28 °C in ~8 h (peak 29.1 °C, rack +1.2 °C over the room) — extra air, shade, feed lightly, a 50 % change ready" };
+    const guardWatch = { available: true, status: "watch", peakC: 27.9, peakAt: iso(-9), crossAt: null, hoursUntil: null, offsetC: 1.2,
+      line: "the rack peaks at 27.9 °C, rack +1.2 °C over the room — above the 26 °C band, keep an eye on it" };
+    const noGuard = { available: false, status: "unknown", peakC: null, peakAt: null, crossAt: null, hoursUntil: null, offsetC: 0, line: "" };
+    const row = (event, hoursAgo, extra = {}) => ({ event, at: iso(hoursAgo), ml: 0, tint: "", from: "", sign: "", eggRatio: 0, tempC: null, purgeMl: 0, ...extra });
+    const learnedA = {
+      clearingH: { available: true, hours: 9.2, samples: 3 }, firstHarvestDays: { available: true, days: 5.5, samples: 2 },
+      runLengthDays: { available: true, days: 11.3, samples: 3 }, yieldMlDay: 610,
+      suggest: { feedIntervalH: 8, restartIntervalDays: 10 },
+      purge: { available: true, byPurge: { "50": { days: 11, runs: 2 }, "100": { days: 13, runs: 2 } },
+        line: "runs bled ~100 ml lasted ~13 d, ~50 ml lasted ~11 d (2 + 2 runs) — the bigger purge buys ~2 more days" } };
+    const learnedNone = {
+      clearingH: { available: false, hours: null, samples: 0 }, firstHarvestDays: { available: true, days: 5.5, samples: 2 },
+      runLengthDays: { available: false, days: null, samples: 0 }, yieldMlDay: null,
+      suggest: { feedIntervalH: null, restartIntervalDays: null }, purge: { available: false, line: "", byPurge: {} } };
+    const cadenceRot = { feedIntervalH: 12, harvestIntervalDays: 1, harvestPct: 25, restartIntervalDays: 14, waterChangeIntervalDays: 0, waterChangePct: 0 };
+    const cadencePod = { feedIntervalH: 24, harvestIntervalDays: 10, harvestPct: 25, restartIntervalDays: 0, waterChangeIntervalDays: 0, waterChangePct: 50 };
+    const rotJar = (over) => ({
+      id: "a", name: "Rotifers A", species: "rotifer_L", speciesName: rot.name || "Rotifers (L-type)", kind: "rotifer", latin: "Brachionus plicatilis",
+      volumeL: 2.5, salinityPpt: 27, vesselKind: "cone", purgeMl: 50, sieveUm: 50, adultSieveUm: 0,
+      tintTarget: rot.tintTarget || "leafy green", firstHarvestDays: 6,
+      note: "Room temperature, no light, an open rigid airline to the cone tip at 1–2 bubbles/s. Feed the concentrate to a leafy green, little and often: clear means hungry, still green at feed time means skip.",
+      feed: { productId: "demo_concentrate", productName: "Rotifer Feed Concentrate", doseMl: 5 },
+      cadence: cadenceRot, hasBottle: true, seededFrom: "", reseedFrom: [], lastSign: "",
+      harvestGuide: { totalMl: 625, mixMl: 480, rodiMl: 145, targetPpt: 27 },
+      restartGuide: { totalMl: 2500, mixMl: 1929, rodiMl: 571, targetPpt: 27 },
+      waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 27 },
+      temp: { available: true, status: "ok", tempC: 25.4, minC: 18, maxC: 26, hardMaxC: 30, actC: 30, criticalC: 33, act: false },
+      guard: guardWatch,
+      ...over,
+    });
+    const jarA = rotJar({
+      state: { status: "producing", ageDays: 23, daysSinceRestart: 9, percent: 64, splitEligible: true, generation: 1, waterChangeOnDemand: false,
+        feed: clock(true, 0), harvest: clock(true, 0), restart: { ...clock(false, 5 * 24), reason: "" }, waterChange: clock(false, 0, false),
+        nextChore: { key: "harvest", at: iso(0), due: true, hoursUntil: 0 } },
+      tint: "clearing", due: ["feed", "harvest"],
+      feedAdvice: { action: "feed_now", reason: "clearing — harvest first, then feed to leafy green" },
+      learned: learnedA, risk: { level: "ok", reason: "steady — nothing to worry about" },
+      lineage: { generation: 1, fromName: "", line: "gen 1 · from the starter" },
+      tintStrip: ["green", "green", "clearing", "green", "clearing", "clearing", "green", "green", "clearing", "green", "clearing", "green", "green", "clearing"],
+      stagger: { available: true, days: 9, idealDays: 7, advice: "B runs 9 days behind — 7 is the ideal stagger" },
+      history: [row("harvest", 2, { ml: 625, tint: "clearing", purgeMl: 50, tempC: 25.4 }), row("feed", 14, { tint: "green", tempC: 24.9 }),
+        row("tint", 26, { tint: "clear", tempC: 24.6 }), row("harvest", 27, { ml: 625, tint: "clear", purgeMl: 50, tempC: 24.6 }),
+        row("split", 9 * 24, { ml: 1250, from: "b" }), row("restart", 9 * 24 + 1, { ml: 2500, tint: "green", purgeMl: 100, tempC: 24.1 }),
+        row("sign", 9 * 24 + 6, { sign: "foam", tempC: 24.3 }), row("seeded", 23 * 24, {})],
+    });
+    const jarB = rotJar({
+      id: "b", name: "Rotifers B",
+      state: { status: "establishing", ageDays: 3, daysSinceRestart: 3, percent: null, splitEligible: false, generation: 2, waterChangeOnDemand: false,
+        feed: clock(false, 6), harvest: { available: false, due: false, at: null, hoursUntil: 72, hoursOverdue: 0 },
+        restart: { ...clock(false, 11 * 24), reason: "" }, waterChange: clock(false, 0, false),
+        nextChore: { key: "feed", at: iso(-6), due: false, hoursUntil: 6 } },
+      tint: "green", due: [], feedAdvice: { action: "wait", reason: "still green — skip, feed when it clears" },
+      learned: learnedNone, risk: { level: "ok", reason: "settling in — feed by the tint, no harvest yet" },
+      seededFrom: "a", lineage: { generation: 2, fromName: "Rotifers A", line: "gen 2 · from Rotifers A" },
+      tintStrip: ["", "", "", "", "", "", "", "", "", "", "", "green", "green", "green"],
+      stagger: { available: true, days: 9, idealDays: 7, advice: "9 days behind A — 7 is the ideal stagger" },
+      history: [row("feed", 12, { tint: "green", tempC: 25.0 }), row("seeded", 3 * 24, { ml: 1250, from: "a", tint: "green" })],
+    });
+    const tub = {
+      id: "p", name: "Pods", species: "tigriopus", speciesName: pod.name || "Tigriopus copepods", kind: "copepod", latin: "Tigriopus californicus",
+      volumeL: 4, salinityPpt: 35, vesselKind: "tub", purgeMl: 0, sieveUm: 50, adultSieveUm: 300,
+      tintTarget: pod.tintTarget || "Granny Smith apple skin", firstHarvestDays: 28,
+      note: "A flat tub, not a cone — they crawl. 35 ppt, 22–26 °C, open airline, loose lid, no light. A generation is a month. Warn at 28 °C: heat kills through oxygen and ammonia, not the animal.",
+      feed: { productId: "demo_podfeed", productName: "Copepod Feed", doseMl: 10 }, cadence: cadencePod,
+      state: { status: "producing", ageDays: 41, daysSinceRestart: 41, percent: 100, splitEligible: true, generation: 1, waterChangeOnDemand: true,
+        feed: clock(false, 4), harvest: clock(false, 3 * 24), restart: clock(false, 0, false),
+        waterChange: { available: true, due: false, at: null, hoursUntil: null, hoursOverdue: 0, reason: "" },
+        nextChore: { key: "feed", at: iso(-4), due: false, hoursUntil: 4 } },
+      tint: "green", due: [], feedAdvice: { action: "wait", reason: "still Granny Smith — skip, feed when it clears" },
+      temp: { available: true, status: "warm", tempC: 26.6, minC: 18, maxC: 26, hardMaxC: 28, actC: 30, criticalC: 32, act: false },
+      learned: learnedNone, risk: { level: "watch", reason: "the room is over the band — feed lightly, extra air" },
+      lastSign: "", lineage: { generation: 1, fromName: "", line: "gen 1 · from the starter" },
+      tintStrip: ["green", "green", "green", "clearing", "green", "green", "green", "green", "clearing", "green", "green", "green", "green", "green"],
+      stagger: { available: false, days: null, idealDays: null, advice: "" }, guard: guardWarn,
+      harvestGuide: { totalMl: 1000, mixMl: 1000, rodiMl: 0, targetPpt: 35 }, restartGuide: { totalMl: 4000, mixMl: 4000, rodiMl: 0, targetPpt: 35 },
+      waterChangeGuide: { totalMl: 2000, mixMl: 2000, rodiMl: 0, targetPpt: 35 },
+      hasBottle: false, seededFrom: "", reseedFrom: [],
+      history: [row("feed", 20, { tint: "green", tempC: 26.3 }), row("water_change", 6 * 24, { ml: 2000, tint: "green", tempC: 25.8 }),
+        row("harvest", 8 * 24, { ml: 1000, tint: "green", tempC: 25.5 }), row("seeded", 41 * 24, {})],
+    };
+    const jars = [jarA, jarB, tub];
+    const vessel = (j) => {
+      const st = j.state || {};
+      const running = st.status === "producing" || st.status === "establishing";
+      const due = new Set(j.due || []);
+      return { id: j.id, name: j.name, kind: j.vesselKind, status: st.status, tint: running ? j.tint : "",
+        pct: st.percent ?? (st.status === "producing" ? 100 : Math.round(100 * (st.ageDays || 0) / (j.firstHarvestDays || 6))),
+        airOn: running, purgeHot: due.has("harvest") || due.has("restart"), harvestHot: due.has("harvest"),
+        refillHot: due.has("harvest") || due.has("restart"), feedHot: running && j.feedAdvice?.action === "feed_now",
+        restartHot: due.has("restart"), tempStatus: j.temp?.status || "unknown",
+        establishDays: st.status === "establishing" ? Math.round(st.ageDays || 0) : null, firstHarvestDays: j.firstHarvestDays || 6 };
+    };
+    const rig = {
+      stage: "harvest",
+      caption: "HARVEST — air off, settle 20 min, bleed ~50 ml off the tip, then 625 ml through the 50 µm net · refill 480 ml mix + 145 ml RODI",
+      cones: [vessel(jarA), vessel(jarB)], tub: vessel(tub),
+      jug: { harvestMl: 625, mixMl: 480, rodiMl: 145, ppt: 27, purgeMl: 50, sieveUm: 50 },
+      bottle: { ml: 480, pct: 48, status: "fresh" },
+    };
+    const species = ["rotifer_L", "tigriopus"].map((id) => ({ ...(this._culturesPresetFallback(id) || { id }) }));
+    const summary = {
+      enabled: true, jars, dueCount: 2, idleJars: [], canAddJar: true, maxJars: 4,
+      bottle: { status: "fresh", remainingMl: 480, hoursLeft: 88, filledAt: iso(26), volumeMl: 1000, doseMl: 20, shelfDays: 5,
+        enriched: true, boost: { status: "gutloaded", hoursLeft: 19.5 }, usageMlDay: 160,
+        history: [{ event: "fed_tank", at: iso(15), ml: 40, slot: "dusk" }, { event: "enriched", at: iso(5), ml: 625 }, { event: "filled", at: iso(26), ml: 625 }] },
+      enrichment: { productId: "demo_enrich", productName: "Rotifer & Artemia Enrichment", drops: 3, soakH: 6, boostWarmH: 8, boostColdH: 24,
+        soak: { status: "soaking", percent: 55, hoursLeft: 2.7, hoursElapsed: 3.3 }, portionMl: 300, jarId: "a", jarName: "Rotifers A" },
+      nextHarvest: { status: "wait", hoursUntil: 14, driver: "depletion" },
+      backup: [
+        { species: "rotifer_L", speciesName: rot.name || "Rotifers (L-type)", running: 2, backedUp: true, continuityDays: 23, guard: guardWatch },
+        { species: "tigriopus", speciesName: pod.name || "Tigriopus copepods", running: 1, backedUp: false, continuityDays: 41, guard: guardWarn },
+      ],
+      guardAvailable: true, rackOffsetC: 1.2, tempC: 25.4,
+      arrival: { rotifer: { fromPpt: 27, toPpt: 27, pouchMl: 500, steps: [], finalStepPpt: 0, withinRule: true,
+        line: "the starter is at ~27 ppt and the cone at 27: float the pouch 15 min and pour in — a 0 ppt step is inside the 5 ppt rule" } },
+      rig, species, tints: ["green", "clearing", "clear"],
+      signs: [{ id: "foam", label: "foam on the surface" }, { id: "milky", label: "milky water" }, { id: "smell", label: "a smell" }, { id: "surface", label: "clustering at the surface" }],
+    };
+    void noGuard;
+    return { summary };
+  }
+
   async _culturesLoadSummary(force = false) {
     const st = this._cultures;
+    if (st.demo) return;   // the staged demo view is not the tank's — never overwrite it
     if (st.loading) return;
     if (!force && st.summary && Date.now() - st.at < 30000) return;
     st.loading = true;
@@ -12455,6 +12617,11 @@ const rigSteps = [
   }
 
   async _culturesCall(msg, okMessage) {
+    if (this._cultures.demo) {
+      this._cultures.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
+      this._render();
+      return;
+    }
     // The feed strip reads the bottle's rows too — a Fed from a strip card
     // must fill its mark on the next paint.
     if (msg && msg.type === "openreef/cultures_bottle") setTimeout(() => this._npsLoadSummary?.(true), 0);
@@ -12629,6 +12796,11 @@ const rigSteps = [
   // so a chore done yesterday reminds tomorrow, not today. Re-running the
   // button re-syncs to the current cadence.
   _culturesSeedReminders() {
+    if (this._cultures.demo) {
+      this._cultures.message = "Demo view — the staged jars must not seed reminders on your real rack.";
+      this._render();
+      return;
+    }
     const m = this._config.maintenance = this._config.maintenance || {};
     const tasks = m.tasks = m.tasks || {};
     const comps = m.completions = m.completions || {};
@@ -12785,19 +12957,20 @@ const rigSteps = [
       const tx = (cx(i) - 160 * cs).toFixed(1);
       const ty = (334 * (1 - cs)).toFixed(1);
       const label = this._escape((c.name || `Rotifers ${i + 1}`).toUpperCase());
-      const fill = tintFill[c.tint] || "#26a69a";
+      const ghost = c.status === "ghost";   // B pencilled in beside a lone running cone (0.7.140)
+      const fill = ghost ? "#78909c" : (tintFill[c.tint] || "#26a69a");
       const opacity = c.status === "none" ? 0 : c.tint === "clear" ? 0.16 : c.tint === "clearing" ? 0.3 : 0.42;
       const topY = 98 + Math.round(142 * (1 - Math.max(0, Math.min(100, Number(c.pct) || 0)) / 100));
       const body = c.kind === "jar"
-        ? `<rect x="110" y="70" width="100" height="250" rx="6" fill="#101a22" stroke="${strokeFor(c)}" stroke-width="2.5" ${c.status === "none" ? 'stroke-dasharray="6 4"' : ""}></rect>`
-        : `<rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="${strokeFor(c)}" stroke-width="2.5" ${c.status === "none" ? 'stroke-dasharray="6 4"' : ""}></rect>
-           <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" fill-opacity="0" stroke="${strokeFor(c)}" stroke-width="2.5" ${c.status === "none" ? 'stroke-dasharray="6 4"' : ""}></polygon>`;
+        ? `<rect x="110" y="70" width="100" height="250" rx="6" fill="#101a22" stroke="${strokeFor(c)}" stroke-width="2.5" ${(c.status === "none" || ghost) ? 'stroke-dasharray="6 4"' : ""}></rect>`
+        : `<rect x="110" y="70" width="100" height="170" fill="#101a22" stroke="${strokeFor(c)}" stroke-width="2.5" ${(c.status === "none" || ghost) ? 'stroke-dasharray="6 4"' : ""}></rect>
+           <polygon points="110,240 210,240 172,320 148,320" fill="#101a22" fill-opacity="0" stroke="${strokeFor(c)}" stroke-width="2.5" ${(c.status === "none" || ghost) ? 'stroke-dasharray="6 4"' : ""}></polygon>`;
       const liquid = opacity > 0 ? (c.kind === "jar"
         ? `<rect x="114" y="${Math.max(98, topY)}" width="92" height="${316 - Math.max(98, topY)}" fill="${fill}" opacity="${opacity}"></rect>`
         : `<clipPath id="culCone${i}"><polygon points="114,98 206,98 206,240 172,318 148,318 114,240"></polygon></clipPath>
            <rect x="114" y="${topY}" width="92" height="${320 - topY}" fill="${fill}" opacity="${opacity}" clip-path="url(#culCone${i})"></rect>`) : "";
       return `
-        <g transform="translate(${tx} ${ty}) scale(${cs})">
+        <g transform="translate(${tx} ${ty}) scale(${cs})"${ghost ? ' opacity="0.45" data-cultures-ghost="1"' : ""}>
           ${body}
           <line x1="114" y1="96" x2="206" y2="96" stroke="#37474f" stroke-width="2"></line>
           ${liquid}
@@ -12808,7 +12981,7 @@ const rigSteps = [
           ${(c.purgeHot || c.restartHot) && c.kind !== "jar" ? `<circle cx="156" cy="312" r="1.8" fill="#4e342e"></circle><circle cx="162" cy="314" r="1.6" fill="#4e342e"></circle><circle cx="167" cy="312" r="1.8" fill="#4e342e"></circle>` : ""}
           <rect x="146" y="320" width="28" height="14" fill="#101a22" stroke="#78909c" stroke-width="2.5"></rect>
           <text x="160" y="150" text-anchor="middle" transform="rotate(-90 160 150)" font-size="13" fill="#cfd8dc" font-family="monospace">${label}</text>
-          ${c.status !== "none" ? `<text x="160" y="58" text-anchor="middle" font-size="${n > 1 ? 13 : 11}" fill="${fill}" font-family="monospace">${this._escape(c.tint || c.status)}</text>` : `<text x="160" y="58" text-anchor="middle" font-size="11" fill="#78909c" font-family="monospace">empty</text>`}
+          ${c.status !== "none" ? `<text x="160" y="58" text-anchor="middle" font-size="${n > 1 ? 13 : 11}" fill="${fill}" font-family="monospace">${this._escape(ghost ? (c.note || "pencilled in") : (c.tint || c.status))}</text>` : `<text x="160" y="58" text-anchor="middle" font-size="11" fill="#78909c" font-family="monospace">empty</text>`}
         </g>`;
     };
     // Air: pump → manifold at y=340 → a stub up into every cone tip; a second
@@ -12824,6 +12997,7 @@ const rigSteps = [
     const tipColour = lead.harvestHot ? "#66bb6a" : "#8d6e63";
     const extraDrops = cones.slice(1).map((c, j) => {
       const i = j + 1;
+      if (c.status === "ghost") return `<path d="M ${outX(i)} ${outY} V 600" fill="none" stroke="#546e7a" stroke-width="3" stroke-linejoin="round" stroke-dasharray="6 4" opacity="0.45"></path>`;
       const on = c.purgeHot || c.harvestHot;
       return pipe(`M ${outX(i)} ${outY} V 600`) + (on ? flow(`M ${outX(i)} ${outY} V 600`, c.harvestHot ? "#66bb6a" : "#8d6e63") : "")
         + `<g transform="rotate(90 ${outX(i)} 380)">${valve(outX(i), 380, on)}</g>`
@@ -12916,14 +13090,15 @@ const rigSteps = [
       ["Fortnightly restart", "settle, purge, then the WHOLE cone through the net into a clean one — the split into B rides this step."],
       ["The tub", "pods crawl: a flat tub, open airline, loose lid. Feed to Granny Smith; after week 4, 25 % through 300 µm every 7–10 days, put the volume back as fresh water."],
     ];
-    const coneCount = Math.max(1, Math.min(4, (rig.cones || []).length || 1));
+    const realCones = (rig.cones || []).filter((c) => c.status !== "ghost");
+    const coneCount = Math.max(1, Math.min(4, realCones.length || 1));
     const shape = `${coneCount === 1 ? "One cone" : `${{ 2: "Two", 3: "Three", 4: "Four" }[coneCount]} cones`} on the hatchery's air, one valve each, the 50 µm net in the union, the fridge bottle${rig.tub ? ", and the pods' tub" : ""} — nothing else.`;
     return `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
           <div style="flex:1;min-width:260px;">
             <p class="eyebrow" style="margin:0;">The rig — live</p>
-            <small class="muted">${shape} The drawing follows whatever the cultures are doing; the rotifers live in the same inverted-bottle cone as the brine hatch.</small>
+            <small class="muted">${shape}${(rig.cones || []).some((c) => c.status === "ghost") ? " B is pencilled in beside A — it comes with the first restart." : ""} The drawing follows whatever the cultures are doing; the rotifers live in the same inverted-bottle cone as the brine hatch.</small>
           </div>
           <button class="secondary compact-button" data-action="cultures-rig-play">${this._culturesRigPreview ? "■ Stop" : "▶ Play the day"}</button>
         </div>
@@ -12986,11 +13161,13 @@ const rigSteps = [
           <p class="muted" style="margin:0;">A jar is a standing population, not a batch: look at the water, feed by its colour, harvest a measured jug, restart before it crashes. Every clock here is real.</p>
         </div>
         <div class="button-row">
-          <button class="secondary compact-button" data-action="cultures-refresh">Refresh</button>
+          <button class="secondary compact-button" data-action="cultures-demo-toggle">${st.demo ? "Exit demo" : "Demo view"}</button>
+          <button class="secondary compact-button" data-action="cultures-refresh" ${st.demo ? "disabled" : ""}>Refresh</button>
           <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="cultures" data-scroll="or-section-cultures">Culture settings</button>
         </div>
       </div>`;
     const notices = `
+      ${st.demo ? `<div class="notice info-notice"><small>Demo view — a staged rack: two cones out of phase, the tub, a soak running and tomorrow's heat warning. The buttons are for show; exit the demo to run the real thing.</small></div>` : ""}
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
@@ -13093,6 +13270,8 @@ const rigSteps = [
           ? `<small class="muted">Your ${j.vesselKind === "cone" ? "cone" : "jar"} clears in ~${this._escape(String(learned.clearingH.hours))} h (${this._escape(String(learned.clearingH.samples))} feeds) — feed every ${this._escape(String(learned.suggest.feedIntervalH))} h? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="feedIntervalH">Apply</button></small>` : "",
         learned.suggest?.restartIntervalDays != null && learned.runLengthDays?.available
           ? `<small class="muted">It runs ~${this._escape(String(learned.runLengthDays.days))} days before it turns (${this._escape(String(learned.runLengthDays.samples))} runs) — restart at ${this._escape(String(learned.suggest.restartIntervalDays))}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="restartIntervalDays">Apply</button></small>` : "",
+        learned.purge?.available
+          ? `<small class="muted">Purge: ${this._escape(learned.purge.line)}.</small>` : "",
         status === "establishing" && learned.firstHarvestDays?.available
           ? `<small class="muted">Your last ${this._escape(String(learned.firstHarvestDays.samples))} seeds took ~${this._escape(String(learned.firstHarvestDays.days))} days to the first harvest.</small>` : "",
         status === "producing" && learned.yieldMlDay != null
@@ -13235,7 +13414,7 @@ const rigSteps = [
             <tbody>${events.map((h) => `<tr>
               <td style="padding:6px 10px;white-space:nowrap;">${this._escape(this._formatActivityTime(h.at))}</td>
               <td style="padding:6px 10px;">${this._escape(h.jar)}</td>
-              <td style="padding:6px 10px;">${this._escape(eventLabel[h.event] || h.event)}${h.from ? ` (${this._escape((jars.find((x) => x.id === h.from) || {}).name || h.from)})` : ""}</td>
+              <td style="padding:6px 10px;">${this._escape(eventLabel[h.event] || h.event)}${h.from ? ` (${this._escape((jars.find((x) => x.id === h.from) || {}).name || h.from)})` : ""}${h.purgeMl ? ` · bled ${this._escape(String(Math.round(h.purgeMl)))} ml` : ""}</td>
               <td style="padding:6px 10px;text-align:right;">${h.ml ? this._escape(String(Math.round(h.ml))) : ""}</td>
               <td style="padding:6px 10px;">${this._escape(h.tint || "")}</td>
               <td style="padding:6px 10px;color:var(--error-color,#e5484d);">${this._escape(h.sign ? (signWord[h.sign] || h.sign) : "")}</td>
@@ -13250,10 +13429,16 @@ const rigSteps = [
     const virgin = jars.length > 0 && jars.every((j) => (j.state?.status || "none") === "none" && !(j.history || []).length);
     const rotPreset = (sum.species || []).find((x) => x.id === "rotifer_L") || this._culturesPresetFallback("rotifer_L") || {};
     const podPreset = (sum.species || []).find((x) => x.id === "tigriopus") || this._culturesPresetFallback("tigriopus") || {};
+    // The starter's acclimation (doc §8.8 #7): the backend's plan in FAO's
+    // 5 ppt steps, aimed at the first cone's water; a plain rule without it.
+    const arrival = sum.arrival?.rotifer;
+    const arrivalLine = arrival?.line
+      ? `${this._escape(arrival.line.charAt(0).toUpperCase() + arrival.line.slice(1))}.`
+      : "Float the pouch 15 min, add cone water to it in steps of no more than 5 ppt, pour in.";
     const welcome = virgin ? `
       <article class="panel stack" style="border-color:rgba(38,166,154,0.4);">
         <p class="eyebrow" style="margin:0;">The day the parcel lands</p>
-        <small><strong>1. Rotifers into the cone.</strong> Fresh water at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt (SG ~1.020 — the jug says how much RODI to cut the 35 ppt mix with), room temperature, air ON to the tip at 1–2 bubbles/s. Float the pouch 15 min, add cone water to it in steps, pour in. Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, sooner only if the water is visibly dense.</small>
+        <small><strong>1. Rotifers into the cone.</strong> Fresh water at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt (SG ~1.020 — the jug says how much RODI to cut the 35 ppt mix with), room temperature, air ON to the tip at 1–2 bubbles/s. ${arrivalLine} Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, sooner only if the water is visibly dense.</small>
         <small><strong>2. Pods into the tub.</strong> A flat 4 L tub half to two-thirds full of 35 ppt, open airline at 1–3 bubbles/s, loose lid, out of the sun. Pour in on delivery day, feed the Copepod Feed at half rate for a week. Tap <em>Seed</em>: a generation is a month, so the first harvest waits until day ${this._escape(String(podPreset.firstHarvestDays || 28))}.</small>
         <small><strong>3. The shelf.</strong> Add the concentrate, the Copepod Feed and the enrichment from the Reefphyto presets in NPS settings, then link each jar's feed bottle below. Reef Juice is a tank dose, nothing to do with the jars — it lives on the NPS food shelf with its own dose and reminder. The unused starter keeps in the fridge, cap loose, five days.</small>
         <small><strong>4. Reminders.</strong> Once seeded, <em>Sync culture reminders</em> puts every chore on the phone, anchored on the real stamps.</small>
@@ -13328,7 +13513,7 @@ const rigSteps = [
         <span><strong>Cultures on</strong><small>The Cultures tab — rotifer and copepod jars with their own feed / harvest / restart clocks, the rotifer fridge bottle, and reminders. Standalone: works with NPS off.</small></span>
       </label>
       <div class="mini-grid">
-        <label>Room temperature sensor (optional)<input data-scope="nps-cultures" data-field="tempEntity" value="${this._escape(cultures.tempEntity || "")}" placeholder="sensor.bench_temperature"></label>
+        <label title="Today's heat line reads it, and the day-ahead heat guard shifts the cooling forecast by what it reads over the room">Room temperature sensor (optional)<input data-scope="nps-cultures" data-field="tempEntity" value="${this._escape(cultures.tempEntity || "")}" placeholder="sensor.bench_temperature"></label>
         <label>Rotifer bottle size (ml)<input type="number" min="0" max="20000" step="50" data-scope="nps-culture-bottle" data-field="volumeMl" value="${this._escape(String(cultures.bottle?.volumeMl ?? 1000))}"></label>
         <label>Bottle feed dose (ml)<input type="number" min="0.5" max="1000" step="0.5" data-scope="nps-culture-bottle" data-field="doseMl" value="${this._escape(String(cultures.bottle?.doseMl ?? 20))}"></label>
         <label>Bottle feeds / day (0 = no plan)<input type="number" min="0" max="24" step="1" data-scope="nps-culture-bottle" data-field="feedsPerDay" value="${this._escape(String(cultures.bottle?.feedsPerDay ?? 0))}"></label>

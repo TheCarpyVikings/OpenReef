@@ -249,11 +249,12 @@ maintenance engine (daily tick is fine — no 20-minute windows here). Card copy
   preview is the only staged view); brackish mode UI — **done 0.7.125** (per-jar salinity with the
   1.020 recommendation, the jug shows the RODI cut); the union disc — **hardware, no code owed** (the
   drawing already labels the 50 µm net); egg-ratio capture — **done 0.7.126**; continuous reactor —
-  shelved (hardware track). The open remainder of V2 is listed in §8.12.
+  shelved (hardware track). Demo-stage data — **done 0.7.140** (the Cultures tab's "Demo view").
+  The audit of what V2 left open, and its closure, is §8.12.
 
 ---
 
-## 8. V2 — the culture joins the rig (2026-09-05) · STATUS: RELEASED 0.7.125–0.7.129 (2026-09-05) · what stayed open is in §8.12
+## 8. V2 — the culture joins the rig (2026-09-05) · STATUS: RELEASED 0.7.125–0.7.129 (2026-09-05); the §8.12 gaps closed in 0.7.140 (2026-09-06)
 
 v1 (0.7.117) shipped a generic jar model with presets taken from a snippet-level sweep. V2 starts
 from three things that changed on 2026-09-04: Reece's Reefphyto order landed (invoice 55330), the
@@ -429,7 +430,9 @@ hatch-cone geometry pinned to y = 334 so the air manifold lines up; tub at (560,
 *As built (0.7.125):* `rig` = `{stage, caption, cones, tub, jug, bottle}` — no `enrich` key and no
 beaker in the drawing; the soak has its own tile beside the rig, and the drawing's only nod to it is
 the "(or enrich this crop first)" caption. `jug` carries `purgeMl` and `sieveUm` as well. A cone is
-drawn dashed only when its jar is configured and unseeded; a one-cone rack shows no ghost B (§8.12).
+drawn dashed when its jar is configured and unseeded; since 0.7.140 a lone RUNNING cone earns a
+ghost B beside it (`status: "ghost"`, faint and dashed, "comes with the first restart") — the
+never-zero doctrine in the drawing, not a jar in the config.
 
 ### 8.5 The culture journal and the learned cadences
 
@@ -530,6 +533,20 @@ from the plan above:**
   (guarded), the phone actions `OPENREEF_CULTURE_{HARVEST|FED|RESTARTED|LATER}:<jar>` and
   `OPENREEF_HATCH_LOADED:<vessel>` handled by the same cores the tab's buttons call, and a source-level
   test that every `websocket_*` handler is registered (three Stage B–C handlers were not until 0.7.129).
+- **0.7.140 (the §8.12 closure):** journal rows carry `purgeMl` (harvest + restart rows on a cone;
+  normaliser clamps 0–500) and `learned.purge` (`run_length_runs` + `purge_note`: two runs at each of
+  two volumes before it speaks); `rig.cones[]` may end with a `status: "ghost"` B; `heat_guard(...,
+  offset_c)` + `rack_offset_c` (the rack sensor's lead over the projection's "now" row, clamped ±5,
+  under 0.5 = noise) and `summary.rackOffsetC`; `summary.arrival.rotifer` = `acclimation_plan(27,
+  cone ppt)` (equal steps ≤ 5 ppt, each addition sized for one step, four additions max, honest when
+  the cap cannot close the gap); the hatchery's three soak notices push through
+  `_async_push_actionable` with `OPENREEF_ENRICH_{DOSE|TOPUP|LOADED}` (cores
+  `_nps_enrich_{dose,second_dose,loaded}_apply` shared with the WS handlers); the daily maintenance
+  digest carries `Done: <task>` for the first two tasks (overdue first) + Later, tag
+  `openreef_maintenance_digest`, handled by `OPENREEF_TASK_DONE:<task_id>` →
+  `_maintenance_complete_apply` (the service's own core; the entry has no `source` — it is the
+  keeper's completion — the notes and the event say "phone"). Panel: the Cultures tab's Demo view
+  (summary-only swap, every tap refused, never saved).
 
 ### 8.8 Suggestions — what would make it the go-to system (ranked)
 
@@ -674,37 +691,45 @@ A 0.7.128 config migrates once in the NPS normaliser (plan fields onto the produ
 fake HA's lenient stub hid it) — registered now, with a source-level test that every
 `websocket_*` handler is registered.
 
-### 8.12 What stayed open — audited against the code 2026-09-06
+### 8.12 What stayed open — audited 2026-09-06, closed in 0.7.140 the same day
 
-Everything §8.9 scheduled is released (0.7.125–0.7.129; `tests/test_cultures.py` 55/55,
-`tests/test_panel_cultures.mjs` 23/23). This is the honest remainder, checked line by line against
-`cultures.py`, `__init__.py` and the panel.
+Everything §8.9 scheduled is released (0.7.125–0.7.129). The audit against `cultures.py`,
+`__init__.py` and the panel found six locked answers only partly delivered and one v1 leftover;
+0.7.140 closed every one that code can close.
 
-**Locked answers only partly delivered (§8.11):**
-- **#6 purge in the journal** — the cone's `purgeMl` setting exists (default 50, 0–500) and the rig
-  caption reads it, but no journal row records the purge, so the learned run length cannot yet say
-  whether more helps.
-- **#7 "B greyed until it exists"** — a cone is drawn dashed only when its jar is configured and
-  unseeded; a one-cone rack shows no ghost B on the manifold.
-- **#9 actionable pushes on both tabs** — the hatch-ready push (Hatched & loaded / Later) and the
-  cultures one-question push carry buttons; the hatchery's enrichment-soak notices and the daily
-  maintenance digest still go out as plain `notify`. The heat-guard push goes through the helper
-  with no buttons (by design — there is nothing to tap).
-- **#10 per-rack sensor for the guard** — `cultures.tempEntity` (falling back to the hatchery's
-  sensor) drives today's heat line, but the day-ahead `heat_guard` reads only the cooling headroom's
-  projection, with no rack offset.
-- **§8.8 #7 starter acclimation maths** — the arrival walkthrough says "add cone water in steps"
-  but does not compute the ±5 ppt steps from the starter's salinity to the cone's.
-- **Research item 7** — Darren's answer on the enrichment window (2–4 h vs 6–12 h) is still open;
-  `soakH` defaults to 6 (2–12) until then.
+**Closed (0.7.140):**
+- **#6 purge in the journal** — harvest and restart rows on a cone record `purgeMl`; the journal
+  shows "harvested · bled 50 ml"; `learned.purge` compares run lengths by purge volume once there are
+  two runs at each of two volumes ("runs bled ~100 ml lasted ~13 d, ~50 ml lasted ~11 d — the bigger
+  purge buys ~2 more days" / "no difference — keep the smaller purge" / "bleed less").
+- **#7 "B greyed until it exists"** — a lone running cone earns a ghost B on the manifold: faint,
+  dashed, "comes with the first restart"; the shape line counts real cones and says B is pencilled in.
+- **#9 actionable pushes on both tabs** — the hatchery's dose / top-up / soak-done notices carry
+  "Dose added" / "Top-up added" / "Enriched & loaded" + Later; the daily digest carries "Done: <task>"
+  for the first two tasks (overdue first) + Later. Every button runs the same core as the tab's
+  button; a stale tap is refused into the activity feed. The heat-guard push stays button-less (nothing
+  to tap).
+- **#10 per-rack sensor for the guard** — `cultures.tempEntity` (or the hatchery's) read against the
+  projection's "now" row gives the rack's offset (clamped ±5 °C, under 0.5 = noise); every guard
+  shifts the forecast by it and the line says "rack +2.0 °C over the room"; `summary.rackOffsetC`.
+- **§8.8 #7 starter acclimation maths** — the walkthrough now reads the backend's plan: "the starter
+  is at ~27 ppt and the cone at 35: float the pouch 15 min, then add 500 ml of cone water, wait 15 min
+  (~31 ppt); then net them into the cone — the last step is 4 ppt". Starter salinity = 27 (Reefphyto
+  cultures at 1.019–1.021; the shipping SG is not on the page — an honest assumption, in the code
+  as `STARTER_PPT`).
+- **Demo-stage data for the Cultures tab (§7.1)** — "Demo view" on the tab: two cones out of phase,
+  the tub, a soak running, tomorrow's heat warning, a journal that learned. Summary-only swap; every
+  tap and the reminder sync are refused while it shows; nothing is ever saved.
 
-**Never built (the "later arcs", untouched):** culture doctor via Lagertha (§8.8 #12); demand-driven
-sizing (#13 — `yield_ml_per_day` and the bottle's depletion driver exist, "when a second cone is
-worth it" does not); camera tint and the 1 ml count (#14); seed swap and benchmarking (#15);
-scan-the-product (#8, second half); demo-stage data for the Cultures tab (§7.1 — the rig's
-play-the-stages preview is the only staged view); the continuous reactor (shelved, hardware track).
-The union disc is a purchase, not code.
+**Still open (not code):** Darren's answer on the enrichment window (2–4 h vs 6–12 h) — `soakH`
+stays 6 (2–12) until then.
 
-**Unverified on real HA:** the companion-app action buttons, the heat guard against the live
-cooling projection, and the culture-card share from the iPad. That soak is the next step, not more
-code.
+**Never built (the "later arcs", untouched by design):** culture doctor via Lagertha (§8.8 #12);
+demand-driven sizing (#13 — `yield_ml_per_day` and the bottle's depletion driver exist, "when a
+second cone is worth it" does not); camera tint and the 1 ml count (#14); seed swap and benchmarking
+(#15); scan-the-product (#8, second half); the continuous reactor (shelved, hardware track). The
+union disc is a purchase, not code.
+
+**Unverified on real HA:** the companion-app action buttons (now on hatch-ready, the three soak
+notices, the cultures question and the digest), the heat guard against the live cooling projection
+with the rack offset, and the culture-card share from the iPad. That soak is the next step.

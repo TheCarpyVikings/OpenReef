@@ -238,7 +238,7 @@ def test_normalise_cultures_defaults_and_junk():
     assert jar["cadence"]["harvestPct"] == 60 and jar["cadence"]["restartIntervalDays"] == 14
     assert jar["state"]["lastTint"] == "" and jar["state"]["startedAt"] == ""
     assert jar["history"] == [{"event": "seeded", "at": "", "ml": 0, "tint": "", "from": "",
-                               "sign": "", "eggRatio": 0, "tempC": None}]
+                               "sign": "", "eggRatio": 0, "tempC": None, "purgeMl": 0}]
     assert out["bottle"]["remainingMl"] == 0
 
 
@@ -581,7 +581,8 @@ def test_summary_carries_the_rig_and_the_vessel_fields():
     assert by_id["c2"]["vesselKind"] == "tub" and by_id["c2"]["adultSieveUm"] == 300
     assert by_id["c2"]["state"]["waterChangeOnDemand"] and by_id["c2"]["tintTarget"].startswith("Granny")
     rig = p["rig"]
-    assert [c["id"] for c in rig["cones"]] == ["c1"] and rig["tub"]["id"] == "c2"
+    assert [c["id"] for c in rig["cones"] if c["status"] != "ghost"] == ["c1"] and rig["tub"]["id"] == "c2"
+    assert rig["cones"][1]["status"] == "ghost" and rig["cones"][1]["name"] == "Rotifers B", "one running cone pencils B in (0.7.140)"
     assert rig["stage"] == "harvest" and rig["cones"][0]["airOn"] and rig["jug"]["harvestMl"] == 625
 
 
@@ -1066,6 +1067,146 @@ def test_every_websocket_handler_is_registered():
     assert handlers, "no handlers found — the regex is wrong"
     missing = sorted(handlers - registered)
     assert not missing, f"handlers the panel can never reach: {missing}"
+
+
+
+# --------------------------------------------------------------------------- #
+# 0.7.140 — the §8.12 gaps: purge in the journal, the ghost cone B, the rack's
+# offset on the guard, the starter's acclimation maths.
+# --------------------------------------------------------------------------- #
+def test_purge_rides_the_journal_and_teaches_the_run_length():
+    entry = _entry(jars={"c1": _jar(started_ago_days=10, lastHarvestAt=_iso(REAL - timedelta(hours=30)))})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "harvested": True}))
+    jar = _cultures(entry)["jars"]["c1"]
+    assert jar["history"][0]["event"] == "harvest" and jar["history"][0]["purgeMl"] == 50, "a cone harvest records the tip bleed"
+    run(integration.websocket_cultures_restart(hass, conn, {"id": 2, "jar_id": "c1"}))
+    jar = _cultures(entry)["jars"]["c1"]
+    assert jar["history"][0]["event"] == "restart" and jar["history"][0]["purgeMl"] == 50
+    # A plain jar has no tip to bleed.
+    plain = _entry(jars={"c1": {**_jar(started_ago_days=10, lastHarvestAt=_iso(REAL - timedelta(hours=30))), "vesselKind": "jar"}})
+    hass2 = FakeHass(entries=[plain])
+    run(integration.websocket_cultures_log(hass2, FakeConnection(), {"id": 1, "jar_id": "c1", "harvested": True}))
+    assert _cultures(plain)["jars"]["c1"]["history"][0]["purgeMl"] == 0
+    # The normaliser keeps and clamps it.
+    out = integration._normalise_cultures({"jars": {"c1": {"history": [{"event": "harvest", "purgeMl": 9999}]}}})
+    assert out["jars"]["c1"]["history"][0]["purgeMl"] == 500
+    # The maths: every finished run with the purge it was bled at; the note
+    # speaks only with two runs at each of two volumes.
+    def rows(days_ago_seed, purge, run_days, harvests=3):
+        seed = REAL - timedelta(days=days_ago_seed)
+        out = [{"event": "seeded", "at": _iso(seed)}]
+        for k in range(1, harvests + 1):
+            out.append({"event": "harvest", "at": _iso(seed + timedelta(days=k)), "ml": 625, "purgeMl": purge})
+        out.append({"event": "restart", "at": _iso(seed + timedelta(days=run_days)), "purgeMl": purge})
+        return out
+    history = rows(60, 50, 11) + rows(48, 50, 12) + rows(35, 100, 14) + rows(20, 100, 13)
+    # Consecutive runs: each restart row is the next run's anchor, so drop the
+    # duplicate seeds after the first run.
+    history = [history[0]] + [r for r in history[1:] if r["event"] != "seeded"]
+    runs = cultures.run_length_runs(history)
+    # Each restart anchors the next run, so the runs are −60→−49 (11 d @50),
+    # −49→−36 (13 d @50), −36→−21 (15 d @100), −21→−7 (14 d @100).
+    assert [(r["days"], r["purgeMl"]) for r in runs] == [(14.0, 100), (15.0, 100), (13.0, 50), (11.0, 50)], "newest first, with its purge"
+    note = cultures.purge_note(runs)
+    assert note["available"] and "the bigger purge buys ~" in note["line"] and note["byPurge"]["100"]["runs"] == 2
+    assert note["byPurge"]["100"]["days"] == 14.5 and note["byPurge"]["50"]["days"] == 12.0
+    assert not cultures.purge_note(runs[:3])["available"], "one run at 50 ml is not a comparison"
+    assert not cultures.purge_note([])["available"]
+    same = cultures.purge_note([{"days": 11, "purgeMl": 50}, {"days": 12, "purgeMl": 50}, {"days": 11.5, "purgeMl": 100}, {"days": 12, "purgeMl": 100}])
+    assert "no difference" in same["line"]
+    worse = cultures.purge_note([{"days": 13, "purgeMl": 50}, {"days": 12, "purgeMl": 50}, {"days": 10, "purgeMl": 100}, {"days": 11, "purgeMl": 100}])
+    assert "bleed less" in worse["line"]
+    learned = cultures.learned_cadences({"species": "rotifer_L", "cadence": {}, "history": history}, [], REAL)
+    assert learned["purge"]["available"] and learned["runLengthDays"]["available"]
+
+
+def test_rig_state_pencils_in_b_beside_one_running_cone():
+    def jar(**over):
+        base = {"id": "c1", "name": "Rotifers A", "vesselKind": "cone", "tint": "clearing", "due": [],
+                "firstHarvestDays": 6, "purgeMl": 50, "sieveUm": 50,
+                "state": {"status": "producing", "percent": 40, "ageDays": 8},
+                "feedAdvice": {"action": "wait"}, "temp": {"status": "ok", "tempC": 23, "hardMaxC": 30},
+                "harvestGuide": {"totalMl": 625, "mixMl": 480, "rodiMl": 145, "targetPpt": 27}}
+        base.update(over)
+        return base
+    one = cultures.rig_state([jar()], {})
+    assert [c["status"] for c in one["cones"]] == ["producing", "ghost"]
+    ghost = one["cones"][1]
+    assert ghost["name"] == "Rotifers B" and ghost["note"] == "comes with the first restart" and ghost["id"] == ""
+    assert not ghost["airOn"] and not ghost["purgeHot"] and one["stage"] == "steady", "a ghost is drawing only — no air, no stage"
+    assert [c["status"] for c in cultures.rig_state([jar(), jar(id="c2", name="Rotifers B")], {})["cones"]] == ["producing", "producing"], "B exists — no ghost"
+    assert [c["status"] for c in cultures.rig_state([jar(state={"status": "none"}, tint="")], {})["cones"]] == ["none"], "nothing running, nothing to pencil in"
+    assert cultures.rig_state([jar(id="c2", name="Pods", vesselKind="tub")], {})["cones"] == [], "a tub earns no cone"
+    establishing = cultures.rig_state([jar(name="Cone", state={"status": "establishing", "percent": None, "ageDays": 2})], {})
+    assert establishing["cones"][1]["name"] == "B" and establishing["stage"] == "establishing"
+
+
+def test_heat_guard_shifts_by_the_racks_own_offset():
+    proj = [{"at": _iso(REAL), "roomC": 24.0}, {"at": _iso(REAL + timedelta(hours=8)), "roomC": 27.0}]
+    assert cultures.rack_offset_c(proj, 26.0, REAL) == 2.0
+    assert cultures.rack_offset_c(proj, None, REAL) is None and cultures.rack_offset_c([], 26.0, REAL) is None
+    assert cultures.rack_offset_c([proj[1]], 26.0, REAL) is None, "no projection row for now, no offset"
+    assert cultures.rack_offset_c(proj, 40.0, REAL) == 5.0 and cultures.rack_offset_c(proj, 10.0, REAL) == -5.0, "clamped"
+    plain = cultures.heat_guard(proj, "tigriopus", REAL)
+    shifted = cultures.heat_guard(proj, "tigriopus", REAL, offset_c=2.0)
+    assert plain["status"] == "watch" and plain["offsetC"] == 0.0 and plain["line"].startswith("room peaks")
+    assert shifted["status"] == "warn" and shifted["offsetC"] == 2.0 and shifted["peakC"] == 29.0
+    assert shifted["line"].startswith("the rack passes 28 °C in ~8 h") and "rack +2.0 °C over the room" in shifted["line"]
+    assert cultures.heat_guard(proj, "tigriopus", REAL, offset_c=0.3)["offsetC"] == 0.0, "under half a degree is noise"
+    assert cultures.heat_guard(proj, "tigriopus", REAL, offset_c=99)["status"] == "watch", "an absurd offset is ignored"
+    assert cultures.heat_guard([], "tigriopus", REAL, offset_c=2.0)["available"] is False
+    # The summary: the rack sensor's lead over the projection's room shifts
+    # every guard, and says so on the payload.
+    entry = _entry(jars={"c2": _jar(species="tigriopus", started_ago_days=40)}, temp_entity="sensor.bench")
+    hass = FakeHass(entries=[entry], states={"sensor.bench": "26.0"})
+    hass.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": proj}}}
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    p = conn.results[-1].payload
+    assert p["rackOffsetC"] == 2.0 and p["jars"][0]["guard"]["status"] == "warn" and p["backup"][0]["guard"]["status"] == "warn"
+    no_sensor = _entry(jars={"c2": _jar(species="tigriopus", started_ago_days=40)})
+    hass2 = FakeHass(entries=[no_sensor])
+    hass2.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": proj}}}
+    conn2 = FakeConnection()
+    run(integration.websocket_cultures_summary(hass2, conn2, {"id": 1}))
+    p2 = conn2.results[-1].payload
+    assert p2["rackOffsetC"] is None and p2["jars"][0]["guard"]["status"] == "watch"
+
+
+def test_acclimation_plan_keeps_every_step_inside_five_ppt():
+    plan = cultures.acclimation_plan(27, 35)
+    assert plan["steps"] == [{"addMl": 500, "ppt": 31.0, "waitMin": 15}] and plan["finalStepPpt"] == 4.0 and plan["withinRule"]
+    assert "add 500 ml of cone water, wait 15 min (~31 ppt)" in plan["line"] and plan["line"].endswith("the last step is 4 ppt")
+    same = cultures.acclimation_plan(27, 27)
+    assert same["steps"] == [] and "float the pouch 15 min and pour in" in same["line"]
+    assert cultures.acclimation_plan(27, 30)["steps"] == [], "3 ppt is inside the rule"
+    down = cultures.acclimation_plan(35, 27)
+    assert down["steps"][0]["ppt"] == 31.0 and down["finalStepPpt"] == -4.0 and "the last step is 4 ppt" in down["line"]
+    three = cultures.acclimation_plan(27, 38)
+    assert len(three["steps"]) == 2 and three["withinRule"]
+    prev = 27.0
+    for step in three["steps"] + [{"ppt": 38.0}]:
+        assert abs(step["ppt"] - prev) <= 5.05, "every step inside the rule"
+        prev = step["ppt"]
+    wild = cultures.acclimation_plan(5, 45)
+    assert len(wild["steps"]) == cultures.ACCLIMATE_STEPS_MAX and not wild["withinRule"] and "too big" in wild["line"]
+    # The summary aims at the first rotifer cone's water; the v1 35 ppt jar
+    # gets the two-step plan, a 27 ppt cone gets "pour in".
+    entry = _entry(jars={"c1": _jar()})
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(FakeHass(entries=[entry]), conn, {"id": 1}))
+    arrival = conn.results[-1].payload["arrival"]["rotifer"]
+    assert arrival["fromPpt"] == 27 and arrival["toPpt"] == 35 and arrival["steps"][0]["ppt"] == 31.0
+    entry = _entry(jars={"c1": {**_jar(), "salinityPpt": 27}, "c2": _jar(species="tigriopus")})
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(FakeHass(entries=[entry]), conn, {"id": 1}))
+    arrival = conn.results[-1].payload["arrival"]["rotifer"]
+    assert arrival["toPpt"] == 27 and arrival["steps"] == []
+    empty = FakeConnection()
+    run(integration.websocket_cultures_summary(FakeHass(entries=[_entry(jars={})]), empty, {"id": 1}))
+    assert empty.results[-1].payload["arrival"]["rotifer"]["toPpt"] == 27, "no jar yet — the preset's water"
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.
