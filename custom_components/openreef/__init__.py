@@ -1114,7 +1114,8 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             continue
         bottle_history.append({"event": str(item.get("event")), "at": _awc_str(item.get("at"), 40),
                                "ml": _awc_num(item.get("ml"), 0, 0, 20000),
-                               **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {})})
+                               **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
+                               **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {})})
     # The DHA step (Stage C): drops into a portion of the crop, a short soak,
     # then the bottle carries a boost clock. Blank productId = the hatchery's
     # enrichment bottle (one Reefphyto bottle serves both).
@@ -1324,7 +1325,8 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
         "handFeeds": [
             {"at": _awc_str(item.get("at"), 40), "ml": _awc_num(item.get("ml"), 0, 0, 5000),
              "from": "bottle" if item.get("from") == "bottle" else "container",
-             **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {})}
+             **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
+             **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {})}
             for item in (raw.get("handFeeds") if isinstance(raw.get("handFeeds"), list) else [])[:nps_engine.HAND_FEED_LOG_MAX]
             if isinstance(item, dict) and _awc_str(item.get("at"), 40)
         ],
@@ -1451,6 +1453,9 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 if item.get("kind") in ("dose", "pump", "transfer", "refill") else "dose",
                 # The planned slot a hand dose satisfies (0.7.135), if it said.
                 **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
+                # Taken back (0.7.136): kept as a tombstone so a stale save
+                # cannot bring it back; every reader skips it.
+                **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {}),
             }
             for item in (raw.get("history") if isinstance(raw.get("history"), list) else [])
             if isinstance(item, dict)
@@ -7747,8 +7752,12 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                         dst_feeds = dst_hatchery.get("handFeeds")
                         merged: dict[str, Any] = {}
                         for item in (dst_feeds if isinstance(dst_feeds, list) else []) + src_feeds:
-                            if isinstance(item, dict) and item.get("at"):
-                                merged.setdefault(str(item["at"]), item)
+                            if not (isinstance(item, dict) and item.get("at")):
+                                continue
+                            key = str(item["at"])
+                            # A tombstoned row beats its live twin (0.7.136).
+                            if key not in merged or (item.get("undoneAt") and not merged[key].get("undoneAt")):
+                                merged[key] = item
                         dst_hatchery["handFeeds"] = sorted(
                             merged.values(), key=lambda item: str(item["at"]), reverse=True
                         )[:nps_engine.HAND_FEED_LOG_MAX]
@@ -7807,9 +7816,11 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
     if isinstance(stored_products, dict) and isinstance(incoming_products, dict):
         def _latest(product: Any) -> datetime | None:
             history = product.get("history") if isinstance(product, dict) else None
-            stamps = [_parse_datetime(item.get("at"))
-                      for item in (history if isinstance(history, list) else [])
-                      if isinstance(item, dict)]
+            rows = [item for item in (history if isinstance(history, list) else []) if isinstance(item, dict)]
+            # An undo is a write too (0.7.136): its tombstone stamp is newer
+            # than any row, so the stored ledger wins over a stale copy.
+            stamps = ([_parse_datetime(item.get("at")) for item in rows]
+                      + [_parse_datetime(item.get("undoneAt")) for item in rows if item.get("undoneAt")])
             stamps = [stamp for stamp in stamps if stamp is not None]
             return max(stamps) if stamps else None
 
@@ -13292,20 +13303,44 @@ async def websocket_consumable_skip_dose(
     _awc_send(connection, msg, hass, config)
 
 
+def _undo_window_ok(at: datetime | None, now: datetime) -> bool:
+    return at is not None and 0 <= (now - at).total_seconds() <= nps_engine.HAND_DOSE_UNDO_MIN * 60
+
+
+def _vessel_holds_that_load(load_iso: Any, at: datetime) -> bool:
+    """Credit a taken-back feed only if the vessel still holds the load it was
+    drawn from — a container reloaded, a bottle replaced or emptied since
+    keeps its level (the ml is not in the new load)."""
+    loaded = _parse_datetime(load_iso)
+    return loaded is not None and loaded <= at
+
+
+def _drop_completion(config: dict[str, Any], task_id: str, stamp: str) -> None:
+    """Remove the reminder completion a feed tap wrote (matched on its stamp)."""
+    maintenance = config.get("maintenance")
+    if not (isinstance(maintenance, dict) and isinstance(maintenance.get("completions"), dict)):
+        return
+    entries = maintenance["completions"].get(task_id)
+    if isinstance(entries, list):
+        maintenance["completions"][task_id] = [
+            item for item in entries if not (isinstance(item, dict) and str(item.get("timestamp")) == stamp)]
+
+
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/consumable_undo_dose",
     vol.Required("product_id"): cv.string,
+    vol.Optional("at"): cv.string,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_consumable_undo_dose(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Undo a mis-tapped hand dose (doc §13.8 Q9): within the window, the last
-    ``dose`` row comes off the history, the ml goes back in the bottle, the
-    plan's clock falls back to the dose before it, and the reminder completion
-    the tap wrote is removed. Nothing else moves — pump debits are the
-    machine's and stay."""
+    """Take back a hand dose (doc §13.16): the row named by ``at`` (else the
+    newest) inside the window is tombstoned — never deleted, so a stale save
+    cannot resurrect it — the ml goes back in the bottle if it is still the
+    same bottle, the plan's clock falls back to the dose before it, and the
+    reminder completion the tap wrote is removed. Pump debits stay."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -13315,36 +13350,79 @@ async def websocket_consumable_undo_dose(
     if product is None:
         return
     now = datetime.now(timezone.utc)
-    undo = nps_engine.hand_dose_undo(product, now)
-    if not undo["available"]:
-        connection.send_error(msg["id"], "nothing_to_undo",
-                              f"Nothing to undo — a hand dose can be taken back for {nps_engine.HAND_DOSE_UNDO_MIN} minutes")
-        return
     history = product.get("history") if isinstance(product.get("history"), list) else []
-    index = next((i for i in range(len(history) - 1, -1, -1)
-                  if isinstance(history[i], dict) and history[i].get("kind") == "dose"
-                  and str(history[i].get("at")) == undo["at"]), None)
-    if index is None:
-        connection.send_error(msg["id"], "nothing_to_undo", "Nothing to undo")
+    stamp = str(msg.get("at") or "")
+    if not stamp:
+        stamp = str(nps_engine.hand_dose_undo(product, now).get("at") or "")
+    row = next((item for item in history
+                if isinstance(item, dict) and item.get("kind") == "dose" and not item.get("undoneAt")
+                and str(item.get("at")) == stamp), None) if stamp else None
+    if row is None or not _undo_window_ok(_parse_datetime(stamp), now):
+        connection.send_error(msg["id"], "nothing_to_undo",
+                              "Nothing to undo — a feed can be taken back for a day")
         return
-    del history[index]
-    bottle_ml = max(0.0, float(product.get("bottleMl") or 0.0))
-    remaining = max(0.0, float(product.get("remainingMl") or 0.0)) + undo["ml"]
-    product["remainingMl"] = round(min(remaining, bottle_ml) if bottle_ml > 0 else remaining, 2)
+    row["undoneAt"] = now.isoformat()
+    ml = max(0.0, float(row.get("ml") or 0.0))
+    credited = _vessel_holds_that_load(product.get("openedAt"), _parse_datetime(stamp)) or not product.get("openedAt")
+    if credited:
+        bottle_ml = max(0.0, float(product.get("bottleMl") or 0.0))
+        remaining = max(0.0, float(product.get("remainingMl") or 0.0)) + ml
+        product["remainingMl"] = round(min(remaining, bottle_ml) if bottle_ml > 0 else remaining, 2)
     previous = [str(item.get("at")) for item in history
-                if isinstance(item, dict) and item.get("kind") == "dose" and item.get("at")]
+                if isinstance(item, dict) and item.get("kind") == "dose" and item.get("at") and not item.get("undoneAt")]
     product["lastDosedAt"] = max(previous) if previous else ""
-    task_id = _nps_shelf_task_id(str(msg["product_id"]))
-    maintenance = config.get("maintenance")
-    if isinstance(maintenance, dict) and isinstance(maintenance.get("completions"), dict):
-        entries = maintenance["completions"].get(task_id)
-        if isinstance(entries, list):
-            maintenance["completions"][task_id] = [
-                item for item in entries
-                if not (isinstance(item, dict) and str(item.get("timestamp")) == undo["at"]
-                        and item.get("source") == MAINTENANCE_SOURCE_SHELF)]
+    _drop_completion(config, _nps_shelf_task_id(str(msg["product_id"])), stamp)
     name = str(product.get("name") or "Bottle")
-    _append_activity(config, f"{name} hand dose undone — {undo['ml']:g} ml back in the bottle", "control")
+    _append_activity(config, f"{name} hand dose undone — {ml:g} ml "
+                             + ("back in the bottle" if credited else "not credited: the bottle was replaced since"), "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_hand_feed_undo",
+    vol.Required("at"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_nps_hand_feed_undo(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Take back a brine hand feed (doc §13.16): the hatchery log row named by
+    ``at`` is tombstoned, the ml returns to the vessel it came from — the
+    container or the fridge bottle — if that vessel still holds the same load,
+    and the hand-feed reminder completion goes. The mark on the strip reopens."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    hatchery = _nps_hatchery_v2(config)
+    now = datetime.now(timezone.utc)
+    stamp = str(msg.get("at") or "")
+    row = next((item for item in hatchery["handFeeds"]
+                if isinstance(item, dict) and str(item.get("at")) == stamp and not item.get("undoneAt")), None)
+    at = _parse_datetime(stamp)
+    if row is None or not _undo_window_ok(at, now):
+        connection.send_error(msg["id"], "nothing_to_undo", "Nothing to undo — a feed can be taken back for a day")
+        return
+    row["undoneAt"] = now.isoformat()
+    ml = max(0.0, float(row.get("ml") or 0.0))
+    if row.get("from") == "bottle":
+        vessel = hatchery["fridgeBottle"]
+        volume = 0.0
+        where = "the fridge bottle"
+    else:
+        vessel = _nps_canonical_reservoir(config)
+        volume = _awc_num(vessel.get("volumeMl"), 0, 0, 50000)
+        where = "the container"
+    credited = _vessel_holds_that_load(vessel.get("mixedAt"), at)
+    if credited:
+        remaining = _awc_num(vessel.get("remainingMl"), 0, 0, 1e9) + ml
+        vessel["remainingMl"] = round(min(remaining, volume) if volume > 0 else remaining, 1)
+    _drop_completion(config, MAINTENANCE_HAND_FEED_TASK_ID, stamp)
+    _append_activity(config, f"Brine hand feed undone — {ml:g} ml "
+                             + (f"back in {where}" if credited else f"not credited: {where} was reloaded since"), "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -15541,9 +15619,10 @@ async def websocket_nps_cysts_opened(
 
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/cultures_bottle",
-    vol.Required("action"): vol.In(("fed", "empty")),
+    vol.Required("action"): vol.In(("fed", "empty", "undo")),
     vol.Optional("ml"): vol.Any(int, float),
     vol.Optional("slot"): cv.string,
+    vol.Optional("at"): cv.string,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -15551,7 +15630,9 @@ async def websocket_cultures_bottle(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """The rotifer fridge bottle: 'fed' debits a dose by hand, 'empty' tips
-    a stale one out and clears its clock."""
+    a stale one out and clears its clock, 'undo' takes a feed back (doc
+    §13.16: the row is tombstoned, the ml returns if the bottle still holds
+    that fill, the hand-feed reminder completion goes)."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -15560,7 +15641,26 @@ async def websocket_cultures_bottle(
     cultures = _nps_cultures_cfg(config)
     bottle = cultures["bottle"]
     now = datetime.now(timezone.utc)
-    if msg["action"] == "empty":
+    if msg["action"] == "undo":
+        stamp = str(msg.get("at") or "")
+        row = next((item for item in bottle["history"]
+                    if isinstance(item, dict) and item.get("event") == "fed_tank"
+                    and str(item.get("at")) == stamp and not item.get("undoneAt")), None)
+        at = _parse_datetime(stamp)
+        if row is None or not _undo_window_ok(at, now):
+            connection.send_error(msg["id"], "nothing_to_undo", "Nothing to undo — a feed can be taken back for a day")
+            return
+        row["undoneAt"] = now.isoformat()
+        ml = max(0.0, awc_engine._f(row.get("ml")))
+        credited = _vessel_holds_that_load(bottle.get("filledAt"), at)
+        if credited:
+            volume = awc_engine._f(bottle.get("volumeMl"))
+            remaining = awc_engine._f(bottle["remainingMl"]) + ml
+            bottle["remainingMl"] = round(min(remaining, volume) if volume > 0 else remaining, 1)
+        _drop_completion(config, MAINTENANCE_HAND_FEED_TASK_ID, stamp)
+        _append_activity(config, f"Rotifer feed undone — {ml:g} ml "
+                                 + ("back in the bottle" if credited else "not credited: the bottle was refilled or emptied since"), "control")
+    elif msg["action"] == "empty":
         _cultures_bottle_history(bottle, "emptied", now, awc_engine._f(bottle["remainingMl"]))
         bottle["remainingMl"] = 0
         bottle["filledAt"] = ""
@@ -20756,6 +20856,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_consumable_log_dose)
     websocket_api.async_register_command(hass, websocket_consumable_skip_dose)
     websocket_api.async_register_command(hass, websocket_consumable_undo_dose)
+    websocket_api.async_register_command(hass, websocket_nps_hand_feed_undo)
     websocket_api.async_register_command(hass, websocket_consumable_refill)
     websocket_api.async_register_command(hass, websocket_consumable_delete)
     websocket_api.async_register_command(hass, websocket_dosing_respread_missed)

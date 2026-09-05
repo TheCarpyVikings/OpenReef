@@ -2702,36 +2702,37 @@ def test_hand_feed_log_is_written_by_both_fed_buttons_and_survives_a_stale_save(
 
 def test_ws_undo_dose_takes_back_a_mis_tap_within_the_window():
     now = datetime.now(timezone.utc)
-    entry = _entry({"rj": _reef_juice(doseMl=3, doseFirstAt="20:00")})
+    stale = _iso(now - timedelta(hours=26))   # yesterday's dose: outside the day-long window
+    entry = _entry({"rj": _reef_juice(doseMl=3, doseFirstAt="20:00", remainingMl=197.0, lastDosedAt=stale,
+                                      history=[{"at": stale, "ml": 3, "kind": "dose"}])})
     cfg = entry.options[CONF_SETTINGS]
     cfg["maintenance"] = {"tasks": {"nps_dose_rj": {"label": "Dose Reef Juice by hand", "cadenceDays": 1}}, "completions": {}}
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
-    # Nothing logged yet: nothing to undo.
+    # Nothing inside the window: nothing to undo.
     run(integration.websocket_consumable_undo_dose(hass, conn, {"id": 0, "product_id": "rj"}))
     assert conn.error_codes == ["nothing_to_undo"]
     conn = FakeConnection()
-    earlier = _iso(now - timedelta(hours=5))
-    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 1, "product_id": "rj", "at": earlier}))
     run(integration.websocket_consumable_log_dose(hass, conn, {"id": 2, "product_id": "rj"}))
     assert not conn.errors
     saved = _saved_products(entry)["rj"]
-    assert saved["remainingMl"] == 194.0 and len(saved["history"]) == 2 and saved["lastDosedAt"] != earlier
-    assert len(entry.options[CONF_SETTINGS]["maintenance"]["completions"]["nps_dose_rj"]) == 2
-    # The plan advertises the undo.
+    assert saved["remainingMl"] == 194.0 and len(saved["history"]) == 2 and saved["lastDosedAt"] != stale
+    assert len(entry.options[CONF_SETTINGS]["maintenance"]["completions"]["nps_dose_rj"]) == 1
+    # The plan advertises the undo — for a day.
     run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
     undo = conn.results[-1].payload["shelf"]["products"]["rj"]["handDose"]["undo"]
-    assert undo["available"] and undo["ml"] == 3.0 and undo["at"] == saved["lastDosedAt"] and 9 <= undo["minutesLeft"] <= 10, undo
-    # Undo: the ml goes back, the row goes, the clock falls back to the earlier dose, the completion goes.
+    assert undo["available"] and undo["ml"] == 3.0 and undo["at"] == saved["lastDosedAt"] and 1430 <= undo["minutesLeft"] <= 1440, undo
+    # Undo: the ml goes back, the row is tombstoned (not deleted), the clock falls back to the earlier dose, the completion goes.
     run(integration.websocket_consumable_undo_dose(hass, conn, {"id": 4, "product_id": "rj"}))
     assert not conn.errors, conn.errors
     saved = _saved_products(entry)["rj"]
-    assert saved["remainingMl"] == 197.0 and len(saved["history"]) == 1 and saved["history"][0]["at"] == earlier
-    assert saved["lastDosedAt"] == earlier
-    comps = entry.options[CONF_SETTINGS]["maintenance"]["completions"]["nps_dose_rj"]
-    assert len(comps) == 1 and comps[0]["timestamp"] == earlier
+    assert saved["remainingMl"] == 197.0 and len(saved["history"]) == 2 and saved["history"][-1]["undoneAt"] and "undoneAt" not in saved["history"][0]
+    assert saved["lastDosedAt"] == stale
+    assert entry.options[CONF_SETTINGS]["maintenance"]["completions"].get("nps_dose_rj", []) == []
     assert any(item.get("message") == "Reef Juice hand dose undone — 3 ml back in the bottle" for item in entry.options[CONF_SETTINGS]["activity"])
-    # The earlier dose is outside the window: nothing more to undo.
+    # Usage sees only the stale dose (3 ml over ~1.08 days ≈ 2.8 ml/day), never the taken-back one (which would double it).
+    assert nps.usage_ml_per_day(saved, now) < 3.0, "a taken-back dose is not usage"
+    # The stale one is outside the window, the undone one is gone: nothing more to undo.
     conn = FakeConnection()
     run(integration.websocket_consumable_undo_dose(hass, conn, {"id": 5, "product_id": "rj"}))
     assert conn.error_codes == ["nothing_to_undo"]
@@ -2742,7 +2743,13 @@ def test_ws_undo_dose_takes_back_a_mis_tap_within_the_window():
     conn2 = FakeConnection()
     run(integration.websocket_consumable_undo_dose(FakeHass(entries=[entry2]), conn2, {"id": 6, "product_id": "p"}))
     assert not conn2.errors and _saved_products(entry2)["p"]["remainingMl"] == 100.0 and _saved_products(entry2)["p"]["lastDosedAt"] == ""
-
+    # A bottle replaced since the dose keeps its level — the row still goes.
+    entry3 = _entry({"p": _product(bottleMl=100, remainingMl=100, doseMl=5, openedAt=_iso(now),
+                                   history=[{"at": _iso(now - timedelta(hours=2)), "ml": 5, "kind": "dose"}], lastDosedAt=_iso(now - timedelta(hours=2)))})
+    conn3 = FakeConnection()
+    run(integration.websocket_consumable_undo_dose(FakeHass(entries=[entry3]), conn3, {"id": 7, "product_id": "p"}))
+    p3 = _saved_products(entry3)["p"]
+    assert not conn3.errors and p3["remainingMl"] == 100.0 and p3["history"][-1]["undoneAt"] and p3["lastDosedAt"] == ""
 
 
 def test_normalise_drops_a_feed_exchange_link_to_a_channel_that_is_gone():
@@ -2902,6 +2909,111 @@ def test_a_feed_that_names_its_slot_fills_that_slot():
     # Junk slots are dropped, not stored.
     run(integration.websocket_nps_hand_feed(hass, conn, {"id": 4, "slot": "midnight-ish"}))
     assert "slot" not in entry.options[CONF_SETTINGS]["nps"]["hatchery"]["handFeeds"][0]
+
+
+def test_undo_any_of_todays_feeds_from_the_strip():
+    """Reece: "add an undo for the completed feeds so I can fix my timeline"
+    (0.7.136). Every done mark — brine from the container or the fridge
+    bottle, the rotifer bottle, the shelf — can be taken back from its card:
+    the row is tombstoned (a stale save cannot bring it back), the ml goes
+    back where it came from if that vessel still holds the same load, the
+    reminder completion goes, and the mark reopens."""
+    now = datetime.now(timezone.utc)
+    loaded = _iso(now - timedelta(hours=6))
+    entry = _v2_entry(reservoir={"volumeMl": 500, "remainingMl": 300, "mixedAt": loaded})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["handFeed"] = {"defaultDoseMl": 30, "feedsPerDay": 3, "windowStart": "11:00", "windowEnd": "21:00"}
+    cfg["nps"]["hatchery"]["fridgeBottle"] = {"remainingMl": 200, "mixedAt": loaded, "refrigeratedAt": loaded}
+    cfg["nps"]["cultures"] = {"enabled": True, "bottle": {"volumeMl": 1000, "remainingMl": 300, "doseMl": 40, "filledAt": _iso(now - timedelta(hours=3))}}
+    cfg["consumables"]["products"]["rj"] = _reef_juice(doseMl=3)
+    cfg["maintenance"] = {"tasks": {"brine_hand_feed": {"label": "Feed live brine", "cadenceDays": 1},
+                                    "nps_dose_rj": {"label": "Dose Reef Juice by hand", "cadenceDays": 1}}, "completions": {}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hand_feed(hass, conn, {"id": 1, "slot": "11:00"}))                         # container 300 -> 270
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 2, "action": "feed", "ml": 20, "slot": "16:00"}))  # fridge bottle 200 -> 180
+    run(integration.websocket_cultures_bottle(hass, conn, {"id": 3, "action": "fed"}))                        # rotifer bottle 300 -> 260
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 4, "product_id": "rj"}))                 # shelf 200 -> 197
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    assert [f["from"] for f in saved["nps"]["hatchery"]["handFeeds"]] == ["bottle", "container"]
+    assert len(saved["maintenance"]["completions"]["brine_hand_feed"]) == 3 and len(saved["maintenance"]["completions"]["nps_dose_rj"]) == 1
+    run(integration.websocket_nps_summary(hass, conn, {"id": 5}))
+    tl = conn.results[-1].payload["timeline"]
+    done = [e for e in tl["events"] if e["status"] == "done"]
+    assert sorted(e["source"] for e in done) == ["brine", "brine", "cultures-bottle", "shelf:rj"], done
+    assert all(e["undoable"] and e["doneStamp"] for e in done), done
+    brine = sorted((e for e in done if e["source"] == "brine"), key=lambda e: e["at"])
+    assert [e["at"] for e in brine] == [660, 960], "the slotted feeds sit on their slots"
+    container_stamp, bottle_stamp = brine[0]["doneStamp"], brine[1]["doneStamp"]
+    rot_stamp = next(e["doneStamp"] for e in done if e["source"] == "cultures-bottle")
+    rj_stamp = next(e["doneStamp"] for e in done if e["source"] == "shelf:rj")
+    # --- The container feed: credited (same load), tombstoned, completion gone.
+    run(integration.websocket_nps_hand_feed_undo(hass, conn, {"id": 6, "at": container_stamp}))
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["hatchery"]["reservoir"]["remainingMl"] == 300
+    rows = {f["at"]: f for f in saved["nps"]["hatchery"]["handFeeds"]}
+    assert rows[container_stamp]["undoneAt"] and "undoneAt" not in rows[bottle_stamp] and len(rows) == 2, "tombstoned, not deleted"
+    assert [c["timestamp"] for c in saved["maintenance"]["completions"]["brine_hand_feed"]] == [rot_stamp, bottle_stamp]
+    assert any("Brine hand feed undone — 30 ml back in the container" == item.get("message") for item in saved["activity"])
+    # --- The fridge-bottle feed goes back to the fridge bottle.
+    run(integration.websocket_nps_hand_feed_undo(hass, conn, {"id": 7, "at": bottle_stamp}))
+    assert not conn.errors and entry.options[CONF_SETTINGS]["nps"]["hatchery"]["fridgeBottle"]["remainingMl"] == 200
+    # --- The rotifer bottle.
+    run(integration.websocket_cultures_bottle(hass, conn, {"id": 8, "action": "undo", "at": rot_stamp}))
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["cultures"]["bottle"]["remainingMl"] == 300 and saved["nps"]["cultures"]["bottle"]["history"][0]["undoneAt"]
+    assert saved["maintenance"]["completions"].get("brine_hand_feed", []) == []
+    # --- The shelf, by stamp.
+    run(integration.websocket_consumable_undo_dose(hass, conn, {"id": 9, "product_id": "rj", "at": rj_stamp}))
+    assert not conn.errors, conn.errors
+    rj = _saved_products(entry)["rj"]
+    assert rj["remainingMl"] == 200.0 and rj["history"][-1]["undoneAt"] and rj["lastDosedAt"] == ""
+    assert entry.options[CONF_SETTINGS]["maintenance"]["completions"].get("nps_dose_rj", []) == []
+    # --- The strip forgets them all; the marks reopen.
+    run(integration.websocket_nps_summary(hass, conn, {"id": 10}))
+    tl2 = conn.results[-1].payload["timeline"]
+    assert not any(e["status"] == "done" for e in tl2["events"]) and tl2["counts"]["done"] == 0
+    assert [e["at"] for e in tl2["events"] if e["source"] == "brine"] == [660, 960, 1260], "the brine slots are open again"
+    # --- A stale save from another tab still carrying the live rows cannot resurrect them.
+    saved = entry.options[CONF_SETTINGS]
+    stored = _deepcopy(saved)
+    incoming = _deepcopy(saved)
+    for row in incoming["nps"]["hatchery"]["handFeeds"]:
+        row.pop("undoneAt", None)
+    for row in incoming["consumables"]["products"]["rj"]["history"]:
+        row.pop("undoneAt", None)
+    incoming["consumables"]["products"]["rj"]["remainingMl"] = 197.0
+    incoming["consumables"]["products"]["rj"]["lastDosedAt"] = rj_stamp
+    for row in incoming["nps"]["cultures"]["bottle"]["history"]:
+        row.pop("undoneAt", None)
+    incoming["nps"]["cultures"]["bottle"]["remainingMl"] = 260
+    integration._nps_preserve_runtime(stored, incoming)
+    assert all(row.get("undoneAt") for row in incoming["nps"]["hatchery"]["handFeeds"]), "the tombstones win the union"
+    assert incoming["consumables"]["products"]["rj"]["remainingMl"] == 200.0 and incoming["consumables"]["products"]["rj"]["history"][-1]["undoneAt"] and incoming["consumables"]["products"]["rj"]["lastDosedAt"] == ""
+    assert incoming["nps"]["cultures"]["bottle"]["remainingMl"] == 300 and incoming["nps"]["cultures"]["bottle"]["history"][0]["undoneAt"]
+    # --- No credit when the container was reloaded after the feed; the row still goes.
+    run(integration.websocket_nps_hand_feed(hass, conn, {"id": 11}))                        # 300 -> 270
+    cfg = entry.options[CONF_SETTINGS]
+    late_stamp = cfg["nps"]["hatchery"]["handFeeds"][0]["at"]
+    cfg["nps"]["hatchery"]["reservoir"]["mixedAt"] = _iso(datetime.now(timezone.utc) + timedelta(seconds=1))
+    run(integration.websocket_nps_hand_feed_undo(hass, conn, {"id": 12, "at": late_stamp}))
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["nps"]["hatchery"]["reservoir"]["remainingMl"] == 270 and saved["nps"]["hatchery"]["handFeeds"][0]["undoneAt"]
+    assert any("not credited: the container was reloaded since" in item.get("message", "") for item in saved["activity"])
+    # --- Outside the day, an unknown stamp, an already-undone row: nothing to undo.
+    old_stamp = _iso(datetime.now(timezone.utc) - timedelta(hours=25))
+    entry.options[CONF_SETTINGS]["nps"]["hatchery"]["handFeeds"].append({"at": old_stamp, "ml": 30, "from": "container"})
+    for bad in (old_stamp, "2020-01-01T00:00:00+00:00", late_stamp):
+        c = FakeConnection()
+        run(integration.websocket_nps_hand_feed_undo(hass, c, {"id": 13, "at": bad}))
+        assert c.error_codes == ["nothing_to_undo"], bad
+    c = FakeConnection()
+    run(integration.websocket_cultures_bottle(hass, c, {"id": 14, "action": "undo", "at": rot_stamp}))
+    assert c.error_codes == ["nothing_to_undo"], "already undone"
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

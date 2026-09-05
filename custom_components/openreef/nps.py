@@ -145,6 +145,8 @@ def usage_ml_per_day(product: dict[str, Any], now: datetime,
     for event in history:
         if not isinstance(event, dict) or event.get("kind") not in ("dose", "pump", "transfer"):
             continue
+        if event.get("undoneAt"):
+            continue   # taken back — the ml never left the bottle
         at = _parse_iso(event.get("at"))
         if at is None:
             continue
@@ -310,12 +312,13 @@ def _anchored_slot(base: datetime, slots: list[int], unit: str, tz: Any) -> date
 
 
 def hand_dose_undo(product: dict[str, Any], now: datetime) -> dict[str, Any]:
-    """The last hand dose, if it was logged within the undo window: what the
-    Undo tap would reverse. History is time-ordered; only ``dose`` rows (the
-    keeper's taps) are undoable — pump debits and transfers are the machine's."""
+    """The newest hand dose still inside the undo window (a day — the strip
+    shows today, and any of today's feeds can be taken back, doc §13.16).
+    Only ``dose`` rows (the keeper's taps) count; pump debits and transfers
+    are the machine's; a tombstoned row (``undoneAt``) is already gone."""
     history = product.get("history") if isinstance(product.get("history"), list) else []
     for item in reversed(history):
-        if not isinstance(item, dict) or item.get("kind") != "dose":
+        if not isinstance(item, dict) or item.get("kind") != "dose" or item.get("undoneAt"):
             continue
         at = _parse_iso(item.get("at"))
         if at is None:
@@ -517,7 +520,7 @@ HATCH_CYST_G_PER_L = 2.0
 HATCH_TEMP_OPTIMUM_C = 28.0
 HATCH_HISTORY_MAX = 50
 HAND_FEED_LOG_MAX = 60        # stamped container/bottle feeds the strip reads (doc §13.10)
-HAND_DOSE_UNDO_MIN = 10       # a mis-tapped hand dose can be undone this long (doc §13.8 Q9)
+HAND_DOSE_UNDO_MIN = 24 * 60  # any of TODAY's feeds can be taken back (doc §13.16) — the strip shows the day
 
 # Fridge storage nearly stops nauplii metabolism: 24 h shelf life at room temp,
 # 48 h refrigerated. Audit 2026-09-01 (doc §12): unfed nauplii lose ~20% dry
@@ -1271,7 +1274,10 @@ def _event(**fields: Any) -> dict[str, Any]:
     """One strip event, every field present — extras and slots alike."""
     base = {"id": "", "at": None, "how": "hand", "source": "", "name": "", "productId": "",
             "ml": None, "actualMl": None, "status": "planned", "doneAt": None,
-            "note": "", "kind": "dose", "band": None, "unplanned": False, "nextDate": None}
+            "note": "", "kind": "dose", "band": None, "unplanned": False, "nextDate": None,
+            # The logged row behind a done mark (its ISO stamp) and whether
+            # the keeper can take it back from the card (doc §13.16).
+            "doneStamp": None, "undoable": False}
     base.update(fields)
     return base
 
@@ -1295,6 +1301,7 @@ def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
             continue
         target["status"] = "done"
         target["doneAt"] = item["at"]
+        target["doneStamp"] = item.get("stamp")
         if item.get("ml") is not None:
             target["actualMl"] = item["ml"]
     for item in rest:
@@ -1313,10 +1320,11 @@ def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
                 best, best_gap = ev, gap
         if best is None:
             extras.append(_event(at=item["at"], ml=item.get("ml"), actualMl=item.get("ml"),
-                                 status="done", doneAt=item["at"], unplanned=True))
+                                 status="done", doneAt=item["at"], doneStamp=item.get("stamp"), unplanned=True))
         else:
             best["status"] = "done"
             best["doneAt"] = item["at"]
+            best["doneStamp"] = item.get("stamp")
             if item.get("ml") is not None:
                 best["actualMl"] = item["ml"]
     return extras
@@ -1449,17 +1457,19 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         source = f"shelf:{pid}"
         done: list[dict[str, Any]] = []
         for item in (product.get("history") if isinstance(product.get("history"), list) else []):
-            if not isinstance(item, dict) or item.get("kind") != "dose":
+            if not isinstance(item, dict) or item.get("kind") != "dose" or item.get("undoneAt"):
                 continue
             minute, _ = _local_minute(item.get("at"), today, tz)
             if minute is not None:
-                done.append({"at": minute, "ml": round(_f(item.get("ml")), 2), "slot": _hhmm_min(item.get("slot"))})
+                done.append({"at": minute, "ml": round(_f(item.get("ml")), 2), "slot": _hhmm_min(item.get("slot")),
+                             "stamp": str(item.get("at"))})
         if pid in quiet:
             done = []
         if not cad["unit"]:
             # No cadence: anything logged today still shows — the strip is the day's truth.
             events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,
-                             ml=d["ml"], actualMl=d["ml"], status="done", doneAt=d["at"], unplanned=True)
+                             ml=d["ml"], actualMl=d["ml"], status="done", doneAt=d["at"], doneStamp=d.get("stamp"),
+                             unplanned=True)
                           for i, d in enumerate(done))
             continue
         skipped_min, skipped_day = _local_minute(product.get("doseSkippedAt"), today, tz)
@@ -1474,7 +1484,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                              status="ghost", nextDate=clock_day.isoformat(),
                              note=f"not today — next {clock_day.strftime('%a %d %b')}"))
             events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,
-                             ml=d["ml"], actualMl=d["ml"], status="done", doneAt=d["at"], unplanned=True)
+                             ml=d["ml"], actualMl=d["ml"], status="done", doneAt=d["at"], doneStamp=d.get("stamp"),
+                             unplanned=True)
                           for i, d in enumerate(done))
             continue
         carried = cad["unit"] == "days" and clock_day < today and not skipped_today
@@ -1538,11 +1549,11 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
     if bottle:
         bottle_done = []
         for item in (bottle.get("history") if isinstance(bottle.get("history"), list) else []):
-            if isinstance(item, dict) and item.get("event") == "fed_tank":
+            if isinstance(item, dict) and item.get("event") == "fed_tank" and not item.get("undoneAt"):
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
                     bottle_done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None,
-                                        "slot": _hhmm_min(item.get("slot"))})
+                                        "slot": _hhmm_min(item.get("slot")), "stamp": str(item.get("at"))})
         # The bottle's own plan (0.7.134): N feeds a day inside its window
         # while it holds rotifers; empty = nothing planned, done marks only.
         per_day = max(0, int(_f(bottle.get("feedsPerDay"))))
@@ -1580,11 +1591,11 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                    for i, t in enumerate(times if on_hand else [])]
         done = []
         for item in (brine_feeds or []):
-            if isinstance(item, dict):
+            if isinstance(item, dict) and not item.get("undoneAt"):
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
                     done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None,
-                                 "slot": _hhmm_min(item.get("slot"))})
+                                 "slot": _hhmm_min(item.get("slot")), "stamp": str(item.get("at"))})
         extras = _timed_plan(planned, done, now_min)
         for i, extra in enumerate(extras):
             extra.update({"id": f"brine:x{i}", "source": "brine", "name": "Live brine",
@@ -1617,6 +1628,12 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         if on_min is not None and off_min is not None and off_min > on_min:
             night = {"onMin": on_min, "offMin": off_min}
 
+    # What the keeper can take back from a mark's card (doc §13.16): a logged
+    # row from the shelf, the brine log or the rotifer bottle. Pump run stamps
+    # and jar harvests are not undoable from here.
+    for e in events:
+        e["undoable"] = bool(e["status"] == "done" and e.get("doneStamp")
+                             and (str(e["source"]).startswith("shelf:") or e["source"] in ("brine", "cultures-bottle")))
     events.sort(key=lambda e: (e["kind"] == "band", e["at"] is None, e["at"] if e["at"] is not None else 0,
                               e["how"] != "pump"))
     upcoming = [e for e in events if e["kind"] == "dose" and e["status"] in ("planned", "due", "late")]

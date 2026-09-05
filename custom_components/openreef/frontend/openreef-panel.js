@@ -1840,8 +1840,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-timeline-skip") this._npsCall({ type: "openreef/consumable_skip_dose", product_id: id },
         "Skipped — the cadence holds, the next slot stands.");
       if (action === "nps-timeline-dosenow") this._doserDoseNow(id, Number(target.dataset.ml));
-      if (action === "nps-timeline-undo") this._npsCall({ type: "openreef/consumable_undo_dose", product_id: id },
-        "Undone — the ml is back in the bottle and the clock fell back to the dose before.");
+      if (action === "nps-timeline-undo") this._npsTimelineUndo(target.dataset.kind, id, target.dataset.at);
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded(id);
       if (action === "nps-hatch-start") this._npsCall(
@@ -10299,6 +10298,16 @@ class OpenReefPanel extends HTMLElement {
       `Logged ${ml} ml — the runway forecast learns from every dose.`);
   }
 
+  // Undo from a mark's card (doc §13.16): one command per ledger — the shelf
+  // bottle, the hatchery's brine log, the rotifer bottle — each stamped by the
+  // row it reverses.
+  _npsTimelineUndo(kind, pid, at) {
+    const done = "Undone — the ml is back where it came from and the mark is open again.";
+    if (kind === "brine") return this._npsCall({ type: "openreef/nps_hand_feed_undo", at }, done);
+    if (kind === "bottle") return this._culturesCall({ type: "openreef/cultures_bottle", action: "undo", at }, done);
+    return this._npsCall({ type: "openreef/consumable_undo_dose", product_id: pid, at }, done);
+  }
+
   // Late logging (doc §13.6, Q3): the dose happened earlier today — stamp it
   // when it happened. The backend refuses the future and anything older than a day.
   _npsTimelineLogLate(pid) {
@@ -11738,14 +11747,14 @@ class OpenReefPanel extends HTMLElement {
       actions.push(`<span class="nps-tl-late"><input type="time" data-nps-late="${esc(pid)}" aria-label="Dosed earlier at"><button class="secondary compact-button" data-action="nps-timeline-log-late" data-id="${esc(pid)}">Dosed earlier</button></span>`);
       if (ev.status !== "skipped") actions.push(`<button class="secondary compact-button" data-action="nps-timeline-skip" data-id="${esc(pid)}" title="Holds the cadence — the next slot stands, no ml moves">Skip today</button>`);
     }
-    // A done hand dose logged in the last few minutes can be taken back (Q9).
-    const undo = shelf?.handDose?.undo || null;
-    if (pid && ev.how === "hand" && ev.status === "done" && undo?.available) {
-      const undoMs = Date.parse(undo.at || "");
-      const undoMin = Number.isFinite(undoMs) ? new Date(undoMs).getHours() * 60 + new Date(undoMs).getMinutes() : null;
-      if (undoMin == null || ev.doneAt == null || undoMin === ev.doneAt) {
-        actions.push(`<button class="secondary compact-button" data-action="nps-timeline-undo" data-id="${esc(pid)}" title="Takes the last hand dose back — ${esc(undo.minutesLeft)} min left">Undo ${esc(undo.ml)} ml</button>`);
-      }
+    // Any of today's done feeds can be taken back from its mark (doc §13.16):
+    // the row is tombstoned, the ml returns where it came from if that vessel
+    // still holds the same load, the reminder completion goes, the mark reopens.
+    if (ev.undoable && ev.doneStamp) {
+      const src = String(ev.source || "");
+      const kind = src.startsWith("shelf:") ? "shelf" : src === "brine" ? "brine" : "bottle";
+      const back = kind === "shelf" ? "the bottle" : kind === "brine" ? "the container or fridge bottle" : "the rotifer bottle";
+      actions.push(`<button class="secondary compact-button" data-action="nps-timeline-undo" data-kind="${kind}" data-id="${esc(pid)}" data-at="${esc(ev.doneStamp)}" title="Takes this feed back — the ml returns to ${back} and the mark reopens">Undo${ev.actualMl != null ? ` ${esc(ev.actualMl)} ml` : ""}</button>`);
     }
     if (cid && ev.kind === "dose" && ev.ml != null) {
       actions.push(`<button class="secondary compact-button" data-action="nps-timeline-dosenow" data-id="${esc(cid)}" data-ml="${esc(ev.ml)}" title="The firmware's guard chain has the final say">Dose ${esc(ev.ml)} ml now</button>`);

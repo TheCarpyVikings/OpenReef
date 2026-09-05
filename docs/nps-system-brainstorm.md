@@ -838,7 +838,7 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
-## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.135 (2026-09-05)** — see §13.10–§13.15
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.136 (2026-09-05)** — see §13.10–§13.16
 
 ### 13.1 What v1 is, honestly
 
@@ -987,4 +987,16 @@ Tests: `test_nps.py` 137 (2 new); `test_panel_nps.mjs` 48 (times-a-day editor as
 ### 13.15 0.7.135 — a tap on a slot's card files the feed against that slot
 
 Reece, live: with brine on 3 feeds 11:00–21:00 he tapped the missed 11:00 mark and hit **Fed 250 ml** at 17:11 — the feed landed on the 16:00 slot (nearest open) and a second tap became an extra. The matcher was right about the clock and wrong about the intent. Now every feed command (`nps_hand_feed`, `nps_fridge_bottle feed`, `consumable_log_dose`, `cultures_bottle fed`) takes an optional `slot` (HH:MM); the strip's card buttons carry the slot of the mark they were opened from (the hatchery card's plain Fed carries none), the row stores it, and `_match_done` files slotted feeds first, then goes greedy for the rest (an unknown or already-filled slot falls back to nearest). A matched feed is drawn **on its slot**; the card says when it really happened ("Done at 17:11 (planned 16:00)"). The button says what it will do: *Fed 250 ml — filed as the 11:00 feed*. The rotifer-bottle card gets its own Fed. Tests: `test_nps.py` 138 (1 new), `test_panel_nps.mjs` 48.
+
+### 13.16 0.7.136 — Undo on every completed feed (Q9, finally settled)
+
+Reece: *"add an undo button for the completed feeds so I can fix my timeline."* The 10-minute shelf-only undo becomes **any of today's feeds, from its mark's card**:
+
+- **Window**: a day (`HAND_DOSE_UNDO_MIN = 1440`) — the strip shows today, so anything on it can be taken back.
+- **Three ledgers, one button**: shelf doses (`consumable_undo_dose`, now with an `at` so any row can be named, not only the newest), brine hand feeds (NEW `nps_hand_feed_undo`, registered — the row's `from` says whether the ml returns to the container or the fridge bottle), rotifer-bottle feeds (`cultures_bottle` action `undo`). Every done mark carries `doneStamp` (its row's ISO stamp) and `undoable`; the card's **Undo N ml** dispatches by source (`_npsTimelineUndo`).
+- **Tombstones, not deletes**: the row gets `undoneAt` and stays. Every reader skips it (usage/runway, the undo hint, the strip's collectors, `lastDosedAt` recompute). The stale-save guards learn it: a product's "latest write" now includes tombstone stamps, and the hatchery hand-feed union prefers the tombstoned twin — a tab still holding the live row cannot resurrect it. The bottle history was already stored-wins.
+- **Credit only into the same load**: the ml returns if the vessel's load stamp (`openedAt` / `mixedAt` / `filledAt`) predates the feed; a container reloaded, a bottle replaced or emptied since keeps its level and the activity line says *not credited*.
+- The reminder completion the tap wrote is removed by stamp (shelf task / `brine_hand_feed`); the normaliser drops an emptied completion list on save, so tests read it with `.get`.
+
+Tests: `test_nps.py` 139 (1 new + the old undo test rewritten for the day window and tombstones), `test_panel_nps.mjs` 48 (undo by ledger).
 

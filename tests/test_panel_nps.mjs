@@ -282,16 +282,27 @@ test("tapping a mark opens its dose card with the right actions, and the actions
     assert(html.includes('data-nps-late="rj"') && html.includes('data-action="nps-timeline-log-late"'), "the dosed-earlier picker");
     assert(html.includes('data-action="nps-timeline-skip" data-id="rj"'), "skip today");
     assert(html.includes('r="9.5"'), "the selected mark wears a halo");
-    // A done dose: no actions but Close — unless the shelf says it can still be undone.
+    // A done dose: no actions but Close — unless the engine says it can be taken back.
     panel._nps.timelineOpen = "shelf:phyto:0";
     html = panel._npsTimelineSvg();
     assert(html.includes("Done at 08:12 (planned 08:00) · 2 ml") && !html.includes("nps-timeline-log") && html.includes("nps-timeline-close") && !html.includes("nps-timeline-undo"), "done card is read-only");
-    const undoAt = new Date(NOW); undoAt.setHours(8, 12, 0, 0);
-    panel._nps.summary.shelf.products.phyto.handDose = { undo: { available: true, ml: 2, at: undoAt.toISOString(), minutesLeft: 7.5 } };
+    const phytoDone = panel._nps.summary.timeline.events.find((e) => e.id === "shelf:phyto:0");
+    phytoDone.undoable = true; phytoDone.doneStamp = "2026-08-13T08:12:00+00:00";
     html = panel._npsTimelineSvg();
-    assert(html.includes('data-action="nps-timeline-undo" data-id="phyto"') && html.includes("Undo 2 ml") && html.includes("7.5 min left"), `undo missing: ${html}`);
-    panel._nps.summary.shelf.products.phyto.handDose.undo.at = new Date(Date.parse(NOW) - 60000).toISOString();
-    assert(!panel._npsTimelineSvg().includes("nps-timeline-undo"), "the undo belongs to the mark it would reverse, not every done dose");
+    assert(html.includes('data-action="nps-timeline-undo" data-kind="shelf" data-id="phyto" data-at="2026-08-13T08:12:00+00:00"') && html.includes("Undo 2 ml"), `undo missing: ${html}`);
+    // Each ledger has its own command: the shelf, the brine log, the rotifer bottle.
+    const undoCalls = [];
+    panel._culturesCall = async (msg) => { undoCalls.push(msg); return {}; };
+    await panel._npsTimelineUndo("shelf", "phyto", "S1");
+    await panel._npsTimelineUndo("brine", "", "S2");
+    await panel._npsTimelineUndo("bottle", "", "S3");
+    assert(calls.at(-2).type === "openreef/consumable_undo_dose" && calls.at(-2).product_id === "phyto" && calls.at(-2).at === "S1", "shelf undo");
+    assert(calls.at(-1).type === "openreef/nps_hand_feed_undo" && calls.at(-1).at === "S2", "brine undo");
+    assert(undoCalls.at(-1).type === "openreef/cultures_bottle" && undoCalls.at(-1).action === "undo" && undoCalls.at(-1).at === "S3", "bottle undo");
+    panel._nps.summary.timeline.events.push({ id: "brine:9", at: 960, how: "hand", source: "brine", name: "Live brine", productId: "", ml: 250,
+      actualMl: 250, status: "done", doneAt: 1031, doneStamp: "2026-08-13T17:11:00+00:00", undoable: true, note: "", kind: "dose", band: null, unplanned: false, nextDate: null });
+    panel._nps.timelineOpen = "brine:9";
+    assert(panel._npsTimelineSvg().includes('data-action="nps-timeline-undo" data-kind="brine" data-id="" data-at="2026-08-13T17:11:00+00:00"'), "a brine mark's card offers undo");
     // A pump tick: dose now with the planned ml.
     panel._nps.timelineOpen = "channel:brine:1";
     html = panel._npsTimelineSvg();
