@@ -2378,6 +2378,288 @@ def test_the_reef_juice_preset_carries_its_plan():
     assert all("doseGuide" not in item for item in nps.PRODUCT_LIBRARY if not item["name"].startswith("Reef Juice"))
 
 
+
+# --- Feed timeline v2 (doc §13): the slot model, the skip, the late log, the strip.
+
+def _tl(now_local, **kw):
+    kw.setdefault("products", {})
+    kw.setdefault("channels", {})
+    return nps.feed_timeline(now_local, **kw)
+
+
+def _by_id(timeline, prefix):
+    return [e for e in timeline["events"] if e["id"].startswith(prefix)]
+
+
+def test_hand_dose_slots_derive_from_the_cadence():
+    hourly = nps.hand_dose_slots(_product(doseEveryHours=6, doseFirstAt="08:00"))
+    assert hourly["unit"] == "hours" and hourly["perDay"] == 4 and hourly["slots"] == [2 * 60, 8 * 60, 14 * 60, 20 * 60]
+    assert hourly["text"] == "every 6 h from 08:00 · 4 a day"
+    odd = nps.hand_dose_slots(_product(doseEveryHours=5, doseFirstAt="08:00"))
+    assert odd["perDay"] == 4 and odd["slots"] == [8 * 60, 13 * 60, 18 * 60, 23 * 60], "restarts at the anchor each day — no drift"
+    chips = nps.hand_dose_slots(_product(doseEveryHours=12))
+    assert chips["perDay"] == 2 and chips["slots"] == [] and chips["firstAt"] == "", "no anchor = any-time chips"
+    daily = nps.hand_dose_slots(_product(doseEveryDays=2, doseFirstAt="20:30"))
+    assert daily["unit"] == "days" and daily["perDay"] == 1 and daily["slots"] == [20 * 60 + 30] and daily["text"] == "every 2 days at 20:30"
+    none = nps.hand_dose_slots(_product())
+    assert none["unit"] == "" and none["perDay"] == 0
+    both = nps.hand_dose_slots(_product(doseEveryDays=3, doseEveryHours=8))
+    assert both["unit"] == "hours", "hours outrank days when both are set"
+
+
+def test_hand_dose_clock_snaps_to_the_anchored_slot_and_stays_in_lockstep():
+    tz = timezone.utc
+    # Every day at 08:00, dosed yesterday 20:00 -> due today 08:00, not 20:00.
+    dosed = datetime(2026, 8, 12, 20, 0, tzinfo=tz)
+    state = nps.hand_dose_state(_product(doseMl=3, doseEveryDays=1, doseFirstAt="08:00", lastDosedAt=_iso(dosed)), NOW, None, tz)
+    assert state["clock"]["at"] == _iso(datetime(2026, 8, 13, 8, 0, tzinfo=tz)) and state["clock"]["due"]
+    assert state["cadenceText"] == "every day at 08:00" and state["slots"] == ["08:00"]
+    # Dosed early today (07:00) -> tomorrow 08:00, the day cadence gates the day.
+    early = nps.hand_dose_state(_product(doseMl=3, doseEveryDays=1, doseFirstAt="08:00",
+                                         lastDosedAt=_iso(datetime(2026, 8, 13, 7, 0, tzinfo=tz))), NOW, None, tz)
+    assert early["clock"]["at"] == _iso(datetime(2026, 8, 14, 8, 0, tzinfo=tz)) and early["clock"]["hoursUntil"] == 20.0
+    # Every 6 h from 08:00, dosed 08:10 -> next 14:00 (snapped, not 14:10).
+    hourly = nps.hand_dose_state(_product(doseMl=1, doseEveryHours=6, doseFirstAt="08:00",
+                                          lastDosedAt=_iso(datetime(2026, 8, 13, 8, 10, tzinfo=tz))), NOW, None, tz)
+    assert hourly["clock"]["at"] == _iso(datetime(2026, 8, 13, 14, 0, tzinfo=tz)) and hourly["clock"]["hoursUntil"] == 2.0
+    assert hourly["everyHours"] == 6.0 and hourly["everyDays"] == 0.0 and hourly["slotsPerDay"] == 4
+    # A dose between slots owns the nearer one: 10:59 -> 14:00, 11:01 -> 20:00.
+    mid = nps.hand_dose_state(_product(doseMl=1, doseEveryHours=6, doseFirstAt="08:00",
+                                       lastDosedAt=_iso(datetime(2026, 8, 13, 10, 59, tzinfo=tz))), NOW, None, tz)
+    assert mid["clock"]["at"] == _iso(datetime(2026, 8, 13, 14, 0, tzinfo=tz))
+    # No anchor = plain arithmetic (the 0.7.129 contract holds).
+    plain = nps.hand_dose_state(_product(doseMl=1, doseEveryHours=6, lastDosedAt=_iso(NOW - timedelta(hours=2))), NOW, None, tz)
+    assert plain["clock"]["hoursUntil"] == 4.0
+    # Late in the day past the last slot -> wraps to tomorrow's first.
+    late = nps.hand_dose_state(_product(doseMl=1, doseEveryHours=6, doseFirstAt="08:00",
+                                        lastDosedAt=_iso(datetime(2026, 8, 13, 20, 5, tzinfo=tz))), NOW, None, tz)
+    assert late["clock"]["at"] == _iso(datetime(2026, 8, 14, 2, 0, tzinfo=tz))
+    # A skip holds the cadence: never dosed but skipped at NOW -> next slot, not "due now".
+    skipped = nps.hand_dose_state(_product(doseMl=3, doseEveryDays=1, doseFirstAt="08:00", doseSkippedAt=_iso(NOW)), NOW, None, tz)
+    assert not skipped["clock"]["due"] and skipped["clock"]["at"] == _iso(datetime(2026, 8, 14, 8, 0, tzinfo=tz))
+    assert skipped["lastAt"] == "" and skipped["skippedAt"] == _iso(NOW), "the real last dose stays untouched"
+
+
+def test_normalise_hours_cadence_anchor_and_skip_stamp():
+    config = integration._normalise_core_config({"consumables": {"products": {
+        "p": {"name": "Phyto", "doseEveryHours": 99, "doseFirstAt": "25:99", "doseSkippedAt": "x" * 80},
+        "q": {"name": "Pods", "doseEveryHours": 6, "doseFirstAt": "8:5"},
+    }}})
+    p = config["consumables"]["products"]["p"]
+    assert p["doseEveryHours"] == 24 and p["doseFirstAt"] == "" and len(p["doseSkippedAt"]) == 40
+    q = config["consumables"]["products"]["q"]
+    assert q["doseEveryHours"] == 6 and q["doseFirstAt"] == "08:05"
+    # The skip stamp is server-written: a stale save must not clobber a newer one.
+    stored = {"consumables": {"products": {"p": _product(doseSkippedAt=_iso(NOW))}}}
+    incoming = _deepcopy(stored)
+    incoming["consumables"]["products"]["p"]["doseSkippedAt"] = ""
+    integration._nps_preserve_runtime(stored, incoming)
+    assert incoming["consumables"]["products"]["p"]["doseSkippedAt"] == _iso(NOW)
+
+
+def test_ws_skip_dose_holds_the_cadence_and_snoozes_the_reminder():
+    entry = _entry({"rj": _reef_juice(doseFirstAt="20:00")})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["tank"] = {"volumeLitres": 52}
+    cfg["maintenance"] = {"tasks": {"nps_dose_rj": {"label": "Dose Reef Juice by hand", "cadenceDays": 1}}, "completions": {}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_consumable_skip_dose(hass, conn, {"id": 1, "product_id": "rj"}))
+    assert not conn.errors
+    saved = _saved_products(entry)["rj"]
+    assert saved["doseSkippedAt"] and saved["lastDosedAt"] == "" and saved["remainingMl"] == 200.0 and saved["history"] == []
+    maintenance = entry.options[CONF_SETTINGS]["maintenance"]
+    comp = maintenance["completions"]["nps_dose_rj"][0]
+    assert comp["skipped"] is True and comp["source"] == "shelf"
+    assert maintenance["tasks"]["nps_dose_rj"]["snoozedUntil"], "the reminder sleeps until the engine's next slot"
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    plan = conn.results[-1].payload["shelf"]["products"]["rj"]["handDose"]
+    assert not plan["clock"]["due"] and plan["clock"]["at"] == maintenance["tasks"]["nps_dose_rj"]["snoozedUntil"], "one clock, two readers"
+    # No cadence = nothing to skip.
+    entry2 = _entry({"p": _product(doseMl=2)})
+    conn2 = FakeConnection()
+    run(integration.websocket_consumable_skip_dose(FakeHass(entries=[entry2]), conn2, {"id": 3, "product_id": "p"}))
+    assert conn2.error_codes == ["no_plan"]
+
+
+def test_ws_log_dose_late_stamps_when_it_happened():
+    entry = _entry({"rj": _reef_juice(doseMl=3)})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    earlier = datetime.now(timezone.utc) - timedelta(hours=3)
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 1, "product_id": "rj", "at": _iso(earlier)}))
+    assert not conn.errors
+    saved = _saved_products(entry)["rj"]
+    assert saved["history"][-1]["at"] == _iso(earlier) and saved["lastDosedAt"] == _iso(earlier) and saved["remainingMl"] == 197.0
+    # A later real dose keeps lastDosedAt at the newest stamp even if a back-dated one follows.
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 2, "product_id": "rj"}))
+    newest = _saved_products(entry)["rj"]["lastDosedAt"]
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 3, "product_id": "rj", "at": _iso(earlier - timedelta(hours=1))}))
+    saved = _saved_products(entry)["rj"]
+    assert saved["lastDosedAt"] == newest and [h["at"] for h in saved["history"]] == sorted(h["at"] for h in saved["history"]), "history stays in time order"
+    # Future or ancient stamps are refused.
+    for bad in (_iso(datetime.now(timezone.utc) + timedelta(minutes=5)), _iso(datetime.now(timezone.utc) - timedelta(days=2)), "junk"):
+        c = FakeConnection()
+        run(integration.websocket_consumable_log_dose(hass, c, {"id": 9, "product_id": "rj", "at": bad}))
+        assert c.error_codes == ["bad_stamp"], bad
+
+
+def test_feed_timeline_pumps_hand_slots_and_the_ladder():
+    tz = timezone.utc
+    now = datetime(2026, 8, 13, 14, 20, tzinfo=tz)  # 14:20
+    channels = {
+        "phyto": {"name": "Phyto pump", "chemical": "food", "enabled": True,
+                  "reservoir": {"productId": "phyto"},
+                  "schedule": {"enabled": True, "mlPerDay": 4, "mode": "doses", "dosesPerDay": 4,
+                               "windowStart": "08:00", "windowEnd": "20:00"},
+                  "state": {"lastDoseAt": _iso(datetime(2026, 8, 13, 12, 31, tzinfo=tz))}},
+        "cont": {"name": "Drip", "chemical": "livefood", "enabled": True,
+                 "schedule": {"enabled": True, "mlPerDay": 50, "mode": "continuous",
+                              "windowStart": "22:00", "windowEnd": "06:00"}},
+        "alk": {"name": "Alk", "chemical": "alk", "schedule": {"enabled": True, "mlPerDay": 20, "mode": "doses", "dosesPerDay": 4}},
+    }
+    products = {
+        "phyto": _product(name="Phyto"),
+        # Every 6 h from 08:00: 08:00 done (logged 08:12), 14:00 due (20 min ago), 20:00 planned, 02:00 missed (successor due).
+        "pods": _product(name="Pods", doseMl=2, doseEveryHours=6, doseFirstAt="08:00",
+                         history=[{"at": _iso(datetime(2026, 8, 13, 8, 12, tzinfo=tz)), "ml": 2, "kind": "dose"},
+                                  {"at": _iso(datetime(2026, 8, 12, 8, 0, tzinfo=tz)), "ml": 2, "kind": "dose"}],
+                         lastDosedAt=_iso(datetime(2026, 8, 13, 8, 12, tzinfo=tz))),
+        # Every day at 09:00, never dosed -> late (days cadence never goes red).
+        "rj": _reef_juice(doseMl=3, doseFirstAt="09:00"),
+        # Every 2 days at 20:00, dosed yesterday -> ghost today.
+        "ghost": _product(name="Amino", doseMl=1, doseEveryDays=2, doseFirstAt="20:00",
+                          lastDosedAt=_iso(datetime(2026, 8, 12, 20, 0, tzinfo=tz))),
+        # Every 12 h, no anchor -> two any-time chips; one extra logged without a plan match counts as the first.
+        "chips": _product(name="Zoo", doseMl=5, doseEveryHours=12,
+                          history=[{"at": _iso(datetime(2026, 8, 13, 10, 0, tzinfo=tz)), "ml": 5, "kind": "dose"}]),
+        # No plan at all, but a dose logged today -> an extra done dot.
+        "loose": _product(name="Loose", history=[{"at": _iso(datetime(2026, 8, 13, 11, 0, tzinfo=tz)), "ml": 4, "kind": "dose"}]),
+    }
+    tl = _tl(now, products=products, channels=channels,
+             awc={"enabled": True, "schedule": {"enabled": True, "mode": "times", "times": ["02:00", "22:00"]}},
+             lighting={"configured": True, "onTime": "09:00", "offTime": "21:00"})
+    assert tl["nowMin"] == 14 * 60 + 20 and tl["night"] == {"onMin": 540, "offMin": 1260}
+    pump = _by_id(tl, "channel:phyto:")
+    assert [e["at"] for e in pump] == [570, 750, 930, 1110] and all(e["ml"] == 1.0 for e in pump)
+    assert [e["status"] for e in pump] == ["expected", "done", "planned", "planned"], "past ticks are expected; the run stamp's nearest is done"
+    assert pump[1]["doneAt"] == 12 * 60 + 31
+    band = _by_id(tl, "channel:cont:")
+    assert len(band) == 1 and band[0]["kind"] == "band" and band[0]["band"] == [1320, 360]
+    assert not _by_id(tl, "channel:alk"), "only food pumps ride the strip"
+    pods = _by_id(tl, "shelf:pods:")
+    assert [(e["at"], e["status"]) for e in pods] == [(120, "missed"), (480, "done"), (840, "due"), (1200, "planned")]
+    assert pods[1]["doneAt"] == 8 * 60 + 12 and pods[1]["actualMl"] == 2.0
+    rj = _by_id(tl, "shelf:rj:")
+    assert [(e["at"], e["status"]) for e in rj] == [(540, "late")] and rj[0]["how"] == "hand"
+    ghost = _by_id(tl, "shelf:ghost:")
+    assert ghost[0]["status"] == "ghost" and ghost[0]["at"] == 1200 and ghost[0]["nextDate"] == "2026-08-14"
+    chips = _by_id(tl, "shelf:chips:")
+    assert [e["at"] for e in chips] == [None, None] and sorted(e["status"] for e in chips) == ["done", "due"]
+    loose = _by_id(tl, "shelf:loose:")
+    assert loose[0]["status"] == "done" and loose[0]["unplanned"] and loose[0]["at"] == 660
+    awc = _by_id(tl, "awc:")
+    assert [(e["at"], e["how"], e["status"]) for e in awc] == [(120, "system", "expected"), (1320, "system", "planned")]
+    # Sorted: timed first by minute, bands and chips after.
+    ats = [e["at"] for e in tl["events"] if e["kind"] == "dose" and e["at"] is not None]
+    assert ats == sorted(ats)
+    assert tl["events"][-1]["kind"] == "band"
+    # Next: the due/late ones first (0 min), then the soonest planned.
+    assert tl["next"][0]["minutesUntil"] == 0 and len(tl["next"]) == 3
+    assert tl["counts"]["pump"] == 4 and tl["counts"]["missed"] == 1 and tl["counts"]["late"] == 1 and tl["counts"]["extra"] == 1
+    assert tl["text"].startswith("12 feeds today — 4 pumped (Phyto pump), 8 by hand ("), tl["text"]
+    assert "1 missed" in tl["text"] and "Set a first-dose time" in tl["text"], tl["text"]
+
+
+def test_feed_timeline_skip_carried_overdue_and_the_zero_states():
+    tz = timezone.utc
+    now = datetime(2026, 8, 13, 14, 20, tzinfo=tz)
+    # Skipped today: every slot left open reads skipped; the logged one stays done.
+    skipped = _product(name="Skip", doseMl=1, doseEveryHours=8, doseFirstAt="06:00",
+                       doseSkippedAt=_iso(datetime(2026, 8, 13, 14, 0, tzinfo=tz)),
+                       history=[{"at": _iso(datetime(2026, 8, 13, 6, 5, tzinfo=tz)), "ml": 1, "kind": "dose"}])
+    # Overdue since Tuesday (every day at 20:00, last dosed Monday) -> due now, not planned for 20:00.
+    carried = _product(name="Carried", doseMl=1, doseEveryDays=1, doseFirstAt="20:00",
+                       lastDosedAt=_iso(datetime(2026, 8, 10, 20, 0, tzinfo=tz)))
+    tl = _tl(now, products={"s": skipped, "c": carried})
+    assert [e["status"] for e in _by_id(tl, "shelf:s:")] == ["done", "skipped", "skipped"]
+    c = _by_id(tl, "shelf:c:")
+    assert c[0]["status"] == "due" and c[0]["at"] == 1200 and c[0]["note"].startswith("overdue since")
+    # Nothing at all.
+    empty = _tl(now)
+    assert empty["events"] == [] and empty["next"] == [] and empty["text"].startswith("Nothing scheduled")
+    # A days-cadence slot past its time is late, never missed, right up to midnight.
+    late_day = _tl(datetime(2026, 8, 13, 23, 59, tzinfo=tz),
+                   products={"rj": _reef_juice(doseMl=3, doseFirstAt="09:00")})
+    assert _by_id(late_day, "shelf:rj:")[0]["status"] == "late"
+    # Local-day bucketing: a dose logged 23:30 UTC yesterday is TODAY in UTC+2.
+    east = timezone(timedelta(hours=2))
+    stamped = _product(name="East", doseMl=1, doseEveryDays=1,
+                       history=[{"at": _iso(datetime(2026, 8, 12, 23, 30, tzinfo=timezone.utc)), "ml": 1, "kind": "dose"}],
+                       lastDosedAt=_iso(datetime(2026, 8, 12, 23, 30, tzinfo=timezone.utc)))
+    tl_east = _tl(datetime(2026, 8, 13, 10, 0, tzinfo=east), products={"e": stamped})
+    e = _by_id(tl_east, "shelf:e:")
+    assert e[0]["status"] == "done" and e[0]["doneAt"] == 90, e
+
+
+def test_feed_timeline_cultures_and_hand_brine():
+    tz = timezone.utc
+    now = datetime(2026, 8, 13, 14, 20, tzinfo=tz)
+    cultures = {"enabled": True, "jars": {
+        "pods": {"name": "Pod tub", "species": "copepod_tisbe",
+                 "state": {"startedAt": _iso(now - timedelta(days=40)), "lastHarvestAt": _iso(now - timedelta(days=11))},
+                 "cadence": {"harvestIntervalDays": 10},
+                 "history": [{"event": "harvest", "at": _iso(datetime(2026, 8, 13, 9, 0, tzinfo=tz)), "ml": 300}]},
+        "rots": {"name": "Cone", "species": "rotifer_L",
+                 "state": {"startedAt": _iso(now - timedelta(days=20)), "lastHarvestAt": _iso(now - timedelta(days=2))},
+                 "cadence": {"harvestIntervalDays": 1},
+                 "history": [{"event": "harvest", "at": _iso(datetime(2026, 8, 13, 9, 0, tzinfo=tz)), "ml": 500}]},
+    }, "bottle": {"history": [{"event": "fed_tank", "at": _iso(datetime(2026, 8, 13, 12, 0, tzinfo=tz)), "ml": 40}]}}
+    hatchery = {"enabled": True, "reservoir": {"remainingMl": 400}, "fridgeBottle": {"remainingMl": 0},
+                "handFeed": {"defaultDoseMl": 30, "feedsPerDay": 2}}
+    feeds = [{"at": _iso(datetime(2026, 8, 13, 8, 0, tzinfo=tz)), "ml": 30}]
+    tl = _tl(now, cultures=cultures, hatchery=hatchery, brine_feeds=feeds,
+             culture_bottle_species={"rotifer_L"})
+    pods = _by_id(tl, "culture:pods:")
+    assert len(pods) == 1 and pods[0]["status"] == "done" and pods[0]["doneAt"] == 540 and pods[0]["actualMl"] == 300.0
+    assert not _by_id(tl, "culture:rots"), "a rotifer harvest fills the bottle — the bottle feeds the tank"
+    bottle = _by_id(tl, "cultures-bottle:")
+    assert bottle[0]["status"] == "done" and bottle[0]["at"] == 720 and bottle[0]["ml"] == 40.0
+    brine = _by_id(tl, "brine:")
+    assert sorted(e["status"] for e in brine) == ["done", "due"] and [e["ml"] for e in brine] == [30.0, 30.0]
+    assert tl["counts"]["hand"] == 4 and tl["counts"]["done"] == 3
+    # With the exchange pump doing the brine, no hand chips.
+    auto = _tl(now, hatchery=hatchery, brine_feeds=feeds, fx_enabled=True)
+    assert not _by_id(auto, "brine:")
+    # Empty container, no chips either — nothing to feed.
+    dry = _tl(now, hatchery={**hatchery, "reservoir": {"remainingMl": 0}})
+    assert not _by_id(dry, "brine:")
+
+
+def test_ws_summary_carries_the_timeline():
+    tz_now = datetime.now(timezone.utc)
+    entry = _entry({"rj": _reef_juice(doseMl=3, doseFirstAt="23:59")},
+                   channels={"phyto": {"name": "Phyto pump", "chemical": "food", "enabled": True,
+                                       "schedule": {"enabled": True, "mlPerDay": 4, "mode": "doses", "dosesPerDay": 2,
+                                                    "windowStart": "00:00", "windowEnd": "00:00"}}})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["maintenance"] = {"tasks": {"brine_hand_feed": {"label": "Feed brine", "cadenceDays": 1}},
+                          "completions": {"brine_hand_feed": [{"id": "x", "timestamp": _iso(tz_now), "notes": "hand-fed 25 ml from the NPS tab", "source": "hatchery"}]}}
+    cfg["nps"]["hatchery"] = {"enabled": True, "reservoir": {"volumeMl": 1000, "remainingMl": 400, "mixedAt": _iso(tz_now)},
+                              "handFeed": {"defaultDoseMl": 30, "feedsPerDay": 2}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    assert not conn.errors
+    tl = conn.results[-1].payload["timeline"]
+    assert set(tl) == {"date", "nowMin", "night", "events", "next", "counts", "text"}
+    ids = [e["id"] for e in tl["events"]]
+    assert "channel:phyto:0" in ids and "shelf:rj:0" in ids and "brine:0" in ids, ids
+    brine = [e for e in tl["events"] if e["source"] == "brine"]
+    assert any(e["status"] == "done" and e["actualMl"] == 25.0 for e in brine), "the completion note's ml is the done mark"
+    assert all(s in nps.TIMELINE_STATUSES for s in (e["status"] for e in tl["events"]))
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

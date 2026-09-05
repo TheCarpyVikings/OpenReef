@@ -209,23 +209,115 @@ def hand_dose_guide(product: dict[str, Any], tank_l: Any) -> dict[str, Any]:
             "stocking": band, "perLitres": per}
 
 
-def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None) -> dict[str, Any]:
+HAND_DOSE_HOURS_MAX = 24.0
+HAND_DOSE_DUE_WINDOW_MIN = 30      # a timed slot is "due" this long after its time, then "late"
+HAND_DOSE_ANYTIME_MATCH_MIN = 1440  # an any-time chip takes a dose logged at any hour
+
+
+def _hhmm_min(value: Any) -> int | None:
+    """'HH:MM' -> minutes since midnight, or None."""
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
+def _min_hhmm(minute: int) -> str:
+    minute = int(minute) % 1440
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def hand_dose_slots(product: dict[str, Any]) -> dict[str, Any]:
+    """The bottle's daily slots, derived from its cadence (doc §13.4): every N
+    hours = floor(24/N) slots a day from the anchor time, restarting at the
+    anchor each day; every N days = one slot at the anchor on due days. No
+    anchor = the same count of "any time today" chips (slots empty)."""
+    hours = max(0.0, _f(product.get("doseEveryHours")))
+    days = max(0.0, _f(product.get("doseEveryDays")))
+    anchor = _hhmm_min(product.get("doseFirstAt"))
+    if hours > 0:
+        hours = min(HAND_DOSE_HOURS_MAX, hours)
+        per_day = max(1, int(24.0 // hours))
+        unit, n = "hours", hours
+    elif days > 0:
+        per_day = 1
+        unit, n = "days", days
+    else:
+        return {"unit": "", "n": 0.0, "firstAt": "", "perDay": 0, "slots": [], "text": ""}
+    slots: list[int] = []
+    if anchor is not None:
+        if unit == "hours":
+            slots = sorted(int(round(anchor + k * hours * 60)) % 1440 for k in range(per_day))
+        else:
+            slots = [anchor]
+    if unit == "hours":
+        text = f"every {hours:g} h"
+        if anchor is not None:
+            text += f" from {_min_hhmm(anchor)}"
+        if per_day > 1:
+            text += f" · {per_day} a day"
+    else:
+        text = "every day" if days == 1 else f"every {days:g} days"
+        if anchor is not None:
+            text += f" at {_min_hhmm(anchor)}"
+    return {"unit": unit, "n": n, "firstAt": _min_hhmm(anchor) if anchor is not None else "",
+            "perDay": per_day, "slots": slots, "text": text}
+
+
+def _anchored_slot(base: datetime, slots: list[int], unit: str, tz: Any) -> datetime:
+    """Where the cadence's next slot actually falls (local wall clock). Hours:
+    the anchored slot nearest ``base`` (a dose ten minutes late still owns its
+    slot, so the next one is the next one, not the one after). Days: the anchor
+    time on ``base``'s date — the day cadence gates the day, the anchor places
+    the slot."""
+    local = base.astimezone(tz) if tz is not None else base
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    ordered = sorted(slots)
+    if unit == "days":
+        return day + timedelta(minutes=ordered[0])
+    candidates = [day + timedelta(days=d, minutes=slot) for d in (-1, 0, 1) for slot in ordered]
+    return min(candidates, key=lambda c: abs((c - local).total_seconds()))
+
+
+def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
+                    tz: Any = None) -> dict[str, Any]:
     """The bottle's hand-dose plan: the size (the keeper's number, else the
-    guide's), the cadence, and a due clock off the last logged hand dose. A
-    planned bottle never dosed is due now — the reminder should say so, not
-    wait a cadence for a dose that never happened."""
+    guide's), the cadence (days OR hours, doc §13.4), and a due clock off the
+    last logged hand dose — or the last skip, which holds the cadence without
+    pretending a dose happened. With an anchor time the clock snaps forward to
+    the next anchored slot, so the shelf reminder, the due pill and the strip
+    all read one function. A planned bottle never dosed is due now."""
     guide = hand_dose_guide(product, tank_l)
     explicit = max(0.0, _f(product.get("doseMl")))
-    every = max(0.0, _f(product.get("doseEveryDays")))
+    cadence = hand_dose_slots(product)
+    every_days = max(0.0, _f(product.get("doseEveryDays")))
+    every_hours = max(0.0, _f(product.get("doseEveryHours")))
     ml = round(explicit, 2) if explicit > 0 else guide["ml"]
     last_iso = str(product.get("lastDosedAt") or "")
     last = _parse_iso(last_iso)
-    if every <= 0:
+    skipped = _parse_iso(product.get("doseSkippedAt"))
+    base = last
+    if skipped is not None and (base is None or skipped > base):
+        base = skipped
+    if not cadence["unit"]:
         clock = {"available": False, "due": False, "at": None, "hoursUntil": None, "hoursOverdue": None}
-    elif last is None:
+    elif base is None:
         clock = {"available": True, "due": True, "at": now.isoformat(), "hoursUntil": 0.0, "hoursOverdue": 0.0}
     else:
-        at = last + timedelta(days=every)
+        if cadence["unit"] == "hours":
+            at = base + timedelta(hours=cadence["n"])
+        else:
+            at = base + timedelta(days=cadence["n"])
+        if cadence["slots"]:
+            at = _anchored_slot(at, cadence["slots"], cadence["unit"], tz)
         try:
             delta_h = (at - now).total_seconds() / 3600.0
         except TypeError:
@@ -233,18 +325,25 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None) 
         clock = {"available": True, "due": delta_h <= 0, "at": at.isoformat(),
                  "hoursUntil": round(max(0.0, delta_h), 1), "hoursOverdue": round(max(0.0, -delta_h), 1)}
     return {
-        "planned": bool(every > 0 or explicit > 0),
+        "planned": bool(cadence["unit"] or explicit > 0),
         "ml": ml,
-        "everyDays": every,
+        "everyDays": every_days if cadence["unit"] != "hours" else 0.0,
+        "everyHours": every_hours if cadence["unit"] == "hours" else 0.0,
+        "firstAt": cadence["firstAt"],
+        "slotsPerDay": cadence["perDay"],
+        "slots": [_min_hhmm(m) for m in cadence["slots"]],
+        "cadenceText": cadence["text"],
         "stocking": guide["stocking"],
         "guide": guide,
         "note": str(product.get("doseNote") or ""),
         "lastAt": last_iso,
+        "skippedAt": str(product.get("doseSkippedAt") or ""),
         "clock": clock,
     }
 
 
-def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None) -> dict[str, Any]:
+def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
+                     tz: Any = None) -> dict[str, Any]:
     """Everything the food shelf shows for one bottle."""
     bottle = max(0.0, _f(product.get("bottleMl")))
     remaining = min(bottle, max(0.0, _f(product.get("remainingMl")))) if bottle else 0.0
@@ -266,7 +365,7 @@ def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None)
         "stirDaily": bool(product.get("stirDaily")),
         "refrigerated": bool(product.get("refrigerated")),
         "categoryLabel": category_label(product.get("category")),
-        "handDose": hand_dose_state(product, now, tank_l),
+        "handDose": hand_dose_state(product, now, tank_l, tz),
     }
 
 
@@ -1069,7 +1168,8 @@ def nutrient_budget(products: dict[str, Any], now: datetime,
     }
 
 
-def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None) -> dict[str, Any]:
+def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None,
+                  tz: Any = None) -> dict[str, Any]:
     """The whole food shelf: per-product states plus the attention counts the
     tab header and (later) notifications read."""
     states: dict[str, dict[str, Any]] = {}
@@ -1077,7 +1177,7 @@ def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None) -
     for pid, product in products.items():
         if not isinstance(product, dict):
             continue
-        state = consumable_state(product, now, tank_l)
+        state = consumable_state(product, now, tank_l, tz)
         states[str(pid)] = state
         if state["low"] or state["empty"]:
             low += 1
@@ -1087,3 +1187,380 @@ def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None) -
             dose_due += 1
     return {"products": states, "lowCount": low, "expiredCount": expired,
             "doseDueCount": dose_due, "count": len(states)}
+
+
+# ---------------------------------------------------------------------------
+# The unified feed timeline (doc §13): every mouthful that goes into the tank
+# today — pumped, poured, harvested — on one 24 h strip, planned slots that
+# fill in when they happen. Backend-computed so the NPS tab, the Feeding tab
+# and the Pulse wall all read one list (the lockstep rule).
+
+TIMELINE_NEXT_MAX = 3
+TIMELINE_STATUSES: tuple[str, ...] = (
+    "planned", "expected", "due", "late", "missed", "skipped", "blocked", "done", "ghost")
+
+
+def _local_minute(iso: Any, today, tz: Any) -> tuple[int | None, Any]:
+    """(minute-of-day if the stamp falls on ``today`` in ``tz``, the local date)."""
+    parsed = _parse_iso(iso)
+    if parsed is None:
+        return None, None
+    try:
+        local = parsed.astimezone(tz) if tz is not None else parsed
+    except (TypeError, ValueError):
+        return None, None
+    day = local.date()
+    if day != today:
+        return None, day
+    return local.hour * 60 + local.minute, day
+
+
+def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
+                tolerance_min: float) -> list[dict[str, Any]]:
+    """Greedy: each logged dose takes the nearest unmatched planned slot within
+    tolerance (an any-time chip takes anything); the rest are extras. Mutates
+    the planned events in place, returns the unplanned extras."""
+    extras: list[dict[str, Any]] = []
+    for item in sorted(done, key=lambda d: d["at"]):
+        best = None
+        best_gap = None
+        for ev in planned:
+            if ev.get("doneAt") is not None or ev["status"] in ("skipped", "ghost"):
+                continue
+            if ev["at"] is None:
+                gap = HAND_DOSE_ANYTIME_MATCH_MIN - 1
+            else:
+                gap = abs(ev["at"] - item["at"])
+                if gap > tolerance_min:
+                    continue
+            if best is None or gap < best_gap:
+                best, best_gap = ev, gap
+        if best is None:
+            extras.append({**item, "status": "done", "doneAt": item["at"], "unplanned": True})
+        else:
+            best["status"] = "done"
+            best["doneAt"] = item["at"]
+            if item.get("ml") is not None:
+                best["actualMl"] = item["ml"]
+    return extras
+
+
+def _slot_status(at: int | None, now_min: int, *, unit: str, spacing_min: float,
+                 carried: bool, skipped: bool) -> str:
+    """The hand-slot ladder (doc §13.5, Q2 as locked): timed slots are due for
+    a short window, then late; an hours cadence goes missed once its successor
+    is due, a days cadence stays late until midnight — the shelf's overdue
+    clock takes over next morning. Any-time chips are simply due all day."""
+    if skipped:
+        return "skipped"
+    if at is None or carried:
+        return "due"
+    if at > now_min:
+        return "planned"
+    if now_min - at < HAND_DOSE_DUE_WINDOW_MIN:
+        return "due"
+    if unit == "hours" and spacing_min > 0 and now_min >= at + spacing_min:
+        return "missed"
+    return "late"
+
+
+def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: dict[str, Any],
+                  awc: dict[str, Any] | None = None, cultures: dict[str, Any] | None = None,
+                  hatchery: dict[str, Any] | None = None,
+                  brine_feeds: list[dict[str, Any]] | None = None,
+                  lighting: dict[str, Any] | None = None, tank_l: Any = None,
+                  fx_channel_id: str = "", fx_enabled: bool = False,
+                  culture_bottle_species: Any = None) -> dict[str, Any]:
+    """Today's feed strip. ``now_local`` must be tz-aware in the keeper's zone;
+    every stamp is bucketed by that local day. Returns the events (sorted,
+    any-time chips last), the night window, the next few, the counts and the
+    plain-English honesty line."""
+    tz = now_local.tzinfo
+    today = now_local.date()
+    now_min = now_local.hour * 60 + now_local.minute
+    events: list[dict[str, Any]] = []
+    bottle_species = set(culture_bottle_species or ())
+
+    def ev(**fields: Any) -> dict[str, Any]:
+        base = {"id": "", "at": None, "how": "hand", "source": "", "name": "", "productId": "",
+                "ml": None, "actualMl": None, "status": "planned", "doneAt": None,
+                "note": "", "kind": "dose", "band": None, "unplanned": False, "nextDate": None}
+        base.update(fields)
+        return base
+
+    # --- Pumps: schedules as slots (the firmware owns the exact clock, so past
+    # ticks are "expected"; the tick nearest the run stamp is the exact "done").
+    for cid in sorted(channels):
+        ch = channels[cid]
+        if not isinstance(ch, dict) or ch.get("chemical") not in ("food", "livefood"):
+            continue
+        if ch.get("enabled") is False:
+            continue
+        sched = ch.get("schedule") if isinstance(ch.get("schedule"), dict) else {}
+        ml_day = _f(sched.get("mlPerDay"))
+        if not sched.get("enabled") or ml_day <= 0:
+            continue
+        name = str(ch.get("name") or cid)
+        pid = str(((ch.get("reservoir") or {}) if isinstance(ch.get("reservoir"), dict) else {}).get("productId") or "")
+        ws = _hhmm_min(sched.get("windowStart")) or 0
+        we = _hhmm_min(sched.get("windowEnd")) or 0
+        span = we - ws if we > ws else (1440 if we == ws else 1440 - ws + we)
+        source = f"channel:{cid}"
+        is_fx = bool(fx_channel_id) and str(cid) == str(fx_channel_id)
+        note = "Live brine — the chaser flush banks owed drain for the matched exchange" if is_fx else ""
+        if str(sched.get("mode") or "doses") == "continuous":
+            events.append(ev(id=f"{source}:band", how="pump", source=source, name=name, productId=pid,
+                             ml=round(ml_day, 2), kind="band", band=[ws, (ws + span) % 1440 or 1440],
+                             status="planned", note=note or f"continuous — {ml_day:g} ml over the window"))
+            continue
+        n = max(1, min(96, int(_f(sched.get("dosesPerDay")) or 1)))
+        step = span / n
+        per = round(ml_day / n, 2)
+        state = ch.get("state") if isinstance(ch.get("state"), dict) else {}
+        last_min, _ = _local_minute(state.get("lastDoseAt"), today, tz)
+        suspended = _parse_iso(state.get("suspendedUntil"))
+        susp_min = None
+        if suspended is not None:
+            susp_min, susp_day = _local_minute(suspended.isoformat(), today, tz)
+            if susp_min is None and susp_day is not None and susp_day > today:
+                susp_min = 1440
+        slots = []
+        for i in range(n):
+            t = int(round((ws + step * (i + 0.5)) % 1440))
+            status = "planned" if t > now_min else "expected"
+            if status == "planned" and susp_min is not None and t < susp_min:
+                status = "blocked"
+            slots.append(ev(id=f"{source}:{i}", at=t, how="pump", source=source, name=name,
+                            productId=pid, ml=per, status=status,
+                            note="paused by a guard — resumes when the suspension lifts" if status == "blocked" else note))
+        if last_min is not None and slots:
+            nearest = min(slots, key=lambda s: abs(s["at"] - last_min))
+            nearest["status"] = "done"
+            nearest["doneAt"] = last_min
+        events.extend(slots)
+
+    # --- The shelf: hand plans as slots (13.4), logged doses as done marks.
+    hand_hint = False
+    for pid in sorted(products):
+        product = products[pid]
+        if not isinstance(product, dict):
+            continue
+        plan = hand_dose_state(product, now_local, tank_l, tz)
+        cad = hand_dose_slots(product)
+        name = str(product.get("name") or pid)
+        source = f"shelf:{pid}"
+        done: list[dict[str, Any]] = []
+        for item in (product.get("history") if isinstance(product.get("history"), list) else []):
+            if not isinstance(item, dict) or item.get("kind") != "dose":
+                continue
+            minute, _ = _local_minute(item.get("at"), today, tz)
+            if minute is not None:
+                done.append({"at": minute, "ml": round(_f(item.get("ml")), 2)})
+        if not cad["unit"]:
+            # No cadence: anything logged today still shows — the strip is the day's truth.
+            events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,
+                             ml=d["ml"], actualMl=d["ml"], status="done", doneAt=d["at"], unplanned=True)
+                          for i, d in enumerate(done))
+            continue
+        skipped_min, skipped_day = _local_minute(product.get("doseSkippedAt"), today, tz)
+        skipped_today = skipped_min is not None
+        clock_at = _parse_iso(plan["clock"].get("at"))
+        clock_day = clock_at.astimezone(tz).date() if clock_at is not None and tz is not None else (clock_at.date() if clock_at else today)
+        ml = plan["ml"]
+        note = plan["note"]
+        if cad["unit"] == "days" and clock_day > today and not skipped_today:
+            at = cad["slots"][0] if cad["slots"] else None
+            events.append(ev(id=f"{source}:ghost", at=at, source=source, name=name, productId=pid, ml=ml,
+                             status="ghost", nextDate=clock_day.isoformat(),
+                             note=f"not today — next {clock_day.strftime('%a %d %b')}"))
+            events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,
+                             ml=d["ml"], actualMl=d["ml"], status="done", doneAt=d["at"], unplanned=True)
+                          for i, d in enumerate(done))
+            continue
+        carried = cad["unit"] == "days" and clock_day < today and not skipped_today
+        slot_times: list[int | None] = list(cad["slots"]) if cad["slots"] else [None] * cad["perDay"]
+        if not cad["slots"]:
+            hand_hint = True
+        planned = []
+        spacing = cad["n"] * 60 if cad["unit"] == "hours" else 1440
+        for i, t in enumerate(slot_times):
+            planned.append(ev(id=f"{source}:{i}", at=t, source=source, name=name, productId=pid, ml=ml,
+                              note=note, status="planned"))
+        extras = _match_done(planned, done, spacing / 2 if cad["unit"] == "hours" else 1440)
+        first_open = True
+        for slot in planned:
+            if slot["status"] == "done":
+                continue
+            slot["status"] = _slot_status(slot["at"], now_min, unit=cad["unit"], spacing_min=spacing,
+                                          carried=carried and first_open, skipped=skipped_today)
+            if carried and first_open and slot["status"] == "due":
+                slot["note"] = (f"overdue since {clock_day.strftime('%a')} · " + note).strip(" ·")
+            first_open = False
+        for i, extra in enumerate(extras):
+            extra.update({"id": f"{source}:x{i}", "source": source, "name": name, "productId": pid,
+                          "actualMl": extra.get("ml"), "note": "extra dose — not on the plan"})
+        events.extend(planned)
+        events.extend(extras)
+
+    # --- Cultures: a harvest into the display is a feed (Q6). Species with a
+    # fridge bottle feed from the bottle; the rest go straight in.
+    cultures = cultures if isinstance(cultures, dict) else {}
+    jars = cultures.get("jars") if isinstance(cultures.get("jars"), dict) else {}
+    for jid in sorted(jars):
+        jar = jars[jid]
+        if not isinstance(jar, dict):
+            continue
+        species = str(jar.get("species") or "")
+        if species in bottle_species:
+            continue
+        state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
+        if not state.get("startedAt"):
+            continue
+        name = f"{jar.get('name') or jid} harvest"
+        source = f"culture:{jid}"
+        done = []
+        for item in (jar.get("history") if isinstance(jar.get("history"), list) else []):
+            if isinstance(item, dict) and item.get("event") == "harvest":
+                minute, _ = _local_minute(item.get("at"), today, tz)
+                if minute is not None:
+                    done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
+        cad = jar.get("cadence") if isinstance(jar.get("cadence"), dict) else {}
+        interval_d = _f(cad.get("harvestIntervalDays"))
+        last = _parse_iso(state.get("lastHarvestAt"))
+        planned = []
+        if interval_d > 0:
+            due_at = (last + timedelta(days=interval_d)) if last is not None else now_local
+            due_day = due_at.astimezone(tz).date() if tz is not None else due_at.date()
+            if due_day <= today:
+                planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None,
+                                  status="due", note="pods straight into the display — the jar's own clock"))
+        extras = _match_done(planned, done, 1440)
+        for i, extra in enumerate(extras):
+            extra.update({"id": f"{source}:x{i}", "source": source, "name": name,
+                          "actualMl": extra.get("ml"), "note": "harvested into the display"})
+        events.extend(planned)
+        events.extend(extras)
+    bottle = cultures.get("bottle") if isinstance(cultures.get("bottle"), dict) else {}
+    for i, item in enumerate(bottle.get("history") if isinstance(bottle.get("history"), list) else []):
+        if isinstance(item, dict) and item.get("event") == "fed_tank":
+            minute, _ = _local_minute(item.get("at"), today, tz)
+            if minute is not None:
+                events.append(ev(id=f"cultures-bottle:x{i}", at=minute, source="cultures-bottle",
+                                 name="Rotifers from the bottle", ml=round(_f(item.get("ml")), 1) or None,
+                                 actualMl=round(_f(item.get("ml")), 1) or None, status="done", doneAt=minute,
+                                 unplanned=True))
+
+    # --- Hand-fed brine: the hatchery's feeds-a-day as any-time chips while
+    # brine is on hand; the hand-feed reminder's completions are the done marks.
+    hatchery = hatchery if isinstance(hatchery, dict) else {}
+    if hatchery and not fx_enabled:
+        res = hatchery.get("reservoir") if isinstance(hatchery.get("reservoir"), dict) else {}
+        fridge = hatchery.get("fridgeBottle") if isinstance(hatchery.get("fridgeBottle"), dict) else {}
+        on_hand = _f(res.get("remainingMl")) > 0 or _f(fridge.get("remainingMl")) > 0
+        hand = hatchery.get("handFeed") if isinstance(hatchery.get("handFeed"), dict) else {}
+        per_day = max(0, int(_f(hand.get("feedsPerDay"))))
+        dose = round(_f(hand.get("defaultDoseMl")), 1) or None
+        planned = [ev(id=f"brine:{i}", how="hand", source="brine", name="Live brine", ml=dose, status="due",
+                      note="from the brine container — the hatchery card's Fed button logs it")
+                   for i in range(per_day if on_hand else 0)]
+        done = []
+        for item in (brine_feeds or []):
+            if isinstance(item, dict):
+                minute, _ = _local_minute(item.get("at"), today, tz)
+                if minute is not None:
+                    done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
+        extras = _match_done(planned, done, 1440)
+        for i, extra in enumerate(extras):
+            extra.update({"id": f"brine:x{i}", "source": "brine", "name": "Live brine",
+                          "actualMl": extra.get("ml"), "note": "hand-fed brine"})
+        events.extend(planned)
+        events.extend(extras)
+
+    # --- The water exchange, quietly, below the axis.
+    awc = awc if isinstance(awc, dict) else {}
+    asched = awc.get("schedule") if isinstance(awc.get("schedule"), dict) else {}
+    if awc.get("enabled") and asched.get("enabled"):
+        if str(asched.get("mode") or "times") == "interval":
+            ws = _hhmm_min(asched.get("windowStart")) or 0
+            we = _hhmm_min(asched.get("windowEnd")) or 0
+            span = we - ws if we > ws else (1440 if we == ws else 1440 - ws + we)
+            events.append(ev(id="awc:band", how="system", source="awc", name="Water change", kind="band",
+                             band=[ws, (ws + span) % 1440 or 1440], note="micro-changes through the window"))
+        else:
+            for i, t in enumerate(asched.get("times") if isinstance(asched.get("times"), list) else []):
+                minute = _hhmm_min(t)
+                if minute is not None:
+                    events.append(ev(id=f"awc:{i}", at=minute, how="system", source="awc", name="Water change",
+                                     status="planned" if minute > now_min else "expected",
+                                     note="the Water Change tab owns the reservoirs"))
+
+    # --- Night, next, counts, the honesty line.
+    night = None
+    if isinstance(lighting, dict) and lighting.get("configured"):
+        on_min, off_min = _hhmm_min(lighting.get("onTime")), _hhmm_min(lighting.get("offTime"))
+        if on_min is not None and off_min is not None and off_min > on_min:
+            night = {"onMin": on_min, "offMin": off_min}
+
+    events.sort(key=lambda e: (e["kind"] == "band", e["at"] is None, e["at"] if e["at"] is not None else 0,
+                              e["how"] != "pump"))
+    upcoming = [e for e in events if e["kind"] == "dose" and e["status"] in ("planned", "due", "late")]
+    upcoming.sort(key=lambda e: (0 if e["at"] is None or e["at"] <= now_min else 1,
+                                 e["at"] if e["at"] is not None else -1))
+    nxt = []
+    for e in upcoming[:TIMELINE_NEXT_MAX]:
+        minutes = 0 if e["at"] is None or e["at"] <= now_min else e["at"] - now_min
+        nxt.append({"id": e["id"], "name": e["name"], "how": e["how"], "at": e["at"], "ml": e["ml"],
+                    "minutesUntil": minutes, "status": e["status"]})
+
+    feeds = [e for e in events if e["kind"] == "dose" and e["how"] != "system" and e["status"] != "ghost"]
+    counts = {
+        "feeds": len(feeds),
+        "pump": sum(1 for e in feeds if e["how"] == "pump"),
+        "hand": sum(1 for e in feeds if e["how"] == "hand"),
+        "done": sum(1 for e in feeds if e["status"] == "done"),
+        "missed": sum(1 for e in feeds if e["status"] == "missed"),
+        "late": sum(1 for e in feeds if e["status"] == "late"),
+        "due": sum(1 for e in feeds if e["status"] == "due"),
+        "extra": sum(1 for e in feeds if e["unplanned"]),
+    }
+
+    def _names(items: list[dict[str, Any]]) -> str:
+        seen: list[str] = []
+        for e in items:
+            if e["name"] not in seen:
+                seen.append(e["name"])
+        return ", ".join(seen[:4]) + (f" +{len(seen) - 4}" if len(seen) > 4 else "")
+
+    if not feeds and not any(e["kind"] == "band" and e["how"] == "pump" for e in events):
+        text = "Nothing scheduled — schedules live on the pump cards, hand doses on the food shelf."
+    else:
+        parts = [f"{counts['feeds']} feed{'s' if counts['feeds'] != 1 else ''} today"]
+        pumped = [e for e in feeds if e["how"] == "pump"]
+        hand = [e for e in feeds if e["how"] == "hand"]
+        bits = []
+        if pumped:
+            bits.append(f"{len(pumped)} pumped ({_names(pumped)})")
+        if hand:
+            bits.append(f"{len(hand)} by hand ({_names(hand)})")
+        if bits:
+            parts[0] += " — " + ", ".join(bits)
+        tail = []
+        if counts["done"]:
+            tail.append(f"{counts['done']} done")
+        if counts["missed"]:
+            tail.append(f"{counts['missed']} missed")
+        if counts["late"]:
+            tail.append(f"{counts['late']} running late")
+        text = ". ".join(parts + ([" · ".join(tail)] if tail else [])) + "."
+    if hand_hint:
+        text += " Set a first-dose time on the bottle and its chips land on the strip."
+
+    return {
+        "date": today.isoformat(),
+        "nowMin": now_min,
+        "night": night,
+        "events": events,
+        "next": nxt,
+        "counts": counts,
+        "text": text,
+    }

@@ -1452,10 +1452,16 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             # band — presets carry it), a one-line how, and the plan's clock.
             "doseMl": round(_awc_num(raw.get("doseMl"), 0, 0, CONSUMABLE_BOTTLE_MAX_ML), 2),
             "doseEveryDays": _awc_num(raw.get("doseEveryDays"), 0, 0, 60),
+            # Doc §13.4: hours cadence (multiple slots a day) + the one anchor
+            # time the keeper types; hours > 0 outranks days in the engine.
+            "doseEveryHours": _awc_num(raw.get("doseEveryHours"), 0, 0, nps_engine.HAND_DOSE_HOURS_MAX),
+            "doseFirstAt": _normalise_schedule_time(raw.get("doseFirstAt")),
             "doseStocking": stocking if stocking in nps_engine.DOSE_STOCKINGS else "medium",
             "doseGuide": dose_guide,
             "doseNote": _awc_str(raw.get("doseNote"), 200),
             "lastDosedAt": _awc_str(raw.get("lastDosedAt"), 40),
+            # Skip today (server-written): holds the cadence without a dose.
+            "doseSkippedAt": _awc_str(raw.get("doseSkippedAt"), 40),
         }
     config["consumables"] = {"products": products}
 
@@ -7772,6 +7778,10 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                 dst_stamp = _latest(dst)
                 if dst_stamp is None or src_stamp > dst_stamp:
                     _copy_runtime_fields(src, dst, ("remainingMl", "history", "lastDosedAt"))
+            src_skip = _parse_datetime(src.get("doseSkippedAt"))
+            dst_skip = _parse_datetime(dst.get("doseSkippedAt"))
+            if src_skip is not None and (dst_skip is None or src_skip > dst_skip):
+                dst["doseSkippedAt"] = src["doseSkippedAt"]
 
 
 def _merge_activity(stored: Any, incoming: dict[str, Any]) -> None:
@@ -13029,7 +13039,8 @@ async def websocket_dosing_mark_refreshed(
 
 # --- Consumables (NPS food shelf) WebSocket API ---------------------------------------------
 
-def _consumable_debit(product: dict[str, Any], ml: float, kind: str) -> None:
+def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
+                      at: datetime | None = None) -> None:
     """The single choke point for bottle ledger movement (the _awc_debit_source
     pattern): decrement remainingMl and append the usage history the runway
     forecast reads. Never raises — a bad bottle must not break a dose flush."""
@@ -13044,10 +13055,12 @@ def _consumable_debit(product: dict[str, Any], ml: float, kind: str) -> None:
     history = product.setdefault("history", [])
     if isinstance(history, list):
         history.append({
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": (at or datetime.now(timezone.utc)).isoformat(),
             "ml": round(ml, 2),
             "kind": kind,
         })
+        if at is not None:
+            history.sort(key=lambda item: str(item.get("at") or "") if isinstance(item, dict) else "")
         del history[:-CONSUMABLE_HISTORY_MAX]
 
 
@@ -13076,7 +13089,8 @@ def _rename_maintenance_task(config: dict[str, Any], old_id: str, new_id: str) -
 
 
 def _nps_shelf_log_completion(config: dict[str, Any], product_id: str, now: datetime,
-                              note: str) -> None:
+                              note: str, skipped: bool = False,
+                              snooze_until: str | None = None) -> None:
     """Mark the bottle's hand-dose reminder done (if the keeper set one) — the
     cultures bridge's pattern: only touches a task that exists, clears the
     snooze in lockstep with the panel's _completeTask."""
@@ -13096,14 +13110,19 @@ def _nps_shelf_log_completion(config: dict[str, Any], product_id: str, now: date
         entries = []
         completions[task_id] = entries
     stamp = now.isoformat()
-    entries.insert(0, {
+    entry = {
         "id": f"{task_id}:shelf:{stamp}",
         "timestamp": stamp,
         "notes": note[:500],
         "source": MAINTENANCE_SOURCE_SHELF,
-    })
+    }
+    if skipped:
+        entry["skipped"] = True
+    entries.insert(0, entry)
     del entries[MAINTENANCE_COMPLETIONS_MAX:]
-    tasks[task_id]["snoozedUntil"] = None
+    # A skip holds the reminder until the engine's next slot (doc §13.8 Q8);
+    # a dose clears any snooze, like the panel's _completeTask.
+    tasks[task_id]["snoozedUntil"] = snooze_until if skipped else None
 
 
 def _nps_shelf_drop_reminder(config: dict[str, Any], product_id: str) -> None:
@@ -13133,6 +13152,7 @@ def _consumable_for_msg(
 
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/consumable_log_dose",
+    vol.Optional("at"): cv.string,
     vol.Required("product_id"): cv.string,
     vol.Optional("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
 })
@@ -13164,12 +13184,61 @@ async def websocket_consumable_log_dose(
                                   "Set this bottle's hand dose in Settings first")
             return
     ml = float(ml)
-    _consumable_debit(product, ml, "dose")
-    product["lastDosedAt"] = now.isoformat()
+    # Late logging (doc §13.6): the dose happened earlier today — stamp it
+    # when it happened, never later than now, never more than a day back.
+    at = now
+    if msg.get("at"):
+        stamped = _parse_datetime(msg["at"])
+        if stamped is None or stamped > now or (now - stamped) > timedelta(hours=24):
+            connection.send_error(msg["id"], "bad_stamp",
+                                  "A late dose can only be logged within the last 24 hours")
+            return
+        at = stamped
+    _consumable_debit(product, ml, "dose", at)
+    previous = _parse_datetime(product.get("lastDosedAt"))
+    if previous is None or at > previous:
+        product["lastDosedAt"] = at.isoformat()
+    name = str(product.get("name") or "Bottle")
+    when = "" if at == now else f" at {dt_util.as_local(at).strftime('%H:%M')}"
+    _nps_shelf_log_completion(config, str(msg["product_id"]), at,
+                              f"Logged automatically — {ml:g} ml of {name} by hand{when}")
+    _append_activity(config, f"{name} dosed by hand — {ml:g} ml{when}", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/consumable_skip_dose",
+    vol.Required("product_id"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_consumable_skip_dose(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Skip today's hand dose (doc §13.8 Q8, HOLD): the cadence clock advances
+    as if dosed now, no ml moves, the last real dose stays what it was, and the
+    reminder is snoozed to the engine's next slot — one function, one clock."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    product = _consumable_for_msg(connection, msg, config)
+    if product is None:
+        return
+    now = datetime.now(timezone.utc)
+    if not nps_engine.hand_dose_slots(product)["unit"]:
+        connection.send_error(msg["id"], "no_plan", "This bottle has no hand-dose cadence to skip")
+        return
+    product["doseSkippedAt"] = now.isoformat()
+    plan = nps_engine.hand_dose_state(product, now, _awc_effective_tank_l(config),
+                                      dt_util.as_local(now).tzinfo)
     name = str(product.get("name") or "Bottle")
     _nps_shelf_log_completion(config, str(msg["product_id"]), now,
-                              f"Logged automatically — {ml:g} ml of {name} by hand")
-    _append_activity(config, f"{name} dosed by hand — {ml:g} ml", "control")
+                              f"Skipped — {name}'s dose held to the next slot", skipped=True,
+                              snooze_until=plan["clock"].get("at"))
+    _append_activity(config, f"{name} hand dose skipped — next {plan['cadenceText']}", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -15522,9 +15591,33 @@ async def websocket_nps_summary(
         "plainShelfHours": round(plain_shelf_h, 1),
         "freshness": freshness,
     })
+    now_local = dt_util.as_local(now_utc)
+    tz = now_local.tzinfo
+    # The unified feed strip (doc §13): the hand-feed reminder's completions
+    # are the brine done-marks (the only stamped record of a container feed).
+    brine_feeds: list[dict[str, Any]] = []
+    maint = config.get("maintenance") if isinstance(config.get("maintenance"), dict) else {}
+    comps = (maint.get("completions") or {}).get(MAINTENANCE_HAND_FEED_TASK_ID)
+    for item in (comps if isinstance(comps, list) else [])[:40]:
+        if not isinstance(item, dict) or item.get("skipped"):
+            continue
+        found = re.search(r"(\d+(?:\.\d+)?) ml", str(item.get("notes") or ""))
+        brine_feeds.append({"at": item.get("timestamp"),
+                            "ml": float(found.group(1)) if found else hatchery_cfg["handFeed"]["defaultDoseMl"]})
+    cultures_cfg = _nps_cultures_cfg(config)
+    timeline = nps_engine.feed_timeline(
+        now_local, products=products, channels=channels,
+        awc=_awc_cfg(config) or {}, cultures=cultures_cfg if cultures_cfg.get("enabled") else None,
+        hatchery=hatchery_cfg if hatchery_cfg.get("enabled") else None, brine_feeds=brine_feeds,
+        lighting=spawning.lighting_window_summary(_effective_lighting_cfg(config) or {}, now_local),
+        tank_l=_awc_effective_tank_l(config),
+        fx_channel_id=str(fx.get("channelId") or ""), fx_enabled=bool(fx.get("enabled")),
+        culture_bottle_species={sid for sid in cultures_engine.species_ids()
+                                if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0})
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
-        "shelf": nps_engine.shelf_summary(products, now_utc, _awc_effective_tank_l(config)),
+        "shelf": nps_engine.shelf_summary(products, now_utc, _awc_effective_tank_l(config), tz),
+        "timeline": timeline,
         "library": [dict(item) for item in nps_engine.PRODUCT_LIBRARY],
         "categories": {key: nps_engine.category_label(key) for key in CONSUMABLE_CATEGORIES},
         # Feed-exchange (Stage B): the hatchery card's whole state — backend
@@ -20533,6 +20626,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_nps_fridge_bottle)
     websocket_api.async_register_command(hass, websocket_nps_enrich_second_dose)
     websocket_api.async_register_command(hass, websocket_consumable_log_dose)
+    websocket_api.async_register_command(hass, websocket_consumable_skip_dose)
     websocket_api.async_register_command(hass, websocket_consumable_refill)
     websocket_api.async_register_command(hass, websocket_consumable_delete)
     websocket_api.async_register_command(hass, websocket_dosing_respread_missed)

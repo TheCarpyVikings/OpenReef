@@ -88,6 +88,42 @@ function summaryFixture() {
     speciesLibrary: [{ id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, note: "" }],
     speciesPlan: { species: [], gaps: [], warnings: [], suggestions: [] },
     budget: { available: false },
+    timeline: timelineFixture(),
+  };
+}
+
+// The backend's day (nps.feed_timeline) at 12:00: a pump with four ticks (one
+// done), a continuous drip band, hand slots across the ladder, an any-time
+// chip, a ghost, an extra, and the water change on the system row.
+function timelineFixture() {
+  const ev = (fields) => ({ id: "", at: null, how: "hand", source: "", name: "", productId: "", ml: null, actualMl: null,
+    status: "planned", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null, ...fields });
+  return {
+    date: "2026-08-13", nowMin: 720, night: { onMin: 540, offMin: 1260 },
+    events: [
+      ev({ id: "channel:brine:0", at: 570, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "expected" }),
+      ev({ id: "channel:brine:1", at: 750, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "planned" }),
+      ev({ id: "channel:brine:2", at: 930, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "planned" }),
+      ev({ id: "channel:brine:3", at: 1110, how: "pump", source: "channel:brine", name: "Brine pump", productId: "pods", ml: 1, status: "blocked", note: "paused by a guard" }),
+      ev({ id: "channel:drip:band", how: "pump", source: "channel:drip", name: "Drip", ml: 50, kind: "band", band: [1320, 360] }),
+      ev({ id: "shelf:phyto:0", at: 480, source: "shelf:phyto", name: "Phyto", productId: "phyto", ml: 2, actualMl: 2, status: "done", doneAt: 492 }),
+      ev({ id: "shelf:phyto:1", at: 710, source: "shelf:phyto", name: "Phyto", productId: "phyto", ml: 2, status: "due" }),
+      ev({ id: "shelf:phyto:2", at: 120, source: "shelf:phyto", name: "Phyto", productId: "phyto", ml: 2, status: "missed" }),
+      ev({ id: "shelf:rj:0", at: 540, source: "shelf:rj", name: "Reef Juice", productId: "rj", ml: 3, status: "late", note: "At dusk." }),
+      ev({ id: "shelf:skip:0", at: 600, source: "shelf:skip", name: "Amino", productId: "skip", ml: 1, status: "skipped" }),
+      ev({ id: "shelf:ghost:ghost", at: 1200, source: "shelf:ghost", name: "Trace", productId: "ghost", ml: 1, status: "ghost", nextDate: "2026-08-14", note: "not today — next Fri 14 Aug" }),
+      ev({ id: "shelf:loose:x0", at: 660, source: "shelf:loose", name: "Oyster", productId: "loose", ml: 4, actualMl: 4, status: "done", doneAt: 660, unplanned: true, note: "extra dose — not on the plan" }),
+      ev({ id: "shelf:chips:0", source: "shelf:chips", name: "Zoo", productId: "chips", ml: 5, status: "due" }),
+      ev({ id: "awc:0", at: 120, how: "system", source: "awc", name: "Water change", status: "expected" }),
+      ev({ id: "awc:1", at: 1320, how: "system", source: "awc", name: "Water change", status: "planned" }),
+    ],
+    next: [
+      { id: "shelf:phyto:1", name: "Phyto", how: "hand", at: 710, ml: 2, minutesUntil: 0, status: "due" },
+      { id: "channel:brine:1", name: "Brine pump", how: "pump", at: 750, ml: 1, minutesUntil: 30, status: "planned" },
+      { id: "channel:brine:2", name: "Brine pump", how: "pump", at: 930, ml: 1, minutesUntil: 210, status: "planned" },
+    ],
+    counts: { feeds: 12, pump: 4, hand: 8, done: 2, missed: 1, late: 1, due: 2, extra: 1 },
+    text: "12 feeds today — 4 pumped (Brine pump), 8 by hand (Phyto, Reef Juice, Amino, Oyster +1). 2 done · 1 missed · 1 running late.",
   };
 }
 
@@ -186,17 +222,152 @@ test("the diagram animates the drain when a matched drain runs", async () => {
   } finally { restore(); }
 });
 
-test("the timeline draws dose ticks, night shading, and a next-event line", async () => {
+test("the feed strip draws two lanes, the ladder, the chips, the queue and the honesty line", async () => {
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
     const html = panel._npsTimelineSvg();
-    // 4 doses across 08:00–20:00 → ticks at 09:30, 12:30, 15:30, 18:30.
-    const ticks = (html.match(/height="5"/g) || []).length;
-    assert(ticks >= 4, `expected ≥4 dose ticks, saw ${ticks}`);
-    assert(html.includes("opacity=\"0.45\""), "night shading missing despite a lighting window");
-    assert(html.includes("Next:"), "next-event line missing");
+    // Pumps are ticks on the upper lane, hand doses circles on the lower one.
+    const ticks = (html.match(/<rect x="[\d.]+" y="19" width="4" height="14"/g) || []).length;
+    const circles = (html.match(/<circle cx="[\d.]+" cy="54" r="(5\.5|4)"/g) || []).length;
+    assert(ticks === 4, `expected 4 pump ticks, saw ${ticks}`);
+    assert(circles === 7, `expected 7 hand circles (timed), saw ${circles}`);
+    // Hollow = planned, solid = done: the planned pump tick has no fill, the done circle is filled and ticked.
+    assert(html.includes('fill="none" stroke="#26c6da"'), "a planned pump tick must be hollow in the channel colour");
+    assert(/<circle cx="[\d.]+" cy="54" r="5\.5" fill="#2e7d32"/.test(html) && html.includes('stroke="#041019"'), "the done hand dose must be solid with a check");
+    // The ladder: due pulses, late is amber, missed is red with a slash, skipped is dotted, ghost is faint.
+    assert(html.includes('class="nps-tl-ev nps-tl-due"'), "the due slot must carry the pulse class");
+    assert(html.includes('stroke="#f5a524"'), "late must read amber");
+    assert(html.includes('<line x1="') && html.includes('stroke="#e5484d" stroke-width="1.5"></line>'), "missed must carry the slash");
+    assert(html.includes('stroke-dasharray="2 2"'), "skipped must be dotted");
+    assert(html.includes('opacity="0.35"'), "the ghost must be faint");
+    // Bands: the drip wraps midnight into two segments; AWC ticks sit on the system row.
+    assert((html.match(/height="6" rx="2" fill="#/g) || []).length === 2, "a midnight-wrapping band draws as two segments");
+    assert((html.match(/y="71" width="2.5" height="6"/g) || []).length === 2, "two water-change ticks on the system row");
+    // Night shading, the now-line, the lane labels.
+    assert(html.includes('opacity="0.45"') && html.includes('x1="221" y1="6"'), "night shading and the now-line at 12:00");
+    assert(html.includes("⚙︎</text>") && html.includes("✋</text>"), "lane labels");
+    // The any-time chip, the queue and the honesty line.
+    assert(html.includes("nps-tl-chip due") && html.includes("Zoo · 5 ml · any time · due now"), `chip row wrong: ${html.slice(html.indexOf("nps-tl-chips"), html.indexOf("nps-tl-chips") + 400)}`);
+    assert(html.includes("✋ Phyto 2 ml · due now") && html.includes("⚙︎ Brine pump 1 ml · in 30 min") && html.includes("in 3 h 30 min"), "the next queue");
+    assert(html.includes("12 feeds today — 4 pumped (Brine pump)"), "the honesty line");
+    assert(html.includes("tap a mark for its dose card"), "the legend");
+    assert(!html.includes("nps-tl-card"), "no card until a mark is tapped");
     noPlaceholders(html, "timeline");
+    // Compact + read-only (the Pulse wall): one lane, no buttons, no legend.
+    const wall = panel._npsTimelineSvg({ compact: true, readOnly: true });
+    assert(!wall.includes("data-action=") && !wall.includes("tap a mark") && wall.includes("12 feeds today"), "the wall strip is quiet");
+    assert(!/cy="54"/.test(wall) && /cy="22"/.test(wall), "compact draws hand marks on the single lane");
+    // No timeline yet: the honest zero-state.
+    panel._nps.summary.timeline = null;
+    assert(panel._npsTimelineSvg().includes("Nothing scheduled"), "zero-state line");
+  } finally { restore(); }
+});
+
+test("tapping a mark opens its dose card with the right actions, and the actions call the right commands", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._config.consumables.products.rj = { name: "Reef Juice", category: "phyto", bottleMl: 250, remainingMl: 200, history: [], doseMl: 3, doseEveryDays: 1, doseFirstAt: "09:00" };
+    panel._nps.summary.shelf.products.rj = { bottleMl: 250, remainingMl: 200, percent: 80, daysUntilEmpty: 40, expiry: { status: "aging", daysLeft: 5 } };
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return {}; };
+    panel._npsLoadSummary = async () => {};
+    // A late hand dose: log now, dosed earlier, skip.
+    panel._nps.timelineOpen = "shelf:rj:0";
+    let html = panel._npsTimelineSvg();
+    assert(html.includes("nps-tl-card") && html.includes("Reef Juice") && html.includes("running late") && html.includes("Planned 09:00 · 3 ml"), "the card names the dose");
+    assert(html.includes("Bottle: 200 of 250 ml (80%) · ≈40 days left · ~5 d before it expires"), "the bottle story rides the card");
+    assert(html.includes('class="primary compact-button" data-action="nps-timeline-log" data-id="rj">Log 3 ml now'), "late = log leads");
+    assert(html.includes('data-nps-late="rj"') && html.includes('data-action="nps-timeline-log-late"'), "the dosed-earlier picker");
+    assert(html.includes('data-action="nps-timeline-skip" data-id="rj"'), "skip today");
+    assert(html.includes('r="9.5"'), "the selected mark wears a halo");
+    // A done dose: no actions but Close.
+    panel._nps.timelineOpen = "shelf:phyto:0";
+    html = panel._npsTimelineSvg();
+    assert(html.includes("Done at 08:12 (planned 08:00) · 2 ml") && !html.includes("nps-timeline-log") && html.includes("nps-timeline-close"), "done card is read-only");
+    // A pump tick: dose now with the planned ml.
+    panel._nps.timelineOpen = "channel:brine:1";
+    html = panel._npsTimelineSvg();
+    assert(html.includes('data-action="nps-timeline-dosenow" data-id="brine" data-ml="1"') && html.includes("⚙︎ food pump"), "pump card offers dose now");
+    // The ghost: says when, offers nothing to log.
+    panel._nps.timelineOpen = "shelf:ghost:ghost";
+    html = panel._npsTimelineSvg();
+    assert(html.includes("Not today — next 2026-08-14 at 20:00") && !html.includes("nps-timeline-log"), "ghost card");
+    // The water change: a deep link.
+    panel._nps.timelineOpen = "awc:1";
+    assert(panel._npsTimelineSvg().includes('data-action="tab" data-id="awc"'), "awc card links out");
+    // Actions: the skip and the plain log go to the shelf commands.
+    await panel._npsCall({ type: "openreef/consumable_skip_dose", product_id: "rj" }, "");
+    assert(calls.at(-1).type === "openreef/consumable_skip_dose" && calls.at(-1).product_id === "rj", "skip command");
+    // The late log: builds today's stamp from the picker, refuses the future.
+    panel._render = () => {};
+    panel.shadowRoot = { querySelector: (sel) => sel === '[data-nps-late="rj"]' ? { value: "08:30" } : null };
+    panel._npsTimelineLogLate("rj");
+    await new Promise((r) => setTimeout(r, 0));
+    const late = calls.at(-1);
+    assert(late.type === "openreef/consumable_log_dose" && late.product_id === "rj" && typeof late.at === "string", `late log wrong: ${JSON.stringify(late)}`);
+    assert(new Date(late.at).getHours() === 8 && new Date(late.at).getMinutes() === 30, "the stamp is today at 08:30 local");
+    panel.shadowRoot = { querySelector: (sel) => sel === '[data-nps-late="rj"]' ? { value: "23:59" } : null };
+    const before = calls.length;
+    panel._npsTimelineLogLate("rj");
+    assert(calls.length === before && /hasn't happened yet/.test(panel._nps.error), "a future time is refused client-side");
+  } finally { restore(); }
+});
+
+test("the shelf editor's cadence unit and anchor drive the reminder, and the card reads the engine's text", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const products = panel._config.consumables.products;
+    products.pods.doseMl = 5;
+    // Days → hours carries the number across and zeroes the other; the reminder becomes a daily chore that says how many a day.
+    panel._npsApplyProductField("pods", "doseEveryN", 2);
+    assert(products.pods.doseEveryDays === 2 && !products.pods.doseEveryHours, "a number under days is days");
+    panel._npsApplyProductField("pods", "doseEveryUnit", "hours");
+    assert(products.pods.doseEveryHours === 2 && products.pods.doseEveryDays === 0, "switching the unit moves the number");
+    panel._npsApplyProductField("pods", "doseEveryN", 6);
+    panel._npsApplyProductField("pods", "doseFirstAt", "08:00");
+    assert(products.pods.doseEveryHours === 6 && products.pods.doseFirstAt === "08:00", "hours + anchor stored");
+    const task = panel._config.maintenance.tasks.nps_dose_pods;
+    assert(task && task.cadenceDays === 1 && task.label === "Dose GoldPods by hand (4 a day)", `hours cadence = a daily chore: ${JSON.stringify(task)}`);
+    panel._npsApplyProductField("pods", "doseEveryUnit", "days");
+    assert(products.pods.doseEveryDays === 6 && products.pods.doseEveryHours === 0 && panel._config.maintenance.tasks.nps_dose_pods.cadenceDays === 6, "back to days");
+    panel._npsApplyProductField("pods", "doseEveryN", 0);
+    assert(!panel._config.maintenance.tasks.nps_dose_pods, "zero removes the reminder");
+    // The editor shows hours selected with the 24 h cap; the card reads the engine's cadence text.
+    products.pods.doseEveryHours = 6;
+    const editor = panel._npsProductSettingsCard("pods", products.pods);
+    assert(editor.includes('value="hours" selected') && editor.includes('max="24"') && editor.includes('type="time"'), "editor reflects the hours unit");
+    const card = panel._npsProductCard("pods", products.pods, { ...panel._nps.summary.shelf.products.pods,
+      handDose: { planned: true, ml: 5, everyDays: 0, everyHours: 6, cadenceText: "every 6 h from 08:00 · 4 a day", guide: {}, lastAt: "", clock: { available: true, due: true } } });
+    assert(card.includes("Hand dose <strong>5 ml</strong> · every 6 h from 08:00 · 4 a day · never dosed"), `card cadence text: ${card}`);
+  } finally { restore(); }
+});
+
+test("the Feeding hub and the Pulse wall carry the strip; the demo stages a mixed day", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._npsLoadSummary = async () => {};
+    const hub = panel._hubTab("feeding");
+    assert(hub.includes("Today's feeds") && hub.includes("12 feeds today"), "the Feeding hub shows the strip");
+    // Zero pumps, one hand plan: still a strip (the hand-feeder's view).
+    panel._config.nps.enabled = false;
+    panel._config.consumables.products.rj = { name: "Reef Juice", doseEveryDays: 1 };
+    assert(panel._hubTab("feeding").includes("Today's feeds"), "hand-feeders get the strip without NPS");
+    delete panel._config.consumables.products.rj;
+    assert(!panel._hubTab("feeding").includes("Today's feeds"), "no plans, no NPS, no strip");
+    panel._config.nps.enabled = true;
+    const wall = panel._pulseFeedStripMarkup();
+    assert(wall.includes("pulse-feeds") && !wall.includes("data-action=") && wall.includes("12 feeds today"), "the wall strip is compact and read-only");
+    // The demo day: pumped and hand feeds, a ghost, an extra, a chip, the exchange.
+    const demo = panel._npsDemoTimeline();
+    const ids = demo.events.map((e) => e.id);
+    assert(ids.includes("channel:demo_phyto_pump:0") && ids.includes("shelf:demo_reef_juice:0") && ids.includes("shelf:demo_amino:ghost") && ids.includes("shelf:demo_oyster:x0") && ids.includes("shelf:demo_rots:0") && ids.includes("awc:1"), "demo day is mixed");
+    assert(demo.counts.pump === 16 && demo.counts.hand === 6 && demo.next.length === 3 && /feeds today — 16 pumped/.test(demo.text), `demo counts: ${JSON.stringify(demo.counts)} ${demo.text}`);
+    panel._nps.summary.timeline = demo;
+    noPlaceholders(panel._npsTimelineSvg(), "demo strip");
   } finally { restore(); }
 });
 
@@ -1250,7 +1421,7 @@ test("the hand-dose plan: the shelf card, the Dosed tap, the settings fields, th
     assert(!plainCard.includes("Hand dose") && plainCard.includes("nps-product-logdose"), "plain bottles keep the classic card");
     // Settings: the plan fields, the stocking select only for a guided bottle.
     const editor = panel._npsProductSettingsCard("rj", products.rj);
-    assert(editor.includes('data-field="doseMl"') && editor.includes('data-field="doseEveryDays"') && editor.includes('data-field="doseStocking"') && editor.includes('data-field="doseNote"'), "plan fields missing");
+    assert(editor.includes('data-field="doseMl"') && editor.includes('data-field="doseEveryN"') && editor.includes('data-field="doseEveryUnit"') && editor.includes('data-field="doseFirstAt"') && editor.includes('data-field="doseStocking"') && editor.includes('data-field="doseNote"'), "plan fields missing");
     assert(editor.includes("1 ml per 27 / 18 / 9 L a day"), "the guide hint is missing");
     assert(!panel._npsProductSettingsCard("pods", products.pods).includes('data-field="doseStocking"'), "no stocking select without a guide");
     // The reminder follows the cadence: seeded, anchored, removed at zero.

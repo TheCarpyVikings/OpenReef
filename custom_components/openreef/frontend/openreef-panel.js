@@ -65,7 +65,7 @@ class OpenReefPanel extends HTMLElement {
       speaking: false, keysOpen: false,
     };
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
-    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false };
+    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "" };
     this._cultures = { summary: null, at: 0, loading: false, error: "", message: "" };
     this._cooling = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
@@ -1831,6 +1831,15 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-product-dosed") this._npsCall({ type: "openreef/consumable_log_dose", product_id: id },
         "Dose logged — the bottle, the runway and the reminder all keep count.");
       if (action === "nps-product-delete") this._npsDeleteProduct(id);
+      // The feed strip (doc §13): tap a mark for its dose card, act from it.
+      if (action === "nps-timeline-event") { this._nps.timelineOpen = this._nps.timelineOpen === id ? "" : id; this._render(); }
+      if (action === "nps-timeline-close") { this._nps.timelineOpen = ""; this._render(); }
+      if (action === "nps-timeline-log") this._npsCall({ type: "openreef/consumable_log_dose", product_id: id },
+        "Dose logged — the mark fills in, the bottle and the reminder keep count.");
+      if (action === "nps-timeline-log-late") this._npsTimelineLogLate(id);
+      if (action === "nps-timeline-skip") this._npsCall({ type: "openreef/consumable_skip_dose", product_id: id },
+        "Skipped — the cadence holds, the next slot stands.");
+      if (action === "nps-timeline-dosenow") this._doserDoseNow(id, Number(target.dataset.ml));
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded(id);
       if (action === "nps-hatch-start") this._npsCall(
@@ -2676,12 +2685,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope === "consumable") {
         const block = this._config.consumables = this._config.consumables || {};
         const products = block.products = block.products || {};
-        if (products[id]) {
-          products[id][field] = ["doseMl", "doseEveryDays"].includes(field) ? Math.max(0, Number(value) || 0) : value;
-          // The hand-dose plan owns its reminder: a cadence seeds the shelf
-          // task, zero removes it (the cultures idiom, one bottle at a time).
-          if (["doseMl", "doseEveryDays", "name"].includes(field)) this._npsSyncDoseReminder(id);
-        }
+        if (products[id]) this._npsApplyProductField(id, field, value);
       }
       if (target.dataset.spawnField) {
         // The compiler form fields are ALSO what the execution strip runs on —
@@ -10293,6 +10297,27 @@ class OpenReefPanel extends HTMLElement {
       `Logged ${ml} ml — the runway forecast learns from every dose.`);
   }
 
+  // Late logging (doc §13.6, Q3): the dose happened earlier today — stamp it
+  // when it happened. The backend refuses the future and anything older than a day.
+  _npsTimelineLogLate(pid) {
+    const input = this.shadowRoot.querySelector(`[data-nps-late="${pid}"]`);
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(input && input.value || ""));
+    if (!m) {
+      this._nps.error = "Pick the time you dosed first.";
+      this._render();
+      return;
+    }
+    const at = new Date();
+    at.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    if (at.getTime() > Date.now()) {
+      this._nps.error = "That time hasn't happened yet — pick an earlier one.";
+      this._render();
+      return;
+    }
+    this._npsCall({ type: "openreef/consumable_log_dose", product_id: pid, at: at.toISOString() },
+      `Logged at ${m[1].padStart(2, "0")}:${m[2]} — the mark fills in where it happened.`);
+  }
+
   _npsDeleteProduct(pid) {
     if (this._nps.confirmDelete !== pid) {
       this._nps.confirmDelete = pid;
@@ -10337,6 +10362,8 @@ class OpenReefPanel extends HTMLElement {
       // so it follows the Profile tank volume until the keeper sets one.
       doseMl: 0,
       doseEveryDays: (preset && preset.doseEveryDays) || 0,
+      doseEveryHours: (preset && preset.doseEveryHours) || 0,
+      doseFirstAt: (preset && preset.doseFirstAt) || "",
       doseStocking: "medium",
       doseGuide: (preset && preset.doseGuide && typeof preset.doseGuide === "object") ? { ...preset.doseGuide } : {},
       doseNote: (preset && preset.doseNote) || "",
@@ -10349,6 +10376,29 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
+  // One shelf field edit (Settings → the bottle card). The cadence is one
+  // number plus a days/hours unit (doc §13.4): hours > 0 outranks days in
+  // the engine, so switching the unit moves the number across and zeroes
+  // the other; the plan's reminder follows every plan edit.
+  _npsApplyProductField(pid, field, value) {
+    const product = this._config?.consumables?.products?.[pid];
+    if (!product) return;
+    if (field === "doseEveryUnit") {
+      const n = Math.max(0, Number(product.doseEveryHours) || Number(product.doseEveryDays) || 0);
+      if (value === "hours") { product.doseEveryHours = Math.min(24, n || 12); product.doseEveryDays = 0; }
+      else { product.doseEveryDays = n || 1; product.doseEveryHours = 0; }
+    } else if (field === "doseEveryN") {
+      const n = Math.max(0, Number(value) || 0);
+      if (Number(product.doseEveryHours) > 0) product.doseEveryHours = Math.min(24, n);
+      else product.doseEveryDays = n;
+    } else {
+      product[field] = ["doseMl", "doseEveryDays", "doseEveryHours"].includes(field) ? Math.max(0, Number(value) || 0) : value;
+    }
+    // The hand-dose plan owns its reminder: a cadence seeds the shelf task,
+    // zero removes it (the cultures idiom, one bottle at a time).
+    if (["doseMl", "doseEveryDays", "doseEveryHours", "doseEveryUnit", "doseEveryN", "doseFirstAt", "name"].includes(field)) this._npsSyncDoseReminder(pid);
+  }
+
   // The shelf's hand-dose reminder for one bottle: nps_dose_<pid> in
   // Maintenance on the bottle's cadence, anchored on its last hand dose (the
   // backend logs each dose as a completion, so the clock keeps itself). A
@@ -10359,16 +10409,20 @@ class OpenReefPanel extends HTMLElement {
     const tasks = m.tasks = m.tasks || {};
     const comps = m.completions = m.completions || {};
     const taskId = `nps_dose_${pid}`;
-    const days = Number(product?.doseEveryDays) || 0;
+    const hours = Number(product?.doseEveryHours) || 0;
+    // An hours cadence is a daily chore to Maintenance (it counts days); the
+    // engine's slot clock does the within-day work (doc §13.4).
+    const days = hours > 0 ? 1 : (Number(product?.doseEveryDays) || 0);
     if (!product || days <= 0) {
       if (tasks[taskId]) delete tasks[taskId];
       return;
     }
     const name = product.name || pid;
+    const perDay = hours > 0 ? Math.max(1, Math.floor(24 / hours)) : 1;
     tasks[taskId] = {
       ...(tasks[taskId] || { enabled: true, notify: true,
         notes: `${product.doseNote ? `${product.doseNote} ` : ""}Tap Dosed on the NPS tab — the shelf keeps the size and the count.` }),
-      label: `Dose ${name} by hand`,
+      label: perDay > 1 ? `Dose ${name} by hand (${perDay} a day)` : `Dose ${name} by hand`,
       cadenceDays: days, criticalAfterDays: days + 2,
     };
     const ms = Date.parse(product.lastDosedAt || "");
@@ -11114,6 +11168,7 @@ class OpenReefPanel extends HTMLElement {
                       waste: { percent: 26, filledL: 6.5 } } },
       state: { nextRun: new Date(now + 37 * 60000).toISOString() },
     };
+    npsSummary.timeline = this._npsDemoTimeline();
     return { config, doserSummary, npsSummary, awcSummary };
   }
 
@@ -11492,103 +11547,260 @@ class OpenReefPanel extends HTMLElement {
       </svg>`;
   }
 
-  // --- The 24 h feed timeline (approximate by design — the firmware owns the
-  // exact clock; this shows the shape of the day and what's next).
-  _npsTimelineSvg() {
-    const hm = (s, d) => {
-      const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || ""));
-      return m ? Math.min(23, +m[1]) * 60 + Math.min(59, +m[2]) : d;
-    };
-    const X = (min) => 10 + (Math.max(0, Math.min(1440, min)) / 1440) * 400;
-    const channels = this._doserChannels();
-    const foodIds = this._npsFoodChannelIds();
+  // --- The unified feed timeline (doc §13). The backend builds the day
+  // (nps.feed_timeline → summary.timeline): every mouthful, pumped or poured,
+  // planned hollow and done solid. This draws it — two lanes (⚙︎ pumps as
+  // ticks, ✋ hand doses as circles), a quiet system row for the water
+  // exchange, night shading, the now-line — and opens a dose card on tap.
+  // Colours are the panel's: pumps by channel index, hand doses by category.
+  _npsTimelineData() {
+    const tl = this._nps?.summary?.timeline;
+    return tl && Array.isArray(tl.events) ? tl : null;
+  }
+
+  _npsCategoryColor(category) {
+    const colors = { phyto: "#2e7d32", zooLive: "#ef6c00", zooPrepared: "#ad1457",
+      blend: "#6a1b9a", bacteria: "#00695c", amino: "#f9a825", trace: "#546e7a",
+      twoPart: "#1565c0", other: "#616161" };
+    return colors[category] || colors.other;
+  }
+
+  _npsTimelineColor(ev) {
+    if (ev.how === "system") return "#42a5f5";
+    if (ev.how === "pump") {
+      const cid = String(ev.source || "").replace(/^channel:/, "");
+      const idx = this._npsFoodChannelIds().indexOf(cid);
+      return this._npsChannelColor(idx < 0 ? 0 : idx);
+    }
+    const product = this._config?.consumables?.products?.[ev.productId];
+    return product ? this._npsCategoryColor(product.category) : "#ef6c00";
+  }
+
+  _npsTimelineStatusLabel(status) {
+    return { planned: "planned", expected: "expected", due: "due now", late: "running late",
+      missed: "missed", skipped: "skipped today", blocked: "blocked", done: "done", ghost: "not today" }[status] || status;
+  }
+
+  _npsTimelineSvg(opts = {}) {
+    const compact = !!opts.compact;
+    const readOnly = !!opts.readOnly;
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const tl = this._npsTimelineData();
+    if (!tl) {
+      return `<div><small>${this._nps?.loading ? "Loading today's feeds…" : "Nothing scheduled — schedules live on the pump cards, hand doses on the food shelf."}</small></div>`;
+    }
+    const L = 30, R = 412, W = R - L;
+    const X = (min) => L + (Math.max(0, Math.min(1440, Number(min) || 0)) / 1440) * W;
+    const hm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+    const pumpY = compact ? 22 : 26, handY = compact ? 22 : 54, sysY = compact ? 40 : 76;
+    const axisY = compact ? 48 : 90, H = axisY + 16;
+    const open = readOnly ? "" : (this._nps?.timelineOpen || "");
+    const act = (ev) => readOnly ? "" : `data-action="nps-timeline-event" data-id="${esc(ev.id)}"`;
+    const chips = [];
+    const marks = tl.events.map((ev) => {
+      const color = this._npsTimelineColor(ev);
+      const label = `${ev.name}${ev.ml != null ? ` · ${ev.actualMl ?? ev.ml} ml` : ""} · ${this._npsTimelineStatusLabel(ev.status)}${ev.at != null ? ` · ${hm(ev.doneAt ?? ev.at)}` : " · any time today"}`;
+      if (ev.kind === "band" && Array.isArray(ev.band)) {
+        const [a0, b0] = ev.band;
+        const y = ev.how === "system" ? sysY - 2 : pumpY - 3;
+        const h = ev.how === "system" ? 4 : 6;
+        const segs = b0 > a0 ? [[a0, b0]] : [[a0, 1440], [0, b0]];
+        return segs.map(([a, b]) => `<rect x="${X(a)}" y="${y}" width="${Math.max(1, X(b) - X(a))}" height="${h}" rx="2" fill="${color}" opacity="0.5" class="nps-tl-ev" ${act(ev)}><title>${esc(label)}</title></rect>`).join("");
+      }
+      if (ev.at == null) { chips.push(ev); return ""; }
+      const x = X(ev.doneAt ?? ev.at);
+      if (ev.how === "system") {
+        return `<g class="nps-tl-ev" ${act(ev)}><title>${esc(label)}</title><rect x="${x - 1.25}" y="${sysY - 5}" width="2.5" height="6" rx="1" fill="${color}" opacity="${ev.status === "expected" ? 0.5 : 1}"></rect></g>`;
+      }
+      const done = ev.status === "done";
+      const stroke = ev.status === "missed" || ev.status === "blocked" ? "#e5484d"
+        : ev.status === "late" ? "#f5a524"
+          : ev.status === "skipped" || ev.status === "ghost" ? "#78909c" : color;
+      const dash = ev.status === "skipped" ? 'stroke-dasharray="2 2"' : ev.status === "ghost" ? 'stroke-dasharray="1.5 2.5"' : "";
+      const opacity = ev.status === "ghost" ? 0.35 : ev.status === "expected" ? 0.55 : 1;
+      const selected = open === ev.id;
+      const cls = `nps-tl-ev${ev.status === "due" ? " nps-tl-due" : ""}${selected ? " nps-tl-sel" : ""}`;
+      let shape;
+      let y;
+      if (ev.how === "pump") {
+        y = pumpY;
+        const solid = done || ev.status === "expected" || ev.status === "blocked";
+        shape = `<rect x="${x - 2}" y="${y - 7}" width="4" height="14" rx="1.5" fill="${solid ? stroke : "none"}" stroke="${stroke}" stroke-width="1.5" ${dash}></rect>`;
+      } else {
+        y = handY;
+        const r = ev.unplanned ? 4 : 5.5;
+        shape = `<circle cx="${x}" cy="${y}" r="${r}" fill="${done ? stroke : "none"}" stroke="${stroke}" stroke-width="1.5" ${dash}></circle>`
+          + (done && !ev.unplanned ? `<path d="M ${x - 2.6} ${y} l 1.8 1.8 l 3.4 -3.6" fill="none" stroke="#041019" stroke-width="1.4" stroke-linecap="round"></path>` : "")
+          + (ev.status === "missed" ? `<line x1="${x - 5}" y1="${y + 5}" x2="${x + 5}" y2="${y - 5}" stroke="#e5484d" stroke-width="1.5"></line>` : "");
+      }
+      return `<g class="${cls}" opacity="${opacity}" ${act(ev)}><title>${esc(label)}</title>${selected ? `<circle cx="${x}" cy="${y}" r="9.5" fill="none" stroke="#dcecff" stroke-width="1" opacity="0.85"></circle>` : ""}${shape}</g>`;
+    }).join("");
+    const night = tl.night
+      ? `<rect x="${L}" y="6" width="${Math.max(0, X(tl.night.onMin) - L)}" height="${axisY - 6}" fill="#0d1b2a" opacity="0.45"></rect>
+         <rect x="${X(tl.night.offMin)}" y="6" width="${Math.max(0, R - X(tl.night.offMin))}" height="${axisY - 6}" fill="#0d1b2a" opacity="0.45"></rect>`
+      : "";
+    const lanes = compact
+      ? `<text x="4" y="${pumpY + 4}" font-size="9" fill="#90a4ae">⚙︎✋</text>`
+      : `<text x="6" y="${pumpY + 4}" font-size="10" fill="#90a4ae"><title>Food pumps — the firmware owns the exact clock</title>⚙︎</text>
+         <text x="6" y="${handY + 4}" font-size="10" fill="#90a4ae"><title>By hand — bottles, brine, harvests</title>✋</text>
+         <text x="6" y="${sysY + 3}" font-size="9" fill="#78909c"><title>Water exchange</title>≋</text>`;
+    const svg = `
+      <svg viewBox="0 0 420 ${H}" style="width:100%;display:block;" role="img" aria-label="Today's feed timeline">
+        ${night}
+        ${!compact ? `<line x1="${L}" y1="${pumpY}" x2="${R}" y2="${pumpY}" stroke="#1e2d3d" stroke-width="1"></line><line x1="${L}" y1="${handY}" x2="${R}" y2="${handY}" stroke="#1e2d3d" stroke-width="1"></line>` : ""}
+        ${lanes}
+        <line x1="${L}" y1="${axisY}" x2="${R}" y2="${axisY}" stroke="#37474f" stroke-width="2"></line>
+        ${[0, 6, 12, 18, 24].map((h) => `
+          <line x1="${X(h * 60)}" y1="${axisY - 4}" x2="${X(h * 60)}" y2="${axisY + 4}" stroke="#546e7a" stroke-width="1"></line>
+          <text x="${X(Math.min(h * 60, 1439))}" y="${axisY + 13}" text-anchor="middle" font-size="8" fill="#78909c">${String(h).padStart(2, "0")}</text>`).join("")}
+        ${marks}
+        <line x1="${X(tl.nowMin)}" y1="6" x2="${X(tl.nowMin)}" y2="${axisY}" stroke="#e5484d" stroke-width="1.5"></line>
+      </svg>`;
+    const chipRow = chips.length ? `
+      <div class="nps-tl-chips">
+        ${chips.map((ev) => `<button class="secondary compact-button nps-tl-chip ${esc(ev.status)}${open === ev.id ? " nps-tl-sel" : ""}" ${act(ev)} ${readOnly ? "disabled" : ""}>
+          ${ev.how === "pump" ? "⚙︎" : "✋"} ${esc(ev.name)}${ev.ml != null ? ` · ${esc(ev.actualMl ?? ev.ml)} ml` : ""} · ${ev.status === "done" ? `done ${ev.doneAt != null ? hm(ev.doneAt) : ""}` : `any time · ${esc(this._npsTimelineStatusLabel(ev.status))}`}
+        </button>`).join("")}
+      </div>` : "";
+    const queue = !compact && Array.isArray(tl.next) && tl.next.length ? `
+      <div class="nps-tl-next">
+        ${tl.next.map((n) => `<span class="pill nps-tl-pill ${esc(n.status)}">${n.how === "pump" ? "⚙︎" : "✋"} ${esc(n.name)}${n.ml != null ? ` ${esc(n.ml)} ml` : ""} · ${n.minutesUntil > 0 ? `in ${n.minutesUntil >= 60 ? `${Math.floor(n.minutesUntil / 60)} h ${n.minutesUntil % 60} min` : `${n.minutesUntil} min`}` : esc(this._npsTimelineStatusLabel(n.status))}</span>`).join("")}
+      </div>` : "";
+    const legend = compact ? "" : `<small class="nps-tl-legend">⚙︎ pumps · ✋ by hand · hollow = planned · solid = done · amber = late · red = missed · dotted = skipped · tap a mark for its dose card</small>`;
+    const card = !readOnly && open ? this._npsTimelineEventCard(open, tl) : "";
+    return `
+      <div class="nps-tl">
+        ${svg}
+        ${chipRow}
+        ${queue}
+        <small>${esc(tl.text)}</small>
+        ${legend}
+        ${card}
+      </div>`;
+  }
+
+  // The dose card (doc §13.6): the whole story of one mark, and the actions
+  // that belong to its kind. Inline under the strip — the shadow-DOM
+  // fullscreen trap (0.7.34) is why nothing here floats.
+  _npsTimelineEventCard(eventId, tl) {
+    const ev = (tl.events || []).find((e) => e.id === eventId);
+    if (!ev) return "";
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const hm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+    const color = this._npsTimelineColor(ev);
+    const howLabel = ev.how === "pump" ? "⚙︎ food pump" : ev.how === "system" ? "≋ water exchange" : "✋ by hand";
+    const status = this._npsTimelineStatusLabel(ev.status);
+    const lines = [];
+    if (ev.kind === "band" && Array.isArray(ev.band)) lines.push(`${hm(ev.band[0])} → ${hm(ev.band[1] % 1440)}${ev.ml != null ? ` · ${esc(ev.ml)} ml over the window` : ""}`);
+    else if (ev.status === "done") lines.push(`Done at ${hm(ev.doneAt ?? ev.at)}${ev.at != null && ev.doneAt != null && ev.doneAt !== ev.at ? ` (planned ${hm(ev.at)})` : ""}${ev.actualMl != null ? ` · ${esc(ev.actualMl)} ml` : ev.ml != null ? ` · ${esc(ev.ml)} ml` : ""}`);
+    else if (ev.status === "ghost") lines.push(`Not today — next ${esc(ev.nextDate || "")}${ev.at != null ? ` at ${hm(ev.at)}` : ""}${ev.ml != null ? ` · ${esc(ev.ml)} ml` : ""}`);
+    else lines.push(`${ev.at != null ? `Planned ${hm(ev.at)}` : "Any time today"}${ev.ml != null ? ` · ${esc(ev.ml)} ml` : ""}`);
+    if (ev.note) lines.push(esc(ev.note));
+    const shelf = this._nps?.summary?.shelf?.products?.[ev.productId] || null;
+    if (shelf && shelf.bottleMl) {
+      const bits = [`${esc(shelf.remainingMl)} of ${esc(shelf.bottleMl)} ml${shelf.percent != null ? ` (${esc(Math.round(shelf.percent))}%)` : ""}`];
+      if (shelf.daysUntilEmpty != null) bits.push(`≈${esc(shelf.daysUntilEmpty)} days left`);
+      if (shelf.expiry?.status === "expired") bits.push("expired");
+      else if (shelf.expiry?.status === "aging") bits.push(`~${esc(shelf.expiry.daysLeft)} d before it expires`);
+      lines.push(`Bottle: ${bits.join(" · ")}`);
+    }
+    const actions = [];
+    const pid = String(ev.source || "").startsWith("shelf:") ? String(ev.source).slice(6) : "";
+    const cid = String(ev.source || "").startsWith("channel:") ? String(ev.source).slice(8) : "";
+    if (pid && ev.how === "hand" && ev.kind === "dose" && ev.status !== "done" && ev.status !== "ghost") {
+      const ml = ev.ml != null ? ev.ml : null;
+      actions.push(`<button class="${ev.status === "due" || ev.status === "late" ? "primary" : "secondary"} compact-button" data-action="nps-timeline-log" data-id="${esc(pid)}">${ml != null ? `Log ${esc(ml)} ml now` : "Log the dose"}</button>`);
+      actions.push(`<span class="nps-tl-late"><input type="time" data-nps-late="${esc(pid)}" aria-label="Dosed earlier at"><button class="secondary compact-button" data-action="nps-timeline-log-late" data-id="${esc(pid)}">Dosed earlier</button></span>`);
+      if (ev.status !== "skipped") actions.push(`<button class="secondary compact-button" data-action="nps-timeline-skip" data-id="${esc(pid)}" title="Holds the cadence — the next slot stands, no ml moves">Skip today</button>`);
+    }
+    if (cid && ev.kind === "dose" && ev.ml != null) {
+      actions.push(`<button class="secondary compact-button" data-action="nps-timeline-dosenow" data-id="${esc(cid)}" data-ml="${esc(ev.ml)}" title="The firmware's guard chain has the final say">Dose ${esc(ev.ml)} ml now</button>`);
+    }
+    if (ev.source === "brine" && ev.status !== "done") lines.push("Tap Fed on the Brine hatchery card — it debits the container and fills this mark.");
+    if (String(ev.source || "").startsWith("culture:")) actions.push(`<button class="secondary compact-button" data-action="tab" data-id="cultures">Open Cultures</button>`);
+    if (ev.source === "awc") actions.push(`<button class="secondary compact-button" data-action="tab" data-id="awc">Open Water Change</button>`);
+    actions.push(`<button class="secondary compact-button" data-action="nps-timeline-close">Close</button>`);
+    return `
+      <div class="nps-tl-card" style="border-left:4px solid ${color};">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <strong>${esc(ev.name)}</strong>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;"><span class="pill nps-tl-pill">${howLabel}</span><span class="pill nps-tl-pill ${esc(ev.status)}">${esc(status)}</span></div>
+        </div>
+        ${lines.map((l) => `<small>${l}</small>`).join("<br>")}
+        <div class="button-row" style="margin-top:8px;">${actions.join("")}</div>
+      </div>`;
+  }
+
+  // The Feeding hub's strip (doc §13.8 Q5a): hand-feeders with zero pumps
+  // get the day at a glance without opening the NPS tab.
+  _npsFeedingStrip() {
+    const products = this._config?.consumables?.products || {};
+    const planned = Object.values(products).some((p) => Number(p?.doseEveryDays) > 0 || Number(p?.doseEveryHours) > 0);
+    if (!this._config?.nps?.enabled && !planned) return "";
+    if (!this._nps) return "";
+    try { Promise.resolve(this._npsLoadSummary()).catch(() => {}); } catch { /* the strip waits */ }
+    return `
+      <article class="panel stack">
+        <p class="eyebrow">Today's feeds</p>
+        ${this._npsTimelineSvg()}
+      </article>`;
+  }
+
+  // The staged demo day: a mixed hand + pump day so the screenshot sells it.
+  _npsDemoTimeline() {
     const now = new Date();
     const nowMin = now.getHours() * 60 + now.getMinutes();
-    const events = [];   // {min, name, color}
-    const rows = [];
-
-    foodIds.forEach((id, idx) => {
-      const ch = channels[id] || {};
-      const sched = ch.schedule || {};
-      if (!sched.enabled || !(Number(sched.mlPerDay) > 0)) return;
-      const color = this._npsChannelColor(idx);
-      const ws = hm(sched.windowStart, 0);
-      let we = hm(sched.windowEnd, 0);
-      const span = we > ws ? we - ws : (we === ws ? 1440 : 1440 - ws + we);
-      const y = 26 + idx * 7;
-      if ((sched.mode || "doses") === "continuous") {
-        rows.push(`<rect x="${X(ws)}" y="${y}" width="${(span / 1440) * 400}" height="4" rx="2" fill="${color}" opacity="0.55"><title>${this._escape(ch.name || id)} — continuous</title></rect>`);
-        return;
-      }
-      const n = Math.max(1, Math.min(48, Math.round(Number(sched.dosesPerDay) || 1)));
+    const ev = (fields) => ({ id: "", at: null, how: "hand", source: "", name: "", productId: "", ml: null, actualMl: null,
+      status: "planned", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null, ...fields });
+    const events = [];
+    const pump = (cid, name, pid, n, ws, we, ml, note) => {
+      const span = we > ws ? we - ws : 1440 - ws + we;
       const step = span / n;
+      let lastDone = null;
       for (let i = 0; i < n; i += 1) {
-        const min = (ws + step * (i + 0.5)) % 1440;
-        events.push({ min, name: ch.name || id, color });
-        rows.push(`<rect x="${X(min) - 1}" y="${y}" width="2.5" height="5" rx="1" fill="${color}"></rect>`);
+        const at = Math.round((ws + step * (i + 0.5)) % 1440);
+        const past = at <= nowMin;
+        if (past) lastDone = i;
+        events.push(ev({ id: `channel:${cid}:${i}`, at, how: "pump", source: `channel:${cid}`, name, productId: pid, ml,
+          status: past ? "expected" : "planned", note }));
       }
-    });
-
-    // AWC slots on the same day (times mode exact; interval mode as a band).
-    const awc = this._config?.automaticWaterChange || {};
-    const asched = awc.schedule || {};
-    if (awc.enabled && asched.enabled) {
-      const color = "#42a5f5";
-      if (String(asched.mode || "times") === "interval") {
-        const ws = hm(asched.windowStart, 0), we = hm(asched.windowEnd, 0);
-        const span = we > ws ? we - ws : (we === ws ? 1440 : 1440 - ws + we);
-        rows.push(`<rect x="${X(ws)}" y="20" width="${(span / 1440) * 400}" height="4" rx="2" fill="${color}" opacity="0.5"><title>Water change — micro-changes</title></rect>`);
-      } else {
-        (Array.isArray(asched.times) ? asched.times : []).forEach((t) => {
-          const min = hm(t, -1);
-          if (min >= 0) {
-            events.push({ min, name: "Water change", color });
-            rows.push(`<rect x="${X(min) - 1}" y="20" width="2.5" height="5" rx="1" fill="${color}"></rect>`);
-          }
-        });
-      }
-    }
-
-    // Night shading from the lighting window (lazy-loaded).
-    let night = "";
-    const win = this._lightingWindow?.data;
-    if (win === null && !this._lightingWindow?.loading) setTimeout(() => this._loadLightingWindow(), 0);
-    if (win && win.configured) {
-      const on = hm(win.onTime, 480), off = hm(win.offTime, 1200);
-      if (off > on) {
-        night = `<rect x="10" y="14" width="${(on / 1440) * 400}" height="34" fill="#0d1b2a" opacity="0.45"></rect>
-                 <rect x="${X(off)}" y="14" width="${410 - X(off)}" height="34" fill="#0d1b2a" opacity="0.45"></rect>`;
-      }
-    }
-
-    // What's next — dose events plus the AWC's own next-run stamp.
-    let next = null;
-    events.forEach((e) => {
-      const delta = e.min > nowMin ? e.min - nowMin : e.min + 1440 - nowMin;
-      if (!next || delta < next.delta) next = { ...e, delta };
-    });
-    const awcNext = Date.parse(this._awcSummary?.state?.nextRun || "");
-    if (Number.isFinite(awcNext) && awcNext > Date.now()) {
-      const delta = Math.round((awcNext - Date.now()) / 60000);
-      if (!next || delta < next.delta) next = { name: "Water change", delta, color: "#42a5f5" };
-    }
-    const nextLine = next
-      ? `Next: <strong>${this._escape(next.name)}</strong> in ${next.delta >= 60 ? `${Math.floor(next.delta / 60)} h ${next.delta % 60} min` : `${next.delta} min`}`
-      : "Nothing scheduled — schedules live on the pump cards and the Water Change tab.";
-
-    return `
-      <div>
-        <svg viewBox="0 0 420 62" style="width:100%;display:block;" role="img" aria-label="24 hour feed timeline">
-          ${night}
-          <line x1="10" y1="48" x2="410" y2="48" stroke="#37474f" stroke-width="2"></line>
-          ${[0, 6, 12, 18, 24].map((h) => `
-            <line x1="${X(h * 60)}" y1="44" x2="${X(h * 60)}" y2="52" stroke="#546e7a" stroke-width="1"></line>
-            <text x="${X(Math.min(h * 60, 1439))}" y="61" text-anchor="middle" font-size="8" fill="#78909c">${String(h).padStart(2, "0")}</text>`).join("")}
-          ${rows.join("")}
-          <line x1="${X(nowMin)}" y1="12" x2="${X(nowMin)}" y2="52" stroke="#e5484d" stroke-width="1.5"></line>
-        </svg>
-        <small>${nextLine}</small>
-      </div>`;
+      if (lastDone != null) { const e = events.find((x) => x.id === `channel:${cid}:${lastDone}`); e.status = "done"; e.doneAt = e.at + 1; }
+    };
+    pump("demo_phyto_pump", "Phyto pump", "demo_phyto", 8, 8 * 60, 20 * 60, 1.5, "");
+    pump("demo_zoo_pump", "Zooplankton pump", "demo_zoo", 2, 18 * 60, 23 * 60, 4.5, "");
+    pump("demo_brine", "Live brine", "demo_brine_bottle", 6, 20 * 60, 8 * 60, 2, "Live brine — the chaser flush banks owed drain for the matched exchange");
+    const hand = (pid, name, ml, slots, spacing, opts = {}) => {
+      slots.forEach((at, i) => {
+        let status = at > nowMin ? "planned" : nowMin - at < 30 ? "due" : nowMin >= at + spacing && spacing < 1440 ? "missed" : "late";
+        let doneAt = null;
+        if (opts.doneBefore != null && at <= opts.doneBefore) { status = "done"; doneAt = at + 6; }
+        events.push(ev({ id: `shelf:${pid}:${i}`, at, source: `shelf:${pid}`, name, productId: pid, ml, status, doneAt,
+          actualMl: status === "done" ? ml : null, note: opts.note || "" }));
+      });
+    };
+    hand("demo_reef_juice", "Reef Juice", 3, [20 * 60 + 30], 1440, { note: "At dusk, skimmer off." });
+    hand("demo_pods", "Copepods", 5, [6 * 60, 14 * 60, 22 * 60], 8 * 60, { doneBefore: Math.min(nowMin, 6 * 60) });
+    events.push(ev({ id: "shelf:demo_amino:ghost", at: 21 * 60, source: "shelf:demo_amino", name: "Amino blend", productId: "demo_amino", ml: 2,
+      status: "ghost", nextDate: new Date(now.getTime() + 86400000).toISOString().slice(0, 10), note: "not today — every 2 days" }));
+    events.push(ev({ id: "shelf:demo_oyster:x0", at: Math.max(0, nowMin - 95), source: "shelf:demo_oyster", name: "Oyster-Feast", productId: "demo_oyster",
+      ml: 2, actualMl: 2, status: "done", doneAt: Math.max(0, nowMin - 95), unplanned: true, note: "extra dose — not on the plan" }));
+    events.push(ev({ id: "shelf:demo_rots:0", source: "shelf:demo_rots", name: "Rotifers", productId: "demo_rots", ml: 40, status: "due",
+      note: "any time today" }));
+    [2 * 60, 22 * 60].forEach((at, i) => events.push(ev({ id: `awc:${i}`, at, how: "system", source: "awc", name: "Water change",
+      status: at > nowMin ? "planned" : "expected", note: "the Water Change tab owns the reservoirs" })));
+    const feeds = events.filter((e) => e.how !== "system" && e.status !== "ghost");
+    const upcoming = events.filter((e) => e.kind === "dose" && e.how !== "system" && ["planned", "due", "late"].includes(e.status))
+      .sort((a, b) => ((a.at == null || a.at <= nowMin) ? 0 : 1) - ((b.at == null || b.at <= nowMin) ? 0 : 1) || (a.at ?? -1) - (b.at ?? -1));
+    const next = upcoming.slice(0, 3).map((e) => ({ id: e.id, name: e.name, how: e.how, at: e.at, ml: e.ml, status: e.status,
+      minutesUntil: e.at == null || e.at <= nowMin ? 0 : e.at - nowMin }));
+    const count = (st) => feeds.filter((e) => e.status === st).length;
+    const pumped = feeds.filter((e) => e.how === "pump").length;
+    return {
+      date: now.toISOString().slice(0, 10), nowMin, night: { onMin: 9 * 60, offMin: 21 * 60 }, events, next,
+      counts: { feeds: feeds.length, pump: pumped, hand: feeds.length - pumped,
+        done: count("done"), missed: count("missed"), late: count("late"), due: count("due"), extra: feeds.filter((e) => e.unplanned).length },
+      text: `${feeds.length} feeds today — ${pumped} pumped (Phyto pump, Zooplankton pump, Live brine), ${feeds.length - pumped} by hand (Reef Juice, Copepods, Oyster-Feast, Rotifers).${count("done") ? ` ${count("done")} done` : ""}${count("missed") ? ` · ${count("missed")} missed` : ""}${count("late") ? ` · ${count("late")} running late` : ""}.`,
+    };
   }
 
   _npsProductCard(pid, product, state) {
@@ -11614,7 +11826,7 @@ class OpenReefPanel extends HTMLElement {
     const guide = plan.guide || {};
     const everyDays = Number(plan.everyDays) || 0;
     const planLine = plan.planned
-      ? `<small>Hand dose <strong>${plan.ml != null ? `${esc(plan.ml)} ml` : "— set the size in Settings"}</strong>${guide.available && !(Number(product.doseMl) > 0) ? ` (${esc(guide.stocking)} stocking: 1 ml per ${esc(guide.perLitres)} L)` : ""}${everyDays > 0 ? ` · every ${everyDays === 1 ? "day" : `${esc(everyDays)} days`}` : " · no reminder"}${plan.lastAt ? ` · last ${esc(this._formatActivityTime(plan.lastAt))}` : " · never dosed"}${plan.note ? `<br>${esc(plan.note)}` : ""}</small>`
+      ? `<small>Hand dose <strong>${plan.ml != null ? `${esc(plan.ml)} ml` : "— set the size in Settings"}</strong>${guide.available && !(Number(product.doseMl) > 0) ? ` (${esc(guide.stocking)} stocking: 1 ml per ${esc(guide.perLitres)} L)` : ""}${plan.cadenceText ? ` · ${esc(plan.cadenceText)}` : everyDays > 0 ? ` · every ${everyDays === 1 ? "day" : `${esc(everyDays)} days`}` : " · no reminder"}${plan.lastAt ? ` · last ${esc(this._formatActivityTime(plan.lastAt))}` : " · never dosed"}${plan.note ? `<br>${esc(plan.note)}` : ""}</small>`
       : guide.available
         ? `<small>Guide: <strong>${esc(guide.ml)} ml</strong> a day at ${esc(guide.stocking)} stocking (1 ml per ${esc(guide.perLitres)} L) — set a cadence in Settings and the shelf reminds you.</small>`
         : "";
@@ -11723,7 +11935,13 @@ class OpenReefPanel extends HTMLElement {
       ${guideLine}
       <div class="mini-grid">
         <label>Dose (ml${guided ? ", 0 = from the guide" : ""})<input type="number" min="0" step="0.1" data-scope="consumable" data-id="${eid}" data-field="doseMl" value="${esc(product.doseMl ?? 0)}"></label>
-        <label>Dose every (days, 0 = no reminder)<input type="number" min="0" max="60" step="1" data-scope="consumable" data-id="${eid}" data-field="doseEveryDays" value="${esc(product.doseEveryDays ?? 0)}"></label>
+        <label>Dose every (0 = no reminder)<span style="display:flex;gap:6px;align-items:center;">
+          <input type="number" min="0" max="${Number(product.doseEveryHours) > 0 ? 24 : 60}" step="${Number(product.doseEveryHours) > 0 ? 0.5 : 1}" style="flex:1;min-width:0;" data-scope="consumable" data-id="${eid}" data-field="doseEveryN" value="${esc(Number(product.doseEveryHours) > 0 ? product.doseEveryHours : (product.doseEveryDays ?? 0))}">
+          <select data-scope="consumable" data-id="${eid}" data-field="doseEveryUnit" style="flex:0 0 auto;">
+            <option value="days" ${Number(product.doseEveryHours) > 0 ? "" : "selected"}>days</option>
+            <option value="hours" ${Number(product.doseEveryHours) > 0 ? "selected" : ""}>hours</option>
+          </select></span></label>
+        <label>First dose at (blank = any time)<input type="time" data-scope="consumable" data-id="${eid}" data-field="doseFirstAt" value="${esc(product.doseFirstAt || "")}"></label>
         ${guided ? `<label>Stocking<select data-scope="consumable" data-id="${eid}" data-field="doseStocking">
           ${["light", "medium", "heavy"].map((v) => `<option value="${v}" ${(product.doseStocking || "medium") === v ? "selected" : ""}>${v}</option>`).join("")}
         </select></label>` : ""}
@@ -13471,6 +13689,7 @@ const rigSteps = [
             system: "The machinery — switches, the guardian, and every setting.",
           }[groupId] || "")}</p>
         </div>
+        ${groupId === "feeding" ? this._npsFeedingStrip() : ""}
         <div class="summary-grid hub-grid">${cards}</div>
       </section>`;
   }
@@ -13661,9 +13880,9 @@ const rigSteps = [
     await this._doserLoadSummary();
   }
 
-  async _doserDoseNow(id) {
+  async _doserDoseNow(id, mlOverride) {
     const el = this.shadowRoot.querySelector(`[data-doser-ml="${id}"]`);
-    const ml = Number(el && el.value) || 0;
+    const ml = Number.isFinite(mlOverride) && mlOverride > 0 ? mlOverride : (Number(el && el.value) || 0);
     if (ml <= 0) {
       this._doserMessage = "Enter a dose volume (ml) first.";
       this._render();
@@ -13688,6 +13907,7 @@ const rigSteps = [
       this._doserMessage = "Failed: " + (err instanceof Error ? err.message : err);
     }
     this._doserLoadSummary?.();
+    if (this._activeTab === "nps") this._npsLoadSummary?.(true);
     this._render();
   }
 
@@ -17599,6 +17819,26 @@ const rigSteps = [
     return this._pulseInsightCurrent()?.key || "";
   }
 
+  // The wall's slim feed strip (doc §13.8 Q5b): one lane, read-only, the
+  // day's shape at a glance. Present mode never adds chatter — no card, no
+  // buttons; the honesty line is the whole caption.
+  _pulseFeedStripMarkup() {
+    try {
+      const products = this._config?.consumables?.products || {};
+      const planned = Object.values(products).some((p) => Number(p?.doseEveryDays) > 0 || Number(p?.doseEveryHours) > 0);
+      if (!this._config?.nps?.enabled && !planned) return "";
+      if (!this._nps) return "";
+      Promise.resolve(this._npsLoadSummary()).catch(() => {});
+      const tl = this._npsTimelineData();
+      if (!tl || !tl.events.length) return "";
+      return `
+        <article class="pulse-block pulse-feeds">
+          <small class="pulse-block-title">Today's feeds</small>
+          ${this._npsTimelineSvg({ compact: true, readOnly: true })}
+        </article>`;
+    } catch { return ""; }
+  }
+
   _pulseInsightMarkup(compact = false) {
     const card = this._pulseInsightCurrent();
     if (!card) return "";
@@ -17919,6 +18159,7 @@ const rigSteps = [
       cfg.showCategories !== false ? this._pulseCategoryBarsMarkup(health) : "",
       cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
       cfg.showToday !== false ? this._pulseTodayMarkup() : "",
+      cfg.showToday !== false ? this._pulseFeedStripMarkup() : "",
     ].filter(Boolean);
     const bottom = blocks.length
       ? `<div class="pulse-diagram-band bottom"><div class="pulse-blocks">${blocks.join("")}</div></div>`
@@ -17937,6 +18178,7 @@ const rigSteps = [
       cfg.showCategories !== false ? this._pulseCategoryBarsMarkup(health) : "",
       cfg.showEquipment !== false ? this._pulseEquipmentMarkup() : "",
       cfg.showToday !== false ? this._pulseTodayMarkup() : "",
+      cfg.showToday !== false ? this._pulseFeedStripMarkup() : "",
     ].filter(Boolean);
     const sparse = !(cfg.showStats !== false && tiles.length) && !blocks.length;
     return `
@@ -29566,6 +29808,26 @@ const rigSteps = [
         .row-go { color: #8da2ba; font-size: 20px; line-height: 1; font-weight: 800; }
         .row-link:hover .row-go, .row-link:focus-visible .row-go { color: var(--openreef-accent, #67e8f9); }
         .pill { display: inline-flex; align-items: center; justify-content: center; min-width: 74px; min-height: 30px; padding: 5px 10px; border-radius: 999px; background: #203247; color: #dbeafe; font-weight: 800; }
+        /* The feed strip (doc §13): marks, chips, the queue, the dose card. */
+        .nps-tl-ev { cursor: pointer; }
+        .nps-tl-ev:hover { filter: brightness(1.25); }
+        @keyframes nps-tl-due { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+        .nps-tl-due { animation: nps-tl-due 1.4s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) { .nps-tl-due { animation: none; } }
+        .nps-tl-chips, .nps-tl-next { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .nps-tl-chip { font-size: 12px; }
+        .nps-tl-chip.due, .nps-tl-chip.late { border-color: var(--warning-color, #f5a524); }
+        .nps-tl-chip.done { opacity: .7; }
+        .nps-tl-chip.nps-tl-sel { border-color: #dcecff; }
+        .nps-tl-pill { min-width: 0; min-height: 24px; padding: 2px 9px; font-size: 11px; font-weight: 600; }
+        .nps-tl-pill.due, .nps-tl-pill.late { color: var(--warning-color, #f5a524); }
+        .nps-tl-pill.missed, .nps-tl-pill.blocked { color: var(--error-color, #e5484d); }
+        .nps-tl-pill.done { color: #66bb6a; }
+        .nps-tl-legend { display: block; margin-top: 4px; opacity: .75; }
+        .nps-tl-card { border: 1px solid #294055; border-radius: 10px; padding: 10px 12px; margin-top: 8px; background: #0f1b28; }
+        .nps-tl-late { display: inline-flex; gap: 6px; align-items: center; }
+        .nps-tl-late input[type="time"] { width: auto; min-width: 0; padding: 4px 6px; }
+        .pulse-feeds svg { width: 100%; }
         .pill.ok { background: #14532d; color: #bbf7d0; }
         .pill.warning { background: #713f12; color: #fde68a; }
         .pill.critical { background: #7f1d1d; color: #fecaca; }

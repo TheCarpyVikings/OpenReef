@@ -837,3 +837,121 @@ rule the no-running branch always used). `driver` says which: `chain`
 `depletion` (the supply on hand, which the panel calls the feeding bottle
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
+
+## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **BUILT 2026-09-05, Stages A–D** (uncommitted; release as 0.7.130) — see §13.10
+
+### 13.1 What v1 is, honestly
+
+`_npsTimelineSvg()` draws a 24 h strip from exactly three sources: food-pump channel schedules (doses spread evenly across the window, or a band for continuous), AWC slots (times or an interval band), and the lighting window for night shading. One "Next:" line underneath. It never reads the shelf's hand-dose plans, the brine container's hand feeds, or the dose history — so a hand-feeder sees "Nothing scheduled" even with five bottles and a due dose (the screenshot: shelf says *1 dose due*, strip says nothing). Events are planned-only: nothing on the strip ever turns into "done".
+
+### 13.2 The idea in one line
+
+**One strip, every mouthful.** Every food that goes into the tank today — pumped or poured — sits on the same 24 h line, planned events as outlines that fill in when they happen, with the pump/hand distinction readable at a glance and a tap opening the full story of that dose.
+
+### 13.3 The event model (backend-authoritative, one pure function)
+
+`nps.feed_timeline(config, now, tank_l, lighting)` → `{date, events[], lanes[], next[], night, honesty}` folded into `nps_summary` as `timeline` (no new WS to forget — the 0.7.129 lesson). Panel renders; never re-derives.
+
+One event shape for everything:
+
+| field | values | notes |
+|---|---|---|
+| `at` | minute-of-day, or `null` | `null` = "any time today" (a hand plan with no preferred time) — shown as a floating chip, never faked to a time |
+| `how` | `pump` · `hand` · `system` | the load-bearing distinction; `system` = AWC slot / matched drain / truce window |
+| `source` | `channel:<id>` · `shelf:<pid>` · `hatchery` · `awc` · `culture:<id>` | where it came from → where the tap links |
+| `productId` | shelf bottle if any | colour + bottle % + expiry for the popover |
+| `ml` | planned or actual | continuous mode carries `mlPerDay` + `band: [start,end]` instead |
+| `status` | `planned` · `due` · `done` · `late` · `missed` · `skipped` · `blocked` | see 13.5 |
+| `doneAt` | actual minute when logged / run stamp | from `history` (`dose`/`pump` kinds), hatchery feeds, HA-switch run stamps |
+| `note` | one plain sentence | "banks 210 ml of owed drain", "UV pauses 20 min", "guide dose for 300 L, medium stocking" |
+
+**Sources swept, per day:**
+
+1. **Pump channels** (as now) — plus reefnode/HA-switch run stamps matched to the nearest planned slot → `done`. Firmware owns the exact clock, so planned ticks stay "approximate by design"; actuals are exact.
+2. **Brine feed-exchange** doses (the fx channel) — each carries the chaser + owed-drain note.
+3. **Shelf hand-dose plans** — `doseMl`, `doseEveryDays` **or** `doseEveryHours`, `doseFirstAt`, `lastDosedAt` (13.4). On an off-day of a multi-day cadence the bottle still shows as a **faint ghost** at its anchor time, `status: ghost`, popover says "next Thursday" (Q7 — informative, revisit if it's noise).
+4. **Hand-fed brine container** — the hatchery's "Fed 250 ml" events (done) and, if the keeper sets one, a feed cadence for the container (planned).
+5. **Dose history** — every `dose`/`pump` history entry stamped today that matched no plan → an *unplanned* done dot ("extra 5 ml Reef Juice, 14:12"). The strip shows what actually happened, not just what was meant to.
+6. **AWC slots / matched drains / truce windows** — `system` lane, visually quiet (thin bands, no colour fight with food).
+7. **Cultures harvest → tank** — **counts, 100 %** (Q6). A harvest logged as fed to the tank is a `hand` done event (`source: culture:<id>`); a culture with a harvest cadence lands planned slots the same way a bottle does. Feeding the *culture* its phyto is not a tank event and stays off the strip.
+
+### 13.4 Hand plans get a clock face — cadence decides the slots (LOCKED, Q1)
+
+Today a hand plan is "X ml every N days" and the due clock is `lastDosedAt + N days` — correct for the reminder, useless for a timeline. Reece's call: **the cadence is the product's**, so the shelf editor gains a second cadence unit rather than a per-bottle list of times:
+
+- `doseEvery: {n, unit: "days" | "hours"}` — stored as the existing `doseEveryDays` **or** a new `doseEveryHours` (mutually exclusive; the editor is one number + a days/hours toggle). Reef Juice = every 1 day; a phyto or rotifer bottle for a Dendro tank = every 6 hours.
+- `doseFirstAt: "HH:MM"` — one anchor time per bottle (default **08:00**, editable). That is the only time the keeper ever types.
+- **Slots per day** derive from the cadence: hours → `floor(24 / n)` slots at `firstAt + k·n h` for `k = 0 …`, restarting at the anchor each day (every 5 h = 08:00, 13:00, 18:00, 23:00 — the label says *"×4 a day from 08:00"*; drift-across-midnight cadences are deliberately not modelled, keepers think in days). Days → one slot at `firstAt` on due days only.
+- `doseFirstAt` unset → the old behaviour: one `at: null` "any time today" chip per due slot. Nothing is faked to a time.
+- **Due clock stays in lockstep**: `hand_dose_state()` clock `at` = the next slot after `lastDosedAt` (hours cadence: `lastDosedAt + n h` snapped to the next anchored slot; days cadence: `lastDosedAt + n d` at `firstAt`). The shelf reminder, the shelf's "1 dose due" pill and the strip must all read the same function — the maintenance-evaluator rule.
+- Save-diff: `doseEveryHours` + `doseFirstAt` join `doseMl`/`doseEveryDays` as keeper-edited fields; `lastDosedAt` stays server-written and guarded.
+
+### 13.5 Status ladder and the visual language
+
+Auto and hand must be distinguishable at arm's length on an iPad and on the Pulse wall, without reading a legend. Three cues, redundant on purpose:
+
+| | pump (auto) | hand |
+|---|---|---|
+| **lane** | upper lane (labelled ⚙︎ pumps) | lower lane (labelled ✋ by hand) |
+| **glyph** | vertical tick / pill, as v1 | circle |
+| **fill** | planned = hollow, done = solid | planned = hollow, done = solid + small ✓ |
+| **colour** | product/channel colour (unchanged) | product colour |
+
+Status overlays (both lanes): `due` = pulsing ring (CSS animation, `prefers-reduced-motion` respected); `late` = amber ring, still hollow; `missed` = red-outlined hollow with a slash; `skipped` = grey hollow, dotted; `blocked` (guard chain refused a pump dose, or truce/AWC exclusion) = red solid with the reason in the popover. `system` lane stays the thin translucent bands of v1, below the axis.
+
+Timing rules (defaults, tune in 13.8): `due` from slot time; `late` after 60 min; `missed` after a 3 h grace, or at midnight if `at: null` was never logged. A missed dose is a fact on the strip, not a nag — the notification story stays with the shelf reminder.
+
+Layout: viewBox grows from 62 → ~110 tall (two lanes + system band + axis). Night shading spans all lanes. The now-line stays red. Left gutter carries the two lane labels; on phones (≤600 px) labels collapse to the ⚙︎/✋ glyphs only.
+
+### 13.6 Tap → the dose card (popover on desktop, bottom sheet on phone)
+
+Every event is a `data-action="timeline-event"` target carrying an event index (buttons MUST carry a class — mixing-station rule). The card:
+
+- **Header**: product name + colour swatch, `how` badge ("Food pump 2 · reefnode" / "By hand"), status word.
+- **The dose**: planned ml, actual ml if different, scheduled time vs done time, bottle % after and days-left runway, expiry status if aging/expired.
+- **Consequences** (only when true): owed drain this dose banks; truce pause length; AWC exclusion; particle/species note from the plan compiler if the bottle is on a species plan.
+- **Actions** by kind:
+  - hand `planned/due/late/missed` → **Log this dose** (calls `consumable_log_dose` with the plan's ml; optional "dosed at" time picker, today-only, past-only, for a late log at its real time — writes `history.at`), **Skip today** (new: `consumable_skip_dose`, stamps `skippedOn: date`; keeps the runway honest because no ml moves), **Open bottle** (scrolls to the shelf card).
+  - pump `planned` → **Dose now** (the existing manual-dose path with the full guard chain; refused reasons shown inline), **Open pump card**.
+  - `done` → the log line, **Undo** only for hand doses logged in the last 10 min (reverses the debit and clears `lastDosedAt` back to the previous history entry — needs a test).
+  - `system` → **Open Water Change**.
+
+### 13.7 "Next" becomes a queue, and the honesty line
+
+Under the strip, the next three events as chips with countdowns, mixed lanes: `✋ Reef Juice 3 ml · in 40 min` · `⚙︎ Phyto 0.8 ml · in 1 h 10` · `≋ Water change 1.2 L · 22:00`. Then the plain-English line in the `scheduleText` tradition: *"9 feeds today — 6 pumped (phyto every 90 min, brine 22:00), 3 by hand (Reef Juice 08:30 and 20:30, copepods any time). 1 missed so far."* Zero-state for a hand-feeder with plans but no times: *"3 hand doses due today — set a time on the bottle and they'll land on the strip."* Zero-state with nothing at all keeps the v1 line.
+
+### 13.8 The grill — ANSWERED 2026-09-05, decisions LOCKED
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Hand-plan times | **Cadence is the product's**: new `doseEveryHours` alongside `doseEveryDays` + one `doseFirstAt` anchor; slots derive from the cadence (13.4). No per-bottle time lists. |
+| 2 | Missed grace | Reece unsure → **proposed default below**. |
+| 3 | Late logging at the real time | **Allowed** — "dosed at" picker, today-only, past-only, writes `history.at`. |
+| 4 | Unplanned doses on the strip | **Show** them as done dots. |
+| 5 | Placement | NPS hero **+ (a) Feeding-tab header for zero-pump keepers + (b) slim Pulse-wall strip**. No Home card. |
+| 6 | Cultures harvest → tank | **Counts, 100 %** as a feed. |
+| 7 | Multi-day off-days | **Faint ghost** at the anchor time — try informative first. |
+| 8 | Skip semantics | **Hold** the cadence (next due as if dosed today). |
+| 9 | Undo window | Reece unsure → **proposed default below**. |
+
+**Proposed for Q2 (missed)** — with hourly cadences in the model, a flat 3 h grace collides with a 2 h cadence. So the grace follows the cadence: a slot is **late** from its time and **missed when its successor slot is due** (hours cadence), or **late until midnight, never red** for day cadences — the shelf's overdue clock takes over the next morning, which is the nag the keeper already has. Night-window slots for nocturnal feeders don't get a red slash at 22:00; they get amber until 23:59. Cheap to change later: one constant and one branch in the status ladder.
+
+**Proposed for Q9 (undo)** — keep a **10 min undo** on hand logs. The likely error is a phone mis-tap on *Log this dose*, and while the shelf editor can fix the ml ledger, it can't cleanly roll `lastDosedAt` back to the previous history entry; undo can, with a test pinning it.
+
+### 13.9 Staged build (once answers land)
+
+- **Stage A — the model**: `nps.feed_timeline()` pure function + `doseEveryHours`/`doseFirstAt` on products (shelf editor toggle) + `hand_dose_state()` clock rewritten onto the slot function + `consumable_skip_dose` WS (registered!) + cultures harvest events + fold into `nps_summary.timeline`. Tests in `tests/test_nps.py`: hours-cadence slot derivation (6 h, 5 h, 24 h), day cadence at the anchor, `at: null` chips, ghost off-days, done-matching to history, late/missed ladder at fixed `now`, skip holds cadence, reminder/strip lockstep. Runner stays last.
+- **Stage B — the strip**: two-lane renderer, glyph/fill language, status overlays, night shading, phone collapse, legend row, queue + honesty line. Demo view gets a mixed hand/pump day so the screenshot sells it.
+- **Stage C — the dose card**: popover/bottom sheet, actions per kind, late-log picker, undo. Reuses the phone-buttons pattern from cultures 0.7.126.
+- **Stage D — placements**: Feeding-tab header for zero-pump setups + Pulse single-lane strip (summon-only rule: no new chatter). Then real-HA soak on Reece's tank with the rotifer/pod bottles hand-fed and the pumps still unwired — the exact mixed case the feature is for.
+
+### 13.10 What was built (2026-09-05) — and what was deliberately left
+
+**Engine (`nps.py`)**: `hand_dose_slots()` (cadence → slots, 13.4), `hand_dose_state()` rewritten onto it with a `tz` argument — the hours clock snaps to the anchored slot *nearest* `last + n h` (a dose ten minutes late still owns its slot), the days clock lands on the anchor of `last + n d`'s date, a skip stamp (`doseSkippedAt`) is the clock base without touching `lastDosedAt`. `feed_timeline()` folds pumps (past ticks `expected`, the tick nearest the run stamp `done`, `blocked` under a suspension), shelf plans (greedy done-matching to history within half the spacing, any-time chips take anything), skips, carried-over overdue (`due` with "overdue since"), off-day ghosts, unplanned extras, copepod harvests (straight into the display) + the rotifer bottle's `fed_tank` rows, hand-fed brine (feeds-a-day chips while brine is on hand; done marks from the hand-feed reminder's completions), the AWC times/interval band, night, the next-three queue, counts and the honesty line. Q2 as proposed: hours cadence → `missed` when the successor slot is due; days cadence → `late` until midnight, never red.
+
+**Backend (`__init__.py`)**: `doseEveryHours` (0–24) + `doseFirstAt` on products; `doseSkippedAt` server-written and carried through a stale save (newest wins); `consumable_log_dose` takes an optional `at` (≤ now, ≤ 24 h back; history re-sorted, `lastDosedAt` = newest); NEW `consumable_skip_dose` WS (registered — the 0.7.129 lesson) logs a `skipped` completion and snoozes the reminder to the engine's next slot; `nps_summary` carries `timeline` and passes the local tz into the shelf so the pill, the reminder and the strip read one clock. Tests: `tests/test_nps.py` 131 green (9 new).
+
+**Panel**: shelf editor = one number + days/hours unit + "First dose at"; `_npsApplyProductField` owns the unit switch; reminder sync makes an hours cadence a daily chore labelled "(N a day)"; shelf card reads the engine's `cadenceText`. `_npsTimelineSvg()` reads `summary.timeline`: two lanes (⚙︎ ticks / ✋ circles), system row, night, now-line, ladder overlays, midnight-wrapping bands, any-time chips, the queue, the honesty line, the legend; `compact`/`readOnly` for the wall. Dose card inline under the strip (`_npsTimelineEventCard`): Log now / Dosed earlier (time picker → `at`) / Skip today / Dose now (pump, via `_doserDoseNow(id, ml)` with the guard chain) / deep links. Placements: NPS hero, Feeding hub (`_npsFeedingStrip`, also for zero-pump keepers with a plan), Pulse wall (`_pulseFeedStripMarkup`, rides `showToday`, read-only). Demo view stages a mixed day (`_npsDemoTimeline`). Tests: `tests/test_panel_nps.mjs` 47 green (4 new); nav/pulse/mobile/cultures/maintenance/diagram/attention untouched and green.
+
+**Left, on purpose**: the 10-min **undo** (Q9 unsure — `history` + `lastDosedAt` rollback needs its own test; next slice); **truce windows** on the system row; brine done-marks exist only when the hand-feed reminder task exists (the only stamped record of a container feed — a `handFeedLog` would be a new server-written field and a new guard, not worth it until someone misses it); the rotifer bottle has done-marks but no planned chips (no cadence exists for it); the dose card is inline rather than a floating sheet (the 0.7.34 shadow-DOM fullscreen trap).
+
