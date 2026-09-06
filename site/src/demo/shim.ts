@@ -119,6 +119,17 @@ const demoBlocked = (what: string): never => {
   );
 };
 
+// Journal-style writes (logging a dose, a jar sign, a salinity reading…)
+// aren't a hardware limit — they're an honesty one: nothing here persists.
+const demoNoPersist = (what: string): never => {
+  throw new Error(
+    `Demo tank: ${what} needs somewhere to live, and nothing here persists — a reload is a fresh tank. On your reef it goes in the log and stays.`,
+  );
+};
+
+const PERSIST_ONLY =
+  /^openreef\/(consumable_|cultures_|nps_hand_feed|nps_fridge_bottle|nps_cysts_opened|nps_hatch_clock|nps_reservoir_discard|nps_enrich_loaded|mixing_(log_salinity|mark_used|salt_stock|set_level|filters_changed|unit_replaced)|cooling_learning)/;
+
 export async function createDemoHass(onMutate: () => void): Promise<{ hass: DemoHass; fixtures: Fixtures; stop: () => void }> {
   const raw: Fixtures = await (await fetch("/demo/fixtures.json")).json();
   const deltaMs = Date.now() - Date.parse(raw.generatedAt);
@@ -202,6 +213,13 @@ export async function createDemoHass(onMutate: () => void): Promise<{ hass: Demo
     "openreef/list_reef_presets": () => clone(ws["openreef/list_reef_presets"]),
     "openreef/guardian_status": () => clone(ws["openreef/guardian_status"]),
     "openreef/vision_summary": () => clone(ws["openreef/vision_summary"]),
+    // The Helm-era pages (0.7.40+): the food shelf + hatchery, the culture
+    // jars, the mixing station, cooling headroom, the spawning executor.
+    "openreef/nps_summary": () => clone(ws["openreef/nps_summary"]),
+    "openreef/cultures_summary": () => clone(ws["openreef/cultures_summary"]),
+    "openreef/mixing_summary": () => clone(ws["openreef/mixing_summary"]),
+    "openreef/cooling_status": () => clone(ws["openreef/cooling_status"]),
+    "openreef/spawning_execution_status": () => clone(ws["openreef/spawning_execution_status"]),
 
     // Quiet, safe empties — tabs that list media simply have none in the demo.
     "openreef/list_timelapse_frames": () => ({ frames: [] }),
@@ -243,8 +261,10 @@ export async function createDemoHass(onMutate: () => void): Promise<{ hass: Demo
       const route = routes[msg.type];
       if (route) return route(msg);
       if (String(msg.type).startsWith("openreef/")) {
-        unrouted.push(String(msg.type));
-        return demoBlocked(`"${String(msg.type).replace("openreef/", "").replace(/_/g, " ")}"`);
+        const type = String(msg.type);
+        unrouted.push(type);
+        const label = `"${type.replace("openreef/", "").replace(/_/g, " ")}"`;
+        return PERSIST_ONLY.test(type) ? demoNoPersist(label) : demoBlocked(label);
       }
       return {};
     },

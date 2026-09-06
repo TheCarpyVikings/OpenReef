@@ -173,11 +173,179 @@ def seed_config() -> dict:
         # The advisor needs a chosen product before it advises; All-For-Reef is
         # the classic single-solution choice for a demo tank.
         "dosing": {
+            "enabled": True,
             "system": {
                 "primaryProduct": "tropic_marin_all_for_reef",
                 "sharedDailyDoseMl": 45,
                 "safetyAcknowledged": True,
             },
+            # Dosing Pumps v2: two HA-timed peristaltics on smart plugs (the
+            # showroom has no OpenReef firmware node, so no kalk stepper —
+            # honest). All-For-Reef carries the chemistry; the phyto pump is
+            # the NPS bridge, debiting the shelf bottle it draws from.
+            "channels": {
+                "afr": {
+                    "name": "All-For-Reef", "chemical": "alk", "enabled": True,
+                    "driver": {"type": "ha_switch_timed",
+                               "entities": {"powerSwitch": "switch.showroom_dose_afr"}},
+                    "schedule": {"enabled": True, "mlPerDay": 45, "mode": "doses", "dosesPerDay": 12,
+                                 "windowStart": "00:00", "windowEnd": "00:00",
+                                 "night": {"enabled": False}},
+                    "guards": {"maxPerDoseMl": 10, "suspendDuringAwc": True},
+                    "calibration": {"mlPerS": 1.2, "spinUpMl": 0.1, "calibratedAt": iso(days_ago(12))},
+                    "reservoir": {"volumeMl": 2000, "remainingMl": 1350, "lowThresholdMl": 200,
+                                  "shelfLifeDays": 0},
+                    "state": {}, "wear": {},
+                },
+                "phyto": {
+                    "name": "Phyto pump", "chemical": "food", "enabled": True,
+                    "productId": "phyto",
+                    "driver": {"type": "ha_switch_timed",
+                               "entities": {"powerSwitch": "switch.showroom_dose_phyto"}},
+                    "schedule": {"enabled": True, "mlPerDay": 30, "mode": "doses", "dosesPerDay": 3,
+                                 "windowStart": "09:00", "windowEnd": "21:00",
+                                 "night": {"enabled": False}},
+                    "guards": {"maxPerDoseMl": 15},
+                    "calibration": {"mlPerS": 1.0, "spinUpMl": 0.0, "calibratedAt": iso(days_ago(9))},
+                    "reservoir": {"volumeMl": 1000, "remainingMl": 620, "lowThresholdMl": 100,
+                                  "shelfLifeDays": 28, "productId": "phyto"},
+                    "state": {}, "wear": {},
+                },
+            },
+        },
+        # The NPS system: the food shelf, the brine hatchery (its clock is
+        # started through the REAL handler in main() and then backdated so a
+        # visitor lands mid-hatch), and the live cultures rig.
+        "consumables": {
+            "products": {
+                "phyto": {
+                    "name": "Live phytoplankton", "brand": "Reef Phyto", "category": "phyto",
+                    "bottleMl": 1000.0, "remainingMl": 620.0, "lowThresholdMl": 150.0,
+                    "openedAt": iso(days_ago(6)), "shelfLifeDaysOpened": 28.0,
+                    "refrigerated": True, "stirDaily": True,
+                    "particleUmMin": 2.0, "particleUmMax": 12.0,
+                    "notes": "Feeds the phyto pump and the rotifer jar.", "createdAt": iso(days_ago(6)),
+                    "history": [],
+                },
+                "powder": {
+                    "name": "Coral powder blend", "brand": "", "category": "blend",
+                    "bottleMl": 120.0, "remainingMl": 74.0, "lowThresholdMl": 20.0,
+                    "openedAt": iso(days_ago(40)), "shelfLifeDaysOpened": 180.0,
+                    "refrigerated": False, "stirDaily": False,
+                    "particleUmMin": 50.0, "particleUmMax": 400.0,
+                    "doseMl": 2.0, "doseEveryDays": 1, "lastDosedAt": iso(days_ago(1, hour=20)),
+                    "notes": "Hand-fed after lights out — the sun corals open for it.",
+                    "createdAt": iso(days_ago(40)), "history": [],
+                },
+                "amino": {
+                    "name": "Amino acids", "brand": "", "category": "amino",
+                    "bottleMl": 250.0, "remainingMl": 45.0, "lowThresholdMl": 50.0,
+                    "openedAt": iso(days_ago(70)), "shelfLifeDaysOpened": 365.0,
+                    "refrigerated": False, "stirDaily": False,
+                    "particleUmMin": 0.0, "particleUmMax": 0.0,
+                    "doseMl": 5.0, "doseEveryDays": 2, "lastDosedAt": iso(days_ago(2, hour=21)),
+                    "notes": "", "createdAt": iso(days_ago(70)), "history": [],
+                },
+            },
+        },
+        "nps": {
+            "enabled": True,
+            "hatchery": {
+                "enabled": True,
+                "eggType": "premium",
+                "hatchHours": 24,
+                "tempEntity": "sensor.showroom_room_temp",
+                "cysts": {"openedAt": iso(days_ago(10))},
+                # The live-brine container the hatch drains into, and the
+                # fridge bottle mixed this morning (brine keeps ~24 h in the
+                # fridge, so "yesterday" would already read as spent).
+                "reservoir": {"volumeMl": 500, "remainingMl": 0},
+                "fridgeBottle": {"volumeMl": 250, "remainingMl": 180, "mixedAt": iso(NOW - timedelta(hours=6))},
+                "handFeed": {"feedsPerDay": 2, "defaultDoseMl": 30, "windowStart": "11:00", "windowEnd": "21:00"},
+                "handFeeds": [
+                    {"at": iso(days_ago(1, hour=18)), "from": "bottle", "ml": 20},
+                    {"at": iso(days_ago(2, hour=18)), "from": "bottle", "ml": 20},
+                ],
+            },
+            "cultures": {
+                "enabled": True,
+                "tempEntity": "sensor.showroom_room_temp",
+                "jars": {
+                    "a": {"name": "Rotifers A", "species": "rotifer_L", "volumeL": 4.0, "salinityPpt": 27,
+                          "feed": {"productId": "phyto", "doseMl": 20}, "cadence": {},
+                          "state": {"startedAt": iso(days_ago(6, hour=19)),
+                                    "lastRestartAt": iso(days_ago(6, hour=19)),
+                                    "lastFedAt": iso(days_ago(0.4)),
+                                    "lastHarvestAt": iso(days_ago(1, hour=8)),
+                                    "lastSign": "cloudy", "lastSignAt": iso(days_ago(0.4)),
+                                    "lastTint": "tan"},
+                          "history": []},
+                    "b": {"name": "Tigriopus B", "species": "tigriopus", "volumeL": 4.0, "salinityPpt": 35,
+                          "feed": {"productId": "phyto", "doseMl": 10}, "cadence": {},
+                          "state": {"startedAt": iso(days_ago(20, hour=19)),
+                                    "lastRestartAt": iso(days_ago(20, hour=19)),
+                                    "lastFedAt": iso(days_ago(2, hour=19)),
+                                    "lastHarvestAt": iso(days_ago(5, hour=9))},
+                          "history": []},
+                },
+                "bottle": {"volumeMl": 1000, "remainingMl": 600, "filledAt": iso(days_ago(1, hour=8)), "doseMl": 20},
+            },
+        },
+        # The saltwater mixing station: two 50 L vessels, NYOS at 35 ppt, a
+        # tested batch sitting in storage (so the AWC sees a ready batch), and
+        # a salt bucket that is getting low enough to mention.
+        "mixingStation": {
+            "enabled": True,
+            "layout": "dual",
+            "vessels": {
+                "rodi": {"volumeLitres": 50, "estimatedLitres": 38, "levelSensorEntity": ""},
+                "mix": {"volumeLitres": 50, "estimatedLitres": 45, "contents": "salt", "levelSensorEntity": ""},
+            },
+            "salt": {"brand": "nyos_pure", "targetPpt": 35.0, "mixHours": 0, "customGPerL": 0},
+            "heat": {"enabled": True, "targetC": 25.0, "tempSensorEntity": ""},
+            "storage": {"circulateEveryH": 6, "circulateForMin": 10, "retestAfterDays": 7},
+            "switches": {
+                "rodiBooster": {"switchEntity": "switch.showroom_mix_booster"},
+                "mixPumpA": {"switchEntity": "switch.showroom_mix_pump_a"},
+                "mixPumpB": {"switchEntity": "switch.showroom_mix_pump_b"},
+                "heater": {"switchEntity": "switch.showroom_mix_heater"},
+            },
+            "rodi": {
+                "rateLph": 6, "fillCapMin": 240,
+                # Filter stages each earn their own litres clock; the DI is
+                # the one getting close, as it always is.
+                "filters": [
+                    {"id": "sed", "label": "Sediment 5 µm", "type": "sediment", "ratedLitres": 6000,
+                     "litresProcessed": 2100, "changedAt": iso(days_ago(95))},
+                    {"id": "carbon", "label": "Carbon block", "type": "carbon", "ratedLitres": 6000,
+                     "litresProcessed": 2100, "changedAt": iso(days_ago(95))},
+                    {"id": "membrane", "label": "RO membrane 75 GPD", "type": "membrane", "ratedLitres": 30000,
+                     "litresProcessed": 9400, "changedAt": iso(days_ago(400))},
+                    {"id": "di", "label": "DI resin", "type": "di", "ratedLitres": 2000,
+                     "litresProcessed": 1750, "changedAt": iso(days_ago(80))},
+                ],
+            },
+            "saltStock": {"kg": 3.1, "bucketKg": 10, "updatedAt": iso(days_ago(3)), "history": []},
+            "batch": {"state": "storing", "type": "salt",
+                      "startedAt": iso(days_ago(3, hour=10)), "stageAt": iso(days_ago(2, hour=12)),
+                      "litres": 45, "loggedPpt": 35.1, "testedAt": iso(days_ago(2, hour=12)),
+                      "usedLitres": 0},
+        },
+        # Cooling headroom: room sensors, a weather entity with an hourly
+        # forecast (served by the fake HA in main()), the dehumidifier on a
+        # plug in auto, and the intake fan in front of the window.
+        "coolingHeadroom": {
+            "enabled": True,
+            "roomTempEntity": "sensor.showroom_room_temp",
+            "humidityEntity": "sensor.showroom_room_rh",
+            "waterTempEntity": "",
+            "targetTempC": 25.5,
+            "weatherEntity": "weather.showroom",
+            "lookaheadHours": 24,
+            "dehumidifier": {"mode": "auto", "armed": True, "switchEntity": "switch.showroom_dehum",
+                             "leadHours": 3, "minOnMinutes": 20, "minOffMinutes": 10, "maxRunHours": 8},
+            "vent": {"mode": "auto", "armed": True, "switchEntity": "switch.showroom_intake_fan",
+                     "windowEntity": "binary_sensor.showroom_window"},
         },
         "manualReadings": {
             # Alk consumption creeping up — decline steepens over the month.
@@ -310,6 +478,21 @@ def seed_states() -> dict:
         "binary_sensor.showroom_fresh_empty": st("off", {"friendly_name": "Fresh reservoir empty", "device_class": "problem"}),
         "binary_sensor.showroom_waste_full": st("off", {"friendly_name": "Waste reservoir full", "device_class": "problem"}),
         "binary_sensor.showroom_high": st("off", {"friendly_name": "Display high level", "device_class": "problem"}),
+        # Room + weather for cooling headroom, the hatchery and the cultures.
+        "sensor.showroom_room_temp": st("27.6", {"unit_of_measurement": "°C", "friendly_name": "Tank room temp", "device_class": "temperature"}),
+        "sensor.showroom_room_rh": st("64", {"unit_of_measurement": "%", "friendly_name": "Tank room humidity", "device_class": "humidity"}),
+        "weather.showroom": {"state": "cloudy", "attributes": {"temperature": 22.0, "humidity": 70, "temperature_unit": "°C", "friendly_name": "Showroom weather"},
+                             "last_changed": iso(NOW - timedelta(minutes=2)), "last_updated": iso(NOW - timedelta(minutes=2))},
+        "switch.showroom_dehum": st("off", {"friendly_name": "Dehumidifier"}),
+        "switch.showroom_intake_fan": st("on", {"friendly_name": "Intake fan"}),
+        "binary_sensor.showroom_window": st("on", {"friendly_name": "Fish-room window", "device_class": "opening"}),
+        # Dosing pumps and the mixing station's plugs.
+        "switch.showroom_dose_afr": st("off", {"friendly_name": "AFR dosing pump"}),
+        "switch.showroom_dose_phyto": st("off", {"friendly_name": "Phyto dosing pump"}),
+        "switch.showroom_mix_booster": st("off", {"friendly_name": "RODI booster pump"}),
+        "switch.showroom_mix_pump_a": st("off", {"friendly_name": "Mix pump A"}),
+        "switch.showroom_mix_pump_b": st("off", {"friendly_name": "Mix pump B"}),
+        "switch.showroom_mix_heater": st("off", {"friendly_name": "Mix vessel heater"}),
     }
 
 
@@ -344,6 +527,38 @@ def _triton_report() -> dict:
     }
 
 
+def _forecast() -> list[dict]:
+    """24 hourly entries from now: a warm, humid afternoon ahead (peaks ~+8 h),
+    cooling into a damp night — enough for the cooling projection to have an
+    opinion about the dehumidifier and the intake fan."""
+    import math
+    items = []
+    for i in range(24):
+        at = NOW + timedelta(hours=i)
+        peak = math.exp(-((i - 8) / 4.5) ** 2)
+        temp = round(19.5 + 9.5 * peak, 1)
+        rh = round(82 - 30 * peak, 0)
+        items.append({"datetime": at.isoformat(), "temperature": temp, "humidity": rh})
+    return items
+
+
+def _backdate(node, key: str, value: str) -> int:
+    """Set every ``key`` that already carries a value, anywhere in a nested
+    config, to ``value``. Used to shift real-handler stamps into the past."""
+    hits = 0
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == key and v:
+                node[k] = value
+                hits += 1
+            else:
+                hits += _backdate(v, key, value)
+    elif isinstance(node, list):
+        for v in node:
+            hits += _backdate(v, key, value)
+    return hits
+
+
 # --------------------------------------------------------------------------- #
 # Run the real handlers, capture their send_result payloads.
 # --------------------------------------------------------------------------- #
@@ -365,6 +580,44 @@ def main() -> int:
     if icp_conn.error_codes:
         print(f"WARNING: ICP seed import failed: {icp_conn.error_codes}")
 
+    # Cooling headroom Layer 2 reads the weather entity's hourly forecast via
+    # weather.get_forecasts — the fake HA answers with a warm, humid day
+    # ahead so the projection, dehumidifier plan and vent advice all render.
+    hass.services.responses[("weather", "get_forecasts")] = {
+        "weather.showroom": {"forecast": _forecast()}
+    }
+
+    # Start a brine hatch through the REAL handler so the vessel state is
+    # exactly what production writes, then backdate the clock 14 h so the
+    # visitor lands mid-hatch (~10 h to go) instead of at zero.
+    hatch_conn = FakeConnection()
+    try:
+        result = integration.websocket_nps_hatch_start(
+            hass, hatch_conn, {"id": 2, "type": "openreef/nps_hatch_start"})
+        if asyncio.iscoroutine(result):
+            run(result)
+        if hatch_conn.error_codes:
+            print(f"WARNING: hatch start refused: {hatch_conn.error_codes}")
+        else:
+            _backdate(entry.options[CONF_SETTINGS], "hatchStartedAt", iso(NOW - timedelta(hours=14)))
+            # The handler also logged "hatch started" (and the litre it drew
+            # from the mix vessel) at NOW — shift those entries back with
+            # the clock so the ticker and the countdown tell one story.
+            for item in entry.options[CONF_SETTINGS].get("activity") or []:
+                text = str(item.get("message", "")).lower()
+                if "hatch" in text and item.get("timestamp", "") >= iso(NOW - timedelta(minutes=5)):
+                    item["timestamp"] = iso(NOW - timedelta(hours=14))
+    except Exception as err:  # noqa: BLE001
+        print(f"WARNING: hatch start failed: {type(err).__name__}: {err}")
+
+    # Cooling headroom's projection (forecast parse, dehumidifier plan, vent
+    # advice) is built by the 5-minute tick, not by the status read — run one
+    # tick the way tests/test_cooling.py does so cooling_status has a plan.
+    try:
+        run(integration._async_cooling_tick(hass, entry, NOW))
+    except Exception as err:  # noqa: BLE001
+        print(f"WARNING: cooling tick failed: {type(err).__name__}: {err}")
+
     handlers = {
         "openreef/get_config": integration.websocket_get_config,
         "openreef/awc_summary": getattr(integration, "websocket_awc_summary", None),
@@ -374,6 +627,13 @@ def main() -> int:
         "openreef/list_reef_presets": getattr(integration, "websocket_list_reef_presets", None),
         "openreef/guardian_status": getattr(integration, "websocket_guardian_status", None),
         "openreef/vision_summary": getattr(integration, "websocket_vision_summary", None),
+        # The Helm-era pages: NPS shelf/hatchery, cultures, mixing station,
+        # cooling headroom, and the spawning executor.
+        "openreef/nps_summary": getattr(integration, "websocket_nps_summary", None),
+        "openreef/cultures_summary": getattr(integration, "websocket_cultures_summary", None),
+        "openreef/mixing_summary": getattr(integration, "websocket_mixing_summary", None),
+        "openreef/cooling_status": getattr(integration, "websocket_cooling_status", None),
+        "openreef/spawning_execution_status": getattr(integration, "websocket_spawning_execution_status", None),
     }
 
     ws: dict[str, object] = {}

@@ -62,12 +62,14 @@ jobs:
 
       # Plain global install, no corepack: a packageManager pin in
       # site/package.json broke the Vercel build (its corepack chokes),
-      # so the pnpm version is pinned here instead.
+      # so the pnpm version is pinned here instead. It must be pnpm 10:
+      # site/pnpm-workspace.yaml uses the pnpm-10 `allowBuilds` key, which
+      # pnpm 9 misreads as an empty workspace ("packages field missing").
       - name: Install site dependencies
         if: steps.need.outputs.needed == 'true'
         working-directory: site
         run: |
-          npm install -g pnpm@9
+          npm install -g pnpm@10
           pnpm install --frozen-lockfile
 
       - name: Drift report (for the PR body), then regenerate + re-pin

@@ -84,42 +84,83 @@ try {
   if (ready) {
     await sleep(1500); // let the default tab finish its reads
 
-    const tabIds = await page.evaluate(() => {
-      const panel = document.querySelector("openreef-panel");
-      const root = panel?.shadowRoot ?? panel;
-      // Deduped: in-page "go to tab" buttons share the selector with the strip.
-      return [
-        ...new Set(
-          [...(root?.querySelectorAll('[data-action="tab"][data-id]') ?? [])].map((el) =>
-            el.getAttribute("data-id"),
-          ),
-        ),
-      ];
-    });
-    if (tabIds.length < 5) failures.push(`only ${tabIds.length} tabs found — panel chrome missing?`);
-    console.log(`tabs discovered: ${tabIds.join(", ")}`);
-
-    for (const id of tabIds) {
-      const before = consoleErrors.length;
-      await page.evaluate((tabId) => {
+    // Tab discovery is a breadth-first crawl: the Helm nav groups (Home /
+    // Water / Feeding / Watch / System) only render their pages' tab buttons
+    // once the group is open, so a single scan of the initial DOM would miss
+    // every page behind a hub. Click each discovered tab, rescan, repeat
+    // until no new ids appear.
+    const scanTabs = () =>
+      page.evaluate(() => {
         const panel = document.querySelector("openreef-panel");
         const root = panel?.shadowRoot ?? panel;
-        root?.querySelector(`[data-action="tab"][data-id="${tabId}"]`)?.click();
-      }, id);
+        return [
+          ...new Set(
+            [...(root?.querySelectorAll('[data-action="tab"][data-id]') ?? [])].map((el) =>
+              el.getAttribute("data-id"),
+            ),
+          ),
+        ];
+      });
+    // A page's tab button only exists while its nav group is open, so a
+    // click can silently no-op once the crawl has wandered into another
+    // group. clickTab therefore falls back to opening each top-level group
+    // (the ids present on the landing page) until the button appears, and
+    // the caller asserts the panel really switched — a discovered tab that
+    // cannot be reached is a failure, not a free pass.
+    const tryClick = (tabId) =>
+      page.evaluate((id) => {
+        const panel = document.querySelector("openreef-panel");
+        const root = panel?.shadowRoot ?? panel;
+        const el = root?.querySelector(`[data-action="tab"][data-id="${id}"]`);
+        if (!el) return false;
+        // Dispatch rather than .click(): some tab links live in SVG (the
+        // diagram's hub links), and SVGElement has no click() method.
+        el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }));
+        return true;
+      }, tabId);
+    const activeTab = () =>
+      page.evaluate(() => document.querySelector("openreef-panel")?._activeTab ?? null);
+    const landingIds = await scanTabs();
+    const clickTab = async (tabId) => {
+      if (await tryClick(tabId)) return true;
+      for (const group of landingIds) {
+        await tryClick(group);
+        await sleep(400);
+        if (await tryClick(tabId)) return true;
+      }
+      return false;
+    };
+
+    const tabIds = [];
+    const queue = [...landingIds];
+    const seen = new Set(queue);
+    while (queue.length) {
+      const id = queue.shift();
+      tabIds.push(id);
+      const before = consoleErrors.length;
+      const clicked = await clickTab(id);
       await sleep(900);
+      const active = await activeTab();
+      if (!clicked || (active !== null && active !== id)) {
+        failures.push(`tab "${id}" could not be reached (active tab: ${active})`);
+      }
       if (consoleErrors.length > before) {
         failures.push(`tab "${id}": ${consoleErrors.slice(before).join(" | ")}`);
       }
       if (SHOTS) await page.screenshot({ path: `${SHOTS}/demo-${id}.png` });
+      for (const found of await scanTabs()) {
+        if (!seen.has(found)) {
+          seen.add(found);
+          queue.push(found);
+        }
+      }
     }
+    if (tabIds.length < 5) failures.push(`only ${tabIds.length} tabs found — panel chrome missing?`);
+    console.log(`tabs swept (${tabIds.length}): ${tabIds.join(", ")}`);
 
     // Reef Pulse is a present-mode takeover, not a tab — enter and leave it.
     // The ✨ Present button only exists on some views, so go home first.
-    await page.evaluate((tabId) => {
-      const panel = document.querySelector("openreef-panel");
-      const root = panel?.shadowRoot ?? panel;
-      root?.querySelector(`[data-action="tab"][data-id="${tabId}"]`)?.click();
-    }, tabIds[0]);
+    await clickTab(tabIds[0]);
     await sleep(900);
     const pulseBefore = consoleErrors.length;
     const pulseOk = await page.evaluate(async () => {
