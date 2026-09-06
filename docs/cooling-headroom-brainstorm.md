@@ -682,18 +682,44 @@ advice["advised"]:` block, since by definition the dew gap is not met. `vent_adv
 `freecool: bool` alongside `advised`, computed with the same deadband treatment, so all
 threshold logic stays in one function; `vent_decision` just reads the two verdicts.
 
-### 13.6 Night purge — the same argument applies (open decision)
+### 13.6 Night purge — DECIDED 2026-09-06: fix it in the same release
 
 `purge` is gated on `advised`, i.e. the full dew gap. But the purge's whole point is *thermal* —
 pre-cool the room's walls, floor and water ahead of a hot day. On a night where outdoor is 6 °C
-cooler but only 1.4 °C drier it will not fire, for the same wrong reason.
+cooler but only 1.4 °C drier it will not fire, for the same wrong reason as §13.2.
 
-Recommend relaxing `purge` to the dew-neutral test (`gap ≥ 0`) rather than `dewGapC`. Risk: dew
-point commonly *rises* toward dawn as temperature falls, so a purge that begins dew-neutral can
-turn wet — but the rule is re-evaluated every five minutes and the deadband stops it at
-`gap < −0.3`, so this is handled by machinery that already exists.
+Auditing it for this decision turned up two things it has never had, both worse than the wrong
+gate. `purge` sits in the `elif` chain **after** `fan_needed` is false — it fires precisely when
+the room does *not* need cooling — and nothing watches the room while it runs:
 
-This one changes shipped behaviour, so it is called out separately rather than folded in.
+- **No thermal test at all.** Its only temperature gate is `advised`'s `out ≤ room + 1`, so it
+  will happily purge with outdoor *at* room temperature, banking nothing.
+- **No low-temperature stop.** `cool` and `freecool` both end when `fan_needed` releases. `purge`
+  has no equivalent: it runs its window out (`PURGE_MAX_HOURS` 8) and stops only if outdoor turns
+  warmer than the room. Twelve-degree air for eight unattended hours can take the room well below
+  target, with the heater fighting it until dawn.
+
+So purge inherits the whole `freecool` gate set rather than merely dropping to dew-neutral:
+
+1. `gap ≥ 0` (dew-neutral) replaces `gap ≥ dewGapC`
+2. `room − out ≥ coolGapC` — the thermal test it never had
+3. `out ≥ coolMinOutdoorC` — the §13.7 floor
+4. **new** `room > target − purgeFloorC` (default 2.0 °C) — stop banking cold once the room is
+   comfortably under target; the thermal-mass equivalent of the `fan_needed` brake
+
+Net: purge fires on more nights (for the right reason), refuses nights where it currently
+achieves nothing, and can no longer overcool. It ends up better guarded than it is today, which
+is why this ships **with** `freecool` rather than after it — and why shipping `freecool` alone
+would leave `purge` as the only path still using a drying test for a thermal job.
+
+Residual risk, accepted: dew point commonly *rises* toward dawn as temperature falls, so a purge
+that begins dew-neutral can turn wet. The dew gate is live (only the *window* comes from the
+forecast; `in_purge_window` just bounds the hours), it is re-evaluated every five minutes, and
+the §13.4 deadband stops it at `gap < −0.3`. Worst case is a few minutes of slightly wet air.
+
+Watch on the first cold nights: `coolMinOutdoorC` 10 °C will block the purge in October, when
+cold air is exactly what a purge wants. Shared with `freecool` for now; split into its own floor
+only if it actually bites.
 
 ### 13.7 Safety — the one new hazard
 
@@ -722,7 +748,8 @@ long before.
 |---|---|---|---|
 | `coolVent` | `true` | bool | enable the `freecool` route |
 | `coolGapC` | `2.0` | 0.5–8.0 | how much cooler outdoor must be |
-| `coolMinOutdoorC` | `10.0` | 0–20 (0 = off) | never freecool on air colder than this |
+| `coolMinOutdoorC` | `10.0` | 0–20 (0 = off) | never freecool (or purge) on air colder than this |
+| `purgeFloorC` | `2.0` | 0–6 | stop the night purge once the room is this far below target |
 
 Default **on**: the route only fires when `fan_needed` is already true — the room at or over its
 gate — which is a narrow and correct window, and it is self-limiting per §13.4. A cold fish room
@@ -764,13 +791,18 @@ too-cold refusal; `coolVent: false` disabling the route entirely; the normaliser
 `_l2_hass` fixture reproducing Reece's 2026-09-06 reading (room 28.4, outdoor 24.3 at 43 %) which
 must return `freecool` — that reading is the acceptance test for the whole section.
 
-### 13.12 Open questions for Reece
+### 13.12 Decisions — LOCKED 2026-09-06 (Reece's answers)
 
-1. **`coolGapC` default 2.0** — or 1.5, given his room sits 4.1 °C over and a fan will not close
-   that gap quickly? 2.0 is the conservative start.
-2. **§13.6 night purge** — relax it to dew-neutral in the same release, or leave `purge` alone
-   until `freecool` has run a few warm days?
-3. **`coolMinOutdoorC` 10 °C** — right for a UK living room, or lower it for the night purge?
-4. **His own settings meanwhile**: `dewGapC` 3 → 2 (at 3 the fan barely runs; his gap lives
-   between 1.4 and 3.0), `minOn` 60 → 20 (his indoor dew moved 1 °C in seven minutes; an hour is
-   far longer than the phenomenon, and the anti-chatter job now belongs to the deadbands).
+1. **`coolGapC` = 2.0.** The conservative start; revisit if his room sits stubbornly 2–3 °C over.
+2. **Night purge: fix it in the same release** — see §13.6, which grew from "relax one gate" into
+   four gates once the audit found purge had no thermal test and no low-temperature stop.
+3. **`coolMinOutdoorC` = 10.0.** Good start; §13.6 notes the October caveat.
+4. **Settings applied 2026-09-06** (before any of this is built): `dewGapC` 3 → **2**, `minOn`
+   60 → **20**, `minOff` **10**. Confirmed working the same afternoon — gap 4.0 °C, one clean
+   run, "Venting: the room needs cooling and outdoor air is drier (25.3 °C, dew point 9.5 °C)".
+   With `room − out` at 1.8 °C, under `coolGapC`, `freecool` would correctly not have fired: the
+   two routes separate cleanly on his live numbers.
+
+Status: **spec complete, not built.** Next step is the build — `cooling.py` gates and deadbands
+first, then the normaliser, then the panel, with §13.11's acceptance test (his 2026-09-06
+reading must return `freecool`) written before the code.
