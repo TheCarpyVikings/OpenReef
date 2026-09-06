@@ -25957,6 +25957,7 @@ const rigSteps = [
     if (!d) return "";
     if (d.kind === "blocked") return `Open the window — ${d.reason}`;
     if (d.kind === "purge") return `${sum.ventControlling && sum.ventFanOn ? "Night purge running" : "Night purge — run the intake fan"}: ${d.reason}`;
+    if (d.kind === "freecool") return `${sum.ventControlling && sum.ventFanOn ? "Free cooling" : "Vent the room — free cooling"}: ${d.reason}`;
     if (d.kind === "cool" || d.kind === "predry") return `${sum.ventControlling && sum.ventFanOn ? "Venting" : "Vent the room"}: ${d.reason}`;
     return "";
   }
@@ -26032,7 +26033,8 @@ const rigSteps = [
       return { key: "cooling", kicker: "Cooling headroom", title: sum.ventControlling && sum.ventFanOn ? "Night purge running" : "Night purge — run the intake fan", detail: sum.ventDecision.reason, status: "ok" };
     }
     if (sum.ventRunning) {
-      return { key: "cooling", kicker: "Cooling headroom", title: sum.ventControlling && sum.ventFanOn ? "Venting the room" : "Vent the room now", detail: sum.ventDecision.reason, status: sum.needed ? "warning" : "ok" };
+      const freecool = sum.ventDecision.kind === "freecool";
+      return { key: "cooling", kicker: "Cooling headroom", title: sum.ventControlling && sum.ventFanOn ? (freecool ? "Free cooling" : "Venting the room") : (freecool ? "Vent the room — free cooling" : "Vent the room now"), detail: sum.ventDecision.reason, status: sum.needed ? "warning" : "ok" };
     }
     if (sum.planActive) {
       return { key: "cooling", kicker: "Cooling headroom", title: sum.ventAdvised ? "Vent the room now" : "Dehumidify now", detail: sum.ventAdvised ? sum.ventReason : sum.plan.reason, status: "warning" };
@@ -26248,6 +26250,9 @@ const rigSteps = [
         <label><span>Intake fan plug</span>${this._awcEntitySelect("cooling-vent", "", "switchEntity", vent.switchEntity || "", "switch")}</label>
         <label><span>Window contact sensor <small>optional — on = open; auto never runs the fan against a closed window</small></span>${this._awcEntitySelect("cooling-vent", "", "windowEntity", vent.windowEntity || "", "binary_sensor")}</label>
         <label><span>Vent when outdoor dew point is at least this much lower (°C)</span><input type="number" min="0.5" max="6" step="0.5" value="${num(vent.dewGapC, 2)}" data-scope="cooling-vent" data-field="dewGapC" /></label>
+        <label><span>…or when the room is this much hotter than outside (°C) <small>free cooling — only ever with air no wetter than indoors</small></span><input type="number" min="0.5" max="8" step="0.5" value="${num(vent.coolGapC, 2)}" data-scope="cooling-vent" data-field="coolGapC" /></label>
+        <label><span>Never free-cool on air colder than (°C) <small>0 = no floor</small></span><input type="number" min="0" max="20" step="1" value="${num(vent.coolMinOutdoorC, 10)}" data-scope="cooling-vent" data-field="coolMinOutdoorC" /></label>
+        <label><span>Stop the night purge once the tank is this far below target (°C)</span><input type="number" min="0" max="6" step="0.5" value="${num(vent.purgeFloorC, 2)}" data-scope="cooling-vent" data-field="purgeFloorC" /></label>
         <label><span>Min on (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(vent.minOnMinutes, 10)}" data-scope="cooling-vent" data-field="minOnMinutes" /></label>
         <label><span>Min off (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(vent.minOffMinutes, 10)}" data-scope="cooling-vent" data-field="minOffMinutes" /></label>
         <label><span>If you switch it by hand</span>
@@ -26256,6 +26261,10 @@ const rigSteps = [
             <option value="reassert" ${vent.overridePolicy === "reassert" ? "selected" : ""}>Re-assert the plan within a tick</option>
           </select></label>
       </div>
+      <label class="toggle-card compact-toggle">
+        <input type="checkbox" data-scope="cooling-vent" data-field="coolVent" ${vent.coolVent === false ? "" : "checked"}>
+        <span><strong>Free cooling</strong><small>Vent whenever outdoor air is simply cooler than the room and no wetter, even when it is not dry enough to be worth venting for drying. A cooler room conducts less heat into the tank — a benefit the dew-point rule cannot see. The night purge uses this too.</small></span>
+      </label>
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="cooling-vent" data-field="nightPurge" ${vent.nightPurge === false ? "" : "checked"}>
         <span><strong>Night purge</strong><small>Ahead of a day that needs the fans, run the intake fan through the coolest forecast hours so the room's walls, floor and water start the afternoon cool.</small></span>

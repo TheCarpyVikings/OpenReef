@@ -254,6 +254,46 @@ test("vent wins over the dehumidifier plan on every surface", async () => {
   assert(panel._coolingMissionRow().includes("Vent the room:"));
 });
 
+test("free cooling: the new kind reads as free cooling everywhere it surfaces", async () => {
+  const reason = "the room is 4.1 \u00b0C hotter than outside (24.3 \u00b0C) and no wetter \u2014 free cooling";
+  const running = l3({ shouldRun: true, kind: "freecool", wants: "freecool", reason },
+    { ventFan: { mode: "auto", armed: true, switchEntity: "switch.vent", controlling: true, state: "on" } });
+  let panel = await prep({ enabled: true, weatherEntity: "weather.home", vent: { mode: "auto", armed: true, switchEntity: "switch.vent" } }, running);
+  let sum = panel._coolingSummary(running);
+  assert(panel._coolingVentLine(sum).startsWith("Free cooling:"), "running says free cooling");
+  assert(panel._coolingVentLine(sum).includes("no wetter"));
+  // Not yet running: it asks, rather than reports.
+  const idle = l3({ shouldRun: true, kind: "freecool", wants: "freecool", reason });
+  panel = await prep({ enabled: true, weatherEntity: "weather.home", vent: { mode: "auto", armed: true, switchEntity: "switch.vent" } }, idle);
+  sum = panel._coolingSummary(idle);
+  assert(panel._coolingVentLine(sum) === `Vent the room \u2014 free cooling: ${reason}`, panel._coolingVentLine(sum));
+  // The refusal that explains declining obviously cooler air must reach the panel.
+  const refused = l3({ shouldRun: false, kind: "none", wants: null,
+    reason: "outdoor air is 5.0 \u00b0C cooler but wetter (dew point 15.0 \u00b0C) \u2014 it would cost the fans more than it saves" });
+  panel = await prep({ enabled: true, weatherEntity: "weather.home", vent: { mode: "auto", armed: true, switchEntity: "switch.vent" } }, refused);
+  panel._settingsSectionOpen = () => true;
+  panel._awcEntitySelect = () => "";
+  assert(panel._coolingSettings().includes("cost the fans more than it saves"),
+    "the refusal that explains declining cooler air must be visible");
+});
+
+test("layer 3 settings render the free-cooling fields", async () => {
+  const cfg = { enabled: true, weatherEntity: "weather.home", vent: { mode: "auto", armed: true, switchEntity: "switch.vent", coolVent: true, coolGapC: 2, coolMinOutdoorC: 10, purgeFloorC: 2 } };
+  const panel = await prep(cfg, l3({ shouldRun: false, kind: "none", wants: null, reason: "" }));
+  panel._settingsSectionOpen = () => true;
+  panel._awcEntitySelect = (scope, _id, field, value) => `<input data-scope="${scope}" data-field="${field}" value="${value}">`;
+  const html = panel._coolingSettings();
+  for (const f of ["coolVent", "coolGapC", "coolMinOutdoorC", "purgeFloorC"]) {
+    assert(html.includes(`data-field="${f}"`), `missing ${f}`);
+  }
+  assert(html.includes("Free cooling"), "the route toggle names itself");
+  // Off is honoured, not defaulted back on.
+  const off = await prep({ enabled: true, vent: { mode: "auto", armed: true, switchEntity: "switch.vent", coolVent: false } }, l3({ shouldRun: false, kind: "none", reason: "" }));
+  off._settingsSectionOpen = () => true;
+  off._awcEntitySelect = () => "";
+  assert(!/data-field="coolVent"[^>]*checked/.test(off._coolingSettings()), "coolVent false stays unchecked");
+});
+
 test("layer 3 settings render the vent fields, window state and controls", async () => {
   const cfg = { enabled: true, weatherEntity: "weather.home", vent: { mode: "auto", armed: true, switchEntity: "switch.vent", windowEntity: "binary_sensor.window", nightPurge: true } };
   const st = l3({ shouldRun: false, kind: "none", wants: null, reason: "outdoor air is as wet as indoors (dew point 19.0 °C) — keep the windows shut" },

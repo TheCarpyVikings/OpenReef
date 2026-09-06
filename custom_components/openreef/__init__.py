@@ -1026,7 +1026,11 @@ def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
             "switchEntity": _normalise_entity_id(raw_v.get("switchEntity")) or "",
             "windowEntity": _normalise_entity_id(raw_v.get("windowEntity")) or "",
             "dewGapC": _awc_num(raw_v.get("dewGapC"), v_defaults["dewGapC"], 0.5, 6.0),
+            "coolVent": bool(raw_v.get("coolVent", True)),
+            "coolGapC": _awc_num(raw_v.get("coolGapC"), v_defaults["coolGapC"], 0.5, 8.0),
+            "coolMinOutdoorC": _awc_num(raw_v.get("coolMinOutdoorC"), v_defaults["coolMinOutdoorC"], 0, 20),
             "nightPurge": bool(raw_v.get("nightPurge", True)),
+            "purgeFloorC": _awc_num(raw_v.get("purgeFloorC"), v_defaults["purgeFloorC"], 0, 6),
             "minOnMinutes": _awc_num(raw_v.get("minOnMinutes"), v_defaults["minOnMinutes"], 5, 120),
             "minOffMinutes": _awc_num(raw_v.get("minOffMinutes"), v_defaults["minOffMinutes"], 5, 120),
             "overridePolicy": "reassert" if raw_v.get("overridePolicy") == "reassert" else "hold",
@@ -19530,8 +19534,11 @@ def cooling_snapshot(
     # gates relax while it moves. Observed state only: no circularity.
     advice = cooling_engine.vent_advice(room_c, dew_now, outdoor["outC"], outdoor["outDewC"],
                                         vent_cfg["dewGapC"],
-                                        vent_fan["state"] == "on" or window_open is True)
-    decision = cooling_engine.vent_decision(advice, needed, projection, now_local, vent_cfg["nightPurge"], window_open)
+                                        vent_fan["state"] == "on" or window_open is True,
+                                        vent_cfg["coolVent"], vent_cfg["coolGapC"],
+                                        vent_cfg["coolMinOutdoorC"])
+    decision = cooling_engine.vent_decision(advice, needed, projection, now_local, vent_cfg["nightPurge"],
+                                            window_open, water_c, target_c, vent_cfg["purgeFloorC"])
     # Re-read now the plan exists, so the panel gets the hold that explains a
     # plug disagreeing with it. The first read above only needed the raw state.
     vent_fan = _cooling_actuator_state(

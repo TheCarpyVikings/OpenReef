@@ -251,6 +251,18 @@ VENT_DEW_GAP_HYST_C = 0.5           # keep venting until the dew gap falls this 
 VENT_TEMP_HYST_C = 0.5              # …and tolerate outdoor air this much warmer once running
 FAN_GATE_HYST_C = 0.3               # room must drop this far below the gate to un-need the fans
 
+# The second reason to vent (§13): sensible cooling. Venting helps a reef room by
+# two independent paths and only the first was ever modelled — drying the air
+# (raises the tank fans' evaporative headroom), and simply being cooler (a 24 °C
+# room conducts less heat into a 26 °C tank than a 28 °C room does). Room
+# temperature cancels out of the headroom index entirely, so the second path is
+# invisible to `evaluate` — yet `fan_needed` is itself a room-temperature test.
+VENT_COOL_GAP_C = 2.0               # free-cool while the room is at least this much hotter than outside
+VENT_COOL_GAP_HYST_C = 0.5          # …and keep going until that closes to within this of the gap
+VENT_DEW_NEUTRAL_HYST_C = 0.3       # free-cooling needs dew-neutral air; this much give once running
+VENT_COOL_MIN_OUTDOOR_C = 10.0      # never free-cool on air colder than this (0 = no floor)
+PURGE_WATER_FLOOR_C = 2.0           # stop the night purge once the TANK is this far below target
+
 DAY_KINDS = ("quiet", "dry-heat", "humid-heat", "chiller")
 DAY_KIND_COPY = {
     "quiet": "Quiet day — the fans aren't needed",
@@ -428,7 +440,9 @@ def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, wate
 
 def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
                 out_dew_c: float | None, gap_c: float = VENT_DEW_GAP_C,
-                venting: bool = False) -> dict[str, Any]:
+                venting: bool = False, cool_vent: bool = True,
+                cool_gap_c: float = VENT_COOL_GAP_C,
+                cool_min_outdoor_c: float = VENT_COOL_MIN_OUTDOOR_C) -> dict[str, Any]:
     """Right now: is the air outside drier (and no warmer) than the air inside?
     If so, the intake fan beats the dehumidifier for free.
 
@@ -464,9 +478,47 @@ def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
     else:
         reason = (f"outdoor air is drier but warmer ({out_c:.1f} °C vs room {room_c:.1f} °C) — "
                   "vent later, when it cools")
+    # --- the second route: sensible cooling, no drying claim ------------------
+    # Dew-neutral and temperature-positive is an unambiguous win. We deliberately
+    # do NOT weigh "cooler but wetter": converting the two paths to a common
+    # currency needs the room's thermal coupling to the tank, in watts per °C of
+    # room excess, which OpenReef does not know and cannot learn from what it
+    # records. Refuse the trade rather than guess at it.
+    cooler_by = float(room_c) - float(out_c)
+    try:
+        cool_need = float(cool_gap_c)
+    except (TypeError, ValueError):
+        cool_need = VENT_COOL_GAP_C
+    try:
+        floor_c = float(cool_min_outdoor_c)
+    except (TypeError, ValueError):
+        floor_c = VENT_COOL_MIN_OUTDOOR_C
+    if venting:
+        cool_need -= VENT_COOL_GAP_HYST_C
+    cooler = cooler_by >= cool_need
+    # Free-cooling is self-defeating the same way venting-to-dry is: cool air
+    # cools the room, which closes the very gap that justified it.
+    dew_neutral = gap >= (-VENT_DEW_NEUTRAL_HYST_C if venting else 0.0)
+    # The floor is a SAFETY gate, not an efficiency one — a deadband here would
+    # relax it in the hazardous direction, so it gets none.
+    warm_enough = floor_c <= 0 or float(out_c) >= floor_c
+    freecool = bool(cool_vent) and cooler and dew_neutral and warm_enough
+    # Only explain a refusal when there was a real opportunity to refuse, so the
+    # panel can say why obviously cooler air is being declined.
+    freecool_reason = ""
+    if bool(cool_vent) and cooler and not advised:
+        if not dew_neutral:
+            freecool_reason = (f"outdoor air is {cooler_by:.1f} °C cooler but wetter "
+                               f"(dew point {out_dew_c:.1f} °C) — it would cost the fans "
+                               "more than it saves")
+        elif not warm_enough:
+            freecool_reason = (f"outdoor air is {cooler_by:.1f} °C cooler but only {out_c:.1f} °C — "
+                               "too cold to blow at the tank")
     return {"advised": advised, "known": True, "reason": reason,
             "outdoorC": round(float(out_c), 1), "outdoorDewC": round(float(out_dew_c), 1),
-            "gapC": round(gap, 1), "hysteresis": bool(venting)}
+            "gapC": round(gap, 1), "hysteresis": bool(venting),
+            "freecool": freecool, "coolerBy": round(cooler_by, 1),
+            "freecoolReason": freecool_reason}
 
 
 def _hhmm(iso: str | None) -> str:
@@ -528,7 +580,7 @@ def _dehumidifier_plan_raw(live: dict[str, Any] | None, live_needed: bool, proje
 # Layer 3 — the intake fan: when venting is worth running, and the night purge
 # --------------------------------------------------------------------------- #
 
-VENT_RUN_KINDS = ("cool", "predry", "purge")
+VENT_RUN_KINDS = ("cool", "freecool", "predry", "purge")
 
 
 def in_purge_window(projection: dict[str, Any] | None, now: datetime) -> bool:
@@ -542,41 +594,84 @@ def in_purge_window(projection: dict[str, Any] | None, now: datetime) -> bool:
     return start <= now <= end + timedelta(hours=1)
 
 
+def _purge_water_ok(water_c: float | None, target_c: float | None, floor_c: float) -> bool:
+    """The night purge's low-temperature stop. `cool` and `freecool` both end
+    when fan_needed releases; the purge fires precisely when fan_needed is
+    already false, so without this it runs its whole window (up to
+    PURGE_MAX_HOURS) and stops only if outdoor turns warmer than the room.
+
+    The floor is on the WATER, not the room. A reef room sits several degrees
+    under the tank's target every night — that is normal, and it is exactly when
+    a purge is worth running — so a room-versus-target test would block every
+    legitimate purge. What actually matters is the tank, and the honest scope of
+    this guard is small: the heater is the real defence, and this only bites if
+    it has failed or is undersized. Two lines for that is worth it. With no probe
+    bound, water falls back to the target and the test passes — no probe, no
+    block."""
+    if water_c is None or target_c is None:
+        return True
+    try:
+        floor = float(floor_c)
+    except (TypeError, ValueError):
+        floor = PURGE_WATER_FLOOR_C
+    return float(water_c) > float(target_c) - floor
+
+
 def vent_decision(advice: dict[str, Any], fan_needed: bool, projection: dict[str, Any] | None,
-                  now: datetime, night_purge: bool, window_open: bool | None) -> dict[str, Any]:
+                  now: datetime, night_purge: bool, window_open: bool | None,
+                  water_c: float | None = None, target_c: float | None = None,
+                  purge_floor_c: float = PURGE_WATER_FLOOR_C) -> dict[str, Any]:
     """Should the intake fan be pulling outdoor air in right now, and why.
 
-    Only ever while the outdoor air is drier and no warmer (``advice``), and
-    only for a reason: cool (the room needs cooling now), predry (a losing
-    hour is coming — dry the room for free first), purge (night purge: the
-    coolest outdoor hours ahead of a day that needs the fans). A bound window
-    sensor reading closed blocks it (kind ``blocked``) — the panel and the
-    notification say "open the window" instead of running a fan against glass.
-    Winter takes care of itself: a cool room with nothing coming has no reason."""
+    Two routes in, and only for a reason. Drying (``advice["advised"]`` — outdoor
+    is drier by dewGapC and no warmer): cool (the room needs cooling now) and
+    predry (a losing hour is coming — dry the room for free first). Sensible
+    cooling (``advice["freecool"]`` — outdoor is materially cooler and no wetter):
+    freecool (the room needs cooling now) and purge (the coolest outdoor hours
+    ahead of a day that needs the fans). Priority is cool → freecool → predry →
+    purge: a present need beats a future preparation, and a route that both dries
+    and cools beats one that only cools.
+
+    A bound window sensor reading closed blocks it (kind ``blocked``) — the panel
+    and the notification say "open the window" instead of running a fan against
+    glass. Winter takes care of itself: a cool room with nothing coming has no
+    reason."""
     if not advice.get("known"):
         return {"shouldRun": False, "kind": "none", "wants": None, "reason": advice.get("reason", "no outdoor reading")}
     kind = None
     reason = ""
-    if advice.get("advised"):
-        if fan_needed:
-            kind = "cool"
-            reason = (f"the room needs cooling and outdoor air is drier ({advice['outdoorC']:.1f} °C, "
-                      f"dew point {advice['outdoorDewC']:.1f} °C, {advice['gapC']:.1f} °C below indoors)")
-        elif projection and projection.get("firstAffectedAt"):
-            worst = projection.get("worst") or {}
-            pct = round(float(worst.get("index", 0)) * 100)
-            kind = "predry"
-            reason = (f"pre-drying the room with outdoor air (dew point {advice['outdoorDewC']:.1f} °C) — "
-                      f"headroom drops to {pct} % from {_hhmm(projection['firstAffectedAt'])}")
-        elif night_purge and projection and projection.get("dayKind") != "quiet" and in_purge_window(projection, now):
-            window = projection.get("purgeWindow") or {}
-            kind = "purge"
-            reason = (f"night purge — the coolest outdoor air ({advice['outdoorC']:.1f} °C) until "
-                      f"{_hhmm(window.get('to'))}, ahead of a {projection.get('dayKind')} day")
+    if advice.get("advised") and fan_needed:
+        kind = "cool"
+        reason = (f"the room needs cooling and outdoor air is drier ({advice['outdoorC']:.1f} °C, "
+                  f"dew point {advice['outdoorDewC']:.1f} °C, {advice['gapC']:.1f} °C below indoors)")
+    elif advice.get("freecool") and fan_needed:
+        kind = "freecool"
+        reason = (f"the room is {advice['coolerBy']:.1f} °C hotter than outside "
+                  f"({advice['outdoorC']:.1f} °C) and no wetter — free cooling")
+    elif advice.get("advised") and projection and projection.get("firstAffectedAt"):
+        worst = projection.get("worst") or {}
+        pct = round(float(worst.get("index", 0)) * 100)
+        kind = "predry"
+        reason = (f"pre-drying the room with outdoor air (dew point {advice['outdoorDewC']:.1f} °C) — "
+                  f"headroom drops to {pct} % from {_hhmm(projection['firstAffectedAt'])}")
+    elif (night_purge and advice.get("freecool") and projection
+            and projection.get("dayKind") != "quiet" and in_purge_window(projection, now)
+            and _purge_water_ok(water_c, target_c, purge_floor_c)):
+        window = projection.get("purgeWindow") or {}
+        kind = "purge"
+        reason = (f"night purge — the coolest outdoor air ({advice['outdoorC']:.1f} °C) until "
+                  f"{_hhmm(window.get('to'))}, ahead of a {projection.get('dayKind')} day")
     if kind is None:
-        return {"shouldRun": False, "kind": "none", "wants": None,
-                "reason": advice.get("reason", "") if not advice.get("advised")
-                else "outdoor air is drier, but the room doesn't need it right now"}
+        # Prefer the free-cooling refusal when there was one: "cooler but wetter"
+        # explains a declined obvious opportunity, where the dew-gap line alone
+        # reads like a bug.
+        if advice.get("freecoolReason"):
+            fallback = advice["freecoolReason"]
+        elif not advice.get("advised") and not advice.get("freecool"):
+            fallback = advice.get("reason", "")
+        else:
+            fallback = "outdoor air is worth having, but the room doesn't need it right now"
+        return {"shouldRun": False, "kind": "none", "wants": None, "reason": fallback}
     if window_open is False:
         return {"shouldRun": False, "kind": "blocked", "wants": kind,
                 "reason": f"{reason} — but the window is closed"}

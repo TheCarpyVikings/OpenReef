@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.144"
+INTEGRATION_VERSION = "0.7.145"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1636,7 +1636,11 @@ DEFAULT_CORE_CONFIG = {
             "switchEntity": "",          # switch.* — the intake fan's plug
             "windowEntity": "",          # binary_sensor.* — on = open (optional)
             "dewGapC": 2.0,              # vent only while outdoor dew ≤ indoor dew − this
+            "coolVent": True,            # …or when outdoor is simply cooler and no wetter
+            "coolGapC": 2.0,             # free-cool while the room is this much hotter than outside
+            "coolMinOutdoorC": 10.0,     # never free-cool/purge on air colder than this (0 = off)
             "nightPurge": True,          # run through the coolest hours ahead of a hot day
+            "purgeFloorC": 2.0,          # stop the purge once the TANK is this far below target
             "minOnMinutes": 10,
             "minOffMinutes": 10,
             "overridePolicy": "hold",

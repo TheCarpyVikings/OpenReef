@@ -652,8 +652,9 @@ def _l3_hass(entry, room=23.0, rh=60.0, out=(20.0, 60.0), fan="off", window=None
     return hass
 
 
-def _advice(advised=True, gap=2.8):
-    return {"advised": advised, "known": True, "reason": "r", "outdoorC": 20.0, "outdoorDewC": 12.0, "gapC": gap}
+def _advice(advised=True, gap=2.8, freecool=True, cooler_by=6.0):
+    return {"advised": advised, "known": True, "reason": "r", "outdoorC": 20.0, "outdoorDewC": 12.0,
+            "gapC": gap, "freecool": freecool, "coolerBy": cooler_by, "freecoolReason": ""}
 
 
 def test_vent_decision_kinds():
@@ -672,7 +673,8 @@ def test_vent_decision_kinds():
     blocked = cooling.vent_decision(_advice(), True, None, NOW, True, False)
     assert blocked["kind"] == "blocked" and not blocked["shouldRun"] and blocked["wants"] == "cool"
     assert cooling.vent_decision(_advice(), True, None, NOW, True, True)["shouldRun"]                # window open
-    wet = cooling.vent_decision(_advice(advised=False), True, None, NOW, True, None)
+    # Genuinely wet outdoor air fails BOTH routes — not drier, and not dew-neutral.
+    wet = cooling.vent_decision(_advice(advised=False, freecool=False), True, None, NOW, True, None)
     assert wet["kind"] == "none" and not wet["shouldRun"]
     assert cooling.vent_decision({"known": False, "reason": "no outdoor reading"}, True, None, NOW, True, None)["kind"] == "none"
 
@@ -751,7 +753,9 @@ def test_actuator_state_publishes_the_hold_that_explains_a_disagreeing_plug():
     from datetime import timedelta as _td
     entry = _l2_entry(vent={"mode": "auto", "armed": True, "switchEntity": "switch.fan",
                             "dewGapC": 5.0, "minOnMinutes": 60, "minOffMinutes": 10})
-    hass = _l2_hass(entry, room=27.0, rh=45.0, out=(24.3, 43.0))   # a 3.2 °C gap: under the bar
+    # Muggy and barely cooler: under the dew bar (5.0) AND under the cool gap
+    # (2.0), so neither route wants the fan while the plug is on.
+    hass = _l2_hass(entry, room=27.0, rh=45.0, out=(26.8, 43.0))
     hass.states.set("switch.fan", FakeState("on"))
     cfg = integration._config_from_entry(entry)
     # Plan says off (the gap is nowhere near 3.0), plug is on, switched on 20
@@ -776,6 +780,80 @@ def test_actuator_state_publishes_the_hold_that_explains_a_disagreeing_plug():
     assert ov == {"state": "on", "since": started}
     # No runtime at all must not explode or invent a hold.
     assert integration.cooling_snapshot(hass, cfg, NOW, None)["ventFan"]["override"] is None
+
+
+def test_freecool_reeces_2026_09_06_reading_is_the_acceptance_case():
+    # The reading that started all this: outdoor 24.3 °C at 43 % (dew 10.8) into
+    # a room 4.1 °C hotter, dew gap 1.4 — refused by the drying rule, obviously
+    # worth having. Room 28.4/38 % puts the dew gap under 2.0 and the room well
+    # over its gate.
+    entry = _l2_entry(vent={"mode": "auto", "armed": True, "switchEntity": "switch.fan"})
+    hass = _l2_hass(entry, room=28.4, rh=38.0, tank=25.5, out=(24.3, 43.0))
+    hass.states.set("switch.fan", FakeState("off"))
+    snap = integration.cooling_snapshot(hass, integration._config_from_entry(entry), NOW, {})
+    assert snap["vent"]["advised"] is False               # the drying rule still says no
+    assert snap["vent"]["gapC"] < 2.0 and snap["vent"]["coolerBy"] >= 2.0
+    assert snap["fanNeeded"] is True
+    assert snap["ventDecision"]["kind"] == "freecool" and snap["ventDecision"]["shouldRun"]
+    assert "free cooling" in snap["ventDecision"]["reason"]
+
+
+def test_freecool_gates_and_their_deadbands():
+    def adv(room, out, out_dew, dew=None, venting=False, **kw):
+        return cooling.vent_advice(room, dew if dew is not None else out_dew + 1.4,
+                                   out, out_dew, 2.0, venting, **kw)
+    # Cooler by 4.1 and dew-neutral (+1.4) → freecool, but never `advised`.
+    yes = adv(28.4, 24.3, 10.8)
+    assert yes["freecool"] is True and yes["advised"] is False and yes["coolerBy"] == 4.1
+    # Cool gap: 2.0 to start, holds to 1.5 while running, never easier to start.
+    assert adv(26.4, 24.3, 10.8)["freecool"] is True                       # 2.1 — over the bar
+    assert adv(26.2, 24.3, 10.8)["freecool"] is False                      # 1.9 — under 2.0
+    assert adv(26.2, 24.3, 10.8, venting=True)["freecool"] is True         # …held while running
+    assert adv(25.7, 24.3, 10.8, venting=True)["freecool"] is False        # 1.4 — past the deadband
+    # Dew-neutral: 0.0 to start, -0.3 while running. Never buy temperature with
+    # moisture, and say so — this is the line that explains a declined chance.
+    wetter = adv(28.4, 24.3, 12.0, dew=11.6)
+    assert wetter["freecool"] is False and "cost the fans more than it saves" in wetter["freecoolReason"]
+    assert adv(28.4, 24.3, 12.0, dew=11.8, venting=True)["freecool"] is True    # -0.2, inside the give
+    assert adv(28.4, 24.3, 12.0, dew=11.6, venting=True)["freecool"] is False   # -0.4, past it
+    # The cold floor is a SAFETY gate: strict, and it gets no deadband.
+    cold = adv(28.4, 8.0, 4.0)
+    assert cold["freecool"] is False and "too cold to blow at the tank" in cold["freecoolReason"]
+    assert adv(28.4, 8.0, 4.0, venting=True)["freecool"] is False
+    assert adv(28.4, 8.0, 4.0, cool_min_outdoor_c=0)["freecool"] is True        # 0 disables the floor
+    # coolVent off removes the route entirely, refusal copy included.
+    off = adv(28.4, 24.3, 10.8, cool_vent=False)
+    assert off["freecool"] is False and off["freecoolReason"] == ""
+    # No opportunity, no explanation to give.
+    assert adv(24.5, 24.3, 10.8)["freecoolReason"] == ""
+
+
+def test_freecool_priority_and_the_purge_floor():
+    proj_hit = {"firstAffectedAt": (NOW + timedelta(hours=5)).isoformat(), "worst": {"index": 0.2},
+                "dayKind": "humid-heat", "purgeWindow": None}
+    # cool beats freecool when both routes are open.
+    assert cooling.vent_decision(_advice(), True, None, NOW, True, None)["kind"] == "cool"
+    # freecool beats predry: a present need before a future preparation.
+    assert cooling.vent_decision(_advice(), True, proj_hit, NOW, True, None)["kind"] == "cool"
+    assert cooling.vent_decision(_advice(advised=False), True, proj_hit, NOW, True, None)["kind"] == "freecool"
+    # predry still needs the drying route — pre-drying with dew-neutral air is
+    # not a thing, so freecool alone must not reach it.
+    assert cooling.vent_decision(_advice(advised=False), False, proj_hit, NOW, True, None)["kind"] == "none"
+    assert cooling.vent_decision(_advice(), False, proj_hit, NOW, True, None)["kind"] == "predry"
+    # The purge now rides the freecool gates, not the dew gap.
+    purge_proj = {"firstAffectedAt": None, "worst": None, "dayKind": "dry-heat",
+                  "purgeWindow": {"from": (NOW - timedelta(hours=1)).isoformat(),
+                                  "to": (NOW + timedelta(hours=2)).isoformat(), "outC": 12}}
+    assert cooling.vent_decision(_advice(advised=False), False, purge_proj, NOW, True, None)["kind"] == "purge"
+    assert cooling.vent_decision(_advice(freecool=False), False, purge_proj, NOW, True, None)["kind"] == "none"
+    # …and stops on the TANK, not the room: a reef room sits well under the
+    # tank's target every night, which is exactly when a purge is worth running.
+    warm = cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None, 25.5, 25.5, 2.0)
+    assert warm["kind"] == "purge"                                   # tank on target, room irrelevant
+    cold = cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None, 23.4, 25.5, 2.0)
+    assert cold["kind"] == "none"                                    # tank 2.1 under target — stop
+    # No probe (water falls back to the target) must never block a purge.
+    assert cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None, None, 25.5, 2.0)["kind"] == "purge"
 
 
 def test_normaliser_vent_block():

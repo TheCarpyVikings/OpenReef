@@ -682,7 +682,7 @@ advice["advised"]:` block, since by definition the dew gap is not met. `vent_adv
 `freecool: bool` alongside `advised`, computed with the same deadband treatment, so all
 threshold logic stays in one function; `vent_decision` just reads the two verdicts.
 
-### 13.6 Night purge — DECIDED 2026-09-06: fix it in the same release
+### 13.6 Night purge — DECIDED 2026-09-06, shipped 0.7.145
 
 `purge` is gated on `advised`, i.e. the full dew gap. But the purge's whole point is *thermal* —
 pre-cool the room's walls, floor and water ahead of a hot day. On a night where outdoor is 6 °C
@@ -704,8 +704,16 @@ So purge inherits the whole `freecool` gate set rather than merely dropping to d
 1. `gap ≥ 0` (dew-neutral) replaces `gap ≥ dewGapC`
 2. `room − out ≥ coolGapC` — the thermal test it never had
 3. `out ≥ coolMinOutdoorC` — the §13.7 floor
-4. **new** `room > target − purgeFloorC` (default 2.0 °C) — stop banking cold once the room is
-   comfortably under target; the thermal-mass equivalent of the `fan_needed` brake
+4. **new** `water > target − purgeFloorC` (default 2.0 °C) — the low-temperature stop
+
+**Correction, made during the build.** §13.6 first specified that floor on the *room*
+(`room > target − purgeFloorC`), justified by "the heater fights it". That is wrong, and the
+existing purge test caught it immediately: `target_c` is the **tank's** target, and a reef room
+sits several degrees under it every night — which is exactly when a purge is worth running. A
+room-versus-target floor would have blocked every legitimate purge. The floor belongs on the
+**water**, and the honest scope of it is narrower than the original framing implied: the heater
+is the real defence, and this only bites if it has failed or is undersized. Cheap, so kept. With
+no probe bound, `water_c` falls back to the target and the test passes — no probe, no block.
 
 Net: purge fires on more nights (for the right reason), refuses nights where it currently
 achieves nothing, and can no longer overcool. It ends up better guarded than it is today, which
@@ -803,6 +811,28 @@ must return `freecool` — that reading is the acceptance test for the whole sec
    With `room − out` at 1.8 °C, under `coolGapC`, `freecool` would correctly not have fired: the
    two routes separate cleanly on his live numbers.
 
-Status: **spec complete, not built.** Next step is the build — `cooling.py` gates and deadbands
-first, then the normaliser, then the panel, with §13.11's acceptance test (his 2026-09-06
-reading must return `freecool`) written before the code.
+### 13.13 Built — 0.7.145 (2026-09-06)
+
+`freecool` and the purge rework shipped together as specified, with one correction (§13.6) and
+one naming change: `PURGE_ROOM_FLOOR_C` → `PURGE_WATER_FLOOR_C`.
+
+Gates as built, all deadbanded on the stop side except the safety floor, which is strict by
+design — a deadband there would relax it in the hazardous direction:
+
+| gate | start | hold until |
+|---|---|---|
+| cool gap | `room − out ≥ coolGapC` | `room − out < coolGapC − 0.5` |
+| dew neutral | `gap ≥ 0` | `gap < −0.3` |
+| cold floor | `out ≥ coolMinOutdoorC` | *(no give — safety)* |
+
+`vent_decision` grew `water_c`/`target_c`/`purge_floor_c`; `vent_advice` grew `cool_vent`,
+`cool_gap_c`, `cool_min_outdoor_c` and returns `freecool`, `coolerBy` and `freecoolReason`. That
+last is set only when there was a real opportunity to refuse, and `vent_decision` prefers it for
+the `none` reason — "cooler but wetter" explains a declined chance where the dew-gap line alone
+reads like the bug Reece originally reported.
+
+Tests: `tests/test_cooling.py` 59, `tests/test_panel_cooling.mjs` 21. The acceptance case is
+`test_freecool_reeces_2026_09_06_reading_is_the_acceptance_case` — his 28.4 °C room against
+24.3 °C at 43 % must return `freecool` while `advised` stays false.
+
+Not yet verified on real HA.
