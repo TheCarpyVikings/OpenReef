@@ -19532,6 +19532,11 @@ def cooling_snapshot(
                                         vent_cfg["dewGapC"],
                                         vent_fan["state"] == "on" or window_open is True)
     decision = cooling_engine.vent_decision(advice, needed, projection, now_local, vent_cfg["nightPurge"], window_open)
+    # Re-read now the plan exists, so the panel gets the hold that explains a
+    # plug disagreeing with it. The first read above only needed the raw state.
+    vent_fan = _cooling_actuator_state(
+        hass, vent_cfg, runtime.get("vent") if isinstance(runtime, dict) else None,
+        decision["shouldRun"], now_local)
     # The room counts as vented when we are running the intake fan, or the
     # window is known open while venting is advised (the keeper is venting).
     vent_active = bool(vent_fan["controlling"] and vent_fan["state"] == "on") or bool(window_open and advice.get("advised"))
@@ -19548,18 +19553,44 @@ def cooling_snapshot(
         "window": {"entity": vent_cfg["windowEntity"], "open": window_open},
         "ventFan": vent_fan,
         "plan": plan,
-        "dehumidifier": _cooling_actuator_state(hass, dehum),
+        "dehumidifier": _cooling_actuator_state(
+            hass, dehum, runtime.get("dehum") if isinstance(runtime, dict) else None,
+            plan["shouldRun"], now_local),
     })
     return snap
 
 
-def _cooling_actuator_state(hass: HomeAssistant, block: dict[str, Any]) -> dict[str, Any]:
+def _cooling_actuator_state(hass: HomeAssistant, block: dict[str, Any],
+                            state: dict[str, Any] | None = None, desired: bool | None = None,
+                            now: datetime | None = None) -> dict[str, Any]:
+    """One plug's live state for the panel — plus the two reasons it is allowed
+    to disagree with the plan, which are otherwise invisible: a manual hold, and
+    the short-cycle guard still counting down. A plug sitting on while the line
+    above it reads "off" is not a bug, but without these it looks like one."""
     entity = block.get("switchEntity") or ""
     st = hass.states.get(entity) if entity else None
+    state = state if isinstance(state, dict) else {}
+    override = state.get("override")
+    actual = None if st is None or st.state in UNAVAILABLE_STATES else st.state == "on"
+    hold = None
+    if desired is not None and actual is not None and bool(desired) != actual and now is not None:
+        key, mins = ("lastOn", block["minOnMinutes"]) if actual else ("lastOff", block["minOffMinutes"])
+        stamp = state.get(key)
+        try:
+            until = datetime.fromisoformat(stamp) + timedelta(minutes=float(mins)) if stamp else None
+        except (TypeError, ValueError):
+            until = None
+        ref = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        if until is not None and until > ref:
+            hold = {"until": until.isoformat(), "minutes": round(float(mins)),
+                    "kind": "minOn" if actual else "minOff"}
     return {
         "mode": block["mode"], "armed": bool(block["armed"]), "switchEntity": entity,
         "controlling": block["mode"] == "auto" and bool(block["armed"]) and bool(entity),
         "state": st.state if st else None,
+        "override": {"state": override.get("state"), "since": override.get("since", "")}
+                    if isinstance(override, dict) else None,
+        "hold": hold,
     }
 
 

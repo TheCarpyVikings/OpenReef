@@ -26228,7 +26228,7 @@ const rigSteps = [
       <div class="spawn-channel-row">
         <strong>Intake fan</strong>
         ${pill(vs.state)}
-        <small class="hint">${vs.controlling ? "OpenReef is driving the plug" : mode === "auto" ? "auto, but not armed — advice only" : mode === "off" ? "off — no advice, no control" : "advise mode — OpenReef tells you, you switch"}${vs.override ? ` · held ${vs.override.state} by hand since ${this._coolingHhmm(vs.override.since)}` : ""}${windowText ? ` · ${windowText}` : ""}</small>
+        <small class="hint">${vs.controlling ? "OpenReef is driving the plug" : mode === "auto" ? "auto, but not armed — advice only" : mode === "off" ? "off — no advice, no control" : "advise mode — OpenReef tells you, you switch"}${vs.override ? ` · held ${vs.override.state} by hand since ${this._coolingHhmm(vs.override.since)}` : ""}${vs.hold ? ` · <strong>held ${vs.hold.kind === "minOn" ? "on" : "off"} until ${this._coolingHhmm(vs.hold.until)}</strong> — the plan changed inside the ${vs.hold.minutes}-minute min ${vs.hold.kind === "minOn" ? "on" : "off"}` : ""}${windowText ? ` · ${windowText}` : ""}</small>
         <div class="button-row">
           <button class="secondary compact-button" data-action="cooling-vent" data-id="run">Run now</button>
           <button class="secondary compact-button" data-action="cooling-vent" data-id="stop">Stop</button>

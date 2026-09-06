@@ -747,6 +747,37 @@ def test_snapshot_latches_fan_needed_and_deadbands_a_running_vent_fan():
     assert integration.cooling_snapshot(hass, cfg, NOW, runtime)["vent"]["hysteresis"] is False
 
 
+def test_actuator_state_publishes_the_hold_that_explains_a_disagreeing_plug():
+    from datetime import timedelta as _td
+    entry = _l2_entry(vent={"mode": "auto", "armed": True, "switchEntity": "switch.fan",
+                            "dewGapC": 5.0, "minOnMinutes": 60, "minOffMinutes": 10})
+    hass = _l2_hass(entry, room=27.0, rh=45.0, out=(24.3, 43.0))   # a 3.2 °C gap: under the bar
+    hass.states.set("switch.fan", FakeState("on"))
+    cfg = integration._config_from_entry(entry)
+    # Plan says off (the gap is nowhere near 3.0), plug is on, switched on 20
+    # minutes ago under a 60-minute min-on: the panel must be able to say why.
+    started = (NOW.astimezone(timezone.utc) - _td(minutes=20)).isoformat()
+    runtime = {"vent": {"asserted": "on", "lastOn": started}}
+    snap = integration.cooling_snapshot(hass, cfg, NOW, runtime)
+    assert snap["ventDecision"]["shouldRun"] is False and snap["ventFan"]["state"] == "on"
+    hold = snap["ventFan"]["hold"]
+    assert hold and hold["kind"] == "minOn" and hold["minutes"] == 60
+    assert hold["until"].startswith((NOW.astimezone(timezone.utc) + _td(minutes=40)).isoformat()[:16])
+    # Past the window there is nothing left to explain.
+    runtime["vent"]["lastOn"] = (NOW.astimezone(timezone.utc) - _td(minutes=90)).isoformat()
+    assert integration.cooling_snapshot(hass, cfg, NOW, runtime)["ventFan"]["hold"] is None
+    # A plug that agrees with the plan is never "held".
+    hass.states.set("switch.fan", FakeState("off"))
+    runtime["vent"]["lastOn"] = started
+    assert integration.cooling_snapshot(hass, cfg, NOW, runtime)["ventFan"]["hold"] is None
+    # A manual hold reaches the panel too — the release button depends on it.
+    runtime["vent"]["override"] = {"since": started, "state": "on", "plannedRun": False}
+    ov = integration.cooling_snapshot(hass, cfg, NOW, runtime)["ventFan"]["override"]
+    assert ov == {"state": "on", "since": started}
+    # No runtime at all must not explode or invent a hold.
+    assert integration.cooling_snapshot(hass, cfg, NOW, None)["ventFan"]["override"] is None
+
+
 def test_normaliser_vent_block():
     cfg = normalise({"coolingHeadroom": {"vent": {"mode": "x", "armed": 1, "switchEntity": "switch.fan",
                                                   "windowEntity": "binary_sensor.win", "dewGapC": 99, "nightPurge": 0,
