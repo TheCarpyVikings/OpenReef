@@ -177,6 +177,13 @@ everything before it is the shop window.
 - Rung 2 — drift alarm: .github/workflows/demo-drift.yml runs
   site/tools/demo-drift.py on every push touching the panel and keeps exactly
   one demo-drift issue open while the pinned panel lags; closes it on catch-up.
+- 2026-09-06: deep dives for the Helm-era arcs shipped — nps-system, feed-timeline,
+  live-cultures, mixing-station, cooling-headroom, dosing-pumps (15 total; hub/footer/
+  siblings derive from FEATURES in copy.ts). capture-demos.mjs walks nav groups.
+- 2026-09-06 first big refresh: panel 0.7.145, seed enables every Helm-era
+  feature (NPS/hatchery/cultures/mixing/cooling/dosing channels). Smoke gate
+  now crawls nav groups breadth-first and asserts each page really opened.
+  CI installs pnpm 10 (site/pnpm-workspace.yaml is pnpm-10 syntax).
 - Rung 3 — self-refresh: .github/workflows/demo-refresh.yml (monthly 1st +
   manual dispatch with force) regenerates in CI (fake-HA harness, no HA
   needed), runs the smoke gate, and opens a `demo-refresh` PR; failure files a
