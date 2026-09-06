@@ -33,18 +33,27 @@ const PANEL_PATH = process.env.PANEL_PATH || "openreef";
 const [W, H] = (process.env.VIEWPORT || "1280x800").split("x").map(Number);
 
 // Panel tab id → output file (matches FEATURES img paths in src/copy.ts).
+// Since the Helm (0.7.72) a page's tab button only exists while its nav group
+// is open, so each entry names its group; hub entries capture the group's own
+// landing page. Pages whose feature is disabled in your config are skipped.
 const ALL_TABS = [
-  { id: "mission", file: "mission-control.png" },
-  { id: "diagram", file: "diagram.png" },
-  { id: "live", file: "live-stats.png" },
-  { id: "controls", file: "controls.png" },
-  { id: "maintenance", file: "maintenance.png" },
-  { id: "awc", file: "awc.png" },
-  { id: "spawning", file: "spawning.png" },
-  { id: "dosing", file: "dosing.png" },
-  { id: "icp", file: "icp.png" },
-  { id: "cameras", file: "cameras.png" },
-  { id: "energy", file: "energy.png" },
+  { group: "home", id: "mission", file: "mission-control.png" },
+  { group: "home", id: "diagram", file: "diagram.png" },
+  { group: "water", id: "awc", file: "awc.png" },
+  { group: "water", id: "mixing", file: "mixing.png" },
+  { group: "water", id: "dosing", file: "dosing.png" },
+  { group: "water", id: "dosing", file: "dosing-pumps.png" },
+  { group: "water", id: "maintenance", file: "maintenance.png" },
+  { group: "water", id: "icp", file: "icp.png" },
+  { group: "feeding", id: "feeding", file: "feed-timeline.png", hub: true },
+  { group: "feeding", id: "nps", file: "nps.png" },
+  { group: "feeding", id: "hatchery", file: "hatchery.png" },
+  { group: "feeding", id: "cultures", file: "cultures.png" },
+  { group: "feeding", id: "spawning", file: "spawning.png" },
+  { group: "watch", id: "cameras", file: "cameras.png" },
+  { group: "watch", id: "live", file: "live-stats.png" },
+  { group: "watch", id: "energy", file: "energy.png" },
+  { group: "system", id: "controls", file: "controls.png" },
 ];
 const wanted = process.env.TABS?.split(",").map((s) => s.trim());
 const TABS = wanted ? ALL_TABS.filter((t) => wanted.includes(t.id)) : ALL_TABS;
@@ -111,13 +120,21 @@ try {
     }
   }
 
-  for (const { id, file } of TABS) {
-    const btn = await page.$(`pierce/[data-action="tab"][data-id="${id}"]`);
-    if (!btn) {
-      console.warn(`- tab "${id}" not found (feature disabled?) — skipped`);
-      continue;
+  for (const { group, id, file, hub } of TABS) {
+    // Open the page's nav group first so its tab button exists.
+    const groupBtn = await page.$(`pierce/[data-action="tab"][data-id="${group}"]`);
+    if (groupBtn) {
+      await groupBtn.click();
+      await sleep(800);
     }
-    await btn.click();
+    if (!hub) {
+      const btn = await page.$(`pierce/[data-action="tab"][data-id="${id}"]`);
+      if (!btn) {
+        console.warn(`- tab "${id}" not found (feature disabled?) — skipped`);
+        continue;
+      }
+      await btn.click();
+    }
     await sleep(3000); // let charts/streams settle
     await page.screenshot({ path: join(outDir, file) });
     console.log(`✓ ${id} → public/demos/${file}`);

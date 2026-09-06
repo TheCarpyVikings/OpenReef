@@ -141,6 +141,42 @@ export const FEATURES: FeatureCard[] = [
     href: "/features/reef-pulse/",
   },
   {
+    title: "Automated NPS system",
+    body: "Feeding non-photosynthetic corals as a schedule: the food shelf, bottle-bridged pumps, the brine hatchery, the matched water exchange and a nutrient budget.",
+    img: "/demos/nps.png",
+    href: "/features/nps-system/",
+  },
+  {
+    title: "Feed timeline",
+    body: "Every mouthful today on one 24-hour strip — pumped, poured or netted — with planned slots that fill in when they happen, windows, late logs and undo.",
+    img: "/demos/feed-timeline.png",
+    href: "/features/feed-timeline/",
+  },
+  {
+    title: "Live cultures",
+    body: "Rotifers and copepods on their own clocks: research presets, a learning journal that re-times your chores, a DHA soak, and a heat guard on the forecast.",
+    img: "/demos/cultures.png",
+    href: "/features/live-cultures/",
+  },
+  {
+    title: "Mixing station",
+    body: "A guided saltwater batch from RODI to storage, brand dose maths, a contents ledger that is the truth — and a water change that refuses untested water.",
+    img: "/demos/mixing.png",
+    href: "/features/mixing-station/",
+  },
+  {
+    title: "Cooling headroom",
+    body: "Fan cooling on physics: dew-point margin, a 24 h projection, a dehumidifier that runs ahead of the heat and a window fan for free cooling — all fail-off.",
+    img: "/demos/cooling.png",
+    href: "/features/cooling-headroom/",
+  },
+  {
+    title: "Dosing pumps",
+    body: "Multi-channel dosing where firmware runs the schedule and OpenReef keeps the ledgers: daily-total-first, trust-aware missed doses, reservoir runway, kalk pH failsafe.",
+    img: "/demos/dosing-pumps.png",
+    href: "/features/dosing-pumps/",
+  },
+  {
     title: "Live monitoring",
     body: "Tap any reading for its full trend, from 1 hour to 30 days. Apex probes, Trident results and cheap third-party sensors, side by side.",
     img: "/demos/live-stats.png",
