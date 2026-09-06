@@ -1,0 +1,32 @@
+[
+ {
+  "file": "1-mission-control.png",
+  "heading": "Mission Control",
+  "height": 165
+ },
+ {
+  "file": "2-current-mode.png",
+  "heading": "Current Mode",
+  "height": 233
+ },
+ {
+  "file": "3-trust-check.png",
+  "heading": "Trust Check",
+  "height": 243
+ },
+ {
+  "file": "4-summary.png",
+  "heading": "review",
+  "height": 310
+ },
+ {
+  "file": "5-why-this-score.png",
+  "heading": "Why this score?",
+  "height": 153
+ },
+ {
+  "file": "6-watch.png",
+  "heading": "Watch",
+  "height": 299
+ }
+]

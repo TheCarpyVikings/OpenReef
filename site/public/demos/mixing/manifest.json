@@ -1,0 +1,42 @@
+[
+ {
+  "file": "1-summary.png",
+  "heading": "6 L/h",
+  "height": 137
+ },
+ {
+  "file": "2-live-view.png",
+  "heading": "Live view",
+  "height": 543
+ },
+ {
+  "file": "3-make-water.png",
+  "heading": "Make water",
+  "height": 330
+ },
+ {
+  "file": "4-move-water.png",
+  "heading": "Move water",
+  "height": 144
+ },
+ {
+  "file": "5-salt-mix.png",
+  "heading": "Salt & mix",
+  "height": 381
+ },
+ {
+  "file": "6-rodi-unit-health.png",
+  "heading": "RODI unit health",
+  "height": 533
+ },
+ {
+  "file": "7-salt-dose-guide.png",
+  "heading": "Salt dose guide",
+  "height": 351
+ },
+ {
+  "file": "8-salt-on-hand.png",
+  "heading": "Salt on hand",
+  "height": 218
+ }
+]

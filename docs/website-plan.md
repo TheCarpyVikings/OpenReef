@@ -177,6 +177,9 @@ everything before it is the shop window.
 - Rung 2 — drift alarm: .github/workflows/demo-drift.yml runs
   site/tools/demo-drift.py on every push touching the panel and keeps exactly
   one demo-drift issue open while the pinned panel lags; closes it on catch-up.
+- 2026-09-07: photos rethought — region shots of each panel (tools/lib/regions.mjs,
+  shared by the showroom and real-tank harnesses) + per-page galleries; brine
+  hatchery gets its own deep dive (16 total); spawning + maintenance pages updated.
 - 2026-09-06: deep dives for the Helm-era arcs shipped — nps-system, feed-timeline,
   live-cultures, mixing-station, cooling-headroom, dosing-pumps (15 total; hub/footer/
   siblings derive from FEATURES in copy.ts). capture-demos.mjs walks nav groups.

@@ -57,3 +57,6 @@ __pycache__/
 
 # agent workspaces / local context
 .agents/
+
+# Region-capture full-page shots: useful locally, never referenced by the site
+site/public/demos/*/full.png

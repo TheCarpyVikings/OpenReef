@@ -235,3 +235,34 @@
     display: none;
   }
 }
+
+/* --- gallery: more shots of the feature, each opens the lightbox ------- */
+
+.dd-gallery {
+  margin-top: 2.2rem;
+}
+
+.dd-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.dd-gallery .dd-shot {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.dd-gallery .dd-shot span {
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+  text-align: left;
+}
+
+@media (max-width: 720px) {
+  .dd-gallery-grid {
+    grid-template-columns: 1fr;
+  }
+}

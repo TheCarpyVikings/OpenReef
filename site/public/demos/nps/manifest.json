@@ -1,0 +1,27 @@
+[
+ {
+  "file": "1-feeding-station.png",
+  "heading": "Feeding station",
+  "height": 929
+ },
+ {
+  "file": "2-summary.png",
+  "heading": "3 bottles",
+  "height": 137
+ },
+ {
+  "file": "3-food-pumps.png",
+  "heading": "Food pumps",
+  "height": 512
+ },
+ {
+  "file": "4-brine-hatchery.png",
+  "heading": "Brine hatchery",
+  "height": 323
+ },
+ {
+  "file": "5-food-shelf.png",
+  "heading": "Food shelf",
+  "height": 500
+ }
+]

@@ -10,9 +10,13 @@ const content: DeepDiveContent = {
   lede: "Multi-channel dosing where the firmware runs the schedule and the guard chain, and Home Assistant owns everything the firmware can't: the missed-dose ledger, the reservoir, the calibration history, tube wear, and the honest word 'behind'. Built from the research on why people stop trusting their doser.",
   buddyLine: "The firmware runs the schedule. I keep the receipts.",
   buddyPose: "idle",
-  img: "/demos/dosing-pumps.png",
-  imgAlt: "OpenReef Dosing tab in Home Assistant — two channels on schedule",
+  img: "/demos/dosing/1-channels.png",
+  imgAlt: "Two channels on schedule: today's progress, the split, reservoir runway, integrity, and bounded manual actions",
   demoLabel: "Open Water → Dosing in the demo",
+  gallery: [
+    { src: "/demos/dosing/2-tomorrow-s-plan.png", alt: "Tomorrow's plan: the schedule computed dose-by-dose, exactly as the firmware will deliver it" },
+    { src: "/demos/dosing/3-advisory.png", alt: "The advisor absorbed into the tab: per-parameter trend, projection and the suggested daily total — advisory only" },
+  ],
   sections: [
     {
       heading: "Who does what — and why it fails safe",

@@ -27,6 +27,7 @@ export default defineConfig({
         "cooling-headroom": `${root}features/cooling-headroom/index.html`,
         "feed-timeline": `${root}features/feed-timeline/index.html`,
         "dosing-pumps": `${root}features/dosing-pumps/index.html`,
+        "brine-hatchery": `${root}features/brine-hatchery/index.html`,
         "features-hub": `${root}features/index.html`,
         demo: `${root}demo/index.html`,
       },

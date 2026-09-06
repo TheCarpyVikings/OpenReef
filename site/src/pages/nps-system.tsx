@@ -10,9 +10,15 @@ const content: DeepDiveContent = {
   lede: "Non-photosynthetic corals don't run on light — they run on logistics: live food, several times a day, forever, with the water exchanged to carry the waste back out. OpenReef turns that logistics problem into a schedule: the food shelf, the pumps, the brine hatchery, and the water exchange in one place.",
   buddyLine: "Sun corals eat like teenagers. I run the kitchen, the fridge, and the bin.",
   buddyPose: "smug",
-  img: "/demos/nps.png",
-  imgAlt: "OpenReef NPS tab — the feeding station diagram in Home Assistant",
+  img: "/demos/nps/1-feeding-station.png",
+  imgAlt: "The feeding station: display tank, the bottles that feed it, the fresh reservoir, and today's strip underneath",
   demoLabel: "Open Feeding → NPS in the demo",
+  gallery: [
+    { src: "/demos/nps/5-food-shelf.png", alt: "The food shelf: every bottle with its ledger, low and dose-due flags, and one-tap Dosed" },
+    { src: "/demos/nps/3-food-pumps.png", alt: "A food pump bridged to its bottle — schedule, reservoir runway, integrity" },
+    { src: "/demos/nps/4-brine-hatchery.png", alt: "The hatchery card on the NPS tab: hatch, fridge bottle, container, and the plan" },
+    { src: "/demos/nps/2-summary.png", alt: "Shelf and water-exchange tiles: bottles to check, litres per day matched" },
+  ],
   sections: [
     {
       heading: "The food shelf: every bottle, honestly counted",

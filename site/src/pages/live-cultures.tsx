@@ -10,9 +10,14 @@ const content: DeepDiveContent = {
   lede: "A brine hatch is a batch measured in hours. A rotifer jar is a standing population measured in days, and a copepod tub is slower still. OpenReef runs all three temporal regimes on one tab — with real clocks, a learning journal, and a phone that asks the right question at the right time.",
   buddyLine: "A rotifer jar is a population, not a batch. I keep the clocks; you keep the sieve.",
   buddyPose: "thinking",
-  img: "/demos/cultures.png",
-  imgAlt: "OpenReef Cultures tab in Home Assistant — the rack",
+  img: "/demos/cultures/2-the-rack.png",
+  imgAlt: "The rack: two jars and the rotifer bottle, each with its clocks, chores, signs and the heat guard",
   demoLabel: "Open Feeding → Cultures in the demo",
+  gallery: [
+    { src: "/demos/cultures/3-the-rig-live.png", alt: "The cone rig drawn live — air, purge, harvest, refill — following the jar's stage" },
+    { src: "/demos/cultures/1-summary.png", alt: "Due now, the rotifer bottle, jar backup status and the room temperature" },
+    { src: "/demos/cultures/4-how-each-one-wants-keeping.png", alt: "How each species wants keeping: the presets behind the clocks" },
+  ],
   sections: [
     {
       heading: "Two species, two rhythms",

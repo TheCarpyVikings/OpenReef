@@ -10,9 +10,13 @@ const content: DeepDiveContent = {
   lede: "Every mouthful that goes into the tank today — pumped, poured, or netted from a culture — on one 24-hour strip, with planned slots that fill in as they happen. One list, computed once, read by the NPS tab, the Feeding hub and the Pulse wall alike.",
   buddyLine: "Every mouthful today, on one strip. Pumped, poured, or netted — I don't care how it got in.",
   buddyPose: "point",
-  img: "/demos/feed-timeline.png",
-  imgAlt: "OpenReef Feeding hub — today's feeds on the timeline strip",
+  img: "/demos/feeding/1-today-s-feeds.png",
+  imgAlt: "Today's feeds: pump lane, hand lane and the system lane, with the chips for what is due",
   demoLabel: "Open the Feeding hub in the demo",
+  gallery: [
+    { src: "/demos/nps/1-feeding-station.png", alt: "The same strip under the feeding station on the NPS tab — one list, two places" },
+    { src: "/demos/feeding/2-summary.png", alt: "The Feeding hub tiles: NPS, hatchery, cultures and spawning at a glance" },
+  ],
   sections: [
     {
       heading: "One strip, three lanes",

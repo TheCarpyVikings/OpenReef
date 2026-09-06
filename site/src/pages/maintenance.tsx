@@ -10,8 +10,14 @@ const content: DeepDiveContent = {
   lede: "Reef maintenance isn't hard — it's relentless. Thirteen recurring jobs on thirteen different clocks, and forgetting the boring one is how tanks quietly decline. OpenReef keeps the calendar, nags exactly once a day, and logs what actually happened.",
   buddyLine: "Your RO/DI filters were due in March. It is no longer March.",
   buddyPose: "facepalm",
-  img: "/demos/maintenance.png",
-  imgAlt: "OpenReef maintenance tab in Home Assistant",
+  img: "/demos/maintenance/3-trends.png",
+  imgAlt: "Water changed per week — automatic and hand-logged changes stacked, with the average and the weeks with none",
+  demoLabel: "Open Water → Maintenance in the demo",
+  gallery: [
+    { src: "/demos/maintenance/5-tasks.png", alt: "Task cards with the new-water record fields — ppt and °C logged on the water change itself" },
+    { src: "/demos/maintenance/2-coming-up.png", alt: "Due this week: the next few days in one list" },
+    { src: "/demos/maintenance/4-trends.png", alt: "How close you run to schedule — each bar an interval, the dashed line the target cadence" },
+  ],
   sections: [
     {
       heading: "The whole routine, pre-loaded",
@@ -33,11 +39,23 @@ const content: DeepDiveContent = {
       ],
     },
     {
+      heading: "The little things that make it stick",
+      paragraphs: [
+        "Task notes ride on the card, under the notification and into the Guardian's snapshot. Checklists give a task up to twelve steps, ticked off on the card for the visit and cleared when you mark it done — the suggested chores come with their usual steps. A streak line tells you how you're really doing: on schedule four in a row, best run nine. Quiet hours hold the night-time pushes; the daily digest keeps its own time, and critical alerts are exempt by design. The digest also nags about bottles — low, empty or expired on the food shelf — so the day's list is the whole day's list.",
+      ],
+      list: [
+        "Push goes to any Home Assistant notify service — a phone, a group, Telegram",
+        "A water change carries a new-water record: the batch's tested salinity, temperature and salt brand from the mixing station, or the numbers you type on the card",
+        "Salt on hand lives as a ledger — every batch debits the bucket, and the digest says how many weeks are left at your change rate",
+        "Home Assistant events for automations: a task falling due, a task done, a consumable running low",
+      ],
+    },
+    {
       heading: "A logbook that fills itself in",
       paragraphs: [
-        "Completions are records, not checkmarks: when you log a water change you can log the litres, and your automatic water changes log themselves — tagged by source, so the maintenance history distinguishes 'the AWC did 25 L on Thursday' from 'I did a 30 L bucket day'. Same-day automatic runs merge into one entry, so a trickle schedule doesn't flood the history. Up to 200 completions are kept per task — a couple of years of honest reefkeeping, queryable.",
+        "Completions are records, not checkmarks: when you log a water change you can log the litres and the new water's salinity and temperature, and your automatic water changes log themselves — tagged by source, so the maintenance history distinguishes 'the AWC did 25 L on Thursday' from 'I did a 30 L bucket day'. Same-day automatic runs merge into one entry, so a trickle schedule doesn't flood the history. Up to 200 completions are kept per task — a couple of years of honest reefkeeping, queryable.",
       ],
-      snippet: `water change · every Mon 09:00
+      snippet: `water change · every Mon 09:00 · streak: on schedule 2 in a row
   ✓ yesterday   25.0 L   (awc, automatic)
   ✓ 8 days ago  25.0 L   (awc, automatic)
   ✓ 15 days ago 30.0 L   "manual bucket day"

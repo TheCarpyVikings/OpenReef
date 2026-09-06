@@ -10,9 +10,16 @@ const content: DeepDiveContent = {
   lede: "Every water change starts with a batch someone mixed, heated, tested and remembered. OpenReef makes the batch a first-class object: a guided workflow from RODI to storage, a contents ledger that is the truth, and a water change that refuses to run on salt water nobody can vouch for.",
   buddyLine: "Salt water you can vouch for: tested, dated, and counted to the litre.",
   buddyPose: "chilled",
-  img: "/demos/mixing.png",
-  imgAlt: "OpenReef Mixing Station tab in Home Assistant",
+  img: "/demos/mixing/2-live-view.png",
+  imgAlt: "Live view: the RODI store and the mix vessel with its tested salinity, drawn from the ledger",
   demoLabel: "Open Water → Mixing Station in the demo",
+  gallery: [
+    { src: "/demos/mixing/6-rodi-unit-health.png", alt: "RODI unit health: the filter train, each stage on its own litres clock" },
+    { src: "/demos/mixing/7-salt-dose-guide.png", alt: "The salt dose guide: full batch, top-up to full, and your own what-if" },
+    { src: "/demos/mixing/5-salt-mix.png", alt: "Salt & mix: the batch's stages, litres on hand, retest and usage logging" },
+    { src: "/demos/mixing/8-salt-on-hand.png", alt: "Salt on hand: the bucket as a ledger, in batches and weeks" },
+    { src: "/demos/mixing/3-make-water.png", alt: "Make water: RODI on demand — fill the store, the vessel or the ATO reservoir" },
+  ],
   sections: [
     {
       heading: "A batch is a state machine, not a bucket",

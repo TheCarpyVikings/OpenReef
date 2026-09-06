@@ -143,37 +143,43 @@ export const FEATURES: FeatureCard[] = [
   {
     title: "Automated NPS system",
     body: "Feeding non-photosynthetic corals as a schedule: the food shelf, bottle-bridged pumps, the brine hatchery, the matched water exchange and a nutrient budget.",
-    img: "/demos/nps.png",
+    img: "/demos/nps/1-feeding-station.png",
     href: "/features/nps-system/",
+  },
+  {
+    title: "Brine hatchery",
+    body: "Live baby brine on schedule: egg-type hatch clocks, a two-rate freshness clock (room vs fridge), yolk-vs-enriched nutrition windows, and the rig drawn live.",
+    img: "/demos/hatchery/3-the-rig-live.png",
+    href: "/features/brine-hatchery/",
   },
   {
     title: "Feed timeline",
     body: "Every mouthful today on one 24-hour strip — pumped, poured or netted — with planned slots that fill in when they happen, windows, late logs and undo.",
-    img: "/demos/feed-timeline.png",
+    img: "/demos/feeding/1-today-s-feeds.png",
     href: "/features/feed-timeline/",
   },
   {
     title: "Live cultures",
     body: "Rotifers and copepods on their own clocks: research presets, a learning journal that re-times your chores, a DHA soak, and a heat guard on the forecast.",
-    img: "/demos/cultures.png",
+    img: "/demos/cultures/2-the-rack.png",
     href: "/features/live-cultures/",
   },
   {
     title: "Mixing station",
     body: "A guided saltwater batch from RODI to storage, brand dose maths, a contents ledger that is the truth — and a water change that refuses untested water.",
-    img: "/demos/mixing.png",
+    img: "/demos/mixing/2-live-view.png",
     href: "/features/mixing-station/",
   },
   {
     title: "Cooling headroom",
     body: "Fan cooling on physics: dew-point margin, a 24 h projection, a dehumidifier that runs ahead of the heat and a window fan for free cooling — all fail-off.",
-    img: "/demos/cooling.png",
+    img: "/demos/pulse/wall.png",
     href: "/features/cooling-headroom/",
   },
   {
     title: "Dosing pumps",
     body: "Multi-channel dosing where firmware runs the schedule and OpenReef keeps the ledgers: daily-total-first, trust-aware missed doses, reservoir runway, kalk pH failsafe.",
-    img: "/demos/dosing-pumps.png",
+    img: "/demos/dosing/1-channels.png",
     href: "/features/dosing-pumps/",
   },
   {
@@ -194,19 +200,19 @@ export const FEATURES: FeatureCard[] = [
   {
     title: "Energy & maintenance",
     body: "Power monitoring plus HA-native maintenance reminders — fixed-day schedules, skip and snooze included.",
-    img: "/demos/maintenance.png",
+    img: "/demos/maintenance/3-trends.png",
     href: "/features/maintenance/",
   },
   {
     title: "Coral spawning",
     body: "The lunar-calendar scheduler: pick a reef, and OpenReef compiles dusk ramps, moonlight and pump slick-mode into a programme your controller runs.",
-    img: "/demos/spawning.png",
+    img: "/demos/spawning/1-live-program.png",
     href: "/features/coral-spawning/",
   },
   {
     title: "Automatic water changes",
     body: "Volume-first AWC on pumps you choose — batch or trickle, drift detection, honest dilution maths, layered safety.",
-    img: "/demos/awc.png",
+    img: "/demos/awc/1-live-view.png",
     href: "/features/automatic-water-change/",
   },
   {

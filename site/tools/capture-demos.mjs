@@ -21,6 +21,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer-core";
+import { captureRegions, openPage } from "./lib/regions.mjs";
 
 const HA_URL = process.env.HA_URL?.replace(/\/$/, "");
 const HA_TOKEN = process.env.HA_TOKEN;
@@ -32,28 +33,18 @@ const CHROME = process.env.CHROME || "/usr/bin/google-chrome";
 const PANEL_PATH = process.env.PANEL_PATH || "openreef";
 const [W, H] = (process.env.VIEWPORT || "1280x800").split("x").map(Number);
 
-// Panel tab id → output file (matches FEATURES img paths in src/copy.ts).
-// Since the Helm (0.7.72) a page's tab button only exists while its nav group
-// is open, so each entry names its group; hub entries capture the group's own
-// landing page. Pages whose feature is disabled in your config are skipped.
+// Pages to capture (group → page, since the Helm). Each page's titled panels
+// land in public/demos/<page>/<n>-<slug>.png — the same names the showroom
+// harness (tools/demo-shots.mjs) produces, so the site swaps tanks for free.
+// Pages whose feature is disabled in your config are skipped.
 const ALL_TABS = [
-  { group: "home", id: "mission", file: "mission-control.png" },
-  { group: "home", id: "diagram", file: "diagram.png" },
-  { group: "water", id: "awc", file: "awc.png" },
-  { group: "water", id: "mixing", file: "mixing.png" },
-  { group: "water", id: "dosing", file: "dosing.png" },
-  { group: "water", id: "dosing", file: "dosing-pumps.png" },
-  { group: "water", id: "maintenance", file: "maintenance.png" },
-  { group: "water", id: "icp", file: "icp.png" },
-  { group: "feeding", id: "feeding", file: "feed-timeline.png", hub: true },
-  { group: "feeding", id: "nps", file: "nps.png" },
-  { group: "feeding", id: "hatchery", file: "hatchery.png" },
-  { group: "feeding", id: "cultures", file: "cultures.png" },
-  { group: "feeding", id: "spawning", file: "spawning.png" },
-  { group: "watch", id: "cameras", file: "cameras.png" },
-  { group: "watch", id: "live", file: "live-stats.png" },
-  { group: "watch", id: "energy", file: "energy.png" },
-  { group: "system", id: "controls", file: "controls.png" },
+  { group: "home", id: "mission" }, { group: "home", id: "diagram" },
+  { group: "water", id: "awc" }, { group: "water", id: "mixing" }, { group: "water", id: "dosing" },
+  { group: "water", id: "maintenance" }, { group: "water", id: "icp" },
+  { group: "feeding", id: "feeding" }, { group: "feeding", id: "nps" }, { group: "feeding", id: "hatchery" },
+  { group: "feeding", id: "cultures" }, { group: "feeding", id: "spawning" },
+  { group: "watch", id: "cameras" }, { group: "watch", id: "live" }, { group: "watch", id: "energy" },
+  { group: "system", id: "controls" },
 ];
 const wanted = process.env.TABS?.split(",").map((s) => s.trim());
 const TABS = wanted ? ALL_TABS.filter((t) => wanted.includes(t.id)) : ALL_TABS;
@@ -120,42 +111,35 @@ try {
     }
   }
 
-  for (const { group, id, file, hub } of TABS) {
-    // Open the page's nav group first so its tab button exists.
-    const groupBtn = await page.$(`pierce/[data-action="tab"][data-id="${group}"]`);
-    if (groupBtn) {
-      await groupBtn.click();
-      await sleep(800);
-    }
-    if (!hub) {
-      const btn = await page.$(`pierce/[data-action="tab"][data-id="${id}"]`);
-      if (!btn) {
-        console.warn(`- tab "${id}" not found (feature disabled?) — skipped`);
-        continue;
-      }
-      await btn.click();
-    }
-    await sleep(3000); // let charts/streams settle
-    await page.screenshot({ path: join(outDir, file) });
-    console.log(`✓ ${id} → public/demos/${file}`);
+  const click = (tabId) => page.evaluate((i) => {
+    const root = document.querySelector("openreef-panel")?.shadowRoot;
+    root?.querySelector(`[data-action="tab"][data-id="${i}"]`)?.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+  }, tabId);
+  for (const { group, id } of TABS) {
+    const present = await page.evaluate((i) => {
+      const root = document.querySelector("openreef-panel")?.shadowRoot;
+      return Boolean(root?.querySelector(`[data-action="tab"][data-id="${i}"]`));
+    }, group);
+    if (!present) { console.warn(`- group "${group}" not found — skipped ${id}`); continue; }
+    await openPage(page, group, id, click);
+    const manifest = await captureRegions(page, join(outDir, id));
+    if (!manifest.length) console.warn(`- ${id}: no regions captured (feature disabled?)`);
+    else console.log(`✓ ${id} → public/demos/${id}/ (${manifest.map((m) => m.file).join(", ")})`);
   }
 
   // Reef Pulse isn't a tab — it's the ✨ Present takeover. Capture it last,
   // from the mission tab, unless a TABS filter excluded it.
   if (!wanted || wanted.includes("pulse")) {
-    const home = await page.$('pierce/[data-action="tab"][data-id="mission"]');
-    if (home) {
-      await home.click();
-      await sleep(1500);
-    }
+    await openPage(page, "home", "mission", click);
     const present = await page.$('pierce/[data-action="open-pulse"]');
     if (!present) {
       console.warn('- pulse: no "open-pulse" button found (Pulse disabled?) — skipped');
     } else {
       await present.click();
       await sleep(4000); // let the wall settle (sparklines, backdrop)
-      await page.screenshot({ path: join(outDir, "pulse.png") });
-      console.log("✓ pulse → public/demos/pulse.png");
+      mkdirSync(join(outDir, "pulse"), { recursive: true });
+      await page.screenshot({ path: join(outDir, "pulse", "wall.png") });
+      console.log("✓ pulse → public/demos/pulse/wall.png");
       const close = await page.$('pierce/[data-action="close-pulse"]');
       if (close) await close.click().catch(() => {});
     }

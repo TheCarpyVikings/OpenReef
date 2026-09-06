@@ -10,9 +10,12 @@ const content: DeepDiveContent = {
   lede: "A tank fan is not an air conditioner. It evaporates water off a 26 °C surface, so what limits it is the gap between the water temperature and the room's dew point — not humidity, not the thermostat. OpenReef measures that gap, forecasts it, and runs the dehumidifier and the window fan only when they change the outcome.",
   buddyLine: "Your fans don't care about humidity. They care about dew point. So do I.",
   buddyPose: "concerned",
-  img: "/demos/cooling.png",
-  imgAlt: "OpenReef Reef Pulse wall showing the cooling headroom insight card",
+  img: "/demos/pulse/wall.png",
+  imgAlt: "The Pulse wall with the cooling headroom insight: venting the room, and why",
   demoLabel: "See the cooling insight on the demo's Pulse wall",
+  gallery: [
+    { src: "/demos/mission/6-watch.png", alt: "Mission Control's Watch list — where a thinning fan margin lands next to the other things to check" },
+  ],
   sections: [
     {
       heading: "The number that actually decides",

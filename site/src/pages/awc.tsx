@@ -10,8 +10,14 @@ const content: DeepDiveContent = {
   lede: "Water changes are the one job every reefer agrees on — and the one most often skipped. OpenReef turns them into a volume-accounted, safety-latched routine: batch or continuous trickle, with maths you can audit.",
   buddyLine: "Bucket day used to be a personality trait. Now it's a schedule entry.",
   buddyPose: "chilled",
-  img: "/demos/awc.png",
-  imgAlt: "OpenReef automatic water change tab in Home Assistant",
+  img: "/demos/awc/1-live-view.png",
+  imgAlt: "Live view: the drain and fill legs, the reservoirs and the display, drawn from the calibrated volumes",
+  demoLabel: "Open Water → Water Change in the demo",
+  gallery: [
+    { src: "/demos/awc/4-history.png", alt: "History: every change with drained and filled litres — the drift and imbalance ledgers read from this" },
+    { src: "/demos/awc/2-manual-change.png", alt: "A manual change: the same volume maths and guards, started by hand" },
+    { src: "/demos/awc/3-summary.png", alt: "Days of fresh water left, next scheduled change, reservoir levels" },
+  ],
   sections: [
     {
       heading: "Volume-first, like the expensive gear",
