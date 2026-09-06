@@ -416,10 +416,13 @@ def test_plan_now_ahead_scheduled_none_and_unrescuable():
 def test_vent_advice_prefers_drier_cooler_outdoor_air():
     yes = cooling.vent_advice(28.0, 22.0, 18.0, 12.0)
     assert yes["advised"] and yes["gapC"] == 10.0
+    # A near miss names the gap and the bar, so the activity log is diagnosable.
     wet = cooling.vent_advice(28.0, 22.0, 18.0, 21.0)
-    assert not wet["advised"] and "as wet" in wet["reason"]
+    assert not wet["advised"] and "only 1.0 °C below indoors, needs 2.0" in wet["reason"]
+    wetter = cooling.vent_advice(28.0, 22.0, 18.0, 23.0)
+    assert not wetter["advised"] and "wetter than indoors" in wetter["reason"]
     warm = cooling.vent_advice(28.0, 22.0, 33.0, 12.0)
-    assert not warm["advised"] and "warmer" in warm["reason"]
+    assert not warm["advised"] and "warmer (33.0 °C vs room 28.0 °C)" in warm["reason"]
     assert not cooling.vent_advice(None, 22.0, 18.0, 12.0)["known"]
 
 
@@ -681,6 +684,67 @@ def test_vent_gap_is_configurable_and_plan_yields_to_venting():
     vented = cooling.dehumidifier_plan(live, True, None, NOW, 3, 25.5, vent_active=True)
     assert vented["kind"] == "vented" and not vented["shouldRun"]
     assert cooling.dehumidifier_plan(cooling.evaluate(26, 20, 50), False, None, NOW, 3, 25.5, vent_active=True)["kind"] == "none"
+
+
+def test_vent_advice_deadband_holds_a_running_fan_through_its_own_success():
+    # 1.6 °C gap: under the 2.0 start threshold, over the 1.5 stop threshold.
+    assert cooling.vent_advice(28.0, 22.0, 18.0, 20.4, gap_c=2.0)["advised"] is False
+    assert cooling.vent_advice(28.0, 22.0, 18.0, 20.4, gap_c=2.0, venting=True)["advised"] is True
+    # Past the far side of the deadband it stops even while running.
+    assert cooling.vent_advice(28.0, 22.0, 18.0, 20.6, gap_c=2.0, venting=True)["advised"] is False
+    # Temperature gate widens the same way: room + 1.0 to start, + 1.5 to hold.
+    assert cooling.vent_advice(28.0, 22.0, 29.3, 12.0)["advised"] is False
+    assert cooling.vent_advice(28.0, 22.0, 29.3, 12.0, venting=True)["advised"] is True
+    assert cooling.vent_advice(28.0, 22.0, 29.6, 12.0, venting=True)["advised"] is False
+    # The deadband only ever widens the stop side — a start is never made easier.
+    assert cooling.vent_advice(28.0, 22.0, 18.0, 20.6, gap_c=2.0)["advised"] is False
+
+
+def test_fan_needed_latch_keeps_a_room_off_the_gate_from_flapping():
+    # Gate is target - 1.0 = 24.5; latched it holds down to 24.2.
+    assert cooling.fan_needed(24.4, None, 25.5, 1.0) is False
+    assert cooling.fan_needed(24.4, None, 25.5, 1.0, latched=True) is True
+    assert cooling.fan_needed(24.1, None, 25.5, 1.0, latched=True) is False
+    # Latching never lowers the bar for a first start.
+    assert cooling.fan_needed(24.3, None, 25.5, 1.0) is False
+    assert cooling.fan_needed(24.6, None, 25.5, 1.0) is True
+    # The tank arm gets NO give: a tank parked on target must not latch on
+    # forever just because the room once crossed the gate.
+    assert cooling.fan_needed(20.0, 25.5, 25.5, 1.0, latched=True) is False
+    assert cooling.fan_needed(20.0, 25.6, 25.5, 1.0, latched=True) is False   # still under target + 0.2
+    assert cooling.fan_needed(20.0, 25.8, 25.5, 1.0) is True
+    assert cooling.fan_needed(None, None, 25.5, 1.0, latched=True) is False
+    assert cooling.fan_needed(30.0, None, "junk", 1.0, latched=True) is False
+
+
+def test_snapshot_latches_fan_needed_and_deadbands_a_running_vent_fan():
+    entry = _l2_entry(vent={"mode": "auto", "armed": True, "switchEntity": "switch.fan"})
+    hass = _l2_hass(entry)
+    hass.states.set("switch.fan", FakeState("off"))
+    cfg = integration._config_from_entry(entry)
+    runtime: dict = {}
+
+    def _snap(room):
+        hass.states.set("sensor.room", _fresh(room))
+        return integration.cooling_snapshot(hass, cfg, NOW, runtime)
+
+    # Gate is 25.5 - 1.0 = 24.5. Inside the deadband but never latched: no.
+    assert _snap(24.4)["fanNeeded"] is False
+    assert runtime["fanNeededLatch"] is False
+    # Cross the gate, then fall back into the deadband: the latch holds it.
+    assert _snap(24.6)["fanNeeded"] is True
+    assert _snap(24.4)["fanNeeded"] is True
+    assert runtime["fanNeededLatch"] is True
+    # Past the far side (24.2) it lets go.
+    assert _snap(24.0)["fanNeeded"] is False
+    # A snapshot with no runtime must not latch — the stateless callers.
+    hass.states.set("sensor.room", _fresh(24.4))
+    assert integration.cooling_snapshot(hass, cfg, NOW, None)["fanNeeded"] is False
+    # The running plug relaxes the vent gates; switching it off tightens them.
+    hass.states.set("switch.fan", FakeState("on"))
+    assert integration.cooling_snapshot(hass, cfg, NOW, runtime)["vent"]["hysteresis"] is True
+    hass.states.set("switch.fan", FakeState("off"))
+    assert integration.cooling_snapshot(hass, cfg, NOW, runtime)["vent"]["hysteresis"] is False
 
 
 def test_normaliser_vent_block():

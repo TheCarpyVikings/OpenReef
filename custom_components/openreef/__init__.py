@@ -19476,8 +19476,13 @@ def cooling_snapshot(
     result = None
     if room_c is not None and rh is not None:
         result = cooling_engine.evaluate(water_c, room_c, rh, cfg["referenceVpdKpa"], cfg["bands"])
-    needed = cooling_engine.fan_needed(room_c, water_c if water_source == "sensor" else None,
-                                       target_c, cfg["fanGateC"])
+    # Latched across ticks so a room sitting on the gate cannot flip this — and
+    # every vent/dehumidifier decision downstream of it — every five minutes.
+    needed = cooling_engine.fan_needed(
+        room_c, water_c if water_source == "sensor" else None, target_c, cfg["fanGateC"],
+        bool(runtime.get("fanNeededLatch")) if isinstance(runtime, dict) else False)
+    if isinstance(runtime, dict):
+        runtime["fanNeededLatch"] = needed
     snap: dict[str, Any] = {
         "at": now_local.isoformat(),
         "enabled": bool(cfg["enabled"]),
@@ -19518,10 +19523,15 @@ def cooling_snapshot(
         cfg["fanGateC"], cfg["referenceVpdKpa"], cfg["bands"], by_hour) if hours else None
     dehum = cfg["dehumidifier"]
     vent_cfg = cfg["vent"]
-    advice = cooling_engine.vent_advice(room_c, dew_now, outdoor["outC"], outdoor["outDewC"], vent_cfg["dewGapC"])
     window_open = _cooling_window_open(hass, vent_cfg["windowEntity"], issues)
-    decision = cooling_engine.vent_decision(advice, needed, projection, now_local, vent_cfg["nightPurge"], window_open)
     vent_fan = _cooling_actuator_state(hass, vent_cfg)
+    # Air already moving (the plug is on, or a bound window is open) is what
+    # collapses the indoor dew gap that justified moving it — so the advice
+    # gates relax while it moves. Observed state only: no circularity.
+    advice = cooling_engine.vent_advice(room_c, dew_now, outdoor["outC"], outdoor["outDewC"],
+                                        vent_cfg["dewGapC"],
+                                        vent_fan["state"] == "on" or window_open is True)
+    decision = cooling_engine.vent_decision(advice, needed, projection, now_local, vent_cfg["nightPurge"], window_open)
     # The room counts as vented when we are running the intake fan, or the
     # window is known open while venting is advised (the keeper is venting).
     vent_active = bool(vent_fan["controlling"] and vent_fan["state"] == "on") or bool(window_open and advice.get("advised"))

@@ -144,16 +144,25 @@ def evaluate(water_c: float, room_c: float, rh_pct: float,
 
 
 def fan_needed(room_c: float | None, water_c: float | None, target_c: float,
-               gate_c: float = 1.0) -> bool:
+               gate_c: float = 1.0, latched: bool = False) -> bool:
     """Is cooling on the table right now? The rig's fan hangs off the guard's
     cool socket (not in HA), so the gate is inferred: the room is at or above
     the target minus the gate, or the tank is already over target. A humid
-    but cool day stays silent — that is the whole point of the feature."""
+    but cool day stays silent — that is the whole point of the feature.
+
+    ``latched`` is the answer this returned last tick. Once true, the room has
+    to fall FAN_GATE_HYST_C below the gate to turn it false again — otherwise a
+    room sitting on the gate flips this, and every vent and dehumidifier
+    decision downstream of it, every five minutes. The give is the room arm's
+    alone: the tank arm already stands 0.2 °C clear of target and water moves
+    far too slowly to chatter, and widening it would leave a tank parked on
+    target — a well-controlled one — reading "needs cooling" forever."""
     try:
         target = float(target_c)
     except (TypeError, ValueError):
         return False
-    if room_c is not None and float(room_c) >= target - float(gate_c):
+    give = FAN_GATE_HYST_C if latched else 0.0
+    if room_c is not None and float(room_c) >= target - float(gate_c) - give:
         return True
     if water_c is not None and float(water_c) > target + 0.2:
         return True
@@ -230,6 +239,17 @@ VENT_DEW_GAP_C = 2.0                # vent only while outdoor dew ≤ indoor dew
 PURGE_BAND_C = 2.0                  # night-purge hours sit within this of the coolest hour
 PURGE_MAX_HOURS = 8                 # …and never longer than a night
 VENT_TEMP_SLACK_C = 1.0             # …and outdoor air is no warmer than room + this
+
+# Deadbands. Every gate here is bang-bang against a live sensor, and the thing
+# each gate switches on is the thing that erases its own reason: the intake fan
+# pulls drier air in, the indoor dew point falls toward outdoor, the gap closes
+# and the fan stops — then the room re-humidifies and it starts again. So a gate
+# that has already fired holds until the signal has moved back past it by this
+# much. Widening the *stop* threshold, never the start one: nothing below begins
+# venting or cooling any sooner than it did before.
+VENT_DEW_GAP_HYST_C = 0.5           # keep venting until the dew gap falls this far under dewGapC
+VENT_TEMP_HYST_C = 0.5              # …and tolerate outdoor air this much warmer once running
+FAN_GATE_HYST_C = 0.3               # room must drop this far below the gate to un-need the fans
 
 DAY_KINDS = ("quiet", "dry-heat", "humid-heat", "chiller")
 DAY_KIND_COPY = {
@@ -407,9 +427,16 @@ def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, wate
 
 
 def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
-                out_dew_c: float | None, gap_c: float = VENT_DEW_GAP_C) -> dict[str, Any]:
+                out_dew_c: float | None, gap_c: float = VENT_DEW_GAP_C,
+                venting: bool = False) -> dict[str, Any]:
     """Right now: is the air outside drier (and no warmer) than the air inside?
-    If so, the intake fan beats the dehumidifier for free."""
+    If so, the intake fan beats the dehumidifier for free.
+
+    ``venting`` means air is already moving — the fan plug is on, or a bound
+    window reads open. That air is what drags the indoor dew point down toward
+    outdoor, so the gap that justified venting narrows the moment venting works.
+    While it is moving both gates relax (dew by VENT_DEW_GAP_HYST_C, temperature
+    by VENT_TEMP_HYST_C) so the fan is not switched off by its own success."""
     if None in (room_c, dew_c, out_c, out_dew_c):
         return {"advised": False, "known": False, "reason": "no outdoor reading"}
     gap = float(dew_c) - float(out_dew_c)
@@ -417,19 +444,29 @@ def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
         need = float(gap_c)
     except (TypeError, ValueError):
         need = VENT_DEW_GAP_C
+    if venting:
+        need -= VENT_DEW_GAP_HYST_C
     drier = gap >= need
-    cool_enough = float(out_c) <= float(room_c) + VENT_TEMP_SLACK_C
+    slack = VENT_TEMP_SLACK_C + (VENT_TEMP_HYST_C if venting else 0.0)
+    cool_enough = float(out_c) <= float(room_c) + slack
     advised = drier and cool_enough
     if advised:
         reason = (f"outdoor dew point {out_dew_c:.1f} °C is {gap:.1f} °C below indoors — "
                   "vent (intake fan + window) instead of dehumidifying")
     elif not drier:
-        reason = f"outdoor air is as wet as indoors (dew point {out_dew_c:.1f} °C) — keep the windows shut"
+        # Always print the gap and the bar it missed. Without them a "close up"
+        # in the activity log is undiagnosable: you cannot tell a room sitting
+        # 0.1 °C under the threshold from one that is genuinely muggy.
+        reason = (f"outdoor air is wetter than indoors (dew point {out_dew_c:.1f} °C) — keep the windows shut"
+                  if gap <= 0 else
+                  f"outdoor dew point {out_dew_c:.1f} °C is only {gap:.1f} °C below indoors, "
+                  f"needs {need:.1f} — keep the windows shut")
     else:
-        reason = f"outdoor air is drier but warmer ({out_c:.1f} °C) — vent later, when it cools"
+        reason = (f"outdoor air is drier but warmer ({out_c:.1f} °C vs room {room_c:.1f} °C) — "
+                  "vent later, when it cools")
     return {"advised": advised, "known": True, "reason": reason,
             "outdoorC": round(float(out_c), 1), "outdoorDewC": round(float(out_dew_c), 1),
-            "gapC": round(gap, 1)}
+            "gapC": round(gap, 1), "hysteresis": bool(venting)}
 
 
 def _hhmm(iso: str | None) -> str:

@@ -26166,7 +26166,7 @@ const rigSteps = [
       ${this._coolingForecastStrip(status)}
       ${weatherBound && !status.projection ? `<small class="hint">${this._escape(status.issues?.forecast || status.issues?.weather || "Waiting for the first forecast read (within five minutes of saving).")}</small>` : ""}
       ${weatherBound && this._coolingLearnedLine(status) ? `<p class="hint">${this._escape(this._coolingLearnedLine(status))} <button class="secondary compact-button" data-action="cooling-learning-reset">Forget learned offsets</button></p>` : ""}
-      ${status.vent?.known ? `<p class="hint">${status.vent.advised ? "🪟 " : ""}<strong>Vent:</strong> ${this._escape(status.vent.reason)}${status.weather?.outC != null ? ` · outdoor ${Number(status.weather.outC).toFixed(1)} °C at ${status.weather.outRh} %` : ""}</p>` : ""}
+      ${status.vent?.known ? `<p class="hint">${status.vent.advised ? "🪟 " : ""}<strong>Vent:</strong> ${this._escape(status.vent.reason)}${status.weather?.outC != null ? ` · outdoor ${Number(status.weather.outC).toFixed(1)} °C at ${status.weather.outRh} %` : ""}${status.vent.hysteresis && status.vent.advised ? ` · <em>holding while air moves — the fan narrows this gap itself</em>` : ""}</p>` : ""}
       ${planLine ? `<p class="hint"><strong>Plan:</strong> ${this._escape(planLine)}</p>` : status.plan ? `<p class="hint"><strong>Plan:</strong> ${this._escape(status.plan.reason)}</p>` : ""}
       ${dehum.switchEntity ? `
       <div class="spawn-channel-row">
