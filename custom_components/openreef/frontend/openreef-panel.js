@@ -8087,8 +8087,8 @@ class OpenReefPanel extends HTMLElement {
       ? `<small class="hint" style="color:var(--warning-color,#f5a524)">✋ Manual override — program resumes at the next ${this._escape(override.resumesAt || "transition")}</small>
          <button class="secondary compact-button" data-action="spawn-exec-resume">Resume now</button>`
       : "";
-    const mismatch = !unavailable && !override && typeof desired === "boolean" && desired !== actualOn
-      ? `<small class="hint">→ switching to ${desired ? "ON" : "OFF"} on the next tick</small>` : "";
+    const mismatch = st.runtime?.controlling && !unavailable && !override && typeof desired === "boolean" && desired !== actualOn
+      ? `<small class="hint">${desired ? "ON" : "OFF"} not confirmed — retrying each minute</small>` : "";
     return `<div class="spawn-channel-row">
       <strong>${label === "Daylight" ? "🌅" : "🌙"} ${this._escape(label)}</strong>
       <small class="hint">${this._escape(ent.entity)}</small>
@@ -8105,7 +8105,7 @@ class OpenReefPanel extends HTMLElement {
       <label><span>Execute on</span>
         <select data-scope="spawn-exec" data-field="mode">
           <option value="apex" ${mode === "apex" ? "selected" : ""}>Neptune Apex — paste the program</option>
-          <option value="openreef" ${mode === "openreef" ? "selected" : ""}>OpenReef — smart plugs, no Apex needed</option>
+          <option value="openreef" ${mode === "openreef" ? "selected" : ""}>OpenReef — control selected plugs</option>
         </select></label>`;
 
     if (mode === "apex") {
@@ -8132,7 +8132,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="awc-section-title"><p class="eyebrow">⚡ Execution</p></div>
         <label class="toggle-card compact-toggle spawn-master">
           <input type="checkbox" data-scope="spawn-exec" data-field="armed" ${armedLocal ? "checked" : ""}>
-          <span><strong>Armed — OpenReef switches the plugs</strong><small>Reconciled every minute, restart-safe. Disarmed, OpenReef never touches them.</small></span>
+          <span><strong>Armed — OpenReef switches the plugs</strong><small>Checks reported plug states every minute and after startup. Disarming leaves daylight in its current state.</small></span>
         </label>
         ${dirtyHint}
         <div class="grid two">
@@ -8140,15 +8140,16 @@ class OpenReefPanel extends HTMLElement {
           <label><span>Daylight plug <small>on at sunrise, off at sunset</small></span>${this._spawnExecEntitySelect("lightEntity", ex.lightEntity || "")}</label>
           <label><span>Moonlight plug <small>optional — real lunar cycle, dark around the new moon</small></span>${this._spawnExecEntitySelect("moonEntity", ex.moonEntity || "")}</label>
           <label><span>Moonlight from <small>% illumination — below this the night stays dark</small></span><input type="number" min="0" max="100" step="5" value="${Number.isFinite(Number(ex.moonMinIlluminationPct)) ? Number(ex.moonMinIlluminationPct) : 25}" data-scope="spawn-exec" data-field="moonMinIlluminationPct" /></label>
-          <label><span>If someone flips a plug by hand</span>
+          <label><span>When someone changes a plug in Home Assistant</span>
             <select data-scope="spawn-exec" data-field="overridePolicy">
-              <option value="hold" ${ex.overridePolicy !== "reassert" ? "selected" : ""}>Respect it until the next sunrise/sunset</option>
+              <option value="hold" ${ex.overridePolicy !== "reassert" ? "selected" : ""}>Hold direct HA user changes until the next transition</option>
               <option value="reassert" ${ex.overridePolicy === "reassert" ? "selected" : ""}>Put it back within a minute</option>
             </select></label>
         </div>
         ${this._spawnExecChannelRow("Daylight", "light")}
         ${this._spawnExecChannelRow("Moonlight", "moon")}
         ${issues}
+        <small class="hint">Using Apex for temperature and moonlight? Leave the moonlight plug empty and seasonal temperature control disabled. Device reboots, wall-button changes and automations are corrected automatically; disarm for maintenance.</small>
         <div class="button-row">
           <button class="secondary compact-button" data-action="spawn-exec-pargate">${parGated ? "Stop gating light alerts from this program" : "Gate light alerts from this program"}</button>
           <button class="secondary compact-button" data-action="spawn-exec-refresh">Refresh status</button>
@@ -8170,31 +8171,38 @@ class OpenReefPanel extends HTMLElement {
     const target = state && state.valid ? state.targetTempC : null;
     const heaterEnt = st.entities?.heater;
     const coolEnt = st.entities?.cool;
+    const tempRange = (this._spawning.presets || []).find(p => p.id === sp.reefPreset)?.tempRangeC;
+    const rangeHint = tempRange ? `<small class="hint">Full seasonal target: ${this._escape(String(tempRange[0]))}–${this._escape(String(tempRange[1]))} °C, plus the ±0.2 °C control band. The whole curve must fit your limits before arming; limits are never raised automatically.</small>` : "";
+    const coolingDelay = Number(st.runtime?.tempCoolingDelaySeconds) || 0;
     const live = (st.entities?.tempSensor || heaterEnt || coolEnt) ? `
       <div class="spawn-channel-row">
         <strong>🌡 Temperature</strong>
         <small class="hint">${reading != null ? `tank ${Number(reading).toFixed(1)} °C` : "no reading yet"}${target != null ? ` · target ${target} °C` : ""}</small>
         ${heaterEnt ? `<small class="hint">heater</small>${pill(heaterEnt)}` : ""}
-        ${coolEnt ? `<small class="hint">fan</small>${pill(coolEnt)}` : ""}
+        ${coolEnt ? `<small class="hint">cooling</small>${pill(coolEnt)}` : ""}
+        ${coolingDelay ? `<small class="hint">Cooling restart delay: ${Math.ceil(coolingDelay)} seconds</small>` : ""}
       </div>` : "";
     return `
       <article class="panel stack spawn-card">
         <div class="awc-section-title"><p class="eyebrow">🌡 Seasonal temperature</p></div>
-        <small class="hint">Today's target always publishes as <code>sensor.openreef_spawning_target_temp</code> while spawning is on — wire your own thermostat to it, zero risk. Direct control below is guarded: heating fails OFF, every sensor doubt switches both plugs off, and hard clamps beat the curve.</small>
+        <small class="hint">Today's interpolated seasonal target publishes as <code>sensor.openreef_spawning_target_temp</code>. Direct control uses a tank temperature sensor reporting °C or °F and HA switch entities. Invalid readings request both outputs OFF, with feedback checks and retries. Enabling or changing a profile immediately selects its current target; acclimate the tank before a large target change.</small>
+        ${rangeHint}
         <label class="toggle-card compact-toggle">
           <input type="checkbox" data-scope="spawn-exec-temp" data-field="acknowledged" ${temp.acknowledged ? "checked" : ""}>
-          <span><strong>I have an independent inline thermostat as the guard</strong><small>e.g. an Inkbird set to the seasonal maximum + 0.5 °C, never driven by software — OpenReef only modulates beneath it. Required before control arms.</small></span>
+          <span><strong>I have independent temperature protection</strong><small>Use equipment-appropriate heating and cooling protection, configured for your animals and hardware. Follow the controller's wiring instructions. A thermostat cannot power equipment through an OFF plug; test HA and power-loss behaviour.</small></span>
         </label>
         <label class="toggle-card compact-toggle">
           <input type="checkbox" data-scope="spawn-exec-temp" data-field="enabled" ${temp.enabled ? "checked" : ""} ${temp.acknowledged ? "" : "disabled"}>
-          <span><strong>OpenReef holds the seasonal temperature</strong><small>Bang-bang at target ± 0.2 °C — the exact heater/chiller mirror of the Apex snippets. Needs the guard acknowledged, a sensor, and at least one plug.</small></span>
+          <span><strong>OpenReef controls seasonal heating and cooling</strong><small>Target ± 0.2 °C with hysteresis and opposing-output checks. Disarming or changing bindings requests the old temperature outputs OFF and retries until confirmed.</small></span>
         </label>
         <div class="grid two">
           <label><span>Tank temperature sensor</span>${this._awcEntitySelect("spawn-exec-temp", "", "sensorEntity", temp.sensorEntity || "", "sensor")}</label>
-          <label><span>Heater plug <small>in series through the guard's heat socket</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "heaterEntity", temp.heaterEntity || "", "switch")}</label>
-          <label><span>Cooling fan plug <small>straight to wall — never through the guard's cool socket</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "coolEntity", temp.coolEntity || "", "switch")}</label>
+          <label><span>Heater switch</span>${this._awcEntitySelect("spawn-exec-temp", "", "heaterEntity", temp.heaterEntity || "", "switch")}</label>
+          <label><span>Cooling switch <small>fan or chiller</small></span>${this._awcEntitySelect("spawn-exec-temp", "", "coolEntity", temp.coolEntity || "", "switch")}</label>
           <label><span>Never heat at/above (°C)</span><input type="number" min="20" max="32" step="0.1" value="${Number.isFinite(Number(temp.maxC)) ? Number(temp.maxC) : 27.5}" data-scope="spawn-exec-temp" data-field="maxC" /></label>
           <label><span>Never cool at/below (°C)</span><input type="number" min="15" max="26" step="0.1" value="${Number.isFinite(Number(temp.minC)) ? Number(temp.minC) : 22.0}" data-scope="spawn-exec-temp" data-field="minC" /></label>
+          <label><span>Maximum time between sensor reports (minutes)</span><input type="number" min="1" max="120" step="1" value="${Number.isFinite(Number(temp.staleMinutes)) ? Number(temp.staleMinutes) : 15}" data-scope="spawn-exec-temp" data-field="staleMinutes" /><small>Match the integration's reporting interval, including unchanged readings. HA reports cannot prove a probe is physically healthy.</small></label>
+          <label><span>Minimum cooling OFF time (seconds)</span><input type="number" min="0" max="1800" step="1" value="${Number.isFinite(Number(temp.coolMinOffSeconds)) ? Number(temp.coolMinOffSeconds) : 180}" data-scope="spawn-exec-temp" data-field="coolMinOffSeconds" /><small>Use the equipment manufacturer's restart delay; a fan may allow zero. Also applies after HA restart. OFF protection is never delayed.</small></label>
         </div>
         ${live}
       </article>`;
@@ -8270,12 +8278,16 @@ class OpenReefPanel extends HTMLElement {
     const mode = ex.mode === "openreef" ? "openreef" : "apex";
     const controlling = !!st.runtime?.controlling;
     const armedBackend = !!st.execution?.armed;
+    const health = st.runtime?.health || "starting";
+    const healthLabel = { ok: "plug states confirmed", fault: "check the plugs", stalled: "lighting checks overdue", override: "manual override", starting: "waiting for first check" };
     const statusPill = st.error
       ? `<span class="pill warning">status unavailable</span>`
+      : st.runtime?.tempPendingRelease?.length
+        ? `<span class="pill warning">temperature shutdown unconfirmed</span>`
       : mode === "apex"
         ? `<span class="pill unknown">Apex executes</span>`
         : controlling
-          ? `<span class="pill ok">running the plugs</span>`
+          ? `<span class="pill ${health === "ok" ? "ok" : "warning"}">${healthLabel[health] || "check lighting status"}</span>`
           : `<span class="pill unknown">${armedBackend ? "standing by" : "disarmed"}</span>`;
     const preset = (this._spawning.presets || []).find((p) => p.id === sp.reefPreset);
     const reefLabel = preset ? preset.label : "Pick a reef";
@@ -8290,11 +8302,15 @@ class OpenReefPanel extends HTMLElement {
       ${state.inSpawnWindow ? `<span class="pill ok">🥚 Spawn window is OPEN — keep nights dark</span>` : ""}` : "";
     const next = state.valid && state.nextTransition
       ? `<small class="hint">Next: ${this._escape(this._spawnExecCountdown(state.nextTransition))}</small>` : "";
+    const checked = controlling && st.runtime?.lastCompletedAt
+      ? `<small class="hint">Last check: ${this._escape(new Date(st.runtime.lastCompletedAt).toLocaleString())} · confirms HA's reported states; verify the actual equipment.</small>` : "";
+    const pendingTemp = st.runtime?.tempPendingRelease?.length
+      ? `<small class="hint">Awaiting temperature output OFF: ${this._escape(st.runtime.tempPendingRelease.join(", "))}. Check the equipment; OpenReef keeps retrying while loaded.</small>` : "";
     const dirtyRow = this._configDirty
       ? `<small class="hint" style="color:var(--warning-color,#f5a524)">Settings changed — Save to refresh this preview.</small>
          <button class="primary compact-button" data-action="save">Save now</button>` : "";
     const body = state.valid
-      ? `${this._spawnSkySvg(state)}<div class="spawn-hero-foot">${chips}${next}${dirtyRow}</div>`
+      ? `${this._spawnSkySvg(state)}<div class="spawn-hero-foot">${chips}${next}${checked}${pendingTemp}${dirtyRow}</div>`
       : `<div class="spawn-hero-foot"><small class="hint">${st.error ? this._escape(st.error) : "Reading the sky…"}</small>${dirtyRow}</div>`;
     return `
       <article class="panel spawn-hero">
@@ -8377,7 +8393,7 @@ class OpenReefPanel extends HTMLElement {
       <article class="panel stack">
         <div class="section-head"><div><h3>🌙 Predicted spawn window</h3><p>${this._escape(prog.preset?.label || "")} · spawns ~${this._escape(String(pred.daysAfterFullMoon?.[0] ?? ""))}–${this._escape(String(pred.daysAfterFullMoon?.[1] ?? ""))} nights after the ${this._escape(pred.localSpawnMonthName || "")} full moon</p></div>${countdown ? `<span class="pill ok">${this._escape(countdown)}</span>` : ""}</div>
         <div class="grid three">
-          <div><span class="hint">Full moon</span><br><strong>${this._escape((pred.fullMoonUtc || "").slice(0, 10) || "—")}</strong></div>
+          <div><span class="hint">Full moon</span><br><strong>${this._escape(pred.fullMoonLocalDate || (pred.fullMoonUtc || "").slice(0, 10) || "—")}</strong></div>
           <div><span class="hint">Window opens</span><br><strong>${this._escape(pred.windowStart || "—")}</strong></div>
           <div><span class="hint">Window closes</span><br><strong>${this._escape(pred.windowEnd || "—")}</strong></div>
         </div>
@@ -8425,6 +8441,8 @@ class OpenReefPanel extends HTMLElement {
       <article class="panel stack">
         <div class="section-head"><div><h3>🌑 New-moon dates ${this._escape(String(prog.params?.year || ""))}</h3><p>Enter these in the Apex lunar / Season Table. ⚠️ Re-check every January 1 — the Apex auto-resets them.</p></div>${copyBtn("newMoonDates", "Copy")}</div>
         <div class="pill-stack" style="flex-wrap:wrap">${moonChips}</div>
+        <small class="hint">Dates use ${this._escape(prog.params?.timeZone || "UTC")}. Match the Apex clock and seasonal offset to the daylight program.</small>
+        ${(prog.lunarWarnings || []).map((warning) => `<small class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(warning)}</small>`).join("")}
       </article>`;
 
     const steps = (prog.walkthrough || []).map((s) => `<li>${this._escape(s)}</li>`).join("");
@@ -18065,12 +18083,12 @@ const rigSteps = [
           : (Number.isFinite(pred.nightsUntilWindowEnd) && pred.nightsUntilWindowEnd >= 0 ? "Spawning window is open now" : "");
       }
       const moonMore = pred ? [
-        pred.fullMoonUtc ? `Full moon: ${String(pred.fullMoonUtc).slice(0, 10)}` : "",
+        pred.fullMoonLocalDate || pred.fullMoonUtc ? `Full moon: ${pred.fullMoonLocalDate || String(pred.fullMoonUtc).slice(0, 10)}` : "",
         pred.windowStart && pred.windowEnd ? `Spawn window: ${pred.windowStart} → ${pred.windowEnd}` : "",
       ] : [];
       const spawnExec = this._config?.spawningProgram?.execution;
       if (spawnExec?.mode === "openreef" && spawnExec?.armed) {
-        moonMore.push(`OpenReef runs the lights — ${this._pulseSpawn.program?.preset?.label || "reef"} photoperiod live`);
+        moonMore.push("OpenReef daylight control is armed — open Spawning to check confirmed plug status");
         if (detail === "Spawning window is open now") detail += " — keep nights dark";
       }
       push("moon", "Tonight's moon", `${moon.phaseName} · ${Math.round(moon.illumination * 100)}% lit`, detail, "ok", moonMore);
@@ -28921,9 +28939,9 @@ const rigSteps = [
               <small>Notify when a device fails to exit a mode, a safety cap force-restores a device, or a timed mode can't auto-return.</small>
             </span>
           </label>
-          <label>Mode alert notify target
+          <label>Mode & spawning alert notify target
             <input data-scope="alerts" data-field="modeNotifyTarget" value="${this._escape(alerts.modeNotifyTarget || "")}" placeholder="notify service e.g. mobile_app_phone">
-            <small>Optional Home Assistant notify service for mode alerts (in addition to the in-HA notification). Leave blank for in-HA only.</small>
+            <small>Optional Home Assistant notify service for mode and spawning faults (in addition to the in-HA notification). Leave blank for in-HA only.</small>
           </label>
         </div>
         <section class="mapping-section">

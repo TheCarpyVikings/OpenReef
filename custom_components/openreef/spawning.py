@@ -23,10 +23,10 @@ computes:
   * a **spawn-window prediction** (full moon of the spawning month + the
     documented "N days after full moon" offset)
 
-…and compiles it into the exact artifacts a reefer pastes into the Apex:
+…and compiles it into data tables and templates for review on the actual Apex:
 the **Season Table** values, the lighting **Profiles**, and the **code**
-snippets (temperature / daylight / lunar), following Rich Ross's documented
-Apex-Local workflow verbatim.
+snippets (temperature / daylight / lunar), based on Rich Ross's documented
+Apex-Local workflow. Verify the templates against the controller and fixtures.
 
 Design note — anchoring: we preserve the biologically important *day length*
 and its seasonal drift, but center the photoperiod on a user-chosen "solar noon"
@@ -338,39 +338,45 @@ def build_environmental_model(
 
 
 def predict_spawn_window(
-    preset: dict[str, Any], year: int, offset_months: int, today: datetime | None = None
+    preset: dict[str, Any], year: int, offset_months: int, today: datetime | None = None,
+    *, solar_noon_hour: float = SPAWNING_DEFAULT_SOLAR_NOON_HOUR,
 ) -> dict[str, Any]:
-    """Predict the spawning night window: the full moon of the (offset-mapped)
-    spawning month + the preset's documented 'N days after full moon' range."""
+    """Inclusive local spawning nights, retaining the last night until sunrise.
+
+    Include the previous year's full moon when a December window crosses into
+    January. With no local clock supplied, exported dates use UTC explicitly.
+    """
     reef_spawn_month = preset["spawnReefMonth"]
     local_spawn_month = ((reef_spawn_month - 1 + offset_months) % 12) + 1
     lo, hi = preset["daysAfterFullMoon"]
-
-    # Search a 2-month window around the local spawning month for its full moon,
-    # rolling into next year if the window has already passed today.
+    tz = today.tzinfo if today is not None and today.tzinfo is not None else timezone.utc
+    if today is not None and today.tzinfo is None:
+        today = today.replace(tzinfo=tz)
     candidates: list[dict[str, Any]] = []
-    for yr in (year, year + 1):
-        start = datetime(yr, 1, 1, tzinfo=timezone.utc)
-        end = datetime(yr + 1, 2, 1, tzinfo=timezone.utc)
+    years = (year - 1, year, year + 1) if today is not None else (year, year + 1)
+    for yr in years:
+        start = datetime(yr, 1, 1, tzinfo=tz).astimezone(timezone.utc)
+        end = datetime(yr + 1, 1, 1, tzinfo=tz).astimezone(timezone.utc) - timedelta(microseconds=1)
         for fm in lunar_events(start, end)["full_moons"]:
-            if fm.month == local_spawn_month:
-                candidates.append(
-                    {
-                        "fullMoonUtc": fm.isoformat(),
-                        "windowStart": (fm + timedelta(days=lo)).date().isoformat(),
-                        "windowEnd": (fm + timedelta(days=hi)).date().isoformat(),
-                        "_window_end_dt": fm + timedelta(days=hi),
-                    }
-                )
-
-    chosen = None
-    if today is not None:
-        for c in candidates:
-            if c["_window_end_dt"] >= today:
-                chosen = c
-                break
-    chosen = chosen or (candidates[0] if candidates else None)
-
+            local_fm = fm.astimezone(tz)
+            if local_fm.month != local_spawn_month:
+                continue
+            window_start = local_fm.date() + timedelta(days=lo)
+            window_end = local_fm.date() + timedelta(days=hi)
+            sr, ss, _ = _sun_minutes(preset["lat"], _shift_months(window_end, -offset_months), solar_noon_hour)
+            sunrise_date = window_end + timedelta(days=1 if sr < ss else 0)
+            next_sr, _, _ = _sun_minutes(preset["lat"], _shift_months(sunrise_date, -offset_months), solar_noon_hour)
+            expiry = datetime(sunrise_date.year, sunrise_date.month, sunrise_date.day, tzinfo=tz) + timedelta(minutes=next_sr)
+            candidates.append({
+                "fullMoonUtc": fm.isoformat(),
+                "fullMoonLocalDate": local_fm.date().isoformat(),
+                "windowStart": window_start.isoformat(), "windowEnd": window_end.isoformat(),
+                "_expiry": expiry, "_end_date": window_end,
+            })
+    candidates.sort(key=lambda c: c["windowStart"])
+    chosen = next((c for c in candidates if today is None or today < c["_expiry"]), None)
+    if chosen is None and candidates:
+        chosen = candidates[-1]
     result = {
         "reefSpawnMonth": reef_spawn_month,
         "reefSpawnMonthName": _MONTHS_FULL[reef_spawn_month - 1],
@@ -379,35 +385,28 @@ def predict_spawn_window(
         "daysAfterFullMoon": [lo, hi],
     }
     if chosen:
-        result.update(
-            {
-                "fullMoonUtc": chosen["fullMoonUtc"],
-                "windowStart": chosen["windowStart"],
-                "windowEnd": chosen["windowEnd"],
-            }
-        )
+        result.update({key: chosen[key] for key in ("fullMoonUtc", "fullMoonLocalDate", "windowStart", "windowEnd")})
         if today is not None:
-            nights = (chosen["_window_end_dt"].date() - today.date()).days
-            result["nightsUntilWindowEnd"] = nights
-            start_dt = datetime.fromisoformat(chosen["windowStart"]).date()
-            result["nightsUntilWindowStart"] = (start_dt - today.date()).days
+            # Post-midnight hours still belong to the last spawning night.
+            calendar_day = min(today.date(), chosen["_end_date"]) if today < chosen["_expiry"] else today.date()
+            result["nightsUntilWindowEnd"] = (chosen["_end_date"] - calendar_day).days
+            result["nightsUntilWindowStart"] = (date.fromisoformat(chosen["windowStart"]) - calendar_day).days
     return result
 
 
 def _code_snippets(temp_probe: str, temp_unit: str) -> dict[str, dict[str, str]]:
-    """The exact Apex code reefers hand-write, per Rich Ross's documented
-    workflow. ``RT`` is the reference temperature the Season Table drives, so this
+    """Apex templates using the documented RT+ signed-differential syntax.
+    ``RT`` is the reference temperature the Season Table drives, so this
     code is constant boilerplate — the *table* carries the seasonal values."""
-    tol = "0.2"  # ±0.2° tolerance (Rich Ross / Craggs ±0.1–0.2°)
     unit = temp_unit.upper()
+    tol = "0.4" if unit == "F" else "0.2"  # nearest 0.1°F to 0.2°C
     return {
         "temperature_heater": {
             "label": f"Heater (±{tol}°{unit}, tracks Season Table RT)",
             "target": "Heater outlet",
             "code": (
                 "Fallback OFF\n"
-                "Set OFF\n"
-                f"If {temp_probe} < RT-{tol} Then ON\n"
+                f"If {temp_probe} < RT+-{tol} Then ON\n"
                 f"If {temp_probe} > RT+{tol} Then OFF"
             ),
             "note": "RT is the seasonal reference temperature set by the Season Table.",
@@ -417,9 +416,8 @@ def _code_snippets(temp_probe: str, temp_unit: str) -> dict[str, dict[str, str]]
             "target": "Chiller outlet",
             "code": (
                 "Fallback OFF\n"
-                "Set OFF\n"
                 f"If {temp_probe} > RT+{tol} Then ON\n"
-                f"If {temp_probe} < RT-{tol} Then OFF"
+                f"If {temp_probe} < RT+-{tol} Then OFF"
             ),
             "note": "Mirror of the heater — keeps the tank inside RT ± tolerance.",
         },
@@ -524,7 +522,7 @@ def generate_program(
     temp_probe: str = "Tmp",
     today: datetime | None = None,
 ) -> dict[str, Any]:
-    """Compile a complete, copy-paste-ready spawning program for a reef preset.
+    """Compile environmental tables and Apex templates for a reef preset.
 
     Returns a JSON-serialisable dict: preset metadata, the 12-row Season Table,
     the lighting Profiles, the Apex code snippets, the year's new/full-moon
@@ -536,9 +534,12 @@ def generate_program(
     temp_unit = "F" if str(temp_unit).upper() == "F" else "C"
 
     model = build_environmental_model(preset, year, offset_months, solar_noon_hour, temp_unit)
-    start = datetime(year, 1, 1, tzinfo=timezone.utc)
-    end = datetime(year, 12, 31, 23, 59, tzinfo=timezone.utc)
+    tz = today.tzinfo if today is not None and today.tzinfo is not None else timezone.utc
+    start = datetime(year, 1, 1, tzinfo=tz).astimezone(timezone.utc)
+    end = datetime(year + 1, 1, 1, tzinfo=tz).astimezone(timezone.utc) - timedelta(microseconds=1)
     events = lunar_events(start, end)
+    new_dates = [d.astimezone(tz).date().isoformat() for d in events["new_moons"]]
+    double_months = sorted({d[:7] for d in new_dates if sum(other[:7] == d[:7] for other in new_dates) > 1})
 
     return {
         "preset": {
@@ -555,13 +556,18 @@ def generate_program(
             "solarNoonHour": solar_noon_hour,
             "tempUnit": temp_unit,
             "tempProbe": temp_probe,
+            "timeZone": str(tz),
         },
         "seasonTable": model,
         "profiles": _profiles(preset),
         "codeSnippets": _code_snippets(temp_probe, temp_unit),
-        "newMoonDates": [d.date().isoformat() for d in events["new_moons"]],
-        "fullMoonDates": [d.date().isoformat() for d in events["full_moons"]],
-        "spawnPrediction": predict_spawn_window(preset, year, offset_months, today),
+        "newMoonDates": new_dates,
+        "fullMoonDates": [d.astimezone(tz).date().isoformat() for d in events["full_moons"]],
+        "lunarWarnings": [
+            f"{month} contains two new moons. Verify how your Apex firmware handles both dates before using this lunar table."
+            for month in double_months
+        ],
+        "spawnPrediction": predict_spawn_window(preset, year, offset_months, today, solar_noon_hour=solar_noon_hour),
         "walkthrough": _walkthrough(),
         "tempRangeC": [round(min(preset["sstMonthlyC"]), 1), round(max(preset["sstMonthlyC"]), 1)],
         "sources": [
@@ -604,6 +610,45 @@ def _sun_minutes(lat: float, reef_date: date, solar_noon_hour: float) -> tuple[i
     sr = int(round((solar_noon_hour - dl / 2) * 60)) % 1440
     ss = int(round((solar_noon_hour + dl / 2) * 60)) % 1440
     return sr, ss, dl
+
+
+def seasonal_temperature(preset: dict[str, Any], local_date: date, offset_months: int = 0) -> float:
+    """Interpolate the monthly (15th-day) table anchors in the local calendar.
+
+    Shift the anchor values, not the date's day number: that avoids jumps when
+    an offset maps a 31-day month into February. The target changes once per day.
+    """
+    anchor = local_date.replace(day=15)
+    if local_date < anchor:
+        right = anchor
+        left = (anchor.replace(day=1) - timedelta(days=1)).replace(day=15)
+    else:
+        left = anchor
+        right = (anchor.replace(day=28) + timedelta(days=4)).replace(day=15)
+    values = preset["sstMonthlyC"]
+    a, b = (values[(d.month - 1 - offset_months) % 12] for d in (left, right))
+    fraction = (local_date - left).days / (right - left).days
+    return round(a + (b - a) * fraction, 3)
+
+
+def temperature_profile_error(cfg: dict[str, Any]) -> str | None:
+    """Reject an enabled curve that cannot fit the user's unchanged hard limits."""
+    temp = (cfg.get("execution") or {}).get("temp") or {}
+    if not temp.get("enabled"):
+        return None
+    preset = REEF_PRESETS.get(cfg.get("reefPreset"))
+    if preset is None:
+        return "Select a valid reef preset before enabling temperature control."
+    low, high = min(preset["sstMonthlyC"]), max(preset["sstMonthlyC"])
+    minimum, maximum = temp.get("minC", 22.0), temp.get("maxC", 27.5)
+    if low - 0.2 < minimum or high + 0.2 > maximum:
+        return (
+            f"This reef's seasonal targets span {low:.1f}–{high:.1f} °C, with a ±0.2 °C control band, "
+            f"outside the configured {minimum:.1f}–{maximum:.1f} °C limits. "
+            "Review the profile and limits for your animals before enabling temperature control; "
+            "OpenReef will not raise the limits automatically."
+        )
+    return None
 
 
 def execution_desired_state(cfg: dict[str, Any], now_local: datetime) -> dict[str, Any]:
@@ -664,10 +709,11 @@ def execution_desired_state(cfg: dict[str, Any], now_local: datetime) -> dict[st
             "tomorrow": abs_min >= 1440,
         }
 
-    prediction = predict_spawn_window(preset, now_local.year, offset, today=now_utc)
+    prediction = predict_spawn_window(preset, now_local.year, offset, today=now_local, solar_noon_hour=noon)
     window_start = prediction.get("windowStart")
     window_end = prediction.get("windowEnd")
-    today_iso = local_date.isoformat()
+    night_date = local_date - timedelta(days=1) if not light_on and sr_min < ss_min and now_min < sr_min else local_date
+    today_iso = night_date.isoformat()
     in_window = bool(window_start and window_end and window_start <= today_iso <= window_end)
 
     return {
@@ -685,7 +731,7 @@ def execution_desired_state(cfg: dict[str, Any], now_local: datetime) -> dict[st
         "moonPhase": moon_phase_name(age),
         "moonQualifies": moon_qualifies,
         "moonThresholdPct": moon_threshold,
-        "targetTempC": round(preset["sstMonthlyC"][reef_date.month - 1], 1),
+        "targetTempC": seasonal_temperature(preset, local_date, offset),
         "nextTransition": next_transition,
         "inSpawnWindow": in_window,
         "spawnWindow": {"start": window_start, "end": window_end} if window_start else None,

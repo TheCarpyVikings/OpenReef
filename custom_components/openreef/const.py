@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.140"
+INTEGRATION_VERSION = "0.7.142"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -819,14 +819,19 @@ SPAWNING_OFFSET_MONTHS_MAX = 11
 # moonlight plugs to the program's desired state (spawning.execution_desired_state).
 SPAWNING_TICK_UNSUB = "spawning_tick_unsub"
 SPAWNING_TICK_SECONDS = 60
+SPAWNING_COMMAND_TIMEOUT_SECONDS = 10
+SPAWNING_MISMATCH_ALERT_SECONDS = 120
+SPAWNING_HEARTBEAT_STALE_SECONDS = 180
+SPAWNING_STATUS_ENTITY = "sensor.openreef_spawning_status"
 SPAWNING_RUNTIME = "spawning_runtime"     # hass.data: asserted states, overrides, issues, notify cooldowns
+SPAWNING_TEMP_OUTPUTS = "spawning_temp_outputs"  # entry options: owned outputs awaiting verified release
 # Stage C — seasonal temperature. The RT target publishes as a bare state-machine
 # sensor (no entity platform, same as the dosing pH mirror); the optional guarded
 # heat/cool control mirrors the Apex heater/chiller snippets at RT ± tolerance.
 SPAWNING_TARGET_TEMP_ENTITY = "sensor.openreef_spawning_target_temp"
 SPAWNING_TEMP_TOLERANCE_C = 0.2           # Rich Ross / Craggs ±0.2° — the Apex snippet mirror
-SPAWNING_TEMP_STALE_MINUTES = 15          # sensor silence beyond this ⇒ everything fails OFF
-SPAWNING_TEMP_PLAUSIBLE_MIN_C = 15.0      # outside this band the probe is not in the water
+SPAWNING_TEMP_STALE_MINUTES = 15          # default report timeout; configurable for the sensor integration
+SPAWNING_TEMP_PLAUSIBLE_MIN_C = 15.0      # outside this band: stop outputs and request inspection
 SPAWNING_TEMP_PLAUSIBLE_MAX_C = 32.0
 
 # Cooling headroom (Layer 1) — humidity-aware fan cooling. The maths live in
@@ -1584,6 +1589,8 @@ DEFAULT_CORE_CONFIG = {
                 "heaterEntity": None,        # switch.* — fails OFF, AND-gated through the inline guard
                 "coolEntity": None,          # switch.* — the fan; cooling's safe direction is ON
                 "maxC": 27.5,                # hard clamp: never command heat at/above this
+                "staleMinutes": SPAWNING_TEMP_STALE_MINUTES,
+                "coolMinOffSeconds": 180,      # configurable fan/chiller minimum OFF duration
                 "minC": 22.0,                # hard clamp: never command cooling at/below this
             },
         },

@@ -161,8 +161,13 @@ from .const import (
     PANEL_URL,
     REEF_PRESETS,
     SPAWNING_DEFAULT_SOLAR_NOON_HOUR,
+    SPAWNING_COMMAND_TIMEOUT_SECONDS,
+    SPAWNING_MISMATCH_ALERT_SECONDS,
+    SPAWNING_HEARTBEAT_STALE_SECONDS,
+    SPAWNING_STATUS_ENTITY,
     SPAWNING_OFFSET_MONTHS_MAX,
     SPAWNING_RUNTIME,
+    SPAWNING_TEMP_OUTPUTS,
     COOLING_RUNTIME,
     COOLING_TICK_UNSUB,
     COOLING_TICK_SECONDS,
@@ -3541,11 +3546,17 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 else None
             )
         try:
-            t_max = round(max(20.0, min(32.0, float(temp_in.get("maxC", t_defaults["maxC"])))), 1)
+            t_max = float(temp_in.get("maxC", t_defaults["maxC"]))
+            if not math.isfinite(t_max):
+                raise ValueError("non-finite limit")
+            t_max = round(max(20.0, min(32.0, t_max)), 1)
         except (TypeError, ValueError):
             t_max = t_defaults["maxC"]
         try:
-            t_min = round(max(15.0, min(26.0, float(temp_in.get("minC", t_defaults["minC"])))), 1)
+            t_min = float(temp_in.get("minC", t_defaults["minC"]))
+            if not math.isfinite(t_min):
+                raise ValueError("non-finite limit")
+            t_min = round(max(15.0, min(26.0, t_min)), 1)
         except (TypeError, ValueError):
             t_min = t_defaults["minC"]
         if t_min >= t_max:
@@ -3572,6 +3583,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 "coolEntity": t_plugs["coolEntity"],
                 "maxC": t_max,
                 "minC": t_min,
+                "staleMinutes": int(_awc_num(temp_in.get("staleMinutes"), SPAWNING_TEMP_STALE_MINUTES, 1, 120)),
+                "coolMinOffSeconds": int(_awc_num(temp_in.get("coolMinOffSeconds"), 180, 0, 1800)),
             },
         }
 
@@ -5141,6 +5154,8 @@ def _persist_entry_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
 ) -> dict[str, Any]:
     normalised = _normalise_core_config(config)
+    # Keep old thermal bindings outside panel-owned settings until OFF is verified.
+    _spawning_remember_temp_outputs(hass, entry, _spawning_execution_cfg(_config_from_entry(entry)))
     options = dict(entry.options)
     options[CONF_SETTINGS] = normalised
     hass.config_entries.async_update_entry(entry, options=options)
@@ -6273,6 +6288,7 @@ async def _async_save_config(
         != _awc_schedule_fingerprint(config)
     )
     normalised = _normalise_core_config(config)
+    _spawning_remember_temp_outputs(hass, entry, _spawning_execution_cfg(_config_from_entry(entry)))
     # Every save re-stamps the completion history: whatever a client is handed from
     # here on is current as of now, which is the anchor _merge_recent_completions uses
     # when that client eventually posts the whole config back.
@@ -9955,6 +9971,16 @@ async def websocket_save_config(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
 
+    binding_error = _spawning_binding_error(_spawning_execution_cfg(_normalise_core_config(msg["config"])))
+    if binding_error:
+        connection.send_error(msg["id"], "spawning_output_conflict", binding_error)
+        return
+
+    temp_error = spawning.temperature_profile_error(_normalise_core_config(msg["config"])["spawningProgram"])
+    if temp_error and _spawning_execution_enabled(_spawning_execution_cfg(_normalise_core_config(msg["config"]))):
+        connection.send_error(msg["id"], "spawning_temperature_limits", temp_error)
+        return
+
     # A panel posts the whole config, so anything logged since it last refreshed —
     # an automatic water change, a completion from an automation — would be dropped.
     _merge_recent_completions(entry.options.get(CONF_SETTINGS), msg["config"])
@@ -10009,6 +10035,16 @@ async def websocket_update_config_alias(
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+
+    binding_error = _spawning_binding_error(_spawning_execution_cfg(_normalise_core_config(msg["settings"])))
+    if binding_error:
+        connection.send_error(msg["id"], "spawning_output_conflict", binding_error)
+        return
+
+    temp_error = spawning.temperature_profile_error(_normalise_core_config(msg["settings"])["spawningProgram"])
+    if temp_error and _spawning_execution_enabled(_spawning_execution_cfg(_normalise_core_config(msg["settings"]))):
+        connection.send_error(msg["id"], "spawning_temperature_limits", temp_error)
         return
 
     _mixing_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
@@ -19154,14 +19190,10 @@ async def websocket_delete_feed_session(
 # Coral Spawning — smart-plug execution (the reconcile tick)
 #
 # spawning.execution_desired_state() is the pure brain; this tick is the hands.
-# Declarative reconcile, never scheduled timers: every minute it asks what the
-# plugs SHOULD be and corrects only mismatches — restart-safe, DST-safe, and a
-# config edit takes effect on the next tick because saves re-arm the scheduler.
-# Manual changes are detected by stamp-and-compare (we remember what we last
-# asserted; a mismatch we didn't cause is a human) — policy "hold" respects the
-# human until the next natural sunrise/sunset, "reassert" corrects within a
-# minute. Disarmed or mode "apex", the tick is never even registered: OpenReef
-# releases the plugs wherever they stand.
+# Reconcile current desired state with reported state every minute. An unrelated
+# save never moves that deadline. Only confirmed direct HA user actions can hold
+# a channel; device recovery and unfulfilled writes are retried. Publish-only
+# ticks keep the target sensor/capture hook alive when execution is disarmed.
 # --------------------------------------------------------------------------- #
 _SPAWNING_EXEC_CHANNELS = (("light", "lightEntity", "daylight"), ("moon", "moonEntity", "moonlight"))
 
@@ -19183,6 +19215,17 @@ def _spawning_execution_enabled(execution: dict[str, Any]) -> bool:
             execution.get("lightEntity") or execution.get("moonEntity") or temp_cfg.get("enabled")
         )
     )
+
+
+def _spawning_binding_error(execution: dict[str, Any]) -> str | None:
+    entities = [execution.get("lightEntity"), execution.get("moonEntity")]
+    temp = execution.get("temp") or {}
+    if temp.get("enabled"):
+        entities.extend((temp.get("heaterEntity"), temp.get("coolEntity")))
+    bound = [entity for entity in entities if entity]
+    if len(bound) != len(set(bound)):
+        return "Each spawning output needs its own entity; daylight, moonlight, heating and cooling cannot share a plug."
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -19984,36 +20027,96 @@ def _clear_spawning_tick(hass: HomeAssistant) -> None:
     unsub = store.pop(SPAWNING_TICK_UNSUB, None)
     if unsub is not None:
         unsub()
+    runtime = store.get(SPAWNING_RUNTIME, {})
+    runtime["generation"] = runtime.get("generation", 0) + 1
+    startup_unsub = runtime.pop("startupUnsub", None)
+    if startup_unsub is not None:
+        startup_unsub()
+
+
+def _spawning_sync_runtime(hass: HomeAssistant, sp_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Invalidate old commands/holds when the saved program changes; retain the lock."""
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(SPAWNING_RUNTIME, {})
+    if runtime.get("program") != sp_cfg:
+        runtime["program"] = deepcopy(sp_cfg)
+        runtime["generation"] = runtime.get("generation", 0) + 1
+        for key in ("asserted", "overrides", "mismatches", "issues", "lastCompletedAt"):
+            runtime.pop(key, None)
+        runtime["configuredAt"] = dt_util.utcnow().isoformat()
+    return runtime
+
+
+def _spawning_tick_current(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, runtime: dict[str, Any], generation: int,
+) -> bool:
+    return (
+        hass.data.get(DOMAIN, {}).get(SPAWNING_RUNTIME) is runtime
+        and runtime.get("generation") == generation
+        and _config_from_entry(entry).get("spawningProgram") == runtime.get("program")
+    )
+
+
+def _spawning_kick(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
+    runtime = hass.data.get(DOMAIN, {}).get(SPAWNING_RUNTIME)
+
+    async def _run() -> None:
+        store = hass.data.get(DOMAIN, {})
+        if store.get(SPAWNING_RUNTIME) is runtime and SPAWNING_TICK_UNSUB in store:
+            await _async_spawning_tick(hass, entry, dt_util.now())
+
+    hass.async_create_task(_run(), "openreef_spawning_reconcile")
 
 
 async def _async_schedule_spawning_tick(
     hass: HomeAssistant, entry: OpenReefConfigEntry | None, config: dict[str, Any] | None = None
 ) -> None:
-    """Arm/disarm the minutely spawning reconcile tick (idempotent, called on
-    every save). The tick also runs in a publish-only mode for any user with the
-    spawning feature on — refreshing the RT target sensor and firing spawn-window
-    captures with zero actuation — so the gate is execution-enabled OR feature-on.
-    Fully off, the runtime (asserted stamps, overrides) is dropped so a re-arm
-    starts with a clean sync instead of stale override state."""
-    _clear_spawning_tick(hass)
+    """Keep one interval across saves; promptly reconcile startup and program edits."""
     if entry is None:
+        _clear_spawning_tick(hass)
         return
-    config = config or _config_from_entry(entry)
+    # A shared save may have yielded since its snapshot was taken.
+    config = _config_from_entry(entry)
     sp_cfg = config.get("spawningProgram")
+    store = hass.data.setdefault(DOMAIN, {})
+    changed = (store.get(SPAWNING_RUNTIME) or {}).get("program") != sp_cfg
+    runtime = _spawning_sync_runtime(hass, sp_cfg)
     feature_on = isinstance(sp_cfg, dict) and bool(sp_cfg.get("enabled"))
-    if not (feature_on or _spawning_execution_enabled(_spawning_execution_cfg(config))):
-        hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
+    if not (feature_on or _spawning_execution_enabled(_spawning_execution_cfg(config)) or _spawning_owned_temp_outputs(entry)):
+        _clear_spawning_tick(hass)
+        _spawning_publish_health(hass, config, runtime)
         return
 
     async def _handle(now: datetime) -> None:
         latest_entry = _first_entry(hass)
         if latest_entry is None or latest_entry.entry_id != entry.entry_id:
             return
+        latest_config = _config_from_entry(latest_entry)
+        health = _spawning_publish_health(hass, latest_config, runtime)
+        if health["health"] == "stalled":
+            await _async_spawning_notify_once(
+                hass, latest_config, "heartbeat", 3600,
+                "Spawning control checks have stopped",
+                "OpenReef has not completed a spawning check for three minutes. "
+                "Check temperature, lighting and Home Assistant; the spawning outputs are unconfirmed.",
+            )
         await _async_spawning_tick(hass, latest_entry, dt_util.now())
 
-    hass.data.setdefault(DOMAIN, {})[SPAWNING_TICK_UNSUB] = async_track_time_interval(
-        hass, _handle, timedelta(seconds=SPAWNING_TICK_SECONDS)
-    )
+    new_interval = SPAWNING_TICK_UNSUB not in store
+    if new_interval:
+        store[SPAWNING_TICK_UNSUB] = async_track_time_interval(
+            hass, _handle, timedelta(seconds=SPAWNING_TICK_SECONDS)
+        )
+    if not (changed or new_interval):
+        return
+    if hass.is_running:
+        _spawning_kick(hass, entry)
+    elif "startupUnsub" not in runtime:
+        @callback
+        def _started(event: Any) -> None:
+            runtime.pop("startupUnsub", None)
+            _spawning_kick(hass, entry)
+
+        runtime["startupUnsub"] = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _started)
 
 
 async def _async_spawning_notify_once(
@@ -20024,7 +20127,7 @@ async def _async_spawning_notify_once(
     it once per cooldown. Stamps live in hass.data (no save, no lock)."""
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(SPAWNING_RUNTIME, {})
     notified = runtime.setdefault("notified", {})
-    now = datetime.now(timezone.utc)
+    now = dt_util.utcnow()
     previous = notified.get(key)
     if previous is not None:
         try:
@@ -20035,6 +20138,76 @@ async def _async_spawning_notify_once(
     notified[key] = now.isoformat()
     await _async_send_mode_notification(hass, config, f"openreef_spawning_{key}", title, message)
     return True
+
+
+def _spawning_health(
+    hass: HomeAssistant, config: dict[str, Any], runtime: dict[str, Any],
+) -> dict[str, Any]:
+    """Reported device agreement and reconcile freshness, never physical-output proof."""
+    execution = _spawning_execution_cfg(config)
+    controlling = _spawning_execution_enabled(execution)
+    same_program = runtime.get("program") == config.get("spawningProgram")
+    last_completed = runtime.get("lastCompletedAt") if same_program else None
+    issues = dict(runtime.get("issues") or {}) if same_program else {}
+    overrides = runtime.get("overrides", {}) if same_program else {}
+    anchor = _parse_datetime(last_completed or runtime.get("configuredAt"))
+    stale = bool(anchor and (dt_util.utcnow() - anchor).total_seconds() >= SPAWNING_HEARTBEAT_STALE_SECONDS)
+    state = spawning.execution_desired_state(config.get("spawningProgram") or {}, dt_util.now())
+    entry = _first_entry(hass)
+    temp = execution.get("temp") or {}
+    active_temp = {e for e in (temp.get("heaterEntity"), temp.get("coolEntity")) if e} if controlling and temp.get("enabled") else set()
+    pending_release = _spawning_owned_temp_outputs(entry) - active_temp if entry else set()
+    if pending_release:
+        issues["temp_release"] = "Temperature outputs awaiting confirmed OFF: " + ", ".join(sorted(pending_release))
+    if controlling and temp.get("enabled"):
+        reading, reason = _spawning_temperature_read(hass, temp)
+        reason = spawning.temperature_profile_error(config["spawningProgram"]) or reason
+        if reason:
+            issues["temp_live"] = reason
+        reported = {role: _spawning_reported_plug(hass, temp.get(key)) for role, key in (("heater", "heaterEntity"), ("cool", "coolEntity")) if temp.get(key)}
+        if any(value is None for value in reported.values()):
+            issues["temp_live_outputs"] = "A temperature output is unavailable or its state is assumed"
+        if reported.get("heater") == reported.get("cool") == "on":
+            issues["temp_live_interlock"] = "Heating and cooling both report ON; awaiting correction"
+        if reading is not None and (
+            (reading >= temp["maxC"] and reported.get("heater") == "on")
+            or (reading <= temp["minC"] and reported.get("cool") == "on")
+        ):
+            issues["temp_live_limit"] = "A temperature output is ON beyond its configured cutoff; awaiting confirmed OFF"
+    if controlling and same_program and state.get("valid"):
+        for channel, key, label in _SPAWNING_EXEC_CHANNELS:
+            entity = execution.get(key)
+            if not entity or channel in overrides:
+                continue
+            st = hass.states.get(entity)
+            if st is None or st.state not in ("on", "off") or (st.state == "on") != state[channel]:
+                issues.setdefault(channel, f"{label} state is not confirmed against the current program")
+    health = (
+        "fault" if pending_release else
+        "disarmed" if not controlling else
+        "starting" if not same_program else
+        "stalled" if stale else
+        "fault" if issues else
+        "starting" if not last_completed else
+        "override" if overrides else "ok"
+    )
+    return {
+        "health": health, "controlling": controlling, "lastCompletedAt": last_completed,
+        "issues": sorted(issues.values()) if controlling or pending_release else [],
+        "tempPendingRelease": sorted(pending_release),
+        "tempCoolingDelaySeconds": runtime.get("tempCoolingDelaySeconds", 0),
+        "mismatchSince": {key: value["since"] for key, value in (runtime.get("mismatches") or {}).items()},
+    }
+
+
+def _spawning_publish_health(
+    hass: HomeAssistant, config: dict[str, Any], runtime: dict[str, Any],
+) -> dict[str, Any]:
+    health = _spawning_health(hass, config, runtime)
+    hass.states.async_set(SPAWNING_STATUS_ENTITY, health["health"], {
+        "friendly_name": "OpenReef Spawning Status", **health,
+    })
+    return health
 
 
 def _spawning_publish_target_sensor(
@@ -20091,254 +20264,431 @@ def _spawning_maybe_capture_window_night(
     )
 
 
-async def _async_spawning_set_plug(hass: HomeAssistant, entity: str, on: bool) -> bool:
-    """Best-effort actuator write for the temperature channels."""
+def _spawning_owned_temp_outputs(entry: OpenReefConfigEntry) -> set[str]:
+    raw = entry.options.get(SPAWNING_TEMP_OUTPUTS, [])
+    return {e for e in raw if isinstance(e, str) and e.startswith("switch.")} if isinstance(raw, list) else set()
+
+
+def _spawning_store_temp_outputs(hass: HomeAssistant, entry: OpenReefConfigEntry, entities: set[str]) -> None:
+    """Server-owned recovery journal: stale panel saves cannot discard a handoff."""
+    if entities != _spawning_owned_temp_outputs(entry):
+        hass.config_entries.async_update_entry(entry, options={**entry.options, SPAWNING_TEMP_OUTPUTS: sorted(entities)})
+
+
+def _spawning_remember_temp_outputs(hass: HomeAssistant, entry: OpenReefConfigEntry, execution: dict[str, Any]) -> None:
+    temp = execution.get("temp") or {}
+    if _spawning_execution_enabled(execution) and temp.get("enabled"):
+        outputs = {e for e in (temp.get("heaterEntity"), temp.get("coolEntity")) if e}
+        _spawning_store_temp_outputs(hass, entry, _spawning_owned_temp_outputs(entry) | outputs)
+
+
+def _spawning_reported_plug(hass: HomeAssistant, entity: str | None) -> str | None:
+    st = hass.states.get(entity) if entity else None
+    if st is None or st.attributes.get("assumed_state") or st.attributes.get("restored"):
+        return None
+    return st.state if st.state in ("on", "off") else None
+
+
+def _spawning_temperature_read(hass: HomeAssistant, temp: dict[str, Any]) -> tuple[float | None, str]:
+    entity = temp.get("sensorEntity")
+    st = hass.states.get(entity) if entity else None
+    if st is None or st.state in UNAVAILABLE_STATES or st.attributes.get("restored") or st.attributes.get("assumed_state"):
+        return None, f"Temperature sensor ({entity}) is unavailable or restored without a live report"
     try:
-        await hass.services.async_call(
-            "switch", "turn_on" if on else "turn_off",
-            {ATTR_ENTITY_ID: entity}, blocking=True, context=None,
-        )
-        return True
-    except Exception:  # noqa: BLE001 — a dead plug must not kill the tick; retry next minute
-        _LOGGER.exception("Spawning temperature control could not switch %s", entity)
-        return False
+        value = float(st.state)
+    except (TypeError, ValueError):
+        return None, f"Temperature sensor ({entity}) is not numeric"
+    unit = str(st.attributes.get("unit_of_measurement", "")).strip().upper()
+    if unit in ("°F", "F", "FAHRENHEIT"):
+        value = (value - 32) * 5 / 9
+    elif unit not in ("°C", "C", "CELSIUS"):
+        return None, f"Temperature sensor ({entity}) needs an explicit Celsius or Fahrenheit unit"
+    last = getattr(st, "last_reported", None) or getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
+    if not isinstance(last, datetime):
+        return None, f"Temperature sensor ({entity}) has no report timestamp"
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (dt_util.utcnow() - last).total_seconds()
+    if age < -60 or age > temp.get("staleMinutes", SPAWNING_TEMP_STALE_MINUTES) * 60:
+        return None, f"Temperature sensor ({entity}) has been silent too long or has an invalid clock"
+    if not SPAWNING_TEMP_PLAUSIBLE_MIN_C <= value <= SPAWNING_TEMP_PLAUSIBLE_MAX_C:
+        return None, f"Temperature reading {value} °C is outside the plausible probe range"
+    return value, ""
+
+
+async def _async_spawning_set_plug(
+    hass: HomeAssistant, entity: str, on: bool, runtime: dict[str, Any],
+) -> bool:
+    """Bound each thermal write and verify feedback; acceptance is not confirmation."""
+    desired = "on" if on else "off"
+    key = f"temp_output_{entity}"
+    issues = runtime.setdefault("issues", {})
+    if _spawning_reported_plug(hass, entity) != desired:
+        try:
+            async with asyncio.timeout(SPAWNING_COMMAND_TIMEOUT_SECONDS):
+                await hass.services.async_call(
+                    "switch", "turn_on" if on else "turn_off",
+                    {ATTR_ENTITY_ID: entity}, blocking=True, context=None,
+                )
+        except Exception:  # noqa: BLE001 — keep the fault until a later confirmed recovery
+            _LOGGER.warning("Spawning temperature command failed for %s", entity, exc_info=True)
+    confirmed = _spawning_reported_plug(hass, entity) == desired
+    if confirmed:
+        issues.pop(key, None)
+    else:
+        issues[key] = f"Temperature plug ({entity}) has not confirmed {desired.upper()}; retrying each minute"
+    return confirmed
+
+
+async def _async_spawning_temp_notify(hass: HomeAssistant, entry: OpenReefConfigEntry, runtime: dict[str, Any]) -> None:
+    if runtime.get("stopping"):
+        return  # the unload path sends one explicit release/follow-up warning
+    faults = {k: v for k, v in runtime.get("issues", {}).items() if k.startswith("temp")}
+    if not faults:
+        return
+    # A drift warning must not consume the cooldown for a later failed safety OFF.
+    if any("not confirmed OFF" in message for message in faults.values()):
+        key = "temp_shutdown"
+    elif set(faults) == {"temp_drift"}:
+        key = "temp_drift"
+    else:
+        key = "temp_fault"
+    await _async_spawning_notify_once(
+        hass, _config_from_entry(entry), key, 1800,
+        "Spawning temperature shutdown unconfirmed" if key == "temp_shutdown" else "Spawning temperature needs attention",
+        "; ".join(faults.values()) + ". Check the actual tank and equipment. OFF requests are verified against HA feedback; "
+        "an independent thermostat cannot power equipment through an OFF plug.",
+    )
 
 
 async def _async_spawning_temp_reconcile(
-    hass: HomeAssistant,
-    config: dict[str, Any],
-    execution: dict[str, Any],
-    state: dict[str, Any],
-    runtime: dict[str, Any],
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    execution: dict[str, Any], state: dict[str, Any], runtime: dict[str, Any], generation: int,
 ) -> None:
-    """Stage C step 2 — guarded seasonal heat/cool: symmetric bang-bang at
-    RT ± tolerance, the exact mirror of the Apex heater/chiller snippets the
-    compiler emits. The plugs' own on/off state is the hysteresis latch, so the
-    software stays stateless. This is a SAFETY channel: manual overrides are
-    never held here, every sensor doubt (unavailable, non-numeric, stale,
-    implausible) switches BOTH actuators OFF and alerts, and hard clamps sit
-    outside the seasonal curve. The required physical guard — an inline
-    thermostat (e.g. an Inkbird) at the seasonal max — is part of the opt-in
-    acknowledgement; heating's safe direction is OFF, cooling's is ON."""
-    temp_cfg = execution.get("temp") if isinstance(execution.get("temp"), dict) else {}
-    issues = runtime.setdefault("issues", {})
-    if not temp_cfg.get("enabled"):
-        for key in ("temp", "temp_heater", "temp_cool"):
-            issues.pop(key, None)
-        runtime.pop("tempReading", None)
-        return
-    heater = temp_cfg.get("heaterEntity")
-    cooler = temp_cfg.get("coolEntity")
-    sensor_entity = temp_cfg.get("sensorEntity")
+    """Stop unwanted outputs first. Never energise against an unconfirmed opposite output.
 
-    reading: float | None = None
+    Bindings are retained in entry options before actuation and across disarm,
+    rebind and restart, until their release is confirmed. Temperature runs before
+    lighting so a slow daylight service cannot postpone this pass's protection.
+    """
+    temp = execution.get("temp") or {}
+    issues = runtime.setdefault("issues", {})
+    _spawning_remember_temp_outputs(hass, entry, execution)
+    owned = _spawning_owned_temp_outputs(entry)
+    requested = _spawning_execution_enabled(execution) and temp.get("enabled") and not runtime.get("stopping")
     reason = ""
-    st = hass.states.get(sensor_entity)
-    if st is None or st.state in UNAVAILABLE_STATES:
-        reason = f"temperature sensor ({sensor_entity}) is unavailable"
+    reading = None
+    if requested:
+        reason = _spawning_binding_error(execution) or spawning.temperature_profile_error(config["spawningProgram"]) or ""
+        if not state.get("valid"):
+            reason = "The spawning temperature program has no valid reef preset"
+        if not reason:
+            reading, reason = _spawning_temperature_read(hass, temp)
+    active = bool(requested and not reason)
+    if reading is not None:
+        runtime["tempReading"] = round(reading, 2)
     else:
-        try:
-            reading = float(st.state)
-        except (TypeError, ValueError):
-            reason = f"temperature sensor ({sensor_entity}) is not numeric"
-        if reading is not None:
-            unit = str(st.attributes.get("unit_of_measurement", "")).upper()
-            if "F" in unit:
-                reading = (reading - 32.0) * 5.0 / 9.0
-            last = getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
-            if isinstance(last, datetime):
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=timezone.utc)
-                if (dt_util.utcnow() - last).total_seconds() > SPAWNING_TEMP_STALE_MINUTES * 60:
-                    reason = f"temperature sensor ({sensor_entity}) has been silent too long"
-            if not reason and not (
-                SPAWNING_TEMP_PLAUSIBLE_MIN_C <= reading <= SPAWNING_TEMP_PLAUSIBLE_MAX_C
-            ):
-                reason = (
-                    f"temperature reading {reading:.1f} °C is implausible — probe out of the water?"
-                )
+        runtime.pop("tempReading", None)
     if reason:
         issues["temp"] = reason
-        runtime.pop("tempReading", None)
-        for entity in (heater, cooler):
-            if entity:
-                await _async_spawning_set_plug(hass, entity, False)
-        await _async_spawning_notify_once(
-            hass, config, "temp_sensor", 6 * 3600,
-            "Spawning temperature control failed safe",
-            f"{reason.capitalize()}. Heater and cooling were switched OFF — the inline "
-            "guard thermostat holds the tank until the sensor recovers.",
-        )
+    else:
+        issues.pop("temp", None)
+    heater, cooler = temp.get("heaterEntity"), temp.get("coolEntity")
+    bindings = {e for e in (heater, cooler) if e} if active else set()
+    obsolete = owned - bindings
+    desires = {entity: False for entity in owned}
+    if active:
+        rt, tol = float(state["targetTempC"]), SPAWNING_TEMP_TOLERANCE_C
+        heat_on = _spawning_reported_plug(hass, heater) == "on"
+        cool_on = _spawning_reported_plug(hass, cooler) == "on"
+        if heater:
+            desires[heater] = reading < rt - tol or (reading <= rt + tol and heat_on and not cool_on)
+            if reading >= temp["maxC"]:
+                desires[heater] = False
+        if cooler:
+            desires[cooler] = reading > rt + tol or (reading >= rt - tol and cool_on and not heat_on)
+            if reading <= temp["minC"]:
+                desires[cooler] = False
+        if abs(reading - rt) > SPAWNING_TEMP_DRIFT_ALERT_C:
+            issues["temp_drift"] = f"Tank {reading:.1f} °C differs from seasonal target {rt:.1f} °C; check equipment and acclimation"
+        else:
+            issues.pop("temp_drift", None)
+    else:
+        issues.pop("temp_drift", None)
+
+    # Record an observed OFF interval; after restart an unknown interval starts now.
+    # This is a minimum restart delay for cooling, never a delay to a safety OFF.
+    off_since = runtime.setdefault("tempOffSince", {})
+    for entity in owned:
+        if _spawning_reported_plug(hass, entity) == "off":
+            off_since.setdefault(entity, dt_util.utcnow())
+        else:
+            off_since.pop(entity, None)
+    to_stop = [entity for entity, desired in desires.items() if not desired]
+    results = await asyncio.gather(*(_async_spawning_set_plug(hass, e, False, runtime) for e in to_stop))
+    released = set()
+    for entity, confirmed in zip(to_stop, results):
+        if confirmed:
+            off_since.setdefault(entity, dt_util.utcnow())
+            if entity in obsolete:
+                released.add(entity)
+    owned = _spawning_owned_temp_outputs(entry) - released
+    _spawning_store_temp_outputs(hass, entry, owned)
+    runtime["tempPendingRelease"] = sorted(owned - bindings)
+    def current() -> bool:
+        return _spawning_tick_current(hass, entry, runtime, generation) and not runtime.get("stopping")
+
+    if not current():
+        await _async_spawning_temp_notify(hass, entry, runtime)
         return
-    issues.pop("temp", None)
-    runtime["tempReading"] = round(reading, 2)
 
-    rt = float(state["targetTempC"])
-    tol = SPAWNING_TEMP_TOLERANCE_C
-    if abs(reading - rt) > SPAWNING_TEMP_DRIFT_ALERT_C:
-        await _async_spawning_notify_once(
-            hass, config, "temp_drift", 6 * 3600,
-            "Tank temperature drifting from the seasonal target",
-            f"The tank reads {reading:.1f} °C against the {rt:.1f} °C seasonal target. "
-            "Check the heater, the fan, and the inline guard thermostat's setpoint.",
+    # Re-read after awaited OFF commands. A newly bad/warm probe must veto heat.
+    latest_reading, latest_reason = _spawning_temperature_read(hass, temp) if active else (None, "")
+    if active and (latest_reason or latest_reading != reading):
+        await asyncio.gather(*(_async_spawning_set_plug(hass, e, False, runtime) for e in bindings))
+        issues["temp"] = latest_reason or "Temperature changed during switching; outputs stopped pending the next check"
+        active = False
+        desires = {e: False for e in owned}
+    for entity, desired in desires.items():
+        if not desired or not current():
+            continue
+        other_outputs = owned - {entity}
+        if any(_spawning_reported_plug(hass, e) != "off" for e in other_outputs):
+            issues["temp_interlock"] = "Heating/cooling start blocked until every opposing or previous output confirms OFF"
+            # An already ON output must also be stopped if its opposite is unknown.
+            await _async_spawning_set_plug(hass, entity, False, runtime)
+            continue
+        issues.pop("temp_interlock", None)
+        if _spawning_reported_plug(hass, entity) is None:
+            issues[f"temp_output_{entity}"] = f"Temperature plug ({entity}) is unavailable or its state is assumed; start blocked"
+            continue
+        if entity == cooler and _spawning_reported_plug(hass, entity) != "on":
+            elapsed = (dt_util.utcnow() - off_since.get(entity, dt_util.utcnow())).total_seconds()
+            if elapsed < temp.get("coolMinOffSeconds", 180):
+                runtime["tempCoolingDelaySeconds"] = int(temp.get("coolMinOffSeconds", 180) - elapsed)
+                continue
+        runtime.pop("tempCoolingDelaySeconds", None)
+        await _async_spawning_set_plug(hass, entity, True, runtime)
+        off_since.pop(entity, None)
+        if not current():
+            # An ON already in flight cannot be recalled; compensate before exiting.
+            await _async_spawning_set_plug(hass, entity, False, runtime)
+            await _async_spawning_temp_notify(hass, entry, runtime)
+            return
+        after, after_reason = _spawning_temperature_read(hass, temp)
+        unsafe = after_reason or (
+            after >= temp["maxC"] or after > rt + tol if entity == heater
+            else after <= temp["minC"] or after < rt - tol
         )
-    try:
-        max_c = float(temp_cfg.get("maxC", 27.5))
-        min_c = float(temp_cfg.get("minC", 22.0))
-    except (TypeError, ValueError):
-        max_c, min_c = 27.5, 22.0
+        if unsafe:
+            await _async_spawning_set_plug(hass, entity, False, runtime)
+            issues["temp"] = after_reason or "Temperature changed during a start; output stopped for re-evaluation"
+    if not any(desires.values()):
+        issues.pop("temp_interlock", None)
+        runtime.pop("tempCoolingDelaySeconds", None)
+    await _async_spawning_temp_notify(hass, entry, runtime)
 
-    for role, entity, on_side, off_side, clamp_off in (
-        ("heater", heater, reading < rt - tol, reading > rt + tol, reading >= max_c),
-        ("cool", cooler, reading > rt + tol, reading < rt - tol, reading <= min_c),
-    ):
-        if not entity:
-            issues.pop(f"temp_{role}", None)
-            continue
-        st_e = hass.states.get(entity)
-        if st_e is None or st_e.state in UNAVAILABLE_STATES:
-            issues[f"temp_{role}"] = f"{role} plug ({entity}) is unavailable"
-            await _async_spawning_notify_once(
-                hass, config, f"unavailable_temp_{role}", 6 * 3600,
-                "Spawning temperature plug unreachable",
-                f"The {role} plug ({entity}) is unavailable — seasonal temperature "
-                "control cannot switch it.",
-            )
-            continue
-        issues.pop(f"temp_{role}", None)
-        actual = st_e.state == "on"
-        desired = True if on_side else False if off_side else actual  # band = hysteresis hold
-        if clamp_off:
-            desired = False  # hard clamp beats the curve, always
-        if desired != actual:
-            await _async_spawning_set_plug(hass, entity, desired)
+
+async def _async_spawning_stop(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
+    """Invalidate pending starts and attempt a verified thermal release on unload."""
+    config = _config_from_entry(entry)
+    runtime = _spawning_sync_runtime(hass, config["spawningProgram"])
+    runtime["stopping"] = True
+    runtime["generation"] += 1
+    async with runtime.setdefault("lock", asyncio.Lock()):
+        await _async_spawning_temp_reconcile(
+            hass, entry, config, _spawning_execution_cfg(config), {}, runtime, runtime["generation"],
+        )
+    if _spawning_owned_temp_outputs(entry):
+        await _async_spawning_notify_once(
+            hass, config, "temp_unload", 0, "Temperature output shutdown is unconfirmed",
+            "OpenReef is unloading but these plugs have not confirmed OFF: "
+            + ", ".join(sorted(_spawning_owned_temp_outputs(entry)))
+            + ". Check them now. Their release will be retried when OpenReef starts again.",
+        )
+    stopped_config = deepcopy(config)
+    stopped_config["spawningProgram"]["execution"]["armed"] = False
+    _spawning_publish_health(hass, stopped_config, runtime)
 
 
 async def _async_spawning_tick(
     hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime
 ) -> None:
-    """Reconcile the spawning plugs to the program's desired state at ``now_local``.
-
-    Also runs publish-only (feature on, execution disarmed/apex): the RT target
-    sensor refreshes and spawn-window captures fire, but nothing is switched."""
+    """Serialize reconciliations; a slow device must not accumulate older ticks."""
     config = _config_from_entry(entry)
-    sp_cfg = config.get("spawningProgram", {})
+    runtime = _spawning_sync_runtime(hass, config["spawningProgram"])
+    if runtime.get("stopping"):
+        return
+    lock = runtime.setdefault("lock", asyncio.Lock())
+    if lock.locked():
+        return  # the independent interval callback still checks the heartbeat
+    async with lock:
+        generation = runtime["generation"]
+        runtime["lastStartedAt"] = dt_util.utcnow().isoformat()
+        try:
+            completed = await _async_spawning_reconcile(hass, entry, now_local, config, runtime, generation)
+            if completed and _spawning_tick_current(hass, entry, runtime, generation):
+                runtime["lastCompletedAt"] = dt_util.utcnow().isoformat()
+                runtime.setdefault("issues", {}).pop("tick", None)
+        except Exception:  # noqa: BLE001 — the next interval can recover
+            _LOGGER.exception("Spawning reconcile failed")
+            if _spawning_tick_current(hass, entry, runtime, generation):
+                runtime.setdefault("issues", {})["tick"] = "Spawning check failed; lighting is unconfirmed"
+                await _async_spawning_notify_once(
+                    hass, _config_from_entry(entry), "tick", 3600,
+                    "Spawning check failed", "Check the daylight plug and Home Assistant logs.",
+                )
+        finally:
+            if hass.data.get(DOMAIN, {}).get(SPAWNING_RUNTIME) is runtime:
+                _spawning_publish_health(hass, _config_from_entry(entry), runtime)
+
+
+async def _async_spawning_reconcile(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, now_local: datetime,
+    config: dict[str, Any], runtime: dict[str, Any], generation: int,
+) -> bool:
+    """One bounded pass using the saved program; discard superseded work after awaits."""
+    sp_cfg = config["spawningProgram"]
     execution = _spawning_execution_cfg(config)
     exec_enabled = _spawning_execution_enabled(execution)
-    if not exec_enabled and not (isinstance(sp_cfg, dict) and sp_cfg.get("enabled")):
-        return
     state = spawning.execution_desired_state(sp_cfg, now_local)
-    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(SPAWNING_RUNTIME, {})
+    await _async_spawning_temp_reconcile(hass, entry, config, execution, state, runtime, generation)
+    if not _spawning_tick_current(hass, entry, runtime, generation):
+        return False
+    if not exec_enabled and not sp_cfg.get("enabled"):
+        return True
     issues = runtime.setdefault("issues", {})
+    binding_error = _spawning_binding_error(execution)
+    if exec_enabled and binding_error:
+        issues["program"] = binding_error
+        await _async_spawning_notify_once(
+            hass, config, "bindings", 3600, "Spawning outputs conflict", binding_error,
+        )
+        return True
     if not state.get("valid"):
         issues["program"] = "the spawning program has no valid reef preset"
         _spawning_publish_target_sensor(hass, sp_cfg, None)
-        return
+        return True
     issues.pop("program", None)
     _spawning_publish_target_sensor(hass, sp_cfg, state)
     _spawning_maybe_capture_window_night(hass, entry, runtime, state, now_local)
     if not exec_enabled:
-        return
+        return True
     asserted = runtime.setdefault("asserted", {})
     overrides = runtime.setdefault("overrides", {})
+    mismatches = runtime.setdefault("mismatches", {})
     policy = execution.get("overridePolicy", "hold")
     activity: list[tuple[str, str]] = []
 
     for channel, entity_key, label in _SPAWNING_EXEC_CHANNELS:
+        if not _spawning_tick_current(hass, entry, runtime, generation):
+            return False
         entity = execution.get(entity_key)
         if not entity:
-            asserted.pop(channel, None)
+            continue
+        if entity in _spawning_owned_temp_outputs(entry):
+            issues[channel] = f"{label} output ({entity}) is awaiting a confirmed temperature-control handoff"
+            continue
+        desired = bool(state[channel])
+        st = hass.states.get(entity)
+        prior = asserted.get(channel)
+        unavailable = st is None or st.state not in ("on", "off")
+        actual = not unavailable and st.state == "on"
+
+        # Only a direct, attributed HA action is evidence of a human. Wall-button
+        # and automation changes without that evidence are reconciled for recovery.
+        context = getattr(st, "context", None)
+        manual = bool(getattr(context, "user_id", None)) and not getattr(context, "parent_id", None)
+        override = overrides.get(channel)
+        if override and (unavailable or desired != override["desiredAtOverride"] or actual == desired):
             overrides.pop(channel, None)
+            asserted.pop(channel, None)
+            prior = None
+            override = None
+        if (
+            not unavailable and actual != desired and not override
+            and prior == desired and channel not in mismatches and manual and policy == "hold"
+        ):
+            override = overrides[channel] = {
+                "since": dt_util.utcnow().isoformat(), "desiredAtOverride": desired,
+            }
+            activity.append((f"Spawning {label} manually changed in Home Assistant — holding until the next transition", "info"))
+        if override:
+            if channel == "light" and not desired and actual and state.get("inSpawnWindow"):
+                await _async_spawning_notify_once(
+                    hass, config, "spawn_window_light", 2 * 3600,
+                    "Spawn-window night — lights are on",
+                    "The daylight plug is manually held ON during a predicted spawn night. Check the tank's darkness.",
+                )
+            continue
+
+        if not unavailable and actual == desired:
+            asserted[channel] = desired
+            mismatches.pop(channel, None)
             issues.pop(channel, None)
             continue
-        desired = bool(state.get(channel))
-        st = hass.states.get(entity)
-        if st is None or st.state in ("unavailable", "unknown"):
+
+        fault = mismatches.get(channel)
+        if not fault or fault["entity"] != entity or fault["desired"] != desired:
+            fault = mismatches[channel] = {
+                "entity": entity, "desired": desired, "since": dt_util.utcnow().isoformat(),
+            }
+        # A mismatch is not a confirmed command, even when the service accepted it.
+        asserted.pop(channel, None)
+        if unavailable:
             issues[channel] = f"{label} plug ({entity}) is unavailable"
             await _async_spawning_notify_once(
                 hass, config, f"unavailable_{channel}", 6 * 3600,
                 "Spawning plug unreachable",
-                f"The spawning {label} plug ({entity}) is unavailable — the program "
-                "cannot switch it. It will keep trying every minute.",
+                f"The {label} plug ({entity}) is unavailable. OpenReef will reconcile it when it reconnects.",
             )
             continue
-        issues.pop(channel, None)
-        actual = st.state == "on"
 
-        override = overrides.get(channel)
-        if override is not None:
-            if bool(override.get("desiredAtOverride")) != desired:
-                overrides.pop(channel, None)  # the natural transition passed — program resumes
-            else:
-                if (
-                    channel == "light" and not desired and actual
-                    and state.get("inSpawnWindow")
-                ):
-                    fired = await _async_spawning_notify_once(
-                        hass, config, "spawn_window_light", 2 * 3600,
-                        "Spawn-window night — lights are on",
-                        "Tonight is inside the predicted spawn window and the daylight "
-                        "plug was switched on by hand. Genuinely dark nights matter — "
-                        "light pollution desynchronises spawning.",
-                    )
-                    if fired:
-                        activity.append(("Spawn-window night with the lights on — dark nights matter", "warning"))
-                continue  # respect the human until the next sunrise/sunset
-
-        if actual == desired:
-            asserted[channel] = desired
-            continue
-
-        prior = asserted.get(channel)
-        if prior == desired and policy == "hold":
-            # We already put this plug where the program wants it and something
-            # else moved it — that's a human. Hold until the next transition.
-            overrides[channel] = {
-                "since": dt_util.utcnow().isoformat(),
-                "desiredAtOverride": desired,
-            }
-            activity.append((
-                f"Spawning {label} plug flipped by hand — holding until the next "
-                f"{'sunset' if desired else 'sunrise'}",
-                "info",
-            ))
-            continue
-
-        domain = entity.split(".", 1)[0]
+        error = False
         try:
-            await hass.services.async_call(
-                domain, "turn_on" if desired else "turn_off",
-                {ATTR_ENTITY_ID: entity}, blocking=True, context=None,
-            )
-        except Exception:  # noqa: BLE001 — a dead plug must not kill the tick; retry next minute
-            _LOGGER.exception("Spawning execution could not switch %s", entity)
-            issues[channel] = f"could not switch the {label} plug ({entity})"
-            continue
-        asserted[channel] = desired
-        if channel == "light":
-            if prior is None:
-                activity.append((
-                    f"Spawning program took the daylight plug — switched {'on' if desired else 'off'}",
-                    "control",
-                ))
-            elif desired:
-                activity.append((
-                    f"Spawning sunrise — lights on until {state.get('sunset')} "
-                    f"({state.get('dayLengthHours')} h {state.get('reefMonthName')} day)",
-                    "control",
-                ))
-            else:
-                night_note = (
-                    " — spawn-window night, keep the room dark" if state.get("inSpawnWindow") else ""
+            async with asyncio.timeout(SPAWNING_COMMAND_TIMEOUT_SECONDS):
+                await hass.services.async_call(
+                    entity.split(".", 1)[0], "turn_on" if desired else "turn_off",
+                    {ATTR_ENTITY_ID: entity}, blocking=True, context=None,
                 )
-                activity.append((f"Spawning sunset — lights off{night_note}", "control"))
+        except Exception:  # noqa: BLE001 — timeout/error is observable and retried next minute
+            _LOGGER.warning("Spawning could not switch %s", entity, exc_info=True)
+            error = True
+        if not _spawning_tick_current(hass, entry, runtime, generation):
+            return False
+        observed = hass.states.get(entity)
+        confirmed = observed is not None and observed.state == ("on" if desired else "off")
+        if confirmed:
+            asserted[channel] = desired
+            mismatches.pop(channel, None)
+            issues.pop(channel, None)
+            if channel == "light":
+                action = "sunrise" if desired else "sunset"
+                message = f"Spawning {action} — daylight plug reports {'ON' if desired else 'OFF'}"
+                if prior is None:
+                    message = f"Spawning program took the daylight plug — reports {'ON' if desired else 'OFF'}"
+                activity.append((message, "control"))
+        else:
+            issues[channel] = f"{label} plug ({entity}) has not confirmed {'ON' if desired else 'OFF'}; retrying each minute"
+            since = datetime.fromisoformat(fault["since"])
+            if error or (dt_util.utcnow() - since).total_seconds() >= SPAWNING_MISMATCH_ALERT_SECONDS:
+                await _async_spawning_notify_once(
+                    hass, config, f"command_{channel}", 3600,
+                    "Spawning lighting command unconfirmed",
+                    f"{issues[channel]}. Check the actual lamp; the scheduled photoperiod may be interrupted.",
+                )
 
-    await _async_spawning_temp_reconcile(hass, config, execution, state, runtime)
-
+    if not _spawning_tick_current(hass, entry, runtime, generation):
+        return False
     if activity:
+        # No await between fetching current settings and persisting just these new
+        # events. Reusing the tick's old configuration could undo a user's disarm.
+        latest = _config_from_entry(entry)
         for message, activity_type in activity:
-            _append_activity(config, message, activity_type)
-        await _async_save_config(hass, entry, config)
+            _append_activity(latest, message, activity_type)
+        _persist_entry_config(hass, entry, latest)
+        _fire_event(hass, CONFIG_UPDATED_EVENT, {"entry_id": entry.entry_id})
+    return True
 
 
 def _effective_lighting_cfg(
@@ -20406,8 +20756,7 @@ def websocket_spawning_execution_status(
             "entities": entities,
             "runtime": {
                 "overrides": overrides,
-                "issues": sorted((runtime.get("issues") or {}).values()),
-                "controlling": _spawning_execution_enabled(execution),
+                **_spawning_health(hass, config, runtime),
                 "tempReading": runtime.get("tempReading"),
             },
         },
@@ -20423,6 +20772,12 @@ def websocket_spawning_execution_resume(
     """Clear a manual-override hold early — the next tick re-asserts the program."""
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(SPAWNING_RUNTIME, {})
     runtime["overrides"] = {}
+    runtime["asserted"] = {}
+    runtime["mismatches"] = {}
+    runtime["generation"] = runtime.get("generation", 0) + 1
+    entry = _first_entry(hass)
+    if entry is not None:
+        _spawning_kick(hass, entry)
     connection.send_result(msg["id"], {"success": True})
 
 
@@ -20465,7 +20820,7 @@ def websocket_generate_spawning_program(
     if preset_id not in REEF_PRESETS:
         connection.send_error(msg["id"], "unknown_preset", f"Unknown reef preset '{preset_id}'")
         return
-    now = datetime.now(timezone.utc)
+    now = dt_util.now()
     year = msg.get("year") or now.year
     offset = msg.get("offsetMonths")
     if offset is None:
@@ -21591,6 +21946,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_awc_timer(hass)
     _clear_awc_scheduler(hass)
     _clear_dosing(hass)
+    await _async_spawning_stop(hass, entry)
     _clear_spawning_tick(hass)
     hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
     _clear_cooling_tick(hass)

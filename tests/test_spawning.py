@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
 from datetime import date, datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -122,7 +123,7 @@ def test_generate_program_emits_rich_ross_code():
     assert "If Sun 180/-180 Then Midday" in snips["daylight_3step"]["code"]
     assert "If Moon 000/000 Then ON" in snips["lunar_lsm"]["code"]
     assert "If Output vMoon = ON Then Moonlight" in snips["radion_moonlight"]["code"]
-    assert "RT-0.2" in snips["temperature_heater"]["code"]
+    assert "RT+-0.2" in snips["temperature_heater"]["code"]
 
 
 def test_temp_probe_and_unit_flow_into_code():
@@ -408,6 +409,7 @@ def test_normalise_execution_defaults():
         "temp": {
             "enabled": False, "acknowledged": False, "sensorEntity": None,
             "heaterEntity": None, "coolEntity": None, "maxC": 27.5, "minC": 22.0,
+            "staleMinutes": 15, "coolMinOffSeconds": 180,
         },
     }
 
@@ -481,7 +483,8 @@ def test_tick_hold_respects_manual_change_until_transition():
     entry = _exec_entry()
     hass = _exec_hass(entry)
     run(integration._async_spawning_tick(hass, entry, _noon()))
-    hass.states.set("switch.tank_light", "off")  # a human at the wall
+    hass.states.set("switch.tank_light", "off")  # direct HA user action
+    hass.states.get("switch.tank_light").context = SimpleNamespace(user_id="tester", parent_id=None)
     run(integration._async_spawning_tick(hass, entry, _noon(2)))
     assert len(_switch_calls(hass, "turn_on")) == 1  # held, not re-asserted
     runtime = hass.data[integration.DOMAIN][integration.SPAWNING_RUNTIME]
@@ -539,12 +542,13 @@ def test_tick_moonlight_follows_the_real_moon():
 _TEMP_BINDINGS = {
     "enabled": True, "acknowledged": True, "sensorEntity": "sensor.tank_temp",
     "heaterEntity": "switch.heater", "coolEntity": "switch.fan",
+    "maxC": 29.5, "coolMinOffSeconds": 0,
 }
-_GBR_JUNE_RT = 24.7  # gbr_central sstMonthlyC[5]
+_GBR_JUNE_RT = spawning.seasonal_temperature(REEF_PRESETS["gbr_central"], _noon().date())
 
 
 def _fresh(value, attrs=None):
-    return FakeState(str(value), attrs, last_changed=datetime.now(timezone.utc))
+    return FakeState(str(value), {"unit_of_measurement": "°C", **(attrs or {})}, last_changed=datetime.now(timezone.utc))
 
 
 def _temp_entry(**temp_over):

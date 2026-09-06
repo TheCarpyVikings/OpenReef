@@ -28,7 +28,7 @@ const EXEC_STATUS = {
     nextTransition: { kind: "sunset", at: "19:30", inMinutes: 60, tomorrow: false },
   },
   entities: {},
-  runtime: { controlling: true, overrides: {}, issues: [] },
+  runtime: { controlling: true, health: "ok", lastCompletedAt: "2026-08-24T12:00:00Z", overrides: {}, issues: [] },
 };
 
 async function spawningPanel(configOver = {}, spawningOver = {}) {
@@ -95,7 +95,62 @@ test("the execution strip renders the backend status — sunrise, sunset, moon, 
   for (const chip of ["06:30", "19:30", "13 h day", "91%", "target 27°C"]) {
     assert(html.includes(chip), `strip must show ${chip}`);
   }
-  assert(html.includes("running the plugs"), "armed status pill must show");
+  assert(html.includes("plug states confirmed"), "confirmed status must show");
+  assert(html.includes("Last check:"), "last completed check must show");
+});
+
+test("armed alone never appears as confirmed, and faults stay visible", async () => {
+  for (const [health, label] of [[undefined, "waiting for first check"], ["stalled", "lighting checks overdue"], ["fault", "check the plugs"], ["override", "manual override"]]) {
+    const panel = await spawningPanel({}, { execStatus: {
+      ...EXEC_STATUS, runtime: { controlling: true, health, overrides: {}, issues: [] },
+    } });
+    const html = panel._spawningTab();
+    assert(html.includes(label), `must show ${label}`);
+    assert(!html.includes("plug states confirmed"), "must not claim confirmation");
+  }
+});
+
+test("the hybrid setup and deliberate HA override policy are explained", async () => {
+  const panel = await spawningPanel();
+  const html = panel._spawningTab();
+  assert(html.includes("Using Apex for temperature and moonlight?"));
+  assert(html.includes("Hold direct HA user changes until the next transition"));
+  assert(html.includes("disarm for maintenance"));
+});
+
+test("export shows local lunar dates and double-new-moon warnings", async () => {
+  const panel = await spawningPanel();
+  const html = panel._spawningProgramView({
+    params: { year: 2027, timeZone: "Europe/London" },
+    spawnPrediction: { fullMoonUtc: "2027-01-01T23:30:00Z", fullMoonLocalDate: "2027-01-02" },
+    lunarWarnings: ["2027-08 contains two new moons."],
+  });
+  assert(html.includes("2027-01-02"));
+  assert(html.includes("2027-08 contains two new moons."));
+  assert(html.includes("Dates use Europe/London"));
+});
+
+test("temperature settings support different sensors and cooling equipment", async () => {
+  const panel = await spawningPanel();
+  const html = panel._spawningTab();
+  assert(html.includes('data-field="staleMinutes"'));
+  assert(html.includes('data-field="coolMinOffSeconds"'));
+  assert(html.includes("Minimum cooling OFF time"));
+  assert(html.includes("independent temperature protection"));
+  assert(!html.includes("zero risk"));
+  assert(!html.includes("never through the guard's cool socket"));
+});
+
+test("pending thermal shutdown remains visible when switching to Apex", async () => {
+  const panel = await spawningPanel({}, { execStatus: {
+    ...EXEC_STATUS,
+    runtime: { controlling: false, health: "fault", tempPendingRelease: ["switch.old_heater"], overrides: {}, issues: ["OFF unconfirmed"] },
+  } });
+  panel._config.spawningProgram.execution.mode = "apex";
+  const html = panel._spawningTab();
+  assert(html.includes("temperature shutdown unconfirmed"));
+  assert(html.includes("switch.old_heater"));
+  assert(!html.includes('class="pill unknown">Apex executes'));
 });
 
 await runTests();
