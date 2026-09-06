@@ -553,3 +553,224 @@ first tick ran inside setup while HA was still booting, and a blocking `get_fore
 either stalls OpenReef's setup or comes back empty. The first read now waits for the
 `homeassistant_started` event when HA is not yet running (the listener's unsub sits in the tick
 slot, so a clear cancels it); the five-minute cadence arms after that first read.
+
+---
+
+## 13. Deadbands and the second reason to vent (spec, 2026-09-06)
+
+### 13.1 What 0.7.143/0.7.144 already fixed
+
+Reece's intake fan was switching on and off all afternoon. His activity log for one half hour,
+with the outdoor dew point pinned at 10.8–11.3 °C the whole time:
+
+| 13:00 | 13:07 | 13:15 | 13:20 | 13:25 | 13:30 |
+|---|---|---|---|---|---|
+| gap 3.0 → vent | under → close up | gap 2.1 → vent | under → close up | gap 2.0 → vent | under → close up |
+
+Six decision flips in thirty minutes. Outdoor never moved; the *indoor* dew point was
+straddling the 2.0 °C bar. Two of the six reached the plug; `minOn`/`minOff` absorbed the rest.
+
+Every Layer 3 gate was bang-bang against a live sensor, and each one switches on the thing that
+erases its own reason: the fan pulls drier air in → indoor dew falls toward outdoor → the gap
+closes → the fan stops → the room re-humidifies → it starts again. The 13:00→13:07 leg is that
+loop caught red-handed: a full 1 °C of indoor dew point removed in seven minutes, by the fan,
+which then switched itself off for it.
+
+`minOn`/`minOff` are in the *time* domain: they floor the cycle **length**, they cannot stop the
+decision flapping. So each gate got a deadband on its **stop side only** — a start is never made
+easier (0.7.143):
+
+| gate | start | hold until |
+|---|---|---|
+| dew gap | `gap ≥ dewGapC` | `gap < dewGapC − 0.5` |
+| outdoor temp | `out ≤ room + 1.0` | `out > room + 1.5` |
+| room/target | `room ≥ target − fanGateC` | `room < target − fanGateC − 0.3` |
+
+The first two key off **observed** state (the plug reads on, or a bound window reads open),
+never off the advice they feed, or it is circular. The third needs memory, so `fan_needed`
+latches through `runtime["fanNeededLatch"]`. The latch is the **room arm's alone**: the tank arm
+already stands 0.2 °C clear of target and water is far too slow to chatter — widening it parks a
+tank sitting *on* target, a well-controlled one, at "needs cooling" forever. `project()` stays
+unlatched; each forecast hour is an independent hypothetical.
+
+0.7.144: the panel read "Intake fan: **off** — outdoor air is as wet as indoors" with the plug
+pill beside it reading **ON**, and nothing explaining it. That was `minOn` legitimately holding a
+run. Worse, the copy for the *other* reason a plug may disagree — "held on by hand since HH:MM"
+plus a **Give it back to the plan** button — could never render, because `_cooling_actuator_state`
+had never published `override`. A manual **Run now** in auto mode therefore pinned the plug until
+the plan happened to flip, invisibly, with the release button hidden behind the missing field.
+Both `override` and `hold` (the short-cycle countdown) now ship in the snapshot.
+
+Also: `vent_advice`'s "close up" copy printed the outdoor dew point but **not the gap** — you
+could see the number when the fan ran and never when it stopped, which is why this needed a log
+to diagnose at all. All three branches now name the gap and the bar they missed.
+
+### 13.2 The gap that is left — venting has two benefits, we model one
+
+Reece's panel, 2026-09-06: outdoor **24.3 °C at 43 %** (dew 10.8 °C), room **4.1 °C hotter**,
+dew gap **1.4 °C**. Verdict: *"keep the windows shut."* That is 24 °C air being refused by a
+28 °C room. Nobody would agree with it standing in the doorway.
+
+It happens because `vent_advice` gates almost entirely on the dew gap, and treats temperature
+only as a *guard* (`out ≤ room + 1`), never as a *reason*. But a reef room loses heat to
+ventilation by two independent paths:
+
+1. **Evaporative** — the tank's fans need `e_s(T_water) − e_a(room)`. Lowering indoor dew raises
+   it. This is what `dewGapC` buys, and §1 is right about it.
+2. **Sensible** — a 24.3 °C room simply conducts less heat into a 26 °C tank than a 28.4 °C room
+   does, and below the target it removes heat outright. Nothing about the dew point is involved.
+
+Path 2 is entirely absent from the vent rule. Note it is *not* redundant with path 1: room
+temperature does not appear in the index at all. `evaluate` computes
+`vpd = e_s(water) − rh/100 · e_s(room)`, and `rh/100 · e_s(room)` **is** `e_a` = `e_s(T_dew)`;
+the room term cancels. Room temperature enters only the `reversed`/`dead` split and the `net`
+direction. So cooling the room at constant dew point changes the headroom index by nothing —
+and yet it is obviously worth doing, because `fan_needed` itself is a *room temperature* test.
+The feature already believes room temperature matters. It just never lets that belief reach the
+vent decision.
+
+### 13.3 The rule — a new `freecool` kind
+
+Named `freecool`, not `chill`: `chiller` is already a day kind and a real piece of reef kit.
+
+Run the intake fan when **all** of:
+
+- `fan_needed` — cooling is on the table (unchanged; the latch of §13.1 applies)
+- `room − out ≥ coolGapC` — outdoor is materially cooler (default **2.0 °C**)
+- `gap ≥ 0` — outdoor dew is **no higher** than indoor
+
+The third condition is the whole safety of it. We are not claiming a drying benefit, so we do
+not demand `dewGapC`; but we must not *import* moisture to buy temperature, because moisture
+costs evaporative headroom directly and that is the expensive currency. Dew-neutral, temperature
+positive: unambiguously a win, no trade to adjudicate.
+
+**Why not weigh the trade when outdoor is cooler but wetter?** Converting the two paths to a
+common currency needs the room's thermal coupling to the tank — how many watts per °C of room
+excess actually reach the water. OpenReef does not know that and cannot learn it from what it
+records. So refuse the trade rather than guess at it. If that is ever wanted, it needs a
+measured coupling constant first, not a fudge factor.
+
+### 13.4 Deadbands (mandatory, not optional)
+
+`freecool` is self-defeating in exactly the way §13.1 describes — venting cool air cools the
+room, which shrinks `room − out`, which stops the vent. Shipping it without deadbands would
+reintroduce the bug we just fixed, in a new place:
+
+| gate | start | hold until |
+|---|---|---|
+| cool gap | `room − out ≥ coolGapC` | `room − out < coolGapC − 0.5` |
+| dew neutral | `gap ≥ 0` | `gap < −0.3` |
+
+Same discipline: stop side only, keyed off observed venting state, never off the advice.
+
+The equilibrium is self-limiting and worth stating: the fan runs until the room is within
+`coolGapC − 0.5` of outdoor, or until `fan_needed` releases (room below `target − fanGateC −
+0.3`). Both are natural stops that already exist. On Reece's numbers — room 4.1 °C over, gap 1.4
+— it would start now, run, and stop when the room is 1.5 °C over outdoor or comfortably under
+target, whichever comes first.
+
+### 13.5 Priority
+
+`cool` → `freecool` → `predry` → `purge`.
+
+`cool` is the stronger claim (drier **and** needed now) and keeps its copy. `freecool` is the
+weaker present-tense claim, so it sits directly behind it and ahead of `predry`, which is about a
+*future* losing hour — a present need beats a future preparation. `purge` stays last.
+
+Structurally this means `freecool` cannot live inside `vent_decision`'s existing `if
+advice["advised"]:` block, since by definition the dew gap is not met. `vent_advice` grows
+`freecool: bool` alongside `advised`, computed with the same deadband treatment, so all
+threshold logic stays in one function; `vent_decision` just reads the two verdicts.
+
+### 13.6 Night purge — the same argument applies (open decision)
+
+`purge` is gated on `advised`, i.e. the full dew gap. But the purge's whole point is *thermal* —
+pre-cool the room's walls, floor and water ahead of a hot day. On a night where outdoor is 6 °C
+cooler but only 1.4 °C drier it will not fire, for the same wrong reason.
+
+Recommend relaxing `purge` to the dew-neutral test (`gap ≥ 0`) rather than `dewGapC`. Risk: dew
+point commonly *rises* toward dawn as temperature falls, so a purge that begins dew-neutral can
+turn wet — but the rule is re-evaluated every five minutes and the deadband stops it at
+`gap < −0.3`, so this is handled by machinery that already exists.
+
+This one changes shipped behaviour, so it is called out separately rather than folded in.
+
+### 13.7 Safety — the one new hazard
+
+Every existing vent gate optimises humidity, so none of them ever had to care how *cold* the
+incoming air is. `freecool` does, and corals object to rapid swings far more than to being a
+degree warm.
+
+The natural brake is already there: `fan_needed` goes false once the room drops below
+`target − fanGateC − 0.3`, which ends the run. But that is evaluated on a five-minute tick, and
+very cold air moves a small room faster than that.
+
+Add `coolMinOutdoorC` (default **10 °C**, `0` disables) — never `freecool` on air colder than
+this. Cheap insurance, and it does not interfere with a UK summer night purge at 15–18 °C. Note
+the existing `purge` has no such floor today; if §13.6 is adopted the floor should apply there
+too.
+
+Not adding a gate for: cooling the room below its own dew point (condensation). At these numbers
+— room 28 → 24, dew 12 — it is unreachable, and `coolGapC` plus the `fan_needed` floor bound it
+long before.
+
+### 13.8 Config
+
+`coolingHeadroom.vent` gains:
+
+| key | default | range | meaning |
+|---|---|---|---|
+| `coolVent` | `true` | bool | enable the `freecool` route |
+| `coolGapC` | `2.0` | 0.5–8.0 | how much cooler outdoor must be |
+| `coolMinOutdoorC` | `10.0` | 0–20 (0 = off) | never freecool on air colder than this |
+
+Default **on**: the route only fires when `fan_needed` is already true — the room at or over its
+gate — which is a narrow and correct window, and it is self-limiting per §13.4. A cold fish room
+in winter never reaches it. It is still a behaviour change and belongs in the release note.
+
+New constants in `cooling.py`: `VENT_COOL_GAP_C`, `VENT_COOL_GAP_HYST_C = 0.5`,
+`VENT_DEW_NEUTRAL_HYST_C = 0.3`, `VENT_COOL_MIN_OUTDOOR_C`.
+
+### 13.9 Copy
+
+| where | text |
+|---|---|
+| reason | "the room is 4.1 °C hotter than outside (24.3 °C) and no wetter — free cooling" |
+| notify | "Vent the room — free cooling" / "Intake fan running: free cooling" |
+| refused, too cold | "outdoor air is 6.2 °C cooler but only 8 °C — too cold to blow at the tank" |
+| refused, wetter | "outdoor air is cooler but wetter (dew point X °C) — it would cost the fans more than it saves" |
+
+The last one matters: it is the line that explains why OpenReef is *declining* obviously cooler
+air, which will otherwise read as the same bug Reece just reported.
+
+### 13.10 What does not change
+
+- **The projection and the 24 h strip.** `freecool` is a conduction benefit; it does not alter
+  fan headroom, so "needed and losing" hours are computed exactly as now. No change to
+  `project()`.
+- **Mutual exclusion.** A freecool-vented room is `vent_active`, so `dehumidifier_plan` yields
+  to it as `vented` through machinery that already exists — and should, since running a
+  dehumidifier into an open window is the waste §11 already names.
+- **`dewGapC` and the `cool` kind.** Untouched. This is strictly an additional route.
+
+### 13.11 Files and tests
+
+`cooling.py` (constants, `vent_advice` verdicts, `vent_decision` kind, `VENT_RUN_KINDS`),
+`__init__.py` (normaliser, snapshot wiring, notify keys), `openreef-panel.js` (three settings
+inputs, the new kind's copy in `_coolingVentLine`, Overview and Pulse).
+
+Tests to add: the three gates and their deadbands; priority against `cool` and `predry`; the
+too-cold refusal; `coolVent: false` disabling the route entirely; the normaliser's clamps; and a
+`_l2_hass` fixture reproducing Reece's 2026-09-06 reading (room 28.4, outdoor 24.3 at 43 %) which
+must return `freecool` — that reading is the acceptance test for the whole section.
+
+### 13.12 Open questions for Reece
+
+1. **`coolGapC` default 2.0** — or 1.5, given his room sits 4.1 °C over and a fan will not close
+   that gap quickly? 2.0 is the conservative start.
+2. **§13.6 night purge** — relax it to dew-neutral in the same release, or leave `purge` alone
+   until `freecool` has run a few warm days?
+3. **`coolMinOutdoorC` 10 °C** — right for a UK living room, or lower it for the night purge?
+4. **His own settings meanwhile**: `dewGapC` 3 → 2 (at 3 the fan barely runs; his gap lives
+   between 1.4 and 3.0), `minOn` 60 → 20 (his indoor dew moved 1 °C in seven minutes; an hour is
+   far longer than the phenomenon, and the anti-chatter job now belongs to the deadbands).
