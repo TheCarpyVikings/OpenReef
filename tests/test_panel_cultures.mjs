@@ -57,7 +57,8 @@ function jarSummary(over = {}) {
     feedAdvice: { action: "feed_now", reason: "clearing — feed on schedule" },
     temp: { available: true, status: "ok", tempC: 23.5, minC: 18, maxC: 26, hardMaxC: 30 },
     harvestGuide: { totalMl: 625, mixMl: 625, rodiMl: 0, targetPpt: 35 },
-    restartGuide: { totalMl: 2500, mixMl: 2500, rodiMl: 0, targetPpt: 35 },
+    restartGuide: { totalMl: 2500, mixMl: 2500, rodiMl: 0, targetPpt: 35, mixPpt: 35, sg: 1.0264 },
+    fillGuide: { totalMl: 2500, mixMl: 2500, rodiMl: 0, targetPpt: 35, mixPpt: 35, sg: 1.0264 },
     waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 35 },
     hasBottle: true, seededFrom: "", reseedFrom: [],
     learned: { clearingH: { available: false, hours: null, samples: 0 }, firstHarvestDays: { available: false, days: null, samples: 0 },
@@ -747,6 +748,50 @@ test("the demo view stages a rack, refuses every tap, and hands the real rack ba
     await new Promise((r) => setTimeout(r, 0));
     assert(calls.length === 1 && calls[0].type === "openreef/cultures_summary", "exit refreshes from the backend");
     assert(panel._cultures.message.startsWith("Demo view closed"), "and says so");
+  } finally { restore(); }
+});
+
+test("day 0 shows the fill split from the station's water, the harvest tap sends what went into the bottle", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const fill = { totalMl: 2000, mixMl: 1543, rodiMl: 457, targetPpt: 27, mixPpt: 35, sg: 1.0204 };
+    const fresh = summaryFixture([
+      jarSummary({ name: "Rotifers A", volumeL: 2, salinityPpt: 27, state: { ...jarSummary().state, status: "none", percent: null }, tint: "", due: [], history: [],
+        fillGuide: fill, restartGuide: fill, harvestGuide: { totalMl: 500, mixMl: 386, rodiMl: 114, targetPpt: 27, mixPpt: 35, sg: 1.0204 },
+        arrivalFillGuide: { totalMl: 1500, mixMl: 1157, rodiMl: 343, targetPpt: 27, mixPpt: 35, sg: 1.0204 }, pouchMl: 500 }),
+      summaryFixture().jars[1],
+    ]);
+    fresh.rig = { ...fresh.rig, jug: { mode: "fill", harvestMl: 2000, mixMl: 1543, rodiMl: 457, ppt: 27, mixPpt: 35, purgeMl: 50, sieveUm: 50 } };
+    let panel = await culturesPanel({}, fresh);
+    let html = panel._culturesTab();
+    assert(html.includes("fill 2000 ml: <strong>1543 ml of 35 ppt mix + 457 ml RODI</strong> → 27 ppt (SG 1.0204)"), `the tile must carry the fill split: ${html.match(/fill [^<]*<strong>[^<]*<\/strong>[^<]*/)?.[0]}`);
+    assert(html.includes("↳ <strong>Rotifers A</strong> (2 L in the vessel, pouch included): mix 1500 ml — <strong>1157 ml of 35 ppt mix + 343 ml RODI</strong> → 27 ppt (SG 1.0204) + the 500 ml pouch."), `the arrival panel must quote the water to mix less the pouch: ${html.match(/↳ [^.]*\./)?.[0]}`);
+    assert(!html.includes("the jug says how much RODI"), "the old hand-wave is gone");
+    const rig = panel._culturesRigSvg(panel._culturesRigState());
+    assert(rig.includes("fill 2000 ml: 1543 ml of 35 ppt mix") && rig.includes("+ 457 ml RODI · @ 27 ppt") && !rig.includes("purge ~"), "the rig's jug reads fill on day 0");
+    noPlaceholders(html, "day-0 tab");
+    // A 35 ppt jar: straight mix, no RODI, no dangling plus.
+    const matched = summaryFixture([jarSummary({ state: { ...jarSummary().state, status: "none", percent: null }, tint: "", due: [], history: [] })]);
+    html = (await culturesPanel({}, matched))._culturesTab();
+    assert(html.includes("fill 2500 ml: <strong>2500 ml of 35 ppt mix</strong> → 35 ppt (SG 1.0264)"), "a matched jar shows straight mix");
+    // Producing: the bottle input rides the harvest tap and the tap sends it.
+    panel = await culturesPanel();
+    html = panel._culturesTab();
+    assert(html.includes('data-cultures-bottle-ml="c1"') && html.includes("Blank = the whole harvest volume (625 ml)"), "the bottle input is missing");
+    const c1Tile = html.slice(html.indexOf('data-culture="c1"'), html.indexOf('data-culture="c2"'));
+    assert(c1Tile.length > 0 && !c1Tile.includes("fill 2500 ml"), "a running jar shows no fill line");
+    const c2Tile = html.slice(html.indexOf('data-culture="c2"'));
+    assert(c2Tile.includes("fill 2500 ml"), "the unseeded tub still shows its fill");
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return {}; };
+    panel._culturesLoadSummary = async () => {};
+    const box = panel.shadowRoot?.querySelector('[data-cultures-bottle-ml="c1"]');
+    if (box) {
+      box.value = "150";
+      panel._culturesLog("c1", true, true);
+      await new Promise((r) => setTimeout(r, 0));
+      assert(calls[0]?.bottle_ml === 150 && calls[0]?.harvested === true, `the tap must send bottle_ml: ${JSON.stringify(calls[0])}`);
+    }
   } finally { restore(); }
 });
 

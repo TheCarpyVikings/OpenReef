@@ -12664,6 +12664,11 @@ const rigSteps = [
     if (harvested) msg.harvested = true;
     const enrichBox = this.shadowRoot?.querySelector(`[data-cultures-enrich="${jarId}"]`);
     if (harvested && enrichBox && enrichBox.checked) msg.enrich = true;
+    // The bottle gets the rinsed crop, not the culture water (that goes to
+    // waste) — blank = the whole harvest volume, the ledger's old assumption.
+    const bottleBox = this.shadowRoot?.querySelector(`[data-cultures-bottle-ml="${jarId}"]`);
+    const bottleMl = bottleBox && bottleBox.value !== "" ? Number(bottleBox.value) : 0;
+    if (harvested && bottleMl > 0) msg.bottle_ml = bottleMl;
     const egg = this.shadowRoot?.querySelector(`[data-cultures-egg="${jarId}"]`);
     const eggRatio = egg && egg.value !== "" ? Number(egg.value) : 0;
     if (eggRatio > 0) msg.egg_ratio = Math.min(100, eggRatio);
@@ -13051,8 +13056,8 @@ const rigSteps = [
         <polygon points="${Math.round(cx(0) + 20)},76 ${Math.round(cx(0) + 30)},72 ${Math.round(cx(0) + 26)},84" fill="${lead.refillHot ? "#26a69a" : "#54707d"}"></polygon>
         <polygon points="330,214 370,214 366,262 334,262" fill="#101a22" stroke="${lead.refillHot ? "#26a69a" : "#78909c"}" stroke-width="2.2"></polygon>
         ${sm(350, 242, "JUG", "middle", lead.refillHot ? "#26a69a" : "#cfd8dc")}
-        ${sm(380, 232, `harvest ${Math.round(Number(jug.harvestMl) || 0)} ml → refill ${Math.round(Number(jug.mixMl) || 0)} ml mix`, "start", lead.refillHot ? "#26a69a" : "#8798a4")}
-        ${sm(380, 246, `${Number(jug.rodiMl) > 0 ? `+ ${Math.round(Number(jug.rodiMl))} ml RODI · ` : ""}@ ${Number(jug.ppt) || 27} ppt · purge ~${Math.round(Number(jug.purgeMl) || 0)} ml first`, "start", lead.refillHot ? "#26a69a" : "#8798a4")}
+        ${sm(380, 232, jug.mode === "fill" ? `fill ${Math.round(Number(jug.harvestMl) || 0)} ml: ${Math.round(Number(jug.mixMl) || 0)} ml of ${Number(jug.mixPpt) || 35} ppt mix` : `harvest ${Math.round(Number(jug.harvestMl) || 0)} ml → refill ${Math.round(Number(jug.mixMl) || 0)} ml mix`, "start", lead.refillHot ? "#26a69a" : "#8798a4")}
+        ${sm(380, 246, `${Number(jug.rodiMl) > 0 ? `+ ${Math.round(Number(jug.rodiMl))} ml RODI · ` : ""}@ ${Number(jug.ppt) || 27} ppt${jug.mode === "fill" ? "" : ` · purge ~${Math.round(Number(jug.purgeMl) || 0)} ml first`}`, "start", lead.refillHot ? "#26a69a" : "#8798a4")}
         ${pipe(tipMain)}${tipHot ? flow(tipMain, tipColour) : ""}
         ${valve(valve1X, outY, tipHot)}<text x="${valve1X}" y="${outY - 20}" text-anchor="middle" font-size="13" fill="${hot(tipHot)}" font-family="monospace">①</text>
         ${extraDrops}
@@ -13261,7 +13266,14 @@ const rigSteps = [
             ${(sum.tints || ["green", "clearing", "clear"]).map((t) => `<option value="${this._escape(t)}" ${t === (j.tint || "") ? "selected" : ""}>${this._escape(t)}</option>`).join("")}
           </select></label>${j.hasBottle && status === "producing" ? `
         <label style="display:flex;gap:6px;align-items:center;font-size:12px;" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done.">
-          <input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none" ? "disabled" : ""}> enrich this crop</label>` : ""}` : "";
+          <input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none" ? "disabled" : ""}> enrich this crop</label>
+        <input type="number" min="1" max="5000" step="10" placeholder="ml into the bottle" data-cultures-bottle-ml="${this._escape(j.id)}" style="width:130px;font-size:11px;" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml).">` : ""}` : "";
+      // Day 0 (and after a crash): the fill — the whole vessel at the jar's
+      // salinity, cut from the mixing station's water with RODI. Backend maths.
+      const fg = j.fillGuide || j.restartGuide || {};
+      const fillLine = (status === "none" || status === "crashed") && Number(fg.totalMl) > 0
+        ? `<small class="muted" title="The fill: this vessel's water at ${this._escape(String(fg.targetPpt))} ppt, cut from the mixing station's ${this._escape(String(fg.mixPpt ?? 35))} ppt water with RODI">fill ${this._escape(String(fg.totalMl))} ml: <strong>${this._escape(String(fg.mixMl))} ml of ${this._escape(String(fg.mixPpt ?? 35))} ppt mix${Number(fg.rodiMl) > 0 ? ` + ${this._escape(String(fg.rodiMl))} ml RODI` : ""}</strong> → ${this._escape(String(fg.targetPpt))} ppt${fg.sg ? ` (SG ${this._escape(String(fg.sg))})` : ""}</small>`
+        : "";
       const advice = running ? `<small class="${j.feedAdvice?.action === "harvest_first" ? "" : "muted"}" ${j.feedAdvice?.action === "harvest_first" ? 'style="color:var(--error-color,#e5484d)"' : ""}>${this._escape(j.feedAdvice?.reason || "")}${j.feedAdvice?.action === "feed_now" ? " → feed" : j.feedAdvice?.action === "skip" ? " → skip" : j.feedAdvice?.action === "harvest_first" ? " → harvest" : ""}</small>` : "";
       // The risk line (V2 Stage B): one sentence with the cause, never a score.
       const risk = running && j.risk && j.risk.level !== "ok"
@@ -13326,6 +13338,7 @@ const rigSteps = [
           <small><strong>${this._escape(j.name)}</strong> · ${this._escape(String(j.volumeL))} L</small>
           <small>${this._escape(j.speciesName)}${j.seededFrom ? ` · from ${this._escape((jars.find((x) => x.id === j.seededFrom) || {}).name || j.seededFrom)}` : ""}</small>
           <small>${statusLine}</small>
+          ${fillLine}
           ${chips ? `<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;">${chips}</div>` : ""}
           ${tintSelect}
           ${advice}
@@ -13453,10 +13466,17 @@ const rigSteps = [
     const arrivalLine = arrival?.line
       ? `${this._escape(arrival.line.charAt(0).toUpperCase() + arrival.line.slice(1))}.`
       : "Float the pouch 15 min, add cone water to it in steps of no more than 5 ppt, pour in.";
+    // The parcel day: the pouch is part of the culture, so the water to mix
+    // is the vessel less the pouch (backend maths, arrivalFillGuide).
+    const fillLines = jars.filter((j) => j.kind !== "copepod" && Number((j.fillGuide || j.restartGuide || {}).totalMl) > 0).map((j) => {
+      const fg = j.arrivalFillGuide && Number(j.arrivalFillGuide.totalMl) > 0 ? j.arrivalFillGuide : (j.fillGuide || j.restartGuide || {});
+      const pouch = j.arrivalFillGuide && Number(j.arrivalFillGuide.totalMl) > 0 && Number(j.pouchMl) > 0 ? ` + the ${this._escape(String(Math.round(j.pouchMl)))} ml pouch` : "";
+      return `<br>↳ <strong>${this._escape(j.name)}</strong> (${this._escape(String(j.volumeL))} L in the vessel${pouch ? ", pouch included" : ""}): mix ${this._escape(String(fg.totalMl))} ml — <strong>${this._escape(String(fg.mixMl))} ml of ${this._escape(String(fg.mixPpt ?? 35))} ppt mix${Number(fg.rodiMl) > 0 ? ` + ${this._escape(String(fg.rodiMl))} ml RODI` : ""}</strong> → ${this._escape(String(fg.targetPpt))} ppt${fg.sg ? ` (SG ${this._escape(String(fg.sg))})` : ""}${pouch}.`;
+    }).join("");
     const welcome = virgin ? `
       <article class="panel stack" style="border-color:rgba(38,166,154,0.4);">
         <p class="eyebrow" style="margin:0;">The day the parcel lands</p>
-        <small><strong>1. Rotifers into the cone.</strong> Fresh water at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt (SG ~1.020 — the jug says how much RODI to cut the 35 ppt mix with), room temperature, air ON to the tip at 1–2 bubbles/s. ${arrivalLine} Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, sooner only if the water is visibly dense.</small>
+        <small><strong>1. Rotifers into the cone.</strong> Fresh water at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt, mixed the day before, room temperature, air ON to the tip at 1–2 bubbles/s. The cut from the mixing station's water:${fillLines || " set the cone's water volume and salinity in Culture settings and the split appears here."} ${arrivalLine} Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, sooner only if the water is visibly dense.</small>
         <small><strong>2. Pods into the tub.</strong> A flat 4 L tub half to two-thirds full of 35 ppt, open airline at 1–3 bubbles/s, loose lid, out of the sun. Pour in on delivery day, feed the Copepod Feed at half rate for a week. Tap <em>Seed</em>: a generation is a month, so the first harvest waits until day ${this._escape(String(podPreset.firstHarvestDays || 28))}.</small>
         <small><strong>3. The shelf.</strong> Add the concentrate, the Copepod Feed and the enrichment from the Reefphyto presets in NPS settings, then link each jar's feed bottle below. Reef Juice is a tank dose, nothing to do with the jars — it lives on the NPS food shelf with its own dose and reminder. The unused starter keeps in the fridge, cap loose, five days.</small>
         <small><strong>4. Reminders.</strong> Once seeded, <em>Sync culture reminders</em> puts every chore on the phone, anchored on the real stamps.</small>
@@ -13499,7 +13519,7 @@ const rigSteps = [
             <label>Vessel<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="vesselKind">
               ${[["cone", "Cone — the hatchery's inverted bottle"], ["tub", "Tub — flat and wide (pods)"], ["jar", "Jar"]].map(([v, l]) => `<option value="${v}" ${(jar?.vesselKind || preset.vesselKind || "jar") === v ? "selected" : ""}>${l}</option>`).join("")}
             </select></label>
-            <label>Water in the vessel (L)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
+            <label title="The culture's whole volume — mixed water plus the starter pouch. Harvests and the jug are percentages of this.">Water in the vessel (L, pouch included)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
             <label>Salinity (ppt)<input type="number" min="5" max="45" step="1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="salinityPpt" value="${this._escape(String(jar?.salinityPpt ?? preset.salinityPpt ?? 35))}"></label>
             ${(jar?.vesselKind || preset.vesselKind) === "cone" ? `<label>Purge before harvest (ml)<input type="number" min="0" max="500" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="purgeMl" value="${this._escape(String(jar?.purgeMl ?? preset.purgeMl ?? 50))}"></label>` : ""}
             <label>Feed bottle<select data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="productId">
@@ -13510,7 +13530,7 @@ const rigSteps = [
           </div>
           <small class="awc-hint">${preset.kind === "copepod"
             ? "Pods crawl — a flat tub, never a cone. 35 ppt is their optimum (Reefphyto)."
-            : "Salinity — Reefphyto cultures rotifers at 1.020 (27 ppt): about 2.5× the offspring of 35 ppt. 35 ppt = a matched backflush and longer-lived animals, lower yield. The cone is the hatchery's: settle, bleed the tip, harvest from the valve."}</small>
+            : "Salinity — Reefphyto cultures rotifers at 1.020 (27 ppt): about 2.5× the offspring of 35 ppt. 35 ppt = a matched backflush and longer-lived animals, lower yield. The Cultures tab shows this vessel's exact split — mixing-station water + RODI — for the fill and for every harvest. The cone is the hatchery's: settle, bleed the tip, harvest from the valve."}</small>
           <small class="awc-hint">Cadence — the preset is the research number; change it only if your jar tells you to.</small>
           <div class="mini-grid">
             ${numberField(jid, "feedIntervalH", "Look / feed every (h)", cad.feedIntervalH, 1, 168, 1, "Rotifers twice a day; pods every 2–3 days")}

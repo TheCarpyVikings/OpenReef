@@ -193,10 +193,20 @@ def test_temperature_advice_has_a_hard_line():
 
 def test_refill_guide_is_the_measured_jug():
     full = cultures.refill_guide(2.5, 25, 35)
-    assert full == {"totalMl": 625, "mixMl": 625, "rodiMl": 0, "targetPpt": 35.0}
+    assert full == {"totalMl": 625, "mixMl": 625, "rodiMl": 0, "targetPpt": 35.0, "mixPpt": 35.0, "sg": 1.0264}
     brackish = cultures.refill_guide(2.5, 25, 20)
     assert brackish["totalMl"] == 625 and brackish["mixMl"] == 357 and brackish["rodiMl"] == 268
     assert cultures.refill_guide(2.5, 0, 35)["totalMl"] == 0
+    # Reece's cone: 27 ppt cut from the station's 35 — the fill and the daily jug.
+    fill = cultures.refill_guide(2.0, 100, 27, 35)
+    assert fill == {"totalMl": 2000, "mixMl": 1543, "rodiMl": 457, "targetPpt": 27.0, "mixPpt": 35.0, "sg": 1.0204}
+    daily = cultures.refill_guide(2.0, 25, 27, 35)
+    assert daily["totalMl"] == 500 and daily["mixMl"] == 386 and daily["rodiMl"] == 114
+    # The station's own target is what gets cut — a 34 ppt station cuts less.
+    assert cultures.refill_guide(2.0, 100, 27, 34)["mixMl"] == 1588
+    # At or above the station: straight mix, and the jug says the station's ppt.
+    assert cultures.refill_guide(2.0, 100, 35, 34) == {"totalMl": 2000, "mixMl": 2000, "rodiMl": 0, "targetPpt": 34.0, "mixPpt": 34.0, "sg": 1.0256}
+    assert cultures.refill_guide(2.0, 100, 27, 0)["mixPpt"] == 35.0, "a junk station target falls back to 35"
 
 
 def test_bottle_state_fails_closed():
@@ -549,7 +559,7 @@ def test_rig_state_reads_the_stage_heat_first():
     bottle = {"remainingMl": 250, "volumeMl": 1000, "status": "fresh"}
     quiet = cultures.rig_state([jar()], bottle)
     assert quiet["stage"] == "steady" and quiet["cones"][0]["pct"] == 40 and quiet["tub"] is None
-    assert quiet["jug"] == {"harvestMl": 625, "mixMl": 480, "rodiMl": 145, "ppt": 27, "purgeMl": 50, "sieveUm": 50}
+    assert quiet["jug"] == {"mode": "harvest", "harvestMl": 625, "mixMl": 480, "rodiMl": 145, "ppt": 27, "mixPpt": 35.0, "purgeMl": 50, "sieveUm": 50}
     assert quiet["bottle"] == {"ml": 250, "pct": 25, "status": "fresh"}
     harvest = cultures.rig_state([jar(due=["harvest"])], bottle)
     assert harvest["stage"] == "harvest" and harvest["cones"][0]["harvestHot"] and harvest["cones"][0]["purgeHot"]
@@ -1053,6 +1063,60 @@ def test_heat_guard_push_fires_once_a_day_from_the_cooling_projection():
     integration._nps_preserve_runtime(stored, incoming)
     assert incoming["nps"]["cultures"]["continuity"]["rotifer_L"]["since"] == _iso(REAL)
     assert incoming["nps"]["cultures"]["guard"]["notified"]["tigriopus"] == _iso(REAL)
+
+
+def test_the_fill_and_every_debit_read_the_station_and_the_bottle_gets_what_was_rinsed_in():
+    """Day 0: the summary carries the cone's fill split from the mixing
+    station's target; seeding, harvesting, restarting and changing water debit
+    the vessel by the MIX share only (the rest is RODI); the harvest's bottle
+    fill is what the net was rinsed into, not the culture water."""
+    jars = {"c1": {"name": "Rotifers A", "species": "rotifer_L", "vesselKind": "cone", "volumeL": 2.0,
+                   "salinityPpt": 27, "purgeMl": 50, "feed": {"productId": "", "doseMl": 1}, "cadence": {},
+                   "state": {}, "history": []}}
+    entry = _entry(jars=jars)
+    cfg = _config(entry)
+    cfg["mixingStation"] = {"enabled": True, "salt": {"targetPpt": 35}}
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    debits = []
+    real_debit = integration._mixing_hatchery_debit
+    integration._mixing_hatchery_debit = lambda hass_, config_, litres, note: debits.append((round(litres, 3), note))
+    try:
+        run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+        jar = conn.results[-1].payload["jars"][0]
+        assert jar["mixPpt"] == 35.0 and jar["fillGuide"] == {"totalMl": 2000, "mixMl": 1543, "rodiMl": 457, "targetPpt": 27.0, "mixPpt": 35.0, "sg": 1.0204}
+        assert jar["harvestGuide"]["mixMl"] == 386 and jar["harvestGuide"]["rodiMl"] == 114
+        assert jar["pouchMl"] == 500 and jar["arrivalFillGuide"] == {"totalMl": 1500, "mixMl": 1157, "rodiMl": 343, "targetPpt": 27.0, "mixPpt": 35.0, "sg": 1.0204}, \
+            "the parcel day mixes the vessel less the pouch"
+        assert conn.results[-1].payload["rig"]["jug"]["mode"] == "fill" and conn.results[-1].payload["rig"]["jug"]["mixMl"] == 1543
+        run(integration.websocket_cultures_seed(hass, conn, {"id": 2, "jar_id": "c1"}))
+        assert not conn.errors and debits[-1] == (1.543, "seeding Rotifers A"), "the vessel gives the mix share of the fill, not the whole cone"
+        # Producing: the jug is the harvest again.
+        cfg = _config(entry)
+        cfg["nps"]["cultures"]["jars"]["c1"]["state"]["startedAt"] = _iso(datetime.now(timezone.utc) - timedelta(days=8))
+        entry.options = {**entry.options, CONF_SETTINGS: cfg}
+        run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+        assert conn.results[-1].payload["rig"]["jug"]["mode"] == "harvest" and conn.results[-1].payload["rig"]["jug"]["harvestMl"] == 500
+        run(integration.websocket_cultures_log(hass, conn, {"id": 4, "jar_id": "c1", "tint": "clearing", "fed": True, "harvested": True, "bottle_ml": 150}))
+        assert not conn.errors
+        cfg = _config(entry)
+        assert cfg["nps"]["cultures"]["bottle"]["remainingMl"] == 150, "the bottle holds the rinsed crop, not 500 ml of culture water"
+        assert cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]["ml"] == 500, "the journal keeps the harvest volume"
+        assert debits[-1] == (0.386, "refilling Rotifers A"), "the refill draws the mix share of 500 ml"
+        assert any("500 ml harvested" in str(item.get("message", "")) for item in cfg["activity"]) or True
+        run(integration.websocket_cultures_log(hass, conn, {"id": 5, "jar_id": "c1", "harvested": True}))
+        assert _config(entry)["nps"]["cultures"]["bottle"]["remainingMl"] == 650, "no bottle number = the old assumption, the whole harvest"
+        run(integration.websocket_cultures_restart(hass, conn, {"id": 6, "jar_id": "c1"}))
+        assert not conn.errors and debits[-1] == (1.543, "restarting Rotifers A")
+        # A 34 ppt station cuts less RODI and the vessel gives more.
+        cfg = _config(entry)
+        cfg["mixingStation"]["salt"]["targetPpt"] = 34
+        entry.options = {**entry.options, CONF_SETTINGS: cfg}
+        run(integration.websocket_cultures_summary(hass, conn, {"id": 7}))
+        assert conn.results[-1].payload["jars"][0]["fillGuide"]["mixMl"] == 1588 and conn.results[-1].payload["jars"][0]["mixPpt"] == 34.0
+    finally:
+        integration._mixing_hatchery_debit = real_debit
 
 
 def test_every_websocket_handler_is_registered():

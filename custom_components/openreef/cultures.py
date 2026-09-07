@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .awc import _f, _parse_iso
+from .mixing import sg_from_ppt
 
 CULTURE_JARS_MAX = 4
 TINTS: tuple[str, ...] = ("green", "clearing", "clear")
@@ -328,18 +329,25 @@ def temperature_advice(temp_c: Any, species_id: Any) -> dict[str, Any]:
             "act": t >= _f(base["actC"]), **base}
 
 
-def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: float = 35.0) -> dict[str, Any]:
-    """The measured jug: how much water a harvest / water change moves, and —
-    for a brackish jar — how to cut the mixing station's 35 ppt to hit it."""
+def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0) -> dict[str, Any]:
+    """The measured jug: how much water a fill / harvest / water change moves,
+    and — for a brackish jar — how to cut the mixing station's water to hit
+    it. ``mix_ppt`` is the station's target (35 unless the keeper set another);
+    the split is a straight dilution, RODI counted as 0 ppt. ``sg`` is the
+    target on the hobby anchor line, for the refractometer."""
     vol = max(0.0, _f(volume_l))
     frac = min(1.0, max(0.0, _f(pct) / 100.0))
     total_ml = round(vol * frac * 1000.0)
+    mix = _f(mix_ppt)
+    if mix <= 0:
+        mix = 35.0
     target = _f(target_ppt)
-    if target <= 0 or target >= mix_ppt:
-        return {"totalMl": total_ml, "mixMl": total_ml, "rodiMl": 0, "targetPpt": mix_ppt}
-    mix_ml = round(total_ml * target / mix_ppt)
+    if target <= 0 or target >= mix:
+        return {"totalMl": total_ml, "mixMl": total_ml, "rodiMl": 0, "targetPpt": round(mix, 1),
+                "mixPpt": round(mix, 1), "sg": sg_from_ppt(mix)}
+    mix_ml = round(total_ml * target / mix)
     return {"totalMl": total_ml, "mixMl": mix_ml, "rodiMl": total_ml - mix_ml,
-            "targetPpt": round(target, 1)}
+            "targetPpt": round(target, 1), "mixPpt": round(mix, 1), "sg": sg_from_ppt(target)}
 
 
 def bottle_state(bottle: dict[str, Any], shelf_days: Any, now: datetime) -> dict[str, Any]:
@@ -437,11 +445,18 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
             "note": "comes with the first restart",
         })
     first_cone = next((j for j in jars if str(j.get("vesselKind") or "jar") != "tub"), None)
-    guide = (first_cone.get("harvestGuide") if first_cone and isinstance(first_cone.get("harvestGuide"), dict)
+    first_status = str(((first_cone or {}).get("state") or {}).get("status") or "none")
+    # Day 0 the jug is the FILL (the whole vessel, cut to the jar's salinity);
+    # once the cone runs it is the harvest's refill.
+    fill_mode = first_status in ("none", "crashed")
+    guide_key = "fillGuide" if fill_mode else "harvestGuide"
+    guide = (first_cone.get(guide_key) if first_cone and isinstance(first_cone.get(guide_key), dict)
              else {}) or {}
     jug = {
+        "mode": "fill" if fill_mode else "harvest",
         "harvestMl": round(_f(guide.get("totalMl"))), "mixMl": round(_f(guide.get("mixMl"))),
         "rodiMl": round(_f(guide.get("rodiMl"))), "ppt": _f(guide.get("targetPpt"), 35.0),
+        "mixPpt": _f(guide.get("mixPpt"), 35.0),
         "purgeMl": round(_f(first_cone.get("purgeMl"))) if first_cone else 0,
         "sieveUm": int(_f(first_cone.get("sieveUm"), 50)) if first_cone else 50,
     }

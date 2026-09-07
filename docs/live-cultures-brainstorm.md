@@ -733,3 +733,21 @@ union disc is a purchase, not code.
 **Unverified on real HA:** the companion-app action buttons (now on hatch-ready, the three soak
 notices, the cultures question and the digest), the heat guard against the live cooling projection
 with the rack offset, and the culture-card share from the iPad. That soak is the next step.
+
+#### Addendum 2026-09-07 (0.7.130) — the cut is on the tab from day 0, and the bottle gets what was rinsed in
+
+Rotifers due in the morning; the section was audited end to end. Three fixes:
+
+1. **The RODI cut was never shown before the first harvest.** `refill_guide` existed but only the
+   producing tile rendered it. Now every jar summary carries `fillGuide` (the whole vessel at the
+   jar's salinity, cut from the station's water) plus `mixPpt` and `sg`; the day-0 tile, the arrival
+   panel (per cone, by name) and the rig's JUG (`jug.mode: "fill"`) all quote it: *1543 ml of 35 ppt mix
+   + 457 ml RODI → 27 ppt (SG 1.0204)* for a 2 L cone.
+2. **The station's target was hardcoded at 35.** `refill_guide(..., mix_ppt)` now takes the mixing
+   station's `salt.targetPpt` (`_cultures_mix_ppt`); every guide and every vessel debit reads it.
+3. **The vessel ledger and the bottle told two small lies.** Seed / harvest refill / restart / water
+   change debited the WHOLE volume from the mixing vessel although 23 % of a 27 ppt cone is RODI —
+   they debit the mix share now. And a harvest filled the fridge bottle with the harvest VOLUME (the
+   culture water, which goes to waste): the Harvested tap gained an "ml into the bottle" box
+   (`cultures_log {bottle_ml}`), blank = the old assumption, so the bottle's clock and the next-harvest
+   driver read the crop that actually went in. The journal keeps the harvest volume.
