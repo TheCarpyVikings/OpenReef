@@ -734,7 +734,7 @@ union disc is a purchase, not code.
 notices, the cultures question and the digest), the heat guard against the live cooling projection
 with the rack offset, and the culture-card share from the iPad. That soak is the next step.
 
-#### Addendum 2026-09-07 (0.7.130) — the cut is on the tab from day 0, and the bottle gets what was rinsed in
+#### Addendum 2026-09-07 (0.7.146) — the cut is on the tab from day 0, and the bottle gets what was rinsed in
 
 Rotifers due in the morning; the section was audited end to end. Three fixes:
 
