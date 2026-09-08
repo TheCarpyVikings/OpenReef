@@ -1197,6 +1197,8 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
     egg_type = (raw.get("eggType")
                 if raw.get("eggType") in nps_engine.egg_type_ids() else "standard")
     hatch_hours = _awc_num(raw.get("hatchHours"), 24, 8, 48)
+    raw_cysts = raw.get("cysts") if isinstance(raw.get("cysts"), dict) else {}
+    global_pouch = _awc_str(raw_cysts.get("openedAt"), 40)
     raw_vessels = raw.get("vessels") if isinstance(raw.get("vessels"), dict) else {}
     vessels: dict[str, dict[str, Any]] = {}
     for vid, raw_vessel in list(raw_vessels.items())[:nps_engine.HATCH_VESSEL_CAP]:
@@ -1204,22 +1206,36 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
             continue
         vessel_state = (raw_vessel.get("state")
                         if isinstance(raw_vessel.get("state"), dict) else {})
+        # Per-HATCHERY settings (0.7.147, Reece's second hatchery): each vessel
+        # carries its own cysts (egg type + clock for its NEXT batch) and its
+        # own pouch stamp. A vessel saved before this inherits the old global
+        # values, so nothing moves on the migration save.
+        vessel_egg = (raw_vessel.get("eggType")
+                      if raw_vessel.get("eggType") in nps_engine.egg_type_ids() else egg_type)
+        vessel_hours = _awc_num(raw_vessel.get("hatchHours"), hatch_hours, 8, 48)
+        vessel_cysts = (raw_vessel.get("cysts")
+                        if isinstance(raw_vessel.get("cysts"), dict) else {})
         vessels[_awc_str(vid, 24) or f"v{len(vessels) + 1}"] = {
             "name": _awc_str(raw_vessel.get("name"), 40) or f"Hatchery {len(vessels) + 1}",
             "volumeL": _awc_num(raw_vessel.get("volumeL"), 1.0, 0.1, 10),
+            "eggType": vessel_egg,
+            "hatchHours": vessel_hours,
+            "cysts": {"openedAt": _awc_str(vessel_cysts.get("openedAt"), 40) or global_pouch},
             "state": {
                 "hatchStartedAt": _awc_str(vessel_state.get("hatchStartedAt"), 40),
                 # Per-batch stamps: settings changes only touch the NEXT batch.
                 "eggType": (vessel_state.get("eggType")
                             if vessel_state.get("eggType") in nps_engine.egg_type_ids()
-                            else egg_type),
-                "hatchHours": _awc_num(vessel_state.get("hatchHours"), hatch_hours, 8, 48),
+                            else vessel_egg),
+                "hatchHours": _awc_num(vessel_state.get("hatchHours"), vessel_hours, 8, 48),
                 "readyNotifiedAt": _awc_str(vessel_state.get("readyNotifiedAt"), 40),
             },
         }
     if not vessels:
         vessels["v1"] = {
             "name": "Hatchery 1", "volumeL": 1.0,
+            "eggType": egg_type, "hatchHours": hatch_hours,
+            "cysts": {"openedAt": global_pouch},
             "state": {
                 "hatchStartedAt": _awc_str(raw_state.get("hatchStartedAt"), 40),
                 "eggType": egg_type, "hatchHours": hatch_hours,
@@ -1350,8 +1366,11 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
         ],
         "tempEntity": _awc_str(raw.get("tempEntity"), 80),
         # The cysts pouch (doc §8.1): opened when, so the Pulse can say when the
-        # fridge weeks are running out (hatch rates fall after 3–4 weeks).
-        "cysts": {"openedAt": _awc_str(((raw.get("cysts") or {}) if isinstance(raw.get("cysts"), dict) else {}).get("openedAt"), 40)},
+        # fridge weeks are running out (hatch rates fall after 3–4 weeks). Since
+        # 0.7.147 the pouch lives on each VESSEL; this one is the legacy stamp
+        # that seeds a vessel without its own, kept so an older panel still
+        # round-trips it.
+        "cysts": {"openedAt": global_pouch},
     }
 
 
@@ -8017,9 +8036,13 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                     if isinstance(dst_vessels, dict):
                         for vid, dst_vessel in dst_vessels.items():
                             src_vessel = src_vessels.get(vid)
-                            if (isinstance(src_vessel, dict) and isinstance(dst_vessel, dict)
-                                    and isinstance(src_vessel.get("state"), dict)):
+                            if not (isinstance(src_vessel, dict) and isinstance(dst_vessel, dict)):
+                                continue
+                            if isinstance(src_vessel.get("state"), dict):
                                 dst_vessel["state"] = deepcopy(src_vessel["state"])
+                            # The per-vessel pouch stamp (0.7.147) is a tap too.
+                            if isinstance(src_vessel.get("cysts"), dict):
+                                dst_vessel["cysts"] = deepcopy(src_vessel["cysts"])
                     _copy_runtime_fields(
                         src_hatchery.get("reservoir"), dst_hatchery.get("reservoir"),
                         ("remainingMl", "mixedAt", "lastLoadEnriched", "enrichedAt",
@@ -14052,11 +14075,47 @@ def _nps_running_batches(config: dict[str, Any]) -> list[tuple[str, datetime, fl
 
 
 def _nps_soonest_ready(config: dict[str, Any]) -> datetime | None:
-    """When the next hatch ripens — the harvest reminder's anchor. The
-    enrichment soak is a CONTAINER affair (0.7.70) and has its own push."""
+    """When the next hatch ripens, across every vessel. The enrichment soak
+    is a CONTAINER affair (0.7.70) and has its own push."""
     ends = [started + timedelta(hours=hours)
             for _vid, started, hours in _nps_running_batches(config)]
     return min(ends) if ends else None
+
+
+def _nps_vessel_ready_at(config: dict[str, Any], vessel_id: str) -> datetime | None:
+    """When THIS vessel's batch ripens (None when it sits idle) — the anchor
+    for its own harvest reminder (0.7.147)."""
+    for vid, started, hours in _nps_running_batches(config):
+        if vid == vessel_id:
+            return started + timedelta(hours=hours)
+    return None
+
+
+def _nps_hatch_task_ids(vessel_id: str) -> tuple[str, str]:
+    """(start task id, harvest task id) for a vessel — one pair of reminders
+    PER HATCHERY (0.7.147). Vessel ``v1`` keeps the original unsuffixed ids so
+    a keeper's existing reminders, completions and history carry straight on;
+    every other vessel gets ``<id>_<vessel>``. LOCKSTEP with the panel's
+    ``_npsHatchTaskIds``."""
+    if vessel_id in ("", "v1"):
+        return MAINTENANCE_HATCH_START_TASK_ID, MAINTENANCE_HATCH_HARVEST_TASK_ID
+    return (f"{MAINTENANCE_HATCH_START_TASK_ID}_{vessel_id}",
+            f"{MAINTENANCE_HATCH_HARVEST_TASK_ID}_{vessel_id}")
+
+
+def _nps_vessel_cfg(config: dict[str, Any], vessel_id: str) -> dict[str, Any]:
+    hatchery = (config.get("nps") or {}).get("hatchery") or {}
+    vessels = hatchery.get("vessels") if isinstance(hatchery.get("vessels"), dict) else {}
+    vessel = vessels.get(vessel_id)
+    return vessel if isinstance(vessel, dict) else {}
+
+
+def _nps_vessel_clock(config: dict[str, Any], vessel_id: str) -> float:
+    """The vessel's own clock for its NEXT batch, falling back to the legacy
+    global for a config an older panel saved."""
+    hatchery = (config.get("nps") or {}).get("hatchery") or {}
+    vessel = _nps_vessel_cfg(config, vessel_id)
+    return _awc_num(vessel.get("hatchHours"), _awc_num(hatchery.get("hatchHours"), 24, 8, 48), 8, 48)
 
 
 def _nps_chain_batches(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -14159,8 +14218,13 @@ def _nps_enrich_debit(config: dict[str, Any], enrichment: dict[str, Any]) -> Non
         _consumable_debit(product, _awc_num(enrichment.get("doseMl"), 1, 0.5, 50), "dose")
 
 
-def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str) -> None:
-    """Keep the brine maintenance reminders honest as the hatchery is driven.
+def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str,
+                              vessel_id: str = "v1") -> None:
+    """Keep ONE hatchery's brine reminders honest as that vessel is driven.
+
+    Every vessel owns its own start + harvest pair (0.7.147 — with two
+    hatcheries the shared pair could only ever follow the batch that ripened
+    soonest, so Hatchery 2 never got a reminder of its own).
 
     ``started``: the 'start' chore was literally just done — log it (its next
     due lands one hatch-cycle out) and point the harvest reminder at the moment
@@ -14178,38 +14242,36 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str)
     tasks = maintenance.get("tasks")
     if not isinstance(tasks, dict):
         return
-    start_task = tasks.get(MAINTENANCE_HATCH_START_TASK_ID)
-    harvest_task = tasks.get(MAINTENANCE_HATCH_HARVEST_TASK_ID)
-    # Vessel-aware (v2): the harvest reminder always tracks the SOONEST-ripe
-    # running batch; callers mutate vessel state BEFORE calling this.
-    soonest = _nps_soonest_ready(config)
+    start_id, harvest_id = _nps_hatch_task_ids(vessel_id)
+    start_task = tasks.get(start_id)
+    harvest_task = tasks.get(harvest_id)
+    # Callers mutate vessel state BEFORE calling this: the harvest reminder
+    # anchors on THIS vessel's batch (None once it has been harvested/cancelled).
+    ready_at = _nps_vessel_ready_at(config, vessel_id)
+    vessel_name = str(_nps_vessel_cfg(config, vessel_id).get("name") or vessel_id)
     if event == "started":
         if isinstance(start_task, dict):
             _nps_hatch_log_completion(
-                maintenance, MAINTENANCE_HATCH_START_TASK_ID, now,
-                "Logged automatically — hatch started from the NPS tab",
+                maintenance, start_id, now,
+                f"Logged automatically — hatch started in {vessel_name} from the NPS tab",
             )
             # Marking it done clears any snooze (lockstep with the panel's _completeTask).
             start_task["snoozedUntil"] = None
-        if isinstance(harvest_task, dict) and soonest is not None and soonest > now:
-            harvest_task["snoozedUntil"] = soonest.isoformat()
+        if isinstance(harvest_task, dict) and ready_at is not None and ready_at > now:
+            harvest_task["snoozedUntil"] = ready_at.isoformat()
     elif event == "harvested":
         if isinstance(harvest_task, dict):
             _nps_hatch_log_completion(
-                maintenance, MAINTENANCE_HATCH_HARVEST_TASK_ID, now,
-                "Logged automatically — 'Hatched & loaded' on the NPS tab",
+                maintenance, harvest_id, now,
+                f"Logged automatically — 'Hatched & loaded' for {vessel_name} on the NPS tab",
             )
-            # Other vessels may still be brewing — keep tracking the next one.
-            harvest_task["snoozedUntil"] = (
-                soonest.isoformat() if soonest is not None and soonest > now else None
-            )
+            # This vessel is idle now; its clock restarts at the next start.
+            harvest_task["snoozedUntil"] = None
         if isinstance(start_task, dict):
-            # Point the "start the next hatch" reminder at the moment the
-            # next-hatch maths recommends (this batch just loaded, so the clock
-            # runs from now; other running batches chain it further out).
-            hatch_hours = _awc_num(
-                ((config.get("nps") or {}).get("hatchery") or {}).get("hatchHours"), 24, 8, 48
-            )
+            # Point THIS vessel's "start the next hatch" reminder at the moment
+            # the next-hatch maths recommends (this batch just loaded, so the
+            # clock runs from now; other running batches chain it further out).
+            hatch_hours = _nps_vessel_clock(config, vessel_id)
             _loaded, shelf_h, _remaining, _rate = _nps_brine_supply(config)
             # Freshness-timed only: the reservoir is mid-reload at this exact
             # moment, so its remaining-ml is not yet trustworthy. The card's
@@ -14227,26 +14289,23 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str)
                 # NOW — a stale snooze must not suppress it.
                 start_task["snoozedUntil"] = None
     elif event == "cancelled":
-        # Re-anchor the harvest reminder onto whatever hatch now ripens soonest.
+        # The batch this vessel's harvest reminder was waiting on is gone.
         if isinstance(harvest_task, dict):
-            if soonest is not None and soonest > now:
-                harvest_task["snoozedUntil"] = soonest.isoformat()
-            else:
-                snoozed = _parse_datetime(harvest_task.get("snoozedUntil"))
-                if snoozed is not None and snoozed > now:
-                    harvest_task["snoozedUntil"] = None
+            snoozed = _parse_datetime(harvest_task.get("snoozedUntil"))
+            if snoozed is not None and snoozed > now:
+                harvest_task["snoozedUntil"] = None
 
 
 def _nps_hatch_retime_reminders(config: dict[str, Any], hours: float,
-                                now: datetime) -> None:
-    """Re-point the brine reminders at a NEW hatch clock.
+                                now: datetime, vessel_id: str = "v1") -> None:
+    """Re-point ONE hatchery's brine reminders at a NEW hatch clock.
 
     LOCKSTEP with the panel's ``_npsSeedHatchReminders`` cadence half: both
     chores run on the HOUR clock (``cadenceHours``), harvest carrying the
     tighter 12 h grace and start the looser 24 h. It only ever RE-TIMES tasks
     the keeper already added — a clock change must never conjure a reminder
-    behind their back. The harvest snooze is re-anchored onto whatever batch
-    now ripens soonest, so callers re-stamp vessels BEFORE calling.
+    behind their back. The harvest snooze is re-anchored onto this vessel's
+    own batch, so callers re-stamp the vessel BEFORE calling.
     """
     maintenance = config.get("maintenance")
     if not isinstance(maintenance, dict):
@@ -14254,11 +14313,9 @@ def _nps_hatch_retime_reminders(config: dict[str, Any], hours: float,
     tasks = maintenance.get("tasks")
     if not isinstance(tasks, dict):
         return
+    start_id, harvest_id = _nps_hatch_task_ids(vessel_id)
     cadence_days = max(1, round(hours / 24.0))
-    for task_id, critical_h in (
-        (MAINTENANCE_HATCH_START_TASK_ID, hours + 24),
-        (MAINTENANCE_HATCH_HARVEST_TASK_ID, hours + 12),
-    ):
+    for task_id, critical_h in ((start_id, hours + 24), (harvest_id, hours + 12)):
         task = tasks.get(task_id)
         if not isinstance(task, dict):
             continue
@@ -14266,11 +14323,11 @@ def _nps_hatch_retime_reminders(config: dict[str, Any], hours: float,
         task["criticalAfterDays"] = cadence_days * 2
         task["cadenceHours"] = hours
         task["criticalAfterHours"] = critical_h
-    harvest_task = tasks.get(MAINTENANCE_HATCH_HARVEST_TASK_ID)
+    harvest_task = tasks.get(harvest_id)
     if isinstance(harvest_task, dict):
-        soonest = _nps_soonest_ready(config)
+        ready_at = _nps_vessel_ready_at(config, vessel_id)
         harvest_task["snoozedUntil"] = (
-            soonest.isoformat() if soonest is not None and soonest > now else None)
+            ready_at.isoformat() if ready_at is not None and ready_at > now else None)
 
 
 def _nps_hatch_clock_follow(previous: Any, incoming: Any) -> None:
@@ -14293,30 +14350,32 @@ def _nps_hatch_clock_follow(previous: Any, incoming: Any) -> None:
     now_cfg = ((incoming.get("nps") or {}).get("hatchery") or {})
     if not isinstance(was, dict) or not isinstance(now_cfg, dict):
         return
-    old_h = _awc_num(was.get("hatchHours"), 0, 0, 48)
-    new_h = _awc_num(now_cfg.get("hatchHours"), 0, 0, 48)
-    if not new_h or not old_h or new_h == old_h:
-        return
-    egg = now_cfg.get("eggType")
+    # Per-hatchery clocks (0.7.147): each vessel's own field is the route; a
+    # vessel without one (an older panel's save) still follows the global.
+    old_global = _awc_num(was.get("hatchHours"), 0, 0, 48)
+    new_global = _awc_num(now_cfg.get("hatchHours"), 0, 0, 48)
+    was_vessels = was.get("vessels") if isinstance(was.get("vessels"), dict) else {}
     vessels = now_cfg.get("vessels") if isinstance(now_cfg.get("vessels"), dict) else {}
     now = datetime.now(timezone.utc)
-    for vessel in vessels.values():
+    for vid, vessel in vessels.items():
         if not isinstance(vessel, dict):
             continue
+        was_vessel = was_vessels.get(vid) if isinstance(was_vessels.get(vid), dict) else {}
+        old_h = _awc_num(was_vessel.get("hatchHours"), old_global, 0, 48)
+        new_h = _awc_num(vessel.get("hatchHours"), new_global, 0, 48)
+        if not new_h or not old_h or new_h == old_h:
+            continue
+        egg = vessel.get("eggType") or now_cfg.get("eggType")
         state = vessel.get("state") if isinstance(vessel.get("state"), dict) else None
-        if not isinstance(state, dict):
-            continue
-        started = _parse_datetime(state.get("hatchStartedAt"))
-        if started is None:
-            continue
-        stamped = _awc_num(state.get("hatchHours"), old_h, 8, 48)
-        if (now - started).total_seconds() / 3600.0 >= stamped:
-            continue                       # ripe already — it keeps its result
-        if state.get("eggType") and state.get("eggType") != egg:
-            continue                       # a different animal on a different clock
-        state["hatchHours"] = new_h
-        state["readyNotifiedAt"] = ""
-    _nps_hatch_retime_reminders(incoming, new_h, now)
+        if isinstance(state, dict):
+            started = _parse_datetime(state.get("hatchStartedAt"))
+            stamped = _awc_num(state.get("hatchHours"), old_h, 8, 48)
+            if (started is not None
+                    and (now - started).total_seconds() / 3600.0 < stamped  # ripe keeps its result
+                    and not (state.get("eggType") and state.get("eggType") != egg)):
+                state["hatchHours"] = new_h
+                state["readyNotifiedAt"] = ""
+        _nps_hatch_retime_reminders(incoming, new_h, now, vid)
 
 
 def _nps_cysts_payload(hatchery: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -14394,10 +14453,12 @@ async def websocket_nps_hatch_start(
     now = datetime.now(timezone.utc)
     state = vessels[target_id]["state"]
     state["hatchStartedAt"] = now.isoformat()
-    state["eggType"] = hatchery["eggType"]
-    state["hatchHours"] = hatchery["hatchHours"]
+    # THIS hatchery's cysts and clock (0.7.147) — two vessels can run
+    # different eggs on different clocks side by side.
+    state["eggType"] = vessels[target_id]["eggType"]
+    state["hatchHours"] = vessels[target_id]["hatchHours"]
     state["readyNotifiedAt"] = ""
-    _nps_hatch_sync_reminders(config, now, "started")
+    _nps_hatch_sync_reminders(config, now, "started", target_id)
     _append_activity(
         config,
         f"Brine hatch started in {vessels[target_id]['name']} — the incubation clock is running",
@@ -14414,6 +14475,7 @@ async def websocket_nps_hatch_start(
     vol.Required("type"): "openreef/nps_hatch_clock",
     vol.Optional("hours"): vol.Coerce(float),
     vol.Optional("vessel_id"): str,
+    vol.Optional("egg_type"): str,
     vol.Optional("restamp"): bool,
 })
 @websocket_api.require_admin
@@ -14441,54 +14503,69 @@ async def websocket_nps_hatch_clock(
         return
     config = _config_from_entry(entry)
     hatchery = _nps_hatchery_v2(config)
-    previous = hatchery["hatchHours"]
-    # No hours at all means "bring everything onto the clock we already have"
-    # — the align button, for a batch stranded on an older stamp.
-    hours = float(round(_awc_num(msg.get("hours"), previous, 8, 48)))
-    hatchery["hatchHours"] = hours
     now = datetime.now(timezone.utc)
     restamp = bool(msg.get("restamp", True))
     only = str(msg.get("vessel_id") or "")
     if only and only not in hatchery["vessels"]:
         connection.send_error(msg["id"], "unknown_vessel", f"No hatchery '{only}'")
         return
+    # Per-hatchery clocks (0.7.147). Naming a vessel sets THAT vessel's clock
+    # (and, with no hours, aligns its batch onto the clock it already has).
+    # A sweep with hours sets every vessel running the named egg type — or
+    # every vessel when none is named — and the legacy global with them.
+    egg_filter = str(msg.get("egg_type") or "")
+    if egg_filter and egg_filter not in nps_engine.egg_type_ids():
+        connection.send_error(msg["id"], "unknown_egg_type", f"No egg type '{egg_filter}'")
+        return
+    targets = [only] if only else [
+        vid for vid in sorted(hatchery["vessels"])
+        if not egg_filter or hatchery["vessels"][vid]["eggType"] == egg_filter]
+    previous = (hatchery["vessels"][targets[0]]["hatchHours"] if targets
+                else hatchery["hatchHours"])
+    # No hours at all means "bring everything onto the clock we already have"
+    # — the align button, for a batch stranded on an older stamp.
+    hours = float(round(_awc_num(msg.get("hours"), previous, 8, 48)))
+    if not only:
+        hatchery["hatchHours"] = hours
     moved: list[dict[str, Any]] = []
     kept: list[str] = []
-    for vid in sorted(hatchery["vessels"]):
-        if only and vid != only:
-            continue
+    for vid in targets:
         vessel = hatchery["vessels"][vid]
+        vessel_previous = vessel["hatchHours"]
+        vessel["hatchHours"] = hours
         state = vessel["state"]
         started = _parse_datetime(state.get("hatchStartedAt"))
-        if started is None:
-            continue
-        name = str(vessel.get("name") or vid)
-        elapsed = (now - started).total_seconds() / 3600.0
-        ripe = elapsed >= _awc_num(state.get("hatchHours"), previous, 8, 48)
-        # A sweeping change follows the egg type it was computed for: moving a
-        # 36 h standard batch onto an 18 h decapsulated clock would be wrong.
-        # Naming a vessel is an explicit override — move THAT batch.
-        wrong_egg = not only and state.get("eggType") != hatchery["eggType"]
-        if not restamp or ripe or wrong_egg:
-            kept.append(name)
-            continue
-        state["hatchHours"] = hours
-        # Re-arm the ready push: a longer clock must not stay "already told
-        # you", and a shorter one that lands the batch ripe right now should
-        # say so on the next tick.
-        state["readyNotifiedAt"] = ""
-        moved.append({"id": vid, "name": name,
-                      "hoursLeft": round(max(hours - elapsed, 0.0), 1)})
-    _nps_hatch_retime_reminders(config, hours, now)
+        if started is not None:
+            name = str(vessel.get("name") or vid)
+            elapsed = (now - started).total_seconds() / 3600.0
+            ripe = elapsed >= _awc_num(state.get("hatchHours"), vessel_previous, 8, 48)
+            # A sweeping change follows the egg type it was computed for: moving
+            # a 36 h standard batch onto an 18 h decapsulated clock would be
+            # wrong. Naming a vessel is an explicit override — move THAT batch.
+            wrong_egg = not only and state.get("eggType") != vessel["eggType"]
+            if not restamp or ripe or wrong_egg:
+                kept.append(name)
+            else:
+                state["hatchHours"] = hours
+                # Re-arm the ready push: a longer clock must not stay "already
+                # told you", and a shorter one that lands the batch ripe right
+                # now should say so on the next tick.
+                state["readyNotifiedAt"] = ""
+                moved.append({"id": vid, "name": name,
+                              "hoursLeft": round(max(hours - elapsed, 0.0), 1)})
+        _nps_hatch_retime_reminders(config, hours, now, vid)
     if hours != previous or moved:
+        where = (str(hatchery["vessels"][only].get("name") or only) if only
+                 else ", ".join(str(hatchery["vessels"][v].get("name") or v) for v in targets))
         _append_activity(
             config,
-            f"Hatch clock set to {hours:g} h"
+            f"Hatch clock set to {hours:g} h for {where}"
             + (f" — {', '.join(b['name'] for b in moved)} moved onto it" if moved else ""),
             "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config,
-              hours=hours, previous=previous, restamped=moved, kept=kept)
+              hours=hours, previous=previous, restamped=moved, kept=kept,
+              vessels=targets)
 
 
 @websocket_api.websocket_command({
@@ -14563,13 +14640,14 @@ def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], request
                 "harvestedAt": now.isoformat(),
                 "plannedHours": _awc_num(state.get("hatchHours"), 24, 8, 48),
                 "actualHours": round(actual_h, 1),
-                "eggType": str(state.get("eggType") or hatchery["eggType"]),
+                "eggType": str(state.get("eggType") or vessels[target_id]["eggType"]),
             })
             del hatchery["history"][nps_engine.HATCH_HISTORY_MAX:]
     if target_id and target_id in vessels:
         vessels[target_id]["state"]["hatchStartedAt"] = ""
         vessels[target_id]["state"]["readyNotifiedAt"] = ""
-    _nps_hatch_sync_reminders(config, now, "harvested" if harvested else "cancelled")
+        _nps_hatch_sync_reminders(config, now, "harvested" if harvested else "cancelled",
+                                  target_id)
     if harvested:
         name = vessels.get(target_id, {}).get("name") or "the hatchery"
         _append_activity(config, f"Brine harvested from {name} — container loaded", "control")
@@ -14619,7 +14697,9 @@ async def websocket_nps_hatch_enrich(
     enrichment["state"] = {
         "startedAt": now.isoformat(),
         "sourceVesselId": "",
-        "eggType": hatchery["eggType"],
+        # The brine in the container came out of the last harvest.
+        "eggType": (str(hatchery["history"][0].get("eggType") or hatchery["eggType"])
+                    if hatchery["history"] else hatchery["eggType"]),
         "plannedHatchHours": 0,
         "actualHatchHours": round(batch_age_h, 1),
         "enrichHours": enrichment["hours"],
@@ -16080,21 +16160,36 @@ async def websocket_cultures_enrich_done(
     _awc_send(connection, msg, hass, config)
 
 
-@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_cysts_opened"})
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_cysts_opened",
+    vol.Optional("vessel_id"): str,
+})
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_nps_cysts_opened(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """A new pouch of cysts opened: the fridge weeks count from now."""
+    """A new pouch of cysts opened: the fridge weeks count from now. The pouch
+    is per HATCHERY (0.7.147 — different cysts in each); naming no vessel
+    stamps every one (one pouch feeding the whole rack)."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     config = _config_from_entry(entry)
     hatchery = _nps_hatchery_v2(config)
-    hatchery["cysts"] = {"openedAt": datetime.now(timezone.utc).isoformat()}
-    _append_activity(config, "Cysts pouch opened — keep it sealed, dry and cold; hatch rates fall after 3–4 weeks", "info")
+    only = str(msg.get("vessel_id") or "")
+    if only and only not in hatchery["vessels"]:
+        connection.send_error(msg["id"], "unknown_vessel", f"No hatchery '{only}'")
+        return
+    stamp = {"openedAt": datetime.now(timezone.utc).isoformat()}
+    targets = [only] if only else sorted(hatchery["vessels"])
+    for vid in targets:
+        hatchery["vessels"][vid]["cysts"] = dict(stamp)
+    if not only:
+        hatchery["cysts"] = dict(stamp)
+    where = ", ".join(str(hatchery["vessels"][vid].get("name") or vid) for vid in targets)
+    _append_activity(config, f"Cysts pouch opened for {where} — keep it sealed, dry and cold; hatch rates fall after 3–4 weeks", "info")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -16229,9 +16324,76 @@ async def websocket_nps_summary(
         if loaded_at:
             freshness = dosing_engine.freshness_state(
                 {"mixedAt": loaded_at, "shelfLifeDays": supply_shelf_h / 24.0}, now_utc)
+    # The room (optional sensor) — read once, advised per vessel below.
+    temp_c: float | None = None
+    temp_entity = hatchery_cfg.get("tempEntity") or ""
+    if temp_entity:
+        temp_state = hass.states.get(temp_entity)
+        try:
+            temp_c = float(temp_state.state) if temp_state is not None else None
+        except (TypeError, ValueError):
+            temp_c = None
+    no_temp = {"available": False, "expectedHours": None, "factor": None, "warm": False}
+
+    def _temp_advice_for(egg_type: str) -> dict[str, Any]:
+        if temp_c is None:
+            return dict(no_temp)
+        # RATED hours in, not the keeper's clock (doc §12): a learned clock
+        # was measured at this temperature already.
+        rated_h = nps_engine.egg_type_hours(egg_type)
+        advice = nps_engine.expected_hatch_hours(rated_h, temp_c)
+        advice["tempC"] = round(temp_c, 1)
+        advice["ratedHours"] = round(rated_h, 1)
+        return advice
+
+    # The molt is as temperature-driven as the hatch (0.7.89).
+    instar_advice = nps_engine.instar_two_delay_hours(temp_c)
+    # Per-hatchery settings + clocks (0.7.147): every vessel carries its own
+    # cysts, clock, pouch, learned hours and temperature advice — and the
+    # ids of its own two reminders. The "primary" one feeds the compact
+    # surfaces (mission row, Pulse).
+    vessels_payload = []
+    status_rank = {"overdue": 3, "ready": 2, "incubating": 1, "none": 0}
+    primary_state: dict[str, Any] = {"status": "none", "hoursElapsed": None,
+                                     "hoursLeft": None, "percent": None}
+    primary_vessel = ""
+    idle_vessel = ""
+    for vid in sorted(hatchery_cfg["vessels"]):
+        vessel = hatchery_cfg["vessels"][vid]
+        v_state = vessel["state"]
+        hatch_st = nps_engine.hatch_state(
+            v_state["hatchStartedAt"], v_state["hatchHours"], now_utc)
+        # The running batch's own stamps ride with its state.
+        hatch_st["eggType"] = v_state["eggType"] if v_state["hatchStartedAt"] else ""
+        hatch_st["hatchHours"] = v_state["hatchHours"] if v_state["hatchStartedAt"] else None
+        if not v_state["hatchStartedAt"] and not idle_vessel:
+            idle_vessel = vid
+        start_id, harvest_id = _nps_hatch_task_ids(vid)
+        vessels_payload.append({
+            "id": vid, "name": vessel["name"], "volumeL": vessel["volumeL"],
+            "eggType": vessel["eggType"], "hatchHours": vessel["hatchHours"],
+            "state": hatch_st,
+            "guide": nps_engine.cyst_dose_guide(vessel["volumeL"]),
+            "cysts": _nps_cysts_payload(vessel, now_utc),
+            "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], vessel["eggType"]),
+            "temp": _temp_advice_for(vessel["eggType"]),
+            "tasks": {"start": start_id, "harvest": harvest_id},
+        })
+        if (not primary_vessel
+                or status_rank.get(hatch_st["status"], 0) > status_rank.get(primary_state["status"], 0)):
+            primary_state = hatch_st
+            primary_vessel = vid
+    # The batch that starts next goes into the first idle vessel (doc §9.3),
+    # so its clock is the one the next-hatch maths plans on.
+    next_start_vessel = hatchery_cfg["vessels"].get(idle_vessel or primary_vessel) or {}
+    next_start_hours = _awc_num(next_start_vessel.get("hatchHours"), hatchery_cfg["hatchHours"], 8, 48)
+    primary_cfg = hatchery_cfg["vessels"].get(primary_vessel) or {}
+    primary_egg = primary_state.get("eggType") or primary_cfg.get("eggType") or hatchery_cfg["eggType"]
+    primary_hours = primary_state.get("hatchHours") or primary_cfg.get("hatchHours") or hatchery_cfg["hatchHours"]
+    temp_advice = _temp_advice_for(primary_egg)
     next_hatch = nps_engine.next_hatch_suggestion(
         now_utc,
-        hatchery_cfg["hatchHours"],
+        next_start_hours,
         # Container AND feeding bottle: whichever dies later anchors the
         # clock, the volume is both (doc §12.6).
         plan_loaded, plan_shelf_h, plan_remaining, plan_rate,
@@ -16242,46 +16404,6 @@ async def websocket_nps_summary(
         # shelf, never the current load's boost window (doc §12).
         chain_shelf_hours=plain_shelf_h,
     )
-    # Per-vessel clocks + the "primary" one the compact surfaces show.
-    vessels_payload = []
-    status_rank = {"overdue": 3, "ready": 2, "incubating": 1, "none": 0}
-    primary_state: dict[str, Any] = {"status": "none", "hoursElapsed": None,
-                                     "hoursLeft": None, "percent": None}
-    idle_vessel = ""
-    for vid in sorted(hatchery_cfg["vessels"]):
-        vessel = hatchery_cfg["vessels"][vid]
-        v_state = vessel["state"]
-        hatch_st = nps_engine.hatch_state(
-            v_state["hatchStartedAt"], v_state["hatchHours"], now_utc)
-        if not v_state["hatchStartedAt"] and not idle_vessel:
-            idle_vessel = vid
-        vessels_payload.append({
-            "id": vid, "name": vessel["name"], "volumeL": vessel["volumeL"],
-            "eggType": v_state["eggType"], "hatchHours": v_state["hatchHours"],
-            "state": hatch_st,
-            "guide": nps_engine.cyst_dose_guide(vessel["volumeL"]),
-        })
-        if status_rank.get(hatch_st["status"], 0) > status_rank.get(primary_state["status"], 0):
-            primary_state = hatch_st
-    # Temperature advisory (never moves the clock) from the optional sensor.
-    temp_advice = {"available": False, "expectedHours": None, "factor": None, "warm": False}
-    instar_advice = nps_engine.instar_two_delay_hours(None)
-    temp_entity = hatchery_cfg.get("tempEntity") or ""
-    if temp_entity:
-        temp_state = hass.states.get(temp_entity)
-        try:
-            temp_c = float(temp_state.state) if temp_state is not None else None
-        except (TypeError, ValueError):
-            temp_c = None
-        if temp_c is not None:
-            # RATED hours in, not the keeper's clock (doc §12): a learned clock
-            # was measured at this temperature already.
-            rated_h = nps_engine.egg_type_hours(hatchery_cfg["eggType"])
-            temp_advice = nps_engine.expected_hatch_hours(rated_h, temp_c)
-            temp_advice["tempC"] = round(temp_c, 1)
-            temp_advice["ratedHours"] = round(rated_h, 1)
-            # The molt is as temperature-driven as the hatch (0.7.89).
-            instar_advice = nps_engine.instar_two_delay_hours(temp_c)
     # Container payload: the CANONICAL reservoir (pump channel's when linked).
     if isinstance(fx_channel, dict):
         ch_res = fx_channel.get("reservoir") or {}
@@ -16354,14 +16476,21 @@ async def websocket_nps_summary(
         # and the daily-driver advice (nextHatch + learned clock + temp).
         "hatchery": {
             "enabled": bool(hatchery_cfg["enabled"]),
-            "eggType": hatchery_cfg["eggType"],
-            "hatchHours": hatchery_cfg["hatchHours"],
+            # The compact surfaces' numbers: the primary vessel's batch (or
+            # its next-batch settings when idle). Per-vessel truth is in
+            # ``vessels`` (0.7.147).
+            "eggType": primary_egg,
+            "hatchHours": primary_hours,
             "eggTypes": [dict(e) for e in nps_engine.EGG_TYPES],
             "history": [dict(item) for item in hatchery_cfg["history"][:10]],
             "vessels": vessels_payload,
             "idleVessel": idle_vessel,
+            "primaryVessel": primary_vessel,
+            # Structural: the slowest clock on the rack sets how many vessels
+            # continuous supply needs.
             "vesselsNeeded": nps_engine.vessels_needed(
-                hatchery_cfg["hatchHours"], plain_shelf_h),
+                max((v["hatchHours"] for v in vessels_payload), default=hatchery_cfg["hatchHours"]),
+                plain_shelf_h),
             "state": primary_state,
             "reservoir": container,
             "fridgeBottle": fridge_bottle,
@@ -16386,9 +16515,9 @@ async def websocket_nps_summary(
                     hatchery_cfg["enrichment"]["state"]["batchLoadedAt"]),
             },
             "handFeed": dict(hatchery_cfg["handFeed"]),
-            "cysts": _nps_cysts_payload(hatchery_cfg, datetime.now(timezone.utc)),
-            "learned": nps_engine.learned_hatch_hours(
-                hatchery_cfg["history"], hatchery_cfg["eggType"]),
+            # Legacy single-pouch/learned/temp fields: the primary vessel's.
+            "cysts": _nps_cysts_payload(primary_cfg or hatchery_cfg, now_utc),
+            "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], primary_egg),
             "temp": temp_advice,
             "instar": instar_advice,
             "vesselPresets": [dict(p) for p in nps_engine.HATCH_VESSEL_PRESETS],

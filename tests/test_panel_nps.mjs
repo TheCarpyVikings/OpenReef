@@ -1055,8 +1055,16 @@ test("a batch on its own clock says so, and stale reminders own up", async () =>
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    // Clock moved to 34 h; the running batch was stamped at 24 h.
-    panel._nps.summary.hatchery = v2HatcherySummary({ hatchHours: 34 });
+    // Hatchery 1's OWN clock moved to 34 h; its running batch was stamped at
+    // 24 h (per-hatchery settings, 0.7.147: v.hatchHours is the vessel's
+    // clock, v.state.hatchHours the batch's stamp).
+    const drifted = (clock, stamp) => {
+      const sum = v2HatcherySummary({ hatchHours: clock });
+      sum.vessels[0].hatchHours = clock;
+      sum.vessels[0].state = { ...sum.vessels[0].state, eggType: "standard", hatchHours: stamp };
+      return sum;
+    };
+    panel._nps.summary.hatchery = drifted(34, 24);
     let html = panel._hatcheryPanel();
     assert(html.includes("on its own 24 h clock"),
       "a countdown that disagrees with settings must explain itself, not look broken");
@@ -1071,10 +1079,11 @@ test("a batch on its own clock says so, and stale reminders own up", async () =>
       "no drift, no note");
     // Reminders added on the old clock are part of the same lie.
     panel._config.maintenance = { tasks: { brine_hatch_harvest: { cadenceHours: 24 } } };
-    panel._nps.summary.hatchery = v2HatcherySummary({ hatchHours: 34 });
+    panel._nps.summary.hatchery = drifted(34, 34);
     html = panel._hatcheryPanel();
     assert(html.includes("still run a 24 h cycle"), "the reminder drift must be surfaced");
     assert(html.includes("Bring them onto 34 h"), "and it must offer the one-tap fix");
+    assert(html.includes('data-action="nps-align-clock" data-id="v1"'), "the fix names the hatchery it re-times");
     // The row keeps its seeder button, but the two must not read identically —
     // Reece's screenshot stacked two buttons labelled the same thing.
     assert(!html.includes(">Sync hatchery reminders</button> <button") &&
@@ -1578,6 +1587,120 @@ test("the feed truce draws under the water row and speaks on the cards", async (
   assert(bands.length >= 2 && bands.every((e) => e.how === "system" && e.kind === "band" && e.band[1] > e.band[0] && e.band[1] <= 1440), `demo truce bands: ${JSON.stringify(bands.map((b) => b.band))}`);
   assert(demo.events.filter((e) => e.how === "pump" && e.kind === "dose").every((e) => e.truce === "UV 2 h · skimmer 45 min"), "demo pump ticks carry the consequence");
   assert(demo.counts.feeds === demo.events.filter((e) => e.how !== "system" && e.status !== "ghost").length, "bands never count as feeds");
+});
+
+
+test("every hatchery gets its own pair of reminders on its own clock (0.7.147)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // Reece's rack on 2026-09-08: Hatchery 1 on standard 24 h cysts, 6 h in;
+    // Hatchery 2 on decapsulated 16 h cysts, idle. One shared pair could only
+    // follow the soonest batch — the second hatchery never got a reminder.
+    const startedIso = new Date(Date.parse(NOW) - 6 * 3600000).toISOString();
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._setDirty = () => { panel._configDirty = true; };
+    panel._config.nps.hatchery = { eggType: "standard", hatchHours: 24, vessels: {
+      v1: { name: "Left cone", volumeL: 1, eggType: "standard", hatchHours: 24,
+            state: { hatchStartedAt: startedIso, eggType: "standard", hatchHours: 24 } },
+      v2: { name: "Right cone", volumeL: 0.7, eggType: "decapsulated", hatchHours: 16, state: {} },
+    } };
+    panel._config.maintenance = { enabled: true, tasks: {}, completions: {} };
+    panel._npsSeedHatchReminders();
+    const tasks = panel._config.maintenance.tasks;
+    assert(tasks.brine_hatch_start && tasks.brine_hatch_harvest, "Hatchery 1 keeps the original ids");
+    assert(tasks.brine_hatch_start_v2 && tasks.brine_hatch_harvest_v2, "Hatchery 2 gets its own pair");
+    assert(tasks.brine_hatch_harvest.cadenceHours === 24 && tasks.brine_hatch_harvest_v2.cadenceHours === 16,
+      "each pair runs on ITS hatchery's clock");
+    assert(tasks.brine_hatch_harvest_v2.criticalAfterHours === 28 && tasks.brine_hatch_start_v2.criticalAfterHours === 40,
+      "the 12 h / 24 h graces follow the vessel's clock");
+    assert(tasks.brine_hatch_start_v2.label === "Start brine shrimp hatch (Right cone)" && tasks.brine_hatch_harvest.label === "Harvest, rinse & load brine (Left cone)",
+      `labels name the hatchery: ${tasks.brine_hatch_start_v2.label} / ${tasks.brine_hatch_harvest.label}`);
+    assert(tasks.brine_hatch_harvest.vesselId === "v1" && tasks.brine_hatch_start_v2.vesselId === "v2", "each task knows its vessel");
+    // Anchors are per vessel: the running batch logs v1's start chore and
+    // snoozes v1's harvest to ITS ripening; the idle v2 pair is untouched.
+    const hoursOut = (Date.parse(tasks.brine_hatch_harvest.snoozedUntil) - Date.parse(NOW)) / 3600000;
+    assert(Math.abs(hoursOut - 18) < 0.01, `Left cone's harvest lands in 18 h, got ${hoursOut}`);
+    assert(!tasks.brine_hatch_harvest_v2.snoozedUntil, "an idle hatchery's harvest reminder is not snoozed onto someone else's batch");
+    const comps = panel._config.maintenance.completions;
+    assert(comps.brine_hatch_start?.length === 1 && !comps.brine_hatch_start_v2, "only the running hatchery logs a start");
+    assert(panel._nps.message.includes("Left cone on 24 h") && panel._nps.message.includes("Right cone on 16 h"), panel._nps.message);
+    // A keeper's own rename survives a re-sync; our generated label follows the vessel.
+    tasks.brine_hatch_harvest_v2.label = "Harvest the decap cone";
+    panel._config.nps.hatchery.vessels.v1.name = "Port cone";
+    panel._npsSeedHatchReminders();
+    assert(panel._config.maintenance.tasks.brine_hatch_harvest_v2.label === "Harvest the decap cone", "a rename is the keeper's");
+    assert(panel._config.maintenance.tasks.brine_hatch_harvest.label === "Harvest, rinse & load brine (Port cone)", "a generated label follows the vessel's name");
+    assert(panel._config.maintenance.completions.brine_hatch_start.length === 1, "re-syncing must not duplicate the completion");
+    // The tab lists both pairs, named.
+    panel._nps.summary.hatchery = v2HatcherySummary();
+    const tab = panel._hatcheryTab();
+    assert(tab.includes("Start the next hatch — Port cone") && tab.includes("Harvest, rinse & load — Right cone"), "the tab names each hatchery's chores");
+    // Removing a hatchery takes its reminders with it (and the seeder prunes strays).
+    delete panel._config.nps.hatchery.vessels.v2;
+    panel._npsSeedHatchReminders();
+    assert(!panel._config.maintenance.tasks.brine_hatch_start_v2 && !panel._config.maintenance.tasks.brine_hatch_harvest_v2,
+      "a removed hatchery's reminders are pruned");
+    assert(panel._config.maintenance.tasks.brine_hatch_start.label === "Start brine shrimp hatch", "a single hatchery drops the name tag");
+  } finally { restore(); }
+});
+
+test("settings are per hatchery: own cysts, own clock, own pouch (0.7.147)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._setDirty = () => { panel._configDirty = true; };
+    panel._settingsSections = {};
+    panel._config.nps.hatchery = { eggType: "standard", hatchHours: 24, vessels: {
+      v1: { name: "Hatchery 1", volumeL: 1, eggType: "standard", hatchHours: 24, state: {} },
+    } };
+    panel._config.maintenance = { tasks: { brine_hatch_start: { label: "x" }, brine_hatch_start_v2: { label: "y" }, brine_hatch_harvest_v2: { label: "z" } } };
+    // Adding a hatchery seeds it from the first one — its own settings from there.
+    panel._npsHandleAction?.({ dataset: { action: "nps-add-vessel" } });
+    const hatchery = panel._config.nps.hatchery;
+    if (!hatchery.vessels.v2) {
+      // Drive the same branch the click handler runs.
+      const seed = Object.values(hatchery.vessels)[0];
+      hatchery.vessels.v2 = { name: "Hatchery 2", volumeL: 1, state: {}, eggType: seed.eggType, hatchHours: seed.hatchHours };
+    }
+    assert(hatchery.vessels.v2.eggType === "standard" && hatchery.vessels.v2.hatchHours === 24, "a new hatchery starts on the first one's cysts and clock");
+    // Its egg type is its own: decapsulated seeds a 16 h clock for v2 only.
+    const v2 = hatchery.vessels.v2;
+    v2.eggType = "decapsulated";
+    const rec = panel._npsEggTypes().find((e) => e.id === "decapsulated");
+    if (rec) v2.hatchHours = rec.hours;
+    assert(v2.hatchHours === 16 && hatchery.vessels.v1.hatchHours === 24, "one hatchery's cysts never move the other's clock");
+    panel._nps.summary.hatchery = v2HatcherySummary({ vessels: [
+      { id: "v1", name: "Hatchery 1", volumeL: 1, eggType: "standard", hatchHours: 24, state: { status: "none" },
+        cysts: { available: true, days: 30, status: "old" } },
+      { id: "v2", name: "Hatchery 2", volumeL: 1, eggType: "decapsulated", hatchHours: 16, state: { status: "none" },
+        cysts: { available: false, days: null, status: "unknown" } },
+    ] });
+    const html = panel._hatcherySettings();
+    assert(!html.includes('data-scope="nps-hatchery" data-field="eggType"'), "the global egg type field is gone");
+    assert(html.includes('data-scope="nps-hatch-vessel" data-id="v1" data-field="eggType"') && html.includes('data-scope="nps-hatch-vessel" data-id="v2" data-field="eggType"'), "each hatchery picks its own cysts");
+    assert(html.includes('data-id="v2" data-field="hatchHours" value="16"') && html.includes('data-id="v1" data-field="hatchHours" value="24"'), "each hatchery shows its own clock");
+    assert(html.includes("opened 30 days ago") && html.includes("not stamped yet"), "each hatchery shows its own pouch");
+    assert(html.includes('data-action="nps-cysts-opened" data-id="v2"'), "the pouch button names the hatchery");
+    // The card: each tile says its own cysts + clock, and the learned/temperature
+    // advice is per hatchery with the apply button aimed at that vessel.
+    panel._nps.summary.hatchery = v2HatcherySummary({ vessels: [
+      { id: "v1", name: "Hatchery 1", volumeL: 1, eggType: "standard", hatchHours: 24,
+        state: { status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62, eggType: "standard", hatchHours: 24 },
+        learned: { available: true, hours: 30, samples: 4 }, temp: { available: false } },
+      { id: "v2", name: "Hatchery 2", volumeL: 1, eggType: "decapsulated", hatchHours: 16, state: { status: "none" },
+        learned: { available: false }, temp: { available: false } },
+    ] });
+    const card = panel._hatcheryPanel();
+    assert(card.includes("Decapsulated cysts · 16 h") && card.includes("Standard cysts (GSL) · 24 h"), "each tile states its own cysts and clock");
+    assert(card.includes("📈 Hatchery 1: your last 4 Standard cysts (GSL) batches"), "learned advice is per hatchery");
+    assert(card.includes('data-action="nps-apply-learned-hours" data-hours="30" data-id="v1"'), "and applies to THAT hatchery");
+    // Removing a hatchery takes its reminders with it.
+    delete hatchery.vessels.v2;
+    panel._npsHatchTaskIds("v2").forEach((tid) => { delete panel._config.maintenance.tasks[tid]; });
+    assert(!panel._config.maintenance.tasks.brine_hatch_start_v2 && panel._config.maintenance.tasks.brine_hatch_start, "v2's reminders go, v1's stay");
+  } finally { restore(); }
 });
 
 // Keep this LAST: a test defined below the runner is a test that never runs.

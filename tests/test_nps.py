@@ -1149,6 +1149,11 @@ def test_ws_hatch_clock_moves_the_batch_the_push_and_the_reminders():
                                 "cadenceDays": 1, "cadenceHours": 24,
                                 "criticalAfterDays": 2, "criticalAfterHours": 36,
                                 "snoozedUntil": (now + timedelta(hours=23.3)).isoformat()},
+        # Hatchery 2's own pair (0.7.147), stuck on a snooze from the old clock.
+        "brine_hatch_harvest_v2": {"label": "Harvest, rinse & load brine (Hatchery 2)",
+                                   "enabled": True, "cadenceDays": 1, "cadenceHours": 24,
+                                   "criticalAfterDays": 2, "criticalAfterHours": 36,
+                                   "snoozedUntil": (now + timedelta(hours=23.3)).isoformat()},
     }}
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
@@ -1156,6 +1161,8 @@ def test_ws_hatch_clock_moves_the_batch_the_push_and_the_reminders():
     assert not conn.errors
     hatchery = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
     assert hatchery["hatchHours"] == 34                     # rounded into the grid
+    assert hatchery["vessels"]["v1"]["hatchHours"] == 34 and hatchery["vessels"]["v2"]["hatchHours"] == 34, \
+        "a sweep sets every hatchery's own clock"
     v1_state = hatchery["vessels"]["v1"]["state"]
     assert v1_state["hatchHours"] == 34, "the running countdown is the visible half"
     assert not v1_state["readyNotifiedAt"], "a longer clock must re-arm the ready push"
@@ -1168,9 +1175,13 @@ def test_ws_hatch_clock_moves_the_batch_the_push_and_the_reminders():
     assert tasks["brine_hatch_harvest"]["cadenceHours"] == 34
     assert tasks["brine_hatch_harvest"]["criticalAfterHours"] == 46
     assert tasks["brine_hatch_harvest"]["cadenceDays"] == 1     # round(34/24) == 1
-    # v2 is ripe NOW, so the harvest reminder must not sit snoozed on a stamp
-    # that belonged to the old clock.
-    assert tasks["brine_hatch_harvest"]["snoozedUntil"] is None
+    # Each hatchery's harvest reminder follows ITS OWN batch (0.7.147):
+    # Hatchery 1's lands when its re-timed batch ripens; Hatchery 2 is ripe
+    # NOW, so its reminder must not sit snoozed on a stamp from the old clock.
+    v1_snooze = datetime.fromisoformat(tasks["brine_hatch_harvest"]["snoozedUntil"])
+    assert abs((v1_snooze - (now + timedelta(hours=33.3))).total_seconds()) < 60
+    assert tasks["brine_hatch_harvest_v2"]["snoozedUntil"] is None
+    assert tasks["brine_hatch_harvest_v2"]["cadenceHours"] == 34
     payload = conn.results[-1].payload
     assert payload["hours"] == 34 and payload["previous"] == 24
     assert [b["name"] for b in payload["restamped"]] == ["Hatchery 1"]
@@ -3291,6 +3302,204 @@ def test_soak_pushes_carry_buttons_and_the_taps_do_the_thing():
     assert conn.errors[-1].code == "no_enrichment"
     run(integration.websocket_nps_enrich_second_dose(hass, conn, {"id": 3}))
     assert conn.errors[-1].code == "no_enrichment"
+
+
+# --- Per-hatchery settings + reminders (0.7.147) ----------------------------
+
+def _rack_entry(now):
+    """Reece's rack, 2026-09-08: Hatchery 1 on standard 24 h cysts, Hatchery 2
+    on decapsulated 16 h — each with its own pair of reminders."""
+    entry = _v2_entry(vessels={
+        "v1": {"name": "Hatchery 1", "volumeL": 1.0, "eggType": "standard", "hatchHours": 24,
+               "cysts": {"openedAt": (now - timedelta(days=30)).isoformat()}, "state": {}},
+        "v2": {"name": "Hatchery 2", "volumeL": 0.7, "eggType": "decapsulated", "hatchHours": 16,
+               "state": {}},
+    })
+    cfg = entry.options[CONF_SETTINGS]
+    task = lambda label, hours, grace: {  # noqa: E731
+        "label": label, "enabled": True, "cadenceDays": 1, "criticalAfterDays": 2,
+        "cadenceHours": hours, "criticalAfterHours": hours + grace, "snoozedUntil": None}
+    cfg["maintenance"] = {"seeded": True, "enabled": True, "completions": {}, "tasks": {
+        "brine_hatch_start": task("Start brine shrimp hatch (Hatchery 1)", 24, 24),
+        "brine_hatch_harvest": task("Harvest, rinse & load brine (Hatchery 1)", 24, 12),
+        "brine_hatch_start_v2": task("Start brine shrimp hatch (Hatchery 2)", 16, 24),
+        "brine_hatch_harvest_v2": task("Harvest, rinse & load brine (Hatchery 2)", 16, 12),
+    }}
+    return entry
+
+
+def test_hatchery_settings_are_per_vessel_and_migrate_from_the_globals():
+    # An older config: one global egg type / clock / pouch → every vessel
+    # inherits them, so nothing moves on the migration save.
+    hatchery = integration._normalise_hatchery({
+        "eggType": "premium", "hatchHours": 20, "cysts": {"openedAt": "2026-08-20T10:00:00+00:00"},
+        "vessels": {"v1": {"name": "A", "volumeL": 1, "state": {}},
+                    "v2": {"name": "B", "volumeL": 1, "eggType": "decapsulated", "hatchHours": 16,
+                           "cysts": {"openedAt": "2026-09-01T10:00:00+00:00"}, "state": {}}},
+    })
+    assert hatchery["vessels"]["v1"]["eggType"] == "premium"
+    assert hatchery["vessels"]["v1"]["hatchHours"] == 20
+    assert hatchery["vessels"]["v1"]["cysts"]["openedAt"] == "2026-08-20T10:00:00+00:00"
+    assert hatchery["vessels"]["v1"]["state"]["eggType"] == "premium"
+    assert hatchery["vessels"]["v1"]["state"]["hatchHours"] == 20
+    # A vessel with its own settings keeps them — the whole point.
+    assert hatchery["vessels"]["v2"]["eggType"] == "decapsulated"
+    assert hatchery["vessels"]["v2"]["hatchHours"] == 16
+    assert hatchery["vessels"]["v2"]["cysts"]["openedAt"] == "2026-09-01T10:00:00+00:00"
+    assert hatchery["vessels"]["v2"]["state"]["hatchHours"] == 16
+    # Garbage is clamped per vessel too.
+    bad = integration._normalise_hatchery({"vessels": {"v1": {"eggType": "nope", "hatchHours": 400, "state": {}}}})
+    assert bad["vessels"]["v1"]["eggType"] == "standard" and bad["vessels"]["v1"]["hatchHours"] == 48
+    assert integration._nps_hatch_task_ids("v1") == ("brine_hatch_start", "brine_hatch_harvest")
+    assert integration._nps_hatch_task_ids("v2") == ("brine_hatch_start_v2", "brine_hatch_harvest_v2")
+
+
+def test_ws_hatch_start_stamps_the_vessels_own_cysts_and_syncs_its_own_reminders():
+    now = datetime.now(timezone.utc)
+    entry = _rack_entry(now)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 1, "vessel_id": "v2"}))
+    assert not conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    v2_state = saved["nps"]["hatchery"]["vessels"]["v2"]["state"]
+    assert v2_state["eggType"] == "decapsulated" and v2_state["hatchHours"] == 16, \
+        "the batch carries ITS hatchery's cysts and clock, not a global"
+    m = saved["maintenance"]
+    assert m["completions"].get("brine_hatch_start_v2"), "Hatchery 2's start chore is the one logged"
+    assert not m["completions"].get("brine_hatch_start"), "Hatchery 1's is not"
+    snooze = datetime.fromisoformat(m["tasks"]["brine_hatch_harvest_v2"]["snoozedUntil"])
+    assert abs((snooze - (now + timedelta(hours=16))).total_seconds()) < 60, \
+        "Hatchery 2's harvest reminder lands when ITS batch ripens"
+    assert m["tasks"]["brine_hatch_harvest"]["snoozedUntil"] is None, \
+        "Hatchery 1's harvest reminder is not dragged onto Hatchery 2's batch"
+    # Now Hatchery 1 starts too — each reminder follows its own vessel.
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 2, "vessel_id": "v1"}))
+    m = entry.options[CONF_SETTINGS]["maintenance"]
+    snooze1 = datetime.fromisoformat(m["tasks"]["brine_hatch_harvest"]["snoozedUntil"])
+    assert abs((snooze1 - (now + timedelta(hours=24))).total_seconds()) < 60
+    snooze2 = datetime.fromisoformat(m["tasks"]["brine_hatch_harvest_v2"]["snoozedUntil"])
+    assert abs((snooze2 - (now + timedelta(hours=16))).total_seconds()) < 60, "v2's stays put"
+    # Harvesting Hatchery 2 logs ITS harvest chore and leaves Hatchery 1's snooze alone.
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 3, "vessel_id": "v2", "harvested": True}))
+    m = entry.options[CONF_SETTINGS]["maintenance"]
+    assert m["completions"].get("brine_hatch_harvest_v2") and not m["completions"].get("brine_hatch_harvest")
+    assert m["tasks"]["brine_hatch_harvest_v2"]["snoozedUntil"] is None
+    assert m["tasks"]["brine_hatch_harvest"]["snoozedUntil"] is not None, "Hatchery 1 is still brewing"
+    history = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["history"]
+    assert history[0]["vesselId"] == "v2" and history[0]["eggType"] == "decapsulated"
+    # Cancelling Hatchery 1 drops ITS stale snooze only.
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 4, "vessel_id": "v1"}))
+    m = entry.options[CONF_SETTINGS]["maintenance"]
+    assert m["tasks"]["brine_hatch_harvest"]["snoozedUntil"] is None
+
+
+def test_ws_hatch_clock_is_per_vessel():
+    now = datetime.now(timezone.utc)
+    entry = _rack_entry(now)
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["vessels"]["v2"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=2)).isoformat(),
+        "eggType": "decapsulated", "hatchHours": 16, "readyNotifiedAt": ""}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # Naming a vessel moves THAT clock — and its batch, and its reminders — only.
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 1, "hours": 18, "vessel_id": "v2"}))
+    assert not conn.errors
+    saved = entry.options[CONF_SETTINGS]
+    vessels = saved["nps"]["hatchery"]["vessels"]
+    assert vessels["v2"]["hatchHours"] == 18 and vessels["v2"]["state"]["hatchHours"] == 18
+    assert vessels["v1"]["hatchHours"] == 24, "Hatchery 1's clock is its own"
+    tasks = saved["maintenance"]["tasks"]
+    assert tasks["brine_hatch_harvest_v2"]["cadenceHours"] == 18 and tasks["brine_hatch_start_v2"]["cadenceHours"] == 18
+    assert tasks["brine_hatch_harvest"]["cadenceHours"] == 24, "Hatchery 1's reminders untouched"
+    snooze = datetime.fromisoformat(tasks["brine_hatch_harvest_v2"]["snoozedUntil"])
+    assert abs((snooze - (now + timedelta(hours=16))).total_seconds()) < 60
+    payload = conn.results[-1].payload
+    assert payload["previous"] == 16 and payload["hours"] == 18 and payload["vessels"] == ["v2"]
+    assert payload["restamped"][0]["id"] == "v2"
+    # A sweep by egg type re-times only the hatcheries running those cysts.
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 2, "hours": 30, "egg_type": "standard"}))
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    assert vessels["v1"]["hatchHours"] == 30 and vessels["v2"]["hatchHours"] == 18
+    assert conn.results[-1].payload["vessels"] == ["v1"]
+    run(integration.websocket_nps_hatch_clock(hass, conn, {"id": 3, "hours": 30, "egg_type": "unicorn"}))
+    assert conn.errors[-1].code == "unknown_egg_type"
+
+
+def test_save_config_follows_each_vessels_own_clock():
+    now = datetime.now(timezone.utc)
+    entry = _rack_entry(now)
+    cfg = entry.options[CONF_SETTINGS]
+    for vid, hours in (("v1", 24), ("v2", 16)):
+        cfg["nps"]["hatchery"]["vessels"][vid]["state"] = {
+            "hatchStartedAt": (now - timedelta(hours=1)).isoformat(),
+            "eggType": cfg["nps"]["hatchery"]["vessels"][vid]["eggType"],
+            "hatchHours": hours, "readyNotifiedAt": ""}
+    incoming = _deepcopy(cfg)
+    incoming["nps"]["hatchery"]["vessels"]["v2"]["hatchHours"] = 20   # the settings field, Hatchery 2 only
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_save_config(hass, conn, {"id": 1, "config": incoming}))
+    saved = entry.options[CONF_SETTINGS]
+    vessels = saved["nps"]["hatchery"]["vessels"]
+    assert vessels["v2"]["state"]["hatchHours"] == 20, "Hatchery 2's running batch follows its clock"
+    assert vessels["v1"]["state"]["hatchHours"] == 24, "Hatchery 1's batch stays on its own clock"
+    tasks = saved["maintenance"]["tasks"]
+    assert tasks["brine_hatch_harvest_v2"]["cadenceHours"] == 20 and tasks["brine_hatch_harvest"]["cadenceHours"] == 24
+    snooze = datetime.fromisoformat(tasks["brine_hatch_harvest_v2"]["snoozedUntil"])
+    assert abs((snooze - (now + timedelta(hours=19))).total_seconds()) < 60
+
+
+def test_ws_cysts_opened_stamps_one_pouch_or_every_pouch():
+    now = datetime.now(timezone.utc)
+    entry = _rack_entry(now)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_cysts_opened(hass, conn, {"id": 1, "vessel_id": "v2"}))
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    v2_opened = datetime.fromisoformat(vessels["v2"]["cysts"]["openedAt"])
+    assert abs((v2_opened - now).total_seconds()) < 60
+    v1_opened = datetime.fromisoformat(vessels["v1"]["cysts"]["openedAt"])
+    assert abs((v1_opened - (now - timedelta(days=30))).total_seconds()) < 60, "Hatchery 1's old pouch stays old"
+    # The summary says so per vessel; the legacy field carries the primary's.
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    by_id = {v["id"]: v for v in hatchery["vessels"]}
+    assert by_id["v1"]["cysts"]["status"] == "old" and by_id["v2"]["cysts"]["status"] == "fresh"
+    assert by_id["v1"]["eggType"] == "standard" and by_id["v2"]["eggType"] == "decapsulated"
+    assert by_id["v1"]["hatchHours"] == 24 and by_id["v2"]["hatchHours"] == 16
+    assert by_id["v2"]["tasks"] == {"start": "brine_hatch_start_v2", "harvest": "brine_hatch_harvest_v2"}
+    assert "learned" in by_id["v2"] and "temp" in by_id["v2"]
+    assert hatchery["primaryVessel"] == "v1" and hatchery["cysts"]["status"] == "old"
+    # No vessel named: one pouch for the whole rack.
+    run(integration.websocket_nps_cysts_opened(hass, conn, {"id": 3}))
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    assert all(abs((datetime.fromisoformat(v["cysts"]["openedAt"]) - now).total_seconds()) < 60
+               for v in vessels.values())
+    run(integration.websocket_nps_cysts_opened(hass, conn, {"id": 4, "vessel_id": "nope"}))
+    assert conn.errors[-1].code == "unknown_vessel"
+
+
+def test_ws_summary_plans_the_next_hatch_on_the_idle_vessels_clock():
+    now = datetime.now(timezone.utc)
+    entry = _rack_entry(now)
+    cfg = entry.options[CONF_SETTINGS]
+    # Hatchery 1 is busy; the next batch goes into Hatchery 2 — a 16 h batch.
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=3)).isoformat(),
+        "eggType": "standard", "hatchHours": 24, "readyNotifiedAt": ""}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    assert hatchery["idleVessel"] == "v2"
+    assert hatchery["nextHatch"]["hatchHours"] == 16, "the next start is planned on Hatchery 2's clock"
+    assert hatchery["state"]["status"] == "incubating" and hatchery["eggType"] == "standard" \
+        and hatchery["hatchHours"] == 24, "the compact surfaces quote the running batch"
+    by_id = {v["id"]: v for v in hatchery["vessels"]}
+    assert by_id["v1"]["state"]["hatchHours"] == 24 and by_id["v1"]["state"]["eggType"] == "standard"
+    assert by_id["v2"]["state"]["hatchHours"] is None and by_id["v2"]["state"]["eggType"] == ""
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

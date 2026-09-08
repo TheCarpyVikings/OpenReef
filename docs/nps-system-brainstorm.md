@@ -378,7 +378,9 @@ schedule and advise; we don't robotically harvest).
 ### 9.7 Open questions for Reece (the grill) · **ANSWERED 2026-08-16 — decisions LOCKED**
 
 > 1. loadVolumeMl per-setup, **default top-to-full**. 2. Stale-first is a **HARD
-> GATE** (discard unlocks load). 3. **Cap 4 vessels, ONE global egg type**.
+> GATE** (discard unlocks load). 3. **Cap 4 vessels, ONE global egg type** —
+> *reversed 2026-09-08 (0.7.147, §9.9): egg type, clock, pouch and reminders are
+> per hatchery now that Reece runs two with different cysts.*
 > 4. Hand-feed: **both** — one-tap "Fed X ml" AND scheduled hand-feed reminders.
 > 5. Cyst tin: **later** (not v2). 6. Learned hatch times: **v2**. 7. Temperature
 > link: **v2**. 8. Hour-precise hatch-ready push: **yes**. 9. Hand-doser brine
@@ -414,6 +416,61 @@ schedule and advise; we don't robotically harvest).
 - **H-C presence**: hatchery strip + container visual, pour animation, demo stage,
   Pulse insights.
 - **H-D options** (per grill): cyst inventory, learned hours, temperature advisory.
+
+### 9.9 Per-hatchery settings and reminders (2026-09-08, 0.7.147)
+
+Reece installed the second hatchery and tapped *Sync hatchery reminders*: it
+"only worked for one hatchery". It had, by design — the §9.7-Q3 answer was one
+global egg type, so there was one `brine_hatch_start` / `brine_hatch_harvest`
+pair, and its harvest snooze tracked whichever batch ripened *soonest*. With two
+cones running, Hatchery 2 could never own a reminder. The same global carried
+`hatchHours` and the cysts pouch, so two vessels with different cysts had no way
+to say so. Decision reversed; the model is now:
+
+```
+nps.hatchery.vessels.<vid>: {
+  name, volumeL,
+  eggType, hatchHours,            # THIS hatchery's cysts + clock for its NEXT batch
+  cysts: { openedAt },            # THIS hatchery's pouch
+  state: { hatchStartedAt, eggType, hatchHours, readyNotifiedAt }   # per-batch stamps (unchanged)
+}
+nps.hatchery.{eggType, hatchHours, cysts}   # legacy globals: seed a vessel without its own; not shown in Settings
+```
+
+- **Migration is silent.** The normaliser fills a vessel's `eggType` /
+  `hatchHours` / `cysts` from the old globals when absent, so nothing moves on
+  the first save. New vessels seed from the first one (panel `nps-add-vessel`).
+- **Reminders are one pair per hatchery.** `_nps_hatch_task_ids(vid)` (backend)
+  and `_npsHatchTaskIds(vid)` (panel) are LOCKSTEP: `v1` keeps the original
+  unsuffixed ids so existing reminders, completions and history carry straight
+  on; every other vessel gets `brine_hatch_start_<vid>` / `brine_hatch_harvest_<vid>`.
+  Labels carry the vessel name when there is more than one; a keeper's own
+  rename survives a re-sync. The seeder prunes pairs whose vessel is gone;
+  removing a vessel in Settings deletes its pair. The hand-feed nag stays
+  single (one container).
+- **Every anchor is per vessel.** `_nps_hatch_sync_reminders(..., vessel_id)`
+  and `_nps_hatch_retime_reminders(..., vessel_id)` log/snooze only that
+  vessel's pair; the harvest snooze is that vessel's own `start + hatchHours`
+  (`_nps_vessel_ready_at`), never the rack-wide soonest. `_nps_soonest_ready`
+  survives only for the chain maths.
+- **The hatch-clock contract (§11) is per vessel.** Surface (1) is now
+  `vessels.<id>.hatchHours`. `nps_hatch_clock` with `vessel_id` sets THAT
+  clock (and aligns that batch with no hours); with `hours` and no vessel it
+  sweeps — optionally filtered by `egg_type` — and the legacy global follows.
+  `_nps_hatch_clock_follow` compares each vessel's old/new clock on save. The
+  learned chip, the temperature line and the reminder-drift line are per
+  vessel on the card, each button aimed at its vessel.
+- **The pouch is per vessel.** `nps_cysts_opened` takes `vessel_id`; with none
+  it stamps every vessel (one pouch feeding the rack — Settings offers that
+  when there is more than one). The save guard copies `vessel.cysts` like
+  `vessel.state`. Pulse pushes one pouch insight per vessel.
+- **Summary shape.** `vessels[]` now carries the vessel's own `eggType` /
+  `hatchHours` (settings), `state.eggType` / `state.hatchHours` (the running
+  batch's stamps, empty when idle), `cysts`, `learned`, `temp` and
+  `tasks.{start,harvest}`. Top-level `eggType` / `hatchHours` / `cysts` /
+  `learned` / `temp` are the **primary** vessel's (`primaryVessel`) for the
+  compact surfaces; `nextHatch` plans on the idle vessel's clock;
+  `vesselsNeeded` uses the slowest clock on the rack.
 
 ---
 
@@ -621,7 +678,7 @@ four different things hang off, and they must move as one:
 
 | # | Surface | Owner | Rule |
 |---|---------|-------|------|
-| 1 | `nps.hatchery.hatchHours` | config | the clock for the **next** batch |
+| 1 | `nps.hatchery.vessels.<id>.hatchHours` (was the global `nps.hatchery.hatchHours` until 0.7.147, §9.9) | config | the clock for **that hatchery's next** batch |
 | 2 | `vessels.<id>.state.hatchHours` | per-batch stamp | the countdown already running |
 | 3 | `state.readyNotifiedAt` | per-batch stamp | the once-per-batch ready push |
 | 4 | `maintenance.tasks.brine_hatch_*` `cadenceHours` + harvest `snoozedUntil` | maintenance | when the phone actually nags |

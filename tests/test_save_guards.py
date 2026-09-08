@@ -236,6 +236,8 @@ def _nps_stored():
             "hatchery": {
                 "enabled": True, "eggType": "standard", "hatchHours": 24,
                 "vessels": {"v1": {"name": "Hatchery 1", "volumeL": 1.0,
+                                   "eggType": "standard", "hatchHours": 24,
+                                   "cysts": {"openedAt": _iso(EARLIER)},
                                    "state": {"hatchStartedAt": _iso(EARLIER),
                                              "eggType": "standard", "hatchHours": 24,
                                              "readyNotifiedAt": ""}}},
@@ -265,6 +267,9 @@ def test_nps_runtime_survives_a_stale_save():
     nps["truce"]["state"] = {}
     nps["hatchery"]["vessels"]["v1"]["state"] = {"hatchStartedAt": ""}
     nps["hatchery"]["vessels"]["v1"]["name"] = "Left rack"   # the client's edit
+    nps["hatchery"]["vessels"]["v1"]["eggType"] = "decapsulated"   # the client's edit (0.7.147)
+    nps["hatchery"]["vessels"]["v1"]["hatchHours"] = 16
+    nps["hatchery"]["vessels"]["v1"]["cysts"] = {"openedAt": ""}   # stale: stamped since
     nps["hatchery"]["reservoir"]["remainingMl"] = 500.0
     nps["hatchery"]["reservoir"]["volumeMl"] = 700.0         # the client's edit
     nps["hatchery"]["reservoir"]["fridgeSavedH"] = 0
@@ -276,6 +281,10 @@ def test_nps_runtime_survives_a_stale_save():
     assert nps["truce"]["state"]["skimmer"]["turnedOff"] == ["switch.skimmer"]
     assert nps["hatchery"]["vessels"]["v1"]["state"]["hatchStartedAt"] == _iso(EARLIER)
     assert nps["hatchery"]["vessels"]["v1"]["name"] == "Left rack"
+    assert nps["hatchery"]["vessels"]["v1"]["eggType"] == "decapsulated" \
+        and nps["hatchery"]["vessels"]["v1"]["hatchHours"] == 16, "per-hatchery settings are the client's"
+    assert nps["hatchery"]["vessels"]["v1"]["cysts"]["openedAt"] == _iso(EARLIER), \
+        "the per-vessel pouch stamp is a tap, not a setting (0.7.147)"
     assert nps["hatchery"]["reservoir"]["remainingMl"] == 120.0
     assert nps["hatchery"]["reservoir"]["volumeMl"] == 700.0
     assert nps["hatchery"]["reservoir"]["fridgeSavedH"] == 3.5
