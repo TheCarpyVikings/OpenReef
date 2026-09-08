@@ -3481,6 +3481,55 @@ def test_ws_cysts_opened_stamps_one_pouch_or_every_pouch():
     assert conn.errors[-1].code == "unknown_vessel"
 
 
+def test_next_hatch_two_cones_running_anchors_on_the_last_load():
+    """Reece's screen, 2026-09-08 — Hatchery 1 at 1.2/36 h, Hatchery 2 at
+    24.4/36 h, 500 ml loaded 2.9 h ago on a 24 h shelf. The next batch must
+    land before the LAST load (Hatchery 1's, +34.8 h, fading +58.8 h + the
+    1 h harvest buffer) goes stale: 59.8 - 37 = start at +22.8 h."""
+    now = NOW
+    s = nps.next_hatch_suggestion(
+        now, 36, _iso(now - timedelta(hours=2.9)), 24, 500, 500,
+        [{"startedAt": _iso(now - timedelta(hours=1.2)), "hatchHours": 36, "id": "v1"},
+         {"startedAt": _iso(now - timedelta(hours=24.4)), "hatchHours": 36, "id": "v2"}],
+        chain_shelf_hours=24)
+    assert s["status"] == "chained" and s["driver"] == "chain"
+    assert abs(s["hoursUntil"] - 22.8) < 0.05, s
+    assert s["chainVessel"] == "v1", "the anchor is the cone that loads LAST, not the one that harvests next"
+    loads_at = datetime.fromisoformat(s["chainLoadsAt"])
+    assert abs((loads_at - (now + timedelta(hours=34.8))).total_seconds()) < 5
+    ready_by = datetime.fromisoformat(s["readyBy"])
+    assert abs((ready_by - (now + timedelta(hours=59.8))).total_seconds()) < 5
+    assert s["overlap"] is True and s["busyCount"] == 2
+    # Hatchery 2 alone (its load lands +11.6 h, fades +35.6 h; a 37 h lead
+    # is already too long) -> start now, and it is the incoming harvest.
+    s2 = nps.next_hatch_suggestion(
+        now, 36, _iso(now - timedelta(hours=2.9)), 24, 500, 500,
+        [{"startedAt": _iso(now - timedelta(hours=24.4)), "hatchHours": 36, "id": "v2"}],
+        chain_shelf_hours=24)
+    assert s2["status"] == "start_now" and s2["chainVessel"] == "v2"
+
+
+def test_ws_summary_primary_is_the_cone_nearest_harvest_and_next_start_is_the_first_free():
+    now = datetime.now(timezone.utc)
+    entry = _rack_entry(now)
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["vessels"]["v1"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=1.2)).isoformat(),
+        "eggType": "standard", "hatchHours": 24, "readyNotifiedAt": ""}
+    cfg["nps"]["hatchery"]["vessels"]["v2"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=10)).isoformat(),
+        "eggType": "decapsulated", "hatchHours": 16, "readyNotifiedAt": ""}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    assert hatchery["primaryVessel"] == "v2", "the mission row quotes the cone nearest harvest, not the first id"
+    assert hatchery["state"]["percent"] > 60 and hatchery["eggType"] == "decapsulated" and hatchery["hatchHours"] == 16
+    assert hatchery["idleVessel"] == "" and hatchery["nextStartVessel"] == "v2", "every cone busy: the next start goes where the first harvest frees a cone"
+    assert hatchery["nextHatch"]["hatchHours"] == 16, "and is planned on THAT cone's clock"
+    assert hatchery["nextHatch"]["chainVessel"] == "v1", "while the deadline is the LAST load"
+
+
 def test_ws_summary_plans_the_next_hatch_on_the_idle_vessels_clock():
     now = datetime.now(timezone.utc)
     entry = _rack_entry(now)

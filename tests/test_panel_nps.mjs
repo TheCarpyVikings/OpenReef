@@ -1467,12 +1467,33 @@ test("next-hatch wording names what sets the deadline, and an empty container de
     panel._nps.summary.feedExchange.prime = { status: "unknown" };
     let html = panel._hatcheryPanel();
     assert(html.includes("before the incoming harvest (Hatchery 1) fades"), "the deadline is the incoming harvest, by name");
+    // Two cones running (Reece's screen, 2026-09-08: Hatchery 1 at 3 %,
+    // Hatchery 2 at 68 %): the anchor is the LAST load, and saying "the
+    // incoming harvest (Hatchery 1)" read as a wrong answer. Tell the chain.
+    panel._nps.summary.hatchery.vessels[0].state = { status: "incubating", hoursElapsed: 1.2, hoursLeft: 34.8, percent: 3 };
+    panel._nps.summary.hatchery.vessels[1].state = { status: "incubating", hoursElapsed: 24.4, hoursLeft: 11.6, percent: 68 };
+    panel._nps.summary.hatchery.nextStartVessel = "v2";
+    panel._nps.summary.hatchery.vesselsNeeded = 2;
+    panel._nps.summary.hatchery.nextHatch = { status: "chained", startAt: new Date(Date.parse(NOW) + 22.8 * 3600000).toISOString(),
+      hoursUntil: 22.8, readyBy: "", driver: "chain", chainVessel: "v1", hatchHours: 36, shelfHours: 24, overlap: true, busyCount: 2 };
+    const two = panel._hatcheryPanel();
+    assert(two.includes("in Hatchery 2 — keeps the chain unbroken: Hatchery 2 harvests in ~11.6 h, then Hatchery 1 harvests in ~34.8 h — a fresh batch lands before the last load in the chain (Hatchery 1's) fades"),
+      `the chain is told in order: ${two.slice(two.indexOf("🔗"), two.indexOf("🔗") + 260)}`);
+    assert(!two.includes("incoming harvest (Hatchery 1)"), "no more 'incoming harvest' for the last load");
+    assert(two.includes("your 2 hatcheries stagger for this") && !two.includes("a second hatcher helps"), "the overlap hint knows the rack already has two cones");
+    panel._nps.summary.hatchery.vessels[1].state = { status: "none" };
+    panel._nps.summary.hatchery.vesselsNeeded = 1;
+    panel._nps.summary.hatchery.nextHatch = { status: "start_now", startAt: NOW, hoursUntil: 0, readyBy: NOW, driver: "chain",
+      chainVessel: "v1", hatchHours: 38, shelfHours: 50, overlap: true, busyCount: 1 };
     assert(!html.includes("before the loaded brine fades"), "nothing is loaded — that wording contradicts the empty container");
     assert(html.includes("Container is empty — the feeding bottle holds the live food (500 ml, enriched, ~46 h left)"),
       "the prime line must not say 'no hatch loaded' beside a full bottle");
     assert(!html.includes("No hatch loaded yet"), "the old line is gone while the bottle holds brine");
     let tab = panel._hatcheryTab();
     assert(tab.includes("before the incoming harvest fades"), "the hero card names the driver too");
+    panel._nps.summary.hatchery.vessels[1].state = { status: "incubating", hoursElapsed: 24.4, hoursLeft: 11.6, percent: 68 };
+    assert(panel._hatcheryTab().includes("before the chain&#039;s last load fades"), "with two cones running the hero card says which load");
+    panel._nps.summary.hatchery.vessels[1].state = { status: "none" };
     // Chained on the bottle's fade: the line says so.
     panel._nps.summary.hatchery.nextHatch = { status: "chained", startAt: new Date(Date.parse(NOW) + 7 * 3600000).toISOString(),
       hoursUntil: 7, driver: "freshness", chainVessel: "v1", hatchHours: 38, shelfHours: 50, overlap: false, busyCount: 1 };
@@ -1696,6 +1717,15 @@ test("settings are per hatchery: own cysts, own clock, own pouch (0.7.147)", asy
     assert(card.includes("Decapsulated cysts · 16 h") && card.includes("Standard cysts (GSL) · 24 h"), "each tile states its own cysts and clock");
     assert(card.includes("📈 Hatchery 1: your last 4 Standard cysts (GSL) batches"), "learned advice is per hatchery");
     assert(card.includes('data-action="nps-apply-learned-hours" data-hours="30" data-id="v1"'), "and applies to THAT hatchery");
+    // Two cones on the same cysts and clock say it ONCE, named for both,
+    // and the button sweeps that egg type (Reece's screen showed it twice).
+    panel._nps.summary.hatchery.vessels[1] = { ...panel._nps.summary.hatchery.vessels[0], id: "v2", name: "Hatchery 2",
+      temp: { available: true, tempC: 25.1, factor: 1.23, expectedHours: 29.6, ratedHours: 24, warm: false } };
+    panel._nps.summary.hatchery.vessels[0].temp = { available: true, tempC: 25.1, factor: 1.23, expectedHours: 29.6, ratedHours: 24, warm: false };
+    const same = panel._hatcheryPanel();
+    assert(same.split("📈").length === 2 && same.includes("📈 Hatchery 1 &amp; Hatchery 2: your last 4"), "one learned line for both cones");
+    assert(same.includes('data-hours="30" data-egg="standard"'), "the shared chip sweeps the egg type");
+    assert(same.split("🌡️").length === 2 && same.includes("🌡️ Hatchery 1 &amp; Hatchery 2: hatchery runs 25.1 °C"), "one temperature line for both cones");
     // Removing a hatchery takes its reminders with it.
     delete hatchery.vessels.v2;
     panel._npsHatchTaskIds("v2").forEach((tid) => { delete panel._config.maintenance.tasks[tid]; });

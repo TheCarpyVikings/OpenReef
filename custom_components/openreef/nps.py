@@ -774,6 +774,7 @@ def next_hatch_suggestion(
         "overlap": shelf_h < lead_h,
         "busyCount": len(running),
         "chainVessel": None,
+        "chainLoadsAt": None,
     }
 
     def _finish(status: str, start_at: datetime | None, ready_by: datetime | None,
@@ -814,6 +815,7 @@ def next_hatch_suggestion(
             key=lambda item: item[0],
         )
         base["chainVessel"] = anchor_id or None
+        base["chainLoadsAt"] = anchor_dt.isoformat()
         ready_by, driver = anchor_dt + timedelta(hours=HATCH_HARVEST_BUFFER_H + chain_shelf_h), "chain"
         if supply_end is not None and supply_end > ready_by:
             ready_by, driver = supply_end, supply_driver

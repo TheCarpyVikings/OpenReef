@@ -16379,13 +16379,23 @@ async def websocket_nps_summary(
             "temp": _temp_advice_for(vessel["eggType"]),
             "tasks": {"start": start_id, "harvest": harvest_id},
         })
-        if (not primary_vessel
-                or status_rank.get(hatch_st["status"], 0) > status_rank.get(primary_state["status"], 0)):
+        # The primary is the batch nearest harvest: a higher status wins, and
+        # between two incubating cones the one with fewer hours to go (Reece's
+        # screen, 2026-09-08: the mission row quoted the 3 % cone over the 68 %).
+        rank, prev = status_rank.get(hatch_st["status"], 0), status_rank.get(primary_state["status"], 0)
+        left = hatch_st.get("hoursLeft")
+        prev_left = primary_state.get("hoursLeft")
+        if (not primary_vessel or rank > prev
+                or (rank == prev and left is not None and prev_left is not None and left < prev_left)):
             primary_state = hatch_st
             primary_vessel = vid
-    # The batch that starts next goes into the first idle vessel (doc §9.3),
-    # so its clock is the one the next-hatch maths plans on.
-    next_start_vessel = hatchery_cfg["vessels"].get(idle_vessel or primary_vessel) or {}
+    # The batch that starts next goes into the first idle vessel (doc §9.3) —
+    # or, with every cone busy, the one that frees first — so its clock is
+    # the one the next-hatch maths plans on.
+    soonest_free = min(_nps_running_batches(config), default=None,
+                       key=lambda item: item[1] + timedelta(hours=item[2]))
+    next_start_id = idle_vessel or (soonest_free[0] if soonest_free else primary_vessel)
+    next_start_vessel = hatchery_cfg["vessels"].get(next_start_id) or {}
     next_start_hours = _awc_num(next_start_vessel.get("hatchHours"), hatchery_cfg["hatchHours"], 8, 48)
     primary_cfg = hatchery_cfg["vessels"].get(primary_vessel) or {}
     primary_egg = primary_state.get("eggType") or primary_cfg.get("eggType") or hatchery_cfg["eggType"]
@@ -16486,6 +16496,7 @@ async def websocket_nps_summary(
             "vessels": vessels_payload,
             "idleVessel": idle_vessel,
             "primaryVessel": primary_vessel,
+            "nextStartVessel": next_start_id,
             # Structural: the slowest clock on the rack sets how many vessels
             # continuous supply needs.
             "vesselsNeeded": nps_engine.vessels_needed(

@@ -1923,7 +1923,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-hand-feed") this._npsCall({ type: "openreef/nps_hand_feed", ...(target.dataset.slot ? { slot: target.dataset.slot } : {}) },
         target.dataset.slot ? `Fed — filed as the ${target.dataset.slot} feed.` : "Hand-feed logged — the container keeps count.");
       if (action === "nps-apply-learned-hours") {
-        this._npsApplyLearnedHours(Number(target.dataset.hours), target.dataset.id || "");
+        this._npsApplyLearnedHours(Number(target.dataset.hours), target.dataset.id || "", target.dataset.egg || "");
       }
       if (action === "nps-align-clock") this._npsAlignClock(target.dataset.id || "");
       if (action === "nps-add-hatch-reminders") this._npsSeedHatchReminders();
@@ -10278,8 +10278,8 @@ class OpenReefPanel extends HTMLElement {
   // carries a cadence, so a config-only write leaves most of the page quoting
   // the old hours. One command moves all three, and it fetches fresh rather
   // than saving this page's snapshot of the whole config over the ledger.
-  async _npsApplyLearnedHours(rawHours, vesselId = "") {
-    return this._npsSetClock({ hours: rawHours, vesselId });
+  async _npsApplyLearnedHours(rawHours, vesselId = "", eggType = "") {
+    return this._npsSetClock({ hours: rawHours, vesselId, eggType });
   }
 
   // --- Per-hatchery settings (0.7.147) --------------------------------------
@@ -10318,7 +10318,7 @@ class OpenReefPanel extends HTMLElement {
     return this._npsSetClock({ vesselId: vesselId || "" });
   }
 
-  async _npsSetClock({ hours: rawHours = null, vesselId = "" } = {}) {
+  async _npsSetClock({ hours: rawHours = null, vesselId = "", eggType = "" } = {}) {
     const hours = rawHours == null
       ? null : Math.max(8, Math.min(48, Math.round(Number(rawHours) || 0)));
     if (rawHours != null && !hours) return;
@@ -10330,6 +10330,7 @@ class OpenReefPanel extends HTMLElement {
     const call = { type: "openreef/nps_hatch_clock" };
     if (hours != null) call.hours = hours;
     if (vesselId) call.vessel_id = vesselId;
+    else if (eggType) call.egg_type = eggType;
     try {
       const res = await this._callWS(call);
       if (res && res.config) {
@@ -10634,23 +10635,40 @@ class OpenReefPanel extends HTMLElement {
     // What sets the deadline (0.7.118): the incoming harvest (named), or the
     // brine on hand — which may be the feeding bottle rather than the container.
     const hatchSum = this._nps?.summary?.hatchery || {};
-    const chainName = (Array.isArray(hatchSum.vessels)
-      ? hatchSum.vessels.find((v) => v.id === next.chainVessel) : null)?.name;
+    const vesselsSum = Array.isArray(hatchSum.vessels) ? hatchSum.vessels : [];
+    const chainName = vesselsSum.find((v) => v.id === next.chainVessel)?.name;
     const bottleOnly = (Number(hatchSum.fridgeBottle?.remainingMl) || 0) > 0
       && !((Number(hatchSum.reservoir?.remainingMl) || 0) > 0);
+    // The chain, in the order it lands (Reece, 2026-09-08: "the incoming
+    // harvest (Hatchery 1)" read as the NEXT harvest, when the maths anchors
+    // on the LAST load — the one whose brine the next batch must beat).
+    const running = vesselsSum
+      .filter((v) => ["incubating", "ready", "overdue"].includes(v.state?.status))
+      .sort((a, b) => (Number(a.state?.hoursLeft) || 0) - (Number(b.state?.hoursLeft) || 0));
+    const chainStory = running.length > 1
+      ? ` ${running.map((v, i) => `${i ? "then " : ""}${this._escape(v.name)} ${Number(v.state?.hoursLeft) > 0 ? `harvests in ~${this._escape(String(v.state.hoursLeft))} h` : "is ready to harvest"}`).join(", ")} —`
+      : "";
     const why = next.driver === "depletion"
       ? (bottleOnly ? "the feeding bottle runs dry" : "the reservoir runs dry")
       : next.driver === "chain"
-        ? `the incoming harvest${chainName ? ` (${this._escape(chainName)})` : ""} fades`
+        ? (running.length > 1
+          ? `the last load in the chain${chainName ? ` (${this._escape(chainName)}'s)` : ""} fades`
+          : `the incoming harvest${chainName ? ` (${this._escape(chainName)})` : ""} fades`)
         : bottleOnly ? "the feeding bottle's brine fades" : "the loaded brine fades";
-    const fridgeHint = "a second hatcher helps — or tap ❄ Refrigerate on the loaded brine: it drains into a feeding bottle in the fridge (the clock slows to the 48 h rate from that moment) and the container is free for the next hatch";
+    const nextStartName = vesselsSum.find((v) => v.id === hatchSum.nextStartVessel)?.name;
+    const inVessel = nextStartName && vesselsSum.length > 1 ? ` in ${this._escape(nextStartName)}` : "";
+    const needed = Number(hatchSum.vesselsNeeded) || 0;
+    const rackHint = vesselsSum.length >= 2 && vesselsSum.length >= needed
+      ? `your ${this._escape(String(vesselsSum.length))} hatcheries stagger for this`
+      : "a second hatcher helps";
+    const fridgeHint = `${rackHint} — or tap ❄ Refrigerate on the loaded brine: it drains into a feeding bottle in the fridge (the clock slows to the 48 h rate from that moment) and the container is free for the next hatch`;
     const overlapNote = next.overlap
       ? (Number(next.shelfHours) >= Number(next.hatchHours)
         ? ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch plus harvest time uses the brine's whole ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`
         : ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch outlives the brine's ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`)
       : "";
     if (next.status === "chained") {
-      return `🔗 Next hatch: start ${when} — keeps the chain unbroken (a fresh batch lands before ${why}).${overlapNote}`;
+      return `🔗 Next hatch: start ${when}${inVessel} — keeps the chain unbroken:${chainStory} a fresh batch lands before ${why}.${overlapNote}`;
     }
     if (next.status === "wait") {
       return `🥚 Next hatch: start ${when} — timed so a ${this._escape(String(next.hatchHours))} h batch is ready before ${why}.${overlapNote}`;
@@ -12345,18 +12363,29 @@ class OpenReefPanel extends HTMLElement {
                               egg: (this._npsEggTypes().find((e) => e.id === v.eggType) || {}).name || eggName,
                               learned: v.learned || {}, temp: v.temp || {} }))
       : [{ id: "", name: "", hours: hatchHours, egg: eggName, learned: hatch.learned || {}, temp: hatch.temp || {} }];
-    const who = (t) => (multi && t.name ? `${this._escape(t.name)}: ` : "");
-    const learnedLine = adviceTargets.map((t) => {
+    // Cones on the same cysts and the same clock get the same advice — say
+    // it once, named for both, and the button moves both (an egg-type sweep).
+    const grouped = [];
+    adviceTargets.forEach((t) => {
+      const key = JSON.stringify([t.egg, t.hours, t.learned, t.temp]);
+      const g = grouped.find((x) => x.key === key);
+      if (g) { g.names.push(t.name); g.ids.push(t.id); } else grouped.push({ ...t, key, names: [t.name], ids: [t.id] });
+    });
+    const who = (t) => (multi && t.names.some(Boolean) ? `${this._escape(t.names.filter(Boolean).join(" & "))}: ` : "");
+    const target = (t) => (t.ids.length > 1
+      ? `data-egg="${this._escape(vessels.find((v) => v.id === t.ids[0])?.eggType || "")}"`
+      : t.id ? `data-id="${this._escape(t.id)}"` : "");
+    const learnedLine = grouped.map((t) => {
       const learned = t.learned;
       return learned.available && Math.abs(Number(learned.hours) - t.hours) >= 2
-        ? `📈 ${who(t)}your last ${this._escape(String(learned.samples))} ${this._escape(t.egg)} batches actually ran ~${this._escape(String(learned.hours))} h (clock says ${this._escape(String(t.hours))} h). <button class="secondary compact-button" data-action="nps-apply-learned-hours" data-hours="${this._escape(String(learned.hours))}" ${t.id ? `data-id="${this._escape(t.id)}"` : ""}>Set clock to ${this._escape(String(Math.round(learned.hours)))} h</button>`
+        ? `📈 ${who(t)}your last ${this._escape(String(learned.samples))} ${this._escape(t.egg)} batches actually ran ~${this._escape(String(learned.hours))} h (clock says ${this._escape(String(t.hours))} h). <button class="secondary compact-button" data-action="nps-apply-learned-hours" data-hours="${this._escape(String(learned.hours))}" ${target(t)}>Set clock to ${this._escape(String(Math.round(learned.hours)))} h</button>`
         : "";
     }).filter(Boolean).join("<br>");
     const temp = hatch.temp || {};
     // The stretch is measured against the RATED hours (0.7.115): a clock set
     // from the learned average already embodies this temperature, and
     // stretching it again said "expect 43.7 h" about batches that ran 36.
-    const tempLine = adviceTargets.map((t) => {
+    const tempLine = grouped.map((t) => {
       const tp = t.temp;
       const learned = t.learned;
       const ratedHours = Number(tp.ratedHours) || t.hours;
@@ -13731,7 +13760,7 @@ const rigSteps = [
         : next.status === "start_now" ? "now"
           : next.status === "overdue" ? "past due" : "—",
       next.status === "no_brine" || !next.status ? "nothing in play — start when ready"
-        : next.driver === "chain" ? "before the incoming harvest fades"
+        : next.driver === "chain" ? ((hatch.vessels || []).filter((v) => ["incubating", "ready", "overdue"].includes(v.state?.status)).length > 1 ? "before the chain's last load fades" : "before the incoming harvest fades")
           : next.driver === "depletion" ? (heroBottleOnly ? "before the bottle runs dry" : "before the container runs dry")
             : heroBottleOnly ? "before the bottle's brine fades" : "before the loaded brine fades",
       next.status === "start_now" || next.status === "overdue" ? "warning" : "ok", "hatchery");
