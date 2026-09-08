@@ -129,6 +129,120 @@ def category_label(category: str) -> str:
     return CATEGORY_LABELS.get(str(category or ""), "Other")
 
 
+# --------------------------------------------------------------------------- #
+# The hatchery stocks the shelf (doc §14, 0.7.149): the brine on hand is a
+# shelf entry the keeper never types in. Two physical vessels, two entries,
+# each on ITS batch's nutritional clock — the yolk window, or the boost window
+# once gut-loaded (hatch_prime_state) — with the hand feeds as its usage log.
+# --------------------------------------------------------------------------- #
+LIVE_BRINE_CONTAINER_ID = "live_brine_container"
+LIVE_BRINE_BOTTLE_ID = "live_brine_bottle"
+LIVE_BRINE_VESSELS = {
+    "container": {"id": LIVE_BRINE_CONTAINER_ID, "name": "Live baby brine (container)",
+                  "where": "the brine container"},
+    "bottle": {"id": LIVE_BRINE_BOTTLE_ID, "name": "Live baby brine (fridge bottle)",
+               "where": "the feeding bottle in the fridge"},
+}
+
+
+def live_brine_library() -> dict[str, Any]:
+    """The seeded 'Live baby brine' entry — its particle window is the one
+    fact the species matcher needs, kept in one place."""
+    for item in PRODUCT_LIBRARY:
+        if item.get("brand") == "Home hatchery":
+            return dict(item)
+    return {"particleUmMin": 400, "particleUmMax": 500}
+
+
+def live_brine_product(vessel: str, remaining_ml: Any, capacity_ml: Any,
+                       loaded_iso: Any, prime: dict[str, Any],
+                       hand_feeds: list[dict[str, Any]] | None = None,
+                       soak: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One live-brine shelf entry in the product shape every shelf reader
+    already understands, plus a ``live`` block that says where it came from
+    and where its clock sits. ``prime`` is ``hatch_prime_state`` for this
+    vessel's batch; ``soak`` (the enrichment state) marks a container mid
+    gut-load, whose yolk clock must NOT condemn it (doc §10.3.1).
+
+    Mid-soak the entry reads ``enriching`` with the soak's hours left; a
+    faded batch (yolk spent, or the boost gone) is ``expired`` — still on
+    the shelf until the keeper discards it, but no longer counted as
+    covering a mouth."""
+    meta = LIVE_BRINE_VESSELS.get(vessel) or LIVE_BRINE_VESSELS["container"]
+    lib = live_brine_library()
+    remaining = max(0.0, _f(remaining_ml))
+    capacity = max(remaining, _f(capacity_ml))
+    status = str(prime.get("status") or "unknown")
+    hours_left = prime.get("primeLeftHours")
+    window_h = prime.get("windowHours")
+    window = prime.get("window")
+    soaking = bool(soak and soak.get("status") == "enriching")
+    if soaking:
+        status, window = "enriching", "soak"
+        hours_left = soak.get("hoursLeft")
+        window_h = None
+    expired = (not soaking) and status in ("fading", "boost_fading", "unknown")
+    history = [
+        {"at": feed.get("at"), "ml": round(max(0.0, _f(feed.get("ml"))), 1), "kind": "dose"}
+        for feed in (hand_feeds or [])
+        if isinstance(feed, dict) and not feed.get("undoneAt")
+        and str(feed.get("from") or "container") == vessel and feed.get("at")]
+    enriched = bool(prime.get("enriched")) or soaking
+    return {
+        "name": meta["name"], "brand": "Home hatchery", "category": "zooLive",
+        "bottleMl": round(capacity, 1), "remainingMl": round(remaining, 1),
+        "lowThresholdMl": 0,
+        "openedAt": str(loaded_iso or ""),
+        "shelfLifeDaysOpened": round(_f(window_h) / 24.0, 3) if _f(window_h) > 0 else 0,
+        "refrigerated": bool(prime.get("refrigerated")), "stirDaily": False,
+        "particleUmMin": _f(lib.get("particleUmMin"), 400.0),
+        "particleUmMax": _f(lib.get("particleUmMax"), 500.0),
+        "notes": f"Stocked by the hatchery from {meta['where']} — the amount and the "
+                 "clock follow the ledger; feed from it and both update.",
+        "createdAt": str(loaded_iso or ""), "history": history,
+        "doseMl": 0, "doseEveryDays": 0, "doseEveryHours": 0, "doseFirstAt": "",
+        "doseTimesPerDay": 0, "doseWindowEnd": "", "doseStocking": "medium",
+        "doseGuide": {}, "doseNote": "", "lastDosedAt": "", "doseSkippedAt": "",
+        "live": {
+            "source": "hatchery", "vessel": vessel, "where": meta["where"],
+            "status": status, "window": window,
+            "hoursLeft": None if hours_left is None else round(max(0.0, _f(hours_left)), 1),
+            "windowHours": None if window_h is None else round(_f(window_h), 1),
+            "ageHours": prime.get("ageHours"),
+            "enriched": enriched,
+            "refrigerated": bool(prime.get("refrigerated")),
+            "expired": expired,
+            "loadedAt": str(loaded_iso or ""),
+        },
+    }
+
+
+def live_expiry_state(live: dict[str, Any]) -> dict[str, Any]:
+    """The shelf's expiry pill for a live entry, in HOURS off the nutritional
+    clock rather than days off an opened stamp: the last quarter of the
+    window is ``aging`` (the shelf's own AGING_FRACTION), the fade is
+    ``expired``. A soak in progress is fresh food that is not ready yet."""
+    hours_left = live.get("hoursLeft")
+    window_h = _f(live.get("windowHours"))
+    if live.get("status") == "enriching":
+        return {"status": "fresh", "daysLeft": None, "ageDays": None,
+                "hoursLeft": hours_left, "soaking": True}
+    if live.get("expired") or hours_left is None:
+        return {"status": "expired", "daysLeft": 0.0,
+                "ageDays": None if live.get("ageHours") is None else round(_f(live.get("ageHours")) / 24.0, 2),
+                "hoursLeft": 0.0, "soaking": False}
+    left_h = max(0.0, _f(hours_left))
+    if left_h <= 0:
+        status = "expired"
+    elif window_h > 0 and left_h <= window_h * AGING_FRACTION:
+        status = "aging"
+    else:
+        status = "fresh"
+    return {"status": status, "daysLeft": round(left_h / 24.0, 2),
+            "ageDays": None if live.get("ageHours") is None else round(_f(live.get("ageHours")) / 24.0, 2),
+            "hoursLeft": round(left_h, 1), "soaking": False}
+
+
 def usage_ml_per_day(product: dict[str, Any], now: datetime,
                      window_days: float = RUNWAY_WINDOW_DAYS) -> float | None:
     """Average daily use from the logged history window. ``dose`` (manual),
@@ -404,7 +518,11 @@ def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
     if low_threshold <= 0 and bottle > 0:
         low_threshold = bottle * LOW_PERCENT_DEFAULT / 100.0
     daily = usage_ml_per_day(product, now)
-    expiry = expiry_state(product, now)
+    live = product.get("live") if isinstance(product.get("live"), dict) else None
+    # A live entry (the hatchery's brine, doc §14) runs the nutritional clock
+    # in hours, and is never "low": the hatchery's next-hatch maths owns its
+    # runway, the shelf only reports it.
+    expiry = live_expiry_state(live) if live else expiry_state(product, now)
     days_left = round(remaining / daily, 1) if daily and daily > 0 else None
     return {
         "bottleMl": bottle,
@@ -412,13 +530,14 @@ def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
         "percent": round(remaining / bottle * 100.0, 1) if bottle > 0 else None,
         "usageMlPerDay": round(daily, 2) if daily else None,
         "daysUntilEmpty": days_left,
-        "low": bool(bottle > 0 and remaining <= low_threshold),
+        "low": bool(bottle > 0 and remaining <= low_threshold) and not live,
         "empty": bool(bottle > 0 and remaining <= 0),
         "expiry": expiry,
         "stirDaily": bool(product.get("stirDaily")),
         "refrigerated": bool(product.get("refrigerated")),
         "categoryLabel": category_label(product.get("category")),
         "handDose": hand_dose_state(product, now, tank_l, tz),
+        **({"live": dict(live)} if live else {}),
     }
 
 
@@ -1077,26 +1196,46 @@ def _ranges_overlap(a_min: float, a_max: float, b_min: float, b_max: float) -> b
 
 
 def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
-                      channels: dict[str, Any]) -> dict[str, Any]:
+                      channels: dict[str, Any],
+                      pending: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """The species compiler: what the selected livestock needs, whether the
     shelf and pumps cover it, and per-pump schedule suggestions. Advisory
     only — suggestions carry cadence/window shape; the keeper owns ml/day
-    (per-colony appetite is not something a library should guess)."""
+    (per-colony appetite is not something a library should guess).
+
+    ``pending`` (doc §14): food on the way but not on the shelf yet — a
+    hatch mid-incubation, a soak running — as ``{name, category,
+    particleUmMin, particleUmMax, note}``. A mouth nothing on the shelf
+    feeds, that a pending source WILL feed, is reported under ``soon``
+    rather than as a gap: the keeper has already done the right thing.
+    A live entry past its fade (``live.expired``) covers nothing."""
     selected = [_SPECIES_BY_ID[sid] for sid in selected_ids if sid in _SPECIES_BY_ID]
     gaps: list[str] = []
+    soon: list[str] = []
     warnings: list[str] = []
     suggestions: list[dict[str, Any]] = []
-    product_list = [p for p in products.values() if isinstance(p, dict)]
+    product_list = [p for p in products.values() if isinstance(p, dict)
+                    and not (isinstance(p.get("live"), dict) and p["live"].get("expired"))]
+    pending_list = [p for p in (pending or []) if isinstance(p, dict)]
+
+    def _feeds(p: dict[str, Any], sp: dict[str, Any]) -> bool:
+        return p.get("category") in sp["foods"] and _ranges_overlap(
+            p.get("particleUmMin"), p.get("particleUmMax"),
+            sp["particleUmMin"], sp["particleUmMax"])
 
     for sp in selected:
         # Shelf coverage: any product in the right category AND particle window?
-        covered = any(
-            p.get("category") in sp["foods"] and _ranges_overlap(
-                p.get("particleUmMin"), p.get("particleUmMax"),
-                sp["particleUmMin"], sp["particleUmMax"])
-            for p in product_list)
+        covered = any(_feeds(p, sp) for p in product_list)
         if not covered and sp["cadence"] != "target":
             wanted = " or ".join(sp["foods"])
+            coming = next((p for p in pending_list if _feeds(p, sp)), None)
+            if coming is not None:
+                note = str(coming.get("note") or "").strip()
+                soon.append(
+                    f"{sp['name']}: nothing on the shelf feeds it yet — "
+                    f"{coming.get('name') or 'live food'} will"
+                    f"{f' ({note})' if note else ''}.")
+                continue
             gaps.append(
                 f"{sp['name']}: nothing on the shelf feeds it "
                 f"(needs {wanted}, {sp['particleUmMin']:g}–{sp['particleUmMax']:g} µm).")
@@ -1149,6 +1288,7 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
         "species": [{"id": s["id"], "name": s["name"], "difficulty": s["difficulty"],
                      "cadence": s["cadence"], "note": s["note"]} for s in selected],
         "gaps": gaps,
+        "soon": soon,
         "warnings": warnings,
         "suggestions": suggestions,
     }
@@ -1230,12 +1370,18 @@ def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None,
     """The whole food shelf: per-product states plus the attention counts the
     tab header and (later) notifications read."""
     states: dict[str, dict[str, Any]] = {}
-    low = expired = dose_due = 0
+    low = expired = dose_due = live_n = 0
     for pid, product in products.items():
         if not isinstance(product, dict):
             continue
         state = consumable_state(product, now, tank_l, tz)
         states[str(pid)] = state
+        if state.get("live"):
+            # The hatchery's own entries (doc §14): counted on the shelf, but
+            # the hatchery card is the authority on their fade and runway —
+            # the attention counts (and the digest's nags) stay the bottles'.
+            live_n += 1
+            continue
         if state["low"] or state["empty"]:
             low += 1
         if state["expiry"]["status"] == "expired":
@@ -1243,7 +1389,7 @@ def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None,
         if state["handDose"]["clock"]["due"]:
             dose_due += 1
     return {"products": states, "lowCount": low, "expiredCount": expired,
-            "doseDueCount": dose_due, "count": len(states)}
+            "doseDueCount": dose_due, "count": len(states), "liveCount": live_n}
 
 
 # ---------------------------------------------------------------------------

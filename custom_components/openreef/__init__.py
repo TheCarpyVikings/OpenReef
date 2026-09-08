@@ -13970,6 +13970,95 @@ def _nps_fridge_bottle_state(config: dict[str, Any], now: datetime) -> dict[str,
     }
 
 
+def _nps_live_shelf(config: dict[str, Any], now: datetime
+                    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The hatchery stocks the shelf (doc §14, 0.7.149): the brine on hand
+    as shelf entries the keeper never types in, and the brine on its way as
+    ``pending`` sources for the coverage compiler.
+
+    Returns ``(products, pending)``. ``products`` holds up to two entries —
+    the container's load and the fridge bottle's — each in the product shape
+    with a ``live`` block (``nps.live_brine_product``), on ITS batch's
+    nutritional clock: the yolk window, the boost window once gut-loaded
+    (``hatch_prime_state``), or the soak's hours left mid-enrichment. The
+    hand feeds logged from that vessel are its usage history, so the runway
+    and the nutrient budget count the brine like any bottle.
+
+    When a feed-exchange pump is bound AND its channel's reservoir names a
+    real product, that product IS the container (doc §5.4) and no container
+    entry is made — one physical vessel, one card. The bottle is always the
+    hatchery's own. Nothing here is persisted: every summary rebuilds it
+    from the ledgers, which is what makes the amount and the clock follow."""
+    nps_cfg = config.get("nps") or {}
+    hatchery = _nps_hatchery_v2(config)
+    # No flag gates this: brine in a ledger is brine on hand, whichever tab
+    # the keeper drives the hatchery from (the standalone tab flag, 0.7.71,
+    # only decides where the card lives).
+    products: dict[str, Any] = {}
+    hand_feeds = [f for f in hatchery.get("handFeeds") or [] if isinstance(f, dict)]
+    fridge_saved_h = _nps_container_credit(config)
+    reservoir_cfg = hatchery["reservoir"]
+    enrich_cfg = hatchery["enrichment"]
+    enrich_st = enrich_cfg["state"]
+    soak = nps_engine.enrich_state(
+        enrich_st["startedAt"], enrich_st["enrichHours"], bool(enrich_cfg["splitDose"]),
+        enrich_st["secondDoseAt"], now, enrich_st["firstDoseAt"],
+        enrich_st["doseDelayH"], enrich_st["batchLoadedAt"])
+    # The container: the canonical ledger, unless a linked product already is it.
+    channels = _dosing_channels(config)
+    fx_channel = channels.get(str((nps_cfg.get("feedExchange") or {}).get("channelId") or ""))
+    linked_pid = (str((fx_channel.get("reservoir") or {}).get("productId") or "")
+                  if isinstance(fx_channel, dict) else "")
+    shelf_products = (config.get("consumables") or {}).get("products") or {}
+    container_is_product = bool(linked_pid) and isinstance(shelf_products.get(linked_pid), dict)
+    if not container_is_product:
+        reservoir = _nps_canonical_reservoir(config)
+        remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 50000)
+        loaded = str(reservoir.get("mixedAt") or "")
+        if remaining > 0 and loaded:
+            enriched_at = (str(reservoir_cfg.get("enrichedAt") or "")
+                           if reservoir_cfg.get("lastLoadEnriched") else "")
+            prime = nps_engine.hatch_prime_state(loaded, now, enriched_at,
+                                                 fridge_saved_h=fridge_saved_h)
+            products[nps_engine.LIVE_BRINE_CONTAINER_ID] = nps_engine.live_brine_product(
+                "container", remaining, _awc_num(reservoir.get("volumeMl"), 0, 0, 50000),
+                loaded, prime, hand_feeds, soak)
+    # The feeding bottle: its own batch, its own two-rate clock (doc §12.6).
+    bottle = hatchery["fridgeBottle"]
+    bottle_ml = _awc_num(bottle.get("remainingMl"), 0, 0, 50000)
+    bottle_loaded = str(bottle.get("mixedAt") or "")
+    if bottle_ml > 0 and bottle_loaded:
+        enriched_at = (str(bottle.get("enrichedAt") or "")
+                       if bottle.get("lastLoadEnriched") else "")
+        prime = nps_engine.hatch_prime_state(
+            bottle_loaded, now, enriched_at,
+            fridged_at_iso=str(bottle.get("refrigeratedAt") or ""),
+            fridge_saved_h=_awc_num(bottle.get("fridgeSavedH"), 0, 0, 240))
+        products[nps_engine.LIVE_BRINE_BOTTLE_ID] = nps_engine.live_brine_product(
+            "bottle", bottle_ml, bottle_ml, bottle_loaded, prime, hand_feeds)
+    # On its way: the batch that ripens soonest, or the soak that is running.
+    pending: list[dict[str, Any]] = []
+    lib = nps_engine.live_brine_library()
+    note = ""
+    if soak.get("status") == "enriching":
+        left = soak.get("hoursLeft")
+        note = ("the enrichment soak is running" if left is None
+                else f"the enrichment soak finishes in ~{float(left):.1f} h")
+    else:
+        running = _nps_running_batches(config)
+        if running:
+            vid, started, hours = min(running, key=lambda item: item[1] + timedelta(hours=item[2]))
+            name = str((hatchery["vessels"].get(vid) or {}).get("name") or vid)
+            left_h = (started + timedelta(hours=hours) - now).total_seconds() / 3600.0
+            note = (f"{name} is ready to harvest now" if left_h <= 0
+                    else f"{name} harvests in ~{left_h:.1f} h")
+    if note:
+        pending.append({"name": "live baby brine from the hatchery", "category": "zooLive",
+                        "particleUmMin": lib.get("particleUmMin", 400),
+                        "particleUmMax": lib.get("particleUmMax", 500), "note": note})
+    return products, pending
+
+
 def _nps_brine_supply_for_planning(
     config: dict[str, Any], now: datetime
 ) -> tuple[Any, float, Any, Any]:
@@ -16437,6 +16526,13 @@ async def websocket_nps_summary(
     })
     now_local = dt_util.as_local(now_utc)
     tz = now_local.tzinfo
+    # The hatchery stocks the shelf (doc §14): the brine on hand joins the
+    # shelf, the coverage report and the nutrient budget as live entries;
+    # brine on its way tells the coverage report what is coming. The strip
+    # keeps its own brine marks (0.7.131), so the timeline reads the typed
+    # products only.
+    live_products, live_pending = _nps_live_shelf(config, now_utc)
+    shelf_products = {**products, **live_products}
     # The unified feed strip (doc §13): the hatchery's own stamped feeds are
     # the brine done-marks (0.7.131 — no longer the reminder's completions).
     brine_feeds: list[dict[str, Any]] = [dict(item) for item in hatchery_cfg["handFeeds"]]
@@ -16459,7 +16555,11 @@ async def websocket_nps_summary(
         truce=_nps_truce_timeline_cfg(config))
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
-        "shelf": nps_engine.shelf_summary(products, now_utc, _awc_effective_tank_l(config), tz),
+        "shelf": {
+            **nps_engine.shelf_summary(shelf_products, now_utc, _awc_effective_tank_l(config), tz),
+            # The live entries themselves (the panel has no config copy of them).
+            "live": live_products,
+        },
         "timeline": timeline,
         "library": [dict(item) for item in nps_engine.PRODUCT_LIBRARY],
         "categories": {key: nps_engine.category_label(key) for key in CONSUMABLE_CATEGORIES},
@@ -16537,9 +16637,10 @@ async def websocket_nps_summary(
         # Species plans + nutrient budget (Stage D) — compiled backend-side.
         "speciesLibrary": [dict(s) for s in nps_engine.SPECIES_LIBRARY],
         "speciesPlan": nps_engine.compile_feed_plan(
-            list((config.get("nps") or {}).get("species") or []), products, channels),
+            list((config.get("nps") or {}).get("species") or []), shelf_products, channels,
+            pending=live_pending),
         "budget": nps_engine.nutrient_budget(
-            products, now_utc, _awc_effective_tank_l(config),
+            shelf_products, now_utc, _awc_effective_tank_l(config),
             awc_engine.daily_equivalent_litres(
                 (_awc_cfg(config) or {}).get("schedule") or {},
                 _awc_effective_tank_l(config))

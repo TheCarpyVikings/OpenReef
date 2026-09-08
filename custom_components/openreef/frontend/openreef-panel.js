@@ -1850,6 +1850,7 @@ class OpenReefPanel extends HTMLElement {
         "New bottle logged — ledger back to full, the expiry clock restarted.",
       );
       if (action === "nps-product-logdose") this._npsLogDose(id);
+      if (action === "nps-live-feed") this._npsLiveFeed(id, target.dataset.vessel);
       if (action === "nps-product-dosed") this._npsCall({ type: "openreef/consumable_log_dose", product_id: id },
         "Dose logged — the bottle, the runway and the reminder all keep count.");
       if (action === "nps-product-delete") this._npsDeleteProduct(id);
@@ -10388,6 +10389,24 @@ class OpenReefPanel extends HTMLElement {
     this._npsLoadSummary(true);
   }
 
+  // A typed feed from a live-brine shelf entry (doc §14): the container's
+  // hand-feed command or the fridge bottle's, with the ml — the same ledgers
+  // the hatchery card debits, so the entry updates itself on the next summary.
+  _npsLiveFeed(pid, vessel) {
+    const input = this.shadowRoot.querySelector(`[data-nps-log="${pid}"]`);
+    const ml = Number(input && input.value);
+    if (!Number.isFinite(ml) || ml <= 0) {
+      this._nps.error = "Enter how many ml you fed first.";
+      this._render();
+      return;
+    }
+    if (input) input.value = "";
+    const call = vessel === "bottle"
+      ? { type: "openreef/nps_fridge_bottle", action: "feed", ml }
+      : { type: "openreef/nps_hand_feed", ml };
+    this._npsCall(call, `Fed ${ml} ml from ${vessel === "bottle" ? "the fridge bottle" : "the container"} — the shelf entry and the strip keep count.`);
+  }
+
   _npsLogDose(pid) {
     const input = this.shadowRoot.querySelector(`[data-nps-log="${pid}"]`);
     const ml = Number(input && input.value);
@@ -12038,6 +12057,7 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _npsProductCard(pid, product, state) {
+    if (product && product.live) return this._npsLiveBrineCard(pid, product, state);
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
     const s = state || {};
@@ -12088,6 +12108,67 @@ class OpenReefPanel extends HTMLElement {
           <input type="number" min="0.1" step="0.1" placeholder="ml" style="width:72px;" data-nps-log="${eid}">
           <button class="secondary compact-button" data-action="nps-product-logdose" data-id="${eid}">Log dose</button>
           <button class="secondary compact-button" data-action="nps-product-newbottle" data-id="${eid}">New bottle</button>
+        </div>
+      </article>`;
+  }
+
+  // A shelf entry the hatchery stocks itself (doc §14): the brine on hand in
+  // the container or the fridge bottle, on its batch's nutritional clock. No
+  // "New bottle", no editing — the ledger IS the bottle; feeding from it here
+  // is the same tap as on the hatchery card.
+  _npsLiveBrineCard(pid, product, state) {
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const eid = esc(pid);
+    const s = state || {};
+    const live = product.live || s.live || {};
+    const isBottle = live.vessel === "bottle";
+    const pct = Number.isFinite(Number(s.percent)) ? Math.max(0, Math.min(100, Number(s.percent))) : null;
+    const hoursLeft = live.hoursLeft == null ? null : Number(live.hoursLeft);
+    const chips = [];
+    let clockLine = "";
+    if (live.status === "enriching") {
+      chips.push(`<span class="pill">Gut-loading</span>`);
+      clockLine = hoursLeft != null
+        ? `Enrichment soak running — ~${esc(hoursLeft)} h to go; the boost clock starts when it ends.`
+        : "Enrichment soak running — the boost clock starts when it ends.";
+    } else if (live.expired) {
+      chips.push(`<span class="pill" style="color:var(--error-color,#e5484d)">${live.window === "boost" ? "Boost gone" : "Faded"}</span>`);
+      clockLine = live.window === "boost"
+        ? "The enrichment boost has worn off — still live food, no longer enriched food."
+        : "Past its nutritional prime — the nauplii have burnt their yolk down.";
+    } else {
+      const warn = (s.expiry || {}).status === "aging";
+      const word = live.enriched ? "Gut-loaded" : "In its prime";
+      chips.push(`<span class="pill"${warn ? ` style="color:var(--warning-color,#f5a524)"` : ""}>${word}${hoursLeft != null ? ` · ~${esc(hoursLeft)} h left` : ""}</span>`);
+      clockLine = live.enriched
+        ? `Enriched — the HUFA boost holds ~${esc(hoursLeft)} h more${live.refrigerated ? " at the fridge rate" : ""}${live.windowHours != null ? ` (of ${esc(live.windowHours)} h)` : ""}.`
+        : `Nutritional prime — ~${esc(hoursLeft)} h before the yolk runs down${live.refrigerated ? " (fridge rate)" : ""}${live.windowHours != null ? ` (window ${esc(live.windowHours)} h)` : ""}; gut-load it to extend the clock.`;
+    }
+    if (live.refrigerated || product.refrigerated) chips.push(`<span class="pill">Fridge</span>`);
+    const runway = s.daysUntilEmpty != null
+      ? `≈${esc(s.daysUntilEmpty)} days of use left${s.usageMlPerDay ? ` (~${esc(s.usageMlPerDay)} ml/day)` : ""}`
+      : "Log feeds and the runway forecast switches on.";
+    const bar = pct == null ? "" : `
+      <div style="height:6px;border-radius:4px;background:var(--divider-color,#333);overflow:hidden;margin:6px 0;">
+        <div style="height:100%;width:${pct}%;background:${live.expired ? "var(--error-color,#e5484d)" : "var(--primary-color,#03a9f4)"};"></div>
+      </div>`;
+    const hatch = this._nps.summary?.hatchery || {};
+    const dose = Number(hatch.handFeed?.defaultDoseMl) || 30;
+    const feedAction = isBottle ? "nps-fridge-feed" : "nps-hand-feed";
+    return `
+      <article class="panel stack" style="gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <div><strong>${esc(product.name)}</strong> <small>· ${esc(product.brand || "Home hatchery")}</small></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">${chips.join("")}<span class="pill">${esc(s.categoryLabel || "Live zooplankton")}</span></div>
+        </div>
+        ${bar}
+        <small>${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml in ${esc(live.where || "the brine container")} · ${runway}</small>
+        <small>🦐 ${clockLine} Stocked by the hatchery — the amount and the clock follow the ledger.</small>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="${feedAction}" title="Debits ${esc(live.where || "the container")}, stamps the feed on the strip">Fed ${esc(dose)} ml</button>
+          <input type="number" min="0.1" step="0.1" placeholder="ml" style="width:72px;" data-nps-log="${eid}">
+          <button class="secondary compact-button" data-action="nps-live-feed" data-id="${eid}" data-vessel="${esc(live.vessel || "container")}">Log feed</button>
+          <button class="secondary compact-button" data-action="tab" data-id="hatchery">Open Brine hatchery →</button>
         </div>
       </article>`;
   }
@@ -12223,8 +12304,9 @@ class OpenReefPanel extends HTMLElement {
     const shelf = sum.shelf || {};
     if (shelf.count) {
       const attention = (shelf.lowCount || 0) + (shelf.expiredCount || 0) + (shelf.doseDueCount || 0);
+      const bottles = Math.max(0, (shelf.count || 0) - (shelf.liveCount || 0));
       cards.push(this._missionSummaryCard("Food shelf",
-        `${shelf.count} bottle${shelf.count === 1 ? "" : "s"}`,
+        `${bottles} bottle${bottles === 1 ? "" : "s"}${shelf.liveCount ? " + live brine" : ""}`,
         attention ? [shelf.lowCount ? `${shelf.lowCount} low` : "", shelf.expiredCount ? `${shelf.expiredCount} expired` : "", shelf.doseDueCount ? `${shelf.doseDueCount} dose${shelf.doseDueCount === 1 ? "" : "s"} due` : ""].filter(Boolean).join(" · ") : "All stocked and fresh",
         attention ? "warning" : "ok", "settings", toSettings));
     }
@@ -13887,10 +13969,16 @@ const rigSteps = [
     const channels = this._doserChannels();
     const foodIds = this._npsFoodChannelIds();
     const dsum = (this._doserSummary && this._doserSummary.summary) || {};
-    const products = (this._config && this._config.consumables && this._config.consumables.products) || {};
+    const cfgProducts = (this._config && this._config.consumables && this._config.consumables.products) || {};
     const shelfStates = (st.summary && st.summary.shelf && st.summary.shelf.products) || {};
-    const pids = Object.keys(products).sort((a, b) =>
-      String(products[a].name || "").localeCompare(String(products[b].name || "")));
+    // The hatchery stocks the shelf (doc §14): its live entries come from the
+    // summary, not the config, and sit first — the freshest food on the shelf.
+    const liveProducts = (st.summary && st.summary.shelf && st.summary.shelf.live) || {};
+    const products = { ...liveProducts, ...cfgProducts };
+    const livePids = Object.keys(liveProducts).sort((a, b) =>
+      ((liveProducts[a].live || {}).vessel === "bottle" ? 1 : 0) - ((liveProducts[b].live || {}).vessel === "bottle" ? 1 : 0));
+    const pids = livePids.concat(Object.keys(cfgProducts).sort((a, b) =>
+      String(cfgProducts[a].name || "").localeCompare(String(cfgProducts[b].name || ""))));
 
     const head = `
       <div class="section-head">
@@ -13964,10 +14052,14 @@ const rigSteps = [
     const planBits = [];
     (plan.gaps || []).forEach((g) => planBits.push(
       `<p class="hint" style="color:var(--warning-color,#f5a524)">🕳 ${this._escape(g)}</p>`));
+    // Food on its way (doc §14): a hatch running or a soak finishing covers
+    // the mouth soon — the keeper has already done the right thing.
+    (plan.soon || []).forEach((g) => planBits.push(
+      `<p class="hint">⏳ ${this._escape(g)}</p>`));
     (plan.warnings || []).forEach((w) => planBits.push(
       `<p class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(w)}</p>`));
-    if (selectedSpecies.length && !(plan.gaps || []).length && !(plan.warnings || []).length) {
-      planBits.push(`<p class="hint">Shelf coverage looks good — every selected mouth has a matching food.</p>`);
+    if (selectedSpecies.length && !(plan.gaps || []).length && !(plan.soon || []).length && !(plan.warnings || []).length) {
+      planBits.push(`<p class="hint">Shelf coverage looks good — every selected mouth has a matching food${(st.summary?.shelf?.liveCount || 0) ? " (the hatchery's live brine counted)" : ""}.</p>`);
     }
     (plan.suggestions || []).forEach((sug) => planBits.push(`
       <div class="setting-card subtle-card" style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;">

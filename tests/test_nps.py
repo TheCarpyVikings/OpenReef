@@ -3552,6 +3552,158 @@ def test_ws_summary_plans_the_next_hatch_on_the_idle_vessels_clock():
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.
+
+# ------------------------------------------------- the hatchery stocks the shelf (doc §14, 0.7.149)
+def test_live_brine_product_runs_the_nutritional_clock_in_hours():
+    loaded = _iso(NOW - timedelta(hours=4))
+    feeds = [{"at": _iso(NOW - timedelta(hours=1)), "ml": 250, "from": "container"},
+             {"at": _iso(NOW - timedelta(hours=2)), "ml": 40, "from": "bottle"},
+             {"at": _iso(NOW - timedelta(hours=3)), "ml": 250, "from": "container",
+              "undoneAt": _iso(NOW - timedelta(hours=2, minutes=50))}]
+    prime = nps.hatch_prime_state(loaded, NOW)
+    product = nps.live_brine_product("container", 500, 750, loaded, prime, feeds)
+    assert product["name"] == "Live baby brine (container)" and product["category"] == "zooLive"
+    assert product["particleUmMin"] == 400 and product["particleUmMax"] == 500
+    assert product["bottleMl"] == 750 and product["remainingMl"] == 500
+    # Only this vessel's feeds, and never an undone one.
+    assert [h["ml"] for h in product["history"]] == [250]
+    live = product["live"]
+    assert live["vessel"] == "container" and live["status"] == "prime" and live["window"] == "yolk"
+    assert live["hoursLeft"] == 20.0 and live["windowHours"] == 24.0 and live["expired"] is False
+    state = nps.consumable_state(product, NOW)
+    assert state["expiry"]["status"] == "fresh" and state["expiry"]["hoursLeft"] == 20.0
+    assert state["expiry"]["daysLeft"] == 0.83
+    assert state["low"] is False and state["usageMlPerDay"] == 250.0 and state["daysUntilEmpty"] == 2.0
+    assert state["live"]["vessel"] == "container"
+    # The last quarter of the window is "aging", like any bottle.
+    old = nps.live_brine_product("container", 500, 750, _iso(NOW - timedelta(hours=19)),
+                                 nps.hatch_prime_state(_iso(NOW - timedelta(hours=19)), NOW), [])
+    assert nps.consumable_state(old, NOW)["expiry"]["status"] == "aging"
+    # Gut-loaded: the boost window is the clock, and it is longer in the fridge.
+    enriched_at = _iso(NOW - timedelta(hours=2))
+    warm = nps.live_brine_product("bottle", 200, 200, _iso(NOW - timedelta(hours=20)),
+                                  nps.hatch_prime_state(_iso(NOW - timedelta(hours=20)), NOW, enriched_at), [])
+    assert warm["live"]["status"] == "gutloaded" and warm["live"]["enriched"] is True
+    assert warm["live"]["hoursLeft"] == 10.0 and warm["live"]["expired"] is False
+    cold = nps.live_brine_product("bottle", 200, 200, _iso(NOW - timedelta(hours=20)),
+                                  nps.hatch_prime_state(_iso(NOW - timedelta(hours=20)), NOW, enriched_at,
+                                                        fridged_at_iso=enriched_at), [])
+    assert cold["live"]["refrigerated"] is True and cold["refrigerated"] is True
+    assert cold["live"]["hoursLeft"] == 46.0, cold["live"]
+    assert cold["name"] == "Live baby brine (fridge bottle)"
+    # Faded: past the yolk window — on the shelf, expired, covering nothing.
+    faded = nps.live_brine_product("container", 300, 750, _iso(NOW - timedelta(hours=30)),
+                                   nps.hatch_prime_state(_iso(NOW - timedelta(hours=30)), NOW), [])
+    assert faded["live"]["expired"] is True
+    assert nps.consumable_state(faded, NOW)["expiry"] == {
+        "status": "expired", "daysLeft": 0.0, "ageDays": 1.25, "hoursLeft": 0.0, "soaking": False}
+    # Mid-soak: the yolk clock must not condemn the batch the app asked to gut-load.
+    soaking = nps.live_brine_product("container", 500, 750, _iso(NOW - timedelta(hours=30)),
+                                     nps.hatch_prime_state(_iso(NOW - timedelta(hours=30)), NOW), [],
+                                     soak={"status": "enriching", "hoursLeft": 5.5})
+    assert soaking["live"]["status"] == "enriching" and soaking["live"]["expired"] is False
+    assert soaking["live"]["hoursLeft"] == 5.5 and soaking["live"]["enriched"] is True
+    assert nps.consumable_state(soaking, NOW)["expiry"]["status"] == "fresh"
+    # The shelf counts live entries but leaves the attention counts to the bottles.
+    summary = nps.shelf_summary({"a": product, "b": faded, "c": _product()}, NOW)
+    assert summary["count"] == 3 and summary["liveCount"] == 2
+    assert summary["expiredCount"] == 0 and summary["lowCount"] == 0
+    # Coverage: live brine feeds the 50–500 µm gorgonian, a faded one does not;
+    # brine on the way is "soon", not a gap.
+    plan = nps.compile_feed_plan(["gorgonian_easy", "gorgonian_hard"], {"a": product}, {})
+    assert plan["gaps"] == ["Gorgonians — Euplexaura, Guaiagorgia: nothing on the shelf feeds it "
+                            "(needs zooPrepared or zooLive, 50–300 µm)."]
+    assert plan["soon"] == []
+    plan = nps.compile_feed_plan(["gorgonian_easy"], {"b": faded}, {})
+    assert len(plan["gaps"]) == 1 and "Menella" in plan["gaps"][0]
+    pending = [{"name": "live baby brine from the hatchery", "category": "zooLive",
+                "particleUmMin": 400, "particleUmMax": 500, "note": "Hatchery 2 harvests in ~10.5 h"}]
+    plan = nps.compile_feed_plan(["gorgonian_easy", "gorgonian_hard"], {}, {}, pending=pending)
+    assert plan["soon"] == ["Gorgonians — Menella, Swiftia, Diodogorgia: nothing on the shelf feeds it "
+                            "yet — live baby brine from the hatchery will (Hatchery 2 harvests in ~10.5 h)."]
+    assert len(plan["gaps"]) == 1 and "Euplexaura" in plan["gaps"][0]
+
+
+def test_ws_summary_stocks_the_shelf_with_the_hatcherys_brine():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 500,
+                                 "mixedAt": _iso(now - timedelta(hours=3))})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["species"] = ["gorgonian_easy", "gorgonian_hard"]
+    hatchery = cfg["nps"]["hatchery"]
+    hatchery["handFeeds"] = [{"at": _iso(now - timedelta(hours=1)), "ml": 250, "from": "container"}]
+    hatchery["fridgeBottle"] = {"remainingMl": 200, "mixedAt": _iso(now - timedelta(hours=10)),
+                                "refrigeratedAt": _iso(now - timedelta(hours=9)),
+                                "lastLoadEnriched": True, "enrichedAt": _iso(now - timedelta(hours=9, minutes=30))}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    shelf = payload["shelf"]
+    assert set(shelf["live"]) == {"live_brine_container", "live_brine_bottle"}
+    assert shelf["count"] == 2 and shelf["liveCount"] == 2 and shelf["expiredCount"] == 0
+    container = shelf["products"]["live_brine_container"]
+    assert container["remainingMl"] == 500 and container["bottleMl"] == 750
+    assert container["expiry"]["status"] == "fresh" and 20.9 <= container["expiry"]["hoursLeft"] <= 21.0
+    assert container["usageMlPerDay"] == 250.0 and container["low"] is False
+    assert container["live"]["where"] == "the brine container"
+    bottle = shelf["products"]["live_brine_bottle"]
+    assert bottle["live"]["enriched"] is True and bottle["live"]["refrigerated"] is True
+    assert bottle["live"]["status"] == "gutloaded" and bottle["remainingMl"] == 200
+    # The two-rate boost clock (doc §12.3): half an hour warm off the 12 h
+    # window before the bottle went cold, the rest at the 48 h rate.
+    assert 36.9 <= bottle["live"]["hoursLeft"] <= 37.1, bottle["live"]
+    # Coverage: the 50–500 µm gorgonian is fed by the brine on hand; the
+    # 50–300 µm one honestly still is not.
+    plan = payload["speciesPlan"]
+    assert len(plan["gaps"]) == 1 and "Euplexaura" in plan["gaps"][0], plan
+    assert plan["soon"] == []
+    # The brine on the way covers the gap in words, once the container is empty.
+    hatchery["reservoir"]["remainingMl"] = 0
+    hatchery["fridgeBottle"]["remainingMl"] = 0
+    hatchery["vessels"]["v1"]["state"] = {"hatchStartedAt": _iso(now - timedelta(hours=10)),
+                                          "eggType": "standard", "hatchHours": 24}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    payload = conn.results[-1].payload
+    assert payload["shelf"]["live"] == {} and payload["shelf"]["count"] == 0
+    plan = payload["speciesPlan"]
+    assert len(plan["soon"]) == 1 and "Hatchery 1 harvests in ~14.0 h" in plan["soon"][0], plan
+    assert len(plan["gaps"]) == 1 and "Euplexaura" in plan["gaps"][0]
+    # A soak running says so instead.
+    hatchery["reservoir"].update({"remainingMl": 500, "mixedAt": _iso(now - timedelta(hours=26))})
+    hatchery["enrichment"] = {"hours": 12, "state": {"startedAt": _iso(now - timedelta(hours=4)),
+                                                     "enrichHours": 12, "batchLoadedAt": _iso(now - timedelta(hours=26))}}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
+    payload = conn.results[-1].payload
+    soaking = payload["shelf"]["products"]["live_brine_container"]
+    assert soaking["live"]["status"] == "enriching" and soaking["expiry"]["status"] == "fresh", soaking["live"]
+    assert 7.9 <= soaking["live"]["hoursLeft"] <= 8.1
+    assert payload["speciesPlan"]["soon"] == []   # the container covers it already
+
+
+def test_ws_summary_live_shelf_defers_to_a_linked_pump_bottle():
+    # A bound feed-exchange pump whose reservoir IS a shelf product: that
+    # product is the container — one physical vessel, one card.
+    now = datetime.now(timezone.utc)
+    entry = _entry(
+        {"brine": _product(name="Baby brine", category="zooLive", particleUmMin=400,
+                           particleUmMax=500)},
+        {"pump": {"name": "Brine pump", "chemical": "livefood",
+                  "reservoir": {"productId": "brine", "volumeMl": 1000, "remainingMl": 600,
+                                "mixedAt": _iso(now - timedelta(hours=2)), "shelfLifeDays": 1}}})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["feedExchange"] = {"enabled": True, "channelId": "pump"}
+    cfg["nps"]["hatchery"] = {"fridgeBottle": {"remainingMl": 150, "mixedAt": _iso(now - timedelta(hours=5)),
+                                               "refrigeratedAt": _iso(now - timedelta(hours=4))}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    shelf = conn.results[-1].payload["shelf"]
+    assert set(shelf["live"]) == {"live_brine_bottle"}, shelf["live"].keys()
+    assert shelf["count"] == 2 and shelf["liveCount"] == 1
+    assert shelf["products"]["live_brine_bottle"]["live"]["refrigerated"] is True
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

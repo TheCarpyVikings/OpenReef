@@ -1733,5 +1733,82 @@ test("settings are per hatchery: own cysts, own clock, own pouch (0.7.147)", asy
   } finally { restore(); }
 });
 
+test("the hatchery stocks the shelf: live brine cards, the on-its-way coverage line, the status card (0.7.149)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._config.nps.species = ["gorgonian_easy", "gorgonian_hard"];
+    panel._nps.summary.hatchery = { enabled: true, handFeed: { defaultDoseMl: 40 }, vessels: [], state: { status: "none" },
+      reservoir: {}, fridgeBottle: { remainingMl: 0 }, nextHatch: { status: "unknown" }, enrichment: { state: { status: "none" } } };
+    const loadedAt = new Date(Date.parse(NOW) - 3 * 3600000).toISOString();
+    const liveBlock = (over) => ({ source: "hatchery", vessel: "container", where: "the brine container", status: "prime", window: "yolk",
+      hoursLeft: 21, windowHours: 24, ageHours: 3, enriched: false, refrigerated: false, expired: false, loadedAt, ...over });
+    const liveProduct = (name, live) => ({ name, brand: "Home hatchery", category: "zooLive", bottleMl: 750, remainingMl: 500,
+      particleUmMin: 400, particleUmMax: 500, history: [], live });
+    const liveState = (live, expiry) => ({ bottleMl: 750, remainingMl: 500, percent: 66.7, usageMlPerDay: 250, daysUntilEmpty: 2,
+      low: false, empty: false, expiry, categoryLabel: "Live zooplankton", handDose: { planned: false, clock: { due: false } }, live });
+    const shelf = panel._nps.summary.shelf;
+    shelf.live = {
+      live_brine_container: liveProduct("Live baby brine (container)", liveBlock({})),
+      live_brine_bottle: liveProduct("Live baby brine (fridge bottle)", liveBlock({ vessel: "bottle", where: "the feeding bottle in the fridge",
+        status: "gutloaded", window: "boost", hoursLeft: 37, windowHours: 46.5, enriched: true, refrigerated: true })),
+    };
+    shelf.products.live_brine_container = liveState(shelf.live.live_brine_container.live, { status: "fresh", daysLeft: 0.88, hoursLeft: 21, soaking: false });
+    shelf.products.live_brine_bottle = liveState(shelf.live.live_brine_bottle.live, { status: "fresh", daysLeft: 1.54, hoursLeft: 37, soaking: false });
+    shelf.count = 4; shelf.liveCount = 2;
+    panel._nps.summary.speciesPlan = { species: [{ id: "gorgonian_easy", name: "Gorgonians — Menella, Swiftia, Diodogorgia" }],
+      gaps: ["Gorgonians — Euplexaura, Guaiagorgia: nothing on the shelf feeds it (needs zooPrepared or zooLive, 50–300 µm)."],
+      soon: [], warnings: [], suggestions: [] };
+    let html = panel._npsTab();
+    noPlaceholders(html, "NPS tab with live brine");
+    // The container card: the hatchery's clock in hours, the hatchery's own feed taps, no New bottle.
+    const cards = html.split('<article class="panel stack" style="gap:8px;">');
+    const container = cards.find((c) => c.includes("Live baby brine (container)"));
+    assert(container, "the container entry must render as a shelf card");
+    assert(container.includes("In its prime · ~21 h left") && container.includes("500 of 750 ml in the brine container"), `container card wrong: ${container}`);
+    assert(container.includes("≈2 days of use left (~250 ml/day)"), "the hand feeds are its runway");
+    assert(container.includes('data-action="nps-hand-feed"') && container.includes(">Fed 40 ml<"), "the container feeds through the hatchery's hand-feed tap");
+    assert(container.includes('data-action="nps-live-feed" data-id="live_brine_container" data-vessel="container"'), "a typed ml goes through the live-feed action");
+    assert(!container.includes("nps-product-newbottle") && !container.includes("nps-product-logdose"), "no bottle actions on a ledger entry");
+    assert(container.includes("gut-load it to extend the clock"), "the plain batch says how to extend its clock");
+    // The bottle card: gut-loaded, cold, its own tap.
+    const bottle = cards.find((c) => c.includes("Live baby brine (fridge bottle)"));
+    assert(bottle && bottle.includes("Gut-loaded · ~37 h left") && bottle.includes(">Fridge<") && bottle.includes("at the fridge rate"), `bottle card wrong: ${bottle}`);
+    assert(bottle.includes('data-action="nps-fridge-feed"') && bottle.includes('data-vessel="bottle"'), "the bottle feeds through the fridge-bottle tap");
+    // Live entries lead the shelf; the typed bottles follow.
+    assert(html.indexOf("Live baby brine (container)") < html.indexOf("Live baby brine (fridge bottle)"), "container before bottle");
+    const shelfIdx = html.indexOf("Food shelf</p>");
+    assert(html.indexOf("Live baby brine (container)", shelfIdx) < html.indexOf("nps-product-logdose", shelfIdx), "live entries lead the shelf");
+    // The status card counts the bottles and says the brine is there.
+    assert(panel._npsStatusCards().includes("2 bottles + live brine"), `status card: ${panel._npsStatusCards()}`);
+    // Coverage: the honest gap stays a gap; food on the way is an hourglass, not a hole.
+    assert(html.includes("🕳 Gorgonians — Euplexaura"), "the 50–300 µm gap stays");
+    panel._nps.summary.speciesPlan.gaps = [];
+    panel._nps.summary.speciesPlan.soon = ["Gorgonians — Menella, Swiftia, Diodogorgia: nothing on the shelf feeds it yet — live baby brine from the hatchery will (Hatchery 2 harvests in ~10.5 h)."];
+    html = panel._npsTab();
+    assert(html.includes("⏳ Gorgonians — Menella") && html.includes("Hatchery 2 harvests in ~10.5 h") && !html.includes("Shelf coverage looks good"), "the soon line renders as information");
+    panel._nps.summary.speciesPlan.soon = [];
+    html = panel._npsTab();
+    assert(html.includes("Shelf coverage looks good — every selected mouth has a matching food (the hatchery's live brine counted)."), "the all-clear credits the brine");
+    // Faded and mid-soak read honestly.
+    const faded = panel._npsProductCard("live_brine_container", liveProduct("Live baby brine (container)", liveBlock({ status: "fading", hoursLeft: 0, expired: true })),
+      liveState(liveBlock({ status: "fading", hoursLeft: 0, expired: true }), { status: "expired", daysLeft: 0, hoursLeft: 0, soaking: false }));
+    assert(faded.includes(">Faded<") && faded.includes("burnt their yolk down"), `faded card wrong: ${faded}`);
+    const soaking = panel._npsProductCard("live_brine_container", liveProduct("Live baby brine (container)", liveBlock({ status: "enriching", window: "soak", hoursLeft: 5.5, windowHours: null, enriched: true })),
+      liveState(liveBlock({ status: "enriching", hoursLeft: 5.5 }), { status: "fresh", daysLeft: null, hoursLeft: 5.5, soaking: true }));
+    assert(soaking.includes(">Gut-loading<") && soaking.includes("~5.5 h to go; the boost clock starts when it ends"), `soak card wrong: ${soaking}`);
+    noPlaceholders(faded + soaking, "live cards");
+    // The typed feed: container → hand feed with ml, bottle → fridge feed with ml.
+    const calls = [];
+    panel._npsCall = (msg) => calls.push(msg);
+    Object.defineProperty(panel, "shadowRoot", { value: { querySelector: (sel) => sel.includes("live_brine_bottle") ? { value: "35" } : { value: "" } }, configurable: true });
+    panel._render = () => {};
+    panel._npsLiveFeed("live_brine_container", "container");
+    assert(calls.length === 0 && panel._nps.error.includes("Enter how many ml"), "an empty ml box asks first");
+    panel._npsLiveFeed("live_brine_bottle", "bottle");
+    assert(calls.length === 1 && calls[0].type === "openreef/nps_fridge_bottle" && calls[0].action === "feed" && calls[0].ml === 35, `bottle feed call wrong: ${JSON.stringify(calls)}`);
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

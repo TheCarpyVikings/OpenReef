@@ -1068,3 +1068,90 @@ Reece: *"Truce windows on the strip's system lane — do this please."*
 - Bands are never feeds: they neither count, nor queue, nor undo. Compact strips (Pulse, the Feeding hub) stack the profiles on one row; the legend line and the ⏸ lane glyph appear only on a day that has a band. `TIMELINE_STATUSES` gains `running`.
 
 Engine: `feed_timeline(..., truce=)` fed by `_nps_truce_timeline_cfg(config)` — per profile its minutes, whether anything armed answers (and the equipment labels), the running stamps and the history. Tests: `test_nps.py` 143 (4 new — bands ran/running/expected, clamp-to-today and merge, the stamps through engage/tick/normaliser/guard, the summary wiring), `test_panel_nps.mjs` 49 (1 new — rows, weights, compact, cards, demo).
+
+## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
+
+Reece's screen: the Species coverage report said *nothing on the shelf
+feeds it* for both gorgonian groups while two cones were running and the
+container held 500 ml of fresh brine. True to the letter — the shelf only
+knew the bottles he had typed in — and useless: the food he cultures
+himself was invisible to the report, the runway and the nutrient budget.
+
+### 14.1 The model
+
+The brine on hand becomes shelf entries the keeper never types in. Two
+physical vessels, two entries, each on ITS batch's clock (§12.6):
+
+- **`live_brine_container`** — the canonical container's load (or nothing
+  when it is empty). Skipped when a feed-exchange pump is bound AND its
+  channel's reservoir names a real product: that product IS the container
+  (§5.4) — one physical vessel, one card.
+- **`live_brine_bottle`** — the feeding bottle in the fridge, whenever it
+  holds brine.
+
+Both are built by `nps.live_brine_product` in the ordinary product shape
+(category `zooLive`, the seeded *Live baby brine* particle window of
+400–500 µm, `bottleMl` = capacity, `remainingMl` = the ledger) plus a
+`live` block: `vessel`, `where`, `status`, `window`, `hoursLeft`,
+`windowHours`, `enriched`, `refrigerated`, `expired`, `loadedAt`. Nothing
+is persisted — `_nps_live_shelf` rebuilds them on every summary from the
+ledgers, which is exactly what makes the amount and the clock follow.
+
+**The shelf life is the nutritional fade, in hours.** `hatch_prime_state`
+per vessel: the yolk window (24 h, two-rate when cold) for an unfed batch;
+the boost window (12 h warm / 48 h fridge, from the END of the soak) once
+gut-loaded — so enriching a batch extends its clock exactly as Reece asked,
+and the fridge extends it further. `live_expiry_state` turns that into
+the shelf's own pill: the last quarter of the window is *aging*, the fade
+is *expired* (`daysLeft` is kept for the old readers, `hoursLeft` is the
+number that matters). A container mid-soak reads *enriching* with the
+soak's hours left — the yolk clock must never condemn the batch the app
+itself asked the keeper to gut-load (§10.3.1). A faded batch stays on the
+shelf (it is physically there until discarded) but **covers nothing** in
+the species compiler.
+
+**Usage is the hand-feed log.** The vessel's own `handFeeds` rows (undone
+ones skipped) are the entry's history, so the runway forecast and the
+nutrient budget count the brine like any bottle. `low` is never set on a
+live entry and the attention counts (`lowCount`/`expiredCount`/the
+digest's nags) stay the bottles' — the hatchery card is the authority on
+the brine's fade and runway; the shelf only reports it. `shelf_summary`
+gains `liveCount`; the status card reads *5 bottles + live brine*.
+
+### 14.2 Coverage learns what is on the way
+
+`compile_feed_plan(..., pending=)` takes food not on the shelf yet — the
+batch that ripens soonest (*Hatchery 2 harvests in ~10.5 h* / *is ready to
+harvest now*) or the soak that is running (*the enrichment soak finishes
+in ~5.5 h*). A mouth nothing on the shelf feeds, that a pending source
+WILL feed, is reported under `soon` (⏳, plain) instead of `gaps` (🕳,
+warning): the keeper has already done the right thing. The all-clear line
+credits the brine when it is what closed the gap.
+
+Honesty kept: baby brine is 400–500 µm, so on Reece's screen the
+Menella/Swiftia/Diodogorgia line (50–500 µm) clears and the
+Euplexaura/Guaiagorgia line (50–300 µm) stays a gap. That is the correct
+answer — those need something smaller (rotifers, prepared 50–300 µm
+foods), and the report should keep saying so.
+
+### 14.3 The card
+
+Live entries lead the shelf (container, then bottle). The card keeps the
+shelf's shape — bar, *500 of 750 ml in the brine container*, the runway —
+and swaps the bottle actions for the hatchery's: *Fed N ml* (the same
+`nps_hand_feed` / `nps_fridge_bottle feed` taps as the hatchery card), a
+typed ml through `nps-live-feed`, and *Open Brine hatchery →*. No *New
+bottle*, no editing, no Settings row: the ledger is the bottle. The clock
+line says which window is running and how to extend it (*gut-load it to
+extend the clock*; *the HUFA boost holds ~37 h more at the fridge rate*;
+*Faded — the nauplii have burnt their yolk down*; *Gut-loading — ~5.5 h to
+go; the boost clock starts when it ends*).
+
+Left alone, on purpose: the feed strip keeps its own brine marks (0.7.131)
+and reads the typed products only, so nothing doubles; the feeding-station
+diagram already draws the container as the brine box. Tests:
+`test_nps.py` 156 (3 new — the product/clock/expiry/coverage engine walk,
+the summary stocking the shelf incl. empty-container *soon* and the soak,
+the pump-linked deferral), `test_panel_nps.mjs` 52 (1 new — both cards,
+ordering, status card, gap vs soon vs all-clear, faded and soaking copy,
+the typed feed routing).
