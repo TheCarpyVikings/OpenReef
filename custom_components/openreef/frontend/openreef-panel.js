@@ -10691,6 +10691,14 @@ class OpenReefPanel extends HTMLElement {
         ? ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch plus harvest time uses the brine's whole ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`
         : ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch outlives the brine's ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`)
       : "";
+    // Every cone busy (0.7.154): the ideal start is a moment no vessel can
+    // honour, so name the one that frees first and own the shortfall. The
+    // overlap heads-up is left off — this line IS that physics, made concrete.
+    if (next.status === "blocked") {
+      const cone = nextStartName ? this._escape(nextStartName) : "the first cone";
+      const late = Number(next.lateHours) || 0;
+      return `<span style="color:var(--warning-color,#f5a524)">⏰ Every hatchery is busy — ${cone} frees first. Start there at ${when}, the moment it is harvested${late > 0 ? `; even then a ${this._escape(String(next.hatchHours))} h batch lands ~${this._escape(String(next.lateHours))} h after ${why}, so tap ❄ Refrigerate on the loaded brine to bridge the gap` : ""}.</span>`;
+    }
     if (next.status === "chained") {
       return `🔗 Next hatch: start ${when}${inVessel} — keeps the chain unbroken:${chainStory} a fresh batch lands before ${why}.${overlapNote}`;
     }
@@ -13922,14 +13930,16 @@ const rigSteps = [
           : res.freshness?.status === "aging" ? "warning" : "ok",
       "hatchery");
     const nextCard = this._missionSummaryCard("Next hatch",
-      next.status === "wait" || next.status === "chained" ? `in ~${next.hoursUntil} h`
+      next.status === "wait" || next.status === "chained" || next.status === "blocked" ? `in ~${next.hoursUntil} h`
         : next.status === "start_now" ? "now"
           : next.status === "overdue" ? "past due" : "—",
       next.status === "no_brine" || !next.status ? "nothing in play — start when ready"
+        : next.status === "blocked" ? (Number(next.lateHours) > 0
+          ? `every cone busy — lands ~${next.lateHours} h late` : "every cone busy — start when one frees")
         : next.driver === "chain" ? ((hatch.vessels || []).filter((v) => ["incubating", "ready", "overdue"].includes(v.state?.status)).length > 1 ? "before the chain's last load fades" : "before the incoming harvest fades")
           : next.driver === "depletion" ? (heroBottleOnly ? "before the bottle runs dry" : "before the container runs dry")
             : heroBottleOnly ? "before the bottle's brine fades" : "before the loaded brine fades",
-      next.status === "start_now" || next.status === "overdue" ? "warning" : "ok", "hatchery");
+      next.status === "start_now" || next.status === "overdue" || next.status === "blocked" ? "warning" : "ok", "hatchery");
     const learned = hatch.learned || {};
     const temp = hatch.temp || {};
     const clockCard = this._missionSummaryCard("The clock",

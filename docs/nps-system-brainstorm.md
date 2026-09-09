@@ -916,6 +916,55 @@ rule the no-running branch always used). `driver` says which: `chain`
 when the container is empty). The prime line, when the container is empty
 and the bottle holds brine, says so instead of "no hatch loaded yet".
 
+### 12.8 The chain plans on the rack it actually has (2026-09-09, 0.7.154)
+
+Reece's screen: Hatchery 1 at 24.8/36 h, Hatchery 2 at 9.4/24 h, 250 ml
+loaded — and the card said "Next hatch: start in ~2.6 h in Hatchery 1"
+beside two cones that were both plainly busy.
+
+The arithmetic was right and the advice was impossible. The chain anchors
+on the LAST batch to land (Hatchery 2, +14.6 h); that load fades 24 h
+after it goes in, at +39.6 h; a 36 h batch plus the 1 h harvest buffer
+needs 37 h of runway, so the ideal start is +2.6 h. What the maths never
+asked is whether anything is free to take the cysts at +2.6 h. Nothing
+was: Hatchery 1 does not empty until +11.2 h.
+
+The vessel was already known and already thrown away. `soonest_free` in
+the WS summary is computed WITH its free-at time, and only its **id** was
+used — to pick whose clock (36 h) to plan on. `next_hatch_suggestion`
+floored `start_at` at `now` and nothing else.
+
+Now it takes `free_at_iso` — the moment the first cone frees, passed ONLY
+when every vessel is busy, because an idle cone can start whenever the
+maths asks. When that lands after the ideal start there is a new status,
+`blocked`: `startAt` becomes the free moment and `lateHours` owns how far
+past `readyBy` the batch then arrives. The shortfall is exactly the delay
+— the ideal start lands ON `readyBy`, so every hour spent waiting for a
+cone is an hour without brine. A ripe-but-unharvested cone frees the
+moment you pull it, so `free_at` is floored at `now` and never drags the
+answer backwards.
+
+The card stops pretending: "Every hatchery is busy — Hatchery 1 frees
+first. Start there at 10/09/2026, 10:11 (~11.2 h from now), the moment it
+is harvested; even then a 36 h batch lands ~8.6 h after the last load in
+the chain (Hatchery 2's) fades, so tap ❄ Refrigerate on the loaded brine
+to bridge the gap." The generic overlap heads-up is left off that one
+status — the blocked line IS that physics, made concrete, and repeating
+the fridge remedy twice reads as noise. The hero card warns rather than
+counting down calmly: "in ~11.2 h · every cone busy — lands ~8.6 h late".
+
+Left alone on purpose: **the phase**. Two cones IS enough for a 36 h clock
+(`vessels_needed(36, 24) = 2` — a load every 18.5 h against a 24 h shelf).
+Reece's two were only 3.4 h apart, so they land in a cluster and then
+starve, and harvest-then-restart preserves that error forever. Telling a
+keeper to hold a cone back to re-stagger the rack is a different feature —
+advice about the rack rather than the next batch — and it wants its own
+design. `blocked` at least stops the page lying while that is unbuilt.
+
+Untouched: the harvest-event reminder path (`_nps_hatch_sync_reminders`)
+calls the same function without `free_at_iso`, and correctly — the cone
+that just harvested IS the free one.
+
 ## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.137 (2026-09-05)** — see §13.10–§13.17
 
 ### 13.1 What v1 is, honestly

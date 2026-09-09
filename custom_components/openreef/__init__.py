@@ -16530,6 +16530,13 @@ async def websocket_nps_summary(
     next_start_id = idle_vessel or (soonest_free[0] if soonest_free else primary_vessel)
     next_start_vessel = hatchery_cfg["vessels"].get(next_start_id) or {}
     next_start_hours = _awc_num(next_start_vessel.get("hatchHours"), hatchery_cfg["hatchHours"], 8, 48)
+    # With every cone mid-hatch the ideal start is a moment nothing can honour
+    # (0.7.154 — Reece's screen: "start in 2.6 h" beside two busy hatcheries).
+    # Hand the maths the moment the first one frees so it plans on the rack it
+    # actually has; an idle cone can take the cysts whenever it asks.
+    free_at_iso = None
+    if not idle_vessel and soonest_free is not None:
+        free_at_iso = (soonest_free[1] + timedelta(hours=soonest_free[2])).isoformat()
     primary_cfg = hatchery_cfg["vessels"].get(primary_vessel) or {}
     primary_egg = primary_state.get("eggType") or primary_cfg.get("eggType") or hatchery_cfg["eggType"]
     primary_hours = primary_state.get("hatchHours") or primary_cfg.get("hatchHours") or hatchery_cfg["hatchHours"]
@@ -16546,6 +16553,7 @@ async def websocket_nps_summary(
         # The batch that loads next is unfed at load: plan it on the plain
         # shelf, never the current load's boost window (doc §12).
         chain_shelf_hours=plain_shelf_h,
+        free_at_iso=free_at_iso,
     )
     # Container payload: the CANONICAL reservoir (pump channel's when linked).
     if isinstance(fx_channel, dict):

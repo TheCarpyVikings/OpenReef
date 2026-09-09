@@ -877,6 +877,7 @@ def next_hatch_suggestion(
     ml_per_day: Any,
     started_iso: Any,
     chain_shelf_hours: Any = None,
+    free_at_iso: Any = None,
 ) -> dict[str, Any]:
     """When to set the next batch of cysts going — the daily-driver question.
 
@@ -894,6 +895,15 @@ def next_hatch_suggestion(
     start plus the shelf life). ``overlap`` flags the structural case where the
     hatch takes longer than the brine stays fresh, so batches must overlap and
     "wait" can never be the answer.
+
+    ``blocked`` (0.7.154) is the full-rack case. The ideal start assumes a cone
+    is free to take the cysts; with every one of them mid-hatch it is a moment
+    nothing can honour. ``free_at_iso`` says when the first cone frees — pass it
+    ONLY when every vessel is busy (an idle cone can start whenever the maths
+    asks) — and when that lands after the ideal start, ``startAt`` becomes the
+    free moment and ``lateHours`` owns how far past ``readyBy`` the batch then
+    arrives. The shortfall is exactly the delay: the ideal start lands ON
+    ``readyBy``, so every hour of waiting for a cone is an hour without brine.
 
     ``started_iso`` accepts one stamp, a LIST of stamps, or a list of
     ``{"startedAt", "hatchHours", "id"}`` dicts (hatchery v2: several vessels,
@@ -940,6 +950,8 @@ def next_hatch_suggestion(
         "busyCount": len(running),
         "chainVessel": None,
         "chainLoadsAt": None,
+        "freeAt": None,
+        "lateHours": None,
     }
 
     def _finish(status: str, start_at: datetime | None, ready_by: datetime | None,
@@ -968,6 +980,13 @@ def next_hatch_suggestion(
             if deplete_by < supply_end:
                 supply_end, supply_driver = deplete_by, "depletion"
 
+    # Every cone busy (0.7.154): the earliest REAL start is when one frees. A
+    # ripe-but-unharvested batch frees the moment you pull it, so floor at now.
+    free_at = _parse_iso(free_at_iso)
+    if free_at is not None:
+        free_at = max(free_at, now)
+        base["freeAt"] = free_at.isoformat()
+
     if running:
         # Batches are on the go: the next start keeps the chain unbroken. The
         # anchor is when the LAST batch loads (its own stamped clock, floored
@@ -985,6 +1004,13 @@ def next_hatch_suggestion(
         if supply_end is not None and supply_end > ready_by:
             ready_by, driver = supply_end, supply_driver
         start_at = ready_by - timedelta(hours=lead_h)
+        if free_at is not None and free_at > max(start_at, now):
+            # No vessel can honour the ideal start: name the moment one frees
+            # and be honest about landing after the deadline rather than
+            # printing a time the rack cannot keep.
+            base["lateHours"] = round(
+                (free_at + timedelta(hours=lead_h) - ready_by).total_seconds() / 3600.0, 1)
+            return _finish("blocked", free_at, ready_by, driver)
         if start_at <= now:
             return _finish("start_now", now, ready_by, driver)
         return _finish("chained", start_at, ready_by, driver)

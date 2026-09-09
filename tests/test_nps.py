@@ -973,6 +973,85 @@ def test_next_hatch_chain_counts_the_brine_on_hand():
     assert s["status"] == "start_now" and s["driver"] == "chain"
 
 
+def test_next_hatch_blocked_when_every_cone_is_busy():
+    # Reece's live screen (0.7.154): Hatchery 1 is 24.8 h into a 36 h batch,
+    # Hatchery 2 is 9.4 h into a 24 h one, 250 ml of brine is loaded. The chain
+    # anchors on H2's load (+14.6 h), which fades at +39.6 h, so a 36 h batch
+    # ideally starts in 2.6 h — a moment NEITHER cone can honour: the first to
+    # free is H1 at +11.2 h. The honest answer is that start, 8.6 h late.
+    batch = [
+        {"startedAt": _iso(NOW - timedelta(hours=24.8)), "hatchHours": 36, "id": "v1"},
+        {"startedAt": _iso(NOW - timedelta(hours=9.4)), "hatchHours": 24, "id": "v2"},
+    ]
+    loaded = _iso(NOW - timedelta(hours=16.1))
+    ideal = nps.next_hatch_suggestion(NOW, 36, loaded, 24, 250, 250, batch,
+                                      chain_shelf_hours=24)
+    assert ideal["status"] == "chained" and ideal["hoursUntil"] == 2.6
+    assert ideal["freeAt"] is None and ideal["lateHours"] is None
+    blocked = nps.next_hatch_suggestion(NOW, 36, loaded, 24, 250, 250, batch,
+                                        chain_shelf_hours=24,
+                                        free_at_iso=_iso(NOW + timedelta(hours=11.2)))
+    assert blocked["status"] == "blocked" and blocked["driver"] == "chain"
+    assert blocked["hoursUntil"] == 11.2 and blocked["lateHours"] == 8.6
+    # The deadline is untouched — only the start moved onto the real rack.
+    assert blocked["readyBy"] == ideal["readyBy"] and blocked["chainVessel"] == "v2"
+    assert blocked["startAt"] == blocked["freeAt"]
+    # A cone that frees BEFORE the ideal start changes nothing.
+    early = nps.next_hatch_suggestion(NOW, 36, loaded, 24, 250, 250, batch,
+                                      chain_shelf_hours=24,
+                                      free_at_iso=_iso(NOW + timedelta(hours=1)))
+    assert early["status"] == "chained" and early["hoursUntil"] == 2.6
+    assert early["lateHours"] is None
+    # A ripe-but-unharvested cone frees the moment you pull it: floored at now,
+    # never dragged into the past.
+    ripe = nps.next_hatch_suggestion(NOW, 36, loaded, 24, 250, 250, batch,
+                                     chain_shelf_hours=24,
+                                     free_at_iso=_iso(NOW - timedelta(hours=5)))
+    assert ripe["status"] == "chained" and ripe["hoursUntil"] == 2.6
+    assert ripe["freeAt"] == _iso(NOW)
+    # Already behind AND every cone busy: still blocked, and the shortfall
+    # counts from the deadline, not from the moment the maths gave up.
+    late = nps.next_hatch_suggestion(NOW, 39.3, loaded, 24, 250, 250, batch,
+                                     chain_shelf_hours=24,
+                                     free_at_iso=_iso(NOW + timedelta(hours=11.2)))
+    assert late["status"] == "blocked" and late["lateHours"] == 11.9
+
+
+def test_ws_summary_blocks_the_next_hatch_when_every_cone_is_busy():
+    # The same screen through the WS lockstep: the summary must never print a
+    # start no vessel can take, and must name the cone that frees first.
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry(reservoir={
+        "volumeMl": 750, "remainingMl": 250, "loadVolumeMl": 0,
+        "mixedAt": (now - timedelta(hours=16)).isoformat()})
+    cfg = entry.options[CONF_SETTINGS]
+    vessels = cfg["nps"]["hatchery"]["vessels"]
+    vessels["v1"]["hatchHours"] = 36
+    vessels["v1"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=24.8)).isoformat(), "hatchHours": 36}
+    vessels["v2"]["hatchHours"] = 24
+    vessels["v2"]["state"] = {
+        "hatchStartedAt": (now - timedelta(hours=9.4)).isoformat(), "hatchHours": 24}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    nxt = hatchery["nextHatch"]
+    assert nxt["status"] == "blocked", nxt
+    # H1 frees first, so it is both the cone named and the start printed.
+    assert hatchery["nextStartVessel"] == "v1"
+    assert abs(nxt["hoursUntil"] - 11.2) < 0.1, nxt
+    assert abs(nxt["lateHours"] - 8.6) < 0.1, nxt
+    # The LAST load still sets the deadline, blocked or not.
+    assert nxt["chainVessel"] == "v2"
+    # Harvest H1 and the cone is free: the ideal start is reachable again.
+    vessels["v1"]["state"] = {}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    nxt = conn.results[-1].payload["hatchery"]["nextHatch"]
+    assert nxt["status"] == "chained", nxt
+    assert nxt["freeAt"] is None and nxt["lateHours"] is None
+
+
 def test_ws_summary_next_hatch_sees_the_bottle_and_names_the_vessel():
     now = datetime.now(timezone.utc)
     entry = _v2_entry(reservoir={"volumeMl": 750, "remainingMl": 0, "loadVolumeMl": 0})

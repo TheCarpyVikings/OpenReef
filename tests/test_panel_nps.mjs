@@ -1947,5 +1947,48 @@ test("feeds at the same time stack instead of hiding one another", async () => {
   } finally { restore(); }
 });
 
+test("a full rack never prints a start no cone can take", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // Reece's screen (0.7.154): both cones mid-hatch, so the ideal start in
+    // ~2.6 h is a moment nothing can honour. Hatchery 1 frees first, in
+    // 11.2 h, and the batch it then takes lands 8.6 h after the chain's last
+    // load has faded.
+    const blockedAt = new Date(Date.parse(NOW) + 11.2 * 3600000).toISOString();
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      hatchHours: 36, vesselsNeeded: 2, idleVessel: "", nextStartVessel: "v1",
+      nextHatch: { status: "blocked", startAt: blockedAt, hoursUntil: 11.2, readyBy: "",
+        driver: "chain", chainVessel: "v2", hatchHours: 36, shelfHours: 24,
+        overlap: true, busyCount: 2, freeAt: blockedAt, lateHours: 8.6 },
+    });
+    panel._nps.summary.hatchery.vessels[0].state = { status: "incubating", hoursElapsed: 24.8, hoursLeft: 11.2, percent: 69 };
+    panel._nps.summary.hatchery.vessels[1].state = { status: "incubating", hoursElapsed: 9.4, hoursLeft: 14.6, percent: 39 };
+    const html = panel._hatcheryPanel();
+    assert(html.includes("Every hatchery is busy — Hatchery 1 frees first"),
+      `the blocked line names the cone that frees first: ${html.slice(html.indexOf("\u23f0"), html.indexOf("\u23f0") + 300)}`);
+    assert(/lands ~8\.6 h after the last load in the chain \(Hatchery 2(&#039;|')s\) fades/.test(html),
+      "the shortfall is owned, against the load that actually sets the deadline");
+    assert(html.includes("\u2744 Refrigerate on the loaded brine to bridge the gap"), "the blocked line offers the remedy");
+    assert(!html.includes("keeps the chain unbroken"), "a blocked rack must not also tell the reachable-start story");
+    // The generic overlap heads-up is left off — this line IS that physics,
+    // made concrete, and repeating the fridge hint twice reads as noise.
+    assert(!html.includes("batches have to overlap"), "the blocked line replaces the overlap heads-up");
+    const tab = panel._hatcheryTab();
+    assert(tab.includes("in ~11.2 h") && tab.includes("every cone busy — lands ~8.6 h late"),
+      `the hero card says when a cone frees and how late that lands: ${tab.slice(tab.indexOf("Next hatch"), tab.indexOf("Next hatch") + 260)}`);
+    // Free a cone and the ordinary chained story comes straight back.
+    panel._nps.summary.hatchery.idleVessel = "v1";
+    panel._nps.summary.hatchery.vessels[0].state = { status: "none" };
+    panel._nps.summary.hatchery.nextHatch = { status: "chained",
+      startAt: new Date(Date.parse(NOW) + 2.6 * 3600000).toISOString(), hoursUntil: 2.6,
+      readyBy: "", driver: "chain", chainVessel: "v2", hatchHours: 36, shelfHours: 24,
+      overlap: true, busyCount: 1, freeAt: null, lateHours: null };
+    const freed = panel._hatcheryPanel();
+    assert(freed.includes("keeps the chain unbroken"), "a free cone gets the ordinary chained line back");
+    assert(!freed.includes("Every hatchery is busy"), "no blocked line once a cone is idle");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();
