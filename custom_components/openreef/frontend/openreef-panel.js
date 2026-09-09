@@ -11781,8 +11781,61 @@ class OpenReefPanel extends HTMLElement {
     const L = 30, R = 412, W = R - L;
     const X = (min) => L + (Math.max(0, Math.min(1440, Number(min) || 0)) / 1440) * W;
     const hm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
-    const pumpY = compact ? 22 : 26, handY = compact ? 22 : 54, sysY = compact ? 40 : 76;
-    const axisY = compact ? 48 : 90, H = axisY + 16;
+    // Feeds landing on the same minute would sit one on top of the other — a
+    // 250 ml brine dose hiding the 2 ml of phyto beside it. Marks close enough
+    // to collide are stacked instead, earliest at the top, threaded by a
+    // hairline so the column still reads as one moment. Worked out before the
+    // lanes are placed, so the strip can make room for the tallest stack; with
+    // nothing colliding the geometry is exactly what it always was.
+    const stackStep = compact ? 11 : 13;
+    const laneKey = (ev) => compact ? "row" : ev.how === "pump" ? "pump" : "hand";
+    const byLane = new Map();
+    for (const ev of tl.events) {
+      if (ev.kind === "band" || ev.at == null || ev.how === "system") continue;
+      const key = laneKey(ev);
+      if (!byLane.has(key)) byLane.set(key, []);
+      byLane.get(key).push(ev);
+    }
+    const clusters = [];
+    const stacks = new Map();
+    const fans = { row: 1, pump: 1, hand: 1 };
+    for (const [key, evs] of byLane) {
+      // The mark's own width: ticks are 4 wide, circles 11 across. Grouping
+      // against the first of a run bounds a cluster to that span, so a busy
+      // pump ladder cannot chain itself into one tall column.
+      const gap = key === "pump" ? 5 : 11;
+      const sorted = evs.slice().sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0));
+      let group = [];
+      const flush = () => {
+        if (group.length > 1) {
+          clusters.push({ key, evs: group });
+          group.forEach((e, i) => stacks.set(e.id, { i, n: group.length }));
+          fans[key] = Math.max(fans[key], group.length);
+        }
+        group = [];
+      };
+      for (const e of sorted) {
+        if (group.length && X(e.at) - X(group[0].at) > gap) flush();
+        group.push(e);
+      }
+      flush();
+    }
+    const stackDy = (ev) => {
+      const s = stacks.get(ev.id);
+      return s ? (s.i - (s.n - 1) / 2) * stackStep : 0;
+    };
+    const halfFan = (n) => ((n - 1) * stackStep) / 2;
+    const pumpHalf = compact ? halfFan(fans.row) : halfFan(fans.pump);
+    const handHalf = compact ? 0 : halfFan(fans.hand);
+    const pumpY = (compact ? 22 : 26) + pumpHalf;
+    const handY = compact ? pumpY : 54 + 2 * pumpHalf + handHalf;
+    const sysY = (compact ? 40 : 76) + 2 * pumpHalf + 2 * handHalf;
+    const axisY = (compact ? 48 : 90) + 2 * pumpHalf + 2 * handHalf, H = axisY + 16;
+    const ties = clusters.map(({ key, evs }) => {
+      const laneY = key === "pump" ? pumpY : handY;
+      const pts = evs.map((e) => `${X(e.at).toFixed(1)},${(laneY + stackDy(e)).toFixed(1)}`).join(" ");
+      return `<polyline points="${pts}" fill="none" stroke="#546e7a" stroke-width="1" opacity="0.55"></polyline>`;
+    }).join("");
     const open = readOnly ? "" : (this._nps?.timelineOpen || "");
     const act = (ev) => readOnly ? "" : `data-action="nps-timeline-event" data-id="${esc(ev.id)}"`;
     const chips = [];
@@ -11822,11 +11875,11 @@ class OpenReefPanel extends HTMLElement {
       let shape;
       let y;
       if (ev.how === "pump") {
-        y = pumpY;
+        y = pumpY + stackDy(ev);
         const solid = done || ev.status === "expected" || ev.status === "blocked";
         shape = `<rect x="${x - 2}" y="${y - 7}" width="4" height="14" rx="1.5" fill="${solid ? stroke : "none"}" stroke="${stroke}" stroke-width="1.5" ${dash}></rect>`;
       } else {
-        y = handY;
+        y = handY + stackDy(ev);
         const r = ev.unplanned ? 4 : 5.5;
         shape = `<circle cx="${x}" cy="${y}" r="${r}" fill="${done ? stroke : "none"}" stroke="${stroke}" stroke-width="1.5" ${dash}></circle>`
           + (done && !ev.unplanned ? `<path d="M ${x - 2.6} ${y} l 1.8 1.8 l 3.4 -3.6" fill="none" stroke="#041019" stroke-width="1.4" stroke-linecap="round"></path>` : "")
@@ -11854,6 +11907,7 @@ class OpenReefPanel extends HTMLElement {
         ${[0, 6, 12, 18, 24].map((h) => `
           <line x1="${X(h * 60)}" y1="${axisY - 4}" x2="${X(h * 60)}" y2="${axisY + 4}" stroke="#546e7a" stroke-width="1"></line>
           <text x="${X(Math.min(h * 60, 1439))}" y="${axisY + 13}" text-anchor="middle" font-size="8" fill="#78909c">${String(h).padStart(2, "0")}</text>`).join("")}
+        ${ties}
         ${marks}
         <line x1="${X(tl.nowMin)}" y1="6" x2="${X(tl.nowMin)}" y2="${axisY}" stroke="#e5484d" stroke-width="1.5"></line>
       </svg>`;
@@ -11867,7 +11921,7 @@ class OpenReefPanel extends HTMLElement {
       <div class="nps-tl-next">
         ${tl.next.map((n) => `<span class="pill nps-tl-pill ${esc(n.status)}">${n.how === "pump" ? "⚙︎" : "✋"} ${esc(n.name)}${n.ml != null ? ` ${esc(n.ml)} ml` : ""} · ${n.minutesUntil > 0 ? `in ${n.minutesUntil >= 60 ? `${Math.floor(n.minutesUntil / 60)} h ${n.minutesUntil % 60} min` : `${n.minutesUntil} min`}` : esc(this._npsTimelineStatusLabel(n.status))}</span>`).join("")}
       </div>` : "";
-    const legend = compact ? "" : `<small class="nps-tl-legend">⚙︎ pumps · ✋ by hand · hollow = planned · solid = done · amber = late · red = missed · dotted = skipped${hasTruce ? " · lilac under the water row = feed truce (bright = running, faint = expected)" : ""} · tap a mark for its dose card</small>`;
+    const legend = compact ? "" : `<small class="nps-tl-legend">⚙︎ pumps · ✋ by hand · hollow = planned · solid = done · amber = late · red = missed · dotted = skipped${hasTruce ? " · lilac under the water row = feed truce (bright = running, faint = expected)" : ""} · tap a mark for its dose card${clusters.length ? " · stacked = the same time" : ""}</small>`;
     const card = !readOnly && open ? this._npsTimelineEventCard(open, tl) : "";
     return `
       <div class="nps-tl">

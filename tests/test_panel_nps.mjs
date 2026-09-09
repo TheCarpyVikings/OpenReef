@@ -1586,7 +1586,10 @@ test("the feed truce draws under the water row and speaks on the cards", async (
   assert((html.match(/y="71" width="2.5" height="6"/g) || []).length === 2 && (html.match(/height="6" rx="2" fill="#/g) || []).length === 2, "the rest of the system row stands");
   // Compact (Pulse / hub): every band on one thin row, no legend, no glyph.
   const compact = panel._npsTimelineSvg({ compact: true, readOnly: true });
-  assert((compact.match(/ y="43" width="[\d.]+" height="3"/g) || []).length === 3, "compact stacks the bands on one row");
+  // The wall strip merges pumps and hand onto one row, so the 09:00 hand dose
+  // and the 09:30 pump tick collide and stack — the system row moves down with
+  // them (43 → 54) rather than the two marks sitting on top of one another.
+  assert((compact.match(/ y="54" width="[\d.]+" height="3"/g) || []).length === 3, `compact stacks the bands on one row: ${compact}`);
   assert(!compact.includes("⏸</text>") && !compact.includes("nps-tl-legend"), "compact stays quiet");
   // The band's card, and the pump card's consequence line.
   panel._nps.timelineOpen = "truce:uv:run";
@@ -1908,6 +1911,39 @@ test("the rotifer bottle joins the shelf: its own card, its own taps, after the 
     panel._render = () => {};
     panel._npsLiveFeed("live_rotifer_bottle", "rotifers");
     assert(npsCalls.length === 0 && cultureCalls.length === 1 && cultureCalls[0].type === "openreef/cultures_bottle" && cultureCalls[0].action === "fed" && cultureCalls[0].ml === 30, `rotifer feed call wrong: ${JSON.stringify(cultureCalls)}`);
+  } finally { restore(); }
+});
+
+test("feeds at the same time stack instead of hiding one another", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const ev = (fields) => ({ id: "", at: null, how: "hand", source: "", name: "", productId: "", ml: null, actualMl: null,
+      status: "planned", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null, truce: "", ...fields });
+    const events = panel._nps.summary.timeline.events;
+    // Reece's day: 250 ml of brine and 2 ml of Reef Juice, both at 16:00.
+    events.push(ev({ id: "brine:same", at: 960, source: "brine", name: "Live brine", productId: "", ml: 250, actualMl: 250, status: "done", doneAt: 960 }));
+    events.push(ev({ id: "shelf:rj:same", at: 960, source: "shelf:rj", name: "Reef Juice", productId: "rj", ml: 2, status: "due" }));
+    const html = panel._npsTimelineSvg();
+    // Same minute, same x — but two different heights, so both are readable.
+    const at16 = [...html.matchAll(/<circle cx="([\d.]+)" cy="([\d.]+)" r="5\.5"/g)].map((m) => [Number(m[1]), Number(m[2])]);
+    const column = at16.filter(([cx]) => Math.abs(cx - (30 + (960 / 1440) * 382)) < 0.01);
+    assert(column.length === 2, `both 16:00 feeds must draw: ${JSON.stringify(at16)}`);
+    assert(Math.abs(column[0][1] - column[1][1]) >= 11, `the pair must clear each other: ${JSON.stringify(column)}`);
+    // Threaded, so the column still reads as one moment, and the legend says so.
+    assert(html.includes("<polyline points=") && html.includes('stroke="#546e7a"'), "the stack is threaded");
+    assert(html.includes("stacked = the same time"), "the legend explains the column");
+    // The lane made room rather than letting the stack fall into the row below.
+    const sysTicks = [...html.matchAll(/y="([\d.]+)" width="2.5" height="6"/g)].map((m) => Number(m[1]));
+    assert(sysTicks.length === 2 && sysTicks.every((y) => y > Math.max(...column.map(([, cy]) => cy))), `the water row must clear the stack: ${sysTicks}`);
+    // Untouched neighbours keep the lane line exactly where it always was.
+    assert(/<circle cx="[\d.]+" cy="54" r="(5\.5|4)"/.test(html), "a lone hand dose still sits on the lane");
+    // Marks far enough apart are left alone: the legend note is the tell.
+    events.splice(events.indexOf(events.find((e) => e.id === "brine:same")), 1);
+    events.splice(events.indexOf(events.find((e) => e.id === "shelf:rj:same")), 1);
+    const quiet = panel._npsTimelineSvg();
+    assert(!quiet.includes("<polyline points=") && !quiet.includes("stacked = the same time"), "no stacking when nothing collides");
+    assert(quiet.includes('viewBox="0 0 420 106"'), `an uncrowded day keeps its old height: ${(quiet.match(/viewBox="[^"]+"/) || [])[0]}`);
   } finally { restore(); }
 });
 

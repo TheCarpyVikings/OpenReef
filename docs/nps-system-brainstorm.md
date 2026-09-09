@@ -1090,6 +1090,37 @@ Reece: *"Truce windows on the strip's system lane — do this please."*
 
 Engine: `feed_timeline(..., truce=)` fed by `_nps_truce_timeline_cfg(config)` — per profile its minutes, whether anything armed answers (and the equipment labels), the running stamps and the history. Tests: `test_nps.py` 143 (4 new — bands ran/running/expected, clamp-to-today and merge, the stamps through engage/tick/normaliser/guard, the summary wiring), `test_panel_nps.mjs` 49 (1 new — rows, weights, compact, cards, demo).
 
+### 13.18 0.7.153 — feeds at the same time stack instead of hiding one another
+
+Reece's screen: 250 ml of live brine and 2 ml of Reef Juice both fall at
+16:00, and the strip drew one circle. Two mouthfuls, one mark — the smaller
+dose sat exactly underneath the larger one, invisible, and the count line
+said more feeds than the eye could find.
+
+- **Marks that would collide are stacked, not overlaid.** Each lane is
+  clustered by the width of its own mark before the lanes are placed — 11 px
+  for a hand circle, 5 px for a pump tick, which at this scale is the point
+  where the shapes genuinely touch. A cluster fans vertically around the lane
+  line, earliest at the top, 13 px apart so nothing clips.
+- **The lane makes room; the rows below move down with it.** The strip's
+  height is derived from the tallest stack, so a stack never falls into the
+  water-change row or the truce bands. A day with nothing colliding draws at
+  exactly the geometry it always did — same lane lines, same height.
+- **Clustering is bounded, not chained.** A run is grouped against its *first*
+  member, so a pump ladder ticking every few minutes cannot chain itself into
+  one tall column; each cluster spans at most one mark's width.
+- **A hairline threads the column** so it still reads as one moment rather than
+  three unrelated feeds, and the legend gains *stacked = the same time* only on
+  a day that has one.
+- **The wall strip too.** Compact merges pumps and hand onto a single row, so
+  collisions there are more likely, not less; it stacks on the same rules.
+
+Presentation only — `_npsTimelineSvg` in the panel. The backend's event model
+is untouched: no new field, no new status, nothing to guard on save. Tests:
+`test_panel_nps.mjs` 55 (1 new — both marks drawn, clear of each other,
+threaded, the water row pushed clear, and an uncrowded day keeping its old
+height).
+
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 
 Reece's screen: the Species coverage report said *nothing on the shelf
