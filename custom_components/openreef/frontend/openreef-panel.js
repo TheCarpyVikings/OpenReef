@@ -12281,9 +12281,9 @@ class OpenReefPanel extends HTMLElement {
       ${guideLine}
       <div class="mini-grid">
         <label>Dose (ml${guided ? ", 0 = from the guide" : ""})<input type="number" min="0" step="0.1" data-scope="consumable" data-id="${eid}" data-field="doseMl" value="${esc(product.doseMl ?? 0)}"></label>
-        <label>${unit === "perDay" ? "Feeds a day" : "Dose every"} (0 = no reminder)<span style="display:flex;gap:6px;align-items:center;">
-          <input type="number" min="0" max="${unit === "days" ? 60 : 24}" step="${unit === "hours" ? 0.5 : 1}" style="flex:1;min-width:0;" data-scope="consumable" data-id="${eid}" data-field="doseEveryN" value="${esc(unit === "perDay" ? product.doseTimesPerDay : unit === "hours" ? product.doseEveryHours : (product.doseEveryDays ?? 0))}">
-          <select data-scope="consumable" data-id="${eid}" data-field="doseEveryUnit" style="flex:0 0 auto;">
+        <label>${unit === "perDay" ? "Feeds a day" : "Dose every"} (0 = no reminder)<span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <input type="number" min="0" max="${unit === "days" ? 60 : 24}" step="${unit === "hours" ? 0.5 : 1}" style="flex:1 1 72px;width:auto;min-width:72px;" data-scope="consumable" data-id="${eid}" data-field="doseEveryN" value="${esc(unit === "perDay" ? product.doseTimesPerDay : unit === "hours" ? product.doseEveryHours : (product.doseEveryDays ?? 0))}">
+          <select data-scope="consumable" data-id="${eid}" data-field="doseEveryUnit" style="flex:0 1 auto;width:auto;min-width:0;">
             <option value="perDay" ${unit === "perDay" ? "selected" : ""}>times a day</option>
             <option value="hours" ${unit === "hours" ? "selected" : ""}>hours</option>
             <option value="days" ${unit === "days" ? "selected" : ""}>days</option>
