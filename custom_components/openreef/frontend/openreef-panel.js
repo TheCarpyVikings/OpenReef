@@ -26601,6 +26601,20 @@ const rigSteps = [
     );
   }
 
+  // The species library filed by family (0.7.150): one grid per group the
+  // summary names, in the summary's order; anything ungrouped (or a summary
+  // without groups — the demo, an older backend) falls into one flat grid.
+  _npsSpeciesGroups(speciesLib) {
+    const groups = (this._nps.summary && Array.isArray(this._nps.summary.speciesGroups))
+      ? this._nps.summary.speciesGroups.filter((g) => g && g.id) : [];
+    if (!groups.length) return [{ id: "", name: "", species: speciesLib }];
+    const out = groups.map((g) => ({ id: g.id, name: g.name || "", species: speciesLib.filter((s) => s.group === g.id) }))
+      .filter((g) => g.species.length);
+    const rest = speciesLib.filter((s) => !groups.some((g) => g.id === s.group));
+    if (rest.length) out.push({ id: "", name: out.length ? "Other" : "", species: rest });
+    return out;
+  }
+
   _npsSettings() {
     const npsCfg = (this._config && this._config.nps) || {};
     const fxCfg = npsCfg.feedExchange || {};
@@ -26632,15 +26646,17 @@ const rigSteps = [
       </label>
 
       <div class="awc-section-title"><p class="eyebrow">Species you keep</p></div>
-      <small class="awc-hint">The tab's coverage report checks the shelf feeds every mouth (food type AND particle size) and shapes each pump's cadence.</small>
-      <div class="mini-grid">
-        ${speciesLib.length ? speciesLib.map((s) => `
+      <small class="awc-hint">The tab's coverage report checks the shelf feeds every mouth (food type AND particle size) and shapes each pump's cadence. Photosynthetic gorgonians (Pseudopterogorgia, Plexaurella, Muricea) feed themselves and are deliberately not listed.</small>
+      ${speciesLib.length ? this._npsSpeciesGroups(speciesLib).map((g) => `
+        ${g.name ? `<p class="eyebrow" style="margin:10px 0 4px;">${this._escape(g.name)}</p>` : ""}
+        <div class="mini-grid">
+          ${g.species.map((s) => `
           <label class="toggle-card compact-toggle" title="${this._escape(s.note || "")}">
             <input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}>
             <span><strong>${this._escape(s.name)}</strong><small>Difficulty ${diffDots(s.difficulty)}</small></span>
-          </label>`).join("")
-          : `<small class="awc-hint">${this._nps.loading ? "Loading the species library…" : "Species library loads with the NPS summary — open the NPS tab once if this stays empty."}</small>`}
-      </div>
+          </label>`).join("")}
+        </div>`).join("")
+        : `<div class="mini-grid"><small class="awc-hint">${this._nps.loading ? "Loading the species library…" : "Species library loads with the NPS summary — open the NPS tab once if this stays empty."}</small></div>`}
 
       <div class="awc-section-title"><p class="eyebrow">Brine feed-exchange</p></div>
       <small class="awc-hint">Every dose on the linked channel — and its line-flush chaser — banks a matched drain the AWC drain pump runs back out when idle.</small>

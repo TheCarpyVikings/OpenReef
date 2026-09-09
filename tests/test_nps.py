@@ -3704,6 +3704,55 @@ def test_ws_summary_live_shelf_defers_to_a_linked_pump_bottle():
     assert shelf["products"]["live_brine_bottle"]["live"]["refrigerated"] is True
 
 
+# ------------------------------------------------- the species catalogue expanded (0.7.150)
+def test_species_library_is_well_formed_and_grouped():
+    ids = [s["id"] for s in nps.SPECIES_LIBRARY]
+    assert len(ids) == len(set(ids)) == 24, ids
+    group_ids = [gid for gid, _ in nps.SPECIES_GROUPS]
+    assert group_ids == ["stony", "gorgonian", "soft", "filter"]
+    valid_foods = {"zooPrepared", "zooLive", "blend", "phyto", "bacteria"}
+    for sp in nps.SPECIES_LIBRARY:
+        assert sp["group"] in group_ids, sp["id"]
+        assert 1 <= sp["difficulty"] <= 5, sp["id"]
+        assert 0 < sp["particleUmMin"] < sp["particleUmMax"], sp["id"]
+        assert sp["cadence"] in ("pulse", "continuous", "target"), sp["id"]
+        assert sp["foods"] and set(sp["foods"]) <= valid_foods, sp["id"]
+        assert sp["name"] and sp["note"], sp["id"]
+    # The original ten keep their ids — they are config keys on live tanks.
+    for sid in ("tubastraea", "dendrophyllia", "chili", "gorgonian_easy", "gorgonian_hard",
+                "rhizotrochus", "blueberry", "dendronephthya", "filterfeeders", "crinoid"):
+        assert sid in ids, sid
+    # The gorgonian family is the one the keeper asked to see more of.
+    gorgs = [s["id"] for s in nps.SPECIES_LIBRARY if s["group"] == "gorgonian"]
+    assert len(gorgs) == 7 and {"gorgonian_whip", "gorgonian_fan", "gorgonian_atlantic",
+                                 "gorgonian_purple"} <= set(gorgs), gorgs
+
+
+def test_new_species_compile_and_survive_the_save_guard():
+    # A new id is a valid config key, the compiler reads its window, and a
+    # phyto shelf covers the filter feeders but not a whip's zooplankton mouth.
+    phyto = _product(name="Phyto", category="phyto", particleUmMin=2, particleUmMax=20)
+    plan = nps.compile_feed_plan(["gorgonian_whip", "featherduster", "seaapple", "cerianthus"],
+                                 {"p": phyto}, {})
+    assert [s["name"] for s in plan["species"]][0].startswith("Sea whips")
+    assert len(plan["gaps"]) == 2, plan["gaps"]
+    assert plan["gaps"][0].startswith("Sea whips — Ellisella") and "50–300 µm" in plan["gaps"][0]
+    assert plan["gaps"][1].startswith("Tube anemone") and "500–5000 µm" in plan["gaps"][1]
+    config = integration._normalise_core_config({
+        "nps": {"species": ["basketstar", "gorgonian_fan", "not_a_species", "basketstar"]}})
+    assert config["nps"]["species"] == ["basketstar", "gorgonian_fan"]
+
+
+def test_ws_summary_carries_the_species_groups():
+    hass = FakeHass(entries=[_entry({}, {})])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    assert [g["id"] for g in payload["speciesGroups"]] == ["stony", "gorgonian", "soft", "filter"]
+    assert payload["speciesGroups"][1]["name"] == "Gorgonians (non-photosynthetic)"
+    assert {s["group"] for s in payload["speciesLibrary"]} == {"stony", "gorgonian", "soft", "filter"}
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

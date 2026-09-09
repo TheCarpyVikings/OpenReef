@@ -1810,5 +1810,46 @@ test("the hatchery stocks the shelf: live brine cards, the on-its-way coverage l
   } finally { restore(); }
 });
 
+test("the species grid files the catalogue by family, and falls back flat without groups", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._settingsSectionsOpen = { nps: true };
+    // No groups on the summary (the demo, an older backend): one flat grid, no family headings.
+    let html;
+    try { html = panel._npsSettings(); } catch { html = null; }
+    if (html === null) return;
+    assert(html.includes('data-id="tubastraea"'), "the flat grid lost the species");
+    assert(!html.includes("Stony NPS corals"), "no groups on the summary must mean no headings");
+    // Groups ride the summary: one heading + grid per family, in the backend's order, empty families skipped.
+    panel._nps.summary.speciesGroups = [
+      { id: "stony", name: "Stony NPS corals" }, { id: "gorgonian", name: "Gorgonians (non-photosynthetic)" },
+      { id: "soft", name: "Soft corals, sea pens & lace corals" }, { id: "filter", name: "Filter feeders, worms, anemones & echinoderms" },
+    ];
+    panel._nps.summary.speciesLibrary = [
+      { id: "tubastraea", group: "stony", name: "Sun coral (Tubastraea)", difficulty: 1, note: "" },
+      { id: "gorgonian_whip", group: "gorgonian", name: "Sea whips — Ellisella, Junceella, Ctenocella, Viminella", difficulty: 3, note: "whips" },
+      { id: "gorgonian_fan", group: "gorgonian", name: "Sea fans — Melithaea, Subergorgia, Annella", difficulty: 4, note: "" },
+      { id: "seaapple", group: "filter", name: "Sea apple (Pseudocolochirus)", difficulty: 4, note: "" },
+      { id: "mystery", name: "Ungrouped thing", difficulty: 2, note: "" },
+    ];
+    panel._config.nps.species = ["gorgonian_fan"];
+    html = panel._npsSettings();
+    const order = ["Stony NPS corals", 'data-id="tubastraea"', "Gorgonians (non-photosynthetic)", 'data-id="gorgonian_whip"',
+      'data-id="gorgonian_fan"', "Filter feeders, worms, anemones &amp; echinoderms", 'data-id="seaapple"', ">Other<", 'data-id="mystery"'];
+    let last = -1;
+    for (const needle of order) {
+      const idx = html.indexOf(needle);
+      assert(idx > last, `species grid out of order at "${needle}"`);
+      last = idx;
+    }
+    assert(!html.includes("Soft corals, sea pens"), "an empty family must not render a heading");
+    assert(/data-id="gorgonian_fan" checked/.test(html), "the kept species must render checked");
+    assert(html.includes('title="whips"'), "the note rides the tooltip");
+    assert(html.includes("Photosynthetic gorgonians"), "the hint must say why the photosynthetic gorgonians are missing");
+    noBareCheckboxes(html, "grouped species grid");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

@@ -63,6 +63,27 @@ Hobby literature states flatly that commercial refrigerated NPS feeders "do not 
 | **Dendronephthya/Scleronephthya** | **Mostly PHYTO** (50–200× more carbon from phyto than zoo; weak nematocysts) — Nannochloropsis/Iso/Tetraselmis + copepod nauplii | **Continuous**: standing density 5,000–50,000 cells/mL (slight green tint), the only proven method | Flow 10–25 cm/s laminar/alternating; most slowly starve over 2–6 months |
 | Feather stars (hardest) | ~400 µm zooplankton | Protocol: 4 feeds/day, each spread over 2 h, 24/7 | Two known long-term successes ever |
 
+The catalogue expanded 2026-09-09 (0.7.150, §15) to the rest of what the hobby actually keeps — the same columns, distilled the same way:
+
+| Group | Eats | Cadence | Notes |
+|---|---|---|---|
+| Black sun coral (*Tubastraea micranthus*) | Meaty, 300–3000 µm | 2×/day | Tree-shaped; strong flow; starves from the tips inward |
+| Atlantic sea whips (Leptogorgia, Lophogorgia) | BBS, Cyclops-size, 100–500 µm | Daily | Gulf/Caribbean collected; the hardiest NPS gorgonians |
+| Purple/red gorgonians (Astrogorgia, Muriceides, Nicella) | Fine zooplankton 50–300 µm | 2×/day | The Indo-Pacific "purple gorgonian" imports |
+| Sea whips (Ellisella, Junceella, Ctenocella, Viminella) | Fine zooplankton 50–300 µm | 2×/day | Strong laminar flow; algae on the branches = losing |
+| Sea fans (Melithaea, Subergorgia, Annella) | Fine zooplankton 50–300 µm | 3×/day, spread | Thousands of mouths; bare patches never regrow |
+| Chironephthya / Siphonogorgia | Fine zooplankton + phyto | 2×/day, night | Nidaliid NPS softies; polyps open after dark |
+| Christmas tree coral (Studeriotes) | Fine zooplankton + phyto | 2×/day, night | Retracts into the stalk by day; feeds with the crown out |
+| Sea pens (Cavernularia, Pteroeides, Virgularia) | 20–300 µm zoo + phyto | 2×/day, night | Deep sand bed to anchor the foot |
+| Lace corals (Distichopora, Stylaster) | 20–200 µm plankton | Near-continuous | Hydrocorals; most fade over months |
+| Tube anemone (Cerianthus) | Meaty 500–5000 µm | Few×/wk | Potent stinger — space from everything |
+| Feather dusters (Sabellastarte, Bispira) | Phyto/bacteria 2–50 µm | Standing density | Dropped crown = starving warning, regrows when fed |
+| Cocos & Christmas tree worms (Protula, Spirobranchus) | Phyto/bacteria 2–50 µm | Continuous | Hard-tube worms; the Porites host has its own needs |
+| Sea apple (Pseudocolochirus) | Phyto, rotifers 2–100 µm | Continuous | Poisons the tank on death — coverage matters daily |
+| Basket star (Astrophyton, Gorgonocephalus) | 200–1000 µm zoo | 3×/day, night | Arms unfurl after lights-out; nothing by day |
+
+Deliberately NOT listed: the photosynthetic gorgonians (Pseudopterogorgia, Plexaurella, Muricea, Eunicea, Pinnigorgia) — they feed themselves, and putting them in the coverage report would invent gaps. The Settings hint says so.
+
 ### The engineering constraints that shape the design
 
 - **Many small pulses beat 1–2 big feeds** for every group (Dendrophyllia 12–24 micro-feeds/day; crinoid 4×2h windows; carnation continuous). Micro-dose scheduling is the core primitive — and the dosing engine already compiles daily-total → 0.1–10 ml doses at 1–240 min intervals.
@@ -1155,3 +1176,31 @@ the summary stocking the shelf incl. empty-container *soon* and the soak,
 the pump-linked deferral), `test_panel_nps.mjs` 52 (1 new — both cards,
 ordering, status card, gap vs soon vs all-clear, faded and soaking copy,
 the typed feed routing).
+
+## 15. The species catalogue expanded (2026-09-09, 0.7.150)
+
+Reece's ask: *more types of gorgonians, and any other popular species or
+species commonly found in the hobby.* The library went from ten entries to
+twenty-four (the §3 second table), and grew a `group` per entry so the
+Settings grid files them by family instead of one flat wall of checkboxes.
+
+- **`nps.SPECIES_GROUPS`** — four families, in display order: stony /
+  gorgonian / soft / filter. `SPECIES_LIBRARY` entries carry `group`; ids
+  are config keys on live tanks, so the original ten keep theirs.
+- **The summary** carries `speciesGroups` (`[{id, name}]`) beside
+  `speciesLibrary`. The panel's `_npsSpeciesGroups` renders one eyebrow +
+  `mini-grid` per family the summary names, skips empty families, files
+  anything ungrouped under *Other*, and falls back to a single flat grid
+  when no groups ride the summary (the demo, an older backend).
+- **The compiler is untouched** — a new id is just another set of foods +
+  particle window, so coverage, *soon*, pump suggestions, and the save
+  guard (`species_ids()`) all pick the new species up for free.
+- **Gorgonians went from three lines to seven**: the starter set, Atlantic
+  whips, purple/red imports, the Ellisella whips, the big fine-polyp fans,
+  the Euplexaura/Guaiagorgia line, blueberry. Photosynthetic gorgonians are
+  deliberately excluded (see §3) and the Settings hint says why.
+
+Tests: `test_nps.py` 159 (3 new — library integrity + the group ladder,
+new ids through the compiler and the save guard, the summary's groups),
+`test_panel_nps.mjs` 53 (1 new — grouped order, empty family skipped,
+*Other* for the ungrouped, flat fallback, the photosynthetic hint).

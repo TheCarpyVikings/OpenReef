@@ -16636,6 +16636,8 @@ async def websocket_nps_summary(
         },
         # Species plans + nutrient budget (Stage D) — compiled backend-side.
         "speciesLibrary": [dict(s) for s in nps_engine.SPECIES_LIBRARY],
+        # 0.7.150: the families the Settings grid files the species under.
+        "speciesGroups": [{"id": gid, "name": label} for gid, label in nps_engine.SPECIES_GROUPS],
         "speciesPlan": nps_engine.compile_feed_plan(
             list((config.get("nps") or {}).get("species") or []), shelf_products, channels,
             pending=live_pending),
