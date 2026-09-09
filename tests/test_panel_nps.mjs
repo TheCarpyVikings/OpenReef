@@ -1851,5 +1851,65 @@ test("the species grid files the catalogue by family, and falls back flat withou
   } finally { restore(); }
 });
 
+test("the rotifer bottle joins the shelf: its own card, its own taps, after the brine (0.7.151)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = { enabled: true, handFeed: { defaultDoseMl: 40 }, vessels: [], state: { status: "none" },
+      reservoir: {}, fridgeBottle: { remainingMl: 0 }, nextHatch: { status: "unknown" }, enrichment: { state: { status: "none" } } };
+    panel._cultures = { summary: { bottle: { doseMl: 25 } }, at: 0, loading: false, error: "", message: "", demo: false };
+    const filledAt = new Date(Date.parse(NOW) - 12 * 3600000).toISOString();
+    const rotLive = (over) => ({ source: "cultures", kind: "rotifers", vessel: "rotifers", where: "the rotifer bottle in the fridge",
+      stockedBy: "the Cultures tab", status: "prime", window: "shelf", hoursLeft: 108, windowHours: 120, ageHours: 12,
+      enriched: true, boostHoursLeft: 22, refrigerated: true, expired: false, loadedAt: filledAt, ...over });
+    const rotProduct = (live) => ({ name: "Live rotifers (fridge bottle)", brand: "Home culture", category: "zooLive", bottleMl: 1000,
+      remainingMl: 300, particleUmMin: 90, particleUmMax: 360, history: [], live });
+    const rotState = (live, expiry) => ({ bottleMl: 1000, remainingMl: 300, percent: 30, usageMlPerDay: 25, daysUntilEmpty: 12,
+      low: false, empty: false, expiry, categoryLabel: "Live zooplankton", handDose: { planned: false, clock: { due: false } }, live });
+    const brineLive = { source: "hatchery", kind: "brine", vessel: "container", where: "the brine container", stockedBy: "the hatchery",
+      status: "prime", window: "yolk", hoursLeft: 21, windowHours: 24, ageHours: 3, enriched: false, boostHoursLeft: null,
+      refrigerated: false, expired: false, loadedAt: filledAt };
+    const shelf = panel._nps.summary.shelf;
+    shelf.live = {
+      live_rotifer_bottle: rotProduct(rotLive({})),
+      live_brine_container: { name: "Live baby brine (container)", brand: "Home hatchery", category: "zooLive", bottleMl: 750, remainingMl: 500,
+        particleUmMin: 400, particleUmMax: 500, history: [], live: brineLive },
+    };
+    shelf.products.live_rotifer_bottle = rotState(shelf.live.live_rotifer_bottle.live, { status: "fresh", daysLeft: 4.5, hoursLeft: 108, soaking: false });
+    shelf.products.live_brine_container = { bottleMl: 750, remainingMl: 500, percent: 66.7, usageMlPerDay: null, daysUntilEmpty: null, low: false, empty: false,
+      expiry: { status: "fresh", daysLeft: 0.88, hoursLeft: 21, soaking: false }, categoryLabel: "Live zooplankton", handDose: { planned: false, clock: { due: false } }, live: brineLive };
+    shelf.count = 4; shelf.liveCount = 2;
+    const html = panel._npsTab();
+    noPlaceholders(html, "NPS tab with rotifers");
+    const cards = html.split('<article class="panel stack" style="gap:8px;">');
+    const rot = cards.find((c) => c.includes("Live rotifers (fridge bottle)"));
+    assert(rot, "the rotifer bottle must render as a shelf card");
+    assert(rot.includes("Fresh · ~108 h left") && rot.includes("Gut-loaded · ~22 h boost") && rot.includes(">Fridge<"), `rotifer chips wrong: ${rot}`);
+    assert(rot.includes("the DHA boost holds ~22 h more; the bottle itself keeps ~108 h of its 5-day shelf"), `rotifer clock line wrong: ${rot}`);
+    assert(rot.includes("300 of 1000 ml in the rotifer bottle in the fridge") && rot.includes("≈12 days of use left (~25 ml/day)"), "ledger line wrong");
+    assert(rot.includes("Stocked by the Cultures tab"), "the rotifer entry names its keeper");
+    assert(rot.includes('data-action="cultures-bottle-fed"') && rot.includes(">Fed 25 ml<"), "the bottle feeds through the cultures tap at the bottle's dose");
+    assert(rot.includes('data-action="nps-live-feed" data-id="live_rotifer_bottle" data-vessel="rotifers"'), "typed ml routes as rotifers");
+    assert(rot.includes('data-id="cultures">Open Live cultures →') && !rot.includes("Open Brine hatchery"), "links to the Cultures tab");
+    assert(html.indexOf("Live baby brine (container)") < html.indexOf("Live rotifers (fridge bottle)"), "brine leads, rotifers follow");
+    // Boost worn off, plain, and stale read honestly.
+    const worn = panel._npsProductCard("live_rotifer_bottle", rotProduct(rotLive({ boostHoursLeft: 0 })), rotState(rotLive({ boostHoursLeft: 0 }), { status: "fresh", daysLeft: 4.5, hoursLeft: 108, soaking: false }));
+    assert(worn.includes(">Boost gone<") && worn.includes("The DHA boost has worn off — still live food for ~108 h"), `worn card wrong: ${worn}`);
+    const plain = panel._npsProductCard("live_rotifer_bottle", rotProduct(rotLive({ enriched: false, boostHoursLeft: null })), rotState(rotLive({ enriched: false, boostHoursLeft: null }), { status: "fresh", daysLeft: 4.5, hoursLeft: 108, soaking: false }));
+    assert(plain.includes("~108 h of the 5-day fridge shelf left; enrich a portion for DHA") && !plain.includes("Boost"), `plain card wrong: ${plain}`);
+    const stale = panel._npsProductCard("live_rotifer_bottle", rotProduct(rotLive({ status: "fading", hoursLeft: 0, expired: true })), rotState(rotLive({ status: "fading", hoursLeft: 0, expired: true }), { status: "expired", daysLeft: 0, hoursLeft: 0, soaking: false }));
+    assert(stale.includes(">Past shelf life<") && stale.includes("empty it and harvest fresh"), `stale card wrong: ${stale}`);
+    noPlaceholders(worn + plain + stale, "rotifer cards");
+    // The typed feed goes to the cultures bottle command with the ml.
+    const npsCalls = [], cultureCalls = [];
+    panel._npsCall = (msg) => npsCalls.push(msg);
+    panel._culturesCall = (msg) => cultureCalls.push(msg);
+    Object.defineProperty(panel, "shadowRoot", { value: { querySelector: () => ({ value: "30" }) }, configurable: true });
+    panel._render = () => {};
+    panel._npsLiveFeed("live_rotifer_bottle", "rotifers");
+    assert(npsCalls.length === 0 && cultureCalls.length === 1 && cultureCalls[0].type === "openreef/cultures_bottle" && cultureCalls[0].action === "fed" && cultureCalls[0].ml === 30, `rotifer feed call wrong: ${JSON.stringify(cultureCalls)}`);
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

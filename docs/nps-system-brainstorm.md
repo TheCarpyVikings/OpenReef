@@ -1204,3 +1204,40 @@ Tests: `test_nps.py` 159 (3 new — library integrity + the group ladder,
 new ids through the compiler and the save guard, the summary's groups),
 `test_panel_nps.mjs` 53 (1 new — grouped order, empty family skipped,
 *Other* for the ungrouped, flat fallback, the photosynthetic hint).
+
+### 14.4 The rotifer bottle joins the shelf (2026-09-09, 0.7.151)
+
+Reece's rotifers arrived on the 8th; the same ask for them. The Cultures
+tab's harvest bottle becomes a third live entry, **`live_rotifer_bottle`**
+(*Live rotifers (fridge bottle)*, brand *Home culture*, the seeded
+90–360 µm window), built by the same `live_brine_product` builder off a
+`rotifer_bottle_prime` shape:
+
+- **The clock is the fridge shelf** — `cultures.bottle_state` on the
+  species' `bottleShelfDays` (5 days for L-type), fail-closed with no
+  stamp. Past the shelf the entry is expired and covers nothing.
+- **The DHA boost is a second window, not the clock.** `bottle_boost`
+  rides in the `live` block as `boostHoursLeft` (None never enriched, 0
+  worn off). A worn-off boost never expires the bottle — they are still
+  live food, and the card says so: *The DHA boost has worn off — still
+  live food for ~N h; enrich the next portion.* This differs from brine
+  on purpose: unfed nauplii burn their yolk down, rotifers in the fridge
+  do not starve on the same clock.
+- **Usage** is the bottle's own `fed_tank` rows (undone ones skipped), so
+  the runway and the budget count the rotifers.
+- **On its way** (pending, for the coverage compiler): the DHA soak
+  running (*finishes in ~N h*) outranks a producing cone into an empty
+  bottle (*Cone A is producing — harvest into the bottle*), which outranks
+  an establishing one (*Cone A's first harvest in ~N d*).
+
+On Reece's screen this is what clears the Euplexaura/Guaiagorgia line
+(50–300 µm): brine cannot, rotifers can — once the first harvest is in
+the bottle, and the report now says exactly when that is.
+
+Card: the same live card, brine first then rotifers, with *Fed N ml* at
+the bottle's own dose through the Cultures tap, a typed ml routed to
+`cultures_bottle fed`, and *Open Live cultures →*. Tests: `test_nps.py`
+161 (2 new — the prime shape, boost beside shelf, usage rows, stale and
+fail-closed, coverage; the summary with a cone producing, establishing,
+soaking and absent), `test_panel_nps.mjs` 54 (1 new — chips, clock line,
+taps, ordering, worn/plain/stale copy, the typed feed routing).

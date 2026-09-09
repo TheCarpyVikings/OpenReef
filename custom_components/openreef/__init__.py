@@ -14056,6 +14056,50 @@ def _nps_live_shelf(config: dict[str, Any], now: datetime
         pending.append({"name": "live baby brine from the hatchery", "category": "zooLive",
                         "particleUmMin": lib.get("particleUmMin", 400),
                         "particleUmMax": lib.get("particleUmMax", 500), "note": note})
+    # The rotifer harvest bottle (0.7.151): the Cultures tab's ledger on the
+    # species' fridge shelf, the DHA boost beside it, the bottle's own
+    # fed_tank rows as usage. On its way: the soak running, a cone producing
+    # into an empty bottle, or a cone still establishing.
+    cultures = _nps_cultures_cfg(config)
+    rot_preset = cultures_engine.species_preset("rotifer_L")
+    shelf_days = rot_preset["bottleShelfDays"]
+    bottle = cultures["bottle"]
+    rot_state = cultures_engine.bottle_state(bottle, shelf_days, now)
+    if rot_state["status"] != "empty":
+        products[nps_engine.LIVE_ROTIFER_BOTTLE_ID] = nps_engine.live_brine_product(
+            "rotifers", rot_state["remainingMl"], bottle["volumeMl"], bottle.get("filledAt"),
+            nps_engine.rotifer_bottle_prime(rot_state, shelf_days), bottle.get("history") or [],
+            boost=cultures_engine.bottle_boost(bottle, cultures["enrichment"]["boostColdH"], now))
+    rot_note = ""
+    enrich = cultures["enrichment"]
+    soak_st = cultures_engine.soak_state(enrich["state"].get("startedAt"), enrich["soakH"],
+                                         enrich["boostWarmH"], now)
+    if soak_st.get("status") == "soaking":
+        left = soak_st.get("hoursLeft")
+        rot_note = ("the DHA soak is running" if left is None
+                    else f"the DHA soak finishes in ~{float(left):.1f} h")
+    else:
+        producing, establishing = [], []
+        for jid, jar in sorted(cultures["jars"].items()):
+            if not isinstance(jar, dict) or cultures_engine.species_preset(jar.get("species")).get("kind") != "rotifer":
+                continue
+            st = cultures_engine.culture_state(jar, now)
+            name = str(jar.get("name") or jid)
+            if st["status"] == "producing":
+                producing.append(name)
+            elif st["status"] == "establishing":
+                first = max(1.0, _awc_num(rot_preset.get("firstHarvestDays"), 6, 1, 60))
+                establishing.append((max(0.0, first - _awc_num(st.get("ageDays"), 0, 0, 1000)), name))
+        if producing:
+            rot_note = f"{producing[0]} is producing — harvest into the bottle"
+        elif establishing:
+            days, name = min(establishing)
+            rot_note = f"{name}'s first harvest in ~{days:.1f} d"
+    if rot_note:
+        rlib = nps_engine.live_library("rotifers")
+        pending.append({"name": "live rotifers from the cone", "category": "zooLive",
+                        "particleUmMin": rlib.get("particleUmMin", 90),
+                        "particleUmMax": rlib.get("particleUmMax", 360), "note": rot_note})
     return products, pending
 
 

@@ -3753,6 +3753,103 @@ def test_ws_summary_carries_the_species_groups():
     assert {s["group"] for s in payload["speciesLibrary"]} == {"stony", "gorgonian", "soft", "filter"}
 
 
+
+# ------------------------------------------------- the rotifer bottle joins the shelf (doc §14.4, 0.7.151)
+def test_live_rotifer_bottle_runs_the_fridge_shelf_with_the_dha_boost_beside_it():
+    from openreef import cultures as cultures_engine
+    filled = _iso(NOW - timedelta(hours=30))
+    bottle = {"volumeMl": 1000, "remainingMl": 400, "filledAt": filled,
+              "lastLoadEnriched": True, "enrichedAt": _iso(NOW - timedelta(hours=4)),
+              "history": [{"event": "filled", "at": filled, "ml": 500},
+                          {"event": "fed_tank", "at": _iso(NOW - timedelta(hours=6)), "ml": 50},
+                          {"event": "fed_tank", "at": _iso(NOW - timedelta(hours=18)), "ml": 50},
+                          {"event": "fed_tank", "at": _iso(NOW - timedelta(hours=20)), "ml": 50,
+                           "undoneAt": _iso(NOW - timedelta(hours=19))}]}
+    state = cultures_engine.bottle_state(bottle, 5.0, NOW)
+    prime = nps.rotifer_bottle_prime(state, 5.0)
+    assert prime == {"status": "prime", "ageHours": 30.0, "primeLeftHours": 90.0, "enriched": False,
+                     "window": "shelf", "windowHours": 120.0, "soakAgeHours": None, "refrigerated": True}
+    product = nps.live_brine_product("rotifers", state["remainingMl"], 1000, filled, prime,
+                                     bottle["history"], boost=cultures_engine.bottle_boost(bottle, 24, NOW))
+    assert product["name"] == "Live rotifers (fridge bottle)" and product["brand"] == "Home culture"
+    assert product["particleUmMin"] == 90 and product["particleUmMax"] == 360
+    assert [h["ml"] for h in product["history"]] == [50, 50], "fed_tank rows only, undone ones skipped"
+    live = product["live"]
+    assert live["kind"] == "rotifers" and live["source"] == "cultures" and live["stockedBy"] == "the Cultures tab"
+    assert live["hoursLeft"] == 90.0 and live["windowHours"] == 120.0 and live["expired"] is False
+    assert live["enriched"] is True and live["boostHoursLeft"] == 20.0 and live["refrigerated"] is True
+    st = nps.consumable_state(product, NOW)
+    assert st["expiry"]["status"] == "fresh" and st["expiry"]["hoursLeft"] == 90.0 and st["low"] is False
+    assert st["usageMlPerDay"] == 100.0 and st["daysUntilEmpty"] == 4.0
+    # A boost that has worn off never expires the bottle — still live food.
+    worn = dict(bottle, enrichedAt=_iso(NOW - timedelta(hours=30)))
+    product = nps.live_brine_product("rotifers", 400, 1000, filled, prime, [],
+                                     boost=cultures_engine.bottle_boost(worn, 24, NOW))
+    assert product["live"]["boostHoursLeft"] == 0.0 and product["live"]["expired"] is False
+    plain = nps.live_brine_product("rotifers", 400, 1000, filled, prime, [],
+                                   boost=cultures_engine.bottle_boost(dict(bottle, lastLoadEnriched=False), 24, NOW))
+    assert plain["live"]["boostHoursLeft"] is None and plain["live"]["enriched"] is False
+    # Past the fridge shelf: expired, covers nothing; no stamp = fail-closed.
+    old = _iso(NOW - timedelta(days=6))
+    stale_state = cultures_engine.bottle_state({"remainingMl": 100, "filledAt": old}, 5.0, NOW)
+    stale = nps.live_brine_product("rotifers", 100, 1000, old, nps.rotifer_bottle_prime(stale_state, 5.0), [])
+    assert stale["live"]["expired"] is True and nps.consumable_state(stale, NOW)["expiry"]["status"] == "expired"
+    assert nps.rotifer_bottle_prime(cultures_engine.bottle_state({"remainingMl": 100}, 5.0, NOW), 5.0)["status"] == "fading"
+    # Coverage: 90–360 µm rotifers feed the 50–300 µm gorgonian that brine cannot.
+    plan = nps.compile_feed_plan(["gorgonian_hard"], {"r": product}, {})
+    assert plan["gaps"] == [] and plan["soon"] == []
+    assert len(nps.compile_feed_plan(["gorgonian_hard"], {"r": stale}, {})["gaps"]) == 1
+
+
+def test_ws_summary_stocks_the_shelf_with_the_rotifer_bottle_and_says_what_the_cones_are_doing():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["species"] = ["gorgonian_hard"]
+    jar = {"name": "Cone A", "species": "rotifer_L", "volumeL": 2.5, "salinityPpt": 27,
+           "feed": {"productId": "", "doseMl": 5}, "cadence": {}, "history": [],
+           "state": {"startedAt": _iso(now - timedelta(days=10)), "lastRestartAt": _iso(now - timedelta(days=10)),
+                     "lastFedAt": _iso(now - timedelta(hours=2))}}
+    cfg["nps"]["cultures"] = {"enabled": True, "jars": {"c1": jar},
+                              "bottle": {"volumeMl": 1000, "remainingMl": 300, "filledAt": _iso(now - timedelta(hours=12)),
+                                         "doseMl": 25, "lastLoadEnriched": True, "enrichedAt": _iso(now - timedelta(hours=2)),
+                                         "history": [{"event": "fed_tank", "at": _iso(now - timedelta(hours=3)), "ml": 25}]}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    shelf = payload["shelf"]
+    assert set(shelf["live"]) == {"live_rotifer_bottle"} and shelf["liveCount"] == 1
+    rot = shelf["products"]["live_rotifer_bottle"]
+    assert rot["remainingMl"] == 300 and rot["bottleMl"] == 1000 and rot["usageMlPerDay"] == 25.0
+    assert 107.9 <= rot["live"]["hoursLeft"] <= 108.1 and rot["expiry"]["status"] == "fresh"
+    assert 21.9 <= rot["live"]["boostHoursLeft"] <= 22.1 and rot["live"]["enriched"] is True
+    # The 50–300 µm gorgonian is fed by the rotifers on hand.
+    assert payload["speciesPlan"]["gaps"] == [] and payload["speciesPlan"]["soon"] == []
+    # Empty bottle, producing cone: on its way.
+    cfg["nps"]["cultures"]["bottle"].update({"remainingMl": 0, "filledAt": ""})
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    plan = conn.results[-1].payload["speciesPlan"]
+    assert plan["gaps"] == [] and len(plan["soon"]) == 1
+    assert "live rotifers from the cone will (Cone A is producing — harvest into the bottle)" in plan["soon"][0], plan
+    # A cone still establishing says when the first harvest lands.
+    jar["state"]["startedAt"] = jar["state"]["lastRestartAt"] = _iso(now - timedelta(days=2))
+    run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
+    plan = conn.results[-1].payload["speciesPlan"]
+    assert len(plan["soon"]) == 1 and "Cone A's first harvest in ~4.0 d" in plan["soon"][0], plan
+    # The DHA soak running outranks the cones.
+    cfg["nps"]["cultures"]["enrichment"] = {"soakH": 6, "state": {"startedAt": _iso(now - timedelta(hours=2)),
+                                                                   "portionMl": 200, "jarId": "c1"}}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 4}))
+    plan = conn.results[-1].payload["speciesPlan"]
+    assert len(plan["soon"]) == 1 and "the DHA soak finishes in ~4.0 h" in plan["soon"][0], plan
+    # No cultures at all: nothing said, nothing stocked.
+    cfg["nps"]["cultures"] = {}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 5}))
+    payload = conn.results[-1].payload
+    assert payload["shelf"]["live"] == {} and len(payload["speciesPlan"]["gaps"]) == 1
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

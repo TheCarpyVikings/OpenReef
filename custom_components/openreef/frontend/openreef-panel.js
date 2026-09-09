@@ -10401,6 +10401,11 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
     if (input) input.value = "";
+    if (vessel === "rotifers") {
+      this._culturesCall({ type: "openreef/cultures_bottle", action: "fed", ml },
+        `Fed ${ml} ml of rotifers — the bottle, the shelf entry and the strip keep count.`);
+      return;
+    }
     const call = vessel === "bottle"
       ? { type: "openreef/nps_fridge_bottle", action: "feed", ml }
       : { type: "openreef/nps_hand_feed", ml };
@@ -12122,11 +12127,31 @@ class OpenReefPanel extends HTMLElement {
     const s = state || {};
     const live = product.live || s.live || {};
     const isBottle = live.vessel === "bottle";
+    const isRotifers = live.kind === "rotifers";
     const pct = Number.isFinite(Number(s.percent)) ? Math.max(0, Math.min(100, Number(s.percent))) : null;
     const hoursLeft = live.hoursLeft == null ? null : Number(live.hoursLeft);
     const chips = [];
     let clockLine = "";
-    if (live.status === "enriching") {
+    if (isRotifers) {
+      // The rotifer bottle (0.7.151): the fridge shelf is the clock; the DHA
+      // boost is a second window that fading never turns into "expired".
+      const boostLeft = live.boostHoursLeft == null ? null : Number(live.boostHoursLeft);
+      if (live.expired) {
+        chips.push(`<span class="pill" style="color:var(--error-color,#e5484d)">Past shelf life</span>`);
+        clockLine = "Past the bottle's fridge shelf — empty it and harvest fresh.";
+      } else {
+        const warn = (s.expiry || {}).status === "aging";
+        chips.push(`<span class="pill"${warn ? ` style="color:var(--warning-color,#f5a524)"` : ""}>Fresh · ~${esc(hoursLeft)} h left</span>`);
+        if (boostLeft != null && boostLeft > 0) chips.push(`<span class="pill">Gut-loaded · ~${esc(boostLeft)} h boost</span>`);
+        else if (boostLeft != null) chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">Boost gone</span>`);
+        const shelfDays = live.windowHours != null ? Math.round(Number(live.windowHours) / 24) : null;
+        clockLine = boostLeft != null && boostLeft > 0
+          ? `Enriched — the DHA boost holds ~${esc(boostLeft)} h more; the bottle itself keeps ~${esc(hoursLeft)} h${shelfDays ? ` of its ${esc(shelfDays)}-day shelf` : ""}.`
+          : boostLeft != null
+            ? `The DHA boost has worn off — still live food for ~${esc(hoursLeft)} h; enrich the next portion.`
+            : `~${esc(hoursLeft)} h${shelfDays ? ` of the ${esc(shelfDays)}-day fridge shelf` : ""} left; enrich a portion for DHA before feeding the fussy mouths.`;
+      }
+    } else if (live.status === "enriching") {
       chips.push(`<span class="pill">Gut-loading</span>`);
       clockLine = hoursLeft != null
         ? `Enrichment soak running — ~${esc(hoursLeft)} h to go; the boost clock starts when it ends.`
@@ -12153,8 +12178,13 @@ class OpenReefPanel extends HTMLElement {
         <div style="height:100%;width:${pct}%;background:${live.expired ? "var(--error-color,#e5484d)" : "var(--primary-color,#03a9f4)"};"></div>
       </div>`;
     const hatch = this._nps.summary?.hatchery || {};
-    const dose = Number(hatch.handFeed?.defaultDoseMl) || 30;
-    const feedAction = isBottle ? "nps-fridge-feed" : "nps-hand-feed";
+    const dose = isRotifers
+      ? (Number(this._cultures?.summary?.bottle?.doseMl) || 20)
+      : (Number(hatch.handFeed?.defaultDoseMl) || 30);
+    const feedAction = isRotifers ? "cultures-bottle-fed" : isBottle ? "nps-fridge-feed" : "nps-hand-feed";
+    const openTab = isRotifers
+      ? `<button class="secondary compact-button" data-action="tab" data-id="cultures">Open Live cultures →</button>`
+      : `<button class="secondary compact-button" data-action="tab" data-id="hatchery">Open Brine hatchery →</button>`;
     return `
       <article class="panel stack" style="gap:8px;">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
@@ -12163,12 +12193,12 @@ class OpenReefPanel extends HTMLElement {
         </div>
         ${bar}
         <small>${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml in ${esc(live.where || "the brine container")} · ${runway}</small>
-        <small>🦐 ${clockLine} Stocked by the hatchery — the amount and the clock follow the ledger.</small>
+        <small>${isRotifers ? "🫧" : "🦐"} ${clockLine} Stocked by ${esc(live.stockedBy || "the hatchery")} — the amount and the clock follow the ledger.</small>
         <div class="button-row">
           <button class="secondary compact-button" data-action="${feedAction}" title="Debits ${esc(live.where || "the container")}, stamps the feed on the strip">Fed ${esc(dose)} ml</button>
           <input type="number" min="0.1" step="0.1" placeholder="ml" style="width:72px;" data-nps-log="${eid}">
           <button class="secondary compact-button" data-action="nps-live-feed" data-id="${eid}" data-vessel="${esc(live.vessel || "container")}">Log feed</button>
-          <button class="secondary compact-button" data-action="tab" data-id="hatchery">Open Brine hatchery →</button>
+          ${openTab}
         </div>
       </article>`;
   }
@@ -13975,8 +14005,8 @@ const rigSteps = [
     // summary, not the config, and sit first — the freshest food on the shelf.
     const liveProducts = (st.summary && st.summary.shelf && st.summary.shelf.live) || {};
     const products = { ...liveProducts, ...cfgProducts };
-    const livePids = Object.keys(liveProducts).sort((a, b) =>
-      ((liveProducts[a].live || {}).vessel === "bottle" ? 1 : 0) - ((liveProducts[b].live || {}).vessel === "bottle" ? 1 : 0));
+    const liveRank = (pid) => ({ container: 0, bottle: 1, rotifers: 2 })[(liveProducts[pid].live || {}).vessel] ?? 3;
+    const livePids = Object.keys(liveProducts).sort((a, b) => liveRank(a) - liveRank(b));
     const pids = livePids.concat(Object.keys(cfgProducts).sort((a, b) =>
       String(cfgProducts[a].name || "").localeCompare(String(cfgProducts[b].name || ""))));
 

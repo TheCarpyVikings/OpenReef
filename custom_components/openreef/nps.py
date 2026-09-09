@@ -137,39 +137,58 @@ def category_label(category: str) -> str:
 # --------------------------------------------------------------------------- #
 LIVE_BRINE_CONTAINER_ID = "live_brine_container"
 LIVE_BRINE_BOTTLE_ID = "live_brine_bottle"
+LIVE_ROTIFER_BOTTLE_ID = "live_rotifer_bottle"
 LIVE_BRINE_VESSELS = {
-    "container": {"id": LIVE_BRINE_CONTAINER_ID, "name": "Live baby brine (container)",
-                  "where": "the brine container"},
-    "bottle": {"id": LIVE_BRINE_BOTTLE_ID, "name": "Live baby brine (fridge bottle)",
-               "where": "the feeding bottle in the fridge"},
+    "container": {"id": LIVE_BRINE_CONTAINER_ID, "kind": "brine",
+                  "name": "Live baby brine (container)", "where": "the brine container",
+                  "brand": "Home hatchery", "stockedBy": "the hatchery"},
+    "bottle": {"id": LIVE_BRINE_BOTTLE_ID, "kind": "brine",
+               "name": "Live baby brine (fridge bottle)", "where": "the feeding bottle in the fridge",
+               "brand": "Home hatchery", "stockedBy": "the hatchery"},
+    # The rotifer harvest bottle (0.7.151): the Cultures tab's ledger, on the
+    # species' fridge shelf (5 days), with the DHA boost as a second window.
+    "rotifers": {"id": LIVE_ROTIFER_BOTTLE_ID, "kind": "rotifers",
+                 "name": "Live rotifers (fridge bottle)", "where": "the rotifer bottle in the fridge",
+                 "brand": "Home culture", "stockedBy": "the Cultures tab"},
 }
 
 
-def live_brine_library() -> dict[str, Any]:
-    """The seeded 'Live baby brine' entry — its particle window is the one
-    fact the species matcher needs, kept in one place."""
+def live_library(kind: str = "brine") -> dict[str, Any]:
+    """The seeded home-culture entry for a live kind — its particle window
+    is the one fact the species matcher needs, kept in one place."""
+    brand, fallback = (("Home hatchery", {"particleUmMin": 400, "particleUmMax": 500})
+                       if kind == "brine" else
+                       ("Home culture", {"particleUmMin": 90, "particleUmMax": 360}))
     for item in PRODUCT_LIBRARY:
-        if item.get("brand") == "Home hatchery":
+        if item.get("brand") == brand and (kind == "brine" or "rotifer" in str(item.get("name", "")).lower()):
             return dict(item)
-    return {"particleUmMin": 400, "particleUmMax": 500}
+    return fallback
+
+
+def live_brine_library() -> dict[str, Any]:
+    return live_library("brine")
 
 
 def live_brine_product(vessel: str, remaining_ml: Any, capacity_ml: Any,
                        loaded_iso: Any, prime: dict[str, Any],
                        hand_feeds: list[dict[str, Any]] | None = None,
-                       soak: dict[str, Any] | None = None) -> dict[str, Any]:
-    """One live-brine shelf entry in the product shape every shelf reader
-    already understands, plus a ``live`` block that says where it came from
-    and where its clock sits. ``prime`` is ``hatch_prime_state`` for this
-    vessel's batch; ``soak`` (the enrichment state) marks a container mid
-    gut-load, whose yolk clock must NOT condemn it (doc §10.3.1).
+                       soak: dict[str, Any] | None = None,
+                       boost: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One live shelf entry in the product shape every shelf reader already
+    understands, plus a ``live`` block that says where it came from and
+    where its clock sits. ``prime`` is ``hatch_prime_state`` for a brine
+    batch, or the same shape built off the rotifer bottle's shelf clock;
+    ``soak`` (the enrichment state) marks a container mid gut-load, whose
+    yolk clock must NOT condemn it (doc §10.3.1); ``boost`` (rotifers) is
+    the DHA window running beside the shelf clock — its fading never
+    expires the bottle, they are still live food.
 
     Mid-soak the entry reads ``enriching`` with the soak's hours left; a
-    faded batch (yolk spent, or the boost gone) is ``expired`` — still on
-    the shelf until the keeper discards it, but no longer counted as
-    covering a mouth."""
+    faded batch (yolk spent, the boost gone, the bottle past its shelf) is
+    ``expired`` — still on the shelf until the keeper discards it, but no
+    longer counted as covering a mouth."""
     meta = LIVE_BRINE_VESSELS.get(vessel) or LIVE_BRINE_VESSELS["container"]
-    lib = live_brine_library()
+    lib = live_library(meta["kind"])
     remaining = max(0.0, _f(remaining_ml))
     capacity = max(remaining, _f(capacity_ml))
     status = str(prime.get("status") or "unknown")
@@ -185,11 +204,16 @@ def live_brine_product(vessel: str, remaining_ml: Any, capacity_ml: Any,
     history = [
         {"at": feed.get("at"), "ml": round(max(0.0, _f(feed.get("ml"))), 1), "kind": "dose"}
         for feed in (hand_feeds or [])
-        if isinstance(feed, dict) and not feed.get("undoneAt")
-        and str(feed.get("from") or "container") == vessel and feed.get("at")]
+        if isinstance(feed, dict) and not feed.get("undoneAt") and feed.get("at")
+        and (str(feed.get("event") or "") == "fed_tank" if meta["kind"] == "rotifers"
+             else str(feed.get("from") or "container") == vessel)]
     enriched = bool(prime.get("enriched")) or soaking
+    boost_left = None
+    if isinstance(boost, dict) and boost.get("status") in ("gutloaded", "faded"):
+        enriched = True
+        boost_left = round(max(0.0, _f(boost.get("hoursLeft"))), 1)
     return {
-        "name": meta["name"], "brand": "Home hatchery", "category": "zooLive",
+        "name": meta["name"], "brand": meta["brand"], "category": "zooLive",
         "bottleMl": round(capacity, 1), "remainingMl": round(remaining, 1),
         "lowThresholdMl": 0,
         "openedAt": str(loaded_iso or ""),
@@ -204,17 +228,39 @@ def live_brine_product(vessel: str, remaining_ml: Any, capacity_ml: Any,
         "doseTimesPerDay": 0, "doseWindowEnd": "", "doseStocking": "medium",
         "doseGuide": {}, "doseNote": "", "lastDosedAt": "", "doseSkippedAt": "",
         "live": {
-            "source": "hatchery", "vessel": vessel, "where": meta["where"],
+            "source": "hatchery" if meta["kind"] == "brine" else "cultures",
+            "kind": meta["kind"], "vessel": vessel, "where": meta["where"],
+            "stockedBy": meta["stockedBy"],
             "status": status, "window": window,
             "hoursLeft": None if hours_left is None else round(max(0.0, _f(hours_left)), 1),
             "windowHours": None if window_h is None else round(_f(window_h), 1),
             "ageHours": prime.get("ageHours"),
             "enriched": enriched,
+            # Rotifers only: the DHA boost's hours left beside the shelf
+            # clock (None = never enriched; 0 = the boost has worn off).
+            "boostHoursLeft": boost_left,
             "refrigerated": bool(prime.get("refrigerated")),
             "expired": expired,
             "loadedAt": str(loaded_iso or ""),
         },
     }
+
+
+def rotifer_bottle_prime(bottle_state: dict[str, Any], shelf_days: Any) -> dict[str, Any]:
+    """The rotifer bottle's shelf clock in ``hatch_prime_state``'s shape, so
+    one builder serves both live kinds: ``prime`` while the fridge shelf
+    holds, ``fading`` past it (or fail-closed with no stamp)."""
+    status = str(bottle_state.get("status") or "empty")
+    hours_left = bottle_state.get("hoursLeft")
+    window_h = max(1.0, _f(shelf_days)) * 24.0
+    age_h = None
+    if hours_left is not None and status != "stale":
+        age_h = round(max(0.0, window_h - _f(hours_left)), 1)
+    return {"status": "fading" if status in ("stale", "empty") else "prime",
+            "ageHours": age_h,
+            "primeLeftHours": None if hours_left is None else round(max(0.0, _f(hours_left)), 1),
+            "enriched": False, "window": "shelf", "windowHours": round(window_h, 1),
+            "soakAgeHours": None, "refrigerated": True}
 
 
 def live_expiry_state(live: dict[str, Any]) -> dict[str, Any]:
