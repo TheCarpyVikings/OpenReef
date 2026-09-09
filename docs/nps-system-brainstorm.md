@@ -965,6 +965,60 @@ Untouched: the harvest-event reminder path (`_nps_hatch_sync_reminders`)
 calls the same function without `free_at_iso`, and correctly — the cone
 that just harvested IS the free one.
 
+### 12.9 The rack's phase, not just its count (2026-09-09, 0.7.155)
+
+`vessels_needed` answers how many cones continuous supply takes. It says
+nothing about **when** they land. Two cones three hours apart satisfy the
+count and still leave the tank a day without brine — the rack is right on
+paper and dry in the water.
+
+`nps.rack_rhythm` projects the schedule instead of assuming an even
+rotation. Every cone walks forward on its OWN clock (0.7.147), restarting
+the moment it is harvested: a batch started at `t` frees the cone at
+`t + clock` and reaches the container at `t + clock + HATCH_HARVEST_BUFFER_H`.
+The measure is the widest gap between consecutive loads — wider than the
+plain shelf and the brine runs out (`dry`), within `HATCH_RHYTHM_TIGHT_H`
+of it and the rhythm holds with no margin (`tight`), otherwise `even`.
+
+**The window starts at the first load the keeper can still move.** Batches
+already incubating are committed, and the hole a clustered pair leaves
+behind them is identical under every plan. That hole is real — it is
+`next_hatch_suggestion`'s to report (§12.8, `blocked`/`lateHours`) —
+but counting it here headlines a number no choice can change and buries
+the rhythm underneath it. `fromAt` says where the window opens. This was
+the difference between the search finding the fix and calling every option
+a draw.
+
+**Plans are ranked leximin, gated on the worst gap.** The search walks
+every vessel across a half-hour grid up to one of its own cycles and
+compares the gap list sorted widest-first, element by element, shortest
+delay winning ties — so a plan that ties on the worst gap but evens out
+everything below it still wins. But the *offer* is gated on the widest gap
+actually narrowing: shaving the second gap while the widest still outruns
+the shelf spends a keeper's evening and changes nothing the tank can feel.
+The projection runs one full cycle past the reported horizon, counting
+gaps that START inside it, so a delay can never flatter itself by pushing
+a load out of view.
+
+**The lever is one cone, once.** `fix` says hold vessel X back D hours on
+its next start — or, for an idle cone, start it D hours from now rather
+than straight away. Same physics, opposite wording; `idle` says which.
+
+**When nothing helps, say what would.** Unequal clocks can lock a rhythm
+no phase shift opens. Reece's live rack is the case: a 36 h cone and a
+24 h one repeat every 72 h around a fixed 24 h hole — exactly the shelf,
+so it holds with nothing to spare, and no delay opens it. `matched` then
+reports what one shared clock across `n` cones would give (36 h / 2 =
+a batch every 18 h). Advisory only — it never says which cysts to buy.
+
+Left to the count: a rack genuinely short of cones. `vessels_needed >
+len(vessels)` already has its own line, so the panel stands the rhythm
+line down rather than stacking two pieces of structural advice.
+
+Presentation and projection only — nothing is persisted, so there is no
+new field to guard on save (§stale-save rules untouched). `rackRhythm`
+rides the summary beside `vesselsNeeded`.
+
 ## 13. Feed timeline v2 — the unified day strip (2026-09-05) · STATUS: **RELEASED 0.7.130–0.7.137 (2026-09-05)** — see §13.10–§13.17
 
 ### 13.1 What v1 is, honestly

@@ -1990,5 +1990,59 @@ test("a full rack never prints a start no cone can take", async () => {
   } finally { restore(); }
 });
 
+test("the rack rhythm reads the cones' phase, not just their number", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const rhythm = (over) => ({ available: true, status: "even", worstGapHours: 18,
+      averageGapHours: 18, shelfHours: 24, vesselCount: 2, horizonHours: 108,
+      fromAt: NOW, loads: [], fix: null, matched: null, ...over });
+    const set = (over) => {
+      panel._nps.summary.hatchery = v2HatcherySummary({ vesselsNeeded: 2, rackRhythm: rhythm(over) });
+      return panel._hatcheryPanel();
+    };
+    // A rack that covers itself states its beat and stays calm.
+    const even = set({});
+    assert(even.includes("longest gap ~18 h against a 24 h shelf — the cones cover each other"),
+      `an even rack states its rhythm: ${even.slice(even.indexOf("\ud83c\udf0a"), even.indexOf("\ud83c\udf0a") + 200)}`);
+    assert(!/warning-color[^<]*Rack rhythm/.test(even), "an even rack must not wear the warning tint");
+    // Two cones, enough by count, clustered by phase: name the cone, the
+    // delay, and what the gap becomes.
+    const dry = set({ status: "dry", worstGapHours: 32.6, averageGapHours: 18,
+      fix: { vesselId: "v2", vesselName: "Hatchery 2", delayHours: 14.5, gapAfterHours: 18.1, idle: false } });
+    assert(dry.includes("the tank goes ~8.6 h without"), `the shortfall is spelled out: ${dry.slice(dry.indexOf("\ud83c\udf0a"), dry.indexOf("\ud83c\udf0a") + 320)}`);
+    assert(dry.includes("Hold Hatchery 2 back ~14.5 h on its next start and the widest gap becomes ~18.1 h"),
+      "the prescription names the cone, the delay and the result");
+    assert(/warning-color[^<]*Rack rhythm/.test(dry), "a rack that runs dry wears the warning tint");
+    // An idle cone takes the same lever, worded the other way round.
+    assert(set({ status: "dry", worstGapHours: 24.8,
+      fix: { vesselId: "v2", vesselName: "Hatchery 2", delayHours: 7, gapAfterHours: 18.2, idle: true } })
+      .includes("Start Hatchery 2 ~7 h from now rather than straight away"),
+      "an idle cone is started later, not held back");
+    // Nothing to prescribe: say what WOULD help instead of inventing a chore,
+    // and stay calm — a tight rack still holds.
+    const tight = set({ status: "tight", worstGapHours: 24, averageGapHours: 14.4,
+      matched: { clockHours: 36, gapHours: 18 } });
+    assert(tight.includes("it holds, with nothing to spare"), "tight is not dry");
+    assert(tight.includes("No delay evens it out — the cones run different clocks"), "the honest diagnosis");
+    assert(tight.includes("Matching them at 36 h across 2 hatcheries would land a batch every ~18 h"),
+      "the matched-clock advice carries real numbers");
+    assert(!/warning-color[^<]*Rack rhythm/.test(tight), "a rhythm that holds must not wear the warning tint");
+    assert(set({ status: "dry", worstGapHours: 36, averageGapHours: 36 })
+      .includes("the gap is baked into the batches already running"), "no fix, no matched: say that plainly");
+    // Too few cones is a COUNT problem — that line owns it, and two pieces of
+    // structural advice at once is noise.
+    panel._nps.summary.hatchery = v2HatcherySummary({ vesselsNeeded: 3,
+      rackRhythm: rhythm({ status: "dry", worstGapHours: 36 }) });
+    const short = panel._hatcheryPanel();
+    assert(short.includes("needs 3 hatcheries"), "the vessel-count advice still renders");
+    assert(!short.includes("Rack rhythm"), "the rhythm line stands down while the rack is a cone short");
+    // Nothing to say without a projection.
+    panel._nps.summary.hatchery = v2HatcherySummary({ vesselsNeeded: 2,
+      rackRhythm: { available: false, status: "even", worstGapHours: null } });
+    assert(!panel._hatcheryPanel().includes("Rack rhythm"), "no projection, no line");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

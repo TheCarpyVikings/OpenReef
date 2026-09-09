@@ -857,6 +857,186 @@ def vessels_needed(hatch_hours: Any, shelf_hours: Any) -> int:
     return max(1, int(-(-lead // shelf)))
 
 
+HATCH_RHYTHM_TIGHT_H = 2.0   # a gap this close to the shelf counts as tight
+HATCH_RHYTHM_STEP_H = 0.5    # the grid the "hold it back" search walks
+
+
+def rack_rhythm(
+    now: datetime,
+    vessels: Any,
+    shelf_hours: Any,
+    horizon_hours: Any = None,
+) -> dict[str, Any]:
+    """Where the rack's loads actually LAND, and the one delay that evens them.
+
+    ``vessels_needed`` answers how many cones continuous supply takes; it says
+    nothing about their phase. Two cones that land three hours apart and then
+    go quiet for a day satisfy the count and still run the tank dry. This
+    projects the real schedule instead of assuming an even rotation.
+
+    Each vessel is walked forward on its OWN clock (0.7.147: different cysts
+    per cone), restarting the moment it is harvested — a batch started at ``t``
+    frees the cone at ``t + clock`` and reaches the container at
+    ``t + clock + HATCH_HARVEST_BUFFER_H``. Batches already incubating cannot
+    be moved, so their load rides along fixed. An idle cone is projected from
+    now, its best case.
+
+    ``vessels`` takes ``{"id", "name", "hatchHours", "startedAt", "batchHours"}``
+    dicts; no ``startedAt`` means idle. The measure is the widest gap between
+    consecutive loads: wider than the shelf and the brine runs out
+    (``status`` ``dry``), within ``HATCH_RHYTHM_TIGHT_H`` of it and the rhythm
+    holds with no margin (``tight``), otherwise ``even``.
+
+    ``fix`` is the single actionable lever the keeper has — hold ONE cone back
+    on its next start (an idle one: start it later). The search walks every
+    vessel across a ``HATCH_RHYTHM_STEP_H`` grid up to one of its own cycles
+    and keeps the delay that shrinks the worst gap most, shortest delay
+    winning ties. It is only offered when the WIDEST gap actually narrows:
+    leximin ranks the candidates, but shaving a lesser gap while the widest
+    still outruns the shelf changes nothing the tank can feel.
+
+    The measure starts at the first load the keeper can still MOVE — batches
+    already incubating are committed, and the hole a clustered pair leaves
+    behind them is the same under every plan. That hole is real, and it is
+    ``next_hatch_suggestion``'s to report (``blocked``/``lateHours``, 0.7.154);
+    counting it here would headline a number no choice can change and drown
+    the rhythm underneath it. ``fromAt`` says where the window opens.
+
+    Plans are then ranked LEXIMIN — the gap list sorted widest-first, compared
+    element by element — so a plan that ties on the worst gap but evens out
+    everything below it still wins. The window runs one full cycle PAST the
+    reported horizon, counting every gap that STARTS inside it, so a delay can
+    never flatter itself by pushing a load out of view.
+
+    ``matched`` is the honest fallback when no delay helps: unequal clocks can
+    lock a rhythm that no phase shift can open (36 h and 24 h repeat every
+    72 h around a fixed 24 h hole), while one shared clock across ``n`` cones
+    would land a batch every ``clock / n``. Advisory — it never says which
+    cysts to buy.
+    """
+    shelf = _f(shelf_hours)
+    if shelf <= 0:
+        shelf = 24.0
+    out: dict[str, Any] = {
+        "available": False, "status": "even", "shelfHours": round(shelf, 1),
+        "worstGapHours": None, "averageGapHours": None, "loads": [],
+        "horizonHours": None, "fix": None, "matched": None, "vesselCount": 0,
+        "fromAt": None,
+    }
+    entries: list[dict[str, Any]] = []
+    for item in vessels or []:
+        if not isinstance(item, dict):
+            continue
+        clock = _f(item.get("hatchHours"))
+        if clock <= 0:
+            clock = 24.0
+        started = _parse_iso(item.get("startedAt"))
+        batch_h = _f(item.get("batchHours"))
+        if batch_h <= 0:
+            batch_h = clock
+        entries.append({
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or item.get("id") or ""),
+            "clock": clock,
+            # The cone empties at harvest; the brine reaches the container a
+            # harvest buffer later. A ripe batch frees it now, never in the past.
+            "free": max(started + timedelta(hours=batch_h), now) if started else now,
+            "pending": started + timedelta(hours=batch_h + HATCH_HARVEST_BUFFER_H) if started else None,
+            "idle": started is None,
+        })
+    if not entries:
+        return out
+    out["vesselCount"] = len(entries)
+    horizon = _f(horizon_hours)
+    if horizon <= 0:
+        horizon = max(48.0, 3.0 * max(e["clock"] for e in entries))
+    end = now + timedelta(hours=horizon)
+
+    # Project one whole cycle past the horizon: the measure only counts gaps
+    # that START in-window, but it needs the load that CLOSES the last one.
+    tail = end + timedelta(hours=max(e["clock"] for e in entries) + HATCH_HARVEST_BUFFER_H)
+
+    def loads_for(entry: dict[str, Any], delay_h: float = 0.0) -> list[datetime]:
+        got: list[datetime] = []
+        if entry["pending"] is not None and entry["pending"] <= tail:
+            got.append(entry["pending"])
+        start = entry["free"] + timedelta(hours=delay_h)
+        while True:
+            load = start + timedelta(hours=entry["clock"] + HATCH_HARVEST_BUFFER_H)
+            if load > tail:
+                break
+            got.append(load)
+            start = start + timedelta(hours=entry["clock"])
+        return got
+
+    # The window opens at the earliest load still on the table — everything
+    # before it is already in a cone and cannot be re-timed.
+    cutoff = min(e["free"] + timedelta(hours=e["clock"] + HATCH_HARVEST_BUFFER_H)
+                 for e in entries)
+
+    def gaps_of(loads: list[datetime]) -> list[float]:
+        """Every movable gap that STARTS inside the horizon, widest first."""
+        ordered = sorted(loads)
+        gaps = [(b - a).total_seconds() / 3600.0
+                for a, b in zip(ordered, ordered[1:]) if cutoff <= a <= end]
+        gaps.sort(reverse=True)
+        return gaps
+
+    base = gaps_of([load for entry in entries for load in loads_for(entry)])
+    if not base:
+        return out
+    worst, average = base[0], sum(base) / len(base)
+    out.update({
+        "available": True,
+        "fromAt": cutoff.isoformat(),
+        "loads": [d.isoformat() for d in sorted(
+            load for entry in entries for load in loads_for(entry)
+            if cutoff <= load <= end)[:24]],
+        "worstGapHours": round(worst, 1),
+        "averageGapHours": round(average, 1),
+        "horizonHours": round(horizon, 1),
+        "status": ("dry" if worst > shelf
+                   else "tight" if worst > shelf - HATCH_RHYTHM_TIGHT_H else "even"),
+    })
+    if out["status"] == "even":
+        return out
+
+    best: tuple[list[float], float, dict[str, Any]] | None = None
+    for idx, entry in enumerate(entries):
+        others = [load for j, other in enumerate(entries) if j != idx
+                  for load in loads_for(other)]
+        steps = int(max(1.0, entry["clock"]) / HATCH_RHYTHM_STEP_H)
+        for step in range(1, steps + 1):
+            delay = step * HATCH_RHYTHM_STEP_H
+            candidate = gaps_of(others + loads_for(entry, delay))
+            if not candidate:
+                continue
+            if best is None or candidate < best[0] or (candidate == best[0] and delay < best[1]):
+                best = (candidate, delay, entry)
+    # Leximin RANKS the plans; the WORST gap gates them. Shaving the second
+    # gap while the widest one still outruns the shelf does not stop the tank
+    # going without — it just spends a keeper's evening for nothing.
+    if best is not None and best[0][0] <= worst - HATCH_RHYTHM_STEP_H:
+        gap_after, delay, entry = best[0][0], best[1], best[2]
+        out["fix"] = {
+            "vesselId": entry["id"], "vesselName": entry["name"],
+            "delayHours": round(delay, 1), "gapAfterHours": round(gap_after, 1),
+            "idle": bool(entry["idle"]),
+        }
+        return out
+
+    # No phase shift helps. Unequal clocks are the usual reason, and one
+    # shared clock across the rack lands a batch every clock / n.
+    clocks = {entry["clock"] for entry in entries}
+    if len(clocks) > 1:
+        slowest = max(clocks)
+        even_gap = slowest / len(entries)
+        if even_gap < worst - HATCH_RHYTHM_STEP_H:
+            out["matched"] = {"clockHours": round(slowest, 1),
+                              "gapHours": round(even_gap, 1)}
+    return out
+
+
 def cyst_dose_guide(volume_l: Any) -> dict[str, Any]:
     """The card's dosing hint: grams at the 2 g/L optimum, and the rough
     nauplii count at premium (90%-grade GSL ≈ 225k/g) yield."""

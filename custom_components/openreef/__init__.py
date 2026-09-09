@@ -16537,6 +16537,21 @@ async def websocket_nps_summary(
     free_at_iso = None
     if not idle_vessel and soonest_free is not None:
         free_at_iso = (soonest_free[1] + timedelta(hours=soonest_free[2])).isoformat()
+    # How many cones continuous supply takes is vessels_needed's question;
+    # WHERE their loads actually land is the rhythm's (0.7.155). Each cone on
+    # its own clock and its own stamped batch, exactly as the chain sees them.
+    rhythm = nps_engine.rack_rhythm(
+        now_utc,
+        [{"id": vid,
+          "name": (hatchery_cfg["vessels"].get(vid) or {}).get("name") or vid,
+          "hatchHours": _nps_vessel_clock(config, vid),
+          "startedAt": (((hatchery_cfg["vessels"].get(vid) or {}).get("state") or {})
+                        .get("hatchStartedAt") or ""),
+          "batchHours": (((hatchery_cfg["vessels"].get(vid) or {}).get("state") or {})
+                         .get("hatchHours"))}
+         for vid in sorted(hatchery_cfg["vessels"])],
+        plain_shelf_h,
+    )
     primary_cfg = hatchery_cfg["vessels"].get(primary_vessel) or {}
     primary_egg = primary_state.get("eggType") or primary_cfg.get("eggType") or hatchery_cfg["eggType"]
     primary_hours = primary_state.get("hatchHours") or primary_cfg.get("hatchHours") or hatchery_cfg["hatchHours"]
@@ -16654,6 +16669,8 @@ async def websocket_nps_summary(
             "vesselsNeeded": nps_engine.vessels_needed(
                 max((v["hatchHours"] for v in vessels_payload), default=hatchery_cfg["hatchHours"]),
                 plain_shelf_h),
+            # Structural too, but about PHASE rather than count (0.7.155).
+            "rackRhythm": rhythm,
             "state": primary_state,
             "reservoir": container,
             "fridgeBottle": fridge_bottle,

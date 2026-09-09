@@ -1098,6 +1098,115 @@ def test_next_hatch_respects_each_batches_stamped_clock():
     assert s["busyCount"] == 1
 
 
+def _rack(*vessels):
+    """(id, name, clock, hours-in) tuples -> rack_rhythm's vessel dicts.
+    hours_in None = the cone sits idle."""
+    out = []
+    for vid, name, clock, hours_in in vessels:
+        out.append({"id": vid, "name": name, "hatchHours": clock,
+                    "startedAt": "" if hours_in is None else _iso(NOW - timedelta(hours=hours_in)),
+                    "batchHours": 0 if hours_in is None else clock})
+    return out
+
+
+def test_rack_rhythm_leaves_an_even_rack_alone():
+    # Two 36 h cones half a cycle apart: a load every 18 h against a 24 h
+    # shelf. Nothing to say, and nothing to prescribe.
+    r = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 24.8),
+                                   ("v2", "Hatchery 2", 36, 6.8)), 24)
+    assert r["available"] and r["status"] == "even"
+    assert r["worstGapHours"] == 18.0 and r["fix"] is None and r["matched"] is None
+
+
+def test_rack_rhythm_finds_the_delay_that_evens_a_clustered_rack():
+    # The case the feature exists for: two 36 h cones only 3.4 h apart. They
+    # satisfy vessels_needed and still leave a 32.6 h hole — 8.6 h longer than
+    # the brine lasts. Holding one back half a cycle closes it.
+    r = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 24.8),
+                                   ("v2", "Hatchery 2", 36, 21.4)), 24)
+    assert nps.vessels_needed(36, 24) == 2      # the COUNT was never the problem
+    assert r["status"] == "dry" and r["worstGapHours"] == 32.6
+    fix = r["fix"]
+    assert fix["vesselId"] == "v2" and abs(fix["delayHours"] - 14.5) < 0.6, fix
+    assert fix["gapAfterHours"] < 24 and fix["idle"] is False
+    # The prescription is real: applying it lands the rack in the clear.
+    after = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 24.8),
+                                       ("v2", "Hatchery 2", 36, 21.4 - fix["delayHours"])), 24)
+    assert after["status"] == "even", after
+
+
+def test_rack_rhythm_delays_an_idle_cone_by_starting_it_later():
+    # Two idle cones started together would land their loads on the same
+    # minute and then go quiet for a whole cycle. The lever is the same one,
+    # worded the other way round: start one of them later.
+    r = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 24, None),
+                                   ("v2", "Hatchery 2", 24, None)), 24)
+    assert r["status"] in ("dry", "tight") and r["worstGapHours"] == 24.0
+    fix = r["fix"]
+    assert fix["idle"] is True and abs(fix["delayHours"] - 12.0) < 0.6, fix
+    assert fix["gapAfterHours"] == 12.0
+
+
+def test_rack_rhythm_says_so_when_no_delay_can_help():
+    # Reece's live rack (0.7.155): a 36 h cone and a 24 h one. Their phases
+    # repeat every 72 h around a fixed 24 h hole — exactly the shelf, so it
+    # holds with nothing to spare, and NO phase shift opens it. Rather than
+    # prescribe a chore that changes nothing, say what would: one shared clock.
+    r = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 24.8),
+                                   ("v2", "Hatchery 2", 24, 9.4)), 24)
+    assert r["status"] == "tight" and r["worstGapHours"] == 24.0
+    assert r["fix"] is None, r["fix"]
+    assert r["matched"] == {"clockHours": 36.0, "gapHours": 18.0}
+    # One cone that simply cannot keep up is a COUNT problem, not a phase one:
+    # no fix, and no matched-clock advice to give with a single clock.
+    lone = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 24.8)), 24)
+    assert lone["status"] == "dry" and lone["worstGapHours"] == 36.0
+    assert lone["fix"] is None and lone["matched"] is None
+
+
+def test_rack_rhythm_measures_only_what_the_keeper_can_still_move():
+    # Batches already incubating are committed. The hole a clustered pair
+    # leaves BEHIND them belongs to next_hatch_suggestion (blocked/lateHours),
+    # not here — counting it would headline a number no choice can change and
+    # bury the fix underneath it.
+    vessels = _rack(("v1", "Hatchery 1", 36, 24.8), ("v2", "Hatchery 2", 36, 21.4))
+    r = nps.rack_rhythm(NOW, vessels, 24)
+    at = datetime.fromisoformat
+    first_movable = at(r["fromAt"])
+    assert all(at(load) >= first_movable for load in r["loads"]), r["loads"]
+    # The committed pair lands at +12.2 h and +15.6 h; the window opens after
+    # both, at the earliest load still on the table.
+    assert (first_movable - NOW).total_seconds() / 3600.0 > 15.6
+    assert nps.rack_rhythm(NOW, [], 24)["available"] is False
+    assert nps.rack_rhythm(NOW, None, 24)["vesselCount"] == 0
+
+
+def test_ws_summary_carries_the_rack_rhythm():
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    vessels = cfg["nps"]["hatchery"]["vessels"]
+    for vid, clock, hours_in in (("v1", 36, 24.8), ("v2", 36, 21.4)):
+        vessels[vid]["hatchHours"] = clock
+        vessels[vid]["state"] = {
+            "hatchStartedAt": (now - timedelta(hours=hours_in)).isoformat(),
+            "hatchHours": clock}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    rhythm = hatchery["rackRhythm"]
+    # Two cones is enough by COUNT and still dry by PHASE — the whole point.
+    assert hatchery["vesselsNeeded"] == 2 and len(hatchery["vessels"]) == 2
+    assert rhythm["status"] == "dry" and rhythm["vesselCount"] == 2
+    assert rhythm["fix"]["vesselName"] == "Hatchery 2"
+    # Each cone is read on its OWN clock, exactly as the chain reads them.
+    vessels["v2"]["hatchHours"] = 24
+    vessels["v2"]["state"]["hatchHours"] = 24
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    assert conn.results[-1].payload["hatchery"]["rackRhythm"]["shelfHours"] == 24.0
+
+
 def test_hatchery_v2_pure_helpers():
     assert nps.vessels_needed(36, 24) == 2      # the documented 2-vessel stagger
     assert nps.vessels_needed(24, 48) == 1

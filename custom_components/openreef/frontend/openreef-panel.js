@@ -10714,6 +10714,36 @@ class OpenReefPanel extends HTMLElement {
     return "";
   }
 
+  // The rack's PHASE, not its count (0.7.155). vessels_needed answers how
+  // many cones continuous supply takes; this answers where their loads
+  // actually land. Backend-side maths (nps.rack_rhythm) — this puts words on
+  // it. Advisory, never a nag: only a rhythm that runs the tank dry gets the
+  // warning tint, and a rack that already covers itself just states its beat.
+  _npsRackRhythmLine(rhythm) {
+    if (!rhythm || !rhythm.available || !(Number(rhythm.worstGapHours) > 0)) return "";
+    const n = (v) => this._escape(String(v));
+    const worst = n(rhythm.worstGapHours);
+    const shelf = n(rhythm.shelfHours);
+    const numbers = `brine lands every ~${n(rhythm.averageGapHours)} h on average, longest gap ~${worst} h against a ${shelf} h shelf`;
+    if (rhythm.status === "even") {
+      return `🌊 Rack rhythm: ${numbers} — the cones cover each other.`;
+    }
+    const verdict = rhythm.status === "dry"
+      ? `the tank goes ~${n(Math.round((Number(rhythm.worstGapHours) - Number(rhythm.shelfHours)) * 10) / 10)} h without`
+      : "it holds, with nothing to spare";
+    const fix = rhythm.fix;
+    const body = fix
+      ? `${fix.idle
+        ? `Start ${n(fix.vesselName)} ~${n(fix.delayHours)} h from now rather than straight away`
+        : `Hold ${n(fix.vesselName)} back ~${n(fix.delayHours)} h on its next start`} and the widest gap becomes ~${n(fix.gapAfterHours)} h — one delayed batch, then the rack keeps itself even.`
+      : rhythm.matched
+        ? `No delay evens it out — the cones run different clocks, so the pattern repeats around that gap. Matching them at ${n(rhythm.matched.clockHours)} h across ${n(rhythm.vesselCount)} hatcheries would land a batch every ~${n(rhythm.matched.gapHours)} h.`
+        : "No delay evens it out — the gap is baked into the batches already running.";
+    const line = `🌊 Rack rhythm: ${numbers} — ${verdict}. ${body}`;
+    return rhythm.status === "dry"
+      ? `<span style="color:var(--warning-color,#f5a524)">${line}</span>` : line;
+  }
+
   // What the rig is doing RIGHT NOW, mapped from the same summary the strip
   // uses. A running preview (the ▶ walkthrough) overrides it client-side.
   _npsRigState() {
@@ -12582,6 +12612,9 @@ class OpenReefPanel extends HTMLElement {
     const neededLine = needed > vessels.length
       ? `⚙️ With ${this._escape(String(hatchHours))} h eggs and ${this._escape(String(reservoirSum.plainShelfHours || reservoirSum.shelfHours || 24))} h brine life, continuous supply needs ${this._escape(String(needed))} hatcheries — you have ${this._escape(String(vessels.length))}. Add one in Settings.`
       : "";
+    // Phase, once the COUNT is right: a rack with too few cones has a bigger
+    // problem than their spacing, and neededLine owns that one.
+    const rhythmLine = neededLine ? "" : this._npsRackRhythmLine(hatch.rackRhythm);
     // The reminders hang off the clock too — if they were added before it
     // moved, the whole system is quoting two different numbers. Say which,
     // per hatchery (each vessel owns its own pair, 0.7.147).
@@ -12682,6 +12715,7 @@ class OpenReefPanel extends HTMLElement {
             ${tempLine ? `<small>${tempLine}</small>` : ""}
             ${moltLine ? `<small>${moltLine}</small>` : ""}
             ${neededLine ? `<small>${neededLine}</small>` : ""}
+            ${rhythmLine ? `<small>${rhythmLine}</small>` : ""}
             ${reminderDriftLine ? `<small>${reminderDriftLine}</small>` : ""}
             <small>${hatchReservoirLine}</small>
             <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
