@@ -1048,10 +1048,6 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
     raw_jars = raw.get("jars") if isinstance(raw.get("jars"), dict) else {}
     jars: dict[str, Any] = {}
     valid_species = set(cultures_engine.species_ids())
-    cadence_caps = {
-        "feedIntervalH": (1, 24 * 7), "harvestIntervalDays": (0.5, 30), "harvestPct": (5, 60),
-        "restartIntervalDays": (0, 90), "waterChangeIntervalDays": (0, 90), "waterChangePct": (0, 100),
-    }
     for raw_id in sorted(raw_jars):
         raw_jar = raw_jars[raw_id]
         jid = _awc_str(raw_id, 24)
@@ -1078,20 +1074,20 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "tint": str(item.get("tint")) if str(item.get("tint")) in cultures_engine.TINTS else "",
                 "from": _awc_str(item.get("from"), 24),
                 # V2 journal (doc §8.5): a crash sign, an egg-ratio spot check
-                # (0 = not counted), the room at the tap (None = no sensor).
+                # (None = not counted), the room at the tap (None = no sensor).
                 "sign": str(item.get("sign")) if str(item.get("sign")) in cultures_engine.SIGNS else "",
-                "eggRatio": _awc_num(item.get("eggRatio"), 0, 0, 100),
+                "eggRatio": _awc_num(item.get("eggRatio"), 0, 0, 100) if item.get("eggRatio") is not None else None,
+                "fed": bool(item.get("fed", item.get("event") == "feed")),
+                "tankMl": _awc_num(item.get("tankMl"), 0, 0, 20000) if item.get("tankMl") is not None else None,
+                # Where THIS harvest went (0.7.161): bottle, tank or soak.
+                # Blank on older rows — the species decides for those.
+                "to": str(item.get("to")) if str(item.get("to")) in cultures_engine.HARVEST_DESTINATIONS else "",
                 "tempC": (round(float(temp_c), 1)
                           if isinstance(temp_c, (int, float)) and not isinstance(temp_c, bool)
                           and -50 <= float(temp_c) <= 60 else None),
                 # 0.7.140 (doc §8.11 #6): the tip bleed the harvest/restart was
                 # done at, so the run-length learning can weigh it.
                 "purgeMl": _awc_num(item.get("purgeMl"), 0, 0, 500),
-                # 0.7.161: where THIS harvest went (bottle, tank or soak — blank
-                # on older rows, the species decides for those) and, for a crop
-                # fed straight in, the volume the net was rinsed into.
-                "to": str(item.get("to")) if str(item.get("to")) in cultures_engine.HARVEST_DESTINATIONS else "",
-                "tankMl": _awc_num(item.get("tankMl"), 0, 0, 20000) if item.get("tankMl") is not None else None,
             })
         vessel_kind = str(raw_jar.get("vesselKind") or "")
         jars[jid] = {
@@ -1109,14 +1105,15 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             "harvestTo": ("tank" if str(raw_jar.get("harvestTo") or "") == "tank" else "bottle"),
             "volumeL": _awc_num(raw_jar.get("volumeL"), 2.5, 0.2, 50),
             "salinityPpt": _awc_num(raw_jar.get("salinityPpt"), preset["salinityPpt"], 5, 45),
+            "starterPpt": (float(raw_jar["starterPpt"])
+                           if not isinstance(raw_jar.get("starterPpt"), bool)
+                           and 0 <= awc_engine._f(raw_jar.get("starterPpt"), -1) <= 60 else None),
+            "starterMl": _awc_num(raw_jar.get("starterMl"), 500, 50, 20000),
             "feed": {
                 "productId": _awc_str(raw_feed.get("productId"), 40),
                 "doseMl": _awc_num(raw_feed.get("doseMl"), 5, 0.5, 200),
             },
-            "cadence": {
-                key: _awc_num(raw_cad.get(key), preset[key], lo, hi)
-                for key, (lo, hi) in cadence_caps.items()
-            },
+            "cadence": cultures_engine.cadence_for(species, raw_cad),
             "state": {
                 "startedAt": _awc_str(raw_state.get("startedAt"), 40),
                 "lastRestartAt": _awc_str(raw_state.get("lastRestartAt"), 40),
@@ -1132,11 +1129,11 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 # Lineage (Stage D): 1 = from a starter, +1 per split/reseed; 0 = unknown.
                 "generation": int(_awc_num(raw_state.get("generation"), 0, 0, 999)),
             },
-            "history": history[:60],
+            "history": history[:600],
         }
     raw_bottle = raw.get("bottle") if isinstance(raw.get("bottle"), dict) else {}
     bottle_history = []
-    for item in (raw_bottle.get("history") if isinstance(raw_bottle.get("history"), list) else [])[:30]:
+    for item in (raw_bottle.get("history") if isinstance(raw_bottle.get("history"), list) else [])[:600]:
         if not isinstance(item, dict) or str(item.get("event")) not in cultures_engine.BOTTLE_EVENTS:
             continue
         bottle_history.append({"event": str(item.get("event")), "at": _awc_str(item.get("at"), 40),
@@ -3153,13 +3150,16 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         except (TypeError, ValueError):
             cadence_hours = 0.0
         if cadence_hours > 0:
-            cadence_hours = max(1.0, min(round(cadence_hours, 1), MAINTENANCE_TASK_CADENCE_HOURS_MAX))
+            culture_task = str(task_id).startswith(MAINTENANCE_CULTURE_TASK_PREFIX)
+            hours_cap = 90 * 24 if culture_task else MAINTENANCE_TASK_CADENCE_HOURS_MAX
+            critical_cap = 180 * 24 if culture_task else MAINTENANCE_TASK_CRITICAL_HOURS_MAX
+            cadence_hours = max(1.0, min(round(cadence_hours, 1), hours_cap))
             try:
                 critical_after_hours = float(raw.get("criticalAfterHours") or cadence_hours * 2)
             except (TypeError, ValueError):
                 critical_after_hours = cadence_hours * 2
             critical_after_hours = max(
-                cadence_hours, min(round(critical_after_hours, 1), MAINTENANCE_TASK_CRITICAL_HOURS_MAX)
+                cadence_hours, min(round(critical_after_hours, 1), critical_cap)
             )
         schedule_mode = raw.get("scheduleMode")
         if schedule_mode not in ("interval", "fixed"):
@@ -4853,6 +4853,9 @@ def _maintenance_due_items(
             continue
         last_done = _maintenance_last_done(completions.get(task_id))
         state = _maintenance_task_state(task, last_done, now)
+        if str(task_id).startswith(MAINTENANCE_CULTURE_TASK_PREFIX):
+            clock = _cultures_task_clock(config, task_id, now)
+            state = ("critical" if clock.get("reason") in ("sign", "slow") else "warning") if clock.get("due") else "ok"
         if state not in ("warning", "critical"):
             continue
         label = str(task.get("label") or task_id)
@@ -14120,9 +14123,9 @@ def _nps_live_shelf(config: dict[str, Any], now: datetime
         st = cultures_engine.culture_state(jar, now)
         if st["status"] != "producing":
             continue
-        jug = cultures_engine.refill_guide(jar["volumeL"], st["cadence"]["harvestPct"], jar["salinityPpt"], mix_ppt)
+        guide = cultures_engine.harvest_guide(jar, mix_ppt)
         products[f"{nps_engine.LIVE_ROTIFER_CONE_PREFIX}{jid}"] = nps_engine.live_cone_product(
-            jid, str(jar.get("name") or jid), st["harvest"], jug["totalMl"],
+            jid, str(jar.get("name") or jid), st["harvest"], guide.get("harvestMl", guide.get("totalMl")),
             str((jar.get("state") or {}).get("lastHarvestAt") or ""), jar.get("history") or [])
         cone_sources += 1
     rot_note = ""
@@ -15394,6 +15397,18 @@ def _cultures_task_id(jar_id: str, chore: str) -> str:
     return f"{MAINTENANCE_CULTURE_TASK_PREFIX}{jar_id}_{chore}"
 
 
+def _cultures_task_clock(config: dict[str, Any], task_id: str, now: datetime) -> dict[str, Any]:
+    """Maintenance and Cultures share establishment, fractional and sign clocks."""
+    cultures = ((config.get("nps") or {}).get("cultures") or {})
+    if not cultures.get("enabled"):
+        return {}
+    for jid, jar in (cultures.get("jars") or {}).items():
+        for chore, key in (("feed", "feed"), ("harvest", "harvest"), ("restart", "restart"), ("water_change", "waterChange")):
+            if task_id == _cultures_task_id(jid, chore):
+                return cultures_engine.culture_state(jar, now)[key]
+    return {}
+
+
 def _cultures_log_completion(config: dict[str, Any], jar_id: str, chore: str,
                              now: datetime, note: str) -> None:
     """Mark the per-jar chore done (if the keeper added the reminder) — the
@@ -15457,10 +15472,10 @@ def _cultures_history(jar: dict[str, Any], event: str, now: datetime, **fields: 
         history = []
         jar["history"] = history
     row = {"event": event, "at": now.isoformat(), "ml": 0, "tint": "", "from": "",
-           "sign": "", "eggRatio": 0, "tempC": None, "purgeMl": 0}
+           "sign": "", "eggRatio": None, "tempC": None, "purgeMl": 0}
     row.update({k: v for k, v in fields.items() if v is not None})
     history.insert(0, row)
-    del history[60:]
+    del history[600:]
 
 
 def _cultures_bottle_history(bottle: dict[str, Any], event: str, now: datetime, ml: float,
@@ -15473,7 +15488,7 @@ def _cultures_bottle_history(bottle: dict[str, Any], event: str, now: datetime, 
     if slot:
         row["slot"] = slot
     history.insert(0, row)
-    del history[30:]
+    del history[600:]
 
 
 def _cultures_enrich_product(config: dict[str, Any], cultures: dict[str, Any]) -> dict[str, Any] | None:
@@ -15489,24 +15504,35 @@ def _cultures_enrich_product(config: dict[str, Any], cultures: dict[str, Any]) -
 
 
 def _cultures_bottle_fill(bottle: dict[str, Any], ml: float, now: datetime, enriched: bool,
-                          config: dict[str, Any]) -> None:
+                          config: dict[str, Any], enriched_at: datetime | None = None,
+                          harvested_at: datetime | None = None) -> None:
     """Pour a crop into the fridge bottle: oldest stamp wins for viability,
     the boost stamp is the soak that just ended, the brim is the brim."""
     was_empty = awc_engine._f(bottle["remainingMl"]) <= 0
     cap = awc_engine._f(bottle["volumeMl"])
     new_ml = awc_engine._f(bottle["remainingMl"]) + ml
     bottle["remainingMl"] = round(min(new_ml, cap) if cap > 0 else new_ml, 1)
-    if was_empty or not bottle["filledAt"]:
-        bottle["filledAt"] = now.isoformat()
-    if enriched:
-        bottle["enrichedAt"] = now.isoformat()
+    if was_empty:
+        bottle["filledAt"] = (harvested_at or now).isoformat()
+    elif bottle.get("filledAt"):
+        old = cultures_engine._parse_iso(bottle["filledAt"])
+        if old is None or old > now:
+            bottle["filledAt"] = ""
+        elif harvested_at is not None:
+            bottle["filledAt"] = min(old, harvested_at).isoformat()
+    # A mixed bottle can claim enrichment only while ALL of it qualifies.
+    old_boost = cultures_engine._parse_iso(bottle.get("enrichedAt"))
+    if enriched and (was_empty or (bottle.get("lastLoadEnriched") and old_boost is not None and old_boost <= now)):
+        stamp = enriched_at or now
+        bottle["enrichedAt"] = (stamp if was_empty else min(old_boost, stamp)).isoformat()
         bottle["lastLoadEnriched"] = True
-    elif was_empty:
+    else:
         bottle["enrichedAt"] = ""
         bottle["lastLoadEnriched"] = False
     if cap > 0 and new_ml > cap:
         _append_activity(config, f"Rotifer bottle full — {round(new_ml - cap)} ml over the top", "warning")
-    _cultures_bottle_history(bottle, "enriched" if enriched else "filled", now, ml)
+    accepted = max(0.0, ml - max(0.0, new_ml - cap)) if cap > 0 else ml
+    _cultures_bottle_history(bottle, "enriched" if enriched else "filled", now, accepted)
 
 
 def _cultures_temp_c(hass: HomeAssistant, config: dict[str, Any], cultures: dict[str, Any]) -> float | None:
@@ -15517,8 +15543,19 @@ def _cultures_temp_c(hass: HomeAssistant, config: dict[str, Any], cultures: dict
         if not entity_id:
             continue
         state = hass.states.get(str(entity_id))
+        if state is None:
+            continue
         try:
-            return float(state.state) if state is not None else None
+            temp = float(state.state)
+            unit = str((getattr(state, "attributes", None) or {}).get("unit_of_measurement") or "°C")
+            if unit in ("°F", "F", "fahrenheit"):
+                temp = (temp - 32) * 5 / 9
+            elif unit in ("K", "kelvin"):
+                temp -= 273.15
+            elif unit not in ("°C", "C", "celsius"):
+                continue
+            if cultures_engine.temperature_advice(temp, "rotifer_L")["available"]:
+                return temp
         except (TypeError, ValueError):
             continue
     return None
@@ -15554,9 +15591,6 @@ def _cultures_touch_continuity(cultures: dict[str, Any], now: datetime) -> None:
             entry["since"] = ""
 
 
-ARRIVAL_POUCH_ML = 500.0     # Reefphyto's live rotifer starter (invoice 55330)
-
-
 def _cultures_mix_ppt(config: dict[str, Any]) -> float:
     """The mixing station's target salinity — the water every culture jug is
     cut from (35 unless the keeper set another). A jar below it is the
@@ -15585,6 +15619,7 @@ def _cultures_seed_jar(config: dict[str, Any], jar: dict[str, Any], now: datetim
         "generation": (parent_gen + 1) if seeded_from else 1,
     })
     _cultures_history(jar, "seeded", now, **({"from": seeded_from} if seeded_from else {}))
+    _cultures_feed_debit(config, jar)
     if isinstance(cultures.get("jars"), dict):
         _cultures_touch_continuity(cultures, now)
 
@@ -15621,7 +15656,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     for jid in sorted(cultures["jars"]):
         jar = cultures["jars"][jid]
         st = cultures_engine.culture_state(jar, now)
-        if st["status"] == "producing":
+        if st["status"] == "producing" and st["restart"].get("reason") not in ("sign", "slow") \
+                and st["waterChange"].get("reason") != "sign":
             producing_by_species.setdefault(jar["species"], []).append(jid)
     for jid in sorted(cultures["jars"]):
         jar = cultures["jars"][jid]
@@ -15632,7 +15668,9 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
                if st[key].get("due")]
         due_count += len(due)
         feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"], st["harvest"],
-                                                  cad["harvestIntervalDays"] * 24.0)
+                                                  cad["harvestIntervalDays"] * 24.0, jar["species"])
+        if st["restart"].get("reason") in ("sign", "slow") or st["waterChange"].get("reason") == "sign":
+            feed_advice = {"action": "check", "reason": "warning signs recorded — check activity, aeration and water quality before feeding or harvesting"}
         temp_advice = cultures_engine.temperature_advice(temp_c, jar["species"])
         sibling_histories = [cultures["jars"][o]["history"] for o in cultures["jars"]
                              if cultures["jars"][o]["species"] == jar["species"]]
@@ -15683,18 +15721,16 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "learned": learned,
             "risk": cultures_engine.risk_line(jar, st, temp_advice, now),
             "lastSign": jar["state"]["lastSign"],
-            "harvestGuide": cultures_engine.refill_guide(
-                jar["volumeL"], cad["harvestPct"], jar["salinityPpt"], mix_ppt),
+            "harvestGuide": cultures_engine.harvest_guide(jar, mix_ppt),
             "restartGuide": fill_guide,
             # Day 0: the whole vessel, cut from the station's water to the
             # jar's salinity — the numbers the arrival panel and the tile show.
             "fillGuide": fill_guide,
-            # The parcel day: the starter pouch is part of the culture volume,
-            # so the water to MIX is the vessel less the pouch (the same
-            # 500 ml the acclimation plan assumes; Reefphyto's rotifer starter).
-            "arrivalFillGuide": cultures_engine.refill_guide(
-                max(0.0, jar["volumeL"] - ARRIVAL_POUCH_ML / 1000.0), 100, jar["salinityPpt"], mix_ppt),
-            "pouchMl": ARRIVAL_POUCH_ML,
+            # Sieve the acclimated starter into the full prepared volume;
+            # shipping water is discarded, so the guide and stock debit agree.
+            "arrivalFillGuide": fill_guide,
+            "pouchMl": jar["starterMl"],
+            "arrival": cultures_engine.acclimation_plan(jar["starterPpt"], jar["salinityPpt"], jar["starterMl"]),
             "waterChangeGuide": cultures_engine.refill_guide(
                 jar["volumeL"], cad["waterChangePct"], jar["salinityPpt"], mix_ppt),
             "hasBottle": awc_engine._f(preset["bottleShelfDays"]) > 0,
@@ -15731,11 +15767,12 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         "jarName": soak_jar.get("name") if isinstance(soak_jar, dict) else None,
     }
     # The next-harvest question, on the FIRST producing rotifer jar's clock.
-    rot_producing = [j for j in jars_payload if j["hasBottle"] and j["state"]["status"] == "producing"]
+    rot_producing = [j for j in jars_payload if j["hasBottle"] and j["state"]["status"] == "producing"
+                     and j["state"]["restart"].get("reason") not in ("sign", "slow")]
     usage = bottle_payload["usageMlDay"]
     if usage is None:
-        hand = ((config.get("nps") or {}).get("hatchery") or {}).get("handFeed") or {}
-        usage = bottle["doseMl"] * _awc_num(hand.get("feedsPerDay"), 2, 1, 24) if bottle["remainingMl"] > 0 else None
+        usage = bottle["doseMl"] * bottle["feedsPerDay"] if bottle["feedsPerDay"] > 0 else None
+    rot_producing.sort(key=lambda j: j["state"]["harvest"].get("hoursUntil") or 0)
     next_harvest = cultures_engine.next_harvest(
         bottle_payload, usage, rot_producing[0]["state"]["harvest"] if rot_producing else None,
         bool(rot_producing))
@@ -15771,7 +15808,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         "backup": backup,
         "guardAvailable": bool(projection_hours),
         "rackOffsetC": rack_offset,
-        "arrival": {"rotifer": cultures_engine.acclimation_plan(cultures_engine.STARTER_PPT, rot_target)},
+        "arrival": {"rotifer": next((j["arrival"] for j in jars_payload if j["species"] == "rotifer_L"),
+                                     cultures_engine.acclimation_plan(None, rot_target))},
         "dueCount": due_count,
         "idleJars": idle,
         "canAddJar": len(cultures["jars"]) < cultures_engine.CULTURE_JARS_MAX,
@@ -15827,6 +15865,18 @@ async def websocket_cultures_seed(
     seeded_from = str(msg.get("from_jar_id") or "")
     if seeded_from and seeded_from not in cultures["jars"]:
         connection.send_error(msg["id"], "unknown_jar", f"No culture jar '{seeded_from}'")
+        return
+    if seeded_from:
+        parent = cultures["jars"][seeded_from]
+        parent_state = cultures_engine.culture_state(parent, now)
+        if seeded_from == jar_id or parent["species"] != jar["species"] or parent_state["status"] != "producing" \
+                or parent_state.get("clearingSlow") or parent_state["restart"].get("reason") == "sign" \
+                or parent_state["waterChange"].get("reason") == "sign":
+            connection.send_error(msg["id"], "invalid_source", "Use a healthy producing sibling of the same species")
+            return
+    guide = _cultures_fill_guide(config, jar)
+    if guide.get("available") is False:
+        connection.send_error(msg["id"], "salinity_unavailable", guide["reason"])
         return
     _cultures_seed_jar(config, jar, now, seeded_from)
     source_name = cultures["jars"][seeded_from]["name"] if seeded_from else ""
@@ -15897,9 +15947,9 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
     honest one). ``destination`` (0.7.161) says where a harvest went — the
     fridge bottle, the enrichment soak, or straight into the tank; blank means
     the jar's own default (a species without a bottle always feeds straight
-    in), and the enrich tick outranks it. Straight into the tank is a hand
-    feed of the tank: the hand-feed reminder logs done and the strip and the
-    feeding log get their row. Returns (code, message) on refusal."""
+    in). Straight into the tank is a hand feed of the tank: the hand-feed
+    reminder logs done and the strip and the feeding log get their row.
+    Returns (code, message) on refusal."""
     cultures = _nps_cultures_cfg(config)
     jar = cultures["jars"].get(jar_id)
     if not isinstance(jar, dict):
@@ -15909,11 +15959,36 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
     if st["status"] in ("none", "crashed"):
         return "jar_idle", f"{jar['name']} is not running — seed it first"
     sign = sign if sign in cultures_engine.SIGNS else ""
-    egg = _awc_num(egg_ratio, 0, 0, 100) if isinstance(egg_ratio, (int, float)) and not isinstance(egg_ratio, bool) else 0
-    if not (fed or harvested or sign or egg or tint in cultures_engine.TINTS):
+    egg = _awc_num(egg_ratio, 0, 0, 100) if isinstance(egg_ratio, (int, float)) and not isinstance(egg_ratio, bool) else None
+    if not (fed or harvested or sign or egg is not None or tint in cultures_engine.TINTS):
         return "nothing_to_log", "Log a tint, a feed, a harvest, a sign or an egg count"
     state = jar["state"]
     preset = cultures_engine.species_preset(jar["species"])
+    has_bottle = awc_engine._f(preset["bottleShelfDays"]) > 0
+    enrichment = cultures["enrichment"]
+    # Where the crop goes: the tap's word, else the enrich tick, else the
+    # jar's default; a species without a bottle has nowhere else than the tank.
+    wants = "soak" if enrich else (destination if destination in cultures_engine.HARVEST_DESTINATIONS else "")
+    if not has_bottle:
+        wants = "tank"
+    elif not wants:
+        wants = "tank" if str(jar.get("harvestTo") or "") == "tank" else "bottle"
+    enrich = wants == "soak"
+    # Refuse an invalid combined tap BEFORE writing signs, feed or stock ledgers.
+    if harvested:
+        if st["status"] == "establishing":
+            return "establishing", f"{jar['name']} is still establishing — first harvest in ~{st['harvest']['hoursUntil']} h"
+        if enrich and has_bottle and enrichment["state"]["startedAt"]:
+            return "enrich_busy", "A portion is already soaking — rinse and bottle it first"
+        refill = cultures_engine.harvest_guide(jar, _cultures_mix_ppt(config), ml)
+        if refill["totalMl"] <= 0 or refill["totalMl"] + refill["purgeMl"] > jar["volumeL"] * 1000:
+            return "invalid_volume", "Harvest plus purge must fit within the culture's working volume"
+        if refill.get("available") is False:
+            return "salinity_unavailable", refill["reason"]
+        if ml is not None and (isinstance(ml, bool) or not 0 < awc_engine._f(ml, -1) <= jar["volumeL"] * 1000):
+            return "invalid_volume", "Enter a finite, positive harvest volume"
+        if bottle_ml is not None and (isinstance(bottle_ml, bool) or not 0 < awc_engine._f(bottle_ml, -1) <= 20000):
+            return "invalid_volume", "Enter the measured rinse volume, between 0 and 20000 ml"
     notes = []
     if tint in cultures_engine.TINTS:
         state["lastTint"] = tint
@@ -15922,7 +15997,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         state["lastSignAt"] = now.isoformat()
         state["lastSign"] = sign
         notes.append(cultures_engine.SIGN_WORDS.get(sign, sign))
-    if egg:
+    if egg is not None:
         notes.append(f"{egg:g} % carrying eggs")
     if fed:
         state["lastFedAt"] = now.isoformat()
@@ -15930,28 +16005,9 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         _cultures_log_completion(config, jar_id, "feed", now, f"Logged automatically — fed from {source}")
         notes.append("fed")
     harvest_ml = 0.0
-    wants = ""
     if harvested:
-        if st["status"] == "establishing":
-            return ("establishing",
-                    f"{jar['name']} is still establishing — first harvest in ~{st['harvest']['hoursUntil']} h")
-        mix_ppt = _cultures_mix_ppt(config)
-        guide = cultures_engine.refill_guide(jar["volumeL"], st["cadence"]["harvestPct"],
-                                             jar["salinityPpt"], mix_ppt)
-        harvest_ml = _awc_num(ml, guide["totalMl"], 1, 50000)
+        harvest_ml = refill["totalMl"]
         into_bottle = _awc_num(bottle_ml, harvest_ml, 1, 50000)
-        has_bottle = awc_engine._f(preset["bottleShelfDays"]) > 0
-        enrichment = cultures["enrichment"]
-        # Where the crop goes: the enrich tick, else the tap's word, else the
-        # jar's default; a species without a bottle has nowhere but the tank.
-        wants = "soak" if enrich else (destination if destination in cultures_engine.HARVEST_DESTINATIONS else "")
-        if not has_bottle:
-            wants = "tank"
-        elif not wants:
-            wants = "tank" if str(jar.get("harvestTo") or "") == "tank" else "bottle"
-        enrich = wants == "soak"
-        if enrich and has_bottle and enrichment["state"]["startedAt"]:
-            return "enrich_busy", "A portion is already soaking — rinse and bottle it first"
         state["lastHarvestAt"] = now.isoformat()
         if has_bottle and enrich:
             # The DHA step: the crop goes into the soak vessel, not the bottle;
@@ -15973,7 +16029,6 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
                                  f"Logged automatically — {round(harvest_ml)} ml harvested from {source}")
         # The refill is fresh water at the jar's salinity: the station's share
         # comes out of the mixing vessel, the rest is RODI (doc §3.1, §8.3).
-        refill = cultures_engine.refill_guide(harvest_ml / 1000.0, 100, jar["salinityPpt"], mix_ppt)
         _mixing_hatchery_debit(hass, config, refill["mixMl"] / 1000.0, f"refilling {jar['name']}")
         notes.append(f"harvested {round(harvest_ml)} ml"
                      + (", straight into the tank" if has_bottle and wants == "tank"
@@ -15984,11 +16039,11 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
     _cultures_history(jar, event, now,
                       ml=round(harvest_ml, 1) if harvested else 0,
                       tint=state["lastTint"] if tint in cultures_engine.TINTS else None,
-                      sign=sign or None, eggRatio=egg or None,
-                      tempC=_cultures_temp_c(hass, config, cultures),
-                      purgeMl=purge,
+                      sign=sign or None, eggRatio=egg, fed=fed,
+                      tankMl=float(bottle_ml) if harvested and wants == "tank" and bottle_ml is not None else None,
                       to=wants if harvested else None,
-                      tankMl=float(bottle_ml) if harvested and wants == "tank" and bottle_ml is not None else None)
+                      tempC=_cultures_temp_c(hass, config, cultures),
+                      purgeMl=purge)
     _append_activity(config, f"{jar['name']}: " + ", ".join(notes), "control")
     return None
 
@@ -16005,8 +16060,19 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
     now = datetime.now(timezone.utc)
     if cultures_engine.culture_state(jar, now)["status"] in ("none", "crashed"):
         return "jar_idle", f"{jar['name']} is not running — seed it first"
+    guide = _cultures_fill_guide(config, jar)
+    if guide.get("available") is False:
+        return "salinity_unavailable", guide["reason"]
+    before = cultures_engine.culture_state(jar, now)
+    if split and not before["splitEligible"]:
+        split = False
+        _append_activity(config, f"{jar['name']}: B was not seeded — use a mature culture without warning signs", "warning")
     jar["state"]["lastRestartAt"] = now.isoformat()
     jar["state"]["lastFedAt"] = now.isoformat()
+    # A complete water replacement also satisfies the water-exchange purpose
+    # of the next harvest; it must not leave an old harvest debt behind.
+    jar["state"]["lastHarvestAt"] = now.isoformat()
+    jar["state"]["lastWaterChangeAt"] = now.isoformat()
     jar["state"]["lastTint"] = "green"
     jar["state"]["lastSignAt"] = ""
     jar["state"]["lastSign"] = ""
@@ -16016,6 +16082,9 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
                       purgeMl=round(jar["purgeMl"]) if jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None)
     _cultures_log_completion(config, jar_id, "restart", now,
                              f"Logged automatically — sieved into a clean jar from {source}")
+    _cultures_log_completion(config, jar_id, "feed", now, "Fed during the clean-jar restart")
+    _cultures_log_completion(config, jar_id, "harvest", now, "Water replaced during the clean-jar restart")
+    _cultures_log_completion(config, jar_id, "water_change", now, "Water replaced during the clean-jar restart")
     _append_activity(config, f"{jar['name']} restarted in a clean jar — the fortnight clock rewinds",
                      "control")
     _mixing_hatchery_debit(hass, config, _cultures_fill_guide(config, jar)["mixMl"] / 1000.0,
@@ -16085,6 +16154,9 @@ async def websocket_cultures_water_change(
                               f"{jar['name']} has no water-change chore — its harvest is the change")
         return
     guide = cultures_engine.refill_guide(jar["volumeL"], pct, jar["salinityPpt"], _cultures_mix_ppt(config))
+    if guide.get("available") is False:
+        connection.send_error(msg["id"], "salinity_unavailable", guide["reason"])
+        return
     jar["state"]["lastWaterChangeAt"] = now.isoformat()
     if cultures_engine.cadence_for(jar["species"], jar.get("cadence"))["restartIntervalDays"] <= 0:
         jar["state"]["lastSignAt"] = ""      # the pods' sign is answered by the change
@@ -16137,6 +16209,11 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
     st = cultures_engine.culture_state(jar, now)
     if st["status"] != "producing":
         return ("not_producing", f"{jar['name']} is not producing yet — let it establish first"), ""
+    if not st["splitEligible"]:
+        return ("not_ready_to_split", "Wait for a mature culture with food remaining and no unresolved warning signs"), ""
+    source_guide = _cultures_fill_guide(config, jar)
+    if source_guide.get("available") is False and not into_id:
+        return ("salinity_unavailable", source_guide["reason"]), ""
     if into_id and into_id not in jars:
         return ("unknown_jar", f"No culture jar '{into_id}'"), ""
     if not into_id:
@@ -16160,13 +16237,18 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
         jars = cultures["jars"]
         jar = jars[jar_id]
     target = jars[into_id]
+    if target["species"] != jar["species"]:
+        return ("species_mismatch", "Split into a vessel for the same species"), into_id
     if cultures_engine.culture_state(target, now)["status"] not in ("none", "crashed"):
         return ("jar_busy", f"{target['name']} is already running"), into_id
+    guide = _cultures_fill_guide(config, target)
+    if guide.get("available") is False:
+        return ("salinity_unavailable", guide["reason"]), into_id
     _cultures_seed_jar(config, target, now, jar_id)
     _cultures_history(jar, "split", now, **{"from": into_id})
-    _append_activity(config, f"{jar['name']} split into {target['name']} — a backup out of phase",
+    _append_activity(config, f"{jar['name']} split into {target['name']} — check the restart dates to stagger them",
                      "control")
-    _mixing_hatchery_debit(hass, config, target["volumeL"], f"splitting into {target['name']}")
+    _mixing_hatchery_debit(hass, config, guide["mixMl"] / 1000.0, f"splitting into {target['name']}")
     return None, into_id
 
 
@@ -16245,10 +16327,12 @@ async def websocket_cultures_apply_learned(
     if isinstance(task, dict):
         if chore == "feed":
             task["cadenceHours"] = float(value)
-            task["criticalAfterHours"] = float(value)
+            task["criticalAfterHours"] = float(value) * 2
         else:
             task["cadenceDays"] = float(value)
-            task["criticalAfterDays"] = 2
+            task["criticalAfterDays"] = float(value) + 2
+            task["cadenceHours"] = float(value) * 24
+            task["criticalAfterHours"] = (float(value) + 2) * 24
     _append_activity(config, (f"{jar['name']}: {chore} cadence set from the journal — "
                               f"{value:g} {'h' if chore == 'feed' else 'days'}"), "control")
     config = await _async_save_config(hass, entry, config)
@@ -16363,7 +16447,7 @@ async def _async_cultures_heat_guard_push(hass: HomeAssistant, config: dict[str,
         await _async_push_actionable(
             hass, target, f"OpenReef: heat ahead for the {item['speciesName']}",
             (lambda line: line[:1].upper() + line[1:])(guard.get("line") or "")
-            + ". Heat kills a culture through oxygen and ammonia, not the animal.",
+            + ". Heat can directly stress animals and worsen oxygen and ammonia problems.",
             [], tag=f"openreef_culture_guard_{sid}")
         cultures["guard"]["notified"][sid] = now.isoformat()
         _append_activity(config, f"Heat guard: {item['speciesName']} — {guard.get('line')}", "warning")
@@ -16455,10 +16539,21 @@ async def websocket_cultures_enrich_done(
         return
     now = datetime.now(timezone.utc)
     enriched = bool(msg.get("bottled", True))
+    soak = cultures_engine.soak_state(state.get("startedAt"), cultures["enrichment"]["soakH"],
+                                       cultures["enrichment"]["boostWarmH"], now)
+    if enriched and soak["status"] != "done":
+        connection.send_error(msg["id"], "soak_not_ready",
+                              "The configured enrichment window is not ready; wait, or end the soak without claiming enrichment")
+        return
     portion = awc_engine._f(state.get("portionMl"))
     jar = cultures["jars"].get(str(state.get("jarId") or ""))
     if portion > 0:
-        _cultures_bottle_fill(cultures["bottle"], portion, now, enriched, config)
+        started = cultures_engine._parse_iso(state.get("startedAt"))
+        _cultures_bottle_fill(cultures["bottle"], portion, now, enriched, config,
+                              enriched_at=(started + timedelta(hours=cultures["enrichment"]["soakH"])) if started else None,
+                              harvested_at=started)
+        if soak["status"] in ("none", "fading"):
+            cultures["bottle"]["filledAt"] = ""  # prolonged/unknown warm storage is not verified fridge life
     if isinstance(jar, dict):
         _cultures_history(jar, "enriched" if enriched else "bottled", now, ml=round(portion, 1))
     cultures["enrichment"]["state"] = {"startedAt": "", "portionMl": 0, "jarId": ""}
@@ -16553,13 +16648,18 @@ async def websocket_cultures_bottle(
         bottle["lastLoadEnriched"] = False
         _append_activity(config, "Rotifer bottle emptied", "control")
     else:
+        bottle_status = cultures_engine.bottle_state(bottle, cultures_engine.species_preset("rotifer_L")["bottleShelfDays"], now)
+        if bottle_status["status"] in ("empty", "stale"):
+            connection.send_error(msg["id"], "bottle_unavailable", "The rotifer bottle is empty or past its storage window")
+            return
+        if msg.get("ml") is not None and (isinstance(msg["ml"], bool) or not 0 < awc_engine._f(msg["ml"], -1) <= 5000):
+            connection.send_error(msg["id"], "invalid_volume", "Enter a finite, positive feed volume")
+            return
         ml = _awc_num(msg.get("ml"), bottle["doseMl"], 0.5, 5000)
-        ml = min(ml, max(0.0, awc_engine._f(bottle["remainingMl"]))) or ml
+        ml = min(ml, max(0.0, awc_engine._f(bottle["remainingMl"])))
         bottle["remainingMl"] = round(max(0.0, awc_engine._f(bottle["remainingMl"]) - ml), 1)
-        if bottle["remainingMl"] <= 0:
-            bottle["filledAt"] = ""
-            bottle["enrichedAt"] = ""
-            bottle["lastLoadEnriched"] = False
+        # Keep this load's identity at zero so its last feed can be undone.
+        # Empty/discard and the next fill replace the identity explicitly.
         _cultures_bottle_history(bottle, "fed_tank", now, ml, slot=_normalise_schedule_time(msg.get("slot")))
         # Feeding rotifers IS hand-feeding the tank (doc §8.6): the NPS
         # hand-feed reminder logs done, the feeding journal gets its row.

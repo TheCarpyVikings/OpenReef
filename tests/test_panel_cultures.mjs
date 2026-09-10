@@ -371,7 +371,7 @@ test("settings carry the vessel, the purge and the salinity recommendation", asy
     const html = panel._culturesSettings();
     assert(html.includes('data-field="vesselKind"') && html.includes("Cone — the hatchery"), "the vessel select is missing");
     assert(html.includes('data-field="purgeMl"'), "the cone's purge field is missing");
-    assert(html.includes("1.020 (27 ppt)") && html.includes("2.5×"), "the salinity recommendation must be on the page");
+    assert(html.includes("SG 1.019–1.021 (about 27 ppt)") && !html.includes("2.5×"), "the salinity recommendation must be on the page");
     assert(html.includes("never a cone"), "the pods' vessel hint is missing");
     // Changing species resets vessel + purge with the salinity (the scope handler).
     const jar = panel._config.nps.cultures.jars.c2;
@@ -477,7 +477,7 @@ test("the learned chips appear only when the journal has taught something", asyn
     let panel = await culturesPanel({}, summaryFixture([taught]));
     let html = panel._culturesTab();
     assert(html.includes("clears in ~9.3 h (3 feeds) — feed every 8 h?") && html.includes('data-field="feedIntervalH">Apply'), "the feed chip is missing");
-    assert(html.includes("runs ~11 days before it turns (3 runs) — restart at 10?") && html.includes('data-field="restartIntervalDays">Apply'), "the restart chip is missing");
+    assert(html.includes("Recorded crashes averaged ~11 days (3 failures) — restart at 10?") && html.includes('data-field="restartIntervalDays">Apply'), "the restart chip is missing");
     assert(html.includes("~610 ml a day harvested lately"), "the yield line is missing");
     assert(!html.includes("seeds took"), "a producing jar does not show the first-harvest line");
     panel = await culturesPanel();
@@ -530,7 +530,7 @@ test("the DHA step: the enrich tick, the soak tile, the boost line and the next-
     panel = await culturesPanel({}, done);
     html = panel._culturesTab();
     assert(html.includes("done — rinse on the net and bottle") && html.includes('class="primary compact-button" data-action="cultures-enrich-done"'), "a finished soak must lead with Rinsed & bottled");
-    assert(html.includes("gut-loaded · ~19.2 h of boost left") && html.includes("fridge · enriched"), "the boost line is missing on the bottle");
+    assert(html.includes("enrichment estimate · ~19.2 h remaining") && html.includes("fridge · enriched"), "the boost line is missing on the bottle");
     assert(html.includes("harvest now — before the bottle goes stale"), "the next-harvest line must escalate");
     panel._culturesLoadSummary = async () => {};
     const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
@@ -582,7 +582,7 @@ test("never zero: the Jars card says backup or not, and the restart seeds B by d
   try {
     let panel = await culturesPanel();
     let html = panel._culturesTab();
-    assert(html.includes("no backup") && html.includes("split at the next restart") && html.includes("12 days without a gap"), "the Jars card must say there is no backup and count continuity");
+    assert(html.includes("no backup") && html.includes("split only a healthy, mature culture") && html.includes("12 days without a gap"), "the Jars card must say there is no backup and count continuity");
     assert(html.includes('data-cultures-split="c1" checked'), "with no backup the restart ticks 'seed B' by default");
     assert(html.includes("gen 1 · from the starter"), "the lineage line is missing");
     assert(html.includes('data-action="cultures-share-card" data-id="c1"'), "the share-card button is missing");
@@ -705,12 +705,12 @@ test("the arrival walkthrough carries the acclimation maths, and a plain rule wi
       line: "the starter is at ~27 ppt and the cone at 35: float the pouch 15 min, then add 500 ml of cone water, wait 15 min (~31 ppt); then net them into the cone — the last step is 4 ppt" } };
     let panel = await culturesPanel({}, withPlan);
     let html = panel._culturesTab();
-    assert(html.includes("The starter is at ~27 ppt and the cone at 35") && html.includes("add 500 ml of cone water, wait 15 min (~31 ppt)"), "the plan must be quoted, capitalised");
+    assert(html.includes("the starter is at ~27 ppt and the cone at 35") && html.includes("add 500 ml of cone water, wait 15 min (~31 ppt)"), "the measured plan must be quoted");
     assert(html.includes("the last step is 4 ppt."), "the sentence ends with the final step");
     assert(!html.includes("add cone water to it in steps"), "the plain rule gives way to the maths");
     panel = await culturesPanel({}, virgin());
     html = panel._culturesTab();
-    assert(html.includes("in steps of no more than 5 ppt"), "without a plan the rule itself is stated");
+    assert(html.includes("Measure starter salinity and volume"), "without a measured salinity the page requests a measurement");
     noPlaceholders(html, "walkthrough");
   } finally { restore(); }
 });
@@ -730,7 +730,7 @@ test("the demo view stages a rack, refuses every tap, and hands the real rack ba
     const html = panel._culturesTab();
     assert(html.includes("Demo view — a staged rack") && html.includes("Exit demo"), "the banner and the exit button");
     assert(html.includes("ROTIFERS A") && html.includes("ROTIFERS B") && html.includes("PODS · TUB"), "the rig draws the staged rack");
-    assert(html.includes("tomorrow") && html.includes("gut-loaded") && html.includes("Purge: runs bled"), "the guard, the boost and the learned purge show");
+    assert(html.includes("tomorrow") && html.includes("enrichment estimate") && html.includes("Purge: runs bled"), "the guard, the boost and the learned purge show");
     assert(html.includes("harvested · bled 50 ml"), "the journal carries the bleed");
     noPlaceholders(html, "cultures demo view");
     // Every tap is refused; nothing reaches the backend; nothing is saved.
@@ -758,14 +758,14 @@ test("day 0 shows the fill split from the station's water, the harvest tap sends
     const fresh = summaryFixture([
       jarSummary({ name: "Rotifers A", volumeL: 2, salinityPpt: 27, state: { ...jarSummary().state, status: "none", percent: null }, tint: "", due: [], history: [],
         fillGuide: fill, restartGuide: fill, harvestGuide: { totalMl: 500, mixMl: 386, rodiMl: 114, targetPpt: 27, mixPpt: 35, sg: 1.0204 },
-        arrivalFillGuide: { totalMl: 1500, mixMl: 1157, rodiMl: 343, targetPpt: 27, mixPpt: 35, sg: 1.0204 }, pouchMl: 500 }),
+        arrivalFillGuide: { totalMl: 2000, mixMl: 1543, rodiMl: 457, targetPpt: 27, mixPpt: 35, sg: 1.0204 }, pouchMl: 500 }),
       summaryFixture().jars[1],
     ]);
     fresh.rig = { ...fresh.rig, jug: { mode: "fill", harvestMl: 2000, mixMl: 1543, rodiMl: 457, ppt: 27, mixPpt: 35, purgeMl: 50, sieveUm: 50 } };
     let panel = await culturesPanel({}, fresh);
     let html = panel._culturesTab();
     assert(html.includes("fill 2000 ml: <strong>1543 ml of 35 ppt mix + 457 ml RODI</strong> → 27 ppt (SG 1.0204)"), `the tile must carry the fill split: ${html.match(/fill [^<]*<strong>[^<]*<\/strong>[^<]*/)?.[0]}`);
-    assert(html.includes("↳ <strong>Rotifers A</strong> (2 L in the vessel, pouch included): mix 1500 ml — <strong>1157 ml of 35 ppt mix + 343 ml RODI</strong> → 27 ppt (SG 1.0204) + the 500 ml pouch."), `the arrival panel must quote the water to mix less the pouch: ${html.match(/↳ [^.]*\./)?.[0]}`);
+    assert(html.includes("↳ <strong>Rotifers A</strong>: prepare 2000 ml — 1543 ml of 35 ppt mix + 457 ml RODI → 27 ppt."), `the arrival panel must fill the working volume for a sieved starter: ${html.match(/↳ [^.]*\./)?.[0]}`);
     assert(!html.includes("the jug says how much RODI"), "the old hand-wave is gone");
     const rig = panel._culturesRigSvg(panel._culturesRigState());
     assert(rig.includes("fill 2000 ml: 1543 ml of 35 ppt mix") && rig.includes("+ 457 ml RODI · @ 27 ppt") && !rig.includes("purge ~"), "the rig's jug reads fill on day 0");
@@ -793,6 +793,55 @@ test("day 0 shows the fill split from the station's water, the harvest tap sends
       assert(calls[0]?.bottle_ml === 150 && calls[0]?.harvested === true, `the tap must send bottle_ml: ${JSON.stringify(calls[0])}`);
     }
   } finally { restore(); }
+});
+
+test("audit: new jars use the species salinity and zero egg observations are sent", async () => {
+  const panel = await culturesPanel();
+  panel._culturesAddJar();
+  assert(panel._config.nps.cultures.jars.c3.salinityPpt === 27, "new rotifers use 27 ppt");
+  let sent;
+  panel._culturesCall = (msg) => { sent = msg; };
+  panel.shadowRoot = { querySelector: (selector) => selector.includes("data-cultures-egg") ? { value: "0" } : null };
+  panel._culturesLog("c1", false, false);
+  assert(sent.egg_ratio === 0, "a measured zero is not missing");
+});
+
+test("audit: the refill labels the stock salinity and includes purge water", async () => {
+  const jar = jarSummary({ salinityPpt: 27, harvestGuide: { totalMl: 625, refillMl: 675, mixMl: 521, rodiMl: 154, mixPpt: 35, targetPpt: 27 } });
+  const panel = await culturesPanel({}, summaryFixture([jar]));
+  const html = panel._culturesTab();
+  assert(html.includes("refill 521 ml @ 35 ppt + 154 ml RODI → 27 ppt"), "stock and final salinity must be distinct");
+  assert(html.includes("harvest + purge replaced"), "both withdrawals are replaced");
+  panel._cultures.summary.jars[0].harvestGuide = { available: false, reason: "Cannot make 40 ppt by diluting 35 ppt water" };
+  assert(panel._culturesTab().includes("Cannot make 40 ppt"), "an impossible recipe must be explained");
+});
+
+test("audit: maintenance waits for the backend first-harvest clock and preserves half days", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel();
+    panel._culturesLoadSummary = async () => {};
+    panel._config.maintenance.enabled = true;
+    panel._config.nps.cultures.jars.c1.cadence.harvestIntervalDays = 0.5;
+    panel._culturesSeedReminders();
+    assert(panel._config.maintenance.tasks.culture_c1_harvest.cadenceHours === 12, "half a day is twelve hours");
+    panel._config.maintenance.tasks.culture_c1_restart.cadenceHours = 90 * 24;
+    assert(panel._maintenanceTask("culture_c1_restart").cadenceHours === 2160, "a 90-day culture interval must not clamp to fourteen days");
+    panel._cultures.summary.jars[0].state.harvest = { available: true, due: false, at: iso(-48), hoursUntil: 48 };
+    assert(panel._maintenanceDueState("culture_c1_harvest").status === "ok", "generic cadence must not override establishment");
+    assert(panel._maintenanceNextDueMs("culture_c1_harvest") === Date.parse(iso(-48)), "upcoming uses the same due instant");
+    panel._cultures.summary.jars[0].state.harvest = { available: false, due: false };
+    assert(panel._maintenanceDueState("culture_c1_harvest").status === "unknown", "crashed and idle jars have no harvest clock");
+  } finally { restore(); }
+});
+
+test("audit: enrichment completion is disabled before the soak is done", async () => {
+  const summary = summaryFixture();
+  summary.enrichment.soak = { status: "soaking", percent: 20, hoursLeft: 4 };
+  const panel = await culturesPanel({}, summary);
+  const html = panel._culturesTab();
+  assert(/data-action="cultures-enrich-done"[^>]*disabled/.test(html), "cannot claim enrichment early");
+  assert(html.includes('data-action="cultures-enrich-plain"'), "an abandoned soak can still be logged plain");
 });
 
 test("a harvest names where it went: the tile's select, the settings default, the tap's word", async () => {
@@ -845,7 +894,7 @@ test("the rack tile is a tidy form: compact ticks, a labelled egg check, aligned
     assert(c1.includes('>Harvest to<select data-cultures-harvest-to="c1">'), "the destination row");
     assert(c1.includes('<label class="culture-tick" title="The DHA step') && c1.includes('data-cultures-enrich="c1"'), "the enrich tick is a compact tick");
     assert(c1.includes('<span>Signs</span>') && c1.includes('<div class="culture-signs">'), "the signs row");
-    assert(c1.includes('>Egg ratio<span class="unit">') && c1.includes('placeholder="%" data-cultures-egg="c1"') && c1.includes("≥ 30 % is healthy"), "the egg check is labelled");
+    assert(c1.includes('>Egg ratio<span class="unit">') && c1.includes('placeholder="%" data-cultures-egg="c1"') && c1.includes("observe the trend") && !c1.includes("≥ 30 % is healthy"), "the egg check is labelled");
     assert(c1.includes('<span>Restart</span><label class="culture-tick"') && c1.includes('data-cultures-split="c1"'), "the split tick is a compact tick");
     assert(!c1.includes("width:64px") && !c1.includes("% eggs") && !c1.includes("Sign:"), "the clipped placeholder and the bare row are gone");
     // Head, form, notes, observations, actions — in that order.

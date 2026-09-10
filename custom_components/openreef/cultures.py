@@ -5,10 +5,9 @@ function of its inputs — no Home Assistant imports, no I/O, no wall clock.
 Orchestration (WS handlers, ledgers, reminders) lives in __init__.py.
 
 The brine hatchery is a batch measured in hours. A culture is a standing
-population measured in days: a rotifer jar is a chemostat (daily harvest ==
-water change == ammonia control, sieve-and-restart every fortnight so the
-week-4 ciliate crash never arrives), a copepod jar is a slow, forgiving
-population (feed every few days, harvest weekly, water change monthly).
+population measured in days: a rotifer jar uses daily partial harvest and
+replacement water; a copepod jar needs slower, density-led harvesting.
+Calendar presets are reminders, not measurements of population or water quality.
 Species presets carry the numbers from the 2026-09 research sweep
 (docs/live-cultures-brainstorm.md §1–§2); the keeper can override any
 cadence per jar and the engine reads the merged view.
@@ -22,9 +21,10 @@ temperature advice never moves a clock.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import math
 from typing import Any
 
-from .awc import _f, _parse_iso
+from .awc import _f, _parse_iso as _awc_parse_iso
 from .mixing import sg_from_ppt
 
 CULTURE_JARS_MAX = 4
@@ -39,12 +39,9 @@ SIGNS: tuple[str, ...] = ("foam", "milky", "smell", "surface")
 SIGN_WORDS = {"foam": "foam on the surface", "milky": "milky water", "smell": "a smell",
               "surface": "clustering at the surface"}
 LEARN_SAMPLES = 3          # rolling window, the hatch clock's contract
-SLOW_FACTOR = 1.5          # clearing this much slower than usual, twice running = tiring
-FEED_EVENTS: tuple[str, ...] = ("feed", "harvest", "seeded", "restart")
-# The DHA step (doc §8.3, Stage C): Reefphyto's algae enrichment, drops into a
-# portion of the crop, a short soak, then the fridge bottle runs a BOOST clock
-# on top of its viability clock — FAO: EFA constant ~7 h warm, 30 % DHA gone by
-# 12 h; the boost holds ~24 h cold (snippet-level, conservative).
+SLOW_FACTOR = 1.5          # two slower clearing observations prompt inspection
+# Supplier-specific soak default; storage/boost windows are scheduling estimates,
+# not assays of DHA or viability. See docs/cultures-audit-2026-09-10.md.
 ENRICH_SOAK_H = 6.0
 ENRICH_DROPS = 3
 ENRICH_DROP_ML = 0.05
@@ -55,16 +52,15 @@ GUARD_LOOKAHEAD_H = 24.0       # the heatwave guard looks one day ahead (doc §8
 TINT_STRIP_DAYS = 14
 RIG_CONES_MAX = 4
 # 0.7.140 (doc §8.12): the purge is a journal fact, so the run-length learning
-# can say whether bleeding more off the tip buys a longer run; the guard
+# can compare observed run lengths at different purge volumes; the guard
 # takes the rack's own offset over the room; the starter's acclimation is
 # arithmetic, not a shrug.
 PURGE_RUNS_MIN = 2             # runs at EACH purge volume before the note speaks
-RACK_OFFSET_MAX_C = 5.0        # a bench cannot run more than this over the room — clamp
+RACK_OFFSET_MAX_C = 5.0        # chosen projection correction cap, not a physical limit
 RACK_OFFSET_WINDOW_H = 1.5     # the projection row that counts as "now"
-STARTER_PPT = 27.0             # Reefphyto cultures at SG 1.019–1.021; shipping SG not
-                               # stated on the page, so the culture's is the honest guess
-ACCLIMATE_STEP_PPT = 5.0       # FAO §3.5: acclimate in ±5 ppt steps
-ACCLIMATE_WAIT_MIN = 15
+STARTER_PPT = 27.0             # culture target only; NEVER a measured shipping salinity
+ACCLIMATE_STEP_PPT = 5.0       # FAO flags transfers differing by more than 5 ppt
+ACCLIMATE_WAIT_MIN = 15       # handling guideline, not a validated acclimation time
 ACCLIMATE_STEPS_MAX = 4
 
 # Species presets. tempMin/MaxC = the productive band; tempHardMaxC = the
@@ -76,13 +72,13 @@ ACCLIMATE_STEPS_MAX = 4
 # restartIntervalDays: the sieve-and-restart into a clean jar (0 = never).
 # firstHarvestDays: let a freshly seeded jar establish before the first draw.
 # splitMinAgeDays: when "Split into B" becomes sensible.
-# bottleShelfDays: how long a harvest keeps in the fridge bottle (0 = the
+# bottleShelfDays: estimated fridge handling window (0 = the
 # harvest goes straight into the tank — no bottle for this species).
 SPECIES: tuple[dict[str, Any], ...] = (
     {"id": "rotifer_L", "name": "Rotifers (L-type)", "kind": "rotifer",
      "latin": "Brachionus plicatilis",
      # V2 (doc §8.2): Reefphyto cultures at SG 1.019–1.021; FAO says optimal
-     # reproduction only below 35 ppt; 35 ppt is a longer-lived, lower-yield jar.
+     # reproduction below 35 ppt; this does not establish a crash-free salinity.
      "vesselKind": "cone",
      "tempMinC": 18.0, "tempMaxC": 26.0, "tempHardMaxC": 30.0,
      "tempActC": 30.0, "tempCriticalC": 33.0,
@@ -98,17 +94,19 @@ SPECIES: tuple[dict[str, Any], ...] = (
      "feedProduct": "Rotifer Feed Concentrate",
      "enrichSoakH": 6.0, "enrichDrops": "1–5", "boostWarmH": 8.0, "boostColdH": 24.0,
      "note": "Room temperature, no light, an open rigid airline to the cone tip at 1–2 bubbles/s "
-             "(no airstone). Feed the concentrate to a leafy green, little and often: clear means "
-             "hungry, still green at feed time means skip. Before a harvest: air off, settle, bleed "
+             "(no airstone). Feed the concentrate to a leafy green, little and often: inspect "
+             "activity when clear, and check before adding food when still green. Before a harvest: air off, settle, bleed "
              "the tip to waste, then 25 % a day through the 50 µm net — the water you take out IS "
              "the water change; refill with matched water. Sieve the whole cone into a clean one "
-             "every fortnight, sooner on foam, milk or smell."},
+             "every fortnight as a preventive routine; investigate milkiness, persistent foam or smell. "
+             "First harvest is conditional on density and activity, not age alone. Check water quality "
+             "and replace evaporation with RODI. Feed dose depends on the product and population."},
     {"id": "tigriopus", "name": "Tigriopus copepods", "kind": "copepod",
      "latin": "Tigriopus californicus",
      # V2: Reefphyto's copepod guide (35 ppt optimal, 22–26 °C, first harvest
-     # 4–6 weeks, ≤25–30 % with 7–10 days between). Heat does not kill the
-     # animal below ~34 °C — a hot flat kills through oxygen and ammonia, so
-     # the tiers are warn 28 / act 30 / critical 32 and the copy says why.
+     # 4–6 weeks, ≤25–30 % with 7–10 days between). The precautionary
+     # warn 28 / act 30 / critical 32 tiers are not measured lethal limits;
+     # direct heat stress and water-quality deterioration both matter.
      "vesselKind": "tub",
      "tempMinC": 18.0, "tempMaxC": 26.0, "tempHardMaxC": 28.0,
      "tempActC": 30.0, "tempCriticalC": 32.0,
@@ -127,14 +125,26 @@ SPECIES: tuple[dict[str, Any], ...] = (
              "loose lid, no light. Feed the Copepod Feed to a Granny Smith green, half rate in week "
              "one. A generation is a month: first harvest at four to six weeks, then no more than "
              "25–30 % with 7–10 days between (50 µm keeps the nauplii, 300 µm the adults); put the "
-             "harvested volume back as fresh water. Any ammonia = a 50 % change now. Warn at 28 °C: "
-             "heat kills through oxygen and ammonia, not the animal — extra air, shade, feed lightly."},
+             "harvested volume back as matched saltwater; water volume does not measure the share of "
+             "a bottom-dwelling population harvested. Test water quality weekly and use RODI for evaporation. "
+             "Detected ammonia/nitrite calls for matched water changes. Heat thresholds are precautionary: "
+             "heat can directly stress the animals and worsen oxygen and ammonia problems."},
 )
 _SPECIES_BY_ID = {s["id"]: s for s in SPECIES}
 CADENCE_FIELDS: tuple[str, ...] = (
     "feedIntervalH", "harvestIntervalDays", "harvestPct", "restartIntervalDays",
     "waterChangeIntervalDays", "waterChangePct",
 )
+CADENCE_CAPS = {
+    "feedIntervalH": (1, 168), "harvestIntervalDays": (0.5, 30), "harvestPct": (5, 60),
+    "restartIntervalDays": (0, 90), "waterChangeIntervalDays": (0, 90), "waterChangePct": (0, 100),
+}
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """A culture clock needs an explicit timezone; ambiguous stamps are unknown."""
+    parsed = _awc_parse_iso(value)
+    return parsed if parsed is not None and parsed.utcoffset() is not None else None
 
 
 def species_ids() -> tuple[str, ...]:
@@ -155,7 +165,7 @@ def cadence_for(species_id: Any, overrides: Any) -> dict[str, float]:
     for key in CADENCE_FIELDS:
         base = _f(preset.get(key))
         val = over.get(key)
-        if isinstance(val, (int, float)) and not isinstance(val, bool):
+        if not isinstance(val, bool) and math.isfinite(_f(val, math.nan)):
             merged[key] = float(val)
         else:
             merged[key] = base
@@ -163,15 +173,19 @@ def cadence_for(species_id: Any, overrides: Any) -> dict[str, float]:
         merged["feedIntervalH"] = _f(preset["feedIntervalH"])
     if merged["harvestIntervalDays"] <= 0:
         merged["harvestIntervalDays"] = _f(preset["harvestIntervalDays"])
-    merged["harvestPct"] = min(60.0, max(5.0, merged["harvestPct"] or _f(preset["harvestPct"])))
+    merged["harvestPct"] = merged["harvestPct"] or _f(preset["harvestPct"])
+    for key, (lo, hi) in CADENCE_CAPS.items():
+        merged[key] = min(hi, max(lo, merged[key]))
     return merged
 
 
 def _due(last_iso: Any, anchor_iso: Any, interval: timedelta, now: datetime) -> dict[str, Any]:
     """Chore clock: due when ``interval`` has passed since the chore was last
     done, or since the anchor (seeded / restarted) if it never was."""
-    last = _parse_iso(last_iso) or _parse_iso(anchor_iso)
-    if last is None:
+    last = _parse_iso(last_iso)
+    anchor = _parse_iso(anchor_iso)
+    last = max(last, anchor) if last is not None and anchor is not None else last or anchor
+    if last is None or last > now:
         return {"available": False, "due": False, "at": None, "hoursUntil": None,
                 "hoursOverdue": None}
     at = last + interval
@@ -203,7 +217,7 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
         "waterChange": _due(None, None, timedelta(hours=1), now),
         "nextChore": None,
     }
-    if started is None:
+    if started is None or started > now:
         return out
     if crashed is not None and crashed >= started:
         out["status"] = "crashed"
@@ -228,7 +242,8 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
         out["harvest"] = _due(last_harvest.isoformat(), None,
                               timedelta(days=cad["harvestIntervalDays"]), now)
     else:
-        out["harvest"] = _due(first_harvest.isoformat(), None, timedelta(0), now)
+        out["harvest"] = _due(started.isoformat(), None,
+                              timedelta(days=_f(species["firstHarvestDays"])), now)
     if cad["restartIntervalDays"] > 0:
         out["restart"] = _due(restart_anchor.isoformat(), None,
                               timedelta(days=cad["restartIntervalDays"]), now)
@@ -242,20 +257,22 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     # running, brings the restart forward. A species without a restart (pods)
     # turns the sign into a water change instead.
     sign_at = _parse_iso(state.get("lastSignAt"))
-    signed = sign_at is not None and sign_at >= restart_anchor
+    signed = sign_at is not None and restart_anchor <= sign_at <= now
     wc_anchor = _parse_iso(state.get("lastWaterChangeAt")) or started
     slow = False
-    samples = clearing_samples(jar.get("history"))
+    samples = clearing_samples([row for at, row in _chronological(jar.get("history"))
+                                if restart_anchor <= at <= now])
     if len(samples) >= 4:
         baseline = sum(samples[2:5]) / len(samples[2:5])
         slow = baseline > 0 and samples[0] > SLOW_FACTOR * baseline and samples[1] > SLOW_FACTOR * baseline
     out["clearingSlow"] = slow
-    if cad["restartIntervalDays"] > 0 and (signed or slow):
+    if species["kind"] == "rotifer" and (signed or slow):
         out["restart"].update({"available": True, "due": True, "hoursUntil": 0.0,
                                "at": (sign_at if signed else now).isoformat(),
+                               "hoursOverdue": round((now - sign_at).total_seconds() / 3600, 1) if signed else 0.0,
                                "reason": "sign" if signed else "slow"})
-    elif cad["restartIntervalDays"] <= 0 and cad["waterChangePct"] > 0 and sign_at is not None \
-            and sign_at >= wc_anchor:
+    elif species["kind"] == "copepod" and cad["waterChangePct"] > 0 and sign_at is not None \
+            and wc_anchor <= sign_at <= now:
         out["waterChange"] = {"available": True, "due": True, "at": sign_at.isoformat(),
                               "hoursUntil": 0.0, "hoursOverdue": round(max(0.0, (now - sign_at).total_seconds() / 3600.0), 1),
                               "reason": "sign"}
@@ -263,7 +280,8 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     # (drift, ammonia, cloudy water) — no clock, but the ceremony exists.
     out["waterChangeOnDemand"] = (cad["waterChangeIntervalDays"] <= 0 < cad["waterChangePct"])
     out["splitEligible"] = (age_days >= _f(species["splitMinAgeDays"])
-                            and str(state.get("lastTint") or "") != "clear")
+                            and str(state.get("lastTint") or "") in ("green", "clearing")
+                            and not signed and not slow)
     # The next chore the keeper should expect (soonest "at"), due ones first.
     chores = []
     for key in ("feed", "harvest", "restart", "waterChange"):
@@ -279,36 +297,33 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 
 def feed_advice(tint: Any, feed_clock: dict[str, Any], harvest_clock: Any = None,
-                harvest_interval_h: Any = None) -> dict[str, Any]:
-    """What the tint says, married to the feed clock. Clear water = the jar
-    ate everything = feed now, whatever the clock. Green at feed time = it is
-    still full of food = skip this one (overfeeding drives ammonia). Clearing
-    = feed on schedule. Harvest DEBT outranks all of it (doc §8.8): two
-    missed harvests means the ammonia is already climbing — harvest first."""
+                harvest_interval_h: Any = None, species_id: Any = "rotifer_L") -> dict[str, Any]:
+    """Inspection and feeding advice from reported tint and chore clocks.
+    A rotifer jar missing two harvests needs its water exchange checked first.
+    Tint and elapsed time do not measure population, oxygen or ammonia."""
     tint = str(tint or "")
     due = bool(feed_clock.get("due"))
-    if isinstance(harvest_clock, dict) and harvest_clock.get("due") and _f(harvest_interval_h) > 0 \
+    if species_preset(species_id)["kind"] == "rotifer" and isinstance(harvest_clock, dict) and harvest_clock.get("due") and _f(harvest_interval_h) > 0 \
             and _f(harvest_clock.get("hoursOverdue")) >= _f(harvest_interval_h):
         return {"action": "harvest_first",
-                "reason": "two harvests missed — harvest before you feed, the ammonia is climbing"}
+                "reason": "two harvests missed — check activity and water quality; a healthy rotifer jar needs its harvest and refill"}
     if tint == "clear":
-        return {"action": "feed_now", "reason": "clear water — the jar is hungry"}
+        return {"action": "feed_now", "reason": "clear water — check activity, then feed lightly if the culture is healthy"}
     if tint == "green":
         return {"action": "skip" if due else "wait",
-                "reason": "still green — plenty of food in the water; feeding now just makes ammonia"}
+                "reason": "still green — check before adding more food; overfeeding can worsen water quality"}
     if tint == "clearing":
         return {"action": "feed_now" if due else "wait",
                 "reason": "clearing — feed on schedule"}
-    return {"action": "feed_now" if due else "wait", "reason": "no tint logged yet"}
+    return {"action": "check" if due else "wait", "reason": "no tint logged yet — inspect the water before feeding"}
 
 
 def temperature_advice(temp_c: Any, species_id: Any) -> dict[str, Any]:
     """Advisory only: where the room sits against the species band. ``hot`` is
     the warning line, ``critical`` the line above which the copy stops
     advising and tells the keeper to move the culture; ``act`` flags the
-    middle tier (doc §8.2: warn 28 / act 30 / critical 32 for Tigriopus —
-    heat kills a jar through oxygen and ammonia long before it kills the
-    animal, so the tiers are about the water, not the species' CTmax)."""
+    middle tier (warn 28 / act 30 / critical 32 for Tigriopus).
+    These precautionary tiers do not measure animal tolerance or water quality."""
     species = species_preset(species_id)
     base = {"minC": species["tempMinC"], "maxC": species["tempMaxC"],
             "hardMaxC": species["tempHardMaxC"],
@@ -317,6 +332,8 @@ def temperature_advice(temp_c: Any, species_id: Any) -> dict[str, Any]:
     try:
         t = float(temp_c)
     except (TypeError, ValueError):
+        return {"available": False, "status": "unknown", "tempC": None, "act": False, **base}
+    if isinstance(temp_c, bool) or not math.isfinite(t) or not -50 <= t <= 60:
         return {"available": False, "status": "unknown", "tempC": None, "act": False, **base}
     if t >= _f(base["criticalC"]):
         status = "critical"
@@ -345,12 +362,33 @@ def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0) 
     if mix <= 0:
         mix = 35.0
     target = _f(target_ppt)
-    if target <= 0 or target >= mix:
+    if target > mix:
+        return {"available": False, "totalMl": total_ml, "mixMl": 0, "rodiMl": 0,
+                "targetPpt": round(target, 1), "mixPpt": round(mix, 1), "sg": sg_from_ppt(target),
+                "reason": f"Cannot make {target:g} ppt by diluting {mix:g} ppt water; prepare stronger saltwater and measure it first."}
+    if target < 0:
+        target = 0.0
+    if target == mix:
         return {"totalMl": total_ml, "mixMl": total_ml, "rodiMl": 0, "targetPpt": round(mix, 1),
                 "mixPpt": round(mix, 1), "sg": sg_from_ppt(mix)}
     mix_ml = round(total_ml * target / mix)
     return {"totalMl": total_ml, "mixMl": mix_ml, "rodiMl": total_ml - mix_ml,
             "targetPpt": round(target, 1), "mixPpt": round(mix, 1), "sg": sg_from_ppt(target)}
+
+
+def harvest_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, ml: Any = None) -> dict[str, Any]:
+    """Harvest volume is separate from the purge; replace both withdrawals."""
+    cad = cadence_for(jar.get("species"), jar.get("cadence"))
+    harvest = round(_f(ml, _f(jar.get("volumeL")) * cad["harvestPct"] * 10), 1)
+    purge = max(0.0, _f(jar.get("purgeMl"))) if jar.get("vesselKind") == "cone" else 0.0
+    refill = refill_guide((harvest + purge) / 1000, 100, jar.get("salinityPpt"), mix_ppt)
+    removal_pct = (harvest + purge) / max(1.0, _f(jar.get("volumeL")) * 1000) * 100
+    warning = (f"Harvest plus purge removes {removal_pct:.1f}% of the working volume; "
+               "this exceeds the default 25–30% harvest guidance. Reduce the withdrawal and check population recovery.") if removal_pct > 30 else ""
+    if removal_pct > 100:
+        refill.update({"available": False, "reason": "Harvest plus purge exceeds the vessel's working volume."})
+    return {**refill, "totalMl": harvest, "refillMl": refill["totalMl"], "purgeMl": purge,
+            "removalPct": round(removal_pct, 1), "warning": warning}
 
 
 def bottle_state(bottle: dict[str, Any], shelf_days: Any, now: datetime) -> dict[str, Any]:
@@ -360,8 +398,8 @@ def bottle_state(bottle: dict[str, Any], shelf_days: Any, now: datetime) -> dict
     if remaining <= 0:
         return {"status": "empty", "remainingMl": 0.0, "hoursLeft": None, "filledAt": ""}
     filled = _parse_iso(bottle.get("filledAt"))
-    shelf_h = max(1.0, _f(shelf_days)) * 24.0
-    if filled is None:
+    shelf_h = max(0.0, _f(shelf_days)) * 24.0
+    if filled is None or filled > now or shelf_h <= 0:
         return {"status": "stale", "remainingMl": remaining, "hoursLeft": 0.0, "filledAt": ""}
     left_h = shelf_h - (now - filled).total_seconds() / 3600.0
     if left_h <= 0:
@@ -447,7 +485,10 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
             "firstHarvestDays": cones[0]["firstHarvestDays"],
             "note": "comes with the first restart",
         })
-    first_cone = next((j for j in jars if str(j.get("vesselKind") or "jar") != "tub"), None)
+    cone_jars = [j for j in jars if str(j.get("vesselKind") or "jar") != "tub"]
+    first_cone = next((j for j in cone_jars if "restart" in (j.get("due") or [])), None)
+    first_cone = first_cone or next((j for j in cone_jars if "harvest" in (j.get("due") or [])), None)
+    first_cone = first_cone or next(iter(cone_jars), None)
     first_status = str(((first_cone or {}).get("state") or {}).get("status") or "none")
     # Day 0 the jug is the FILL (the whole vessel, cut to the jar's salinity);
     # once the cone runs it is the harvest's refill.
@@ -460,7 +501,9 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
         "harvestMl": round(_f(guide.get("totalMl"))), "mixMl": round(_f(guide.get("mixMl"))),
         "rodiMl": round(_f(guide.get("rodiMl"))), "ppt": _f(guide.get("targetPpt"), 35.0),
         "mixPpt": _f(guide.get("mixPpt"), 35.0),
-        "purgeMl": round(_f(first_cone.get("purgeMl"))) if first_cone else 0,
+        "purgeMl": round(_f(guide.get("purgeMl"), _f((first_cone or {}).get("purgeMl")))) if first_cone else 0,
+        "jarName": str((first_cone or {}).get("name") or ""),
+        "available": guide.get("available", True), "reason": guide.get("reason", ""),
         "sieveUm": int(_f(first_cone.get("sieveUm"), 50)) if first_cone else 50,
     }
     remaining = max(0.0, _f(bottle.get("remainingMl")))
@@ -472,7 +515,7 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
     caption = "IDLE — seed the cone and the rig comes alive"
     stage = "idle"
     by_temp = {"critical": 3, "hot": 2}
-    hot = sorted((v for v in vessels if v["tempStatus"] in by_temp),
+    hot = sorted((v for v in vessels if v["tempStatus"] in by_temp and v["status"] in ("establishing", "producing")),
                  key=lambda v: -by_temp[v["tempStatus"]])
     if hot:
         v = hot[0]
@@ -484,6 +527,8 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
         else:
             stage, caption = "heat", (f"ROOM {t} °C — over {v['name']}'s {temp.get('hardMaxC')} °C line: "
                                       "extra air, shade, feed lightly, a 50 % change ready")
+    elif guide.get("available") is False:
+        stage, caption = "mixing", str(guide.get("reason"))
     elif any(v["restartHot"] for v in cones):
         stage, caption = "restart", ("RESTART DUE — air off, settle, bleed the tip, the whole cone "
                                      "through the net into a clean one")
@@ -491,11 +536,11 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
         stage = "harvest"
         refill = (f"{jug['mixMl']} ml mix + {jug['rodiMl']} ml RODI" if jug["rodiMl"]
                   else f"{jug['mixMl']} ml fresh")
-        caption = (f"HARVEST — air off, settle 20 min, bleed ~{jug['purgeMl']} ml off the tip, then "
+        caption = (f"HARVEST — {jug['jarName']}: air off briefly, watch settling, bleed ~{jug['purgeMl']} ml off the tip, then "
                    f"{jug['harvestMl']} ml through the {jug['sieveUm']} µm net · refill {refill}")
     elif tub and tub["harvestHot"]:
         stage, caption = "tub_harvest", ("POD HARVEST — 25 % through 300 µm for adults, 50 µm "
-                                         "for nauplii · put the volume back as fresh water")
+                                         "for nauplii · replace the removed water with matched saltwater; check population recovery")
     elif any(v["feedHot"] for v in vessels):
         v = next(v for v in vessels if v["feedHot"])
         target = next((j.get("tintTarget") for j in jars if j.get("id") == v["id"]), "") or "a light green"
@@ -534,12 +579,14 @@ def clearing_samples(history: Any) -> list[float]:
     samples: list[float] = []
     fed_at: datetime | None = None
     for at, row in _chronological(history):
+        if row.get("event") in ("seeded", "restart", "crashed"):
+            fed_at = None
         if row.get("tint") == "clear" and fed_at is not None:
             hours = (at - fed_at).total_seconds() / 3600.0
             if 0 < hours <= 7 * 24:
                 samples.append(round(hours, 1))
             fed_at = None
-        if row.get("event") in FEED_EVENTS:
+        if row.get("event") in ("feed", "seeded", "restart") or row.get("fed") is True:
             fed_at = at
     samples.reverse()
     return samples
@@ -560,18 +607,21 @@ def first_harvest_samples(histories: Any) -> list[float]:
                 if 0 < days <= 60:
                     samples.append((at, round(days, 1)))
                 seed_at = None
+            elif event == "crashed":
+                seed_at = None
     samples.sort(key=lambda item: item[0], reverse=True)
     return [days for _at, days in samples]
 
 
-def run_length_samples(history: Any) -> list[float]:
-    """Days a jar ran between seed/restart and the next restart or crash —
-    what the fortnight cap should really be for THIS jar. Newest first."""
+def run_length_samples(history: Any, failures_only: bool = False) -> list[float]:
+    """Observed days between seed/restart and a later restart or crash.
+    Routine cleaning is not a failure; learning can request crashes only.
+    Newest first."""
     samples: list[float] = []
     anchor: datetime | None = None
     for at, row in _chronological(history):
         event = row.get("event")
-        if event in ("restart", "crashed") and anchor is not None:
+        if event in ("restart", "crashed") and anchor is not None and (not failures_only or event == "crashed"):
             days = (at - anchor).total_seconds() / 86400.0
             if 0 < days <= 90:
                 samples.append(round(days, 1))
@@ -611,9 +661,8 @@ def run_length_runs(history: Any) -> list[dict[str, Any]]:
 
 
 def purge_note(runs: Any) -> dict[str, Any]:
-    """Does bleeding more off the tip buy a longer run? Only when the journal
-    has PURGE_RUNS_MIN runs at each of two purge volumes — before that the
-    honest answer is 'not enough runs yet', and the note stays silent."""
+    """Compare observed runs at different purge volumes without inferring cause.
+    Require PURGE_RUNS_MIN runs per volume before showing a comparison."""
     by_purge: dict[float, list[float]] = {}
     for run in (runs if isinstance(runs, list) else []):
         if not isinstance(run, dict):
@@ -626,33 +675,38 @@ def purge_note(runs: Any) -> dict[str, Any]:
     low, high = min(table), max(table)
     d_low, d_high = table[low]["days"], table[high]["days"]
     if d_high - d_low >= 1.0:
-        verdict = f"the bigger purge buys ~{d_high - d_low:.0f} more days"
+        verdict = f"~{d_high - d_low:.0f} more days observed with the bigger purge; this does not establish the cause"
     elif d_low - d_high >= 1.0:
-        verdict = "the bigger purge is not helping — bleed less"
+        verdict = "shorter runs observed with the bigger purge; this does not establish the cause"
     else:
-        verdict = "no difference — keep the smaller purge"
+        verdict = "similar observed run lengths; no change recommended from this alone"
     line = (f"runs bled ~{high:.0f} ml lasted ~{d_high:g} d, ~{low:.0f} ml lasted ~{d_low:g} d "
             f"({table[high]['runs']} + {table[low]['runs']} runs) — {verdict}")
     return {"available": True, "line": line, "byPurge": {str(int(k)): v for k, v in table.items()}}
 
 
+def _daily_volume(history: Any, now: datetime, window_days: float, event: str) -> float | None:
+    """Mean daily logged volume, including today's partial day and zero-use days.
+
+    Start at the first retained record or the calendar-window boundary. This
+    avoids counting N daily draws across only N-1 intervals. It is an observed
+    volume, not a population-density or food-nutrition estimate.
+    """
+    days = max(1, int(_f(window_days, 14)))
+    start_day = (now - timedelta(days=days - 1)).date()
+    rows = [(at.astimezone(now.tzinfo), row) for at, row in _chronological(history) if at <= now]
+    if not rows:
+        return None
+    first_day = max(start_day, rows[0][0].date())
+    total = sum(max(0.0, _f(row.get("ml"))) for at, row in rows
+                if at.date() >= first_day and row.get("event") == event and not row.get("undoneAt"))
+    return round(total / max(1, (now.date() - first_day).days + 1), 1) if total > 0 else None
+
+
 def yield_ml_per_day(history: Any, now: datetime, window_days: float = 14.0) -> float | None:
     """Harvested ml per day over the recent window — the NPS runway's demand
     figure. None until something has been harvested."""
-    total = 0.0
-    oldest: datetime | None = None
-    for at, row in _chronological(history):
-        if row.get("event") != "harvest":
-            continue
-        age_days = (now - at).total_seconds() / 86400.0
-        if age_days < 0 or age_days > window_days:
-            continue
-        total += max(0.0, _f(row.get("ml")))
-        oldest = at if oldest is None or at < oldest else oldest
-    if oldest is None or total <= 0:
-        return None
-    span = max(1.0, (now - oldest).total_seconds() / 86400.0)
-    return round(total / span)
+    return _daily_volume(history, now, window_days, "harvest")
 
 
 def _rolling(samples: list[float], key: str) -> dict[str, Any]:
@@ -668,21 +722,24 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
     """Everything the journal can teach about this jar, plus the two numbers
     it would change if the keeper taps Apply: feed a little before the water
     clears, restart a day before the run usually turns."""
-    history = jar.get("history") if isinstance(jar.get("history"), list) else []
+    history = [row for at, row in _chronological(jar.get("history")) if at <= now]
     cad = cadence_for(jar.get("species"), jar.get("cadence"))
     clearing = _rolling(clearing_samples(history), "hours")
-    first = _rolling(first_harvest_samples(sibling_histories), "days")
+    siblings = [[row for at, row in _chronological(history) if at <= now]
+                for history in (sibling_histories if isinstance(sibling_histories, list) else [])]
+    first = _rolling(first_harvest_samples(siblings), "days")
     run = _rolling(run_length_samples(history), "days")
+    failures = _rolling(run_length_samples(history, failures_only=True), "days")
     suggest: dict[str, Any] = {"feedIntervalH": None, "restartIntervalDays": None}
     if clearing["available"]:
         hours = max(2.0, min(72.0, round(clearing["hours"] * 0.9)))
         if abs(hours - cad["feedIntervalH"]) >= 1:
             suggest["feedIntervalH"] = hours
-    if run["available"] and cad["restartIntervalDays"] > 0:
-        days = max(3.0, round(run["days"] - 1))
-        if abs(days - cad["restartIntervalDays"]) >= 1:
+    if failures["available"] and cad["restartIntervalDays"] > 0:
+        days = max(3.0, round(failures["days"] - 1))
+        if days < cad["restartIntervalDays"]:
             suggest["restartIntervalDays"] = days
-    return {"clearingH": clearing, "firstHarvestDays": first, "runLengthDays": run,
+    return {"clearingH": clearing, "firstHarvestDays": first, "runLengthDays": run, "failureDays": failures,
             "yieldMlDay": yield_ml_per_day(history, now), "suggest": suggest,
             "purge": purge_note(run_length_runs(history))}
 
@@ -699,14 +756,14 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
     watch: list[str] = []
     t_status = str((temp or {}).get("status") or "")
     if t_status == "critical" or (t_status == "hot" and (temp or {}).get("act")):
-        act.append(f"room {temp.get('tempC')} °C — over the act line (oxygen and ammonia, not the animal)")
+        act.append(f"room {temp.get('tempC')} °C — over the precautionary act line; check culture temperature, aeration and water quality")
     elif t_status == "hot":
         watch.append(f"room {temp.get('tempC')} °C — over the warning line")
     harvest = st.get("harvest") or {}
     interval_h = _f(cad.get("harvestIntervalDays")) * 24.0
     if harvest.get("due") and st.get("status") == "producing":
-        if interval_h > 0 and _f(harvest.get("hoursOverdue")) >= interval_h:
-            act.append("two harvests missed — the ammonia is climbing, harvest before you feed")
+        if species_preset(jar.get("species"))["kind"] == "rotifer" and interval_h > 0 and _f(harvest.get("hoursOverdue")) >= interval_h:
+            act.append("two harvests missed — check water quality and harvest/refill if the population is healthy")
         else:
             watch.append("harvest overdue")
     sign = str(state.get("lastSign") or "")
@@ -716,17 +773,17 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
         act.append(f"{SIGN_WORDS.get(sign, sign)} since the last "
                    f"{'restart' if restart.get('reason') == 'sign' else 'water change'}")
     if st.get("clearingSlow"):
-        watch.append("clearing is slowing — the culture is tiring")
+        watch.append("clearing is slowing — check activity, temperature and feeding amounts")
     for at, row in _chronological(jar.get("history")):
-        if row.get("event") in ("feed", "harvest") and row.get("tint") == "green" \
+        if (row.get("event") == "feed" or row.get("fed") is True) and row.get("tint") == "green" \
                 and 0 <= (now - at).total_seconds() <= 86400:
-            watch.append("fed on green water — that is how ammonia starts")
+            watch.append("fed on green water — check for excess feed and test water quality")
             break
     if act:
         return {"level": "act", "reason": "; ".join(act)}
     if watch:
         return {"level": "watch", "reason": "; ".join(watch)}
-    return {"level": "ok", "reason": "steady — nothing to worry about"}
+    return {"level": "ok", "reason": "no warning from the recorded observations"}
 
 
 # --------------------------------------------------------------------------- #
@@ -740,7 +797,7 @@ def soak_state(started_iso: Any, soak_h: Any, warm_h: Any, now: datetime) -> dic
     started = _parse_iso(started_iso)
     hours = _f(soak_h) if _f(soak_h) > 0 else ENRICH_SOAK_H
     warm = _f(warm_h) if _f(warm_h) > 0 else BOOST_WARM_H
-    if started is None:
+    if started is None or started > now:
         return {"status": "none", "percent": None, "hoursLeft": None, "hoursElapsed": None}
     elapsed = max(0.0, (now - started).total_seconds() / 3600.0)
     if elapsed < hours:
@@ -759,7 +816,7 @@ def bottle_boost(bottle: dict[str, Any], cold_h: Any, now: datetime) -> dict[str
     if _f(bottle.get("remainingMl")) <= 0 or not bottle.get("lastLoadEnriched"):
         return {"status": "none", "hoursLeft": None}
     enriched = _parse_iso(bottle.get("enrichedAt"))
-    if enriched is None:
+    if enriched is None or enriched > now:
         return {"status": "faded", "hoursLeft": 0.0}
     cold = _f(cold_h) if _f(cold_h) > 0 else BOOST_COLD_H
     left = cold - (now - enriched).total_seconds() / 3600.0
@@ -771,19 +828,7 @@ def bottle_boost(bottle: dict[str, Any], cold_h: Any, now: datetime) -> dict[str
 def bottle_usage_ml_per_day(history: Any, now: datetime, window_days: float = 7.0) -> float | None:
     """How fast the bottle is being fed out — ml a day over the recent window,
     None until a feed has been logged (never a guess)."""
-    total = 0.0
-    oldest: datetime | None = None
-    for at, row in _chronological(history):
-        if row.get("event") != "fed_tank":
-            continue
-        age_days = (now - at).total_seconds() / 86400.0
-        if age_days < 0 or age_days > window_days:
-            continue
-        total += max(0.0, _f(row.get("ml")))
-        oldest = at if oldest is None or at < oldest else oldest
-    if oldest is None or total <= 0:
-        return None
-    return round(total / max(1.0, (now - oldest).total_seconds() / 86400.0), 1)
+    return _daily_volume(history, now, window_days, "fed_tank")
 
 
 def next_harvest(bottle_state: dict[str, Any], ml_per_day: Any, harvest_clock: Any,
@@ -796,6 +841,9 @@ def next_harvest(bottle_state: dict[str, Any], ml_per_day: Any, harvest_clock: A
         return {"status": "none", "hoursUntil": None, "driver": None}
     status = str(bottle_state.get("status") or "empty")
     clock = harvest_clock if isinstance(harvest_clock, dict) else {}
+    # Bottle demand must not shorten a culture's recovery interval.
+    if clock.get("available") and not clock.get("due"):
+        return {"status": "wait", "hoursUntil": clock.get("hoursUntil"), "driver": "jar"}
     if status in ("empty", "stale"):
         return {"status": "now", "hoursUntil": 0.0,
                 "driver": "empty" if status == "empty" else "freshness"}
@@ -825,7 +873,7 @@ def rack_offset_c(projection_hours: Any, temp_c: Any, now: datetime,
     projection describes, from the projection row nearest to now. None
     without a sensor reading or a row inside the window; clamped to
     ±RACK_OFFSET_MAX_C so a mis-linked sensor cannot invent a heatwave."""
-    if not isinstance(temp_c, (int, float)) or isinstance(temp_c, bool):
+    if not isinstance(temp_c, (int, float)) or isinstance(temp_c, bool) or not math.isfinite(temp_c):
         return None
     nearest: tuple[float, float] | None = None
     for row in (projection_hours if isinstance(projection_hours, list) else []):
@@ -833,7 +881,7 @@ def rack_offset_c(projection_hours: Any, temp_c: Any, now: datetime,
             continue
         at = _parse_iso(row.get("at"))
         room = row.get("roomC")
-        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool):
+        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool) or not math.isfinite(room):
             continue
         gap = abs((at - now).total_seconds()) / 3600.0
         if gap <= window_h and (nearest is None or gap < nearest[0]):
@@ -863,7 +911,7 @@ def heat_guard(projection_hours: Any, species_id: Any, now: datetime,
             continue
         at = _parse_iso(row.get("at"))
         room = row.get("roomC")
-        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool):
+        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool) or not math.isfinite(room):
             continue
         hours = (at - now).total_seconds() / 3600.0
         if -1.0 <= hours <= lookahead_h:
@@ -872,6 +920,7 @@ def heat_guard(projection_hours: Any, species_id: Any, now: datetime,
     if not rows:
         return {**base, "available": False, "status": "unknown", "peakC": None, "peakAt": None,
                 "crossAt": None, "hoursUntil": None, "line": ""}
+    rows.sort(key=lambda row: row[0])
     peak_at, peak_c, _h = max(rows, key=lambda r: r[1])
     hard = _f(species["tempHardMaxC"])
     band = _f(species["tempMaxC"])
@@ -903,13 +952,16 @@ def stagger_advice(jar_a: dict[str, Any], jar_b: dict[str, Any], now: datetime) 
     if days is None or interval <= 0:
         return {"available": False, "days": None, "idealDays": None, "advice": ""}
     ideal = round(interval / 2.0, 1)
-    gap = days % interval if interval > 0 else days
+    other_interval = cadence_for(jar_b.get("species"), jar_b.get("cadence"))["restartIntervalDays"]
+    if interval != other_interval:
+        return {"available": False, "days": None, "idealDays": None, "advice": "Different restart intervals — compare the next due dates."}
+    gap = min(days % interval, interval - days % interval)
     off = abs(gap - ideal)
     if off <= 2.0:
-        advice = f"restart cycles {gap:.0f} days apart — a proper backup"
+        advice = f"restart cycles {gap:.0f} days apart — staggered; keep both cultures healthy"
     else:
-        advice = (f"restart cycles only {gap:.0f} days apart (ideal {ideal:g}) — hold one restart "
-                  f"{off:.0f} day{'s' if off >= 1.5 else ''} to spread them")
+        advice = (f"restart cycles only {gap:.0f} days apart (ideal {ideal:g}) — plan an earlier clean-jar restart "
+                  "for one healthy culture; never delay a due restart or a response to warning signs")
     return {"available": True, "days": round(gap, 1), "idealDays": ideal, "advice": advice}
 
 
@@ -919,9 +971,9 @@ def tint_strip(history: Any, now: datetime, days: int = TINT_STRIP_DAYS) -> list
     by_day: dict[str, str] = {}
     for at, row in _chronological(history):
         tint = str(row.get("tint") or "")
-        if tint not in TINTS:
+        if tint not in TINTS or at > now:
             continue
-        by_day[at.date().isoformat()] = tint
+        by_day[at.astimezone(now.tzinfo).date().isoformat()] = tint
     out = []
     for back in range(days - 1, -1, -1):
         out.append(by_day.get((now - timedelta(days=back)).date().isoformat(), ""))
@@ -930,7 +982,7 @@ def tint_strip(history: Any, now: datetime, days: int = TINT_STRIP_DAYS) -> list
 
 def continuity_days(since_iso: Any, now: datetime) -> float | None:
     since = _parse_iso(since_iso)
-    if since is None:
+    if since is None or since > now:
         return None
     return round(max(0.0, (now - since).total_seconds() / 86400.0), 1)
 
@@ -943,11 +995,15 @@ def acclimation_plan(from_ppt: Any, to_ppt: Any, pouch_ml: float = 500.0,
     the net into the cone itself. Inside the rule from the start = float and
     pour. Additions are capped — a gap the cap cannot close says so instead
     of pretending."""
-    start = _f(from_ppt, STARTER_PPT)
+    if from_ppt is None or isinstance(from_ppt, bool) or not math.isfinite(_f(from_ppt, math.nan)):
+        return {"available": False, "steps": [], "withinRule": False,
+                "line": "measure the starter salinity and volume before acclimating; the supplier's culture target is not a shipping measurement"}
+    start = _f(from_ppt)
     target = _f(to_ppt, STARTER_PPT)
     pouch = max(50.0, _f(pouch_ml, 500.0))
     gap = target - start
-    n = max(1, int(-(-abs(gap) // max_step)))          # ceil(gap / step)
+    max_step = max(0.1, _f(max_step, ACCLIMATE_STEP_PPT))
+    n = max(1, math.ceil(abs(gap) / max_step))
     delta = gap / n
     steps: list[dict[str, Any]] = []
     ppt = start
@@ -966,14 +1022,13 @@ def acclimation_plan(from_ppt: Any, to_ppt: Any, pouch_ml: float = 500.0,
     within = abs(final) <= max_step + 0.05
     if not steps:
         line = (f"the starter is at ~{start:g} ppt and the cone at {target:g}: float the pouch "
-                f"{wait_min} min and pour in — a {abs(final):g} ppt step is inside the 5 ppt rule")
+                f"{wait_min} min, then sieve and rinse into the prepared vessel — a {abs(final):g} ppt step is within the {max_step:g} ppt guideline")
     else:
         parts = [f"add {st['addMl']} ml of cone water, wait {st['waitMin']} min (~{st['ppt']:g} ppt)"
                  for st in steps]
         line = (f"the starter is at ~{start:g} ppt and the cone at {target:g}: float the pouch "
                 f"{wait_min} min, then " + "; ".join(parts)
                 + (f"; then net them into the cone — the last step is {abs(final):g} ppt" if within
-                   else f"; the last step would still be {abs(final):g} ppt — too big: use a larger "
-                        "pouch or drip the cone water in over an hour"))
+                   else f"; the last step would still be {abs(final):g} ppt — too big: stop and obtain a supplier-specific acclimation protocol"))
     return {"fromPpt": round(start, 1), "toPpt": round(target, 1), "pouchMl": round(pouch),
             "steps": steps, "finalStepPpt": final, "withinRule": within, "line": line}

@@ -54,6 +54,7 @@ def _jar(species="rotifer_L", started_ago_days=None, now=None, **state):
         jar["state"]["startedAt"] = _iso(base - timedelta(days=started_ago_days))
         jar["state"]["lastRestartAt"] = jar["state"]["startedAt"]
         jar["state"]["lastFedAt"] = jar["state"]["startedAt"]
+        jar["state"]["lastTint"] = "green"
     jar["state"].update(state)
     return jar
 
@@ -175,7 +176,7 @@ def test_feed_advice_reads_the_tint():
     assert cultures.feed_advice("green", due)["action"] == "skip"
     assert cultures.feed_advice("green", wait)["action"] == "wait"
     assert cultures.feed_advice("clearing", due)["action"] == "feed_now"
-    assert cultures.feed_advice("", due)["action"] == "feed_now"
+    assert cultures.feed_advice("", due)["action"] == "check"
 
 
 def test_temperature_advice_has_a_hard_line():
@@ -205,7 +206,7 @@ def test_refill_guide_is_the_measured_jug():
     # The station's own target is what gets cut — a 34 ppt station cuts less.
     assert cultures.refill_guide(2.0, 100, 27, 34)["mixMl"] == 1588
     # At or above the station: straight mix, and the jug says the station's ppt.
-    assert cultures.refill_guide(2.0, 100, 35, 34) == {"totalMl": 2000, "mixMl": 2000, "rodiMl": 0, "targetPpt": 34.0, "mixPpt": 34.0, "sg": 1.0256}
+    assert cultures.refill_guide(2.0, 100, 35, 34)["available"] is False, "dilution cannot increase salinity"
     assert cultures.refill_guide(2.0, 100, 27, 0)["mixPpt"] == 35.0, "a junk station target falls back to 35"
 
 
@@ -248,7 +249,7 @@ def test_normalise_cultures_defaults_and_junk():
     assert jar["cadence"]["harvestPct"] == 60 and jar["cadence"]["restartIntervalDays"] == 14
     assert jar["state"]["lastTint"] == "" and jar["state"]["startedAt"] == ""
     assert jar["history"] == [{"event": "seeded", "at": "", "ml": 0, "tint": "", "from": "",
-                               "sign": "", "eggRatio": 0, "tempC": None, "purgeMl": 0, "to": "", "tankMl": None}]
+                               "sign": "", "eggRatio": None, "fed": False, "tankMl": None, "to": "", "tempC": None, "purgeMl": 0}]
     assert out["bottle"]["remainingMl"] == 0
 
 
@@ -369,7 +370,7 @@ def test_ws_split_creates_b_from_a_producing_jar_and_refuses_otherwise():
     conn = FakeConnection()
     run(integration.websocket_cultures_split(hass, conn, {"id": 1, "jar_id": "c1"}))
     assert conn.errors[-1].code == "not_producing"
-    _cultures(entry)["jars"]["c1"]["state"]["startedAt"] = _iso(REAL - timedelta(days=12))
+    _cultures(entry)["jars"]["c1"]["state"]["startedAt"] = _iso(REAL - timedelta(days=15))
     run(integration.websocket_cultures_split(hass, conn, {"id": 2, "jar_id": "c1"}))
     jars = _cultures(entry)["jars"]
     assert set(jars) == {"c1", "c2"}
@@ -377,7 +378,7 @@ def test_ws_split_creates_b_from_a_producing_jar_and_refuses_otherwise():
     assert jars["c2"]["volumeL"] == 2.5 and jars["c2"]["feed"]["productId"] == "phyto"
     assert jars["c2"]["state"]["seededFrom"] == "c1" and jars["c2"]["state"]["startedAt"]
     assert jars["c1"]["history"][0]["event"] == "split" and jars["c1"]["history"][0]["from"] == "c2"
-    assert jars["c1"]["state"]["startedAt"] == _iso(REAL - timedelta(days=12)), "the source keeps its clocks"
+    assert jars["c1"]["state"]["startedAt"] == _iso(REAL - timedelta(days=15)), "the source keeps its clocks"
     # A second split reuses the idle sibling, never a third jar.
     run(integration.websocket_cultures_crash(hass, conn, {"id": 3, "jar_id": "c2"}))
     run(integration.websocket_cultures_split(hass, conn, {"id": 4, "jar_id": "c1"}))
@@ -421,7 +422,7 @@ def test_ws_bottle_fed_and_empty():
     assert _cultures(entry)["bottle"]["remainingMl"] == 80.0
     run(integration.websocket_cultures_bottle(hass, conn, {"id": 2, "action": "fed", "ml": 80}))
     bottle = _cultures(entry)["bottle"]
-    assert bottle["remainingMl"] == 0 and bottle["filledAt"] == "", "empty clears the clock"
+    assert bottle["remainingMl"] == 0 and bottle["filledAt"], "retain the load identity so the last feed can be undone"
     bottle["remainingMl"] = 50
     bottle["filledAt"] = _iso(REAL)
     run(integration.websocket_cultures_bottle(hass, conn, {"id": 3, "action": "empty"}))
@@ -559,7 +560,7 @@ def test_rig_state_reads_the_stage_heat_first():
     bottle = {"remainingMl": 250, "volumeMl": 1000, "status": "fresh"}
     quiet = cultures.rig_state([jar()], bottle)
     assert quiet["stage"] == "steady" and quiet["cones"][0]["pct"] == 40 and quiet["tub"] is None
-    assert quiet["jug"] == {"mode": "harvest", "harvestMl": 625, "mixMl": 480, "rodiMl": 145, "ppt": 27, "mixPpt": 35.0, "purgeMl": 50, "sieveUm": 50}
+    assert quiet["jug"] == {"mode": "harvest", "harvestMl": 625, "mixMl": 480, "rodiMl": 145, "ppt": 27, "mixPpt": 35.0, "purgeMl": 50, "sieveUm": 50, "jarName": "Rotifers A", "available": True, "reason": ""}
     assert quiet["bottle"] == {"ml": 250, "pct": 25, "status": "fresh"}
     harvest = cultures.rig_state([jar(due=["harvest"])], bottle)
     assert harvest["stage"] == "harvest" and harvest["cones"][0]["harvestHot"] and harvest["cones"][0]["purgeHot"]
@@ -647,8 +648,8 @@ def test_learned_cadences_follow_the_hatch_clock_contract():
     jar["history"] = mine
     learned = cultures.learned_cadences(jar, [mine, sib], NOW)
     assert learned["runLengthDays"] == {"available": True, "days": 11.0, "samples": 3}
-    assert learned["suggest"]["restartIntervalDays"] == 10.0, "restart a day before it usually turns"
-    assert learned["yieldMlDay"] == 918, "1875 ml over the 49 h span of the window"
+    assert learned["suggest"]["restartIntervalDays"] is None, "planned restarts are not evidence of crashes"
+    assert learned["yieldMlDay"] == 133.9, "1875 ml over the known 14-calendar-day window, including zero-harvest days"
     assert learned["firstHarvestDays"]["samples"] == 2 and learned["firstHarvestDays"]["available"], "one sample per seed, across the species' jars"
     assert cultures.first_harvest_samples([sib, [_row("harvest", 3 * 24), _row("seeded", 9 * 24)]]) == [6.0, 5.0]
 
@@ -690,7 +691,7 @@ def test_risk_line_explains_itself():
     ok = _jar(started_ago_days=10, lastHarvestAt=_iso(NOW - timedelta(hours=5)), lastFedAt=_iso(NOW - timedelta(hours=1)), now=NOW)
     st = cultures.culture_state(ok, NOW)
     temp = cultures.temperature_advice(23, "rotifer_L")
-    assert cultures.risk_line(ok, st, temp, NOW) == {"level": "ok", "reason": "steady — nothing to worry about"}
+    assert cultures.risk_line(ok, st, temp, NOW) == {"level": "ok", "reason": "no warning from the recorded observations"}
     debt = _jar(started_ago_days=10, lastHarvestAt=_iso(NOW - timedelta(hours=60)), now=NOW)
     risk = cultures.risk_line(debt, cultures.culture_state(debt, NOW), temp, NOW)
     assert risk["level"] == "act" and "two harvests missed" in risk["reason"]
@@ -829,18 +830,16 @@ def test_soak_and_boost_clocks():
 
 
 def test_next_harvest_names_its_driver():
-    clock = {"available": True, "due": False, "at": _iso(NOW), "hoursUntil": 20.0}
+    clock = {"available": True, "due": False, "at": _iso(NOW + timedelta(hours=20)), "hoursUntil": 20.0}
     fresh = {"status": "fresh", "remainingMl": 300, "hoursLeft": 60.0}
     assert cultures.next_harvest(fresh, None, clock, False)["status"] == "none"
-    assert cultures.next_harvest({"status": "empty", "remainingMl": 0}, None, clock, True) == {"status": "now", "hoursUntil": 0.0, "driver": "empty"}
-    assert cultures.next_harvest({"status": "stale", "remainingMl": 100, "hoursLeft": 0}, None, clock, True)["driver"] == "freshness"
-    assert cultures.next_harvest(fresh, 600, clock, True) == {"status": "wait", "hoursUntil": 12.0, "driver": "depletion"}
-    assert cultures.next_harvest(fresh, 100, clock, True)["driver"] == "jar"
-    assert cultures.next_harvest({"status": "fresh", "remainingMl": 300, "hoursLeft": 5.0}, 100, clock, True)["driver"] == "freshness"
+    for bottle in (fresh, {"status": "empty"}, {"status": "stale", "hoursLeft": 0}):
+        assert cultures.next_harvest(bottle, 600, clock, True) == {"status": "wait", "hoursUntil": 20, "driver": "jar"}
     assert cultures.next_harvest(fresh, None, {**clock, "due": True}, True)["status"] == "now"
+    assert cultures.next_harvest({"status": "empty"}, None, {**clock, "due": True}, True)["driver"] == "empty"
     history = [{"event": "fed_tank", "at": _iso(NOW - timedelta(hours=2)), "ml": 20}, {"event": "fed_tank", "at": _iso(NOW - timedelta(hours=26)), "ml": 20},
                {"event": "filled", "at": _iso(NOW - timedelta(hours=30)), "ml": 625}]
-    assert cultures.bottle_usage_ml_per_day(history, NOW) == 36.9 and cultures.bottle_usage_ml_per_day([], NOW) is None
+    assert cultures.bottle_usage_ml_per_day(history, NOW) == 20 and cultures.bottle_usage_ml_per_day([], NOW) is None
 
 
 def test_ws_harvest_can_go_to_the_soak_and_then_the_bottle_carries_the_boost():
@@ -864,7 +863,8 @@ def test_ws_harvest_can_go_to_the_soak_and_then_the_bottle_carries_the_boost():
     p = conn.results[-1].payload
     assert p["enrichment"]["soak"]["status"] == "soaking" and p["enrichment"]["jarName"] == "Rotifers A"
     assert p["enrichment"]["productName"] == "Rotifer & Artemia Enrichment"
-    assert p["nextHarvest"]["status"] == "now" and p["nextHarvest"]["driver"] == "empty"
+    assert p["nextHarvest"]["status"] == "wait" and p["nextHarvest"]["driver"] == "jar"
+    _cultures(entry)["enrichment"]["state"]["startedAt"] = _iso(datetime.now(timezone.utc) - timedelta(hours=7))
     run(integration.websocket_cultures_enrich_done(hass, conn, {"id": 4}))
     cult = _cultures(entry)
     assert cult["bottle"]["remainingMl"] == 625 and cult["bottle"]["lastLoadEnriched"] and cult["bottle"]["enrichedAt"]
@@ -878,7 +878,7 @@ def test_ws_harvest_can_go_to_the_soak_and_then_the_bottle_carries_the_boost():
     assert p["nextHarvest"]["status"] == "wait" and p["nextHarvest"]["driver"] in ("depletion", "jar", "freshness")
     # A plain harvest on top keeps the boost flag honest: the LAST load was not enriched.
     run(integration.websocket_cultures_log(hass, conn, {"id": 7, "jar_id": "c1", "harvested": True}))
-    assert _cultures(entry)["bottle"]["remainingMl"] == 1000 and _cultures(entry)["bottle"]["lastLoadEnriched"], "a top-up on an enriched bottle keeps the flag (the older batch rules)"
+    assert _cultures(entry)["bottle"]["remainingMl"] == 1000 and not _cultures(entry)["bottle"]["lastLoadEnriched"], "a plain top-up removes the whole-bottle enrichment claim"
 
 
 def test_ws_enrich_plain_and_bottle_feed_log_the_tank():
@@ -963,10 +963,10 @@ def test_stagger_tint_strip_and_continuity():
     a = _jar(started_ago_days=20, lastRestartAt=_iso(NOW - timedelta(days=9)), now=NOW)
     b = _jar(started_ago_days=12, lastRestartAt=_iso(NOW - timedelta(days=2)), now=NOW)
     good = cultures.stagger_advice(a, b, NOW)
-    assert good["available"] and good["days"] == 7.0 and good["idealDays"] == 7.0 and "a proper backup" in good["advice"]
+    assert good["available"] and good["days"] == 7.0 and good["idealDays"] == 7.0 and "staggered" in good["advice"]
     b["state"]["lastRestartAt"] = _iso(NOW - timedelta(days=8))
     close = cultures.stagger_advice(a, b, NOW)
-    assert close["days"] == 1.0 and "hold one restart" in close["advice"]
+    assert close["days"] == 1.0 and "never delay a due restart" in close["advice"]
     pod_a = _jar(species="tigriopus", started_ago_days=40, now=NOW)
     assert cultures.stagger_advice(pod_a, pod_a, NOW)["available"] is False, "no restart, no stagger"
     history = [_row("tint", 2, tint="clear"), _row("feed", 20, tint="green"), _row("harvest", 30, tint="clearing"),
@@ -1029,7 +1029,7 @@ def test_ws_restart_can_seed_b_from_the_same_crop():
     run(integration.websocket_cultures_restart(hass, conn, {"id": 2, "jar_id": "c1", "split": True}))
     assert "c2" not in _cultures(entry)["jars"]
     activity = entry.options[CONF_SETTINGS].get("activity") or []
-    assert any("could not seed B" in str(a.get("message", "")) for a in activity)
+    assert any("B was not seeded" in str(a.get("message", "")) for a in activity)
 
 
 def test_heat_guard_push_fires_once_a_day_from_the_cooling_projection():
@@ -1086,9 +1086,8 @@ def test_the_fill_and_every_debit_read_the_station_and_the_bottle_gets_what_was_
         run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
         jar = conn.results[-1].payload["jars"][0]
         assert jar["mixPpt"] == 35.0 and jar["fillGuide"] == {"totalMl": 2000, "mixMl": 1543, "rodiMl": 457, "targetPpt": 27.0, "mixPpt": 35.0, "sg": 1.0204}
-        assert jar["harvestGuide"]["mixMl"] == 386 and jar["harvestGuide"]["rodiMl"] == 114
-        assert jar["pouchMl"] == 500 and jar["arrivalFillGuide"] == {"totalMl": 1500, "mixMl": 1157, "rodiMl": 343, "targetPpt": 27.0, "mixPpt": 35.0, "sg": 1.0204}, \
-            "the parcel day mixes the vessel less the pouch"
+        assert jar["harvestGuide"]["mixMl"] == 424 and jar["harvestGuide"]["rodiMl"] == 126, "replace harvest plus purge"
+        assert jar["pouchMl"] == 500 and jar["arrivalFillGuide"] == jar["fillGuide"], "sieve the starter into the full prepared volume; discard shipping water"
         assert conn.results[-1].payload["rig"]["jug"]["mode"] == "fill" and conn.results[-1].payload["rig"]["jug"]["mixMl"] == 1543
         run(integration.websocket_cultures_seed(hass, conn, {"id": 2, "jar_id": "c1"}))
         assert not conn.errors and debits[-1] == (1.543, "seeding Rotifers A"), "the vessel gives the mix share of the fill, not the whole cone"
@@ -1103,7 +1102,7 @@ def test_the_fill_and_every_debit_read_the_station_and_the_bottle_gets_what_was_
         cfg = _config(entry)
         assert cfg["nps"]["cultures"]["bottle"]["remainingMl"] == 150, "the bottle holds the rinsed crop, not 500 ml of culture water"
         assert cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]["ml"] == 500, "the journal keeps the harvest volume"
-        assert debits[-1] == (0.386, "refilling Rotifers A"), "the refill draws the mix share of 500 ml"
+        assert debits[-1] == (0.424, "refilling Rotifers A"), "the refill draws the mix share of 550 ml, including the purge"
         assert any("500 ml harvested" in str(item.get("message", "")) for item in cfg["activity"]) or True
         run(integration.websocket_cultures_log(hass, conn, {"id": 5, "jar_id": "c1", "harvested": True}))
         assert _config(entry)["nps"]["cultures"]["bottle"]["remainingMl"] == 650, "no bottle number = the old assumption, the whole harvest"
@@ -1271,14 +1270,14 @@ def test_purge_rides_the_journal_and_teaches_the_run_length():
     # −49→−36 (13 d @50), −36→−21 (15 d @100), −21→−7 (14 d @100).
     assert [(r["days"], r["purgeMl"]) for r in runs] == [(14.0, 100), (15.0, 100), (13.0, 50), (11.0, 50)], "newest first, with its purge"
     note = cultures.purge_note(runs)
-    assert note["available"] and "the bigger purge buys ~" in note["line"] and note["byPurge"]["100"]["runs"] == 2
+    assert note["available"] and "does not establish the cause" in note["line"] and note["byPurge"]["100"]["runs"] == 2
     assert note["byPurge"]["100"]["days"] == 14.5 and note["byPurge"]["50"]["days"] == 12.0
     assert not cultures.purge_note(runs[:3])["available"], "one run at 50 ml is not a comparison"
     assert not cultures.purge_note([])["available"]
     same = cultures.purge_note([{"days": 11, "purgeMl": 50}, {"days": 12, "purgeMl": 50}, {"days": 11.5, "purgeMl": 100}, {"days": 12, "purgeMl": 100}])
-    assert "no difference" in same["line"]
+    assert "similar observed run lengths" in same["line"]
     worse = cultures.purge_note([{"days": 13, "purgeMl": 50}, {"days": 12, "purgeMl": 50}, {"days": 10, "purgeMl": 100}, {"days": 11, "purgeMl": 100}])
-    assert "bleed less" in worse["line"]
+    assert "shorter runs observed" in worse["line"]
     learned = cultures.learned_cadences({"species": "rotifer_L", "cadence": {}, "history": history}, [], REAL)
     assert learned["purge"]["available"] and learned["runLengthDays"]["available"]
 
@@ -1341,7 +1340,7 @@ def test_acclimation_plan_keeps_every_step_inside_five_ppt():
     assert plan["steps"] == [{"addMl": 500, "ppt": 31.0, "waitMin": 15}] and plan["finalStepPpt"] == 4.0 and plan["withinRule"]
     assert "add 500 ml of cone water, wait 15 min (~31 ppt)" in plan["line"] and plan["line"].endswith("the last step is 4 ppt")
     same = cultures.acclimation_plan(27, 27)
-    assert same["steps"] == [] and "float the pouch 15 min and pour in" in same["line"]
+    assert same["steps"] == [] and "float the pouch 15 min, then sieve" in same["line"]
     assert cultures.acclimation_plan(27, 30)["steps"] == [], "3 ppt is inside the rule"
     down = cultures.acclimation_plan(35, 27)
     assert down["steps"][0]["ppt"] == 31.0 and down["finalStepPpt"] == -4.0 and "the last step is 4 ppt" in down["line"]
@@ -1355,19 +1354,19 @@ def test_acclimation_plan_keeps_every_step_inside_five_ppt():
     assert len(wild["steps"]) == cultures.ACCLIMATE_STEPS_MAX and not wild["withinRule"] and "too big" in wild["line"]
     # The summary aims at the first rotifer cone's water; the v1 35 ppt jar
     # gets the two-step plan, a 27 ppt cone gets "pour in".
-    entry = _entry(jars={"c1": _jar()})
+    entry = _entry(jars={"c1": {**_jar(), "starterPpt": 27}})
     conn = FakeConnection()
     run(integration.websocket_cultures_summary(FakeHass(entries=[entry]), conn, {"id": 1}))
     arrival = conn.results[-1].payload["arrival"]["rotifer"]
     assert arrival["fromPpt"] == 27 and arrival["toPpt"] == 35 and arrival["steps"][0]["ppt"] == 31.0
-    entry = _entry(jars={"c1": {**_jar(), "salinityPpt": 27}, "c2": _jar(species="tigriopus")})
+    entry = _entry(jars={"c1": {**_jar(), "salinityPpt": 27, "starterPpt": 27}, "c2": _jar(species="tigriopus")})
     conn = FakeConnection()
     run(integration.websocket_cultures_summary(FakeHass(entries=[entry]), conn, {"id": 1}))
     arrival = conn.results[-1].payload["arrival"]["rotifer"]
     assert arrival["toPpt"] == 27 and arrival["steps"] == []
     empty = FakeConnection()
     run(integration.websocket_cultures_summary(FakeHass(entries=[_entry(jars={})]), empty, {"id": 1}))
-    assert empty.results[-1].payload["arrival"]["rotifer"]["toPpt"] == 27, "no jar yet — the preset's water"
+    assert empty.results[-1].payload["arrival"]["rotifer"]["available"] is False, "no measured shipping salinity"
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

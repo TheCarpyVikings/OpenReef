@@ -2843,7 +2843,7 @@ def test_feed_timeline_cultures_and_hand_brine():
     tl = _tl(now, cultures=cultures, hatchery=hatchery, brine_feeds=feeds,
              culture_bottle_species={"rotifer_L"})
     pods = _by_id(tl, "culture:pods:")
-    assert len(pods) == 1 and pods[0]["status"] == "done" and pods[0]["doneAt"] == 540 and pods[0]["actualMl"] == 300.0
+    assert len(pods) == 1 and pods[0]["status"] == "done" and pods[0]["doneAt"] == 540 and pods[0]["actualMl"] is None
     assert not _by_id(tl, "culture:rots"), "a rotifer harvest fills the bottle — the bottle feeds the tank"
     bottle = _by_id(tl, "cultures-bottle:")
     assert bottle[0]["status"] == "done" and bottle[0]["at"] == 720 and bottle[0]["ml"] == 40.0
@@ -4206,7 +4206,7 @@ def test_feed_log_sweeps_every_ledger_newest_first():
     assert timed["how"] == "pump" and timed["name"] == "Zoo pump" and timed["ml"] == 4.5 and timed["note"] == ""
     assert by[("2026-09-09", "19:00", "channel:z1")]["note"] == "manual dose"
     pods = by[("2026-09-10", "06:05", "culture:pods")]
-    assert pods["name"] == "Pod tub harvest" and pods["ml"] == 300.0 and pods["note"] == "harvested into the display" and not pods["undoable"]
+    assert pods["name"] == "Pod tub harvest" and pods["ml"] is None and pods["note"] == "sieved harvest into the display; culture water discarded" and not pods["undoable"]
     assert by[("2026-09-10", "10:00", "cultures-bottle")]["undoable"] is True and by[("2026-09-10", "10:00", "cultures-bottle")]["slot"] == "10:00"
     assert by[("2026-09-09", "10:00", "cultures-bottle")]["undone"] is True
     # The window, not the day, decides undo: yesterday evening's dose is inside a day.

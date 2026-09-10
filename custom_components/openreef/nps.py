@@ -180,16 +180,6 @@ def _harvest_went_to_tank(row: dict[str, Any], bottle_species: bool) -> bool:
     return to == "tank" or (not to and not bottle_species)
 
 
-def _harvest_tank_ml(row: dict[str, Any], bottle_species: bool) -> float | None:
-    """The volume that reached the tank: the rinsed crop when it was measured,
-    else the harvest itself for a species that goes in with its water."""
-    if _f(row.get("tankMl")) > 0:
-        return round(_f(row.get("tankMl")), 1)
-    if not bottle_species:
-        return round(_f(row.get("ml")), 1) or None
-    return None
-
-
 def live_cone_product(jar_id: str, name: str, harvest_clock: dict[str, Any], harvest_ml: Any,
                       last_harvest_iso: Any, history: Any) -> dict[str, Any]:
     """A producing rotifer cone whose harvests go straight into the tank, as a
@@ -2304,24 +2294,21 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             if isinstance(item, dict) and item.get("event") == "harvest" and _harvest_went_to_tank(item, bottled):
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
-                    done.append({"at": minute, "ml": _harvest_tank_ml(item, bottled)})
+                    done.append({"at": minute, "ml": round(_f(item.get("tankMl")), 1) or None})
         if not straight and not done:
             continue
         # The jar's OWN clock (cultures.culture_state, 0.7.158): the first
         # harvest lands when establishment ends, every later one an interval
         # after the last. A jar still establishing plans nothing here — the
         # Cultures card says "first harvest in ~27 d", so must the strip — and
-        # a crashed jar has no clock at all. A harvest is a day-granular
-        # chore: due on its day, any time, like a days-cadence bottle.
+        # a crashed jar has no clock at all. Respect the exact due instant,
+        # including establishment and fractional-day recovery intervals.
         clock = culture_state(jar, now_local).get("harvest") or {}
-        clock_at = _parse_iso(clock.get("at")) if clock.get("available") else None
         planned = []
-        if straight and clock_at is not None:
-            due_day = clock_at.astimezone(tz).date() if tz is not None else clock_at.date()
-            if due_day <= today:
-                planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None, status="due",
-                                  note=("through the net straight into the tank — the cone's own clock" if bottled
-                                        else "pods straight into the display — the jar's own clock")))
+        if straight and clock.get("due") and cultures.get("enabled", True):
+            planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None, status="due",
+                              note=("through the net straight into the tank — the cone's own clock" if bottled
+                                    else "check population density before harvesting pods — the jar's own clock")))
         extras = _timed_plan(planned, done, now_min)
         for i, extra in enumerate(extras):
             extra.update({"id": f"{source}:x{i}", "source": source, "name": name,
@@ -2688,9 +2675,9 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
         for item in (jar.get("history") if isinstance(jar.get("history"), list) else []):
             if isinstance(item, dict) and item.get("event") == "harvest" and _harvest_went_to_tank(item, bottled):
                 add(item.get("at"), how="hand", source=f"culture:{jid}", name=name,
-                    ml=_harvest_tank_ml(item, bottled),
+                    ml=round(_f(item.get("tankMl")), 1) or None,
                     note=("sieved harvest straight into the tank; culture water discarded" if bottled
-                          else "harvested into the display"))
+                          else "sieved harvest into the display; culture water discarded"))
     bottle = cultures.get("bottle") if isinstance(cultures.get("bottle"), dict) else {}
     for item in (bottle.get("history") if isinstance(bottle.get("history"), list) else []):
         if isinstance(item, dict) and item.get("event") == "fed_tank":

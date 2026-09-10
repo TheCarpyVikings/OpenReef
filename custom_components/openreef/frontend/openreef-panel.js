@@ -2668,15 +2668,13 @@ class OpenReefPanel extends HTMLElement {
         const npsCfg = this._config.nps = this._config.nps || {};
         const cultures = npsCfg.cultures = npsCfg.cultures || {};
         const jars = cultures.jars = cultures.jars || {};
-        const jar = jars[id] = jars[id] || { name: "Culture", species: "rotifer_L", volumeL: 2.5, salinityPpt: 35, feed: {}, cadence: {}, state: {}, history: [] };
+        const jar = jars[id] = jars[id] || { name: "Culture", species: "rotifer_L", volumeL: 2.5, salinityPpt: 27, feed: {}, cadence: {}, state: {}, history: [] };
         if (scope === "nps-culture-feed") {
           jar.feed = jar.feed || {};
           jar.feed[field] = field === "doseMl" ? Math.max(0.5, Number(value) || 5) : value;
         } else if (scope === "nps-culture-cadence") {
           jar.cadence = jar.cadence || {};
           jar.cadence[field] = Math.max(0, Number(value) || 0);
-        } else if (field === "harvestTo") {
-          jar.harvestTo = value === "tank" ? "tank" : "bottle";
         } else if (field === "species") {
           jar.species = value;
           // A new species means its own cadence — overrides from the old one
@@ -2688,7 +2686,11 @@ class OpenReefPanel extends HTMLElement {
             jar.vesselKind = preset.vesselKind || "jar";
             jar.purgeMl = preset.purgeMl || 0;
           }
-        } else if (field === "volumeL" || field === "salinityPpt") {
+        } else if (field === "harvestTo") {
+          jar.harvestTo = value === "tank" ? "tank" : "bottle";
+        } else if (field === "starterPpt") {
+          jar.starterPpt = value === "" ? null : Number(value);
+        } else if (field === "volumeL" || field === "salinityPpt" || field === "starterMl") {
           jar[field] = Number(value) || jar[field];
         } else if (field === "purgeMl") {
           jar.purgeMl = Math.max(0, Math.min(500, Number(value) || 0));
@@ -12427,10 +12429,6 @@ class OpenReefPanel extends HTMLElement {
       </article>`;
   }
 
-  // A shelf entry the hatchery stocks itself (doc §14): the brine on hand in
-  // the container or the fridge bottle, on its batch's nutritional clock. No
-  // "New bottle", no editing — the ledger IS the bottle; feeding from it here
-  // is the same tap as on the hatchery card.
   // A producing rotifer cone that feeds the tank straight from the net
   // (0.7.161): a SOURCE on the shelf, not a bottle — no fill bar, no shelf
   // life. The cone's own harvest clock is the card's clock; the tap is the
@@ -12463,6 +12461,10 @@ class OpenReefPanel extends HTMLElement {
       </article>`;
   }
 
+  // A shelf entry the hatchery stocks itself (doc §14): the brine on hand in
+  // the container or the fridge bottle, on its batch's nutritional clock. No
+  // "New bottle", no editing — the ledger IS the bottle; feeding from it here
+  // is the same tap as on the hatchery card.
   _npsLiveBrineCard(pid, product, state) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
@@ -13091,7 +13093,7 @@ const rigSteps = [
       runLengthDays: { available: true, days: 11.3, samples: 3 }, yieldMlDay: 610,
       suggest: { feedIntervalH: 8, restartIntervalDays: 10 },
       purge: { available: true, byPurge: { "50": { days: 11, runs: 2 }, "100": { days: 13, runs: 2 } },
-        line: "runs bled ~100 ml lasted ~13 d, ~50 ml lasted ~11 d (2 + 2 runs) — the bigger purge buys ~2 more days" } };
+        line: "runs bled ~100 ml lasted ~13 d, ~50 ml lasted ~11 d (2 + 2 runs) — ~2 more days observed with the bigger purge; this does not establish the cause" } };
     const learnedNone = {
       clearingH: { available: false, hours: null, samples: 0 }, firstHarvestDays: { available: true, days: 5.5, samples: 2 },
       runLengthDays: { available: false, days: null, samples: 0 }, yieldMlDay: null,
@@ -13105,7 +13107,7 @@ const rigSteps = [
       note: "Room temperature, no light, an open rigid airline to the cone tip at 1–2 bubbles/s. Feed the concentrate to a leafy green, little and often: clear means hungry, still green at feed time means skip.",
       feed: { productId: "demo_concentrate", productName: "Rotifer Feed Concentrate", doseMl: 5 },
       cadence: cadenceRot, hasBottle: true, seededFrom: "", reseedFrom: [], lastSign: "",
-      harvestGuide: { totalMl: 625, mixMl: 480, rodiMl: 145, targetPpt: 27 },
+      harvestGuide: { totalMl: 625, refillMl: 675, mixMl: 521, rodiMl: 154, mixPpt: 35, targetPpt: 27 },
       restartGuide: { totalMl: 2500, mixMl: 1929, rodiMl: 571, targetPpt: 27 },
       waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 27 },
       temp: { available: true, status: "ok", tempC: 25.4, minC: 18, maxC: 26, hardMaxC: 30, actC: 30, criticalC: 33, act: false },
@@ -13265,7 +13267,7 @@ const rigSteps = [
     if (harvested && bottleMl > 0) msg.bottle_ml = bottleMl;
     const egg = this.shadowRoot?.querySelector(`[data-cultures-egg="${jarId}"]`);
     const eggRatio = egg && egg.value !== "" ? Number(egg.value) : 0;
-    if (eggRatio > 0) msg.egg_ratio = Math.min(100, eggRatio);
+    if (egg && egg.value !== "" && Number.isFinite(eggRatio) && eggRatio >= 0) msg.egg_ratio = Math.min(100, eggRatio);
     this._culturesCall(msg, harvested
       ? (msg.destination === "tank" ? "Harvest logged — straight into the tank; the strip, the log and the reminders keep count."
         : "Harvest logged — the bottle and the reminders keep count.")
@@ -13292,7 +13294,7 @@ const rigSteps = [
     const box = this.shadowRoot?.querySelector(`[data-cultures-split="${jarId}"]`);
     const split = !!(box && box.checked);
     this._culturesCall({ type: "openreef/cultures_restart", jar_id: jarId, split },
-      split ? "Restarted — and B is seeded from the same crop, out of phase." : "Restart logged — the fortnight clock rewinds.");
+      split ? "Restart logged — check the rack for B and its restart dates." : "Restart logged — the fortnight clock rewinds.");
   }
 
   // The culture card (doc §8.8 #9): the jar as a thing with a history you
@@ -13381,7 +13383,7 @@ const rigSteps = [
     const hasRotifers = Object.values(jars).some((j) => j?.species === "rotifer_L");
     jars[`c${next}`] = {
       name: hasRotifers ? `Culture ${next}` : "Rotifers A", species: "rotifer_L", volumeL: 2.5,
-      salinityPpt: 35, feed: { productId: "", doseMl: 5 }, cadence: {}, state: {}, history: [],
+      salinityPpt: 27, feed: { productId: "", doseMl: 5 }, cadence: {}, state: {}, history: [],
     };
     this._setDirty(true);
     this._render();
@@ -13454,33 +13456,36 @@ const rigSteps = [
         cadenceHours: feedH, criticalAfterHours: feedH * 2,
       };
       anchor(feedId, jar?.state?.lastFedAt);
-      const harvestDays = Math.max(1, Math.round(Number(cad.harvestIntervalDays) || preset.harvestIntervalDays));
+      const harvestDays = Math.max(0.5, Number(cad.harvestIntervalDays) || preset.harvestIntervalDays);
       const harvestId = `culture_${jid}_harvest`;
       tasks[harvestId] = {
         ...(tasks[harvestId] || { label: `Harvest ${name}`, enabled: true, notify: true,
           notes: `${cad.harvestPct || preset.harvestPct}% through ${preset.sieveUm} µm, culture water to waste (never the tank), refill with fresh saltwater. Tap Harvested on the Cultures tab.` }),
         cadenceDays: harvestDays, criticalAfterDays: harvestDays * 2,
+        cadenceHours: harvestDays * 24, criticalAfterHours: harvestDays * 48,
       };
       anchor(harvestId, jar?.state?.lastHarvestAt || jar?.state?.startedAt);
-      const restartDays = Math.round(Number(cad.restartIntervalDays ?? preset.restartIntervalDays) || 0);
+      const restartDays = Number(cad.restartIntervalDays ?? preset.restartIntervalDays) || 0;
       const restartId = `culture_${jid}_restart`;
       if (restartDays > 0) {
         tasks[restartId] = {
           ...(tasks[restartId] || { label: `Restart ${name} in a clean jar`, enabled: true, notify: true,
-            notes: "Sieve the whole culture through the mesh into a clean jar with fresh water; wash the old jar. This is what stops the week-4 crash." }),
+            notes: "Sieve the whole culture through the mesh into a clean jar with fresh water; wash the old jar. This reduces waste and contamination; no calendar guarantees a crash-free culture." }),
           cadenceDays: restartDays, criticalAfterDays: restartDays + 7,
+          cadenceHours: restartDays * 24, criticalAfterHours: (restartDays + 7) * 24,
         };
         anchor(restartId, jar?.state?.lastRestartAt || jar?.state?.startedAt);
       } else if (tasks[restartId]) {
         delete tasks[restartId];
       }
-      const wcDays = Math.round(Number(cad.waterChangeIntervalDays ?? preset.waterChangeIntervalDays) || 0);
+      const wcDays = Number(cad.waterChangeIntervalDays ?? preset.waterChangeIntervalDays) || 0;
       const wcId = `culture_${jid}_water_change`;
       if (wcDays > 0) {
         tasks[wcId] = {
           ...(tasks[wcId] || { label: `Water change ${name}`, enabled: true, notify: true,
             notes: `${cad.waterChangePct || preset.waterChangePct}% — siphon while harvesting, top up with matched saltwater. Tap Water change on the Cultures tab.` }),
           cadenceDays: wcDays, criticalAfterDays: wcDays + 7,
+          cadenceHours: wcDays * 24, criticalAfterHours: (wcDays + 7) * 24,
         };
         anchor(wcId, jar?.state?.lastWaterChangeAt || jar?.state?.startedAt);
       } else if (tasks[wcId]) {
@@ -13515,16 +13520,16 @@ const rigSteps = [
       airOn: false, purgeHot: false, harvestHot: false, refillHot: false, feedHot: false, restartHot: false, tempStatus: "ok", ...over });
     const tub = (over) => ({ id: "demo-tub", name: "Pods", kind: "tub", status: "producing", tint: "green", pct: 100,
       airOn: true, purgeHot: false, harvestHot: false, refillHot: false, feedHot: false, restartHot: false, tempStatus: "ok", ...over });
-    const jug = { harvestMl: 625, mixMl: 480, rodiMl: 145, ppt: 27, purgeMl: 50, sieveUm: 50 };
+    const jug = { harvestMl: 625, mixMl: 521, rodiMl: 154, ppt: 27, mixPpt: 35, purgeMl: 50, sieveUm: 50 };
     const bottle = (ml, status) => ({ ml, pct: Math.round(ml / 10), status });
     const S = (stage, caption, c, b, t) => ({ stage, caption, cones: [cone(c || {})], tub: tub(t || {}), jug, bottle: b || bottle(0, "empty"), bottleHot: false });
     return [
       S("look", "1 · LOOK — the tint says it: leafy green (fed), clearing (on schedule), clear (hungry)", { airOn: true }),
-      S("settle", "2 · SETTLE — air OFF, 15–30 min: crud and dead rotifers sink to the tip, the live ones stay up", { airOn: false }),
+      S("settle", "2 · SETTLE — air OFF, 15–30 min: watch settling briefly; check the waste for live rotifers and restore air promptly", { airOn: false }),
       S("purge", "3 · PURGE — crack ①, mesh half OFF: the first ~50 ml of tip crud straight to waste", { purgeHot: true }),
-      S("harvest", "4 · HARVEST — mesh half ON, ① part-open: 625 ml through the 50 µm net · water to waste, every rotifer stays on the net", { harvestHot: true, pct: 45 }),
-      { ...S("bottle", "5 · BOTTLE — rinse the net into the fridge bottle (or enrich this crop first) · the 5-day clock starts", { pct: 45 }, bottle(625, "fresh")), bottleHot: true },
-      S("refill", "6 · REFILL — the same 625 ml back in as fresh 1.020: 480 ml mix + 145 ml RODI per the jug", { refillHot: true, pct: 60 }, bottle(625, "fresh")),
+      S("harvest", "4 · HARVEST — mesh half ON, ① part-open: 625 ml through the 50 µm net · water to waste; rinse the retained rotifers gently", { harvestHot: true, pct: 45 }),
+      { ...S("bottle", "5 · BOTTLE — rinse into clean matched saltwater; keep cold, check activity; storage time is an estimate", { pct: 45 }, bottle(625, "fresh")), bottleHot: true },
+      S("refill", "6 · REFILL — replace 625 ml harvest + 50 ml purge: 521 ml of 35 ppt mix + 154 ml RODI → about 27 ppt", { refillHot: true, pct: 60 }, bottle(625, "fresh")),
       S("feed", "7 · FEED — air ON · concentrate to leafy green, little and often · tap Harvested + fed", { feedHot: true, airOn: true, tint: "green" }, bottle(625, "fresh")),
       S("restart", "FORTNIGHTLY · RESTART — settle, purge, then the WHOLE cone through the net into a clean one · the split into B rides this step", { purgeHot: true, harvestHot: true, refillHot: true, restartHot: true, pct: 100 }, bottle(625, "fresh")),
       S("tub", "THE TUB — pods crawl, so a flat tub: air on, feed to Granny Smith · after week 4, 25 % through 300 µm every 7–10 days", {}, bottle(625, "fresh"), { harvestHot: true }),
@@ -13819,7 +13824,7 @@ const rigSteps = [
       !jars.length ? "none" : !backup.length ? `${producing} producing` : unbacked.length ? "no backup" : "backed up",
       jars.length ? [
         ...backup.map((b) => `${b.speciesName.toLowerCase()}: ${b.running} running${b.continuityDays != null ? `, ${Math.round(b.continuityDays)} days without a gap` : ""}`),
-        unbacked.length ? "split at the next restart — a crash never zeroes you then" : "",
+        unbacked.length ? "split only a healthy, mature culture; keep separate equipment for the backup" : "",
         crashed ? `${crashed} crashed` : ""].filter(Boolean).join(" · ") || "the rack is steady"
         : "up to 4 jars",
       crashed || unbacked.length ? "warning" : "ok", "settings", { section: "cultures", scroll: "or-section-cultures" });
@@ -13861,7 +13866,7 @@ const rigSteps = [
       // column, control column — with compact controls. The base input rule
       // (full width, 42 px tall) is for settings forms, not a rack tile.
       const tintSelect = running ? `
-        <label class="culture-field" title="${this._escape(j.tintTarget ? `Aim for ${j.tintTarget}` : "")}">Water<select data-cultures-tint="${this._escape(j.id)}">
+        <label class="culture-field" title="${this._escape(j.tintTarget ? `Aim for ${j.tintTarget}` : "")}">Water<select data-cultures-tint="${this._escape(j.id)}"><option value="" ${!j.tint ? "selected" : ""}>Not checked</option>
             ${(sum.tints || ["green", "clearing", "clear"]).map((t) => `<option value="${this._escape(t)}" ${t === (j.tint || "") ? "selected" : ""}>${this._escape(t)}</option>`).join("")}
           </select></label>${j.hasBottle && status === "producing" ? `
         <label class="culture-field" title="Where this crop goes. The jar's default is set in Culture settings; the enrich tick sends it to the soak first.">Harvest to<select data-cultures-harvest-to="${this._escape(j.id)}">
@@ -13873,7 +13878,7 @@ const rigSteps = [
       // Day 0 (and after a crash): the fill — the whole vessel at the jar's
       // salinity, cut from the mixing station's water with RODI. Backend maths.
       const fg = j.fillGuide || j.restartGuide || {};
-      const fillLine = (status === "none" || status === "crashed") && Number(fg.totalMl) > 0
+      const fillLine = fg.available === false ? `<small class="muted">${this._escape(fg.reason)}</small>` : (status === "none" || status === "crashed") && Number(fg.totalMl) > 0
         ? `<small class="muted" title="The fill: this vessel's water at ${this._escape(String(fg.targetPpt))} ppt, cut from the mixing station's ${this._escape(String(fg.mixPpt ?? 35))} ppt water with RODI">fill ${this._escape(String(fg.totalMl))} ml: <strong>${this._escape(String(fg.mixMl))} ml of ${this._escape(String(fg.mixPpt ?? 35))} ppt mix${Number(fg.rodiMl) > 0 ? ` + ${this._escape(String(fg.rodiMl))} ml RODI` : ""}</strong> → ${this._escape(String(fg.targetPpt))} ppt${fg.sg ? ` (SG ${this._escape(String(fg.sg))})` : ""}</small>`
         : "";
       const advice = running ? `<small class="${j.feedAdvice?.action === "harvest_first" ? "" : "muted"}" ${j.feedAdvice?.action === "harvest_first" ? 'style="color:var(--error-color,#e5484d)"' : ""}>${this._escape(j.feedAdvice?.reason || "")}${j.feedAdvice?.action === "feed_now" ? " → feed" : j.feedAdvice?.action === "skip" ? " → skip" : j.feedAdvice?.action === "harvest_first" ? " → harvest" : ""}</small>` : "";
@@ -13885,23 +13890,23 @@ const rigSteps = [
         <div class="culture-field" title="A crash sign brings the ${j.kind === "copepod" ? "water change" : "restart"} forward — tap the one you see"><span>Signs</span>
           <div class="culture-signs">${(sum.signs || []).map((sg) => `<button class="secondary compact-button"${j.lastSign === sg.id ? ' style="border-color:var(--error-color,#e5484d);"' : ""} data-action="cultures-sign" data-id="${this._escape(j.id)}" data-sign="${this._escape(sg.id)}">${this._escape(sg.id)}</button>`).join("")}</div>
         </div>
-        <label class="culture-field" title="Optional egg-ratio spot check: the share of females carrying eggs in a 1 ml sample. ≥ 30 % is healthy, < 15 % means a collapse is near.">Egg ratio<span class="unit"><input type="number" min="0" max="100" step="1" placeholder="%" data-cultures-egg="${this._escape(j.id)}"><small class="muted">≥ 30 % is healthy</small></span></label>` : "";
+        <label class="culture-field" title="Optional measured percentage of females carrying eggs. Follow the trend alongside activity and water quality; a percentage alone cannot predict a crash.">Egg ratio<span class="unit"><input type="number" min="0" max="100" step="1" placeholder="%" data-cultures-egg="${this._escape(j.id)}"><small class="muted">observe the trend</small></span></label>` : "";
       const lineageLine = running && j.lineage?.line ? `<small class="muted">${this._escape(j.lineage.line)}${j.stagger?.available ? ` · ${this._escape(j.stagger.advice)}` : ""}</small>` : "";
       const guard = j.guard || {};
       const guardLine = running && guard.available && guard.status !== "clear"
         ? `<small style="color:${guard.status === "warn" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-guard="${this._escape(guard.status)}">${guard.status === "warn" ? "🌡️ tomorrow: " : "🌡️ "}${this._escape(guard.line)}</small>`
         : "";
-      const needsBackup = status === "producing" && j.hasBottle && (sum.backup || []).some((b) => b.species === j.species && !b.backedUp) && (sum.canAddJar || (sum.idleJars || []).length);
-      const splitTick = running && s.restart?.available && j.hasBottle && (sum.canAddJar || (sum.idleJars || []).length)
+      const needsBackup = status === "producing" && s.splitEligible && j.hasBottle && (sum.backup || []).some((b) => b.species === j.species && !b.backedUp) && (sum.canAddJar || (sum.idleJars || []).length);
+      const splitTick = running && s.splitEligible && s.restart?.available && j.hasBottle && (sum.canAddJar || (sum.idleJars || []).length)
         ? `
-        <div class="culture-field"><span>Restart</span><label class="culture-tick" title="The net is already in hand: the restart seeds B from the same crop, a backup out of phase"><input type="checkbox" data-cultures-split="${this._escape(j.id)}" ${needsBackup ? "checked" : ""}> seed B on restart</label></div>`
+        <div class="culture-field"><span>Restart</span><label class="culture-tick" title="The net is already in hand: the restart seeds B from the same crop, a second culture; check its restart date"><input type="checkbox" data-cultures-split="${this._escape(j.id)}" ${needsBackup ? "checked" : ""}> seed B on restart</label></div>`
         : "";
       const learned = j.learned || {};
       const learnedLines = running ? [
         learned.suggest?.feedIntervalH != null && learned.clearingH?.available
           ? `<small class="muted">Your ${j.vesselKind === "cone" ? "cone" : "jar"} clears in ~${this._escape(String(learned.clearingH.hours))} h (${this._escape(String(learned.clearingH.samples))} feeds) — feed every ${this._escape(String(learned.suggest.feedIntervalH))} h? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="feedIntervalH">Apply</button></small>` : "",
         learned.suggest?.restartIntervalDays != null && learned.runLengthDays?.available
-          ? `<small class="muted">It runs ~${this._escape(String(learned.runLengthDays.days))} days before it turns (${this._escape(String(learned.runLengthDays.samples))} runs) — restart at ${this._escape(String(learned.suggest.restartIntervalDays))}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="restartIntervalDays">Apply</button></small>` : "",
+          ? `<small class="muted">Recorded crashes averaged ~${this._escape(String(learned.failureDays?.days ?? learned.runLengthDays.days))} days (${this._escape(String(learned.failureDays?.samples ?? learned.runLengthDays.samples))} failures) — restart at ${this._escape(String(learned.suggest.restartIntervalDays))}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="restartIntervalDays">Apply</button></small>` : "",
         learned.purge?.available
           ? `<small class="muted">Purge: ${this._escape(learned.purge.line)}.</small>` : "",
         status === "establishing" && learned.firstHarvestDays?.available
@@ -13909,13 +13914,13 @@ const rigSteps = [
         status === "producing" && learned.yieldMlDay != null
           ? `<small class="muted">~${this._escape(String(learned.yieldMlDay))} ml a day harvested lately.</small>` : "",
       ].filter(Boolean).join("") : "";
-      const guide = running && status === "producing"
-        ? `<small class="muted" title="The measured jug: what comes out through the ${this._escape(String(j.sieveUm))} µm mesh goes to waste, the same volume of fresh saltwater goes back">${j.vesselKind === "cone" && Number(j.purgeMl) > 0 ? `purge ${this._escape(String(Math.round(j.purgeMl)))} ml · ` : ""}harvest ${this._escape(String(j.harvestGuide?.totalMl || 0))} ml · refill ${this._escape(String(j.harvestGuide?.mixMl || 0))} ml @ ${this._escape(String(j.harvestGuide?.targetPpt || 35))} ppt${j.harvestGuide?.rodiMl ? ` + ${this._escape(String(j.harvestGuide.rodiMl))} ml RODI` : ""}</small>`
+      const guide = j.harvestGuide?.available === false ? `<small class="muted">${this._escape(j.harvestGuide.reason)}</small>` : running && status === "producing"
+        ? `<small class="muted" title="The measured jug: what comes out through the ${this._escape(String(j.sieveUm))} µm mesh goes to waste, the same volume of fresh saltwater goes back">${j.vesselKind === "cone" && Number(j.purgeMl) > 0 ? `purge ${this._escape(String(Math.round(j.purgeMl)))} ml · ` : ""}harvest ${this._escape(String(j.harvestGuide?.totalMl || 0))} ml · refill ${this._escape(String(j.harvestGuide?.mixMl || 0))} ml @ ${this._escape(String(j.harvestGuide?.mixPpt || 35))} ppt${j.harvestGuide?.rodiMl ? ` + ${this._escape(String(j.harvestGuide.rodiMl))} ml RODI` : ""} → ${this._escape(String(j.harvestGuide?.targetPpt || j.salinityPpt))} ppt (harvest + purge replaced)</small>`
         : "";
       const tempLine = j.temp?.available && j.temp.status !== "ok"
         ? `<small style="color:${j.temp.status === "hot" || j.temp.status === "critical" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}">🌡️ ${this._escape(String(j.temp.tempC))} °C — ${
           j.temp.status === "critical" ? `over the ${this._escape(String(j.temp.criticalC ?? j.temp.hardMaxC))} °C critical line — cool the room or move the culture NOW.`
-            : j.temp.status === "hot" ? `${j.temp.act ? `over the ${this._escape(String(j.temp.actC ?? j.temp.hardMaxC))} °C act line` : `over the ${this._escape(String(j.temp.hardMaxC))} °C hard line`}. Heat kills a culture through oxygen and ammonia, not the animal: extra air, shade, feed lightly, have a 50 % change ready.`
+            : j.temp.status === "hot" ? `${j.temp.act ? `over the ${this._escape(String(j.temp.actC ?? j.temp.hardMaxC))} °C act line` : `over the ${this._escape(String(j.temp.hardMaxC))} °C hard line`}. Heat can directly stress animals and worsen oxygen and ammonia problems: extra air, shade, feed lightly, have a 50 % change ready.`
               : j.temp.status === "warm" ? `above the ${this._escape(String(j.temp.maxC))} °C band — keep an eye on it` : `below the ${this._escape(String(j.temp.minC))} °C band — everything runs slow`}</small>`
         : "";
       const reseed = status === "crashed" || status === "none"
@@ -13930,14 +13935,15 @@ const rigSteps = [
         status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="cultures-harvested" data-id="${this._escape(j.id)}" title="Logs the tint, a feed and today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}">Harvested + fed</button>` : "",
         running && s.restart?.available ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-restart" data-id="${this._escape(j.id)}" title="Sieve the whole jar into a clean one with fresh water">Restarted</button>` : "",
         running && (s.waterChange?.available || s.waterChangeOnDemand) ? `<button class="${due.includes("waterChange") ? "primary" : "secondary"} compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? `On a sign — drift, any ammonia, cloudy water: ${this._escape(String(j.waterChangeGuide?.totalMl || 0))} ml out, fresh in` : "The scheduled change"}">Water changed</button>` : "",
-        status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a backup out of phase, so a crash never zeroes you">Split into B</button>` : "",
+        status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a second culture; check the dates to stagger its restart">Split into B</button>` : "",
         running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${this._escape(j.id)}">Crashed</button>` : "",
         status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${this._escape(j.id)}" title="A picture of this jar's story — species, age, generation, the restart ring, the last 14 days of water">Share card</button>` : "",
       ].filter(Boolean).join("");
       // The tile (0.7.163): the jar and its name centred, then three
       // left-aligned blocks — the water and the crop, the notes, the
       // observations — and the actions. Same facts, one column, one rhythm.
-      const notes = [fillLine, advice, risk, guide, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
+      const withdrawalWarning = j.harvestGuide?.warning ? `<small style="color:var(--warning-color,#f5a524)">${this._escape(j.harvestGuide.warning)}</small>` : "";
+      const notes = [fillLine, advice, risk, guide, withdrawalWarning, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
       return `
         <div class="culture-tile" data-culture="${this._escape(j.id)}">
           <div class="culture-jar">${this._culturesJarSvg(j)}</div>
@@ -13966,9 +13972,9 @@ const rigSteps = [
           <text x="52" y="122" text-anchor="middle" font-size="10" fill="#90a4ae">${this._escape(bottle.status === "empty" || !bottle.status ? "empty" : `${Math.round(bottle.remainingMl || 0)} ml`)}</text>
         </svg>
         <small><strong>Rotifer bottle</strong> · fridge${bottle.enriched ? " · enriched" : ""}</small>
-        ${bottle.boost?.status === "gutloaded" ? `<small style="color:#7e57c2">gut-loaded · ~${this._escape(String(bottle.boost.hoursLeft))} h of boost left</small>`
-          : bottle.boost?.status === "faded" ? `<small class="muted">boost faded — still live food, no longer enriched food</small>` : ""}
-        <small>${bottle.status === "fresh" ? `fresh · ~${this._escape(String(bottle.hoursLeft))} h left` : bottle.status === "aging" ? `<span style="color:var(--warning-color,#f5a524)">aging · ~${this._escape(String(bottle.hoursLeft))} h</span>` : bottle.status === "stale" ? `<span style="color:var(--error-color,#e5484d)">stale — tip it out</span>` : `keeps ~${this._escape(String(bottle.shelfDays || 3))} days cold`}</small>
+        ${bottle.boost?.status === "gutloaded" ? `<small style="color:#7e57c2">enrichment estimate · ~${this._escape(String(bottle.boost.hoursLeft))} h remaining</small>`
+          : bottle.boost?.status === "faded" ? `<small class="muted">estimated enrichment window passed — check viability; nutrient content is not measured</small>` : ""}
+        <small>${bottle.status === "fresh" ? `fresh · ~${this._escape(String(bottle.hoursLeft))} h left` : bottle.status === "aging" ? `<span style="color:var(--warning-color,#f5a524)">aging · ~${this._escape(String(bottle.hoursLeft))} h</span>` : bottle.status === "stale" ? `<span style="color:var(--error-color,#e5484d)">stale — tip it out</span>` : `storage estimate: up to ${this._escape(String(bottle.shelfDays || 5))} days at about 4 °C; check activity before use`}</small>
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
           ${Number(bottle.remainingMl) > 0 && bottle.status !== "stale" ? `<button class="secondary compact-button" data-action="cultures-bottle-fed">Fed ${this._escape(String(Math.round(bottle.doseMl || 20)))} ml</button>` : ""}
           ${Number(bottle.remainingMl) > 0 ? `<button class="danger-text compact-button" data-action="cultures-bottle-empty">Empty</button>` : ""}
@@ -13985,9 +13991,9 @@ const rigSteps = [
         <small><strong>Soak</strong> · ${this._escape(sum.enrichment?.jarName || "rotifers")}</small>
         <small>${soak.status === "soaking" ? `${this._escape(String(sum.enrichment?.drops ?? 3))} drops in · ~${this._escape(String(soak.hoursLeft))} h to go`
           : soak.status === "done" ? `<span style="color:#7e57c2">done — rinse on the net and bottle · ~${this._escape(String(soak.hoursLeft))} h of warm boost left</span>`
-            : `<span style="color:var(--warning-color,#f5a524)">warm window spent — bottle it, it's still live food</span>`}</small>
+            : `<span style="color:var(--warning-color,#f5a524)">warm window spent — viability and enrichment are unverified</span>`}</small>
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
-          <button class="${soak.status === "soaking" ? "secondary" : "primary"} compact-button" data-action="cultures-enrich-done" title="Rinse the portion on the net into the fridge bottle — the bottle carries a boost clock from now">Rinsed &amp; bottled</button>
+          <button class="${soak.status === "soaking" ? "secondary" : "primary"} compact-button" data-action="cultures-enrich-done" title="Rinse after the configured soak; the enrichment clock retains its original completion time" ${soak.status !== "done" ? "disabled" : ""}>Rinsed &amp; bottled</button>
           <button class="secondary compact-button" data-action="cultures-enrich-plain" title="Give up on the soak: the portion goes into the bottle unenriched">Bottle it plain</button>
         </div>
       </div>` : "";
@@ -14049,7 +14055,7 @@ const rigSteps = [
               <td style="padding:6px 10px;text-align:right;">${h.ml ? this._escape(String(Math.round(h.ml))) : ""}</td>
               <td style="padding:6px 10px;">${this._escape(h.tint || "")}</td>
               <td style="padding:6px 10px;color:var(--error-color,#e5484d);">${this._escape(h.sign ? (signWord[h.sign] || h.sign) : "")}</td>
-              <td style="padding:6px 10px;text-align:right;">${h.eggRatio ? `${this._escape(String(Math.round(h.eggRatio)))} %` : ""}</td>
+              <td style="padding:6px 10px;text-align:right;">${h.eggRatio != null ? `${this._escape(String(Math.round(h.eggRatio)))} %` : ""}</td>
               <td style="padding:6px 10px;text-align:right;">${h.tempC != null ? this._escape(String(h.tempC)) : ""}</td>
             </tr>`).join("")}</tbody>
           </table>
@@ -14063,22 +14069,18 @@ const rigSteps = [
     // The starter's acclimation (doc §8.8 #7): the backend's plan in FAO's
     // 5 ppt steps, aimed at the first cone's water; a plain rule without it.
     const arrival = sum.arrival?.rotifer;
-    const arrivalLine = arrival?.line
-      ? `${this._escape(arrival.line.charAt(0).toUpperCase() + arrival.line.slice(1))}.`
-      : "Float the pouch 15 min, add cone water to it in steps of no more than 5 ppt, pour in.";
-    // The parcel day: the pouch is part of the culture, so the water to mix
-    // is the vessel less the pouch (backend maths, arrivalFillGuide).
-    const fillLines = jars.filter((j) => j.kind !== "copepod" && Number((j.fillGuide || j.restartGuide || {}).totalMl) > 0).map((j) => {
-      const fg = j.arrivalFillGuide && Number(j.arrivalFillGuide.totalMl) > 0 ? j.arrivalFillGuide : (j.fillGuide || j.restartGuide || {});
-      const pouch = j.arrivalFillGuide && Number(j.arrivalFillGuide.totalMl) > 0 && Number(j.pouchMl) > 0 ? ` + the ${this._escape(String(Math.round(j.pouchMl)))} ml pouch` : "";
-      return `<br>↳ <strong>${this._escape(j.name)}</strong> (${this._escape(String(j.volumeL))} L in the vessel${pouch ? ", pouch included" : ""}): mix ${this._escape(String(fg.totalMl))} ml — <strong>${this._escape(String(fg.mixMl))} ml of ${this._escape(String(fg.mixPpt ?? 35))} ppt mix${Number(fg.rodiMl) > 0 ? ` + ${this._escape(String(fg.rodiMl))} ml RODI` : ""}</strong> → ${this._escape(String(fg.targetPpt))} ppt${fg.sg ? ` (SG ${this._escape(String(fg.sg))})` : ""}${pouch}.`;
+    const arrivalLine = "Measure starter salinity and volume in Culture settings. Use a separate jug of matched water for acclimation and record that water separately. Then sieve and rinse into the full prepared vessel; discard shipping water.";
+    const fillLines = jars.filter((j) => j.kind !== "copepod").map((j) => {
+      const fg = j.fillGuide || j.restartGuide || {};
+      if (fg.available === false) return `<br>↳ <strong>${this._escape(j.name)}</strong>: ${this._escape(fg.reason)}`;
+      return `<br>↳ <strong>${this._escape(j.name)}</strong>: prepare ${this._escape(String(fg.totalMl))} ml — ${this._escape(String(fg.mixMl))} ml of ${this._escape(String(fg.mixPpt ?? 35))} ppt mix + ${this._escape(String(fg.rodiMl))} ml RODI → ${this._escape(String(fg.targetPpt))} ppt. ${this._escape(j.arrival?.line || arrival?.line || arrivalLine)}.`;
     }).join("");
     const welcome = virgin ? `
       <article class="panel stack" style="border-color:rgba(38,166,154,0.4);">
         <p class="eyebrow" style="margin:0;">The day the parcel lands</p>
-        <small><strong>1. Rotifers into the cone.</strong> Fresh water at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt, mixed the day before, room temperature, air ON to the tip at 1–2 bubbles/s. The cut from the mixing station's water:${fillLines || " set the cone's water volume and salinity in Culture settings and the split appears here."} ${arrivalLine} Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, sooner only if the water is visibly dense.</small>
-        <small><strong>2. Pods into the tub.</strong> A flat 4 L tub half to two-thirds full of 35 ppt, open airline at 1–3 bubbles/s, loose lid, out of the sun. Pour in on delivery day, feed the Copepod Feed at half rate for a week. Tap <em>Seed</em>: a generation is a month, so the first harvest waits until day ${this._escape(String(podPreset.firstHarvestDays || 28))}.</small>
-        <small><strong>3. The shelf.</strong> Add the concentrate, the Copepod Feed and the enrichment from the Reefphyto presets in NPS settings, then link each jar's feed bottle below. Reef Juice is a tank dose, nothing to do with the jars — it lives on the NPS food shelf with its own dose and reminder. The unused starter keeps in the fridge, cap loose, five days.</small>
+        <small><strong>1. Rotifers into the cone.</strong> Fresh saltwater at ${this._escape(String(rotPreset.salinityPpt || 27))} ppt, mixed the day before, room temperature, air ON to the tip at 1–2 bubbles/s. The cut from the mixing station's water:${fillLines || " set the cone's water volume and salinity in Culture settings and the split appears here."} ${arrivalLine} Feed the concentrate to a leafy green. Tap <em>Seed from a starter</em>: the first harvest unlocks at day ${this._escape(String(rotPreset.firstHarvestDays || 6))}, only harvest when activity and population density are sufficient; some starters take 7–14 days or longer.</small>
+        <small><strong>2. Pods into the tub.</strong> A flat 4 L tub half to two-thirds full of 35 ppt, open airline at 1–3 bubbles/s, loose lid, out of the sun. Check starter salinity, acclimate as directed by the supplier, and transfer into matched water. Feed lightly during the first week. Tap <em>Seed</em>: a generation is a month, so the first harvest waits until day ${this._escape(String(podPreset.firstHarvestDays || 28))}.</small>
+        <small><strong>3. The shelf.</strong> Add the concentrate, the Copepod Feed and the enrichment from the Reefphyto presets in NPS settings, then link each jar's feed bottle below. Reef Juice is a tank dose, nothing to do with the jars — it lives on the NPS food shelf with its own dose and reminder. Follow the supplier’s storage directions for unused starter; five days is an upper estimate for refrigerated rotifers, not a viability guarantee.</small>
         <small><strong>4. Reminders.</strong> Once seeded, <em>Sync culture reminders</em> puts every chore on the phone, anchored on the real stamps.</small>
       </article>` : "";
     const rigPanel = st.summary && jars.length ? this._culturesRigPanel() : "";
@@ -14119,8 +14121,10 @@ const rigSteps = [
             <label>Vessel<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="vesselKind">
               ${[["cone", "Cone — the hatchery's inverted bottle"], ["tub", "Tub — flat and wide (pods)"], ["jar", "Jar"]].map(([v, l]) => `<option value="${v}" ${(jar?.vesselKind || preset.vesselKind || "jar") === v ? "selected" : ""}>${l}</option>`).join("")}
             </select></label>
-            <label title="The culture's whole volume — mixed water plus the starter pouch. Harvests and the jug are percentages of this.">Water in the vessel (L, pouch included)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
+            <label title="Final working volume after sieving the starter into matched water. Harvests are percentages of this volume.">Working culture volume (L)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
             <label>Salinity (ppt)<input type="number" min="5" max="45" step="1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="salinityPpt" value="${this._escape(String(jar?.salinityPpt ?? preset.salinityPpt ?? 35))}"></label>
+            <label>Measured starter salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="starterPpt" value="${this._escape(String(jar?.starterPpt ?? ""))}" placeholder="Measure first"></label>
+            <label>Measured starter volume (ml)<input type="number" min="50" max="20000" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="starterMl" value="${this._escape(String(jar?.starterMl ?? 500))}"></label>
             ${(jar?.vesselKind || preset.vesselKind) === "cone" ? `<label>Purge before harvest (ml)<input type="number" min="0" max="500" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="purgeMl" value="${this._escape(String(jar?.purgeMl ?? preset.purgeMl ?? 50))}"></label>` : ""}
             ${preset.kind !== "copepod" ? `<label title="Where a harvest goes by default. Straight feeders skip the bottle: the harvest is the tank's feed, the strip plans it on the cone's clock, and the shelf shows the cone as a live source.">Harvest goes to<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="harvestTo">
               <option value="bottle" ${(jar?.harvestTo || "bottle") !== "tank" ? "selected" : ""}>the fridge bottle (5-day clock, DHA step)</option>
@@ -14130,17 +14134,17 @@ const rigSteps = [
               <option value="">Not linked</option>
               ${Object.entries(products).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(jar?.feed?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}
             </select></label>
-            <label>Feed dose (ml)<input type="number" min="0.5" max="200" step="0.5" data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="doseMl" value="${this._escape(String(jar?.feed?.doseMl ?? 5))}"></label>
+            <label>Recorded feed dose (ml)<input type="number" min="0.5" max="200" step="0.5" data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="doseMl" value="${this._escape(String(jar?.feed?.doseMl ?? 5))}"></label>
           </div>
           <small class="awc-hint">${preset.kind === "copepod"
-            ? "Pods crawl — a flat tub, never a cone. 35 ppt is their optimum (Reefphyto)."
-            : "Salinity — Reefphyto cultures rotifers at 1.020 (27 ppt): about 2.5× the offspring of 35 ppt. 35 ppt = a matched backflush and longer-lived animals, lower yield. The Cultures tab shows this vessel's exact split — mixing-station water + RODI — for the fill and for every harvest. The cone is the hatchery's: settle, bleed the tip, harvest from the valve."}</small>
-          <small class="awc-hint">Cadence — the preset is the research number; change it only if your jar tells you to.</small>
+            ? "Pods crawl — a flat tub, never a cone. 35 ppt is this setup’s target. Replace evaporation with RODI; replace harvested water with matched saltwater. Test water quality weekly."
+            : "Salinity — Reefphyto cultures rotifers at SG 1.019–1.021 (about 27 ppt). Productivity varies with strain, temperature, food and density; there is no fixed yield multiplier. The Cultures tab shows this vessel's exact split — mixing-station water + RODI — for the fill and for every harvest. The cone is the hatchery's: settle, bleed the tip, harvest from the valve."}</small>
+          <small class="awc-hint">Cadence — these are starting points. Check population density, feeding and water quality before harvesting.</small>
           <div class="mini-grid">
-            ${numberField(jid, "feedIntervalH", "Look / feed every (h)", cad.feedIntervalH, 1, 168, 1, "Rotifers twice a day; pods every 2–3 days")}
+            ${numberField(jid, "feedIntervalH", "Look / feed every (h)", cad.feedIntervalH, 1, 168, 1, "Inspect rotifers twice a day and pods daily; feed according to activity, tint and product guidance")}
             ${numberField(jid, "harvestIntervalDays", "Harvest every (days)", cad.harvestIntervalDays, 0.5, 30, 0.5)}
             ${numberField(jid, "harvestPct", "Harvest (%)", cad.harvestPct, 5, 60, 1, "The removed water is the water change")}
-            ${numberField(jid, "restartIntervalDays", "Clean-jar restart every (days, 0 = never)", cad.restartIntervalDays, 0, 90, 1, "Sieve the whole culture into a clean jar — stops the week-4 crash")}
+            ${numberField(jid, "restartIntervalDays", "Clean-jar restart every (days, 0 = never)", cad.restartIntervalDays, 0, 90, 1, "Sieve into a clean jar; a preventive cleaning interval, not a guaranteed lifespan")}
             ${numberField(jid, "waterChangeIntervalDays", "Water change every (days, 0 = none)", cad.waterChangeIntervalDays, 0, 90, 1)}
             ${numberField(jid, "waterChangePct", "Water change (%)", cad.waterChangePct, 0, 100, 1)}
           </div>
@@ -14155,7 +14159,7 @@ const rigSteps = [
         <span><strong>Cultures on</strong><small>The Cultures tab — rotifer and copepod jars with their own feed / harvest / restart clocks, the rotifer fridge bottle, and reminders. Standalone: works with NPS off.</small></span>
       </label>
       <div class="mini-grid">
-        <label title="Today's heat line reads it, and the day-ahead heat guard shifts the cooling forecast by what it reads over the room">Room temperature sensor (optional)<input data-scope="nps-cultures" data-field="tempEntity" value="${this._escape(cultures.tempEntity || "")}" placeholder="sensor.bench_temperature"></label>
+        <label title="Today's heat line reads it, and the day-ahead heat guard shifts the cooling forecast by what it reads over the room">Culture / rack temperature sensor (optional)<input data-scope="nps-cultures" data-field="tempEntity" value="${this._escape(cultures.tempEntity || "")}" placeholder="sensor.bench_temperature"></label>
         <label>Rotifer bottle size (ml)<input type="number" min="0" max="20000" step="50" data-scope="nps-culture-bottle" data-field="volumeMl" value="${this._escape(String(cultures.bottle?.volumeMl ?? 1000))}"></label>
         <label>Bottle feed dose (ml)<input type="number" min="0.5" max="1000" step="0.5" data-scope="nps-culture-bottle" data-field="doseMl" value="${this._escape(String(cultures.bottle?.doseMl ?? 20))}"></label>
         <label>Bottle feeds / day (0 = no plan)<input type="number" min="0" max="24" step="1" data-scope="nps-culture-bottle" data-field="feedsPerDay" value="${this._escape(String(cultures.bottle?.feedsPerDay ?? 0))}"></label>
@@ -14172,7 +14176,7 @@ const rigSteps = [
         <label>Soak (h)<input type="number" min="2" max="12" step="0.5" data-scope="nps-culture-enrich" data-field="soakH" value="${this._escape(String(cultures.enrichment?.soakH ?? 6))}" title="Reefphyto's product page says 6–12 h, its culture guide 2–4 h — ask Darren; 6 h is the default"></label>
       </div>
       <small class="awc-hint">Falls back to the brine hatchery's sensor when blank. Advisory only — the clocks never move with temperature, the copy does: a jar over its species' hard line gets a real warning (the heatwave lesson).</small>
-      <small class="awc-hint"><strong>Jars</strong> (up to 4). Start with ONE rotifer jar; when it is dense, "Split into B" on the Cultures tab seeds the second — a backup out of phase, so a crash never zeroes you.</small>
+      <small class="awc-hint"><strong>Jars</strong> (up to 4). Start with ONE rotifer jar; when it is dense, "Split into B" on the Cultures tab seeds the second — a second culture; check the dates to stagger its restart.</small>
       ${jarRows}
       <div class="button-row">
         <button class="secondary compact-button" data-action="cultures-add-jar" ${Object.keys(jars).length >= 4 ? "disabled" : ""}>Add jar</button>
@@ -18694,7 +18698,7 @@ const rigSteps = [
         if (hot.length) {
           const critical = hot.some((j) => j.temp.status === "critical");
           push("cultures-heat", "Cultures", `${hot.map((j) => j.name).join(" + ")}: room over the hard line`,
-            `${hot[0].temp.tempC} °C — heat kills a culture through oxygen and ammonia: extra air, shade, feed lightly${critical ? ". Over the critical line: move the cultures NOW." : ", a 50 % change ready."}`, "critical");
+            `${hot[0].temp.tempC} °C — heat can stress animals and worsen oxygen and ammonia problems: extra air, shade, feed lightly${critical ? ". Over the critical line: move the cultures NOW." : ", a 50 % change ready."}`, "critical");
         }
         const due = jars.filter((j) => (j.due || []).length);
         if (due.length) {
@@ -18712,9 +18716,9 @@ const rigSteps = [
         const soak = sum.enrichment?.soak || {};
         if (soak.status === "done" || soak.status === "fading") {
           push("cultures-soak", "Cultures", soak.status === "done" ? "Soak done — rinse and bottle the rotifers" : "The soak's warm window is spent",
-            soak.status === "done" ? `~${soak.hoursLeft} h of warm boost left before it fades.` : "Bottle it anyway — still live food, no longer enriched food.", "warning");
+            soak.status === "done" ? `~${soak.hoursLeft} h of warm boost left before it fades.` : "Check viability and storage conditions; the elapsed timer cannot confirm live food.", "warning");
         } else if (sum.bottle?.boost?.status === "gutloaded") {
-          push("cultures-boost", "Cultures", `Rotifer bottle: gut-loaded, ~${sum.bottle.boost.hoursLeft} h of boost left`, "Feed the corals from it while the DHA holds.", "ok");
+          push("cultures-boost", "Cultures", `Rotifer bottle: gut-loaded, ~${sum.bottle.boost.hoursLeft} h of boost left`, "Use promptly after checking activity; this is an estimated enrichment window.", "ok");
         }
         const nh = sum.nextHarvest || {};
         if (nh.status === "now" || (nh.status === "wait" && Number(nh.hoursUntil) <= 12)) {
@@ -18723,7 +18727,7 @@ const rigSteps = [
         }
         (sum.backup || []).filter((b) => b.guard?.status === "warn").forEach((b) =>
           push(`cultures-guard-${b.species}`, "Cultures", `Heat ahead for the ${b.speciesName.toLowerCase()}`,
-            `${b.guard.line}. Heat kills a culture through oxygen and ammonia, not the animal.`, "warning"));
+            `${b.guard.line}. Heat can directly stress animals and worsen oxygen and ammonia problems.`, "warning"));
         // A pouch per hatchery (0.7.147); an older summary carries one.
         const pouchVessels = (this._nps?.summary?.hatchery?.vessels || []).filter((v) => v.cysts);
         const pouches = pouchVessels.length
@@ -27345,9 +27349,10 @@ const rigSteps = [
     // Optional hour-grained cadence (hatch chores); 0 = day-based. Lockstep with
     // the backend normaliser's clamps.
     const rawHours = Number(raw.cadenceHours);
-    const cadenceHours = Number.isFinite(rawHours) && rawHours > 0 ? Math.max(1, Math.min(336, rawHours)) : 0;
+    const cultureTask = String(id).startsWith("culture_");
+    const cadenceHours = Number.isFinite(rawHours) && rawHours > 0 ? Math.max(1, Math.min(cultureTask ? 2160 : 336, rawHours)) : 0;
     const criticalAfterHours = cadenceHours > 0
-      ? Math.max(cadenceHours, Math.min(672, Number(raw.criticalAfterHours) || cadenceHours * 2))
+      ? Math.max(cadenceHours, Math.min(cultureTask ? 4320 : 672, Number(raw.criticalAfterHours) || cadenceHours * 2))
       : 0;
     const toIntList = (v, lo, hi) => (Array.isArray(v)
       ? [...new Set(v.map((n) => parseInt(n, 10)).filter((n) => Number.isInteger(n) && n >= lo && n <= hi))].sort((a, b) => a - b)
@@ -27465,6 +27470,7 @@ const rigSteps = [
     if (state.status === "warning" || state.status === "critical") return Date.now();
     const task = this._maintenanceTask(id);
     const snoozeMs = Date.parse(task.snoozedUntil || "");
+    if (state.cultureDueAt) return Math.max(Date.parse(state.cultureDueAt), Number.isFinite(snoozeMs) ? snoozeMs : 0);
     let baseMs;
     if (task.scheduleMode === "fixed") {
       const next = this._maintenanceNextScheduledAfter(task, new Date());
@@ -27501,6 +27507,18 @@ const rigSteps = [
     const snoozeMs = Date.parse(task.snoozedUntil || "");
     if (Number.isFinite(snoozeMs) && snoozeMs > Date.now()) {
       return { status: "ok", label: "snoozed", detail: `Snoozed until ${this._formatActivityTime(task.snoozedUntil)}.`, latest, snoozed: true };
+    }
+    const cultureTask = /^culture_(.+)_(feed|harvest|restart|water_change)$/.exec(id);
+    if (cultureTask) {
+      if (!this._culturesEnabled()) return { status: "unknown", label: "cultures off", detail: "Cultures are disabled.", latest };
+      if (!this._cultures.demo && !this._cultures.loading && (!this._cultures.at || Date.now() - this._cultures.at > 30000)) this._culturesLoadSummary();
+      const summary = this._cultures.demo ? this._culturesDemoStash?.summary : this._cultures.summary;
+      const jar = (summary?.jars || []).find((j) => j.id === cultureTask[1]);
+      const key = cultureTask[2] === "water_change" ? "waterChange" : cultureTask[2];
+      const clock = jar?.state?.[key];
+      if (!clock?.available) return { status: "unknown", label: "no active clock", detail: "The culture has no active clock for this chore.", latest };
+      return { status: clock.due ? (["sign", "slow"].includes(clock.reason) ? "critical" : "warning") : "ok",
+        label: clock.due ? "due" : "scheduled", detail: clock.due ? "Due on the culture’s own clock." : `Due ${this._formatActivityTime(clock.at)}.`, latest, cultureDueAt: clock.at };
     }
     if (task.scheduleMode === "fixed") {
       const [lastSched, prevSched] = this._maintenanceScheduledDates(task, new Date());
