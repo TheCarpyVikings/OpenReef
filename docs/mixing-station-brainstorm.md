@@ -658,3 +658,10 @@ and the unit hero read the same way. The run's own nearly-done heads-up (§24) o
 draws of a litre or more — a 22-second run would get the warning after the stop. The panel
 input is `min=0.01 step=any`, the hint shows the 0.057 L = 57 ml example with its ETA at the
 current rate, and a seconds-long run says "under a minute left" instead of "about 0 min".
+
+**0.7.160 — the millilitre box.** Typing 0.057 for 57 ml is a chore, so the draw row carries
+a second input, "or millilitres" (`data-mixing-draw-ml`, min 10, whole numbers). The two are
+one number in two units: `_mixingDrawSync(unit, raw)` (pure, tested) converts whichever box
+was typed in and the input hook patches the other in place — never a render, so typing never
+fights the summary poll. The chosen size lives in `_mixingDrawL` and seeds both boxes on the
+next render. The draw button still reads the litres box; the WS contract is unchanged.

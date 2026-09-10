@@ -1740,8 +1740,8 @@ class OpenReefPanel extends HTMLElement {
         const litres = Number(this.shadowRoot.querySelector("[data-mixing-draw-litres]")?.value) || 0;
         const destination = this.shadowRoot.querySelector("[data-mixing-draw-dest]")?.value || "store";
         if (litres >= 0.01) this._mixingAction({ type: "openreef/mixing_rodi_draw", litres, destination });
-        else if (litres > 0) { this._mixingMessage = "Timed draws start at 10 ml — enter 0.01 L or more."; this._render(); }
-        else { this._mixingMessage = "Enter how many litres of RODI to run."; this._render(); }
+        else if (litres > 0) { this._mixingMessage = "Timed draws start at 10 ml (0.01 L)."; this._render(); }
+        else { this._mixingMessage = "Enter how much RODI to run — litres or millilitres."; this._render(); }
       }
       if (action === "mixing-rodi-fill") {
         // Open-ended fill: litres 0 means "to the float valve".
@@ -2017,6 +2017,20 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "feed-seek") { this._feedSeek(Number(target.value)); return; }
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
+      if (target.dataset.mixingDrawLitres !== undefined || target.dataset.mixingDrawMl !== undefined) {
+        // Litres and millilitres are one number: typing in either box
+        // patches the other in place (never a render — typing must not fight it).
+        const isMl = target.dataset.mixingDrawMl !== undefined;
+        const other = this.shadowRoot.querySelector(isMl ? "[data-mixing-draw-litres]" : "[data-mixing-draw-ml]");
+        const synced = this._mixingDrawSync(isMl ? "ml" : "litres", target.value);
+        if (synced) {
+          this._mixingDrawL = synced.litres;
+          if (other) other.value = isMl ? String(synced.litres) : String(synced.ml);
+        } else if (other && target.value === "") {
+          other.value = "";
+        }
+        return;
+      }
       if (target.dataset.mixingDoseWhatif !== undefined) {
         // Live what-if maths on the dose card: litres × the engine's own
         // g/L, patched into the text in place — typing never fights a render.
@@ -3403,8 +3417,15 @@ class OpenReefPanel extends HTMLElement {
     return Number.isFinite(value) ? Number(value).toFixed(digits) : "--";
   }
 
-  _sensorDigits(sensorId) {
-    if (sensorId === "ph" || sensorId === "alkalinity") return 2;
+  // One draw size, two units: whichever box the keeper types in wins, the
+  // other follows. Returns {litres, ml} or null for a blank/invalid entry.
+  _mixingDrawSync(unit, raw) {
+    const v = Number(raw);
+    if (raw === "" || raw == null || !Number.isFinite(v) || v < 0) return null;
+    const ml = unit === "ml" ? Math.round(v) : Math.round(v * 1000);
+    return { litres: ml / 1000, ml };
+  }
+
   // Litres for a sentence: whole millilitres under a litre (57 ml), litres
   // above (10.0 L) — a small RODI draw reads as what it is, never as "0.1 L".
   _formatLitres(value, digits = 1) {
@@ -3414,6 +3435,8 @@ class OpenReefPanel extends HTMLElement {
     return `${v.toFixed(digits)} L`;
   }
 
+  _sensorDigits(sensorId) {
+    if (sensorId === "ph" || sensorId === "alkalinity") return 2;
     if (sensorId === "phosphate") return 3;
     if (["nitrate", "dissolved_oxygen"].includes(sensorId)) return 2;
     if (["orp", "calcium", "magnesium", "co2", "flow", "par"].includes(sensorId)) return 0;
@@ -26023,12 +26046,16 @@ const rigSteps = [
           <button class="secondary" data-action="mixing-cal-back" ${disabled}>Back</button>
         </div>`;
     } else {
+      // The draw size survives a re-render (summary polls) — the two boxes
+      // are one number in two units, kept in step by _mixingDrawSync.
+      const drawL = Number.isFinite(this._mixingDrawL) && this._mixingDrawL > 0 ? this._mixingDrawL : 10;
       body = `
         <p class="muted">${dual
           ? "Fill the store, fill the vessel, or T off to the ATO reservoir — each on its own."
           : "Fill the vessel, or T off to the ATO reservoir."}</p>
-        <div class="mini-grid">
-          <label>Litres (for a timed draw)<input type="number" min="0.01" step="any" inputmode="decimal" data-mixing-draw-litres value="10"></label>
+        <div class="mini-grid mixing-draw-grid">
+          <label>Litres (for a timed draw)<input type="number" min="0.01" step="any" inputmode="decimal" data-mixing-draw-litres value="${drawL}"></label>
+          <label>or millilitres<input type="number" min="10" step="1" inputmode="numeric" data-mixing-draw-ml value="${Math.round(drawL * 1000)}"></label>
           <label>Destination<select data-mixing-draw-dest>
             ${dual ? `<option value="store">RODI store</option>` : ""}
             <option value="mix" ${dual ? "" : "selected"}>${dual ? "Mix vessel" : "The vessel"}</option>
@@ -26040,7 +26067,7 @@ const rigSteps = [
           <button class="secondary" data-action="mixing-rodi-draw" ${disabled}>Run the litres</button>
           <button class="secondary" data-action="mixing-cal-prep" ${disabled}>Calibrate flow</button>
         </div>
-        <small class="awc-hint">Fill until full runs to the float valve (the fill cap is the backstop). Small draws are fine — 0.057 L is 57 ml${rate > 0 ? `, about ${Math.max(1, Math.round(0.057 / rate * 3600))} s at this rate` : ""}; timed draws start at 10 ml. ${rate > 0
+        <small class="awc-hint">Fill until full runs to the float valve (the fill cap is the backstop). Type litres or millilitres — the other box follows${rate > 0 ? ` (57 ml is about ${Math.max(1, Math.round(0.057 / rate * 3600))} s at this rate)` : ""}; timed draws start at 10 ml. ${rate > 0
           ? `Flow rate: ${Number(rate)} L/h${rodi?.calibratedAt
             ? ` — calibrated ${new Date(rodi.calibratedAt).toLocaleDateString()}`
             : " — set by hand; a timed calibration makes the litres honest"}.`
@@ -31074,6 +31101,8 @@ const rigSteps = [
         .color-field { gap: 6px; }
         .picker { display: grid; gap: 9px; align-content: start; }
         .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .mini-grid.mixing-draw-grid { grid-template-columns: 1fr 1fr 1.4fr; }
+        @media (max-width: 700px) { .mini-grid.mixing-draw-grid { grid-template-columns: 1fr 1fr; } .mini-grid.mixing-draw-grid > label:last-child { grid-column: 1 / -1; } }
         .candidate-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #8da2ba; font-size: 12px; font-weight: 800; }
         .candidates { display: grid; gap: 7px; }
         .candidate { display: grid; gap: 3px; min-width: 0; text-align: left; }

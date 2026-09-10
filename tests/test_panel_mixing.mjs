@@ -951,8 +951,20 @@ test("a 57 ml draw reads as millilitres — the input, the guard and the readout
   // The input takes millilitre-scale decimals, floored at 10 ml.
   assert(/data-mixing-draw-litres/.test(html), "the draw input is missing");
   assert(html.includes('min="0.01" step="any"'), "the draw input still floors at whole litres");
-  assert(html.includes("0.057 L is 57 ml"), "the hint does not show the ml example");
-  assert(html.includes("about 22 s at this rate"), "the hint lost the small-draw ETA");
+  assert(html.includes("57 ml is about 22 s at this rate"), "the hint lost the small-draw ETA");
+  // The millilitre box (0.7.160): one number in two units, both seeded from
+  // the remembered draw size, kept in step by the pure sync helper.
+  assert(html.includes('data-mixing-draw-ml value="10000"'), "the ml box is missing or unseeded");
+  assert(html.includes('data-mixing-draw-litres value="10"'), "the litres box lost its default");
+  panel._mixingDrawL = 0.057;
+  const small = panel._mixingTab();
+  assert(small.includes('data-mixing-draw-litres value="0.057"'), "a remembered 57 ml did not seed the litres box");
+  assert(small.includes('data-mixing-draw-ml value="57"'), "a remembered 57 ml did not seed the ml box");
+  assert(JSON.stringify(panel._mixingDrawSync("ml", "57")) === JSON.stringify({ litres: 0.057, ml: 57 }), "57 ml -> 0.057 L");
+  assert(JSON.stringify(panel._mixingDrawSync("litres", "0.125")) === JSON.stringify({ litres: 0.125, ml: 125 }), "0.125 L -> 125 ml");
+  assert(JSON.stringify(panel._mixingDrawSync("litres", "10")) === JSON.stringify({ litres: 10, ml: 10000 }), "10 L -> 10000 ml");
+  assert(panel._mixingDrawSync("ml", "") === null, "a blank box syncs to nothing");
+  assert(panel._mixingDrawSync("ml", "abc") === null, "junk syncs to nothing");
   // The sentence helper: ml under a litre, litres above.
   assert(panel._formatLitres(0.057) === "57 ml", `0.057 -> ${panel._formatLitres(0.057)}`);
   assert(panel._formatLitres(0.028) === "28 ml", "half-way reads in ml");

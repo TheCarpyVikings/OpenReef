@@ -18490,6 +18490,8 @@ async def websocket_mixing_rodi_draw(
         where = {"store": "the RODI store", "mix": "the vessel"}.get(destination, "the T-off")
         if litres > 0:
             flush_note = f" incl. the {flush_s:g} s flush" if flush_s > 0 else ""
+            eta = (f"about {minutes:.0f} min" if minutes >= 2
+                   else f"about {round(minutes * 60):g} s")
             _append_activity(
                 config, f"Mixing station: RODI run started — "
                 f"{mixing_engine.format_litres(litres)} to {where} "
@@ -18592,8 +18594,6 @@ async def websocket_mixing_calibrate(
                                       "litres and set the rate")
                 return
             await _async_mixing_stop_switches(
-            eta = (f"about {minutes:.0f} min" if minutes >= 2
-                   else f"about {round(minutes * 60):g} s")
                 hass, config, ("rodiBooster",), connection.context(msg))
             cal["stoppedAt"] = datetime.now(timezone.utc).isoformat()
             rodi["calibration"] = cal
