@@ -801,7 +801,7 @@ test("a harvest names where it went: the tile's select, the settings default, th
     const panel = await culturesPanel();
     let html = panel._culturesTab();
     assert(html.includes('data-cultures-harvest-to="c1"') && html.includes('<option value="bottle" selected>the fridge bottle</option>'), "the producing rotifer tile must carry the destination select, bottle by default");
-    assert(html.includes('placeholder="ml rinsed in"'), "the rinse box lost its new label");
+    assert(html.includes('>Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="625" data-cultures-bottle-ml="c1"'), "the rinse box lost its label — blank means the whole harvest, so the box shows it");
     const c2Tile = html.slice(html.indexOf('data-culture="c2"'));
     assert(!c2Tile.includes("data-cultures-harvest-to"), "the pods have nowhere else than the tank — no select");
     const settings = panel._culturesSettings();
@@ -829,6 +829,33 @@ test("a harvest names where it went: the tile's select, the settings default, th
     const fixture = summaryFixture([jarSummary({ harvestTo: "tank" }), summaryFixture().jars[1]]);
     html = (await culturesPanel({}, fixture))._culturesTab();
     assert(html.includes('<option value="tank" selected>straight into the tank</option>'), "the jar's default must lead the select");
+  } finally { restore(); }
+});
+
+test("the rack tile is a tidy form: compact ticks, a labelled egg check, aligned rows (0.7.163)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel();
+    const html = panel._culturesTab();
+    noPlaceholders(html, "rack tiles");
+    assert(html.includes('<div class="culture-tile" data-culture="c1">'), "the tile carries the rack class");
+    const c1 = html.slice(html.indexOf('data-culture="c1"'), html.indexOf('data-culture="c2"'));
+    // Every control sits on a labelled row; the ticks are ticks, not 42 px boxes.
+    assert(c1.includes('<label class="culture-field" title="Aim for leafy green — spinach, not pea soup">Water<select data-cultures-tint="c1">'), "the Water row");
+    assert(c1.includes('>Harvest to<select data-cultures-harvest-to="c1">'), "the destination row");
+    assert(c1.includes('<label class="culture-tick" title="The DHA step') && c1.includes('data-cultures-enrich="c1"'), "the enrich tick is a compact tick");
+    assert(c1.includes('<span>Signs</span>') && c1.includes('<div class="culture-signs">'), "the signs row");
+    assert(c1.includes('>Egg ratio<span class="unit">') && c1.includes('placeholder="%" data-cultures-egg="c1"') && c1.includes("≥ 30 % is healthy"), "the egg check is labelled");
+    assert(c1.includes('<span>Restart</span><label class="culture-tick"') && c1.includes('data-cultures-split="c1"'), "the split tick is a compact tick");
+    assert(!c1.includes("width:64px") && !c1.includes("% eggs") && !c1.includes("Sign:"), "the clipped placeholder and the bare row are gone");
+    // Head, form, notes, observations, actions — in that order.
+    const order = ['class="culture-jar"', 'class="culture-head"', 'class="culture-form"', 'class="culture-notes"', "<span>Signs</span>", 'class="button-row"'];
+    let last = -1;
+    for (const needle of order) { const idx = c1.indexOf(needle); assert(idx > last, `tile out of order at ${needle}`); last = idx; }
+    // The stylesheet sizes the ticks and the compact controls.
+    const css = panel._styles();
+    assert(css.includes('.culture-tick input[type="checkbox"] { width: 15px; height: 15px; min-height: 0;'), "tick sizing rule missing");
+    assert(css.includes('.culture-field select, .culture-field input[type="number"] { min-height: 30px;'), "compact control rule missing");
   } finally { restore(); }
 });
 

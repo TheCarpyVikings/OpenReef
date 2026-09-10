@@ -769,3 +769,20 @@ cone's own harvest clock, tank harvests as usage, the same tap — so species co
 food on hand and the "on its way" note goes. The strip plans its harvest mark on the cone's clock;
 a bottle-default cone plans nothing but a one-off straight harvest still lands as a done mark.
 Nutrient budget: a straight harvest carries no figure and is not priced.
+
+#### Addendum 2026-09-10 (0.7.163) — the rack tile tidied
+
+Reece's screen: a full-size checkbox for "seed B on restart", the egg-ratio box clipped to
+"% eg", a Water select the height of a settings field, every line at its own alignment. Cause:
+the tile's controls were bare inputs under the panel's base rule (`input, select { width: 100%;
+min-height: 42px }`), which is written for settings forms. Now the tile is `.culture-tile`: the
+jar and its name centred (`.culture-jar`, `.culture-head`, the due chips as a `.pill-row`), then
+a labelled two-column form (`.culture-field`: label 62 px, control 1fr; compact selects and
+number boxes at 30 px) — Water, Harvest to, the enrich tick, Rinsed in — then the notes between
+hairlines (`.culture-notes`: feed advice, risk, harvest guide, learned lines, lineage, heat
+guard, temperature), then Signs / Egg ratio / Restart, then the actions left-aligned. Ticks are
+`.culture-tick` (15 px, `accent-color`). The egg check is labelled "Egg ratio" with a "%" box
+and "≥ 30 % is healthy" beside it; the rinse box's placeholder is the bottle's default volume
+so blank reads as what it means. Same data attributes, taps and WS calls throughout. Verified
+by rendering the tab through the test harness into a shadow root and screenshotting it with
+headless Chrome (before/after in the session scratchpad). `test_panel_cultures.mjs` 30 (1 new).

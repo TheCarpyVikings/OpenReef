@@ -13857,19 +13857,19 @@ const rigSteps = [
         establishing: `establishing · first harvest in ~${this._escape(String(Math.round((s.harvest?.hoursUntil || 0) / 24 * 10) / 10))} d`,
         crashed: `<span style="color:var(--error-color,#e5484d)">crashed</span> at day ${this._escape(String(Math.round(s.ageDays || 0)))}`,
       })[status] || "empty — seed it";
+      // The tile's form (0.7.163): every control on a labelled row — label
+      // column, control column — with compact controls. The base input rule
+      // (full width, 42 px tall) is for settings forms, not a rack tile.
       const tintSelect = running ? `
-        <label style="display:flex;gap:6px;align-items:center;font-size:12px;" title="${this._escape(j.tintTarget ? `Aim for ${j.tintTarget}` : "")}">Water
-          <select data-cultures-tint="${this._escape(j.id)}" style="font-size:12px;">
+        <label class="culture-field" title="${this._escape(j.tintTarget ? `Aim for ${j.tintTarget}` : "")}">Water<select data-cultures-tint="${this._escape(j.id)}">
             ${(sum.tints || ["green", "clearing", "clear"]).map((t) => `<option value="${this._escape(t)}" ${t === (j.tint || "") ? "selected" : ""}>${this._escape(t)}</option>`).join("")}
           </select></label>${j.hasBottle && status === "producing" ? `
-        <label style="display:flex;gap:6px;align-items:center;font-size:12px;" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done.">
-          <input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none" ? "disabled" : ""}> enrich this crop</label>
-        <label style="display:flex;gap:6px;align-items:center;font-size:12px;" title="Where this crop goes. The jar's default is set in Culture settings; the enrich tick sends it to the soak first.">to
-          <select data-cultures-harvest-to="${this._escape(j.id)}" style="font-size:12px;">
+        <label class="culture-field" title="Where this crop goes. The jar's default is set in Culture settings; the enrich tick sends it to the soak first.">Harvest to<select data-cultures-harvest-to="${this._escape(j.id)}">
             <option value="bottle" ${(j.harvestTo || "bottle") !== "tank" ? "selected" : ""}>the fridge bottle</option>
             <option value="tank" ${j.harvestTo === "tank" ? "selected" : ""}>straight into the tank</option>
           </select></label>
-        <input type="number" min="1" max="5000" step="10" placeholder="ml rinsed in" data-cultures-bottle-ml="${this._escape(j.id)}" style="width:110px;font-size:11px;" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">` : ""}` : "";
+        <div class="culture-field"><span></span><label class="culture-tick" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done."><input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none" ? "disabled" : ""}> enrich this crop</label></div>
+        <label class="culture-field" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="${(j.harvestTo || "bottle") !== "tank" ? this._escape(String(j.harvestGuide?.totalMl || "")) : ""}" data-cultures-bottle-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>` : ""}` : "";
       // Day 0 (and after a crash): the fill — the whole vessel at the jar's
       // salinity, cut from the mixing station's water with RODI. Backend maths.
       const fg = j.fillGuide || j.restartGuide || {};
@@ -13882,11 +13882,10 @@ const rigSteps = [
         ? `<small style="color:${j.risk.level === "act" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-risk="${this._escape(j.risk.level)}">${j.risk.level === "act" ? "⚠ " : "👀 "}${this._escape(j.risk.reason || "")}</small>`
         : "";
       const signs = running ? `
-        <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;align-items:center;" title="A crash sign brings the ${j.kind === "copepod" ? "water change" : "restart"} forward — tap the one you see">
-          <small class="muted">Sign:</small>
-          ${(sum.signs || []).map((sg) => `<button class="secondary compact-button" style="font-size:11px;padding:2px 6px;${j.lastSign === sg.id ? "border-color:var(--error-color,#e5484d);" : ""}" data-action="cultures-sign" data-id="${this._escape(j.id)}" data-sign="${this._escape(sg.id)}">${this._escape(sg.id)}</button>`).join("")}
-          <input type="number" min="0" max="100" step="1" placeholder="% eggs" data-cultures-egg="${this._escape(j.id)}" style="width:64px;font-size:11px;" title="Optional egg-ratio spot check: the share of females carrying eggs in a 1 ml sample. ≥ 30 % is healthy, < 15 % means a collapse is near.">
-        </div>` : "";
+        <div class="culture-field" title="A crash sign brings the ${j.kind === "copepod" ? "water change" : "restart"} forward — tap the one you see"><span>Signs</span>
+          <div class="culture-signs">${(sum.signs || []).map((sg) => `<button class="secondary compact-button"${j.lastSign === sg.id ? ' style="border-color:var(--error-color,#e5484d);"' : ""} data-action="cultures-sign" data-id="${this._escape(j.id)}" data-sign="${this._escape(sg.id)}">${this._escape(sg.id)}</button>`).join("")}</div>
+        </div>
+        <label class="culture-field" title="Optional egg-ratio spot check: the share of females carrying eggs in a 1 ml sample. ≥ 30 % is healthy, < 15 % means a collapse is near.">Egg ratio<span class="unit"><input type="number" min="0" max="100" step="1" placeholder="%" data-cultures-egg="${this._escape(j.id)}"><small class="muted">≥ 30 % is healthy</small></span></label>` : "";
       const lineageLine = running && j.lineage?.line ? `<small class="muted">${this._escape(j.lineage.line)}${j.stagger?.available ? ` · ${this._escape(j.stagger.advice)}` : ""}</small>` : "";
       const guard = j.guard || {};
       const guardLine = running && guard.available && guard.status !== "clear"
@@ -13894,7 +13893,8 @@ const rigSteps = [
         : "";
       const needsBackup = status === "producing" && j.hasBottle && (sum.backup || []).some((b) => b.species === j.species && !b.backedUp) && (sum.canAddJar || (sum.idleJars || []).length);
       const splitTick = running && s.restart?.available && j.hasBottle && (sum.canAddJar || (sum.idleJars || []).length)
-        ? `<label style="display:flex;gap:4px;align-items:center;font-size:11px;" title="The net is already in hand: the restart seeds B from the same crop, a backup out of phase"><input type="checkbox" data-cultures-split="${this._escape(j.id)}" ${needsBackup ? "checked" : ""}> seed B on restart</label>`
+        ? `
+        <div class="culture-field"><span>Restart</span><label class="culture-tick" title="The net is already in hand: the restart seeds B from the same crop, a backup out of phase"><input type="checkbox" data-cultures-split="${this._escape(j.id)}" ${needsBackup ? "checked" : ""}> seed B on restart</label></div>`
         : "";
       const learned = j.learned || {};
       const learnedLines = running ? [
@@ -13934,25 +13934,23 @@ const rigSteps = [
         running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${this._escape(j.id)}">Crashed</button>` : "",
         status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${this._escape(j.id)}" title="A picture of this jar's story — species, age, generation, the restart ring, the last 14 days of water">Share card</button>` : "",
       ].filter(Boolean).join("");
+      // The tile (0.7.163): the jar and its name centred, then three
+      // left-aligned blocks — the water and the crop, the notes, the
+      // observations — and the actions. Same facts, one column, one rhythm.
+      const notes = [fillLine, advice, risk, guide, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
       return `
-        <div class="stack" style="gap:4px;align-items:center;min-width:170px;max-width:260px;" data-culture="${this._escape(j.id)}">
-          ${this._culturesJarSvg(j)}
-          <small><strong>${this._escape(j.name)}</strong> · ${this._escape(String(j.volumeL))} L</small>
-          <small>${this._escape(j.speciesName)}${j.seededFrom ? ` · from ${this._escape((jars.find((x) => x.id === j.seededFrom) || {}).name || j.seededFrom)}` : ""}</small>
-          <small>${statusLine}</small>
-          ${fillLine}
-          ${chips ? `<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;">${chips}</div>` : ""}
-          ${tintSelect}
-          ${advice}
-          ${risk}
-          ${guide}
-          ${learnedLines}
-          ${lineageLine}
-          ${guardLine}
-          ${signs}
-          ${splitTick}
-          ${tempLine}
-          <div class="button-row" style="flex-wrap:wrap;justify-content:center;">${buttons}</div>
+        <div class="culture-tile" data-culture="${this._escape(j.id)}">
+          <div class="culture-jar">${this._culturesJarSvg(j)}</div>
+          <div class="culture-head">
+            <small><strong>${this._escape(j.name)}</strong> <span class="muted">· ${this._escape(String(j.volumeL))} L</span></small>
+            <small>${this._escape(j.speciesName)}${j.seededFrom ? ` · from ${this._escape((jars.find((x) => x.id === j.seededFrom) || {}).name || j.seededFrom)}` : ""}</small>
+            <small>${statusLine}</small>
+            ${chips ? `<div class="pill-row">${chips}</div>` : ""}
+          </div>
+          ${tintSelect ? `<div class="culture-form">${tintSelect}</div>` : ""}
+          ${notes ? `<div class="culture-notes">${notes}</div>` : ""}
+          ${signs || splitTick ? `<div class="culture-form">${signs}${splitTick}</div>` : ""}
+          <div class="button-row">${buttons}</div>
         </div>`;
     }).join("");
     const anyRotifers = jars.some((j) => j.hasBottle);
@@ -30676,6 +30674,28 @@ const rigSteps = [
         .tabs button.active, .primary, .range-picker button.active, .mode-button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
         .secondary:hover, .tabs button:hover { border-color: var(--openreef-accent); }
         .compact-button { min-height: 30px; padding: 6px 10px; font-size: 12px; }
+        /* The culture rack tile (0.7.163): a centred jar over a labelled
+           two-column form. The base input rule (full width, 42 px tall) is
+           for settings forms — here every control is compact, and a tick
+           is a 15 px tick, not a 42 px box. */
+        .culture-tile { display: flex; flex-direction: column; gap: 6px; width: 276px; max-width: 100%; flex: 0 1 276px; align-items: stretch; }
+        .culture-jar { display: flex; justify-content: center; }
+        .culture-head { display: grid; gap: 2px; text-align: center; }
+        .culture-head .pill-row { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
+        .culture-tile .pill { min-width: 0; min-height: 22px; padding: 2px 8px; font-size: 11px; }
+        .culture-form { display: grid; gap: 5px; }
+        .culture-field { display: grid; grid-template-columns: 62px 1fr; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: #a7b7ca; }
+        .culture-field select, .culture-field input[type="number"] { min-height: 30px; padding: 4px 8px; font-size: 12px; font-weight: 500; border-radius: 6px; }
+        .culture-field .unit { display: flex; gap: 6px; align-items: center; min-width: 0; }
+        .culture-field .unit input[type="number"] { width: 70px; flex: 0 0 auto; }
+        .culture-field .unit small { font-weight: 500; }
+        .culture-tick { display: flex; gap: 7px; align-items: center; font-size: 12px; font-weight: 500; color: #dbeafe; cursor: pointer; }
+        .culture-tick input[type="checkbox"] { width: 15px; height: 15px; min-height: 0; padding: 0; margin: 0; flex: 0 0 auto; accent-color: #4fc3f7; }
+        .culture-signs { display: flex; gap: 4px; flex-wrap: wrap; }
+        .culture-signs .compact-button { min-height: 24px; padding: 2px 7px; font-size: 11px; }
+        .culture-notes { display: grid; gap: 3px; padding: 6px 0; border-top: 1px solid #1f2f42; border-bottom: 1px solid #1f2f42; }
+        .culture-notes small { line-height: 1.3; }
+        .culture-tile .button-row { justify-content: flex-start; gap: 6px; flex-wrap: wrap; }
         /* Reef Pulse's front door: in the topbar on every tab. Accent-outlined
            with a soft breathing glow — visibly the standout, not another grey
            secondary — while staying quieter than the primary Save button. */
