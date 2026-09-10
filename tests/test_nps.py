@@ -2556,7 +2556,7 @@ def test_ws_log_dose_without_ml_uses_the_plan_and_keeps_the_reminder():
     run(integration.websocket_consumable_log_dose(hass, conn, {"id": 2, "product_id": "rj"}))
     assert not conn.errors
     saved = _saved_products(entry)["rj"]
-    assert saved["remainingMl"] == 197.1 and saved["history"][-1] == {"at": saved["history"][-1]["at"], "ml": 2.9, "kind": "dose"}
+    assert saved["remainingMl"] == 197.1 and saved["history"][-1] == {"at": saved["history"][-1]["at"], "ml": 2.9, "kind": "dose", "to": "tank"}
     assert saved["lastDosedAt"]
     maintenance = entry.options[CONF_SETTINGS]["maintenance"]
     assert maintenance["completions"]["nps_dose_rj"][0]["source"] == "shelf"
@@ -2992,7 +2992,8 @@ def test_normalise_drops_a_feed_exchange_link_to_a_channel_that_is_gone():
 
 def test_feed_timeline_keeps_soak_and_jar_bottles_off_the_strip():
     """Selcon into the soak and phyto into a jar are logged as bottle doses,
-    but they are not tank feeds (Reece's strip showed a Selcon dot)."""
+    but they are not tank feeds (Reece's strip showed a Selcon dot). These
+    rows are UNSTAMPED — the pre-0.7.165 link rule; stamped rows are next."""
     tz = timezone.utc
     now = datetime(2026, 8, 13, 14, 20, tzinfo=tz)
     row = [{"at": _iso(datetime(2026, 8, 13, 1, 19, tzinfo=tz)), "ml": 0.5, "kind": "dose"}]
@@ -3012,6 +3013,82 @@ def test_feed_timeline_keeps_soak_and_jar_bottles_off_the_strip():
     conn = FakeConnection()
     run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
     assert not any(e["productId"] == "selcon" for e in conn.results[-1].payload["timeline"]["events"])
+
+
+def test_a_dose_row_says_where_it_went_and_the_strip_reads_the_row():
+    """0.7.165: the strip, the log and the budget read each row's own
+    destination, never the bottle's current link — the link rewrote the past
+    in both directions (a Selcon soak dose became a tank feed once the link
+    moved on or broke; a phyto bottle linked to a jar lost its tank feeds)."""
+    tz = timezone.utc
+    now = datetime(2026, 9, 10, 20, 0, tzinfo=tz)
+    soak = {"at": _iso(datetime(2026, 9, 10, 9, 45, tzinfo=tz)), "ml": 0.5, "kind": "dose", "to": "soak"}
+    tank = {"at": _iso(datetime(2026, 9, 10, 19, 23, tzinfo=tz)), "ml": 2, "kind": "dose", "to": "tank"}
+    jar = {"at": _iso(datetime(2026, 9, 10, 8, 0, tzinfo=tz)), "ml": 5, "kind": "dose", "to": "jar", "jarId": "j1"}
+    legacy = {"at": _iso(datetime(2026, 9, 10, 7, 0, tzinfo=tz)), "ml": 1, "kind": "dose"}
+    products = {
+        # Yesterday's enrichment bottle, link long gone: its soak doses stay soak doses.
+        "selcon": _product(name="Selcon", category="enrichment", history=[soak, legacy],
+                           doseMl=0.5, doseTimesPerDay=2, doseFirstAt="09:00", doseWindowEnd="21:00"),
+        # One phyto bottle feeding the tank by hand AND a rotifer jar.
+        "rj": _product(name="Reef Juice", history=[jar, tank, legacy]),
+    }
+    done_ml = lambda events: sorted(e["ml"] for e in events if e["status"] == "done")  # noqa: E731
+    # No link at all: stamped rows speak for themselves; the unstamped one is a tank feed (the old rule).
+    strip = _tl(now, products=products)
+    sel = _by_id(strip, "shelf:selcon:")
+    assert done_ml(sel) == [1] and all(e["status"] == "done" for e in sel), "the legacy row lands, the soak row never does, and an enrichment bottle's cadence plans no tank slots"
+    assert done_ml(_by_id(strip, "shelf:rj:")) == [1, 2], "the jar dose is not a tank feed"
+    # The links (the 0.7.133 rule) now decide the unstamped rows only.
+    strip = _tl(now, products=products, quiet_product_ids={"selcon", "rj"})
+    assert not _by_id(strip, "shelf:selcon:"), "the legacy row follows the link; the stamped soak row was never a feed"
+    assert done_ml(_by_id(strip, "shelf:rj:")) == [2], "the tank-stamped dose shows though the bottle is linked to a jar"
+    # The log agrees, row for row.
+    log = nps.feed_log(now, products=products, channels={}, quiet_product_ids={"selcon", "rj"})
+    assert [(r["productId"], r["ml"]) for r in log["rows"]] == [("rj", 2)]
+    log = nps.feed_log(now, products=products, channels={})
+    assert sorted((r["productId"], r["ml"]) for r in log["rows"]) == [("rj", 1), ("rj", 2), ("selcon", 1)]
+    # The budget counts only what went in the tank; the runway counts every drop.
+    assert nps.usage_ml_per_day(products["rj"], now) == 8.0
+    assert nps.usage_ml_per_day(products["rj"], now, tank_only=True) == 3.0
+    assert nps.usage_ml_per_day(products["rj"], now, tank_only=True, legacy_tank=False) == 2.0
+    assert nps.nutrient_budget({"rj": products["rj"]}, now, 100, 2.0, quiet_product_ids={"rj"})["feedingMlPerDay"] == 2.0
+    assert nps.nutrient_budget({"selcon": products["selcon"]}, now, 100, 2.0, quiet_product_ids={"selcon"}) == {"available": False}
+
+
+def test_ws_dose_rows_carry_their_destination():
+    """The writers stamp the row: the shelf tap (tank; soak on an enrichment
+    bottle; or as the tap says), the hatchery's enrichment dose (soak), a jar
+    feed (jar + its id). The normaliser round-trips a stamp and drops a
+    nonsense one. With NO link configured the strip and the log are right."""
+    entry = _entry({"selcon": _product(name="Selcon", category="enrichment", bottleMl=60, remainingMl=50),
+                    "rj": _product(name="Reef Juice")})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 1, "product_id": "selcon", "ml": 0.5}))
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 2, "product_id": "selcon", "ml": 0.5, "to": "tank"}))
+    run(integration.websocket_consumable_log_dose(hass, conn, {"id": 3, "product_id": "rj", "ml": 2}))
+    assert not conn.errors, conn.errors
+    saved = _saved_products(entry)
+    assert [row["to"] for row in saved["selcon"]["history"]] == ["soak", "tank"]
+    assert saved["rj"]["history"][-1]["to"] == "tank"
+    activity = [item.get("message") for item in entry.options[CONF_SETTINGS]["activity"]]
+    assert "Selcon dosed into the soak — 0.5 ml" in activity and "Reef Juice dosed by hand — 2 ml" in activity
+    run(integration.websocket_nps_summary(hass, conn, {"id": 4}))
+    payload = conn.results[-1].payload
+    assert sorted((e["productId"], e["ml"]) for e in payload["timeline"]["events"] if e["source"].startswith("shelf:")) == [("rj", 2), ("selcon", 0.5)]
+    assert sorted((r["productId"], r["ml"]) for r in payload["feedLog"]["rows"]) == [("rj", 2), ("selcon", 0.5)]
+    assert payload["hatchery"]["enrichment"]["productName"] is None, "unlinked reads unlinked — the panel says so, not 'Selcon'"
+    config = integration._config_from_entry(entry)
+    integration._nps_enrich_debit(config, {"productId": "selcon", "doseMl": 1})
+    integration._cultures_feed_debit(config, {"feed": {"productId": "rj", "doseMl": 5}}, "j1")
+    rows = config["consumables"]["products"]
+    assert rows["selcon"]["history"][-1]["to"] == "soak"
+    assert rows["rj"]["history"][-1]["to"] == "jar" and rows["rj"]["history"][-1]["jarId"] == "j1"
+    rows["rj"]["history"].append({"at": _iso(NOW), "ml": 1, "kind": "dose", "to": "moon"})
+    normalised = integration._normalise_core_config({"consumables": {"products": rows}})["consumables"]["products"]
+    assert normalised["rj"]["history"][-2]["to"] == "jar" and normalised["rj"]["history"][-2]["jarId"] == "j1"
+    assert "to" not in normalised["rj"]["history"][-1]
 
 
 

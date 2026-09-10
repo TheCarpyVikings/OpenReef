@@ -45,7 +45,7 @@ BRINE_PRIME_HOURS = 24.0
 # presets; everything stays user-editable, and "custom" is always available.
 # particleUm ranges feed the Stage D species/particle matcher.
 PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
-    {"name": "Selcon", "brand": "American Marine", "category": "other",
+    {"name": "Selcon", "brand": "American Marine", "category": "enrichment",
      "bottleMl": 60, "shelfLifeDaysOpened": 120, "refrigerated": True, "stirDaily": False,
      "particleUmMin": 0, "particleUmMax": 0,
      "notes": "HUFA/B12 enrichment emulsion for the hatchery's enrichment soak — "
@@ -72,7 +72,7 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
      "particleUmMin": 1, "particleUmMax": 20,
      "notes": "The Tigriopus tub's food — feed to a Granny Smith apple-skin green, half rate in "
               "week one, again when it clears."},
-    {"name": "Rotifer & Artemia Enrichment", "brand": "Reefphyto", "category": "other",
+    {"name": "Rotifer & Artemia Enrichment", "brand": "Reefphyto", "category": "enrichment",
      "bottleMl": 100, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 0, "particleUmMax": 0,
      "notes": "Live Nannochloropsis (EPA) + Isochrysis (DHA) — an algae enrichment, not an "
@@ -123,12 +123,41 @@ CATEGORY_LABELS = {
     "phyto": "Phytoplankton", "zooLive": "Live zooplankton",
     "zooPrepared": "Zooplankton (prepared)", "blend": "Blend",
     "bacteria": "Bacteria", "amino": "Amino acids", "trace": "Trace",
-    "twoPart": "2-part", "other": "Other",
+    "twoPart": "2-part", "enrichment": "Enrichment (soak)", "other": "Other",
 }
 
 
 def category_label(category: str) -> str:
     return CATEGORY_LABELS.get(str(category or ""), "Other")
+
+
+# Where a logged dose went (0.7.165), stamped on the row by whoever wrote it.
+# The strip, the log and the nutrient budget read the ROW — never the bottle's
+# current link, which said what the bottle was for at READ time and rewrote
+# the past every time the keeper switched enrichment products (a Selcon soak
+# dose became a tank feed; a phyto bottle linked to a jar lost its tank
+# feeds). A row without a stamp predates 0.7.165 and follows the old link
+# rule until it ages out of the windows. An ``enrichment`` bottle's hand dose
+# goes in the soak unless the keeper says tank.
+DOSE_DESTINATIONS = ("tank", "soak", "jar")
+ENRICHMENT_CATEGORY = "enrichment"
+
+
+def dose_feeds_tank(row: Any, legacy_tank: bool = True) -> bool:
+    """True when this bottle history row put food in the display: a ``pump``
+    row always did; a ``dose`` row says so itself (``to``) or — unstamped,
+    from before 0.7.165 — defers to ``legacy_tank``, the caller's link rule."""
+    if not isinstance(row, dict):
+        return False
+    kind = row.get("kind")
+    if kind == "pump":
+        return True
+    if kind != "dose":
+        return False
+    to = row.get("to")
+    if to in DOSE_DESTINATIONS:
+        return to == "tank"
+    return bool(legacy_tank)
 
 
 # --------------------------------------------------------------------------- #
@@ -334,11 +363,17 @@ def live_expiry_state(live: dict[str, Any]) -> dict[str, Any]:
 
 
 def usage_ml_per_day(product: dict[str, Any], now: datetime,
-                     window_days: float = RUNWAY_WINDOW_DAYS) -> float | None:
+                     window_days: float = RUNWAY_WINDOW_DAYS, *,
+                     tank_only: bool = False, legacy_tank: bool = True) -> float | None:
     """Average daily use from the logged history window. ``dose`` (manual),
     ``pump`` (dose-event decrement) and ``transfer`` (poured into a pump
     reservoir) all count as demand; ``refill`` is supply and doesn't. None = no
-    usage logged in the window — the honest no-forecast answer, never a guess."""
+    usage logged in the window — the honest no-forecast answer, never a guess.
+
+    ``tank_only`` (0.7.165) is the nutrient budget's view: a hand dose counts
+    only if its row says it went in the tank (``dose_feeds_tank``) — the soak
+    and the jars are not the display. The runway keeps every row: a soak dose
+    empties the bottle just the same."""
     history = product.get("history")
     if not isinstance(history, list) or window_days <= 0:
         return None
@@ -351,6 +386,8 @@ def usage_ml_per_day(product: dict[str, Any], now: datetime,
             continue
         if event.get("undoneAt"):
             continue   # taken back — the ml never left the bottle
+        if tank_only and event.get("kind") == "dose" and not dose_feeds_tank(event, legacy_tank):
+            continue   # the soak or a jar, not the display
         at = _parse_iso(event.get("at"))
         if at is None:
             continue
@@ -1863,6 +1900,7 @@ CATEGORY_NUTRIENTS = {
     "amino":       {"n": 0.8, "p": 0.02},
     "trace":       {"n": 0.0, "p": 0.0},
     "twoPart":     {"n": 0.0, "p": 0.0},
+    "enrichment":  {"n": 0.5, "p": 0.05},   # counts only when a row says it went in the tank
     "other":       {"n": 0.5, "p": 0.05},
 }
 NO3_BAND = (2.0, 20.0)     # NPS guardrails: never zero, never runaway
@@ -1870,19 +1908,24 @@ PO4_BAND = (0.01, 0.1)
 
 
 def nutrient_budget(products: dict[str, Any], now: datetime,
-                    tank_litres: float, daily_exchange_l: float) -> dict[str, Any]:
+                    tank_litres: float, daily_exchange_l: float,
+                    quiet_product_ids: Any = None) -> dict[str, Any]:
     """Feed load vs water-change export, from the shelf's own logged usage.
     Honesty rules: no logged usage ⇒ no budget (never a guess); the steady-state
     projection counts ONLY feeding in and water changes out — skimming, bacteria
-    and algae all help you beyond this number, so reality should land lower."""
+    and algae all help you beyond this number, so reality should land lower.
+    Only what went in the TANK is load (0.7.165): each dose row says where it
+    went; a row from before the stamp follows the bottle's current link
+    (``quiet_product_ids``) as it always did."""
     tank_l = max(0.0, _f(tank_litres))
+    quiet = {str(pid) for pid in (quiet_product_ids or ())}
     load_n = load_p = 0.0
     feeding_ml_day = 0.0
     per_category: dict[str, float] = {}
-    for product in products.values():
+    for pid, product in products.items():
         if not isinstance(product, dict):
             continue
-        daily = usage_ml_per_day(product, now)
+        daily = usage_ml_per_day(product, now, tank_only=True, legacy_tank=str(pid) not in quiet)
         if not daily:
             continue
         density = CATEGORY_NUTRIENTS.get(str(product.get("category")),
@@ -2151,9 +2194,11 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
     now_min = now_local.hour * 60 + now_local.minute
     events: list[dict[str, Any]] = []
     bottle_species = set(culture_bottle_species or ())
-    # Bottles whose logged doses feed something OTHER than the tank (the
-    # enrichment soak, a culture jar): their history is not a tank feed, so
-    # no extras — a keeper-set tank cadence still lands its planned slots.
+    # Bottles linked to the enrichment soak or a culture jar (0.7.133). Since
+    # 0.7.165 every dose row says where it went, so the link only decides the
+    # rows from before the stamp — switching enrichment products no longer
+    # rewrites the past. An enrichment-category bottle's cadence is a soak
+    # reminder, not a tank plan: it lands no slots on the strip.
     quiet = {str(pid) for pid in (quiet_product_ids or ())}
 
     ev = _event
@@ -2216,19 +2261,21 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         if not isinstance(product, dict):
             continue
         plan = hand_dose_state(product, now_local, tank_l, tz)
-        cad = hand_dose_slots(product)
+        soak_bottle = str(product.get("category") or "") == ENRICHMENT_CATEGORY
+        cad = (hand_dose_slots(product) if not soak_bottle
+               else {"unit": "", "n": 0.0, "firstAt": "", "perDay": 0, "slots": [], "text": ""})
         name = str(product.get("name") or pid)
         source = f"shelf:{pid}"
+        legacy_tank = pid not in quiet
         done: list[dict[str, Any]] = []
         for item in (product.get("history") if isinstance(product.get("history"), list) else []):
-            if not isinstance(item, dict) or item.get("kind") != "dose" or item.get("undoneAt"):
+            if (not isinstance(item, dict) or item.get("kind") != "dose" or item.get("undoneAt")
+                    or not dose_feeds_tank(item, legacy_tank)):
                 continue
             minute, _ = _local_minute(item.get("at"), today, tz)
             if minute is not None:
                 done.append({"at": minute, "ml": round(_f(item.get("ml")), 2), "slot": _hhmm_min(item.get("slot")),
                              "stamp": str(item.get("at"))})
-        if pid in quiet:
-            done = []
         if not cad["unit"]:
             # No cadence: anything logged today still shows — the strip is the day's truth.
             events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,
@@ -2571,9 +2618,10 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
     be tz-aware in the keeper's zone — every stamp is bucketed by that day.
 
     Taken-back feeds stay in the list flagged ``undone`` (a log that hides its
-    reversals is not a log) but never count. Bottles that feed the enrichment
-    soak or a culture jar (``quiet_product_ids``) never appear — their doses
-    are not tank feeds (0.7.133)."""
+    reversals is not a log) but never count. A dose into the enrichment soak
+    or a culture jar is not a tank feed: since 0.7.165 the row itself says
+    where it went (``to``); a row from before the stamp follows the bottle's
+    current link (``quiet_product_ids``, the 0.7.133 rule) until it ages out."""
     tz = now_local.tzinfo
     try:
         days = int(_f(days)) or FEED_LOG_DAYS_DEFAULT
@@ -2635,15 +2683,17 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
         if ch.get("enabled") is not False and sched.get("enabled") and _f(sched.get("mlPerDay")) > 0 and not ha_timed:
             unrecorded.append(name)
 
-    # --- The shelf: hand-logged doses and pump debits, per bottle.
+    # --- The shelf: hand-logged doses and pump debits, per bottle — the rows
+    # that went in the tank (a pump row always did; a dose row says).
     for pid in sorted(products):
         product = products[pid]
-        if not isinstance(product, dict) or pid in quiet:
+        if not isinstance(product, dict):
             continue
         name = str(product.get("name") or pid)
         source = f"shelf:{pid}"
+        legacy_tank = pid not in quiet
         for item in (product.get("history") if isinstance(product.get("history"), list) else []):
-            if not isinstance(item, dict) or item.get("kind") not in ("dose", "pump"):
+            if not dose_feeds_tank(item, legacy_tank):
                 continue
             pumped = item.get("kind") == "pump"
             add(item.get("at"), how="pump" if pumped else "hand", source=source, name=name, productId=pid,

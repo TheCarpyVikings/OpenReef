@@ -1507,6 +1507,12 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 # Taken back (0.7.136): kept as a tombstone so a stale save
                 # cannot bring it back; every reader skips it.
                 **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {}),
+                # Where the ml went (0.7.165): tank, soak or jar — the row's
+                # own word, so the strip never reads the past through the
+                # bottle's current link. Absent = written before the stamp.
+                **({"to": item.get("to")} if item.get("to") in nps_engine.DOSE_DESTINATIONS else {}),
+                **({"jarId": _awc_str(item.get("jarId"), 24)}
+                   if item.get("to") == "jar" and _awc_str(item.get("jarId"), 24) else {}),
             }
             for item in (raw.get("history") if isinstance(raw.get("history"), list) else [])
             if isinstance(item, dict)
@@ -13548,10 +13554,14 @@ async def websocket_dosing_mark_refreshed(
 # --- Consumables (NPS food shelf) WebSocket API ---------------------------------------------
 
 def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
-                      at: datetime | None = None, slot: str = "") -> None:
+                      at: datetime | None = None, slot: str = "",
+                      to: str = "", jar_id: str = "") -> None:
     """The single choke point for bottle ledger movement (the _awc_debit_source
     pattern): decrement remainingMl and append the usage history the runway
-    forecast reads. Never raises — a bad bottle must not break a dose flush."""
+    forecast reads. Never raises — a bad bottle must not break a dose flush.
+    ``to`` (0.7.165) is where a dose went — tank, soak or jar — stamped by the
+    caller that knows; the feed strip, the log and the nutrient budget read
+    it, so a bottle's history stays true when its link changes."""
     try:
         ml = max(0.0, float(ml or 0))
     except (TypeError, ValueError):
@@ -13569,6 +13579,10 @@ def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
         }
         if slot:
             row["slot"] = slot
+        if to in nps_engine.DOSE_DESTINATIONS:
+            row["to"] = to
+            if to == "jar" and jar_id:
+                row["jarId"] = str(jar_id)[:24]
         history.append(row)
         if at is not None:
             history.sort(key=lambda item: str(item.get("at") or "") if isinstance(item, dict) else "")
@@ -13667,6 +13681,8 @@ def _consumable_for_msg(
     vol.Optional("slot"): cv.string,
     vol.Required("product_id"): cv.string,
     vol.Optional("ml"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=CONSUMABLE_BOTTLE_MAX_ML)),
+    # Where it went (0.7.165); default = the bottle's category (enrichment → soak).
+    vol.Optional("to"): vol.In(("tank", "soak")),
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -13677,7 +13693,10 @@ async def websocket_consumable_log_dose(
     'dosed 5 ml' and the bottle ledger plus the usage history (which powers the
     days-left runway) both update. No ml = the bottle's hand-dose plan (the
     keeper's size, else the guide's from the tank volume). Every hand dose
-    stamps the plan's clock and marks the shelf reminder done, if it exists."""
+    stamps the plan's clock and marks the shelf reminder done, if it exists.
+    The row says where the ml went (0.7.165): an enrichment bottle's dose is
+    a soak dose unless the tap says ``to: tank``; any other bottle's is a
+    tank feed. The strip and the log read the row, never the link."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -13707,15 +13726,17 @@ async def websocket_consumable_log_dose(
             return
         at = stamped
     slot = _normalise_schedule_time(msg.get("slot"))
-    _consumable_debit(product, ml, "dose", at, slot)
+    to = msg.get("to") or ("soak" if product.get("category") == nps_engine.ENRICHMENT_CATEGORY else "tank")
+    _consumable_debit(product, ml, "dose", at, slot, to=to)
     previous = _parse_datetime(product.get("lastDosedAt"))
     if previous is None or at > previous:
         product["lastDosedAt"] = at.isoformat()
     name = str(product.get("name") or "Bottle")
     when = ("" if at == now else f" at {dt_util.as_local(at).strftime('%H:%M')}") + (f" (the {slot} dose)" if slot else "")
+    how = "into the soak" if to == "soak" else "by hand"
     _nps_shelf_log_completion(config, str(msg["product_id"]), at,
-                              f"Logged automatically — {ml:g} ml of {name} by hand{when}")
-    _append_activity(config, f"{name} dosed by hand — {ml:g} ml{when}", "control")
+                              f"Logged automatically — {ml:g} ml of {name} {how}{when}")
+    _append_activity(config, f"{name} dosed {how} — {ml:g} ml{when}", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -14428,7 +14449,7 @@ def _nps_enrich_debit(config: dict[str, Any], enrichment: dict[str, Any]) -> Non
     products = (config.get("consumables") or {}).get("products") or {}
     product = products.get(product_id)
     if isinstance(product, dict):
-        _consumable_debit(product, _awc_num(enrichment.get("doseMl"), 1, 0.5, 50), "dose")
+        _consumable_debit(product, _awc_num(enrichment.get("doseMl"), 1, 0.5, 50), "dose", to="soak")
 
 
 def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str,
@@ -15561,8 +15582,10 @@ def _cultures_temp_c(hass: HomeAssistant, config: dict[str, Any], cultures: dict
     return None
 
 
-def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any]) -> None:
-    """One feed = one dose off the linked phyto bottle (the shelf keeps count)."""
+def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any], jar_id: str = "") -> None:
+    """One feed = one dose off the linked phyto bottle (the shelf keeps count).
+    The row says it went in the jar (0.7.165), so the tank's strip never
+    counts it — and the same bottle's tank doses still show."""
     feed = jar.get("feed") if isinstance(jar.get("feed"), dict) else {}
     product_id = str(feed.get("productId") or "")
     if not product_id:
@@ -15570,7 +15593,7 @@ def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any]) -> None:
     products = (config.get("consumables") or {}).get("products") or {}
     product = products.get(product_id)
     if isinstance(product, dict):
-        _consumable_debit(product, _awc_num(feed.get("doseMl"), 5, 0.5, 200), "dose")
+        _consumable_debit(product, _awc_num(feed.get("doseMl"), 5, 0.5, 200), "dose", to="jar", jar_id=jar_id)
 
 
 def _cultures_touch_continuity(cultures: dict[str, Any], now: datetime) -> None:
@@ -16001,7 +16024,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         notes.append(f"{egg:g} % carrying eggs")
     if fed:
         state["lastFedAt"] = now.isoformat()
-        _cultures_feed_debit(config, jar)
+        _cultures_feed_debit(config, jar, jar_id)
         _cultures_log_completion(config, jar_id, "feed", now, f"Logged automatically — fed from {source}")
         notes.append("fed")
     harvest_ml = 0.0
@@ -16016,7 +16039,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
                                    "jarId": jar_id}
             product = _cultures_enrich_product(config, cultures)
             if isinstance(product, dict):
-                _consumable_debit(product, round(enrichment["drops"] * cultures_engine.ENRICH_DROP_ML, 2), "dose")
+                _consumable_debit(product, round(enrichment["drops"] * cultures_engine.ENRICH_DROP_ML, 2), "dose", to="soak")
             notes.append(f"{enrichment['drops']:g} drops of enrichment, {enrichment['soakH']:g} h soak")
         elif has_bottle and wants == "tank":
             # Straight into the tank (0.7.161): the crop IS the feed. The
@@ -16076,7 +16099,7 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
     jar["state"]["lastTint"] = "green"
     jar["state"]["lastSignAt"] = ""
     jar["state"]["lastSign"] = ""
-    _cultures_feed_debit(config, jar)
+    _cultures_feed_debit(config, jar, jar_id)
     _cultures_history(jar, "restart", now, ml=round(jar["volumeL"] * 1000),
                       tempC=_cultures_temp_c(hass, config, cultures),
                       purgeMl=round(jar["purgeMl"]) if jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None)
@@ -16897,7 +16920,9 @@ async def websocket_nps_summary(
     # the brine done-marks (0.7.131 — no longer the reminder's completions).
     brine_feeds: list[dict[str, Any]] = [dict(item) for item in hatchery_cfg["handFeeds"]]
     cultures_cfg = _nps_cultures_cfg(config)
-    # Bottles that feed the soak or a culture jar, not the tank (0.7.133).
+    # Bottles linked to the soak or a culture jar (0.7.133). Since 0.7.165 a
+    # dose row carries its own destination, so this set only decides the rows
+    # from before the stamp — and what covers a mouth NOW (0.7.162).
     quiet_products = {hatchery_cfg["enrichment"]["productId"], cultures_cfg["enrichment"]["productId"]}
     quiet_products.update(str((jar.get("feed") or {}).get("productId") or "")
                           for jar in cultures_cfg["jars"].values() if isinstance(jar, dict))
@@ -17024,7 +17049,8 @@ async def websocket_nps_summary(
                 (_awc_cfg(config) or {}).get("schedule") or {},
                 _awc_effective_tank_l(config))
             if (_awc_cfg(config) or {}).get("enabled")
-            and ((_awc_cfg(config) or {}).get("schedule") or {}).get("enabled") else 0.0),
+            and ((_awc_cfg(config) or {}).get("schedule") or {}).get("enabled") else 0.0,
+            quiet_product_ids=quiet_products),
     })
 
 

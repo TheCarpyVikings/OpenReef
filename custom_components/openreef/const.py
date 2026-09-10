@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.164"
+INTEGRATION_VERSION = "0.7.165"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -448,7 +448,7 @@ CONSUMABLE_HISTORY_MAX = 50               # per-product dose/refill events kept
 CONSUMABLE_BOTTLE_MAX_ML = 50000.0        # matches DOSING_RESERVOIR_MAX_ML
 CONSUMABLE_CATEGORIES = (
     "phyto", "zooLive", "zooPrepared", "blend", "bacteria",
-    "amino", "trace", "twoPart", "other",
+    "amino", "trace", "twoPart", "enrichment", "other",
 )
 DOSING_BRUSHED_CAL_RUN_S = 30.0           # brushed calibration: fixed timed burst (vs 100 rev)
 # Brushed (DC head) driver roles: the shared stepper roles minus stepper/pH-specific

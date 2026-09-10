@@ -603,7 +603,7 @@ def test_reefphyto_products_are_on_the_shelf():
                  "Rotifer & Artemia Enrichment"):
         assert name in names and names[name]["brand"] == "Reefphyto" and names[name]["refrigerated"]
     assert "not designed as a culture feed" in names["Reef Juice (live phyto blend)"]["notes"]
-    assert names["Rotifer & Artemia Enrichment"]["category"] == "other", "drops, not a feed-plan food"
+    assert names["Rotifer & Artemia Enrichment"]["category"] == "enrichment", "drops into the soak, not a feed-plan food (0.7.165)"
 
 
 

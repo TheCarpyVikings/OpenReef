@@ -11379,7 +11379,7 @@ class OpenReefPanel extends HTMLElement {
       library: [],
       categories: { phyto: "Phytoplankton", zooLive: "Live zooplankton",
         zooPrepared: "Zooplankton (prepared)", blend: "Blend", bacteria: "Bacteria",
-        amino: "Amino acids", trace: "Trace", twoPart: "2-part", other: "Other" },
+        amino: "Amino acids", trace: "Trace", twoPart: "2-part", enrichment: "Enrichment (soak)", other: "Other" },
       feedExchange: {
         enabled: true, channelId: "demo_brine", channelName: "Live brine",
         minDrainMl: 150, maxOwedMl: 2000,
@@ -12402,7 +12402,7 @@ class OpenReefPanel extends HTMLElement {
         ? `<small>Guide: <strong>${esc(guide.ml)} ml</strong> a day at ${esc(guide.stocking)} stocking (1 ml per ${esc(guide.perLitres)} L) — set a cadence in Settings and the shelf reminds you.</small>`
         : "";
     const dosedButton = plan.planned && plan.ml != null
-      ? `<button class="${clock.due ? "primary" : "secondary"} compact-button" data-action="nps-product-dosed" data-id="${eid}">Dosed ${esc(plan.ml)} ml</button>`
+      ? `<button class="${clock.due ? "primary" : "secondary"} compact-button" data-action="nps-product-dosed" data-id="${eid}">${product.category === "enrichment" ? "Soak dose" : "Dosed"} ${esc(plan.ml)} ml</button>`
       : "";
     const runway = s.daysUntilEmpty != null
       ? `≈${esc(s.daysUntilEmpty)} days of use left${s.usageMlPerDay ? ` (~${esc(s.usageMlPerDay)} ml/day)` : ""}`
@@ -12563,7 +12563,7 @@ class OpenReefPanel extends HTMLElement {
     if (served && Object.keys(served).length) return served;
     return { phyto: "Phytoplankton", zooLive: "Live zooplankton",
       zooPrepared: "Zooplankton (prepared)", blend: "Blend", bacteria: "Bacteria",
-      amino: "Amino acids", trace: "Trace", twoPart: "2-part", other: "Other" };
+      amino: "Amino acids", trace: "Trace", twoPart: "2-part", enrichment: "Enrichment (soak)", other: "Other" };
   }
 
   // Full product editor — Settings-side (the page card stays informative).
@@ -12893,7 +12893,7 @@ class OpenReefPanel extends HTMLElement {
       // Selcon goes into the holding vessel; the dose reminder anchors on the
       // loaded batch's age (instar II).
       enrichIdle && !containerStale && !reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
-        ? `<button class="secondary compact-button" data-action="nps-enrich" title="Selcon into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II). The running hatch is untouched.">Enrich brine</button>` : "",
+        ? `<button class="secondary compact-button" data-action="nps-enrich" title="The enrichment into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II). The running hatch is untouched.">Enrich brine</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${this._npsHatchRemindersExist() ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
@@ -12907,10 +12907,10 @@ class OpenReefPanel extends HTMLElement {
     const enrichTile = !enrichIdle ? `
       <div class="stack" style="gap:4px;align-items:center;min-width:120px;" data-enrich-vessel>
         ${this._npsEnrichVesselSvg(enrichState)}
-        <small><strong>Enrichment</strong> · ${this._escape(enrichSum.productName || "Selcon")}</small>
+        <small><strong>Enrichment</strong> · ${enrichSum.productName ? this._escape(enrichSum.productName) : "no bottle linked — pick one in Settings"}</small>
         <small>${enrichState.status === "enriching"
           ? (enrichState.firstDoseDue
-            ? `<span style="color:var(--warning-color,#f5a524)">planned dose time — check feeding stage, then add ${this._escape(enrichSum.productName || "Selcon")}</span>`
+            ? `<span style="color:var(--warning-color,#f5a524)">planned dose time — check feeding stage, then add ${this._escape(enrichSum.productName || "the enrichment")}</span>`
             : enrichState.hoursLeft == null
               ? `holding — dose at +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 8))} h (instar II)`
               : `~${this._escape(String(enrichState.hoursLeft))} h of soak left`)

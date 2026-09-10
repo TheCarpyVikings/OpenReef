@@ -2272,5 +2272,47 @@ test("species coverage reads each mouth: the foods, the size, who feeds it (0.7.
   } finally { restore(); }
 });
 
+test("an unlinked enrichment reads unlinked, and an enrichment bottle's tap is a soak dose (0.7.165)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    // The tile used to print "Selcon" whatever was linked — a broken link
+    // debits nothing and the keeper never knew. Now it names the bottle or says so.
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      enrichment: { hours: 12, doseMl: 1, doseDelayH: 8, batchDoseDelayH: 8,
+        productId: "", productName: null, splitDose: false, sourceVesselId: "v1",
+        state: { status: "enriching", hoursElapsed: 8.5, hoursLeft: null, percent: 0, firstDoseDue: true, secondDoseDue: false } },
+    });
+    let html = panel._npsTab();
+    assert(html.includes("<strong>Enrichment</strong> · no bottle linked — pick one in Settings"), "an unlinked enrichment must say so");
+    assert(html.includes("then add the enrichment"), "the dose prompt must not name a bottle that is not linked");
+    assert(!html.includes("Selcon"), "no hard-coded product name");
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      enrichment: { hours: 12, doseMl: 1, doseDelayH: 8, batchDoseDelayH: 8,
+        productId: "rae", productName: "Rotifer & Artemia Enrichment", splitDose: false, sourceVesselId: "v1",
+        state: { status: "enriching", hoursElapsed: 8.5, hoursLeft: null, percent: 0, firstDoseDue: true, secondDoseDue: false } },
+    });
+    html = panel._npsTab();
+    assert(html.includes("<strong>Enrichment</strong> · Rotifer &amp; Artemia Enrichment") && html.includes("then add Rotifer &amp; Artemia Enrichment"), "the linked bottle is named");
+    // The shelf: an enrichment-category bottle's tap logs a soak dose, not a feed.
+    const products = panel._config.consumables.products;
+    products.sel = { name: "Selcon", brand: "American Marine", category: "enrichment", bottleMl: 60, remainingMl: 20.5, lowThresholdMl: 0,
+      shelfLifeDaysOpened: 120, history: [], doseMl: 0.5, doseEveryDays: 0, doseTimesPerDay: 2, doseFirstAt: "09:00", doseWindowEnd: "21:00",
+      doseStocking: "medium", doseGuide: {}, doseNote: "", lastDosedAt: "" };
+    const due = { bottleMl: 60, remainingMl: 20.5, percent: 34, usageMlPerDay: 1, daysUntilEmpty: 20.5, low: false, empty: false,
+      expiry: { status: "fresh", daysLeft: 100 }, categoryLabel: "Enrichment (soak)",
+      handDose: { planned: true, ml: 0.5, everyDays: 0, stocking: "medium", guide: { available: false }, note: "",
+                  lastAt: "", cadenceText: "2 a day 09:00–21:00", clock: { available: true, due: true, hoursUntil: 0, hoursOverdue: 0 } } };
+    const card = panel._npsProductCard("sel", products.sel, due);
+    assert(card.includes('data-action="nps-product-dosed" data-id="sel">Soak dose 0.5 ml'), `the enrichment tap must say soak: ${(card.match(/nps-product-dosed[^<]*/) || [])[0]}`);
+    noPlaceholders(card, "enrichment bottle card");
+    // The category is offered even before a summary has served the labels.
+    const served = panel._nps.summary.categories;
+    panel._nps.summary.categories = undefined;
+    assert(panel._npsCategoryLabels().enrichment === "Enrichment (soak)", "the fallback category map must carry enrichment");
+    panel._nps.summary.categories = served;
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

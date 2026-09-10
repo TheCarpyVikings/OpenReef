@@ -1305,6 +1305,52 @@ happened. Tests: `test_nps.py` 172 (1 new — establishing, past
 establishment with no harvest yet, producing inside and past its interval,
 crashed).
 
+### 13.21 0.7.165 — a dose says where it went (2026-09-10)
+
+Reece's screen, again: Selcon on the tank's feed strip and in the feeding
+log — 0.5 ml at 09:45 and 19:23, "by hand", Undo buttons and all — the same
+Selcon dot 0.7.133 was written to remove. 0.7.133's fix was a READ-time
+rule: a bottle currently linked as the hatchery's (or the rotifer soak's)
+enrichment, or as a jar's feed, was "quiet" and its dose rows were skipped.
+But a dose row was `{at, ml, kind: "dose"}` — it never recorded where the
+ml went — so the link was being used as a time machine, and it failed in
+both directions. Switch enrichment products (or lose the link: a stale
+save, a re-created bottle — the settings are the client's, only
+`enrichment.state` is guarded) and every past Selcon soak dose becomes a
+tank feed. Feed Reef Juice to the tank by hand AND link it to a rotifer jar
+and all its tank feeds vanish, because the bottle is quiet. The nutrient
+budget had the same flaw: soak doses counted as tank load at the `other`
+density. Keepers change enrichment products; the strip cannot re-read
+history through whichever bottle is linked today.
+
+Fixed at the source — the row. `_consumable_debit` takes `to` (`tank`,
+`soak` or `jar`, plus `jarId`) and each of the four dose writers stamps
+what it alone knows: the shelf/strip tap → `tank` (or `soak` on an
+`enrichment`-category bottle, or as the tap says — `consumable_log_dose`
+accepts `to`); the hatchery's Enrich / first dose / top-up → `soak`; the
+cultures DHA drops → `soak`; a jar's phyto feed → `jar`. The strip
+(`feed_timeline`), the log (`feed_log`) and the budget (`nutrient_budget`
+→ `usage_ml_per_day(tank_only=True)`) read the row through one helper,
+`dose_feeds_tank`. A row from before 0.7.165 has no stamp and follows the
+old link rule until it ages out of the 30-day window — deliberately NOT a
+one-shot migration, which would have frozen whatever the link happened to
+be at upgrade (Reece's was broken at the time). The links themselves stay
+as write-time pointers (what the Enrich button debits) and as the
+present-tense answer to "what covers this mouth now" (0.7.162). The runway
+still counts every drop: a soak dose empties the bottle just the same.
+
+The bottle knows what it is: a new `enrichment` category (Selcon and
+Reefphyto's Rotifer & Artemia Enrichment ship in it). Its shelf tap reads
+"Soak dose", its cadence is a soak reminder and lands no slots on the tank
+strip, and the hatchery tile names the linked bottle or says *no bottle
+linked — pick one in Settings* instead of the hard-coded "Selcon" that hid
+a broken link (without one the Enrich button debits nothing, silently).
+Tests: `test_nps.py` 177 (2 new — the row contract on the strip, the log
+and the budget, both directions and the legacy fallback; the writers'
+stamps, the WS default and the normaliser round-trip), `test_cultures.py`
+62, `test_panel_nps.mjs` 62 (1 new — the unlinked tile, the Soak dose tap,
+the category label).
+
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 
 Reece's screen: the Species coverage report said *nothing on the shelf
