@@ -3037,7 +3037,7 @@ def test_a_dose_row_says_where_it_went_and_the_strip_reads_the_row():
     # No link at all: stamped rows speak for themselves; the unstamped one is a tank feed (the old rule).
     strip = _tl(now, products=products)
     sel = _by_id(strip, "shelf:selcon:")
-    assert done_ml(sel) == [1] and all(e["status"] == "done" for e in sel), "the legacy row lands, the soak row never does, and an enrichment bottle's cadence plans no tank slots"
+    assert not sel, "an enrichment bottle: the soak row never lands, its unstamped row is a soak dose too (0.7.166), its cadence plans no tank slots"
     assert done_ml(_by_id(strip, "shelf:rj:")) == [1, 2], "the jar dose is not a tank feed"
     # The links (the 0.7.133 rule) now decide the unstamped rows only.
     strip = _tl(now, products=products, quiet_product_ids={"selcon", "rj"})
@@ -3047,13 +3047,39 @@ def test_a_dose_row_says_where_it_went_and_the_strip_reads_the_row():
     log = nps.feed_log(now, products=products, channels={}, quiet_product_ids={"selcon", "rj"})
     assert [(r["productId"], r["ml"]) for r in log["rows"]] == [("rj", 2)]
     log = nps.feed_log(now, products=products, channels={})
-    assert sorted((r["productId"], r["ml"]) for r in log["rows"]) == [("rj", 1), ("rj", 2), ("selcon", 1)]
+    assert sorted((r["productId"], r["ml"]) for r in log["rows"]) == [("rj", 1), ("rj", 2)], "the enrichment bottle's legacy row is not a feed, link or no link"
     # The budget counts only what went in the tank; the runway counts every drop.
     assert nps.usage_ml_per_day(products["rj"], now) == 8.0
     assert nps.usage_ml_per_day(products["rj"], now, tank_only=True) == 3.0
     assert nps.usage_ml_per_day(products["rj"], now, tank_only=True, legacy_tank=False) == 2.0
     assert nps.nutrient_budget({"rj": products["rj"]}, now, 100, 2.0, quiet_product_ids={"rj"})["feedingMlPerDay"] == 2.0
     assert nps.nutrient_budget({"selcon": products["selcon"]}, now, 100, 2.0, quiet_product_ids={"selcon"}) == {"available": False}
+    assert nps.nutrient_budget({"selcon": products["selcon"]}, now, 100, 2.0) == {"available": False}, "and not load either, unlinked"
+    # A plain `other` bottle (a keeper who does dose Selcon into the tank) keeps the link rule.
+    other = {"vits": _product(name="Vitamins", category="other", history=[legacy])}
+    assert done_ml(_by_id(_tl(now, products=other), "shelf:vits:")) == [1]
+    assert not _by_id(_tl(now, products=other, quiet_product_ids={"vits"}), "shelf:vits:")
+
+
+def test_library_enrichment_bottles_migrate_to_the_enrichment_category_once():
+    """Schema 58 (0.7.166): a Selcon or Reefphyto R&A bottle added from the
+    library carried the old ``other`` category; a config saved before 58 has
+    them re-categorised by the library's name + brand. A keeper's later
+    choice (saved at 58+) and a bottle the library never knew are left alone."""
+    def cfg(schema, **products):
+        return {"schemaVersion": schema, "consumables": {"products": products}}
+    out = integration._normalise_core_config(cfg(
+        57, sel=_product(name="Selcon", brand="American Marine", category="other"),
+        rae=_product(name="Rotifer & Artemia Enrichment", brand="Reefphyto", category="other"),
+        mine=_product(name="My vitamins", brand="American Marine", category="other"),
+        rj=_product(name="Reef Juice (live phyto blend)", brand="Reefphyto")))
+    products = out["consumables"]["products"]
+    assert [products[k]["category"] for k in ("sel", "rae", "mine", "rj")] == ["enrichment", "enrichment", "other", "phyto"]
+    assert out["schemaVersion"] == integration.const.CORE_SCHEMA_VERSION == 58
+    kept = integration._normalise_core_config(cfg(58, sel=_product(name="Selcon", brand="American Marine", category="other")))
+    assert kept["consumables"]["products"]["sel"]["category"] == "other", "a choice saved at 58 stands"
+    assert integration._normalise_core_config(cfg(
+        57, sel=_product(name="Selcon", brand="American Marine", category="enrichment")))["consumables"]["products"]["sel"]["category"] == "enrichment"
 
 
 def test_ws_dose_rows_carry_their_destination():

@@ -2112,6 +2112,29 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
     }
 
 
+def _migrate_library_enrichment_bottles(config: dict[str, Any]) -> None:
+    """Schema 58 (0.7.166), once: a bottle added from the library as Selcon or
+    Reefphyto's Rotifer & Artemia Enrichment carried the library's old
+    ``other`` category. The category now decides that its taps are soak doses
+    and its unstamped rows are not tank feeds, so a config saved before 58 has
+    them re-categorised — by the library's own name and brand, never by
+    guesswork. A keeper's later choice (a config saved at 58 or above) and a
+    bottle the library never knew are left alone."""
+    stored = config.get("schemaVersion")
+    if not isinstance(stored, (int, float)) or stored >= 58:
+        return
+    library = {(item.get("name"), item.get("brand")) for item in nps_engine.PRODUCT_LIBRARY
+               if item.get("category") == nps_engine.ENRICHMENT_CATEGORY}
+    products = ((config.get("consumables") or {}).get("products")
+                if isinstance(config.get("consumables"), dict) else None)
+    if not isinstance(products, dict):
+        return
+    for product in products.values():
+        if (isinstance(product, dict) and product.get("category") == "other"
+                and (product.get("name"), product.get("brand")) in library):
+            product["category"] = nps_engine.ENRICHMENT_CATEGORY
+
+
 def _normalise_core_config(settings: Any) -> dict[str, Any]:
     if not isinstance(settings, dict):
         return deepcopy(DEFAULT_CORE_CONFIG)
@@ -2119,6 +2142,8 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         return _legacy_to_core_config(settings)
 
     config = _deep_merge(DEFAULT_CORE_CONFIG, settings)
+    # One-shot migrations read the STORED version before it is re-stamped.
+    _migrate_library_enrichment_bottles(config)
     config["schemaVersion"] = DEFAULT_CORE_CONFIG["schemaVersion"]
 
     tank = config.setdefault("tank", {})

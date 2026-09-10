@@ -1351,6 +1351,29 @@ stamps, the WS default and the normaliser round-trip), `test_cultures.py`
 62, `test_panel_nps.mjs` 62 (1 new — the unlinked tile, the Soak dose tap,
 the category label).
 
+### 13.22 0.7.166 — the bottle's category settles its past too; library bottles fix themselves (2026-09-10)
+
+Reece: "sometimes I will use Selcon, sometimes a different product — I'm
+not using Selcon now." 0.7.165's release note still told him to re-link the
+unused bottle so its pre-stamp rows would leave the log: the fallback for
+unstamped rows was the link rule alone — the very flaw, in miniature. Two
+changes. (1) `legacy_dose_feeds_tank` — the strip, the log and the budget
+read the bottle's category as well as the link for UNSTAMPED rows: an
+`enrichment` bottle's old rows are soak doses, linked or not. Stamped rows
+never pass through it, so the principle holds: a category change can only
+reclassify rows written before 0.7.165, which are aging out. (2) Schema 58:
+a bottle added from the library as Selcon or Reefphyto's Rotifer & Artemia
+Enrichment carried the library's old `other`; a config saved before 58 has
+them re-categorised by the library's own name + brand, once, in
+`_normalise_core_config` before the version is re-stamped — a keeper's
+later choice (saved at 58+) and a bottle the library never knew are left
+alone. Net: nothing to do after updating. Switch products by changing the
+hatchery link when you want the Enrich button to debit the new bottle; the
+unused bottle sits on the shelf saying nothing. Tests: `test_nps.py` 178
+(1 new — the migration; the row test now expects the enrichment bottle's
+legacy row off the strip, the log and the budget, and a plain `other`
+bottle still on the link rule).
+
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 
 Reece's screen: the Species coverage report said *nothing on the shelf

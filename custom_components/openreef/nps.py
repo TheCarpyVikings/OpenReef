@@ -160,6 +160,18 @@ def dose_feeds_tank(row: Any, legacy_tank: bool = True) -> bool:
     return bool(legacy_tank)
 
 
+def legacy_dose_feeds_tank(pid: Any, product: dict[str, Any], quiet: Any) -> bool:
+    """The rule for UNSTAMPED rows (before 0.7.165): a bottle linked to the
+    soak or a jar (``quiet``) did not feed the tank — nor, since 0.7.166, an
+    ``enrichment``-category bottle, linked or not: the keeper switches
+    products, and yesterday's bottle sits on the shelf with no link at all.
+    Stamped rows never come here, so a category change can only reclassify
+    rows that are already aging out."""
+    if str(pid) in {str(q) for q in (quiet or ())}:
+        return False
+    return str((product or {}).get("category") or "") != ENRICHMENT_CATEGORY
+
+
 # --------------------------------------------------------------------------- #
 # The hatchery stocks the shelf (doc §14, 0.7.149): the brine on hand is a
 # shelf entry the keeper never types in. Two physical vessels, two entries,
@@ -1925,7 +1937,8 @@ def nutrient_budget(products: dict[str, Any], now: datetime,
     for pid, product in products.items():
         if not isinstance(product, dict):
             continue
-        daily = usage_ml_per_day(product, now, tank_only=True, legacy_tank=str(pid) not in quiet)
+        daily = usage_ml_per_day(product, now, tank_only=True,
+                                 legacy_tank=legacy_dose_feeds_tank(pid, product, quiet))
         if not daily:
             continue
         density = CATEGORY_NUTRIENTS.get(str(product.get("category")),
@@ -2198,7 +2211,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
     # 0.7.165 every dose row says where it went, so the link only decides the
     # rows from before the stamp — switching enrichment products no longer
     # rewrites the past. An enrichment-category bottle's cadence is a soak
-    # reminder, not a tank plan: it lands no slots on the strip.
+    # reminder, not a tank plan: it lands no slots on the strip, and its
+    # unstamped rows are soak doses too, linked or not (0.7.166).
     quiet = {str(pid) for pid in (quiet_product_ids or ())}
 
     ev = _event
@@ -2266,7 +2280,7 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                else {"unit": "", "n": 0.0, "firstAt": "", "perDay": 0, "slots": [], "text": ""})
         name = str(product.get("name") or pid)
         source = f"shelf:{pid}"
-        legacy_tank = pid not in quiet
+        legacy_tank = legacy_dose_feeds_tank(pid, product, quiet)
         done: list[dict[str, Any]] = []
         for item in (product.get("history") if isinstance(product.get("history"), list) else []):
             if (not isinstance(item, dict) or item.get("kind") != "dose" or item.get("undoneAt")
@@ -2691,7 +2705,7 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
             continue
         name = str(product.get("name") or pid)
         source = f"shelf:{pid}"
-        legacy_tank = pid not in quiet
+        legacy_tank = legacy_dose_feeds_tank(pid, product, quiet)
         for item in (product.get("history") if isinstance(product.get("history"), list) else []):
             if not dose_feeds_tank(item, legacy_tank):
                 continue
