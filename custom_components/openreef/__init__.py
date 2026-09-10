@@ -12343,7 +12343,7 @@ async def _async_dosing_ha_executor(
         if any(r.get("severity") == "block" for r in reasons):
             continue
         if await _async_dosing_ha_run(hass, entry, config, cid, channel, per_dose):
-            _dosing_record_event(channel, "dose", f"HA-timed dose started: {per_dose:g} ml")
+            _dosing_record_event(channel, "dose", f"HA-timed dose started: {per_dose:g} ml", ml=per_dose)
             changed = True
     return changed
 
@@ -13156,9 +13156,17 @@ async def _async_dosing_press(hass: HomeAssistant, channel: dict[str, Any], role
     return True
 
 
-def _dosing_record_event(channel: dict[str, Any], kind: str, detail: str) -> None:
+def _dosing_record_event(channel: dict[str, Any], kind: str, detail: str,
+                         ml: float | None = None) -> None:
+    """One line on the channel's own event feed. ``ml`` — a dose OpenReef
+    itself started, with a known volume — lets the feeding log count it
+    (doc §13.19); a firmware "requested" manual dose carries none, since the
+    guard chain may still refuse it."""
     events = channel.setdefault("events", [])
-    events.insert(0, {"at": datetime.now(timezone.utc).isoformat(), "kind": kind, "detail": detail[:200]})
+    row: dict[str, Any] = {"at": datetime.now(timezone.utc).isoformat(), "kind": kind, "detail": detail[:200]}
+    if ml is not None:
+        row["ml"] = round(float(ml), 2)
+    events.insert(0, row)
     del events[DOSING_EVENTS_MAX:]
 
 
@@ -13397,7 +13405,7 @@ async def websocket_dosing_dose_now(
             connection.send_error(msg["id"], "not_bound",
                                   "Bind the pump switch entity and calibrate the flow first")
             return
-        _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose started")
+        _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose started", ml=ml)
         config = await _async_save_config(hass, entry, config)
         _awc_send(connection, msg, hass, config, started=True)
         return
@@ -16497,7 +16505,11 @@ async def websocket_cultures_bottle(
     _awc_send(connection, msg, hass, config)
 
 
-@websocket_api.websocket_command({vol.Required("type"): "openreef/nps_summary"})
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_summary",
+    # The feeding log's window in local days (doc §13.19); today counts as one.
+    vol.Optional("log_days"): vol.All(vol.Coerce(int), vol.Range(min=1, max=nps_engine.FEED_LOG_DAYS_MAX)),
+})
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_nps_summary(
@@ -16719,6 +16731,9 @@ async def websocket_nps_summary(
     quiet_products.update(str((jar.get("feed") or {}).get("productId") or "")
                           for jar in cultures_cfg["jars"].values() if isinstance(jar, dict))
     quiet_products.discard("")
+    # Species whose harvest fills a fridge bottle: the bottle feeds the tank.
+    bottle_species = {sid for sid in cultures_engine.species_ids()
+                      if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0}
     timeline = nps_engine.feed_timeline(
         now_local, products=products, channels=channels,
         awc=_awc_cfg(config) or {}, cultures=cultures_cfg if cultures_cfg.get("enabled") else None,
@@ -16726,10 +16741,16 @@ async def websocket_nps_summary(
         lighting=spawning.lighting_window_summary(_effective_lighting_cfg(config) or {}, now_local),
         tank_l=_awc_effective_tank_l(config),
         fx_channel_id=str(fx.get("channelId") or ""), fx_enabled=bool(fx.get("enabled")),
-        culture_bottle_species={sid for sid in cultures_engine.species_ids()
-                                if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0},
+        culture_bottle_species=bottle_species,
         quiet_product_ids=quiet_products,
         truce=_nps_truce_timeline_cfg(config))
+    # The feeding log (doc §13.19): the same ledgers swept across days, as a
+    # list. Stamped feeds are feeds whatever the block's enabled flag says now.
+    feed_log = nps_engine.feed_log(
+        now_local, products=products, channels=channels, cultures=cultures_cfg,
+        hatchery=hatchery_cfg, brine_feeds=brine_feeds,
+        days=msg.get("log_days") or nps_engine.FEED_LOG_DAYS_DEFAULT,
+        quiet_product_ids=quiet_products, culture_bottle_species=bottle_species)
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
         "shelf": {
@@ -16738,6 +16759,7 @@ async def websocket_nps_summary(
             "live": live_products,
         },
         "timeline": timeline,
+        "feedLog": feed_log,
         "library": [dict(item) for item in nps_engine.PRODUCT_LIBRARY],
         "categories": {key: nps_engine.category_label(key) for key in CONSUMABLE_CATEGORIES},
         # Feed-exchange (Stage B): the hatchery card's whole state — backend

@@ -2328,3 +2328,203 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         "counts": counts,
         "text": text,
     }
+
+
+# --------------------------------------------------------------------------- #
+# The feeding log (doc §13.19): every mouthful that went into the tank, as a
+# list. The strip shows one day as marks; this sweeps the same ledgers across
+# days and hands them over newest first — the shelf's dose/pump rows, the
+# hatchery's stamped hand feeds, the rotifer bottle, the pods harvested
+# straight into the display, and the doses OpenReef itself ran on a pump.
+# Read-only: nothing is written, so there is nothing new to guard on save.
+# --------------------------------------------------------------------------- #
+FEED_LOG_DAYS_DEFAULT = 7
+FEED_LOG_DAYS_MAX = 90
+FEED_LOG_MAX = 300           # rows a summary carries — the ledgers keep fewer anyway
+FEED_LOG_HOW: tuple[str, ...] = ("hand", "pump")
+
+
+def _log_row(**fields: Any) -> dict[str, Any]:
+    """One log row, every field present. ``at`` is the ledger's own stamp,
+    verbatim, so an undo can name the row exactly as the strip does."""
+    base = {"id": "", "at": "", "date": "", "time": "", "how": "hand", "source": "", "name": "",
+            "productId": "", "ml": None, "from": "", "via": "", "slot": "", "note": "",
+            "undone": False, "undoneAt": None, "undoable": False}
+    base.update(fields)
+    return base
+
+
+def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[str, Any],
+             cultures: dict[str, Any] | None = None, hatchery: dict[str, Any] | None = None,
+             brine_feeds: list[dict[str, Any]] | None = None,
+             days: Any = FEED_LOG_DAYS_DEFAULT,
+             quiet_product_ids: Any = None, culture_bottle_species: Any = None,
+             limit: int = FEED_LOG_MAX) -> dict[str, Any]:
+    """The feeds of the last ``days`` local days (today counts as one), newest
+    first, with per-day counts and the plain-English line. ``now_local`` must
+    be tz-aware in the keeper's zone — every stamp is bucketed by that day.
+
+    Taken-back feeds stay in the list flagged ``undone`` (a log that hides its
+    reversals is not a log) but never count. Bottles that feed the enrichment
+    soak or a culture jar (``quiet_product_ids``) never appear — their doses
+    are not tank feeds (0.7.133)."""
+    tz = now_local.tzinfo
+    try:
+        days = int(_f(days)) or FEED_LOG_DAYS_DEFAULT
+    except (TypeError, ValueError):
+        days = FEED_LOG_DAYS_DEFAULT
+    days = max(1, min(FEED_LOG_DAYS_MAX, days))
+    today = now_local.date()
+    since = today - timedelta(days=days - 1)
+    quiet = {str(pid) for pid in (quiet_product_ids or ())}
+    bottle_species = set(culture_bottle_species or ())
+    undo_window = timedelta(minutes=HAND_DOSE_UNDO_MIN)
+    rows: list[tuple[datetime, dict[str, Any]]] = []
+
+    def add(iso: Any, **fields: Any) -> None:
+        parsed = _parse_iso(iso)
+        if parsed is None:
+            return
+        try:
+            local = parsed.astimezone(tz) if tz is not None else parsed
+        except (TypeError, ValueError):
+            return
+        day = local.date()
+        if day < since or day > today:
+            return
+        row = _log_row(at=str(iso), date=day.isoformat(), time=f"{local.hour:02d}:{local.minute:02d}", **fields)
+        row["id"] = f"{row['source']}@{row['at']}"
+        # What the keeper can still take back (doc §13.16): a logged row from
+        # the shelf, the brine log or the rotifer bottle, inside the window.
+        row["undoable"] = bool(fields.get("undoable") and not row["undone"]
+                               and timedelta(0) <= now_local - parsed <= undo_window)
+        rows.append((parsed, row))
+
+    # --- Pumps: which shelf bottle each food channel draws from (its pump
+    # rows are the record), and the doses OpenReef timed itself otherwise.
+    bottle_channel: dict[str, str] = {}
+    unrecorded: list[str] = []
+    for cid in sorted(channels):
+        ch = channels[cid]
+        if not isinstance(ch, dict) or ch.get("chemical") not in ("food", "livefood"):
+            continue
+        name = str(ch.get("name") or cid)
+        reservoir = ch.get("reservoir") if isinstance(ch.get("reservoir"), dict) else {}
+        pid = str(reservoir.get("productId") or "")
+        bound = bool(pid and reservoir.get("productIsBottle") and isinstance(products.get(pid), dict) and pid not in quiet)
+        if bound:
+            bottle_channel.setdefault(pid, name)
+            continue
+        source = f"channel:{cid}"
+        driver = ch.get("driver") if isinstance(ch.get("driver"), dict) else {}
+        ha_timed = str(driver.get("type") or "") == "ha_switch_timed"
+        for item in (ch.get("events") if isinstance(ch.get("events"), list) else []):
+            # Only a run OpenReef started with a known volume is a feed here;
+            # a firmware "requested" manual dose may still be refused.
+            if not isinstance(item, dict) or item.get("kind") not in ("dose", "manual_dose") or item.get("ml") is None:
+                continue
+            add(item.get("at"), how="pump", source=source, name=name, ml=round(_f(item.get("ml")), 2),
+                note="manual dose" if item.get("kind") == "manual_dose" else "")
+        sched = ch.get("schedule") if isinstance(ch.get("schedule"), dict) else {}
+        if ch.get("enabled") is not False and sched.get("enabled") and _f(sched.get("mlPerDay")) > 0 and not ha_timed:
+            unrecorded.append(name)
+
+    # --- The shelf: hand-logged doses and pump debits, per bottle.
+    for pid in sorted(products):
+        product = products[pid]
+        if not isinstance(product, dict) or pid in quiet:
+            continue
+        name = str(product.get("name") or pid)
+        source = f"shelf:{pid}"
+        for item in (product.get("history") if isinstance(product.get("history"), list) else []):
+            if not isinstance(item, dict) or item.get("kind") not in ("dose", "pump"):
+                continue
+            pumped = item.get("kind") == "pump"
+            add(item.get("at"), how="pump" if pumped else "hand", source=source, name=name, productId=pid,
+                ml=round(_f(item.get("ml")), 2), via=bottle_channel.get(pid, "") if pumped else "",
+                slot=str(item.get("slot") or ""), undone=bool(item.get("undoneAt")),
+                undoneAt=item.get("undoneAt") or None, undoable=not pumped)
+
+    # --- Hand-fed brine: the hatchery's own stamped feeds (0.7.131), from the
+    # container or the fridge bottle — whether or not an exchange pump exists.
+    for item in (brine_feeds or []):
+        if not isinstance(item, dict):
+            continue
+        add(item.get("at"), how="hand", source="brine", name="Live brine", ml=round(_f(item.get("ml")), 1) or None,
+            **{"from": "bottle" if item.get("from") == "bottle" else "container"},
+            slot=str(item.get("slot") or ""), undone=bool(item.get("undoneAt")),
+            undoneAt=item.get("undoneAt") or None, undoable=True)
+
+    # --- Cultures: pods harvested straight into the display (Q6), and the
+    # rotifer bottle's feeds. A rotifer harvest fills the bottle, not the tank.
+    cultures = cultures if isinstance(cultures, dict) else {}
+    jars = cultures.get("jars") if isinstance(cultures.get("jars"), dict) else {}
+    for jid in sorted(jars):
+        jar = jars[jid]
+        if not isinstance(jar, dict) or str(jar.get("species") or "") in bottle_species:
+            continue
+        name = f"{jar.get('name') or jid} harvest"
+        for item in (jar.get("history") if isinstance(jar.get("history"), list) else []):
+            if isinstance(item, dict) and item.get("event") == "harvest":
+                add(item.get("at"), how="hand", source=f"culture:{jid}", name=name,
+                    ml=round(_f(item.get("ml")), 1) or None, note="harvested into the display")
+    bottle = cultures.get("bottle") if isinstance(cultures.get("bottle"), dict) else {}
+    for item in (bottle.get("history") if isinstance(bottle.get("history"), list) else []):
+        if isinstance(item, dict) and item.get("event") == "fed_tank":
+            add(item.get("at"), how="hand", source="cultures-bottle", name="Rotifers from the bottle",
+                ml=round(_f(item.get("ml")), 1) or None, slot=str(item.get("slot") or ""),
+                undone=bool(item.get("undoneAt")), undoneAt=item.get("undoneAt") or None, undoable=True)
+
+    # --- Newest first, the cap, the days, the counts, the line.
+    rows.sort(key=lambda pair: (pair[0], pair[1]["source"]), reverse=True)
+    truncated = len(rows) > max(1, int(limit))
+    kept = [row for _, row in rows[:max(1, int(limit))]]
+    per_day: list[dict[str, Any]] = []
+    by_day: dict[str, dict[str, Any]] = {}
+    for row in kept:
+        bucket = by_day.get(row["date"])
+        if bucket is None:
+            bucket = by_day[row["date"]] = {"date": row["date"], "feeds": 0, "hand": 0, "pump": 0, "undone": 0}
+            per_day.append(bucket)
+        if row["undone"]:
+            bucket["undone"] += 1
+            continue
+        bucket["feeds"] += 1
+        bucket[row["how"]] += 1
+    counts = {
+        "feeds": sum(d["feeds"] for d in per_day),
+        "hand": sum(d["hand"] for d in per_day),
+        "pump": sum(d["pump"] for d in per_day),
+        "undone": sum(d["undone"] for d in per_day),
+    }
+    span = "today" if days == 1 else f"in the last {days} days"
+    if not counts["feeds"] and not counts["undone"]:
+        text = (f"No feeds logged {span} — every Fed tap, logged dose and pump run lands here."
+                if days == 1 else f"No feeds logged {span}.")
+    else:
+        bits = []
+        if counts["hand"]:
+            bits.append(f"{counts['hand']} by hand")
+        if counts["pump"]:
+            bits.append(f"{counts['pump']} pumped")
+        text = f"{counts['feeds']} feed{'s' if counts['feeds'] != 1 else ''} {span}"
+        if bits:
+            text += " — " + ", ".join(bits)
+        if counts["undone"]:
+            text += f" · {counts['undone']} taken back"
+        text += "."
+    if unrecorded:
+        names = ", ".join(unrecorded[:3]) + (f" +{len(unrecorded) - 3}" if len(unrecorded) > 3 else "")
+        text += (f" {names}: the firmware runs its own clock, so each dose is logged only when the pump"
+                 f" draws from a bottle on the shelf.")
+    return {
+        "date": today.isoformat(),
+        "since": since.isoformat(),
+        "days": days,
+        "rows": kept,
+        "perDay": per_day,
+        "counts": counts,
+        "truncated": truncated,
+        "unrecorded": unrecorded,
+        "text": text,
+    }

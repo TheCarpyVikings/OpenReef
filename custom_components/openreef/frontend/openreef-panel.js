@@ -82,7 +82,9 @@ class OpenReefPanel extends HTMLElement {
       speaking: false, keysOpen: false,
     };
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
-    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "" };
+    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "",
+                  // The feeding log's window (local days) and how many rows are unfolded (doc §13.19).
+                  logDays: 7, logShown: 10 };
     this._cultures = { summary: null, at: 0, loading: false, error: "", message: "", demo: false };
     this._cooling = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
@@ -1864,6 +1866,9 @@ class OpenReefPanel extends HTMLElement {
         "Skipped — the cadence holds, the next slot stands.");
       if (action === "nps-timeline-dosenow") this._doserDoseNow(id, Number(target.dataset.ml));
       if (action === "nps-timeline-undo") this._npsTimelineUndo(target.dataset.kind, id, target.dataset.at);
+      // The feeding log (doc §13.19): the window, and unfolding older rows.
+      if (action === "nps-log-days") this._npsLogDays(Number(id));
+      if (action === "nps-log-more") { this._nps.logShown = (Number(this._nps.logShown) || 10) + 20; this._render(); }
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded(id);
       if (action === "nps-hatch-start") this._npsCall(
@@ -10245,7 +10250,7 @@ class OpenReefPanel extends HTMLElement {
     if (!force && st.summary && Date.now() - st.at < 30000) return;
     st.loading = true;
     try {
-      st.summary = await this._callWS({ type: "openreef/nps_summary" });
+      st.summary = await this._callWS({ type: "openreef/nps_summary", log_days: Math.max(1, Math.min(90, Number(st.logDays) || 7)) });
       st.error = "";
     } catch (err) {
       st.error = (err && err.message) || "Could not load the food shelf.";
@@ -11401,6 +11406,7 @@ class OpenReefPanel extends HTMLElement {
       state: { nextRun: new Date(now + 37 * 60000).toISOString() },
     };
     npsSummary.timeline = this._npsDemoTimeline();
+    npsSummary.feedLog = this._npsDemoFeedLog();
     return { config, doserSummary, npsSummary, awcSummary };
   }
 
@@ -12058,6 +12064,152 @@ class OpenReefPanel extends HTMLElement {
         ${lines.map((l) => `<small>${l}</small>`).join("<br>")}
         <div class="button-row" style="margin-top:8px;">${actions.join("")}</div>
       </div>`;
+  }
+
+  // The feeding log (doc §13.19): every mouthful that went into the tank, as
+  // a list. The backend sweeps the strip's ledgers across days (nps.feed_log,
+  // folded into the summary); this groups the rows by day and offers the
+  // strip's own undo on today's rows — same ledger, same stamp, same command.
+  _npsLogDays(days) {
+    const st = this._nps;
+    st.logDays = Math.max(1, Math.min(90, Number(days) || 7));
+    st.logShown = 10;
+    if (st.demo) {
+      if (st.summary) st.summary.feedLog = this._npsDemoFeedLog();
+      this._render();
+      return;
+    }
+    st.at = 0;
+    this._npsLoadSummary(true);
+  }
+
+  // Day headings from the backend's LOCAL dates — no browser-zone drift: the
+  // row's date and the summary's "today" come from the same clock.
+  _npsLogDayLabel(dateIso, todayIso) {
+    const parse = (iso) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+      return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+    };
+    const day = parse(dateIso);
+    if (!day) return dateIso ? String(dateIso) : "Undated";
+    if (dateIso === todayIso) return "Today";
+    const today = parse(todayIso);
+    if (today && Math.round((today.getTime() - day.getTime()) / 86400000) === 1) return "Yesterday";
+    return day.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  }
+
+  _npsFeedLogPanel() {
+    const st = this._nps || {};
+    const log = st.summary && st.summary.feedLog;
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const days = Number(st.logDays) || 7;
+    const shown = Number(st.logShown) || 10;
+    const ranges = [[1, "Today"], [7, "7 days"], [30, "30 days"]];
+    const head = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+        <p class="eyebrow" style="margin:0;">Feeding log</p>
+        <div class="button-row nps-log-controls">
+          ${ranges.map(([n, label]) => `<button class="${days === n ? "primary" : "secondary"} compact-button" data-action="nps-log-days" data-id="${n}">${label}</button>`).join("")}
+        </div>
+      </div>`;
+    if (!log || !Array.isArray(log.rows)) {
+      return `
+      <article class="panel stack nps-log">
+        ${head}
+        <p class="hint">${st.loading ? "Loading the log…" : "Every Fed tap, logged dose and pump run lands here once the summary loads."}</p>
+      </article>`;
+    }
+    const rows = log.rows.slice(0, shown);
+    const perDay = new Map((Array.isArray(log.perDay) ? log.perDay : []).map((d) => [d.date, d]));
+    const groups = [];
+    for (const row of rows) {
+      const last = groups[groups.length - 1];
+      if (last && last.date === row.date) last.rows.push(row);
+      else groups.push({ date: row.date, rows: [row] });
+    }
+    const dayHead = (date) => {
+      const d = perDay.get(date) || {};
+      const n = Number(d.feeds) || 0;
+      const bits = [];
+      if (Number(d.hand)) bits.push(`${esc(d.hand)} by hand`);
+      if (Number(d.pump)) bits.push(`${esc(d.pump)} pumped`);
+      return `${esc(this._npsLogDayLabel(date, log.date))} · ${n} feed${n === 1 ? "" : "s"}${bits.length ? ` (${bits.join(", ")})` : ""}`;
+    };
+    const rowHtml = (row) => {
+      const src = String(row.source || "");
+      const kind = src.startsWith("shelf:") ? "shelf" : src === "brine" ? "brine" : src === "cultures-bottle" ? "bottle" : "";
+      const pid = src.startsWith("shelf:") ? src.slice(6) : "";
+      const details = [];
+      if (row.slot) details.push(`filed as the ${esc(row.slot)} feed`);
+      if (row.from) details.push(row.from === "bottle" ? "from the fridge bottle" : "from the container");
+      if (row.via) details.push(`via ${esc(row.via)}`);
+      if (row.note) details.push(esc(row.note));
+      if (row.undone) details.push("taken back");
+      const tone = row.undone ? "undone" : row.how === "pump" ? "pump" : "control";
+      const pill = row.undone ? "undone" : row.how === "pump" ? "pumped" : "by hand";
+      const undo = row.undoable && kind
+        ? `<button class="secondary compact-button" data-action="nps-timeline-undo" data-kind="${kind}" data-id="${esc(pid)}" data-at="${esc(row.at)}" title="Takes this feed back — the ml returns where it came from and the strip's mark reopens">Undo</button>`
+        : "";
+      return `
+          <div class="activity-item nps-log-row ${tone}">
+            <span>${esc(row.time)}</span>
+            <strong>${row.how === "pump" ? "⚙︎" : "✋"} ${esc(row.name)}${row.ml != null ? ` · ${esc(row.ml)} ml` : ""}${details.length ? ` <small class="nps-log-detail">${details.join(" · ")}</small>` : ""}</strong>
+            <span class="nps-log-aside"><span class="pill nps-tl-pill${row.undone ? " undone" : ""}">${pill}</span>${undo}</span>
+          </div>`;
+    };
+    const body = groups.map((g) => `
+        <p class="eyebrow nps-log-day">${dayHead(g.date)}</p>
+        <div class="activity-list log-list nps-log-list">${g.rows.map(rowHtml).join("")}</div>`).join("");
+    const more = log.rows.length > rows.length
+      ? `<div class="button-row"><button class="secondary compact-button" data-action="nps-log-more">Show more (${log.rows.length - rows.length} older)</button></div>`
+      : log.truncated ? `<p class="muted">Showing the newest ${esc(log.rows.length)} — the ledgers hold the rest.</p>` : "";
+    return `
+      <article class="panel stack nps-log">
+        ${head}
+        ${body}
+        <small>${esc(log.text)}</small>
+        ${more}
+      </article>`;
+  }
+
+  // The demo's log: a few days of the staged mixed tank, newest first, in the
+  // backend's row shape (nps.feed_log) so the panel renders it unchanged.
+  _npsDemoFeedLog() {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const dateOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const pattern = [
+      [6 * 60 + 5, "hand", "shelf:demo_pods", "Copepods", "demo_pods", 5, {}],
+      [8 * 60 + 45, "pump", "shelf:demo_phyto", "Phyto", "demo_phyto", 1.5, { via: "Phyto pump" }],
+      [11 * 60 + 10, "hand", "brine", "Live brine", "", 250, { from: "container", slot: "11:00" }],
+      [14 * 60 + 2, "hand", "shelf:demo_pods", "Copepods", "demo_pods", 5, {}],
+      [16 * 60 + 20, "hand", "brine", "Live brine", "", 250, { from: "bottle", slot: "16:00" }],
+      [18 * 60 + 30, "pump", "channel:demo_zoo_pump", "Zooplankton pump", "", 4.5, {}],
+      [20 * 60 + 34, "hand", "shelf:demo_reef_juice", "Reef Juice", "demo_reef_juice", 3, {}],
+      [22 * 60 + 15, "hand", "shelf:demo_pods", "Copepods", "demo_pods", 5, {}],
+    ];
+    const days = Math.max(1, Math.min(90, Number(this._nps && this._nps.logDays) || 7));
+    const rows = [];
+    const perDay = [];
+    for (let back = 0; back < Math.min(3, days); back += 1) {
+      const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back);
+      const date = dateOf(day);
+      const bucket = { date, feeds: 0, hand: 0, pump: 0, undone: 0 };
+      pattern.filter(([min]) => back > 0 || min <= nowMin).slice().reverse().forEach(([min, how, source, name, productId, ml, extra]) => {
+        const at = new Date(day.getFullYear(), day.getMonth(), day.getDate(), Math.floor(min / 60), min % 60).toISOString();
+        rows.push({ id: `${source}@${at}`, at, date, time: `${pad(Math.floor(min / 60))}:${pad(min % 60)}`, how, source, name, productId, ml,
+          from: extra.from || "", via: extra.via || "", slot: extra.slot || "", note: "", undone: false, undoneAt: null, undoable: false });
+        bucket.feeds += 1;
+        bucket[how] += 1;
+      });
+      if (bucket.feeds) perDay.push(bucket);
+    }
+    const counts = { feeds: rows.length, hand: rows.filter((r) => r.how === "hand").length, pump: rows.filter((r) => r.how === "pump").length, undone: 0 };
+    const since = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1));
+    const span = days === 1 ? "today" : `in the last ${days} days`;
+    return { date: dateOf(now), since: dateOf(since), days, rows, perDay, counts, truncated: false, unrecorded: [],
+      text: counts.feeds ? `${counts.feeds} feed${counts.feeds === 1 ? "" : "s"} ${span} — ${counts.hand} by hand, ${counts.pump} pumped.` : `No feeds logged ${span}.` };
   }
 
   // The Feeding hub's strip (doc §13.8 Q5a): hand-feeders with zero pumps
@@ -14217,7 +14369,7 @@ const rigSteps = [
 
     const hatcheryPanel = this._hatcheryPanel(true);
 
-    return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${this._npsStatusCards()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}</section>`;
+    return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${this._npsStatusCards()}${this._npsFeedLogPanel()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}</section>`;
   }
 
   // The Helm (0.7.72, Reece's pick — option C): five task groups replace the
@@ -30766,6 +30918,16 @@ const rigSteps = [
         .nps-tl-card { border: 1px solid #294055; border-radius: 10px; padding: 10px 12px; margin-top: 8px; background: #0f1b28; }
         .nps-tl-late { display: inline-flex; gap: 6px; align-items: center; }
         .nps-tl-late input[type="time"] { width: auto; min-width: 0; padding: 4px 6px; }
+        /* The feeding log (doc §13.19): the strip's ledgers as a list, by day. */
+        .nps-log-controls { flex-wrap: wrap; }
+        .nps-log-day { margin: 4px 0 0; }
+        .nps-log-list .activity-item { grid-template-columns: minmax(52px, .1fr) 1fr auto; padding: 7px 0; }
+        .nps-log-row.pump strong { color: #a5f3fc; }
+        .nps-log-row.undone strong { text-decoration: line-through; opacity: .55; }
+        .nps-log-detail { color: #8da2ba; font-weight: 500; }
+        .nps-log-aside { display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end; }
+        .nps-log-list .pill { color: #dbeafe; }
+        .nps-log-list .pill.undone { color: #94a3b8; }
         .maintenance-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; gap: 4px; }
         .maintenance-steps label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; font-size: 13px; }
         .maintenance-steps input[type="checkbox"] { margin-top: 2px; flex: 0 0 auto; }

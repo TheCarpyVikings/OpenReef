@@ -2069,5 +2069,106 @@ test("hatchery audit: soak actions and supply advice respect the current batch",
   } finally { restore(); }
 });
 
+test("the feeding log lists every mouthful by day, with undo on today's rows and a range picker", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};                    // the fetch and the range switch re-render; no DOM here
+    // The summary fetch names the window.
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return summaryFixture(); };
+    panel._nps.logDays = 30;
+    panel._nps.at = 0;
+    await panel._npsLoadSummary(true);
+    assert(calls.length === 1 && calls[0].type === "openreef/nps_summary" && calls[0].log_days === 30, "the fetch carries log_days");
+    panel._nps.logDays = 7;
+    panel._nps.logShown = 10;
+    // The backend's rows (nps.feed_log): three days, hand and pump, one taken back.
+    const row = (fields) => ({ id: "", at: "", date: "2026-08-13", time: "00:00", how: "hand", source: "", name: "", productId: "",
+      ml: null, from: "", via: "", slot: "", note: "", undone: false, undoneAt: null, undoable: false, ...fields });
+    panel._nps.summary.feedLog = {
+      date: "2026-08-13", since: "2026-08-07", days: 7,
+      rows: [
+        row({ at: "2026-08-13T11:34:00+00:00", time: "11:34", source: "shelf:rj", name: "Reef Juice", productId: "rj", ml: 2, slot: "11:00", undoable: true }),
+        row({ at: "2026-08-13T11:10:00+00:00", time: "11:10", source: "brine", name: "Live brine", ml: 250, from: "container", undoable: true }),
+        row({ at: "2026-08-13T09:05:00+00:00", time: "09:05", source: "brine", name: "Live brine", ml: 250, from: "bottle", undone: true, undoneAt: "2026-08-13T09:20:00+00:00" }),
+        row({ at: "2026-08-13T08:45:00+00:00", time: "08:45", how: "pump", source: "shelf:phyto", name: "Phyto", productId: "phyto", ml: 1.5, via: "Phyto pump" }),
+        row({ at: "2026-08-13T06:05:00+00:00", time: "06:05", source: "culture:pods", name: "Pod tub harvest", ml: 300, note: "harvested into the display" }),
+        row({ at: "2026-08-12T20:30:00+00:00", date: "2026-08-12", time: "20:30", source: "shelf:rj", name: "Reef Juice", productId: "rj", ml: 2, undoable: true }),
+        row({ at: "2026-08-12T10:00:00+00:00", date: "2026-08-12", time: "10:00", source: "cultures-bottle", name: "Rotifers from the bottle", ml: 40, undoable: true }),
+        row({ at: "2026-08-10T16:00:00+00:00", date: "2026-08-10", time: "16:00", source: "brine", name: "Live brine", ml: 250, from: "container" }),
+      ],
+      perDay: [
+        { date: "2026-08-13", feeds: 4, hand: 3, pump: 1, undone: 1 },
+        { date: "2026-08-12", feeds: 2, hand: 2, pump: 0, undone: 0 },
+        { date: "2026-08-10", feeds: 1, hand: 1, pump: 0, undone: 0 },
+      ],
+      counts: { feeds: 7, hand: 6, pump: 1, undone: 1 }, truncated: false, unrecorded: [],
+      text: "7 feeds in the last 7 days — 6 by hand, 1 pumped · 1 taken back.",
+    };
+    let html = panel._npsFeedLogPanel();
+    assert(html.includes("Feeding log"), "the panel has its eyebrow");
+    // Grouped by day, newest first, each day with its counts; the weekday
+    // label comes from the backend's local date, whatever the browser's zone.
+    const today = html.indexOf("Today · 4 feeds (3 by hand, 1 pumped)");
+    const yesterday = html.indexOf("Yesterday · 2 feeds (2 by hand)");
+    const monday = html.search(/Mon(day)?,? (10 Aug|Aug 10) · 1 feed \(1 by hand\)/);
+    assert(today >= 0 && yesterday > today && monday > yesterday, `days in order, newest first: ${today} ${yesterday} ${monday}`);
+    // Rows: the clock, the glyph, the name, the ml, the story, the pill.
+    assert(html.includes("<span>11:34</span>") && html.includes("✋ Reef Juice · 2 ml") && html.includes("filed as the 11:00 feed"), "a shelf dose row");
+    assert(html.includes("✋ Live brine · 250 ml") && html.includes("from the container") && html.includes("from the fridge bottle"), "brine rows say where from");
+    assert(html.includes("⚙︎ Phyto · 1.5 ml") && html.includes("via Phyto pump") && html.includes(">pumped</span>"), "a pumped row names the pump");
+    assert(html.includes("harvested into the display") && html.includes(">by hand</span>"), "the harvest row keeps its note");
+    // Undo only where the engine allows it — by ledger and by stamp, the strip's own command.
+    assert(html.includes('data-action="nps-timeline-undo" data-kind="shelf" data-id="rj" data-at="2026-08-13T11:34:00+00:00"'), "the shelf row can be undone");
+    assert(html.includes('data-kind="brine" data-id="" data-at="2026-08-13T11:10:00+00:00"'), "the brine row too");
+    assert(html.includes('data-kind="bottle" data-id="" data-at="2026-08-12T10:00:00+00:00"'), "and the rotifer bottle");
+    assert(!html.includes('data-at="2026-08-13T08:45:00+00:00"') && !html.includes('data-at="2026-08-10T16:00:00+00:00"'), "pump rows and old rows carry no undo");
+    // A taken-back row stays, struck through and named.
+    assert(html.includes("nps-log-row undone") && html.includes(">undone</span>") && html.includes("taken back"), "the undone row is flagged");
+    assert(html.includes("7 feeds in the last 7 days"), "the honesty line");
+    // Range chips, and the fold.
+    assert(html.includes('class="primary compact-button" data-action="nps-log-days" data-id="7">7 days') && html.includes('data-action="nps-log-days" data-id="1">Today') && html.includes('data-id="30">30 days'), "range chips");
+    assert(!html.includes("nps-log-more"), "eight rows fit the default fold");
+    panel._nps.logShown = 3;
+    html = panel._npsFeedLogPanel();
+    assert(html.includes("Show more (5 older)") && !html.includes("Yesterday"), "the fold hides older rows and their days");
+    noPlaceholders(html, "feeding log");
+    // The NPS tab carries it, after the status cards and before the pumps.
+    panel._nps.logShown = 10;
+    const tab = panel._npsTab();
+    const at = (needle) => tab.indexOf(needle);
+    assert(at('>Feeding log</p>') > at('>Feeding station</p>') && at('>Feeding log</p>') < at('>Food pumps</p>'), "the log sits under the station, above the pumps");
+    // A new range reloads with the new window and folds the list again.
+    const reloads = [];
+    panel._npsLoadSummary = async (force) => { reloads.push({ force, days: panel._nps.logDays }); };
+    panel._nps.logShown = 30;
+    panel._npsLogDays(30);
+    assert(reloads.length === 1 && reloads[0].force === true && reloads[0].days === 30 && panel._nps.logShown === 10, "a new range reloads");
+    // Zero-state.
+    panel._nps.summary.feedLog = { date: "2026-08-13", since: "2026-08-13", days: 1, rows: [], perDay: [],
+      counts: { feeds: 0, hand: 0, pump: 0, undone: 0 }, truncated: false, unrecorded: [],
+      text: "No feeds logged today — every Fed tap, logged dose and pump run lands here." };
+    html = panel._npsFeedLogPanel();
+    assert(html.includes("No feeds logged today") && !html.includes("activity-item"), "zero-state");
+    // No summary yet: the hint, not a crash.
+    panel._nps.summary = null;
+    assert(panel._npsFeedLogPanel().includes("once the summary loads"), "no summary, no rows");
+    // The demo stages a log in the backend's shape, newest first, and the
+    // range switch rebuilds it without a fetch.
+    panel._nps.demo = true;
+    panel._nps.summary = summaryFixture();
+    panel._nps.logDays = 7;
+    const demo = panel._npsDemoFeedLog();
+    assert(demo.rows.length > 0 && demo.perDay.length >= 1 && demo.perDay.every((d) => d.feeds > 0), "the demo stages a log");
+    assert(demo.rows.every((r, i) => i === 0 || r.at <= demo.rows[i - 1].at), "demo rows newest first");
+    assert(demo.rows.some((r) => r.how === "pump" && r.via) && demo.rows.some((r) => r.source === "brine" && r.from), "the demo mixes hand and pump");
+    reloads.length = 0;
+    panel._npsLogDays(1);
+    assert(reloads.length === 0 && panel._nps.summary.feedLog.days === 1 && panel._nps.summary.feedLog.rows.every((r) => r.date === panel._nps.summary.feedLog.date), "the demo's range switch stays local");
+    noPlaceholders(panel._npsFeedLogPanel(), "demo feeding log");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

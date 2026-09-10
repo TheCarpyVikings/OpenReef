@@ -4059,6 +4059,188 @@ def test_ws_summary_stocks_the_shelf_with_the_rotifer_bottle_and_says_what_the_c
     assert payload["shelf"]["live"] == {} and len(payload["speciesPlan"]["gaps"]) == 1
 
 
+# --------------------------------------------------------------------------- #
+# The feeding log (doc §13.19, 0.7.157): every mouthful across days, as a list.
+# --------------------------------------------------------------------------- #
+
+def test_feed_log_sweeps_every_ledger_newest_first():
+    """The shelf's dose/pump rows, the brine hand feeds, the rotifer bottle,
+    the pods harvested into the display and the doses OpenReef timed itself —
+    newest first, per-day counts, taken-back rows flagged but never counted,
+    soak/jar bottles and older days left out, undo only inside the window."""
+    tz = timezone.utc
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=tz)
+
+    def stamp(days_back, h, m=0):
+        return _iso(datetime(2026, 9, 10, h, m, tzinfo=tz) - timedelta(days=days_back))
+
+    products = {
+        "rj": _product(name="Reef Juice", history=[
+            {"at": stamp(0, 11, 34), "ml": 2, "kind": "dose", "slot": "11:00"},
+            {"at": stamp(0, 9, 0), "ml": 2, "kind": "dose", "undoneAt": stamp(0, 9, 4)},
+            {"at": stamp(0, 10, 30), "ml": 250, "kind": "refill"},
+            {"at": stamp(0, 10, 31), "ml": 40, "kind": "transfer"},
+            {"at": stamp(1, 20, 30), "ml": 2, "kind": "dose"},
+            {"at": stamp(8, 20, 30), "ml": 2, "kind": "dose"},
+            {"at": "junk", "ml": 2, "kind": "dose"},
+        ]),
+        "phyto": _product(name="Phyto", history=[
+            {"at": stamp(0, 8, 45), "ml": 1.5, "kind": "pump"},
+            {"at": stamp(1, 8, 45), "ml": 1.5, "kind": "pump"},
+        ]),
+        "selcon": _product(name="Selcon", history=[{"at": stamp(0, 7, 0), "ml": 1, "kind": "dose"}]),
+    }
+    channels = {
+        "p1": {"name": "Phyto pump", "chemical": "food", "enabled": True,
+               "driver": {"type": "openreef_esphome_brushed"},
+               "schedule": {"enabled": True, "mlPerDay": 3},
+               "reservoir": {"productId": "phyto", "productIsBottle": True},
+               # Bottle-bound: the bottle's pump rows are the record, not these.
+               "events": [{"at": stamp(0, 8, 45), "kind": "dose", "detail": "x", "ml": 1.5}]},
+        "z1": {"name": "Zoo pump", "chemical": "food", "enabled": True,
+               "driver": {"type": "ha_switch_timed"},
+               "schedule": {"enabled": True, "mlPerDay": 9},
+               "reservoir": {"productId": "", "productIsBottle": False},
+               "events": [
+                   {"at": stamp(0, 7, 15), "kind": "dose", "detail": "HA-timed dose started: 4.5 ml", "ml": 4.5},
+                   {"at": stamp(0, 7, 0), "kind": "dose", "detail": "pre-0.7.157 row, no volume"},
+                   {"at": stamp(1, 19, 0), "kind": "manual_dose", "detail": "3 ml manual dose started", "ml": 3},
+                   {"at": stamp(1, 18, 0), "kind": "calibrated", "detail": "1 ml/s", "ml": 30},
+               ]},
+        "f1": {"name": "Firmware pump", "chemical": "livefood", "enabled": True,
+               "driver": {"type": "openreef_esphome_brushed"},
+               "schedule": {"enabled": True, "mlPerDay": 10}, "reservoir": {}, "events": []},
+        "alk": {"name": "Alk", "chemical": "alk", "enabled": True,
+                "events": [{"at": stamp(0, 6, 0), "kind": "dose", "detail": "x", "ml": 10}]},
+    }
+    brine = [
+        {"at": stamp(0, 11, 10), "ml": 250, "from": "container", "slot": "11:00"},
+        {"at": stamp(0, 9, 5), "ml": 250, "from": "bottle", "undoneAt": stamp(0, 9, 20)},
+        {"at": stamp(2, 16, 0), "ml": 250, "from": "container"},
+        {"at": stamp(30, 16, 0), "ml": 250, "from": "container"},
+    ]
+    cultures = {"enabled": True, "jars": {
+        "pods": {"name": "Pod tub", "species": "copepod_tisbe", "history": [
+            {"event": "harvest", "at": stamp(0, 6, 5), "ml": 300},
+            {"event": "feed", "at": stamp(0, 6, 6), "ml": 5}]},
+        "rots": {"name": "Cone A", "species": "rotifer_L", "history": [
+            {"event": "harvest", "at": stamp(0, 6, 30), "ml": 500}]},
+    }, "bottle": {"history": [
+        {"event": "fed_tank", "at": stamp(0, 10, 0), "ml": 40, "slot": "10:00"},
+        {"event": "fed_tank", "at": stamp(1, 10, 0), "ml": 40, "undoneAt": stamp(1, 10, 5)},
+        {"event": "filled", "at": stamp(1, 9, 0), "ml": 500}]}}
+
+    log = nps.feed_log(now, products=products, channels=channels, cultures=cultures, brine_feeds=brine,
+                       quiet_product_ids={"selcon"}, culture_bottle_species={"rotifer_L"})
+    assert log["date"] == "2026-09-10" and log["since"] == "2026-09-04" and log["days"] == 7
+    seen = [(r["date"], r["time"], r["source"]) for r in log["rows"]]
+    assert seen == [
+        ("2026-09-10", "11:34", "shelf:rj"), ("2026-09-10", "11:10", "brine"),
+        ("2026-09-10", "10:00", "cultures-bottle"), ("2026-09-10", "09:05", "brine"),
+        ("2026-09-10", "09:00", "shelf:rj"), ("2026-09-10", "08:45", "shelf:phyto"),
+        ("2026-09-10", "07:15", "channel:z1"), ("2026-09-10", "06:05", "culture:pods"),
+        ("2026-09-09", "20:30", "shelf:rj"), ("2026-09-09", "19:00", "channel:z1"),
+        ("2026-09-09", "10:00", "cultures-bottle"), ("2026-09-09", "08:45", "shelf:phyto"),
+        ("2026-09-08", "16:00", "brine"),
+    ], seen
+    by = {(r["date"], r["time"], r["source"]): r for r in log["rows"]}
+    rj = by[("2026-09-10", "11:34", "shelf:rj")]
+    assert rj["how"] == "hand" and rj["slot"] == "11:00" and rj["productId"] == "rj" and rj["ml"] == 2.0
+    assert rj["undoable"] is True and rj["undone"] is False and rj["at"] == stamp(0, 11, 34)
+    assert rj["id"] == f"shelf:rj@{stamp(0, 11, 34)}"
+    assert set(rj) == {"id", "at", "date", "time", "how", "source", "name", "productId", "ml", "from", "via",
+                       "slot", "note", "undone", "undoneAt", "undoable"}
+    undone = by[("2026-09-10", "09:00", "shelf:rj")]
+    assert undone["undone"] is True and undone["undoneAt"] == stamp(0, 9, 4) and undone["undoable"] is False
+    feed = by[("2026-09-10", "11:10", "brine")]
+    assert feed["from"] == "container" and feed["slot"] == "11:00" and feed["ml"] == 250.0 and feed["undoable"] is True
+    assert by[("2026-09-10", "09:05", "brine")]["from"] == "bottle" and by[("2026-09-10", "09:05", "brine")]["undone"] is True
+    pumped = by[("2026-09-10", "08:45", "shelf:phyto")]
+    assert pumped["how"] == "pump" and pumped["via"] == "Phyto pump" and pumped["undoable"] is False
+    timed = by[("2026-09-10", "07:15", "channel:z1")]
+    assert timed["how"] == "pump" and timed["name"] == "Zoo pump" and timed["ml"] == 4.5 and timed["note"] == ""
+    assert by[("2026-09-09", "19:00", "channel:z1")]["note"] == "manual dose"
+    pods = by[("2026-09-10", "06:05", "culture:pods")]
+    assert pods["name"] == "Pod tub harvest" and pods["ml"] == 300.0 and pods["note"] == "harvested into the display" and not pods["undoable"]
+    assert by[("2026-09-10", "10:00", "cultures-bottle")]["undoable"] is True and by[("2026-09-10", "10:00", "cultures-bottle")]["slot"] == "10:00"
+    assert by[("2026-09-09", "10:00", "cultures-bottle")]["undone"] is True
+    # The window, not the day, decides undo: yesterday evening's dose is inside a day.
+    assert by[("2026-09-09", "20:30", "shelf:rj")]["undoable"] is True
+    assert by[("2026-09-09", "08:45", "shelf:phyto")]["undoable"] is False
+    assert by[("2026-09-08", "16:00", "brine")]["undoable"] is False
+    assert log["perDay"] == [
+        {"date": "2026-09-10", "feeds": 6, "hand": 4, "pump": 2, "undone": 2},
+        {"date": "2026-09-09", "feeds": 3, "hand": 1, "pump": 2, "undone": 1},
+        {"date": "2026-09-08", "feeds": 1, "hand": 1, "pump": 0, "undone": 0},
+    ], log["perDay"]
+    assert log["counts"] == {"feeds": 10, "hand": 6, "pump": 4, "undone": 3}
+    assert log["unrecorded"] == ["Firmware pump"] and log["truncated"] is False
+    assert log["text"] == ("10 feeds in the last 7 days — 6 by hand, 4 pumped · 3 taken back. Firmware pump: the "
+                           "firmware runs its own clock, so each dose is logged only when the pump draws from a "
+                           "bottle on the shelf."), log["text"]
+    # Today only; two days; the cap; junk windows.
+    today = nps.feed_log(now, products=products, channels=channels, cultures=cultures, brine_feeds=brine,
+                         quiet_product_ids={"selcon"}, culture_bottle_species={"rotifer_L"}, days=1)
+    assert len(today["rows"]) == 8 and today["since"] == "2026-09-10" and today["text"].startswith("6 feeds today — 4 by hand, 2 pumped · 2 taken back.")
+    two = nps.feed_log(now, products=products, channels=channels, cultures=cultures, brine_feeds=brine,
+                       quiet_product_ids={"selcon"}, culture_bottle_species={"rotifer_L"}, days=2)
+    assert len(two["rows"]) == 12 and two["since"] == "2026-09-09"
+    capped = nps.feed_log(now, products=products, channels=channels, cultures=cultures, brine_feeds=brine,
+                          quiet_product_ids={"selcon"}, culture_bottle_species={"rotifer_L"}, limit=3)
+    assert capped["truncated"] is True and [r["time"] for r in capped["rows"]] == ["11:34", "11:10", "10:00"]
+    assert capped["counts"]["feeds"] == 3, "the counts follow the rows carried"
+    assert nps.feed_log(now, products={}, channels={}, days="x")["days"] == 7
+    assert nps.feed_log(now, products={}, channels={}, days=500)["days"] == nps.FEED_LOG_DAYS_MAX
+    # Nothing at all: the honest zero-states.
+    empty = nps.feed_log(now, products={}, channels={})
+    assert empty["rows"] == [] and empty["perDay"] == [] and empty["text"] == "No feeds logged in the last 7 days."
+    assert nps.feed_log(now, products={}, channels={}, days=1)["text"].startswith("No feeds logged today — every Fed tap")
+    # A different zone buckets by ITS day: 23:30 UTC on the 9th is the 10th in Auckland.
+    nz = timezone(timedelta(hours=12))
+    row = nps.feed_log(datetime(2026, 9, 10, 12, 0, tzinfo=nz),
+                       products={"rj": _product(name="Reef Juice", history=[{"at": stamp(1, 23, 30), "ml": 2, "kind": "dose"}])},
+                       channels={}, days=1)["rows"]
+    assert len(row) == 1 and row[0]["date"] == "2026-09-10" and row[0]["time"] == "11:30"
+
+
+def test_ws_summary_carries_the_feed_log_and_a_timed_dose_stamps_its_volume():
+    tz_now = datetime.now(timezone.utc)
+    entry = _entry({"rj": _reef_juice(doseMl=3, doseFirstAt="23:59", history=[
+                        {"at": _iso(tz_now - timedelta(minutes=30)), "ml": 3, "kind": "dose"},
+                        {"at": _iso(tz_now - timedelta(days=3)), "ml": 3, "kind": "dose"}])},
+                   channels={"zoo": {"name": "Zoo pump", "chemical": "food", "enabled": True,
+                                     "driver": {"type": "ha_switch_timed"},
+                                     "schedule": {"enabled": True, "mlPerDay": 4, "mode": "doses", "dosesPerDay": 2,
+                                                  "windowStart": "00:00", "windowEnd": "00:00"}}})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"] = {"enabled": True, "reservoir": {"volumeMl": 1000, "remainingMl": 400, "mixedAt": _iso(tz_now)},
+                              "handFeed": {"defaultDoseMl": 30, "feedsPerDay": 2},
+                              "handFeeds": [{"at": _iso(tz_now - timedelta(hours=1)), "ml": 25, "from": "container"}]}
+    # A dose OpenReef timed itself stamps its volume; a firmware "requested"
+    # manual dose does not — the guard chain may still refuse it.
+    channel = cfg["dosing"]["channels"]["zoo"]
+    integration._dosing_record_event(channel, "dose", "HA-timed dose started: 4.5 ml", ml=4.5)
+    integration._dosing_record_event(channel, "manual_dose", "2 ml manual dose requested")
+    assert channel["events"][1]["ml"] == 4.5 and "ml" not in channel["events"][0]
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.errors
+    log = conn.results[-1].payload["feedLog"]
+    assert set(log) == {"date", "since", "days", "rows", "perDay", "counts", "truncated", "unrecorded", "text"}
+    assert log["days"] == nps.FEED_LOG_DAYS_DEFAULT
+    assert [r["source"] for r in log["rows"]] == ["channel:zoo", "shelf:rj", "brine", "shelf:rj"], log["rows"]
+    assert log["rows"][0]["ml"] == 4.5 and log["rows"][0]["how"] == "pump"
+    assert log["rows"][1]["undoable"] is True and log["rows"][3]["undoable"] is False
+    assert log["counts"] == {"feeds": 4, "hand": 3, "pump": 1, "undone": 0} and log["unrecorded"] == []
+    # The window rides the request.
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2, "log_days": 2}))
+    log = conn.results[-1].payload["feedLog"]
+    assert log["days"] == 2 and [r["source"] for r in log["rows"]] == ["channel:zoo", "shelf:rj", "brine"]
+    # The strip is untouched by the log's existence.
+    assert "channel:zoo:0" in [e["id"] for e in conn.results[-1].payload["timeline"]["events"]]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

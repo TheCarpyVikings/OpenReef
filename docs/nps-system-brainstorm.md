@@ -1226,6 +1226,63 @@ is untouched: no new field, no new status, nothing to guard on save. Tests:
 threaded, the water row pushed clear, and an uncrowded day keeping its old
 height).
 
+### 13.19 0.7.157 — the feeding log: every mouthful, as a list (2026-09-10)
+
+Reece: *"can we add a feeding log (list) to the automated NPS page please —
+logging all feeds that go into the tank."* The strip shows one day as marks;
+a keeper who wants to know what went in on Tuesday, or whether the 16:00
+brine really happened, had to remember. Now the same record reads as a list.
+
+- **No new store.** The log is a sweep of the ledgers the strip already
+  reads, across days instead of one: the shelf's `dose` and `pump` history
+  rows, the hatchery's stamped `handFeeds` (container and fridge bottle), the
+  rotifer bottle's `fed_tank` rows, the pods harvested straight into the
+  display, and the doses OpenReef timed itself on a pump (channel `events`
+  of kind `dose`/`manual_dose` — which now carry `ml` when the integration
+  started the run; a firmware *requested* manual dose carries none, since the
+  guard chain may still refuse it). Nothing is written, so there is nothing
+  new to guard on save.
+- **`nps.feed_log(now_local, days=…)`** returns `{date, since, days, rows,
+  perDay, counts, truncated, unrecorded, text}`. Each row: the ledger's own
+  stamp verbatim (`at`), its LOCAL `date` and `time` (the keeper's zone, so a
+  browser elsewhere cannot drift the day), `how` (hand/pump), `source`,
+  `name`, `ml`, `from` (container/bottle), `via` (the pump a bottle's pump
+  row came through), `slot`, `note`, `undone`/`undoneAt`, `undoable`.
+  Newest first; `FEED_LOG_MAX` (300) rows, oldest cut, `truncated` says so.
+- **Taken-back feeds stay, flagged.** A log that hides its reversals is not
+  a log: an undone row is listed struck through with *taken back*, and never
+  counts. Quiet bottles (the soak, a jar's feed) never appear — their doses
+  are not tank feeds (0.7.133). 2-part and trace bottles on the shelf are
+  swept like the strip sweeps them; if that ever reads wrong, the filter is
+  one category set.
+- **Undo from the list.** Today's shelf doses, brine feeds and bottle feeds
+  carry the strip's own undo (`_npsTimelineUndo` — same ledger, same stamp,
+  same command, same day-long window). Pump rows and harvests are the
+  machine's and the jar's: no undo, as on the strip.
+- **The honesty line** says what the firmware cannot: a food pump on a
+  firmware clock whose bottle is not on the shelf logs no per-dose row
+  (`unrecorded`) — *"Firmware pump: the firmware runs its own clock, so each
+  dose is logged only when the pump draws from a bottle on the shelf."*
+- **The summary carries it** (`nps_summary.feedLog`, no new WS — the 0.7.129
+  lesson) with an optional `log_days` (1–90, default 7; today counts as one).
+  The panel keeps the window (`_nps.logDays`) and passes it on every fetch;
+  a new range reloads. Rows fold at ten with *Show more*.
+- **On the page**: a *Feeding log* panel right under the feeding station,
+  grouped by day (*Today · 4 feeds (3 by hand, 1 pumped)*, *Yesterday*, then
+  the weekday), Today / 7 days / 30 days chips, the row's clock, glyph, name,
+  ml and its story (*filed as the 11:00 feed · from the container · via Phyto
+  pump*). The demo view stages three days of the mixed tank.
+
+Retention is the ledgers': `CONSUMABLE_HISTORY_MAX` (50 rows per bottle),
+`HAND_FEED_LOG_MAX` (60), the rotifer bottle's 30, a pump's 30 events. A
+bottle dosed four times a day reaches back about twelve days; that is the
+log's real horizon, and the 30-day chip shows whatever the ledgers still
+hold. Tests: `test_nps.py` (2 new — every ledger swept newest first with the
+counts, the window, the cap, the zones, the zero-states; the summary wiring
+and the pump's stamped volume), `test_panel_nps.mjs` (1 new — the grouped
+list, undo by ledger and stamp, the fold, the range reload, the tab
+placement, the zero-states, the demo).
+
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 
 Reece's screen: the Species coverage report said *nothing on the shelf
