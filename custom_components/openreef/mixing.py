@@ -306,6 +306,21 @@ def _booster_driven(cfg: Any) -> bool:
     return bool(isinstance(switch, dict) and str(switch.get("switchEntity") or "").strip())
 
 
+# The smallest timed draw (0.7.159): litres are metered as rate x time, and
+# under 10 ml the clock is shorter than a switch's own latency — noise, not
+# water. Anything from a single-digit ml culture top-up upward is honest.
+RODI_DRAW_MIN_L = 0.01
+
+
+def format_litres(litres: Any) -> str:
+    """Litres for a sentence: whole millilitres under a litre (57 ml), the
+    usual litres above (10 L, 2.5 L) — small draws read as what they are."""
+    lit = _f(litres)
+    if 0 < lit < 1:
+        return f"{round(lit * 1000):g} ml"
+    return f"{round(lit, 3):g} L"
+
+
 def draw_guard_reasons(cfg: Any, litres: Any, destination: Any) -> list[str]:
     """Why a RODI run must not start. Two shapes (doc §15): litres > 0 is a
     TIMED draw metered by rate x time (an unknown rate refuses honestly);
@@ -326,6 +341,9 @@ def draw_guard_reasons(cfg: Any, litres: Any, destination: Any) -> list[str]:
     lit = _f(litres)
     if lit < 0:
         reasons.append("Draw litres cannot be negative")
+    if 0 < lit < RODI_DRAW_MIN_L:
+        reasons.append(f"A timed draw starts at {format_litres(RODI_DRAW_MIN_L)} "
+                       f"({RODI_DRAW_MIN_L:g} L) — under that the clock is noise, not water")
     rate = _f(_rodi_cfg(cfg).get("rateLph"))
     if lit > 0 and rate <= 0:
         reasons.append("RODI flow rate is unknown — calibrate it (or set a rate "
@@ -415,10 +433,10 @@ def rodi_status(cfg: Any, now: datetime) -> dict[str, Any]:
         if done is not None and target > 0:
             done = min(target, done)
         out["draw"] = {
-            "litres": round(target, 1),
+            "litres": round(target, 3),
             "openEnded": target <= 0,
             "destination": str(draw.get("destination") or "store"),
-            "litresDone": round(done, 1) if done is not None else None,
+            "litresDone": round(done, 3) if done is not None else None,
             "percent": round(min(100.0, done / target * 100.0), 0)
             if target > 0 and done is not None else None,
             "minutesLeft": round(max(0.0, (ends - now).total_seconds() / 60.0), 0)
@@ -508,9 +526,10 @@ def draw_alert(cfg: Any) -> dict[str, Any] | None:
                             "water."),
             })
 
-    if target > 0:
+    if target >= 1.0:
         # The run's own finish line: by construction this lands before endsAt
-        # (pct < 100), so it needs no suppression check.
+        # (pct < 100), so it needs no suppression check. Sub-litre draws
+        # (0.7.159) are over in seconds — a heads-up would land after the stop.
         where = {"store": "the RODI store", "mix": "the mix vessel"}.get(dest, "the T-off")
         done = target * pct / 100.0
         mins_left = (target - done) / rate * 60.0

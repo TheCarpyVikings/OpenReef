@@ -1739,7 +1739,8 @@ class OpenReefPanel extends HTMLElement {
       if (action === "mixing-rodi-draw") {
         const litres = Number(this.shadowRoot.querySelector("[data-mixing-draw-litres]")?.value) || 0;
         const destination = this.shadowRoot.querySelector("[data-mixing-draw-dest]")?.value || "store";
-        if (litres > 0) this._mixingAction({ type: "openreef/mixing_rodi_draw", litres, destination });
+        if (litres >= 0.01) this._mixingAction({ type: "openreef/mixing_rodi_draw", litres, destination });
+        else if (litres > 0) { this._mixingMessage = "Timed draws start at 10 ml — enter 0.01 L or more."; this._render(); }
         else { this._mixingMessage = "Enter how many litres of RODI to run."; this._render(); }
       }
       if (action === "mixing-rodi-fill") {
@@ -3404,6 +3405,15 @@ class OpenReefPanel extends HTMLElement {
 
   _sensorDigits(sensorId) {
     if (sensorId === "ph" || sensorId === "alkalinity") return 2;
+  // Litres for a sentence: whole millilitres under a litre (57 ml), litres
+  // above (10.0 L) — a small RODI draw reads as what it is, never as "0.1 L".
+  _formatLitres(value, digits = 1) {
+    const v = Number(value);
+    if (!Number.isFinite(v)) return "--";
+    if (v > 0 && v < 1) return `${Math.round(v * 1000)} ml`;
+    return `${v.toFixed(digits)} L`;
+  }
+
     if (sensorId === "phosphate") return 3;
     if (["nitrate", "dissolved_oxygen"].includes(sensorId)) return 2;
     if (["orp", "calcium", "magnesium", "co2", "flow", "par"].includes(sensorId)) return 0;
@@ -25654,7 +25664,7 @@ const rigSteps = [
     if (rodi?.draw) {
       const d = rodi.draw;
       unitValue = d.openEnded ? "Filling…"
-        : `${this._format(d.litresDone, 1)} of ${this._format(d.litres, 1)} L`;
+        : `${this._formatLitres(d.litresDone)} of ${this._formatLitres(d.litres)}`;
       unitDetail = { store: "Running into the RODI store", mix: "Running into the vessel" }[d.destination]
         || "Running out the T-off (ATO / external)";
       unitStatus = "ok";
@@ -25959,11 +25969,11 @@ const rigSteps = [
       const where = { store: "the RODI store", mix: "the vessel" }[d.destination] || "the T-off (ATO / external)";
       body = d.openEnded
         ? `
-        <p class="muted">Filling ${where} — the float valve is the stop${d.litresDone != null ? `; about <strong>${this._format(d.litresDone, 1)} L</strong> so far` : ""}${d.minutesLeft != null ? ` · software cap in ${this._format(d.minutesLeft, 0)} min` : ""}.</p>
+        <p class="muted">Filling ${where} — the float valve is the stop${d.litresDone != null ? `; about <strong>${this._formatLitres(d.litresDone)}</strong> so far` : ""}${d.minutesLeft != null ? ` · software cap in ${this._format(d.minutesLeft, 0)} min` : ""}.</p>
         <div class="button-row"><button class="primary" data-action="mixing-rodi-stop" ${disabled}>Fill done — stop</button></div>`
         : `
-        <p class="muted"><strong>${this._format(d.litresDone, 1)} of ${this._format(d.litres, 1)} L</strong>
-          → ${where}${d.minutesLeft != null ? ` · about ${this._format(d.minutesLeft, 0)} min left` : ""}.</p>
+        <p class="muted"><strong>${this._formatLitres(d.litresDone)} of ${this._formatLitres(d.litres)}</strong>
+          → ${where}${d.minutesLeft != null ? ` · ${d.minutesLeft < 1 ? "under a minute" : `about ${this._format(d.minutesLeft, 0)} min`} left` : ""}.</p>
         <div class="button-row"><button class="danger-text" data-action="mixing-rodi-stop" ${disabled}>Stop draw</button></div>`;
     } else if (rodi?.calibration) {
       const cal = rodi.calibration;
@@ -26018,7 +26028,7 @@ const rigSteps = [
           ? "Fill the store, fill the vessel, or T off to the ATO reservoir — each on its own."
           : "Fill the vessel, or T off to the ATO reservoir."}</p>
         <div class="mini-grid">
-          <label>Litres (for a timed draw)<input type="number" min="1" step="1" data-mixing-draw-litres value="10"></label>
+          <label>Litres (for a timed draw)<input type="number" min="0.01" step="any" inputmode="decimal" data-mixing-draw-litres value="10"></label>
           <label>Destination<select data-mixing-draw-dest>
             ${dual ? `<option value="store">RODI store</option>` : ""}
             <option value="mix" ${dual ? "" : "selected"}>${dual ? "Mix vessel" : "The vessel"}</option>
@@ -26030,7 +26040,7 @@ const rigSteps = [
           <button class="secondary" data-action="mixing-rodi-draw" ${disabled}>Run the litres</button>
           <button class="secondary" data-action="mixing-cal-prep" ${disabled}>Calibrate flow</button>
         </div>
-        <small class="awc-hint">Fill until full runs to the float valve (the fill cap is the backstop). ${rate > 0
+        <small class="awc-hint">Fill until full runs to the float valve (the fill cap is the backstop). Small draws are fine — 0.057 L is 57 ml${rate > 0 ? `, about ${Math.max(1, Math.round(0.057 / rate * 3600))} s at this rate` : ""}; timed draws start at 10 ml. ${rate > 0
           ? `Flow rate: ${Number(rate)} L/h${rodi?.calibratedAt
             ? ` — calibrated ${new Date(rodi.calibratedAt).toLocaleDateString()}`
             : " — set by hand; a timed calibration makes the litres honest"}.`

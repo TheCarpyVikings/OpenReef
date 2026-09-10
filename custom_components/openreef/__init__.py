@@ -1884,7 +1884,7 @@ def _normalise_mixing_filters(raw_rodi: dict[str, Any]) -> list[dict[str, Any]]:
             "ratedLitres": round(_awc_num(stage.get("ratedLitres"), 0, 0,
                                           MIXING_FILTER_RATED_MAX_L), 1),
             "litresProcessed": round(_awc_num(stage.get("litresProcessed"), 0, 0,
-                                              MIXING_LITRES_PROCESSED_MAX), 1),
+                                              MIXING_LITRES_PROCESSED_MAX), 2),
             "changedAt": _awc_str(stage.get("changedAt"), 40),
         })
     if not filters:
@@ -1894,7 +1894,7 @@ def _normalise_mixing_filters(raw_rodi: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": "f1", "label": "Filters", "type": "other",
                 "ratedLitres": round(legacy_rated, 1),
                 "litresProcessed": round(_awc_num(raw_rodi.get("litresProcessed"), 0, 0,
-                                                  MIXING_LITRES_PROCESSED_MAX), 1),
+                                                  MIXING_LITRES_PROCESSED_MAX), 2),
                 "changedAt": _awc_str(raw_rodi.get("filterChangedAt"), 40),
             })
     return filters
@@ -1983,14 +1983,14 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
                                           MIXING_VESSEL_MAX_L), 1),
         "calibratedAt": _awc_str(raw_rodi.get("calibratedAt"), 40),
         "litresProcessed": round(_awc_num(raw_rodi.get("litresProcessed"), 0, 0,
-                                          MIXING_LITRES_PROCESSED_MAX), 1),
+                                          MIXING_LITRES_PROCESSED_MAX), 2),
         "meteredSince": _awc_str(raw_rodi.get("meteredSince"), 40),
         "filters": _normalise_mixing_filters(raw_rodi),
         # Live-run stamps preserved, only clamped — a normalise pass must never
         # move a running draw or calibration (the batch-block rule).
         "draw": {
             "active": bool(raw_draw.get("active", False)),
-            "litres": round(_awc_num(raw_draw.get("litres"), 0, 0, MIXING_VESSEL_MAX_L), 1),
+            "litres": round(_awc_num(raw_draw.get("litres"), 0, 0, MIXING_VESSEL_MAX_L), 3),
             "destination": draw_dest if draw_dest in MIXING_DRAW_DESTINATIONS else "store",
             "startedAt": _awc_str(raw_draw.get("startedAt"), 40),
             "endsAt": _awc_str(raw_draw.get("endsAt"), 40),
@@ -17792,13 +17792,13 @@ def _mixing_add_processed(cfg: dict[str, Any], litres: float) -> None:
     # cannot know when that counting began (no date beats a false one).
     if before <= 0 and not rodi.get("meteredSince"):
         rodi["meteredSince"] = datetime.now(timezone.utc).isoformat()
-    rodi["litresProcessed"] = round(min(before + litres, MIXING_LITRES_PROCESSED_MAX), 1)
+    rodi["litresProcessed"] = round(min(before + litres, MIXING_LITRES_PROCESSED_MAX), 2)
     filters = rodi.get("filters") if isinstance(rodi.get("filters"), list) else []
     for stage in filters:
         if not isinstance(stage, dict):
             continue
         used = _awc_num(stage.get("litresProcessed"), 0, 0, MIXING_LITRES_PROCESSED_MAX) + litres
-        stage["litresProcessed"] = round(min(used, MIXING_LITRES_PROCESSED_MAX), 1)
+        stage["litresProcessed"] = round(min(used, MIXING_LITRES_PROCESSED_MAX), 2)
 
 
 def _clear_mixing_rodi_timer(hass: HomeAssistant) -> None:
@@ -17858,7 +17858,7 @@ async def _async_mixing_finish_draw(
         else:
             done = 0.0
     else:
-        done = round(rate * elapsed_h, 1)
+        done = round(rate * elapsed_h, 3)
         if not stopped_early:
             # The scheduled stop fired: never claim more than asked for unless
             # it genuinely overran (late fire after a restart) — and say so.
@@ -17868,7 +17868,7 @@ async def _async_mixing_finish_draw(
                     f"of a planned {target:g} L (restart delay); levels credited honestly",
                     "warning")
             else:
-                done = round(target, 1)
+                done = round(target, 3)
     if dest == "store":
         _mixing_credit_rodi(cfg, done)
     elif dest == "mix":
@@ -17894,11 +17894,11 @@ async def _async_mixing_finish_draw(
             config, f"Mixing station: fill confirmed {where} — read as full at the "
             "float valve; correct the level if it isn't", "control")
     elif stopped_early:
-        _append_activity(config, f"Mixing station: RODI run stopped — about {done:g} L "
-                         f"{where}", "control")
+        _append_activity(config, "Mixing station: RODI run stopped — about "
+                         f"{mixing_engine.format_litres(done)} {where}", "control")
     else:
-        _append_activity(config, f"Mixing station: RODI run done — {done:g} L {where}",
-                         "control")
+        _append_activity(config, "Mixing station: RODI run done — "
+                         f"{mixing_engine.format_litres(done)} {where}", "control")
 
 
 async def _async_schedule_mixing_rodi(
@@ -18483,7 +18483,7 @@ async def websocket_mixing_rodi_draw(
             minutes = _awc_num(cfg.get("rodi", {}).get("fillCapMin"),
                                MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)
         cfg.setdefault("rodi", {})["draw"] = {
-            "active": True, "litres": round(litres, 1), "destination": destination,
+            "active": True, "litres": round(litres, 3), "destination": destination,
             "startedAt": now.isoformat(),
             "endsAt": (now + timedelta(minutes=minutes)).isoformat(),
         }
@@ -18491,8 +18491,9 @@ async def websocket_mixing_rodi_draw(
         if litres > 0:
             flush_note = f" incl. the {flush_s:g} s flush" if flush_s > 0 else ""
             _append_activity(
-                config, f"Mixing station: RODI run started — {litres:g} L to {where} "
-                f"(about {minutes:.0f} min at {rate:g} L/h{flush_note})", "control")
+                config, f"Mixing station: RODI run started — "
+                f"{mixing_engine.format_litres(litres)} to {where} "
+                f"({eta} at {rate:g} L/h{flush_note})", "control")
         else:
             _append_activity(
                 config, f"Mixing station: filling {where} — the float valve is the stop, "
@@ -18591,6 +18592,8 @@ async def websocket_mixing_calibrate(
                                       "litres and set the rate")
                 return
             await _async_mixing_stop_switches(
+            eta = (f"about {minutes:.0f} min" if minutes >= 2
+                   else f"about {round(minutes * 60):g} s")
                 hass, config, ("rodiBooster",), connection.context(msg))
             cal["stoppedAt"] = datetime.now(timezone.utc).isoformat()
             rodi["calibration"] = cal

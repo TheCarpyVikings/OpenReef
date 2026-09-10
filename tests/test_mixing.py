@@ -2171,6 +2171,70 @@ def test_manual_water_change_is_stamped_with_the_vessels_water():
     cfg["mixingStation"]["vessels"]["mix"]["contents"] = "rodi"
     assert integration._mixing_new_water_stamp(hass, cfg) == {}
 
+def test_small_draws_keep_their_millilitres():
+    # 0.7.159: a 57 ml culture top-up is a real draw. The guard floors timed
+    # draws at 10 ml (below that the clock is switch latency, not water), the
+    # status keeps the ml instead of rounding 0.057 up to "0.1 L", and the
+    # sentence helper says "57 ml" not "0.057 L".
+    assert mixing.format_litres(0.057) == "57 ml"
+    assert mixing.format_litres(10) == "10 L"
+    assert mixing.format_litres(2.5) == "2.5 L"
+    assert mixing.format_litres(0) == "0 L"
+    cfg = _cfg(rodi={"rateLph": 9.21, "fillCapMin": 240}, simulate=True)
+    cfg["switches"] = {"rodiBooster": {"switchEntity": "switch.mix_booster"}}
+    assert any("10 ml" in r for r in mixing.draw_guard_reasons(cfg, 0.005, "external"))
+    assert mixing.draw_guard_reasons(cfg, 0.01, "external") == []
+    assert mixing.draw_guard_reasons(cfg, 0.057, "external") == []
+    # 57 ml at 9.21 L/h is ~22 s: half-way through, the status reads ml, not 0.0/0.1.
+    live = _cfg(rodi={
+        "rateLph": 9.21, "fillCapMin": 240,
+        "draw": {"active": True, "litres": 0.057, "destination": "external",
+                 "startedAt": _iso(NOW - timedelta(seconds=11)),
+                 "endsAt": _iso(NOW + timedelta(seconds=11))}})
+    status = mixing.rodi_status(live, NOW)["draw"]
+    assert status["litres"] == 0.057
+    assert status["litresDone"] == 0.028
+    assert status["percent"] == 49.0
+    assert status["minutesLeft"] == 0.0
+    # The nearly-done heads-up is for runs long enough to want one: a
+    # sub-litre draw gets no run-finish story (only a container story could apply).
+    live["rodi"]["alertPct"] = 80
+    assert mixing.draw_alert(live) is None
+
+
+def test_small_draw_runs_end_to_end_and_the_ledgers_add_it_up():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station(_rodi_over(rateLph=9.21))
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 0.057, "destination": "store"}))
+    assert conn.results[-1].payload["success"] is True, conn.results[-1].payload
+    rodi = _mix_state(entry)["rodi"]
+    assert rodi["draw"]["active"] is True and rodi["draw"]["litres"] == 0.057
+    log = integration._config_from_entry(entry)["activity"][-1]["message"]
+    assert "57 ml" in log and " s at 9.21 L/h" in log, log
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    stops = [r for r in scheduler.scheduled[before:]
+             if not r["cancelled"] and 15 < (r["run_at"] - now).total_seconds() < 30]
+    assert len(stops) == 1, "expected one stop leg about 22 s out"
+
+    async def _fire():
+        await stops[0]["callback"](stops[0]["run_at"])
+    run(_fire())
+    state = _mix_state(entry)
+    assert state["rodi"]["draw"]["active"] is False
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 40.06     # 40 anchor + 57 ml (2 dp)
+    assert state["rodi"]["litresProcessed"] == 0.06                  # odometer keeps the ml too
+    assert "57 ml" in integration._config_from_entry(entry)["activity"][-1]["message"]
+    # A sub-10 ml ask is refused with a reason, never an error.
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 2, "litres": 0.004, "destination": "store"}))
+    assert conn.results[-1].payload["success"] is False
+    assert any("10 ml" in r for r in conn.results[-1].payload["reasons"])
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

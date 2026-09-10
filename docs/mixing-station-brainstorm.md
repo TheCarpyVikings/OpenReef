@@ -642,3 +642,19 @@ Also in 0.7.139: hand-logged water changes from the vessel (and AWC rows when th
 water came from it) carry `newWater = {ppt, tempC, brand}` — the batch's tested salinity,
 the heat sensor's reading and the brand — with the keeper's typed figures winning.
 
+
+## §31 The draw keeps its millilitres (0.7.159)
+
+A culture top-up is 57 ml, not "0.1 L". Timed draws are metered as rate x time, and the
+whole path now keeps three decimals: the WS handler stores the litres as asked, the normalise
+pass no longer rounds a running draw to one place, `rodi_status` reports `litres`/`litresDone`
+to the ml, and the finish leg credits the same figure. The odometer and the per-stage filter
+ledgers moved to two decimals so a run of small draws adds up instead of rounding to a phantom
+0.1 L (or to nothing). `draw_guard_reasons` floors timed draws at `RODI_DRAW_MIN_L` (10 ml) —
+under that the clock is shorter than a plug's own latency — and refuses with a reason, never an
+error; open-ended fills (0) are untouched. `mixing.format_litres()` and the panel's
+`_formatLitres()` say "57 ml" under a litre and "10 L" above, so activity rows, the draw card
+and the unit hero read the same way. The run's own nearly-done heads-up (§24) only arms for
+draws of a litre or more — a 22-second run would get the warning after the stop. The panel
+input is `min=0.01 step=any`, the hint shows the 0.057 L = 57 ml example with its ETA at the
+current rate, and a seconds-long run says "under a minute left" instead of "about 0 min".
