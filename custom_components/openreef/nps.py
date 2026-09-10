@@ -1473,7 +1473,8 @@ SPECIES_LIBRARY: tuple[dict[str, Any], ...] = (
     {"id": "blueberry", "group": "gorgonian", "name": "Blueberry gorgonian (Acalycigorgia)", "difficulty": 5,
      "particleUmMin": 5, "particleUmMax": 200, "cadence": "continuous",
      "feedsPerDay": 8, "night": False, "trainable": False,
-     "foods": ("phyto", "zooLive"),
+     # 0.7.162: oyster eggs are in its own note — prepared zooplankton was missing.
+     "foods": ("phyto", "zooLive", "zooPrepared"),
      "note": "'Cut flowers of the hobby.' Near-continuous micro-plankton, rotifers, "
              "oyster eggs. Expert-only, honestly."},
     {"id": "dendronephthya", "group": "soft", "name": "Dendronephthya / Scleronephthya", "difficulty": 5,
@@ -1599,6 +1600,28 @@ SPECIES_LIBRARY: tuple[dict[str, Any], ...] = (
 
 _SPECIES_BY_ID = {s["id"]: s for s in SPECIES_LIBRARY}
 
+# What the animal eats, in words (0.7.162) — the report's chips and sentences.
+# CATEGORY_LABELS names a product's category on the shelf; these name a mouth.
+FOOD_WORDS = {
+    "phyto": "live phyto", "zooLive": "live zooplankton",
+    "zooPrepared": "prepared zooplankton", "blend": "a coral blend",
+    "bacteria": "bacterioplankton",
+}
+
+# The foods a keeper actually has to hand, as size references for the mouth
+# note (0.7.162). Judged by the matcher's own rule — right food type AND
+# overlapping particle window — so "rotifers fit" means a rotifer bottle on
+# the shelf WOULD count for this mouth, and a row can never contradict its
+# own verdict. The windows are the shelf presets' (PRODUCT_LIBRARY).
+MOUTHFUL_REFERENCES: tuple[tuple[str, str, float, float], ...] = (
+    ("live phyto", "phyto", 1, 20),
+    ("rotifers", "zooLive", 90, 360),
+    ("oyster eggs", "zooPrepared", 150, 250),
+    ("baby brine", "zooLive", 400, 500),
+    ("adult copepods", "zooLive", 500, 1200),
+    ("mysis-sized meaty food", "zooPrepared", 1000, 10000),
+)
+
 
 def species_ids() -> tuple[str, ...]:
     return tuple(s["id"] for s in SPECIES_LIBRARY)
@@ -1608,9 +1631,79 @@ def _ranges_overlap(a_min: float, a_max: float, b_min: float, b_max: float) -> b
     return max(_f(a_min), _f(b_min)) <= min(_f(a_max) or 1e9, _f(b_max) or 1e9)
 
 
+def _words(items: list[str]) -> str:
+    """'a' / 'a and b' / 'a, b and c'."""
+    items = [str(i) for i in items if i]
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def particle_label(lo: Any, hi: Any) -> str:
+    return f"{_f(lo):g}–{_f(hi):g} µm"
+
+
+def mouth_note(sp: dict[str, Any]) -> dict[str, Any]:
+    """The mouth in the keeper's own foods: which reference foods fit this
+    species (right type AND size — the matcher's rule), which are too big,
+    which too fine. A food of the right size but the wrong type goes
+    unsaid: size is not why it fails."""
+    fits: list[str] = []
+    too_big: list[str] = []
+    too_fine: list[str] = []
+    lo, hi = _f(sp.get("particleUmMin")), _f(sp.get("particleUmMax"))
+    for name, category, ref_lo, ref_hi in MOUTHFUL_REFERENCES:
+        if _ranges_overlap(ref_lo, ref_hi, lo, hi):
+            if category in (sp.get("foods") or ()):
+                fits.append(name)
+        elif ref_lo > hi:
+            too_big.append(name)
+        elif ref_hi < lo:
+            too_fine.append(name)
+    parts = []
+    if fits:
+        parts.append(f"{_words(fits)} {'fit' if len(fits) > 1 else 'fits'}")
+    if too_big:
+        parts.append(f"{_words(too_big)} {'are' if len(too_big) > 1 else 'is'} too big")
+    if too_fine:
+        parts.append(f"{_words(too_fine)} {'are' if len(too_fine) > 1 else 'is'} too fine")
+    note = "; ".join(parts)
+    return {"fits": fits, "tooBig": too_big, "tooFine": too_fine,
+            "note": (note[0].upper() + note[1:] + ".") if note else ""}
+
+
+def _rhythm(sp: dict[str, Any]) -> str:
+    """How the animal wants feeding, as one clause."""
+    n = max(0, int(_f(sp.get("feedsPerDay"))))
+    if sp.get("cadence") == "target":
+        return "Target-fed by hand, whole items to each polyp — automation assists, never replaces"
+    if sp.get("cadence") == "continuous":
+        return f"A standing food density — near-continuous, {n} small feeds a day at the least"
+    when = "after lights-out" if sp.get("night") else "by day"
+    line = f"{n} feed{'' if n == 1 else 's'} a day, {when}"
+    return f"{line} — trainable to open by day" if sp.get("trainable") else line
+
+
+def species_card(sp: dict[str, Any]) -> dict[str, Any]:
+    """A library species as the panel describes it (0.7.162): everything the
+    library knows plus the foods in words, the particle window as a label,
+    the mouth note and the feeding rhythm — composed here, rendered there."""
+    foods = list(sp.get("foods") or ())
+    return {
+        **sp,
+        "foods": foods,
+        "foodWords": [FOOD_WORDS.get(c, c) for c in foods],
+        "particle": particle_label(sp.get("particleUmMin"), sp.get("particleUmMax")),
+        "mouth": mouth_note(sp),
+        "rhythm": _rhythm(sp),
+    }
+
+
 def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
                       channels: dict[str, Any],
-                      pending: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                      pending: list[dict[str, Any]] | None = None,
+                      quiet_product_ids: set[str] | frozenset[str] | None = None,
+                      ) -> dict[str, Any]:
     """The species compiler: what the selected livestock needs, whether the
     shelf and pumps cover it, and per-pump schedule suggestions. Advisory
     only — suggestions carry cadence/window shape; the keeper owns ml/day
@@ -1621,14 +1714,31 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
     particleUmMin, particleUmMax, note}``. A mouth nothing on the shelf
     feeds, that a pending source WILL feed, is reported under ``soon``
     rather than as a gap: the keeper has already done the right thing.
-    A live entry past its fade (``live.expired``) covers nothing."""
+    A live entry past its fade (``live.expired``) covers nothing.
+
+    ``quiet_product_ids`` (0.7.162): bottles that feed a culture jar or the
+    soak, not the tank. The cone's phyto concentrate matches a phyto
+    feeder's mouth by type and size, yet none of it reaches the display —
+    so it covers nothing and drives no pump, and a species it WOULD have
+    fed names it under ``cultureFeeds`` so the report can say so.
+
+    Each ``species`` entry is its ``species_card`` plus the verdict:
+    ``status`` (covered / soon / gap / hand), ``fedBy`` (the shelf entries
+    that feed it), ``pumps`` (the channels dosing one of them), ``coming``
+    (the pending source, for soon), ``needs`` (for a gap), ``cultureFeeds``
+    and one ``verdict`` sentence. ``gaps`` and ``soon`` keep their one-line
+    forms; ``counts`` tallies the statuses."""
     selected = [_SPECIES_BY_ID[sid] for sid in selected_ids if sid in _SPECIES_BY_ID]
+    quiet = {str(pid) for pid in (quiet_product_ids or ()) if pid}
     gaps: list[str] = []
     soon: list[str] = []
     warnings: list[str] = []
     suggestions: list[dict[str, Any]] = []
-    product_list = [p for p in products.values() if isinstance(p, dict)
-                    and not (isinstance(p.get("live"), dict) and p["live"].get("expired"))]
+    product_items = [(pid, p) for pid, p in products.items() if isinstance(p, dict)
+                     and pid not in quiet
+                     and not (isinstance(p.get("live"), dict) and p["live"].get("expired"))]
+    culture_items = [(pid, p) for pid, p in products.items()
+                     if isinstance(p, dict) and pid in quiet]
     pending_list = [p for p in (pending or []) if isinstance(p, dict)]
 
     def _feeds(p: dict[str, Any], sp: dict[str, Any]) -> bool:
@@ -1636,22 +1746,42 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
             p.get("particleUmMin"), p.get("particleUmMax"),
             sp["particleUmMin"], sp["particleUmMax"])
 
+    entries: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
     for sp in selected:
+        card = species_card(sp)
         # Shelf coverage: any product in the right category AND particle window?
-        covered = any(_feeds(p, sp) for p in product_list)
-        if not covered and sp["cadence"] != "target":
+        fed_by = [{"id": pid, "name": str(p.get("name") or pid),
+                   "live": isinstance(p.get("live"), dict)}
+                  for pid, p in product_items if _feeds(p, sp)]
+        spoken_for = [str(p.get("name") or pid) for pid, p in culture_items if _feeds(p, sp)]
+        needs = (f"{' or '.join(FOOD_WORDS.get(c, c) for c in sp['foods'])} "
+                 f"at {card['particle']}")
+        coming: dict[str, Any] | None = None
+        if fed_by:
+            status = "covered"
+        elif sp["cadence"] == "target":
+            status = "hand"
+        else:
             wanted = " or ".join(sp["foods"])
-            coming = next((p for p in pending_list if _feeds(p, sp)), None)
-            if coming is not None:
-                note = str(coming.get("note") or "").strip()
+            source = next((p for p in pending_list if _feeds(p, sp)), None)
+            if source is not None:
+                note = str(source.get("note") or "").strip()
+                coming = {"name": str(source.get("name") or "live food"), "note": note}
+                status = "soon"
                 soon.append(
                     f"{sp['name']}: nothing on the shelf feeds it yet — "
-                    f"{coming.get('name') or 'live food'} will"
+                    f"{coming['name']} will"
                     f"{f' ({note})' if note else ''}.")
-                continue
-            gaps.append(
-                f"{sp['name']}: nothing on the shelf feeds it "
-                f"(needs {wanted}, {sp['particleUmMin']:g}–{sp['particleUmMax']:g} µm).")
+            else:
+                status = "gap"
+                gaps.append(
+                    f"{sp['name']}: nothing on the shelf feeds it "
+                    f"(needs {wanted}, {sp['particleUmMin']:g}–{sp['particleUmMax']:g} µm).")
+        entry = {**card, "status": status, "fedBy": fed_by, "pumps": [], "coming": coming,
+                 "needs": needs, "cultureFeeds": spoken_for, "verdict": ""}
+        entries.append(entry)
+        by_id[sp["id"]] = entry
 
     # Per-pump suggestions: a channel whose linked bottle matches a selected
     # species inherits that species' cadence shape.
@@ -1659,14 +1789,13 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
         if not isinstance(channel, dict) \
                 or channel.get("chemical") not in ("food", "livefood"):
             continue
-        product = products.get(str((channel.get("reservoir") or {}).get("productId") or ""))
+        pid = str((channel.get("reservoir") or {}).get("productId") or "")
+        if pid in quiet:
+            continue                        # it doses a culture, not the tank
+        product = products.get(pid)
         if not isinstance(product, dict):
             continue
-        matches = [
-            sp for sp in selected
-            if product.get("category") in sp["foods"] and _ranges_overlap(
-                product.get("particleUmMin"), product.get("particleUmMax"),
-                sp["particleUmMin"], sp["particleUmMax"])]
+        matches = [sp for sp in selected if _feeds(product, sp)]
         if not matches:
             if selected:
                 warnings.append(
@@ -1674,6 +1803,8 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
                     f"({product.get('name')}) feeds none of the selected species — "
                     "check the particle size.")
             continue
+        for sp in matches:
+            by_id[sp["id"]]["pumps"].append(str(channel.get("name") or cid))
         # The hungriest matching species shapes the schedule.
         driver_sp = max(matches, key=lambda s: s["feedsPerDay"])
         doses = max(1, int(driver_sp["feedsPerDay"]))
@@ -1691,6 +1822,26 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
                      else "Discrete pulse feeds"),
         })
 
+    # One sentence per animal, now the pumps are known.
+    for entry in entries:
+        if entry["status"] == "covered":
+            fed = _words([f["name"] for f in entry["fedBy"]])
+            pumps = _words(entry["pumps"])
+            verdict = f"Fed by {fed}{f', dosed by {pumps}' if pumps else ''}."
+        elif entry["status"] == "hand":
+            verdict = "Target-fed by hand — the shelf is not asked to cover it."
+        elif entry["status"] == "soon":
+            note = entry["coming"]["note"]
+            verdict = (f"Nothing on the shelf feeds it yet — {entry['coming']['name']} will"
+                       f"{f' ({note})' if note else ''}.")
+        else:
+            verdict = f"Nothing on the shelf feeds it — needs {entry['needs']}."
+        if entry["cultureFeeds"]:
+            verdict += (f" {_words(entry['cultureFeeds'])} "
+                        f"{'is' if len(entry['cultureFeeds']) == 1 else 'are'} "
+                        "a culture's feed, so not counted.")
+        entry["verdict"] = verdict
+
     hardest = max((s["difficulty"] for s in selected), default=0)
     if hardest >= 5:
         warnings.append(
@@ -1698,8 +1849,9 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
             "starve slowly over 2–6 months even with good automation — source "
             "well, feed relentlessly, and let the camera and logs tell you the truth.")
     return {
-        "species": [{"id": s["id"], "name": s["name"], "difficulty": s["difficulty"],
-                     "cadence": s["cadence"], "note": s["note"]} for s in selected],
+        "species": entries,
+        "counts": {k: sum(1 for e in entries if e["status"] == k)
+                   for k in ("covered", "soon", "gap", "hand")},
         "gaps": gaps,
         "soon": soon,
         "warnings": warnings,

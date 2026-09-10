@@ -11421,12 +11421,29 @@ class OpenReefPanel extends HTMLElement {
           readyBy: iso(-43 * 3600000), driver: "freshness",
           hatchHours: 24, shelfHours: 33, overlap: false, busyCount: 1 } },
       speciesLibrary: [
-        { id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, note: "" },
-        { id: "gorgonian_easy", name: "Gorgonians — Menella, Swiftia, Diodogorgia", difficulty: 2, note: "" },
+        { id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, note: "",
+          foodWords: ["prepared zooplankton", "live zooplankton", "a coral blend"], particle: "300–3000 µm" },
+        { id: "gorgonian_easy", name: "Gorgonians — Menella, Swiftia, Diodogorgia", difficulty: 2, note: "",
+          foodWords: ["prepared zooplankton", "live zooplankton"], particle: "50–500 µm" },
       ],
+      // The rows the backend compiler writes for this shelf (0.7.162).
       speciesPlan: {
-        species: [{ name: "Sun coral (Tubastraea)" }, { name: "Gorgonians — Menella, Swiftia, Diodogorgia" }],
-        gaps: [], warnings: [],
+        species: [
+          { id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, status: "covered",
+            foodWords: ["prepared zooplankton", "live zooplankton", "a coral blend"], particle: "300–3000 µm",
+            mouth: { note: "Rotifers, baby brine, adult copepods and mysis-sized meaty food fit; live phyto and oyster eggs are too fine." },
+            fedBy: [{ id: "demo_pods", name: "GoldPods", live: false }], pumps: ["Zooplankton pump"], coming: null, cultureFeeds: [],
+            verdict: "Fed by GoldPods, dosed by Zooplankton pump.",
+            rhythm: "1 feed a day, after lights-out — trainable to open by day", note: "" },
+          { id: "gorgonian_easy", name: "Gorgonians — Menella, Swiftia, Diodogorgia", difficulty: 2, status: "covered",
+            foodWords: ["prepared zooplankton", "live zooplankton"], particle: "50–500 µm",
+            mouth: { note: "Rotifers, oyster eggs, baby brine and adult copepods fit; mysis-sized meaty food is too big; live phyto is too fine." },
+            fedBy: [{ id: "demo_pods", name: "GoldPods", live: false }], pumps: ["Zooplankton pump"], coming: null, cultureFeeds: [],
+            verdict: "Fed by GoldPods, dosed by Zooplankton pump.",
+            rhythm: "1 feed a day, by day", note: "" },
+        ],
+        counts: { covered: 2, soon: 0, gap: 0, hand: 0 },
+        gaps: [], soon: [], warnings: [],
         suggestions: [{ channelId: "demo_zoo_pump", channelName: "Zooplankton pump",
           for: "Gorgonians — Menella, Swiftia, Diodogorgia", dosesPerDay: 2, night: false,
           note: "Discrete pulse feeds" }],
@@ -14430,33 +14447,58 @@ const rigSteps = [
       </article>`;
 
     // --- Species coverage: RESULTS only (picking what you keep is Settings) -
+    // 0.7.162: one row per animal — what it eats, how big its mouth is, who
+    // on the shelf feeds it. Every sentence is the backend compiler's
+    // (nps.compile_feed_plan); this only lays the rows out. Food on its way
+    // (doc §14) is the ⏳ row, a target-fed animal the 🖐 one.
     const selectedSpecies = (this._config && this._config.nps && this._config.nps.species) || [];
     const plan = (st.summary && st.summary.speciesPlan) || {};
+    const esc = (v) => this._escape(v == null ? "" : String(v));
     const planBits = [];
-    (plan.gaps || []).forEach((g) => planBits.push(
-      `<p class="hint" style="color:var(--warning-color,#f5a524)">🕳 ${this._escape(g)}</p>`));
-    // Food on its way (doc §14): a hatch running or a soak finishing covers
-    // the mouth soon — the keeper has already done the right thing.
-    (plan.soon || []).forEach((g) => planBits.push(
-      `<p class="hint">⏳ ${this._escape(g)}</p>`));
+    const statusIcon = { covered: "✅", soon: "⏳", gap: "🕳", hand: "🖐" };
+    (plan.species || []).forEach((s) => {
+      const status = String(s.status || "");
+      const icon = statusIcon[status] || "•";
+      const tone = status === "gap" ? ` style="color:var(--warning-color,#f5a524)"` : "";
+      const chips = (Array.isArray(s.foodWords) ? s.foodWords : []).map((w) => `<span class="pill">${esc(w)}</span>`);
+      if (s.particle) chips.push(`<span class="pill" title="The particle window this mouth can take">${esc(s.particle)}</span>`);
+      const mouth = s.mouth && s.mouth.note ? `<small>Mouth ${esc(s.particle)} — ${esc(s.mouth.note)}</small>` : "";
+      planBits.push(`
+        <div class="setting-card subtle-card stack" style="gap:4px;" data-species="${esc(s.id)}">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+            <strong>${icon} ${esc(s.name)}</strong><small>Difficulty ${this._npsDifficultyDots(s.difficulty)}</small>
+          </div>
+          ${chips.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;">${chips.join("")}</div>` : ""}
+          ${mouth}
+          ${s.verdict ? `<small${tone}>${esc(s.verdict)}</small>` : ""}
+          ${s.rhythm ? `<small class="hint">${esc(s.rhythm)}.${s.note ? ` ${esc(s.note)}` : ""}</small>` : ""}
+        </div>`);
+    });
     (plan.warnings || []).forEach((w) => planBits.push(
       `<p class="hint" style="color:var(--warning-color,#f5a524)">⚠️ ${this._escape(w)}</p>`));
-    if (selectedSpecies.length && !(plan.gaps || []).length && !(plan.soon || []).length && !(plan.warnings || []).length) {
-      planBits.push(`<p class="hint">Shelf coverage looks good — every selected mouth has a matching food${(st.summary?.shelf?.liveCount || 0) ? " (the hatchery's live brine counted)" : ""}.</p>`);
-    }
     (plan.suggestions || []).forEach((sug) => planBits.push(`
       <div class="setting-card subtle-card" style="display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;">
         <small><strong>${this._escape(sug.channelName)}</strong> → ${this._escape(String(sug.dosesPerDay))} doses/day${sug.night ? ", night-weighted" : ""} <em>(for ${this._escape(sug.for)})</em> — ${this._escape(sug.note)}</small>
         <button class="secondary compact-button" data-action="nps-apply-species" data-id="${this._escape(sug.channelId)}" data-doses="${Number(sug.dosesPerDay) || 1}" data-night="${sug.night ? "1" : ""}">Apply</button>
       </div>`));
-    const speciesNames = (plan.species || []).map((s) => this._escape(s.name)).join(" · ");
+    // The headline tallies the backend's statuses; the rows carry the why.
+    const counts = plan.counts || {};
+    const total = (plan.species || []).length;
+    const countBits = [];
+    if (counts.covered) countBits.push(`${counts.covered} fed from the shelf`);
+    if (counts.soon) countBits.push(`${counts.soon} ${counts.soon === 1 ? "on its way" : "on their way"}`);
+    if (counts.gap) countBits.push(`${counts.gap} with nothing on the shelf`);
+    if (counts.hand) countBits.push(`${counts.hand} hand-fed`);
+    const headline = total
+      ? `${total} ${total === 1 ? "animal" : "animals"}${countBits.length ? ` · ${countBits.join(" · ")}` : ""}`
+      : (st.loading ? "Reading the shelf…" : "No species report yet — the shelf loads with the NPS summary.");
     const speciesPanel = selectedSpecies.length ? `
       <article class="panel stack">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
           <p class="eyebrow" style="margin:0;">Species coverage</p>
           <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="nps" data-scroll="or-section-nps">Edit species</button>
         </div>
-        ${speciesNames ? `<small>${speciesNames}</small>` : ""}
+        <small${total ? "" : ' class="hint"'}>${esc(headline)}</small>
         ${planBits.join("")}
       </article>` : "";
 
@@ -26988,6 +27030,12 @@ const rigSteps = [
     );
   }
 
+  // Difficulty 1–5 as dots — the Settings grid and the coverage rows share it.
+  _npsDifficultyDots(d) {
+    const n = Math.max(1, Math.min(5, Number(d) || 1));
+    return "●".repeat(n) + "○".repeat(5 - n);
+  }
+
   // The species library filed by family (0.7.150): one grid per group the
   // summary names, in the summary's order; anything ungrouped (or a summary
   // without groups — the demo, an older backend) falls into one flat grid.
@@ -27017,8 +27065,7 @@ const rigSteps = [
     }
     const speciesLib = (this._nps.summary && this._nps.summary.speciesLibrary) || [];
     const library = (this._nps.summary && this._nps.summary.library) || [];
-    const diffDots = (d) => "●".repeat(Math.max(1, Math.min(5, Number(d) || 1)))
-      + "○".repeat(5 - Math.max(1, Math.min(5, Number(d) || 1)));
+    const diffDots = (d) => this._npsDifficultyDots(d);
     const foodChannelOpts = [`<option value="">— pick a live-food channel —</option>`]
       .concat(this._npsFoodChannelIds().map((id) => {
         const ch = this._doserChannels()[id] || {};
@@ -27040,7 +27087,7 @@ const rigSteps = [
           ${g.species.map((s) => `
           <label class="toggle-card compact-toggle" title="${this._escape(s.note || "")}">
             <input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}>
-            <span><strong>${this._escape(s.name)}</strong><small>Difficulty ${diffDots(s.difficulty)}</small></span>
+            <span><strong>${this._escape(s.name)}</strong><small>Difficulty ${diffDots(s.difficulty)}${Array.isArray(s.foodWords) && s.foodWords.length ? ` · ${this._escape(s.foodWords.join(", "))}` : ""}${s.particle ? ` · ${this._escape(String(s.particle))}` : ""}</small></span>
           </label>`).join("")}
         </div>`).join("")
         : `<div class="mini-grid"><small class="awc-hint">${this._nps.loading ? "Loading the species library…" : "Species library loads with the NPS summary — open the NPS tab once if this stays empty."}</small></div>`}

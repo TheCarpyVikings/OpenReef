@@ -4340,6 +4340,110 @@ def test_feed_timeline_reads_the_jars_own_harvest_clock():
     assert card["status"] == "establishing" and card["harvest"]["due"] is False, card
 
 
+def test_species_coverage_reads_each_mouth():
+    # 0.7.162: every selected animal gets a card — the foods in words, the
+    # window, the mouth in the keeper's own foods, the rhythm — and a verdict
+    # naming who on the shelf feeds it.
+    hard = nps.species_card(nps._SPECIES_BY_ID["gorgonian_hard"])
+    assert hard["foodWords"] == ["prepared zooplankton", "live zooplankton"] and hard["particle"] == "50–300 µm"
+    assert hard["mouth"] == {
+        "fits": ["rotifers", "oyster eggs"],
+        "tooBig": ["baby brine", "adult copepods", "mysis-sized meaty food"],
+        "tooFine": ["live phyto"],
+        "note": "Rotifers and oyster eggs fit; baby brine, adult copepods and mysis-sized meaty food "
+                "are too big; live phyto is too fine."}
+    assert hard["rhythm"] == "2 feeds a day, by day"
+    dendro = nps.species_card(nps._SPECIES_BY_ID["dendronephthya"])
+    assert dendro["mouth"]["fits"] == ["live phyto"] and dendro["mouth"]["tooFine"] == []
+    assert dendro["mouth"]["note"].startswith("Live phyto fits; rotifers, oyster eggs, baby brine")
+    assert dendro["rhythm"] == "A standing food density — near-continuous, 12 small feeds a day at the least"
+    assert nps.species_card(nps._SPECIES_BY_ID["tubastraea"])["rhythm"] == \
+        "1 feed a day, after lights-out — trainable to open by day"
+    assert nps.species_card(nps._SPECIES_BY_ID["rhizotrochus"])["rhythm"].startswith("Target-fed by hand")
+    # The blueberry's own note names oyster eggs: prepared zooplankton fits now.
+    assert "oyster eggs" in nps.species_card(nps._SPECIES_BY_ID["blueberry"])["mouth"]["fits"]
+    # The report: who feeds whom, the pump that doses it, the culture's feed
+    # that would have matched but never reaches the tank, the hand-fed one.
+    products = {
+        "rj": _product(name="Reef Juice", particleUmMin=1, particleUmMax=20),
+        "rfc": _product(name="Rotifer Feed Concentrate", particleUmMin=1, particleUmMax=12),
+        "bb": _product(name="Live baby brine", category="zooLive", particleUmMin=400, particleUmMax=500),
+    }
+    channels = {"c1": {"name": "Brine pump", "chemical": "livefood", "reservoir": {"productId": "bb"}},
+                "c2": {"name": "Cone drip", "chemical": "food", "reservoir": {"productId": "rfc"}}}
+    plan = nps.compile_feed_plan(["gorgonian_easy", "dendronephthya", "rhizotrochus", "gorgonian_hard"],
+                                 products, channels, quiet_product_ids={"rfc"})
+    by_id = {e["id"]: e for e in plan["species"]}
+    easy = by_id["gorgonian_easy"]
+    assert easy["status"] == "covered" and easy["fedBy"] == [{"id": "bb", "name": "Live baby brine", "live": False}]
+    assert easy["pumps"] == ["Brine pump"] and easy["verdict"] == "Fed by Live baby brine, dosed by Brine pump."
+    dendro = by_id["dendronephthya"]
+    assert dendro["status"] == "covered" and [f["name"] for f in dendro["fedBy"]] == ["Reef Juice"]
+    assert dendro["cultureFeeds"] == ["Rotifer Feed Concentrate"]
+    assert dendro["verdict"] == "Fed by Reef Juice. Rotifer Feed Concentrate is a culture's feed, so not counted."
+    assert by_id["rhizotrochus"]["status"] == "hand"
+    assert by_id["rhizotrochus"]["verdict"] == "Target-fed by hand — the shelf is not asked to cover it."
+    hard = by_id["gorgonian_hard"]
+    assert hard["status"] == "gap" and hard["fedBy"] == [] and hard["coming"] is None
+    assert hard["needs"] == "prepared zooplankton or live zooplankton at 50–300 µm"
+    assert hard["verdict"] == "Nothing on the shelf feeds it — needs prepared zooplankton or live zooplankton at 50–300 µm."
+    assert plan["counts"] == {"covered": 2, "soon": 0, "gap": 1, "hand": 1}
+    # The one-line forms are untouched; the cone's pump raises no warning and drives no suggestion.
+    assert plan["gaps"] == ["Gorgonians — Euplexaura, Guaiagorgia: nothing on the shelf feeds it "
+                            "(needs zooPrepared or zooLive, 50–300 µm)."]
+    assert plan["soon"] == [] and [s["channelId"] for s in plan["suggestions"]] == ["c1"]
+    assert not [w for w in plan["warnings"] if "Cone drip" in w], plan["warnings"]
+    # Nothing quiet: the concentrate counts like any phyto bottle.
+    plan = nps.compile_feed_plan(["dendronephthya"], products, {})
+    assert plan["species"][0]["verdict"] == "Fed by Reef Juice and Rotifer Feed Concentrate."
+    assert plan["species"][0]["cultureFeeds"] == []
+    # Food on its way is the soon row, with the source named.
+    pending = [{"name": "live rotifers from the cone", "category": "zooLive", "particleUmMin": 90,
+                "particleUmMax": 360, "note": "Cone A's first harvest in ~4.0 d"}]
+    plan = nps.compile_feed_plan(["gorgonian_hard"], {}, {}, pending=pending)
+    row = plan["species"][0]
+    assert row["status"] == "soon"
+    assert row["coming"] == {"name": "live rotifers from the cone", "note": "Cone A's first harvest in ~4.0 d"}
+    assert row["verdict"] == ("Nothing on the shelf feeds it yet — live rotifers from the cone will "
+                              "(Cone A's first harvest in ~4.0 d).")
+    assert plan["counts"]["soon"] == 1 and len(plan["soon"]) == 1
+
+
+def test_ws_summary_species_report_sets_the_cones_feed_aside():
+    # 0.7.162: the jar's linked phyto is the cone's, not the display's — the
+    # summary's report says so instead of calling the Dendronephthya fed, and
+    # the library rides the summary as cards.
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry()
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["species"] = ["dendronephthya"]
+    cfg["consumables"]["products"]["rfc"] = _product(name="Rotifer Feed Concentrate", particleUmMin=1, particleUmMax=12)
+    cfg["nps"]["cultures"] = {"enabled": True, "jars": {"c1": {
+        "name": "Cone A", "species": "rotifer_L", "volumeL": 2.5, "salinityPpt": 27,
+        "feed": {"productId": "rfc", "doseMl": 5}, "cadence": {}, "history": [],
+        "state": {"startedAt": _iso(now - timedelta(days=2)), "lastRestartAt": _iso(now - timedelta(days=2))}}}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.errors
+    payload = conn.results[-1].payload
+    row = payload["speciesPlan"]["species"][0]
+    assert row["id"] == "dendronephthya" and row["status"] == "gap", row
+    assert row["cultureFeeds"] == ["Rotifer Feed Concentrate"] and row["fedBy"] == []
+    assert row["verdict"] == ("Nothing on the shelf feeds it — needs live phyto at 1–20 µm. "
+                              "Rotifer Feed Concentrate is a culture's feed, so not counted.")
+    assert payload["speciesPlan"]["counts"] == {"covered": 0, "soon": 0, "gap": 1, "hand": 0}
+    lib = {s["id"]: s for s in payload["speciesLibrary"]}
+    assert lib["dendronephthya"]["particle"] == "1–20 µm" and lib["dendronephthya"]["foodWords"] == ["live phyto"]
+    assert lib["gorgonian_hard"]["mouth"]["fits"] == ["rotifers", "oyster eggs"]
+    # A tank phyto on the shelf: fed by that one alone, the cone's still set aside.
+    cfg["consumables"]["products"]["rj"] = _product(name="Reef Juice", particleUmMin=1, particleUmMax=20)
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    row = conn.results[-1].payload["speciesPlan"]["species"][0]
+    assert row["status"] == "covered" and [f["name"] for f in row["fedBy"]] == ["Reef Juice"]
+    assert row["verdict"] == "Fed by Reef Juice. Rotifer Feed Concentrate is a culture's feed, so not counted."
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

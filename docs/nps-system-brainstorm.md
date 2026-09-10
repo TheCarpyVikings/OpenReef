@@ -1456,3 +1456,58 @@ the bottle's own dose through the Cultures tap, a typed ml routed to
 fail-closed, coverage; the summary with a cone producing, establishing,
 soaking and absent), `test_panel_nps.mjs` 54 (1 new — chips, clock line,
 taps, ordering, worn/plain/stale copy, the typed feed routing).
+
+### 14.5 Species coverage reads each mouth (2026-09-10, 0.7.162)
+
+Reece's screen, three animals ticked — two gorgonians and a
+Dendronephthya. The card listed the names in grey, one ⏳ line for the
+Euplexaura, and the expert-tier warning. Nothing about the Dendronephthya
+at all, because a covered mouth got no line: grey read as "covered",
+silence read as "not showing", and covered-by-*what* was never said.
+
+**Now:** one row per animal, every word the compiler's
+(`nps.compile_feed_plan` over `nps.species_card`); the panel lays rows out.
+
+- Icon, name, difficulty dots; chips for the foods in words (`FOOD_WORDS`:
+  live phyto / live zooplankton / prepared zooplankton / a coral blend /
+  bacterioplankton) and the particle window.
+- The mouth note: which of the keeper's own foods fit, which are too big,
+  which too fine — `MOUTHFUL_REFERENCES` (live phyto 1–20, rotifers 90–360,
+  oyster eggs 150–250, baby brine 400–500, adult copepods 500–1200,
+  mysis-sized meaty food 1000–10000 µm), judged by the matcher's own
+  type-AND-overlap rule, so "rotifers fit" means a rotifer bottle on the
+  shelf WOULD count and a row can never contradict its verdict. A food of
+  the right size but the wrong type goes unsaid: size is not why it fails.
+- The verdict: *Fed by A and B, dosed by P.* / *Nothing on the shelf feeds
+  it yet — X will (when).* / *Nothing on the shelf feeds it — needs live
+  zooplankton at 50–300 µm.* / *Target-fed by hand — the shelf is not
+  asked to cover it.* Statuses covered / soon / gap / hand, tallied in
+  `counts` for the headline (*3 animals · 2 fed from the shelf · 1
+  hand-fed*).
+- The rhythm (feeds a day, by day or after lights-out, trainable; a
+  standing density; by hand) followed by the library's note.
+
+**The cone's feed is not the tank's.** The strip's quiet set (0.7.133 — a
+jar's linked feed, the soak's emulsion) now reaches the compiler as
+`quiet_product_ids`. The Rotifer Feed Concentrate matches a Dendronephthya
+by type and size, yet none of it goes in the display: it covers nothing,
+drives no pump and raises no "feeds none of the selected species" warning,
+and the row says *Rotifer Feed Concentrate is a culture's feed, so not
+counted.* Reece's Dendronephthya is fed by the Reef Juice alone.
+
+**Settings grid:** each species card carries its foods and window beside
+the difficulty, so a mouth's needs show before it is ticked
+(`speciesLibrary` rides the summary as cards).
+
+**Library fix:** the blueberry gorgonian's own note names oyster eggs;
+`zooPrepared` joined its foods.
+
+`gaps` / `soon` keep their one-line forms. Not changed: the species
+windows themselves — the sun corals' 300 µm floor still lets a rotifer
+bottle count for them by a hair; tightening that is a library tuning call,
+not a reporting one. Tests: `test_nps.py` 175 (2 new — the cards and mouth
+notes, the report with a pump, a quiet bottle, a hand-fed and a gap
+species, the soon row; the summary setting the cone's feed aside),
+`test_panel_nps.mjs` 61 (1 new — rows, chips, mouth, verdicts, headline,
+the grid line; and the Settings tests now set `_settingsSections`, the
+field the panel reads, instead of bailing silently under the harness).

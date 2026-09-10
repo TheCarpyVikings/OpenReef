@@ -16907,12 +16907,17 @@ async def websocket_nps_summary(
             "nextHatch": next_hatch,
         },
         # Species plans + nutrient budget (Stage D) — compiled backend-side.
-        "speciesLibrary": [dict(s) for s in nps_engine.SPECIES_LIBRARY],
+        # 0.7.162: each species as a card — foods in words, the particle
+        # window, the mouth note, the rhythm — so Settings can say what a
+        # mouth needs before it is ticked.
+        "speciesLibrary": [nps_engine.species_card(s) for s in nps_engine.SPECIES_LIBRARY],
         # 0.7.150: the families the Settings grid files the species under.
         "speciesGroups": [{"id": gid, "name": label} for gid, label in nps_engine.SPECIES_GROUPS],
+        # The quiet bottles (a jar's feed, the soak's emulsion) feed a culture,
+        # not the tank: they cover no mouth and drive no pump (0.7.162).
         "speciesPlan": nps_engine.compile_feed_plan(
             list((config.get("nps") or {}).get("species") or []), shelf_products, channels,
-            pending=live_pending),
+            pending=live_pending, quiet_product_ids=quiet_products),
         "budget": nps_engine.nutrient_budget(
             shelf_products, now_utc, _awc_effective_tank_l(config),
             awc_engine.daily_equivalent_litres(
