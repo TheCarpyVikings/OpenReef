@@ -24,6 +24,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .awc import _f, _parse_iso
+# The jar's own harvest clock (0.7.158): the strip reads the same function the
+# Cultures card and the culture reminders read — never a re-derived copy.
+from .cultures import culture_state
 
 RUNWAY_WINDOW_DAYS = 14        # usage averaging window for days-left forecasts
 LOW_PERCENT_DEFAULT = 10.0     # lowThresholdMl 0 = auto ⇒ this % of the bottle
@@ -2096,13 +2099,17 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
                     done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
-        cad = jar.get("cadence") if isinstance(jar.get("cadence"), dict) else {}
-        interval_d = _f(cad.get("harvestIntervalDays"))
-        last = _parse_iso(state.get("lastHarvestAt"))
+        # The jar's OWN clock (cultures.culture_state, 0.7.158): the first
+        # harvest lands when establishment ends, every later one an interval
+        # after the last. A jar still establishing plans nothing here — the
+        # Cultures card says "first harvest in ~27 d", so must the strip — and
+        # a crashed jar has no clock at all. A harvest is a day-granular
+        # chore: due on its day, any time, like a days-cadence bottle.
+        clock = culture_state(jar, now_local).get("harvest") or {}
+        clock_at = _parse_iso(clock.get("at")) if clock.get("available") else None
         planned = []
-        if interval_d > 0:
-            due_at = (last + timedelta(days=interval_d)) if last is not None else now_local
-            due_day = due_at.astimezone(tz).date() if tz is not None else due_at.date()
+        if clock_at is not None:
+            due_day = clock_at.astimezone(tz).date() if tz is not None else clock_at.date()
             if due_day <= today:
                 planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None,
                                   status="due", note="pods straight into the display — the jar's own clock"))

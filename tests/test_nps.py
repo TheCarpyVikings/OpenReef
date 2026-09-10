@@ -4241,6 +4241,60 @@ def test_ws_summary_carries_the_feed_log_and_a_timed_dose_stamps_its_volume():
     assert "channel:zoo:0" in [e["id"] for e in conn.results[-1].payload["timeline"]["events"]]
 
 
+def test_feed_timeline_reads_the_jars_own_harvest_clock():
+    """0.7.158 (doc §13.20): the Pod's tub on day 1 said "harvest · due now"
+    on the strip while the Cultures card said "first harvest in ~27 d". The
+    strip re-derived the clock; now it reads cultures.culture_state, so an
+    establishing jar plans nothing, a crashed jar has no clock, and a
+    producing jar is due on its day and not before."""
+    from openreef import cultures as cultures_engine
+    tz = timezone.utc
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=tz)
+
+    def jar(started_days, last_harvest_days=None, crashed_days=None):
+        state = {"startedAt": _iso(now - timedelta(days=started_days))}
+        if last_harvest_days is not None:
+            state["lastHarvestAt"] = _iso(now - timedelta(days=last_harvest_days))
+        if crashed_days is not None:
+            state["crashedAt"] = _iso(now - timedelta(days=crashed_days))
+        return {"enabled": True, "jars": {"pods": {"name": "Pod's", "species": "tigriopus",
+                                                    "state": state, "cadence": {}, "history": []}}}
+
+    # Day 1 of generation 1: establishing — the card's clock says 27 days.
+    establishing = jar(1)
+    clock = cultures_engine.culture_state(establishing["jars"]["pods"], now)
+    assert clock["status"] == "establishing" and clock["harvest"]["due"] is False and clock["harvest"]["hoursUntil"] == 27 * 24.0
+    tl = _tl(now, cultures=establishing)
+    assert not _by_id(tl, "culture:pods"), "an establishing jar plans no harvest on the strip"
+    assert tl["counts"]["feeds"] == 0 and tl["next"] == [] and tl["text"].startswith("Nothing scheduled")
+    # Establishment over (28 d), never harvested: the first harvest is due.
+    first = _tl(now, cultures=jar(29))
+    chips = _by_id(first, "culture:pods")
+    assert len(chips) == 1 and chips[0]["status"] == "due" and chips[0]["at"] is None and chips[0]["name"] == "Pod's harvest"
+    assert first["next"][0]["name"] == "Pod's harvest" and first["counts"]["feeds"] == 1
+    # Producing, harvested three days ago on a ten-day interval: not today.
+    assert not _by_id(_tl(now, cultures=jar(40, last_harvest_days=3)), "culture:pods")
+    # Producing, eleven days since the last harvest: due.
+    assert _by_id(_tl(now, cultures=jar(40, last_harvest_days=11)), "culture:pods")[0]["status"] == "due"
+    # Crashed: no clock, no chip — whatever the stamps say.
+    assert not _by_id(_tl(now, cultures=jar(40, last_harvest_days=11, crashed_days=2)), "culture:pods")
+    # The real payload path: the summary normalises the jar and the strip agrees with the card.
+    entry = _entry({})
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["cultures"] = {"enabled": True, "jars": {"pods": {"name": "Pod's", "species": "tigriopus",
+                                                                  "volumeL": 3, "state": {"startedAt": _iso(datetime.now(timezone.utc) - timedelta(days=1))}}}}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.errors
+    events = conn.results[-1].payload["timeline"]["events"]
+    assert not [e for e in events if e["source"].startswith("culture:")], events
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 2}))
+    assert not conn.errors, conn.errors
+    card = conn.results[-1].payload["jars"][0]["state"]
+    assert card["status"] == "establishing" and card["harvest"]["due"] is False, card
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

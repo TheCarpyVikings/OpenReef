@@ -1283,6 +1283,28 @@ and the pump's stamped volume), `test_panel_nps.mjs` (1 new — the grouped
 list, undo by ledger and stamp, the fold, the range reload, the tab
 placement, the zero-states, the demo).
 
+### 13.20 0.7.158 — the strip reads the jar's own harvest clock (2026-09-10)
+
+Reece's screen: the Pod's tub on day 1 of generation 1, the Cultures card
+saying *establishing · first harvest in ~27.3 d*, and the strip saying
+*Pod's harvest · any time · due now*. The strip was wrong. Its jar loop
+re-derived the harvest clock from the interval and the last-harvest stamp,
+and a jar that had never been harvested came out due *now* — it never asked
+about the species' establishment period (Tigriopus: 28 days), and it never
+noticed a crashed jar either. The chip's own note claimed "the jar's own
+clock"; it was a copy.
+
+Fixed at the source: `feed_timeline` now calls `cultures.culture_state()` —
+the function the Cultures card and the culture reminders read — and plans a
+harvest only when that clock is available and its day is today or earlier
+(a harvest is a day-granular chore: due on its day, any time, like a
+days-cadence bottle). An establishing jar plans nothing; a crashed jar has
+no clock. The honesty line and the next-up queue follow (7 feeds → 6 on that
+screen). The feeding log (§13.19) is untouched — it only lists harvests that
+happened. Tests: `test_nps.py` 172 (1 new — establishing, past
+establishment with no harvest yet, producing inside and past its interval,
+crashed).
+
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 
 Reece's screen: the Species coverage report said *nothing on the shelf
