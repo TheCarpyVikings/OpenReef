@@ -684,7 +684,7 @@ test("egg-type choice seeds the recommended hatch hours in settings", async () =
     hatchery.eggType = "decapsulated";
     const rec = panel._npsEggTypes().find((e) => e.id === "decapsulated");
     if (rec) hatchery.hatchHours = rec.hours;
-    assert(hatchery.hatchHours === 16, "decapsulated should seed 16 h");
+    assert(hatchery.hatchHours === 24, "decapsulation alone does not establish a faster hatch time");
   } finally { restore(); }
 });
 
@@ -729,7 +729,7 @@ test("hand-dosers get the brine clocks and the loaded button without a pump", as
     const html = panel._npsTab();
     assert(html.includes('data-action="nps-hatch-loaded"'), "the loaded button must not need a pump");
     assert(html.includes("Hand-dosing mode"), "hand-dose hint missing");
-    assert(html.includes("nutritional prime"), "the prime clock should run without a pump");
+    assert(html.includes("post-load handling window"), "the prime clock should run without a pump");
   } finally { restore(); }
 });
 
@@ -786,14 +786,14 @@ test("the v2 strip shows every vessel, the container, and the advisory brains", 
     assert(html.includes("Set clock to 20 h"), "the learned-clock Apply is missing");
     // A learned clock exists, so the temperature line quotes the rule of
     // thumb but defers to the measured runs (0.7.115).
-    assert(html.includes("rule of thumb ~36 h") && html.includes("measured beats modelled"),
+    assert(html.includes("rough temperature model gives ~36 h") && html.includes("not a supplier rating or a hatch measurement"),
       "the temperature advisory is missing or stretches the learned clock");
-    assert(!html.includes("needs 2 hatcheries"), "two vessels for a needed-2 setup — no nag");
+    assert(!html.includes("estimate is 2 hatcheries"), "two vessels for a needed-2 setup — no nag");
     // Down a vessel, the structural advice appears.
     const short = v2HatcherySummary({ vesselsNeeded: 2 });
     short.vessels = short.vessels.slice(0, 1);
     panel._nps.summary.hatchery = short;
-    assert(panel._npsTab().includes("needs 2 hatcheries"), "the structural vessel-count advice is missing");
+    assert(panel._npsTab().includes("estimate is 2 hatcheries"), "the structural vessel-count advice is missing");
     noPlaceholders(html, "v2 hatchery strip");
   } finally { restore(); }
 });
@@ -1157,7 +1157,7 @@ test("the enrichment tile holds the Selcon until instar II", async () => {
     // The molt has landed: the amber prompt and the Add dose button appear.
     html = withEnrich({ status: "enriching", hoursElapsed: 8.5, hoursLeft: null,
       percent: 0, firstDoseDue: true, secondDoseDue: false }, 8);
-    assert(html.includes("mouths are open"), "the dose-due prompt is missing");
+    assert(html.includes("planned dose time — check feeding stage"), "the dose-due prompt is missing");
     assert(html.includes('data-action="nps-enrich-dose"'), "the Add dose button is missing");
     noPlaceholders(html, "enrichment dose-delay tile");
   } finally { restore(); }
@@ -1335,15 +1335,15 @@ test("an enriched batch reads gut-loaded, never 'past prime, hatch fresh'", asyn
     fx.prime = { status: "boost_fading", ageHours: 44, primeLeftHours: 0,
                  enriched: true, window: "boost", windowHours: 12, soakAgeHours: 20 };
     html = panel._hatcheryPanel();
-    assert(html.includes("boost has drained"), "the honest ending for an enriched batch");
-    assert(html.includes("Still live food"), "...and it does not tell him to bin it");
+    assert(html.includes("planned enrichment window has passed"), "the honest ending for an enriched batch");
+    assert(html.includes("viability depend on temperature and handling"), "...and it does not tell him to bin it");
     // The unenriched path keeps the yolk story, now labelled as such.
     fx.prime = { status: "fading", ageHours: 30, primeLeftHours: 0,
                  enriched: false, window: "yolk", windowHours: 24 };
     html = panel._hatcheryPanel();
-    assert(html.includes("never enriched") && html.includes("yolk window"),
+    assert(html.includes("unenriched load") && html.includes("planned handling window"),
       "unenriched brine still ages out — and now names the reason");
-    assert(html.includes("enrich it"), "with enrichment offered as the way out");
+    assert(html.includes("Discard it and prepare a fresh batch"), "expired brine is not revived by enrichment");
   } finally { restore(); }
 });
 
@@ -1357,15 +1357,15 @@ test("a cool bench moves the molt, so the dose-delay advice moves with it", asyn
     hatch.instar = { available: true, hours: 9.0, factor: 1.13 };
     hatch.enrichment = { ...(hatch.enrichment || {}), doseDelayH: 6 };
     let html = panel._hatcheryPanel();
-    assert(html.includes("molt to instar II lands nearer"), "6 h is early at 26.4 °C");
-    assert(html.includes("no mouth"), "and it says why an early dose is wasted");
+    assert(html.includes("rough model suggests"), "6 h is early at 26.4 °C");
+    assert(html.includes("Confirm instar II"), "and it says why an early dose is wasted");
     // Setting already past the molt: no nag.
     hatch.enrichment.doseDelayH = 10;
-    assert(!panel._hatcheryPanel().includes("lands nearer"), "in step — no nag");
+    assert(!panel._hatcheryPanel().includes("rough model suggests"), "in step — no nag");
     // No sensor, no claim.
     hatch.enrichment.doseDelayH = 6;
     hatch.instar = { available: false, hours: 8, factor: null };
-    assert(!panel._hatcheryPanel().includes("lands nearer"),
+    assert(!panel._hatcheryPanel().includes("rough model suggests"),
       "without a temperature reading the app has nothing to argue with");
   } finally { restore(); }
 });
@@ -1428,7 +1428,7 @@ test("the temperature line measures the stretch against the rated hours and defe
     });
     let html = panel._hatcheryPanel();
     assert(!html.includes("not 38 h"), "the learned clock must not be stretched again");
-    assert(html.includes("measured beats modelled"), "the line defers to the measured runs");
+    assert(html.includes("not a supplier rating or a hatch measurement"), "the line defers to the measured runs");
     // No learned clock, a 24 h clock: the honest stretch on the rated hours.
     panel._nps.summary.hatchery = v2HatcherySummary({
       hatchHours: 24,
@@ -1436,7 +1436,7 @@ test("the temperature line measures the stretch against the rated hours and defe
       learned: { available: false, hours: null, samples: 0 },
     });
     html = panel._hatcheryPanel();
-    assert(html.includes("expect ~27.6 h, not 24 h"), "no learned clock: the rule of thumb speaks");
+    assert(html.includes("rough temperature model gives ~27.6 h"), "no learned clock: the rule of thumb speaks");
     // A clock already longer than the rule of thumb is not told to stretch.
     panel._nps.summary.hatchery = v2HatcherySummary({
       hatchHours: 36,
@@ -1444,7 +1444,7 @@ test("the temperature line measures the stretch against the rated hours and defe
       learned: { available: false, hours: null, samples: 0 },
     });
     html = panel._hatcheryPanel();
-    assert(html.includes("already allows for it"), "a generous clock is left alone");
+    assert(html.includes("Inspect hatch-out before changing the 36 h clock"), "a generous clock is left alone");
   } finally { restore(); }
 });
 
@@ -1466,7 +1466,7 @@ test("next-hatch wording names what sets the deadline, and an empty container de
     });
     panel._nps.summary.feedExchange.prime = { status: "unknown" };
     let html = panel._hatcheryPanel();
-    assert(html.includes("before the incoming harvest (Hatchery 1) fades"), "the deadline is the incoming harvest, by name");
+    assert(html.includes("Start the next hatch now") && html.includes("allow 38 h plus harvest time"), "the deadline is the incoming harvest, by name");
     // Two cones running (Reece's screen, 2026-09-08: Hatchery 1 at 3 %,
     // Hatchery 2 at 68 %): the anchor is the LAST load, and saying "the
     // incoming harvest (Hatchery 1)" read as a wrong answer. Tell the chain.
@@ -1477,7 +1477,7 @@ test("next-hatch wording names what sets the deadline, and an empty container de
     panel._nps.summary.hatchery.nextHatch = { status: "chained", startAt: new Date(Date.parse(NOW) + 22.8 * 3600000).toISOString(),
       hoursUntil: 22.8, readyBy: "", driver: "chain", chainVessel: "v1", hatchHours: 36, shelfHours: 24, overlap: true, busyCount: 2 };
     const two = panel._hatcheryPanel();
-    assert(two.includes("in Hatchery 2 — keeps the chain unbroken: Hatchery 2 harvests in ~11.6 h, then Hatchery 1 harvests in ~34.8 h — a fresh batch lands before the last load in the chain (Hatchery 1's) fades"),
+    assert(two.includes("in Hatchery 2 — planning the following load: Hatchery 2 harvests in ~11.6 h, then Hatchery 1 harvests in ~34.8 h — it is due by the time the last load in the chain (Hatchery 1's) fades"),
       `the chain is told in order: ${two.slice(two.indexOf("🔗"), two.indexOf("🔗") + 260)}`);
     assert(!two.includes("incoming harvest (Hatchery 1)"), "no more 'incoming harvest' for the last load");
     assert(two.includes("your 2 hatcheries stagger for this") && !two.includes("a second hatcher helps"), "the overlap hint knows the rack already has two cones");
@@ -1498,7 +1498,7 @@ test("next-hatch wording names what sets the deadline, and an empty container de
     panel._nps.summary.hatchery.nextHatch = { status: "chained", startAt: new Date(Date.parse(NOW) + 7 * 3600000).toISOString(),
       hoursUntil: 7, driver: "freshness", chainVessel: "v1", hatchHours: 38, shelfHours: 50, overlap: false, busyCount: 1 };
     html = panel._hatcheryPanel();
-    assert(html.includes("a fresh batch lands before the feeding bottle's brine fades"), "chained on the bottle");
+    assert(html.includes("it is due by the time the feeding bottle's brine fades"), "chained on the bottle");
     tab = panel._hatcheryTab();
     assert(/before the bottle(&#039;|')s brine fades/.test(tab), "hero card: the bottle, not 'the loaded brine'");
     // Depletion of the bottle.
@@ -1694,7 +1694,7 @@ test("settings are per hatchery: own cysts, own clock, own pouch (0.7.147)", asy
     v2.eggType = "decapsulated";
     const rec = panel._npsEggTypes().find((e) => e.id === "decapsulated");
     if (rec) v2.hatchHours = rec.hours;
-    assert(v2.hatchHours === 16 && hatchery.vessels.v1.hatchHours === 24, "one hatchery's cysts never move the other's clock");
+    assert(v2.hatchHours === 24 && hatchery.vessels.v1.hatchHours === 24, "one hatchery's cysts never move the other's clock");
     panel._nps.summary.hatchery = v2HatcherySummary({ vessels: [
       { id: "v1", name: "Hatchery 1", volumeL: 1, eggType: "standard", hatchHours: 24, state: { status: "none" },
         cysts: { available: true, days: 30, status: "old" } },
@@ -1704,7 +1704,7 @@ test("settings are per hatchery: own cysts, own clock, own pouch (0.7.147)", asy
     const html = panel._hatcherySettings();
     assert(!html.includes('data-scope="nps-hatchery" data-field="eggType"'), "the global egg type field is gone");
     assert(html.includes('data-scope="nps-hatch-vessel" data-id="v1" data-field="eggType"') && html.includes('data-scope="nps-hatch-vessel" data-id="v2" data-field="eggType"'), "each hatchery picks its own cysts");
-    assert(html.includes('data-id="v2" data-field="hatchHours" value="16"') && html.includes('data-id="v1" data-field="hatchHours" value="24"'), "each hatchery shows its own clock");
+    assert(html.includes('data-id="v2" data-field="hatchHours" value="24"') && html.includes('data-id="v1" data-field="hatchHours" value="24"'), "each hatchery shows its own clock");
     assert(html.includes("opened 30 days ago") && html.includes("not stamped yet"), "each hatchery shows its own pouch");
     assert(html.includes('data-action="nps-cysts-opened" data-id="v2"'), "the pouch button names the hatchery");
     // The card: each tile says its own cysts + clock, and the learned/temperature
@@ -1728,7 +1728,7 @@ test("settings are per hatchery: own cysts, own clock, own pouch (0.7.147)", asy
     const same = panel._hatcheryPanel();
     assert(same.split("📈").length === 2 && same.includes("📈 Hatchery 1 &amp; Hatchery 2: your last 4"), "one learned line for both cones");
     assert(same.includes('data-hours="30" data-egg="standard"'), "the shared chip sweeps the egg type");
-    assert(same.split("🌡️").length === 2 && same.includes("🌡️ Hatchery 1 &amp; Hatchery 2: hatchery runs 25.1 °C"), "one temperature line for both cones");
+    assert(same.split("🌡️").length === 2 && same.includes("🌡️ Hatchery 1 &amp; Hatchery 2: sensor reads 25.1 °C"), "one temperature line for both cones");
     // Removing a hatchery takes its reminders with it.
     delete hatchery.vessels.v2;
     panel._npsHatchTaskIds("v2").forEach((tid) => { delete panel._config.maintenance.tasks[tid]; });
@@ -1965,11 +1965,11 @@ test("a full rack never prints a start no cone can take", async () => {
     panel._nps.summary.hatchery.vessels[0].state = { status: "incubating", hoursElapsed: 24.8, hoursLeft: 11.2, percent: 69 };
     panel._nps.summary.hatchery.vessels[1].state = { status: "incubating", hoursElapsed: 9.4, hoursLeft: 14.6, percent: 39 };
     const html = panel._hatcheryPanel();
-    assert(html.includes("Every hatchery is busy — Hatchery 1 frees first"),
+    assert(html.includes("The earliest next load comes from Hatchery 1"),
       `the blocked line names the cone that frees first: ${html.slice(html.indexOf("\u23f0"), html.indexOf("\u23f0") + 300)}`);
     assert(/lands ~8\.6 h after the last load in the chain \(Hatchery 2(&#039;|')s\) fades/.test(html),
       "the shortfall is owned, against the load that actually sets the deadline");
-    assert(html.includes("\u2744 Refrigerate on the loaded brine to bridge the gap"), "the blocked line offers the remedy");
+    assert(html.includes("Plan another food source for that gap"), "the blocked line offers the remedy");
     assert(!html.includes("keeps the chain unbroken"), "a blocked rack must not also tell the reachable-start story");
     // The generic overlap heads-up is left off — this line IS that physics,
     // made concrete, and repeating the fridge hint twice reads as noise.
@@ -1985,7 +1985,7 @@ test("a full rack never prints a start no cone can take", async () => {
       readyBy: "", driver: "chain", chainVessel: "v2", hatchHours: 36, shelfHours: 24,
       overlap: true, busyCount: 1, freeAt: null, lateHours: null };
     const freed = panel._hatcheryPanel();
-    assert(freed.includes("keeps the chain unbroken"), "a free cone gets the ordinary chained line back");
+    assert(freed.includes("planning the following load"), "a free cone gets the ordinary chained line back");
     assert(!freed.includes("Every hatchery is busy"), "no blocked line once a cone is idle");
   } finally { restore(); }
 });
@@ -2003,7 +2003,7 @@ test("the rack rhythm reads the cones' phase, not just their number", async () =
     };
     // A rack that covers itself states its beat and stays calm.
     const even = set({});
-    assert(even.includes("longest gap ~18 h against a 24 h shelf — the cones cover each other"),
+    assert(even.includes("longest gap ~18 h against a 24 h supply window — covered if each cone is restarted promptly"),
       `an even rack states its rhythm: ${even.slice(even.indexOf("\ud83c\udf0a"), even.indexOf("\ud83c\udf0a") + 200)}`);
     assert(!/warning-color[^<]*Rack rhythm/.test(even), "an even rack must not wear the warning tint");
     // Two cones, enough by count, clustered by phase: name the cone, the
@@ -2023,24 +2023,49 @@ test("the rack rhythm reads the cones' phase, not just their number", async () =
     // and stay calm — a tight rack still holds.
     const tight = set({ status: "tight", worstGapHours: 24, averageGapHours: 14.4,
       matched: { clockHours: 36, gapHours: 18 } });
-    assert(tight.includes("it holds, with nothing to spare"), "tight is not dry");
-    assert(tight.includes("No delay evens it out — the cones run different clocks"), "the honest diagnosis");
-    assert(tight.includes("Matching them at 36 h across 2 hatcheries would land a batch every ~18 h"),
+    assert(tight.includes("within the planned window, with little margin"), "tight is not dry");
+    assert(tight.includes("No tested delay improves the widest gap over this forecast"), "the honest diagnosis");
+    assert(tight.includes("A shared 36 h cycle, evenly staggered, would average 18 h between loads"),
       "the matched-clock advice carries real numbers");
     assert(!/warning-color[^<]*Rack rhythm/.test(tight), "a rhythm that holds must not wear the warning tint");
     assert(set({ status: "dry", worstGapHours: 36, averageGapHours: 36 })
-      .includes("the gap is baked into the batches already running"), "no fix, no matched: say that plainly");
+      .includes("No tested single-cone delay improves the widest gap over this forecast"), "no fix, no matched: say that plainly");
     // Too few cones is a COUNT problem — that line owns it, and two pieces of
     // structural advice at once is noise.
     panel._nps.summary.hatchery = v2HatcherySummary({ vesselsNeeded: 3,
       rackRhythm: rhythm({ status: "dry", worstGapHours: 36 }) });
     const short = panel._hatcheryPanel();
-    assert(short.includes("needs 3 hatcheries"), "the vessel-count advice still renders");
+    assert(short.includes("estimate is 3 hatcheries"), "the vessel-count advice still renders");
     assert(!short.includes("Rack rhythm"), "the rhythm line stands down while the rack is a cone short");
     // Nothing to say without a projection.
     panel._nps.summary.hatchery = v2HatcherySummary({ vesselsNeeded: 2,
       rackRhythm: { available: false, status: "even", worstGapHours: null } });
     assert(!panel._hatcheryPanel().includes("Rack rhythm"), "no projection, no line");
+  } finally { restore(); }
+});
+
+test("hatchery audit: soak actions and supply advice respect the current batch", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.summary.hatchery = v2HatcherySummary({
+      enrichment: { hours: 12, productName: "Selcon", state: {
+        status: "enriching", hoursLeft: 11, percent: 8, firstDoseDue: false } },
+      nextHatch: { status: "start_now", hatchHours: 36, lateHours: 8,
+        supplyGapHours: 4, shelfHours: 24, overlap: true },
+    });
+    let html = panel._hatcheryPanel();
+    assert(!html.includes('data-action="nps-fridge-in"'), "a running soak cannot be refrigerated");
+    assert(/data-action="nps-enrich-loaded" disabled/.test(html), "soak done stays disabled before completion");
+    assert(html.includes("still land ~8 h after") && html.includes("earlier gap of ~4 h"), "both supply gaps are visible");
+    assert(html.includes("Finish and rinse before feeding") && html.includes("does not schedule this soak"), "a running soak is not presented as available food");
+    assert(!html.includes("Refrigerate on the loaded brine"), "refrigeration is not promised as a remedy during a soak");
+    panel._nps.summary.hatchery.enrichment.state = { status: "done", hoursLeft: 0, percent: 100 };
+    html = panel._hatcheryPanel();
+    assert(!/data-action="nps-enrich-loaded" disabled/.test(html), "a completed soak can be acknowledged");
+    const rig = panel._hatcheryRigPanel();
+    assert(rig.includes("submerged 120 µm screen") && rig.includes("also retains larger debris"), "mesh advice describes what the screen can do");
+    assert(!rig.includes("700 ml fresh 35 ppt"), "the live rig does not prescribe a hardcoded refill");
   } finally { restore(); }
 });
 

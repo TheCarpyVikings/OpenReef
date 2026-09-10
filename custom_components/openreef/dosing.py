@@ -400,9 +400,11 @@ def guard_reasons(
     if channel.get("chemical") in ("livefood", "food") and now is not None:
         # food channels default shelfLifeDays 0 (shelf-stable ⇒ freshness_state
         # says fresh); a user-set shelf life opts into the same fail-closed rule.
-        fresh = freshness_state(_cfg(channel, "reservoir"), now)
+        fresh = live.get("foodFreshness") or freshness_state(_cfg(channel, "reservoir"), now)
         what = "live-food culture" if channel.get("chemical") == "livefood" else "food reservoir"
-        if fresh["status"] == "stale":
+        if fresh["status"] == "soaking":
+            block("food_soaking", "The brine enrichment soak is running; finish and rinse before dosing.")
+        elif fresh["status"] == "stale":
             block("stale_food",
                   f"The {what} is past its shelf life — refresh the "
                   "reservoir and tap 'Refreshed', or nothing doses.")

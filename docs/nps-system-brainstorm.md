@@ -1,5 +1,7 @@
 # Automated NPS System — research + design brief
 
+> **Hatchery audit update (2026-09-10):** The historical hatchery recommendations and earlier audit verdicts below are superseded by [the current hatchery audit](hatchery-audit-2026-09-10.md), including its corrected calculations and explicit biological/model limits.
+
 Date: 2026-08-12 · Status: **Stage A SHIPPED (0.7.40, 2026-08-13)** — Stages B–E next · Research: 3 web agents + 3 codebase mappers (full dossiers summarized here)
 
 > **Naming decision (2026-08-13)**: plain **"NPS"** for the tab and marketing ("Automated NPS System" long form). Feast/Ægir branding rejected — searchable beats clever here.

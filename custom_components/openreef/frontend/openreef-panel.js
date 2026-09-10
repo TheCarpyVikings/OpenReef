@@ -10600,13 +10600,13 @@ class OpenReefPanel extends HTMLElement {
     if (Array.isArray(served) && served.length) return served;
     return [
       { id: "standard", name: "Standard cysts (GSL)", hours: 24,
-        note: "The usual eBay/LFS cysts: 18–24 h at 26–30 °C, ~25 ppt, strong aeration." },
-      { id: "decapsulated", name: "Decapsulated cysts", hours: 16,
-        note: "Shell already dissolved — hatches faster (~16 h) and no shell separation." },
-      { id: "premium", name: "High-hatch premium cysts", hours: 20,
-        note: "90%+ hatch-rate grades tend to pop a little sooner (~20 h)." },
+        note: "24 h starting estimate at 25–28 °C. Follow the supplier's salinity, light and aeration guidance; inspect hatch-out." },
+      { id: "decapsulated", name: "Decapsulated cysts", hours: 24,
+        note: "Use hatchable decapsulated cysts; dried feed-only products may not hatch. Timing depends on the product, not shell removal alone." },
+      { id: "premium", name: "High-hatch premium cysts", hours: 24,
+        note: "High hatch percentage describes yield, not speed. Start with the supplier's hatch time; 24 h is a planning default." },
       { id: "cool_room", name: "Cool room (below ~24 °C)", hours: 36,
-        note: "No heater on the hatcher? Budget up to 36 h — temperature rules the clock." },
+        note: "36 h planning estimate only; cool-water hatches can take longer. Check hatch-out and the supplier's guidance." },
     ];
   }
 
@@ -10685,7 +10685,12 @@ class OpenReefPanel extends HTMLElement {
     const rackHint = vesselsSum.length >= 2 && vesselsSum.length >= needed
       ? `your ${this._escape(String(vesselsSum.length))} hatcheries stagger for this`
       : "a second hatcher helps";
-    const fridgeHint = `${rackHint} — or tap ❄ Refrigerate on the loaded brine: it drains into a feeding bottle in the fridge (the clock slows to the 48 h rate from that moment) and the container is free for the next hatch`;
+    const canFridge = Number(hatchSum.reservoir?.remainingMl) > 0
+      && hatchSum.reservoir?.freshness?.status !== "stale"
+      && (!hatchSum.enrichment?.state?.status || hatchSum.enrichment.state.status === "none");
+    const fridgeHint = canFridge
+      ? `${rackHint}; refrigeration can extend the loaded batch's planning window, but check its volume and remaining life`
+      : `${rackHint}; plan another food source for any supply gap`;
     const overlapNote = next.overlap
       ? (Number(next.shelfHours) >= Number(next.hatchHours)
         ? ` Heads-up: a ${this._escape(String(next.hatchHours))} h hatch plus harvest time uses the brine's whole ${this._escape(String(next.shelfHours))} h shelf life — batches have to overlap (${fridgeHint}).`
@@ -10697,16 +10702,16 @@ class OpenReefPanel extends HTMLElement {
     if (next.status === "blocked") {
       const cone = nextStartName ? this._escape(nextStartName) : "the first cone";
       const late = Number(next.lateHours) || 0;
-      return `<span style="color:var(--warning-color,#f5a524)">⏰ Every hatchery is busy — ${cone} frees first. Start there at ${when}, the moment it is harvested${late > 0 ? `; even then a ${this._escape(String(next.hatchHours))} h batch lands ~${this._escape(String(next.lateHours))} h after ${why}, so tap ❄ Refrigerate on the loaded brine to bridge the gap` : ""}.</span>`;
+      return `<span style="color:var(--warning-color,#f5a524)">⏰ The earliest next load comes from ${cone}. Start there at ${when}, once harvested${late > 0 ? `; even then a ${this._escape(String(next.hatchHours))} h batch lands ~${this._escape(String(next.lateHours))} h after ${why}. Plan another food source for that gap` : ""}.</span>`;
     }
     if (next.status === "chained") {
-      return `🔗 Next hatch: start ${when}${inVessel} — keeps the chain unbroken:${chainStory} a fresh batch lands before ${why}.${overlapNote}`;
+      return `🔗 Next hatch: start ${when}${inVessel} — planning the following load:${chainStory} it is due by the time ${why}.${overlapNote}`;
     }
     if (next.status === "wait") {
       return `🥚 Next hatch: start ${when} — timed so a ${this._escape(String(next.hatchHours))} h batch is ready before ${why}.${overlapNote}`;
     }
     if (next.status === "start_now") {
-      return `<span style="color:var(--warning-color,#f5a524)">⏰ Start the next hatch now — a ${this._escape(String(next.hatchHours))} h batch only lands before ${why} if the cysts go in today.</span>${overlapNote}`;
+      return `<span style="color:var(--warning-color,#f5a524)">⏰ Start the next hatch now${inVessel} — allow ${this._escape(String(next.hatchHours))} h plus harvest time.${Number(next.lateHours) > 0 ? ` It will still land ~${this._escape(String(next.lateHours))} h after the current supply window ends; plan another food source.` : ""}</span>${overlapNote}`;
     }
     if (next.status === "overdue") {
       return `<span style="color:var(--warning-color,#f5a524)">⏰ Past time — ${next.driver === "depletion" ? (bottleOnly ? "the feeding bottle is running dry" : "the reservoir is running dry") : bottleOnly ? "the feeding bottle's brine is going stale" : "the loaded brine is going stale"}; start the next hatch as soon as you can.</span>${overlapNote}`;
@@ -10724,21 +10729,21 @@ class OpenReefPanel extends HTMLElement {
     const n = (v) => this._escape(String(v));
     const worst = n(rhythm.worstGapHours);
     const shelf = n(rhythm.shelfHours);
-    const numbers = `brine lands every ~${n(rhythm.averageGapHours)} h on average, longest gap ~${worst} h against a ${shelf} h shelf`;
+    const numbers = `projected loads average ~${n(rhythm.averageGapHours)} h apart, longest gap ~${worst} h against a ${shelf} h supply window`;
     if (rhythm.status === "even") {
-      return `🌊 Rack rhythm: ${numbers} — the cones cover each other.`;
+      return `🌊 Rack rhythm: ${numbers} — covered if each cone is restarted promptly and each load replaces or outlasts the previous batch.`;
     }
     const verdict = rhythm.status === "dry"
       ? `the tank goes ~${n(Math.round((Number(rhythm.worstGapHours) - Number(rhythm.shelfHours)) * 10) / 10)} h without`
-      : "it holds, with nothing to spare";
+      : "within the planned window, with little margin";
     const fix = rhythm.fix;
     const body = fix
       ? `${fix.idle
         ? `Start ${n(fix.vesselName)} ~${n(fix.delayHours)} h from now rather than straight away`
         : `Hold ${n(fix.vesselName)} back ~${n(fix.delayHours)} h on its next start`} and the widest gap becomes ~${n(fix.gapAfterHours)} h — one delayed batch, then the rack keeps itself even.`
       : rhythm.matched
-        ? `No delay evens it out — the cones run different clocks, so the pattern repeats around that gap. Matching them at ${n(rhythm.matched.clockHours)} h across ${n(rhythm.vesselCount)} hatcheries would land a batch every ~${n(rhythm.matched.gapHours)} h.`
-        : "No delay evens it out — the gap is baked into the batches already running.";
+        ? `No tested delay improves the widest gap over this forecast. A shared ${n(rhythm.matched.clockHours)} h cycle, evenly staggered, would average ${n(rhythm.matched.gapHours)} h between loads; only use a cycle that suits the actual hatch-out.`
+        : "No tested single-cone delay improves the widest gap over this forecast.";
     const line = `🌊 Rack rhythm: ${numbers} — ${verdict}. ${body}`;
     return rhythm.status === "dry"
       ? `<span style="color:var(--warning-color,#f5a524)">${line}</span>` : line;
@@ -10783,7 +10788,7 @@ class OpenReefPanel extends HTMLElement {
       return { ...base, stage: "enrich", enrichPct: pct(es.percent), air2On: true,
         caption: es.status === "enriching"
           ? (es.firstDoseDue
-            ? "SOAKING — mouths are open: add the Selcon now"
+            ? "SOAKING — planned dose time: check feeding stage"
             : es.hoursLeft == null
               ? "SOAKING — holding in clean water until instar II"
               : `ENRICHING — ${es.hoursLeft} h of soak left`)
@@ -10985,8 +10990,8 @@ class OpenReefPanel extends HTMLElement {
         <rect x="352" y="660" width="56" height="12" rx="4" fill="#101a22" stroke="#42a5f5" stroke-width="2.2"></rect>
         ${rig.meshHot ? `<circle cx="368" cy="646" r="2" fill="#ef6c00"></circle><circle cx="381" cy="645" r="2.2" fill="#ef6c00"></circle><circle cx="394" cy="646" r="2" fill="#ef6c00"></circle>` : ""}
         ${sm(424, 640, "clear union · 120 µm mesh disc")}
-        ${sm(424, 654, "instar I is ~430 µm — water passes,")}
-        ${sm(424, 668, "nothing else does · drain part-open, gently")}
+        ${sm(424, 654, "120 µm retains nauplii and larger debris;")}
+        ${sm(424, 668, "rinse gently; keep the screen submerged")}
         ${pipe("M 380 672 V 692")}
         ${rig.meshHot ? `<path d="M 380 672 V 692" fill="none" stroke="#4e6572" stroke-width="1.6" class="awc-flow"></path>` : ""}
         ${sm(392, 688, "water only — never the tank")}
@@ -10995,10 +11000,10 @@ class OpenReefPanel extends HTMLElement {
         <path d="M 340 640 C 250 560 300 300 552 236" fill="none" stroke="${rig.backflushHot ? "#26a69a" : "#54707d"}" stroke-width="1.6" stroke-dasharray="5 4"${rig.backflushHot ? ` class="awc-flow"` : ""}></path>
         <polygon points="552,236 540,234 544,244" fill="${rig.backflushHot ? "#26a69a" : "#54707d"}"></polygon>
         ${sm(198, 470, "invert the mesh half over the vessel —", "start", rig.backflushHot ? "#26a69a" : "#8798a4")}
-        ${sm(198, 484, "backflush 700 ml fresh 35 ppt · air ON", "start", rig.backflushHot ? "#26a69a" : "#8798a4")}
+        ${sm(198, 484, "tank-matched backflush · within capacity · air ON", "start", rig.backflushHot ? "#26a69a" : "#8798a4")}
         ${sm(198, 498, "then tap Hatched &amp; loaded", "start", rig.backflushHot ? "#26a69a" : "#8798a4")}
         ${sm(716, 560, "crud bleed: mesh half OFF,")}
-        ${sm(716, 574, "crack ② + ③ — first ~20 ml")}
+        ${sm(716, 574, "collect a small test bleed; inspect for nauplii")}
         ${sm(716, 588, "of tip crud straight to waste")}
         ${badge(500, 126, 1)}${badge(716, 452, 2)}${badge(700, 546, 3)}${badge(300, 652, 4)}
         ${badge(544, 262, 5)}${badge(736, 330, 6)}${badge(428, 716, 7)}
@@ -12468,13 +12473,13 @@ class OpenReefPanel extends HTMLElement {
     const bottleSumMl = Math.max(0, Number(bottleSum.remainingMl) || 0);
     const primeHold = bankedH > 0 ? "at room temp, with the bottle's cold hours banked" : "at room temp";
     const primeLine = prime.status === "gutloaded"
-      ? `🦐 Gut-loaded — this batch has been FED, so it is not running on yolk any more. The HUFA boost holds ~${this._escape(String(prime.primeLeftHours))} h (${this._escape(String(prime.windowHours))} h ${primeHold}, counted from the end of the soak).`
+      ? `🦐 Gut-loaded — this batch has been FED, so it is not running on yolk any more. The HUFA boost holds for an estimated ~${this._escape(String(prime.primeLeftHours))} h (${this._escape(String(prime.windowHours))} h ${primeHold}, counted from the planned soak end). This is a handling estimate, not a measured nutrient level.`
       : prime.status === "boost_fading"
-        ? `🦐 The enrichment boost has drained — the soak ended ${this._escape(String(prime.soakAgeHours))} h ago, and DHA retro-converts within a day at room temp. Still live food, just no longer enriched food.`
+        ? `🦐 The planned enrichment window has passed — the soak ended ${this._escape(String(prime.soakAgeHours))} h ago. Nutrient retention and viability depend on temperature and handling.`
         : prime.status === "prime"
-          ? `🦐 Hatch is in its nutritional prime — ~${this._escape(String(prime.primeLeftHours))} h left (unenriched nauplii lose 30–50% of their calories by 48 h).`
+          ? `🦐 About ${this._escape(String(prime.primeLeftHours))} h remain in the post-load handling window. Unfed nauplii lose energy from hatch onward; the load time does not establish their biological age.`
           : prime.status === "fading"
-            ? `🦐 Hatch is ${this._escape(String(prime.ageHours))} h old and was never enriched — past the 24 h yolk window. Feed it out, enrich it, or hatch fresh.`
+            ? `🦐 This unenriched load was recorded ${this._escape(String(prime.ageHours))} h ago and is outside its planned handling window. Discard it and prepare a fresh batch.`
             : bottleSumMl > 0
               ? `🦐 Container is empty — the feeding bottle holds the live food (${this._escape(String(Math.round(bottleSumMl)))} ml${bottleSum.lastLoadEnriched ? ", enriched" : ""}${bottleSum.freshness?.hoursLeft != null ? `, ~${this._escape(String(bottleSum.freshness.hoursLeft))} h left` : ""}). The next harvest reloads the container.`
               : `🦐 No hatch loaded yet — tap "Hatched &amp; loaded" once the reservoir is filled.`;
@@ -12491,13 +12496,17 @@ class OpenReefPanel extends HTMLElement {
     // drains the container into the feeding bottle that goes cold.
     const fridgeRes = hatch.reservoir || {};
     const fridgeButton = Number(fridgeRes.remainingMl) > 0 && fridgeRes.mixedAt
+      && fresh.status !== "stale"
+      && (!hatch.enrichment?.state?.status || hatch.enrichment.state.status === "none")
       ? `<button class="secondary compact-button" data-action="nps-fridge-in" title="Drain the container into a separate feeding bottle and put THAT in the fridge. 2–4 °C near-stops nauplii metabolism: the bottle's clock runs at the 48 h rate from this moment (warm hours already spent stay spent), and the container is free for the next hatch.">❄ Refrigerate</button>`
       : "";
     const hatchState = hatch.state || {};
     const hatchHours = Number(hatch.hatchHours) || 24;
     const eggName = (this._npsEggTypes().find((e) => e.id === (hatch.eggType || "standard")) || {}).name
       || "Standard cysts";
-    const nextHatchLine = this._npsNextHatchLine(hatch.nextHatch, hatchState.status);
+    const nextHatchLine = this._npsNextHatchLine(hatch.nextHatch, hatchState.status)
+      + (Number(hatch.nextHatch?.supplyGapHours) > 0
+        ? ` <span style="color:var(--warning-color,#f5a524)">An earlier gap of ~${this._escape(String(hatch.nextHatch.supplyGapHours))} h is also projected before the incoming loads cover demand; plan another food source.</span>` : "");
     // --- Hatchery v2 strip: every vessel with its own clock + the container --
     const vessels = Array.isArray(hatch.vessels) && hatch.vessels.length
       ? hatch.vessels
@@ -12532,12 +12541,12 @@ class OpenReefPanel extends HTMLElement {
            <button class="secondary compact-button" data-action="nps-align-clock" data-id="${this._escape(v.id)}" title="Move this running batch onto ${this._escape(v.name)}'s ${this._escape(String(vClock))} h clock — its countdown, its ready push and its harvest reminder all follow.">Move to ${this._escape(String(vClock))} h</button>`
         : "";
       const guide = v.guide && v.guide.available
-        ? `<small class="muted" title="2 g/L is the documented optimum — more cysts hatch WORSE">~${this._escape(String(v.guide.grams))} g cysts</small>` : "";
+        ? `<small class="muted" title="2 g/L is a conservative starting density; actual hatch yield depends on cysts, oxygen and water conditions">~${this._escape(String(v.guide.grams))} g cysts</small>` : "";
       const buttons = [
         vs.status === "none" || !vs.status
           ? `<button class="secondary compact-button" data-action="nps-hatch-start" data-id="${this._escape(v.id)}">Start hatch</button>` : "",
         vs.status === "incubating"
-          ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}" title="Instar I nauplii (first ~18 h) are the most nutritious — harvesting early is the premium move">Harvest now</button>`
+          ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}" title="Inspect for swimming nauplii before harvesting; the timer estimates hatch-out and does not measure it.">Harvest now</button>`
           : "",
         (vs.status === "ready" || vs.status === "overdue")
           ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}">Hatched &amp; loaded</button>` : "",
@@ -12582,7 +12591,7 @@ class OpenReefPanel extends HTMLElement {
     const learnedLine = grouped.map((t) => {
       const learned = t.learned;
       return learned.available && Math.abs(Number(learned.hours) - t.hours) >= 2
-        ? `📈 ${who(t)}your last ${this._escape(String(learned.samples))} ${this._escape(t.egg)} batches actually ran ~${this._escape(String(learned.hours))} h (clock says ${this._escape(String(t.hours))} h). <button class="secondary compact-button" data-action="nps-apply-learned-hours" data-hours="${this._escape(String(learned.hours))}" ${target(t)}>Set clock to ${this._escape(String(Math.round(learned.hours)))} h</button>`
+        ? `📈 ${who(t)}your last ${this._escape(String(learned.samples))} ${this._escape(t.egg)} batches were harvested after ~${this._escape(String(learned.hours))} h (clock says ${this._escape(String(t.hours))} h; includes any delay before you harvested). <button class="secondary compact-button" data-action="nps-apply-learned-hours" data-hours="${this._escape(String(learned.hours))}" ${target(t)}>Set clock to ${this._escape(String(Math.min(48, Math.max(8, Math.round(learned.hours)))))} h</button>`
         : "";
     }).filter(Boolean).join("<br>");
     const temp = hatch.temp || {};
@@ -12593,12 +12602,10 @@ class OpenReefPanel extends HTMLElement {
       const tp = t.temp;
       const learned = t.learned;
       const ratedHours = Number(tp.ratedHours) || t.hours;
+      if (tp.warm) return `<span style="color:var(--warning-color,#f5a524)">🌡️ Hatchery runs ${this._escape(String(tp.tempC))} °C — above ~30 °C hatch quality drops; aim for 25–28 °C.</span>`;
       if (!tp.available) return "";
-      if (tp.warm) return `<span style="color:var(--warning-color,#f5a524)">🌡️ Hatchery runs ${this._escape(String(tp.tempC))} °C — above ~30 °C hatch quality drops; aim for 26–28 °C.</span>`;
       if (!(Number(tp.factor) > 1.05)) return "";
-      if (learned.available) return `🌡️ ${who(t)}hatchery runs ${this._escape(String(tp.tempC))} °C — below the 28 °C optimum, so the ${this._escape(String(ratedHours))} h these cysts are rated for stretches (rule of thumb ~${this._escape(String(tp.expectedHours))} h). Your last ${this._escape(String(learned.samples))} batches actually ran ~${this._escape(String(learned.hours))} h — measured beats modelled, so plan on that.`;
-      if (Number(tp.expectedHours) - t.hours >= 1) return `🌡️ ${who(t)}hatchery runs ${this._escape(String(tp.tempC))} °C — expect ~${this._escape(String(tp.expectedHours))} h, not ${this._escape(String(t.hours))} h (cooler water stretches the clock).`;
-      return `🌡️ ${who(t)}hatchery runs ${this._escape(String(tp.tempC))} °C — cooler than the 28 °C optimum; your ${this._escape(String(t.hours))} h clock already allows for it (rule of thumb ~${this._escape(String(tp.expectedHours))} h).`;
+      return `🌡️ ${who(t)}sensor reads ${this._escape(String(tp.tempC))} °C. The rough temperature model gives ~${this._escape(String(tp.expectedHours))} h from the ${this._escape(String(ratedHours))} h preset; this is not a supplier rating or a hatch measurement. Inspect hatch-out before changing the ${this._escape(String(t.hours))} h clock.`;
     }).filter((line, i, all) => line && all.indexOf(line) === i).join("<br>");
     // The molt is temperature-driven too (0.7.89) — a cool bench moves the
     // moment the batch grows a mouth, and dosing before it just fouls water.
@@ -12606,11 +12613,11 @@ class OpenReefPanel extends HTMLElement {
     const doseDelayH = Number((hatch.enrichment || {}).doseDelayH);
     const moltLine = instar.available && Number.isFinite(doseDelayH)
       && Number(instar.hours) - doseDelayH >= 1
-      ? `🍼 At ${this._escape(String(temp.tempC))} °C the molt to instar II lands nearer ~${this._escape(String(instar.hours))} h, not +${this._escape(String(doseDelayH))} h. Nauplii have no mouth before it — an earlier dose just fouls the vessel. Raise "First dose at +hours" in Settings.`
+      ? `🍼 The rough model suggests ~${this._escape(String(instar.hours))} h from hatch to feeding stage at ${this._escape(String(temp.tempC))} °C. Your +${this._escape(String(doseDelayH))} h reminder counts from loading. Confirm instar II and follow the enrichment product's instructions.`
       : "";
     const needed = Number(hatch.vesselsNeeded) || 0;
     const neededLine = needed > vessels.length
-      ? `⚙️ With ${this._escape(String(hatchHours))} h eggs and ${this._escape(String(reservoirSum.plainShelfHours || reservoirSum.shelfHours || 24))} h brine life, continuous supply needs ${this._escape(String(needed))} hatcheries — you have ${this._escape(String(vessels.length))}. Add one in Settings.`
+      ? `⚙️ At the slowest configured cycle, the ideal staggered estimate is ${this._escape(String(needed))} hatcheries for the planned supply window; you have ${this._escape(String(vessels.length))}. Different clocks, harvest delays and feed volumes affect actual coverage.`
       : "";
     // Phase, once the COUNT is right: a rack with too few cones has a bigger
     // problem than their spacing, and neededLine owns that one.
@@ -12638,13 +12645,16 @@ class OpenReefPanel extends HTMLElement {
       // Enrichment is a CONTAINER action (never touches a running hatch): the
       // Selcon goes into the holding vessel; the dose reminder anchors on the
       // loaded batch's age (instar II).
-      enrichIdle && Number(reservoirSum.remainingMl) > 0
+      enrichIdle && !containerStale && !reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
         ? `<button class="secondary compact-button" data-action="nps-enrich" title="Selcon into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II). The running hatch is untouched.">Enrich brine</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${this._npsHatchRemindersExist() ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
     // drain is on. Hand-dosers get the same clocks from the container's stamp.
-    const hatchReservoirLine = `${primeLine}${freshLine ? ` · ${freshLine}` : ""}${fridgeButton ? ` ${fridgeButton}` : ""}${fxCfg.channelId
+    const soakAvailability = !enrichIdle
+      ? `The container is in an enrichment cycle${enrichState.hoursLeft != null && Number(enrichState.hoursLeft) > 0 ? ` with ~${this._escape(String(enrichState.hoursLeft))} h left` : ""}. Finish and rinse before feeding; use another food source meanwhile. The rack forecast assumes plain harvests and does not schedule this soak.`
+      : "";
+    const hatchReservoirLine = `${soakAvailability || primeLine}${!soakAvailability && freshLine ? ` · ${freshLine}` : ""}${fridgeButton ? ` ${fridgeButton}` : ""}${fxCfg.channelId
       ? "" : ` · Hand-dosing mode — link a live-food pump in Settings to automate the dosing.`}`;
     // The enrichment vessel tile — only while a batch is soaking.
     const enrichTile = !enrichIdle ? `
@@ -12653,7 +12663,7 @@ class OpenReefPanel extends HTMLElement {
         <small><strong>Enrichment</strong> · ${this._escape(enrichSum.productName || "Selcon")}</small>
         <small>${enrichState.status === "enriching"
           ? (enrichState.firstDoseDue
-            ? `<span style="color:var(--warning-color,#f5a524)">mouths are open — add the ${this._escape(enrichSum.productName || "Selcon")} now</span>`
+            ? `<span style="color:var(--warning-color,#f5a524)">planned dose time — check feeding stage, then add ${this._escape(enrichSum.productName || "Selcon")}</span>`
             : enrichState.hoursLeft == null
               ? `holding — dose at +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 8))} h (instar II)`
               : `~${this._escape(String(enrichState.hoursLeft))} h of soak left`)
@@ -12664,7 +12674,7 @@ class OpenReefPanel extends HTMLElement {
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
           ${enrichState.firstDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-dose">Add dose</button>` : ""}
           ${enrichState.secondDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-second-dose">Log top-up</button>` : ""}
-          <button class="secondary compact-button" data-action="nps-enrich-loaded" title="The gut-loaded brine stays in the vessel — this just stamps the boost clock. Mesh-rinse before feed-out if you like.">Soak done</button>
+          <button class="secondary compact-button" data-action="nps-enrich-loaded" ${enrichState.status === "enriching" ? "disabled" : ""} title="Confirm the completed soak. The boost window starts at the planned soak end. Rinse before feeding.">Soak done</button>
           <button class="danger-text compact-button" data-action="nps-enrich-cancel">Cancel</button>
         </div>
       </div>` : "";
@@ -12730,11 +12740,11 @@ class OpenReefPanel extends HTMLElement {
 const rigSteps = [
       ["Air off", "shells float in the hatch cone; cysts and crud sink to the tips (a few minutes)."],
       ["Transfer: open ① + ②", "nauplii ride down to LIVE BRINE, shells stay behind. Close ①."],
-      ["Crud bleed", "mesh half OFF — crack ② + ③, the first ~20 ml of tip crud runs straight to waste. Mesh half back ON."],
-      ["Mesh drain: open ② + ③ part-way", "everything through the 120 µm disc — water to waste, every nauplius stays on the mesh."],
-      ["Backflush", "invert the mesh half over the vessel; 700 ml fresh 35 ppt washes them home. Air ON — the vessel IS the aerated container. Tap \"Hatched &amp; loaded\"."],
-      ["Optional Selcon, on the dose push (instar II)", "a second mesh cycle before feed-out is the rinse."],
-      ["Housekeeping", "crack ③ a moment to bleed the dead leg; rinse the mesh in the waste water."],
+      ["Crud bleed", "mesh half OFF — crack ② + ③, collect a small initial bleed and inspect it before discarding; nauplii can leave too. Mesh half back ON."],
+      ["Mesh drain: open ② + ③ part-way", "drain gently through the submerged 120 µm screen; it also retains larger debris. Inspect the catch."],
+      ["Backflush", "invert the mesh half over the vessel; fresh tank-matched saltwater washes them home; use the configured load volume within capacity. Air ON — the vessel IS the aerated container. Tap \"Hatched &amp; loaded\"."],
+      ["Optional Selcon, on the dose push (instar II)", "rinse the enriched nauplii before feeding; keep the screen submerged."],
+      ["Housekeeping", "crack ③ a moment to bleed the dead leg; clean the mesh with clean water after use."],
     ];
     // The shape line counts the real rig: N hatch cones + the live-brine
     // vessel. Summary first (demo swaps it), config as the fallback.
@@ -13939,7 +13949,7 @@ const rigSteps = [
     const batchCard = (es.status && es.status !== "none")
       ? this._missionSummaryCard("Soak",
         es.status === "enriching" ? (es.hoursLeft == null ? "holding" : `${es.hoursLeft} h left`) : "rinse & load",
-        es.firstDoseDue ? "mouths are open — add the Selcon" : es.status === "enriching" ? "gut-loading in the vessel" : "the boost clock is running",
+        es.firstDoseDue ? "planned dose time — confirm instar II" : es.status === "enriching" ? "gut-loading in the vessel" : "the boost clock is running",
         es.status === "overdue" || es.firstDoseDue ? "warning" : "ok", "hatchery")
       : hs.status === "incubating"
         ? this._missionSummaryCard("Batch", `${hs.percent}%`, `${eggName} · ~${hs.hoursLeft} h to go`, "ok", "hatchery")
@@ -13978,8 +13988,8 @@ const rigSteps = [
     const temp = hatch.temp || {};
     const clockCard = this._missionSummaryCard("The clock",
       `${hatch.hatchHours || 24} h`,
-      learned.available ? `your batches actually run ~${learned.hours} h`
-        : temp.available ? `${temp.tempC} °C → expect ~${temp.expectedHours} h` : eggName,
+      learned.available ? `harvests logged at ~${learned.hours} h`
+        : temp.available ? `${temp.tempC} °C → rough estimate ~${temp.expectedHours} h` : eggName,
       learned.available && Math.abs(Number(learned.hours) - Number(hatch.hatchHours || 24)) >= 2 ? "warning" : "ok",
       "settings", { section: "hatchery", scroll: "or-section-hatchery" });
     const summaryCards = `<div class="summary-grid">${batchCard}${contCard}${nextCard}${clockCard}</div>`;
@@ -14022,10 +14032,10 @@ const rigSteps = [
           </table>
         </div>
         ${(Array.isArray(hatch.vessels) && hatch.vessels.some((v) => v.learned)
-          ? hatch.vessels.filter((v, i, all) => v.learned?.available && all.findIndex((x) => x.eggType === v.eggType) === i)
-              .map((v) => ({ learned: v.learned, egg: (this._npsEggTypes().find((e) => e.id === v.eggType) || {}).name || "cysts" }))
+          ? hatch.vessels.filter((v) => v.learned?.available)
+              .map((v) => ({ learned: v.learned, name: v.name, egg: (this._npsEggTypes().find((e) => e.id === v.eggType) || {}).name || "cysts" }))
           : (learned.available ? [{ learned, egg: eggName }] : []))
-          .map((t) => `<small class="muted">Learned clock: your last ${this._escape(String(t.learned.samples))} ${this._escape(t.egg)} batches averaged ~${this._escape(String(t.learned.hours))} h — the "Set clock" chip above applies it.</small>`).join("")}
+          .map((t) => `<small class="muted">Harvest history${t.name ? ` (${this._escape(t.name)})` : ""}: the last ${this._escape(String(t.learned.samples))} ${this._escape(t.egg)} batches were harvested after ~${this._escape(String(t.learned.hours))} h on average, including any delay before harvest.</small>`).join("")}
       </article>` : "";
 
     // --- Reminders: the three chores, on the hatch clock -------------------
@@ -18437,7 +18447,7 @@ const rigSteps = [
         pouches.forEach(({ key, cysts, name }) => {
           if (cysts.available && cysts.status !== "fresh") {
             push(key, "Brine hatchery", `${name ? `${name}'s cysts` : "Cysts"} pouch opened ${cysts.days} days ago`,
-              cysts.status === "old" ? "Hatch rates fall after 3–4 weeks in the fridge — expect a thinner batch, or open a fresh pouch." : "Coming up on the 3–4 week line — keep it sealed, dry and cold.", cysts.status === "old" ? "warning" : "ok");
+              cysts.status === "old" ? "Check storage conditions and hatch yield against the supplier’s guidance; age alone does not establish viability." : "Storage check due — keep cysts sealed, dry and cold according to the supplier.", cysts.status === "old" ? "warning" : "ok");
           }
         });
       }
@@ -26665,7 +26675,7 @@ const rigSteps = [
         <input type="checkbox" data-scope="nps-hatchery" data-field="enabled" ${this._hatcheryEnabled() ? "checked" : ""}>
         <span><strong>Brine hatchery on</strong><small>The standalone Brine hatchery tab — hatch clocks, harvest pushes, the container ledger and the rig blueprint. No NPS corals required.</small></span>
       </label>
-      <small class="awc-hint">Hatcheries (up to 4 — two staggered vessels is the classic continuous-supply rig). Each hatchery has its <strong>own cysts, its own clock and its own pouch</strong> — different cysts hatch on different clocks, so pick the egg type per hatchery and the recommended hours fill in; override freely if your room runs warm or cool. Volume drives the cyst-dose guide: 2 g/L is the documented optimum.</small>
+      <small class="awc-hint">Hatcheries (up to 4 — two staggered vessels is the classic continuous-supply rig). Each hatchery has its <strong>own cysts, its own clock and its own pouch</strong> — different cysts hatch on different clocks, so pick the egg type per hatchery and the recommended hours fill in; override freely if your room runs warm or cool. Volume drives a conservative cyst-dose guide of 2 g/L; adjust to the supplier’s guidance and observed hatch-out.</small>
       ${this._npsVesselEntries().map(([vid, v]) => {
         const egg = v?.eggType || npsCfg.hatchery?.eggType || "standard";
         const rec = this._npsEggTypes().find((e) => e.id === egg) || {};
@@ -26686,7 +26696,7 @@ const rigSteps = [
           <label>Volume (L)<input type="number" min="0.1" max="10" step="0.1" data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="volumeL" value="${this._escape(String(v?.volumeL ?? 1))}"></label>
           ${multi ? `<button class="danger-text compact-button" data-action="nps-remove-vessel" data-id="${this._escape(vid)}">Remove</button>` : ""}
         </div>
-        <small class="awc-hint">${this._escape(rec.note || "")} <strong>Its cysts pouch</strong> — ${pouch.available ? `opened ${this._escape(String(pouch.days))} days ago${pouch.status === "old" ? " — past the 3–4 week line, expect a thinner hatch" : ""}` : "not stamped yet"}. <button class="secondary compact-button" data-action="nps-cysts-opened" data-id="${this._escape(vid)}">Opened a new pouch${multi ? ` for ${this._escape(v?.name || vid)}` : ""}</button></small>`;
+        <small class="awc-hint">${this._escape(rec.note || "")} <strong>Its cysts pouch</strong> — ${pouch.available ? `opened ${this._escape(String(pouch.days))} days ago${pouch.status === "old" ? " — check storage and hatch yield" : ""}` : "not stamped yet"}. <button class="secondary compact-button" data-action="nps-cysts-opened" data-id="${this._escape(vid)}">Opened a new pouch${multi ? ` for ${this._escape(v?.name || vid)}` : ""}</button></small>`;
       }).join("")}
       ${this._npsVesselEntries().length < 4 ? `<div class="button-row"><button class="secondary compact-button" data-action="nps-add-vessel">+ Add a hatchery</button></div>` : ""}
       <small class="awc-hint">Brine dosing container — the ledger behind the fill level, the depletion maths and the stale gate. "Load volume" 0 = top to full on every load.</small>
@@ -26698,16 +26708,16 @@ const rigSteps = [
         <label>Feeding window from (blank = any time)<input type="time" data-scope="nps-hand-feed" data-field="windowStart" value="${this._escape(String(npsCfg.hatchery?.handFeed?.windowStart || ""))}"></label>
         <label>Feeding window to (blank = spread over 24 h)<input type="time" data-scope="nps-hand-feed" data-field="windowEnd" value="${this._escape(String(npsCfg.hatchery?.handFeed?.windowEnd || ""))}"></label>
       </div>
-      <small class="awc-hint"><strong>Cysts pouches</strong> — stamped per hatchery above. Keep each sealed, dry and at or below 4 °C; hatch rates fall after 3–4 weeks in the fridge, so the Pulse says when the weeks are running out.${this._npsVesselEntries().length > 1 ? ` One pouch feeding every hatchery? <button class="secondary compact-button" data-action="nps-cysts-opened">Opened a new pouch for all</button>` : ""}</small>
+      <small class="awc-hint"><strong>Cysts pouches</strong> — stamped per hatchery above. Keep each sealed, dry and at or below 4 °C; follow the supplier’s storage life. The 3–4 week reminder is a check of storage and hatch yield, not an expiry measurement.${this._npsVesselEntries().length > 1 ? ` One pouch feeding every hatchery? <button class="secondary compact-button" data-action="nps-cysts-opened">Opened a new pouch for all</button>` : ""}</small>
       <small class="awc-hint"><strong>Fridge</strong> — per batch, not a setting, and a separate feeding bottle, not the container: the "❄ Refrigerate" button beside the brine advice on the Hatchery tab drains the container into the bottle and stamps WHEN it went cold. The bottle's clock then runs at the 48 h rate from that moment (2–4 °C near-stops nauplii metabolism), the warm hours already spent stay spent, and the container is free for the next hatch. Feed from the bottle by hand, pour it back, or empty it from its tile.</small>
       <div class="mini-grid">
         <label>Hatchery temp sensor (optional)<input data-scope="nps-hatchery" data-field="tempEntity" value="${this._escape(npsCfg.hatchery?.tempEntity || "")}" placeholder="sensor.hatchery_temperature"></label>
       </div>
-      <small class="awc-hint">Advisory only: 26–28 °C is the sweet spot; each degree cooler stretches the clock ~8% (20 °C roughly doubles it). The countdown never moves — you just get told what to expect.</small>
-      <small class="awc-hint"><strong>Enrichment</strong> — per-batch "→ Enrich" at harvest rinses the batch into a separate soak vessel (GSL nauplii carry no DHA; the soak restores it — proven for larvae, recommended for NPS corals). An enriched load runs a tighter freshness clock (12 h room / 48 h fridged).</small>
-      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I can't eat: the molt to instar II lands ~8 h at the 28 °C optimum (sources span 6–12 h) and LATER on a cool bench — with a hatchery temp sensor the card tells you the stretched number. "→ Enrich" holds the batch in clean water and the dose push arrives at +N h; 0 = dose at load (warm benches, fully-hatched-out batches).</small>
+      <small class="awc-hint">Use a water-temperature sensor where possible. 25–28 °C is a common hatching range. The 8% per degree model is an uncalibrated planning heuristic, not a validated biological equation; confirm hatch-out and use your product’s instructions.</small>
+      <small class="awc-hint"><strong>Enrichment</strong> — "Enrich brine" starts a soak in the loaded holding container. Select the dose and duration for your product and nauplii density. Selcon’s manufacturer gives 1–12 h with aeration; 12 h is this app’s default. The 12 h warm / 48 h cold post-soak windows are planning limits, not guarantees of DHA retention or viability.</small>
+      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I cannot feed; enrichment uptake starts at instar II, often several hours after hatching. This reminder counts from loading, which may happen well after hatch-out. Confirm the feeding stage; 0 means the batch can already feed. Cold storage delays development, so elapsed wall time alone cannot confirm readiness.</small>
       <div class="mini-grid">
-        <label>Soak time (hours)<input type="number" min="2" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
+        <label>Soak time (hours)<input type="number" min="1" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
         <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>
         <label>First dose at +hours<input type="number" min="0" max="24" data-scope="nps-enrichment" data-field="doseDelayH" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseDelayH ?? 8))}"></label>
         <label>Enrichment bottle<select data-scope="nps-enrichment" data-field="productId">
@@ -26717,7 +26727,7 @@ const rigSteps = [
       </div>
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="nps-enrichment" data-field="splitDose" ${npsCfg.hatchery?.enrichment?.splitDose ? "checked" : ""}>
-        <span><strong>Split-dose top-up</strong><small>INVE-style second dose ~10 h into the soak — you get a reminder and a "Log top-up" button (debits the bottle again).</small></span>
+        <span><strong>Split-dose top-up</strong><small>Optional product-specific second dose at +10 h. This adds another full configured dose; it does not halve the first dose. Use only when your enrichment protocol calls for it.</small></span>
       </label>
 
     `;

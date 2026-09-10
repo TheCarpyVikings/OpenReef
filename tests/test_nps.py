@@ -987,7 +987,7 @@ def test_next_hatch_blocked_when_every_cone_is_busy():
     ideal = nps.next_hatch_suggestion(NOW, 36, loaded, 24, 250, 250, batch,
                                       chain_shelf_hours=24)
     assert ideal["status"] == "chained" and ideal["hoursUntil"] == 2.6
-    assert ideal["freeAt"] is None and ideal["lateHours"] is None
+    assert ideal["freeAt"] is None and ideal["lateHours"] == 0
     blocked = nps.next_hatch_suggestion(NOW, 36, loaded, 24, 250, 250, batch,
                                         chain_shelf_hours=24,
                                         free_at_iso=_iso(NOW + timedelta(hours=11.2)))
@@ -1001,7 +1001,7 @@ def test_next_hatch_blocked_when_every_cone_is_busy():
                                       chain_shelf_hours=24,
                                       free_at_iso=_iso(NOW + timedelta(hours=1)))
     assert early["status"] == "chained" and early["hoursUntil"] == 2.6
-    assert early["lateHours"] is None
+    assert early["lateHours"] == 0
     # A ripe-but-unharvested cone frees the moment you pull it: floored at now,
     # never dragged into the past.
     ripe = nps.next_hatch_suggestion(NOW, 36, loaded, 24, 250, 250, batch,
@@ -1037,11 +1037,11 @@ def test_ws_summary_blocks_the_next_hatch_when_every_cone_is_busy():
     run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
     hatchery = conn.results[-1].payload["hatchery"]
     nxt = hatchery["nextHatch"]
-    assert nxt["status"] == "blocked", nxt
-    # H1 frees first, so it is both the cone named and the start printed.
-    assert hatchery["nextStartVessel"] == "v1"
-    assert abs(nxt["hoursUntil"] - 11.2) < 0.1, nxt
-    assert abs(nxt["lateHours"] - 8.6) < 0.1, nxt
+    assert nxt["status"] == "chained", nxt
+    # H2 frees later but completes its next 24 h batch sooner.
+    assert hatchery["nextStartVessel"] == "v2"
+    assert abs(nxt["hoursUntil"] - 14.6) < 0.1, nxt
+    assert nxt["lateHours"] == 0, nxt
     # The LAST load still sets the deadline, blocked or not.
     assert nxt["chainVessel"] == "v2"
     # Harvest H1 and the cone is free: the ideal start is reachable again.
@@ -1049,7 +1049,7 @@ def test_ws_summary_blocks_the_next_hatch_when_every_cone_is_busy():
     run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
     nxt = conn.results[-1].payload["hatchery"]["nextHatch"]
     assert nxt["status"] == "chained", nxt
-    assert nxt["freeAt"] is None and nxt["lateHours"] is None
+    assert nxt["freeAt"] is None and nxt["lateHours"] == 0
 
 
 def test_ws_summary_next_hatch_sees_the_bottle_and_names_the_vessel():
@@ -1652,6 +1652,20 @@ def test_enrich_push_reminds_the_first_dose_once():
     assert len(_notes("openreef_enrich_dose")) == 1, "the dose push must fire exactly once"
 
 
+def _elapse_soak(entry):
+    hatchery = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    state = hatchery["enrichment"]["state"]
+    hours = float(state["enrichHours"]) + 0.01
+    old_load = hatchery["reservoir"]["mixedAt"]
+    for key in ("startedAt", "firstDoseAt", "batchLoadedAt"):
+        if state.get(key):
+            state[key] = (datetime.fromisoformat(state[key]) - timedelta(hours=hours)).isoformat()
+    hatchery["reservoir"]["mixedAt"] = state["batchLoadedAt"]
+    for row in hatchery["history"]:
+        if row["harvestedAt"] == old_load:
+            row["harvestedAt"] = state["batchLoadedAt"]
+
+
 def test_ws_enrich_is_a_container_action():
     # Reece's mesh flow: "Enrich" soaks the LOADED brine and must NEVER touch
     # a running hatch. Soak done stamps the boost clock — nothing moves.
@@ -1669,6 +1683,7 @@ def test_ws_enrich_is_a_container_action():
     assert products["selcon"]["remainingMl"] == 48                   # dose at engage (delay 0)
     run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 3}))
     assert conn.errors and conn.errors[-1].code == "enrich_busy"
+    _elapse_soak(entry)
     run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 4}))
     saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
     assert saved["reservoir"]["remainingMl"] == 300, "soak done moves NO volume"
@@ -1694,20 +1709,23 @@ def test_ws_soak_done_badges_the_harvested_batch():
     assert len(saved["history"]) == 1 and not saved["history"][0].get("enriched")
     assert saved["history"][0]["vesselId"] == "v1"
     run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 3}))
+    _elapse_soak(entry)
     run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 4}))
     saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
     assert len(saved["history"]) == 1, "soak done badges the harvest row, never adds one"
     row = saved["history"][0]
-    assert row["enriched"] is True and row["enrichedHours"] == 0.0
+    assert row["enriched"] is True and row["enrichedHours"] == 12.0
     assert row["vesselId"] == "v1", "the badge stays on the cone that hatched it"
     log = entry.options[CONF_SETTINGS]["activity"]
     assert any("Hatchery 1 batch is gut-loaded" in str(item.get("message", "")) for item in log), \
         "the log names the hatchery whose batch soaked"
     # A second harvest into the same container (top-up) then a second soak
     # badges the NEW row and leaves the first badge alone.
+    run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 40, "action": "fill"}))
     run(integration.websocket_nps_hatch_start(hass, conn, {"id": 5}))
     run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 6, "harvested": True}))
     run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 7}))
+    _elapse_soak(entry)
     run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 8}))
     saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
     assert len(saved["history"]) == 2
@@ -1828,7 +1846,7 @@ def test_hatch_ready_push_fires_for_standalone_hatcheries():
 
 
 def test_egg_type_hours_and_normaliser():
-    assert nps.egg_type_hours("decapsulated") == 16
+    assert nps.egg_type_hours("decapsulated") == 24
     assert nps.egg_type_hours("nonsense") == 24        # unknown → standard
     config = integration._normalise_core_config({
         "nps": {"hatchery": {"eggType": "made_up", "hatchHours": 200}},
@@ -1957,9 +1975,10 @@ def test_ws_summary_hand_dose_brine_clocks():
     assert fx["prime"]["status"] == "prime"
     assert fx["freshness"]["status"] == "fresh"
     next_hatch = payload["hatchery"]["nextHatch"]
-    # 24 h hatch + 24 h shelf = structural overlap: the honest advice is now.
+    # The current batch is already 4 h old, so start now; equal steady-state
+    # cycles do not require structural overlap if harvest handling overlaps restart.
     assert next_hatch["status"] == "start_now"
-    assert next_hatch["overlap"] is True
+    assert next_hatch["overlap"] is False
 
 
 def test_ws_summary_never_calls_an_enriched_batch_stale():
@@ -2156,7 +2175,7 @@ def test_brine_window_is_a_two_rate_clock():
     assert late == 36.0
     # Fridged once it is already spent: nothing comes back.
     spent = _iso(NOW - timedelta(hours=30))
-    assert nps.brine_window_hours(spent, NOW, 24, 48, _iso(NOW)) == 30.0
+    assert nps.brine_window_hours(spent, NOW, 24, 48, _iso(NOW)) == 24.0
     # Banked credit from an earlier spell extends the room window.
     assert nps.brine_window_hours(loaded, NOW, 24, 48, None, 5.0) == 29.0
     # Exit: 20 h at 4 °C on a 24/48 clock spends 10 warm-equivalent hours and
@@ -2271,6 +2290,7 @@ def test_ws_fridge_fill_refusals_and_the_enriched_bottle():
     run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 2, "action": "fill"}))
     assert conn.errors and conn.errors[-1].code == "soaking"
     # Soak done, then fill: the gut-loaded batch goes cold on the BOOST clock.
+    _elapse_soak(entry)
     run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 3}))
     run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 4, "action": "fill"}))
     bottle = _bottle(entry)
@@ -2351,7 +2371,7 @@ def test_ws_fridge_fill_on_top_and_return_keep_the_older_clock():
     assert bottle["remainingMl"] == 500 and bottle["mixedAt"] == older, \
         "topping up: the older batch's clock rules the mix"
     log = entry.options[CONF_SETTINGS]["activity"]
-    assert any("older batch's clock rules" in str(i.get("message", "")) for i in log)
+    assert any("shorter remaining window rules" in str(i.get("message", "")) for i in log)
     # A fresh harvest fills the drained container; pouring the bottle back
     # clamps at the brim and the older batch's clock rules again.
     run(integration.websocket_nps_hatch_start(hass, conn, {"id": 2}))
@@ -2360,9 +2380,9 @@ def test_ws_fridge_fill_on_top_and_return_keep_the_older_clock():
     assert res["remainingMl"] == 750
     run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 4, "action": "return"}))
     res = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]
-    assert res["remainingMl"] == 750, "clamped at the brim"
-    assert res["mixedAt"] == older
-    assert _bottle(entry)["remainingMl"] == 0
+    assert conn.errors[-1].code == "container_full"
+    assert res["remainingMl"] == 750
+    assert _bottle(entry)["remainingMl"] == 500, "an overflowing return must not erase stock"
 
 
 def test_planning_supply_counts_the_feeding_bottle():
@@ -2381,14 +2401,14 @@ def test_planning_supply_counts_the_feeding_bottle():
     assert c_shelf == 24.0 and c_rem == 200, "the container's own clock is unchanged"
     assert p_loaded == bottle_loaded, "the bottle dies later: it anchors the planning clock"
     assert abs(p_shelf - (2 + 22 / 24 * 48)) < 0.1
-    assert p_rem == 500 and p_rate == c_rate, "the volume is both"
+    assert abs(p_rem - 95) < 0.01 and p_rate == c_rate, "only stock usable before each expiry counts"
     # An older bottle than the container: the container anchors, the volume is still both.
     cfg["nps"]["hatchery"]["fridgeBottle"] = {
         "remainingMl": 300, "mixedAt": (now - timedelta(hours=45)).isoformat(),
         "refrigeratedAt": (now - timedelta(hours=44)).isoformat()}
     config = integration._config_from_entry(entry)
     p_loaded, p_shelf, p_rem, _ = integration._nps_brine_supply_for_planning(config, now)
-    assert p_loaded == c_loaded and p_shelf == 24.0 and p_rem == 500
+    assert p_loaded == c_loaded and p_shelf == 24.0 and abs(p_rem - 10) < 0.01
 
 
 def test_vessel_ledger_keeps_two_decimals_across_a_save():
@@ -3421,7 +3441,7 @@ def test_hatch_ready_push_waits_for_quiet_hours_to_end():
     run(integration._async_nps_hatch_ready_push(hass2, fresh))
     prompt = [c for c in hass2.services.calls if c.domain == "persistent_notification" and c.service == "create"
               and "hatch_ready" in (c.data or {}).get("notification_id", "")]
-    assert len(prompt) == 1 and prompt[0].data["message"].startswith("The 24 h hatch is done.")
+    assert len(prompt) == 1 and prompt[0].data["message"].startswith("The 24 h hatch timer has finished.")
 
 
 
@@ -3435,6 +3455,7 @@ def test_soak_pushes_carry_buttons_and_the_taps_do_the_thing():
     cfg["nps"]["hatchery"]["enrichment"]["state"].update({
         "startedAt": (datetime.now(timezone.utc) - timedelta(hours=9)).isoformat(),
         "enrichHours": 12, "doseDelayH": 8,
+        "batchLoadedAt": cfg["nps"]["hatchery"]["reservoir"]["mixedAt"],
     })
     hass = FakeHass(entries=[entry])
 
@@ -3684,7 +3705,7 @@ def test_next_hatch_two_cones_running_anchors_on_the_last_load():
     assert abs(s["hoursUntil"] - 22.8) < 0.05, s
     assert s["chainVessel"] == "v1", "the anchor is the cone that loads LAST, not the one that harvests next"
     loads_at = datetime.fromisoformat(s["chainLoadsAt"])
-    assert abs((loads_at - (now + timedelta(hours=34.8))).total_seconds()) < 5
+    assert abs((loads_at - (now + timedelta(hours=35.8))).total_seconds()) < 5
     ready_by = datetime.fromisoformat(s["readyBy"])
     assert abs((ready_by - (now + timedelta(hours=59.8))).total_seconds()) < 5
     assert s["overlap"] is True and s["busyCount"] == 2

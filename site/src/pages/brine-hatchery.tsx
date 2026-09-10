@@ -7,7 +7,7 @@ import "./deepdive.css";
 const content: DeepDiveContent = {
   slug: "brine-hatchery",
   h1: "The Brine Hatchery",
-  lede: "Live baby brine is the best food most reefs never get, because hatching it is a 24-hour chore with four clocks nobody keeps in their head. OpenReef keeps them: the hatch, the yolk, the fridge, and the enrichment — every one a real stamp, every push at the hour that matters.",
+  lede: "Track live brine from hatch to harvest, storage and enrichment. OpenReef turns your logged actions and chosen timings into reminders and supply estimates, so you can plan the next batch and check hatch-out when it matters.",
   buddyLine: "Hatch, harvest, hold, enrich. Four clocks, one tin of eggs, and a phone that knows which one is ticking.",
   buddyPose: "thinking",
   img: "/demos/hatchery/3-the-rig-live.png",
@@ -20,50 +20,50 @@ const content: DeepDiveContent = {
   ],
   sections: [
     {
-      heading: "A clock that knows what eggs you bought",
+      heading: "A clock for each hatchery",
       paragraphs: [
-        "Four egg presets carry their own hatch hours — standard Great Salt Lake cysts around 24 h, decapsulated around 16 h, high-hatch premium grades around 20 h, and a cool room without a heater budgeting up to 36 h — because temperature rules the clock. The hatch is a stamped timestamp evaluated on read: incubating with an honest percentage, ready in its harvest window, then overdue with a grace period while the yolk clock keeps running. The card shows the expectation adjusted to your room (27.6 °C → expect ~20.6 h) and a cyst guide at 2 g per litre with a rough nauplii count.",
-        "Up to four vessels, and the tab is blunt about continuity: with 24-hour eggs and 24-hour brine life, an unbroken supply needs two hatcheries — so it plans the next hatch to land before the current harvest fades, and tells you when one vessel isn't enough.",
+        "Each vessel keeps its own cyst type and hatch clock. Standard, premium and hatchable decapsulated cysts start with a 24 h planning default; the cool-room preset starts at 36 h. Follow the supplier's timing and inspect the hatch: grade and shell removal alone do not establish completion time. The optional temperature model is a rough heuristic. The cyst guide starts at 2 g per litre; its nauplii count is illustrative.",
+        "Use up to four vessels. The planner compares when each could complete its next batch, checks storage and volume limits, and reports projected supply gaps. Steady supply depends on cycle lengths, spacing, harvest handling and feed demand; two cones do not guarantee it.",
       ],
     },
     {
       heading: "Two nutrition clocks, not one",
       paragraphs: [
-        "Freshness runs on a two-rate clock: a batch spends its window at the room rate (24 h) until the moment it goes into the fridge, then at the fridge rate (48 h) from then on — so a fresh load fridged at once gets the full two days, one fridged after twelve warm hours has half its life left and spends that half slowly, and taking it out banks the hours the fridge saved.",
-        "Nutrition is a second clock entirely. An unenriched batch runs on yolk — prime for the first 24 hours, then fading as reserves burn down. An enriched batch has been fed: it isn't starving at 24 h, it's gut-loaded and carrying the DHA that Great Salt Lake nauplii never have on their own; what ticks from then is the boost draining away. And the enrichment soak anchors on the first dose, not the load, because instar I nauplii cannot eat — the molt lands six to twelve hours after hatching, and emulsion dosed before it just fouls the water.",
+        "The handling model budgets 24 h warm or 48 h cold for plain brine, accounting for when refrigeration starts. Under that model, twelve warm hours use half the budget, leaving 24 cold hours. Refrigeration cannot restore an expired batch, and topping up does not renew older brine. These are planning limits, not measurements of viability.",
+        "Unfed nauplii use their reserves from hatch onward; loading the container does not establish their biological age. Enrichment uptake requires feeding-stage nauplii. OpenReef counts the configured soak from the first logged dose and the post-soak window from its planned end, so a late confirmation does not renew the clock. Confirm the animals' stage and follow the enrichment product's instructions.",
       ],
       snippet: `hatchery 1 · premium · 24 h clock
-  14 h elapsed · ~10 h to go · 27.6 °C → expect ~20.6 h
-  next hatch 09:26 tomorrow — keeps the chain unbroken
-fridge bottle 180 ml · mixed 6 h ago · ~18 h of life left
-enrichment: first dose due once the nauplii can eat`,
+  14 h elapsed · ~10 h to the planned harvest
+  next start considers each cone's completion time
+fridge bottle 180 ml · its own storage clock
+enrichment: confirm feeding stage before dosing`,
     },
     {
       heading: "The rig, drawn live",
       paragraphs: [
         "Two vessels, three valves, one mesh. The drawing follows whatever stage the hatchery is in — air on for the hatch, shells floating and cysts sinking, the transfer to the live vessel, the crud bleed, the mesh drain through a 120 µm disc, the backflush that washes the nauplii home — and Play the stages walks a newcomer through the whole sequence before they've wet a hose.",
-        "Every harvest debits the cysts and feeds the timeline: the brine container's doses land on today's strip as planned slots, a hand-feed logs against the container or the fridge bottle, and Hatched & loaded arrives on your phone as a button, not a paragraph. Quiet hours hold the ready push overnight and say how long it's been waiting when it finally lands.",
+        "Harvests enter the journal, and feeds debit the container or fridge bottle. The hatch-ready reminder provides a Hatched & loaded button; it still needs you to check the hatch. Quiet hours can delay that reminder. The 120 µm screen retains nauplii and larger debris: keep it submerged, rinse gently and inspect the catch.",
       ],
     },
   ],
   limits: [
     "The hatch hours are presets and a temperature adjustment, not a sensor in the cone — the harvest window is a forecast you confirm by looking.",
     "Enrichment is a step you do; OpenReef times the soak, debits the bottle and refuses to bottle mid-soak, but it can't see the emulsion go in.",
-    "Continuous supply genuinely needs two vessels; with one, the tab tells you so and plans around the gap rather than pretending.",
+    "Supply forecasts assume prompt harvests and restarts, sufficient batch volume and the chosen storage windows. The rack forecast does not schedule the physical cleaning, rinsing or enrichment workflow.",
     "Feeding out live brine is a hand dose today unless a live-food pump is linked in Settings — then the pump doses it and the shelf debits it.",
   ],
   faq: [
     {
       q: "Why does it care whether the brine went in the fridge?",
-      a: "Because the fridge roughly doubles brine life, but only for the hours it was actually cold. The two-rate clock gives credit for exactly that time — a batch fridged at once keeps two days, one fridged late keeps less, and the number on the card is honest either way.",
+      a: "Cold storage slows development and energy use. The app applies a planning model to the time logged warm and cold; it cannot measure survival, oxygen or nutritional content. Check storage conditions and the batch itself before feeding.",
     },
     {
       q: "What's the point of enriching if I feed them within a day?",
-      a: "Great Salt Lake nauplii carry almost no DHA on their own; a few hours in an enrichment emulsion after their first molt loads them with it. OpenReef delays the dose until they can actually eat, then counts down the boost so you feed at the peak, not after it's gone.",
+      a: "An appropriate enrichment can change the food's nutrient profile for the animals you keep. Uptake depends on feeding stage, product, density, aeration and duration. OpenReef times the protocol you select; it cannot confirm a nutrient level from elapsed time alone.",
     },
     {
       q: "Do I need NPS corals for this?",
-      a: "No — the hatchery page says it itself: no NPS corals required. Live brine is the best conditioning food for most fish and LPS; the NPS system just gives it a bigger job.",
+      a: "No. The hatchery works independently of NPS mode. Choose live brine and any enrichment according to the feeding needs and prey size of your livestock.",
     },
   ],
 };

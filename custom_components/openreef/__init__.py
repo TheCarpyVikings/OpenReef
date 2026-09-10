@@ -1294,7 +1294,7 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
     raw_enrich_state = (raw_enrich.get("state")
                         if isinstance(raw_enrich.get("state"), dict) else {})
     enrichment = {
-        "hours": _awc_num(raw_enrich.get("hours"), nps_engine.ENRICH_DEFAULT_HOURS, 2, 36),
+        "hours": _awc_num(raw_enrich.get("hours"), nps_engine.ENRICH_DEFAULT_HOURS, 1, 36),
         "doseMl": _awc_num(raw_enrich.get("doseMl"), 1, 0.5, 50),
         # Instar I can't eat — the Selcon goes in this many hours after load
         # (the molt; ~6-12 h warm, longer on a cool bench). 0 = dose at load.
@@ -11352,7 +11352,27 @@ def _dosing_lighting_off_window(config: dict[str, Any], local_dt: datetime) -> t
     return on_end, on_start
 
 
-def _dosing_live_state(hass: HomeAssistant, channel: dict[str, Any]) -> dict[str, Any]:
+def _dosing_food_freshness(channel: dict[str, Any], now: datetime,
+                           config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Use the hatchery's batch clock for its linked pump, without changing
+    the saved channel settings. Other food channels keep their own clock."""
+    reservoir = channel.get("reservoir") or {}
+    if config is not None:
+        nps_cfg = config.get("nps") or {}
+        linked = _dosing_channels(config).get(str((nps_cfg.get("feedExchange") or {}).get("channelId") or ""))
+        if linked is channel:
+            hatchery = nps_cfg.get("hatchery") or {}
+            if ((hatchery.get("enrichment") or {}).get("state") or {}).get("startedAt"):
+                return {"status": "soaking", "hoursLeft": None, "ageHours": None}
+            room_h = nps_engine._f(reservoir.get("shelfLifeDays"), 1.0) * 24 or 24.0
+            shelf_h = _nps_batch_shelf_hours(reservoir.get("mixedAt"),
+                                            hatchery.get("reservoir") or {}, now, room_h)
+            reservoir = {**reservoir, "shelfLifeDays": shelf_h / 24.0}
+    return dosing_engine.freshness_state(reservoir, now)
+
+
+def _dosing_live_state(hass: HomeAssistant, channel: dict[str, Any],
+                       config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Entity snapshot the engine's guard mirror consumes. None means "not bound /
     can't tell" — the engine treats unknowns per-guard (fail closed only where the
     firmware would)."""
@@ -11418,6 +11438,7 @@ def _dosing_live_state(hass: HomeAssistant, channel: dict[str, Any]) -> dict[str
         "dosedSensorTrusted": dosed_trusted,
         "boundCount": len(bound),
         "availableCount": available,
+        "foodFreshness": _dosing_food_freshness(channel, datetime.now(timezone.utc), config),
     }
 
 
@@ -11525,7 +11546,8 @@ def _dosing_desired_writes(
     return writes
 
 
-def _dosing_desired_switches(channel: dict[str, Any], now: datetime | None = None) -> dict[str, bool]:
+def _dosing_desired_switches(channel: dict[str, Any], now: datetime | None = None,
+                             config: dict[str, Any] | None = None) -> dict[str, bool]:
     """Desired firmware switch states. The enable switch only goes on when HA can
     stand behind the schedule: calibrated, (for kalk) the missing-pH state
     explicitly acknowledged, and (for live food) the culture still FRESH — the
@@ -11540,9 +11562,8 @@ def _dosing_desired_switches(channel: dict[str, Any], now: datetime | None = Non
         calibrated = (channel.get("calibration", {}).get("stepsPerMl") or 0) > 0
     fresh_ok = True
     if channel.get("chemical") == "livefood":
-        reservoir = channel.get("reservoir", {}) if isinstance(channel.get("reservoir"), dict) else {}
-        fresh_ok = dosing_engine.freshness_state(
-            reservoir, now or datetime.now(timezone.utc))["status"] != "stale"
+        fresh_ok = _dosing_food_freshness(
+            channel, now or datetime.now(timezone.utc), config)["status"] not in ("stale", "soaking")
     ph_ok = bool(guards.get("phEntity")) or bool(guards.get("phMissingAcknowledged")) or channel.get("chemical") != "kalk"
     schedule = channel.get("schedule", {}) if isinstance(channel.get("schedule"), dict) else {}
     schedule_on = bool(schedule.get("enabled"))
@@ -11635,7 +11656,7 @@ async def _async_dosing_sync_pass(
                 )
                 wrote[ent] = value
 
-        for role, want_on in _dosing_desired_switches(channel).items():
+        for role, want_on in _dosing_desired_switches(channel, config=config).items():
             ent = entities.get(role)
             if not ent:
                 continue
@@ -12316,7 +12337,7 @@ async def _async_dosing_ha_executor(
         last = _parse_datetime(state.get("lastDoseAt"))
         if last is not None and (now_utc - last).total_seconds() < interval_min * 60 - 5:
             continue
-        live = _dosing_live_state(hass, channel)
+        live = _dosing_live_state(hass, channel, config)
         live["dosedTodayMl"] = dosed_today
         reasons = dosing_engine.guard_reasons(channel, live, now_minutes, False, now_utc)
         if any(r.get("severity") == "block" for r in reasons):
@@ -12555,7 +12576,7 @@ async def _async_dosing_fire_queued(
     # The ordinary manual gates re-apply at FIRE time (fail-closed: a channel that
     # went stale/uncalibrated/suspended while queued must not dose).
     now_local = dt_util.now()
-    live = _dosing_live_state(hass, channel)
+    live = _dosing_live_state(hass, channel, config)
     live["awcActive"] = _dosing_awc_suspended(config)
     live["now"] = datetime.now(timezone.utc)
     blocked = [
@@ -12620,7 +12641,7 @@ async def _async_nps_hatch_ready_push(
         ready_at = started + timedelta(hours=hours)
         held = (f"Ready since {dt_util.as_local(ready_at).strftime('%H:%M')} — held through your quiet hours. "
                 if now - ready_at >= timedelta(minutes=90) else "")
-        message = (held + f"The {hours:g} h hatch is done. Rinse the nauplii (never dose "
+        message = (held + f"The {hours:g} h hatch timer has finished. Check hatch-out, then rinse the nauplii (never dose "
                    "hatch water), resuspend at tank salinity, load the container, "
                    "then tap 'Hatched & loaded'. Harvesting promptly keeps the "
                    "yolk calories.")
@@ -12645,7 +12666,7 @@ async def _async_nps_hatch_ready_push(
     if enrich_started is not None:
         elapsed_h = (now - enrich_started).total_seconds() / 3600.0
         enrich_hours = _awc_num(enrich_state.get("enrichHours"),
-                                nps_engine.ENRICH_DEFAULT_HOURS, 2, 48)
+                                nps_engine.ENRICH_DEFAULT_HOURS, 1, 48)
         delay_h = _awc_num(enrich_state.get("doseDelayH"), 0, 0, 24)
         first_dose = _parse_datetime(enrich_state.get("firstDoseAt"))
         if first_dose is None and delay_h <= 0:
@@ -12664,7 +12685,7 @@ async def _async_nps_hatch_ready_push(
             notices.append((
                 "openreef_enrich_dose",
                 "OpenReef: Add the enrichment dose",
-                "The batch has crossed instar II — add the Selcon and tap "
+                "The planned dose time has arrived — confirm feeding-stage nauplii, add the enrichment and tap "
                 "'Add dose' on the NPS tab. The soak clock proper starts there.",
                 [{"action": "OPENREEF_ENRICH_DOSE", "title": "Dose added"},
                  {"action": "OPENREEF_LATER", "title": "Later"}]))
@@ -12675,7 +12696,7 @@ async def _async_nps_hatch_ready_push(
                 "OpenReef: Brine enrichment done — rinse & load",
                 "The soak is finished. Rinse on a fine screen (emulsion residue "
                 "breeds bacteria), load the container, then tap 'Enriched & "
-                "loaded'. Warm-held enriched brine loses half its boost in a day.",
+                "loaded'. The post-soak window is a handling estimate; nutrient retention varies.",
                 [{"action": "OPENREEF_ENRICH_LOADED", "title": "Enriched & loaded"},
                  {"action": "OPENREEF_LATER", "title": "Later"}]))
         elif (bool(enrichment.get("splitDose"))
@@ -12747,7 +12768,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
         state = channel.setdefault("state", {})
         entities = channel.get("driver", {}).get("entities", {})
         entities = entities if isinstance(entities, dict) else {}
-        live = _dosing_live_state(hass, channel)
+        live = _dosing_live_state(hass, channel, config)
         compiled = dosing_engine.compile_schedule(channel, lighting_off, now_local)
         plan = compiled["plan"]
 
@@ -12907,11 +12928,9 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
         # (mirror of the suspend re-assertion above); after a refresh the sync's
         # desired-switches path turns it back on.
         if channel.get("chemical") == "livefood":
-            fresh = dosing_engine.freshness_state(
-                channel.get("reservoir", {}) if isinstance(channel.get("reservoir"), dict) else {},
-                now_utc)
+            fresh = _dosing_food_freshness(channel, now_utc, config)
             was_stale = bool(rt.get("staleFood"))
-            is_stale = fresh["status"] == "stale"
+            is_stale = fresh["status"] in ("stale", "soaking")
             rt["staleFood"] = is_stale
             if is_stale:
                 enable_ent = entities.get("enabledSwitch")
@@ -13162,7 +13181,7 @@ async def websocket_dosing_summary(
     live_map: dict[str, dict[str, Any]] = {}
     bindings: dict[str, dict[str, Any]] = {}
     for cid, channel in channels.items():
-        live = _dosing_live_state(hass, channel)
+        live = _dosing_live_state(hass, channel, config)
         live["awcActive"] = awc_suspended
         live_map[cid] = live
         entities = channel.get("driver", {}).get("entities", {})
@@ -13327,7 +13346,7 @@ async def websocket_dosing_dose_now(
         connection.send_error(msg["id"], "dose_out_of_bounds", f"Manual dose must be 0–{max_ml:g} ml")
         return
     now_local = dt_util.now()
-    live = _dosing_live_state(hass, channel)
+    live = _dosing_live_state(hass, channel, config)
     live["awcActive"] = _dosing_awc_suspended(config)
     live["now"] = datetime.now(timezone.utc)
     reasons = [
@@ -13955,7 +13974,7 @@ def _nps_fridge_bottle_state(config: dict[str, Any], now: datetime) -> dict[str,
     bottle = (((config.get("nps") or {}).get("hatchery") or {}).get("fridgeBottle") or {})
     remaining = _awc_num(bottle.get("remainingMl"), 0, 0, 50000)
     loaded = str(bottle.get("mixedAt") or "")
-    if remaining <= 0 or not loaded:
+    if remaining <= 0:
         return {"remainingMl": 0, "mixedAt": "", "refrigeratedAt": "",
                 "lastLoadEnriched": False, "shelfHours": None, "freshness": None}
     shelf_h = _nps_batch_shelf_hours(loaded, bottle, now)
@@ -14106,9 +14125,9 @@ def _nps_live_shelf(config: dict[str, Any], now: datetime
 def _nps_brine_supply_for_planning(
     config: dict[str, Any], now: datetime
 ) -> tuple[Any, float, Any, Any]:
-    """The next-hatch supply with the feeding bottle counted in: the keeper
-    feeds out whichever batch dies first, so the supply's clock is the
-    LATER-expiring of container and bottle, and the volume is both."""
+    """Plan first-expiring-first use; expired or unconsumable stock is not
+    runway. In particular, a large nearly-expired container cannot borrow
+    the feeding bottle's later expiry for its entire volume."""
     loaded, shelf_h, remaining, rate = _nps_brine_supply(config, now)
     bottle = _nps_fridge_bottle_state(config, now)
     if bottle["remainingMl"] <= 0:
@@ -14118,13 +14137,25 @@ def _nps_brine_supply_for_planning(
         loaded_dt = _parse_datetime(iso)
         return None if loaded_dt is None else loaded_dt + timedelta(hours=hours)
 
-    combined = (None if remaining is None
-                else round(_awc_num(remaining, 0, 0, 1e9) + bottle["remainingMl"], 1))
     container_exp = _expiry(loaded, shelf_h)
     bottle_exp = _expiry(bottle["mixedAt"], bottle["shelfHours"])
-    if bottle_exp is not None and (container_exp is None or bottle_exp > container_exp):
-        return bottle["mixedAt"], bottle["shelfHours"], combined, rate
-    return loaded, shelf_h, combined, rate
+    batches = [(container_exp, loaded, shelf_h, remaining),
+               (bottle_exp, bottle["mixedAt"], bottle["shelfHours"], bottle["remainingMl"])]
+    batches = sorted((b for b in batches if b[0] is not None and b[0] > now
+                      and (b[3] is None or b[3] > 0)), key=lambda b: b[0])
+    if not batches:
+        return None, nps_engine.BRINE_SHELF_H_ROOM, 0.0, rate
+    per_hour = nps_engine._f(rate) / 24.0
+    cursor, usable = now, 0.0
+    for expiry, _loaded, _shelf, ml in batches:
+        if ml is None:
+            return batches[-1][1], batches[-1][2], None, rate
+        available = max(0.0, (expiry - cursor).total_seconds() / 3600.0)
+        portion = min(ml, available * per_hour) if per_hour > 0 else ml
+        usable += portion
+        if per_hour > 0:
+            cursor += timedelta(hours=portion / per_hour)
+    return batches[-1][1], batches[-1][2], usable, rate
 
 
 def _nps_plain_shelf_hours(config: dict[str, Any], now: datetime) -> float:
@@ -14133,7 +14164,6 @@ def _nps_plain_shelf_hours(config: dict[str, Any], now: datetime) -> float:
     nps_cfg = config.get("nps") or {}
     channels = _dosing_channels(config)
     fx_channel = channels.get(str((nps_cfg.get("feedExchange") or {}).get("channelId") or ""))
-    saved_h = _nps_container_credit(config)
     room_h = nps_engine.BRINE_SHELF_H_ROOM
     reservoir = ((nps_cfg.get("hatchery") or {}).get("reservoir") or {})
     if isinstance(fx_channel, dict):
@@ -14143,9 +14173,8 @@ def _nps_plain_shelf_hours(config: dict[str, Any], now: datetime) -> float:
         except (TypeError, ValueError):
             shelf_days = 1.0
         room_h = shelf_days * 24.0 if shelf_days > 0 else 24.0
-    return nps_engine.brine_window_hours(
-        reservoir.get("mixedAt"), now, room_h,
-        max(nps_engine.BRINE_SHELF_H_FRIDGE, room_h), "", saved_h)
+    # This is the NEXT batch's window, never the current batch's cold credit.
+    return room_h
 
 
 def _nps_brine_supply(config: dict[str, Any],
@@ -14266,16 +14295,22 @@ def _nps_container_load(
     gate, volume move (loadVolumeMl 0 = top-to-full, clamped at the brim),
     freshness stamp, enriched flag. Returns (code, message) on refusal."""
     reservoir = _nps_canonical_reservoir(config)
+    if hatchery["enrichment"]["state"].get("startedAt"):
+        return "soaking", "Finish or cancel the current soak before adding another harvest."
     remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
+    old_loaded = str(reservoir.get("mixedAt") or "")
+    old_credit = hatchery["reservoir"].get("fridgeSavedH", 0)
     if remaining > 0:
-        supply_loaded, shelf_h, _r, _rate = _nps_brine_supply(config)
+        supply_loaded, shelf_h, _r, _rate = _nps_brine_supply(config, now)
         loaded_dt = _parse_datetime(supply_loaded)
         age_ok = (loaded_dt is not None
-                  and (now - loaded_dt).total_seconds() / 3600.0 <= shelf_h)
+                  and (now - loaded_dt).total_seconds() / 3600.0 < shelf_h)
         if not age_ok:
             return ("stale_brine",
                     "The container still holds brine past its shelf life — "
                     "discard it before loading the fresh batch.")
+        if hatchery["reservoir"].get("lastLoadEnriched") and not enriched:
+            return "enriched_brine", "Feed or refrigerate the enriched batch before loading plain brine."
     volume = _awc_num(reservoir.get("volumeMl"), 0, 0, 50000)
     load = _awc_num(hatchery["reservoir"].get("loadVolumeMl"), 0, 0, 50000)
     remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
@@ -14291,6 +14326,10 @@ def _nps_container_load(
     # A fresh load is a fresh batch at room temperature: any credit an
     # earlier bottle poured back starts over (doc §12).
     hatchery["reservoir"]["fridgeSavedH"] = 0
+    if remaining > 0:
+        # Topping up does not renew the older portion's clock.
+        reservoir["mixedAt"] = old_loaded
+        hatchery["reservoir"]["fridgeSavedH"] = old_credit
     return None
 
 
@@ -14405,13 +14444,18 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str,
             # the next-hatch maths recommends (this batch just loaded, so the
             # clock runs from now; other running batches chain it further out).
             hatch_hours = _nps_vessel_clock(config, vessel_id)
-            _loaded, shelf_h, _remaining, _rate = _nps_brine_supply(config)
-            # Freshness-timed only: the reservoir is mid-reload at this exact
-            # moment, so its remaining-ml is not yet trustworthy. The card's
-            # live suggestion picks up depletion once the volume is reset.
+            loaded, shelf_h, remaining, rate = _nps_brine_supply_for_planning(config, now)
+            reservoir = _nps_canonical_reservoir(config)
+            load_ml = nps_engine._f(((config.get("nps") or {}).get("hatchery") or {}).get("reservoir", {}).get("loadVolumeMl"))
+            capacity = nps_engine._f(reservoir.get("volumeMl"))
+            load_ml = min(load_ml, capacity) if load_ml > 0 and capacity > 0 else load_ml or capacity
+            # The load has already updated the ledger. Retain top-up age,
+            # cold-bottle supply and depletion just as the dashboard does.
             suggestion = nps_engine.next_hatch_suggestion(
-                now, hatch_hours, now.isoformat(), shelf_h, None, None,
+                now, hatch_hours, loaded, shelf_h, remaining, rate,
                 _nps_chain_batches(config),
+                chain_shelf_hours=_nps_plain_shelf_hours(config, now),
+                load_volume_ml=load_ml,
             )
             start_at = _parse_datetime(suggestion.get("startAt"))
             if (suggestion.get("status") in ("wait", "chained")
@@ -14822,6 +14866,12 @@ async def websocket_nps_hatch_enrich(
         return
     now = datetime.now(timezone.utc)
     # Per-batch stamps — editing settings mid-soak never moves a running soak.
+    if _nps_batch_is_stale(loaded_iso, hatchery["reservoir"], now):
+        connection.send_error(msg["id"], "stale_brine", "Discard the expired batch before enriching fresh brine.")
+        return
+    if hatchery["reservoir"].get("lastLoadEnriched"):
+        connection.send_error(msg["id"], "already_enriched", "This batch has already completed enrichment.")
+        return
     delay_h = enrichment["doseDelayH"]
     loaded_dt = _parse_datetime(loaded_iso)
     batch_age_h = ((now - loaded_dt).total_seconds() / 3600.0
@@ -14869,16 +14919,27 @@ def _nps_enrich_loaded_apply(config: dict[str, Any], now: datetime) -> tuple[str
     state = hatchery["enrichment"]["state"]
     if _parse_datetime(state.get("startedAt")) is None:
         return "no_enrichment", "Nothing is enriching"
+    reservoir = _nps_canonical_reservoir(config)
+    if (nps_engine._f(reservoir.get("remainingMl")) <= 0
+            or reservoir.get("mixedAt") != state.get("batchLoadedAt")):
+        return "batch_changed", "The soaking batch is no longer in the container; cancel the soak."
+    first = _parse_datetime(state.get("firstDoseAt"))
+    if first is None:
+        return "no_first_dose", "Log the first enrichment dose before completing the soak."
+    hours = nps_engine._f(state.get("enrichHours")) or nps_engine.ENRICH_DEFAULT_HOURS
+    finished = first + timedelta(hours=hours)
+    if now < finished:
+        return "soak_incomplete", "The planned enrichment soak is still running."
     hatchery["reservoir"]["lastLoadEnriched"] = True
-    hatchery["reservoir"]["enrichedAt"] = now.isoformat()
+    # A late acknowledgement must not renew an already fading boost.
+    hatchery["reservoir"]["enrichedAt"] = finished.isoformat()
     # The boost window starts HERE, warm: whatever the yolk clock had banked
     # from a cold spell is moot once the batch has eaten (doc §12).
     hatchery["reservoir"]["fridgeSavedH"] = 0
     # Enriched time counts from the FIRST DOSE — holding in clean water
     # before the instar II molt is not enrichment.
     soak_started = _parse_datetime(state.get("startedAt"))
-    fed_from = _parse_datetime(state.get("firstDoseAt")) or soak_started
-    enriched_h = round(max(0.0, (now - fed_from).total_seconds() / 3600.0), 1)
+    enriched_h = round(hours, 1)
     marked = _nps_journal_mark_enriched(hatchery, state, soak_started, enriched_h)
     hatchery["enrichment"]["state"] = {
         "startedAt": "", "sourceVesselId": "", "eggType": "",
@@ -14892,11 +14953,11 @@ def _nps_enrich_loaded_apply(config: dict[str, Any], now: datetime) -> tuple[str
         _append_activity(
             config,
             f"Soak done — the {vessel_name} batch is gut-loaded ({enriched_h:g} h); "
-            "the boost clock runs from now (mesh-rinse before feed-out if you like)",
+            "the boost clock runs from the scheduled soak end; rinse before feeding",
             "control")
     else:
         _append_activity(config, "Soak done — gut-loaded brine in the vessel; the boost "
-                                 "clock runs from now (mesh-rinse before feed-out if you like)",
+                                 "clock runs from the scheduled soak end; rinse before feeding",
                          "control")
     return None
 
@@ -14911,6 +14972,12 @@ def _nps_enrich_dose_apply(config: dict[str, Any], now: datetime) -> tuple[str, 
         return "no_enrichment", "Nothing is enriching"
     if state.get("firstDoseAt"):
         return "already_dosed", "The dose is already logged"
+    reservoir = _nps_canonical_reservoir(config)
+    if (nps_engine._f(reservoir.get("remainingMl")) <= 0
+            or reservoir.get("mixedAt") != state.get("batchLoadedAt")):
+        return "batch_changed", "The soaking batch is no longer in the container; cancel the soak."
+    if _nps_batch_is_stale(reservoir.get("mixedAt"), hatchery["reservoir"], now):
+        return "stale_brine", "The waiting batch has expired; cancel the soak and discard it."
     _nps_enrich_debit(config, hatchery["enrichment"])
     state["firstDoseAt"] = now.isoformat()
     _append_activity(config, "Enrichment dose added — the soak proper begins", "control")
@@ -15058,7 +15125,7 @@ def _nps_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime) 
     loaded_dt = _parse_datetime(loaded_iso)
     if loaded_dt is None:
         return True
-    return (now - loaded_dt).total_seconds() / 3600.0 > _nps_batch_shelf_hours(loaded_iso, stamps, now)
+    return (now - loaded_dt).total_seconds() / 3600.0 >= _nps_batch_shelf_hours(loaded_iso, stamps, now)
 
 
 @websocket_api.websocket_command({
@@ -15091,7 +15158,7 @@ async def websocket_nps_fridge_bottle(
     now = datetime.now(timezone.utc)
     action = msg["action"]
     bottle_ml = _awc_num(bottle.get("remainingMl"), 0, 0, 50000)
-    bottle_loaded = bool(bottle_ml > 0 and str(bottle.get("mixedAt") or ""))
+    bottle_loaded = bottle_ml > 0
     if action == "fill":
         remaining = _awc_num(container.get("remainingMl"), 0, 0, 1e9)
         loaded_iso = str(container.get("mixedAt") or "")
@@ -15113,20 +15180,29 @@ async def websocket_nps_fridge_bottle(
                                   "The feeding bottle still holds brine past its shelf life — "
                                   "empty it before refilling")
             return
+        if bottle_ml + remaining > 50000:
+            connection.send_error(msg["id"], "bottle_full", "The transfer exceeds the bottle ledger's 50 L limit.")
+            return
+        if bottle_loaded and bool(bottle.get("lastLoadEnriched")) != bool(res_cfg.get("lastLoadEnriched")):
+            connection.send_error(msg["id"], "mixed_enrichment", "Keep enriched and plain batches separate; empty the bottle before changing batches.")
+            return
         merged = ""
         if bottle_loaded:
-            # Topping up a bottle that still holds brine: the OLDER batch's
-            # clock rules the mix — conservative, and honest about the risk.
-            old_dt = _parse_datetime(bottle["mixedAt"])
-            new_dt = _parse_datetime(loaded_iso)
-            if old_dt is not None and new_dt is not None and new_dt < old_dt:
+            # Compare remaining life at the DESTINATION temperature. The
+            # oldest batch can have more life left after spending time cold.
+            incoming = {**res_cfg, "refrigeratedAt": now.isoformat()}
+            old_end = _parse_datetime(bottle["mixedAt"]) + timedelta(
+                hours=_nps_batch_shelf_hours(bottle["mixedAt"], bottle, now))
+            new_end = _parse_datetime(loaded_iso) + timedelta(
+                hours=_nps_batch_shelf_hours(loaded_iso, incoming, now))
+            if new_end < old_end:
                 bottle.update({"mixedAt": loaded_iso,
                                "lastLoadEnriched": bool(res_cfg.get("lastLoadEnriched")),
                                "enrichedAt": str(res_cfg.get("enrichedAt") or ""),
                                "fridgeSavedH": _awc_num(res_cfg.get("fridgeSavedH"), 0, 0, 240),
                                "refrigeratedAt": now.isoformat()})
             bottle["remainingMl"] = round(min(50000.0, bottle_ml + remaining), 1)
-            merged = f" on top of the {bottle_ml:g} ml already there (the older batch's clock rules)"
+            merged = f" on top of the {bottle_ml:g} ml already there (the shorter remaining window rules)"
         else:
             bottle.update({
                 "remainingMl": round(remaining, 1), "mixedAt": loaded_iso,
@@ -15146,6 +15222,7 @@ async def websocket_nps_fridge_bottle(
             connection.send_error(msg["id"], "bottle_empty", "The feeding bottle is empty")
             return
         ml = _awc_num(msg.get("ml"), hatchery["handFeed"]["defaultDoseMl"], 0.5, 1000)
+        ml = min(ml, bottle_ml)
         bottle["remainingMl"] = round(max(0.0, bottle_ml - ml), 1)
         _nps_log_hand_feed(config, now, ml, " from the fridge bottle",
                            slot=_normalise_schedule_time(msg.get("slot")))
@@ -15159,10 +15236,20 @@ async def websocket_nps_fridge_bottle(
             return
         cont_remaining = _awc_num(container.get("remainingMl"), 0, 0, 1e9)
         cont_loaded = str(container.get("mixedAt") or "")
-        if cont_remaining > 0 and cont_loaded and _nps_batch_is_stale(cont_loaded, res_cfg, now):
+        if cont_remaining > 0 and _nps_batch_is_stale(cont_loaded, res_cfg, now):
             connection.send_error(msg["id"], "stale_brine",
                                   "The container still holds brine past its shelf life — "
                                   "discard it before pouring the bottle back")
+            return
+        if hatchery["enrichment"]["state"].get("startedAt"):
+            connection.send_error(msg["id"], "soaking", "Finish or cancel the soak before returning another batch.")
+            return
+        if cont_remaining > 0 and bool(bottle.get("lastLoadEnriched")) != bool(res_cfg.get("lastLoadEnriched")):
+            connection.send_error(msg["id"], "mixed_enrichment", "Keep enriched and plain batches separate; empty the container first.")
+            return
+        volume = _awc_num(container.get("volumeMl"), 0, 0, 50000)
+        if cont_remaining + bottle_ml > (volume or 50000):
+            connection.send_error(msg["id"], "container_full", "The bottle will not fit in the container; feed some out first.")
             return
         cold_h, saved_h = _nps_bottle_exit(bottle, now)
         volume = _awc_num(container.get("volumeMl"), 0, 0, 50000)
@@ -15170,8 +15257,11 @@ async def websocket_nps_fridge_bottle(
         container["remainingMl"] = round(min(volume, total) if volume > 0 else total, 1)
         old_dt = _parse_datetime(cont_loaded) if cont_remaining > 0 else None
         new_dt = _parse_datetime(bottle["mixedAt"])
-        if old_dt is None or (new_dt is not None and new_dt < old_dt):
-            # The bottle's batch is the older (or only) one: its clock rules.
+        old_end = (old_dt + timedelta(hours=_nps_batch_shelf_hours(cont_loaded, res_cfg, now))
+                   if old_dt is not None else None)
+        new_end = new_dt + timedelta(hours=_nps_batch_shelf_hours(bottle["mixedAt"], bottle, now))
+        if old_end is None or new_end < old_end:
+            # The shorter remaining window rules after the bottle warms.
             container["mixedAt"] = bottle["mixedAt"]
             res_cfg.update({"lastLoadEnriched": bool(bottle.get("lastLoadEnriched")),
                             "enrichedAt": str(bottle.get("enrichedAt") or ""),
@@ -15209,6 +15299,8 @@ async def websocket_nps_reservoir_discard(
     reservoir["mixedAt"] = ""
     hatchery = _nps_hatchery_v2(config)
     hatchery["reservoir"]["fridgeSavedH"] = 0
+    hatchery["reservoir"].update({"lastLoadEnriched": False, "enrichedAt": ""})
+    hatchery["enrichment"]["state"] = {}
     _append_activity(config, "Old brine discarded — the container is empty", "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
@@ -15236,6 +15328,10 @@ async def websocket_nps_hand_feed(
     ml = _awc_num(msg.get("ml"), hatchery["handFeed"]["defaultDoseMl"], 0.5, 1000)
     reservoir = _nps_canonical_reservoir(config)
     remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
+    if remaining <= 0:
+        connection.send_error(msg["id"], "no_brine", "The brine container is empty.")
+        return
+    ml = min(ml, remaining)
     reservoir["remainingMl"] = round(max(0.0, remaining - ml), 1)
     now = datetime.now(timezone.utc)
     _nps_log_hand_feed(config, now, ml, "", slot=_normalise_schedule_time(msg.get("slot")))
@@ -16437,13 +16533,9 @@ async def websocket_nps_summary(
         config, now_utc)
     if isinstance(fx_channel, dict):
         reservoir = fx_channel.get("reservoir") or {}
-        if reservoir_cfg.get("lastLoadEnriched"):
-            # The enriched cap outranks the channel's configured shelf life.
-            freshness = dosing_engine.freshness_state(
-                {"mixedAt": reservoir.get("mixedAt"),
-                 "shelfLifeDays": supply_shelf_h / 24.0}, now_utc)
-        else:
-            freshness = dosing_engine.freshness_state(reservoir, now_utc)
+        freshness = dosing_engine.freshness_state(
+            {"mixedAt": reservoir.get("mixedAt"),
+             "shelfLifeDays": supply_shelf_h / 24.0}, now_utc)
         prime = nps_engine.hatch_prime_state(
             reservoir.get("mixedAt"), now_utc, enriched_at, fridge_saved_h=fridge_saved_h)
     else:
@@ -16464,12 +16556,22 @@ async def websocket_nps_summary(
         temp_state = hass.states.get(temp_entity)
         try:
             temp_c = float(temp_state.state) if temp_state is not None else None
+            if temp_c is not None and not math.isfinite(temp_c):
+                temp_c = None
+            unit = str((getattr(temp_state, "attributes", {}) or {}).get("unit_of_measurement") or "°C")
+            if temp_c is not None:
+                if unit in ("°F", "F", "℉"):
+                    temp_c = (temp_c - 32.0) * 5.0 / 9.0
+                elif unit == "K":
+                    temp_c -= 273.15
+                elif unit not in ("°C", "C", "℃"):
+                    temp_c = None
         except (TypeError, ValueError):
             temp_c = None
     no_temp = {"available": False, "expectedHours": None, "factor": None, "warm": False}
 
     def _temp_advice_for(egg_type: str) -> dict[str, Any]:
-        if temp_c is None:
+        if temp_c is None or egg_type == "cool_room":
             return dict(no_temp)
         # RATED hours in, not the keeper's clock (doc §12): a learned clock
         # was measured at this temperature already.
@@ -16508,7 +16610,7 @@ async def websocket_nps_summary(
             "state": hatch_st,
             "guide": nps_engine.cyst_dose_guide(vessel["volumeL"]),
             "cysts": _nps_cysts_payload(vessel, now_utc),
-            "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], vessel["eggType"]),
+            "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], vessel["eggType"], vid),
             "temp": _temp_advice_for(vessel["eggType"]),
             "tasks": {"start": start_id, "harvest": harvest_id},
         })
@@ -16522,12 +16624,13 @@ async def websocket_nps_summary(
                 or (rank == prev and left is not None and prev_left is not None and left < prev_left)):
             primary_state = hatch_st
             primary_vessel = vid
-    # The batch that starts next goes into the first idle vessel (doc §9.3) —
-    # or, with every cone busy, the one that frees first — so its clock is
-    # the one the next-hatch maths plans on.
-    soonest_free = min(_nps_running_batches(config), default=None,
-                       key=lambda item: item[1] + timedelta(hours=item[2]))
-    next_start_id = idle_vessel or (soonest_free[0] if soonest_free else primary_vessel)
+    # Compare completion times, not just free times: a faster cone can
+    # finish the next batch sooner even if it frees later.
+    running_by_id = {vid: started + timedelta(hours=hours)
+                     for vid, started, hours in _nps_running_batches(config)}
+    next_start_id = min(hatchery_cfg["vessels"], key=lambda vid: (
+        max(now_utc, running_by_id.get(vid, now_utc))
+        + timedelta(hours=_nps_vessel_clock(config, vid)), vid))
     next_start_vessel = hatchery_cfg["vessels"].get(next_start_id) or {}
     next_start_hours = _awc_num(next_start_vessel.get("hatchHours"), hatchery_cfg["hatchHours"], 8, 48)
     # With every cone mid-hatch the ideal start is a moment nothing can honour
@@ -16535,8 +16638,15 @@ async def websocket_nps_summary(
     # Hand the maths the moment the first one frees so it plans on the rack it
     # actually has; an idle cone can take the cysts whenever it asks.
     free_at_iso = None
-    if not idle_vessel and soonest_free is not None:
-        free_at_iso = (soonest_free[1] + timedelta(hours=soonest_free[2])).isoformat()
+    if next_start_id in running_by_id:
+        free_at_iso = running_by_id[next_start_id].isoformat()
+    next_load_ml = nps_engine._f(reservoir_cfg.get("loadVolumeMl"))
+    capacity_ml = nps_engine._f(_nps_canonical_reservoir(config).get("volumeMl"))
+    if capacity_ml > 0:
+        next_load_ml = min(next_load_ml, capacity_ml) if next_load_ml > 0 else capacity_ml
+    planning_shelf_h = plain_shelf_h
+    if next_load_ml > 0 and nps_engine._f(plan_rate) > 0:
+        planning_shelf_h = min(plain_shelf_h, next_load_ml / nps_engine._f(plan_rate) * 24.0)
     # How many cones continuous supply takes is vessels_needed's question;
     # WHERE their loads actually land is the rhythm's (0.7.155). Each cone on
     # its own clock and its own stamped batch, exactly as the chain sees them.
@@ -16550,7 +16660,7 @@ async def websocket_nps_summary(
           "batchHours": (((hatchery_cfg["vessels"].get(vid) or {}).get("state") or {})
                          .get("hatchHours"))}
          for vid in sorted(hatchery_cfg["vessels"])],
-        plain_shelf_h,
+        planning_shelf_h,
     )
     primary_cfg = hatchery_cfg["vessels"].get(primary_vessel) or {}
     primary_egg = primary_state.get("eggType") or primary_cfg.get("eggType") or hatchery_cfg["eggType"]
@@ -16559,8 +16669,7 @@ async def websocket_nps_summary(
     next_hatch = nps_engine.next_hatch_suggestion(
         now_utc,
         next_start_hours,
-        # Container AND feeding bottle: whichever dies later anchors the
-        # clock, the volume is both (doc §12.6).
+        # Container and bottle, counting only usable stock before each expiry.
         plan_loaded, plan_shelf_h, plan_remaining, plan_rate,
         # Per-batch clocks (0.7.62) + the enriching pseudo-batch (§10): brine
         # on the way is brine on the way, whatever vessel it sits in.
@@ -16569,6 +16678,7 @@ async def websocket_nps_summary(
         # shelf, never the current load's boost window (doc §12).
         chain_shelf_hours=plain_shelf_h,
         free_at_iso=free_at_iso,
+        load_volume_ml=next_load_ml,
     )
     # Container payload: the CANONICAL reservoir (pump channel's when linked).
     if isinstance(fx_channel, dict):
@@ -16668,7 +16778,7 @@ async def websocket_nps_summary(
             # continuous supply needs.
             "vesselsNeeded": nps_engine.vessels_needed(
                 max((v["hatchHours"] for v in vessels_payload), default=hatchery_cfg["hatchHours"]),
-                plain_shelf_h),
+                planning_shelf_h),
             # Structural too, but about PHASE rather than count (0.7.155).
             "rackRhythm": rhythm,
             "state": primary_state,
@@ -16697,7 +16807,7 @@ async def websocket_nps_summary(
             "handFeed": dict(hatchery_cfg["handFeed"]),
             # Legacy single-pouch/learned/temp fields: the primary vessel's.
             "cysts": _nps_cysts_payload(primary_cfg or hatchery_cfg, now_utc),
-            "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], primary_egg),
+            "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], primary_egg, primary_vessel),
             "temp": temp_advice,
             "instar": instar_advice,
             "vesselPresets": [dict(p) for p in nps_engine.HATCH_VESSEL_PRESETS],
@@ -16810,7 +16920,7 @@ async def websocket_dosing_respread_missed(
         return
     now_local = dt_util.now()
     now_minutes = now_local.hour * 60 + now_local.minute
-    live = _dosing_live_state(hass, channel)
+    live = _dosing_live_state(hass, channel, config)
     if not live.get("dosedSensorTrusted"):
         # Without a readable dosed-today sensor the cap preflight would run
         # against 0.0 — refusing beats re-dosing already-delivered volume (R33).

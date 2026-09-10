@@ -31,9 +31,8 @@ AGING_FRACTION = 0.25          # final quarter of shelf life ⇒ "aging" (dosing
 
 # Feed-exchange (Stage B): every live-food dose PLUS its line-flush chaser is
 # water IN — the matched drain owes both back out so the tank level (and the
-# ATO) never notices feeding. Research: nauplii lose 30–50% of caloric value
-# between 24 h and 48 h post-hatch — the prime window below drives the
-# hatchery card's countdown.
+# ATO) never notices feeding. The hatchery's 24 h handling window is a
+# planning default; unfed nauplii lose energy from hatch onward.
 FEED_EXCHANGE_MIN_DRAIN_DEFAULT = 150.0   # ml — not worth spinning a pump below this
 FEED_EXCHANGE_MAX_OWED_DEFAULT = 2000.0   # ml — a blocked drain must not bank a flood
 BRINE_PRIME_HOURS = 24.0
@@ -621,20 +620,17 @@ def feed_exchange_batch(owed_ml: float, min_drain_ml: float, max_batch_ml: float
     return round(batch, 1) if batch >= min_drain else 0.0
 
 
-# Hatchery (v1): the incubation clock. Hatch times from the 2026-08 research
-# sweep — standard Great Salt Lake cysts run 18–24 h at 26–30 °C; decapsulated
-# cysts (shell dissolved) harvest ~16 h; cooler rooms stretch everything.
-# OVERDUE_GRACE: nauplii left in the hatcher keep burning yolk — past this the
-# card starts nagging (they lose 30–50% of calories by 48 h post-hatch).
+# Hatchery planning presets, not supplier ratings or observations of hatch-out.
+# See docs/hatchery-audit-2026-09-10.md for evidence and model limitations.
 EGG_TYPES: tuple[dict[str, Any], ...] = (
     {"id": "standard", "name": "Standard cysts (GSL)", "hours": 24,
-     "note": "The usual eBay/LFS cysts: 18–24 h at 26–30 °C, ~25 ppt, strong aeration."},
-    {"id": "decapsulated", "name": "Decapsulated cysts", "hours": 16,
-     "note": "Shell already dissolved — hatches faster (~16 h) and no shell separation."},
-    {"id": "premium", "name": "High-hatch premium cysts", "hours": 20,
-     "note": "90%+ hatch-rate grades tend to pop a little sooner (~20 h)."},
+     "note": "24 h starting estimate at 25–28 °C. Follow the supplier's salinity, light and aeration guidance; inspect hatch-out."},
+    {"id": "decapsulated", "name": "Decapsulated cysts", "hours": 24,
+     "note": "Use hatchable decapsulated cysts; dried feed-only products may not hatch. Timing depends on the product, not shell removal alone."},
+    {"id": "premium", "name": "High-hatch premium cysts", "hours": 24,
+     "note": "High hatch percentage describes yield, not speed. Start with the supplier's hatch time; 24 h is a planning default."},
     {"id": "cool_room", "name": "Cool room (below ~24 °C)", "hours": 36,
-     "note": "No heater on the hatcher? Budget up to 36 h — temperature rules the clock."},
+     "note": "36 h planning estimate only; cool-water hatches can take longer. Check hatch-out and the supplier's guidance."},
 )
 _EGG_TYPES_BY_ID = {e["id"]: e for e in EGG_TYPES}
 HATCH_OVERDUE_GRACE_H = 12.0
@@ -676,10 +672,8 @@ def hatch_state(started_iso: Any, hatch_hours: float, now: datetime) -> dict[str
 # the next-start maths leaves this much slack on top of the incubation hours.
 HATCH_HARVEST_BUFFER_H = 1.0
 
-# Hatchery v2 (doc §9): vessel cap, dosing-density guide (research §9.6 — 2 g/L
-# is the documented optimum, >2 reduces hatch-out), and the temperature rule of
-# thumb (28 °C is the sweet spot; each degree cooler stretches the clock ~8%,
-# capped where the sources run out of data).
+# 2 g/L is a conservative starting density. The temperature multiplier is
+# an uncalibrated heuristic; it is not a universal Artemia growth equation.
 HATCH_VESSEL_CAP = 4
 HATCH_CYST_G_PER_L = 2.0
 HATCH_TEMP_OPTIMUM_C = 28.0
@@ -698,12 +692,10 @@ HAND_DOSE_UNDO_MIN = 24 * 60  # any of TODAY's feeds can be taken back (doc §13
 BRINE_SHELF_H_ROOM = 24.0
 BRINE_SHELF_H_FRIDGE = 48.0
 
-# Enrichment chain (doc §10): the HUFA boost is TRANSIENT — DHA falls to under
-# half within 24 h at room temp (Evjemo 1997), so an enriched load keeps a
-# tighter clock: 12 h on the counter, 48 h fridged (<10 °C holds ≥24 h with
-# <5% loss). Hobby single-dose soak defaults to 12 h; the INVE-style split
-# protocol tops up at T+10 h. Done batches get a short grace — enriched brine
-# degrades faster than a plain hatch.
+# Post-enrichment handling limits, not measured HUFA retention. Cold-storage
+# results for unfed nauplii cannot establish enriched DHA retention. Selcon's
+# current FAQ allows 1–12 h with aeration; the 12 h default is configurable.
+# A second full dose at +10 h is opt-in and must suit the chosen product.
 ENRICH_SHELF_H_ROOM = 12.0
 ENRICH_SHELF_H_FRIDGE = 48.0
 ENRICH_DEFAULT_HOURS = 12.0
@@ -772,10 +764,11 @@ def brine_window_hours(loaded_iso: Any, now: datetime, room_h: Any, fridge_h: An
         return round(room + saved, 2)
     in_at_h = min(age_h, max(0.0, in_at_h))
     room_spent_h = max(0.0, in_at_h - saved)
-    cold_h = max(0.0, age_h - in_at_h)
-    consumed = room_spent_h / room + cold_h / fridge
-    remaining = max(0.0, 1.0 - consumed)
-    return round(age_h + remaining * fridge, 2)
+    # Fix the expiry at fridge entry. Recomputing age + max(remaining, 0)
+    # moved an expired batch's deadline forward on every read.
+    if room_spent_h >= room:
+        return round(room + saved, 10)
+    return round(in_at_h + (1.0 - room_spent_h / room) * fridge, 10)
 
 
 def fridge_saved_on_exit(fridged_at_iso: Any, now: datetime,
@@ -800,22 +793,19 @@ def fridge_saved_on_exit(fridged_at_iso: Any, now: datetime,
 
 
 def expected_hatch_hours(base_hours: Any, temp_c: Any) -> dict[str, Any]:
-    """Advisory only — never moves the real clock. At 28 °C the RATED hours
-    stand; each degree cooler stretches them ~8% (research: 24 h at 28 °C
-    becomes ~36 h at 21 °C, 36–48 h at 20 °C), clamped at 2.2×. Warmer than
-    optimum is not rewarded — above ~30 °C hatch quality drops, so we flag it
-    instead of promising speed.
+    """Advisory heuristic: preset × (1 + 0.08 × degrees below 28 °C).
 
-    Feed it the egg type's RATED hours, never the keeper's clock (audit
-    2026-09-01, doc §12): a clock set from the learned average was measured
-    at this very temperature, and stretching it again double-counted the
-    cold — "expect ~43.7 h, not 38 h" about batches that actually ran 36."""
+    This is not fitted to a cyst batch or validated across strains. Only
+    provide numerical estimates at 18–32 °C; flag excessive heat separately.
+    The input is a preset, never the keeper’s observed harvest duration, so
+    a temperature effect is not counted twice. It never changes a real clock."""
     base = _f(base_hours)
     if base <= 0:
         base = 24.0
     temp = _f(temp_c, -999.0)
-    if temp < -50 or temp > 60:
-        return {"available": False, "expectedHours": None, "factor": None, "warm": False}
+    if temp < 18 or temp > 32:
+        return {"available": False, "expectedHours": None, "factor": None,
+                "warm": 30 < temp <= 60}
     factor = 1.0 + max(0.0, (HATCH_TEMP_OPTIMUM_C - temp)) * 0.08
     factor = min(factor, 2.2)
     return {"available": True,
@@ -824,16 +814,17 @@ def expected_hatch_hours(base_hours: Any, temp_c: Any) -> dict[str, Any]:
             "warm": temp > 30.0}
 
 
-def learned_hatch_hours(history: Any, egg_type: str) -> dict[str, Any]:
-    """Rolling average of the last three ACTUAL hatch durations for this egg
-    type (early harvests included — that's the point). Needs two samples before
-    it says anything; advisory-with-Apply like every other suggestion."""
+def learned_hatch_hours(history: Any, egg_type: str, vessel_id: str = "") -> dict[str, Any]:
+    """Last three logged start-to-harvest durations, optionally per vessel.
+    Includes keeper delay: this does not measure biological hatch completion.
+    Needs two samples and never applies a new clock automatically."""
     if not isinstance(history, list):
         return {"available": False, "hours": None, "samples": 0}
     actuals = [
         _f(item.get("actualHours"))
         for item in history
         if isinstance(item, dict) and item.get("eggType") == egg_type
+        and (not vessel_id or item.get("vesselId") == vessel_id)
         and _f(item.get("actualHours")) > 0
     ]
     actuals = actuals[:3]
@@ -845,16 +836,17 @@ def learned_hatch_hours(history: Any, egg_type: str) -> dict[str, Any]:
 
 
 def vessels_needed(hatch_hours: Any, shelf_hours: Any) -> int:
-    """Continuous supply needs ceil(lead / shelf) staggered vessels — the
-    documented two-vessel 12–24 h rotation falls straight out of this."""
+    """Ideal steady-state vessel count, ceil(cycle / usable supply window).
+    Assumes even spacing and immediate restart; mixed clocks need rack_rhythm."""
     hours = _f(hatch_hours)
     if hours <= 0:
         hours = 24.0
     shelf = _f(shelf_hours)
     if shelf <= 0:
         shelf = 24.0
-    lead = hours + HATCH_HARVEST_BUFFER_H
-    return max(1, int(-(-lead // shelf)))
+    # Harvest handling overlaps the next incubation, as rack_rhythm assumes.
+    # The buffer delays the first supply, not every steady-state cycle.
+    return max(1, int(-(-hours // shelf)))
 
 
 HATCH_RHYTHM_TIGHT_H = 2.0   # a gap this close to the shelf counts as tight
@@ -941,7 +933,8 @@ def rack_rhythm(
             # The cone empties at harvest; the brine reaches the container a
             # harvest buffer later. A ripe batch frees it now, never in the past.
             "free": max(started + timedelta(hours=batch_h), now) if started else now,
-            "pending": started + timedelta(hours=batch_h + HATCH_HARVEST_BUFFER_H) if started else None,
+            "pending": (max(started + timedelta(hours=batch_h), now)
+                        + timedelta(hours=HATCH_HARVEST_BUFFER_H)) if started else None,
             "idle": started is None,
         })
     if not entries:
@@ -1038,8 +1031,8 @@ def rack_rhythm(
 
 
 def cyst_dose_guide(volume_l: Any) -> dict[str, Any]:
-    """The card's dosing hint: grams at the 2 g/L optimum, and the rough
-    nauplii count at premium (90%-grade GSL ≈ 225k/g) yield."""
+    """Grams at a 2 g/L starting density; count assumes 225,000 nauplii/g.
+    The count is illustrative, not a measurement of this cyst batch's yield."""
     volume = _f(volume_l)
     if volume <= 0:
         return {"available": False, "grams": None, "nauplii": None}
@@ -1058,6 +1051,7 @@ def next_hatch_suggestion(
     started_iso: Any,
     chain_shelf_hours: Any = None,
     free_at_iso: Any = None,
+    load_volume_ml: Any = None,
 ) -> dict[str, Any]:
     """When to set the next batch of cysts going — the daily-driver question.
 
@@ -1111,6 +1105,10 @@ def next_hatch_suggestion(
     chain_shelf_h = _f(chain_shelf_hours)
     if chain_shelf_h <= 0:
         chain_shelf_h = shelf_h
+    rate = _f(ml_per_day)
+    load_ml = _f(load_volume_ml)
+    if rate > 0 and load_ml > 0:
+        chain_shelf_h = min(chain_shelf_h, load_ml / rate * 24.0)
     lead_h = hours + HATCH_HARVEST_BUFFER_H
     raw_starts = started_iso if isinstance(started_iso, (list, tuple)) else [started_iso]
     running: list[tuple[datetime, float, str]] = []
@@ -1126,12 +1124,14 @@ def next_hatch_suggestion(
         "status": "no_brine", "startAt": None, "hoursUntil": None,
         "readyBy": None, "driver": None,
         "hatchHours": round(hours, 1), "shelfHours": round(shelf_h, 1),
-        "overlap": shelf_h < lead_h,
+        "overlap": chain_shelf_h < hours,
         "busyCount": len(running),
         "chainVessel": None,
         "chainLoadsAt": None,
         "freeAt": None,
         "lateHours": None,
+        "supplyGapHours": None,
+        "chainShelfHours": round(chain_shelf_h, 1),
     }
 
     def _finish(status: str, start_at: datetime | None, ready_by: datetime | None,
@@ -1144,6 +1144,10 @@ def next_hatch_suggestion(
         if start_at is not None:
             out["startAt"] = start_at.isoformat()
             out["hoursUntil"] = round(max(0.0, (start_at - now).total_seconds() / 3600.0), 1)
+            if ready_by is not None:
+                out["lateHours"] = round(max(0.0, (
+                    max(start_at, now) + timedelta(hours=lead_h) - ready_by
+                ).total_seconds() / 3600.0), 1)
         return out
 
     # Brine on hand (container and/or feeding bottle) gives out at the
@@ -1155,7 +1159,9 @@ def next_hatch_suggestion(
         supply_end = loaded + timedelta(hours=shelf_h)
         remaining = _f(remaining_ml, -1.0)
         rate = _f(ml_per_day)
-        if remaining >= 0 and rate > 0:
+        if remaining == 0:
+            supply_end, supply_driver = now, "depletion"
+        elif remaining > 0 and rate > 0:
             deplete_by = now + timedelta(hours=remaining / rate * 24.0)
             if deplete_by < supply_end:
                 supply_end, supply_driver = deplete_by, "depletion"
@@ -1168,6 +1174,17 @@ def next_hatch_suggestion(
         base["freeAt"] = free_at.isoformat()
 
     if running:
+        # Report holes before the final incoming load as well as planning
+        # the batch after it. A late final load cannot cover an earlier gap.
+        covered_until = max(now, supply_end) if supply_end is not None else now
+        first_gap = 0.0
+        for load_at in sorted(max(stamp + timedelta(hours=batch_h), now)
+                              + timedelta(hours=HATCH_HARVEST_BUFFER_H)
+                              for stamp, batch_h, _vid in running):
+            if load_at > covered_until and not first_gap:
+                first_gap = (load_at - covered_until).total_seconds() / 3600.0
+            covered_until = max(covered_until, load_at + timedelta(hours=chain_shelf_h))
+        base["supplyGapHours"] = round(first_gap, 1)
         # Batches are on the go: the next start keeps the chain unbroken. The
         # anchor is when the LAST batch loads (its own stamped clock, floored
         # at now — a ripe batch loads about now); its brine fades shelf_h
@@ -1179,7 +1196,7 @@ def next_hatch_suggestion(
             key=lambda item: item[0],
         )
         base["chainVessel"] = anchor_id or None
-        base["chainLoadsAt"] = anchor_dt.isoformat()
+        base["chainLoadsAt"] = (anchor_dt + timedelta(hours=HATCH_HARVEST_BUFFER_H)).isoformat()
         ready_by, driver = anchor_dt + timedelta(hours=HATCH_HARVEST_BUFFER_H + chain_shelf_h), "chain"
         if supply_end is not None and supply_end > ready_by:
             ready_by, driver = supply_end, supply_driver
@@ -1285,7 +1302,7 @@ def instar_two_delay_hours(temp_c: Any = None,
     if base <= 0:
         base = INSTAR_II_HOURS
     temp = _f(temp_c, -999.0)
-    if temp < -50 or temp > 60:
+    if temp < 18 or temp > 32:
         return {"available": False, "hours": round(base, 1), "factor": None}
     factor = min(1.0 + max(0.0, (HATCH_TEMP_OPTIMUM_C - temp)) * 0.08, 2.2)
     return {"available": True,
@@ -1298,35 +1315,16 @@ def hatch_prime_state(mixed_at_iso: Any, now: datetime,
                       refrigerated: bool = False,
                       fridged_at_iso: Any = None,
                       fridge_saved_h: Any = 0.0) -> dict[str, Any]:
-    """Where this hatch sits in its NUTRITIONAL window - and which window that
-    even is, because enrichment swaps one clock for another.
+    """The logged batch’s handling window, not a nutrient or viability assay.
 
-    An UNENRICHED batch runs on yolk: ``prime`` for the first 24 h, then
-    ``fading`` as the reserves burn down (30-50% of calories gone by 48 h).
+    Legacy statuses ``prime``/``fading`` describe the plain 24 h warm / 48 h
+    cold planning budget counted from load. Actual hatch age is unknown.
+    ``gutloaded``/``boost_fading`` describe the enriched 12 h warm / 48 h
+    cold budget counted from planned soak end. They cannot certify DHA
+    content: product, strain, oxygen, density and temperature all matter.
 
-    An ENRICHED batch has been FED. Calling it depleted at 24 h is simply
-    wrong - it is gut-loaded, and it now carries the DHA that Great Salt Lake
-    nauplii never have on their own. What ticks is no longer starvation but
-    retro-conversion: the HUFA boost is transient (Evjemo 1997 - DHA under
-    half within a day warm; <5% loss for 24 h+ below 10 C). So an enriched
-    batch reads ``gutloaded`` while the boost holds (12 h room / 48 h fridge,
-    counted from the END of the soak) and ``boost_fading`` after - still live
-    food, no longer enriched food. Never "past prime, hatch fresh".
-
-    This matters because the app's own protocol guarantees the collision: no
-    mouths until the molt, then a 12 h soak, and the yolk window is spent by
-    the time the soak finishes. The old single clock condemned every batch it
-    had just told the keeper to gut-load (Reece, 0.7.89).
-
-    ``primeLeftHours`` always means "hours left in the window that matters",
-    so compact surfaces need no new arithmetic.
-
-    The fridge is per batch (doc §12, 0.7.115): ``fridged_at_iso`` says when
-    THIS load went cold and both windows run the two-rate clock from there
-    (``brine_window_hours``). The yolk window is fridge-aware too — the old
-    fixed 24 h called a cold, unfed batch "fading" while the container beside
-    it still read fresh. ``refrigerated`` (legacy) means "cold since the
-    window began"."""
+    Both use brine_window_hours so refrigeration credit and expiry agree.
+    ``refrigerated`` is the legacy cold-since-window-start flag."""
     unknown = {"status": "unknown", "ageHours": None, "primeLeftHours": None,
                "enriched": False, "window": None, "windowHours": None,
                "soakAgeHours": None, "refrigerated": False}
