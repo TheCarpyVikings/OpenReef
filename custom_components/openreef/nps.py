@@ -140,6 +140,8 @@ def category_label(category: str) -> str:
 LIVE_BRINE_CONTAINER_ID = "live_brine_container"
 LIVE_BRINE_BOTTLE_ID = "live_brine_bottle"
 LIVE_ROTIFER_BOTTLE_ID = "live_rotifer_bottle"
+LIVE_ROTIFER_CONE_PREFIX = "live_rotifer_cone_"     # + the jar id (0.7.161)
+LIVE_USAGE_ROWS = 60                                 # a source's usage rows carried into the shelf
 LIVE_BRINE_VESSELS = {
     "container": {"id": LIVE_BRINE_CONTAINER_ID, "kind": "brine",
                   "name": "Live baby brine (container)", "where": "the brine container",
@@ -169,6 +171,56 @@ def live_library(kind: str = "brine") -> dict[str, Any]:
 
 def live_brine_library() -> dict[str, Any]:
     return live_library("brine")
+
+
+def _harvest_went_to_tank(row: dict[str, Any], bottle_species: bool) -> bool:
+    """A harvest row that fed the tank: stamped ``to: tank`` (0.7.161), or an
+    older row from a species that never had a bottle."""
+    to = str(row.get("to") or "")
+    return to == "tank" or (not to and not bottle_species)
+
+
+def _harvest_tank_ml(row: dict[str, Any], bottle_species: bool) -> float | None:
+    """The volume that reached the tank: the rinsed crop when it was measured,
+    else the harvest itself for a species that goes in with its water."""
+    if _f(row.get("tankMl")) > 0:
+        return round(_f(row.get("tankMl")), 1)
+    if not bottle_species:
+        return round(_f(row.get("ml")), 1) or None
+    return None
+
+
+def live_cone_product(jar_id: str, name: str, harvest_clock: dict[str, Any], harvest_ml: Any,
+                      last_harvest_iso: Any, history: Any) -> dict[str, Any]:
+    """A producing rotifer cone whose harvests go straight into the tank, as a
+    shelf entry (0.7.161). A SOURCE, not a bottle: no capacity, no fill, no
+    shelf life — feeding does not empty a culture. Its clock is the cone's
+    own harvest clock and its usage the tank harvests that carried a volume,
+    so coverage reads it as food on hand and the log can price the habit."""
+    lib = live_library("rotifers")
+    usage = [{"at": str(row.get("at") or ""), "ml": round(_f(row.get("tankMl")), 1), "kind": "dose"}
+             for row in (history if isinstance(history, list) else [])
+             if isinstance(row, dict) and row.get("event") == "harvest"
+             and str(row.get("to") or "") == "tank" and _f(row.get("tankMl")) > 0]
+    clock = harvest_clock if isinstance(harvest_clock, dict) else {}
+    return {
+        "name": f"Live rotifers ({name}, straight from the cone)", "brand": "Home culture",
+        "category": "zooLive", "bottleMl": 0, "remainingMl": 0, "lowThresholdMl": 0,
+        "openedAt": "", "shelfLifeDaysOpened": 0, "refrigerated": False, "stirDaily": False,
+        "particleUmMin": lib.get("particleUmMin", 90), "particleUmMax": lib.get("particleUmMax", 360),
+        "notes": "", "createdAt": "", "history": usage[-LIVE_USAGE_ROWS:],
+        "doseMl": 0, "doseEveryDays": 0, "doseStocking": "medium", "doseGuide": {}, "doseNote": "",
+        "lastDosedAt": "",
+        "live": {
+            "kind": "rotifers", "vessel": "cone", "source": True,
+            "jarId": str(jar_id), "jarName": str(name),
+            "where": f"the cone ({name})", "stockedBy": "the Cultures tab",
+            "harvestDue": bool(clock.get("due")), "harvestAt": clock.get("at"),
+            "harvestHoursUntil": clock.get("hoursUntil"), "harvestMl": round(_f(harvest_ml)) or None,
+            "lastHarvestAt": str(last_harvest_iso or ""),
+            "hoursLeft": None, "expired": False,
+        },
+    }
 
 
 def live_brine_product(vessel: str, remaining_ml: Any, capacity_ml: Any,
@@ -2086,8 +2138,10 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         if not isinstance(jar, dict):
             continue
         species = str(jar.get("species") or "")
-        if species in bottle_species:
-            continue
+        bottled = species in bottle_species
+        # A bottle species feeds straight when the jar's default says so
+        # (0.7.161); a one-off straight harvest still lands as a done mark.
+        straight = not bottled or str(jar.get("harvestTo") or "") == "tank"
         state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
         if not state.get("startedAt"):
             continue
@@ -2095,10 +2149,12 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         source = f"culture:{jid}"
         done = []
         for item in (jar.get("history") if isinstance(jar.get("history"), list) else []):
-            if isinstance(item, dict) and item.get("event") == "harvest":
+            if isinstance(item, dict) and item.get("event") == "harvest" and _harvest_went_to_tank(item, bottled):
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
-                    done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None})
+                    done.append({"at": minute, "ml": _harvest_tank_ml(item, bottled)})
+        if not straight and not done:
+            continue
         # The jar's OWN clock (cultures.culture_state, 0.7.158): the first
         # harvest lands when establishment ends, every later one an interval
         # after the last. A jar still establishing plans nothing here — the
@@ -2108,15 +2164,19 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         clock = culture_state(jar, now_local).get("harvest") or {}
         clock_at = _parse_iso(clock.get("at")) if clock.get("available") else None
         planned = []
-        if clock_at is not None:
+        if straight and clock_at is not None:
             due_day = clock_at.astimezone(tz).date() if tz is not None else clock_at.date()
             if due_day <= today:
-                planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None,
-                                  status="due", note="pods straight into the display — the jar's own clock"))
+                planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None, status="due",
+                                  note=("through the net straight into the tank — the cone's own clock" if bottled
+                                        else "pods straight into the display — the jar's own clock")))
         extras = _timed_plan(planned, done, now_min)
         for i, extra in enumerate(extras):
             extra.update({"id": f"{source}:x{i}", "source": source, "name": name,
                           "actualMl": extra.get("ml"), "note": "harvested into the display"})
+        for e in planned + extras:
+            e["jarId"] = jid
+            e["hasBottle"] = bottled
         events.extend(planned)
         events.extend(extras)
     bottle = cultures.get("bottle") if isinstance(cultures.get("bottle"), dict) else {}
@@ -2468,13 +2528,17 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
     jars = cultures.get("jars") if isinstance(cultures.get("jars"), dict) else {}
     for jid in sorted(jars):
         jar = jars[jid]
-        if not isinstance(jar, dict) or str(jar.get("species") or "") in bottle_species:
+        if not isinstance(jar, dict):
             continue
-        name = f"{jar.get('name') or jid} harvest"
+        bottled = str(jar.get("species") or "") in bottle_species
+        name = (f"Rotifers from the cone ({jar.get('name') or jid})" if bottled
+                else f"{jar.get('name') or jid} harvest")
         for item in (jar.get("history") if isinstance(jar.get("history"), list) else []):
-            if isinstance(item, dict) and item.get("event") == "harvest":
+            if isinstance(item, dict) and item.get("event") == "harvest" and _harvest_went_to_tank(item, bottled):
                 add(item.get("at"), how="hand", source=f"culture:{jid}", name=name,
-                    ml=round(_f(item.get("ml")), 1) or None, note="harvested into the display")
+                    ml=_harvest_tank_ml(item, bottled),
+                    note=("sieved harvest straight into the tank; culture water discarded" if bottled
+                          else "harvested into the display"))
     bottle = cultures.get("bottle") if isinstance(cultures.get("bottle"), dict) else {}
     for item in (bottle.get("history") if isinstance(bottle.get("history"), list) else []):
         if isinstance(item, dict) and item.get("event") == "fed_tank":

@@ -2170,5 +2170,39 @@ test("the feeding log lists every mouthful by day, with undo on today's rows and
   } finally { restore(); }
 });
 
+test("a straight-feeding cone is a source card on the shelf, and a cone mark's card takes the harvest", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const product = { name: "Live rotifers (Rotifers A, straight from the cone)", brand: "Home culture", category: "zooLive",
+      bottleMl: 0, remainingMl: 0, history: [{ at: NOW, ml: 120, kind: "dose" }],
+      live: { kind: "rotifers", vessel: "cone", source: true, jarId: "c1", jarName: "Rotifers A", where: "the cone (Rotifers A)",
+              stockedBy: "the Cultures tab", harvestDue: true, harvestAt: NOW, harvestHoursUntil: 0, harvestMl: 500,
+              lastHarvestAt: new Date(Date.parse(NOW) - 20 * 3600000).toISOString(), hoursLeft: null, expired: false } };
+    const state = { bottleMl: 0, remainingMl: 0, percent: null, usageMlPerDay: 120, daysUntilEmpty: null, low: false, empty: false,
+      expiry: { status: "fresh", daysLeft: null }, categoryLabel: "Live zooplankton", handDose: { planned: false, clock: { due: false } } };
+    const card = panel._npsProductCard("live_rotifer_cone_c1", product, state);
+    assert(card.includes("Harvest due") && card.includes("Straight to the tank"), "the chips are missing");
+    assert(card.includes("A standing culture, not a bottle") && card.includes("About 500 ml a day through the net, harvest due now") && card.includes("~120 ml a day into the tank"), `the source line is wrong: ${card}`);
+    assert(card.includes('class="primary compact-button" data-action="cultures-harvest-tank" data-id="c1"') && card.includes('data-cultures-bottle-ml="c1"'), "the tap and the rinse box are missing");
+    assert(!card.includes("New bottle") && !card.includes("Log dose") && !card.includes("of 0 ml"), "a source is not a bottle");
+    noPlaceholders(card, "cone source card");
+    const later = { ...product, live: { ...product.live, harvestDue: false, harvestHoursUntil: 14 } };
+    const quiet = panel._npsProductCard("live_rotifer_cone_c1", later, state);
+    assert(quiet.includes("next harvest in ~14 h") && quiet.includes('class="secondary compact-button" data-action="cultures-harvest-tank"'), "not due = a quiet tap");
+    // The dose card of a cone mark: the harvest, either way.
+    const tl = { events: [{ id: "culture:c1:0", source: "culture:c1", kind: "dose", how: "hand", status: "due", at: 540, name: "Rotifers A harvest",
+      ml: null, note: "through the net straight into the tank — the cone's own clock", jarId: "c1", hasBottle: true }] };
+    const doseCard = panel._npsTimelineEventCard("culture:c1:0", tl);
+    assert(doseCard.includes('data-action="cultures-harvest-tank" data-id="c1"') && doseCard.includes("Harvested → straight into the tank"), "the straight tap is missing from the dose card");
+    assert(doseCard.includes('data-action="cultures-harvest-bottle" data-id="c1"'), "a bottle species offers the bottle too");
+    const podsTl = { events: [{ ...tl.events[0], id: "culture:p1:0", source: "culture:p1", jarId: "p1", hasBottle: false, name: "Pods harvest" }] };
+    const podsCard = panel._npsTimelineEventCard("culture:p1:0", podsTl);
+    assert(podsCard.includes('data-action="cultures-harvest-tank" data-id="p1"') && !podsCard.includes("cultures-harvest-bottle"), "pods have no bottle to offer");
+    const done = { events: [{ ...tl.events[0], status: "done", doneAt: 540, doneStamp: NOW }] };
+    assert(!panel._npsTimelineEventCard("culture:c1:0", done).includes("cultures-harvest-tank"), "a done mark offers no harvest");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

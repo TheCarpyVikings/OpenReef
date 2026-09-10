@@ -30,6 +30,9 @@ from .mixing import sg_from_ppt
 CULTURE_JARS_MAX = 4
 TINTS: tuple[str, ...] = ("green", "clearing", "clear")
 VESSEL_KINDS: tuple[str, ...] = ("cone", "tub", "jar")
+# Where a harvest goes (0.7.161): the fridge bottle, straight into the tank,
+# or the enrichment soak first. A species without a bottle only knows "tank".
+HARVEST_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "soak")
 # Crash signs the keeper can tap (doc §8.5): each one is a restart (rotifers)
 # or a water change (pods) due NOW, whatever the calendar says.
 SIGNS: tuple[str, ...] = ("foam", "milky", "smell", "surface")

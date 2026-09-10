@@ -1892,6 +1892,8 @@ class OpenReefPanel extends HTMLElement {
         "Seeded — the culture clocks are running. Let it establish before the first harvest.");
       if (action === "cultures-fed") this._culturesLog(id, true, false);
       if (action === "cultures-harvested") this._culturesLog(id, true, true);
+      if (action === "cultures-harvest-tank") this._culturesLog(id, false, true, "tank");
+      if (action === "cultures-harvest-bottle") this._culturesLog(id, false, true, "bottle");
       if (action === "cultures-restart") this._culturesRestart(id);
       if (action === "cultures-share-card") this._culturesShareCard(id);
       if (action === "cultures-water-change") this._culturesCall({ type: "openreef/cultures_water_change", jar_id: id },
@@ -2673,6 +2675,8 @@ class OpenReefPanel extends HTMLElement {
         } else if (scope === "nps-culture-cadence") {
           jar.cadence = jar.cadence || {};
           jar.cadence[field] = Math.max(0, Number(value) || 0);
+        } else if (field === "harvestTo") {
+          jar.harvestTo = value === "tank" ? "tank" : "bottle";
         } else if (field === "species") {
           jar.species = value;
           // A new species means its own cadence — overrides from the old one
@@ -12085,6 +12089,11 @@ class OpenReefPanel extends HTMLElement {
     if (ev.source === "cultures-bottle" && ev.status !== "done" && ev.kind === "dose") {
       actions.push(`<button class="primary compact-button" data-action="cultures-bottle-fed"${slotAttr} title="Debits the rotifer bottle and fills this mark">Fed ${ev.ml != null ? `${esc(ev.ml)} ml` : "rotifers"}${filed}</button>`);
     }
+    if (String(ev.source || "").startsWith("culture:") && ev.status !== "done" && ev.kind === "dose") {
+      const jid = esc(ev.jarId || String(ev.source).split(":")[1] || "");
+      actions.push(`<button class="primary compact-button" data-action="cultures-harvest-tank" data-id="${jid}" title="Logs the harvest as fed straight into the tank and fills this mark">Harvested → straight into the tank</button>`);
+      if (ev.hasBottle) actions.push(`<button class="secondary compact-button" data-action="cultures-harvest-bottle" data-id="${jid}" title="Logs the harvest into the fridge bottle instead">→ into the bottle</button>`);
+    }
     if (String(ev.source || "").startsWith("culture:")) actions.push(`<button class="secondary compact-button" data-action="tab" data-id="cultures">Open Cultures</button>`);
     if (ev.source === "awc") actions.push(`<button class="secondary compact-button" data-action="tab" data-id="awc">Open Water Change</button>`);
     actions.push(`<button class="secondary compact-button" data-action="nps-timeline-close">Close</button>`);
@@ -12344,7 +12353,9 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _npsProductCard(pid, product, state) {
-    if (product && product.live) return this._npsLiveBrineCard(pid, product, state);
+    if (product && product.live) {
+      return product.live.vessel === "cone" ? this._npsLiveConeCard(pid, product, state) : this._npsLiveBrineCard(pid, product, state);
+    }
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
     const s = state || {};
@@ -12403,6 +12414,38 @@ class OpenReefPanel extends HTMLElement {
   // the container or the fridge bottle, on its batch's nutritional clock. No
   // "New bottle", no editing — the ledger IS the bottle; feeding from it here
   // is the same tap as on the hatchery card.
+  // A producing rotifer cone that feeds the tank straight from the net
+  // (0.7.161): a SOURCE on the shelf, not a bottle — no fill bar, no shelf
+  // life. The cone's own harvest clock is the card's clock; the tap is the
+  // same harvest as on the Cultures tile, filed as fed straight into the tank.
+  _npsLiveConeCard(pid, product, state) {
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const s = state || {};
+    const live = product.live || s.live || {};
+    const jid = esc(live.jarId || "");
+    const chips = [];
+    if (live.harvestDue) chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">Harvest due</span>`);
+    chips.push(`<span class="pill">Straight to the tank</span>`);
+    const nextLine = live.harvestDue ? "harvest due now"
+      : live.harvestHoursUntil != null ? `next harvest in ~${esc(Math.round(Number(live.harvestHoursUntil)))} h` : "on the cone's clock";
+    const last = live.lastHarvestAt ? `last ${esc(this._formatActivityTime(live.lastHarvestAt))}` : "not harvested yet";
+    const usage = s.usageMlPerDay ? ` · ~${esc(s.usageMlPerDay)} ml a day into the tank` : "";
+    return `
+      <article class="panel stack" style="gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
+          <div><strong>${esc(product.name)}</strong> <small>· ${esc(product.brand || "Home culture")}</small></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">${chips.join("")}<span class="pill">${esc(s.categoryLabel || "Live zooplankton")}</span></div>
+        </div>
+        <small>A standing culture, not a bottle — feeding does not empty it. ${live.harvestMl ? `About ${esc(live.harvestMl)} ml a day through the net, ` : ""}${nextLine} · ${last}${usage}.</small>
+        <small>🫧 Stocked by ${esc(live.stockedBy || "the Cultures tab")} — the clock is the cone's own harvest clock.</small>
+        <div class="button-row">
+          <button class="${live.harvestDue ? "primary" : "secondary"} compact-button" data-action="cultures-harvest-tank" data-id="${jid}" title="Logs the harvest as fed straight into the tank: the strip, the log and the hand-feed reminder all keep count">Harvested → straight into the tank</button>
+          <input type="number" min="1" max="5000" step="10" placeholder="ml rinsed in" style="width:110px;" data-cultures-bottle-ml="${jid}" title="Optional: what you rinsed the net into. Blank = a harvest with no volume.">
+          <button class="secondary compact-button" data-action="tab" data-id="cultures">Open Live cultures →</button>
+        </div>
+      </article>`;
+  }
+
   _npsLiveBrineCard(pid, product, state) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
@@ -13170,7 +13213,7 @@ const rigSteps = [
     }
     // The feed strip reads the bottle's rows too — a Fed from a strip card
     // must fill its mark on the next paint.
-    if (msg && msg.type === "openreef/cultures_bottle") setTimeout(() => this._npsLoadSummary?.(true), 0);
+    if (msg && (msg.type === "openreef/cultures_bottle" || (msg.type === "openreef/cultures_log" && msg.harvested))) setTimeout(() => this._npsLoadSummary?.(true), 0);
     try {
       await this._callWS(msg);
       this._cultures.message = okMessage || "";
@@ -13183,7 +13226,7 @@ const rigSteps = [
 
   // The daily tap: the tint the keeper saw (a select beside the jar) plus
   // whether they fed and/or harvested. One call, one ledger movement each.
-  _culturesLog(jarId, fed, harvested) {
+  _culturesLog(jarId, fed, harvested, destination = "") {
     const select = this.shadowRoot?.querySelector(`[data-cultures-tint="${jarId}"]`);
     const tint = select && select.value ? String(select.value) : "";
     const msg = { type: "openreef/cultures_log", jar_id: jarId };
@@ -13192,6 +13235,12 @@ const rigSteps = [
     if (harvested) msg.harvested = true;
     const enrichBox = this.shadowRoot?.querySelector(`[data-cultures-enrich="${jarId}"]`);
     if (harvested && enrichBox && enrichBox.checked) msg.enrich = true;
+    // Where the crop went (0.7.161): the caller's word, else the tile's
+    // select, else the backend falls back to the jar's default. The enrich
+    // tick outranks both — the soak is a destination of its own.
+    const toSelect = this.shadowRoot?.querySelector(`[data-cultures-harvest-to="${jarId}"]`);
+    const to = destination || (toSelect && toSelect.value ? String(toSelect.value) : "");
+    if (harvested && !msg.enrich && ["bottle", "tank"].includes(to)) msg.destination = to;
     // The bottle gets the rinsed crop, not the culture water (that goes to
     // waste) — blank = the whole harvest volume, the ledger's old assumption.
     const bottleBox = this.shadowRoot?.querySelector(`[data-cultures-bottle-ml="${jarId}"]`);
@@ -13200,7 +13249,9 @@ const rigSteps = [
     const egg = this.shadowRoot?.querySelector(`[data-cultures-egg="${jarId}"]`);
     const eggRatio = egg && egg.value !== "" ? Number(egg.value) : 0;
     if (eggRatio > 0) msg.egg_ratio = Math.min(100, eggRatio);
-    this._culturesCall(msg, harvested ? "Harvest logged — the bottle and the reminders keep count."
+    this._culturesCall(msg, harvested
+      ? (msg.destination === "tank" ? "Harvest logged — straight into the tank; the strip, the log and the reminders keep count."
+        : "Harvest logged — the bottle and the reminders keep count.")
       : fed ? "Feed logged — the phyto bottle keeps count." : "Tint logged.");
   }
 
@@ -13796,7 +13847,12 @@ const rigSteps = [
           </select></label>${j.hasBottle && status === "producing" ? `
         <label style="display:flex;gap:6px;align-items:center;font-size:12px;" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done.">
           <input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none" ? "disabled" : ""}> enrich this crop</label>
-        <input type="number" min="1" max="5000" step="10" placeholder="ml into the bottle" data-cultures-bottle-ml="${this._escape(j.id)}" style="width:130px;font-size:11px;" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml).">` : ""}` : "";
+        <label style="display:flex;gap:6px;align-items:center;font-size:12px;" title="Where this crop goes. The jar's default is set in Culture settings; the enrich tick sends it to the soak first.">to
+          <select data-cultures-harvest-to="${this._escape(j.id)}" style="font-size:12px;">
+            <option value="bottle" ${(j.harvestTo || "bottle") !== "tank" ? "selected" : ""}>the fridge bottle</option>
+            <option value="tank" ${j.harvestTo === "tank" ? "selected" : ""}>straight into the tank</option>
+          </select></label>
+        <input type="number" min="1" max="5000" step="10" placeholder="ml rinsed in" data-cultures-bottle-ml="${this._escape(j.id)}" style="width:110px;font-size:11px;" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">` : ""}` : "";
       // Day 0 (and after a crash): the fill — the whole vessel at the jar's
       // salinity, cut from the mixing station's water with RODI. Backend maths.
       const fg = j.fillGuide || j.restartGuide || {};
@@ -14051,6 +14107,10 @@ const rigSteps = [
             <label title="The culture's whole volume — mixed water plus the starter pouch. Harvests and the jug are percentages of this.">Water in the vessel (L, pouch included)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
             <label>Salinity (ppt)<input type="number" min="5" max="45" step="1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="salinityPpt" value="${this._escape(String(jar?.salinityPpt ?? preset.salinityPpt ?? 35))}"></label>
             ${(jar?.vesselKind || preset.vesselKind) === "cone" ? `<label>Purge before harvest (ml)<input type="number" min="0" max="500" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="purgeMl" value="${this._escape(String(jar?.purgeMl ?? preset.purgeMl ?? 50))}"></label>` : ""}
+            ${preset.kind !== "copepod" ? `<label title="Where a harvest goes by default. Straight feeders skip the bottle: the harvest is the tank's feed, the strip plans it on the cone's clock, and the shelf shows the cone as a live source.">Harvest goes to<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="harvestTo">
+              <option value="bottle" ${(jar?.harvestTo || "bottle") !== "tank" ? "selected" : ""}>the fridge bottle (5-day clock, DHA step)</option>
+              <option value="tank" ${jar?.harvestTo === "tank" ? "selected" : ""}>straight into the tank (no bottle)</option>
+            </select></label>` : ""}
             <label>Feed bottle<select data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="productId">
               <option value="">Not linked</option>
               ${Object.entries(products).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(jar?.feed?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}

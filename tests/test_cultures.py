@@ -248,7 +248,7 @@ def test_normalise_cultures_defaults_and_junk():
     assert jar["cadence"]["harvestPct"] == 60 and jar["cadence"]["restartIntervalDays"] == 14
     assert jar["state"]["lastTint"] == "" and jar["state"]["startedAt"] == ""
     assert jar["history"] == [{"event": "seeded", "at": "", "ml": 0, "tint": "", "from": "",
-                               "sign": "", "eggRatio": 0, "tempC": None, "purgeMl": 0}]
+                               "sign": "", "eggRatio": 0, "tempC": None, "purgeMl": 0, "to": "", "tankMl": None}]
     assert out["bottle"]["remainingMl"] == 0
 
 
@@ -1117,6 +1117,103 @@ def test_the_fill_and_every_debit_read_the_station_and_the_bottle_gets_what_was_
         assert conn.results[-1].payload["jars"][0]["fillGuide"]["mixMl"] == 1588 and conn.results[-1].payload["jars"][0]["mixPpt"] == 34.0
     finally:
         integration._mixing_hatchery_debit = real_debit
+
+
+def test_a_harvest_can_go_straight_into_the_tank():
+    """0.7.161: the jar's default destination, the per-harvest override, the
+    ledgers each one moves. Straight into the tank = no bottle fill, a row
+    stamped to:tank with the rinsed volume, the hand-feed reminder done, the
+    activity line; the bottle path and the soak path are untouched."""
+    started = _iso(datetime.now(timezone.utc) - timedelta(days=9))
+    jars = {"c1": {"name": "Rotifers A", "species": "rotifer_L", "vesselKind": "cone", "volumeL": 2.0,
+                   "salinityPpt": 27, "purgeMl": 50, "harvestTo": "tank", "feed": {"productId": "", "doseMl": 1},
+                   "cadence": {}, "state": {"startedAt": started, "lastRestartAt": started, "lastFedAt": started, "lastTint": "green"},
+                   "history": []}}
+    entry = _entry(jars=jars, maintenance={"tasks": {"brine_hand_feed": {"label": "Feed the tank", "cadenceDays": 1, "snoozedUntil": "2099-01-01T00:00:00+00:00"}},
+                                           "completions": {}})
+    cfg = _config(entry)
+    assert cfg["nps"]["cultures"]["jars"]["c1"]["harvestTo"] == "tank", "the default survives the normaliser"
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    real_debit = integration._mixing_hatchery_debit
+    integration._mixing_hatchery_debit = lambda *a, **k: None
+    try:
+        run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+        jar = conn.results[-1].payload["jars"][0]
+        assert jar["harvestTo"] == "tank" and jar["state"]["status"] == "producing"
+        # The default: straight in, with the rinsed volume.
+        run(integration.websocket_cultures_log(hass, conn, {"id": 2, "jar_id": "c1", "tint": "clearing", "harvested": True, "bottle_ml": 120}))
+        assert not conn.errors, conn.errors
+        cfg = _config(entry)
+        assert cfg["nps"]["cultures"]["bottle"]["remainingMl"] == 0, "nothing went into the bottle"
+        row = cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]
+        assert row["event"] == "harvest" and row["to"] == "tank" and row["tankMl"] == 120 and row["ml"] == 500
+        maintenance = cfg["maintenance"]
+        assert maintenance["completions"]["brine_hand_feed"][0]["notes"].endswith("rotifers from Rotifers A straight into the tank")
+        assert maintenance["tasks"]["brine_hand_feed"]["snoozedUntil"] is None
+        assert any("straight into the tank" in str(item.get("message", "")) for item in cfg["activity"])
+        # The override: this crop into the bottle after all.
+        run(integration.websocket_cultures_log(hass, conn, {"id": 3, "jar_id": "c1", "harvested": True, "destination": "bottle", "bottle_ml": 150}))
+        assert not conn.errors, conn.errors
+        cfg = _config(entry)
+        assert cfg["nps"]["cultures"]["bottle"]["remainingMl"] == 150
+        row = cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]
+        assert row["to"] == "bottle" and row["tankMl"] is None
+        # The soak still wins when ticked.
+        run(integration.websocket_cultures_log(hass, conn, {"id": 4, "jar_id": "c1", "harvested": True, "enrich": True, "destination": "tank"}))
+        assert not conn.errors, conn.errors
+        cfg = _config(entry)
+        assert cfg["nps"]["cultures"]["enrichment"]["state"]["startedAt"] and cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]["to"] == "soak"
+        # A bottle-default jar with no word goes to the bottle, as before.
+        cfg["nps"]["cultures"]["jars"]["c1"]["harvestTo"] = "bottle"
+        cfg["nps"]["cultures"]["enrichment"]["state"] = {"startedAt": "", "portionMl": 0, "jarId": ""}
+        entry.options = {**entry.options, CONF_SETTINGS: cfg}
+        run(integration.websocket_cultures_log(hass, conn, {"id": 5, "jar_id": "c1", "harvested": True, "bottle_ml": 100}))
+        cfg = _config(entry)
+        assert cfg["nps"]["cultures"]["bottle"]["remainingMl"] == 250 and cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]["to"] == "bottle"
+        # Junk defaults normalise to the bottle; the WS refuses a junk destination.
+        assert integration._normalise_cultures({"jars": {"x": {"species": "rotifer_L", "harvestTo": "sink"}}})["jars"]["x"]["harvestTo"] == "bottle"
+        assert integration._normalise_cultures({"jars": {"x": {"species": "rotifer_L", "history": [{"event": "harvest", "to": "moon"}, {"event": "harvest", "to": "tank"}]}}})["jars"]["x"]["history"][0]["to"] == "" \
+            and integration._normalise_cultures({"jars": {"x": {"species": "rotifer_L", "history": [{"event": "harvest", "to": "tank"}]}}})["jars"]["x"]["history"][0]["to"] == "tank"
+    finally:
+        integration._mixing_hatchery_debit = real_debit
+
+
+def test_a_straight_feeding_cone_is_a_source_on_the_live_shelf():
+    """The shelf shows a producing tank-default cone as a live SOURCE (no
+    capacity, the harvest clock, tank harvests as usage) and drops the
+    'on its way' note; a bottle-default cone keeps the note and no entry."""
+    started = _iso(datetime.now(timezone.utc) - timedelta(days=9))
+    harvested_at = _iso(datetime.now(timezone.utc) - timedelta(hours=30))
+    jars = {"c1": {"name": "Rotifers A", "species": "rotifer_L", "vesselKind": "cone", "volumeL": 2.0,
+                   "salinityPpt": 27, "purgeMl": 50, "harvestTo": "tank", "feed": {"productId": "", "doseMl": 1},
+                   "cadence": {}, "state": {"startedAt": started, "lastRestartAt": started, "lastFedAt": started, "lastHarvestAt": harvested_at, "lastTint": "green"},
+                   "history": [{"event": "harvest", "at": harvested_at, "ml": 500, "to": "tank", "tankMl": 120}]}}
+    entry = _entry(jars=jars)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    assert not conn.errors, conn.errors
+    payload = conn.results[-1].payload
+    live = payload["shelf"]["live"]
+    entry_id = "live_rotifer_cone_c1"
+    assert entry_id in live, list(live)
+    src = live[entry_id]
+    assert src["name"] == "Live rotifers (Rotifers A, straight from the cone)" and src["category"] == "zooLive"
+    assert src["live"]["vessel"] == "cone" and src["live"]["source"] and src["live"]["jarId"] == "c1"
+    assert src["live"]["harvestDue"] is True and src["live"]["harvestMl"] == 500 and src["live"]["lastHarvestAt"] == harvested_at
+    assert src["history"] == [{"at": harvested_at, "ml": 120.0, "kind": "dose"}]
+    state = payload["shelf"]["products"][entry_id]
+    # 120 ml logged 30 h ago: the runway averages over the observed span (1.25 d).
+    assert state["percent"] is None and state["empty"] is False and state["low"] is False and state["usageMlPerDay"] == 96.0
+    assert not any("from the cone" in str(p.get("name")) for p in payload.get("pending", []) if isinstance(p, dict)), "the cone is on the shelf, not on its way"
+    # Bottle-default: no source, the note stays.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["harvestTo"] = "bottle"
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    payload = conn.results[-1].payload
+    assert entry_id not in payload["shelf"]["live"]
 
 
 def test_every_websocket_handler_is_registered():

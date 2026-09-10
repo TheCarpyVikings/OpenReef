@@ -1087,6 +1087,11 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 # 0.7.140 (doc §8.11 #6): the tip bleed the harvest/restart was
                 # done at, so the run-length learning can weigh it.
                 "purgeMl": _awc_num(item.get("purgeMl"), 0, 0, 500),
+                # 0.7.161: where THIS harvest went (bottle, tank or soak — blank
+                # on older rows, the species decides for those) and, for a crop
+                # fed straight in, the volume the net was rinsed into.
+                "to": str(item.get("to")) if str(item.get("to")) in cultures_engine.HARVEST_DESTINATIONS else "",
+                "tankMl": _awc_num(item.get("tankMl"), 0, 0, 20000) if item.get("tankMl") is not None else None,
             })
         vessel_kind = str(raw_jar.get("vesselKind") or "")
         jars[jid] = {
@@ -1098,6 +1103,10 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             "vesselKind": (vessel_kind if vessel_kind in cultures_engine.VESSEL_KINDS
                            else preset["vesselKind"]),
             "purgeMl": _awc_num(raw_jar.get("purgeMl"), preset["purgeMl"], 0, 500),
+            # Where a harvest goes by default (0.7.161): the fridge bottle, or
+            # straight into the tank for keepers who feed from the net. Only a
+            # bottle species reads it; the per-harvest tap can override it.
+            "harvestTo": ("tank" if str(raw_jar.get("harvestTo") or "") == "tank" else "bottle"),
             "volumeL": _awc_num(raw_jar.get("volumeL"), 2.5, 0.2, 50),
             "salinityPpt": _awc_num(raw_jar.get("salinityPpt"), preset["salinityPpt"], 5, 45),
             "feed": {
@@ -14097,11 +14106,32 @@ def _nps_live_shelf(config: dict[str, Any], now: datetime
             "rotifers", rot_state["remainingMl"], bottle["volumeMl"], bottle.get("filledAt"),
             nps_engine.rotifer_bottle_prime(rot_state, shelf_days), bottle.get("history") or [],
             boost=cultures_engine.bottle_boost(bottle, cultures["enrichment"]["boostColdH"], now))
+    # Straight feeders (0.7.161): a producing rotifer cone whose harvests go
+    # into the tank is a shelf SOURCE — no fill bar, the cone's own harvest
+    # clock, its tank harvests as the usage — so coverage counts it as real
+    # food, not food on its way, and the tap lives where feeds are logged.
+    cone_sources = 0
+    mix_ppt = _cultures_mix_ppt(config)
+    for jid, jar in sorted(cultures["jars"].items()):
+        if not isinstance(jar, dict) or cultures_engine.species_preset(jar.get("species")).get("kind") != "rotifer":
+            continue
+        if str(jar.get("harvestTo") or "") != "tank":
+            continue
+        st = cultures_engine.culture_state(jar, now)
+        if st["status"] != "producing":
+            continue
+        jug = cultures_engine.refill_guide(jar["volumeL"], st["cadence"]["harvestPct"], jar["salinityPpt"], mix_ppt)
+        products[f"{nps_engine.LIVE_ROTIFER_CONE_PREFIX}{jid}"] = nps_engine.live_cone_product(
+            jid, str(jar.get("name") or jid), st["harvest"], jug["totalMl"],
+            str((jar.get("state") or {}).get("lastHarvestAt") or ""), jar.get("history") or [])
+        cone_sources += 1
     rot_note = ""
     enrich = cultures["enrichment"]
     soak_st = cultures_engine.soak_state(enrich["state"].get("startedAt"), enrich["soakH"],
                                          enrich["boostWarmH"], now)
-    if soak_st.get("status") == "soaking":
+    if cone_sources:
+        pass                        # the cone is on the shelf itself — nothing "on its way"
+    elif soak_st.get("status") == "soaking":
         left = soak_st.get("hoursLeft")
         rot_note = ("the DHA soak is running" if left is None
                     else f"the DHA soak finishes in ~{float(left):.1f} h")
@@ -15395,6 +15425,21 @@ def _cultures_log_completion(config: dict[str, Any], jar_id: str, chore: str,
     tasks[task_id]["snoozedUntil"] = None
 
 
+def _nps_hand_feed_done(config: dict[str, Any], now: datetime, note: str) -> None:
+    """Feeding live food to the tank by hand IS the NPS hand-feed chore (doc
+    §8.6): if the keeper added that reminder, log it done and clear its snooze
+    — the rotifer bottle's Fed tap and a straight-into-the-tank harvest share it."""
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    feed_task = tasks.get(MAINTENANCE_HAND_FEED_TASK_ID) if isinstance(tasks, dict) else None
+    if not isinstance(feed_task, dict):
+        return
+    _nps_hatch_log_completion(maintenance, MAINTENANCE_HAND_FEED_TASK_ID, now, note)
+    feed_task["snoozedUntil"] = None
+
+
 def _cultures_jar_for_msg(
     connection: websocket_api.ActiveConnection, msg: dict[str, Any], cultures: dict[str, Any]
 ) -> tuple[str, dict[str, Any]] | None:
@@ -15619,6 +15664,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "mixPpt": mix_ppt,
             "volumeL": jar["volumeL"], "salinityPpt": jar["salinityPpt"],
             "vesselKind": jar["vesselKind"], "purgeMl": jar["purgeMl"],
+            "harvestTo": (jar.get("harvestTo") or "bottle") if awc_engine._f(preset["bottleShelfDays"]) > 0 else "tank",
             "sieveUm": preset["sieveUm"], "adultSieveUm": preset["adultSieveUm"],
             "tintTarget": preset["tintTarget"], "feedProduct": preset["feedProduct"],
             "firstHarvestDays": preset["firstHarvestDays"],
@@ -15804,6 +15850,7 @@ async def websocket_cultures_seed(
     vol.Optional("harvested"): bool,
     vol.Optional("ml"): vol.Any(int, float),
     vol.Optional("bottle_ml"): vol.Any(int, float),
+    vol.Optional("destination"): vol.In(("bottle", "tank", "soak")),
     vol.Optional("sign"): str,
     vol.Optional("egg_ratio"): vol.Any(int, float),
     vol.Optional("enrich"): bool,
@@ -15825,7 +15872,8 @@ async def websocket_cultures_log(
     error = _cultures_log_apply(
         hass, config, str(msg.get("jar_id") or ""),
         tint=str(msg.get("tint") or ""), fed=bool(msg.get("fed")), harvested=bool(msg.get("harvested")),
-        ml=msg.get("ml"), bottle_ml=msg.get("bottle_ml"), sign=str(msg.get("sign") or ""),
+        ml=msg.get("ml"), bottle_ml=msg.get("bottle_ml"), destination=str(msg.get("destination") or ""),
+        sign=str(msg.get("sign") or ""),
         egg_ratio=msg.get("egg_ratio"), enrich=bool(msg.get("enrich")), source="the Cultures tab")
     if error is not None:
         connection.send_error(msg["id"], error[0], error[1])
@@ -15837,7 +15885,7 @@ async def websocket_cultures_log(
 def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str, *,
                         tint: str = "", fed: bool = False, harvested: bool = False,
                         ml: Any = None, bottle_ml: Any = None, sign: str = "", egg_ratio: Any = None,
-                        enrich: bool = False,
+                        enrich: bool = False, destination: str = "",
                         source: str = "the Cultures tab") -> tuple[str, str] | None:
     """One tap, every ledger: a feed debits the phyto bottle; a rotifer harvest
     fills the fridge bottle (oldest stamp wins — a top-up never resets the
@@ -15846,7 +15894,12 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
     logs its reminder done. ``ml`` is the harvest volume (default the jug's),
     ``bottle_ml`` what the net was rinsed into (default the harvest volume —
     the culture water itself goes to waste, so the keeper's number is the
-    honest one). Returns (code, message) on refusal."""
+    honest one). ``destination`` (0.7.161) says where a harvest went — the
+    fridge bottle, the enrichment soak, or straight into the tank; blank means
+    the jar's own default (a species without a bottle always feeds straight
+    in), and the enrich tick outranks it. Straight into the tank is a hand
+    feed of the tank: the hand-feed reminder logs done and the strip and the
+    feeding log get their row. Returns (code, message) on refusal."""
     cultures = _nps_cultures_cfg(config)
     jar = cultures["jars"].get(jar_id)
     if not isinstance(jar, dict):
@@ -15877,6 +15930,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         _cultures_log_completion(config, jar_id, "feed", now, f"Logged automatically — fed from {source}")
         notes.append("fed")
     harvest_ml = 0.0
+    wants = ""
     if harvested:
         if st["status"] == "establishing":
             return ("establishing",
@@ -15888,6 +15942,14 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         into_bottle = _awc_num(bottle_ml, harvest_ml, 1, 50000)
         has_bottle = awc_engine._f(preset["bottleShelfDays"]) > 0
         enrichment = cultures["enrichment"]
+        # Where the crop goes: the enrich tick, else the tap's word, else the
+        # jar's default; a species without a bottle has nowhere but the tank.
+        wants = "soak" if enrich else (destination if destination in cultures_engine.HARVEST_DESTINATIONS else "")
+        if not has_bottle:
+            wants = "tank"
+        elif not wants:
+            wants = "tank" if str(jar.get("harvestTo") or "") == "tank" else "bottle"
+        enrich = wants == "soak"
         if enrich and has_bottle and enrichment["state"]["startedAt"]:
             return "enrich_busy", "A portion is already soaking — rinse and bottle it first"
         state["lastHarvestAt"] = now.isoformat()
@@ -15900,6 +15962,11 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
             if isinstance(product, dict):
                 _consumable_debit(product, round(enrichment["drops"] * cultures_engine.ENRICH_DROP_ML, 2), "dose")
             notes.append(f"{enrichment['drops']:g} drops of enrichment, {enrichment['soakH']:g} h soak")
+        elif has_bottle and wants == "tank":
+            # Straight into the tank (0.7.161): the crop IS the feed. The
+            # bottle stays as it was; the tank's hand-feed reminder logs done.
+            _nps_hand_feed_done(config, now,
+                                f"Logged automatically — rotifers from {jar['name']} straight into the tank")
         elif has_bottle:
             _cultures_bottle_fill(cultures["bottle"], into_bottle, now, False, config)
         _cultures_log_completion(config, jar_id, "harvest", now,
@@ -15909,7 +15976,9 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         refill = cultures_engine.refill_guide(harvest_ml / 1000.0, 100, jar["salinityPpt"], mix_ppt)
         _mixing_hatchery_debit(hass, config, refill["mixMl"] / 1000.0, f"refilling {jar['name']}")
         notes.append(f"harvested {round(harvest_ml)} ml"
-                     + (f", {round(into_bottle)} ml bottled" if has_bottle and round(into_bottle) != round(harvest_ml) else ""))
+                     + (", straight into the tank" if has_bottle and wants == "tank"
+                        else f", {round(into_bottle)} ml bottled" if has_bottle and wants == "bottle" and round(into_bottle) != round(harvest_ml)
+                        else ""))
     event = ("harvest" if harvested else "feed" if fed else "sign" if sign else "tint")
     purge = round(jar["purgeMl"]) if harvested and jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None
     _cultures_history(jar, event, now,
@@ -15917,7 +15986,9 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
                       tint=state["lastTint"] if tint in cultures_engine.TINTS else None,
                       sign=sign or None, eggRatio=egg or None,
                       tempC=_cultures_temp_c(hass, config, cultures),
-                      purgeMl=purge)
+                      purgeMl=purge,
+                      to=wants if harvested else None,
+                      tankMl=float(bottle_ml) if harvested and wants == "tank" and bottle_ml is not None else None)
     _append_activity(config, f"{jar['name']}: " + ", ".join(notes), "control")
     return None
 

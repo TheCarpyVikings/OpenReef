@@ -795,5 +795,42 @@ test("day 0 shows the fill split from the station's water, the harvest tap sends
   } finally { restore(); }
 });
 
+test("a harvest names where it went: the tile's select, the settings default, the tap's word", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel();
+    let html = panel._culturesTab();
+    assert(html.includes('data-cultures-harvest-to="c1"') && html.includes('<option value="bottle" selected>the fridge bottle</option>'), "the producing rotifer tile must carry the destination select, bottle by default");
+    assert(html.includes('placeholder="ml rinsed in"'), "the rinse box lost its new label");
+    const c2Tile = html.slice(html.indexOf('data-culture="c2"'));
+    assert(!c2Tile.includes("data-cultures-harvest-to"), "the pods have nowhere else than the tank — no select");
+    const settings = panel._culturesSettings();
+    assert(settings.includes('data-scope="nps-culture-jar" data-id="c1" data-field="harvestTo"') && settings.includes("straight into the tank (no bottle)"), "the rotifer jar must offer its default destination");
+    assert(!settings.includes('data-id="c2" data-field="harvestTo"'), "the pods offer no destination");
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return {}; };
+    panel._culturesLoadSummary = async () => {};
+    panel._npsLoadSummary = async () => {};
+    panel._culturesLog("c1", false, true, "tank");
+    await new Promise((r) => setTimeout(r, 0));
+    assert(calls[0]?.harvested === true && calls[0]?.destination === "tank" && !calls[0]?.fed, `the tap must send its destination: ${JSON.stringify(calls[0])}`);
+    assert(panel._cultures.message.includes("straight into the tank"), "the message must say where it went");
+    panel._culturesLog("c1", true, true);
+    await new Promise((r) => setTimeout(r, 0));
+    const select = panel.shadowRoot?.querySelector('[data-cultures-harvest-to="c1"]');
+    if (select) {
+      assert(calls[1]?.destination === "bottle", `the tile's select is the default word: ${JSON.stringify(calls[1])}`);
+      select.value = "tank";
+      panel._culturesLog("c1", true, true);
+      await new Promise((r) => setTimeout(r, 0));
+      assert(calls[2]?.destination === "tank", "the select's choice rides the tap");
+    }
+    // A tank-default jar renders the select on tank.
+    const fixture = summaryFixture([jarSummary({ harvestTo: "tank" }), summaryFixture().jars[1]]);
+    html = (await culturesPanel({}, fixture))._culturesTab();
+    assert(html.includes('<option value="tank" selected>straight into the tank</option>'), "the jar's default must lead the select");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

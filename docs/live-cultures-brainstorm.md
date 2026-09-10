@@ -751,3 +751,21 @@ Rotifers due in the morning; the section was audited end to end. Three fixes:
    culture water, which goes to waste): the Harvested tap gained an "ml into the bottle" box
    (`cultures_log {bottle_ml}`), blank = the old assumption, so the bottle's clock and the next-harvest
    driver read the crop that actually went in. The journal keeps the harvest volume.
+
+
+#### Addendum 2026-09-10 (0.7.161) — where a rotifer harvest goes
+
+Reece: "sometimes users will harvest and feed straight from the culture vessel, so the rotifers will
+never reach the fridge bottle. how do users log these feeds?" They could not — the harvest tap
+assumed the bottle. Now a harvest names its destination: the jar's default (`jars.<id>.harvestTo`:
+bottle | tank, rotifers only; pods are always tank), overridden per crop by the tile's select, the
+strip's dose card or the shelf, and by the enrich tick (soak wins). `cultures_log {destination}`.
+Straight into the tank: no bottle fill, the harvest row stamped `to: tank` with the rinsed volume as
+`tankMl` (blank = a harvest with no volume), the NPS hand-feed reminder logged done
+(`_nps_hand_feed_done`, shared with the bottle's Fed), a done mark on the strip and a row in the
+feeding log ("Rotifers from the cone (<jar>)"). A tank-default producing cone joins the live shelf
+as a SOURCE (`live_rotifer_cone_<jid>`, `nps.live_cone_product`): no capacity or shelf life, the
+cone's own harvest clock, tank harvests as usage, the same tap — so species coverage counts it as
+food on hand and the "on its way" note goes. The strip plans its harvest mark on the cone's clock;
+a bottle-default cone plans nothing but a one-off straight harvest still lands as a done mark.
+Nutrient budget: a straight harvest carries no figure and is not priced.

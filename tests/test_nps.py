@@ -3760,6 +3760,51 @@ def test_ws_summary_plans_the_next_hatch_on_the_idle_vessels_clock():
     assert by_id["v2"]["state"]["hatchHours"] is None and by_id["v2"]["state"]["eggType"] == ""
 
 
+def test_the_strip_and_the_log_read_where_a_rotifer_harvest_went():
+    """0.7.161: a tank-default rotifer cone plans its harvest on the strip and
+    its to:tank rows are done feeds; a bottle-default cone plans nothing but a
+    one-off straight harvest still lands as a done mark; the feeding log names
+    the cone and skips harvests that filled the bottle."""
+    tz = timezone.utc
+    now = datetime(2026, 8, 13, 14, 20, tzinfo=tz)
+    at = _iso(datetime(2026, 8, 13, 9, 0, tzinfo=tz))
+    straight = {"enabled": True, "jars": {
+        "rots": {"name": "Cone A", "species": "rotifer_L", "harvestTo": "tank",
+                 "state": {"startedAt": _iso(now - timedelta(days=20)), "lastHarvestAt": _iso(now - timedelta(days=2))},
+                 "cadence": {"harvestIntervalDays": 1},
+                 "history": [{"event": "harvest", "at": at, "ml": 500, "to": "tank", "tankMl": 120}]},
+    }, "bottle": {"history": []}}
+    tl = _tl(now, cultures=straight, culture_bottle_species={"rotifer_L"})
+    marks = _by_id(tl, "culture:rots")
+    assert marks and marks[0]["status"] == "done" and marks[0]["doneAt"] == 540 and marks[0]["actualMl"] == 120.0
+    assert marks[0]["jarId"] == "rots" and marks[0]["hasBottle"] is True
+    due = {"enabled": True, "jars": {"rots": {**straight["jars"]["rots"], "history": [],
+                                            "state": {"startedAt": _iso(now - timedelta(days=20)), "lastHarvestAt": _iso(now - timedelta(days=2))}}},
+           "bottle": {"history": []}}
+    tl = _tl(now, cultures=due, culture_bottle_species={"rotifer_L"})
+    planned = _by_id(tl, "culture:rots")
+    assert planned and planned[0]["status"] == "due" and "straight into the tank" in planned[0]["note"]
+    bottled = {"enabled": True, "jars": {"rots": {**straight["jars"]["rots"], "harvestTo": "bottle",
+                                                "history": [{"event": "harvest", "at": at, "ml": 500, "to": "bottle"}]}},
+               "bottle": {"history": []}}
+    assert not _by_id(_tl(now, cultures=bottled, culture_bottle_species={"rotifer_L"}), "culture:rots"), "a bottle harvest is not a feed"
+    once = {"enabled": True, "jars": {"rots": {**bottled["jars"]["rots"],
+                                             "history": [{"event": "harvest", "at": at, "ml": 500, "to": "tank"}]}},
+            "bottle": {"history": []}}
+    one_off = _by_id(_tl(now, cultures=once, culture_bottle_species={"rotifer_L"}), "culture:rots")
+    assert len(one_off) == 1 and one_off[0]["status"] == "done" and one_off[0]["actualMl"] is None, "a one-off straight harvest is a done mark, nothing planned"
+    log = nps.feed_log(now, products={}, channels={}, cultures=straight, culture_bottle_species={"rotifer_L"})
+    rows = [r for r in log["rows"] if r["source"] == "culture:rots"]
+    assert len(rows) == 1 and rows[0]["name"] == "Rotifers from the cone (Cone A)" and rows[0]["ml"] == 120.0 \
+        and rows[0]["note"] == "sieved harvest straight into the tank; culture water discarded"
+    assert not [r for r in nps.feed_log(now, products={}, channels={}, cultures=bottled, culture_bottle_species={"rotifer_L"})["rows"] if r["source"] == "culture:rots"]
+    # Older pods rows carry no destination and still count.
+    pods = {"enabled": True, "jars": {"pods": {"name": "Pod tub", "species": "copepod_tisbe",
+                                              "state": {"startedAt": _iso(now - timedelta(days=40))},
+                                              "history": [{"event": "harvest", "at": at, "ml": 300}]}}}
+    assert nps.feed_log(now, products={}, channels={}, cultures=pods, culture_bottle_species={"rotifer_L"})["rows"][0]["name"] == "Pod tub harvest"
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 
 # ------------------------------------------------- the hatchery stocks the shelf (doc §14, 0.7.149)
