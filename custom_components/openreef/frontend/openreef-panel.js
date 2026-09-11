@@ -84,7 +84,9 @@ class OpenReefPanel extends HTMLElement {
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
     this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "",
                   // The feeding log's window (local days) and how many rows are unfolded (doc §13.19).
-                  logDays: 7, logShown: 10 };
+                  logDays: 7, logShown: 10,
+                  // The planned row whose dose card is open in the log (0.7.170).
+                  logOpen: "" };
     this._cultures = { summary: null, at: 0, loading: false, error: "", message: "", demo: false };
     this._cooling = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
@@ -1866,7 +1868,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-product-delete") this._npsDeleteProduct(id);
       // The feed strip (doc §13): tap a mark for its dose card, act from it.
       if (action === "nps-timeline-event") { this._nps.timelineOpen = this._nps.timelineOpen === id ? "" : id; this._render(); }
-      if (action === "nps-timeline-close") { this._nps.timelineOpen = ""; this._render(); }
+      if (action === "nps-timeline-close") { this._nps.timelineOpen = ""; this._nps.logOpen = ""; this._render(); }
       if (action === "nps-timeline-log") this._npsCall({ type: "openreef/consumable_log_dose", product_id: id, ...(target.dataset.slot ? { slot: target.dataset.slot } : {}) },
         "Dose logged — the mark fills in, the bottle and the reminder keep count.");
       if (action === "nps-timeline-log-late") this._npsTimelineLogLate(id);
@@ -1877,6 +1879,8 @@ class OpenReefPanel extends HTMLElement {
       // The feeding log (doc §13.19): the window, and unfolding older rows.
       if (action === "nps-log-days") this._npsLogDays(Number(id));
       if (action === "nps-log-more") { this._nps.logShown = (Number(this._nps.logShown) || 10) + 20; this._render(); }
+      // A planned row in the log (0.7.170): tap it for the mark's own dose card.
+      if (action === "nps-log-event") { this._nps.logOpen = this._nps.logOpen === id ? "" : id; this._render(); }
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded(id);
       if (action === "nps-hatch-start") this._npsCall(
@@ -12200,13 +12204,57 @@ class OpenReefPanel extends HTMLElement {
       if (last && last.date === row.date) last.rows.push(row);
       else groups.push({ date: row.date, rows: [row] });
     }
+    // Today's open marks (0.7.170): the strip's planned, due, late, missed
+    // and skipped feeds join the Today group greyed out, in clock order with
+    // the done rows, so the list reads as the day sheet. Bands, water changes
+    // and truces are not feeds; a done mark is already a row; a ghost is not
+    // today's. A tap opens the mark's own dose card under the row — the same
+    // card, the same commands, as the strip.
+    const tl = this._npsTimelineData();
+    const planned = tl && (!tl.date || !log.date || tl.date === log.date)
+      ? tl.events.filter((ev) => ev.kind === "dose" && ev.how !== "system" && ev.status !== "done" && ev.status !== "ghost")
+      : [];
+    if (planned.length && !groups.some((g) => g.date === log.date)) groups.unshift({ date: log.date, rows: [] });
+    const toCome = planned.filter((ev) => ev.status !== "missed" && ev.status !== "skipped").length;
+    const missed = planned.filter((ev) => ev.status === "missed").length;
+    const hm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+    const openId = String(st.logOpen || "");
     const dayHead = (date) => {
       const d = perDay.get(date) || {};
       const n = Number(d.feeds) || 0;
       const bits = [];
       if (Number(d.hand)) bits.push(`${esc(d.hand)} by hand`);
       if (Number(d.pump)) bits.push(`${esc(d.pump)} pumped`);
-      return `${esc(this._npsLogDayLabel(date, log.date))} · ${n} feed${n === 1 ? "" : "s"}${bits.length ? ` (${bits.join(", ")})` : ""}`;
+      const ahead = date === log.date && planned.length
+        ? `${toCome ? ` · ${toCome} to come` : ""}${missed ? ` · ${missed} missed` : ""}` : "";
+      return `${esc(this._npsLogDayLabel(date, log.date))} · ${n} feed${n === 1 ? "" : "s"}${bits.length ? ` (${bits.join(", ")})` : ""}${ahead}`;
+    };
+    const plannedHtml = (ev) => {
+      const pid = String(ev.source || "").startsWith("shelf:") ? String(ev.source).slice(6) : "";
+      const sel = openId === ev.id;
+      const details = [];
+      if (ev.at == null) details.push("any time today");
+      if (ev.note) details.push(esc(ev.note));
+      // A shelf hand dose logs straight from the row, filed against its slot
+      // (0.7.135); everything else, and the fuller story, is on the card.
+      const quick = pid && ev.how === "hand"
+        ? `<button class="${ev.status === "due" || ev.status === "late" || ev.status === "missed" ? "primary" : "secondary"} compact-button" data-action="nps-timeline-log" data-id="${esc(pid)}"${ev.at != null ? ` data-slot="${hm(ev.at)}"` : ""} title="Logs this dose now${ev.at != null ? ` — filed as the ${hm(ev.at)} dose` : ""}">${ev.ml != null ? `Log ${esc(ev.ml)} ml` : "Log"}</button>`
+        : "";
+      return `
+          <div class="activity-item nps-log-row planned ${esc(ev.status)}${sel ? " nps-log-sel" : ""}" data-action="nps-log-event" data-id="${esc(ev.id)}" role="button" tabindex="0" title="Tap for this feed's dose card">
+            <span>${ev.at != null ? hm(ev.at) : "—"}</span>
+            <strong>${ev.how === "pump" ? "⚙︎" : "✋"} ${esc(ev.name)}${ev.ml != null ? ` · ${esc(ev.ml)} ml` : ""}${details.length ? ` <small class="nps-log-detail">${details.join(" · ")}</small>` : ""}</strong>
+            <span class="nps-log-aside"><span class="pill nps-tl-pill ${esc(ev.status)}">${esc(this._npsTimelineStatusLabel(ev.status))}</span>${quick}</span>
+          </div>${sel ? this._npsTimelineEventCard(ev.id, tl) : ""}`;
+    };
+    const clockMin = (row) => { const m = /^(\d{1,2}):(\d{2})/.exec(String(row.time || "")); return m ? Number(m[1]) * 60 + Number(m[2]) : -1; };
+    const dayRows = (g) => {
+      const done = g.rows.map((row) => ({ min: clockMin(row), order: 1, html: rowHtml(row) }));
+      if (g.date !== log.date) return done.map((r) => r.html).join("");
+      // Newest first, like the log: a later slot sits above an earlier feed;
+      // an any-time mark is still open, so it heads the day.
+      const open = planned.map((ev) => ({ min: ev.at != null ? Number(ev.at) : 1441, order: 0, html: plannedHtml(ev) }));
+      return done.concat(open).sort((a, b) => b.min - a.min || a.order - b.order).map((r) => r.html).join("");
     };
     const rowHtml = (row) => {
       const src = String(row.source || "");
@@ -12232,7 +12280,7 @@ class OpenReefPanel extends HTMLElement {
     };
     const body = groups.map((g) => `
         <p class="eyebrow nps-log-day">${dayHead(g.date)}</p>
-        <div class="activity-list log-list nps-log-list">${g.rows.map(rowHtml).join("")}</div>`).join("");
+        <div class="activity-list log-list nps-log-list">${dayRows(g)}</div>`).join("");
     const more = log.rows.length > rows.length
       ? `<div class="button-row"><button class="secondary compact-button" data-action="nps-log-more">Show more (${log.rows.length - rows.length} older)</button></div>`
       : log.truncated ? `<p class="muted">Showing the newest ${esc(log.rows.length)} — the ledgers hold the rest.</p>` : "";
@@ -31160,6 +31208,12 @@ const rigSteps = [
         .nps-log-aside { display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end; }
         .nps-log-list .pill { color: #dbeafe; }
         .nps-log-list .pill.undone { color: #94a3b8; }
+        /* Today's open marks in the log (0.7.170): greyed until they are fed, a tap for the card. */
+        .nps-log-row.planned { cursor: pointer; }
+        .nps-log-row.planned > span:first-child, .nps-log-row.planned > strong { opacity: .5; }
+        .nps-log-row.planned:hover > strong, .nps-log-row.planned.nps-log-sel > strong { opacity: .85; }
+        .nps-log-row.planned .pill { color: #94a3b8; }
+        .nps-log-list .nps-tl-card { margin: 2px 0 8px; }
         .maintenance-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; gap: 4px; }
         .maintenance-steps label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; font-size: 13px; }
         .maintenance-steps input[type="checkbox"] { margin-top: 2px; flex: 0 0 auto; }

@@ -1532,6 +1532,45 @@ container held 500 ml of fresh brine. True to the letter — the shelf only
 knew the bottles he had typed in — and useless: the food he cultures
 himself was invisible to the report, the runway and the nutrient budget.
 
+
+### 13.26 0.7.170 — the log lists what is still to come, and logs it from the row (2026-09-11)
+
+Reece, from the screenshot of the Feeding log: *"can we also add planned
+feeds to the log - grayed out. when these planned feeds are clicked, id like
+to be able to log the dose."* The log was the past only; the strip held the
+rest of the day. Now the Today group is the day sheet.
+
+- **Today's open marks join the Today group, greyed.** The panel reads the
+  strip's own `timeline.events` (no new WS, no backend change — the 0.7.129
+  lesson) and lists every feed mark that is not yet a row: `kind: dose`,
+  hand or pump, status planned / due / late / missed / skipped / expected /
+  blocked. A done mark is already a row; a ghost is another day's; bands,
+  water changes and truces are not feeds. The rows sit in clock order with
+  the done rows, newest first — a 20:30 slot above the 19:42 feed, a missed
+  02:00 at the foot, an any-time mark heading the day (clock shown as *—*,
+  story *any time today*). Only when the timeline's `date` is the log's
+  `date`; a stale timeline lists nothing. A day with no feeds yet still gets
+  its Today group.
+- **The day head counts them**: *Today · 6 feeds (6 by hand) · 4 to come ·
+  1 missed* (skipped marks are listed, greyed, but counted nowhere).
+- **Log it from the row.** A shelf hand dose carries a quick *Log 2 ml*
+  button — `consumable_log_dose` with the slot (0.7.135), so a missed 11:00
+  done at 17:00 still files as 11:00; primary when due, late or missed. Tap
+  anywhere else on the row and the mark's own dose card opens under it —
+  `_npsTimelineEventCard`, the same card as the strip: *Log now*, *Dosed
+  earlier*, *Skip today*, a pump tick's *Dose now*, the bottle's level, the
+  truce it will start. `_nps.logOpen` holds the tapped id; the card's Close
+  clears both it and the strip's `timelineOpen`. Pump ticks have no quick
+  button (the firmware's guard chain answers on the card).
+- **Greyed, not gone**: clock and name at half opacity, the status pill in
+  slate, brightening on hover and when selected; the strip's amber/red
+  pills are kept for due/late/missed so the eye still finds what is owed.
+
+Tests: `test_panel_nps.mjs` (the log test extended — which marks list and
+which never do, the counts, the slot-carrying quick log, no quick log on a
+pump tick, clock order, the card under the tapped row, the zero-state's
+Today group, a stale timeline listing nothing).
+
 ### 14.1 The model
 
 The brine on hand becomes shelf entries the keeper never types in. Two

@@ -2161,8 +2161,35 @@ test("the feeding log lists every mouthful by day, with undo on today's rows and
       counts: { feeds: 7, hand: 6, pump: 1, undone: 1 }, truncated: false, unrecorded: [],
       text: "7 feeds in the last 7 days — 6 by hand, 1 pumped · 1 taken back.",
     };
+    panel._nps.summary.timeline.date = "2026-08-13";
     let html = panel._npsFeedLogPanel();
     assert(html.includes("Feeding log"), "the panel has its eyebrow");
+    // Today's open marks join the Today group greyed out (0.7.170): planned,
+    // due, late, missed, skipped and expected doses — never a done mark, a
+    // ghost, a band, a water change or a truce.
+    const plannedIds = [...html.matchAll(/nps-log-row planned [a-z]+[^>]*data-action="nps-log-event" data-id="([^"]+)"/g)].map((m) => m[1]);
+    assert(plannedIds.includes("shelf:phyto:1") && plannedIds.includes("shelf:phyto:2") && plannedIds.includes("shelf:rj:0") && plannedIds.includes("shelf:skip:0") && plannedIds.includes("shelf:chips:0"), `hand marks listed: ${plannedIds}`);
+    assert(plannedIds.includes("channel:brine:0") && plannedIds.includes("channel:brine:1") && plannedIds.includes("channel:brine:3"), `pump ticks listed: ${plannedIds}`);
+    assert(!plannedIds.includes("shelf:phyto:0") && !plannedIds.includes("shelf:loose:x0") && !plannedIds.includes("shelf:ghost:ghost") && !plannedIds.includes("channel:drip:band") && !plannedIds.includes("awc:1") && !plannedIds.some((id) => id.startsWith("truce:")), `only open feeds: ${plannedIds}`);
+    assert(html.includes("Today · 4 feeds (3 by hand, 1 pumped) · 7 to come · 1 missed"), "the day head counts what is still to come");
+    // A planned row: the clock, the greyed name, the status pill, and a
+    // quick Log for a shelf hand dose filed against its slot.
+    assert(html.includes("<span>11:50</span>") && html.includes("✋ Phyto · 2 ml") && html.includes('class="pill nps-tl-pill due">due now</span>'), "the due phyto row");
+    assert(html.includes('data-action="nps-timeline-log" data-id="phyto" data-slot="11:50"') && html.includes(">Log 2 ml</button>"), "the quick log carries the slot");
+    assert(html.includes('class="pill nps-tl-pill missed">missed</span>') && html.includes('data-action="nps-timeline-log" data-id="phyto" data-slot="02:00"'), "the missed 02:00 row logs against 02:00");
+    assert(html.includes("<span>—</span>") && html.includes("any time today"), "an any-time mark has no clock");
+    assert(!html.includes('data-action="nps-timeline-log" data-id="pods"'), "a pump tick has no quick log");
+    // Newest first with the done rows: 12:30's tick above 11:50's dose above the 11:34 feed, the missed 02:00 at the foot.
+    const rowAt = (needle) => html.indexOf(needle);
+    assert(rowAt("<span>12:30</span>") < rowAt("<span>11:50</span>") && rowAt("<span>11:50</span>") < rowAt("<span>11:34</span>") && rowAt("<span>06:05</span>") < rowAt('data-id="shelf:phyto:2"'), "clock order, newest first");
+    assert(!html.includes("nps-tl-card"), "no card until a row is tapped");
+    // Tap a planned row: its dose card opens under it, the strip's own card.
+    panel._nps.logOpen = "shelf:rj:0";
+    html = panel._npsFeedLogPanel();
+    assert(html.includes("nps-log-row planned late nps-log-sel") && html.includes("nps-tl-card"), "the tapped row is selected and carries the card");
+    assert(html.indexOf("nps-tl-card") > html.indexOf('data-id="shelf:rj:0"') && html.includes("Log 3 ml now — filed as the 09:00 dose") && html.includes("Dosed earlier") && html.includes("Skip today") && html.includes('data-action="nps-timeline-close"'), "the card has the mark's actions");
+    panel._nps.logOpen = "";
+    html = panel._npsFeedLogPanel();
     // Grouped by day, newest first, each day with its counts; the weekday
     // label comes from the backend's local date, whatever the browser's zone.
     const today = html.indexOf("Today · 4 feeds (3 by hand, 1 pumped)");
@@ -2205,7 +2232,13 @@ test("the feeding log lists every mouthful by day, with undo on today's rows and
       counts: { feeds: 0, hand: 0, pump: 0, undone: 0 }, truncated: false, unrecorded: [],
       text: "No feeds logged today — every Fed tap, logged dose and pump run lands here." };
     html = panel._npsFeedLogPanel();
-    assert(html.includes("No feeds logged today") && !html.includes("activity-item"), "zero-state");
+    assert(html.includes("No feeds logged today") && html.includes("nps-log-row planned") && !html.includes("nps-log-row control"), "zero-state still lists the day's open marks");
+    assert(html.includes("Today · 0 feeds · 7 to come · 1 missed"), "a Today group is made for them");
+    // Another day's timeline never leaks into the log.
+    panel._nps.summary.timeline.date = "2026-08-12";
+    html = panel._npsFeedLogPanel();
+    assert(!html.includes("activity-item"), "a stale timeline lists nothing");
+    panel._nps.summary.timeline.date = "2026-08-13";
     // No summary yet: the hint, not a crash.
     panel._nps.summary = null;
     assert(panel._npsFeedLogPanel().includes("once the summary loads"), "no summary, no rows");
