@@ -4650,6 +4650,145 @@ def test_ws_summary_species_report_sets_the_cones_feed_aside():
     assert row["verdict"] == "Fed by Reef Juice. Rotifer Feed Concentrate is a culture's feed, so not counted."
 
 
+
+def _join_entry(mixed_hours_ago=10, dose_delay_h=0):
+    # Reece's screen (2026-09-11): the container loaded and enriched, and
+    # Hatchery 2 ripe — one container, two cones, a 12 h soak.
+    entry = _enrich_entry(dose_delay_h=dose_delay_h, remaining=300,
+                          mixed_hours_ago=mixed_hours_ago)
+    cfg = entry.options[CONF_SETTINGS]
+    cfg["nps"]["hatchery"]["vessels"]["v2"]["state"] = {
+        "hatchStartedAt": (datetime.now(timezone.utc) - timedelta(hours=23)).isoformat(),
+        "eggType": "standard", "hatchHours": 24,
+    }
+    return entry
+
+
+def _shift_soak(entry, hours):
+    # Time passes on a running soak: every stamp that anchors it ages by
+    # `hours` — the container's load stamp included, so Soak done still finds
+    # its batch — and every journal row ages with it.
+    hatchery = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    state = hatchery["enrichment"]["state"]
+    for key in ("startedAt", "firstDoseAt", "batchLoadedAt"):
+        if state.get(key):
+            state[key] = (datetime.fromisoformat(state[key]) - timedelta(hours=hours)).isoformat()
+    hatchery["reservoir"]["mixedAt"] = state["batchLoadedAt"]
+    for row in hatchery.get("history") or []:
+        if row.get("harvestedAt"):
+            row["harvestedAt"] = (datetime.fromisoformat(row["harvestedAt"])
+                                  - timedelta(hours=hours)).isoformat()
+
+
+def test_ws_harvest_joins_a_running_soak_while_enough_of_it_remains():
+    # Reece (2026-09-11): Hatchery 2 at 96 %, the container 0.6 h into a
+    # 12 h soak, "Harvest now" refused out of sight. Two cones ~12 h apart
+    # and a 12 h soak collide EVERY cycle, so a ripe harvest JOINS the soak:
+    # the newest nauplii get what remains of it, the older portion keeps its
+    # stamps, and Soak done still finds its batch.
+    entry = _join_entry()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))  # dose in, 12 h soak
+    _shift_soak(entry, 4)                                               # 4 h in, 8 h left
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    soak_before = dict(saved["enrichment"]["state"])
+    load_before = saved["reservoir"]["mixedAt"]
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    join = conn.results[-1].payload["hatchery"]["enrichment"]["join"]
+    assert join["active"] is True and join["ok"] is True and join["holding"] is False, join
+    assert abs(join["hoursLeft"] - 8.0) < 0.05 and join["minHours"] == 6.0, join
+    run(integration.websocket_nps_hatch_cancel(
+        hass, conn, {"id": 3, "harvested": True, "vessel_id": "v2"}))
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert saved["reservoir"]["remainingMl"] == 500, "the harvest tops the container to full"
+    assert saved["reservoir"]["mixedAt"] == load_before, "the older portion keeps the load stamp"
+    assert saved["enrichment"]["state"] == soak_before, "the soak's own stamps are untouched"
+    assert not saved["vessels"]["v2"]["state"]["hatchStartedAt"], "the cone stands down"
+    assert saved["history"][0]["vesselId"] == "v2" and not saved["history"][0].get("enriched")
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("Hatchery 2 — joined the running soak" in str(i.get("message", ""))
+               and "~8 h of it" in str(i.get("message", "")) for i in log), \
+        [i.get("message") for i in log][-3:]
+    # Soak done still finds its batch, and the join row earns the hours IT
+    # soaked (8), not the soak's full 12.
+    _shift_soak(entry, 8.01)
+    run(integration.websocket_nps_enrich_loaded(hass, conn, {"id": 4}))
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert saved["reservoir"]["lastLoadEnriched"] is True
+    assert not saved["enrichment"]["state"]["startedAt"], "the soak stands down"
+    row = saved["history"][0]
+    assert row["vesselId"] == "v2" and row["enriched"] is True and row["enrichedHours"] == 8.0, row
+
+
+def test_ws_harvest_waits_under_the_join_floor_and_joins_a_holding_soak():
+    # Under the floor the harvest waits, out loud: nothing moves, the cone
+    # keeps its clock, the refusal names the hours and the way out.
+    entry = _join_entry()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    _shift_soak(entry, 10)                                              # 2 h left
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    join = conn.results[-1].payload["hatchery"]["enrichment"]["join"]
+    assert join["active"] is True and join["ok"] is False and abs(join["hoursLeft"] - 2.0) < 0.05, join
+    run(integration.websocket_nps_hatch_cancel(
+        hass, conn, {"id": 3, "harvested": True, "vessel_id": "v2"}))
+    assert conn.errors and conn.errors[-1].code == "soaking", conn.errors
+    assert "~2 h left" in conn.errors[-1].message and "6 h minimum" in conn.errors[-1].message
+    assert "Soak done" in conn.errors[-1].message and "cancel the soak" in conn.errors[-1].message
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert saved["reservoir"]["remainingMl"] == 300, "a refused harvest moves nothing"
+    assert saved["vessels"]["v2"]["state"]["hatchStartedAt"], "a refused harvest keeps the batch"
+    # A finished soak nobody has acknowledged: the way out is Soak done.
+    _shift_soak(entry, 2.5)
+    run(integration.websocket_nps_hatch_cancel(
+        hass, conn, {"id": 4, "harvested": True, "vessel_id": "v2"}))
+    assert conn.errors[-1].code == "soaking" and "has finished" in conn.errors[-1].message
+    # Holding for the molt (no dose in yet): the join gets the whole soak.
+    entry = _join_entry(mixed_hours_ago=2, dose_delay_h=8)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    join = conn.results[-1].payload["hatchery"]["enrichment"]["join"]
+    assert join == {"active": True, "ok": True, "hoursLeft": 12.0, "minHours": 6.0,
+                    "holding": True}, join
+    run(integration.websocket_nps_hatch_cancel(
+        hass, conn, {"id": 3, "harvested": True, "vessel_id": "v2"}))
+    assert not conn.errors, conn.errors
+    saved = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    assert saved["reservoir"]["remainingMl"] == 500
+    assert not saved["enrichment"]["state"]["firstDoseAt"], "the dose is still to come"
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("Hatchery 2 — joined the holding container" in str(i.get("message", ""))
+               for i in log), [i.get("message") for i in log][-3:]
+    # No soak: the verdict is idle and the plain row stands.
+    entry = _join_entry()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    join = conn.results[-1].payload["hatchery"]["enrichment"]["join"]
+    assert join == {"active": False, "ok": True, "hoursLeft": None, "minHours": 6.0,
+                    "holding": False}, join
+    run(integration.websocket_nps_hatch_cancel(
+        hass, conn, {"id": 2, "harvested": True, "vessel_id": "v2"}))
+    log = entry.options[CONF_SETTINGS]["activity"]
+    assert any("Hatchery 2 — container loaded" in str(i.get("message", "")) for i in log)
+    # A soak whose batch has left the container is a soak to cancel, not join.
+    entry = _join_entry()
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    entry.options[CONF_SETTINGS]["nps"]["hatchery"]["reservoir"]["remainingMl"] = 0
+    run(integration.websocket_nps_hatch_cancel(
+        hass, conn, {"id": 2, "harvested": True, "vessel_id": "v2"}))
+    assert conn.errors and conn.errors[-1].code == "soaking"
+    assert "no longer in the container" in conn.errors[-1].message
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

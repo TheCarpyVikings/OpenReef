@@ -881,6 +881,15 @@ ENRICH_SHELF_MAX_H = 72.0
 INSTAR_II_HOURS = 8.0
 INSTAR_II_DELAY_MAX_H = 24.0
 
+# A ripe harvest may JOIN a soak that is running (0.7.169 — Reece's Hatchery 2
+# stuck behind the container's soak). One container, two cones ~12 h apart
+# and a 12 h soak collide every cycle, and a batch left swimming unfed spends
+# its yolk. The newest nauplii get what remains of the soak, so the floor is
+# ReefPhyto's own minimum (their page: "allow 6–12 hours"), or half a shorter
+# planned soak; below it the harvest waits for Soak done rather than diluting
+# an enriched container with barely-fed brine.
+ENRICH_JOIN_MIN_H = 6.0
+
 # Named vessel presets for the volume picker (product → working water volume).
 # Research note: the Ziss line is ZH-700 / ZH-2000 — there is no ZH-1000.
 HATCH_VESSEL_PRESETS: tuple[dict[str, Any], ...] = (

@@ -14375,16 +14375,62 @@ def _nps_chain_batches(config: dict[str, Any]) -> list[dict[str, Any]]:
             for vid, started, batch_h in _nps_running_batches(config)]
 
 
+def _nps_soak_join(hatchery: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """May a fresh harvest JOIN the soak that is running? (0.7.169.) One
+    helper, three readers — the load gate, the summary (the tile draws THIS,
+    never its own arithmetic) and the harvest's activity row — so what the
+    tile says is what the tap gets. ``active``: a soak is engaged. ``ok``:
+    the newest nauplii would still get ``minHours`` of it. ``hoursLeft``:
+    the soak that remains (the whole soak while the container is holding
+    for the molt). ``holding``: no dose is in yet."""
+    state = hatchery["enrichment"]["state"]
+    min_h = nps_engine.ENRICH_JOIN_MIN_H
+    if _parse_datetime(state.get("startedAt")) is None:
+        return {"active": False, "ok": True, "hoursLeft": None, "minHours": min_h,
+                "holding": False}
+    hours = float(nps_engine._f(state.get("enrichHours")) or nps_engine.ENRICH_DEFAULT_HOURS)
+    first = _parse_datetime(state.get("firstDoseAt"))
+    if first is None:
+        left_h = hours
+    else:
+        left_h = max(0.0, (first + timedelta(hours=hours) - now).total_seconds() / 3600.0)
+    floor_h = min(min_h, hours / 2.0)
+    return {"active": True, "ok": left_h >= floor_h, "hoursLeft": round(left_h, 1),
+            "minHours": round(floor_h, 1), "holding": first is None}
+
+
 def _nps_container_load(
     config: dict[str, Any], hatchery: dict[str, Any], now: datetime, *, enriched: bool
 ) -> tuple[str, str] | None:
     """The load ledger, shared by plain harvest and enriched load: HARD stale
     gate, volume move (loadVolumeMl 0 = top-to-full, clamped at the brim),
-    freshness stamp, enriched flag. Returns (code, message) on refusal."""
+    freshness stamp, enriched flag. A running soak is JOINED while enough of
+    it remains (0.7.169, `_nps_soak_join`), never silently refused. Returns
+    (code, message) on refusal."""
     reservoir = _nps_canonical_reservoir(config)
-    if hatchery["enrichment"]["state"].get("startedAt"):
-        return "soaking", "Finish or cancel the current soak before adding another harvest."
     remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
+    join = _nps_soak_join(hatchery, now)
+    if join["active"]:
+        # The harvest joins the soak: the older portion keeps its load stamp
+        # (top-up semantics below), the soak's own stamps are untouched, so
+        # Soak done still finds its batch. An enriched load never lands on a
+        # soak, an empty container is a soak to cancel, and under the floor
+        # the harvest waits — out loud.
+        if enriched:
+            return "soaking", "Finish or cancel the current soak before adding another harvest."
+        if remaining <= 0:
+            return ("soaking",
+                    "The soaking batch is no longer in the container — cancel the soak, then harvest.")
+        if not join["ok"]:
+            if join["hoursLeft"] <= 0:
+                return ("soaking",
+                        "The soak has finished — tap Soak done, then feed or refrigerate the "
+                        "enriched batch before harvesting; or cancel the soak.")
+            return ("soaking",
+                    f"The soak has only ~{join['hoursLeft']:g} h left — too little for a fresh "
+                    f"harvest to load ({join['minHours']:g} h minimum). Let it finish and tap "
+                    "Soak done, feed or refrigerate the enriched batch, then harvest; or cancel "
+                    "the soak.")
     old_loaded = str(reservoir.get("mixedAt") or "")
     old_credit = hatchery["reservoir"].get("fridgeSavedH", 0)
     if remaining > 0:
@@ -14438,7 +14484,7 @@ def _nps_bottle_exit(res: dict[str, Any], now: datetime) -> tuple[float, float]:
 
 def _nps_journal_mark_enriched(
     hatchery: dict[str, Any], state: dict[str, Any], soak_started: datetime | None,
-    enriched_h: float,
+    enriched_h: float, first_dose: datetime | None = None, finished: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Soak done: the journal earns its badge (0.7.112). Enrichment is a
     container action, so the batch that soaked is the one whose harvest
@@ -14459,6 +14505,22 @@ def _nps_journal_mark_enriched(
             if harvested is not None and harvested <= soak_started:
                 target = row
                 break
+    # Harvests that JOINED the soak (0.7.169) — rows written after the load
+    # and before the soak ended — earn the badge too, each with the hours it
+    # actually soaked: from its own harvest, or from the first dose if that
+    # came later. The primary row keeps the full figure below.
+    loaded_dt = _parse_datetime(loaded_iso)
+    if loaded_dt is not None and finished is not None:
+        for row in history:
+            if row is target:
+                continue
+            harvested = _parse_datetime(row.get("harvestedAt"))
+            if harvested is None or harvested <= loaded_dt or harvested > finished:
+                continue
+            fed_from = max(harvested, first_dose) if first_dose is not None else harvested
+            row["enriched"] = True
+            row["enrichedHours"] = round(
+                max(0.0, min(enriched_h, (finished - fed_from).total_seconds() / 3600.0)), 1)
     if target is None:
         return None
     target["enriched"] = True
@@ -14848,7 +14910,8 @@ async def websocket_nps_hatch_cancel(
     work: HARD stale gate (never load fresh brine onto stale — discard first),
     move the load volume into the canonical container, stamp its freshness
     clock, and append the batch to the hatch history (planned vs actual hours
-    feeds the learned-clock advisory)."""
+    feeds the learned-clock advisory). 0.7.169: a running soak is joined while
+    enough of it remains (`_nps_soak_join`), never silently refused."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -14883,6 +14946,9 @@ def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], request
     if harvested:
         # HARD GATE (Reece, locked): stale brine never gets fresh brine poured
         # onto it — the container must be discarded first.
+        # A running soak is joined, not a wall (0.7.169): read the verdict
+        # BEFORE the load, from the helper the gate and the summary share.
+        join = _nps_soak_join(hatchery, now)
         before_ml = _awc_num(_nps_canonical_reservoir(config).get("remainingMl"), 0, 0, 1e9)
         error = _nps_container_load(config, hatchery, now, enriched=False)
         if error is not None:
@@ -14914,7 +14980,18 @@ def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], request
                                   target_id)
     if harvested:
         name = vessels.get(target_id, {}).get("name") or "the hatchery"
-        _append_activity(config, f"Brine harvested from {name} — container loaded", "control")
+        if join["active"] and join["holding"]:
+            _append_activity(
+                config,
+                f"Brine harvested from {name} — joined the holding container; the dose is "
+                "still to come and the whole soak follows", "control")
+        elif join["active"]:
+            _append_activity(
+                config,
+                f"Brine harvested from {name} — joined the running soak; the newest nauplii "
+                f"get ~{join['hoursLeft']:g} h of it", "control")
+        else:
+            _append_activity(config, f"Brine harvested from {name} — container loaded", "control")
     return None
 
 
@@ -15027,7 +15104,7 @@ def _nps_enrich_loaded_apply(config: dict[str, Any], now: datetime) -> tuple[str
     # before the instar II molt is not enrichment.
     soak_started = _parse_datetime(state.get("startedAt"))
     enriched_h = round(hours, 1)
-    marked = _nps_journal_mark_enriched(hatchery, state, soak_started, enriched_h)
+    marked = _nps_journal_mark_enriched(hatchery, state, soak_started, enriched_h, first, finished)
     hatchery["enrichment"]["state"] = {
         "startedAt": "", "sourceVesselId": "", "eggType": "",
         "plannedHatchHours": 0, "actualHatchHours": 0, "enrichHours": 0,
@@ -17054,6 +17131,9 @@ async def websocket_nps_summary(
                     if isinstance(products.get(hatchery_cfg["enrichment"]["productId"]), dict) else None,
                 "splitDose": bool(hatchery_cfg["enrichment"]["splitDose"]),
                 "sourceVesselId": hatchery_cfg["enrichment"]["state"]["sourceVesselId"],
+                # 0.7.169: may a ripe harvest join this soak? The helper the
+                # load gate reads, so the tile's verdict is the tap's verdict.
+                "join": _nps_soak_join(hatchery_cfg, now_utc),
                 "state": nps_engine.enrich_state(
                     hatchery_cfg["enrichment"]["state"]["startedAt"],
                     hatchery_cfg["enrichment"]["state"]["enrichHours"],

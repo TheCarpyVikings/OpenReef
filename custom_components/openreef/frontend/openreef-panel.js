@@ -1200,6 +1200,13 @@ class OpenReefPanel extends HTMLElement {
       const action = target.dataset.action;
       const id = target.dataset.id;
       const field = target.dataset.field;
+      // NPS notices land where the tap was (0.7.169): a refusal from the
+      // hatchery card renders inside that card, not in the tab's top banner
+      // a phone has scrolled past — Reece's "Harvest now" looked dead.
+      if (this._nps && action && action.startsWith("nps-")) {
+        this._nps.noticeScope = /^nps-(hatch-|enrich|fridge-|hand-feed|discard-brine|align-clock|apply-learned-hours|add-hatch-reminders)/.test(action)
+          ? "hatchery" : "";
+      }
 
       if (action === "tab") {
         this._stopCameraWebRTC();
@@ -11143,9 +11150,12 @@ class OpenReefPanel extends HTMLElement {
       if (vesselId) call.vessel_id = vesselId;
       await this._callWS(call);
       if (cid) await this._callWS({ type: "openreef/dosing_mark_refreshed", channel_id: cid });
-      this._nps.message = cid
-        ? "Hatch loaded — freshness and prime clocks restarted; the hatcher stands down."
-        : "Hatch loaded — the freshness clock is running; hand-dose from the container and it keeps count.";
+      const join = this._nps.summary?.hatchery?.enrichment?.join || {};
+      this._nps.message = join.active
+        ? "Hatch loaded into the running soak — the older portion keeps its clock, the newest nauplii get the soak that remains; the hatcher stands down."
+        : cid
+          ? "Hatch loaded — freshness and prime clocks restarted; the hatcher stands down."
+          : "Hatch loaded — the freshness clock is running; hand-dose from the container and it keeps count.";
       this._nps.error = "";
     } catch (err) {
       this._nps.error = (err && err.message) || "That didn't work — try again.";
@@ -12767,6 +12777,10 @@ class OpenReefPanel extends HTMLElement {
     const enrichSum = hatch.enrichment || {};
     const enrichState = enrichSum.state || {};
     const enrichIdle = !enrichState.status || enrichState.status === "none";
+    // May a ripe harvest join the soak? The backend's verdict (0.7.169) —
+    // the tile draws it, never its own arithmetic, so what it says is what
+    // the tap gets.
+    const join = enrichSum.join || {};
     const vesselTiles = vessels.map((v) => {
       const vs = v.state || {};
       // Per-hatchery cysts + clock (0.7.147): v.eggType / v.hatchHours are the
@@ -12791,14 +12805,29 @@ class OpenReefPanel extends HTMLElement {
         : "";
       const guide = v.guide && v.guide.available
         ? `<small class="muted" title="2 g/L is a conservative starting density; actual hatch yield depends on cysts, oxygen and water conditions">~${this._escape(String(v.guide.grams))} g cysts</small>` : "";
+      // A soak in the container (0.7.169): the harvest JOINS it while enough
+      // soak remains, and the tile says so before the tap; under the floor
+      // the harvest waits and the tile says why.
+      const hasBatch = vs.status === "incubating" || vs.status === "ready" || vs.status === "overdue";
+      const joinBlocked = hasBatch && join.active && !join.ok;
+      const joinLeft = this._escape(String(join.hoursLeft));
+      const joinLine = !hasBatch || !join.active ? ""
+        : join.ok
+          ? `<small class="muted" title="The container is soaking. Harvesting pours this batch in with it: the older portion keeps its clock, the newest nauplii get the soak that remains.">${join.holding ? "harvest joins the soak · dose still to come" : `harvest joins the soak · ~${joinLeft} h of it left`}</small>`
+          : Number(join.hoursLeft) > 0
+            ? `<small style="color:var(--warning-color,#f5a524)" title="A harvest needs at least ${this._escape(String(join.minHours))} h of soak to load; this soak has ~${joinLeft} h left. Let it finish, tap Soak done, feed or refrigerate the enriched batch, then harvest — or cancel the soak.">soak too far along to join (~${joinLeft} h left) — wait for Soak done</small>`
+            : `<small style="color:var(--warning-color,#f5a524)" title="The soak has finished. Tap Soak done, then feed or refrigerate the enriched batch before harvesting — or cancel the soak.">soak finished — tap Soak done first</small>`;
+      const joinTitle = hasBatch && join.active && join.ok
+        ? ` The container is soaking: this harvest joins the soak and the newest nauplii get ${join.holding ? "the whole soak once the dose goes in" : `~${joinLeft} h of it`} (a live-algae enrichment needs 6–12 h; an oil emulsion still waits for their molt).`
+        : "";
       const buttons = [
         vs.status === "none" || !vs.status
           ? `<button class="secondary compact-button" data-action="nps-hatch-start" data-id="${this._escape(v.id)}">Start hatch</button>` : "",
         vs.status === "incubating"
-          ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}" title="Inspect for swimming nauplii before harvesting; the timer estimates hatch-out and does not measure it.">Harvest now</button>`
+          ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}" title="Inspect for swimming nauplii before harvesting; the timer estimates hatch-out and does not measure it.${joinTitle}"${joinBlocked ? " disabled" : ""}>Harvest now</button>`
           : "",
         (vs.status === "ready" || vs.status === "overdue")
-          ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}">Hatched &amp; loaded</button>` : "",
+          ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}"${joinTitle ? ` title="${joinTitle.trim()}"` : ""}${joinBlocked ? " disabled" : ""}>Hatched &amp; loaded</button>` : "",
         vs.status === "incubating"
           ? `<button class="danger-text compact-button" data-action="nps-hatch-cancel" data-id="${this._escape(v.id)}">Cancel</button>` : "",
       ].filter(Boolean).join("");
@@ -12810,6 +12839,7 @@ class OpenReefPanel extends HTMLElement {
           ${settingsLine}
           ${clockNote}
           ${guide}
+          ${joinLine}
           <div class="button-row" style="flex-wrap:wrap;justify-content:center;">${buttons}</div>
         </div>`;
     }).join("");
@@ -12900,8 +12930,18 @@ class OpenReefPanel extends HTMLElement {
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
     // drain is on. Hand-dosers get the same clocks from the container's stamp.
+    // The same verdict, in the container's own line (0.7.169).
+    const joinCopy = !enrichIdle && join.active
+      ? join.ok
+        ? join.holding
+          ? " A ripe hatchery can still be harvested into it — the newest nauplii get the whole soak once the dose goes in."
+          : ` A ripe hatchery can still be harvested into it — the newest nauplii get the ~${this._escape(String(join.hoursLeft))} h that remain.`
+        : Number(join.hoursLeft) > 0
+          ? ` Too little soak is left (~${this._escape(String(join.hoursLeft))} h) for a fresh harvest to load — let it finish, then feed or refrigerate the enriched batch before the next harvest.`
+          : " The soak has finished — tap Soak done, then feed or refrigerate the enriched batch before the next harvest."
+      : "";
     const soakAvailability = !enrichIdle
-      ? `The container is in an enrichment cycle${enrichState.hoursLeft != null && Number(enrichState.hoursLeft) > 0 ? ` with ~${this._escape(String(enrichState.hoursLeft))} h left` : ""}. Finish and rinse before feeding; use another food source meanwhile. The rack forecast assumes plain harvests and does not schedule this soak.`
+      ? `The container is in an enrichment cycle${enrichState.hoursLeft != null && Number(enrichState.hoursLeft) > 0 ? ` with ~${this._escape(String(enrichState.hoursLeft))} h left` : ""}. Finish and rinse before feeding; use another food source meanwhile.${joinCopy} The rack forecast assumes plain harvests and does not schedule this soak.`
       : "";
     const hatchReservoirLine = `${soakAvailability || primeLine}${!soakAvailability && freshLine ? ` · ${freshLine}` : ""}${fridgeButton ? ` ${fridgeButton}` : ""}${fxCfg.channelId
       ? "" : ` · Hand-dosing mode — link a live-food pump in Settings to automate the dosing.`}`;
@@ -12969,6 +13009,8 @@ class OpenReefPanel extends HTMLElement {
             <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="hatchery" data-scroll="or-section-hatchery">Hatch settings</button>
           </div>
         </div>
+        ${st.noticeScope === "hatchery" && st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}
+        ${st.noticeScope === "hatchery" && st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
         <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
           <div style="display:flex;gap:14px;flex-wrap:wrap;">${vesselTiles}${enrichTile}${fridgeTile}</div>
           ${this._npsBrineContainerSvg(reservoirSum)}
@@ -14364,8 +14406,8 @@ const rigSteps = [
       </div>`;
 
     const notices = `
-      ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
-      ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
+      ${st.message && st.noticeScope !== "hatchery" ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
+      ${st.error && st.noticeScope !== "hatchery" ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
     return `<section class="stack">${head}${notices}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}</section>`;
   }
@@ -14415,8 +14457,8 @@ const rigSteps = [
           <button class="secondary compact-button" data-action="nps-demo-awc" ${st.demoStage ? "disabled" : ""}>${st.demoStage && st.demoStage.startsWith("awc") ? "Water change in progress…" : "💧 Run a water change"}</button>
         </div></div>` : ""}
       ${st.demo && demoStageCopy ? `<div class="notice info-notice"><small>${demoStageCopy}</small></div>` : ""}
-      ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
-      ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
+      ${st.message && st.noticeScope !== "hatchery" ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
+      ${st.error && st.noticeScope !== "hatchery" ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
     // --- Setup checklist + the feeding station (diagram hero + timeline) ---
     const setupCard = this._npsSetupCard();

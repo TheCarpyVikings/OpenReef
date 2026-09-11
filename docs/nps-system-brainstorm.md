@@ -1447,6 +1447,83 @@ Tests: test_nps.py 181 (the `moltInHours` maths; the early-dose WS flow with
 its push discipline), test_panel_nps 63 (the tile test grows the Dose-now,
 dosed-early and past-molt states; a new mission-card test).
 
+### 13.25 0.7.169 — a ripe harvest joins the soak (2026-09-11)
+
+Reece's screen, the evening 0.7.168 shipped: Hatchery 2 at 96 %, "Harvest
+now" lit, and nothing happening on the iPhone or the PC. The tap was firing.
+The backend refused it — `_nps_container_load` returned *Finish or cancel
+the current soak before adding another harvest*, because the container was
+0.6 h into a 12 h Rotifer & Artemia soak — and the panel drew the refusal
+in the tab's top banner, a screen and a half above the tile the thumb was
+on. A refusal nobody sees is a dead button.
+
+Two things were wrong: a bug, and a design that could never have worked
+for a two-cone rack.
+
+- **The refusal was invisible.** NPS notices rendered in one place, the
+  tab's head. Any action taken from the hatchery card — harvest, cancel,
+  dose, soak done, fridge — that the backend refused told the keeper why
+  somewhere they were not looking.
+- **The gate itself.** One container, two cones ~12 h apart (the rack
+  rhythm of 0.7.155 plans exactly that) and a 12 h soak collide every
+  cycle: whichever cone ripens second ripens into a soaking container.
+  "Finish the soak first" means 11 h more in the cone for nauplii at their
+  most nutritious now (instar I, yolk intact), or cancelling a soak that
+  has done nothing wrong. ReefPhyto's own protocol is *freshly hatched
+  nauplii, 6–12 h* — a second batch poured in with 11 h to run is exactly
+  the batch they describe.
+
+What changed:
+
+- **A harvest joins a running soak** while at least `ENRICH_JOIN_MIN_H`
+  (6 h, ReefPhyto's floor — or half a shorter planned soak) of it remains.
+  The container's older portion keeps its load stamp and its freshness
+  clock (top-up semantics, as for plain brine); the soak's own stamps are
+  untouched, so Soak done still finds its batch. Below the floor the
+  harvest waits, out loud: *The soak has only ~2 h left — too little for a
+  fresh harvest to load (6 h minimum). Let it finish and tap Soak done…*;
+  a finished-but-unacknowledged soak says *tap Soak done first*; a soak
+  whose batch has left the container says *cancel the soak*. An enriched
+  load never lands on a soak (unchanged).
+- **One verdict, three readers.** `_nps_soak_join(hatchery, now)` →
+  `{active, ok, hoursLeft, minHours, holding}` is read by the load gate,
+  by the summary (`hatchery.enrichment.join`) and by the harvest's
+  activity row. The tile renders the summary's verdict — never its own
+  arithmetic — so what the tile says is what the tap gets (the 0.7.158
+  rule: never re-derive another engine's clock).
+- **The tile says it before the tap.** Under a cone with a batch: *harvest
+  joins the soak · ~11.4 h of it left* (or *· dose still to come* while
+  the container holds for the molt); under the floor the button is
+  disabled and the line reads *soak too far along to join (~2 h left) —
+  wait for Soak done*. The container's own line carries the same verdict;
+  the Harvest-now title spells out both protocols (algae needs 6–12 h; an
+  emulsion still waits for the newest batch's molt).
+- **The refusal lands where the tap was.** NPS notices carry a scope: a
+  tap on any hatchery-card action (`nps-hatch-*`, `nps-enrich*`,
+  `nps-fridge-*`, hand feed, discard, align clock, learned hours, the
+  reminders) renders its message or refusal inside the card, above the
+  tiles, on the Hatchery and NPS tabs alike; every other NPS action keeps
+  the top banner. The phone's push button already logged its refusal to
+  the activity feed.
+- **The journal badges every batch that soaked.** Soak done marks the
+  rows harvested after the load and before the soak's end too, each with
+  the hours it actually soaked (from its own harvest, or from the first
+  dose if that came later); the primary row keeps the full figure.
+- **The activity row is honest**: *Brine harvested from Hatchery 2 —
+  joined the running soak; the newest nauplii get ~8 h of it* / *joined
+  the holding container; the dose is still to come and the whole soak
+  follows*.
+
+Not changed: the Soak-done floor (the planned hours still have to elapse),
+the fridge's mid-soak refusals (a soak stays warm), the enriched-brine gate
+after Soak done (feed or refrigerate before plain brine lands on it).
+
+Tests: test_nps.py 183 (the join — verdict, top-up, untouched soak, the
+badge with its own hours; the floor, the finished soak, the holding case,
+no soak, the drained container), test_hatchery_audit 17 (the "soaking batch
+cannot be replaced" regression rewritten to the join contract), test_panel_nps
+64 (the tile's states, the container line, the scoped notice on both tabs).
+
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 
 Reece's screen: the Species coverage report said *nothing on the shelf

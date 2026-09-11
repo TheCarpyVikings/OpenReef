@@ -71,12 +71,29 @@ class HatcheryAudit(unittest.TestCase):
         self.assertEqual(res["enrichedAt"], stamp(16))
         self.assertTrue(integration._nps_batch_is_stale(res["mixedAt"], res, NOW))
 
-    def test_soaking_batch_cannot_be_replaced_or_completed_after_emptying(self):
+    def test_soaking_batch_is_joined_not_replaced_and_cannot_complete_after_emptying(self):
+        # 0.7.169: a harvest JOINS a running soak while enough of it remains —
+        # the older portion keeps its load stamp — but an enriched load never
+        # lands on a soak, under the floor the harvest waits, and once the
+        # container is emptied the soak has no batch: the load says cancel,
+        # Soak done says the batch changed.
         config = config_with_load()
         hatchery = config["nps"]["hatchery"]
-        hatchery["enrichment"]["state"].update({"startedAt": stamp(1), "firstDoseAt": stamp(1)})
-        self.assertEqual(integration._nps_container_load(config, hatchery, NOW, enriched=False)[0], "soaking")
+        hatchery["enrichment"]["state"].update({
+            "startedAt": stamp(1), "firstDoseAt": stamp(1), "batchLoadedAt": stamp(2)})
+        loaded = hatchery["reservoir"]["mixedAt"]
+        self.assertIsNone(integration._nps_container_load(config, hatchery, NOW, enriched=False))
+        self.assertEqual(hatchery["reservoir"]["remainingMl"], 750)
+        self.assertEqual(hatchery["reservoir"]["mixedAt"], loaded)
+        self.assertEqual(integration._nps_container_load(config, hatchery, NOW, enriched=True)[0], "soaking")
+        hatchery["enrichment"]["state"]["firstDoseAt"] = stamp(10)
+        code, message = integration._nps_container_load(config, hatchery, NOW, enriched=False)
+        self.assertEqual(code, "soaking")
+        self.assertIn("~2 h left", message)
         hatchery["reservoir"]["remainingMl"] = 0
+        code, message = integration._nps_container_load(config, hatchery, NOW, enriched=False)
+        self.assertEqual(code, "soaking")
+        self.assertIn("cancel the soak", message)
         self.assertEqual(integration._nps_enrich_loaded_apply(config, NOW)[0], "batch_changed")
 
     def test_planner_only_counts_volume_that_can_be_used_before_each_expiry(self):

@@ -2357,5 +2357,77 @@ test("an unlinked enrichment reads unlinked, and an enrichment bottle's tap is a
   } finally { restore(); }
 });
 
+test("a ripe hatchery joins a running soak — the tile says so, and a refusal lands in the card", async () => {
+  // Reece's screen (2026-09-11): Hatchery 2 at 96 %, the container soaking
+  // with ~11.4 h left, "Harvest now" refused by the backend and the refusal
+  // drawn in the tab's top banner the phone had scrolled past — a dead tap.
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const soaking = (join) => v2HatcherySummary({
+      vessels: [
+        { id: "v1", name: "Hatchery 1", volumeL: 0.4, eggType: "standard", hatchHours: 24,
+          state: { status: "incubating", hoursElapsed: 8, hoursLeft: 16, percent: 33 }, guide: null },
+        { id: "v2", name: "Hatchery 2", volumeL: 0.4, eggType: "standard", hatchHours: 24,
+          state: { status: "incubating", hoursElapsed: 23.1, hoursLeft: 0.9, percent: 96 }, guide: null },
+      ],
+      enrichment: { hours: 12, doseMl: 1, doseDelayH: 0, batchDoseDelayH: 0, productId: "rp",
+        productName: "Rotifer & Artemia Enrichment", splitDose: false, sourceVesselId: "",
+        state: { status: "enriching", hoursElapsed: 0.6, hoursLeft: 11.4, percent: 5,
+          firstDoseDue: false, secondDoseDue: false, moltInHours: 0 },
+        join },
+    });
+    const tile2 = (html) => html.slice(html.indexOf('data-vessel="v2"'), html.indexOf("data-enrich-vessel"));
+    // Enough soak left: Hatchery 2 is harvestable and the tile says it joins.
+    panel._nps.summary.hatchery = soaking({ active: true, ok: true, hoursLeft: 11.4, minHours: 6, holding: false });
+    let html = panel._npsTab();
+    let v2 = tile2(html);
+    assert(v2.includes(">Harvest now<"), "Hatchery 2 must offer its harvest mid-soak");
+    assert(!/nps-hatch-loaded" data-id="v2"[^>]*disabled/.test(v2), "with 11.4 h of soak left the harvest must be enabled");
+    assert(v2.includes("harvest joins the soak · ~11.4 h of it left"), `the tile must say the harvest joins the soak: ${v2}`);
+    assert(v2.includes("a live-algae enrichment needs 6–12 h"), "the button's title must carry the protocol");
+    assert(html.includes("can still be harvested into it") && html.includes("~11.4 h that remain"), "the container line must say a harvest can still land");
+    noPlaceholders(html, "hatchery card mid-soak");
+    // Holding for the molt: the join gets the whole soak.
+    panel._nps.summary.hatchery = soaking({ active: true, ok: true, hoursLeft: 12, minHours: 6, holding: true });
+    html = panel._npsTab();
+    assert(tile2(html).includes("harvest joins the soak · dose still to come"), "a holding soak must say the dose is still to come");
+    assert(html.includes("the whole soak once the dose goes in"), "the container line must carry the holding case");
+    // Too little left: the button is disabled and the tile says why.
+    panel._nps.summary.hatchery = soaking({ active: true, ok: false, hoursLeft: 2, minHours: 6, holding: false });
+    html = panel._npsTab();
+    v2 = tile2(html);
+    assert(/nps-hatch-loaded" data-id="v2"[^>]*disabled/.test(v2), "with 2 h of soak left the harvest must wait");
+    assert(v2.includes("soak too far along to join (~2 h left) — wait for Soak done"), `the tile must say why: ${v2}`);
+    assert(html.includes("Too little soak is left (~2 h)"), "the container line must say why");
+    // Finished but unacknowledged: the way out is Soak done.
+    panel._nps.summary.hatchery = soaking({ active: true, ok: false, hoursLeft: 0, minHours: 6, holding: false });
+    panel._nps.summary.hatchery.enrichment.state = { status: "done", hoursElapsed: 12.2, hoursLeft: 0, percent: 100, firstDoseDue: false, secondDoseDue: false, moltInHours: 0 };
+    html = panel._npsTab();
+    assert(tile2(html).includes("soak finished — tap Soak done first"), "a finished soak must point at Soak done");
+    // No soak: the plain tile, nothing about joining.
+    panel._nps.summary.hatchery = soaking({ active: false, ok: true, hoursLeft: null, minHours: 6, holding: false });
+    panel._nps.summary.hatchery.enrichment.state = { status: "none", firstDoseDue: false, secondDoseDue: false };
+    html = panel._npsTab();
+    assert(!html.includes("joins the soak") && !html.includes("too far along"), "no soak, no join copy");
+    assert(!/nps-hatch-loaded" data-id="v2"[^>]*disabled/.test(tile2(html)), "no soak, no disabled harvest");
+    // A refusal lands IN the card when the tap came from it — and only there,
+    // on the Hatchery tab (Reece's screen) and the NPS tab alike.
+    panel._nps.noticeScope = "hatchery";
+    panel._nps.error = "The soak has only ~2 h left — too little for a fresh harvest to load.";
+    html = panel._hatcheryTab();
+    const card = html.slice(html.indexOf(">Today<"), html.indexOf('data-vessel="v1"'));
+    assert(card.includes("too little for a fresh harvest"), "the refusal must render inside the hatchery card, above the tiles");
+    assert((html.match(/too little for a fresh harvest/g) || []).length === 1, "the refusal must not also sit in the tab's top banner");
+    const tab = panel._npsTab();
+    assert(tab.slice(tab.indexOf("Open Brine hatchery"), tab.indexOf('data-vessel="v1"')).includes("too little for a fresh harvest"), "the NPS tab's copy of the card carries it too");
+    assert((tab.match(/too little for a fresh harvest/g) || []).length === 1, "…once");
+    panel._nps.noticeScope = "";
+    html = panel._hatcheryTab();
+    assert(html.includes("too little for a fresh harvest") && html.indexOf("too little for a fresh harvest") < html.indexOf(">Today<"), "other NPS actions keep the top banner, above the card");
+    panel._nps.error = "";
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();
