@@ -102,6 +102,72 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
     {"name": "Ultra Sea Fan", "brand": "Fauna Marin", "category": "zooPrepared",
      "bottleMl": 100, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": False,
      "particleUmMin": 50, "particleUmMax": 300},
+    # The shop shelf (0.7.167) — the products a UK keeper actually buys, read from
+    # the labels 2026-09-11 (docs/nps-system-brainstorm.md §13.23). Where a
+    # label gives no opened-bottle clock the value is an upper estimate and the
+    # note says so; the label wins.
+    {"name": "Reef Energy Plus (AB+)", "brand": "Red Sea", "category": "amino",
+     "bottleMl": 500, "shelfLifeDaysOpened": 365, "refrigerated": True, "stirDaily": False,
+     "particleUmMin": 0, "particleUmMax": 0,
+     "notes": "Amino acids, carbohydrates and vitamins in one bottle. Refrigerate after opening "
+              "(good for a year); a week's worth can sit unrefrigerated in a dosing container. "
+              "Skimmer off 15–30 min after the dose; pipette a little straight onto sun corals "
+              "and Goniopora.",
+     # Red Sea's label, per 100 L a day: mixed reef / SPS frags 4 ml, SPS dominant
+     # 8 ml, ultra-low-nutrient SPS 12 ml — the bands read as tank types here.
+     "doseGuide": {"light": 25, "medium": 12.5, "heavy": 8.3}, "doseEveryDays": 1,
+     "doseNote": "Bands are Red Sea's tank types: light = mixed reef or frags (4 ml/100 L), "
+                 "medium = SPS dominant (8), heavy = ultra-low-nutrient SPS (12). Skimmer off "
+                 "15–30 min."},
+    {"name": "PhytoGreen-M", "brand": "Brightwell Aquatics", "category": "phyto",
+     "bottleMl": 250, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
+     "particleUmMin": 10, "particleUmMax": 15,
+     "notes": "Preserved Tetraselmis, 10–15 µm. Shake well, refrigerate once opened; the "
+              "90-day clock is an estimate — the label wins."},
+    {"name": "Zooplanktos-S", "brand": "Brightwell Aquatics", "category": "zooPrepared",
+     "bottleMl": 250, "shelfLifeDaysOpened": 0, "refrigerated": False, "stirDaily": False,
+     "particleUmMin": 50, "particleUmMax": 300,
+     "notes": "Rotifers, their eggs and crustacean eggs, 50–300 µm, over 4,000 prey per ml; "
+              "no fridge needed. Sized for stony corals, clams, sponges and tube worms."},
+    {"name": "Arcti-Pods", "brand": "Reef Nutrition", "category": "zooPrepared",
+     "bottleMl": 177, "shelfLifeDaysOpened": 42, "refrigerated": True, "stirDaily": False,
+     "particleUmMin": 2000, "particleUmMax": 3000,
+     "notes": "Whole arctic Calanus, about 3 mm — for anemones, big-mouthed LPS and "
+              "planktivorous fish, not the filter feeders. Same fridge handling as the rest "
+              "of the Reef Nutrition range; never freeze."},
+    {"name": "Coral Frenzy slurry", "brand": "Coral Frenzy", "category": "blend",
+     "bottleMl": 250, "shelfLifeDaysOpened": 1, "refrigerated": True, "stirDaily": True,
+     "particleUmMin": 50, "particleUmMax": 300,
+     "notes": "Powder, 50–300 µm — mix fresh each feed. This bottle is the mixed slurry, not "
+              "the tub; the tub keeps dry on the shelf."},
+    {"name": "AF Power Food slurry", "brand": "Aquaforest", "category": "blend",
+     "bottleMl": 250, "shelfLifeDaysOpened": 1, "refrigerated": True, "stirDaily": True,
+     "particleUmMin": 0, "particleUmMax": 0,
+     "notes": "One measuring spoon per 100 L stirred a minute into ~20 ml of tank water, "
+              "pipetted onto the corals or into the flow; weekly, up to daily on a mature "
+              "tank. Aquaforest gives no particle size — set one if you measure it. The tub "
+              "keeps dry; this bottle is the slurry."},
+    {"name": "Ultra LPS Grow + Color (M)", "brand": "Fauna Marin", "category": "zooPrepared",
+     "bottleMl": 100, "shelfLifeDaysOpened": 0, "refrigerated": False, "stirDaily": False,
+     "particleUmMin": 600, "particleUmMax": 900,
+     "notes": "Soft pellets, about 0.6–0.9 mm, for target-feeding LPS, sun corals and "
+              "dendros — soak a pinch in tank water first. Keeps dry; no fridge."},
+    {"name": "Polyp-Booster", "brand": "PolypLab", "category": "amino",
+     "bottleMl": 100, "shelfLifeDaysOpened": 0, "refrigerated": False, "stirDaily": False,
+     "particleUmMin": 0, "particleUmMax": 0,
+     "notes": "The feeding trigger: 1 ml per 227 L (60 US gal) 30–60 s before Reef-Roids or "
+              "any feed, and the polyps open. Store cool and dark."},
+    {"name": "AF Amino Mix", "brand": "Aquaforest", "category": "amino",
+     "bottleMl": 50, "shelfLifeDaysOpened": 0, "refrigerated": False, "stirDaily": False,
+     "particleUmMin": 0, "particleUmMax": 0,
+     "notes": "Free amino acids — a drop per 100 L a day to start, after lights-out. Store "
+              "cool and dark."},
+    {"name": "Live copepods (shop pouch)", "brand": "Shop-bought", "category": "zooLive",
+     "bottleMl": 250, "shelfLifeDaysOpened": 5, "refrigerated": True, "stirDaily": False,
+     "particleUmMin": 100, "particleUmMax": 1000,
+     "notes": "A mixed Tisbe / Tigriopus / Apocyclops pouch — pour in after lights-out, some "
+              "into the refugium to seed it. A few days chilled at most; the supplier's "
+              "directions win."},
     {"name": "Live rotifers (fridge bottle)", "brand": "Home culture", "category": "zooLive",
      "bottleMl": 1000, "shelfLifeDaysOpened": 5, "refrigerated": True, "stirDaily": False,
      "particleUmMin": 90, "particleUmMax": 360,
@@ -117,6 +183,11 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
     {"name": "Waste-Away", "brand": "Dr Tim's", "category": "bacteria",
      "bottleMl": 473, "shelfLifeDaysOpened": 180, "refrigerated": False, "stirDaily": False,
      "particleUmMin": 0, "particleUmMax": 2},
+    {"name": "MicroBacter7", "brand": "Brightwell Aquatics", "category": "bacteria",
+     "bottleMl": 250, "shelfLifeDaysOpened": 0, "refrigerated": False, "stirDaily": False,
+     "particleUmMin": 0, "particleUmMax": 2,
+     "notes": "Bacterial blend for nutrient export that doubles as bacterioplankton. "
+              "Maintenance is a weekly dose, not a daily one; store cool and dark."},
 )
 
 CATEGORY_LABELS = {

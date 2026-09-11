@@ -101,6 +101,8 @@ Deliberately NOT listed: the photosynthetic gorgonians (Pseudopterogorgia, Plexa
 
 Reef Nutrition Oyster-Feast 1–200 µm (refrigerate 1–5 °C, 9-mo unopened); Phyto-Feast/Roti-Feast/R.O.E./Arcti-Pods same handling, never freeze; Coral Frenzy 50–300 µm; Reef-Roids ~150–200 µm (mix-fresh, clogs 1.1 mm doser fittings — large-bore only); Fauna Marin Ultra Sea Fan (the gorgonian-specific feed); NYOS GoldPods **shelf-stable** (easiest automation target); live phyto Nanno 1–2 µm / Iso ~5 µm / Tetraselmis ~10 µm; rotifers 150–300 µm; Artemia nauplii ~450 µm; Tisbe/Apocyclops nauplii. Carbon dosing (vinegar/NoPox) + Dr Tim's Waste-Away double as **bacterioplankton generators** — export mechanism that is also food.
 
+Shop shelf added 0.7.167 (labels read 2026-09-11): Red Sea Reef Energy Plus (AB+) 4 / 8 / 12 ml per 100 L a day for mixed reef / SPS dominant / ULNS, refrigerate after opening, good a year, skimmer off 15–30 min; Brightwell PhytoGreen-M Tetraselmis 10–15 µm (fridge), Zooplanktos-S 50–300 µm rotifers + eggs (no fridge), MicroBacter7 (bacteria, weekly maintenance); Reef Nutrition Arcti-Pods ~3 mm Calanus; Coral Frenzy 50–300 µm powder; Aquaforest AF Power Food 1 spoon / 100 L stirred into 20 ml (no published particle size) and AF Amino Mix; Fauna Marin Ultra LPS Grow + Color M ~0.6–0.9 mm pellets; PolypLab Polyp-Booster 1 ml / 227 L before a feed; a shop pouch of live copepods.
+
 ## 4. What already exists in the codebase (from the mapping agents)
 
 Almost everything below the orchestration layer:
@@ -1373,6 +1375,27 @@ unused bottle sits on the shelf saying nothing. Tests: `test_nps.py` 178
 (1 new — the migration; the row test now expects the enrichment bottle's
 legacy row off the strip, the log and the budget, and a plain `other`
 bottle still on the link rule).
+
+### 13.23 0.7.167 — the shop shelf (2026-09-11)
+
+Reece: "can we add some more commonly used product presets to the NPS shelf
+please. i have red sea AB+ for eg." Eleven presets join `PRODUCT_LIBRARY`,
+read from the labels (§3 "Food library facts" carries the numbers): AB+ is
+the one that earns a **dose guide** — Red Sea's 4 / 8 / 12 ml per 100 L a
+day become 25 / 12.5 / 8.3 L per ml, so the hand-dose plan sizes it from
+the Profile tank volume exactly as Reef Juice's does; the bands read as
+Red Sea's tank types (mixed reef / SPS dominant / ULNS) and the dose note
+says so. Guides stay DAILY plans only — the card's hint says "a day", so
+weekly products (MicroBacter7, AF Power Food) carry a note, not a guide.
+Powders follow the Reef-Roids convention: the bottle on the shelf is the
+mixed slurry (one-day clock), the tub keeps dry. Where a label gives no
+opened-bottle clock the preset says the number is an estimate.
+
+One panel change rides along: `_npsAddProduct` now copies the preset's
+`notes` into the new bottle's Notes box. The Reefphyto handling notes were
+written for the keeper in 0.7.117 and had never reached the card. Tests:
+test_nps.py 179 (one new — completeness, unique names, the AB+ maths),
+test_panel_nps 62 (the add test also checks the note).
 
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 

@@ -1558,12 +1558,13 @@ test("the hand-dose plan: the shelf card, the Dosed tap, the settings fields, th
     assert(!panel._config.maintenance.tasks.nps_dose_rj, "a zero cadence removes the reminder");
     // Adding the preset brings the plan and the reminder with it.
     panel._nps.summary.library = [{ name: "Reef Juice (live phyto blend)", brand: "Reefphyto", category: "phyto", bottleMl: 250,
-      shelfLifeDaysOpened: 90, refrigerated: true, stirDaily: true, doseGuide: { light: 27, medium: 18, heavy: 9 }, doseEveryDays: 1, doseNote: "Dusk." }];
+      shelfLifeDaysOpened: 90, refrigerated: true, stirDaily: true, doseGuide: { light: 27, medium: 18, heavy: 9 }, doseEveryDays: 1, doseNote: "Dusk.", notes: "Tank dose only." }];
     panel._setDirty = () => {};
     panel._render = () => {};
     panel._npsAddProduct("0");
     const added = Object.entries(panel._config.consumables.products).find(([, p]) => p.name.startsWith("Reef Juice (live"));
     assert(added && added[1].doseGuide.medium === 18 && added[1].doseEveryDays === 1 && added[1].doseNote === "Dusk.", "the preset's plan must ride along");
+    assert(added[1].notes === "Tank dose only.", "the preset's handling note lands in the Notes box (0.7.167)");
     assert(panel._config.maintenance.tasks[`nps_dose_${added[0]}`]?.cadenceDays === 1, "adding the preset seeds its reminder");
     // The status card and Pulse speak for the due bottle.
     const cards = panel._npsStatusCards();

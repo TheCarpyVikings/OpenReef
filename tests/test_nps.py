@@ -2597,7 +2597,42 @@ def test_hand_dose_stamp_survives_a_stale_save_and_leaves_with_the_bottle():
 def test_the_reef_juice_preset_carries_its_plan():
     rj = next(item for item in nps.PRODUCT_LIBRARY if item["name"].startswith("Reef Juice"))
     assert rj["doseGuide"] == {"light": 27, "medium": 18, "heavy": 9} and rj["doseEveryDays"] == 1 and rj["doseNote"]
-    assert all("doseGuide" not in item for item in nps.PRODUCT_LIBRARY if not item["name"].startswith("Reef Juice"))
+    # A guide is a DAILY plan (the card's hint says "a day"): every preset that
+    # carries one names all three bands and a one-day cadence.
+    for item in nps.PRODUCT_LIBRARY:
+        if "doseGuide" in item:
+            assert set(item["doseGuide"]) == {"light", "medium", "heavy"} and item["doseEveryDays"] == 1 and item["doseNote"], item["name"]
+            assert all(nps._f(v) > 0 for v in item["doseGuide"].values()), item["name"]
+        else:
+            assert "doseEveryDays" not in item and "doseNote" not in item, item["name"]
+
+
+def test_the_shop_shelf_presets_read_their_labels():
+    """0.7.167: the products a keeper buys — every entry complete, names unique,
+    categories known, and Red Sea's AB+ label turned into a guide."""
+    names = [item["name"] for item in nps.PRODUCT_LIBRARY]
+    assert len(names) == len(set(names)), "preset names must be unique — the panel keys buttons by index, the keeper by name"
+    for item in nps.PRODUCT_LIBRARY:
+        assert item["category"] in nps.CATEGORY_LABELS, item["name"]
+        for key in ("brand", "bottleMl", "shelfLifeDaysOpened", "refrigerated", "stirDaily", "particleUmMin", "particleUmMax"):
+            assert key in item, f"{item['name']} lacks {key}"
+        assert nps._f(item["particleUmMax"]) >= nps._f(item["particleUmMin"]), item["name"]
+    by_name = {item["name"]: item for item in nps.PRODUCT_LIBRARY}
+    ab = by_name["Reef Energy Plus (AB+)"]
+    assert ab["brand"] == "Red Sea" and ab["category"] == "amino" and ab["refrigerated"] and ab["shelfLifeDaysOpened"] == 365
+    # 4 / 8 / 12 ml per 100 L a day -> 25 / 12.5 / 8.3 L per ml; a 300 L SPS tank gets 24 ml.
+    assert ab["doseGuide"] == {"light": 25, "medium": 12.5, "heavy": 8.3}
+    guided = nps.hand_dose_guide({"doseGuide": ab["doseGuide"], "doseStocking": "medium"}, 300)
+    assert guided["available"] and guided["ml"] == 24.0
+    assert by_name["Zooplanktos-S"]["particleUmMin"] == 50 and by_name["Zooplanktos-S"]["particleUmMax"] == 300 and not by_name["Zooplanktos-S"]["refrigerated"]
+    assert by_name["Arcti-Pods"]["category"] == "zooPrepared" and by_name["Arcti-Pods"]["particleUmMin"] >= 2000
+    assert by_name["MicroBacter7"]["category"] == "bacteria" and by_name["Coral Frenzy slurry"]["shelfLifeDaysOpened"] == 1
+    assert by_name["Live copepods (shop pouch)"]["category"] == "zooLive"
+    # Every shop preset explains itself — the note is what the card shows.
+    for name in ("Reef Energy Plus (AB+)", "PhytoGreen-M", "Zooplanktos-S", "Arcti-Pods", "Coral Frenzy slurry",
+                 "AF Power Food slurry", "Ultra LPS Grow + Color (M)", "Polyp-Booster", "AF Amino Mix",
+                 "Live copepods (shop pouch)", "MicroBacter7"):
+        assert by_name[name].get("notes"), name
 
 
 

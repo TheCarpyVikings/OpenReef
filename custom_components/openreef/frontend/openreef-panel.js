@@ -10536,7 +10536,9 @@ class OpenReefPanel extends HTMLElement {
       stirDaily: !!(preset && preset.stirDaily),
       particleUmMin: (preset && preset.particleUmMin) || 0,
       particleUmMax: (preset && preset.particleUmMax) || 0,
-      notes: "",
+      // The preset's handling note lands in the Notes box (0.7.167) — it was
+      // written for the keeper and never reached the card before.
+      notes: (preset && typeof preset.notes === "string") ? preset.notes : "",
       createdAt: now,
       history: [],
       // The hand-dose plan: presets that carry a dose guide (Reef Juice's
