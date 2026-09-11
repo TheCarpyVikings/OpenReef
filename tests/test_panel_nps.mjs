@@ -1153,15 +1153,57 @@ test("the enrichment tile holds the Selcon until instar II", async () => {
     };
     // Holding: clean water, no dose yet — the tile says when the dose lands.
     let html = withEnrich({ status: "enriching", hoursElapsed: 3, hoursLeft: null,
-      percent: 0, firstDoseDue: false, secondDoseDue: false }, 8);
-    assert(html.includes("holding — dose at +8 h"), "the holding copy is missing");
+      percent: 0, firstDoseDue: false, secondDoseDue: false, moltInHours: 5 }, 8);
+    assert(html.includes("holding — dose at +8 h") && html.includes("~5 h to go"),
+      "the holding copy must say when the planned dose lands");
     assert(!html.includes(">Add dose<"), "no dose button before the molt");
+    // 0.7.168: the hold is advice — "Dose now" starts the soak early, and the
+    // tap explains which product that is right for (ReefPhyto's live algae).
+    assert(html.includes(">Dose now<") && html.includes('data-action="nps-enrich-dose"'),
+      "the early-dose tap is missing from the holding tile");
+    assert(html.includes("freshly hatched nauplii") && html.includes("wait for instar II"),
+      "the tap must carry both protocols");
+    // Dosed early: the soak runs from the dose, the tile says the feeding
+    // stage is still ahead, and no second first-dose is offered.
+    html = withEnrich({ status: "enriching", hoursElapsed: 1, hoursLeft: 11,
+      percent: 8, firstDoseDue: false, secondDoseDue: false, moltInHours: 5 }, 8);
+    assert(html.includes("11 h of soak left") && html.includes("dosed early — feeding stage (instar II) in ~5 h"),
+      "an early dose must read as early, with the molt still ahead");
+    assert(!html.includes(">Dose now<") && !html.includes(">Add dose<"), "one first dose only");
+    // Past the molt the running soak reads plain.
+    html = withEnrich({ status: "enriching", hoursElapsed: 9, hoursLeft: 3,
+      percent: 75, firstDoseDue: false, secondDoseDue: false, moltInHours: 0 }, 8);
+    assert(html.includes("3 h of soak left") && !html.includes("dosed early"), "no early tag once the molt has passed");
     // The molt has landed: the amber prompt and the Add dose button appear.
     html = withEnrich({ status: "enriching", hoursElapsed: 8.5, hoursLeft: null,
       percent: 0, firstDoseDue: true, secondDoseDue: false }, 8);
     assert(html.includes("planned dose time — check feeding stage"), "the dose-due prompt is missing");
     assert(html.includes('data-action="nps-enrich-dose"'), "the Add dose button is missing");
     noPlaceholders(html, "enrichment dose-delay tile");
+  } finally { restore(); }
+});
+
+test("the mission card says holding, not gut-loading, before any food is in", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const soak = (state) => {
+      panel._nps.summary.hatchery = v2HatcherySummary({
+        state: { status: "none" },
+        enrichment: { hours: 12, doseMl: 1, doseDelayH: 8, batchDoseDelayH: 8, productId: "",
+          productName: "Rotifer & Artemia Enrichment", splitDose: false, sourceVesselId: "",
+          state },
+      });
+      return panel._hatcheryTab();
+    };
+    let html = soak({ status: "enriching", hoursElapsed: 1, hoursLeft: null, percent: 0,
+      firstDoseDue: false, secondDoseDue: false, moltInHours: 6 });
+    assert(html.includes("holding in clean water — dose now, or wait for instar II"),
+      "the holding card must not claim gut-loading before the dose");
+    assert(html.includes("(or dose now)"), "the rig caption offers the early dose too");
+    html = soak({ status: "enriching", hoursElapsed: 2, hoursLeft: 10, percent: 17,
+      firstDoseDue: false, secondDoseDue: false, moltInHours: 5 });
+    assert(html.includes("gut-loading in the vessel"), "once dosed, the card says so");
   } finally { restore(); }
 });
 

@@ -1630,6 +1630,74 @@ def test_ws_enrich_old_batch_doses_immediately():
     assert not conn.errors
 
 
+def test_enrich_state_reports_the_hours_to_the_planned_dose():
+    # 0.7.168: the hold is advice — the card needs to know how far off the
+    # planned feeding stage is, both while holding and after an early dose.
+    holding = nps.enrich_state(_iso(NOW - timedelta(hours=1)), 12, False, "", NOW,
+                               "", 8, _iso(NOW - timedelta(hours=2)))
+    assert holding["firstDoseDue"] is False and holding["moltInHours"] == 6.0
+    # Dosed 1 h ago on a batch loaded 3 h ago: the soak counts from the dose
+    # (11 h left) and the planned feeding stage is still 5 h off.
+    early = nps.enrich_state(_iso(NOW - timedelta(hours=1)), 12, False, "", NOW,
+                             _iso(NOW - timedelta(hours=1)), 8, _iso(NOW - timedelta(hours=3)))
+    assert early["status"] == "enriching" and early["hoursLeft"] == 11.0
+    assert early["firstDoseDue"] is False and early["moltInHours"] == 5.0
+    # Past the molt the number is 0; a no-delay protocol has none to report;
+    # nor does an idle or finished soak.
+    late = nps.enrich_state(_iso(NOW - timedelta(hours=1)), 12, False, "", NOW,
+                            _iso(NOW - timedelta(hours=1)), 8, _iso(NOW - timedelta(hours=9)))
+    assert late["moltInHours"] == 0.0
+    assert nps.enrich_state(_iso(NOW - timedelta(hours=1)), 12, False, "", NOW)["moltInHours"] is None
+    assert nps.enrich_state("", 12, False, "", NOW)["moltInHours"] is None
+    assert nps.enrich_state(_iso(NOW - timedelta(hours=13)), 12, False, "", NOW)["moltInHours"] is None
+
+
+def test_ws_enrich_dose_now_starts_the_soak_early():
+    # Reece (2026-09-11): "can we make it possible to start brine shrimp
+    # enrichment early" — ReefPhyto's live-algae enrichment goes in with
+    # freshly hatched nauplii. A 2 h-old batch, delay 8: engage holds, then
+    # the keeper doses now — debit, clock from the dose, an honest activity
+    # row, and the molt push never fires for a dose already in.
+    entry = _enrich_entry(dose_delay_h=8, mixed_hours_ago=2)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_enrich(hass, conn, {"id": 1}))
+    assert entry.options[CONF_SETTINGS]["consumables"]["products"]["selcon"]["remainingMl"] == 50
+    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 2}))
+    assert not conn.errors, "an early dose must be accepted — the hold is advice"
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["consumables"]["products"]["selcon"]["remainingMl"] == 48
+    assert saved["nps"]["hatchery"]["enrichment"]["state"]["firstDoseAt"]
+    assert any("dose added early" in str(item.get("message", ""))
+               and "planned dose was +8 h" in str(item.get("message", ""))
+               for item in saved["activity"]), "the log must say the dose went in early"
+    run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
+    es = conn.results[-1].payload["hatchery"]["enrichment"]["state"]
+    assert es["status"] == "enriching" and es["hoursLeft"] == 12.0, "the soak runs from the dose"
+    assert es["firstDoseDue"] is False and es["moltInHours"] == 6.0
+    run(integration.websocket_nps_enrich_dose(hass, conn, {"id": 4}))
+    assert conn.errors[-1].code == "already_dosed"
+
+    def _notes(nid):
+        return [c for c in hass.services.calls
+                if c.domain == "persistent_notification" and c.service == "create"
+                and (c.data or {}).get("notification_id") == nid]
+
+    # The batch crosses the molt with the dose already in: nothing to ask for.
+    hatchery = entry.options[CONF_SETTINGS]["nps"]["hatchery"]
+    for holder, key in ((hatchery["enrichment"]["state"], "batchLoadedAt"),
+                        (hatchery["reservoir"], "mixedAt")):
+        holder[key] = (datetime.fromisoformat(holder[key]) - timedelta(hours=7)).isoformat()
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert not _notes("openreef_enrich_dose"), "a dose already in must not be asked for again"
+    assert not _notes("openreef_enrich_done"), "the soak is not done at 1 h"
+    # And the done push counts its hours from the early dose.
+    _elapse_soak(entry)
+    run(integration._async_nps_hatch_ready_push(hass, entry))
+    assert len(_notes("openreef_enrich_done")) == 1
+    assert not _notes("openreef_enrich_dose")
+
+
 def test_enrich_push_reminds_the_first_dose_once():
     entry = _enrich_entry(dose_delay_h=8)
     cfg = entry.options[CONF_SETTINGS]

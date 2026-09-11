@@ -10836,7 +10836,7 @@ class OpenReefPanel extends HTMLElement {
           ? (es.firstDoseDue
             ? "SOAKING — planned dose time: check feeding stage"
             : es.hoursLeft == null
-              ? "SOAKING — holding in clean water until instar II"
+              ? "SOAKING — holding in clean water until instar II (or dose now)"
               : `ENRICHING — ${es.hoursLeft} h of soak left`)
           : "ENRICHMENT DONE — mesh cycle to rinse, then load" };
     }
@@ -12895,7 +12895,7 @@ class OpenReefPanel extends HTMLElement {
       // Selcon goes into the holding vessel; the dose reminder anchors on the
       // loaded batch's age (instar II).
       enrichIdle && !containerStale && !reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
-        ? `<button class="secondary compact-button" data-action="nps-enrich" title="The enrichment into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II). The running hatch is untouched.">Enrich brine</button>` : "",
+        ? `<button class="secondary compact-button" data-action="nps-enrich" title="The enrichment into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II), or dose now from the soak tile for a live-algae enrichment. The running hatch is untouched.">Enrich brine</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${this._npsHatchRemindersExist() ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
@@ -12914,14 +12914,20 @@ class OpenReefPanel extends HTMLElement {
           ? (enrichState.firstDoseDue
             ? `<span style="color:var(--warning-color,#f5a524)">planned dose time — check feeding stage, then add ${this._escape(enrichSum.productName || "the enrichment")}</span>`
             : enrichState.hoursLeft == null
-              ? `holding — dose at +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 8))} h (instar II)`
-              : `~${this._escape(String(enrichState.hoursLeft))} h of soak left`)
+              ? `holding — dose at +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 8))} h (instar II)${Number(enrichState.moltInHours) > 0 ? `, ~${this._escape(String(enrichState.moltInHours))} h to go` : ""}`
+              : `~${this._escape(String(enrichState.hoursLeft))} h of soak left${Number(enrichState.moltInHours) > 0 ? ` · dosed early — feeding stage (instar II) in ~${this._escape(String(enrichState.moltInHours))} h` : ""}`)
           : enrichState.status === "overdue"
             ? `<span style="color:var(--warning-color,#f5a524)">load now — the boost is draining</span>`
             : "<strong>done</strong> — rinse &amp; load"}</small>
         ${enrichState.secondDoseDue ? `<small><span style="color:var(--warning-color,#f5a524)">Top-up due</span></small>` : ""}
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
-          ${enrichState.firstDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-dose">Add dose</button>` : ""}
+          ${enrichState.firstDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-dose">Add dose</button>`
+            // The hold is advice, not a lock (0.7.168): a live-algae enrichment
+            // goes in with freshly hatched nauplii. Same core as "Add dose";
+            // the soak clock runs from the dose.
+            : enrichState.status === "enriching" && enrichState.hoursLeft == null
+              ? `<button class="secondary compact-button" data-action="nps-enrich-dose" title="Start the soak before the planned +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 8))} h. ReefPhyto's Rotifer &amp; Artemia Enrichment is live algae: their page says to add it to freshly hatched nauplii and allow 6–12 h (12 h loads the most DHA). An oil emulsion such as Selcon should wait for instar II — dosed before the molt it only fouls the water. The soak clock runs from the dose.">Dose now</button>`
+              : ""}
           ${enrichState.secondDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-second-dose">Log top-up</button>` : ""}
           <button class="secondary compact-button" data-action="nps-enrich-loaded" ${enrichState.status === "enriching" ? "disabled" : ""} title="Confirm the completed soak. The boost window starts at the planned soak end. Rinse before feeding.">Soak done</button>
           <button class="danger-text compact-button" data-action="nps-enrich-cancel">Cancel</button>
@@ -14215,7 +14221,7 @@ const rigSteps = [
     const batchCard = (es.status && es.status !== "none")
       ? this._missionSummaryCard("Soak",
         es.status === "enriching" ? (es.hoursLeft == null ? "holding" : `${es.hoursLeft} h left`) : "rinse & load",
-        es.firstDoseDue ? "planned dose time — confirm instar II" : es.status === "enriching" ? "gut-loading in the vessel" : "the boost clock is running",
+        es.firstDoseDue ? "planned dose time — confirm instar II" : es.status === "enriching" ? (es.hoursLeft == null ? "holding in clean water — dose now, or wait for instar II" : "gut-loading in the vessel") : "the boost clock is running",
         es.status === "overdue" || es.firstDoseDue ? "warning" : "ok", "hatchery")
       : hs.status === "incubating"
         ? this._missionSummaryCard("Batch", `${hs.percent}%`, `${eggName} · ~${hs.hoursLeft} h to go`, "ok", "hatchery")
@@ -27010,7 +27016,7 @@ const rigSteps = [
       </div>
       <small class="awc-hint">Use a water-temperature sensor where possible. 25–28 °C is a common hatching range. The 8% per degree model is an uncalibrated planning heuristic, not a validated biological equation; confirm hatch-out and use your product’s instructions.</small>
       <small class="awc-hint"><strong>Enrichment</strong> — "Enrich brine" starts a soak in the loaded holding container. Select the dose and duration for your product and nauplii density. Selcon’s manufacturer gives 1–12 h with aeration; 12 h is this app’s default. The 12 h warm / 48 h cold post-soak windows are planning limits, not guarantees of DHA retention or viability.</small>
-      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I cannot feed; enrichment uptake starts at instar II, often several hours after hatching. This reminder counts from loading, which may happen well after hatch-out. Confirm the feeding stage; 0 means the batch can already feed. Cold storage delays development, so elapsed wall time alone cannot confirm readiness.</small>
+      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I cannot feed; enrichment uptake starts at instar II, often several hours after hatching. This reminder counts from loading, which may happen well after hatch-out. Confirm the feeding stage; 0 means the batch can already feed. Cold storage delays development, so elapsed wall time alone cannot confirm readiness. A live-algae enrichment (ReefPhyto's Rotifer &amp; Artemia Enrichment) goes in with freshly hatched nauplii and needs 6–12 h — set 0 here, or tap "Dose now" on a holding soak; an oil emulsion should wait for the molt.</small>
       <div class="mini-grid">
         <label>Soak time (hours)<input type="number" min="1" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
         <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>

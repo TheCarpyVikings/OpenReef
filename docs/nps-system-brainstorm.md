@@ -1397,6 +1397,56 @@ written for the keeper in 0.7.117 and had never reached the card. Tests:
 test_nps.py 179 (one new — completeness, unique names, the AB+ maths),
 test_panel_nps 62 (the add test also checks the note).
 
+### 13.24 0.7.168 — the soak can start early (2026-09-11)
+
+Reece: "can we make it possible to start brine shrimp enrichment early
+please. please read the info from ReefPhyto on their Rotifer & Artemia
+Enrichment." Their product page (fetched and verified 2026-09-11): *"Add
+enrichment to a vessel containing freshly hatched nauplii and allow 6 to 12
+hours before harvesting and feeding. Newly hatched nauplii have an open gut
+that absorbs the enrichment microalgae rapidly. By the end of the enrichment
+period their gut contents are visibly coloured by the Nannochloropsis and
+Isochrysis cells, a reliable visual indicator that gut-loading has occurred
+effectively."* Dose: 1–5 drops, to culture density (a thin culture takes
+less); the full 12 h "produces rotifers with higher DHA loading" than a
+shorter soak. Store refrigerated, use within three months.
+
+The app's hold (§10.3.1) was built for an oil emulsion: instar I has no
+mouth, and Selcon dosed before the molt only fouls the water — so the tile
+sat on "holding — dose at +9 h (instar II)" with nothing to tap but Cancel,
+and the backend never minded (`nps_enrich_dose` never gated on the hour; the
+panel hid the button). A live-algae enrichment is a different animal: the
+cells stay alive in the vessel, nothing fouls, and the supplier's own
+protocol starts the clock at hatch. The biology has not changed (FAO 361's
+molt still lands ~8 h at 28 °C and the code still says so) — the hold is
+ADVICE, and the keeper decides.
+
+What changed:
+- **"Dose now"** on the holding tile — the same `nps_enrich_dose` core as
+  "Add dose". The soak counts from the dose exactly as a due one does, the
+  molt push never fires for a dose already in, and "Soak done" comes due
+  `hours` after the dose. The tap's title carries both protocols so nobody
+  early-doses an emulsion by accident.
+- **`enrich_state.moltInHours`** — hours to the planned feeding stage on the
+  batch's own clock (None when the protocol has no delay; 0 once passed).
+  Holding reads "~6 h to go"; an early dose reads "dosed early — feeding
+  stage (instar II) in ~5 h". Read-time only; nothing joins a save guard.
+- The activity row: "Enrichment dose added early — the batch is 2.1 h old,
+  the planned dose was +8 h; the soak clock runs from now."
+- The mission card's holding line stops claiming "gut-loading in the vessel"
+  before any food is in; the rig caption offers the early dose.
+- The settings hint and the Reefphyto preset note carry the page's protocol
+  (freshly hatched, 6–12 h, 12 h for the most DHA, the visibly coloured gut).
+  A keeper who always uses the algae product sets "First dose at +hours" to
+  0 and the dose goes in at engage, as before.
+- `INTEGRATION_VERSION` catches up: 0.7.167 shipped it at 0.7.166, and it is
+  the panel script's cache-buster, so that release's panel change could have
+  served stale.
+
+Tests: test_nps.py 181 (the `moltInHours` maths; the early-dose WS flow with
+its push discipline), test_panel_nps 63 (the tile test grows the Dose-now,
+dosed-early and past-molt states; a new mission-card test).
+
 ## 14. The hatchery stocks the shelf (2026-09-09, 0.7.149)
 
 Reece's screen: the Species coverage report said *nothing on the shelf

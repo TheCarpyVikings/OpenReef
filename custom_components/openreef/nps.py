@@ -76,8 +76,9 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
      "bottleMl": 100, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 0, "particleUmMax": 0,
      "notes": "Live Nannochloropsis (EPA) + Isochrysis (DHA) — an algae enrichment, not an "
-              "emulsion. 1–5 drops per portion of rotifers or nauplii, 6 h (their pages say 2–4 "
-              "or 6–12), rinse before feeding."},
+              "emulsion. Their page: 1–5 drops per vessel, dosed to density; goes in with "
+              "FRESHLY HATCHED nauplii, 6–12 h before harvest (12 h loads the most DHA); the "
+              "gut reads visibly coloured once it has worked. Rinse before feeding."},
     {"name": "Live phytoplankton blend", "brand": "AlgaeBarn OceanMagik", "category": "phyto",
      "bottleMl": 946, "shelfLifeDaysOpened": 28, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 1, "particleUmMax": 10},
@@ -1410,34 +1411,47 @@ def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
     stamp (``batch_loaded_iso``), not from the moment the button was tapped.
     Evening-enriching a morning batch is due immediately; enriching right
     after loading waits out the molt. Missing stamp falls back to the engage
-    time (the pre-container behaviour)."""
+    time (the pre-container behaviour).
+
+    The hold is advice, not a lock (0.7.168 — Reece, with ReefPhyto's page):
+    their live-algae enrichment goes in with FRESHLY HATCHED nauplii and
+    needs 6–12 h, so ``nps_enrich_dose`` accepts a dose before the planned
+    hour and the soak counts from that dose exactly as it would from a due
+    one. ``moltInHours`` reports how far off the planned feeding stage still
+    is on the batch's own clock (None = the protocol has no delay; 0 = it
+    has passed) so the card can say "dosed early" honestly."""
     started = _parse_iso(started_iso)
     hours = _f(enrich_hours)
     if hours <= 0:
         hours = ENRICH_DEFAULT_HOURS
     if started is None:
         return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
-                "percent": None, "firstDoseDue": False, "secondDoseDue": False}
+                "percent": None, "firstDoseDue": False, "secondDoseDue": False,
+                "moltInHours": None}
     try:
         elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0)
     except TypeError:
         return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
-                "percent": None, "firstDoseDue": False, "secondDoseDue": False}
+                "percent": None, "firstDoseDue": False, "secondDoseDue": False,
+                "moltInHours": None}
     delay_h = max(0.0, _f(dose_delay_h))
     first = _parse_iso(first_dose_iso)
     if first is None and delay_h <= 0:
         first = started  # immediate-dose protocol: food went in at soak start
+    # The age that matters is the BATCH's, measured from its load stamp when
+    # we have one — the molt runs on it whether the dose is in or not.
+    dose_ref = _parse_iso(batch_loaded_iso) or started
+    try:
+        batch_age_h = max(0.0, (now - dose_ref).total_seconds() / 3600.0)
+    except TypeError:
+        batch_age_h = elapsed_h
+    molt_in_h = round(max(0.0, delay_h - batch_age_h), 1) if delay_h > 0 else None
     if first is None:
-        # Holding — waiting for the molt. The age that matters is the BATCH's,
-        # measured from its load stamp when we have one.
-        dose_ref = _parse_iso(batch_loaded_iso) or started
-        try:
-            batch_age_h = max(0.0, (now - dose_ref).total_seconds() / 3600.0)
-        except TypeError:
-            batch_age_h = elapsed_h
+        # Holding — waiting for the molt, or for the keeper to dose now.
         return {"status": "enriching", "hoursElapsed": round(elapsed_h, 1),
                 "hoursLeft": None, "percent": 0.0,
-                "firstDoseDue": batch_age_h >= delay_h, "secondDoseDue": False}
+                "firstDoseDue": batch_age_h >= delay_h, "secondDoseDue": False,
+                "moltInHours": molt_in_h}
     fed_h = max(0.0, (now - first).total_seconds() / 3600.0)
     second_due = (bool(split_dose)
                   and _parse_iso(second_dose_iso) is None
@@ -1448,11 +1462,13 @@ def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
                 "hoursElapsed": round(elapsed_h, 1),
                 "hoursLeft": round(hours - fed_h, 1),
                 "percent": round(min(99.0, fed_h / hours * 100.0), 0),
-                "firstDoseDue": False, "secondDoseDue": second_due}
+                "firstDoseDue": False, "secondDoseDue": second_due,
+                "moltInHours": molt_in_h}
     status = "overdue" if fed_h > hours + ENRICH_OVERDUE_GRACE_H else "done"
     return {"status": status, "hoursElapsed": round(elapsed_h, 1),
             "hoursLeft": 0.0, "percent": 100.0,
-            "firstDoseDue": False, "secondDoseDue": False}
+            "firstDoseDue": False, "secondDoseDue": False,
+            "moltInHours": None}
 
 
 def instar_two_delay_hours(temp_c: Any = None,

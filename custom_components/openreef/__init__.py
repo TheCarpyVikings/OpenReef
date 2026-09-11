@@ -15052,7 +15052,10 @@ def _nps_enrich_loaded_apply(config: dict[str, Any], now: datetime) -> tuple[str
 def _nps_enrich_dose_apply(config: dict[str, Any], now: datetime) -> tuple[str, str] | None:
     """Log the FIRST enrichment dose (delayed protocols): the batch crossed
     instar II, the Selcon goes in now — debit the bottle and anchor the soak
-    clock proper here."""
+    clock proper here. Accepted BEFORE the planned hour as well (0.7.168):
+    the instar II hold is advice, not a lock — ReefPhyto's live-algae
+    enrichment goes in with freshly hatched nauplii and needs 6–12 h, and
+    the keeper decides. The soak counts from the dose either way."""
     hatchery = _nps_hatchery_v2(config)
     state = hatchery["enrichment"]["state"]
     if not state.get("startedAt"):
@@ -15067,7 +15070,21 @@ def _nps_enrich_dose_apply(config: dict[str, Any], now: datetime) -> tuple[str, 
         return "stale_brine", "The waiting batch has expired; cancel the soak and discard it."
     _nps_enrich_debit(config, hatchery["enrichment"])
     state["firstDoseAt"] = now.isoformat()
-    _append_activity(config, "Enrichment dose added — the soak proper begins", "control")
+    # Ahead of the planned hour (0.7.168): say so, and that the clock runs
+    # from here — the log is the keeper's record of which protocol they ran.
+    delay_h = _awc_num(state.get("doseDelayH"), 0, 0, 24)
+    loaded = (_parse_datetime(state.get("batchLoadedAt"))
+              or _parse_datetime(state.get("startedAt")))
+    batch_age_h = ((now - loaded).total_seconds() / 3600.0
+                   if loaded is not None else delay_h)
+    if delay_h > 0 and batch_age_h < delay_h:
+        _append_activity(
+            config,
+            f"Enrichment dose added early — the batch is {batch_age_h:.1f} h old, the "
+            f"planned dose was +{delay_h:g} h; the soak clock runs from now",
+            "control")
+    else:
+        _append_activity(config, "Enrichment dose added — the soak proper begins", "control")
     return None
 
 
