@@ -164,4 +164,34 @@ test("timelapse clear sits on the Cameras tab; the Pulse device face rides with 
   assert(faces.includes('data-action="pulse-device-face" data-id="follow"') && faces.includes("pulse-device-faces"));
 });
 
+
+// --- Stage C: data editors out of Settings --------------------------------------
+
+test("the three data editors are dialogs off their tabs; Settings only points at them", async () => {
+  const panel = await makePanel({ maintenance: { enabled: true, tasks: {} }, nps: { species: [] }, consumables: { products: {} }, diagram: {} });
+  panel._nps = { summary: { speciesLibrary: [], library: [] }, loading: false };
+  panel._configDirty = false;
+  panel._settingsSectionOpen = () => true;
+  panel._healthSections = {};
+  panel._settingsPanel = (id, title, description, content) => `<!--${id}-->${content}`;
+  // Maintenance
+  const maint = panel._maintenanceSettings(true);
+  assert(!maint.includes("add-maintenance-task") && !maint.includes("load-suggested-tasks") && maint.includes('data-action="maintenance-tasks-open"'));
+  const tasks = panel._maintenanceTasksDialog();
+  assert(tasks.includes('data-action="add-maintenance-task"') && tasks.includes('data-action="load-suggested-tasks"') && tasks.includes('data-action="maintenance-tasks-close"'));
+  // NPS
+  let nps = "";
+  try { nps = panel._npsSettings(); } catch { nps = ""; }
+  if (nps) assert(!nps.includes('data-action="nps-add-product"') && nps.includes('data-action="nps-library-open"'));
+  const library = panel._npsLibraryDialog();
+  assert(library.includes('data-action="nps-add-product" data-library="custom"') && library.includes('data-action="nps-library-close"'));
+  // Diagram
+  let diagram = "";
+  try { diagram = panel._diagramSettings(); } catch { diagram = ""; }
+  if (diagram) assert(!diagram.includes("coral-pick-species") && diagram.includes('data-action="coral-open"'));
+  panel._coralRegistryMarkup = () => `<!--registry-->`;
+  const coral = panel._coralDialog();
+  assert(coral.includes("<!--registry-->") && coral.includes('data-action="coral-close"'));
+});
+
 await runTests();

@@ -188,12 +188,21 @@ test("the settings section carries every moved form", async () => {
       html = null;
     }
     if (html !== null) {
-      for (const scope of ["nps-exchange", "nps-truce", "nps-species", "consumable"]) {
+      for (const scope of ["nps-exchange", "nps-truce"]) {
         assert(html.includes(`data-scope="${scope}"`), `settings missing the ${scope} form`);
       }
       assert(html.includes("Salinity rule"), "salinity rule copy missing from settings");
-      assert(html.includes("Bottle size (ml)"), "product editor missing from settings");
+      // 0.7.178: species and the shelf are livestock/stock — the Species & shelf dialog off the NPS tab.
+      for (const scope of ["nps-species", "consumable"]) {
+        assert(!html.includes(`data-scope="${scope}"`), `settings still carries the ${scope} form`);
+      }
+      assert(html.includes('data-action="nps-library-open"'), "settings points at the dialog");
     }
+    const library = panel._npsLibraryDialogBody();
+    for (const scope of ["nps-species", "consumable"]) {
+      assert(library.includes(`data-scope="${scope}"`), `the dialog is missing the ${scope} form`);
+    }
+    assert(library.includes("Bottle size (ml)"), "product editor missing from the dialog");
   } finally { restore(); }
 });
 
@@ -1880,7 +1889,7 @@ test("the species grid files the catalogue by family, and falls back flat withou
     const panel = await npsPanel();
     panel._settingsSections = { nps: true };
     // No groups on the summary (the demo, an older backend): one flat grid, no family headings.
-    let html = panel._npsSettings();
+    let html = panel._npsLibraryDialogBody();
     assert(html.includes('data-id="tubastraea"'), "the flat grid lost the species");
     assert(!html.includes("Stony NPS corals"), "no groups on the summary must mean no headings");
     // Groups ride the summary: one heading + grid per family, in the backend's order, empty families skipped.
@@ -1896,7 +1905,7 @@ test("the species grid files the catalogue by family, and falls back flat withou
       { id: "mystery", name: "Ungrouped thing", difficulty: 2, note: "" },
     ];
     panel._config.nps.species = ["gorgonian_fan"];
-    html = panel._npsSettings();
+    html = panel._npsLibraryDialogBody();
     const order = ["Stony NPS corals", 'data-id="tubastraea"', "Gorgonians (non-photosynthetic)", 'data-id="gorgonian_whip"',
       'data-id="gorgonian_fan"', "Filter feeders, worms, anemones &amp; echinoderms", 'data-id="seaapple"', ">Other<", 'data-id="mystery"'];
     let last = -1;
@@ -2347,7 +2356,7 @@ test("species coverage reads each mouth: the foods, the size, who feeds it (0.7.
     panel._settingsSections = { nps: true };
     panel._nps.summary.speciesLibrary = [{ id: "gorgonian_easy", group: "gorgonian", name: "Gorgonians — Menella, Swiftia, Diodogorgia", difficulty: 2, note: "",
       foodWords: ["prepared zooplankton", "live zooplankton"], particle: "50–500 µm" }];
-    const settings = panel._npsSettings();
+    const settings = panel._npsLibraryDialogBody();
     assert(settings.includes("Difficulty ●●○○○ · prepared zooplankton, live zooplankton · 50–500 µm"), `settings grid: ${(settings.match(/Difficulty[^<]*/) || [])[0]}`);
   } finally { restore(); }
 });

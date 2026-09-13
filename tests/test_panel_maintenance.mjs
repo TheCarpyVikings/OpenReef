@@ -337,16 +337,17 @@ test("test_the_checklist_ticks_for_the_visit_and_the_usual_steps_are_one_tap_awa
     const bare = await makePanel(configForCase({}));
     assert(!bare._maintenanceTaskCard("subject").includes("maintenance-steps"));
     // Settings: one step per line, and the usual steps for a suggested chore.
-    const settings = panel._maintenanceSettings(true);
+    // 0.7.178: the task editor is the Manage tasks dialog off the Maintenance tab.
+    const settings = panel._maintenanceTasksDialogBody();
     assert(settings.includes('data-field="stepsText"') && settings.includes("Return pump off\nSiphon\nRefill</textarea>"), "the textarea round-trips the lines");
     const wc = await makePanel({ maintenance: { enabled: true, tasks: { water_change: { label: "Water change", enabled: true, cadenceDays: 7, criticalAfterDays: 14, scheduleMode: "interval", builtin: true } }, completions: {} } });
     wc._render = () => {};
     wc._setDirty = () => {};
-    assert(wc._maintenanceSettings(true).includes('data-action="maintenance-usual-steps" data-id="water_change"'), "a suggested chore without steps offers the usual ones");
+    assert(wc._maintenanceTasksDialogBody().includes('data-action="maintenance-usual-steps" data-id="water_change"'), "a suggested chore without steps offers the usual ones");
     wc._maintenanceUsualSteps("water_change");
     const steps = wc._config.maintenance.tasks.water_change.steps;
     assert(Array.isArray(steps) && steps.length === 5 && steps[0] === "Return pump and skimmer off", JSON.stringify(steps));
-    assert(!wc._maintenanceSettings(true).includes('data-action="maintenance-usual-steps"'), "once taken, the offer goes");
+    assert(!wc._maintenanceTasksDialogBody().includes('data-action="maintenance-usual-steps"'), "once taken, the offer goes");
     wc._maintenanceUsualSteps("no_such_task");
   } finally {
     restore();

@@ -149,3 +149,27 @@ Stayed in Settings on purpose: the AWC demo-mode toggle (see §7).
 
 Tests: `test_panel_settings.mjs` 8 (+4), AWC flood test reads the dialog body, cultures and
 NPS pouch tests read the tile line. All panel suites green.
+
+## 9. Stage C — built as 0.7.178 (2026-09-13)
+
+Data editors out of Settings, each a dialog off the tab that shows the data (Reece chose the
+dialog over an inline section, §6):
+
+| moved | from | to |
+|---|---|---|
+| Reef layer coral registry (species/colour pickers, add, starter set) | Settings → Tank diagram | Diagram tab → **🪸 Reef layer** dialog (`_coralDialog` wraps `_coralRegistryMarkup`). Settings keeps system type, aquascape and the three wall toggles. |
+| Species you keep + Food shelf (presets, product cards) | Settings → Automated NPS | NPS tab → **Species & shelf** dialog (`_npsLibraryDialogBody` re-derives the library from the summary and lazy-loads it). Settings keeps the enable toggle, feed-exchange, truce, food-pump creators and the water-exchange link. The NPS tab body itself still carries no forms — the dialog renders globally. |
+| Task editor (add, remove, suggested, cadence, steps) | Settings → Maintenance | Maintenance tab → **Manage tasks** dialog (`_maintenanceTasksDialogBody`). Settings keeps tracking, AWC logging and reminders. |
+
+Every editing dialog carries `_saveControls()` in its head, so a change made there saves
+without a trip to Settings. All three flags clear on any tab change.
+
+Tests: `test_panel_settings.mjs` 9 (+1); NPS and maintenance suites read the dialog bodies
+where they used to read Settings.
+
+## 10. Where this leaves Settings
+
+Fields, toggles and mappings only, in six groups, ~4,000 words lighter. Every readout, every
+operation and every livestock/stock editor now lives on its own screen or in a dialog off it.
+Two things stayed by design: the AWC demo-mode toggle (§7) and the Lighting "today" window,
+which is a preview of the setting it sits under.

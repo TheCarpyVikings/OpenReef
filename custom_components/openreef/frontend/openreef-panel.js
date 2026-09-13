@@ -1230,6 +1230,9 @@ class OpenReefPanel extends HTMLElement {
         this._coolingDialogOpen = false;
         this._awcPumpsDialogOpen = false;
         this._systemCheckDialogOpen = false;
+        this._coralDialogOpen = false;
+        this._npsLibraryDialogOpen = false;
+        this._maintenanceTasksDialogOpen = false;
         this._cameraFocus = null;
         this._cameraFullscreenFallback = false;
         this._recordingFocus = null;
@@ -1326,6 +1329,12 @@ class OpenReefPanel extends HTMLElement {
       if (action === "spawn-exec-resume") this._spawnExecResume();
       if (action === "spawn-exec-refresh") this._loadSpawnExecStatus(true);
       if (action === "cooling-refresh") this._loadCoolingStatus(true);
+      if (action === "coral-open") { this._coralDialogOpen = true; this._render(); }
+      if (action === "coral-close") { this._coralDialogOpen = false; this._render(); }
+      if (action === "nps-library-open") { this._npsLibraryDialogOpen = true; this._render(); }
+      if (action === "nps-library-close") { this._npsLibraryDialogOpen = false; this._render(); }
+      if (action === "maintenance-tasks-open") { this._maintenanceTasksDialogOpen = true; this._render(); }
+      if (action === "maintenance-tasks-close") { this._maintenanceTasksDialogOpen = false; this._render(); }
       if (action === "awc-pumps-open") { this._awcPumpsDialogOpen = true; this._render(); }
       if (action === "awc-pumps-close") { this._awcPumpsDialogOpen = false; this._render(); }
       if (action === "system-check-open") { this._systemCheckDialogOpen = true; this._render(); }
@@ -7136,6 +7145,9 @@ class OpenReefPanel extends HTMLElement {
         ${this._coolingDialogOpen ? this._coolingDialog() : ""}
         ${this._awcPumpsDialogOpen ? this._awcPumpsDialog() : ""}
         ${this._systemCheckDialogOpen ? this._systemCheckDialog() : ""}
+        ${this._coralDialogOpen ? this._coralDialog() : ""}
+        ${this._npsLibraryDialogOpen ? this._npsLibraryDialog() : ""}
+        ${this._maintenanceTasksDialogOpen ? this._maintenanceTasksDialog() : ""}
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
         ${this._equipmentDetail ? this._equipmentDetailModal() : ""}
         ${this._controlConfirm ? this._controlConfirmModal() : ""}
@@ -14521,6 +14533,7 @@ const rigSteps = [
       <div class="section-head">
         <div><h2>Automated NPS System</h2><p>Feeding non-photosynthetic corals is a logistics problem — OpenReef turns it into a schedule. Food pumps, the bottle shelf, and the water exchange in one place.</p></div>
         <div class="button-row">
+          <button class="secondary compact-button" data-action="nps-library-open">Species &amp; shelf</button>
           <button class="secondary compact-button" data-action="nps-demo-toggle">${st.demo ? "Exit demo" : "Demo view"}</button>
           ${st.demo ? "" : `<button class="secondary compact-button" data-action="nps-refresh">Refresh</button>`}
         </div>
@@ -20694,6 +20707,25 @@ const rigSteps = [
   // Settings-side registry: name it, pick species and colour, and it appears
   // on the rockwork. Species decides the zone; drag it between valid spots in
   // arrange mode like any other node.
+  // The Reef layer dialog (0.7.178): the coral registry, off the Diagram tab.
+  _coralDialog() {
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog coral-dialog">
+          <button class="close" data-action="coral-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Living diagram</p>
+              <div class="live-trend-title"><h2>Reef layer</h2></div>
+              <p class="muted">The corals on your rock — pick a species and a colour, place it, and the diagram and the Pulse wall draw it. Saved with your settings.</p>
+            </div>
+            ${this._saveControls()}
+          </div>
+          ${this._coralRegistryMarkup()}
+        </section>
+      </div>`;
+  }
+
   _coralRegistryMarkup() {
     const corals = this._diagramCorals();
     const pick = this._coralPickSpecies || "zoa";
@@ -20898,6 +20930,7 @@ const rigSteps = [
           <div class="settings-toolbar">
             <button class="secondary compact-button" data-action="diagram-full">⤢ Full screen</button>
             <button class="secondary compact-button" data-action="diagram-arrange">${this._diagramArranging ? "✓ Done arranging" : "✎ Arrange"}</button>
+            <button class="secondary compact-button" data-action="coral-open">🪸 Reef layer</button>
             <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Configure</button>
             ${this._pulseEnabled() ? `<button class="secondary compact-button" data-action="open-pulse">✨ Present</button>` : ""}
           </div>
@@ -27966,6 +27999,63 @@ const rigSteps = [
     return out;
   }
 
+  // Species & shelf (0.7.178): the species you keep and the food-shelf
+  // bottles — livestock and stock, edited from the NPS tab, not Settings.
+  _npsLibraryDialogBody() {
+    const npsCfg = (this._config && this._config.nps) || {};
+    const selectedSpecies = Array.isArray(npsCfg.species) ? npsCfg.species : [];
+    const products = this._config?.consumables?.products || {};
+    const pids = Object.keys(products).sort((a, b) =>
+      String(products[a].name || "").localeCompare(String(products[b].name || "")));
+    // The species/product libraries ride the NPS summary — lazy-load so the
+    // dialog works before the tab was opened.
+    if (this._nps.summary === null && !this._nps.loading) {
+      setTimeout(() => this._npsLoadSummary(), 0);
+    }
+    const speciesLib = (this._nps.summary && this._nps.summary.speciesLibrary) || [];
+    const library = (this._nps.summary && this._nps.summary.library) || [];
+    const diffDots = (d) => this._npsDifficultyDots(d);
+    return `
+      <div class="awc-section-title"><p class="eyebrow">Species you keep</p></div>
+      <small class="awc-hint">The tab's coverage report checks the shelf feeds every mouth (food type AND particle size) and shapes each pump's cadence. Photosynthetic gorgonians (Pseudopterogorgia, Plexaurella, Muricea) feed themselves and are deliberately not listed.</small>
+      ${speciesLib.length ? this._npsSpeciesGroups(speciesLib).map((g) => `
+        ${g.name ? `<p class="eyebrow" style="margin:10px 0 4px;">${this._escape(g.name)}</p>` : ""}
+        <div class="mini-grid">
+          ${g.species.map((s) => `
+          <label class="toggle-card compact-toggle" title="${this._escape(s.note || "")}">
+            <input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}>
+            <span><strong>${this._escape(s.name)}</strong><small>Difficulty ${diffDots(s.difficulty)}${Array.isArray(s.foodWords) && s.foodWords.length ? ` · ${this._escape(s.foodWords.join(", "))}` : ""}${s.particle ? ` · ${this._escape(String(s.particle))}` : ""}</small></span>
+          </label>`).join("")}
+        </div>`).join("")
+        : `<div class="mini-grid"><small class="awc-hint">${this._nps.loading ? "Loading the species library…" : "Species library loads with the NPS summary — open the NPS tab once if this stays empty."}</small></div>`}
+
+      <div class="awc-section-title"><p class="eyebrow">Food shelf</p></div>
+      <small class="awc-hint">Presets carry handling metadata from the NPS research — shelf life, fridge, stirring, particle size. Everything stays editable. Edits save with the Save bar.</small>
+      <div class="button-row" style="flex-wrap:wrap;">
+        ${library.map((p, i) => `<button class="secondary compact-button" data-action="nps-add-product" data-library="${i}">${this._escape(p.name)}</button>`).join("")}
+        <button class="secondary compact-button" data-action="nps-add-product" data-library="custom">Custom product</button>
+      </div>
+      ${pids.map((pid) => this._npsProductSettingsCard(pid, products[pid])).join("")}`;
+  }
+
+  _npsLibraryDialog() {
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog nps-library-dialog">
+          <button class="close" data-action="nps-library-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Automated NPS</p>
+              <div class="live-trend-title"><h2>Species &amp; shelf</h2></div>
+              <p class="muted">Tick the animals you keep and the coverage report checks the shelf feeds every mouth. Add bottles from the presets and edit them here. Saved with your settings.</p>
+            </div>
+            ${this._saveControls()}
+          </div>
+          ${this._npsLibraryDialogBody()}
+        </section>
+      </div>`;
+  }
+
   _npsSettings() {
     const npsCfg = (this._config && this._config.nps) || {};
     const fxCfg = npsCfg.feedExchange || {};
@@ -27995,19 +28085,8 @@ const rigSteps = [
         <span><strong>Enable the NPS tab</strong><small>The tab stays informative — every knob lives here.</small></span>
       </label>
 
-      <div class="awc-section-title"><p class="eyebrow">Species you keep</p></div>
-      <small class="awc-hint">The tab's coverage report checks the shelf feeds every mouth (food type AND particle size) and shapes each pump's cadence. Photosynthetic gorgonians (Pseudopterogorgia, Plexaurella, Muricea) feed themselves and are deliberately not listed.</small>
-      ${speciesLib.length ? this._npsSpeciesGroups(speciesLib).map((g) => `
-        ${g.name ? `<p class="eyebrow" style="margin:10px 0 4px;">${this._escape(g.name)}</p>` : ""}
-        <div class="mini-grid">
-          ${g.species.map((s) => `
-          <label class="toggle-card compact-toggle" title="${this._escape(s.note || "")}">
-            <input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}>
-            <span><strong>${this._escape(s.name)}</strong><small>Difficulty ${diffDots(s.difficulty)}${Array.isArray(s.foodWords) && s.foodWords.length ? ` · ${this._escape(s.foodWords.join(", "))}` : ""}${s.particle ? ` · ${this._escape(String(s.particle))}` : ""}</small></span>
-          </label>`).join("")}
-        </div>`).join("")
-        : `<div class="mini-grid"><small class="awc-hint">${this._nps.loading ? "Loading the species library…" : "Species library loads with the NPS summary — open the NPS tab once if this stays empty."}</small></div>`}
-
+      <div class="awc-section-title"><p class="eyebrow">Species &amp; shelf</p></div>
+      <small class="awc-hint">The species you keep and the bottles on the food shelf are livestock and stock, not settings — they are edited from the NPS tab. <button class="secondary compact-button" data-action="nps-library-open">Open Species &amp; shelf</button></small>
       <div class="awc-section-title"><p class="eyebrow">Brine feed-exchange</p></div>
       <small class="awc-hint">Every dose on the linked channel — and its line-flush chaser — banks a matched drain the AWC drain pump runs back out when idle.</small>
       <small class="awc-hint">⚠️ <strong>Salinity rule:</strong> only link a channel whose reservoir is <strong>tank-salinity</strong> (rinsed brine resuspended in tank-strength saltwater). Matching a drain to phyto, bacteria or any unmatched liquid removes salt against a fresh addition and slowly freshens the tank — those pumps are deliberately left out of the exchange.</small>
@@ -28044,14 +28123,6 @@ const rigSteps = [
         <button class="secondary compact-button" data-action="nps-add-food-pump" data-label="Bacteria">+ Bacteria pump</button>
         <button class="secondary compact-button" data-action="nps-add-brine-pump">+ Live brine pump</button>
       </div>
-
-      <div class="awc-section-title"><p class="eyebrow">Food shelf</p></div>
-      <small class="awc-hint">Presets carry handling metadata from the NPS research — shelf life, fridge, stirring, particle size. Everything stays editable. Edits save with the Save bar.</small>
-      <div class="button-row" style="flex-wrap:wrap;">
-        ${library.map((p, i) => `<button class="secondary compact-button" data-action="nps-add-product" data-library="${i}">${this._escape(p.name)}</button>`).join("")}
-        <button class="secondary compact-button" data-action="nps-add-product" data-library="custom">Custom product</button>
-      </div>
-      ${pids.map((pid) => this._npsProductSettingsCard(pid, products[pid])).join("")}
 
       <div class="awc-section-title"><p class="eyebrow">Water exchange</p></div>
       <small class="awc-hint">The exchange schedule is the Automatic Water Change's — one source of truth, edited in Settings → Automatic Water Change.</small>
@@ -28536,7 +28607,8 @@ const rigSteps = [
             <p>Your recurring reef chores — tick them off and OpenReef tracks what's due.</p>
           </div>
           <div class="button-row">
-            <button class="secondary" data-action="tab" data-id="settings">Edit tasks</button>
+            <button class="secondary" data-action="maintenance-tasks-open">Manage tasks</button>
+            <button class="secondary" data-action="tab" data-id="settings" data-section="maintenance" data-scroll="or-section-maintenance">Settings</button>
           </div>
         </div>
         <div class="summary-grid">
@@ -29186,48 +29258,10 @@ const rigSteps = [
     `;
   }
 
-  _maintenanceSettings(forceOpen = false) {
-    const config = this._maintenanceConfig();
+  // Manage tasks (0.7.178): the task list editor, off the Maintenance tab.
+  _maintenanceTasksDialogBody() {
     const tasks = this._maintenanceTaskList();
-    const reminders = config.reminders || {};
-    return this._settingsPanel(
-      "maintenance",
-      "Maintenance",
-      "Your recurring reef chores. Enable the ones you do, set cadences, or add your own.",
-      `
-        <label class="toggle-card">
-          <input type="checkbox" data-scope="maintenance" data-field="enabled" ${config.enabled === false ? "" : "checked"}>
-          <span>
-            <strong>Track maintenance tasks</strong>
-            <small>Enabled tasks show on the Maintenance tab; overdue ones surface in Attention and gently nudge Reef Health.</small>
-          </span>
-        </label>
-        <label class="toggle-card">
-          <input type="checkbox" data-scope="maintenance" data-field="logAwcChanges" ${config.logAwcChanges === false ? "" : "checked"}>
-          <span>
-            <strong>Log automatic water changes</strong>
-            <small>Every completed AWC run is recorded against your water-change task — tagged <em>auto</em> in the history and shown as its own colour in the weekly chart. Runs on the same day are merged into one entry. Turn this off to chart only the changes you log by hand.</small>
-          </span>
-        </label>
-        <div class="setting-card subtle-card">
-          <div class="section-head"><div><p class="eyebrow">Reminders</p><h3>HA-native nudges — free, unlimited, no app paywall</h3></div></div>
-          <label class="toggle-card">
-            <input type="checkbox" data-scope="maintenance-reminders" data-field="enabled" ${reminders.enabled === false ? "" : "checked"}>
-            <span><strong>Remind me when tasks are due</strong><small>One daily check fires an in-Home-Assistant notification (plus an optional push to any notify service) for anything due or overdue, and names any bottle running low — never a second-by-second nag.</small></span>
-          </label>
-          ${reminders.enabled === false ? "" : `
-            <div class="mini-grid">
-              <label>Daily check time<input type="time" data-scope="maintenance-reminders" data-field="time" value="${this._escape(reminders.time || "09:00")}"></label>
-              <label>Push target — any notify service<input data-scope="maintenance-reminders" data-field="notifyTarget" value="${this._escape(reminders.notifyTarget || "")}" placeholder="mobile_app_pixel, or a notify group"><small>The name after <code>notify.</code> — a phone, a notify group, Telegram, anything Home Assistant can notify. Blank = in-HA notifications only.</small></label>
-            </div>
-            <label class="toggle-card">
-              <input type="checkbox" data-scope="maintenance-reminders" data-field="persistent" ${reminders.persistent === false ? "" : "checked"}>
-              <span><strong>Show in-HA persistent notifications</strong><small>A dashboard notification per due task that clears the moment you mark it done. Turn off for phone-push only.</small></span>
-            </label>
-            <p class="muted">Automations can listen for <code>openreef_maintenance_due</code>, <code>openreef_maintenance_done</code> and <code>openreef_consumable_low</code> — fired on the daily check and whenever a task is logged done.</p>
-            <p class="muted">Phone push calls a Home Assistant <code>notify.&lt;target&gt;</code> service — the companion app creates one like <code>notify.mobile_app_yourphone</code>, so enter <code>mobile_app_yourphone</code>. Leave it empty for in-HA notifications only.</p>
-          `}
-        </div>
+    return `
         <div class="section-head">
           <div><p class="eyebrow">Add a task</p></div>
           <div class="button-row">
@@ -29302,7 +29336,70 @@ const rigSteps = [
               `;
             }).join("")}
           </div>
-        ` : `<p class="muted">No tasks yet — add one above or hit "Load suggested".</p>`}
+        ` : `<p class="muted">No tasks yet — add one above or hit "Load suggested".</p>`}`;
+  }
+
+  _maintenanceTasksDialog() {
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog maintenance-tasks-dialog">
+          <button class="close" data-action="maintenance-tasks-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Maintenance</p>
+              <div class="live-trend-title"><h2>Manage tasks</h2></div>
+              <p class="muted">Your recurring reef chores: add your own, load the suggested ones, set cadences and steps. Saved with your settings.</p>
+            </div>
+            ${this._saveControls()}
+          </div>
+          ${this._maintenanceTasksDialogBody()}
+        </section>
+      </div>`;
+  }
+
+  _maintenanceSettings(forceOpen = false) {
+    const config = this._maintenanceConfig();
+    const tasks = this._maintenanceTaskList();
+    const reminders = config.reminders || {};
+    return this._settingsPanel(
+      "maintenance",
+      "Maintenance",
+      "Your recurring reef chores. Enable the ones you do, set cadences, or add your own.",
+      `
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="maintenance" data-field="enabled" ${config.enabled === false ? "" : "checked"}>
+          <span>
+            <strong>Track maintenance tasks</strong>
+            <small>Enabled tasks show on the Maintenance tab; overdue ones surface in Attention and gently nudge Reef Health.</small>
+          </span>
+        </label>
+        <label class="toggle-card">
+          <input type="checkbox" data-scope="maintenance" data-field="logAwcChanges" ${config.logAwcChanges === false ? "" : "checked"}>
+          <span>
+            <strong>Log automatic water changes</strong>
+            <small>Every completed AWC run is recorded against your water-change task — tagged <em>auto</em> in the history and shown as its own colour in the weekly chart. Runs on the same day are merged into one entry. Turn this off to chart only the changes you log by hand.</small>
+          </span>
+        </label>
+        <div class="setting-card subtle-card">
+          <div class="section-head"><div><p class="eyebrow">Reminders</p><h3>HA-native nudges — free, unlimited, no app paywall</h3></div></div>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="maintenance-reminders" data-field="enabled" ${reminders.enabled === false ? "" : "checked"}>
+            <span><strong>Remind me when tasks are due</strong><small>One daily check fires an in-Home-Assistant notification (plus an optional push to any notify service) for anything due or overdue, and names any bottle running low — never a second-by-second nag.</small></span>
+          </label>
+          ${reminders.enabled === false ? "" : `
+            <div class="mini-grid">
+              <label>Daily check time<input type="time" data-scope="maintenance-reminders" data-field="time" value="${this._escape(reminders.time || "09:00")}"></label>
+              <label>Push target — any notify service<input data-scope="maintenance-reminders" data-field="notifyTarget" value="${this._escape(reminders.notifyTarget || "")}" placeholder="mobile_app_pixel, or a notify group"><small>The name after <code>notify.</code> — a phone, a notify group, Telegram, anything Home Assistant can notify. Blank = in-HA notifications only.</small></label>
+            </div>
+            <label class="toggle-card">
+              <input type="checkbox" data-scope="maintenance-reminders" data-field="persistent" ${reminders.persistent === false ? "" : "checked"}>
+              <span><strong>Show in-HA persistent notifications</strong><small>A dashboard notification per due task that clears the moment you mark it done. Turn off for phone-push only.</small></span>
+            </label>
+            <p class="muted">Automations can listen for <code>openreef_maintenance_due</code>, <code>openreef_maintenance_done</code> and <code>openreef_consumable_low</code> — fired on the daily check and whenever a task is logged done.</p>
+            <p class="muted">Phone push calls a Home Assistant <code>notify.&lt;target&gt;</code> service — the companion app creates one like <code>notify.mobile_app_yourphone</code>, so enter <code>mobile_app_yourphone</code>. Leave it empty for in-HA notifications only.</p>
+          `}
+        </div>
+        <p class="muted">The task list itself — add, remove, cadence, the suggested chores — is managed from the Maintenance tab. <button class="secondary compact-button" data-action="maintenance-tasks-open">Manage tasks</button></p>
       `,
       forceOpen,
     );
@@ -29666,7 +29763,7 @@ const rigSteps = [
             <small>A small column of live values (temp, pH, salinity, alk…) floats in the display — up to four, tinted when out of range, tappable for history.</small>
           </span>
         </label>
-        ${this._coralRegistryMarkup()}
+        <p class="muted">The <strong>Reef layer</strong> — the corals on your rock, their species and colours — is livestock, not a setting: edit it from the Diagram tab. <button class="secondary compact-button" data-action="coral-open">Open the Reef layer</button></p>
         <p class="muted">${mapped.length
           ? `On your diagram right now: ${this._escape(mapped.join(", "))}. It draws whatever is switch-mapped in Equipment (plus your dosing channels) — map more gear and it appears.`
           : "Nothing to draw yet — map your gear in Settings → Equipment (return pump, wavemakers, heater, skimmer, ATO, lighting) and it appears on the diagram automatically."}</p>
@@ -31741,7 +31838,8 @@ ${parts.buttons}
         .how-it-works-body p { margin: 0; }
         .issue-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; margin: -2px 0 4px; }
         .issue-actions small { color: #9fb2c7; }
-        .awc-pumps-dialog, .system-check-dialog { max-width: 1000px; gap: 14px; }
+        .awc-pumps-dialog, .system-check-dialog, .coral-dialog, .nps-library-dialog, .maintenance-tasks-dialog { max-width: 1000px; gap: 14px; }
+        .coral-dialog .settings-save, .nps-library-dialog .settings-save, .maintenance-tasks-dialog .settings-save { align-self: flex-start; }
         .awc-pumps-dialog .live-trend-head .settings-save { align-self: flex-start; }
         .pulse-device-faces { margin-top: 10px; }
         .cooling-dialog { max-width: 1000px; gap: 14px; }
