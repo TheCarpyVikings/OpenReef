@@ -31839,7 +31839,9 @@ ${parts.buttons}
         .issue-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; margin: -2px 0 4px; }
         .issue-actions small { color: #9fb2c7; }
         .awc-pumps-dialog, .system-check-dialog, .coral-dialog, .nps-library-dialog, .maintenance-tasks-dialog { max-width: 1000px; gap: 14px; }
-        .coral-dialog .settings-save, .nps-library-dialog .settings-save, .maintenance-tasks-dialog .settings-save { align-self: flex-start; }
+        .trend-dialog .live-trend-head .settings-save { display: flex; gap: 8px; align-items: center; align-self: flex-start; flex: 0 0 auto; }
+        .maintenance-tasks-dialog .grid.four { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+        .maintenance-tasks-dialog .section-head .button-row { flex-wrap: wrap; }
         .awc-pumps-dialog .live-trend-head .settings-save { align-self: flex-start; }
         .pulse-device-faces { margin-top: 10px; }
         .cooling-dialog { max-width: 1000px; gap: 14px; }
