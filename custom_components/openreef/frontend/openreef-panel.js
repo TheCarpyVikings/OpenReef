@@ -25,6 +25,15 @@ const MAINTENANCE_DEFAULT_STEPS = {
 // LOG_PAGE_SIZE rows at a time.
 const LOG_MAX_ENTRIES = 200;
 const LOG_PAGE_SIZE = 30;
+// Live Stats (docs/live-stats-brainstorm.md §4, §8)
+const LIVE_RING_MS = 2 * 60 * 60 * 1000;   // live readings kept per sensor
+const LIVE_RING_MAX = 240;
+const LIVE_STALE_FALLBACK_MIN = 15;         // until the ring knows the cadence
+const LIVE_PROJECT_HIT_H = 3;               // "hits the limit" horizon
+const LIVE_PROJECT_BACK_H = 6;              // "back in range" horizon
+const LIVE_MARK_TOLERANCE_MS = 30 * 60 * 1000;
+const LIVE_SPARK_W = 320;
+const LIVE_SPARK_H = 84;
 
 class OpenReefPanel extends HTMLElement {
   constructor() {
@@ -168,15 +177,20 @@ class OpenReefPanel extends HTMLElement {
     this._diagramDrag = null;
     this._diagramMotion = null;
     this._pulseDiagArm = null;
-    this._liveStatsMode = this._loadLiveStatsMode();
+    // Live Stats: a 24 h history per sensor (recorder), a short ring of live
+    // readings per sensor (every hass push), and the mark-a-moment draft.
     this._liveSparks = {};
     this._liveSparksAt = 0;
     this._liveSparksLoading = false;
+    this._liveReadings = {};
+    this._liveMarkOpen = false;
+    this._liveHoverEl = null;
   }
 
   set hass(hass) {
     this._hass = hass;
     this._subscribeConfigEvents();
+    if (this._config) this._recordLiveReadings();
     if (this._config) {
       if (this._shouldRenderForHassUpdate()) {
         this._render();
@@ -348,25 +362,6 @@ class OpenReefPanel extends HTMLElement {
       window.localStorage?.setItem("openreef:settingsSections:v1", JSON.stringify(this._settingsSections));
     } catch {
       // Section memory is a convenience only; OpenReef still works without localStorage.
-    }
-  }
-
-  // Live Stats card display preference (number | graph | gauge). View-only, so it
-  // lives in localStorage like the other view toggles — no save/dirty round-trip.
-  _loadLiveStatsMode() {
-    try {
-      const stored = window.localStorage?.getItem("openreef:liveStatsMode:v1");
-      return ["number", "graph", "gauge"].includes(stored) ? stored : "number";
-    } catch {
-      return "number";
-    }
-  }
-
-  _saveLiveStatsMode() {
-    try {
-      window.localStorage?.setItem("openreef:liveStatsMode:v1", this._liveStatsMode);
-    } catch {
-      // Convenience only.
     }
   }
 
@@ -1196,6 +1191,15 @@ class OpenReefPanel extends HTMLElement {
     if (this._eventsAttached) return;
     this._eventsAttached = true;
 
+    // Live Stats sparkline hover (delegated: survives every re-render).
+    this.shadowRoot.addEventListener("pointermove", (event) => this._liveSparkHover(event));
+    this.addEventListener("pointerleave", () => this._liveSparkHoverEnd());
+    this.shadowRoot.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || !event.target?.matches?.("[data-field='live-mark-label']")) return;
+      event.preventDefault();
+      this._liveMarkSave();
+    });
+
     this.shadowRoot.addEventListener("click", (event) => {
       const target = event.target.closest("[data-action]");
       if (!target) return;
@@ -1690,14 +1694,16 @@ class OpenReefPanel extends HTMLElement {
         this._logViewState().limit += LOG_PAGE_SIZE;
         this._render();
       }
-      if (action === "live-mode") {
-        const mode = target.dataset.mode;
-        if (["number", "graph", "gauge"].includes(mode) && mode !== this._liveStatsMode) {
-          this._liveStatsMode = mode;
-          this._saveLiveStatsMode();
-          this._render();
-        }
+      if (action === "live-mark-open") {
+        this._liveMarkOpen = true;
+        this._render();
       }
+      if (action === "live-mark-cancel") {
+        this._liveMarkOpen = false;
+        this._render();
+      }
+      if (action === "live-mark-save") this._liveMarkSave();
+      if (action === "live-mark-clear") this._liveMarkClear();
       if (action === "show-trend") this._loadTrend(id);
       if (action === "trend-range") {
         if (this._trend?.source === "manual") this._loadManualTrend(id, target.dataset.range);
@@ -7113,9 +7119,7 @@ class OpenReefPanel extends HTMLElement {
       requestAnimationFrame(() => this._positionOnboarding());
     }
     this._maybeAutoStartOnboarding();
-    if (this._activeTab === "live" && this._liveStatsMode === "graph") {
-      this._loadLiveSparklines();
-    }
+    if (this._activeTab === "live") this._loadLiveSparklines();
     if (this._pendingScroll) {
       const anchor = this._pendingScroll;
       this._pendingScroll = "";
@@ -24133,9 +24137,391 @@ const rigSteps = [
     }).join("");
   }
 
+  // ── Live Stats ─────────────────────────────────────────────────────────
+  // One card per sensor: what, how much, which way it is moving (and how fast,
+  // and where that ends), and the last day with the safe range drawn on it.
+  // Direction and rate are panel-only for v1 (docs/live-stats-brainstorm.md
+  // §4, decisions §8). If the backend ever wants a rate, the slope moves there
+  // and the panel reads it — never two slopes with two windows.
+
+  // Per-group rate windows (§8.3): water moves slowly, air moves fast.
+  _liveRateWindows(group) {
+    return ["room", "flow", "lighting"].includes(group)
+      ? { now: 15, context: 60 }
+      : { now: 30, context: 120 };
+  }
+
+  // Every hass push: remember the reading, stamped with when HA last heard it.
+  // Two hours, capped, deduped by stamp — a flat sensor that keeps reporting
+  // still counts as alive, which is what the cadence/stale check needs.
+  _recordLiveReadings() {
+    if (!this._config?.sensors || !this._hass?.states) return;
+    if (!this._liveReadings) this._liveReadings = {};
+    const now = Date.now();
+    for (const [id, sensor] of this._enabledSensors()) {
+      if (!sensor.entity_id || this._sensorKind(sensor, id) === "binary") continue;
+      const value = this._number(sensor.entity_id);
+      if (value === null) continue;
+      const state = this._state(sensor.entity_id);
+      const stamp = Date.parse(state?.last_reported || state?.last_updated || state?.last_changed || "") || now;
+      const ring = this._liveReadings[id] || (this._liveReadings[id] = []);
+      const last = ring[ring.length - 1];
+      if (last && last.time === stamp) continue;
+      ring.push({ time: stamp, value });
+      const cutoff = now - LIVE_RING_MS;
+      while (ring.length && (ring[0].time < cutoff || ring.length > LIVE_RING_MAX)) ring.shift();
+    }
+  }
+
+  // The 24 h recorder history plus any live readings newer than it, oldest first.
+  _liveSeries(id) {
+    const history = Array.isArray(this._liveSparks?.[id]) ? this._liveSparks[id] : [];
+    const ring = this._liveReadings?.[id] || [];
+    const lastHistory = history.length ? history[history.length - 1].time : 0;
+    return history.concat(ring.filter((p) => p.time > lastHistory));
+  }
+
+  // Minutes since HA last heard from the sensor; null when it never has.
+  _liveAgeMinutes(sensor) {
+    const state = this._state(sensor.entity_id);
+    const raw = state?.last_reported || state?.last_updated || state?.last_changed;
+    const stamp = raw ? Date.parse(raw) : NaN;
+    if (!Number.isFinite(stamp)) return null;
+    return Math.max(0, (Date.now() - stamp) / 60000);
+  }
+
+  // Stale = 3 × the sensor's own cadence, floor 10 min, cap 60 min (§8.7). The
+  // cadence is the median gap in the live ring; until the ring holds four
+  // readings (a fresh reload) the threshold is a flat 15 min.
+  _liveStaleAfterMinutes(id) {
+    const ring = this._liveReadings?.[id] || [];
+    if (ring.length < 4) return LIVE_STALE_FALLBACK_MIN;
+    const gaps = [];
+    for (let i = 1; i < ring.length; i += 1) gaps.push((ring[i].time - ring[i - 1].time) / 60000);
+    gaps.sort((a, b) => a - b);
+    const median = gaps[Math.floor(gaps.length / 2)];
+    return Math.min(60, Math.max(10, median * 3));
+  }
+
+  _liveStale(id, sensor) {
+    if (!sensor.entity_id || this._sensorKind(sensor, id) === "binary") return { stale: false, ageMinutes: null };
+    const ageMinutes = this._liveAgeMinutes(sensor);
+    if (ageMinutes === null) return { stale: false, ageMinutes: null };
+    return { stale: ageMinutes >= this._liveStaleAfterMinutes(id), ageMinutes };
+  }
+
+  // Least-squares slope over the last `minutes`, in units per hour. The live
+  // ring wins when it has three readings in the window (finer than the
+  // thinned recorder history); otherwise the history. Null = nothing to say.
+  _liveSlope(id, minutes) {
+    const cutoff = Date.now() - minutes * 60000;
+    const pick = (points) => (points || []).filter((p) => p.time >= cutoff && Number.isFinite(p.value));
+    let window_ = pick(this._liveReadings?.[id]);
+    if (window_.length < 3) window_ = pick(this._liveSeries(id));
+    if (window_.length < 3) return null;
+    const t0 = window_[0].time;
+    return this._linearFit(window_.map((p) => (p.time - t0) / 3600000), window_.map((p) => p.value)).slope;
+  }
+
+  _liveClock(hoursFromNow) {
+    return new Date(Date.now() + hoursFromNow * 3600000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Which way, how fast, and where that ends (§4.2). Null when there is nothing
+  // honest to say: binary, unmapped, stale, or fewer than three readings in
+  // the window. Speed is judged against the sensor's own safe band so one rule
+  // fits °C, pH and ppm: under 1.5 % of the band per hour is steady, 8 % is fast.
+  _liveDirection(id, sensor) {
+    if (!sensor.entity_id || this._sensorKind(sensor, id) === "binary") return null;
+    if (this._liveStale(id, sensor).stale) return null;
+    const value = this._number(sensor.entity_id);
+    if (value === null) return null;
+    const windows = this._liveRateWindows(sensor.group);
+    const rate = this._liveSlope(id, windows.now);
+    if (rate === null) return null;
+    const rateContext = this._liveSlope(id, windows.context);
+    const min = Number(sensor.min);
+    const max = Number(sensor.max);
+    const span = Number.isFinite(min) && Number.isFinite(max) && max > min ? max - min : null;
+    const pctPerHour = span ? Math.abs(rate) / span * 100 : null;
+    let speed = "steady";
+    if (pctPerHour === null) speed = rate !== 0 ? "moving" : "steady";
+    else if (pctPerHour >= 8) speed = "fast";
+    else if (pctPerHour >= 1.5) speed = "moving";
+    const rising = rate > 0;
+    const arrow = speed === "steady" ? "→" : speed === "fast" ? (rising ? "↑" : "↓") : (rising ? "↗" : "↘");
+    let toward = false;
+    let away = false;
+    let projection = "";
+    if (speed !== "steady" && span) {
+      const mid = (min + max) / 2;
+      toward = (rising && value > mid) || (!rising && value < mid);
+      away = !toward;
+      if (value > max || value < min) {
+        const limit = value > max ? max : min;
+        const hours = (limit - value) / rate;
+        if (hours > 0 && hours <= LIVE_PROJECT_BACK_H) projection = `back in range ≈ ${this._liveClock(hours)}`;
+        else if (hours <= 0) projection = "still moving away";
+      } else {
+        const limit = rising ? max : min;
+        const hours = (limit - value) / rate;
+        if (hours > 0 && hours <= LIVE_PROJECT_HIT_H) {
+          projection = `hits ${this._format(limit, this._sensorDigits(id))} ≈ ${this._liveClock(hours)} at this pace`;
+        }
+      }
+    }
+    return { rate, rateContext, speed, arrow, rising, toward, away, projection, windowMinutes: windows.now };
+  }
+
+  _liveRateText(id, sensor, rate) {
+    const digits = this._sensorDigits(id);
+    const rateDigits = digits < 2 ? digits + 1 : digits;
+    const unit = sensor.unit ? ` ${this._escape(sensor.unit)}` : "";
+    return `${rate > 0 ? "+" : "−"}${this._format(Math.abs(rate), rateDigits)}${unit}/h`;
+  }
+
+  _liveDirectionMarkup(id, sensor, direction, staleInfo) {
+    if (staleInfo.stale) return `<div class="live-dir"><span class="live-arrow">·</span><span class="live-note">no fresh readings</span></div>`;
+    if (!direction) return `<div class="live-dir"><span class="live-arrow">·</span><span class="live-note">watching for a trend</span></div>`;
+    const cls = direction.toward ? "toward" : direction.away ? "away" : "";
+    const word = direction.speed === "steady" ? "steady" : direction.rising ? "rising" : "falling";
+    const rate = direction.speed === "steady"
+      ? `<span class="live-note">steady last ${direction.windowMinutes} min</span>`
+      : `<span class="live-rate">${this._liveRateText(id, sensor, direction.rate)}</span>`;
+    let note = "";
+    if (direction.projection) note = `<span class="live-note ${cls}">· ${this._escape(direction.projection)}</span>`;
+    else if (direction.speed !== "steady") note = `<span class="live-note ${cls}">· ${direction.toward ? "toward the limit" : "back toward the middle"}</span>`;
+    return `<div class="live-dir" data-live-direction="${word}"><span class="live-arrow ${cls}" aria-label="${word}">${direction.arrow}</span>${rate}${note}</div>`;
+  }
+
+  // ── The marked moment: "since I opened the window" (§4.3, §8.5) ──────────
+  // One global mark, kept in the config so the iPad sees it too. Written by
+  // the panel, never the server, so it needs no stale-save guard.
+  _liveMarker() {
+    const marker = this._config?.display?.liveMarker;
+    if (!marker || !marker.at) return null;
+    const at = Date.parse(marker.at);
+    if (!Number.isFinite(at)) return null;
+    return { at, label: String(marker.label || "Marked") };
+  }
+
+  _liveMarkerWhen(marker) {
+    const at = new Date(marker.at);
+    const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  }
+
+  _liveAgeLabel(minutes) {
+    const m = Math.max(0, Math.round(Number(minutes) || 0));
+    if (m < 60) return `${m} min`;
+    if (m < 48 * 60) return `${Math.round(m / 60)} h`;
+    return `${Math.round(m / 1440)} d`;
+  }
+
+  // Change since the mark: now minus the reading nearest the mark. Null when
+  // the mark is older than the history held, or no reading sits near it.
+  _liveMarkerDelta(id, sensor, marker = this._liveMarker()) {
+    if (!marker || !sensor.entity_id || this._sensorKind(sensor, id) === "binary") return null;
+    const now = this._number(sensor.entity_id);
+    if (now === null) return null;
+    const series = this._liveSeries(id).filter((p) => Number.isFinite(p.value));
+    if (!series.length || series[0].time > marker.at + LIVE_MARK_TOLERANCE_MS) return null;
+    let best = null;
+    for (const p of series) {
+      if (!best || Math.abs(p.time - marker.at) < Math.abs(best.time - marker.at)) best = p;
+    }
+    if (!best || Math.abs(best.time - marker.at) > LIVE_MARK_TOLERANCE_MS) return null;
+    return now - best.value;
+  }
+
+  _liveMarkSave() {
+    const input = this.shadowRoot?.querySelector("[data-field='live-mark-label']");
+    const label = ((input && input.value) || "").trim().slice(0, 40) || "Marked";
+    // Pin the current readings so the Δ starts from exactly this moment.
+    this._recordLiveReadings();
+    this._config.display = this._config.display || {};
+    this._config.display.liveMarker = { at: new Date().toISOString(), label };
+    this._liveMarkOpen = false;
+    this._render();
+    this._persistConfigSilently().catch((err) => {
+      this._error = err instanceof Error ? err.message : "Could not save the mark";
+      this._render();
+    });
+  }
+
+  _liveMarkClear() {
+    if (this._config?.display) delete this._config.display.liveMarker;
+    this._render();
+    this._persistConfigSilently().catch((err) => {
+      this._error = err instanceof Error ? err.message : "Could not clear the mark";
+      this._render();
+    });
+  }
+
+  _liveMarkerRow(marker) {
+    const help = `<span class="live-marker-help">Every card shows its change since the mark.</span>`;
+    if (this._liveMarkOpen) {
+      return `
+        <div class="live-markers">
+          <span class="muted">Since:</span>
+          <input class="live-mark-input" data-field="live-mark-label" maxlength="40" placeholder="What just happened? e.g. Opened window" autofocus>
+          <button class="compact-button live-mark-save" data-action="live-mark-save">Mark now</button>
+          <button class="compact-button secondary" data-action="live-mark-cancel">Cancel</button>
+        </div>`;
+    }
+    if (marker) {
+      return `
+        <div class="live-markers">
+          <span class="muted">Since:</span>
+          <span class="live-chip solid"><i></i>${this._escape(marker.label)} · ${this._escape(this._liveMarkerWhen(marker))} · ${this._escape(this._liveAgeLabel((Date.now() - marker.at) / 60000))} ago
+            <button class="live-chip-clear" data-action="live-mark-clear" aria-label="Clear the mark" title="Clear the mark">×</button></span>
+          <button class="live-chip" data-action="live-mark-open">Mark a new moment</button>
+          ${help}
+        </div>`;
+    }
+    return `
+      <div class="live-markers">
+        <span class="muted">Since:</span>
+        <button class="live-chip" data-action="live-mark-open">+ Mark this moment</button>
+        ${help}
+      </div>`;
+  }
+
+  // ── The sparkline ─────────────────────────────────────────────────────────
+  // 24 h dimmed, the last hour bright, the safe band as a faint fill with its
+  // edges labelled, a dot for now (hollow when stale), a dashed tick for the
+  // mark. The line is the panel cyan, never the status colour: a red line
+  // would fight a red pill, and a green one would lie when the reading is
+  // heading the wrong way. The y-scale is the union of the safe band and the
+  // day's readings, so a calm sensor draws a calm line.
+  _liveSparkSvg(id, sensor, series, marker) {
+    const W = LIVE_SPARK_W;
+    const H = LIVE_SPARK_H;
+    const padL = 2;
+    const padR = 34;
+    const padT = 10;
+    const padB = 4;
+    const points = (series || []).filter((p) => Number.isFinite(p.value));
+    if (points.length < 2) {
+      return `<svg viewBox="0 0 ${W} ${H}" class="live-spark-svg empty" aria-hidden="true"><line x1="${padL}" y1="${H / 2}" x2="${W - padR}" y2="${H / 2}" /><text class="live-spark-lbl" x="${(W - padR) / 2}" y="${H / 2 - 8}" text-anchor="middle">gathering the last 24 h…</text></svg>`;
+    }
+    const digits = this._sensorDigits(id);
+    const min = Number(sensor.min);
+    const max = Number(sensor.max);
+    const hasRange = Number.isFinite(min) && Number.isFinite(max) && max > min;
+    const values = points.map((p) => p.value);
+    const lo = Math.min(hasRange ? min : Infinity, ...values);
+    const hi = Math.max(hasRange ? max : -Infinity, ...values);
+    const pad = (hi - lo) * 0.12 || 1;
+    const y0 = lo - pad;
+    const y1 = hi + pad;
+    const t1 = Date.now();
+    const t0 = t1 - 24 * 3600000;
+    const X = (t) => padL + Math.max(0, Math.min(1, (t - t0) / (t1 - t0))) * (W - padL - padR);
+    const Y = (v) => padT + (1 - (v - y0) / (y1 - y0)) * (H - padT - padB);
+    const recentCut = t1 - 60 * 60000;
+    const firstRecent = points.findIndex((p) => p.time >= recentCut);
+    // The two segments share a boundary point so the line stays continuous.
+    const older = firstRecent === -1 ? points : points.slice(0, firstRecent + 1);
+    const recent = firstRecent === -1 ? [] : points.slice(Math.max(0, firstRecent - 1));
+    const path = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${X(p.time).toFixed(1)} ${Y(p.value).toFixed(1)}`).join(" ");
+    const last = points[points.length - 1];
+    const area = `${path(points)} L${X(last.time).toFixed(1)} ${H - padB} L${X(points[0].time).toFixed(1)} ${H - padB} Z`;
+    const gid = `live-grad-${this._escape(id)}`;
+    const band = hasRange ? `
+      <rect class="live-spark-band" x="${padL}" y="${Y(max).toFixed(1)}" width="${W - padL - padR}" height="${(Y(min) - Y(max)).toFixed(1)}" />
+      <line class="live-spark-edge" x1="${padL}" x2="${W - padR}" y1="${Y(max).toFixed(1)}" y2="${Y(max).toFixed(1)}" />
+      <line class="live-spark-edge" x1="${padL}" x2="${W - padR}" y1="${Y(min).toFixed(1)}" y2="${Y(min).toFixed(1)}" />
+      <text class="live-spark-lbl" x="${W - padR + 5}" y="${(Y(max) + 3.5).toFixed(1)}">${this._escape(this._format(max, digits))}</text>
+      <text class="live-spark-lbl" x="${W - padR + 5}" y="${(Y(min) + 3.5).toFixed(1)}">${this._escape(this._format(min, digits))}</text>` : "";
+    const mark = marker && marker.at >= t0 && marker.at <= t1
+      ? `<line class="live-spark-mark" x1="${X(marker.at).toFixed(1)}" x2="${X(marker.at).toFixed(1)}" y1="${padT - 4}" y2="${H - padB}" />`
+      : "";
+    const stale = this._liveStale(id, sensor).stale;
+    const cx = X(last.time).toFixed(1);
+    const cy = Y(last.value).toFixed(1);
+    const now = stale
+      ? `<circle class="live-spark-now stale" cx="${cx}" cy="${cy}" r="4" />`
+      : `<circle class="live-spark-now-ring" cx="${cx}" cy="${cy}" r="6" /><circle class="live-spark-now" cx="${cx}" cy="${cy}" r="4" />`;
+    return `<svg viewBox="0 0 ${W} ${H}" class="live-spark-svg" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#67e8f9" stop-opacity=".16" /><stop offset="1" stop-color="#67e8f9" stop-opacity="0" /></linearGradient></defs>
+      ${band}
+      <path class="live-spark-area" d="${area}" fill="url(#${gid})" />
+      <path class="live-spark-history" d="${path(older)}" />
+      ${recent.length > 1 ? `<path class="live-spark-recent" d="${path(recent)}" />` : ""}
+      ${mark}
+      <line class="live-spark-cross" data-live-cross x1="0" x2="0" y1="${padT - 4}" y2="${H - padB}" style="display:none" />
+      ${now}
+    </svg>`;
+  }
+
+  // Hover: the nearest reading's time and value, with a crosshair. Delegated
+  // from the shadow root so a re-render costs nothing to re-wire.
+  _liveSparkHover(event) {
+    const wrap = event.target?.closest?.("[data-live-spark]");
+    if (!wrap) {
+      this._liveSparkHoverEnd();
+      return;
+    }
+    const id = wrap.dataset.liveSpark;
+    const sensor = this._config?.sensors?.[id];
+    const series = this._liveSeries(id).filter((p) => Number.isFinite(p.value));
+    const svg = wrap.querySelector("svg");
+    const tip = wrap.querySelector("[data-live-tip]");
+    const cross = wrap.querySelector("[data-live-cross]");
+    if (!sensor || !svg || !tip || !cross || series.length < 2) return;
+    const rect = svg.getBoundingClientRect();
+    const padL = 2;
+    const padR = 34;
+    const scale = rect.width / LIVE_SPARK_W;
+    if (!scale) return;
+    const x = (event.clientX - rect.left) / scale;
+    const frac = Math.max(0, Math.min(1, (x - padL) / (LIVE_SPARK_W - padL - padR)));
+    const t1 = Date.now();
+    const t0 = t1 - 24 * 3600000;
+    const t = t0 + frac * (t1 - t0);
+    let best = series[0];
+    for (const p of series) if (Math.abs(p.time - t) < Math.abs(best.time - t)) best = p;
+    const bx = padL + Math.max(0, Math.min(1, (best.time - t0) / (t1 - t0))) * (LIVE_SPARK_W - padL - padR);
+    cross.setAttribute("x1", bx.toFixed(1));
+    cross.setAttribute("x2", bx.toFixed(1));
+    cross.style.display = "";
+    const when = new Date(best.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    tip.textContent = `${when}  ${this._format(best.value, this._sensorDigits(id))}${sensor.unit ? ` ${sensor.unit}` : ""}`;
+    tip.style.left = `${(bx * scale).toFixed(0)}px`;
+    tip.hidden = false;
+    this._liveHoverEl = wrap;
+  }
+
+  _liveSparkHoverEnd() {
+    const wrap = this._liveHoverEl;
+    if (!wrap) return;
+    const tip = wrap.querySelector("[data-live-tip]");
+    const cross = wrap.querySelector("[data-live-cross]");
+    if (tip) tip.hidden = true;
+    if (cross) cross.style.display = "none";
+    this._liveHoverEl = null;
+  }
+
+  // ── The page ──────────────────────────────────────────────────────────────
+  _liveRows() {
+    return this._enabledSensors().map(([id, sensor]) => {
+      const badge = this._liveStatBadge(id, sensor);
+      const staleInfo = this._liveStale(id, sensor);
+      return {
+        id,
+        sensor,
+        badge,
+        stale: staleInfo.stale,
+        ageMinutes: staleInfo.ageMinutes,
+        attention: badge.status === "warning" || badge.status === "critical",
+      };
+    });
+  }
+
   _liveStats() {
-    const sensors = this._enabledSensors();
-    if (!sensors.length) {
+    const rows = this._liveRows();
+    if (!rows.length) {
       return `
         <section class="stack">
           <h2>Live Stats</h2>
@@ -24143,48 +24529,114 @@ const rigSteps = [
         </section>
       `;
     }
-    const mapped = sensors.filter(([, s]) => s.entity_id).length;
-    const badges = sensors.map(([id, s]) => this._liveStatBadge(id, s).status);
-    const inRange = badges.filter((s) => s === "ok").length;
-    const attention = badges.filter((s) => s === "warning" || s === "critical").length;
-    const attentionStatus = attention ? (badges.includes("critical") ? "critical" : "warning") : "ok";
     const groupLabel = { tank: "Tank", sump: "Sump", chemistry: "Chemistry", water: "Water level", flow: "Flow", lighting: "Lighting", safety: "Safety", room: "Environment" };
     const groupOrder = ["tank", "sump", "chemistry", "water", "flow", "lighting", "safety", "room"];
+    const groupOf = (row) => (row.sensor.group && groupLabel[row.sensor.group] ? row.sensor.group : "tank");
+    // Anything that is not OK moves to the top (§8.2) — moved, not copied, so
+    // the counts stay honest; its home group says where it went.
+    const needsLook = rows.filter((row) => row.attention);
     const buckets = {};
-    sensors.forEach(([id, s]) => {
-      const g = s.group && groupLabel[s.group] ? s.group : "tank";
-      (buckets[g] = buckets[g] || []).push([id, s]);
+    rows.filter((row) => !row.attention).forEach((row) => {
+      const g = groupOf(row);
+      (buckets[g] = buckets[g] || []).push(row);
     });
-    return `
-      <section class="stack">
-        <div class="section-head">
-          <div><h2>Live Stats</h2><p>Your reef readings at a glance — grouped and range-checked.</p></div>
-          <div class="range-picker live-mode-picker">
-            ${[["number", "Numbers"], ["graph", "Graphs"], ["gauge", "Gauges"]].map(([m, label]) =>
-              `<button class="compact-button ${this._liveStatsMode === m ? "active" : ""}" data-action="live-mode" data-mode="${m}">${label}</button>`).join("")}
+    const cards = (list) => `<div class="live-grid">${list.map((row) => this._liveStatCard(row.id, row.sensor)).join("")}</div>`;
+    const group = (g) => {
+      const list = buckets[g];
+      const moved = rows.filter((row) => groupOf(row) === g).length - list.length;
+      const count = `${list.length} sensor${list.length === 1 ? "" : "s"}${moved ? ` · ${moved} needs a look` : ""}`;
+      return `
+        <section class="live-group">
+          <div class="live-group-head">
+            <p class="eyebrow">${this._escape(groupLabel[g])}</p>
+            <span class="muted">${this._escape(count)}</span>
           </div>
+          ${cards(list)}
+        </section>`;
+    };
+    return `
+      <section class="stack live-page">
+        <div class="section-head">
+          <div><h2>Live Stats</h2><p>Every mapped reading, which way it is moving, and how fast.</p></div>
         </div>
-        <div class="summary-grid">
-          ${this._missionSummaryCard("Sensors", `${mapped}/${sensors.length}`, mapped === sensors.length ? "all mapped" : "mapped to Home Assistant", mapped ? "ok" : "unknown", "settings")}
-          ${this._missionSummaryCard("In range", String(inRange), inRange === sensors.length ? "everything nominal" : "inside safe range", inRange ? "ok" : "unknown", "live")}
-          ${this._missionSummaryCard("Attention", String(attention), attention ? "near or out of range" : "nothing flagged", attentionStatus, attention ? "mission" : "live")}
-        </div>
-        ${groupOrder.filter((g) => buckets[g]?.length).map((g) => `
+        <div class="live-truth" data-live-truth>${this._liveTruthMarkup(rows)}</div>
+        ${this._liveMarkerRow(this._liveMarker())}
+        ${needsLook.length ? `
           <section class="live-group">
-            <div class="live-group-head">
-              <p class="eyebrow">${this._escape(groupLabel[g])}</p>
-              <span class="muted">${buckets[g].length} sensor${buckets[g].length === 1 ? "" : "s"}</span>
+            <div class="live-group-head attention">
+              <p class="eyebrow">Needs a look</p>
+              <span class="muted">${needsLook.length} reading${needsLook.length === 1 ? "" : "s"}</span>
             </div>
-            <div class="grid three">
-              ${buckets[g].map(([id, s]) => this._liveStatCard(id, s)).join("")}
-            </div>
-          </section>
-        `).join("")}
+            ${cards(needsLook)}
+          </section>` : ""}
+        ${groupOrder.filter((g) => buckets[g]?.length).map(group).join("")}
+        <div class="live-legend">
+          <span><i></i>last 24 h</span>
+          <span><i class="recent"></i>last hour</span>
+          <span><i class="dot"></i>now</span>
+          <span><i class="band"></i>safe range</span>
+          <span><i class="mark"></i>marked moment</span>
+        </div>
       </section>
     `;
   }
 
+  // One sentence that names the thing that matters, plus four small counts.
+  _liveTruthMarkup(rows) {
+    const mapped = rows.filter((row) => row.sensor.entity_id).length;
+    const inRange = rows.filter((row) => row.badge.status === "ok" && !row.stale).length;
+    const attention = rows.filter((row) => row.attention);
+    const stale = rows.filter((row) => row.stale);
+    const parts = [];
+    if (!attention.length && !stale.length && mapped === rows.length && inRange === rows.length) {
+      parts.push(`<b>All ${rows.length} in range.</b> ${this._escape(this._liveCalmLine())}`);
+    } else {
+      parts.push(`<b>${inRange} of ${rows.length} in range.</b>`);
+      attention.forEach((row) => parts.push(this._liveAttentionSentence(row)));
+      if (stale.length) {
+        const oldest = Math.max(...stale.map((row) => row.ageMinutes || 0));
+        parts.push(`${stale.map((row) => this._escape(row.sensor.label)).join(", ")} ${stale.length === 1 ? "has" : "have"} not reported for ${this._liveAgeLabel(oldest)}.`);
+      }
+      const unmapped = rows.length - mapped;
+      if (unmapped) parts.push(`${unmapped} not mapped yet.`);
+    }
+    const count = (n, label, cls = "") => `<div class="${cls}"><strong>${this._escape(n)}</strong><small>${label}</small></div>`;
+    return `
+      <div class="live-say">${parts.join(" ")}</div>
+      <div class="live-counts">
+        ${count(`${mapped}/${rows.length}`, "mapped")}
+        ${count(inRange, "in range")}
+        ${count(attention.length, "attention", attention.length ? "warn" : "")}
+        ${count(stale.length, "stale", stale.length ? "warn" : "")}
+      </div>`;
+  }
+
+  _liveAttentionSentence(row) {
+    const label = this._escape(row.sensor.label);
+    const word = row.badge.label === "alert" ? "alerting" : row.badge.label;
+    const head = `<span class="warn">${label} is ${this._escape(word)}</span>`;
+    const d = this._liveDirection(row.id, row.sensor);
+    if (!d || d.speed === "steady") return `${head}.`;
+    const verb = d.rising ? "rising" : "falling";
+    const rate = this._liveRateText(row.id, row.sensor, d.rate).replace(/^[+−]/, "");
+    const tail = d.projection ? ` — ${this._escape(d.projection)}` : "";
+    return d.away ? `${head} but ${verb} ${rate}${tail}.` : `${head} and still ${verb} ${rate}${tail}.`;
+  }
+
+  // Personality only on the calm state (§8.8) — never beside a warning.
+  _liveCalmLine() {
+    if (this._tone() !== "cheeky") return "Everything is where it should be.";
+    const lines = [
+      "Nothing to see here. Go and look at the corals.",
+      "Boring, in the best way.",
+      "The reef is minding its own business.",
+      "Nothing moving that shouldn't be.",
+    ];
+    return lines[new Date().getDate() % lines.length];
+  }
+
   // Friendly status badge for a sensor card: in range / near limit / high / low / —.
+  // Shared with Reef Pulse and the diagram, so its contract does not move.
   _liveStatBadge(id, sensor) {
     const status = this._sensorStatus(sensor, id);
     if (this._sensorKind(sensor, id) === "binary") {
@@ -24210,95 +24662,80 @@ const rigSteps = [
     const badge = this._liveStatBadge(id, sensor);
     const mapped = Boolean(sensor.entity_id);
     const numeric = this._sensorKind(sensor, id) !== "binary";
-    const trendEnabled = numeric && mapped;
-    // Graph/gauge only make sense for a mapped numeric sensor; everything else
-    // (binary safety sensors, unmapped) falls back to the number card.
-    const mode = trendEnabled ? this._liveStatsMode : "number";
-    const valueMarkup = (cls = "") => `
-      <div class="live-stat-value ${cls}">
-        <strong>${this._escape(display)}</strong>
-        ${unit ? `<span>${this._escape(unit)}</span>` : ""}
-      </div>`;
-    const head = `
-      <div class="live-stat-head">
-        <p>${this._escape(sensor.label)}</p>
-        <span class="pill ${badge.status}">${this._escape(badge.label)}</span>
-      </div>`;
-    // Entity IDs are intentionally gone; keep only the "Not mapped" status and the
-    // Trend affordance, right-aligned.
-    const foot = `
-      <div class="stat-foot">
-        ${mapped ? "<span></span>" : `<small>Not mapped</small>`}
-        ${trendEnabled ? `<span class="trend-chip">Trend ›</span>` : ""}
-      </div>`;
-    let inner;
-    if (mode === "graph") {
-      inner = `${head}${valueMarkup("compact")}
-        <div class="live-spark" data-live-spark="${this._escape(id)}">${this._pulseSparkSvg(this._liveSparks[id])}</div>
-        ${foot}`;
-    } else if (mode === "gauge") {
-      inner = `${head}
-        ${this._liveGaugeMarkup(id, sensor, badge, display, unit)}
-        ${foot}`;
-    } else {
-      inner = `${head}${valueMarkup()}${foot}`;
+    const staleInfo = numeric && mapped ? this._liveStale(id, sensor) : { stale: false, ageMinutes: null };
+    const status = staleInfo.stale ? "stale" : badge.status;
+    const pill = staleInfo.stale
+      ? `<span class="pill stale">stale ${this._escape(this._liveAgeLabel(staleInfo.ageMinutes))}</span>`
+      : `<span class="pill ${badge.status}">${this._escape(badge.label)}</span>`;
+    const head = `<div class="live-card-head"><h3>${this._escape(sensor.label)}</h3>${pill}</div>`;
+    const reading = `<div class="live-reading"><strong>${this._escape(display)}</strong>${unit ? `<span>${this._escape(unit)}</span>` : ""}</div>`;
+    if (!numeric || !mapped) {
+      // Binary safety sensors and unmapped slots: no trend, no direction.
+      return `
+        <article class="live-card ${status} no-trend" data-live-card="${this._escape(id)}">
+          ${head}${reading}
+          <div class="live-foot">${mapped ? "" : "<small>Not mapped</small>"}</div>
+        </article>`;
     }
-    return trendEnabled ? `
-      <button class="stat live-stat stat-accent ${badge.status} stat-button mode-${mode}" data-action="show-trend" data-id="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
-        ${inner}
+    const direction = this._liveDirection(id, sensor);
+    const series = this._liveSeries(id);
+    const marker = this._liveMarker();
+    const delta = this._liveMarkerDelta(id, sensor, marker);
+    const digits = this._sensorDigits(id);
+    const values = series.map((p) => p.value).filter((v) => Number.isFinite(v));
+    const dayStats = values.length >= 2
+      ? `<span class="live-day">24 h <b>${this._format(Math.min(...values), digits)}–${this._format(Math.max(...values), digits)}</b> · avg <b>${this._format(values.reduce((a, b) => a + b, 0) / values.length, digits)}</b></span>`
+      : `<span class="live-day">gathering the last 24 h</span>`;
+    const deltaText = delta === null ? "—" : `<b>${delta > 0 ? "+" : delta < 0 ? "−" : ""}${this._format(Math.abs(delta), digits)}</b>`;
+    const since = marker ? `<span class="live-since"><i></i>${deltaText} since ${this._escape(this._liveMarkerWhen(marker))}</span>` : "";
+    return `
+      <button class="live-card ${status} stat-button" data-action="show-trend" data-id="${this._escape(id)}" data-live-card="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
+        ${head}${reading}
+        ${this._liveDirectionMarkup(id, sensor, direction, staleInfo)}
+        <div class="live-spark" data-live-spark="${this._escape(id)}">${this._liveSparkSvg(id, sensor, series, marker)}<div class="live-tip" data-live-tip hidden></div></div>
+        <div class="live-foot">${dayStats}${since}<span class="trend-chip">Trend ›</span></div>
       </button>
-    ` : `
-      <article class="stat live-stat stat-accent ${badge.status} no-trend">
-        ${inner}
-      </article>
     `;
   }
 
-  // Semicircle gauge showing where the reading sits between its min and max,
-  // filled + coloured by the status badge. Arc length for r=44 ≈ 138.2.
-  _liveGaugeMarkup(id, sensor, badge, display, unit) {
-    const value = this._number(sensor.entity_id);
-    const min = Number(sensor.min);
-    const max = Number(sensor.max);
-    const hasRange = value !== null && Number.isFinite(min) && Number.isFinite(max) && max > min;
-    const pct = hasRange ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
-    const len = 138.2;
-    const offset = (len * (1 - pct)).toFixed(1);
-    return `
-      <div class="live-gauge ${badge.status}">
-        <svg viewBox="0 0 100 58" class="live-gauge-svg" preserveAspectRatio="xMidYMax meet" aria-hidden="true">
-          <path class="live-gauge-track" d="M 6 50 A 44 44 0 0 1 94 50" />
-          <path class="live-gauge-arc" d="M 6 50 A 44 44 0 0 1 94 50" stroke-dasharray="${len}" stroke-dashoffset="${hasRange ? offset : len}" />
-        </svg>
-        <div class="live-gauge-value">
-          <strong>${this._escape(display)}</strong>${unit ? `<span>${this._escape(unit)}</span>` : ""}
-        </div>
-        ${hasRange ? `<div class="live-gauge-bounds"><small>${this._escape(this._format(min, 1))}</small><small>${this._escape(this._format(max, 1))}</small></div>` : ""}
-      </div>`;
-  }
-
-  // Fetch 24h sparkline history for the visible numeric sensors when Live Stats is
-  // in graph mode — sequential + capped + cached ~4 min (targeted-and-capped rule).
+  // Fetch the 24 h history for every numeric sensor when Live Stats is open —
+  // sequential, capped, cached ~4 min (targeted-and-capped rule). Each card is
+  // patched in place as its history lands: a full render mid-fetch would jump
+  // the scroll and kill a hover.
   async _loadLiveSparklines(force = false) {
     if (this._liveSparksLoading) return;
     if (!force && this._liveSparksAt && Date.now() - this._liveSparksAt < 4 * 60 * 1000) return;
     this._liveSparksLoading = true;
+    let changed = false;
     try {
       for (const [id, sensor] of this._enabledSensors()) {
-        if (this._activeTab !== "live" || this._liveStatsMode !== "graph") break;
+        if (this._activeTab !== "live") break;
         if (!sensor.entity_id || this._sensorKind(sensor, id) === "binary") continue;
         try {
           this._liveSparks[id] = await this._fetchTrendPoints(sensor.entity_id, "24h");
+          changed = true;
         } catch {
-          // Keep whatever we had; a flat placeholder is fine.
+          // Keep whatever we had; the card says "gathering" until it lands.
         }
-        const el = this.shadowRoot && this.shadowRoot.querySelector(`[data-live-spark="${id}"]`);
-        if (el) el.innerHTML = this._pulseSparkSvg(this._liveSparks[id]);
+        this._liveRefreshCard(id);
       }
       this._liveSparksAt = Date.now();
     } finally {
       this._liveSparksLoading = false;
     }
+    if (changed) this._liveRefreshTruth();
+  }
+
+  _liveRefreshCard(id) {
+    const sensor = this._config?.sensors?.[id];
+    const el = this.shadowRoot && this.shadowRoot.querySelector(`[data-live-card="${id}"]`);
+    if (!sensor || !el) return;
+    el.outerHTML = this._liveStatCard(id, sensor);
+  }
+
+  _liveRefreshTruth() {
+    const el = this.shadowRoot && this.shadowRoot.querySelector("[data-live-truth]");
+    if (el) el.innerHTML = this._liveTruthMarkup(this._liveRows());
   }
 
   _controls() {
@@ -31271,11 +31708,7 @@ const rigSteps = [
         .stat-accent.warning { border-color: #a16207; box-shadow: inset 4px 0 0 #f59e0b; }
         .stat-accent.critical { border-color: #b91c1c; box-shadow: inset 4px 0 0 #ef4444; }
         .stat-accent.unknown { border-color: #334155; background: linear-gradient(180deg, rgba(51, 65, 85, .14), rgba(16, 29, 44, .96)); box-shadow: inset 4px 0 0 #475569; }
-        /* Live Stats groups */
-        .live-group { display: grid; gap: 12px; }
-        .live-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; border-bottom: 1px solid rgba(148, 163, 184, .14); padding-bottom: 6px; }
-        .live-group-head .eyebrow { margin-bottom: 0; }
-        .live-group-head span.muted { font-size: 12px; font-weight: 800; }
+        /* Energy total card (shares the old live-stat head/value/foot rules) */
         .live-stat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
         .live-stat-head p { color: #dcecff; font-weight: 800; }
         .live-stat-value { display: flex; align-items: baseline; gap: 7px; }
@@ -31285,23 +31718,88 @@ const rigSteps = [
         .live-stat .stat-foot small { color: #8da2ba; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .live-stat .trend-chip { border: 1px solid #294055; border-radius: 999px; padding: 4px 10px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; white-space: nowrap; }
         .live-stat.stat-button:hover .trend-chip, .live-stat.stat-button:focus-visible .trend-chip { border-color: var(--openreef-accent); }
-        /* Live Stats display modes: Numbers / Graphs / Gauges */
-        .live-mode-picker { flex-wrap: nowrap; }
-        .live-stat-value.compact strong { font-size: 24px; }
-        .live-spark { height: 58px; margin: 2px 0; }
-        .live-spark .pulse-spark-svg { width: 100%; height: 100%; display: block; }
-        .live-gauge { display: grid; justify-items: center; gap: 2px; position: relative; }
-        .live-gauge-svg { width: 100%; max-width: 220px; height: auto; display: block; }
-        .live-gauge-track { fill: none; stroke: rgba(255, 255, 255, .12); stroke-width: 9; stroke-linecap: round; }
-        .live-gauge-arc { fill: none; stroke: #22c55e; stroke-width: 9; stroke-linecap: round; transition: stroke-dashoffset .7s ease; filter: drop-shadow(0 0 5px rgba(34, 197, 94, .5)); }
-        .live-gauge.warning .live-gauge-arc { stroke: #f59e0b; filter: drop-shadow(0 0 5px rgba(245, 158, 11, .5)); }
-        .live-gauge.critical .live-gauge-arc { stroke: #ef4444; filter: drop-shadow(0 0 5px rgba(239, 68, 68, .55)); }
-        .live-gauge.unknown .live-gauge-arc { stroke: #64748b; filter: none; }
-        .live-gauge-value { margin-top: -18px; display: flex; align-items: baseline; gap: 6px; }
-        .live-gauge-value strong { font-size: 30px; color: #67e8f9; line-height: 1; }
-        .live-gauge-value span { color: #9fb2c7; font-weight: 800; font-size: 13px; }
-        .live-gauge-bounds { width: 100%; max-width: 220px; display: flex; justify-content: space-between; margin-top: 2px; }
-        .live-gauge-bounds small { color: #8da2ba; font-size: 10px; font-weight: 800; font-variant-numeric: tabular-nums; }
+        /* Live Stats — one card: what, how much, which way, the last day */
+        .live-page .section-head p { color: #8da2ba; }
+        .live-truth { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; border: 1px solid #24364a; border-radius: 10px; background: #121f2f; padding: 14px 18px; }
+        .live-say { font-size: 15px; color: #e5edf5; line-height: 1.45; }
+        .live-say b { font-weight: 800; }
+        .live-say .warn { color: #fbbf24; }
+        .live-counts { display: flex; gap: 22px; }
+        .live-counts div { display: grid; gap: 1px; text-align: right; }
+        .live-counts strong { font-size: 20px; font-weight: 800; color: #e5edf5; font-variant-numeric: tabular-nums; line-height: 1.1; }
+        .live-counts small { color: #8da2ba; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; font-weight: 800; }
+        .live-counts .warn strong { color: #fbbf24; }
+        .live-markers { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: #8da2ba; font-size: 13px; }
+        .live-marker-help { color: #8da2ba; font-size: 12px; }
+        .live-chip { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; border: 1px dashed #3a5470; border-radius: 999px; padding: 5px 12px; color: #dcecff; background: transparent; font-size: 13px; font-weight: 700; cursor: pointer; }
+        .live-chip:hover { border-color: var(--openreef-accent); }
+        .live-chip.solid { border-style: solid; background: #162536; cursor: default; }
+        .live-chip.solid:hover { border-color: #3a5470; }
+        .live-chip i { display: inline-block; width: 2px; height: 12px; background: #67e8f9; border-radius: 1px; }
+        .live-chip-clear { border: 0; background: none; color: #8da2ba; cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; min-height: 0; }
+        .live-chip-clear:hover { color: #e5edf5; }
+        .live-mark-input { width: auto; flex: 1 1 220px; max-width: 360px; min-height: 36px; padding: 7px 11px; }
+        .live-mark-save { border-color: var(--openreef-accent-border); background: var(--openreef-accent-soft); }
+        .live-group { display: grid; gap: 12px; }
+        .live-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; border-bottom: 1px solid rgba(148, 163, 184, .14); padding-bottom: 6px; }
+        .live-group-head .eyebrow { margin-bottom: 0; }
+        .live-group-head.attention .eyebrow { color: #fbbf24; }
+        .live-group-head span.muted { font-size: 12px; font-weight: 800; }
+        .live-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+        .live-card { position: relative; display: grid; gap: 10px; align-content: start; min-height: 0; border: 1px solid #24364a; border-radius: 10px; background: #121f2f; padding: 14px 16px 12px; text-align: left; color: #e5edf5; font: inherit; }
+        .live-card.stat-button { cursor: pointer; transition: border-color .15s; }
+        .live-card.stat-button:hover { border-color: #3a5470; }
+        .live-card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; border-radius: 10px 10px 0 0; background: transparent; }
+        .live-card.warning::before { background: #f59e0b; }
+        .live-card.critical::before { background: #ef4444; }
+        .live-card.warning { border-color: rgba(245, 158, 11, .45); }
+        .live-card.critical { border-color: rgba(239, 68, 68, .45); background: linear-gradient(180deg, rgba(239, 68, 68, .06), #121f2f 40%); }
+        .live-card.no-trend { cursor: default; }
+        .live-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+        .live-card-head h3 { margin: 0; font-size: 14px; font-weight: 800; color: #dcecff; }
+        .live-card .pill { min-width: 0; min-height: 0; padding: 3px 9px; font-size: 11.5px; gap: 6px; }
+        .live-card .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+        .pill.stale { background: rgba(141, 162, 186, .14); color: #a7b7ca; }
+        .live-card .pill.stale::before { background: transparent; border: 1.5px solid currentColor; box-sizing: border-box; }
+        .live-reading { display: flex; align-items: baseline; gap: 6px; }
+        .live-reading strong { font-size: 34px; font-weight: 800; color: #67e8f9; line-height: 1; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+        .live-reading span { color: #9fb2c7; font-weight: 800; font-size: 13px; }
+        .live-dir { display: flex; align-items: center; gap: 8px; min-height: 22px; font-size: 13px; color: #b7c6d8; flex-wrap: wrap; }
+        .live-arrow { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: #162536; color: #e5edf5; font-weight: 800; font-size: 14px; }
+        .live-arrow.toward { color: #fbbf24; background: rgba(245, 158, 11, .14); }
+        .live-arrow.away { color: #86efac; background: rgba(34, 197, 94, .12); }
+        .live-rate { font-weight: 800; color: #e5edf5; font-variant-numeric: tabular-nums; }
+        .live-note { color: #8da2ba; }
+        .live-note.toward { color: #fbbf24; }
+        .live-note.away { color: #86efac; }
+        .live-spark { position: relative; aspect-ratio: 320 / 84; height: auto; margin: 2px -4px 0; }
+        .live-spark-svg { width: 100%; height: 100%; display: block; overflow: visible; }
+        .live-spark-svg.empty line { stroke: rgba(255, 255, 255, .18); stroke-width: 1.5; stroke-dasharray: 4 5; }
+        .live-spark-band { fill: rgba(34, 197, 94, .07); }
+        .live-spark-edge { stroke: rgba(34, 197, 94, .45); stroke-width: 1; stroke-dasharray: 2 3; }
+        .live-spark-lbl { font-size: 9.5px; font-weight: 800; fill: #8da2ba; font-variant-numeric: tabular-nums; }
+        .live-spark-history { fill: none; stroke: #3d5a74; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+        .live-spark-recent { fill: none; stroke: #8ff0ff; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
+        .live-spark-mark { stroke: #67e8f9; stroke-width: 1.5; stroke-dasharray: 3 3; opacity: .75; }
+        .live-spark-cross { stroke: #8da2ba; stroke-width: 1; opacity: .6; }
+        .live-spark-now-ring { fill: #121f2f; }
+        .live-spark-now { fill: #8ff0ff; }
+        .live-spark-now.stale { fill: #121f2f; stroke: #8da2ba; stroke-width: 2; }
+        .live-tip { position: absolute; top: 4px; transform: translateX(-50%); pointer-events: none; border: 1px solid #24364a; background: #0b1220; color: #e5edf5; border-radius: 6px; padding: 3px 7px; font-size: 11.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .live-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: #8da2ba; font-size: 12px; flex-wrap: wrap; }
+        .live-day, .live-since { font-variant-numeric: tabular-nums; }
+        .live-day b, .live-since b { color: #dcecff; font-weight: 800; }
+        .live-since { display: inline-flex; align-items: center; gap: 6px; }
+        .live-since i { display: inline-block; width: 2px; height: 10px; background: #67e8f9; border-radius: 1px; }
+        .live-card .trend-chip { border: 1px solid #294055; border-radius: 999px; padding: 4px 10px; color: #a7f3d0; background: #0b2b24; font-size: 12px; font-weight: 800; white-space: nowrap; margin-left: auto; }
+        .live-card.stat-button:hover .trend-chip, .live-card.stat-button:focus-visible .trend-chip { border-color: var(--openreef-accent); }
+        .live-legend { color: #8da2ba; font-size: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+        .live-legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid #3d5a74; vertical-align: middle; margin-right: 6px; }
+        .live-legend i.recent { border-color: #8ff0ff; }
+        .live-legend i.band { height: 10px; border: 0; background: rgba(34, 197, 94, .12); box-shadow: inset 0 1px 0 rgba(34, 197, 94, .5), inset 0 -1px 0 rgba(34, 197, 94, .5); }
+        .live-legend i.mark { width: 0; height: 12px; border-top: 0; border-left: 2px dashed #67e8f9; }
+        .live-legend i.dot { width: 8px; height: 8px; border: 2px solid #0b1220; background: #8ff0ff; border-radius: 50%; }
+        @media (max-width: 720px) { .live-truth { grid-template-columns: 1fr; } .live-grid { grid-template-columns: 1fr; } }
         /* Collapsible Mission Control sections (quiet by default) */
         .mission-section { padding: 0; overflow: hidden; border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .mission-section.collapsed { border-color: #24364a; background: #121f2f; }
