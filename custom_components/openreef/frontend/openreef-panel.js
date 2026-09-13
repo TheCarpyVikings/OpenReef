@@ -1228,6 +1228,8 @@ class OpenReefPanel extends HTMLElement {
         this._equipmentDetail = null;
         this._controlConfirm = null;
         this._coolingDialogOpen = false;
+        this._awcPumpsDialogOpen = false;
+        this._systemCheckDialogOpen = false;
         this._cameraFocus = null;
         this._cameraFullscreenFallback = false;
         this._recordingFocus = null;
@@ -1324,6 +1326,10 @@ class OpenReefPanel extends HTMLElement {
       if (action === "spawn-exec-resume") this._spawnExecResume();
       if (action === "spawn-exec-refresh") this._loadSpawnExecStatus(true);
       if (action === "cooling-refresh") this._loadCoolingStatus(true);
+      if (action === "awc-pumps-open") { this._awcPumpsDialogOpen = true; this._render(); }
+      if (action === "awc-pumps-close") { this._awcPumpsDialogOpen = false; this._render(); }
+      if (action === "system-check-open") { this._systemCheckDialogOpen = true; this._render(); }
+      if (action === "system-check-close") { this._systemCheckDialogOpen = false; this._render(); }
       if (action === "cooling-open") {
         this._coolingDialogOpen = true;
         this._loadCoolingStatus(true);
@@ -6513,7 +6519,7 @@ class OpenReefPanel extends HTMLElement {
       // In Mission Control these cards deep-link into the System Check section in
       // Settings; inside Settings itself they stay as plain (non-link) cards.
       return link
-        ? `<button class="system-card system-card-link ${status}" data-action="tab" data-id="settings" data-section="system" aria-label="${this._escape(item.label || item.key || "Check")} — Open System Check">${inner}</button>`
+        ? `<button class="system-card system-card-link ${status}" data-action="system-check-open" aria-label="${this._escape(item.label || item.key || "Check")} — Open System Check">${inner}</button>`
         : `<article class="system-card ${status}">${inner}</article>`;
     }).join("");
   }
@@ -7128,6 +7134,8 @@ class OpenReefPanel extends HTMLElement {
         ${this._setupOpen ? this._setupWizard() : ""}
         ${this._trend ? this._trendModal() : ""}
         ${this._coolingDialogOpen ? this._coolingDialog() : ""}
+        ${this._awcPumpsDialogOpen ? this._awcPumpsDialog() : ""}
+        ${this._systemCheckDialogOpen ? this._systemCheckDialog() : ""}
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
         ${this._equipmentDetail ? this._equipmentDetailModal() : ""}
         ${this._controlConfirm ? this._controlConfirmModal() : ""}
@@ -12916,6 +12924,7 @@ class OpenReefPanel extends HTMLElement {
           ${clockNote}
           ${guide}
           ${joinLine}
+          ${this._npsPouchLine(v)}
           <div class="button-row" style="flex-wrap:wrap;justify-content:center;">${buttons}</div>
         </div>`;
     }).join("");
@@ -16382,9 +16391,11 @@ const rigSteps = [
           <p>Calibrated, volume-accurate water changes with layered safety — knows litres changed and litres remaining, unlike sensor-only systems.</p>
         </div>
         <div class="button-row">
-          <button class="secondary" data-action="tab" data-id="settings" data-section="awc" data-scroll="or-section-awc">Setup &amp; calibration</button>
+          <button class="secondary" data-action="awc-pumps-open">Pumps &amp; calibration</button>
+          <button class="secondary" data-action="tab" data-id="settings" data-section="awc" data-scroll="or-section-awc">Settings</button>
         </div>
-      </div>`;
+      </div>
+      ${this._awcFloodNotice(awc.safety || {})}`;
 
     const banner = this._awcStatusBanner(state);
     const message = this._awcMessage
@@ -16652,22 +16663,10 @@ const rigSteps = [
     );
   }
 
-  _awcSetupBody(awc) {
-    const pumps = awc.pumps || {};
-    const res = awc.reservoirs || {};
-    const safety = awc.safety || {};
-    const ato = awc.ato || {};
-    const guards = awc.guards || {};
-    const sched = awc.schedule || {};
-    const policy = awc.sourcePolicy || {};
-    const schedMode = sched.mode === "interval" ? "interval" : "times";
-    const days = Array.isArray(sched.days) ? sched.days : [];
-    const dayBtns = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `
-      <label class="awc-day-toggle">
-        <input type="checkbox" data-scope="awc-schedule" data-field="scheduleDay" data-day="${d}" ${days.includes(d) ? "checked" : ""}>
-        <span>${d}</span>
-      </label>`).join("");
-
+  // One pump's calibration card — the ceremony (timed runs, measured ml, the
+  // multi-point fit, tubing replaced). Lived in Settings → AWC until 0.7.177;
+  // now the "Pumps & calibration" dialog on the Water Change tab.
+  _awcPumpCard(role, pumps) {
     const calRuns = this._awcCalRuns || {};
     const calBusy = this._awcCalRunBusy;
     const calRunsBlock = (role) => {
@@ -16717,6 +16716,81 @@ const rigSteps = [
             <button class="secondary inline-btn" data-action="awc-tubing-replaced" data-id="${role}">Tubing replaced</button></small>
         </article>`;
     };
+    return pumpRow(role);
+  }
+
+  // The cysts pouch, on the hatchery tile it belongs to (0.7.177): how old the
+  // open pouch is, and the stamp for a new one. Read from the summary's
+  // per-vessel cysts; an older summary without them shows nothing.
+  _npsPouchLine(v) {
+    const pouch = v && v.cysts ? v.cysts : null;
+    if (!pouch) return "";
+    const age = pouch.available ? `pouch opened ${this._escape(String(pouch.days))} d ago${pouch.status === "old" ? " — check storage and hatch yield" : ""}` : "pouch not stamped";
+    return `<small class="muted" title="Stamp the day you open a new pouch of cysts — hatch yield drifts as a pouch ages.">${age} · <button class="secondary compact-button" data-action="nps-cysts-opened" data-id="${this._escape(v.id)}">New pouch</button></small>`;
+  }
+
+  _awcFloodNotice(safety) {
+    if (safety.leakEntity || safety.floodMissingAcknowledged) return "";
+    return `
+          <div class="notice warning-notice">
+            <small><strong>No flood failsafe.</strong> Without a leak sensor, nothing outside the firmware can stop a stuck pump — reservoir sizing and dose lines ending in air are your only limits. Water changes stay blocked until you acknowledge this.</small>
+            <div class="button-row"><button class="secondary" data-action="awc-ack-flood">I understand — run without a leak sensor</button></div>
+          </div>`;
+  }
+
+  _awcPumpsDialogBody(awc) {
+    const pumps = awc.pumps || {};
+    const safety = awc.safety || {};
+    return `
+      ${this._awcFloodNotice(safety)}
+      ${!safety.leakEntity && safety.floodMissingAcknowledged ? `<small class="awc-hint">Running without a leak sensor (acknowledged). Binding one later re-arms the hardware failsafe automatically.</small>` : ""}
+      <div class="awc-pump-grid">
+        ${this._awcPumpCard("drain", pumps)}
+        ${this._awcPumpCard("fill", pumps)}
+        ${pumps.fill2 ? this._awcPumpCard("fill2", pumps) : ""}
+      </div>
+      <div class="button-row">
+        ${pumps.fill2
+          ? `<button class="secondary" data-action="awc-remove-source">Remove second source</button>`
+          : `<button class="secondary" data-action="awc-add-source">+ Add second fresh source (alternating reservoirs)</button>`}
+      </div>`;
+  }
+
+  _awcPumpsDialog() {
+    const awc = this._config?.automaticWaterChange || {};
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog awc-pumps-dialog">
+          <button class="close" data-action="awc-pumps-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Water Change</p>
+              <div class="live-trend-title"><h2>Pumps &amp; calibration</h2></div>
+              <p class="muted">Run each pump into a measuring jug, enter what it moved, and the flow rate follows. Flow and exchange factor are saved with your settings.</p>
+            </div>
+            ${this._saveControls()}
+          </div>
+          ${this._awcPumpsDialogBody(awc)}
+        </section>
+      </div>`;
+  }
+
+  _awcSetupBody(awc) {
+    const pumps = awc.pumps || {};
+    const res = awc.reservoirs || {};
+    const safety = awc.safety || {};
+    const ato = awc.ato || {};
+    const guards = awc.guards || {};
+    const sched = awc.schedule || {};
+    const policy = awc.sourcePolicy || {};
+    const schedMode = sched.mode === "interval" ? "interval" : "times";
+    const days = Array.isArray(sched.days) ? sched.days : [];
+    const dayBtns = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `
+      <label class="awc-day-toggle">
+        <input type="checkbox" data-scope="awc-schedule" data-field="scheduleDay" data-day="${d}" ${days.includes(d) ? "checked" : ""}>
+        <span>${d}</span>
+      </label>`).join("");
+
 
     return `
       <div class="awc-settings-stack">
@@ -16743,16 +16817,14 @@ const rigSteps = [
 
         <section class="mapping-section awc-settings-block">
           <div class="awc-section-title"><p class="eyebrow">Pumps (ESP32 peristaltic)</p></div>
-          <div class="awc-pump-grid">
-            ${pumpRow("drain")}
-            ${pumpRow("fill")}
-            ${pumps.fill2 ? pumpRow("fill2") : ""}
+          <div class="mini-grid">
+            ${["drain", "fill", ...(pumps.fill2 ? ["fill2"] : [])].map((role) => {
+              const p = pumps[role] || {};
+              const label = role === "drain" ? "Drain" : role === "fill2" ? "Fill (source 2)" : "Fill";
+              return `<label>${label} pump switch ${this._awcEntitySelect("awc-pump", `data-id="${role}"`, "switchEntity", p.switchEntity || "", "switch")}<small>${p.mlPerS ? `${p.mlPerS} ml/s` : "not calibrated yet"}</small></label>`;
+            }).join("")}
           </div>
-          <div class="button-row">
-            ${pumps.fill2
-              ? `<button class="secondary" data-action="awc-remove-source">Remove second source</button>`
-              : `<button class="secondary" data-action="awc-add-source">+ Add second fresh source (alternating reservoirs)</button>`}
-          </div>
+          <small class="awc-hint">Calibration, timed runs, the second source and "tubing replaced" live on the Water Change tab under <strong>Pumps &amp; calibration</strong>. <button class="secondary compact-button" data-action="tab" data-id="awc">Open Water Change</button></small>
         </section>
 
         <section class="mapping-section awc-settings-block">
@@ -16800,10 +16872,7 @@ const rigSteps = [
             <label>Leak sensor ${this._awcEntitySelect("awc-safety", "", "leakEntity", safety.leakEntity || "", "binary_sensor")}</label>
           </div>
           ${!safety.leakEntity && !safety.floodMissingAcknowledged ? `
-          <div class="notice warning-notice">
-            <small><strong>No flood failsafe.</strong> Without a leak sensor, nothing outside the firmware can stop a stuck pump — reservoir sizing and dose lines ending in air are the only protection. Pick a leak sensor above (it can live on another node), or acknowledge to run without one. Water changes stay blocked until you do one or the other.</small>
-            <div class="button-row"><button class="secondary" data-action="awc-ack-flood">I understand — run without a leak sensor</button></div>
-          </div>` : (!safety.leakEntity
+          <small class="awc-hint"><strong>No leak sensor bound.</strong> Water changes stay blocked until you acknowledge that on the Water Change tab (Pumps &amp; calibration).</small>` : (!safety.leakEntity
             ? `<small class="awc-hint">Running without a leak sensor (acknowledged). Binding one later re-arms the hardware failsafe automatically.</small>` : "")}
           <div class="mini-grid">
             <label>Max single change (% tank)<input type="number" min="1" max="100" step="1" data-scope="awc-safety" data-field="maxSingleChangePercent" value="${safety.maxSingleChangePercent ?? 25}"></label>
@@ -22554,7 +22623,31 @@ const rigSteps = [
   // would show — which switches change, which are locked, which are missing —
   // because a wall tablet invites stray touches and Feed can stop the return
   // pump. Apply only appears once that plan is on screen.
+  // The per-device face pick (0.7.177): stored on this device only, so the
+  // wall iPad can wear a different face — picked where you stand, on the wall.
+  _pulseDeviceFacesMarkup() {
+    return `
+      <div class="pulse-faces pulse-device-faces">
+            <small class="muted">On this screen — wear a different face on this device only. Stored on the device itself (not saved to OpenReef), so the wall iPad can run the Living Diagram while your phone opens the Data Wall. Takes effect immediately, no Save needed.</small>
+            <div class="pulse-face-row">
+              <button class="secondary pulse-face-btn ${this._pulseDeviceFaceId() === "" ? "active-face" : ""}" data-action="pulse-device-face" data-id="follow">
+                <strong>Follow saved settings</strong>
+                <small>This device shows whatever is configured above.</small>
+              </button>
+              ${Object.entries(this._pulseFaces()).map(([id, face]) => `
+                <button class="secondary pulse-face-btn ${this._pulseDeviceFaceId() === id ? "active-face" : ""}" data-action="pulse-device-face" data-id="${this._escape(id)}">
+                  <strong>${this._escape(face.label)}</strong>
+                  <small>${this._escape(face.hint)}</small>
+                </button>
+              `).join("")}
+            </div>
+            ${this._pulseDeviceFaceId() ? `<small class="muted">📌 This device is wearing <strong>${this._escape(this._pulseFaces()[this._pulseDeviceFaceId()].label)}</strong> — the toggles below still edit the saved default for every other screen.</small>` : ""}
+          </div>`;
+  }
+
   _pulseFocusModesMarkup() {
+    // A wall that may not change mode renders no card at all (stray touches);
+    // the per-device face pick rides along with the mode list only.
     if (!this._pulseModeAllowed()) return "";
     const choices = this._modeChoices();
     if (!choices.length) return "";
@@ -22606,7 +22699,8 @@ const rigSteps = [
       }).join("");
       return `${head}
         <div class="pulse-mode-list">${rows}</div>
-        <p class="pulse-focus-note dim">Only equipment you have explicitly armed can move. You will see the full plan before anything changes.</p>`;
+        <p class="pulse-focus-note dim">Only equipment you have explicitly armed can move. You will see the full plan before anything changes.</p>
+        ${this._pulseDeviceFacesMarkup()}`;
     }
 
     const mode = choices.find(([id]) => id === pick);
@@ -23111,6 +23205,7 @@ const rigSteps = [
         <div class="actions">
           <button class="secondary compact-button" data-action="timelapse-grab" ${hasCamera ? "" : "disabled"}>Grab frame now</button>
           <button class="secondary compact-button" data-action="timelapse-reload">Reload</button>
+          <button class="secondary compact-button danger-button" data-action="timelapse-clear" ${frames.length ? "" : "disabled"}>Clear timelapse</button>
           <button class="secondary compact-button" data-action="tab" data-id="settings">Settings</button>
         </div>
       </div>`;
@@ -23324,10 +23419,7 @@ const rigSteps = [
         </label>
       </div>
       <p class="muted">Recent frames stay detailed for day-cycle replay; older days thin to 1/day, then 1/week, then 1/month — so years of growth fit in a few hundred frames.</p>
-      <div class="actions">
-        <button class="secondary compact-button danger-button" data-action="timelapse-clear">Clear timelapse</button>
-        <small class="muted">"Grab a frame now" lives on the Cameras tab.</small>
-      </div>
+      <small class="muted">"Grab a frame now" and "Clear timelapse" live on the Cameras tab.</small>
     `;
     return this._settingsPanel(
       "timelapse",
@@ -23543,7 +23635,7 @@ const rigSteps = [
     const trust = this._trustCheckData();
     const dosing = this._dosingEnabled() ? this._dosingMissionState() : null;
     const summaryCards = [
-      cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings", { section: "system" }) : "",
+      cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings", { action: "system-check-open" }) : "",
       cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission", { scroll: "or-anchor-health" }) : "",
       cards.dosing && dosing ? this._missionSummaryCard("Dosing", dosing.value, dosing.detail, dosing.status, "dosing", { tour: "dosing" }) : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
@@ -23617,8 +23709,10 @@ const rigSteps = [
     const tourAttr = opts.tour ? ` data-tour="${this._escape(opts.tour)}"` : "";
     // One coherent accessible name instead of three separate inline nodes.
     const ariaLabel = this._escape([label, value, detail].filter(Boolean).join(" — "));
+    // opts.action: a card that opens a dialog instead of switching tab.
+    const actionAttrs = opts.action ? `data-action="${this._escape(opts.action)}"` : `data-action="tab" data-id="${this._escape(tab)}"${sectionAttr}${msectionAttr}${scrollAttr}${tourAttr}`;
     return `
-      <button class="summary-card ${status}" data-action="tab" data-id="${this._escape(tab)}"${sectionAttr}${msectionAttr}${scrollAttr}${tourAttr} aria-label="${ariaLabel}">
+      <button class="summary-card ${status}" ${actionAttrs} aria-label="${ariaLabel}">
         <span>${this._escape(label)}</span>
         <strong>${this._escape(value)}</strong>
         <small>${this._escape(detail)}</small>
@@ -23659,7 +23753,10 @@ const rigSteps = [
             <h3>${this._escape(this._trustStatusLabel(trust.status || "unknown"))}</h3>
             <p>${this._escape(this._trustSummaryText(trust))}</p>
           </div>
-          <button class="secondary compact-button" data-action="refresh-trust-check">Refresh</button>
+          <div class="button-row">
+            <button class="secondary compact-button" data-action="refresh-trust-check">Refresh</button>
+            <button class="secondary compact-button" data-action="system-check-open">Full System Check</button>
+          </div>
         </div>
         <div class="system-grid">
           ${this._trustCheckRows(4, true)}
@@ -23981,14 +24078,14 @@ const rigSteps = [
     sensorAlerts.forEach((alert) => {
       const impact = this._sensorAlertImpact(alert.id, alert.sensor, alert.status);
       if (alert.status === "unknown") {
-        issues.push(["warning", alert.title, alert.detail, "settings"]);
+        issues.push(["warning", alert.title, alert.detail, "settings", alert.id]);
         return;
       }
       if (!impact.affectsScore) {
-        issues.push(["warning", `${alert.title} (context)`, `${alert.detail} · context only`, "live"]);
+        issues.push(["warning", `${alert.title} (context)`, `${alert.detail} · context only`, "live", alert.id]);
         return;
       }
-      issues.push([alert.status === "critical" ? "critical" : "warning", alert.title, alert.detail, "live"]);
+      issues.push([alert.status === "critical" ? "critical" : "warning", alert.title, alert.detail, "live", alert.id]);
     });
     if (unmappedSensors.length) {
       issues.push(["warning", "Sensors still need mapping", unmappedSensors.map(([, sensor]) => sensor.label).join(", "), "settings"]);
@@ -24034,7 +24131,7 @@ const rigSteps = [
       issues.push(["info", "No equipment mapped yet", "Add pumps, heaters, skimmers, lights, or other switch-controlled devices when you are ready.", "settings"]);
     }
 
-    return issues.map(([severity, title, detail, tab]) => ({ severity, title, detail, tab }));
+    return issues.map(([severity, title, detail, tab, sensorId]) => ({ severity, title, detail, tab, sensorId: sensorId || "" }));
   }
 
   // The shelf's bottles that need a hand: [severity, title, detail, tab] rows
@@ -24081,15 +24178,34 @@ const rigSteps = [
 
     return `
       <div class="issue-list">
-        ${issues.map(({ severity, title, detail, tab }) => `
+        ${issues.map(({ severity, title, detail, tab, sensorId }) => `
           <button class="issue-item ${severity}" data-action="tab" data-id="${this._escape(tab)}">
             <span class="pill ${severity === "info" ? "unknown" : severity}">${this._escape(severity)}</span>
             <strong>${this._escape(title)}</strong>
             <small>${this._escape(detail)}</small>
           </button>
+          ${sensorId ? `<div class="issue-actions alert-actions">${this._alertActionButtons(sensorId)}</div>` : ""}
         `).join("")}
       </div>
     `;
+  }
+
+  // Ack / Mute for one sensor alert. Lived in Settings → Alerts until 0.7.177;
+  // a live alert is acted on where it is seen — the Attention list.
+  _alertActionButtons(id) {
+    const escalation = this._config.alertEscalation || {};
+    const sensor = (this._config.sensors || {})[id] || {};
+    const status = this._sensorStatus(sensor, id);
+    const acknowledged = Boolean(escalation.acknowledged?.[id]);
+    const mutedUntil = this._formatMutedUntil(id);
+    const canAck = ["critical", "warning", "unknown"].includes(status) && !acknowledged;
+    const state = mutedUntil ? `<small>Muted until ${this._escape(mutedUntil)}</small>` : acknowledged ? `<small>Acknowledged until it resolves</small>` : "";
+    if (this._isAlertMuted(id)) {
+      return `${state}<button class="secondary compact-button" data-action="unmute-alert" data-id="${this._escape(id)}">Unmute</button>`;
+    }
+    return `${state}${canAck ? `<button class="secondary compact-button" data-action="ack-alert" data-id="${this._escape(id)}">Ack</button>` : ""}
+      <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="60">Mute 1h</button>
+      <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="1440">Mute 24h</button>`;
   }
 
   _sensorRow(id, sensor) {
@@ -27789,7 +27905,7 @@ const rigSteps = [
           <label>Volume (L)<input type="number" min="0.1" max="10" step="0.1" data-scope="nps-hatch-vessel" data-id="${this._escape(vid)}" data-field="volumeL" value="${this._escape(String(v?.volumeL ?? 1))}"></label>
           ${multi ? `<button class="danger-text compact-button" data-action="nps-remove-vessel" data-id="${this._escape(vid)}">Remove</button>` : ""}
         </div>
-        <small class="awc-hint">${this._escape(rec.note || "")} <strong>Its cysts pouch</strong> — ${pouch.available ? `opened ${this._escape(String(pouch.days))} days ago${pouch.status === "old" ? " — check storage and hatch yield" : ""}` : "not stamped yet"}. <button class="secondary compact-button" data-action="nps-cysts-opened" data-id="${this._escape(vid)}">Opened a new pouch${multi ? ` for ${this._escape(v?.name || vid)}` : ""}</button></small>`;
+        <small class="awc-hint">${this._escape(rec.note || "")} <strong>Its cysts pouch</strong> — ${pouch.available ? `opened ${this._escape(String(pouch.days))} days ago${pouch.status === "old" ? " — check storage and hatch yield" : ""}` : "not stamped yet"}. Stamp a new pouch from its tile on the Brine hatchery tab.</small>`;
       }).join("")}
       ${this._npsVesselEntries().length < 4 ? `<div class="button-row"><button class="secondary compact-button" data-action="nps-add-vessel">+ Add a hatchery</button></div>` : ""}
       <small class="awc-hint">Brine dosing container — the ledger behind the fill level, the depletion maths and the stale gate. "Load volume" 0 = top to full on every load.</small>
@@ -29386,22 +29502,7 @@ const rigSteps = [
               `).join("")}
             </div>
           </div>
-          <div class="pulse-faces pulse-device-faces">
-            <small class="muted">On this screen — wear a different face on this device only. Stored on the device itself (not saved to OpenReef), so the wall iPad can run the Living Diagram while your phone opens the Data Wall. Takes effect immediately, no Save needed.</small>
-            <div class="pulse-face-row">
-              <button class="secondary pulse-face-btn ${this._pulseDeviceFaceId() === "" ? "active-face" : ""}" data-action="pulse-device-face" data-id="follow">
-                <strong>Follow saved settings</strong>
-                <small>This device shows whatever is configured above.</small>
-              </button>
-              ${Object.entries(this._pulseFaces()).map(([id, face]) => `
-                <button class="secondary pulse-face-btn ${this._pulseDeviceFaceId() === id ? "active-face" : ""}" data-action="pulse-device-face" data-id="${this._escape(id)}">
-                  <strong>${this._escape(face.label)}</strong>
-                  <small>${this._escape(face.hint)}</small>
-                </button>
-              `).join("")}
-            </div>
-            ${this._pulseDeviceFaceId() ? `<small class="muted">📌 This device is wearing <strong>${this._escape(this._pulseFaces()[this._pulseDeviceFaceId()].label)}</strong> — the toggles below still edit the saved default for every other screen.</small>` : ""}
-          </div>
+          <small class="muted">On this screen — the per-device face (a different look on the wall iPad only) is picked on the Pulse wall itself, under Mode.</small>
           <div class="mini-grid">
             <label>Backdrop
               <select data-scope="pulse" data-field="backdrop">
@@ -30381,37 +30482,7 @@ const rigSteps = [
     const alerts = this._config.alerts || {};
     const escalation = this._config.alertEscalation || {};
     const sensors = this._enabledSensors();
-    const alertRows = sensors.map(([id, sensor]) => {
-      const status = this._sensorStatus(sensor, id);
-      const mutedUntil = this._formatMutedUntil(id);
-      const acknowledged = Boolean(escalation.acknowledged?.[id]);
-      const statusDetail = mutedUntil
-        ? `Muted until ${mutedUntil}`
-        : acknowledged
-          ? "Acknowledged until this alert resolves"
-        : sensor.alertsEnabled === false
-          ? "Alerts muted for this sensor"
-          : this._escape(sensor.entity_id || "No entity mapped");
-      const canAck = ["critical", "warning", "unknown"].includes(status) && !acknowledged;
-      return `
-        <div class="row alert-row">
-          <div>
-            <strong>${this._escape(sensor.label || id)}</strong>
-            <span>${statusDetail}</span>
-          </div>
-          <div class="alert-actions">
-            <span class="pill ${status}">${this._escape(this._sensorStatusLabel(status))}</span>
-            ${this._isAlertMuted(id)
-              ? `<button class="secondary compact-button" data-action="unmute-alert" data-id="${this._escape(id)}">Unmute</button>`
-              : `
-                ${canAck ? `<button class="secondary compact-button" data-action="ack-alert" data-id="${this._escape(id)}">Ack</button>` : ""}
-                <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="60">Mute 1h</button>
-                <button class="secondary compact-button" data-action="mute-alert" data-id="${this._escape(id)}" data-minutes="1440">Mute 24h</button>
-              `}
-          </div>
-        </div>
-      `;
-    }).join("");
+    // The per-sensor Ack / Mute list moved to Mission Control's Attention list (0.7.177).
     const history = Array.isArray(alerts.history) ? alerts.history.slice(0, 10) : [];
     const quiet = this._config.quietHours || {};
     return this._settingsPanel(
@@ -30528,7 +30599,7 @@ const rigSteps = [
           </div>
         </section>
         <div class="status-list">
-          ${alertRows || `<p class="muted">Enable sensor types to see their alert state here.</p>`}
+          <p class="muted">Live alerts are acknowledged and muted from Mission Control's <strong>Attention</strong> list, next to the reading that raised them. <button class="secondary compact-button" data-action="tab" data-id="mission">Open Mission Control</button></p>
         </div>
         <div class="section-head">
           <div>
@@ -30651,7 +30722,9 @@ const rigSteps = [
     );
   }
 
-  _systemCheckSettings() {
+  // The System Check pieces, shared by the Settings section (fields) and the
+  // dialog (readouts) — 0.7.177 split them so Settings stays settings.
+  _systemCheckParts() {
     const check = this._systemCheck();
     const trust = this._trustCheckData();
     const trustCounts = this._trustCounts(trust);
@@ -30702,12 +30775,8 @@ const rigSteps = [
       ["Last activity", check.lastActivity],
       ["Unsaved changes", check.dirty ? "yes" : "no"],
     ];
-    return this._settingsPanel(
-      "system",
-      "System Check",
-      "A simple readiness check first. Advanced beta diagnostics stay tucked away unless you need them.",
-      `
-        <section class="mapping-section readiness-panel ${readinessState}">
+    return {
+      readiness: `        <section class="mapping-section readiness-panel ${readinessState}">
           <div class="section-head">
             <div>
               <p class="eyebrow">Trust Check</p>
@@ -30732,15 +30801,8 @@ const rigSteps = [
           <div class="system-grid">
             ${this._trustCheckRows(8)}
           </div>
-          <div class="grid two compact">
-            <label>Last backup review
-              <input type="date" data-scope="trust-check" data-field="lastBackupReview" value="${this._escape(String(trustConfig.lastBackupReview || "").slice(0, 10))}">
-              <small>Record the date you last verified a Home Assistant/OpenReef backup exists.</small>
-            </label>
-          </div>
-        </section>
-
-        <details class="mapping-section advanced-settings">
+        </section>`,
+      diagnostics: `        <details class="mapping-section advanced-settings">
           <summary>
             <div>
               <p class="eyebrow">Advanced diagnostics</p>
@@ -30759,9 +30821,8 @@ const rigSteps = [
               `).join("")}
             </div>
           </div>
-        </details>
-
-        <details class="mapping-section advanced-settings">
+        </details>`,
+      watchdog: `        <details class="mapping-section advanced-settings">
           <summary>
             <div>
               <p class="eyebrow">Watchdog</p>
@@ -30796,9 +30857,8 @@ const rigSteps = [
               <small>The name after <code>notify.</code> — any notify service.</small>
             </label>
           </div>
-        </details>
-
-        <details class="mapping-section advanced-settings">
+        </details>`,
+      probe: `        <details class="mapping-section advanced-settings">
           <summary>
             <div>
               <p class="eyebrow">Probe Health</p>
@@ -30831,9 +30891,8 @@ const rigSteps = [
               <input type="number" min="0.1" max="10" step="0.1" data-scope="sensor-health" data-field="temperatureMismatchC" value="${this._escape(String(sensorHealth.temperatureMismatchC || 1.5))}">
             </label>
           </div>
-        </details>
-
-        <details class="mapping-section advanced-settings">
+        </details>`,
+      edge: `        <details class="mapping-section advanced-settings">
           <summary>
             <div>
               <p class="eyebrow">Edge Failsafes</p>
@@ -30878,9 +30937,8 @@ const rigSteps = [
               <input data-scope="edge-failsafes" data-field="notes" value="${this._escape(edgeFailsafes.notes || "")}" placeholder="Board, relay, probe, or kit note">
             </label>
           </div>
-        </details>
-
-        <details class="mapping-section advanced-settings">
+        </details>`,
+      replay: `        <details class="mapping-section advanced-settings">
           <summary>
             <div>
               <p class="eyebrow">Reef Replay</p>
@@ -30898,14 +30956,60 @@ const rigSteps = [
               </div>
             `).join("") : `<p class="muted">No incidents yet. Alert history, captures, and activity will appear here.</p>`}
           </div>
-        </details>
-
-        <div class="button-row">
+        </details>`,
+      buttons: `        <div class="button-row">
           <button class="secondary" data-action="validate">Refresh checks</button>
           <button class="primary" data-action="copy-support-summary">Copy support summary</button>
+        </div>`,
+      backupReview: `          <div class="grid two compact">
+            <label>Last backup review
+              <input type="date" data-scope="trust-check" data-field="lastBackupReview" value="${this._escape(String(trustConfig.lastBackupReview || "").slice(0, 10))}">
+              <small>Record the date you last verified a Home Assistant/OpenReef backup exists.</small>
+            </label>
+          </div>`,
+    };
+  }
+
+  _systemCheckSettings() {
+    const parts = this._systemCheckParts();
+    return this._settingsPanel(
+      "system",
+      "System Check",
+      "Watchdog, probe health and edge-failsafe settings. The readiness check itself lives in the System Check dialog.",
+      `
+        <p class="muted">Trust Check, the readiness snapshot, Reef Replay and the support summary are one tap from Mission Control's system cards. <button class="secondary compact-button" data-action="system-check-open">Open System Check</button></p>
+        <div class="grid two compact">
+${parts.backupReview}
         </div>
+${parts.watchdog}
+${parts.probe}
+${parts.edge}
       `,
     );
+  }
+
+  // The System Check dialog (0.7.177): readiness, diagnostics, replay and the
+  // support summary — a status page, opened from the Mission Control cards.
+  _systemCheckDialog() {
+    const parts = this._systemCheckParts();
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog system-check-dialog">
+          <button class="close" data-action="system-check-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">System</p>
+              <div class="live-trend-title"><h2>System Check</h2></div>
+              <p class="muted">A simple readiness check first. Advanced diagnostics stay tucked away unless you need them.</p>
+            </div>
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="system" data-scroll="or-section-system">Settings</button>
+          </div>
+${parts.readiness}
+${parts.diagnostics}
+${parts.replay}
+${parts.buttons}
+        </section>
+      </div>`;
   }
 
   _energyPicker(field, label) {
@@ -31635,6 +31739,11 @@ const rigSteps = [
         .how-it-works { display: grid; gap: 8px; justify-items: start; }
         .how-it-works-body { border-left: 3px solid #24364a; padding: 4px 12px; color: #9fb2c7; font-size: 13px; display: grid; gap: 8px; }
         .how-it-works-body p { margin: 0; }
+        .issue-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; margin: -2px 0 4px; }
+        .issue-actions small { color: #9fb2c7; }
+        .awc-pumps-dialog, .system-check-dialog { max-width: 1000px; gap: 14px; }
+        .awc-pumps-dialog .live-trend-head .settings-save { align-self: flex-start; }
+        .pulse-device-faces { margin-top: 10px; }
         .cooling-dialog { max-width: 1000px; gap: 14px; }
         .cooling-dialog .notice { margin-bottom: 0; }
         .cooling-dialog .live-trend-head .button-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }

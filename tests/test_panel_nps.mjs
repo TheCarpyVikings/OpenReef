@@ -1753,7 +1753,9 @@ test("settings are per hatchery: own cysts, own clock, own pouch (0.7.147)", asy
     assert(html.includes('data-scope="nps-hatch-vessel" data-id="v1" data-field="eggType"') && html.includes('data-scope="nps-hatch-vessel" data-id="v2" data-field="eggType"'), "each hatchery picks its own cysts");
     assert(html.includes('data-id="v2" data-field="hatchHours" value="24"') && html.includes('data-id="v1" data-field="hatchHours" value="24"'), "each hatchery shows its own clock");
     assert(html.includes("opened 30 days ago") && html.includes("not stamped yet"), "each hatchery shows its own pouch");
-    assert(html.includes('data-action="nps-cysts-opened" data-id="v2"'), "the pouch button names the hatchery");
+    assert(!html.includes('data-action="nps-cysts-opened"'), "the pouch stamp left Settings for the tile (0.7.177)");
+    assert(panel._npsPouchLine({ id: "v2", cysts: { available: false } }).includes('data-action="nps-cysts-opened" data-id="v2"'), "the tile's pouch button names the hatchery");
+    assert(panel._npsPouchLine({ id: "v3" }) === "", "no cysts on the summary, no line");
     // The card: each tile says its own cysts + clock, and the learned/temperature
     // advice is per hatchery with the apply button aimed at that vessel.
     panel._nps.summary.hatchery = v2HatcherySummary({ vessels: [

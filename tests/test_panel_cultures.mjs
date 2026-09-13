@@ -569,7 +569,9 @@ test("the journal merges the bottle's rows, the hub card reads the bottle, the h
     if (card) assert(card.includes("bottle 400 ml") && card.includes("harvest in ~14 h"), "the hub card must read the bottle and the next harvest");
     panel._nps.summary = { hatchery: { cysts: { available: true, openedAt: iso(22 * 24), days: 22, status: "aging" } } };
     const hs = panel._hatcherySettings();
-    assert(hs.includes("opened 22 days ago") && hs.includes('data-action="nps-cysts-opened"'), "the cysts line is missing from hatchery settings");
+    assert(hs.includes("opened 22 days ago") && !hs.includes('data-action="nps-cysts-opened"'), "settings shows the pouch age; the stamp moved to the tile (0.7.177)");
+    const tile = panel._npsPouchLine({ id: "v1", cysts: { available: true, days: 22, status: "aging" } });
+    assert(tile.includes("pouch opened 22 d ago") && tile.includes('data-action="nps-cysts-opened" data-id="v1"'), "the tile stamps the cysts");
     panel._culturesLoadSummary = async () => {};
     const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
     assert(titles.includes("Brine hatchery: Cysts pouch opened 22 days ago"), `cysts Pulse line missing: ${titles}`);

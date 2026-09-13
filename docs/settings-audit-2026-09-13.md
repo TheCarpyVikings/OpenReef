@@ -130,3 +130,22 @@ Each stage is its own release, tests in lockstep, no change to any saved config 
   Water Change tab has no other way into demo mode.
 - Tests: new `tests/test_panel_settings.mjs` (4). Mixing and NPS suites open their how blocks
   before reading the copy.
+
+## 8. Stage B — built as 0.7.177 (2026-09-13)
+
+Operations out of Settings, each to the screen where the thing it acts on is seen:
+
+| moved | from | to |
+|---|---|---|
+| Ack / Mute 1h / Mute 24h per sensor | Settings → Alerts | Mission Control → Attention rows (`_alertActionButtons`, rendered under the issue that raised it; issues now carry `sensorId`). Settings keeps notifications, escalation, quiet hours, history. |
+| Pump calibration (calibrate, timed runs, multi-point fit, tubing replaced, second source) | Settings → AWC | Water Change tab → **Pumps & calibration** dialog (`_awcPumpsDialog`, `_awcPumpCard`). Settings keeps each pump's switch entity and shows its ml/s. |
+| Flood consent ("I understand — run without a leak sensor") | Settings → AWC | The same dialog AND a banner at the top of the Water Change tab (`_awcFloodNotice`). Settings says where to acknowledge and keeps the quiet "acknowledged" reminder. |
+| Clear timelapse | Settings → Timelapse | Cameras tab → Timelapse header, disabled when there are no frames. |
+| "Opened a new pouch" cysts stamp | Settings → Brine hatchery | The hatchery's own tile (`_npsPouchLine`: pouch age + New pouch). Settings keeps the age sentence. |
+| Trust Check panel, readiness snapshot, Advanced diagnostics, Reef Replay, Refresh checks, Copy support summary, Test notification | Settings → System Check | **System Check** dialog (`_systemCheckDialog`), opened from the Mission Control system cards, the Trust Check summary card (`_missionSummaryCard` grew `opts.action`) and a Full System Check button on the Trust panel. Settings keeps last backup review, Watchdog, Probe Health, Edge Failsafes (`_systemCheckParts` feeds both). |
+| Per-device Pulse face | Settings → Reef Pulse | The Pulse wall's control card, under the mode list (`_pulseDeviceFacesMarkup`). A wall that may not change mode still renders no card — that contract predates this and stands, so the device face is only pickable where mode switching is allowed. Saved faces stay in Settings. |
+
+Stayed in Settings on purpose: the AWC demo-mode toggle (see §7).
+
+Tests: `test_panel_settings.mjs` 8 (+4), AWC flood test reads the dialog body, cultures and
+NPS pouch tests read the tile line. All panel suites green.

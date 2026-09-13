@@ -85,13 +85,83 @@ test("duplicates of tab actions left Settings: capture-now, timelapse grab, the 
   try { html = panel._timelapseSettings(); } catch (e) { html = ""; }
   if (html) {
     assert(!html.includes('data-action="timelapse-grab"'), "grab is on the Cameras tab");
-    assert(html.includes('data-action="timelapse-clear"'), "clear stays until Stage B moves it");
+    assert(!html.includes('data-action="timelapse-clear"'), "clear moved to the Cameras tab in Stage B");
   }
   try { html = panel._manualTestSettings(); } catch (e) { html = ""; }
   if (html) assert(!html.includes('data-action="apply-manual-schedule-preset"'), "the preset is applied from the Manual Tests tab");
   // At least one of the three rendered in this harness, or the test proves nothing.
   const rendered = ["_captureSettings", "_timelapseSettings", "_manualTestSettings"].filter((m) => { try { return Boolean(panel[m]()); } catch { return false; } });
   assert(rendered.length >= 1, `no duplicate-bearing section rendered in the harness: ${rendered}`);
+});
+
+
+// --- Stage B: operations out of Settings --------------------------------------
+
+test("attention rows carry Ack / Mute for sensor alerts, and only for them", async () => {
+  const panel = await makePanel({ sensors: { temp: { label: "Temp" } }, alertEscalation: {} });
+  panel._sensorStatus = () => "warning";
+  panel._formatMutedUntil = () => "";
+  panel._isAlertMuted = () => false;
+  const html = panel._missionIssuesHtml([
+    { severity: "warning", title: "Temp high", detail: "27.1 °C", tab: "live", sensorId: "temp" },
+    { severity: "warning", title: "Sensors still need mapping", detail: "pH", tab: "settings", sensorId: "" },
+  ]);
+  assert(html.includes('data-action="ack-alert" data-id="temp"') && html.includes('data-action="mute-alert" data-id="temp" data-minutes="1440"'));
+  assertEqual((html.match(/issue-actions/g) || []).length, 1, "only the sensor alert gets actions");
+  panel._isAlertMuted = () => true;
+  panel._formatMutedUntil = () => "14:00";
+  const muted = panel._alertActionButtons("temp");
+  assert(muted.includes("Muted until 14:00") && muted.includes('data-action="unmute-alert"') && !muted.includes("ack-alert"));
+  // Settings → Alerts no longer lists them.
+  const settings = await makePanel({ quietHours: { enabled: false }, alerts: {}, alertEscalation: {}, sensors: {} });
+  settings._settingsSections = {}; settings._healthSections = {};
+  settings._enabledSensors = () => [];
+  const body = settings._alertsSettings(true);
+  assert(!body.includes("ack-alert") && body.includes("Open Mission Control"));
+});
+
+test("System Check: fields stay in Settings, readouts go to the dialog, the cards open it", async () => {
+  const panel = await makePanel({});
+  panel._systemCheckParts = () => ({ readiness: "<i>R</i>", diagnostics: "<i>D</i>", watchdog: "<i>W</i>", probe: "<i>P</i>", edge: "<i>E</i>", replay: "<i>X</i>", buttons: "<i>B</i>", backupReview: "<i>K</i>" });
+  panel._settingsPanel = (id, title, description, content) => `<!--${id}-->${content}`;
+  const settings = panel._systemCheckSettings();
+  for (const k of ["W", "P", "E", "K"]) assert(settings.includes(`<i>${k}</i>`), `settings keeps ${k}`);
+  for (const k of ["R", "D", "X", "B"]) assert(!settings.includes(`<i>${k}</i>`), `settings drops ${k}`);
+  assert(settings.includes('data-action="system-check-open"'));
+  const dialog = panel._systemCheckDialog();
+  for (const k of ["R", "D", "X", "B"]) assert(dialog.includes(`<i>${k}</i>`), `dialog shows ${k}`);
+  for (const k of ["W", "P", "E"]) assert(!dialog.includes(`<i>${k}</i>`), `dialog hides ${k}`);
+  assert(dialog.includes('data-action="system-check-close"'));
+  const card = panel._missionSummaryCard("Trust Check", "Ready", "all clear", "ok", "settings", { action: "system-check-open" });
+  assert(card.includes('data-action="system-check-open"') && !card.includes('data-id="settings"'));
+});
+
+test("AWC: calibration and the flood consent live in the Pumps & calibration dialog, not Settings", async () => {
+  const panel = await makePanel({ automaticWaterChange: { pumps: { drain: { switchEntity: "switch.d" }, fill: {} }, safety: {} } });
+  panel._awcEntitySelect = (scope, id, field, value) => `<select ${id} data-scope="${scope}" data-field="${field}"><option>${value}</option></select>`;
+  panel._configDirty = false;
+  const dialog = panel._awcPumpsDialog();
+  assert(dialog.includes('data-action="awc-calibrate" data-id="drain"') && dialog.includes('data-action="awc-cal-run"'), "calibration in the dialog");
+  assert(dialog.includes('data-action="awc-ack-flood"') && dialog.includes('data-action="awc-pumps-close"'));
+  assert(dialog.includes('data-action="awc-tubing-replaced"'));
+  let settings = "";
+  try { settings = panel._awcSetupBody(panel._config.automaticWaterChange); } catch { settings = ""; }
+  if (settings) {
+    assert(!settings.includes("awc-calibrate") && !settings.includes("awc-cal-run") && !settings.includes("awc-ack-flood"), "settings is config only");
+    assert(settings.includes('data-field="switchEntity"') && settings.includes("No leak sensor bound"), "settings keeps the switch and says where consent lives");
+  }
+});
+
+test("timelapse clear sits on the Cameras tab; the Pulse device face rides with the wall's mode list", async () => {
+  const panel = await makePanel({ timelapse: {}, pulse: {} });
+  panel._cameraList = () => [["cam", { entity_id: "camera.x" }]];
+  panel._timelapse = { loaded: true, loading: false, frames: [{ at: 1 }], error: "" };
+  panel._loadTimelapseFrames = () => {};
+  let html = "";
+  try { html = panel._timelapseSection(); } catch { html = ""; }
+  if (html) assert(html.includes('data-action="timelapse-clear"') && html.includes('data-action="timelapse-grab"'));
+  const faces = panel._pulseDeviceFacesMarkup();
+  assert(faces.includes('data-action="pulse-device-face" data-id="follow"') && faces.includes("pulse-device-faces"));
 });
 
 await runTests();
