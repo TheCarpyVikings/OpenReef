@@ -836,3 +836,109 @@ Tests: `tests/test_cooling.py` 59, `tests/test_panel_cooling.mjs` 21. The accept
 24.3 °C at 43 % must return `freecool` while `advised` stays false.
 
 Not yet verified on real HA.
+
+## 14. The silent grey zone — `losing` and the humidity ceiling (spec, 2026-09-13)
+
+### 14.1 What Reece saw
+
+2026-09-13 screenshot: 48 % fan effect, "Fan headroom thinning", room 26.1 °C at 68 %, dew point
+19.6 °C, tank 25.1 °C against a fixed 24.8 °C target. The 24 h strip ran 43–57 % every hour. The
+plan line read "no hour in the next 24 h where the fans are needed and losing". He has never once
+had dehumidifier advice.
+
+Nothing was broken. The plan has exactly two triggers and both key off the fan-effect *band*:
+
+- **now** — the live band is in `WARN_BANDS` (weak / dead / reversed), i.e. under 40 %.
+- **ahead / scheduled** — the projection has an "affected" hour, the same test per forecast hour.
+
+Thin (40–70 %) is a deliberately silent band, and his room lives there all day: fans at half
+effect, tank sitting 0.3 °C over target, the engine shrugging because "half" is not "losing".
+On top of that the intake fan was in Auto and running, so even a firing plan would have been
+overridden to `vented` — that day on a 1.7 °C dew gap (the relaxed bar) with outdoor air at 90 %.
+The band edges are backend config only, not in the panel, so there was no knob to reach.
+
+### 14.2 The two rules
+
+**`losing` — the tank-outcome trigger.** The honest signal that the dehumidifier "changes the
+outcome" is not the index, it is the water. A fan that is on and not holding the tank is losing,
+whatever percentage it scores.
+
+- start: `fan_needed` AND a real probe (`waterSource == "sensor"`) AND
+  `water − target ≥ losingOverC` AND band under good.
+- hold (stop-side deadband only, per §13): `water − target ≥ losingOverC − 0.2`; the band gate
+  stays strict — once the fans are back in good they are doing the job and the compressor's heat
+  has no business in the room.
+- `losingOverC` default **0.3**, 0 = off. No probe → never fires (the water falls back to the
+  target and the margin is zero by construction, but the gate is explicit anyway).
+- copy: "the fans are on but the tank is still 0.3 °C over target at 48 %".
+
+**`ceiling` — the room humidity ceiling (Reece's ask).** A different job to cooling: it protects
+the house, the electronics and the salt creep, and it fires on cool humid days too. The locked
+physics (§2) say RH is the wrong *cooling* metric, so this is labelled a house rule, not folded
+into the index.
+
+- start: `rh ≥ maxRh`. Not gated on `fan_needed`.
+- hold: `rh ≥ maxRh − 5`.
+- `maxRh` default **0 = off**. Reece will set ~70.
+- copy: "room humidity 72 % is over the 70 % ceiling".
+
+Both inherit everything that makes this beat the dumb humidistat he switched off: the vent
+exclusion (drying air you blow out of the window is waste — `vented` still overrides every
+running kind), min on / min off, max run + the bucket nudge, the manual hold, and fails-off on
+leaving auto.
+
+### 14.3 Priority
+
+`now` → `unrescuable` → `losing` → `ahead` → `ceiling` → `scheduled` → `none`. A present cooling
+failure beats a house rule; a house rule beats a forecast that has not started yet (`scheduled`
+is a "not yet" — it must not hide a ceiling breach that wants the plug on now).
+
+### 14.4 The latch
+
+`dehumidifier_plan` stays stateless; the tick passes the previous tick's plan kind
+(`runtime["planLatch"]`) and the engine relaxes the matching gate. Same shape as
+`fanNeededLatch`. Stop side only — a start is never made easier.
+
+### 14.5 Notifications
+
+`losing` and `ceiling` join the once-per-plan notification (`plan_<kind>`, six-hour cooldown)
+and the activity log. `losing` logs as a warning, `ceiling` as info. Advise: "Start the
+dehumidifier". Auto + controlling: "Dehumidifier plan — OpenReef will run the dehumidifier".
+
+### 14.6 Panel
+
+Two fields in the Forecast + dehumidifier grid: "Dehumidify when the tank sits over target by
+(°C)" and "Room humidity ceiling (% RH)". Plan line: `losing` → "Dehumidify now — …",
+`ceiling` → "Dehumidify — …". Insight card: `losing` is the existing "Dehumidify now" warning
+card (vent advice still takes the title when outdoor air is drier); `ceiling` gets its own card,
+ok while the fans are not needed, warning when they are.
+
+### 14.7 What does not change
+
+The projection still marks affected hours by band; the forecast cannot see the tank, so
+`losing` is live-only. The vent decision is untouched. The "act at" band idea from the brainstorm
+is folded into `losing` (its band gate) rather than exposed as a third number.
+
+### 14.8 Decisions
+
+1. `losingOverC` 0.3, on by default — this IS the fix for the grey zone, and only a bound probe
+   can trigger it.
+2. `maxRh` off by default; Reece sets his own.
+3. `vented` beats both. Revisit only if a wet 90 % outdoor day shows venting winning on paper
+   while the room stays muggy (§14.1 was close to that).
+
+### 14.9 Built — 0.7.174 (2026-09-13)
+
+Shipped as specified. `dehumidifier_plan` grew `losing_over_c`, `max_rh`, `water_known` and
+`latched` (the previous tick's kind, stamped in `runtime["planLatch"]` after the vent
+re-evaluation so both plan calls in a tick see last tick's value). New constants
+`LOSING_HYST_C` 0.2 and `CEILING_HYST_RH` 5. Config `dehumidifier.losingOverC` (0–3, default
+0.3) and `dehumidifier.maxRh` (0–95, default 0). Panel: `planCeiling` on the summary, the two
+fields, the ceiling card.
+
+Tests: `tests/test_cooling.py` 65 (+6), `tests/test_panel_cooling.mjs` 24 (+3). The acceptance
+case is `test_plan_losing_is_reeces_2026_09_13_screenshot` — 25.1 °C tank, 24.8 target, room
+26.1 °C at 68 % must return `losing` where 0.7.173 returned `none`.
+
+Not yet verified on real HA. Reece: set the ceiling to taste (~70), leave `losingOverC` at 0.3,
+and watch the Log tab for "Dehumidifier: the fans are on but the tank is still…".

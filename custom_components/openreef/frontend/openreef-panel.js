@@ -27327,7 +27327,8 @@ const rigSteps = [
       status: result.status, netFan: result.netFan,
       dayKind: projection?.dayKind || "", dayKindLabel: projection?.dayKindLabel || "",
       worstPct, firstAffectedAt: projection?.firstAffectedAt || null,
-      plan, planActive: Boolean(plan && (plan.kind === "now" || plan.kind === "ahead")),
+      plan, planActive: Boolean(plan && (plan.kind === "now" || plan.kind === "ahead" || plan.kind === "losing" || plan.kind === "ceiling")),
+      planCeiling: Boolean(plan && plan.kind === "ceiling"),
       ventAdvised: Boolean(vent && vent.advised), ventReason: vent?.reason || "",
       ventDecision: status.ventDecision || null,
       ventRunning: Boolean(status.ventDecision?.shouldRun),
@@ -27357,7 +27358,8 @@ const rigSteps = [
   _coolingPlanLine(sum) {
     const plan = sum?.plan;
     if (!plan) return "";
-    if (plan.kind === "now" || plan.kind === "ahead") return `Dehumidify now — ${plan.reason}`;
+    if (plan.kind === "now" || plan.kind === "ahead" || plan.kind === "losing") return `Dehumidify now — ${plan.reason}`;
+    if (plan.kind === "ceiling") return `Dehumidify — ${plan.reason}`;
     if (plan.kind === "scheduled") return `Dehumidifier: ${plan.reason}`;
     if (plan.kind === "unrescuable") return `Chiller day — ${plan.reason}`;
     if (plan.kind === "vented") return `Dehumidifier off — ${plan.reason}`;
@@ -27420,6 +27422,10 @@ const rigSteps = [
     if (sum.ventRunning) {
       const freecool = sum.ventDecision.kind === "freecool";
       return { key: "cooling", kicker: "Cooling headroom", title: sum.ventControlling && sum.ventFanOn ? (freecool ? "Free cooling" : "Venting the room") : (freecool ? "Vent the room — free cooling" : "Vent the room now"), detail: sum.ventDecision.reason, status: sum.needed ? "warning" : "ok" };
+    }
+    if (sum.planCeiling) {
+      // A house rule, not a cooling failure: calm unless the fans are needed too.
+      return { key: "cooling", kicker: "Cooling headroom", title: sum.ventAdvised ? "Vent the room — humidity over the ceiling" : "Dehumidify — humidity over the ceiling", detail: sum.ventAdvised ? sum.ventReason : sum.plan.reason, status: sum.needed ? "warning" : "ok" };
     }
     if (sum.planActive) {
       return { key: "cooling", kicker: "Cooling headroom", title: sum.ventAdvised ? "Vent the room now" : "Dehumidify now", detail: sum.ventAdvised ? sum.ventReason : sum.plan.reason, status: "warning" };
@@ -27569,7 +27575,7 @@ const rigSteps = [
       </div>` : ""}`;
     return `
       <div class="awc-section-title"><p class="eyebrow">Forecast + dehumidifier</p></div>
-      <small class="hint">Bind a weather entity and OpenReef projects the next day hour by hour — room temperature and dew point follow the outdoor forecast plus the live indoor offset — and tells you when the fans will lose it and when to start the dehumidifier so its heat lands before the peak, not in it. If outdoor air is drier, it says vent instead. Advise tells you; auto switches a plug. Efficiency, never safety: it fails off and the fan/guard stay the backstop.</small>
+      <small class="hint">Bind a weather entity and OpenReef projects the next day hour by hour — room temperature and dew point follow the outdoor forecast plus the live indoor offset — and tells you when the fans will lose it and when to start the dehumidifier so its heat lands before the peak, not in it. If outdoor air is drier, it says vent instead. Two more triggers need no forecast: the fans are on but the tank is still sitting over target (the honest sign they are losing), and a plain room-humidity ceiling for the house. Advise tells you; auto switches a plug. Efficiency, never safety: it fails off and the fan/guard stay the backstop.</small>
       <div class="grid two">
         <label><span>Weather entity <small>hourly forecast — HA's built-in weather.home works</small></span>${this._awcEntitySelect("cooling", "", "weatherEntity", cfg.weatherEntity || "", "weather")}</label>
         <label><span>Look ahead (hours)</span><input type="number" min="6" max="48" step="1" value="${num(cfg.lookaheadHours, 24)}" data-scope="cooling" data-field="lookaheadHours" /></label>
@@ -27584,6 +27590,8 @@ const rigSteps = [
         <label><span>Max run (hours)</span><input type="number" min="1" max="24" step="1" value="${num(dehum.maxRunHours, 8)}" data-scope="cooling-dehum" data-field="maxRunHours" /></label>
         <label><span>Min on (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(dehum.minOnMinutes, 20)}" data-scope="cooling-dehum" data-field="minOnMinutes" /></label>
         <label><span>Min off (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(dehum.minOffMinutes, 10)}" data-scope="cooling-dehum" data-field="minOffMinutes" /></label>
+        <label><span>Dehumidify when the tank sits over target by (°C) <small>with the fans on and under full headroom · needs a tank probe · 0 = off</small></span><input type="number" min="0" max="3" step="0.1" value="${num(dehum.losingOverC, 0.3)}" data-scope="cooling-dehum" data-field="losingOverC" /></label>
+        <label><span>Room humidity ceiling (% RH) <small>a house rule — runs whatever the tank is doing, holds until 5 points under · 0 = off</small></span><input type="number" min="0" max="95" step="1" value="${num(dehum.maxRh, 0)}" data-scope="cooling-dehum" data-field="maxRh" /></label>
         <label><span>If you switch it by hand</span>
           <select data-scope="cooling-dehum" data-field="overridePolicy">
             <option value="hold" ${dehum.overridePolicy !== "reassert" ? "selected" : ""}>Hold until the plan changes</option>

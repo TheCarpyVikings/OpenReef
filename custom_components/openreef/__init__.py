@@ -1019,6 +1019,8 @@ def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
             "minOffMinutes": _awc_num(raw_d.get("minOffMinutes"), d_defaults["minOffMinutes"], 5, 120),
             "maxRunHours": _awc_num(raw_d.get("maxRunHours"), d_defaults["maxRunHours"], 1, 24),
             "overridePolicy": "reassert" if raw_d.get("overridePolicy") == "reassert" else "hold",
+            "losingOverC": _awc_num(raw_d.get("losingOverC"), d_defaults["losingOverC"], 0, 3.0),
+            "maxRh": _awc_num(raw_d.get("maxRh"), d_defaults["maxRh"], 0, 95),
         },
         "vent": {
             "mode": mode_v if mode_v in ("off", "advise", "auto") else v_defaults["mode"],
@@ -20360,7 +20362,12 @@ def cooling_snapshot(
     # The room counts as vented when we are running the intake fan, or the
     # window is known open while venting is advised (the keeper is venting).
     vent_active = bool(vent_fan["controlling"] and vent_fan["state"] == "on") or bool(window_open and advice.get("advised"))
-    plan = cooling_engine.dehumidifier_plan(result, needed, projection, now_local, dehum["leadHours"], target_c, vent_active)
+    # The previous tick's kind relaxes only the stop side of the gate it
+    # names (losing / ceiling) — the same shape as fanNeededLatch.
+    plan_latched = runtime.get("planLatch") if isinstance(runtime, dict) else None
+    plan = cooling_engine.dehumidifier_plan(
+        result, needed, projection, now_local, dehum["leadHours"], target_c, vent_active,
+        dehum["losingOverC"], dehum["maxRh"], water_source == "sensor", plan_latched)
     snap.update({
         "weather": {"entity": weather, **{k: outdoor[k] for k in ("outC", "outRh", "outDewC", "available")}},
         "offsets": offsets,
@@ -20620,9 +20627,10 @@ async def _async_cooling_tick_body(
     # the keeper hears "the fans are gone, do X" once, not twice.
     plan = snap["plan"]
     dehum = cfg["dehumidifier"]
-    plan_key = plan["kind"] if plan["kind"] in ("now", "unrescuable") else f"{plan['kind']}:{plan.get('startAt') or ''}"
+    plan_key = (plan["kind"] if plan["kind"] in ("now", "unrescuable", "losing", "ceiling")
+                else f"{plan['kind']}:{plan.get('startAt') or ''}")
     plan_sent = False
-    if dehum["mode"] != "off" and plan["kind"] in ("now", "ahead", "scheduled", "unrescuable"):
+    if dehum["mode"] != "off" and plan["kind"] in ("now", "ahead", "scheduled", "unrescuable", "losing", "ceiling"):
         if runtime.get("planKey") != plan_key:
             runtime["planKey"] = plan_key
             vent = snap["vent"]
@@ -20643,7 +20651,7 @@ async def _async_cooling_tick_body(
                 plan_sent = await _async_cooling_notify_once(
                     hass, config, f"plan_{plan['kind']}", COOLING_NOTIFY_COOLDOWN_S, title, message)
             activity.append((f"Dehumidifier: {plan['reason']}" + (" — vent instead" if vent.get("advised") else ""),
-                             "warning" if plan["kind"] in ("now", "unrescuable") else "info"))
+                             "warning" if plan["kind"] in ("now", "unrescuable", "losing") else "info"))
     elif plan["kind"] in ("none", "vented") and runtime.get("planKey"):
         runtime.pop("planKey", None)
     if band_note and cfg["notify"]:
@@ -20687,9 +20695,12 @@ async def _async_cooling_tick_body(
     vent_active = bool(snap["ventFan"]["controlling"] and fan_on) or bool(snap["window"]["open"] and snap["vent"].get("advised"))
     if vent_active != snap["ventActive"]:
         snap["ventActive"] = vent_active
+        # runtime["planLatch"] is still last tick's kind here — it is stamped below.
         snap["plan"] = cooling_engine.dehumidifier_plan(
             snap["result"], snap["fanNeeded"], snap["projection"], now_local,
-            cfg["dehumidifier"]["leadHours"], snap["targetC"], vent_active)
+            dehum["leadHours"], snap["targetC"], vent_active,
+            dehum["losingOverC"], dehum["maxRh"], snap["waterSource"] == "sensor", runtime.get("planLatch"))
+    runtime["planLatch"] = snap["plan"]["kind"]
     await _async_cooling_actuator_reconcile(hass, config, snap, runtime, now_local, activity, "dehumidifier")
     if activity:
         for message, kind in activity:

@@ -413,6 +413,125 @@ def test_plan_now_ahead_scheduled_none_and_unrescuable():
     assert quiet["kind"] == "none"
 
 
+def test_plan_losing_is_reeces_2026_09_13_screenshot():
+    # 48 % (thin), tank 25.1 vs a 24.8 target, fans on — no WARN band, no
+    # affected hour, and until §14 the plan read "no hour … losing".
+    live = cooling.evaluate(25.1, 26.1, 68)
+    assert live["band"] == "thin"
+    quiet = cooling.dehumidifier_plan(live, True, None, NOW, 3, 24.8)
+    assert quiet["kind"] == "none"
+    plan = cooling.dehumidifier_plan(live, True, None, NOW, 3, 24.8, losing_over_c=0.3, water_known=True)
+    assert plan["shouldRun"] and plan["kind"] == "losing"
+    assert "0.3 °C over target at 48 %" in plan["reason"] and plan["startAt"] == NOW.isoformat()
+    # Gates: 0 = off; no probe never fires; fans not needed; band good = the fans are doing it.
+    assert cooling.dehumidifier_plan(live, True, None, NOW, 3, 24.8, losing_over_c=0, water_known=True)["kind"] == "none"
+    assert cooling.dehumidifier_plan(live, True, None, NOW, 3, 24.8, losing_over_c=0.3, water_known=False)["kind"] == "none"
+    assert cooling.dehumidifier_plan(live, False, None, NOW, 3, 24.8, losing_over_c=0.3, water_known=True)["kind"] == "none"
+    good = cooling.evaluate(25.1, 24.0, 40)
+    assert good["band"] == "good"
+    assert cooling.dehumidifier_plan(good, True, None, NOW, 3, 24.8, losing_over_c=0.3, water_known=True)["kind"] == "none"
+    # Stop-side deadband: latched, 0.2 under the bar still runs; unlatched it does not.
+    near = cooling.evaluate(25.0, 26.1, 68)                     # 0.2 over target
+    assert cooling.dehumidifier_plan(near, True, None, NOW, 3, 24.8, losing_over_c=0.3, water_known=True)["kind"] == "none"
+    assert cooling.dehumidifier_plan(near, True, None, NOW, 3, 24.8, losing_over_c=0.3, water_known=True,
+                                     latched="losing")["kind"] == "losing"
+    assert cooling.dehumidifier_plan(near, True, None, NOW, 3, 24.8, losing_over_c=0.3, water_known=True,
+                                     latched="ceiling")["kind"] == "none"  # only its own gate relaxes
+    # Vented still wins.
+    assert cooling.dehumidifier_plan(live, True, None, NOW, 3, 24.8, vent_active=True, losing_over_c=0.3,
+                                     water_known=True)["kind"] == "vented"
+
+
+def test_plan_ceiling_is_a_house_rule_with_its_own_deadband():
+    muggy = cooling.evaluate(25.5, 21.0, 72)                    # cool, wet: fans not needed
+    assert cooling.dehumidifier_plan(muggy, False, None, NOW, 3, 25.5)["kind"] == "none"
+    plan = cooling.dehumidifier_plan(muggy, False, None, NOW, 3, 25.5, max_rh=70)
+    assert plan["shouldRun"] and plan["kind"] == "ceiling" and "72 % is over the 70 % ceiling" in plan["reason"]
+    assert cooling.dehumidifier_plan(muggy, False, None, NOW, 3, 25.5, max_rh=0)["kind"] == "none"
+    # 66 %: under the bar cold, still over it while latched (holds to 65).
+    easing = cooling.evaluate(25.5, 21.0, 66)
+    assert cooling.dehumidifier_plan(easing, False, None, NOW, 3, 25.5, max_rh=70)["kind"] == "none"
+    assert cooling.dehumidifier_plan(easing, False, None, NOW, 3, 25.5, max_rh=70, latched="ceiling")["kind"] == "ceiling"
+    assert cooling.dehumidifier_plan(cooling.evaluate(25.5, 21.0, 64), False, None, NOW, 3, 25.5, max_rh=70,
+                                     latched="ceiling")["kind"] == "none"
+    assert cooling.dehumidifier_plan(muggy, False, None, NOW, 3, 25.5, max_rh=70, vent_active=True)["kind"] == "vented"
+    assert cooling.dehumidifier_plan(None, False, None, NOW, 3, 25.5, max_rh=70)["kind"] == "none"
+
+
+def test_plan_priority_now_losing_ahead_ceiling_scheduled():
+    kw = {"losing_over_c": 0.3, "max_rh": 70, "water_known": True}
+    # now beats losing: weak band, tank over target.
+    weak = cooling.evaluate(26.0, 28, 75)
+    assert weak["band"] == "weak"
+    assert cooling.dehumidifier_plan(weak, True, None, NOW, 3, 25.5, **kw)["kind"] == "now"
+    # losing beats ahead: thin, over target, and a hit inside the lead window.
+    out_c = lambda i: 20 if i < 5 else 27
+    proj = cooling.project(cooling.parse_forecast(_fc(12, out_c=out_c, out_rh=70)), NOW, 24, 25.5, 25.5,
+                           {"offsetT": 3.0, "offsetDew": 5.0}, 1.0)
+    thin_over = cooling.evaluate(25.9, 26.1, 68)
+    assert thin_over["band"] == "thin"
+    inside = NOW + timedelta(hours=2)
+    assert cooling.dehumidifier_plan(thin_over, True, proj, inside, 3, 25.5, **kw)["kind"] == "losing"
+    # ahead beats ceiling.
+    wet_ok = cooling.evaluate(25.5, 23, 75)
+    assert cooling.dehumidifier_plan(wet_ok, False, proj, inside, 3, 25.5, **kw)["kind"] == "ahead"
+    # ceiling beats scheduled — the not-yet must not hide a breach that wants the plug on now.
+    sched = cooling.dehumidifier_plan(wet_ok, False, proj, NOW, 3, 25.5, **kw)
+    assert sched["shouldRun"] and sched["kind"] == "ceiling"
+    assert cooling.dehumidifier_plan(cooling.evaluate(25.5, 23, 60), False, proj, NOW, 3, 25.5, **kw)["kind"] == "scheduled"
+
+
+def test_normaliser_dehumidifier_losing_and_ceiling_fields():
+    cfg = normalise({"coolingHeadroom": {"dehumidifier": {"losingOverC": "9", "maxRh": 120}}})["coolingHeadroom"]
+    assert cfg["dehumidifier"]["losingOverC"] == 3.0 and cfg["dehumidifier"]["maxRh"] == 95.0
+    cfg = normalise({"coolingHeadroom": {"dehumidifier": {"losingOverC": -1, "maxRh": "junk"}}})["coolingHeadroom"]
+    assert cfg["dehumidifier"]["losingOverC"] == 0.0 and cfg["dehumidifier"]["maxRh"] == 0.0
+    cfg = normalise({"coolingHeadroom": {}})["coolingHeadroom"]
+    assert cfg["dehumidifier"]["losingOverC"] == 0.3 and cfg["dehumidifier"]["maxRh"] == 0.0
+
+
+def test_tick_losing_notifies_once_and_auto_runs_the_plug_then_latches():
+    # Reece's room in auto: thin band, tank 0.3 over — the plug goes on, one
+    # notification, and a tick with the tank 0.2 over keeps it (latched).
+    entry = _l2_entry(mode="auto", armed=True, targetTempC=24.8)
+    now = datetime.now(timezone.utc)
+    hass = _l2_hass(entry, room=26.1, rh=68, tank=25.1)
+    run(integration._async_cooling_tick(hass, entry, now))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["result"]["band"] == "thin" and snap["plan"]["kind"] == "losing"
+    assert len(_plug_calls(hass, "turn_on")) == 1
+    notes = [n for n in _notes(hass) if "plan_losing" in str(n.data.get("notification_id"))]
+    assert len(notes) == 1 and "Dehumidifier plan" in notes[0].data.get("title", "")
+    assert any("still 0.3 °C over target" in a["message"] and a["type"] == "warning"
+               for a in _activity(entry, "Dehumidifier"))
+    hass.states.set("sensor.tank", _fresh(25.0))
+    hass.states.set("switch.dehum", "on")
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=5)))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["plan"]["kind"] == "losing", "0.2 over holds while latched"
+    assert len(notes) == 1 and not _plug_calls(hass, "turn_off")
+    # Tank back on target: the plan releases (min-on may hold the plug, the plan does not).
+    hass.states.set("sensor.tank", _fresh(24.8))
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=10)))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert snap["plan"]["kind"] == "none"
+
+
+def test_tick_ceiling_advises_on_a_cool_muggy_evening():
+    entry = _entry(weatherEntity="weather.home", vent={"mode": "off"},
+                   dehumidifier={"mode": "advise", "switchEntity": "switch.dehum", "maxRh": 70})
+    now = datetime.now(timezone.utc)
+    hass = _l2_hass(entry, room=21.0, rh=74, tank=25.5)
+    run(integration._async_cooling_tick(hass, entry, now))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert not snap["fanNeeded"] and snap["plan"]["kind"] == "ceiling"
+    notes = [n for n in _notes(hass) if "plan_ceiling" in str(n.data.get("notification_id"))]
+    assert len(notes) == 1 and "Start the dehumidifier" in notes[0].data.get("title", "")
+    assert any("74 % is over the 70 % ceiling" in a["message"] and a["type"] == "info"
+               for a in _activity(entry, "Dehumidifier"))
+    assert not _plug_calls(hass, "turn_on")
+
+
 def test_vent_advice_prefers_drier_cooler_outdoor_air():
     yes = cooling.vent_advice(28.0, 22.0, 18.0, 12.0)
     assert yes["advised"] and yes["gapC"] == 10.0

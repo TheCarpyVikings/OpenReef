@@ -208,6 +208,58 @@ test("layer 2 settings render the weather/dehumidifier fields, the plan, vent an
   assert(!advise._coolingSettings().includes('data-field="armed"'), "no armed toggle outside auto");
 });
 
+test("losing: thin band, tank over target — the plan surfaces as Dehumidify now everywhere", async () => {
+  const losing = { shouldRun: true, kind: "losing", startAt: "x", until: null, reason: "the fans are on but the tank is still 0.3 °C over target at 48 %" };
+  const st = l2({ fanNeeded: true, plan: losing,
+    result: { ...status().result, index: 0.48, band: "thin", status: "ok", title: "Fan headroom thinning" },
+    vent: { advised: false, known: true, reason: "outdoor air is wetter than indoors" } });
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home", dehumidifier: { mode: "advise" } }, st);
+  const sum = panel._coolingSummary();
+  assertEqual(sum.planActive, true);
+  assertEqual(sum.planCeiling, false);
+  assert(panel._coolingPlanLine(sum).startsWith("Dehumidify now — the fans are on but"), panel._coolingPlanLine(sum));
+  const card = panel._coolingInsightCard();
+  assertEqual(card.title, "Dehumidify now");
+  assertEqual(card.status, "warning");
+  assert(card.detail.includes("0.3 °C over target"));
+  assert(panel._coolingMissionRow().includes("Dehumidify now"));
+});
+
+test("ceiling: a house rule — calm card while the fans are not needed, warning when they are", async () => {
+  const ceiling = { shouldRun: true, kind: "ceiling", startAt: "x", until: null, reason: "room humidity 74 % is over the 70 % ceiling" };
+  const calm = l2({ fanNeeded: false, plan: ceiling, vent: { advised: false, known: true, reason: "outdoor air is wetter than indoors" } });
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, calm);
+  const sum = panel._coolingSummary();
+  assertEqual(sum.planActive, true);
+  assertEqual(sum.planCeiling, true);
+  assertEqual(panel._coolingPlanLine(sum), "Dehumidify — room humidity 74 % is over the 70 % ceiling");
+  let card = panel._coolingInsightCard();
+  assertEqual(card.title, "Dehumidify — humidity over the ceiling");
+  assertEqual(card.status, "ok");
+  const hot = await prep({ enabled: true, weatherEntity: "weather.home" }, l2({ fanNeeded: true, plan: ceiling, vent: { advised: false, known: true, reason: "" } }));
+  card = hot._coolingInsightCard();
+  assertEqual(card.status, "warning");
+  const vented = await prep({ enabled: true, weatherEntity: "weather.home" }, l2({ fanNeeded: false, plan: ceiling }));
+  assertEqual(vented._coolingInsightCard().title, "Vent the room — humidity over the ceiling");
+  assert(panel._coolingMissionRow().includes("over the 70 % ceiling"));
+});
+
+test("layer 2 settings render the losing and ceiling fields with their values", async () => {
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home", dehumidifier: { mode: "advise", losingOverC: 0.5, maxRh: 70 } }, l2());
+  panel._settingsSectionOpen = () => true;
+  panel._awcEntitySelect = () => "";
+  const html = panel._coolingSettings();
+  assert(html.includes('value="0.5" data-scope="cooling-dehum" data-field="losingOverC"'), "losingOverC field");
+  assert(html.includes('value="70" data-scope="cooling-dehum" data-field="maxRh"'), "maxRh field");
+  assert(html.includes("Room humidity ceiling"));
+  const defaults = await prep({ enabled: true, dehumidifier: { mode: "advise" } }, l2());
+  defaults._settingsSectionOpen = () => true;
+  defaults._awcEntitySelect = () => "";
+  const h2 = defaults._coolingSettings();
+  assert(h2.includes('value="0.3" data-scope="cooling-dehum" data-field="losingOverC"'), "default 0.3");
+  assert(h2.includes('value="0" data-scope="cooling-dehum" data-field="maxRh"'), "default off");
+});
+
 
 // --- Layer 3: the intake fan ------------------------------------------------
 

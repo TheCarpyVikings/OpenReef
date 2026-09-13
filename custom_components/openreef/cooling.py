@@ -235,6 +235,17 @@ OFFSET_ALPHA = 0.3                  # EMA weight of the newest live difference
 UNRESCUABLE_OVER_TARGET_C = 4.0
 UNRESCUABLE_INDEX = 0.10
 
+# "Losing": the fans are on, the tank is still over target and the band is
+# under good — the honest signal that dehumidifying changes the outcome. A
+# room that lives in the thin band all summer (Reece's, 43–57 % every hour of
+# 2026-09-13) never trips WARN_BANDS, yet its fans are visibly not holding the
+# water. Stop-side deadband only, per §13: the start is never made easier.
+LOSING_HYST_C = 0.2
+# Room humidity ceiling — a house rule (mould, electronics, salt creep), not a
+# cooling rule; RH is the wrong cooling metric (§2) so it stays out of the
+# index. Holds until RH falls this far under the ceiling.
+CEILING_HYST_RH = 5.0
+
 VENT_DEW_GAP_C = 2.0                # vent only while outdoor dew ≤ indoor dew − this
 PURGE_BAND_C = 2.0                  # night-purge hours sit within this of the coolest hour
 PURGE_MAX_HOURS = 8                 # …and never longer than a night
@@ -528,24 +539,70 @@ def _hhmm(iso: str | None) -> str:
 
 def dehumidifier_plan(live: dict[str, Any] | None, live_needed: bool, projection: dict[str, Any] | None,
                       now: datetime, lead_h: float, target_c: float,
-                      vent_active: bool = False) -> dict[str, Any]:
+                      vent_active: bool = False, losing_over_c: float = 0.0, max_rh: float = 0.0,
+                      water_known: bool = False, latched: str | None = None) -> dict[str, Any]:
     """Should the dehumidifier be running right now, and why. Stateless: the
-    actuator layer adds the short-cycle timing and the manual-override hold.
+    actuator layer adds the short-cycle timing and the manual-override hold;
+    ``latched`` is the kind this returned last tick, and only relaxes the
+    stop side of the gate it names (losing / ceiling).
 
-    kinds: now (fans already down), ahead (inside the lead window of a
-    projected hit), scheduled (a hit is coming, not yet time), unrescuable
-    (chiller day — its heat would land in the peak), vented (the room is being
-    vented with drier outdoor air — drying air you blow out of the window is
-    waste), none."""
-    plan = _dehumidifier_plan_raw(live, live_needed, projection, now, lead_h, target_c)
+    kinds, in priority order: now (fans already down), unrescuable (chiller
+    day — its heat would land in the peak), losing (fans on, tank still over
+    target by ``losing_over_c``, band under good — needs a real probe),
+    ahead (inside the lead window of a projected hit), ceiling (room RH over
+    ``max_rh`` — a house rule, not gated on cooling), scheduled (a hit is
+    coming, not yet time), none. vented overrides every running kind: the
+    room is being vented with drier outdoor air, and drying air you blow out
+    of the window is waste."""
+    plan = _dehumidifier_plan_raw(live, live_needed, projection, now, lead_h, target_c,
+                                  losing_over_c, max_rh, water_known, latched)
     if vent_active and plan["shouldRun"]:
         return {"shouldRun": False, "kind": "vented", "startAt": plan.get("startAt"), "until": plan.get("until"),
                 "reason": "venting instead — outdoor air is drier than indoors, so the dehumidifier stays off"}
     return plan
 
 
+def _losing(live: dict[str, Any] | None, live_needed: bool, target_c: float, over_c: float,
+            water_known: bool, latched: bool) -> dict[str, Any] | None:
+    """The tank-outcome trigger (§14.2). The band gate stays strict even while
+    latched: once the fans are back in good they are doing the job and the
+    compressor's heat has no business in the room."""
+    try:
+        over = float(over_c)
+    except (TypeError, ValueError):
+        over = 0.0
+    if not live or not live_needed or over <= 0 or not water_known:
+        return None
+    if live.get("band") == "good":
+        return None
+    excess = float(live.get("waterC", 0)) - float(target_c)
+    if excess < over - (LOSING_HYST_C if latched else 0.0):
+        return None
+    pct = round(float(live.get("index", 0)) * 100)
+    return {"shouldRun": True, "kind": "losing", "startAt": None, "until": None,
+            "reason": f"the fans are on but the tank is still {excess:.1f} °C over target at {pct} %"}
+
+
+def _ceiling(live: dict[str, Any] | None, max_rh: float, latched: bool) -> dict[str, Any] | None:
+    """The room humidity ceiling (§14.2). Not gated on cooling: this is about
+    the house, and a cool muggy evening counts."""
+    try:
+        ceiling = float(max_rh)
+    except (TypeError, ValueError):
+        ceiling = 0.0
+    if not live or ceiling <= 0 or live.get("rh") is None:
+        return None
+    rh = float(live["rh"])
+    if rh < ceiling - (CEILING_HYST_RH if latched else 0.0):
+        return None
+    return {"shouldRun": True, "kind": "ceiling", "startAt": None, "until": None,
+            "reason": f"room humidity {rh:.0f} % is over the {ceiling:.0f} % ceiling"}
+
+
 def _dehumidifier_plan_raw(live: dict[str, Any] | None, live_needed: bool, projection: dict[str, Any] | None,
-                           now: datetime, lead_h: float, target_c: float) -> dict[str, Any]:
+                           now: datetime, lead_h: float, target_c: float,
+                           losing_over_c: float = 0.0, max_rh: float = 0.0,
+                           water_known: bool = False, latched: str | None = None) -> dict[str, Any]:
     if live and live_needed and live.get("band") in WARN_BANDS:
         room = float(live.get("roomC", 0))
         if room >= target_c + UNRESCUABLE_OVER_TARGET_C and float(live.get("index", 0)) < UNRESCUABLE_INDEX:
@@ -556,6 +613,12 @@ def _dehumidifier_plan_raw(live: dict[str, Any] | None, live_needed: bool, proje
         until = projection.get("lastAffectedAt") if projection else None
         return {"shouldRun": True, "kind": "now", "startAt": now.isoformat(), "until": until,
                 "reason": f"the fans are down to {pct} % right now"}
+    losing = _losing(live, live_needed, target_c, losing_over_c, water_known, latched == "losing")
+    if losing:
+        losing["startAt"] = now.isoformat()
+        losing["until"] = projection.get("lastAffectedAt") if projection else None
+        return losing
+    scheduled = None
     if projection and projection.get("firstAffectedAt"):
         first = _parse_when(projection["firstAffectedAt"])
         last = _parse_when(projection.get("lastAffectedAt")) or first
@@ -567,9 +630,18 @@ def _dehumidifier_plan_raw(live: dict[str, Any] | None, live_needed: bool, proje
             return {"shouldRun": True, "kind": "ahead", "startAt": start.isoformat(), "until": until.isoformat(),
                     "reason": f"fan headroom drops to {pct} % from {_hhmm(projection['firstAffectedAt'])}"}
         if now < start:
-            return {"shouldRun": False, "kind": "scheduled", "startAt": start.isoformat(), "until": until.isoformat(),
-                    "reason": (f"start by {_hhmm(start.isoformat())} — headroom drops to {pct} % "
-                               f"from {_hhmm(projection['firstAffectedAt'])}")}
+            scheduled = {"shouldRun": False, "kind": "scheduled", "startAt": start.isoformat(), "until": until.isoformat(),
+                         "reason": (f"start by {_hhmm(start.isoformat())} — headroom drops to {pct} % "
+                                    f"from {_hhmm(projection['firstAffectedAt'])}")}
+    # The house rule sits under a present cooling need and above a forecast
+    # that has not started: "scheduled" is a not-yet and must not hide a
+    # ceiling breach that wants the plug on now.
+    ceiling = _ceiling(live, max_rh, latched == "ceiling")
+    if ceiling:
+        ceiling["startAt"] = now.isoformat()
+        return ceiling
+    if scheduled:
+        return scheduled
     hours = projection.get("hours") if projection else None
     span = f"the next {len(hours)} h" if hours else "the forecast"
     return {"shouldRun": False, "kind": "none", "startAt": None, "until": None,

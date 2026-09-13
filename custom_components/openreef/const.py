@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.173"
+INTEGRATION_VERSION = "0.7.174"
 
 # Guardian (Lagertha live avatar) — API keys live in the config entry options
 # under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
@@ -1625,6 +1625,8 @@ DEFAULT_CORE_CONFIG = {
             "minOffMinutes": 10,
             "maxRunHours": 8,            # then off + a "check the bucket" nudge
             "overridePolicy": "hold",    # hold (until the plan flips) | reassert
+            "losingOverC": 0.3,          # run while the fans are on and the tank sits this far over target (0 = off)
+            "maxRh": 0,                  # room humidity ceiling, % RH — a house rule (0 = off)
         },
         # Layer 3: the intake fan in front of a slightly-open window — free
         # dehumidification and cooling whenever outdoor air is drier and no
