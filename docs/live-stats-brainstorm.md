@@ -6,7 +6,7 @@ temperature going up or down, and how fast?"
 
 Mockup (example data, hover the sparklines): https://claude.ai/code/artifact/0722b031-87c1-4f4c-9d86-e324ddd5ed67
 
-Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10). Later ideas: §8.1.
+Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10), **the trend modal as 0.7.173** (§11). Later ideas: §8.1.
 
 ---
 
@@ -300,3 +300,28 @@ Still panel-only. The three §8.1 v2 rows, plus one correction v2 forced.
   Settings, list density).
 - **Later** (unchanged): per-sensor speed thresholds; typical-day ghost line; room ↔ tank
   coupling; direction-line tap → 6 h trend.
+
+## 11. The trend modal, and the switch you could not see — shipped as 0.7.173 (2026-09-13)
+
+Reece, first real-HA look (2026-09-13): *"it looks great, much better. can we extend the look to
+the individual sensor cards please (when clicked and opened larger) — they still have the old
+bland styling. also the 'cards/list' selector is hard to see."*
+
+- **The switch.** `.compact-button` carries size only; the Cards | List buttons had no
+  background rule of their own and inherited HA's default white button. `.live-density button`
+  now wears the panel's secondary look (`#172536` on `#294055`), accent when active. Same rule
+  serves the modal's range switch.
+- **The trend modal in the card's language.** `_trendSvg(points, unit, range, digits, opts)`
+  draws 640×240: the safe band with dashed edges (labelled where they sit clear of the range's
+  own min/max gridlines), the area gradient, the dimmed line (`#4f7799` here — a touch brighter
+  than the card's, it is the subject) with the last hour bright, OpenReef's event ticks and the
+  keeper's mark wherever the chosen range reaches them, an endpoint dot (hollow when stale),
+  and the shared hover — the wrapper carries `data-live-source="trend"`, the x-domain and the
+  range, so `_liveSparkHover` reads the modal's points and formats a date beyond a day.
+- **The header** is the card's: label + pill, the big reading, the direction line. Ranges are
+  the compact switch. The three tiles became a stats row: Latest · Low · High · **Average** ·
+  **Since <mark>** (Δ, or "—"). The entity id survives as one small line at the foot.
+- **Hand-logged parameters** (`source: "manual"`) get the band from their own min/max and the
+  chart, nothing from the ring, the mark or the ledger — "Hand-logged results" where the
+  direction line would be.
+- **Tests**: 23 → 25 (a live sensor's modal; a hand-logged one).

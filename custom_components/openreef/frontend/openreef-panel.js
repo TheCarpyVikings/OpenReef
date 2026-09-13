@@ -24613,8 +24613,11 @@ const rigSteps = [
       return;
     }
     const id = wrap.dataset.liveSpark;
-    const sensor = this._config?.sensors?.[id];
-    const series = this._liveSeries(id).filter((p) => Number.isFinite(p.value));
+    const trend = wrap.dataset.liveSource === "trend";
+    const sensor = trend && this._trend?.source === "manual"
+      ? (this._trend.manualMeta || this._manualTestMeta(id))
+      : this._config?.sensors?.[id];
+    const series = (trend ? (this._trend?.points || []) : this._liveSeries(id)).filter((p) => Number.isFinite(p.value));
     const svg = wrap.querySelector("svg");
     const tip = wrap.querySelector("[data-live-tip]");
     const cross = wrap.querySelector("[data-live-cross]");
@@ -24625,8 +24628,9 @@ const rigSteps = [
     if (!scale) return;
     const x = (event.clientX - rect.left) / scale;
     const frac = Math.max(0, Math.min(1, (x - padL) / (W - padL - padR)));
-    const t1 = Date.now();
-    const t0 = t1 - 24 * 3600000;
+    const domain = trend && wrap.dataset.liveDomain ? wrap.dataset.liveDomain.split(",").map(Number) : null;
+    const t1 = domain ? domain[1] : Date.now();
+    const t0 = domain ? domain[0] : t1 - 24 * 3600000;
     const t = t0 + frac * (t1 - t0);
     let best = series[0];
     for (const p of series) if (Math.abs(p.time - t) < Math.abs(best.time - t)) best = p;
@@ -24634,8 +24638,9 @@ const rigSteps = [
     cross.setAttribute("x1", bx.toFixed(1));
     cross.setAttribute("x2", bx.toFixed(1));
     cross.style.display = "";
-    const when = new Date(best.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    tip.textContent = `${when}  ${this._format(best.value, this._sensorDigits(id))}${sensor.unit ? ` ${sensor.unit}` : ""}`;
+    const when = trend ? this._liveTrendWhen(best.time, wrap.dataset.liveRange || "24h") : new Date(best.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const digits = trend ? (this._trend?.digits ?? this._sensorDigits(id)) : this._sensorDigits(id);
+    tip.textContent = `${when}  ${this._format(best.value, digits)}${sensor.unit ? ` ${sensor.unit}` : ""}`;
     tip.style.left = `${(bx * scale).toFixed(0)}px`;
     tip.hidden = false;
     this._liveHoverEl = wrap;
@@ -30863,91 +30868,155 @@ const rigSteps = [
     };
   }
 
-  _trendSvg(points, unit, range, digits = 2) {
+  // The trend modal's chart in the card's language (0.7.173): the safe band
+  // with labelled edges, the range in the dimmed line and the last hour bright,
+  // the keeper's mark and OpenReef's events where the range reaches them, a dot
+  // for now, hover for any point. One vocabulary from the card to the chart.
+  _trendSvg(points, unit, range, digits = 2, opts = {}) {
     if (points.length < 2) return `<div class="empty-chart">No trend points yet.</div>`;
-    const width = 640;
-    const height = 220;
-    const pad = 22;
-    const minTime = points[0].time;
-    const maxTime = points[points.length - 1].time;
-    const values = points.map((point) => point.value);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const valueRange = max - min || 1;
-    const timeRange = maxTime - minTime || 1;
-    const coords = points.map((point) => {
-      const x = pad + ((point.time - minTime) / timeRange) * (width - pad * 2);
-      const y = height - pad - ((point.value - min) / valueRange) * (height - pad * 2);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    });
-    const fillCoords = [
-      `${pad},${height - pad}`,
-      ...coords,
-      `${width - pad},${height - pad}`,
-    ].join(" ");
-
+    const W = 640;
+    const H = 240;
+    const padL = 8;
+    const padR = 48;
+    const padT = 14;
+    const padB = 10;
+    const sensor = opts.sensor || {};
+    const min = Number(sensor.min);
+    const max = Number(sensor.max);
+    const hasRange = Number.isFinite(min) && Number.isFinite(max) && max > min;
+    const values = points.map((p) => p.value);
+    const dataMin = Math.min(...values);
+    const dataMax = Math.max(...values);
+    const lo = Math.min(hasRange ? min : Infinity, dataMin);
+    const hi = Math.max(hasRange ? max : -Infinity, dataMax);
+    const pad = (hi - lo) * 0.1 || 1;
+    const y0 = lo - pad;
+    const y1 = hi + pad;
+    const t0 = points[0].time;
+    const t1 = points[points.length - 1].time;
+    const X = (t) => padL + Math.max(0, Math.min(1, (t - t0) / ((t1 - t0) || 1))) * (W - padL - padR);
+    const Y = (v) => padT + (1 - (v - y0) / (y1 - y0)) * (H - padT - padB);
+    const recentCut = Date.now() - 60 * 60000;
+    const firstRecent = points.findIndex((p) => p.time >= recentCut);
+    const older = firstRecent === -1 ? points : points.slice(0, firstRecent + 1);
+    const recent = firstRecent === -1 ? [] : points.slice(Math.max(0, firstRecent - 1));
+    const path = (pts) => pts.map((p, i) => `${i ? "L" : "M"}${X(p.time).toFixed(1)} ${Y(p.value).toFixed(1)}`).join(" ");
+    const last = points[points.length - 1];
+    const area = `${path(points)} L${X(last.time).toFixed(1)} ${H - padB} L${X(points[0].time).toFixed(1)} ${H - padB} Z`;
+    const label = (v, y, cls = "") => `<text class="live-spark-lbl ${cls}" x="${W - padR + 6}" y="${(y + 3.5).toFixed(1)}">${this._escape(this._format(v, digits))}</text>`;
+    // The range's own extremes as faint gridlines; the band's edges are labelled
+    // wherever they sit clear of those two.
+    const grid = `
+      <line class="live-trend-grid" x1="${padL}" x2="${W - padR}" y1="${Y(dataMax).toFixed(1)}" y2="${Y(dataMax).toFixed(1)}" />${label(dataMax, Y(dataMax), "data")}
+      <line class="live-trend-grid" x1="${padL}" x2="${W - padR}" y1="${Y(dataMin).toFixed(1)}" y2="${Y(dataMin).toFixed(1)}" />${label(dataMin, Y(dataMin), "data")}`;
+    const clear = (y) => Math.abs(y - Y(dataMax)) > 11 && Math.abs(y - Y(dataMin)) > 11;
+    const band = hasRange ? `
+      <rect class="live-spark-band" x="${padL}" y="${Y(max).toFixed(1)}" width="${W - padL - padR}" height="${(Y(min) - Y(max)).toFixed(1)}" />
+      <line class="live-spark-edge" x1="${padL}" x2="${W - padR}" y1="${Y(max).toFixed(1)}" y2="${Y(max).toFixed(1)}" />
+      <line class="live-spark-edge" x1="${padL}" x2="${W - padR}" y1="${Y(min).toFixed(1)}" y2="${Y(min).toFixed(1)}" />
+      ${clear(Y(max)) ? label(max, Y(max), "band") : ""}${clear(Y(min)) ? label(min, Y(min), "band") : ""}` : "";
+    const marker = opts.marker;
+    const mark = marker && marker.at >= t0 && marker.at <= t1
+      ? `<line class="live-spark-mark" x1="${X(marker.at).toFixed(1)}" x2="${X(marker.at).toFixed(1)}" y1="${padT - 6}" y2="${H - padB}" />`
+      : "";
+    const events = (opts.events || []).filter((e) => e.time >= t0 && e.time <= t1).map((e) => {
+      const ex = X(e.time).toFixed(1);
+      return `<line class="live-spark-event" x1="${ex}" x2="${ex}" y1="${H - padB - 12}" y2="${H - padB}"><title>${this._escape(`${this._liveTrendWhen(e.time, range)} · ${e.label}`)}</title></line>`;
+    }).join("");
+    const cx = X(last.time).toFixed(1);
+    const cy = Y(last.value).toFixed(1);
+    const now = opts.stale
+      ? `<circle class="live-spark-now stale" cx="${cx}" cy="${cy}" r="5" />`
+      : `<circle class="live-spark-now-ring" cx="${cx}" cy="${cy}" r="7" /><circle class="live-spark-now" cx="${cx}" cy="${cy}" r="5" />`;
+    const gid = `live-trend-grad-${this._escape(opts.sensorId || "trend")}`;
     return `
-      <div class="chart-wrap">
-        <svg class="trend-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${this._escape(this._trendRangeLabel(range))} trend">
-          <line x1="${pad}" y1="${pad}" x2="${width - pad}" y2="${pad}" vector-effect="non-scaling-stroke" />
-          <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" vector-effect="non-scaling-stroke" />
-          <polygon points="${fillCoords}" />
-          <polyline points="${coords.join(" ")}" vector-effect="non-scaling-stroke" />
-        </svg>
+      <div class="chart-wrap live-trend-wrap">
+        <div class="live-spark live-trend" data-live-spark="${this._escape(opts.sensorId || "")}" data-live-source="trend" data-live-geom="${W},${padL},${padR}" data-live-domain="${t0},${t1}" data-live-range="${this._escape(range)}">
+          <svg class="live-spark-svg live-trend-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${this._escape(this._trendRangeLabel(range))} trend">
+            <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#67e8f9" stop-opacity=".16" /><stop offset="1" stop-color="#67e8f9" stop-opacity="0" /></linearGradient></defs>
+            ${band}${grid}
+            <path class="live-spark-area" d="${area}" fill="url(#${gid})" />
+            <path class="live-spark-history" d="${path(older)}" />
+            ${recent.length > 1 ? `<path class="live-spark-recent" d="${path(recent)}" />` : ""}
+            ${events}
+            ${mark}
+            <line class="live-spark-cross" data-live-cross x1="0" x2="0" y1="${padT - 6}" y2="${H - padB}" style="display:none" />
+            ${now}
+          </svg>
+          <div class="live-tip" data-live-tip hidden></div>
+        </div>
         <div class="chart-labels">
-          <span>${this._formatTrendTime(minTime, range)}</span>
-          <strong>${this._format(max, digits)} ${this._escape(unit || "")}</strong>
-          <span>${this._formatTrendTime(maxTime, range)}</span>
+          <span>${this._formatTrendTime(t0, range)}</span>
+          <strong>${this._escape(this._trendRangeLabel(range))}</strong>
+          <span>${this._formatTrendTime(t1, range)}</span>
         </div>
       </div>
     `;
   }
 
+  // A point's time for the trend's range: a clock inside a day, date + clock beyond.
+  _liveTrendWhen(time, range) {
+    const clock = new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return ["1h", "6h", "24h"].includes(range) ? clock : `${this._formatTrendTime(time, range)} ${clock}`;
+  }
+
   _trendModal() {
     const manual = this._trend.source === "manual";
-    const sensor = manual ? this._trend.manualMeta || this._manualTestMeta(this._trend.sensorId) : this._config.sensors?.[this._trend.sensorId] || {};
+    const sensorId = this._trend.sensorId;
+    const sensor = manual ? this._trend.manualMeta || this._manualTestMeta(sensorId) : this._config.sensors?.[sensorId] || {};
     const points = this._trend.points || [];
     const summary = this._trendSummary(points);
     const range = this._trend.range || "24h";
-    const digits = this._trend.digits ?? this._sensorDigits(this._trend.sensorId);
+    const digits = this._trend.digits ?? this._sensorDigits(sensorId);
     const coverageMessage = manual ? "" : this._trendCoverageMessage(points, range);
     const ranges = manual ? this._manualTrendRanges() : this._trendRanges();
+    const unit = sensor.unit || "";
+    // A live sensor brings the card's whole vocabulary with it; a hand-logged
+    // parameter has no ring, no mark, no ledger — the chart alone.
+    const live = !manual && Boolean(sensor.entity_id);
+    const badge = live ? this._liveStatBadge(sensorId, sensor) : null;
+    const staleInfo = live ? this._liveStale(sensorId, sensor) : { stale: false, ageMinutes: null };
+    const direction = live ? this._liveDirection(sensorId, sensor) : null;
+    const marker = live ? this._liveMarker() : null;
+    const delta = live ? this._liveMarkerDelta(sensorId, sensor, marker) : null;
+    const events = live ? this._liveEvents(sensorId, sensor) : [];
+    const pill = !live ? "" : staleInfo.stale
+      ? `<span class="pill stale">stale ${this._escape(this._liveAgeLabel(staleInfo.ageMinutes))}</span>`
+      : `<span class="pill ${badge.status}">${this._escape(badge.label)}</span>`;
+    const withUnit = (v) => `${this._format(v, digits)}${unit ? ` ${this._escape(unit)}` : ""}`;
+    const stat = (label, value) => `<div><small>${label}</small><strong>${value}</strong></div>`;
+    const average = summary ? points.reduce((a, p) => a + p.value, 0) / points.length : null;
     return `
       <div class="modal">
-        <section class="wizard trend-dialog">
-          <button class="close" data-action="close-trend">x</button>
-          <div class="section-head">
+        <section class="wizard trend-dialog live-trend-dialog">
+          <button class="close" data-action="close-trend" aria-label="Close">×</button>
+          <div class="live-trend-head">
             <div>
               <p class="eyebrow">${this._escape(this._trendRangeLabel(range))} trend</p>
-              <h2>${this._escape(sensor.label || "Sensor")}</h2>
-              <p class="muted">${this._escape(this._trend.entityId || "Not mapped")}</p>
+              <div class="live-trend-title"><h2>${this._escape(sensor.label || "Sensor")}</h2>${pill}</div>
+              ${live ? `
+                <div class="live-reading live-trend-reading"><strong>${this._escape(this._sensorDisplayValue(sensorId, sensor))}</strong>${unit ? `<span>${this._escape(unit)}</span>` : ""}</div>
+                ${this._liveDirectionMarkup(sensorId, sensor, direction, staleInfo)}` : `<p class="muted">${manual ? "Hand-logged results" : "Not mapped"}</p>`}
             </div>
-            <button class="secondary" data-action="refresh-trend" data-id="${this._escape(this._trend.sensorId)}" ${this._trend.loading ? "disabled" : ""}>Refresh</button>
+            <button class="secondary compact-button" data-action="refresh-trend" data-id="${this._escape(sensorId)}" ${this._trend.loading ? "disabled" : ""}>Refresh</button>
           </div>
-          <div class="range-picker">
-            ${ranges.map(([id, label]) => `
-              <button
-                class="${range === id ? "active" : ""}"
-                data-action="trend-range"
-                data-id="${this._escape(this._trend.sensorId)}"
-                data-range="${this._escape(id)}"
-                ${this._trend.loading ? "disabled" : ""}
-              >
-                ${this._escape(label)}
-              </button>
-            `).join("")}
+          <div class="live-density live-trend-ranges" role="group" aria-label="Range">
+            ${ranges.map(([id, label]) => `<button class="compact-button ${range === id ? "active" : ""}" data-action="trend-range" data-id="${this._escape(sensorId)}" data-range="${this._escape(id)}" ${this._trend.loading ? "disabled" : ""}>${this._escape(label)}</button>`).join("")}
           </div>
           ${this._trend.loading ? `<div class="center-card compact-center"><div class="spinner"></div><p>Loading trend...</p></div>` : ""}
           ${this._trend.error ? `<div class="notice error">${this._escape(this._trend.error)}</div>` : ""}
           ${coverageMessage ? `<div class="notice warning-notice">${this._escape(coverageMessage)}</div>` : ""}
-          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, sensor.unit, range, digits) : ""}
+          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, unit, range, digits, { sensor, sensorId, marker, events, stale: staleInfo.stale }) : ""}
           ${summary ? `
-            <div class="trend-summary">
-              <article><span>Latest</span><strong>${this._format(summary.latest, digits)} ${this._escape(sensor.unit || "")}</strong></article>
-              <article><span>Low</span><strong>${this._format(summary.min, digits)} ${this._escape(sensor.unit || "")}</strong></article>
-              <article><span>High</span><strong>${this._format(summary.max, digits)} ${this._escape(sensor.unit || "")}</strong></article>
+            <div class="live-trend-stats">
+              ${stat("Latest", withUnit(summary.latest))}
+              ${stat("Low", withUnit(summary.min))}
+              ${stat("High", withUnit(summary.max))}
+              ${stat("Average", withUnit(average))}
+              ${marker ? stat(`Since ${this._escape(this._liveMarkerWhen(marker))}`, delta === null ? "—" : `${delta > 0 ? "+" : delta < 0 ? "−" : ""}${withUnit(Math.abs(delta))}`) : ""}
             </div>
           ` : ""}
+          ${live ? `<p class="live-trend-entity muted">${this._escape(this._trend.entityId || "")}</p>` : ""}
         </section>
       </div>
     `;
@@ -31967,6 +32036,31 @@ const rigSteps = [
         .live-spark-event:hover { opacity: 1; stroke-width: 3; }
         .live-pace { color: #b7c6d8; font-style: italic; }
         .live-density { display: inline-flex; gap: 6px; }
+        .live-density button { border: 1px solid #294055; border-radius: 8px; background: #172536; color: #dcecff; font-weight: 700; }
+        .live-density button:hover { border-color: var(--openreef-accent); }
+        .live-density button.active { background: var(--openreef-accent); border-color: var(--openreef-accent); color: #041019; font-weight: 800; }
+        .live-trend-dialog { max-width: 960px; gap: 14px; }
+        .live-trend-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; padding-right: 46px; }
+        .live-trend-head > div { display: grid; gap: 6px; min-width: 0; }
+        .live-trend-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .live-trend-title h2 { margin: 0; }
+        .live-trend-title .pill { min-width: 0; min-height: 0; padding: 3px 9px; font-size: 11.5px; gap: 6px; }
+        .live-trend-title .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+        .live-trend-title .pill.stale::before { background: transparent; border: 1.5px solid currentColor; box-sizing: border-box; }
+        .live-trend-reading strong { font-size: 30px; }
+        .live-trend-ranges { flex-wrap: wrap; }
+        .live-trend-wrap { gap: 6px; padding: 10px 12px 8px; }
+        .live-spark.live-trend { aspect-ratio: 640 / 240; margin: 0; }
+        .live-trend-svg .live-spark-history { stroke: #4f7799; stroke-width: 2; }
+        .live-trend-svg .live-spark-recent { stroke-width: 2.6; }
+        .live-trend-svg .live-spark-lbl { font-size: 11px; }
+        .live-trend-svg .live-spark-lbl.data { fill: #6b8199; }
+        .live-trend-grid { stroke: rgba(148, 163, 184, .16); stroke-width: 1; stroke-dasharray: 3 4; }
+        .live-trend-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+        .live-trend-stats div { display: grid; gap: 3px; border: 1px solid #24364a; border-radius: 8px; padding: 10px 12px; background: #0b1724; }
+        .live-trend-stats small { color: #8da2ba; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+        .live-trend-stats strong { color: #67e8f9; font-size: 20px; font-variant-numeric: tabular-nums; }
+        .live-trend-entity { font-size: 12px; }
         .live-list { display: grid; border: 1px solid #24364a; border-radius: 10px; background: #121f2f; overflow: hidden; }
         .live-row { display: grid; grid-template-columns: minmax(140px, 1.3fr) 110px minmax(120px, 1.1fr) minmax(160px, 1.4fr) auto; align-items: center; gap: 14px; width: 100%; min-height: 0; padding: 10px 16px; border: 0; border-top: 1px solid rgba(148, 163, 184, .14); border-radius: 0; background: transparent; color: #e5edf5; font: inherit; text-align: left; }
         .live-row:first-child { border-top: 0; }

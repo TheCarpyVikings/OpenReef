@@ -454,5 +454,45 @@ test("list density: one row per sensor, Needs a look first, mini sparkline witho
   } finally { restore(); }
 });
 
+
+// ── 0.7.173: the trend modal in the card's language ────────────────────────
+
+test("trend modal for a live sensor carries the pill, the direction line, the band, the mark, the events and a stats row", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const cfg = config({ activity: ledger(), display: { liveMarker: { at: isoMinsAgo(48), label: "Opened window" } } });
+    const points = ramp(25.0, 25.3, 24 * 60, 48);
+    const panel = await live(cfg, states(), { tank_temp: ramp(25.2, 25.3, 30) }, { tank_temp: points });
+    panel._trend = { sensorId: "tank_temp", entityId: "sensor.tank_temp", range: "24h", loading: false, points, error: "" };
+    const html = panel._trendModal();
+    assert(html.includes('class="pill ok">in range'), "pill in the title");
+    assert(html.includes('class="live-dir"'), "direction line");
+    assert(html.includes('class="live-spark-band"') && html.includes(">26.0</text>") && html.includes(">24.0</text>"), "band with labelled edges");
+    assert(html.includes("live-spark-mark") && html.includes("live-spark-event"), "mark and ledger ticks reach a 24 h chart");
+    assert(html.includes('data-live-source="trend"') && html.includes('data-live-geom="640,8,48"') && html.includes('data-live-domain="'), "hover geometry and domain");
+    assert(html.includes("<small>Average</small>") && html.includes("<small>Since "), "stats row");
+    assert(!html.includes("range-picker") && html.includes('data-action="trend-range" data-id="tank_temp" data-range="7d"'), "ranges as the compact switch");
+    assert(html.includes('class="live-spark-history"') && html.includes('class="live-spark-recent"'), "dimmed range, bright last hour");
+    assert(html.includes("sensor.tank_temp"), "entity id kept, small, at the foot");
+  } finally { restore(); }
+});
+
+test("trend modal for a hand-logged parameter: the band and the chart, no ring, no mark, no ledger", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const cfg = config({ activity: ledger(), display: { liveMarker: { at: isoMinsAgo(48), label: "Opened window" } } });
+    const panel = await live(cfg, states());
+    const points = [10, 5, 1].map((d, i) => ({ time: minsAgo(d * 1440), value: 8 + i * 0.4 }));
+    panel._trend = { source: "manual", sensorId: "alkalinity", entityId: "", range: "30d", loading: false, error: "", points, manualMeta: { label: "Alkalinity", unit: "dKH", min: 7, max: 11 }, digits: 2 };
+    const html = panel._trendModal();
+    assert(html.includes("Hand-logged results") && !html.includes('class="live-dir"'), "no direction line");
+    assert(html.includes('class="live-spark-band"') && html.includes(">11.00</text>"), "band from the manual range");
+    assert(!html.includes("live-spark-mark") && !html.includes("live-spark-event") && !html.includes("<small>Since "), "nothing from the ring or the ledger");
+    assert(html.includes('data-live-range="30d"'), "hover formats dates beyond a day");
+    assertEqual(panel._liveTrendWhen(minsAgo(0), "24h").length, 5);
+    assert(panel._liveTrendWhen(minsAgo(0), "30d").length > 5, "date + clock");
+  } finally { restore(); }
+});
+
 // Keep this LAST: tests registered below the runner never run.
 await runTests();
