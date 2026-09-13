@@ -975,6 +975,8 @@ test("hatchery settings live in their own section (0.7.71)", async () => {
   try {
     const panel = await npsPanel();
     panel._settingsSections = { hatchery: true, nps: true };
+    // The pouch and enrichment explainers sit in closed "How this works" blocks (0.7.176); open them for the copy checks.
+    panel._healthSections = { "how-hatchery-pouches": true, "how-hatchery-enrichment": true };
     let html;
     try { html = panel._hatcherySettings(); } catch { html = null; }
     if (html !== null) {

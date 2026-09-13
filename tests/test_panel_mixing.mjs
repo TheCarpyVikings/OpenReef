@@ -87,6 +87,8 @@ async function mixingPanel(config = {}, summary = summaryBlob()) {
   panel._mixingSummary = summary;
   panel._mixingSummaryAt = Date.now();
   panel._hass = { states: {} };
+  // The calibration explainer sits in a closed "How this works" block (0.7.176); open it so the hint assertions still read it.
+  panel._healthSections = { "how-mixing-rate": true };
   return panel;
 }
 

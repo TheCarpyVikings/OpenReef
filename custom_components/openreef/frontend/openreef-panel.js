@@ -1668,6 +1668,9 @@ class OpenReefPanel extends HTMLElement {
         this._saveSettingsSections();
         this._render();
       }
+      if (action === "settings-jump") {
+        this.shadowRoot.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
       if (action === "expand-settings" || action === "collapse-settings") {
         const open = action === "expand-settings";
         this._allSettingsSectionIds().forEach((section) => {
@@ -22996,10 +22999,7 @@ const rigSteps = [
           <input type="number" min="0" max="600" step="5" data-scope="capture" data-field="cooldownSeconds" value="${this._escape(capture.cooldownSeconds ?? 20)}">
         </label>
       </div>
-      <p class="muted">Pre-roll needs the camera's stream kept warm; leave it at 0 if clips come out empty. Cooldown stops a flapping sensor spamming clips.</p>
-      <div class="actions">
-        <button class="secondary compact-button" data-action="capture-now" ${cams.length ? "" : "disabled"}>Capture now</button>
-      </div>
+      <p class="muted">Pre-roll needs the camera's stream kept warm; leave it at 0 if clips come out empty. Cooldown stops a flapping sensor spamming clips. "Capture now" lives on the Cameras tab.</p>
     `;
     return this._settingsPanel(
       "capture",
@@ -23325,8 +23325,8 @@ const rigSteps = [
       </div>
       <p class="muted">Recent frames stay detailed for day-cycle replay; older days thin to 1/day, then 1/week, then 1/month — so years of growth fit in a few hundred frames.</p>
       <div class="actions">
-        <button class="secondary compact-button" data-action="timelapse-grab" ${cams.length ? "" : "disabled"}>Grab a frame now</button>
         <button class="secondary compact-button danger-button" data-action="timelapse-clear">Clear timelapse</button>
+        <small class="muted">"Grab a frame now" lives on the Cameras tab.</small>
       </div>
     `;
     return this._settingsPanel(
@@ -27163,7 +27163,7 @@ const rigSteps = [
         <label>Near-full alert (%, 0 = off)<input type="number" min="0" max="99" step="5" data-scope="mixing-rodi" data-field="alertPct" value="${Number(rodi.alertPct) || 0}"></label>
         <label>T-off container volume (L, 0 = no T-off alert)<input type="number" min="0" step="1" data-scope="mixing-rodi" data-field="externalVolumeL" value="${Number(rodi.externalVolumeL) || 0}"></label>
       </div>
-      <small class="awc-hint">The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. If your unit auto-flushes to drain before producing, set the flush seconds: that time is discounted from calibration and every metered run, so the flush never counts as water. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty. Timed draws also get a nearly-done heads-up at the same threshold (8 of 10 L at 80%) — whichever story lands first is the one that fires.</small>
+      ${this._howItWorks("mixing-rate", `<p>The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. If your unit auto-flushes to drain before producing, set the flush seconds: that time is discounted from calibration and every metered run, so the flush never counts as water. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty. Timed draws also get a nearly-done heads-up at the same threshold (8 of 10 L at 80%) — whichever story lands first is the one that fires.</p>`)}
       <small class="awc-hint">Filter stages, in flow order — each cartridge tracks its own litres and rated life (0 = untracked; the maker's spec or your own experience sets it). Every litre through the unit counts against every stage.</small>
       ${(Array.isArray(rodi.filters) ? rodi.filters : []).map((f) => `
       <div class="mini-grid">
@@ -27228,7 +27228,32 @@ const rigSteps = [
       <small class="awc-hint">Every coupling here respects the guard above — set it to Off and this station's ledger is never touched from outside the Mixing tab.</small>`;
   }
 
+  // Settings is for settings (0.7.176). Thirty sections used to sit in one
+  // flat list in no user-facing order; they now file under six groups in the
+  // order of the nav rail, with jump chips at the top. Readouts, operations
+  // and livestock data leave for their own screens in the later stages of
+  // docs/settings-audit-2026-09-13.md.
+  _settingsGroups() {
+    return [
+      { id: "display", label: "Profile & display", icon: "🏠",
+        sections: () => [this._profileSettings(), this._guideSettings(), this._missionSettings(), this._liveStatsSettings(),
+          this._overlaySettings(), this._pulseSettings(), this._diagramSettings()] },
+      { id: "sensing", label: "Sensors & tests", icon: "🌡️",
+        sections: () => [this._sensorSettings(), this._manualTestSettings(), this._coolingSettings(), this._lightingScheduleSettings()] },
+      { id: "water", label: "Water", icon: "💧",
+        sections: () => [this._dosingSettings(), this._awcSettings(), this._mixingSettings(), this._maintenanceSettings()] },
+      { id: "feeding", label: "Feeding", icon: "🦐",
+        sections: () => [this._npsSettings(), this._hatcherySettings(), this._culturesSettings()] },
+      { id: "watch", label: "Watch", icon: "📷",
+        sections: () => [this._cameraSettings(), this._captureSettings(), this._timelapseSettings(), this._feedWatchSettings(), this._visionSettings()] },
+      { id: "system", label: "Safety & system", icon: "🛡️",
+        sections: () => [this._equipmentSettings(), this._modePreviewSettings(), this._alertsSettings(), this._interlockSettings(),
+          this._energySettings(), this._systemCheckSettings(), this._backupRestoreSettings()] },
+    ];
+  }
+
   _settings() {
+    const groups = this._settingsGroups();
     return `
       <section class="stack">
         <div class="section-head">
@@ -27243,38 +27268,29 @@ const rigSteps = [
           </div>
         </div>
         ${this._configDirty ? `<div class="notice warning-notice sticky-save-warning"><strong>Unsaved changes.</strong> Save before applying modes or leaving Settings.</div>` : ""}
-        ${this._profileSettings()}
-        ${this._guideSettings()}
-        ${this._missionSettings()}
-        ${this._liveStatsSettings()}
-        ${this._sensorSettings()}
-        ${this._coolingSettings()}
-        ${this._manualTestSettings()}
-        ${this._maintenanceSettings()}
-        ${this._dosingSettings()}
-        ${this._awcSettings()}
-        ${this._mixingSettings()}
-        ${this._npsSettings()}
-        ${this._hatcherySettings()}
-        ${this._culturesSettings()}
-        ${this._equipmentSettings()}
-        ${this._cameraSettings()}
-        ${this._captureSettings()}
-        ${this._timelapseSettings()}
-        ${this._overlaySettings()}
-        ${this._feedWatchSettings()}
-        ${this._visionSettings()}
-        ${this._pulseSettings()}
-        ${this._diagramSettings()}
-        ${this._modePreviewSettings()}
-        ${this._alertsSettings()}
-        ${this._lightingScheduleSettings()}
-        ${this._interlockSettings()}
-        ${this._energySettings()}
-        ${this._systemCheckSettings()}
-        ${this._backupRestoreSettings()}
+        <nav class="settings-jump" aria-label="Jump to a settings group">
+          ${groups.map((g) => `<button class="secondary compact-button" data-action="settings-jump" data-id="or-group-${g.id}">${g.icon} ${this._escape(g.label)}</button>`).join("")}
+        </nav>
+        ${groups.map((g) => `
+        <div class="settings-group" id="or-group-${g.id}">
+          <h3 class="settings-group-head"><span>${g.icon}</span> ${this._escape(g.label)}</h3>
+          ${g.sections().join("")}
+        </div>`).join("")}
       </section>
     `;
+  }
+
+  // A collapsed "How this works" block for the manual-length paragraphs that
+  // used to sit above a section's fields. Same persisted toggle as the
+  // Mission Control sections (toggle-health-section), closed by default.
+  _howItWorks(id, body, label = "How this works") {
+    const key = `how-${id}`;
+    const open = this._healthSectionOpen(key);
+    return `
+      <div class="how-it-works ${open ? "open" : ""}">
+        <button class="secondary compact-button" data-action="toggle-health-section" data-section="${this._escape(key)}" data-open="${open ? 1 : 0}">${open ? "Hide" : label}</button>
+        ${open ? `<div class="how-it-works-body">${body}</div>` : ""}
+      </div>`;
   }
 
   // --- Cooling headroom (Layer 1) ------------------------------------------
@@ -27669,7 +27685,7 @@ const rigSteps = [
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
     return `
       <div class="awc-section-title"><p class="eyebrow">Forecast + dehumidifier</p></div>
-      <small class="hint">Bind a weather entity and OpenReef projects the next day hour by hour — room temperature and dew point follow the outdoor forecast plus the live indoor offset — and tells you when the fans will lose it and when to start the dehumidifier so its heat lands before the peak, not in it. If outdoor air is drier, it says vent instead. Two more triggers need no forecast: the fans are on but the tank is still sitting over target (the honest sign they are losing), and a plain room-humidity ceiling for the house. Advise tells you; auto switches a plug. Efficiency, never safety: it fails off and the fan/guard stay the backstop.</small>
+      ${this._howItWorks("cooling-forecast", `<p>Bind a weather entity and OpenReef projects the next day hour by hour — room temperature and dew point follow the outdoor forecast plus the live indoor offset — and tells you when the fans will lose it and when to start the dehumidifier so its heat lands before the peak, not in it. If outdoor air is drier, it says vent instead. Two more triggers need no forecast: the fans are on but the tank is still sitting over target (the honest sign they are losing), and a plain room-humidity ceiling for the house. Advise tells you; auto switches a plug. Efficiency, never safety: it fails off and the fan/guard stay the backstop.</p>`)}
       <div class="grid two">
         <label><span>Weather entity <small>hourly forecast — HA's built-in weather.home works</small></span>${this._awcEntitySelect("cooling", "", "weatherEntity", cfg.weatherEntity || "", "weather")}</label>
         <label><span>Look ahead (hours)</span><input type="number" min="6" max="48" step="1" value="${num(cfg.lookaheadHours, 24)}" data-scope="cooling" data-field="lookaheadHours" /></label>
@@ -27706,7 +27722,7 @@ const rigSteps = [
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
     return `
       <div class="awc-section-title"><p class="eyebrow">Intake fan (vent)</p></div>
-      <small class="hint">The circulating fan in front of a slightly-open window is free dehumidification and cooling whenever outdoor air is drier and no warmer — usually most of a UK summer. OpenReef runs it (or tells you to) only for a reason: the room needs cooling now, a losing hour is coming and the room can be pre-dried, or the night purge through the coolest hours before a hot day. Never at the same time as the dehumidifier. On a muggy evening it says close up.</small>
+      ${this._howItWorks("cooling-vent", `<p>The circulating fan in front of a slightly-open window is free dehumidification and cooling whenever outdoor air is drier and no warmer — usually most of a UK summer. OpenReef runs it (or tells you to) only for a reason: the room needs cooling now, a losing hour is coming and the room can be pre-dried, or the night purge through the coolest hours before a hot day. Never at the same time as the dehumidifier. On a muggy evening it says close up.</p>`)}
       <div class="grid two">
         <label><span>Intake fan</span>
           <select data-scope="cooling-vent" data-field="mode">
@@ -27785,14 +27801,12 @@ const rigSteps = [
         <label>Feeding window from (blank = any time)<input type="time" data-scope="nps-hand-feed" data-field="windowStart" value="${this._escape(String(npsCfg.hatchery?.handFeed?.windowStart || ""))}"></label>
         <label>Feeding window to (blank = spread over 24 h)<input type="time" data-scope="nps-hand-feed" data-field="windowEnd" value="${this._escape(String(npsCfg.hatchery?.handFeed?.windowEnd || ""))}"></label>
       </div>
-      <small class="awc-hint"><strong>Cysts pouches</strong> — stamped per hatchery above. Keep each sealed, dry and at or below 4 °C; follow the supplier’s storage life. The 3–4 week reminder is a check of storage and hatch yield, not an expiry measurement.${this._npsVesselEntries().length > 1 ? ` One pouch feeding every hatchery? <button class="secondary compact-button" data-action="nps-cysts-opened">Opened a new pouch for all</button>` : ""}</small>
-      <small class="awc-hint"><strong>Fridge</strong> — per batch, not a setting, and a separate feeding bottle, not the container: the "❄ Refrigerate" button beside the brine advice on the Hatchery tab drains the container into the bottle and stamps WHEN it went cold. The bottle's clock then runs at the 48 h rate from that moment (2–4 °C near-stops nauplii metabolism), the warm hours already spent stay spent, and the container is free for the next hatch. Feed from the bottle by hand, pour it back, or empty it from its tile.</small>
+      ${this._howItWorks("hatchery-pouches", `<p><strong>Cysts pouches</strong> — stamped per hatchery above. Keep each sealed, dry and at or below 4 °C; follow the supplier’s storage life. The 3–4 week reminder is a check of storage and hatch yield, not an expiry measurement.${this._npsVesselEntries().length > 1 ? ` One pouch feeding every hatchery? <button class="secondary compact-button" data-action="nps-cysts-opened">Opened a new pouch for all</button>` : ""}</p><p><strong>Fridge</strong> — per batch, not a setting, and a separate feeding bottle, not the container: the "❄ Refrigerate" button beside the brine advice on the Hatchery tab drains the container into the bottle and stamps WHEN it went cold. The bottle's clock then runs at the 48 h rate from that moment (2–4 °C near-stops nauplii metabolism), the warm hours already spent stay spent, and the container is free for the next hatch. Feed from the bottle by hand, pour it back, or empty it from its tile.</p>`)}
       <div class="mini-grid">
         <label>Hatchery temp sensor (optional)<input data-scope="nps-hatchery" data-field="tempEntity" value="${this._escape(npsCfg.hatchery?.tempEntity || "")}" placeholder="sensor.hatchery_temperature"></label>
       </div>
       <small class="awc-hint">Use a water-temperature sensor where possible. 25–28 °C is a common hatching range. The 8% per degree model is an uncalibrated planning heuristic, not a validated biological equation; confirm hatch-out and use your product’s instructions.</small>
-      <small class="awc-hint"><strong>Enrichment</strong> — "Enrich brine" starts a soak in the loaded holding container. Select the dose and duration for your product and nauplii density. Selcon’s manufacturer gives 1–12 h with aeration; 12 h is this app’s default. The 12 h warm / 48 h cold post-soak windows are planning limits, not guarantees of DHA retention or viability.</small>
-      <small class="awc-hint"><strong>First dose at +hours</strong> — instar I cannot feed; enrichment uptake starts at instar II, often several hours after hatching. This reminder counts from loading, which may happen well after hatch-out. Confirm the feeding stage; 0 means the batch can already feed. Cold storage delays development, so elapsed wall time alone cannot confirm readiness. A live-algae enrichment (ReefPhyto's Rotifer &amp; Artemia Enrichment) goes in with freshly hatched nauplii and needs 6–12 h — set 0 here, or tap "Dose now" on a holding soak; an oil emulsion should wait for the molt.</small>
+      ${this._howItWorks("hatchery-enrichment", `<p><strong>Enrichment</strong> — "Enrich brine" starts a soak in the loaded holding container. Select the dose and duration for your product and nauplii density. Selcon’s manufacturer gives 1–12 h with aeration; 12 h is this app’s default. The 12 h warm / 48 h cold post-soak windows are planning limits, not guarantees of DHA retention or viability.</p><p><strong>First dose at +hours</strong> — instar I cannot feed; enrichment uptake starts at instar II, often several hours after hatching. This reminder counts from loading, which may happen well after hatch-out. Confirm the feeding stage; 0 means the batch can already feed. Cold storage delays development, so elapsed wall time alone cannot confirm readiness. A live-algae enrichment (ReefPhyto's Rotifer &amp; Artemia Enrichment) goes in with freshly hatched nauplii and needs 6–12 h — set 0 here, or tap "Dose now" on a holding soak; an oil emulsion should wait for the molt.</p>`)}
       <div class="mini-grid">
         <label>Soak time (hours)<input type="number" min="1" max="36" data-scope="nps-enrichment" data-field="hours" value="${this._escape(String(npsCfg.hatchery?.enrichment?.hours ?? 12))}"></label>
         <label>Dose (ml)<input type="number" min="0.5" max="50" step="0.5" data-scope="nps-enrichment" data-field="doseMl" value="${this._escape(String(npsCfg.hatchery?.enrichment?.doseMl ?? 1))}"></label>
@@ -28059,7 +28073,7 @@ const rigSteps = [
             <p class="eyebrow">${this._escape(this._tankProfileLabel(this._tankProfile()))} suggestion</p>
             <h4>Use the preset as a starting point, then change any test cadence to match how you reef.</h4>
           </div>
-          <button class="secondary" data-action="apply-manual-schedule-preset">Apply suggested routine</button>
+          <button class="secondary compact-button" data-action="tab" data-id="manual">Apply it from the Manual Tests tab</button>
         </div>
         <label class="toggle-card">
           <input type="checkbox" data-scope="manual-tests" data-field="enabled" ${manualTests.enabled === false ? "" : "checked"}>
@@ -31614,6 +31628,13 @@ const rigSteps = [
         .cooling-cell.thin { color: #facc15; font-weight: 600; }
         .cooling-cell.weak { color: #fb923c; font-weight: 600; }
         .cooling-cell.dead, .cooling-cell.reversed { color: #f87171; font-weight: 600; }
+        .settings-jump { display: flex; flex-wrap: wrap; gap: 6px; position: sticky; top: 0; z-index: 2; padding: 8px 0; background: var(--openreef-bg, #0a1420); }
+        .settings-group { display: grid; gap: 12px; scroll-margin-top: 56px; }
+        .settings-group-head { margin: 14px 0 0; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #8da2ba; display: flex; align-items: center; gap: 8px; }
+        .settings-group-head span { font-size: 15px; }
+        .how-it-works { display: grid; gap: 8px; justify-items: start; }
+        .how-it-works-body { border-left: 3px solid #24364a; padding: 4px 12px; color: #9fb2c7; font-size: 13px; display: grid; gap: 8px; }
+        .how-it-works-body p { margin: 0; }
         .cooling-dialog { max-width: 1000px; gap: 14px; }
         .cooling-dialog .notice { margin-bottom: 0; }
         .cooling-dialog .live-trend-head .button-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }

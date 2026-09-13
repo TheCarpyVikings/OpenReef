@@ -96,3 +96,37 @@ Each stage is its own release, tests in lockstep, no change to any saved config 
 3. Reef Pulse: keep the per-device face pick in Settings, or move it to the Present button?
 4. Maintenance task editor: a dialog on the Maintenance tab, or an inline "Manage tasks"
    section at the bottom of that tab?
+
+## 6. Decisions (Reece, 2026-09-13)
+
+1. One release per stage — agreed.
+2. Groups as in §3 — agreed.
+3. Reef Pulse face pick — Reece asked for a recommendation. There are two pickers: the
+   **saved faces** (rewrite the twelve wall toggles in config) and the **on-this-screen face**
+   (localStorage, per device, so the wall iPad can wear a different face). The saved faces are
+   a setting and stay. The per-device face is what you reach for standing at the wall, so it
+   belongs on the Pulse wall's own control strip (0.7.34's mode switching already lives
+   there). Recommendation: move the per-device pick in Stage B, keep the saved faces here.
+4. Maintenance task editor — Reece asked for the options explained. **Dialog**: a "Manage
+   tasks" button on the Maintenance tab opens a modal with the list, add/remove, cadence and
+   the ten suggested tasks; editing is a deliberate act, the tab stays a checklist, and it
+   matches the cooling and System Check dialogs. **Inline**: a collapsed "Manage tasks"
+   section at the foot of the tab; one tap fewer, but the page grows and remove buttons sit
+   near the done-ticks on a phone. Recommendation: dialog. Awaiting Reece's call.
+
+## 7. Stage A — built as 0.7.176 (2026-09-13)
+
+- `_settingsGroups()` + `_settings()`: six groups in nav-rail order, `#or-group-<id>`
+  anchors, sticky jump chips (`settings-jump` scrolls the group into view). Existing deep
+  links (`data-section` / `or-section-<id>`) are untouched.
+- `_howItWorks(id, body)`: closed by default, persisted through the same
+  `toggle-health-section` state as the Mission Control sections (`how-<id>`). Applied where
+  the audit found paragraphs over ~70 words: cooling forecast (114 w) and vent (84 w), the
+  mixing rate explainer (115 w), the hatchery pouch/fridge pair and the enrichment/first-dose
+  pair. Reef Pulse already had a `<details>` wall guide, so it was left. AWC and Dosing had
+  nothing over 40 words — their weight is fields, which is correct for Settings.
+- Duplicates dropped: Capture now, Grab a frame now, Apply suggested routine (each now points
+  at its tab). The AWC demo-mode toggle STAYS: with real hardware configured and demo off, the
+  Water Change tab has no other way into demo mode.
+- Tests: new `tests/test_panel_settings.mjs` (4). Mixing and NPS suites open their how blocks
+  before reading the copy.
