@@ -6,7 +6,7 @@ temperature going up or down, and how fast?"
 
 Mockup (example data, hover the sparklines): https://claude.ai/code/artifact/0722b031-87c1-4f4c-9d86-e324ddd5ed67
 
-Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9); v2 = §8.1.
+Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10). Later ideas: §8.1.
 
 ---
 
@@ -263,3 +263,40 @@ Panel-only. No backend change: the mark is written by the panel into `display.li
   Needs a look, the truth strip in both voices, the sparkline's parts.
 - **Not done in v1**: List density, automatic event ticks + the Settings list, the acceleration
   hint (§8.1 v2); per-sensor speed thresholds; the typical-day ghost line.
+
+## 10. v2 — shipped as 0.7.172 (2026-09-13)
+
+Still panel-only. The three §8.1 v2 rows, plus one correction v2 forced.
+
+- **The series is one line now.** v1's `_liveSeries` appended only ring readings newer than the
+  history, and `_liveSlope` read the ring *first* — so the 60-minute context window, when the
+  ring held three readings, was just the last quarter-hour again and no pace could ever show.
+  Now `_liveSeries` = history up to where the ring begins, then the ring (finer, authoritative
+  where it exists), and every slope reads that one series.
+- **Pace** (`direction.pace`): `|rate_now| > 1.5 × |rate_context|` → *picking up*; `< 0.5 ×` →
+  *easing*; a sign change against a context that was itself moving (≥ 1.5 %/h of the band) →
+  *just turned*. Steady never has a pace. Shown as `· picking up` after the rate on the card,
+  and in the truth strip as *"but falling 1.60 %/h and picking up"* / *"but now falling …"*.
+- **Ledger event ticks** (`_liveEvents`): the activity ledger carries only `{timestamp, message,
+  type}`, so kinds are read off the message (`_liveEventKinds`): **water** (`^(Scheduled )?water
+  change`), **feed** (hand feeds, brine/rotifer feeds, shelf doses, enrichment), **equipment**
+  (` switched (on|off)` — hand switches and the cooling arc's fans/dehumidifier alike). Each
+  kind lists the groups it can plausibly move (water → tank/sump/chemistry/water; feed →
+  tank/sump/chemistry; equipment → tank/sump/room/flow/lighting). Last 24 h, newest first, cap
+  12 per card. Drawn as short amber ticks on the baseline, each with its message as a native
+  `<title>` tooltip — quieter than the keeper's mark on purpose. Mode changes and lights are
+  not in the ledger, so they get no tick (§8.6's map, trimmed to what exists).
+- **Settings → Live Stats**: one toggle per kind (`display.liveEventTicks[kind] = false` to
+  switch off; absent = on). Client-written; no guard.
+- **List density**: `Cards | List` in the section head (`openreef:liveDensity:v1`, view-only
+  localStorage like the other view toggles). One row per sensor — name + group, value, a
+  200×28 mini sparkline (band, both segments, ticks, endpoint; no labels), the direction line,
+  the pill — Needs a look first, then the group order, the moved row reading "Environment ·
+  needs a look". Binary/unmapped rows are plain articles. Phone: the row collapses to name +
+  value + pill. `_liveRefreshCard` patches a row or a card by the current density.
+- **Hover** reads its geometry off the wrapper (`data-live-geom="W,padL,padR"`) so the mini
+  and the full sparkline share one handler.
+- **Tests**: `tests/test_panel_live.mjs` 18 → 23 (pace ×2, event kinds, tick relevance +
+  Settings, list density).
+- **Later** (unchanged): per-sensor speed thresholds; typical-day ghost line; room ↔ tank
+  coupling; direction-line tap → 6 h trend.

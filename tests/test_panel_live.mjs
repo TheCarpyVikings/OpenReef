@@ -65,6 +65,7 @@ async function live(cfg = config(), st = states(), readings = {}, sparks = {}) {
   panel._liveReadings = readings;
   panel._liveSparks = sparks;
   panel._liveMarkOpen = false;
+  panel._settingsSections = {};
   panel._activeTab = "live";
   return panel;
 }
@@ -343,6 +344,113 @@ test("binary and unmapped cards are plain articles with no trend", async () => {
     assert(leak.startsWith("\n        <article") && leak.includes("no-trend") && !leak.includes("live-spark"), leak);
     const ph = panel._liveStatCard("ph", cfg.sensors.ph);
     assert(ph.includes("Not mapped") && !ph.includes("show-trend"), ph);
+  } finally { restore(); }
+});
+
+
+// ── v2: pace ────────────────────────────────────────────────────────────────
+
+test("pace: a steep last quarter-hour against a mild hour is picking up; a mild one against a steep hour is easing", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // Ring covers 15 min at −1.2 °C/h; history covers the hour at −0.3 °C/h.
+    const up = await live(config(), states(), { room_temp: ramp(26.3, 26.0, 15) }, { room_temp: ramp(26.3, 26.0, 60, 12).filter((p) => p.time < minsAgo(15)) });
+    const d1 = up._liveDirection("room_temp", up._config.sensors.room_temp);
+    assertEqual(d1.pace, "picking up");
+    assert(up._liveDirectionMarkup("room_temp", up._config.sensors.room_temp, d1, { stale: false }).includes('live-pace">· picking up'), "pace shown");
+    // Ring: −0.4 °C/h over 15 min; history before it: −2.4 °C/h.
+    const ease = await live(config(), states(), { room_temp: ramp(26.1, 26.0, 15) }, { room_temp: ramp(28.0, 26.2, 60, 12).filter((p) => p.time < minsAgo(15)) });
+    const d2 = ease._liveDirection("room_temp", ease._config.sensors.room_temp);
+    assertEqual(d2.pace, "easing");
+  } finally { restore(); }
+});
+
+test("pace: a reversal against an hour that was itself moving has just turned — 'now falling' in the strip", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const st = states({ "sensor.humidity": state(63.0) });
+    // Hour was rising +1.6 %/h; the last 15 min fall at −1.6 %/h.
+    const panel = await live(config(), st, { humidity: ramp(63.4, 63.0, 15) }, { humidity: ramp(62.2, 63.4, 60, 12).filter((p) => p.time < minsAgo(15)) });
+    const d = panel._liveDirection("humidity", panel._config.sensors.humidity);
+    assertEqual(d.pace, "just turned");
+    const strip = panel._liveTruthMarkup(panel._liveRows());
+    assert(strip.includes("but now falling 1.60 %/h — back in range ≈ "), strip);
+    const steady = await live(config(), states(), { ph: ramp(8.05, 8.052, 30) }, { ph: ramp(7.9, 8.05, 120, 24) });
+    assertEqual(steady._liveDirection("ph", steady._config.sensors.ph).pace, "", "steady never has a pace");
+  } finally { restore(); }
+});
+
+// ── v2: ledger event ticks ──────────────────────────────────────────────────
+
+function ledger() {
+  return [
+    { timestamp: isoMinsAgo(20), message: "Water change complete: 20.0 L exchanged", type: "control" },
+    { timestamp: isoMinsAgo(35), message: "Hand-fed 5 ml of live brine", type: "control" },
+    { timestamp: isoMinsAgo(47), message: "Window fan switched on — room 26.8 °C, dew-point margin 9.1 °C", type: "info" },
+    { timestamp: isoMinsAgo(60 * 30), message: "Water change started: 20.0 L (drain_fill)", type: "control" },
+    { timestamp: isoMinsAgo(5), message: "OpenReef heartbeat OK", type: "info" },
+    { timestamp: "not a date", message: "Hand-fed 2 ml of live brine", type: "control" },
+  ];
+}
+
+test("event kinds read off the message; unknown messages are not events", async () => {
+  const panel = await live();
+  assertEqual(panel._liveEventKind("Water change started: 20.0 L (drain_fill)").id, "water");
+  assertEqual(panel._liveEventKind("Scheduled water change blocked: source empty").id, "water");
+  assertEqual(panel._liveEventKind("Hand-fed 5 ml of live brine (the 11:00 feed)").id, "feed");
+  assertEqual(panel._liveEventKind("Reef Roids dosed by hand — 2 ml").id, "feed");
+  assertEqual(panel._liveEventKind("Dehumidifier switched off — margin recovered").id, "equipment");
+  assertEqual(panel._liveEventKind("Heater switched on by hand from the panel").id, "equipment");
+  assertEqual(panel._liveEventKind("OpenReef heartbeat OK"), null);
+  assertEqual(panel._liveEventKind("Mixing station: RODI run done — 20 L"), null);
+});
+
+test("ticks land only on the groups a kind can move, only within 24 h, only when the kind is on", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const cfg = config({ activity: ledger() });
+    const panel = await live(cfg, states());
+    const tank = panel._liveEvents("tank_temp", cfg.sensors.tank_temp);
+    assertEqual(tank.map((e) => e.kind), ["water", "feed", "equipment"], "tank sees all three; the 30 h old one and the undated one are dropped");
+    const room = panel._liveEvents("room_temp", cfg.sensors.room_temp);
+    assertEqual(room.map((e) => e.kind), ["equipment"], "a water change does not move the room");
+    assertEqual(panel._liveEvents("leak", cfg.sensors.leak), []);
+    const svg = panel._liveSparkSvg("tank_temp", cfg.sensors.tank_temp, ramp(25.0, 25.3, 24 * 60, 48), null, { events: tank });
+    assertEqual((svg.match(/live-spark-event/g) || []).length, 3, "three ticks");
+    assert(svg.includes("<title>") && svg.includes("· Water change complete: 20.0 L exchanged</title>"), "each tick carries its message");
+    // Switch feeds off in Settings.
+    cfg.display.liveEventTicks = { feed: false };
+    assertEqual(panel._liveEventTicksEnabled(), { water: true, feed: false, equipment: true });
+    assertEqual(panel._liveEvents("tank_temp", cfg.sensors.tank_temp).map((e) => e.kind), ["water", "equipment"]);
+    const settings = panel._liveStatsSettings();
+    assert(settings.includes('data-scope="live-event" data-id="feed" ') && !settings.includes('data-id="feed" checked'), "feed unticked in Settings");
+    assert(settings.includes('data-id="water" checked'), "water ticked");
+  } finally { restore(); }
+});
+
+// ── v2: list density ────────────────────────────────────────────────────────
+
+test("list density: one row per sensor, Needs a look first, mini sparkline without labels", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const cfg = config({ activity: ledger() });
+    cfg.sensors.ph.entity_id = "";
+    const panel = await live(cfg, states({ "sensor.humidity": state(63.5) }), { humidity: ramp(63.9, 63.5, 15) }, { tank_temp: ramp(25.0, 25.3, 24 * 60, 48) });
+    assertEqual(panel._liveDensity(), "cards", "default");
+    panel._liveDensity = () => "list";
+    const html = panel._liveStats();
+    assert(html.includes('class="live-list"') && !html.includes('class="live-grid"'), "rows, not cards");
+    assert(html.includes('data-action="live-density" data-id="list"'), "density switch");
+    const rows = [...html.matchAll(/data-live-card="([a-z_]+)"/g)].map((m) => m[1]);
+    assertEqual(rows, ["humidity", "tank_temp", "ph", "leak", "room_temp"], "Needs a look first, then the group order");
+    assert(html.includes("Environment · needs a look"), "the moved row says so");
+    const tankRow = html.slice(html.indexOf('data-live-card="tank_temp"'), html.indexOf('data-live-card="ph"'));
+    assert(tankRow.includes('live-spark-svg mini') && !tankRow.includes(">26.0</text>"), "mini sparkline carries no edge labels");
+    assert(tankRow.includes('data-live-geom="200,2,4"'), "hover geometry for the mini");
+    assert(tankRow.includes("live-spark-event"), "ticks on the mini too");
+    const phRow = html.slice(html.indexOf('data-live-card="ph"'), html.indexOf('data-live-card="leak"'));
+    assert(phRow.startsWith('data-live-card="ph">') && phRow.includes("Not mapped") && !phRow.includes("show-trend"), "unmapped row is plain");
+    assert(html.includes("live-legend") && html.includes("OpenReef events"), "legend explains the ticks");
   } finally { restore(); }
 });
 
