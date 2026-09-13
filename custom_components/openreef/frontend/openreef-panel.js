@@ -1227,6 +1227,7 @@ class OpenReefPanel extends HTMLElement {
         this._setupOpen = false;
         this._equipmentDetail = null;
         this._controlConfirm = null;
+        this._coolingDialogOpen = false;
         this._cameraFocus = null;
         this._cameraFullscreenFallback = false;
         this._recordingFocus = null;
@@ -1323,6 +1324,15 @@ class OpenReefPanel extends HTMLElement {
       if (action === "spawn-exec-resume") this._spawnExecResume();
       if (action === "spawn-exec-refresh") this._loadSpawnExecStatus(true);
       if (action === "cooling-refresh") this._loadCoolingStatus(true);
+      if (action === "cooling-open") {
+        this._coolingDialogOpen = true;
+        this._loadCoolingStatus(true);
+        this._render();
+      }
+      if (action === "cooling-close") {
+        this._coolingDialogOpen = false;
+        this._render();
+      }
       if (action === "cooling-dehum") this._coolingActuator("dehumidifier", id);
       if (action === "cooling-vent") this._coolingActuator("vent", id);
       if (action === "cooling-learning-reset") this._coolingLearningReset();
@@ -7114,6 +7124,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._activeContent()}
         ${this._setupOpen ? this._setupWizard() : ""}
         ${this._trend ? this._trendModal() : ""}
+        ${this._coolingDialogOpen ? this._coolingDialog() : ""}
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
         ${this._equipmentDetail ? this._equipmentDetailModal() : ""}
         ${this._controlConfirm ? this._controlConfirmModal() : ""}
@@ -27390,7 +27401,7 @@ const rigSteps = [
     else if (sum && sum.planActive) detail += ` · ${this._coolingPlanLine(sum)}`;
     else if (sum && sum.plan?.kind === "scheduled") detail += ` · drops to ${sum.worstPct} % from ${this._coolingHhmm(sum.firstAffectedAt)}`;
     return `
-      <button class="row row-link" data-action="tab" data-id="settings" aria-label="Cooling headroom — Open settings">
+      <button class="row row-link" data-action="cooling-open" aria-label="Cooling headroom — Open the live view">
         <div>
           <strong>Cooling headroom</strong>
           ${detail ? `<span>${this._escape(detail)}</span>` : ""}
@@ -27492,6 +27503,114 @@ const rigSteps = [
       </div>`;
   }
 
+  // One plug's row in the dialog: state pill, who is driving it, the hold
+  // that explains a plug disagreeing with the plan, and the hand controls.
+  _coolingActuatorRow(label, role, block, st, extra = "") {
+    const mode = ["off", "advise", "auto"].includes(block.mode) ? block.mode : "advise";
+    const state = st.state;
+    const pill = !state || state === "unavailable" || state === "unknown"
+      ? `<span class="pill warning">unavailable</span>`
+      : `<span class="pill ${state === "on" ? "ok" : "unknown"}">${state === "on" ? "ON" : "OFF"}</span>`;
+    const who = st.controlling ? "OpenReef is driving the plug" : mode === "auto" ? "auto, but not armed — advice only" : mode === "off" ? "off — no advice, no control" : "advise mode — OpenReef tells you, you switch";
+    const held = st.override ? ` · held ${st.override.state} by hand since ${this._coolingHhmm(st.override.since)}` : "";
+    const hold = st.hold ? ` · <strong>held ${st.hold.kind === "minOn" ? "on" : "off"} until ${this._coolingHhmm(st.hold.until)}</strong> — the plan changed inside the ${st.hold.minutes}-minute min ${st.hold.kind === "minOn" ? "on" : "off"}` : "";
+    return `
+      <div class="spawn-channel-row">
+        <strong>${label}</strong>
+        ${pill}
+        <small class="hint">${who}${held}${hold}${extra}</small>
+        <div class="button-row">
+          <button class="secondary compact-button" data-action="${role}" data-id="run">Run now</button>
+          <button class="secondary compact-button" data-action="${role}" data-id="stop">Stop</button>
+          ${st.override ? `<button class="secondary compact-button" data-action="${role}" data-id="resume">Give it back to the plan</button>` : ""}
+        </div>
+      </div>`;
+  }
+
+  // The Cooling headroom dialog (0.7.175): everything the keeper wants to
+  // SEE — today's reading, the verdict, the 24 h strip, the what-if table
+  // and the plug controls — off the Mission Control row, so Settings can go
+  // back to being settings. Pure render of the cached status.
+  _coolingDialog() {
+    const cfg = this._coolingCfg();
+    const status = this._cooling?.status;
+    const sum = this._coolingSummary(status);
+    const loading = Boolean(this._cooling?.loading) && !status;
+    const settingsBtn = `<button class="secondary compact-button" data-action="tab" data-id="settings" data-section="cooling" data-scroll="or-section-cooling">Settings</button>`;
+    const refreshBtn = `<button class="secondary compact-button" data-action="cooling-refresh" ${this._cooling?.loading ? "disabled" : ""}>Refresh</button>`;
+    const stat = (label, value, cls = "") => `<div class="${cls}"><small>${label}</small><strong>${value}</strong></div>`;
+    let body = "";
+    if (!cfg.enabled) {
+      body = `<div class="notice">Cooling headroom is switched off. Turn it on in Settings and map a room temperature and a humidity sensor.</div>`;
+    } else if (!status) {
+      body = loading ? `<div class="center-card compact-center"><div class="spinner"></div><p>Reading the room…</p></div>`
+        : `<div class="notice error">${this._escape(this._cooling?.error || "No reading yet.")}</div>`;
+    } else {
+      const r = status.result;
+      const card = this._coolingInsightCard();
+      const verdict = !card ? "" : `<div class="notice ${card.status === "critical" ? "danger-notice" : card.status === "warning" ? "warning-notice" : ""}"><strong>${this._escape(card.title)}</strong>${card.detail ? ` — ${this._escape(card.detail)}` : ""}</div>`;
+      const weather = status.weather || {};
+      const stats = !r ? "" : `
+        <div class="live-trend-stats cooling-stats">
+          ${stat("Tank", `${Number(r.waterC).toFixed(1)} °C`)}
+          ${stat("Room dew point", `${Number(r.dewC).toFixed(1)} °C`)}
+          ${stat("Margin", `${Number(r.marginC).toFixed(1)} °C`, `band-${this._escape(r.band)}`)}
+          ${stat("Room", `${Number(r.roomC).toFixed(1)} °C`)}
+          ${stat("Humidity", `${Math.round(Number(r.rh))} %`)}
+          ${stat("Target", `${Number(status.targetC).toFixed(1)} °C`)}
+          ${stat("Fans needed", status.fanNeeded ? "Yes" : "No")}
+          ${weather.outC != null ? stat("Outdoor", `${Number(weather.outC).toFixed(1)} °C · dew ${Number(weather.outDewC).toFixed(1)} °C`) : ""}
+        </div>
+        <small class="hint">Margin = tank minus the room's dew point: how much water vapour the air can still take. Target ${status.targetSource === "spawning" ? "follows the seasonal program" : "is fixed"}${status.waterSource === "target" ? " · no tank probe, using the target as the water temperature" : ""}.</small>`;
+      const ventLine = sum ? this._coolingVentLine(sum) : "";
+      const planLine = sum ? this._coolingPlanLine(sum) : "";
+      const now = `
+        <div class="cooling-now">
+          ${status.vent?.known ? `<p class="hint">${status.vent.advised ? "🪟 " : ""}<strong>Vent:</strong> ${this._escape(status.vent.reason)}${weather.outRh != null ? ` · outdoor ${Number(weather.outC).toFixed(1)} °C at ${weather.outRh} %` : ""}${status.vent.hysteresis && status.vent.advised ? ` · <em>holding while air moves — the fan narrows this gap itself</em>` : ""}</p>` : ""}
+          ${planLine ? `<p class="hint"><strong>Plan:</strong> ${this._escape(planLine)}</p>` : status.plan ? `<p class="hint"><strong>Plan:</strong> ${this._escape(status.plan.reason)}</p>` : ""}
+          ${ventLine ? `<p class="hint"><strong>Intake fan:</strong> ${this._escape(ventLine)}</p>` : status.ventDecision ? `<p class="hint"><strong>Intake fan:</strong> off — ${this._escape(status.ventDecision.reason)}</p>` : ""}
+        </div>`;
+      const dehum = cfg.dehumidifier || {};
+      const vent = cfg.vent || {};
+      const windowText = !status.window?.entity ? "" : status.window.open == null ? " · window sensor unavailable" : status.window.open ? " · window open" : " · window closed";
+      const plugs = `
+        ${dehum.switchEntity ? this._coolingActuatorRow("Dehumidifier", "cooling-dehum", dehum, status.dehumidifier || {}) : ""}
+        ${vent.switchEntity ? this._coolingActuatorRow("Intake fan", "cooling-vent", vent, status.ventFan || {}, windowText) : windowText ? `<small class="hint">${this._escape(windowText.slice(3))}</small>` : ""}`;
+      const weatherBound = Boolean(cfg.weatherEntity);
+      const forecast = !weatherBound ? `<small class="hint">Bind a weather entity in Settings for the 24 h projection, the dehumidifier plan and the night purge.</small>` : `
+        ${this._coolingForecastStrip(status)}
+        ${!status.projection ? `<small class="hint">${this._escape(status.issues?.forecast || status.issues?.weather || "Waiting for the first forecast read (within five minutes of saving).")}</small>` : ""}
+        ${this._coolingLearnedLine(status) ? `<p class="hint">${this._escape(this._coolingLearnedLine(status))} <button class="secondary compact-button" data-action="cooling-learning-reset">Forget learned offsets</button></p>` : ""}`;
+      const issues = Object.values(status.issues || {});
+      body = `
+        ${verdict}
+        ${stats}
+        <div class="awc-section-title"><p class="eyebrow">Right now</p></div>
+        ${now}
+        ${plugs}
+        <div class="awc-section-title"><p class="eyebrow">Next 24 h</p></div>
+        ${forecast}
+        <div class="awc-section-title"><p class="eyebrow">What the fans are worth</p></div>
+        ${this._coolingWhatIfTable(status)}
+        ${issues.length ? `<ul class="hint">${issues.map((i) => `<li>${this._escape(i)}</li>`).join("")}</ul>` : ""}`;
+    }
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog cooling-dialog">
+          <button class="close" data-action="cooling-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Cooling headroom · live</p>
+              <div class="live-trend-title"><h2>${sum && sum.pct != null ? `${sum.pct} % fan effect` : "Cooling headroom"}</h2>${sum ? `<span class="pill ${sum.pill}">${this._escape(sum.label)}</span>` : ""}</div>
+              ${sum && sum.pct != null ? `<p class="muted">${this._escape(sum.detail)}${sum.needed ? "" : " · fans not needed right now"}</p>` : ""}
+            </div>
+            <div class="button-row">${refreshBtn}${settingsBtn}</div>
+          </div>
+          ${body}
+        </section>
+      </div>`;
+  }
+
   _coolingSettings() {
     const cfg = this._coolingCfg();
     const enabled = Boolean(cfg.enabled);
@@ -27501,16 +27620,15 @@ const rigSteps = [
     const spawningOn = Boolean(this._config.spawningProgram?.enabled);
     const targetMode = cfg.targetMode === "spawning" ? "spawning" : "fixed";
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
-    const issues = Object.values(status?.issues || {});
-    const live = !enabled ? "" : !status ? `<p class="hint">${this._cooling?.error ? this._escape(this._cooling.error) : "Loading the live reading…"}</p>` : `
+    // Settings is for settings (0.7.175): the live reading, the forecast
+    // strip, the what-if table and the plug controls live in the dialog.
+    const live = !enabled ? "" : `
       <div class="spawn-channel-row">
-        <strong>${sum && sum.pct != null ? `${sum.pct} % fan effect` : "No reading"}</strong>
+        <strong>${sum && sum.pct != null ? `${sum.pct} % fan effect` : status ? "No reading" : "Loading…"}</strong>
         <span class="pill ${sum ? sum.pill : "unknown"}">${this._escape(sum ? sum.label : "Not reporting")}</span>
-        <small class="hint">${this._escape(sum ? sum.detail : "")}${status.fanNeeded ? "" : " · fans not needed right now"}</small>
-        <small class="hint">Target ${Number(status.targetC).toFixed(1)} °C (${status.targetSource === "spawning" ? "seasonal program" : "fixed"})${status.waterSource === "target" ? " · no tank probe, using the target as the water temperature" : ""}</small>
-      </div>
-      ${issues.length ? `<ul class="hint">${issues.map((i) => `<li>${this._escape(i)}</li>`).join("")}</ul>` : ""}
-      ${this._coolingWhatIfTable(status)}`;
+        <button class="secondary compact-button" data-action="cooling-open">Open the live view</button>
+        <small class="hint">Today's reading, the 24 h forecast, the what-if table and the plug controls — also one tap from the Cooling headroom row in Mission Control.</small>
+      </div>`;
     const content = `
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="cooling" data-field="enabled" ${enabled ? "checked" : ""}>
@@ -27549,30 +27667,6 @@ const rigSteps = [
     const dehum = cfg.dehumidifier || {};
     const mode = ["off", "advise", "auto"].includes(dehum.mode) ? dehum.mode : "advise";
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
-    const weatherBound = Boolean(cfg.weatherEntity);
-    const ds = status?.dehumidifier || {};
-    const pill = (state) => !state || state === "unavailable" || state === "unknown"
-      ? `<span class="pill warning">unavailable</span>`
-      : `<span class="pill ${state === "on" ? "ok" : "unknown"}">${state === "on" ? "ON" : "OFF"}</span>`;
-    const planLine = sum ? this._coolingPlanLine(sum) : "";
-    const readout = !cfg.enabled || !status ? "" : `
-      ${this._coolingForecastStrip(status)}
-      ${weatherBound && !status.projection ? `<small class="hint">${this._escape(status.issues?.forecast || status.issues?.weather || "Waiting for the first forecast read (within five minutes of saving).")}</small>` : ""}
-      ${weatherBound && this._coolingLearnedLine(status) ? `<p class="hint">${this._escape(this._coolingLearnedLine(status))} <button class="secondary compact-button" data-action="cooling-learning-reset">Forget learned offsets</button></p>` : ""}
-      ${status.vent?.known ? `<p class="hint">${status.vent.advised ? "🪟 " : ""}<strong>Vent:</strong> ${this._escape(status.vent.reason)}${status.weather?.outC != null ? ` · outdoor ${Number(status.weather.outC).toFixed(1)} °C at ${status.weather.outRh} %` : ""}${status.vent.hysteresis && status.vent.advised ? ` · <em>holding while air moves — the fan narrows this gap itself</em>` : ""}</p>` : ""}
-      ${planLine ? `<p class="hint"><strong>Plan:</strong> ${this._escape(planLine)}</p>` : status.plan ? `<p class="hint"><strong>Plan:</strong> ${this._escape(status.plan.reason)}</p>` : ""}
-      ${dehum.switchEntity ? `
-      <div class="spawn-channel-row">
-        <strong>Dehumidifier</strong>
-        ${pill(ds.state)}
-        <small class="hint">${ds.controlling ? "OpenReef is driving the plug" : mode === "auto" ? "auto, but not armed — advice only" : mode === "off" ? "off — no advice, no control" : "advise mode — OpenReef tells you, you switch"}${ds.override ? ` · held ${ds.override.state} by hand since ${this._coolingHhmm(ds.override.since)}` : ""}</small>
-        <div class="button-row">
-          <button class="secondary compact-button" data-action="cooling-dehum" data-id="run">Run now</button>
-          <button class="secondary compact-button" data-action="cooling-dehum" data-id="stop">Stop</button>
-          ${ds.override ? `<button class="secondary compact-button" data-action="cooling-dehum" data-id="resume">Give it back to the plan</button>` : ""}
-          <button class="secondary compact-button" data-action="cooling-refresh">Refresh</button>
-        </div>
-      </div>` : ""}`;
     return `
       <div class="awc-section-title"><p class="eyebrow">Forecast + dehumidifier</p></div>
       <small class="hint">Bind a weather entity and OpenReef projects the next day hour by hour — room temperature and dew point follow the outdoor forecast plus the live indoor offset — and tells you when the fans will lose it and when to start the dehumidifier so its heat lands before the peak, not in it. If outdoor air is drier, it says vent instead. Two more triggers need no forecast: the fans are on but the tank is still sitting over target (the honest sign they are losing), and a plain room-humidity ceiling for the house. Advise tells you; auto switches a plug. Efficiency, never safety: it fails off and the fan/guard stay the backstop.</small>
@@ -27602,8 +27696,7 @@ const rigSteps = [
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="cooling-dehum" data-field="armed" ${dehum.armed ? "checked" : ""} ${dehum.switchEntity ? "" : "disabled"}>
         <span><strong>Armed — OpenReef switches the dehumidifier</strong><small>Needs a plug. Compressor guards: min on/off, max run then a bucket nudge. Leaving auto switches it off once and lets go.</small></span>
-      </label>` : ""}
-      ${readout}`;
+      </label>` : ""}`;
   }
 
   // Layer 3: the intake fan — vent rule, window sensor, night purge.
@@ -27611,25 +27704,6 @@ const rigSteps = [
     const vent = cfg.vent || {};
     const mode = ["off", "advise", "auto"].includes(vent.mode) ? vent.mode : "advise";
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
-    const vs = status?.ventFan || {};
-    const pill = (state) => !state || state === "unavailable" || state === "unknown"
-      ? `<span class="pill warning">unavailable</span>`
-      : `<span class="pill ${state === "on" ? "ok" : "unknown"}">${state === "on" ? "ON" : "OFF"}</span>`;
-    const windowText = !status?.window?.entity ? "" : status.window.open == null ? "window sensor unavailable" : status.window.open ? "window open" : "window closed";
-    const ventLine = sum ? this._coolingVentLine(sum) : "";
-    const readout = !cfg.enabled || !status ? "" : `
-      ${ventLine ? `<p class="hint"><strong>Intake fan:</strong> ${this._escape(ventLine)}</p>` : status.ventDecision ? `<p class="hint"><strong>Intake fan:</strong> off — ${this._escape(status.ventDecision.reason)}</p>` : ""}
-      ${vent.switchEntity ? `
-      <div class="spawn-channel-row">
-        <strong>Intake fan</strong>
-        ${pill(vs.state)}
-        <small class="hint">${vs.controlling ? "OpenReef is driving the plug" : mode === "auto" ? "auto, but not armed — advice only" : mode === "off" ? "off — no advice, no control" : "advise mode — OpenReef tells you, you switch"}${vs.override ? ` · held ${vs.override.state} by hand since ${this._coolingHhmm(vs.override.since)}` : ""}${vs.hold ? ` · <strong>held ${vs.hold.kind === "minOn" ? "on" : "off"} until ${this._coolingHhmm(vs.hold.until)}</strong> — the plan changed inside the ${vs.hold.minutes}-minute min ${vs.hold.kind === "minOn" ? "on" : "off"}` : ""}${windowText ? ` · ${windowText}` : ""}</small>
-        <div class="button-row">
-          <button class="secondary compact-button" data-action="cooling-vent" data-id="run">Run now</button>
-          <button class="secondary compact-button" data-action="cooling-vent" data-id="stop">Stop</button>
-          ${vs.override ? `<button class="secondary compact-button" data-action="cooling-vent" data-id="resume">Give it back to the plan</button>` : ""}
-        </div>
-      </div>` : windowText ? `<small class="hint">${this._escape(windowText)}</small>` : ""}`;
     return `
       <div class="awc-section-title"><p class="eyebrow">Intake fan (vent)</p></div>
       <small class="hint">The circulating fan in front of a slightly-open window is free dehumidification and cooling whenever outdoor air is drier and no warmer — usually most of a UK summer. OpenReef runs it (or tells you to) only for a reason: the room needs cooling now, a losing hour is coming and the room can be pre-dried, or the night purge through the coolest hours before a hot day. Never at the same time as the dehumidifier. On a muggy evening it says close up.</small>
@@ -27666,8 +27740,7 @@ const rigSteps = [
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="cooling-vent" data-field="armed" ${vent.armed ? "checked" : ""} ${vent.switchEntity ? "" : "disabled"}>
         <span><strong>Armed — OpenReef switches the intake fan</strong><small>Needs a plug. Without a window sensor it assumes you leave the window ajar. Leaving auto switches it off once and lets go.</small></span>
-      </label>` : ""}
-      ${readout}`;
+      </label>` : ""}`;
   }
 
   // Hatchery settings — its own section (0.7.71): breeders configure a
@@ -31541,6 +31614,17 @@ const rigSteps = [
         .cooling-cell.thin { color: #facc15; font-weight: 600; }
         .cooling-cell.weak { color: #fb923c; font-weight: 600; }
         .cooling-cell.dead, .cooling-cell.reversed { color: #f87171; font-weight: 600; }
+        .cooling-dialog { max-width: 1000px; gap: 14px; }
+        .cooling-dialog .notice { margin-bottom: 0; }
+        .cooling-dialog .live-trend-head .button-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        .cooling-dialog .awc-section-title { margin-top: 4px; }
+        .cooling-now { display: grid; gap: 6px; }
+        .cooling-now p { margin: 0; }
+        .cooling-stats.live-trend-stats { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+        .cooling-stats div.band-good strong { color: #4ade80; }
+        .cooling-stats div.band-thin strong { color: #facc15; }
+        .cooling-stats div.band-weak strong { color: #fb923c; }
+        .cooling-stats div.band-dead strong, .cooling-stats div.band-reversed strong { color: #f87171; }
         .cooling-strip-wrap { display: grid; gap: 6px; }
         .cooling-strip { display: flex; gap: 3px; overflow-x: auto; padding-bottom: 4px; }
         .cooling-hour { flex: 0 0 44px; display: grid; gap: 1px; text-align: center; border-radius: 6px; padding: 5px 2px; border: 1px solid #24364a; background: #0b1724; }

@@ -96,7 +96,7 @@ test("what-if table renders the backend grid with band classes", async () => {
   assertEqual(panel._coolingWhatIfTable({}), "");
 });
 
-test("settings section renders fields, readout and the spawning option gated on the program", async () => {
+test("settings section renders fields, a summary pill and the spawning option gated on the program", async () => {
   const panel = await prep();
   panel._settingsSectionOpen = () => true;
   panel._awcEntitySelect = (scope, _id, field, value) => `<input data-scope="${scope}" data-field="${field}" value="${value}">`;
@@ -104,8 +104,38 @@ test("settings section renders fields, readout and the spawning option gated on 
   assert(html.includes('data-field="enabled"') && html.includes('data-field="targetTempC"'));
   assert(html.includes('data-field="humidityEntity"'));
   assert(html.includes("2 % fan effect"));
+  assert(html.includes('data-action="cooling-open"'), "settings links to the live view");
   assert(html.includes("(program off)"), "spawning target disabled while the program is off");
-  assert(html.includes("cooling-grid"));
+  // Settings is for settings: the readouts live in the dialog.
+  assert(!html.includes("cooling-grid") && !html.includes("cooling-strip"));
+});
+
+test("mission row opens the dialog, not settings; the dialog carries the reading, verdict and table", async () => {
+  const panel = await prep();
+  const row = panel._coolingMissionRow();
+  assert(row.includes('data-action="cooling-open"') && !row.includes('data-id="settings"'), row);
+  const html = panel._coolingDialog();
+  assert(html.includes('data-action="cooling-close"'));
+  assert(html.includes("<h2>2 % fan effect</h2>"), "headline is the live percentage");
+  assert(html.includes("Evaporative cooling has stopped"), "the insight card is the verdict");
+  assert(html.includes("danger-notice") || html.includes("warning-notice"), "a warning verdict is loud");
+  assert(html.includes("<small>Room dew point</small><strong>25.9 °C</strong>"), "stat tiles");
+  assert(html.includes("band-dead"), "margin tile carries the band");
+  assert(html.includes("<small>Fans needed</small><strong>Yes</strong>"));
+  assert(html.includes("cooling-grid"), "what-if table moved into the dialog");
+  assert(html.includes("Bind a weather entity"), "no forecast without a weather entity");
+  assert(html.includes('data-action="tab" data-id="settings" data-section="cooling"'), "settings deep link");
+});
+
+test("dialog degrades: disabled, loading, and an error each read as a sentence", async () => {
+  const off = await prep({ enabled: false }, null);
+  assert(off._coolingDialog().includes("switched off"));
+  const loading = await prep({ enabled: true }, null);
+  loading._cooling.loading = true;
+  assert(loading._coolingDialog().includes("Reading the room"));
+  const failed = await prep({ enabled: true }, null);
+  failed._cooling.error = "WS down";
+  assert(failed._coolingDialog().includes("WS down"));
 });
 
 test("status load is cached and never runs while disabled", async () => {
@@ -198,10 +228,14 @@ test("layer 2 settings render the weather/dehumidifier fields, the plan, vent an
   const html = panel._coolingSettings();
   assert(html.includes('data-field="weatherEntity"') && html.includes('data-scope="cooling-dehum" data-field="mode"'));
   assert(html.includes('data-field="armed"'), "armed toggle appears in auto mode");
-  assert(html.includes("OpenReef is driving the plug"));
-  assert(html.includes("Give it back to the plan"), "resume button while held");
-  assert(html.includes("<strong>Vent:</strong>") && html.includes("<strong>Plan:</strong>"));
-  assert(html.includes("cooling-strip"));
+  assert(!html.includes("cooling-strip") && !html.includes("Run now"), "no readouts or plug controls in settings");
+  const dialog = panel._coolingDialog();
+  assert(dialog.includes("OpenReef is driving the plug"));
+  assert(dialog.includes("Give it back to the plan"), "resume button while held");
+  assert(dialog.includes('data-action="cooling-dehum" data-id="run"'));
+  assert(dialog.includes("<strong>Vent:</strong>") && dialog.includes("<strong>Plan:</strong>"));
+  assert(dialog.includes("cooling-strip"), "forecast strip moved into the dialog");
+  assert(dialog.includes("<small>Outdoor</small><strong>20.0 °C · dew 12.0 °C</strong>"));
   const advise = await prep({ enabled: true, dehumidifier: { mode: "advise" } }, l2());
   advise._settingsSectionOpen = () => true;
   advise._awcEntitySelect = () => "";
@@ -323,9 +357,7 @@ test("free cooling: the new kind reads as free cooling everywhere it surfaces", 
   const refused = l3({ shouldRun: false, kind: "none", wants: null,
     reason: "outdoor air is 5.0 \u00b0C cooler but wetter (dew point 15.0 \u00b0C) \u2014 it would cost the fans more than it saves" });
   panel = await prep({ enabled: true, weatherEntity: "weather.home", vent: { mode: "auto", armed: true, switchEntity: "switch.vent" } }, refused);
-  panel._settingsSectionOpen = () => true;
-  panel._awcEntitySelect = () => "";
-  assert(panel._coolingSettings().includes("cost the fans more than it saves"),
+  assert(panel._coolingDialog().includes("cost the fans more than it saves"),
     "the refusal that explains declining cooler air must be visible");
 });
 
@@ -356,9 +388,11 @@ test("layer 3 settings render the vent fields, window state and controls", async
   const html = panel._coolingSettings();
   assert(html.includes('data-scope="cooling-vent" data-field="mode"') && html.includes('data-field="windowEntity"'));
   assert(html.includes('data-field="nightPurge"') && html.includes('data-scope="cooling-vent" data-field="armed"'));
-  assert(html.includes("window closed"));
-  assert(html.includes("keep the windows shut"));
-  assert(html.includes('data-action="cooling-vent" data-id="resume"'), "resume while held");
+  const dialog = panel._coolingDialog();
+  assert(dialog.includes("window closed"));
+  assert(dialog.includes("keep the windows shut"));
+  assert(dialog.includes('data-action="cooling-vent" data-id="resume"'), "resume while held");
+  assert(!html.includes('data-action="cooling-vent" data-id="resume"'), "plug controls left settings");
   const off = await prep({ enabled: true, vent: { mode: "off" } }, l3({ shouldRun: false, kind: "none", reason: "" }));
   off._settingsSectionOpen = () => true;
   off._awcEntitySelect = () => "";
@@ -379,10 +413,8 @@ test("learned-offsets line: learning, then coverage; strip hint counts learned h
   assert(panel._coolingForecastStrip(some).includes("per-hour learned offsets on 4 of 6 hours"));
   assert(!panel._coolingForecastStrip(l2()).includes("per-hour learned"));
   assertEqual(panel._coolingLearnedLine(status()), "");
-  panel._settingsSectionOpen = () => true;
-  panel._awcEntitySelect = () => "";
   panel._cooling.status = some;
-  assert(panel._coolingSettings().includes('data-action="cooling-learning-reset"'));
+  assert(panel._coolingDialog().includes('data-action="cooling-learning-reset"'), "forget button lives in the dialog");
 });
 
 await runTests();

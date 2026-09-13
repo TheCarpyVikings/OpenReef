@@ -942,3 +942,24 @@ case is `test_plan_losing_is_reeces_2026_09_13_screenshot` — 25.1 °C tank, 24
 
 Not yet verified on real HA. Reece: set the ceiling to taste (~70), leave `losingOverC` at 0.3,
 and watch the Log tab for "Dehumidifier: the fans are on but the tank is still…".
+
+## 15. The live view is a dialog; Settings is for settings — 0.7.175 (2026-09-13)
+
+Reece: "when I click Cooling headroom can we create a decent modal instead of taking me to
+Settings — the settings menu is getting very crowded." The Mission Control row now opens
+`_coolingDialog()` (`cooling-open` / `cooling-close`, closed by any tab change), a
+`wizard trend-dialog cooling-dialog` in the same family as the Live Stats trend modal:
+
+- head: `{pct} % fan effect` + band pill + the dew-point detail; Refresh and a Settings deep
+  link (`data-section="cooling"`).
+- the verdict: `_coolingInsightCard()` as a notice (warning/danger by status).
+- stat tiles (`live-trend-stats`): tank, room dew point, margin (coloured by band), room,
+  humidity, target, fans needed, outdoor.
+- Right now: the Vent / Plan / Intake fan lines, then the two plug rows (`_coolingActuatorRow`,
+  Run now / Stop / Give it back to the plan).
+- Next 24 h: the forecast strip, the learned-offsets line + Forget button.
+- What the fans are worth: the what-if table. Issues last.
+
+Settings lost every readout, the strip, the table and the plug controls; it keeps the fields
+and one summary row with an "Open the live view" button. Tests: `test_panel_cooling.mjs` 26.
+Verified by headless-Chrome screenshot of the dialog with Reece's 2026-09-13 numbers.
