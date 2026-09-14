@@ -1090,6 +1090,9 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 # 0.7.140 (doc §8.11 #6): the tip bleed the harvest/restart was
                 # done at, so the run-length learning can weigh it.
                 "purgeMl": _awc_num(item.get("purgeMl"), 0, 0, 500),
+                # 0.7.184: a look that decided NOT to feed — the feed chore
+                # skipped for this cycle, the water still on the record.
+                "skipped": bool(item.get("skipped")),
             })
         vessel_kind = str(raw_jar.get("vesselKind") or "")
         jars[jid] = {
@@ -1120,6 +1123,9 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "startedAt": _awc_str(raw_state.get("startedAt"), 40),
                 "lastRestartAt": _awc_str(raw_state.get("lastRestartAt"), 40),
                 "lastFedAt": _awc_str(raw_state.get("lastFedAt"), 40),
+                # 0.7.184: the last skipped feed — holds the feed clock for one
+                # interval without claiming a feed (culture_state reads it).
+                "lastFeedSkippedAt": _awc_str(raw_state.get("lastFeedSkippedAt"), 40),
                 "lastHarvestAt": _awc_str(raw_state.get("lastHarvestAt"), 40),
                 "lastWaterChangeAt": _awc_str(raw_state.get("lastWaterChangeAt"), 40),
                 "lastTint": tint if tint in cultures_engine.TINTS else "",
@@ -15552,10 +15558,13 @@ def _cultures_task_clock(config: dict[str, Any], task_id: str, now: datetime) ->
 
 
 def _cultures_log_completion(config: dict[str, Any], jar_id: str, chore: str,
-                             now: datetime, note: str) -> None:
+                             now: datetime, note: str, skipped: bool = False,
+                             snooze_until: str | None = None) -> None:
     """Mark the per-jar chore done (if the keeper added the reminder) — the
     hatchery bridge's pattern: only touches tasks that exist, clears the
-    snooze in lockstep with the panel's _completeTask."""
+    snooze in lockstep with the panel's _completeTask. A SKIP (0.7.184) logs
+    a non-counting entry and holds the reminder until the jar's next slot,
+    like the panel's _skipTask."""
     maintenance = config.get("maintenance")
     if not isinstance(maintenance, dict):
         return
@@ -15572,14 +15581,17 @@ def _cultures_log_completion(config: dict[str, Any], jar_id: str, chore: str,
         entries = []
         completions[task_id] = entries
     stamp = now.isoformat()
-    entries.insert(0, {
+    entry = {
         "id": f"{task_id}:culture:{stamp}",
         "timestamp": stamp,
         "notes": note[:500],
         "source": MAINTENANCE_SOURCE_CULTURES,
-    })
+    }
+    if skipped:
+        entry["skipped"] = True
+    entries.insert(0, entry)
     del entries[MAINTENANCE_COMPLETIONS_MAX:]
-    tasks[task_id]["snoozedUntil"] = None
+    tasks[task_id]["snoozedUntil"] = snooze_until if skipped else None
 
 
 def _nps_hand_feed_done(config: dict[str, Any], now: datetime, note: str) -> None:
@@ -15614,7 +15626,7 @@ def _cultures_history(jar: dict[str, Any], event: str, now: datetime, **fields: 
         history = []
         jar["history"] = history
     row = {"event": event, "at": now.isoformat(), "ml": 0, "tint": "", "from": "",
-           "sign": "", "eggRatio": None, "tempC": None, "purgeMl": 0}
+           "sign": "", "eggRatio": None, "tempC": None, "purgeMl": 0, "skipped": False}
     row.update({k: v for k, v in fields.items() if v is not None})
     history.insert(0, row)
     del history[600:]
@@ -15883,6 +15895,9 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             # same species; a producing one can be split into an idle jar.
             "reseedFrom": [j for j in producing_by_species.get(jar["species"], []) if j != jid],
             "history": list(jar["history"][:12]),
+            # The feeding / water-tint timeline (0.7.184): a month of marks
+            # and the clearing spans, the panel only draws them.
+            "timeline": cultures_engine.feed_timeline(jar["history"], now),
         })
     rotifer_shelf_days = cultures_engine.species_preset("rotifer_L")["bottleShelfDays"]
     bottle = cultures["bottle"]
@@ -16048,6 +16063,7 @@ async def websocket_cultures_seed(
     vol.Optional("sign"): str,
     vol.Optional("egg_ratio"): vol.Any(int, float),
     vol.Optional("enrich"): bool,
+    vol.Optional("skip_feed"): bool,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -16068,7 +16084,8 @@ async def websocket_cultures_log(
         tint=str(msg.get("tint") or ""), fed=bool(msg.get("fed")), harvested=bool(msg.get("harvested")),
         ml=msg.get("ml"), bottle_ml=msg.get("bottle_ml"), destination=str(msg.get("destination") or ""),
         sign=str(msg.get("sign") or ""),
-        egg_ratio=msg.get("egg_ratio"), enrich=bool(msg.get("enrich")), source="the Cultures tab")
+        egg_ratio=msg.get("egg_ratio"), enrich=bool(msg.get("enrich")), skip_feed=bool(msg.get("skip_feed")),
+        source="the Cultures tab")
     if error is not None:
         connection.send_error(msg["id"], error[0], error[1])
         return
@@ -16080,6 +16097,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
                         tint: str = "", fed: bool = False, harvested: bool = False,
                         ml: Any = None, bottle_ml: Any = None, sign: str = "", egg_ratio: Any = None,
                         enrich: bool = False, destination: str = "",
+                        skip_feed: bool = False,
                         source: str = "the Cultures tab") -> tuple[str, str] | None:
     """One tap, every ledger: a feed debits the phyto bottle; a rotifer harvest
     fills the fridge bottle (oldest stamp wins — a top-up never resets the
@@ -16093,6 +16111,11 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
     the jar's own default (a species without a bottle always feeds straight
     in). Straight into the tank is a hand feed of the tank: the hand-feed
     reminder logs done and the strip and the feeding log get their row.
+    ``skip_feed`` (0.7.184) is the look that decided NOT to feed: the tint
+    goes on the record, the jar's feed clock holds for one interval from
+    now, and the feed reminder (if any) logs a non-counting skip snoozed to
+    that slot — so the keeper can watch how long the water takes to clear
+    before the next feed without a feed row muddying the sample.
     Returns (code, message) on refusal."""
     cultures = _nps_cultures_cfg(config)
     jar = cultures["jars"].get(jar_id)
@@ -16104,8 +16127,12 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         return "jar_idle", f"{jar['name']} is not running — seed it first"
     sign = sign if sign in cultures_engine.SIGNS else ""
     egg = _awc_num(egg_ratio, 0, 0, 100) if isinstance(egg_ratio, (int, float)) and not isinstance(egg_ratio, bool) else None
-    if not (fed or harvested or sign or egg is not None or tint in cultures_engine.TINTS):
-        return "nothing_to_log", "Log a tint, a feed, a harvest, a sign or an egg count"
+    if fed and skip_feed:
+        return "fed_and_skipped", "A feed is either fed or skipped — not both"
+    if harvested and skip_feed:
+        return "harvest_and_skipped", "A harvest is fed with it — log the harvest, or skip the feed"
+    if not (fed or harvested or skip_feed or sign or egg is not None or tint in cultures_engine.TINTS):
+        return "nothing_to_log", "Log a tint, a feed, a skip, a harvest, a sign or an egg count"
     state = jar["state"]
     preset = cultures_engine.species_preset(jar["species"])
     has_bottle = awc_engine._f(preset["bottleShelfDays"]) > 0
@@ -16148,6 +16175,13 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         _cultures_feed_debit(config, jar, jar_id)
         _cultures_log_completion(config, jar_id, "feed", now, f"Logged automatically — fed from {source}")
         notes.append("fed")
+    if skip_feed:
+        state["lastFeedSkippedAt"] = now.isoformat()
+        next_feed = cultures_engine.culture_state(jar, now)["feed"]
+        _cultures_log_completion(config, jar_id, "feed", now,
+                                 f"Skipped from {source}" + (f" — water {tint}" if tint in cultures_engine.TINTS else ""),
+                                 skipped=True, snooze_until=next_feed.get("at"))
+        notes.append("feed skipped")
     harvest_ml = 0.0
     if harvested:
         harvest_ml = refill["totalMl"]
@@ -16178,7 +16212,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
                      + (", straight into the tank" if has_bottle and wants == "tank"
                         else f", {round(into_bottle)} ml bottled" if has_bottle and wants == "bottle" and round(into_bottle) != round(harvest_ml)
                         else ""))
-    event = ("harvest" if harvested else "feed" if fed else "sign" if sign else "tint")
+    event = ("harvest" if harvested else "feed" if fed else "sign" if sign else "tint" if tint in cultures_engine.TINTS else "skip" if skip_feed else "tint")
     purge = round(jar["purgeMl"]) if harvested and jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None
     _cultures_history(jar, event, now,
                       ml=round(harvest_ml, 1) if harvested else 0,
@@ -16187,7 +16221,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
                       tankMl=float(bottle_ml) if harvested and wants == "tank" and bottle_ml is not None else None,
                       to=wants if harvested else None,
                       tempC=_cultures_temp_c(hass, config, cultures),
-                      purgeMl=purge)
+                      purgeMl=purge, skipped=True if skip_feed else None)
     _append_activity(config, f"{jar['name']}: " + ", ".join(notes), "control")
     return None
 
@@ -16536,6 +16570,10 @@ def _cultures_push_plan(summary: dict[str, Any]) -> list[dict[str, Any]]:
             actions.append({"action": f"OPENREEF_CULTURE_HARVEST:{jid}", "title": "Harvested + fed"})
         if "feed" in due and "harvest" not in due and len(actions) < 2:
             actions.append({"action": f"OPENREEF_CULTURE_FED:{jid}", "title": "Fed"})
+            # The look that decided not to feed (0.7.184): still green, skip
+            # — the reminder holds until the next slot. Only when it fits.
+            if len(actions) < 2:
+                actions.append({"action": f"OPENREEF_CULTURE_SKIP:{jid}", "title": "Skipped"})
         actions.append({"action": f"OPENREEF_CULTURE_LATER:{jid}", "title": "Later"})
         advice = (jar.get("feedAdvice") or {}).get("reason") or ""
         restart_reason = (st.get("restart") or {}).get("reason")
@@ -16619,6 +16657,8 @@ async def _async_notification_action(hass: HomeAssistant, event: Any) -> None:
         error = _cultures_log_apply(hass, config, arg, fed=True, harvested=True, source="the phone")
     elif kind == "OPENREEF_CULTURE_FED":
         error = _cultures_log_apply(hass, config, arg, fed=True, source="the phone")
+    elif kind == "OPENREEF_CULTURE_SKIP":
+        error = _cultures_log_apply(hass, config, arg, skip_feed=True, source="the phone")
     elif kind == "OPENREEF_CULTURE_RESTARTED":
         error = _cultures_restart_apply(hass, config, arg, source="the phone")
     elif kind == "OPENREEF_HATCH_LOADED":

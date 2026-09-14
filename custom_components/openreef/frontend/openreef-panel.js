@@ -114,7 +114,7 @@ class OpenReefPanel extends HTMLElement {
                   logDays: 7, logShown: 10,
                   // The planned row whose dose card is open in the log (0.7.170).
                   logOpen: "" };
-    this._cultures = { summary: null, at: 0, loading: false, error: "", message: "", demo: false };
+    this._cultures = { summary: null, at: 0, loading: false, error: "", message: "", demo: false, timelineDays: 14 };
     this._cooling = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
@@ -1963,6 +1963,9 @@ class OpenReefPanel extends HTMLElement {
           : { type: "openreef/cultures_seed", jar_id: id },
         "Seeded — the culture clocks are running. Let it establish before the first harvest.");
       if (action === "cultures-fed") this._culturesLog(id, true, false);
+      if (action === "cultures-looked") this._culturesLog(id, false, false);
+      if (action === "cultures-skip-feed") this._culturesLog(id, false, false, "", true);
+      if (action === "cultures-timeline-days") { this._cultures.timelineDays = Number(target.dataset.days) || 14; this._render(); }
       if (action === "cultures-harvested") this._culturesLog(id, true, true);
       if (action === "cultures-harvest-tank") this._culturesLog(id, false, true, "tank");
       if (action === "cultures-harvest-bottle") this._culturesLog(id, false, true, "bottle");
@@ -13265,7 +13268,28 @@ const rigSteps = [
     const guardWatch = { available: true, status: "watch", peakC: 27.9, peakAt: iso(-9), crossAt: null, hoursUntil: null, offsetC: 1.2,
       line: "the rack peaks at 27.9 °C, rack +1.2 °C over the room — above the 26 °C band, keep an eye on it" };
     const noGuard = { available: false, status: "unknown", peakC: null, peakAt: null, crossAt: null, hoursUntil: null, offsetC: 0, line: "" };
-    const row = (event, hoursAgo, extra = {}) => ({ event, at: iso(hoursAgo), ml: 0, tint: "", from: "", sign: "", eggRatio: 0, tempC: null, purgeMl: 0, ...extra });
+    const row = (event, hoursAgo, extra = {}) => ({ event, at: iso(hoursAgo), ml: 0, tint: "", from: "", sign: "", eggRatio: 0, tempC: null, purgeMl: 0, skipped: false, ...extra });
+    // The timeline (0.7.184): what cultures.feed_timeline would say for these
+    // rows — marks oldest first, the clearing spans, the newest one open.
+    const mk = (event, hoursAgo, extra = {}) => ({ at: iso(hoursAgo), event, tint: "", fed: event === "feed" || event === "harvest", skipped: false, ml: 0, sign: "", tempC: null, ...extra });
+    const tl = (marks, spans, tintBefore = "") => ({ days: 30, since: iso(30 * 24), tintBefore,
+      marks: marks.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), spans });
+    // A daily rhythm: fed at 14:00-ish, clearing by 20:00, clear by 01:00 —
+    // 11 h to clear — with one look on day 3 that skipped the feed.
+    const rhythmA = [];
+    const spansA = [];
+    for (let d = 1; d <= 8; d += 1) {
+      if (d === 3) rhythmA.push(mk("tint", d * 24 + 14, { tint: "green", skipped: true }));
+      else { rhythmA.push(mk("feed", d * 24 + 14, { tint: "green" })); spansA.push({ fedAt: iso(d * 24 + 14), clearAt: iso(d * 24 + 3), hours: 11, open: false }); }
+      rhythmA.push(mk("tint", d * 24 + 8, { tint: "clearing" }), mk("tint", d * 24 + 3, { tint: "clear" }));
+    }
+    const timelineA = tl([mk("seeded", 23 * 24), mk("sign", 9 * 24 + 6, { sign: "foam" }), mk("restart", 9 * 24 + 1, { tint: "green", ml: 2500 }), mk("split", 9 * 24, { ml: 1250 }),
+      ...rhythmA, mk("harvest", 27, { tint: "clear", ml: 625 }), mk("feed", 14, { tint: "green" }), mk("harvest", 2, { tint: "clearing", ml: 625 })],
+      [...spansA, { fedAt: iso(2), clearAt: null, hours: 2, open: true }]);
+    const timelineB = tl([mk("seeded", 3 * 24, { tint: "green", ml: 1250 }), mk("feed", 2 * 24 + 12, { tint: "green" }), mk("feed", 36, { tint: "green" }), mk("feed", 12, { tint: "green" })],
+      [{ fedAt: iso(12), clearAt: null, hours: 12, open: true }]);
+    const timelineP = tl([mk("harvest", 8 * 24, { tint: "green", ml: 1000 }), mk("water_change", 6 * 24, { tint: "green", ml: 2000 }), mk("tint", 3 * 24, { tint: "clearing" }), mk("feed", 20, { tint: "green" })],
+      [{ fedAt: iso(20), clearAt: null, hours: 20, open: true }], "green");
     const learnedA = {
       clearingH: { available: true, hours: 9.2, samples: 3 }, firstHarvestDays: { available: true, days: 5.5, samples: 2 },
       runLengthDays: { available: true, days: 11.3, samples: 3 }, yieldMlDay: 610,
@@ -13306,6 +13330,7 @@ const rigSteps = [
         row("tint", 26, { tint: "clear", tempC: 24.6 }), row("harvest", 27, { ml: 625, tint: "clear", purgeMl: 50, tempC: 24.6 }),
         row("split", 9 * 24, { ml: 1250, from: "b" }), row("restart", 9 * 24 + 1, { ml: 2500, tint: "green", purgeMl: 100, tempC: 24.1 }),
         row("sign", 9 * 24 + 6, { sign: "foam", tempC: 24.3 }), row("seeded", 23 * 24, {})],
+      timeline: timelineA,
     });
     const jarB = rotJar({
       id: "b", name: "Rotifers B",
@@ -13319,6 +13344,7 @@ const rigSteps = [
       tintStrip: ["", "", "", "", "", "", "", "", "", "", "", "green", "green", "green"],
       stagger: { available: true, days: 9, idealDays: 7, advice: "9 days behind A — 7 is the ideal stagger" },
       history: [row("feed", 12, { tint: "green", tempC: 25.0 }), row("seeded", 3 * 24, { ml: 1250, from: "a", tint: "green" })],
+      timeline: timelineB,
     });
     const tub = {
       id: "p", name: "Pods", species: "tigriopus", speciesName: pod.name || "Tigriopus copepods", kind: "copepod", latin: "Tigriopus californicus",
@@ -13341,6 +13367,7 @@ const rigSteps = [
       hasBottle: false, seededFrom: "", reseedFrom: [],
       history: [row("feed", 20, { tint: "green", tempC: 26.3 }), row("water_change", 6 * 24, { ml: 2000, tint: "green", tempC: 25.8 }),
         row("harvest", 8 * 24, { ml: 1000, tint: "green", tempC: 25.5 }), row("seeded", 41 * 24, {})],
+      timeline: timelineP,
     };
     const jars = [jarA, jarB, tub];
     const vessel = (j) => {
@@ -13423,13 +13450,17 @@ const rigSteps = [
 
   // The daily tap: the tint the keeper saw (a select beside the jar) plus
   // whether they fed and/or harvested. One call, one ledger movement each.
-  _culturesLog(jarId, fed, harvested, destination = "") {
+  // ``skipFeed`` (0.7.184) is the look that decided NOT to feed: the tint
+  // goes on the record, the feed clock and its reminder hold to the next
+  // slot as a skip — no phyto moves, no feed row muddies the clearing time.
+  _culturesLog(jarId, fed, harvested, destination = "", skipFeed = false) {
     const select = this.shadowRoot?.querySelector(`[data-cultures-tint="${jarId}"]`);
     const tint = select && select.value ? String(select.value) : "";
     const msg = { type: "openreef/cultures_log", jar_id: jarId };
     if (tint) msg.tint = tint;
     if (fed) msg.fed = true;
     if (harvested) msg.harvested = true;
+    if (skipFeed && !fed && !harvested) msg.skip_feed = true;
     const enrichBox = this.shadowRoot?.querySelector(`[data-cultures-enrich="${jarId}"]`);
     if (harvested && enrichBox && enrichBox.checked) msg.enrich = true;
     // Where the crop went (0.7.161): the caller's word, else the tile's
@@ -13446,10 +13477,17 @@ const rigSteps = [
     const egg = this.shadowRoot?.querySelector(`[data-cultures-egg="${jarId}"]`);
     const eggRatio = egg && egg.value !== "" ? Number(egg.value) : 0;
     if (egg && egg.value !== "" && Number.isFinite(eggRatio) && eggRatio >= 0) msg.egg_ratio = Math.min(100, eggRatio);
+    if (!fed && !harvested && !msg.skip_feed && !tint && !("egg_ratio" in msg)) {
+      this._cultures.message = "Pick the water you saw first — green, clearing or clear.";
+      this._render();
+      return;
+    }
     this._culturesCall(msg, harvested
       ? (msg.destination === "tank" ? "Harvest logged — straight into the tank; the strip, the log and the reminders keep count."
         : "Harvest logged — the bottle and the reminders keep count.")
-      : fed ? "Feed logged — the phyto bottle keeps count." : "Tint logged.");
+      : fed ? "Feed logged — the phyto bottle keeps count."
+        : msg.skip_feed ? "Feed skipped — the water is on the record; the reminder holds until the next slot."
+          : "Tint logged — nothing else moved.");
   }
 
   // A crash sign (V2 Stage B): foam, milky water, a smell, pods at the
@@ -13880,6 +13918,102 @@ const rigSteps = [
       </svg>`;
   }
 
+  // The feeding / water-tint timeline (0.7.184): one lane per jar — a band
+  // of the water as last reported, the taps on it (looked, fed, skipped,
+  // harvested, restarted, a sign, a crash) and the clearing spans: feed →
+  // the first tap that found the water CLEAR, in hours, the newest still
+  // open. The backend builds the marks and the spans (cultures.feed_timeline,
+  // the same rule as the learned clearing time); this only draws them.
+  _culturesTimelinePanel() {
+    const st = this._cultures;
+    const sum = st.summary || {};
+    const jars = (sum.jars || []).filter((j) => (j.timeline?.marks || []).length
+      || ["producing", "establishing"].includes(j.state?.status));
+    if (!jars.length) return "";
+    const days = [7, 14, 30].includes(Number(st.timelineDays)) ? Number(st.timelineDays) : 14;
+    const now = Date.now();
+    const since = now - days * 86400000;
+    const W = 1000; const PAD = 10; const LANE_H = 76;
+    const x = (ms) => Math.round(10 * (PAD + (W - 2 * PAD) * Math.max(0, Math.min(1, (ms - since) / (now - since))))) / 10;
+    const tintColor = { green: "#43a047", clearing: "#9ccc65", clear: "#4fc3f7" };
+    const esc = (v) => this._escape(String(v ?? ""));
+    const when = (iso) => this._formatActivityTime(iso);
+    const hoursWord = (h) => `${Number(h) < 10 ? Math.round(Number(h) * 10) / 10 : Math.round(Number(h))} h`;
+    // The day grid: a tick a day, labelled every day for a week, every other
+    // day for a fortnight, weekly for a month.
+    const labelEvery = days <= 7 ? 1 : days <= 14 ? 2 : 7;
+    const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
+    const ticks = [];
+    for (let d = 0; d <= days; d += 1) {
+      const ms = dayStart.getTime() - d * 86400000;
+      if (ms < since) break;
+      ticks.push({ ms, label: d === 0 ? "today" : d % labelEvery === 0
+        ? new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : "" });
+    }
+    const grid = ticks.map((t) => `<line x1="${x(t.ms)}" y1="0" x2="${x(t.ms)}" y2="${LANE_H}" stroke="rgba(255,255,255,0.07)" stroke-width="1"></line>`).join("");
+    const axis = `
+      <div></div>
+      <svg viewBox="0 0 ${W} 18" class="culture-tl-axis" role="presentation" aria-hidden="true">
+        ${ticks.filter((t) => t.label).map((t) => `<text x="${x(t.ms)}" y="13" text-anchor="${t.ms === ticks[0].ms ? "end" : "middle"}" font-size="11" fill="#90a4ae">${esc(t.label)}</text>`).join("")}
+      </svg>`;
+    const glyph = { restart: "↻", seeded: "●", split: "⑂", crashed: "✕", sign: "!", water_change: "≈" };
+    const lanes = jars.map((j) => {
+      const tl = j.timeline || {};
+      const marks = (tl.marks || []).filter((m) => Date.parse(m.at) >= since && Date.parse(m.at) <= now);
+      const earlier = (tl.marks || []).filter((m) => m.tint && Date.parse(m.at) < since);
+      const tintBefore = earlier.length ? earlier[earlier.length - 1].tint : (tl.tintBefore || "");
+      // The band: each tint tap colours the water until the next one.
+      const tinted = marks.filter((m) => m.tint);
+      const band = [];
+      if (tintBefore) band.push({ from: since, to: tinted.length ? Date.parse(tinted[0].at) : now, tint: tintBefore, carried: true });
+      tinted.forEach((m, i) => band.push({ from: Date.parse(m.at), to: i + 1 < tinted.length ? Date.parse(tinted[i + 1].at) : now, tint: m.tint }));
+      const bandSvg = band.map((b) => `<rect x="${x(b.from)}" y="10" width="${Math.max(0.5, x(b.to) - x(b.from))}" height="14" fill="${tintColor[b.tint] || "#546e7a"}" opacity="${b.carried ? 0.28 : 0.5}" data-tl-band="${esc(b.tint)}"><title>${esc(b.tint)} · ${b.carried ? "as last reported before this window" : `reported ${when(new Date(b.from).toISOString())}`}</title></rect>`).join("");
+      const dots = tinted.map((m) => `<circle cx="${x(Date.parse(m.at))}" cy="17" r="4.5" fill="${tintColor[m.tint]}" stroke="#0b1320" stroke-width="1.5" data-tl-tint="${esc(m.tint)}"><title>${esc(m.tint)} · ${esc(when(m.at))}${m.tempC != null ? ` · ${esc(m.tempC)} °C` : ""}</title></circle>`).join("");
+      // The taps: what the keeper did at each look.
+      const taps = marks.map((m) => {
+        const cx = x(Date.parse(m.at));
+        const title = `${esc(when(m.at))} · ${m.event === "harvest" ? `harvested${m.ml ? ` ${Math.round(m.ml)} ml` : ""}${m.fed ? " + fed" : ""}`
+          : m.skipped ? `looked${m.tint ? ` (${esc(m.tint)})` : ""} — feed skipped`
+            : m.event === "feed" ? `fed${m.tint ? ` (${esc(m.tint)})` : ""}`
+              : m.event === "sign" ? `a crash sign: ${esc(m.sign)}` : m.event === "water_change" ? `water change${m.ml ? ` ${Math.round(m.ml)} ml` : ""}`
+                : m.event === "tint" ? `looked (${esc(m.tint)})` : esc(m.event)}`;
+        if (m.event === "harvest") return `<path d="M ${cx} 37 l 6 7 l -6 7 l -6 -7 z" fill="#4fc3f7" data-tl-mark="harvest"><title>${title}</title></path>`;
+        if (m.skipped) return `<path d="M ${cx - 6} 38 h 12 l -6 11 z" fill="none" stroke="#f5a524" stroke-width="1.6" stroke-dasharray="2 1.5" data-tl-mark="skip"><title>${title}</title></path>`;
+        if (m.event === "feed" || m.fed) return `<path d="M ${cx - 6} 50 h 12 l -6 -12 z" fill="#66bb6a" data-tl-mark="feed"><title>${title}</title></path>`;
+        if (m.event === "tint") return `<line x1="${cx}" y1="27" x2="${cx}" y2="33" stroke="#90a4ae" stroke-width="1.5" data-tl-mark="tint"><title>${title}</title></line>`;
+        const red = m.event === "crashed" || m.event === "sign";
+        return `<text x="${cx}" y="49" text-anchor="middle" font-size="13" font-weight="700" fill="${red ? "#e5484d" : "#b0bec5"}" data-tl-mark="${esc(m.event)}">${glyph[m.event] || "·"}<title>${title}</title></text>`;
+      }).join("");
+      // The clearing spans: feed → first CLEAR tap, the open one to now.
+      const spans = (tl.spans || []).filter((sp) => (sp.open ? now : Date.parse(sp.clearAt)) >= since).map((sp) => {
+        const x1 = x(Date.parse(sp.fedAt)); const x2 = x(sp.open ? now : Date.parse(sp.clearAt));
+        const label = hoursWord(sp.hours);
+        const title = sp.open ? `fed ${esc(when(sp.fedAt))} — still clearing, ${label} so far` : `fed ${esc(when(sp.fedAt))} → clear ${esc(when(sp.clearAt))} · ${label}`;
+        return `<g data-tl-span="${sp.open ? "open" : "closed"}"><title>${title}</title>
+          <line x1="${x1}" y1="64" x2="${x2}" y2="64" stroke="#4fc3f7" stroke-width="3" stroke-linecap="round" ${sp.open ? 'stroke-dasharray="4 4" opacity="0.6"' : ""}></line>
+          ${x2 - x1 >= 26 ? `<text x="${(x1 + x2) / 2}" y="73" text-anchor="middle" font-size="10" fill="#90caf9">${esc(label)}</text>` : ""}</g>`;
+      }).join("");
+      const learned = j.learned?.clearingH?.available ? `clears in ~${esc(j.learned.clearingH.hours)} h · ${esc(j.learned.clearingH.samples)} feeds` : "";
+      const open = (tl.spans || []).find((sp) => sp.open);
+      const nameLine = `<div class="culture-tl-name"><strong>${esc(j.name)}</strong><br><small class="muted">${esc(j.speciesName || j.species || "")}${learned ? `<br>${learned}` : ""}${open && Number(open.hours) >= 1 ? `<br>clearing for ${esc(hoursWord(open.hours))}` : ""}</small></div>`;
+      const empty = !marks.length && !band.length ? `<text x="${W / 2}" y="46" text-anchor="middle" font-size="12" fill="#78909c">no looks in this window</text>` : "";
+      return `${nameLine}
+      <svg viewBox="0 0 ${W} ${LANE_H}" class="culture-tl-lane" role="img" aria-label="${esc(j.name)} — feeding and water timeline" data-tl-jar="${esc(j.id)}">
+        ${grid}${bandSvg}${dots}${taps}${spans}${empty}
+      </svg>`;
+    }).join("");
+    const rangeButtons = [7, 14, 30].map((d) => `<button class="${d === days ? "primary" : "secondary"} compact-button" data-action="cultures-timeline-days" data-days="${d}">${d} d</button>`).join("");
+    return `
+      <article class="panel stack" data-culture-timeline="${days}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <p class="eyebrow" style="margin:0;">Feeding &amp; water timeline</p>
+          <div class="button-row">${rangeButtons}</div>
+        </div>
+        <div class="culture-tl">${axis}${lanes}</div>
+        <small class="culture-tl-legend">band = the water as last reported (<span style="color:#43a047">green</span> · <span style="color:#9ccc65">clearing</span> · <span style="color:#4fc3f7">clear</span>) · ▲ fed · ▽ looked, feed skipped · ◆ harvested · ↻ restart · ! sign · ✕ crash · blue bar = feed → clear, in hours (dashed = still clearing) · hover a mark for its story</small>
+      </article>`;
+  }
+
   _culturesRigPanel() {
     const rig = this._culturesRigState();
     const rigSteps = [
@@ -14070,6 +14204,9 @@ const rigSteps = [
         </div>
         <label class="culture-field" title="Optional measured percentage of females carrying eggs. Follow the trend alongside activity and water quality; a percentage alone cannot predict a crash.">Egg ratio<span class="unit"><input type="number" min="0" max="100" step="1" placeholder="%" data-cultures-egg="${this._escape(j.id)}"><small class="muted">observe the trend</small></span></label>` : "";
       const lineageLine = running && j.lineage?.line ? `<small class="muted">${this._escape(j.lineage.line)}${j.stagger?.available ? ` · ${this._escape(j.stagger.advice)}` : ""}</small>` : "";
+      // The look that decided not to feed (0.7.184): the clock holds, say so.
+      const skippedLine = running && s.feed?.skipped && !due.includes("feed")
+        ? `<small class="muted" data-culture-skipped="${this._escape(j.id)}">feed skipped · next look in ~${this._escape(String(Math.round(Number(s.feed.hoursUntil) || 0)))} h</small>` : "";
       const guard = j.guard || {};
       const guardLine = running && guard.available && guard.status !== "clear"
         ? `<small style="color:${guard.status === "warn" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-guard="${this._escape(guard.status)}">${guard.status === "warn" ? "🌡️ tomorrow: " : "🌡️ "}${this._escape(guard.line)}</small>`
@@ -14109,7 +14246,9 @@ const rigSteps = [
       const buttons = [
         !running ? `<button class="secondary compact-button" data-action="cultures-seed" data-id="${this._escape(j.id)}">Seed from a starter</button>` : "",
         reseed,
+        running ? `<button class="secondary compact-button" data-action="cultures-looked" data-id="${this._escape(j.id)}" title="Logs the water you saw (and an egg count if you typed one) — nothing else moves: no feed, no phyto, the reminders stand">Looked</button>` : "",
         running ? `<button class="secondary compact-button" data-action="cultures-fed" data-id="${this._escape(j.id)}" title="Logs the tint and one feed — debits the phyto bottle">Fed</button>` : "",
+        running && due.includes("feed") ? `<button class="secondary compact-button" data-action="cultures-skip-feed" data-id="${this._escape(j.id)}" title="Looked, not feeding: logs the water and skips this feed — the reminder holds until the next slot, no phyto moves, and the clearing time stays honest">Skip feed</button>` : "",
         status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="cultures-harvested" data-id="${this._escape(j.id)}" title="Logs the tint, a feed and today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}">Harvested + fed</button>` : "",
         running && s.restart?.available ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-restart" data-id="${this._escape(j.id)}" title="Sieve the whole jar into a clean one with fresh water">Restarted</button>` : "",
         running && (s.waterChange?.available || s.waterChangeOnDemand) ? `<button class="${due.includes("waterChange") ? "primary" : "secondary"} compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? `On a sign — drift, any ammonia, cloudy water: ${this._escape(String(j.waterChangeGuide?.totalMl || 0))} ml out, fresh in` : "The scheduled change"}">Water changed</button>` : "",
@@ -14121,7 +14260,7 @@ const rigSteps = [
       // left-aligned blocks — the water and the crop, the notes, the
       // observations — and the actions. Same facts, one column, one rhythm.
       const withdrawalWarning = j.harvestGuide?.warning ? `<small style="color:var(--warning-color,#f5a524)">${this._escape(j.harvestGuide.warning)}</small>` : "";
-      const notes = [fillLine, advice, risk, guide, withdrawalWarning, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
+      const notes = [fillLine, advice, skippedLine, risk, guide, withdrawalWarning, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
       return `
         <div class="culture-tile" data-culture="${this._escape(j.id)}">
           <div class="culture-jar">${this._culturesJarSvg(j)}</div>
@@ -14208,7 +14347,7 @@ const rigSteps = [
     const events = jars.flatMap((j) => (j.history || []).map((h) => ({ ...h, jar: j.name })))
       .concat((bottle.history || []).map((h) => ({ ...h, jar: "Bottle" })))
       .filter((h) => h.at).sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 12);
-    const eventLabel = { seeded: "seeded", feed: "fed", tint: "looked", harvest: "harvested", restart: "restarted", water_change: "water change", split: "split", crashed: "crashed", sign: "sign",
+    const eventLabel = { seeded: "seeded", feed: "fed", tint: "looked", skip: "feed skipped", harvest: "harvested", restart: "restarted", water_change: "water change", split: "split", crashed: "crashed", sign: "sign",
       enriched: "enriched & bottled", bottled: "bottled plain", filled: "filled", fed_tank: "fed to the tank", emptied: "emptied" };
     const signWord = Object.fromEntries((sum.signs || []).map((sg) => [sg.id, sg.label]));
     const journal = events.length ? `
@@ -14229,7 +14368,7 @@ const rigSteps = [
             <tbody>${events.map((h) => `<tr>
               <td style="padding:6px 10px;white-space:nowrap;">${this._escape(this._formatActivityTime(h.at))}</td>
               <td style="padding:6px 10px;">${this._escape(h.jar)}</td>
-              <td style="padding:6px 10px;">${this._escape(eventLabel[h.event] || h.event)}${h.from ? ` (${this._escape((jars.find((x) => x.id === h.from) || {}).name || h.from)})` : ""}${h.purgeMl ? ` · bled ${this._escape(String(Math.round(h.purgeMl)))} ml` : ""}</td>
+              <td style="padding:6px 10px;">${this._escape(h.skipped && h.event === "tint" ? "looked · feed skipped" : eventLabel[h.event] || h.event)}${h.from ? ` (${this._escape((jars.find((x) => x.id === h.from) || {}).name || h.from)})` : ""}${h.purgeMl ? ` · bled ${this._escape(String(Math.round(h.purgeMl)))} ml` : ""}</td>
               <td style="padding:6px 10px;text-align:right;">${h.ml ? this._escape(String(Math.round(h.ml))) : ""}</td>
               <td style="padding:6px 10px;">${this._escape(h.tint || "")}</td>
               <td style="padding:6px 10px;color:var(--error-color,#e5484d);">${this._escape(h.sign ? (signWord[h.sign] || h.sign) : "")}</td>
@@ -14262,6 +14401,7 @@ const rigSteps = [
         <small><strong>4. Reminders.</strong> Once seeded, <em>Sync culture reminders</em> puts every chore on the phone, anchored on the real stamps.</small>
       </article>` : "";
     const rigPanel = st.summary && jars.length ? this._culturesRigPanel() : "";
+    const timelinePanel = st.summary && jars.length ? this._culturesTimelinePanel() : "";
 
     return `
       <section class="stack">
@@ -14270,6 +14410,7 @@ const rigSteps = [
         ${summaryCards}
         ${welcome}
         ${strip}
+        ${timelinePanel}
         ${rigPanel}
         ${notes}
         ${journal}
@@ -32190,6 +32331,11 @@ ${parts.buttons}
         .culture-notes { display: grid; gap: 3px; padding: 6px 0; border-top: 1px solid #1f2f42; border-bottom: 1px solid #1f2f42; }
         .culture-notes small { line-height: 1.3; }
         .culture-tile .button-row { justify-content: flex-start; gap: 6px; flex-wrap: wrap; }
+        .culture-tl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 2px 10px; align-items: center; }
+        .culture-tl svg { width: 100%; height: auto; display: block; }
+        .culture-tl-name { font-size: 12px; line-height: 1.3; min-width: 0; }
+        .culture-tl-legend { font-size: 11px; opacity: 0.75; line-height: 1.4; }
+        @media (max-width: 640px) { .culture-tl { grid-template-columns: 92px minmax(0, 1fr); } }
         /* Reef Pulse's front door: in the topbar on every tab. Accent-outlined
            with a soft breathing glow — visibly the standout, not another grey
            secondary — while staying quieter than the primary Save button. */

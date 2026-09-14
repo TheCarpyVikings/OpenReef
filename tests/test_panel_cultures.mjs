@@ -910,5 +910,130 @@ test("the rack tile is a tidy form: compact ticks, a labelled egg check, aligned
   } finally { restore(); }
 });
 
+
+// --- 0.7.184: the look that decided not to feed, and the timeline ----------
+test("rack tile: Looked logs the water alone; Skip feed only when the feed is due; a held clock says so", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const held = jarSummary({ id: "c2", name: "Rotifers B", due: [], tint: "green",
+      state: { ...jarSummary().state, feed: { ...clock(false, 9), skipped: true } },
+      feedAdvice: { action: "wait", reason: "still green — check before adding more food" } });
+    const panel = await culturesPanel({}, summaryFixture([jarSummary(), held]));
+    const html = panel._culturesTab();
+    noPlaceholders(html, "skip/looked tile");
+    const c1 = html.slice(html.indexOf('data-culture="c1"'), html.indexOf('data-culture="c2"'));
+    const c2 = html.slice(html.indexOf('data-culture="c2"'));
+    assert(c1.includes('data-action="cultures-looked" data-id="c1"'), "Looked is on the tile");
+    assert(c1.includes('data-action="cultures-skip-feed" data-id="c1"') && c1.includes("holds until the next slot"), "Skip feed sits beside Fed when the feed is due");
+    assert(c1.indexOf('cultures-looked') < c1.indexOf('cultures-fed"') && c1.indexOf('cultures-fed"') < c1.indexOf('cultures-skip-feed'), "Looked · Fed · Skip feed, in that order");
+    assert(!c1.includes('data-culture-skipped="c1"'), "a due feed is not 'held'");
+    assert(c2.includes('data-action="cultures-looked" data-id="c2"') && !c2.includes("cultures-skip-feed"), "nothing to skip when the feed is not due");
+    assert(c2.includes('data-culture-skipped="c2">feed skipped · next look in ~9 h</small>'), "the held clock is said plainly");
+  } finally { restore(); }
+});
+
+test("the taps: Skip feed sends the tint and skip_feed, Looked sends the tint alone, and neither goes out empty", async () => {
+  const panel = await culturesPanel();
+  const calls = [];
+  panel._callWS = async (msg) => { calls.push(msg); return {}; };
+  panel._culturesLoadSummary = async () => {};
+  let tint = "green";
+  panel.shadowRoot = { querySelector: (selector) => selector.includes("data-cultures-tint") ? { value: tint } : null };
+  panel._culturesLog("c1", false, false, "", true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert(calls.length === 1 && calls[0].type === "openreef/cultures_log" && calls[0].jar_id === "c1", `one cultures_log call: ${JSON.stringify(calls)}`);
+  assert(calls[0].tint === "green" && calls[0].skip_feed === true && !("fed" in calls[0]) && !("harvested" in calls[0]), `the skip: ${JSON.stringify(calls[0])}`);
+  assert(panel._cultures.message.includes("Feed skipped") && panel._cultures.message.includes("holds until the next slot"), panel._cultures.message);
+  panel._culturesLog("c1", false, false);
+  await new Promise((r) => setTimeout(r, 0));
+  assert(calls.length === 2 && calls[1].tint === "green" && !("skip_feed" in calls[1]) && !("fed" in calls[1]), `the look: ${JSON.stringify(calls[1])}`);
+  assert(panel._cultures.message === "Tint logged — nothing else moved.", panel._cultures.message);
+  // Fed wins over skip if both were somehow asked for.
+  panel._culturesLog("c1", true, false, "", true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert(calls[2].fed === true && !("skip_feed" in calls[2]), `fed, not skipped: ${JSON.stringify(calls[2])}`);
+  // No tint picked, nothing else typed: no call, a nudge instead.
+  tint = "";
+  panel._culturesLog("c1", false, false);
+  await new Promise((r) => setTimeout(r, 0));
+  assert(calls.length === 3 && panel._cultures.message.startsWith("Pick the water you saw first"), `an empty look stays home: ${panel._cultures.message}`);
+  // A skip with no tint still goes — the skip is the fact.
+  panel._culturesLog("c1", false, false, "", true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert(calls.length === 4 && calls[3].skip_feed === true && !("tint" in calls[3]), `a bare skip: ${JSON.stringify(calls[3])}`);
+});
+
+test("timeline: a lane per jar — the tint band, the taps, the clearing spans, the open span, the range toggle", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const timeline = { days: 30, since: iso(30 * 24), tintBefore: "clear",
+      marks: [
+        { at: iso(20 * 24), event: "feed", tint: "green", fed: true, skipped: false, ml: 0, sign: "", tempC: 24.1 },   // outside a 14-day view
+        { at: iso(5 * 24 + 6), event: "feed", tint: "green", fed: true, skipped: false, ml: 0, sign: "", tempC: 24.0 },
+        { at: iso(5 * 24 - 3), event: "tint", tint: "clear", fed: false, skipped: false, ml: 0, sign: "", tempC: null },
+        { at: iso(4 * 24), event: "tint", tint: "green", fed: false, skipped: true, ml: 0, sign: "", tempC: 24.4 },
+        { at: iso(3 * 24), event: "harvest", tint: "clearing", fed: true, skipped: false, ml: 625, sign: "", tempC: 24.2 },
+        { at: iso(2 * 24), event: "sign", tint: "", fed: false, skipped: false, ml: 0, sign: "foam", tempC: null },
+        { at: iso(30), event: "feed", tint: "green", fed: true, skipped: false, ml: 0, sign: "", tempC: 24.6 },
+      ],
+      spans: [
+        { fedAt: iso(20 * 24), clearAt: iso(19 * 24), hours: 24, open: false },     // outside a 14-day view
+        { fedAt: iso(5 * 24 + 6), clearAt: iso(5 * 24 - 3), hours: 9, open: false },
+        { fedAt: iso(30), clearAt: null, hours: 30, open: true },
+      ] };
+    const jar = jarSummary({ timeline, learned: { ...jarSummary().learned, clearingH: { available: true, hours: 9.2, samples: 3 } } });
+    const bare = jarSummary({ id: "c2", name: "Rotifers B", timeline: { days: 30, since: iso(30 * 24), tintBefore: "", marks: [], spans: [] } });
+    const panel = await culturesPanel({}, summaryFixture([jar, bare]));
+    let html = panel._culturesTab();
+    noPlaceholders(html, "timeline");
+    assert(html.includes('data-culture-timeline="14"'), "14 days by default");
+    assert(html.indexOf('data-culture-timeline="14"') < html.indexOf("The rig") || !html.includes("The rig"), "the timeline sits above the rig, under the rack");
+    const tl = html.slice(html.indexOf('data-culture-timeline="14"'), html.indexOf("culture-tl-legend"));
+    const lane = tl.slice(tl.indexOf('data-tl-jar="c1"'), tl.indexOf('data-tl-jar="c2"'));
+    assert((lane.match(/data-tl-mark="feed"/g) || []).length === 2, "two feeds inside the fortnight (the 20-day-old one is out)");
+    assert(lane.includes('data-tl-mark="skip"') && lane.includes("stroke-dasharray") && lane.includes("looked (green) — feed skipped"), "the skipped look is a hollow, dotted triangle with its story");
+    assert(lane.includes('data-tl-mark="harvest"') && lane.includes("harvested 625 ml + fed"), "the harvest diamond");
+    assert(lane.includes('data-tl-mark="sign"') && lane.includes("a crash sign: foam"), "the sign");
+    assert(lane.includes('data-tl-band="clear"') && lane.includes("as last reported before this window"), "the band starts from the tint in force before the window");
+    assert((lane.match(/data-tl-tint=/g) || []).length === 5, "one dot per tint tap in view (two feeds, a look, a skipped look, a harvest)");
+    assert(lane.includes('data-tl-span="closed"') && lane.includes(">9 h</text>") && !lane.includes(">24 h<"), "the 9 h clearing span is drawn and labelled; the old one is out of view");
+    assert(lane.includes('data-tl-span="open"') && lane.includes("still clearing, 30 h so far") && lane.includes(">30 h</text>"), "the open span is measured to now");
+    assert(tl.includes("clears in ~9.2 h · 3 feeds") && tl.includes("clearing for 30 h"), "the lane's name carries the learned time and the open wait");
+    assert(tl.includes('data-tl-jar="c2"') && tl.includes("no looks in this window"), "an empty lane says so");
+    assert(tl.includes('data-action="cultures-timeline-days" data-days="7"') && tl.includes('class="primary compact-button" data-action="cultures-timeline-days" data-days="14"'), "the range toggle");
+    assert(html.includes("▽ looked, feed skipped") && html.includes("dashed = still clearing"), "the legend");
+    // The 30-day view lets the old feed and its span back in.
+    panel._cultures.timelineDays = 30;
+    html = panel._culturesTab();
+    const lane30 = html.slice(html.indexOf('data-tl-jar="c1"'), html.indexOf('data-tl-jar="c2"'));
+    assert((lane30.match(/data-tl-mark="feed"/g) || []).length === 3 && lane30.includes(">24 h</text>"), "30 days shows all three feeds and the 24 h span");
+    assert(html.includes('data-culture-timeline="30"'), "the toggle is reflected");
+    // The demo view carries a timeline per jar.
+    const demo = panel._culturesDemoData().summary;
+    assert(demo.jars.every((j) => Array.isArray(j.timeline?.marks) && j.timeline.marks.length && Array.isArray(j.timeline.spans)), "demo jars have timelines");
+    assert(demo.jars[0].timeline.marks.some((m) => m.skipped) && demo.jars[0].timeline.spans.some((sp) => sp.open), "the demo shows a skip and an open span");
+    for (let i = 1; i < demo.jars[0].timeline.marks.length; i += 1) {
+      assert(Date.parse(demo.jars[0].timeline.marks[i - 1].at) <= Date.parse(demo.jars[0].timeline.marks[i].at), "demo marks are oldest first");
+    }
+  } finally { restore(); }
+});
+
+test("journal: a skipped look and a bare skip are named", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const jar = jarSummary({ history: [
+      { event: "tint", at: iso(2), ml: 0, tint: "green", from: "", sign: "", eggRatio: null, tempC: 24.1, skipped: true },
+      { event: "skip", at: iso(26), ml: 0, tint: "", from: "", sign: "", eggRatio: null, tempC: null, skipped: true },
+      { event: "tint", at: iso(50), ml: 0, tint: "clear", from: "", sign: "", eggRatio: null, tempC: null, skipped: false },
+    ] });
+    const panel = await culturesPanel({}, summaryFixture([jar]));
+    const html = panel._culturesTab();
+    const journal = html.slice(html.indexOf("Culture journal"));
+    assert(journal.includes(">looked · feed skipped<"), "the look that skipped");
+    assert(journal.includes(">feed skipped<"), "the bare skip");
+    assert(journal.includes(">looked<"), "a plain look stays a look");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

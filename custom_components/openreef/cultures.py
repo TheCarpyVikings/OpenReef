@@ -231,8 +231,16 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     establishing = age_days < _f(species["firstHarvestDays"])
     out["status"] = "establishing" if establishing else "producing"
 
-    out["feed"] = _due(state.get("lastFedAt"), state.get("startedAt"),
+    # A skipped feed (0.7.184) holds the feed clock for one interval without
+    # pretending the jar was fed: the anchor moves to the skip, lastFedAt
+    # stays where it was (the clearing maths read the history, not this).
+    skip_at = _parse_iso(state.get("lastFeedSkippedAt"))
+    fed_at = _parse_iso(state.get("lastFedAt"))
+    skip_live = skip_at is not None and started <= skip_at <= now
+    feed_anchor = skip_at.isoformat() if skip_live else state.get("startedAt")
+    out["feed"] = _due(state.get("lastFedAt"), feed_anchor,
                        timedelta(hours=cad["feedIntervalH"]), now)
+    out["feed"]["skipped"] = bool(skip_live and (fed_at is None or skip_at > fed_at))
     # The first harvest lands when establishment ends (firstHarvestDays after
     # the seed), every later one an interval after the last — a jar still
     # establishing reports the wait honestly, never "due".
@@ -978,6 +986,62 @@ def tint_strip(history: Any, now: datetime, days: int = TINT_STRIP_DAYS) -> list
     for back in range(days - 1, -1, -1):
         out.append(by_day.get((now - timedelta(days=back)).date().isoformat(), ""))
     return out
+
+
+TIMELINE_DAYS = 30
+TIMELINE_ROWS_MAX = 240
+
+
+def feed_timeline(history: Any, now: datetime, days: int = TIMELINE_DAYS) -> dict[str, Any]:
+    """The feeding / water-tint timeline (0.7.184): every journal row inside
+    the window as a compact mark, oldest first, plus the clearing spans — one
+    per feed, from the feed to the first tap that found the water CLEAR, by
+    the same rule as ``clearing_samples`` (a later feed before it cleared
+    voids the span; a seed, restart or crash resets). The newest feed with no
+    clear yet is an OPEN span measured to now — the keeper watching how long
+    the water takes to clear before the next feed."""
+    since = now - timedelta(days=max(1, int(days)))
+    rows = [(at, row) for at, row in _chronological(history) if at <= now]
+    marks: list[dict[str, Any]] = []
+    tint_before = ""
+    for at, row in rows:
+        if at < since:
+            if str(row.get("tint") or "") in TINTS:
+                tint_before = str(row["tint"])
+            elif row.get("event") in ("seeded", "restart", "crashed"):
+                tint_before = ""
+            continue
+        tint = str(row.get("tint") or "")
+        marks.append({
+            "at": at.isoformat(),
+            "event": str(row.get("event") or ""),
+            "tint": tint if tint in TINTS else "",
+            "fed": bool(row.get("fed")) or row.get("event") == "feed",
+            "skipped": bool(row.get("skipped")),
+            "ml": round(_f(row.get("ml")), 1) if _f(row.get("ml")) > 0 else 0,
+            "sign": str(row.get("sign") or "") if str(row.get("sign") or "") in SIGNS else "",
+            "tempC": row.get("tempC") if isinstance(row.get("tempC"), (int, float)) and not isinstance(row.get("tempC"), bool) else None,
+        })
+    marks = marks[-TIMELINE_ROWS_MAX:]
+    spans: list[dict[str, Any]] = []
+    fed_at: datetime | None = None
+    for at, row in rows:
+        if row.get("event") in ("seeded", "restart", "crashed"):
+            fed_at = None
+        if row.get("tint") == "clear" and fed_at is not None:
+            hours = (at - fed_at).total_seconds() / 3600.0
+            if 0 < hours <= 7 * 24 and at >= since:
+                spans.append({"fedAt": fed_at.isoformat(), "clearAt": at.isoformat(),
+                              "hours": round(hours, 1), "open": False})
+            fed_at = None
+        if row.get("event") in ("feed", "seeded", "restart") or row.get("fed") is True:
+            fed_at = at
+    if fed_at is not None and fed_at >= since:
+        hours = (now - fed_at).total_seconds() / 3600.0
+        if hours <= 7 * 24:
+            spans.append({"fedAt": fed_at.isoformat(), "clearAt": None, "hours": round(hours, 1), "open": True})
+    return {"days": int(days), "since": since.isoformat(), "tintBefore": tint_before,
+            "marks": marks, "spans": spans}
 
 
 def continuity_days(since_iso: Any, now: datetime) -> float | None:

@@ -786,3 +786,34 @@ and "≥ 30 % is healthy" beside it; the rinse box's placeholder is the bottle's
 so blank reads as what it means. Same data attributes, taps and WS calls throughout. Verified
 by rendering the tab through the test harness into a shadow root and screenshotting it with
 headless Chrome (before/after in the session scratchpad). `test_panel_cultures.mjs` 30 (1 new).
+
+#### Addendum 2026-09-14 (0.7.184) — the look that decided not to feed, and the timeline
+
+Reece: "I'm struggling to log a water clarity check without logging a feed at the same time. I
+want to log the clarity even if I'm skipping the feed — this should clear the feeding task
+(skipped). It'll help me see how long the water takes to clear before feeds." The backend
+always accepted a tint-only tap; the tile had no button for it, and a look that skipped a due
+feed left the reminder nagging. Now the tile has **Looked** (the tint, and an egg count if
+typed — nothing else moves) and, only while the feed is due, **Skip feed**: `cultures_log
+{tint, skip_feed: true}`. A skip stamps `state.lastFeedSkippedAt`; `culture_state` moves the
+feed clock's anchor to it (one interval from the skip, `feed.skipped: true` while the skip is
+the newer word), `lastFedAt` untouched, no phyto debited. The feed reminder gets a non-counting
+`skipped: true` completion snoozed to the jar's next slot (`_cultures_log_completion(skipped,
+snooze_until)`, the panel's `_skipTask` shape). The row is `event: tint` (or `skip` with no
+tint) with `skipped: true` — the normaliser keeps both. Fed + skip, or harvest + skip, is
+refused. The phone's feed-only question gains a **Skipped** button (`OPENREEF_CULTURE_SKIP`).
+The tile says "feed skipped · next look in ~N h" while the clock is held.
+
+The **Feeding & water timeline** (a new panel under the rack, 7 / 14 / 30 days): one lane per
+jar — a band of the water as last reported (each tint tap colours it until the next; the tint
+in force before the window opens carries in, faint), the taps (▲ fed, ▽ looked-and-skipped
+hollow amber, ◆ harvest, ↻ restart, ! sign, ✕ crash, a tick for a plain look) and the
+clearing spans: feed → the first tap that found the water CLEAR, in hours, drawn as a bar with
+its label; the newest feed with no clear yet is an OPEN span, dashed to now ("clearing for
+30 h"). `cultures.feed_timeline(history, now, days=30)` builds marks (oldest first, capped
+240) and spans by the SAME rule as `clearing_samples` (a later feed voids; seed/restart/crash
+resets) — the payload ships it per jar as `timeline`; the panel only draws (LOCKSTEP). The
+lane's name carries the learned "clears in ~N h" and the open wait. Journal rows read
+"looked · feed skipped" / "feed skipped". `test_cultures.py` 65 (3 new),
+`test_panel_cultures.mjs` 38 (4 new). Verified by rendering the demo view through the harness
+and screenshotting with headless Chrome.

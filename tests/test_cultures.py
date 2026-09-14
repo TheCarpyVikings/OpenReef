@@ -249,7 +249,7 @@ def test_normalise_cultures_defaults_and_junk():
     assert jar["cadence"]["harvestPct"] == 60 and jar["cadence"]["restartIntervalDays"] == 14
     assert jar["state"]["lastTint"] == "" and jar["state"]["startedAt"] == ""
     assert jar["history"] == [{"event": "seeded", "at": "", "ml": 0, "tint": "", "from": "",
-                               "sign": "", "eggRatio": None, "fed": False, "tankMl": None, "to": "", "tempC": None, "purgeMl": 0}]
+                               "sign": "", "eggRatio": None, "fed": False, "tankMl": None, "to": "", "tempC": None, "purgeMl": 0, "skipped": False}]
     assert out["bottle"]["remainingMl"] == 0
 
 
@@ -769,7 +769,8 @@ def test_push_plan_is_one_question_per_jar():
     assert plan[0]["title"] == "OpenReef: Rotifers A — feed + harvest?"
     assert [a["title"] for a in plan[0]["actions"]] == ["Harvested + fed", "Later"]
     assert plan[0]["actions"][0]["action"] == "OPENREEF_CULTURE_HARVEST:c1" and plan[0]["message"].startswith("Clearing")
-    assert [a["title"] for a in plan[1]["actions"]] == ["Fed", "Later"]
+    assert [a["title"] for a in plan[1]["actions"]] == ["Fed", "Skipped", "Later"]
+    assert plan[1]["actions"][1]["action"] == "OPENREEF_CULTURE_SKIP:c2"
     assert [a["title"] for a in plan[2]["actions"]] == ["Restarted", "Harvested + fed", "Later"]
     assert plan[2]["message"].startswith("Foam on the surface")
 
@@ -1367,6 +1368,116 @@ def test_acclimation_plan_keeps_every_step_inside_five_ppt():
     empty = FakeConnection()
     run(integration.websocket_cultures_summary(FakeHass(entries=[_entry(jars={})]), empty, {"id": 1}))
     assert empty.results[-1].payload["arrival"]["rotifer"]["available"] is False, "no measured shipping salinity"
+
+
+
+# --------------------------------------------------------------------------- #
+# 0.7.184 — the look that decided not to feed, and the timeline
+# --------------------------------------------------------------------------- #
+def test_skipped_feed_holds_the_clock_without_claiming_a_feed():
+    # Fed 20 h ago on a 12 h cadence: due. A skip 1 h ago holds it 11 h more.
+    jar = _jar(started_ago_days=10, now=NOW, lastFedAt=_iso(NOW - timedelta(hours=20)))
+    assert cultures.culture_state(jar, NOW)["feed"]["due"] is True
+    jar["state"]["lastFeedSkippedAt"] = _iso(NOW - timedelta(hours=1))
+    st = cultures.culture_state(jar, NOW)
+    assert st["feed"]["due"] is False and st["feed"]["hoursUntil"] == 11.0 and st["feed"]["skipped"] is True
+    assert jar["state"]["lastFedAt"] == _iso(NOW - timedelta(hours=20)), "a skip never pretends to be a feed"
+    # A feed after the skip is the newer word.
+    jar["state"]["lastFedAt"] = _iso(NOW - timedelta(minutes=30))
+    st = cultures.culture_state(jar, NOW)
+    assert st["feed"]["skipped"] is False and st["feed"]["hoursUntil"] == 11.5
+    # A skip from before this seed is history, not the present.
+    jar = _jar(started_ago_days=1, now=NOW, lastFedAt=_iso(NOW - timedelta(hours=20)),
+               lastFeedSkippedAt=_iso(NOW - timedelta(days=3)))
+    st = cultures.culture_state(jar, NOW)
+    assert st["feed"]["due"] is True and st["feed"]["skipped"] is False
+
+
+def test_feed_timeline_marks_and_clearing_spans():
+    history = [  # newest first, as stored
+        _row("feed", 2, tint="clearing"),                       # open span, 2 h so far
+        _row("tint", 4, tint="clear"),                          # clears the 10 h feed: 6 h
+        _row("feed", 10, tint="green"),                         # voids the 18 h feed's span
+        _row("tint", 12, tint="green", skipped=True),           # the look that skipped
+        _row("feed", 18, tint="clearing"),
+        _row("tint", 21, tint="clear"),                         # clears the 30 h feed: 9 h
+        _row("feed", 30, tint="clear"),
+        _row("seeded", 40 * 24),                                # outside the window
+    ]
+    tl = cultures.feed_timeline(history, NOW, days=30)
+    assert tl["days"] == 30 and tl["since"] == _iso(NOW - timedelta(days=30))
+    assert [m["event"] for m in tl["marks"]] == ["feed", "tint", "feed", "tint", "feed", "tint", "feed"], "oldest first, window only"
+    assert tl["marks"][0]["at"] == _iso(NOW - timedelta(hours=30)) and tl["marks"][0]["fed"] is True
+    skipped = [m for m in tl["marks"] if m["skipped"]]
+    assert len(skipped) == 1 and skipped[0]["tint"] == "green" and skipped[0]["fed"] is False
+    assert [(sp["hours"], sp["open"]) for sp in tl["spans"]] == [(9.0, False), (6.0, False), (2.0, True)]
+    assert tl["spans"][0]["fedAt"] == _iso(NOW - timedelta(hours=30)) and tl["spans"][0]["clearAt"] == _iso(NOW - timedelta(hours=21))
+    assert tl["spans"][2]["clearAt"] is None
+    # The spans agree with the learning's samples (newest first there).
+    assert cultures.clearing_samples(history) == [6.0, 9.0]
+    # A crash resets: no span across it; a 7-day window drops the old marks.
+    tl = cultures.feed_timeline([_row("tint", 1, tint="clear"), _row("crashed", 3), _row("feed", 5)], NOW)
+    assert tl["spans"] == [] and [m["event"] for m in tl["marks"]] == ["feed", "crashed", "tint"]
+    assert cultures.feed_timeline([_row("feed", 10 * 24)], NOW, days=7)["marks"] == []
+    assert cultures.feed_timeline(None, NOW) == {"days": 30, "since": _iso(NOW - timedelta(days=30)), "tintBefore": "", "marks": [], "spans": []}
+    # The water as last reported before the window opens, so the band never starts blank.
+    assert cultures.feed_timeline([_row("feed", 2, tint="green"), _row("tint", 9 * 24, tint="clear")], NOW, days=7)["tintBefore"] == "clear"
+    assert cultures.feed_timeline([_row("restart", 8 * 24), _row("tint", 9 * 24, tint="clear")], NOW, days=7)["tintBefore"] == ""
+
+
+def test_ws_skip_feed_logs_the_look_and_skips_the_reminder():
+    maintenance = {"tasks": {"culture_c1_feed": {"label": "Feed rotifers", "snoozedUntil": None}},
+                   "completions": {}}
+    entry = _entry(jars={"c1": _jar(started_ago_days=5, lastFedAt=_iso(REAL - timedelta(hours=20)))},
+                   maintenance=maintenance)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # Fed and skipped at once is nonsense; so is a skipped harvest.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "tint": "green", "fed": True, "skip_feed": True}))
+    assert conn.errors[-1].code == "fed_and_skipped"
+    run(integration.websocket_cultures_log(hass, conn, {"id": 2, "jar_id": "c1", "harvested": True, "skip_feed": True}))
+    assert conn.errors[-1].code == "harvest_and_skipped"
+    # The look: still green, not fed.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 3, "jar_id": "c1", "tint": "green", "skip_feed": True}))
+    cfg = entry.options[CONF_SETTINGS]
+    jar = cfg["nps"]["cultures"]["jars"]["c1"]
+    assert jar["state"]["lastTint"] == "green" and jar["state"]["lastFeedSkippedAt"]
+    assert jar["state"]["lastFedAt"] == _iso(REAL - timedelta(hours=20)), "the feed stamp is untouched"
+    assert cfg["consumables"]["products"]["phyto"]["remainingMl"] == 300.0, "no phyto moved"
+    assert jar["history"][0]["event"] == "tint" and jar["history"][0]["tint"] == "green"
+    assert jar["history"][0]["skipped"] is True and jar["history"][0]["fed"] is False
+    comps = cfg["maintenance"]["completions"]["culture_c1_feed"]
+    assert comps[0]["skipped"] is True and comps[0]["source"] == "cultures" and "water green" in comps[0]["notes"]
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 30}))
+    payload = conn.results[-1].payload
+    feed = next(j for j in payload["jars"] if j["id"] == "c1")["state"]["feed"]
+    assert feed["due"] is False and feed["skipped"] is True and 11.9 <= feed["hoursUntil"] <= 12.0
+    assert cfg["maintenance"]["tasks"]["culture_c1_feed"]["snoozedUntil"] == feed["at"], "the reminder holds to the jar's next slot"
+    assert "feed" not in next(j for j in payload["jars"] if j["id"] == "c1")["due"]
+    # The normaliser keeps both, and the payload ships the timeline.
+    norm = _config(entry)["nps"]["cultures"]["jars"]["c1"]
+    assert norm["state"]["lastFeedSkippedAt"] == jar["state"]["lastFeedSkippedAt"] and norm["history"][0]["skipped"] is True
+    tl = next(j for j in payload["jars"] if j["id"] == "c1")["timeline"]
+    assert tl["days"] == 30 and tl["marks"][-1]["skipped"] is True and tl["marks"][-1]["tint"] == "green"
+    # A skip with no tint is still a row — the skip itself.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 4, "jar_id": "c1", "skip_feed": True}))
+    assert _cultures(entry)["jars"]["c1"]["history"][0]["event"] == "skip"
+    # A skip after a clear tap counts in the clearing maths like any look.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 5, "jar_id": "c1", "tint": "clear", "skip_feed": True}))
+    assert _cultures(entry)["jars"]["c1"]["history"][0]["tint"] == "clear"
+    # The phone's Skipped button is the same tap.
+    class Ev:
+        def __init__(self, action):
+            self.data = {"action": action}
+    before = _cultures(entry)["jars"]["c1"]["state"]["lastFeedSkippedAt"]
+    run(integration._async_notification_action(hass, Ev("OPENREEF_CULTURE_SKIP:c1")))
+    after = _cultures(entry)["jars"]["c1"]["state"]["lastFeedSkippedAt"]
+    assert after >= before and _cultures(entry)["jars"]["c1"]["history"][0]["skipped"] is True
+    # An idle jar has nothing to skip.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 6, "jar_id": "c1", "skip_feed": True}))
+    entry2 = _entry(jars={"c1": _jar()})
+    run(integration.websocket_cultures_log(FakeHass(entries=[entry2]), conn, {"id": 7, "jar_id": "c1", "skip_feed": True}))
+    assert conn.errors[-1].code == "jar_idle"
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.
