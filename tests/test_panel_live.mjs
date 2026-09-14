@@ -586,9 +586,11 @@ test("room ↔ tank: the tank that follows the room two hours later at a third o
   try {
     const { room, tank } = coupledDay(120, 0.3, 0.02);
     const panel = await live(config(), states(), {}, { tank_temp: tank, room_temp: room });
-    assertEqual(panel._liveCouplingPairs(), [{ tankId: "tank_temp", roomId: "room_temp" }], "pH and humidity are not temperatures");
-    const c = panel._liveCoupling("tank_temp", "room_temp");
+    assertEqual(panel._liveCouplingPairs(), [{ kind: "temp", yId: "tank_temp", xId: "room_temp" }], "pH and humidity are not temperatures; no CO₂ sensor, no CO₂ pair");
+    const TEMP = { kind: "temp", yId: "tank_temp", xId: "room_temp" };
+    const c = panel._liveCouplingFor(TEMP);
     assert(c, "a coupling");
+    assertEqual(c.method, "raw", "no typical day yet: the raw series");
     assert(Math.abs(c.lagMinutes - 120) <= 10, `lag ${c.lagMinutes}`);
     assert(Math.abs(c.gain - 0.3) < 0.05, `gain ${c.gain}`);
     assert(c.r > 0.95, `r ${c.r}`);
@@ -604,18 +606,153 @@ test("room ↔ tank: no line for a heater-held tank, a flat room, noise, or too 
     const { room } = coupledDay();
     const flatTank = room.map((p) => ({ time: p.time, value: 25.0 }));
     const held = await live(config(), states(), {}, { tank_temp: flatTank, room_temp: room });
-    assertEqual(held._liveCoupling("tank_temp", "room_temp"), null, "heater-held tank");
+    const TEMP = { kind: "temp", yId: "tank_temp", xId: "room_temp" };
+    assertEqual(held._liveCouplingFor(TEMP), null, "heater-held tank");
     const flatRoom = room.map((p) => ({ time: p.time, value: 22.0 }));
     const still = await live(config(), states(), {}, { tank_temp: coupledDay().tank, room_temp: flatRoom });
-    assertEqual(still._liveCoupling("tank_temp", "room_temp"), null, "flat room");
+    assertEqual(still._liveCouplingFor(TEMP), null, "flat room");
     let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5;
     const noisy = await live(config(), states(), {}, { tank_temp: room.map((p) => ({ time: p.time, value: 25 + rnd() })), room_temp: room });
-    assertEqual(noisy._liveCoupling("tank_temp", "room_temp"), null, "noise");
+    assertEqual(noisy._liveCouplingFor(TEMP), null, "noise");
     const short = await live(config(), states(), {}, { tank_temp: coupledDay().tank.slice(-30), room_temp: room });
-    assertEqual(short._liveCoupling("tank_temp", "room_temp"), null, "five hours is not enough");
+    assertEqual(short._liveCouplingFor(TEMP), null, "five hours is not enough");
     assertEqual(held._liveLagLabel(12), "10 min");
     assertEqual(held._liveLagLabel(95), "1.5 h");
     assertEqual(held._liveLagLabel(120), "2 h");
+  } finally { restore(); }
+});
+
+
+// ── 0.7.182: room CO₂ → pH on the residuals, the temperature pair judged the same way ──
+
+const CO2 = { label: "CO₂ level", enabled: true, alertsEnabled: true, entity_id: "sensor.room_co2", group: "room", min: 350, max: 800, unit: "ppm", kind: "numeric" };
+const configWithCo2 = (over = {}) => { const c = config(over); c.sensors.co2 = CO2; return c; };
+
+// Seven days of hourly points. Both carry a 24 h cycle (lights on the pH, the
+// household on the CO₂). On top, CO₂ has an "event" some days — a few hours
+// of +250 ppm at a different hour each day — and the pH answers it `lagH`
+// hours later at `gainPer100` pH per +100 ppm, or not at all.
+function co2phWeek({ lagH = 3, gainPer100 = -0.04, respond = true, events = true } = {}) {
+  const co2 = [], ph = [];
+  const hourStart = new Date(NOW_MS); hourStart.setUTCMinutes(30, 0, 0);
+  const eventAt = (t) => {
+    if (!events) return 0;
+    const day = Math.floor((t - (NOW_MS - 7 * 86400000)) / 86400000);
+    const hour = new Date(t).getUTCHours();
+    const starts = [null, 3, null, 14, 9, null, 20, 6][day] ?? null;   // day index 0..7
+    return starts !== null && hour >= starts && hour < starts + 5 ? 250 : 0;
+  };
+  for (let i = 7 * 24; i >= 1; i -= 1) {
+    const t = hourStart.getTime() - i * 3600000;
+    const hour = new Date(t).getUTCHours();
+    const co2Cycle = 480 + 120 * Math.max(0, Math.sin((2 * Math.PI * (hour - 12)) / 24));
+    const phCycle = 8.03 + 0.10 * Math.sin((2 * Math.PI * (hour - 8)) / 24);
+    co2.push({ time: t, value: co2Cycle + eventAt(t) });
+    ph.push({ time: t, value: phCycle + (respond ? (gainPer100 / 100) * eventAt(t - lagH * 3600000) : 0) });
+  }
+  return { co2, ph };
+}
+
+async function co2phPanel(week, over = {}) {
+  const cfg = configWithCo2(over);
+  const st = states({ "sensor.room_co2": state(520) });
+  const panel = await live(cfg, st, {}, {});
+  panel._liveGhosts = {
+    co2: { ...panel._liveGhostHours(week.co2), points: week.co2, at: NOW_MS },
+    ph: { ...panel._liveGhostHours(week.ph), points: week.ph, at: NOW_MS },
+  };
+  return panel;
+}
+
+test("room CO₂ → pH: pairs form only with both sensors; the ledger blanks two hours after feeds and water changes", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await co2phPanel(co2phWeek(), { activity: ledger() });
+    assertEqual(panel._liveCouplingPairs().map((p) => p.kind + ":" + p.yId + "<" + p.xId), ["temp:tank_temp<room_temp", "co2ph:ph<co2"]);
+    const windows = panel._liveMaskedWindows(["feed", "water"], 2 * 3600000);
+    assertEqual(windows.length, 3, "two feeds and one water change inside the ledger's dated entries (the undated one is dropped)");
+    assert(windows.every(([a, b]) => b - a === 2 * 3600000));
+  } finally { restore(); }
+});
+
+test("room CO₂ → pH: the response hidden under two daily cycles is found on the residuals — lag, gain, and the share of equilibrium", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await co2phPanel(co2phWeek({ lagH: 3, gainPer100: -0.04 }));
+    const c = panel._liveCouplingFor({ kind: "co2ph", yId: "ph", xId: "co2" });
+    assert(c && !c.none, "a coupling");
+    assertEqual(c.lagMinutes, 180, "three hours");
+    assert(Math.abs(c.gainPer100 - (-0.04)) < 0.008, `gain ${c.gainPer100}`);
+    assert(c.r < -0.8, `r ${c.r}`);
+    assert(c.theoryPer100 < -0.07 && c.theoryPer100 > -0.09, `theory ${c.theoryPer100} at ~${c.meanCo2} ppm`);
+    assert(c.fraction > 0.4 && c.fraction < 0.6, `fraction ${c.fraction}`);
+    const card = panel._liveStatCard("ph", panel._config.sensors.ph);
+    assert(card.includes("follows room CO₂ by ~3 h · each +100 ppm ≈ −0.04 pH · ~"), card.match(/live-couple[^>]*>.*?<span>([^<]*)/s)?.[1] || "no line");
+    assert(card.includes("% of full equilibrium"), "equilibrium share");
+  } finally { restore(); }
+});
+
+test("room CO₂ → pH: two daily cycles alone say nothing; the wrong sign says nothing; ample data with no response says 'no measurable link'", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const PAIR = { kind: "co2ph", yId: "ph", xId: "co2" };
+    // No events at all: raw series would correlate through the shared day; residuals hold nothing.
+    const cycles = await co2phPanel(co2phWeek({ events: false }));
+    assertEqual(cycles._liveCouplingFor(PAIR), null, "shared rhythm cancels");
+    // pH RISING with room CO₂ is a confound, not chemistry.
+    const wrong = await co2phPanel(co2phWeek({ gainPer100: +0.04 }));
+    assertEqual(wrong._liveCouplingFor(PAIR), null, "wrong sign");
+    // The room moved for a week and the pH ignored it.
+    const deaf = await co2phPanel(co2phWeek({ respond: false }));
+    assertEqual(deaf._liveCouplingFor(PAIR), { kind: "co2ph", none: true }, "no link, said out loud");
+    const card = deaf._liveStatCard("ph", deaf._config.sensors.ph);
+    assert(card.includes("no measurable link to room CO₂ beyond the daily cycle") && card.includes("live-couple none"), "grey line");
+    // Only three days: too early to say there is no link.
+    const week = co2phWeek({ respond: false });
+    const short = await co2phPanel({ co2: week.co2.slice(-72), ph: week.ph.slice(-72) });
+    assertEqual(short._liveCouplingFor(PAIR), null, "three days: silence, not a verdict");
+  } finally { restore(); }
+});
+
+test("temperature coupling uses the residuals once both typical days exist, and still finds the two-hour follow", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const { room, tank } = coupledDay(120, 0.3, 0.02);
+    const panel = await live(config(), states(), {}, { tank_temp: tank, room_temp: room });
+    // Typical days that are flat (so the residual equals the raw signal minus a constant).
+    const flatWeek = (base) => weekOfHours(7, base).map((p) => ({ ...p, value: base }));
+    panel._liveGhosts = {
+      tank_temp: { ...panel._liveGhostHours(flatWeek(25)), points: flatWeek(25), at: NOW_MS },
+      room_temp: { ...panel._liveGhostHours(flatWeek(22)), points: flatWeek(22), at: NOW_MS },
+    };
+    const c = panel._liveCouplingFor({ kind: "temp", yId: "tank_temp", xId: "room_temp" });
+    assert(c, "a coupling");
+    assertEqual(c.method, "residual");
+    assert(Math.abs(c.lagMinutes - 120) <= 10, `lag ${c.lagMinutes}`);
+    assert(Math.abs(c.gain - 0.3) < 0.05, `gain ${c.gain}`);
+    const card = panel._liveStatCard("tank_temp", panel._config.sensors.tank_temp);
+    assert(card.includes("each minus its typical day"), "the title says how it was judged");
+  } finally { restore(); }
+});
+
+test("the modal's 'What moves it' names the daily cycle, every coupling aimed at the sensor, and what is left", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await co2phPanel(co2phWeek({ lagH: 3, gainPer100: -0.04 }), { activity: [] });
+    panel._trend = { sensorId: "ph", entityId: "sensor.ph", range: "24h", loading: false, error: "", points: panel._liveGhosts.ph.points.slice(-24) };
+    const html = panel._trendModal();
+    assert(html.includes("What moves it"), "section");
+    assert(/<b>Daily cycle<\/b> · typically 7\.9\d at \d\d:30 → 8\.1\d at \d\d:30, a swing of 0\.20/.test(html), html.match(/Daily cycle<\/b>[^<]*/)?.[0] || "no cycle row");
+    assert(html.includes("<b>CO₂ level</b> · follows room CO₂ by ~3 h"), "coupling row");
+    assert(html.includes("<b>Beyond those</b> · ±"), "residual row");
+    // A sensor with no typical day yet says so instead.
+    const bare = await live(config(), states(), {}, { tank_temp: ramp(25.0, 25.3, 24 * 60, 48) });
+    bare._trend = { sensorId: "tank_temp", entityId: "sensor.tank_temp", range: "24h", loading: false, error: "", points: bare._liveSparks.tank_temp };
+    const b = bare._trendModal();
+    assert(b.includes("gathering a typical day") && b.includes("<b>Room temperature</b> · waiting for a typical day"), "honest while gathering");
+    // Hand-logged parameters get no drivers section.
+    bare._trend = { source: "manual", sensorId: "alkalinity", entityId: "", range: "30d", loading: false, error: "", points: [], manualMeta: { label: "Alkalinity", unit: "dKH", min: 7, max: 11 }, digits: 2 };
+    assert(!bare._trendModal().includes("What moves it"));
   } finally { restore(); }
 });
 

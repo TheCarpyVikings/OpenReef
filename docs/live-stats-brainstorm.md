@@ -6,7 +6,7 @@ temperature going up or down, and how fast?"
 
 Mockup (example data, hover the sparklines): https://claude.ai/code/artifact/0722b031-87c1-4f4c-9d86-e324ddd5ed67
 
-Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10), **the trend modal as 0.7.173** (§11), **the three parked ideas as 0.7.181** (§12). Nothing is parked now except per-sensor speed thresholds.
+Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10), **the trend modal as 0.7.173** (§11), **the three parked ideas as 0.7.181** (§12), **room CO₂ → pH and the residual couplings as 0.7.182** (§13). Nothing is parked now except per-sensor speed thresholds.
 
 ---
 
@@ -356,3 +356,63 @@ Reece asked for the three parked ideas together. Panel-only; no backend change.
 - **Tests**: 25 → 30 (fold + interpolation + midnight wrap + the four-day floor; ghost placement
   on card/mini/modal and its absence; the tap attribute; a synthetic 2 h / 0.3 coupling found
   within 10 min and 0.05; the four refusals; lag labels).
+
+## 13. Room CO₂ → pH, and every coupling judged on the residuals — shipped as 0.7.182 (2026-09-14)
+
+Reece: *"a correlation between room CO₂ and tank pH would be useful. This needs to be well
+thought out though — pH cycles over a 24 hour period anyway."* Answers to the grill: the
+skimmer draws **room air**; show it on **both** the card and the modal; give the temperature
+coupling the **same treatment**.
+
+### 13.1 The physics and the trap
+
+At fixed alkalinity, pH follows the CO₂ dissolved in the water, which tracks the air the skimmer
+pulls in: fully equilibrated, ΔpH = −log₁₀(CO₂ ratio), so 400 → 800 ppm costs ~0.3. Real tanks
+equilibrate partly, over hours. But pH runs a 24 h cycle of its own (photosynthesis under the
+lights) and room CO₂ runs another (the household), and two signals with the same period
+correlate strongly at *some* lag whatever their relationship — a raw fit would report the
+lights-on-to-home-time offset as "the lag".
+
+### 13.2 What was built
+
+- **Residuals first.** `_liveResidualSeries(id, fine)` = a sensor's series minus its typical
+  day (§12's ghost): the unusual part. Fine = the merged 24 h series on the 10-minute grid;
+  coarse = the seven days of hourly statistics the ghost was folded from (now kept as
+  `_liveGhosts[id].points`). A shared rhythm cancels by construction.
+- **One engine** (`_liveCoupleGrid`): y on a grid over [t0, t1], x on the same grid started a
+  lag-ceiling earlier, optional mask windows blanked from y, Pearson r + slope at every lag,
+  the best |r| of the *wanted sign* wins; the strongest wrong-sign |r|, the overlap and the
+  flat-signal flags come back too. `_liveCouplingFor(pair)` applies it per pair:
+  - **temp** (room → tank/sump temperature): residuals on the fine series when both typical
+    days exist, the raw series until then (`method: "residual" | "raw"` — the title says which);
+    10-min grid over 24 h, lags to 6 h, r ≥ 0.6, positive.
+  - **co2ph** (room CO₂ → pH): hourly residuals over 7 days, lags to 8 h, ≥ 72 h overlap,
+    **negative** sign only, room must have moved (SD ≥ 30 ppm), pH residual SD ≥ 0.01. The
+    ledger's feeds and water changes blank the two hours after them (`_liveMaskedWindows`) so a
+    feeding dip is never credited to the room. A wrong-sign fit ≥ 0.6 → **silence** (something
+    else drives both). Five days of overlap, a room that moved and no fit → **"no measurable link
+    to room CO₂ beyond the daily cycle"**, in grey — said out loud because the skimmer draws
+    room air, so an absent link is itself a finding.
+- **The equilibrium share.** Theory per +100 ppm at the room's weekly mean c̄ is −100/(ln 10 · c̄)
+  (−0.079 at 550 ppm). The measured gain over it is the fraction reported: *"each +100 ppm ≈
+  −0.04 pH · ~50 % of full equilibrium"*. A tank near 100 % breathes hard; near 0 % the air is
+  not reaching the water.
+- **Pairs** (`_liveCouplingPairs`): temp pairs as before; co2ph when a room-group sensor reads
+  as CO₂ (label or entity) and a pH sensor exists (id `ph` or label starting "pH").
+- **Card**: the pH card gains the ↔ line like the tank temperature card; hover shows the basis
+  (statistics or last 24 h, residual or raw), r, and the theory figure.
+- **Modal — "What moves it"** (`_liveDriversMarkup`, live sensors only): ☀ *Daily cycle*
+  (typical low → high with their clock times and the swing; "gathering a typical day" until
+  four days exist), one ↔ row per coupling aimed at the sensor (result, "no measurable link", or
+  "no convincing link in the data so far" / "waiting for a typical day"), and ≈ *Beyond those*
+  (the hourly residual's SD — what neither explains). Shows for pH and both temperatures.
+- **Tests**: 30 → 35 — pairs + the ledger mask; the response hidden under two cycles found on
+  the residuals (lag 3 h, gain within 0.008, r < −0.8, theory and fraction); two cycles alone →
+  silence, wrong sign → silence, deaf pH for a week → "no link", three days → silence; the
+  temperature pair on residuals (method flag + the title); the drivers section in three states.
+
+### 13.3 Not done
+
+Kalkwasser/alk dosing and the lighting schedule are not masked (the ledger does not carry them);
+the residual method absorbs their *regular* effect via the typical day, but an irregular dose
+still lands in the fit. Per-sensor speed thresholds remain the only parked item on the page.

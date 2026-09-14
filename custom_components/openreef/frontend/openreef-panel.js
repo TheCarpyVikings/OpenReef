@@ -43,6 +43,13 @@ const LIVE_COUPLE_STEP_MIN = 10;            // resample grid for room ↔ tank
 const LIVE_COUPLE_MAX_LAG_MIN = 6 * 60;
 const LIVE_COUPLE_MIN_OVERLAP = 72;         // 12 h of grid points
 const LIVE_COUPLE_MIN_R = 0.6;
+const LIVE_CO2PH_MAX_LAG_H = 8;             // room CO₂ → pH lag ceiling
+const LIVE_CO2PH_MIN_OVERLAP_H = 72;        // three days of hourly residuals
+const LIVE_CO2PH_NONE_OVERLAP_H = 120;      // five days before "no link" may be said
+const LIVE_CO2PH_NONE_MAX_R = 0.3;
+const LIVE_CO2PH_MIN_CO2_SD = 30;           // ppm — the room must have moved
+const LIVE_CO2PH_MIN_PH_SD = 0.01;
+const LIVE_CO2PH_MASK_H = 2;                // hours blanked after a feed or water change
 
 class OpenReefPanel extends HTMLElement {
   constructor() {
@@ -24650,24 +24657,35 @@ const rigSteps = [
     return d.trim() ? `<path class="live-spark-ghost" d="${d.trim()}" />` : "";
   }
 
-  // ── Room ↔ tank coupling (0.7.174) ────────────────────────────────────────
-  // How long the tank takes to follow the room, and by how much. Both series
-  // are resampled onto a ten-minute grid over the last day and the tank is
-  // correlated against the room at every lag up to six hours; the best lag is
-  // reported only when the fit is convincing and the room actually moved.
+  // ── Couplings (0.7.181 → 0.7.182): what one sensor does to another ──────
+  // Two pairs: room temperature → tank/sump temperature, and room CO₂ → pH.
+  // Both are judged the same way — on the RESIDUALS from each sensor's typical
+  // day, so a 24 h rhythm the two merely share (lights on the pH, the household
+  // on the CO₂) cancels by construction, and only the unusual part is fitted:
+  // the window opened, the evening with six people in the room. Lags are
+  // scanned up to a ceiling; the best fit is reported only when it is
+  // convincing, of the right sign, and both signals actually moved.
   _liveCouplingPairs() {
     const sensors = this._enabledSensors().filter(([id, s]) => s.entity_id && this._sensorKind(s, id) !== "binary");
     const isTemp = (s) => /°/.test(String(s.unit || "")) || /temp/i.test(String(s.label || ""));
+    const isCo2 = (s) => /co2|co₂/i.test(String(s.label || "")) || /co2/i.test(String(s.entity_id || ""));
+    const isPh = ([id, s]) => id === "ph" || /^ph\b/i.test(String(s.label || ""));
+    const pairs = [];
     const room = sensors.find(([, s]) => s.group === "room" && isTemp(s));
-    if (!room) return [];
-    return sensors
-      .filter(([, s]) => ["tank", "sump"].includes(s.group || "tank") && isTemp(s))
-      .map(([tankId]) => ({ tankId, roomId: room[0] }));
+    if (room) {
+      sensors
+        .filter(([, s]) => ["tank", "sump"].includes(s.group || "tank") && isTemp(s))
+        .forEach(([tankId]) => pairs.push({ kind: "temp", yId: tankId, xId: room[0] }));
+    }
+    const co2 = sensors.find(([, s]) => s.group === "room" && isCo2(s) && !isTemp(s));
+    const ph = sensors.find(isPh);
+    if (co2 && ph) pairs.push({ kind: "co2ph", yId: ph[0], xId: co2[0] });
+    return pairs;
   }
 
   // Values on a regular grid, linear between readings; null before the first
-  // reading, after the last, or across a gap longer than three hours.
-  _liveResample(points, t0, t1, stepMs) {
+  // reading, after the last, or across a gap longer than `gapMs`.
+  _liveResample(points, t0, t1, stepMs, gapMs = 3 * 3600000) {
     const pts = (points || []).filter((p) => Number.isFinite(p?.time) && Number.isFinite(p?.value)).sort((a, b) => a.time - b.time);
     const out = [];
     let j = 0;
@@ -24677,13 +24695,13 @@ const rigSteps = [
       const b = pts[j + 1];
       if (!a || a.time > t) { out.push(null); continue; }
       if (!b) { out.push(t - a.time <= stepMs ? a.value : null); continue; }
-      if (b.time - a.time > 3 * 3600000) { out.push(null); continue; }
+      if (b.time - a.time > gapMs) { out.push(null); continue; }
       out.push(a.value + (b.value - a.value) * ((t - a.time) / ((b.time - a.time) || 1)));
     }
     return out;
   }
 
-  _liveCorrelate(xs, ys) {
+  _liveCorrelate(xs, ys, minVarX, minVarY) {
     const n = xs.length;
     if (n < 3) return null;
     const mx = xs.reduce((a, b) => a + b, 0) / n;
@@ -24698,39 +24716,138 @@ const rigSteps = [
       sxx += dx * dx;
       syy += dy * dy;
     }
-    // A flat room or a heater-held tank has nothing to correlate.
-    if (sxx / n < 0.01 || syy / n < 0.0004) return null;
-    return { r: sxy / Math.sqrt(sxx * syy), slope: sxy / sxx };
+    if (sxx / n < minVarX) return { flatX: true };
+    if (syy / n < minVarY) return { flatY: true };
+    return { r: sxy / Math.sqrt(sxx * syy), slope: sxy / sxx, n };
   }
 
-  _liveCoupling(tankId, roomId) {
-    const step = LIVE_COUPLE_STEP_MIN * 60000;
-    const t1 = Date.now();
-    const t0 = t1 - 24 * 3600000;
-    const tank = this._liveResample(this._liveSeries(tankId), t0, t1, step);
-    // The room grid starts a lag earlier so every tank point has a partner.
-    const roomStart = t0 - LIVE_COUPLE_MAX_LAG_MIN * 60000;
-    const room = this._liveResample(this._liveSeries(roomId), roomStart, t1, step);
-    const offset = Math.round((t0 - roomStart) / step);
-    const maxLag = Math.round(LIVE_COUPLE_MAX_LAG_MIN / LIVE_COUPLE_STEP_MIN);
+  // A sensor's series minus its typical day — the unusual part. Null until a
+  // typical day exists. `fine` = the merged 24 h series (10-min work), else the
+  // seven days of hourly statistics the ghost was folded from.
+  _liveResidualSeries(id, fine) {
+    const hours = this._liveGhost(id);
+    if (!hours) return null;
+    const source = fine ? this._liveSeries(id) : (this._liveGhosts?.[id]?.points || []);
+    const out = [];
+    for (const p of source) {
+      const typical = this._liveGhostValueAt(hours, p.time);
+      if (typical === null || !Number.isFinite(p?.value)) continue;
+      out.push({ time: p.time, value: p.value - typical });
+    }
+    return out;
+  }
+
+  // Hours to blank from a pH fit: the ledger's feeds and water changes each
+  // move pH on their own for a while, and must not be credited to the room.
+  _liveMaskedWindows(kinds, afterMs) {
+    const enabled = this._liveEventTicksEnabled();
+    const out = [];
+    for (const item of this._logEntries()) {
+      const time = Date.parse(item.timestamp || "");
+      if (!Number.isFinite(time)) continue;
+      const kind = this._liveEventKind(item.message);
+      if (!kind || !kinds.includes(kind.id)) continue;
+      out.push([time, time + afterMs]);
+    }
+    return out;
+  }
+
+  // The engine: y on a grid over [t0, t1]; x on the same grid started `maxLag`
+  // earlier so every lag has a partner; the best-|r| lag of the wanted sign.
+  _liveCoupleGrid(spec) {
+    const { yPoints, xPoints, t0, t1, stepMs, maxLagMs, sign, minOverlap, minVarX, minVarY, mask = [], gapMs } = spec;
+    const y = this._liveResample(yPoints, t0, t1, stepMs, gapMs);
+    if (mask.length) {
+      for (let i = 0; i < y.length; i += 1) {
+        const t = t0 + i * stepMs;
+        if (mask.some(([a, b]) => t >= a && t <= b)) y[i] = null;
+      }
+    }
+    const xStart = t0 - maxLagMs;
+    const x = this._liveResample(xPoints, xStart, t1, stepMs, gapMs);
+    const offset = Math.round((t0 - xStart) / stepMs);
+    const maxLag = Math.round(maxLagMs / stepMs);
     let best = null;
+    let wrongSignR = 0;
+    let overlap = 0;
+    let flatX = false;
+    let flatY = false;
     for (let lag = 0; lag <= maxLag; lag += 1) {
       const xs = [];
       const ys = [];
-      for (let i = 0; i < tank.length; i += 1) {
-        const y = tank[i];
-        const x = room[i + offset - lag];
-        if (y === null || x === null || x === undefined) continue;
-        xs.push(x);
-        ys.push(y);
+      for (let i = 0; i < y.length; i += 1) {
+        const yv = y[i];
+        const xv = x[i + offset - lag];
+        if (yv === null || xv === null || xv === undefined) continue;
+        xs.push(xv);
+        ys.push(yv);
       }
-      if (xs.length < LIVE_COUPLE_MIN_OVERLAP) continue;
-      const stats = this._liveCorrelate(xs, ys);
+      if (lag === 0) overlap = xs.length;
+      if (xs.length < minOverlap) continue;
+      const stats = this._liveCorrelate(xs, ys, minVarX, minVarY);
       if (!stats) continue;
-      if (!best || stats.r > best.r) best = { lagMinutes: lag * LIVE_COUPLE_STEP_MIN, r: stats.r, gain: stats.slope, n: xs.length };
+      if (stats.flatX) { flatX = true; continue; }
+      if (stats.flatY) { flatY = true; continue; }
+      if (Math.sign(stats.r) !== sign) {
+        wrongSignR = Math.max(wrongSignR, Math.abs(stats.r));
+        continue;
+      }
+      if (!best || Math.abs(stats.r) > Math.abs(best.r)) best = { lagMs: lag * stepMs, r: stats.r, slope: stats.slope, n: stats.n };
     }
-    if (!best || best.r < LIVE_COUPLE_MIN_R || best.gain <= 0) return null;
-    return best;
+    return { best, wrongSignR, overlap, flatX, flatY };
+  }
+
+  // One coupling, by pair. Returns null (nothing honest to say), a result, or
+  // { none: true } when the data are ample and show no link.
+  _liveCouplingFor(pair) {
+    const now = Date.now();
+    if (pair.kind === "temp") {
+      // Residuals on the fine series when both typical days exist; the raw
+      // series until then (a tank following its room is physical enough to
+      // read raw, and the first days would otherwise say nothing).
+      const yRes = this._liveResidualSeries(pair.yId, true);
+      const xRes = this._liveResidualSeries(pair.xId, true);
+      const residual = Boolean(yRes && xRes);
+      const grid = this._liveCoupleGrid({
+        yPoints: residual ? yRes : this._liveSeries(pair.yId),
+        xPoints: residual ? xRes : this._liveSeries(pair.xId),
+        t0: now - 24 * 3600000, t1: now, stepMs: LIVE_COUPLE_STEP_MIN * 60000, maxLagMs: LIVE_COUPLE_MAX_LAG_MIN * 60000,
+        sign: 1, minOverlap: LIVE_COUPLE_MIN_OVERLAP, minVarX: 0.01, minVarY: 0.0004,
+      });
+      const b = grid.best;
+      if (!b || b.r < LIVE_COUPLE_MIN_R) return null;
+      return { kind: "temp", lagMinutes: b.lagMs / 60000, r: b.r, gain: b.slope, n: b.n, method: residual ? "residual" : "raw" };
+    }
+    if (pair.kind === "co2ph") {
+      const yRes = this._liveResidualSeries(pair.yId, false);
+      const xRes = this._liveResidualSeries(pair.xId, false);
+      if (!yRes || !xRes) return null;
+      const step = 3600000;
+      const grid = this._liveCoupleGrid({
+        yPoints: yRes, xPoints: xRes,
+        t0: now - 7 * 24 * 3600000, t1: now, stepMs: step, maxLagMs: LIVE_CO2PH_MAX_LAG_H * step,
+        sign: -1, minOverlap: LIVE_CO2PH_MIN_OVERLAP_H, minVarX: LIVE_CO2PH_MIN_CO2_SD ** 2, minVarY: LIVE_CO2PH_MIN_PH_SD ** 2,
+        mask: this._liveMaskedWindows(["feed", "water"], LIVE_CO2PH_MASK_H * step), gapMs: 4 * step,
+      });
+      const b = grid.best;
+      // Ample data, a room that moved, and nothing to show for it: say so.
+      // A strong fit of the wrong sign means something else is driving both:
+      // silence, never a verdict either way.
+      if (grid.wrongSignR >= LIVE_COUPLE_MIN_R) return null;
+      const ample = grid.overlap >= LIVE_CO2PH_NONE_OVERLAP_H && !grid.flatX;
+      if (!b || Math.abs(b.r) < LIVE_COUPLE_MIN_R) {
+        return ample && (grid.flatY || (b && Math.abs(b.r) < LIVE_CO2PH_NONE_MAX_R) || (!b && !grid.flatY)) ? { kind: "co2ph", none: true } : null;
+      }
+      // Theory: at fixed alkalinity pH shifts by −log10 of the CO₂ ratio, so
+      // per +100 ppm near the room's mean c̄: −100 / (ln 10 · c̄).
+      const raw = (this._liveGhosts?.[pair.xId]?.points || []).map((p) => p.value).filter(Number.isFinite);
+      const mean = raw.length ? raw.reduce((a, c) => a + c, 0) / raw.length : null;
+      const gainPer100 = b.slope * 100;
+      const theoryPer100 = mean ? -100 / (Math.LN10 * mean) : null;
+      const fraction = theoryPer100 ? Math.max(0, Math.min(1.5, gainPer100 / theoryPer100)) : null;
+      return { kind: "co2ph", lagMinutes: b.lagMs / 60000, r: b.r, gainPer100, theoryPer100, fraction, meanCo2: mean, n: b.n, method: "residual" };
+    }
+    return null;
   }
 
   _liveLagLabel(minutes) {
@@ -24739,15 +24856,68 @@ const rigSteps = [
     return `${half % 1 === 0 ? half : half.toFixed(1)} h`;
   }
 
+  // The sentence for a coupling result, in the reefer's units.
+  _liveCouplingText(pair, c) {
+    const yUnit = this._config.sensors?.[pair.yId]?.unit || "";
+    const signed = (v, d) => this._format(v, d).replace(/^-/, "−");
+    if (c.none) return "no measurable link to room CO₂ beyond the daily cycle";
+    const lag = c.lagMinutes < 20 ? "tracks the room closely" : `follows ${pair.kind === "co2ph" ? "room CO₂" : "the room"} by ~${this._liveLagLabel(c.lagMinutes)}`;
+    if (pair.kind === "temp") {
+      const u = yUnit ? ` ${yUnit}` : "";
+      return `${lag} · each 1${u} in the room ≈ ${signed(c.gain, 2)}${u} in the tank`;
+    }
+    const equil = c.fraction === null ? "" : ` · ~${Math.round(c.fraction * 100)} % of full equilibrium`;
+    return `${lag} · each +100 ppm ≈ ${signed(c.gainPer100, 2)} pH${equil}`;
+  }
+
+  _liveCouplingTitle(pair, c) {
+    if (c.none) return "Seven days of hourly statistics, each minus its typical day: the room's CO₂ moved and the pH did not follow it";
+    const basis = c.method === "residual" ? "each minus its typical day" : "raw (no typical day yet)";
+    const theory = pair.kind === "co2ph" && c.theoryPer100 !== null ? `; theory at ${Math.round(c.meanCo2)} ppm: ${this._format(c.theoryPer100, 2)} pH per +100 ppm if fully equilibrated` : "";
+    return `${pair.kind === "co2ph" ? "Seven days of hourly statistics" : "The last 24 h"}, ${basis}: correlation ${this._format(c.r, 2)} at the best lag${theory}`;
+  }
+
   _liveCouplingMarkup(id) {
-    const pair = this._liveCouplingPairs().find((p) => p.tankId === id);
-    if (!pair) return "";
-    const c = this._liveCoupling(pair.tankId, pair.roomId);
-    if (!c) return "";
-    const unit = this._config.sensors?.[id]?.unit || "";
-    const lag = c.lagMinutes < 20 ? "tracks the room closely" : `follows the room by ~${this._liveLagLabel(c.lagMinutes)}`;
-    const gain = `each 1${unit ? ` ${unit}` : ""} in the room ≈ ${this._format(c.gain, 2)}${unit ? ` ${unit}` : ""} in the tank`;
-    return `<div class="live-couple" data-live-couple="${this._escape(pair.roomId)}" title="From the last 24 h: correlation ${this._format(c.r, 2)} at the best lag"><span class="live-couple-glyph">↔</span><span>${this._escape(lag)} · ${this._escape(gain)}</span></div>`;
+    return this._liveCouplingPairs().filter((p) => p.yId === id).map((pair) => {
+      const c = this._liveCouplingFor(pair);
+      if (!c) return "";
+      return `<div class="live-couple ${c.none ? "none" : ""}" data-live-couple="${this._escape(pair.xId)}" title="${this._escape(this._liveCouplingTitle(pair, c))}"><span class="live-couple-glyph">↔</span><span>${this._escape(this._liveCouplingText(pair, c))}</span></div>`;
+    }).join("");
+  }
+
+  // ── "What moves it" (0.7.182): the modal's drivers section ──────────────
+  // The typical day's swing, then every coupling that targets this sensor,
+  // then what is left over. Needs a typical day; says so until there is one.
+  _liveDriversMarkup(id, sensor) {
+    const hours = this._liveGhost(id);
+    const digits = this._sensorDigits(id);
+    const unit = sensor.unit ? ` ${this._escape(sensor.unit)}` : "";
+    const row = (glyph, label, text, cls = "") => `<div class="live-driver ${cls}"><span class="live-couple-glyph">${glyph}</span><span><b>${label}</b> · ${text}</span></div>`;
+    const rows = [];
+    if (!hours) {
+      rows.push(row("☀", "Daily cycle", "gathering a typical day — four days of history needed"));
+    } else {
+      let lo = Infinity, hi = -Infinity, loH = 0, hiH = 0;
+      hours.forEach((v, h) => { if (v === null) return; if (v < lo) { lo = v; loH = h; } if (v > hi) { hi = v; hiH = h; } });
+      const clock = (h) => `${String(h).padStart(2, "0")}:30`;
+      rows.push(row("☀", "Daily cycle", `typically ${this._format(lo, digits)}${unit} at ${clock(loH)} → ${this._format(hi, digits)}${unit} at ${clock(hiH)}, a swing of ${this._format(hi - lo, digits)}${unit}`));
+    }
+    this._liveCouplingPairs().filter((p) => p.yId === id).forEach((pair) => {
+      const xLabel = this._escape(this._config.sensors?.[pair.xId]?.label || pair.xId);
+      const c = this._liveCouplingFor(pair);
+      if (!c) rows.push(row("↔", xLabel, hours ? "no convincing link in the data so far" : "waiting for a typical day"));
+      else rows.push(row("↔", xLabel, this._escape(this._liveCouplingText(pair, c)), c.none ? "none" : ""));
+    });
+    if (hours) {
+      const res = this._liveResidualSeries(id, false) || [];
+      if (res.length >= 24) {
+        const vals = res.map((p) => p.value);
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const sd = Math.sqrt(vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length);
+        rows.push(row("≈", "Beyond those", `±${this._format(sd, digits)}${unit} hour to hour, unexplained`));
+      }
+    }
+    return `<section class="live-drivers"><p class="eyebrow">What moves it</p>${rows.join("")}</section>`;
   }
 
   // ── The sparkline ─────────────────────────────────────────────────────────
@@ -25236,7 +25406,7 @@ const rigSteps = [
             const end = new Date();
             const start = new Date(end.getTime() - 7 * 24 * 3600000);
             const points = await this._fetchStatisticTrendPoints(sensor.entity_id, start, end, "7d");
-            this._liveGhosts[id] = { ...this._liveGhostHours(points), at: Date.now() };
+            this._liveGhosts[id] = { ...this._liveGhostHours(points), points, at: Date.now() };
           } catch {
             this._liveGhosts[id] = { hours: [], days: 0, covered: 0, at: Date.now() };
           }
@@ -31513,6 +31683,7 @@ ${parts.buttons}
               ${marker ? stat(`Since ${this._escape(this._liveMarkerWhen(marker))}`, delta === null ? "—" : `${delta > 0 ? "+" : delta < 0 ? "−" : ""}${withUnit(Math.abs(delta))}`) : ""}
             </div>
           ` : ""}
+          ${live ? this._liveDriversMarkup(sensorId, sensor) : ""}
           ${live ? `<p class="live-trend-entity muted">${this._escape(this._trend.entityId || "")}</p>` : ""}
         </section>
       </div>
@@ -32561,7 +32732,13 @@ ${parts.buttons}
         .live-dir[data-trend-range] { cursor: pointer; border-radius: 6px; margin: 0 -4px; padding: 0 4px; }
         .live-card.stat-button:hover .live-dir[data-trend-range] { background: rgba(103, 232, 249, .05); }
         .live-couple { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #b7c6d8; }
-        .live-couple-glyph { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: #162536; color: #9fb2c7; font-weight: 800; font-size: 13px; }
+        .live-couple-glyph { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: #162536; color: #9fb2c7; font-weight: 800; font-size: 13px; flex-shrink: 0; }
+        .live-couple.none { color: #8da2ba; }
+        .live-drivers { display: grid; gap: 8px; border: 1px solid #24364a; border-radius: 8px; padding: 12px 14px; background: #0b1724; }
+        .live-drivers .eyebrow { margin-bottom: 2px; }
+        .live-driver { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #b7c6d8; }
+        .live-driver b { color: #dcecff; font-weight: 800; }
+        .live-driver.none { color: #8da2ba; }
         .live-spark-event { stroke: #c9a24a; stroke-width: 2; opacity: .8; }
         .live-spark-event:hover { opacity: 1; stroke-width: 3; }
         .live-pace { color: #b7c6d8; font-style: italic; }
