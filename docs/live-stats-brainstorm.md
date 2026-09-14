@@ -6,7 +6,7 @@ temperature going up or down, and how fast?"
 
 Mockup (example data, hover the sparklines): https://claude.ai/code/artifact/0722b031-87c1-4f4c-9d86-e324ddd5ed67
 
-Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10), **the trend modal as 0.7.173** (§11), **the three parked ideas as 0.7.181** (§12), **room CO₂ → pH and the residual couplings as 0.7.182** (§13). Nothing is parked now except per-sensor speed thresholds.
+Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10), **the trend modal as 0.7.173** (§11), **the three parked ideas as 0.7.181** (§12), **room CO₂ → pH and the residual couplings as 0.7.182** (§13). **The noise gate as 0.7.183** (§14). Nothing is parked.
 
 ---
 
@@ -416,3 +416,32 @@ lights-on-to-home-time offset as "the lag".
 Kalkwasser/alk dosing and the lighting schedule are not masked (the ledger does not carry them);
 the residual method absorbs their *regular* effect via the typical day, but an irregular dose
 still lands in the fit. Per-sensor speed thresholds remain the only parked item on the page.
+
+## 14. The noise gate — shipped as 0.7.183 (2026-09-14)
+
+Reece, from the soak: *"we may need to do the per group thresholds. pH and CO₂ are noisy."* The
+screenshots showed CO₂ "just turned" on −67 ppm/h and pH "picking up" on +0.14/h — the slopes noise
+makes on a short window. Built with the recommendation: a gate on the slope's own uncertainty,
+with per-sensor floors as the coarse layer under it.
+
+- **`_liveSlopeFit(id, minutes, endMinutesAgo)`** returns the least-squares slope with its
+  standard error from the fit's residual scatter (`residualStdev` is the population figure; the
+  slope's error uses n − 2): `se = s / √Sxx`. `significant` = |slope| ≥ 2 × se. A calm probe keeps
+  a tiny error and its sensitivity; a jittery one earns a wide error and silence. Nothing to tune.
+- **Direction**: `speed` is *steady* unless the slope is significant AND clears the floor.
+  Floors (`_liveSpeedFloor`): chemistry ids (pH, ORP, alk, Ca, Mg, NO₃, PO₄, salinity, DO) or the
+  chemistry group → steady 2.5 %/h, fast 10; room/flow/lighting → 2 / 8; water temperature → 1.5 / 8.
+  pH gets the chemistry floor even when it sits in the tank group.
+- **Context is the window behind the now-window**, not around it: 15 min "now" vs the 45 min
+  before; 30 vs 90 for water. A turn is judged against what came before, not a blend of both.
+- **Pace** needs both slopes real and *apart*: |rate − rate_ctx| ≥ 2 × √(se² + se_ctx²). "just
+  turned" also needs the context significant and above the floor; "easing" needs the context
+  significant. Two noise slopes never make a turn.
+- **Copy**: a steady line held there by noise reads *"steady last 30 min · within noise"*, hover
+  explains ("Slope +0.02/h is within this probe's noise (±0.05/h)"); a real rate's hover shows its
+  ± noise. The truth strip inherits the gate, so "falling 2.15 %/h" only appears when it is real.
+- **Tests**: 35 → 39 — jittery pH with no trend (steady, within noise, no pace/projection); a
+  real pH move that clears its noise; four jittery CO₂ readings that never "turn" against a real
+  hour, while a real reversal still does; the floors by sensor kind and a perfect line's zero error.
+- **Consequence**: fewer arrows on a noisy probe — the honest count. If a probe is so noisy that
+  real moves never clear the gate, the fix is the probe's own smoothing in HA, not a looser gate.

@@ -30,6 +30,8 @@ const LIVE_RING_MS = 2 * 60 * 60 * 1000;   // live readings kept per sensor
 const LIVE_RING_MAX = 240;
 const LIVE_STALE_FALLBACK_MIN = 15;         // until the ring knows the cadence
 const LIVE_PROJECT_HIT_H = 3;               // "hits the limit" horizon
+const LIVE_SLOPE_SIGMA = 2;                 // a slope must be this many of its own errors from zero
+const LIVE_CHEM_IDS = ["ph", "orp", "alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity", "dissolved_oxygen"];
 const LIVE_PROJECT_BACK_H = 6;              // "back in range" horizon
 const LIVE_MARK_TOLERANCE_MS = 30 * 60 * 1000;
 const LIVE_SPARK_W = 320;
@@ -24415,11 +24417,38 @@ const rigSteps = [
   // Least-squares slope over the last `minutes` of the merged series, in units
   // per hour. Fewer than three readings in the window: null, nothing to say.
   _liveSlope(id, minutes) {
-    const cutoff = Date.now() - minutes * 60000;
-    const window_ = this._liveSeries(id).filter((p) => p.time >= cutoff && Number.isFinite(p.value));
+    const fit = this._liveSlopeFit(id, minutes);
+    return fit ? fit.slope : null;
+  }
+
+  // The slope with its own uncertainty (0.7.183): the standard error from the
+  // fit's residual scatter. A noisy probe earns a wide error and, with it,
+  // silence; a calm one keeps its sensitivity. No constant to tune per tank.
+  _liveSlopeFit(id, minutes, endMinutesAgo = 0) {
+    const end = Date.now() - endMinutesAgo * 60000;
+    const cutoff = end - minutes * 60000;
+    const window_ = this._liveSeries(id).filter((p) => p.time >= cutoff && p.time <= end && Number.isFinite(p.value));
     if (window_.length < 3) return null;
     const t0 = window_[0].time;
-    return this._linearFit(window_.map((p) => (p.time - t0) / 3600000), window_.map((p) => p.value)).slope;
+    const xs = window_.map((p) => (p.time - t0) / 3600000);
+    const ys = window_.map((p) => p.value);
+    const fit = this._linearFit(xs, ys);
+    const n = xs.length;
+    const mx = xs.reduce((a, b) => a + b, 0) / n;
+    const sxx = xs.reduce((a, x) => a + (x - mx) ** 2, 0);
+    // residualStdev is the population figure; the slope's error wants n − 2.
+    const resid = fit.residualStdev * Math.sqrt(n / Math.max(1, n - 2));
+    const se = sxx > 0 ? resid / Math.sqrt(sxx) : Infinity;
+    return { slope: fit.slope, se, n, significant: Math.abs(fit.slope) >= LIVE_SLOPE_SIGMA * se };
+  }
+
+  // The coarse floor under the noise gate, by what the sensor is: chemistry
+  // and air are judged against a wider "steady" band than water temperature.
+  _liveSpeedFloor(id, sensor) {
+    const group = sensor?.group || "tank";
+    if (LIVE_CHEM_IDS.includes(id) || group === "chemistry") return { steady: 2.5, fast: 10 };
+    if (["room", "flow", "lighting"].includes(group)) return { steady: 2, fast: 8 };
+    return { steady: 1.5, fast: 8 };
   }
 
   _liveClock(hoursFromNow) {
@@ -24436,17 +24465,25 @@ const rigSteps = [
     const value = this._number(sensor.entity_id);
     if (value === null) return null;
     const windows = this._liveRateWindows(sensor.group);
-    const rate = this._liveSlope(id, windows.now);
-    if (rate === null) return null;
-    const rateContext = this._liveSlope(id, windows.context);
+    const fitNow = this._liveSlopeFit(id, windows.now);
+    if (!fitNow) return null;
+    const rate = fitNow.slope;
+    // The context is the window BEHIND the "now" window, not around it — a
+    // turn is judged against what came before, not against a blend of both.
+    const fitContext = this._liveSlopeFit(id, windows.context - windows.now, windows.now);
+    const rateContext = fitContext ? fitContext.slope : null;
     const min = Number(sensor.min);
     const max = Number(sensor.max);
     const span = Number.isFinite(min) && Number.isFinite(max) && max > min ? max - min : null;
     const pctPerHour = span ? Math.abs(rate) / span * 100 : null;
+    const floor = this._liveSpeedFloor(id, sensor);
+    // Steady unless the slope clears its own noise AND the coarse floor.
     let speed = "steady";
-    if (pctPerHour === null) speed = rate !== 0 ? "moving" : "steady";
-    else if (pctPerHour >= 8) speed = "fast";
-    else if (pctPerHour >= 1.5) speed = "moving";
+    if (fitNow.significant) {
+      if (pctPerHour === null) speed = rate !== 0 ? "moving" : "steady";
+      else if (pctPerHour >= floor.fast) speed = "fast";
+      else if (pctPerHour >= floor.steady) speed = "moving";
+    }
     const rising = rate > 0;
     const arrow = speed === "steady" ? "→" : speed === "fast" ? (rising ? "↑" : "↓") : (rising ? "↗" : "↘");
     let toward = false;
@@ -24473,15 +24510,18 @@ const rigSteps = [
     // and a half times it is picking up, under half is easing, and a change of
     // sign against a context that was itself moving means it has just turned —
     // the window-opened moment, seen from inside the hour that preceded it.
+    // Pace only when both slopes are real and differ by more than their
+    // combined uncertainty — two noise slopes never make a "turn".
     let pace = "";
-    if (speed !== "steady" && rateContext !== null && span) {
+    if (speed !== "steady" && fitContext && span) {
       const contextPct = Math.abs(rateContext) / span * 100;
       const sameSign = Math.sign(rateContext) === Math.sign(rate);
-      if (!sameSign && contextPct >= 1.5) pace = "just turned";
-      else if (Math.abs(rate) > 1.5 * Math.abs(rateContext)) pace = "picking up";
-      else if (Math.abs(rate) < 0.5 * Math.abs(rateContext)) pace = "easing";
+      const apart = Math.abs(rate - rateContext) >= LIVE_SLOPE_SIGMA * Math.sqrt(fitNow.se ** 2 + fitContext.se ** 2);
+      if (apart && !sameSign && fitContext.significant && contextPct >= floor.steady) pace = "just turned";
+      else if (apart && Math.abs(rate) > 1.5 * Math.abs(rateContext)) pace = "picking up";
+      else if (apart && fitContext.significant && Math.abs(rate) < 0.5 * Math.abs(rateContext)) pace = "easing";
     }
-    return { rate, rateContext, speed, arrow, rising, toward, away, projection, pace, windowMinutes: windows.now };
+    return { rate, rateContext, se: fitNow.se, significant: fitNow.significant, speed, arrow, rising, toward, away, projection, pace, windowMinutes: windows.now };
   }
 
   _liveRateText(id, sensor, rate) {
@@ -24497,9 +24537,10 @@ const rigSteps = [
     if (!direction) return `<div class="live-dir" ${tap}><span class="live-arrow">·</span><span class="live-note">watching for a trend</span></div>`;
     const cls = direction.toward ? "toward" : direction.away ? "away" : "";
     const word = direction.speed === "steady" ? "steady" : direction.rising ? "rising" : "falling";
+    const noisy = direction.speed === "steady" && !direction.significant && direction.rate !== 0;
     const rate = direction.speed === "steady"
-      ? `<span class="live-note">steady last ${direction.windowMinutes} min</span>`
-      : `<span class="live-rate">${this._liveRateText(id, sensor, direction.rate)}</span>`;
+      ? `<span class="live-note" title="${noisy ? this._escape(`Slope ${this._liveRateText(id, sensor, direction.rate)} is within this probe's noise (±${this._liveRateText(id, sensor, direction.se).replace(/^[+−]/, "")})`) : ""}">steady last ${direction.windowMinutes} min${noisy ? " · within noise" : ""}</span>`
+      : `<span class="live-rate" title="±${this._escape(this._liveRateText(id, sensor, direction.se).replace(/^[+−]/, ""))} noise">${this._liveRateText(id, sensor, direction.rate)}</span>`;
     const pace = direction.pace ? `<span class="live-pace">· ${direction.pace}</span>` : "";
     let note = "";
     if (direction.projection) note = `<span class="live-note ${cls}">· ${this._escape(direction.projection)}</span>`;

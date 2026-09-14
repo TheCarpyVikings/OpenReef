@@ -756,5 +756,86 @@ test("the modal's 'What moves it' names the daily cycle, every coupling aimed at
   } finally { restore(); }
 });
 
+
+// ── 0.7.183: the noise gate ─────────────────────────────────────────────────
+
+// Readings every `cadence` minutes over the last `minutes`, a straight line
+// from `from` to `to` with deterministic jitter of ±`jitter`.
+function jittery(from, to, minutes, jitter, cadence = 5, seed = 5) {
+  let s = seed; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647 - 0.5;
+  const out = [];
+  for (let m = minutes; m >= 0; m -= cadence) {
+    out.push({ time: minsAgo(m), value: from + (to - from) * (1 - m / minutes) + rnd() * 2 * jitter });
+  }
+  return out;
+}
+
+test("noise gate: a jittery pH probe with no real trend reads steady, within noise — no arrow, no pace, no projection", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await live(config(), states(), { ph: jittery(8.05, 8.05, 30, 0.012) }, { ph: jittery(8.02, 8.05, 120, 0.012, 5, 9) });
+    const fit = panel._liveSlopeFit("ph", 30);
+    assertEqual(fit.significant, false, `slope ${fit.slope} vs se ${fit.se}`);
+    const d = panel._liveDirection("ph", panel._config.sensors.ph);
+    assertEqual(d.speed, "steady");
+    assertEqual(d.pace, "");
+    assertEqual(d.projection, "");
+    assertEqual(d.significant, false);
+    const html = panel._liveDirectionMarkup("ph", panel._config.sensors.ph, d, { stale: false });
+    assert(html.includes("steady last 30 min · within noise"), html);
+    assert(html.includes("is within this probe&#039;s noise"), "the title explains");
+  } finally { restore(); }
+});
+
+test("noise gate: a real pH move clears its own noise and still reads as a move with its ± on hover", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    // +0.06 over 30 min (0.12/h = 20 % of the band) with ±0.005 jitter.
+    const panel = await live(config(), states({ "sensor.ph": state(8.11) }), { ph: jittery(8.05, 8.11, 30, 0.005) });
+    const d = panel._liveDirection("ph", panel._config.sensors.ph);
+    assertEqual(d.significant, true);
+    assertEqual(d.speed, "fast");
+    assertEqual(d.arrow, "↑");
+    const html = panel._liveDirectionMarkup("ph", panel._config.sensors.ph, d, { stale: false });
+    assert(/title="±0\.\d+\/h noise"/.test(html), html);
+  } finally { restore(); }
+});
+
+test("noise gate: four jittery CO₂ readings never 'just turn', even against a real hour behind them", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const cfg = configWithCo2();
+    const st = states({ "sensor.room_co2": state(520) });
+    // The hour was genuinely rising (+120 ppm over 60 min); the last 15 min are four noisy readings around 520.
+    const hour = jittery(400, 520, 60, 3, 5, 2).filter((p) => p.time < minsAgo(15));
+    const now = jittery(520, 520, 15, 12, 5, 4);
+    const panel = await live(cfg, st, { co2: now }, { co2: hour });
+    const d = panel._liveDirection("co2", cfg.sensors.co2);
+    assertEqual(d.speed, "steady", `rate ${d.rate} se ${d.se}`);
+    assertEqual(d.pace, "");
+    // The same hour with a real reversal in the last 15 min (−200 ppm, calm readings) does turn.
+    const turn = await live(cfg, states({ "sensor.room_co2": state(320) }), { co2: jittery(520, 320, 15, 2, 5, 6) }, { co2: hour });
+    const dt = turn._liveDirection("co2", cfg.sensors.co2);
+    assertEqual(dt.speed, "fast");
+    assertEqual(dt.pace, "just turned");
+  } finally { restore(); }
+});
+
+test("the floor under the gate is by what the sensor is: chemistry 2.5 %/h, air 2 %/h, water 1.5 %/h", async () => {
+  const panel = await live();
+  assertEqual(panel._liveSpeedFloor("ph", { group: "tank" }), { steady: 2.5, fast: 10 }, "pH is chemistry even in the tank group");
+  assertEqual(panel._liveSpeedFloor("nitrate", { group: "chemistry" }), { steady: 2.5, fast: 10 });
+  assertEqual(panel._liveSpeedFloor("co2", { group: "room" }), { steady: 2, fast: 8 });
+  assertEqual(panel._liveSpeedFloor("tank_temp", { group: "tank" }), { steady: 1.5, fast: 8 });
+  const restore = freezeTime(NOW);
+  try {
+    // A perfect line has no scatter: significant, se 0.
+    const clean = await live(config(), states(), { tank_temp: ramp(25.55, 25.7, 30) });
+    const fit = clean._liveSlopeFit("tank_temp", 30);
+    assertEqual(fit.significant, true);
+    assert(fit.se < 1e-9, `se ${fit.se}`);
+  } finally { restore(); }
+});
+
 // Keep this LAST: tests registered below the runner never run.
 await runTests();
