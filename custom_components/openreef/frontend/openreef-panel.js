@@ -37,6 +37,12 @@ const LIVE_SPARK_H = 84;
 const LIVE_MINI_W = 200;                    // list-density sparkline
 const LIVE_MINI_H = 28;
 const LIVE_EVENT_TICKS_MAX = 12;            // ledger ticks per card
+const LIVE_GHOST_MIN_DAYS = 4;              // days of statistics before a typical day is drawn
+const LIVE_GHOST_TTL_MS = 60 * 60 * 1000;   // statistics refetch cadence
+const LIVE_COUPLE_STEP_MIN = 10;            // resample grid for room ↔ tank
+const LIVE_COUPLE_MAX_LAG_MIN = 6 * 60;
+const LIVE_COUPLE_MIN_OVERLAP = 72;         // 12 h of grid points
+const LIVE_COUPLE_MIN_R = 0.6;
 
 class OpenReefPanel extends HTMLElement {
   constructor() {
@@ -186,6 +192,7 @@ class OpenReefPanel extends HTMLElement {
     this._liveSparksAt = 0;
     this._liveSparksLoading = false;
     this._liveReadings = {};
+    this._liveGhosts = {};
     this._liveMarkOpen = false;
     this._liveHoverEl = null;
   }
@@ -1739,7 +1746,11 @@ class OpenReefPanel extends HTMLElement {
         this._setLiveDensity(id);
         this._render();
       }
-      if (action === "show-trend") this._loadTrend(id);
+      if (action === "show-trend") {
+        // The direction line opens the six-hour trend — the window the arrow
+        // was judged in — anywhere else on the card opens the day.
+        this._loadTrend(id, event.target.closest?.("[data-trend-range]")?.dataset.trendRange || undefined);
+      }
       if (action === "trend-range") {
         if (this._trend?.source === "manual") this._loadManualTrend(id, target.dataset.range);
         else this._loadTrend(id, target.dataset.range);
@@ -24474,8 +24485,9 @@ const rigSteps = [
   }
 
   _liveDirectionMarkup(id, sensor, direction, staleInfo) {
-    if (staleInfo.stale) return `<div class="live-dir"><span class="live-arrow">·</span><span class="live-note">no fresh readings</span></div>`;
-    if (!direction) return `<div class="live-dir"><span class="live-arrow">·</span><span class="live-note">watching for a trend</span></div>`;
+    const tap = `data-trend-range="6h" title="Open the 6-hour trend"`;
+    if (staleInfo.stale) return `<div class="live-dir" ${tap}><span class="live-arrow">·</span><span class="live-note">no fresh readings</span></div>`;
+    if (!direction) return `<div class="live-dir" ${tap}><span class="live-arrow">·</span><span class="live-note">watching for a trend</span></div>`;
     const cls = direction.toward ? "toward" : direction.away ? "away" : "";
     const word = direction.speed === "steady" ? "steady" : direction.rising ? "rising" : "falling";
     const rate = direction.speed === "steady"
@@ -24485,7 +24497,7 @@ const rigSteps = [
     let note = "";
     if (direction.projection) note = `<span class="live-note ${cls}">· ${this._escape(direction.projection)}</span>`;
     else if (direction.speed !== "steady") note = `<span class="live-note ${cls}">· ${direction.toward ? "toward the limit" : "back toward the middle"}</span>`;
-    return `<div class="live-dir" data-live-direction="${word}"><span class="live-arrow ${cls}" aria-label="${word}">${direction.arrow}</span>${rate}${pace}${note}</div>`;
+    return `<div class="live-dir" data-live-direction="${word}" ${tap}><span class="live-arrow ${cls}" aria-label="${word}">${direction.arrow}</span>${rate}${pace}${note}</div>`;
   }
 
   // ── The marked moment: "since I opened the window" (§4.3, §8.5) ──────────
@@ -24581,6 +24593,163 @@ const rigSteps = [
       </div>`;
   }
 
+  // ── The typical day (0.7.174) ─────────────────────────────────────────────
+  // Seven days of hourly statistics folded onto the clock: each entry is the
+  // mean of that hour-of-day across the days that have it, null until at least
+  // LIVE_GHOST_MIN_DAYS days do. Drawn faint and dashed behind today's line so
+  // "is today unusual?" is answered by whether the two lines part company.
+  _liveGhostHours(points) {
+    const slots = Array.from({ length: 24 }, () => ({ total: 0, n: 0, days: new Set() }));
+    const allDays = new Set();
+    for (const p of points || []) {
+      const value = Number.parseFloat(p?.value);
+      if (!Number.isFinite(p?.time) || !Number.isFinite(value)) continue;
+      const d = new Date(p.time);
+      const slot = slots[d.getHours()];
+      slot.total += value;
+      slot.n += 1;
+      slot.days.add(d.toDateString());
+      allDays.add(d.toDateString());
+    }
+    const hours = slots.map((slot) => (slot.days.size >= LIVE_GHOST_MIN_DAYS ? slot.total / slot.n : null));
+    return { hours, days: allDays.size, covered: hours.filter((h) => h !== null).length };
+  }
+
+  // The typical value at a moment: linear between neighbouring hour centres
+  // (an hourly mean sits at :30), wrapping across midnight.
+  _liveGhostValueAt(hours, time) {
+    if (!Array.isArray(hours) || hours.length !== 24) return null;
+    const d = new Date(time);
+    const h = d.getHours() + d.getMinutes() / 60 - 0.5;
+    const lo = Math.floor(h);
+    const a = ((lo % 24) + 24) % 24;
+    const b = (a + 1) % 24;
+    const f = h - lo;
+    if (hours[a] === null || hours[b] === null) return null;
+    return hours[a] + (hours[b] - hours[a]) * f;
+  }
+
+  _liveGhost(id) {
+    const g = this._liveGhosts?.[id];
+    return g && g.days >= LIVE_GHOST_MIN_DAYS && g.covered >= 12 ? g.hours : null;
+  }
+
+  _liveGhostPath(hours, t0, t1, X, Y) {
+    const step = 20 * 60000;
+    let d = "";
+    let pen = false;
+    for (let t = t0; t <= t1; t += step) {
+      const v = this._liveGhostValueAt(hours, t);
+      if (v === null) {
+        pen = false;
+        continue;
+      }
+      d += `${pen ? "L" : "M"}${X(t).toFixed(1)} ${Y(v).toFixed(1)} `;
+      pen = true;
+    }
+    return d.trim() ? `<path class="live-spark-ghost" d="${d.trim()}" />` : "";
+  }
+
+  // ── Room ↔ tank coupling (0.7.174) ────────────────────────────────────────
+  // How long the tank takes to follow the room, and by how much. Both series
+  // are resampled onto a ten-minute grid over the last day and the tank is
+  // correlated against the room at every lag up to six hours; the best lag is
+  // reported only when the fit is convincing and the room actually moved.
+  _liveCouplingPairs() {
+    const sensors = this._enabledSensors().filter(([id, s]) => s.entity_id && this._sensorKind(s, id) !== "binary");
+    const isTemp = (s) => /°/.test(String(s.unit || "")) || /temp/i.test(String(s.label || ""));
+    const room = sensors.find(([, s]) => s.group === "room" && isTemp(s));
+    if (!room) return [];
+    return sensors
+      .filter(([, s]) => ["tank", "sump"].includes(s.group || "tank") && isTemp(s))
+      .map(([tankId]) => ({ tankId, roomId: room[0] }));
+  }
+
+  // Values on a regular grid, linear between readings; null before the first
+  // reading, after the last, or across a gap longer than three hours.
+  _liveResample(points, t0, t1, stepMs) {
+    const pts = (points || []).filter((p) => Number.isFinite(p?.time) && Number.isFinite(p?.value)).sort((a, b) => a.time - b.time);
+    const out = [];
+    let j = 0;
+    for (let t = t0; t <= t1; t += stepMs) {
+      while (j < pts.length - 1 && pts[j + 1].time <= t) j += 1;
+      const a = pts[j];
+      const b = pts[j + 1];
+      if (!a || a.time > t) { out.push(null); continue; }
+      if (!b) { out.push(t - a.time <= stepMs ? a.value : null); continue; }
+      if (b.time - a.time > 3 * 3600000) { out.push(null); continue; }
+      out.push(a.value + (b.value - a.value) * ((t - a.time) / ((b.time - a.time) || 1)));
+    }
+    return out;
+  }
+
+  _liveCorrelate(xs, ys) {
+    const n = xs.length;
+    if (n < 3) return null;
+    const mx = xs.reduce((a, b) => a + b, 0) / n;
+    const my = ys.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0;
+    let sxx = 0;
+    let syy = 0;
+    for (let i = 0; i < n; i += 1) {
+      const dx = xs[i] - mx;
+      const dy = ys[i] - my;
+      sxy += dx * dy;
+      sxx += dx * dx;
+      syy += dy * dy;
+    }
+    // A flat room or a heater-held tank has nothing to correlate.
+    if (sxx / n < 0.01 || syy / n < 0.0004) return null;
+    return { r: sxy / Math.sqrt(sxx * syy), slope: sxy / sxx };
+  }
+
+  _liveCoupling(tankId, roomId) {
+    const step = LIVE_COUPLE_STEP_MIN * 60000;
+    const t1 = Date.now();
+    const t0 = t1 - 24 * 3600000;
+    const tank = this._liveResample(this._liveSeries(tankId), t0, t1, step);
+    // The room grid starts a lag earlier so every tank point has a partner.
+    const roomStart = t0 - LIVE_COUPLE_MAX_LAG_MIN * 60000;
+    const room = this._liveResample(this._liveSeries(roomId), roomStart, t1, step);
+    const offset = Math.round((t0 - roomStart) / step);
+    const maxLag = Math.round(LIVE_COUPLE_MAX_LAG_MIN / LIVE_COUPLE_STEP_MIN);
+    let best = null;
+    for (let lag = 0; lag <= maxLag; lag += 1) {
+      const xs = [];
+      const ys = [];
+      for (let i = 0; i < tank.length; i += 1) {
+        const y = tank[i];
+        const x = room[i + offset - lag];
+        if (y === null || x === null || x === undefined) continue;
+        xs.push(x);
+        ys.push(y);
+      }
+      if (xs.length < LIVE_COUPLE_MIN_OVERLAP) continue;
+      const stats = this._liveCorrelate(xs, ys);
+      if (!stats) continue;
+      if (!best || stats.r > best.r) best = { lagMinutes: lag * LIVE_COUPLE_STEP_MIN, r: stats.r, gain: stats.slope, n: xs.length };
+    }
+    if (!best || best.r < LIVE_COUPLE_MIN_R || best.gain <= 0) return null;
+    return best;
+  }
+
+  _liveLagLabel(minutes) {
+    if (minutes < 60) return `${Math.max(5, Math.round(minutes / 5) * 5)} min`;
+    const half = Math.round(minutes / 30) / 2;
+    return `${half % 1 === 0 ? half : half.toFixed(1)} h`;
+  }
+
+  _liveCouplingMarkup(id) {
+    const pair = this._liveCouplingPairs().find((p) => p.tankId === id);
+    if (!pair) return "";
+    const c = this._liveCoupling(pair.tankId, pair.roomId);
+    if (!c) return "";
+    const unit = this._config.sensors?.[id]?.unit || "";
+    const lag = c.lagMinutes < 20 ? "tracks the room closely" : `follows the room by ~${this._liveLagLabel(c.lagMinutes)}`;
+    const gain = `each 1${unit ? ` ${unit}` : ""} in the room ≈ ${this._format(c.gain, 2)}${unit ? ` ${unit}` : ""} in the tank`;
+    return `<div class="live-couple" data-live-couple="${this._escape(pair.roomId)}" title="From the last 24 h: correlation ${this._format(c.r, 2)} at the best lag"><span class="live-couple-glyph">↔</span><span>${this._escape(lag)} · ${this._escape(gain)}</span></div>`;
+  }
+
   // ── The sparkline ─────────────────────────────────────────────────────────
   // 24 h dimmed, the last hour bright, the safe band as a faint fill with its
   // edges labelled, a dot for now (hollow when stale), a dashed tick for the
@@ -24608,8 +24777,9 @@ const rigSteps = [
     const max = Number(sensor.max);
     const hasRange = Number.isFinite(min) && Number.isFinite(max) && max > min;
     const values = points.map((p) => p.value);
-    const lo = Math.min(hasRange ? min : Infinity, ...values);
-    const hi = Math.max(hasRange ? max : -Infinity, ...values);
+    const ghostValues = (opts.ghost || []).filter((v) => v !== null && Number.isFinite(v));
+    const lo = Math.min(hasRange ? min : Infinity, ...values, ...ghostValues);
+    const hi = Math.max(hasRange ? max : -Infinity, ...values, ...ghostValues);
     const pad = (hi - lo) * 0.12 || 1;
     const y0 = lo - pad;
     const y1 = hi + pad;
@@ -24655,6 +24825,7 @@ const rigSteps = [
     return `<svg viewBox="0 0 ${W} ${H}" class="live-spark-svg ${mini ? "mini" : ""}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
       <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#67e8f9" stop-opacity=".16" /><stop offset="1" stop-color="#67e8f9" stop-opacity="0" /></linearGradient></defs>
       ${band}
+      ${opts.ghost ? this._liveGhostPath(opts.ghost, t0, t1, X, Y) : ""}
       <path class="live-spark-area" d="${area}" fill="url(#${gid})" />
       <path class="live-spark-history" d="${path(older)}" />
       ${recent.length > 1 ? `<path class="live-spark-recent" d="${path(recent)}" />` : ""}
@@ -24769,7 +24940,7 @@ const rigSteps = [
     return `
       <button class="live-row ${status} stat-button" data-action="show-trend" data-id="${this._escape(id)}" data-live-card="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
         ${name}${value}
-        <span class="live-row-spark live-spark mini" data-live-spark="${this._escape(id)}" data-live-geom="${geom.W},${geom.padL},${geom.padR}">${this._liveSparkSvg(id, sensor, series, marker, { mini: true, events: this._liveEvents(id, sensor) })}<span class="live-tip" data-live-tip hidden></span></span>
+        <span class="live-row-spark live-spark mini" data-live-spark="${this._escape(id)}" data-live-geom="${geom.W},${geom.padL},${geom.padR}">${this._liveSparkSvg(id, sensor, series, marker, { mini: true, events: this._liveEvents(id, sensor), ghost: this._liveGhost(id) })}<span class="live-tip" data-live-tip hidden></span></span>
         ${this._liveDirectionMarkup(id, sensor, direction, staleInfo)}
         ${pill}
       </button>`;
@@ -24911,6 +25082,7 @@ const rigSteps = [
           <span><i class="band"></i>safe range</span>
           <span><i class="mark"></i>marked moment</span>
           ${ticksOn ? `<span><i class="event"></i>OpenReef events (hover)</span>` : ""}
+          ${rows.some((row) => this._liveGhost(row.id)) ? `<span><i class="ghost"></i>typical day (7-day average)</span>` : ""}
         </div>
       </section>
     `;
@@ -25019,8 +25191,11 @@ const rigSteps = [
     const delta = this._liveMarkerDelta(id, sensor, marker);
     const digits = this._sensorDigits(id);
     const values = series.map((p) => p.value).filter((v) => Number.isFinite(v));
+    const ghost = this._liveGhost(id);
+    const typicalNow = ghost ? this._liveGhostValueAt(ghost, Date.now()) : null;
+    const typical = typicalNow === null ? "" : ` · typical now <b>${this._format(typicalNow, digits)}</b>`;
     const dayStats = values.length >= 2
-      ? `<span class="live-day">24 h <b>${this._format(Math.min(...values), digits)}–${this._format(Math.max(...values), digits)}</b> · avg <b>${this._format(values.reduce((a, b) => a + b, 0) / values.length, digits)}</b></span>`
+      ? `<span class="live-day">24 h <b>${this._format(Math.min(...values), digits)}–${this._format(Math.max(...values), digits)}</b> · avg <b>${this._format(values.reduce((a, b) => a + b, 0) / values.length, digits)}</b>${typical}</span>`
       : `<span class="live-day">gathering the last 24 h</span>`;
     const deltaText = delta === null ? "—" : `<b>${delta > 0 ? "+" : delta < 0 ? "−" : ""}${this._format(Math.abs(delta), digits)}</b>`;
     const since = marker ? `<span class="live-since"><i></i>${deltaText} since ${this._escape(this._liveMarkerWhen(marker))}</span>` : "";
@@ -25028,7 +25203,8 @@ const rigSteps = [
       <button class="live-card ${status} stat-button" data-action="show-trend" data-id="${this._escape(id)}" data-live-card="${this._escape(id)}" aria-label="Open ${this._escape(sensor.label)} trend">
         ${head}${reading}
         ${this._liveDirectionMarkup(id, sensor, direction, staleInfo)}
-        <div class="live-spark" data-live-spark="${this._escape(id)}" data-live-geom="${LIVE_SPARK_W},2,34">${this._liveSparkSvg(id, sensor, series, marker, { events: this._liveEvents(id, sensor) })}<div class="live-tip" data-live-tip hidden></div></div>
+        ${this._liveCouplingMarkup(id)}
+        <div class="live-spark" data-live-spark="${this._escape(id)}" data-live-geom="${LIVE_SPARK_W},2,34">${this._liveSparkSvg(id, sensor, series, marker, { events: this._liveEvents(id, sensor), ghost })}<div class="live-tip" data-live-tip hidden></div></div>
         <div class="live-foot">${dayStats}${since}<span class="trend-chip">Trend ›</span></div>
       </button>
     `;
@@ -25052,6 +25228,18 @@ const rigSteps = [
           changed = true;
         } catch {
           // Keep whatever we had; the card says "gathering" until it lands.
+        }
+        // The typical day: seven days of hourly statistics, refetched hourly.
+        const ghost = this._liveGhosts[id];
+        if (!ghost || Date.now() - (ghost.at || 0) > LIVE_GHOST_TTL_MS) {
+          try {
+            const end = new Date();
+            const start = new Date(end.getTime() - 7 * 24 * 3600000);
+            const points = await this._fetchStatisticTrendPoints(sensor.entity_id, start, end, "7d");
+            this._liveGhosts[id] = { ...this._liveGhostHours(points), at: Date.now() };
+          } catch {
+            this._liveGhosts[id] = { hours: [], days: 0, covered: 0, at: Date.now() };
+          }
         }
         this._liveRefreshCard(id);
       }
@@ -31194,8 +31382,9 @@ ${parts.buttons}
     const values = points.map((p) => p.value);
     const dataMin = Math.min(...values);
     const dataMax = Math.max(...values);
-    const lo = Math.min(hasRange ? min : Infinity, dataMin);
-    const hi = Math.max(hasRange ? max : -Infinity, dataMax);
+    const ghostValues = (opts.ghost || []).filter((v) => v !== null && Number.isFinite(v));
+    const lo = Math.min(hasRange ? min : Infinity, dataMin, ...ghostValues);
+    const hi = Math.max(hasRange ? max : -Infinity, dataMax, ...ghostValues);
     const pad = (hi - lo) * 0.1 || 1;
     const y0 = lo - pad;
     const y1 = hi + pad;
@@ -31242,6 +31431,7 @@ ${parts.buttons}
           <svg class="live-spark-svg live-trend-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${this._escape(this._trendRangeLabel(range))} trend">
             <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#67e8f9" stop-opacity=".16" /><stop offset="1" stop-color="#67e8f9" stop-opacity="0" /></linearGradient></defs>
             ${band}${grid}
+            ${opts.ghost ? this._liveGhostPath(opts.ghost, t0, t1, X, Y) : ""}
             <path class="live-spark-area" d="${area}" fill="url(#${gid})" />
             <path class="live-spark-history" d="${path(older)}" />
             ${recent.length > 1 ? `<path class="live-spark-recent" d="${path(recent)}" />` : ""}
@@ -31313,7 +31503,7 @@ ${parts.buttons}
           ${this._trend.loading ? `<div class="center-card compact-center"><div class="spinner"></div><p>Loading trend...</p></div>` : ""}
           ${this._trend.error ? `<div class="notice error">${this._escape(this._trend.error)}</div>` : ""}
           ${coverageMessage ? `<div class="notice warning-notice">${this._escape(coverageMessage)}</div>` : ""}
-          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, unit, range, digits, { sensor, sensorId, marker, events, stale: staleInfo.stale }) : ""}
+          ${!this._trend.loading && !this._trend.error ? this._trendSvg(points, unit, range, digits, { sensor, sensorId, marker, events, stale: staleInfo.stale, ghost: live && ["1h", "6h", "24h"].includes(range) ? this._liveGhost(sensorId) : null }) : ""}
           ${summary ? `
             <div class="live-trend-stats">
               ${stat("Latest", withUnit(summary.latest))}
@@ -32365,6 +32555,13 @@ ${parts.buttons}
         .live-legend i.mark { width: 0; height: 12px; border-top: 0; border-left: 2px dashed #67e8f9; }
         .live-legend i.dot { width: 8px; height: 8px; border: 2px solid #0b1220; background: #8ff0ff; border-radius: 50%; }
         .live-legend i.event { width: 0; height: 8px; border-top: 0; border-left: 2px solid #c9a24a; vertical-align: -1px; }
+        .live-legend i.ghost { border-top: 2px dashed rgba(148, 163, 184, .7); }
+        .live-spark-ghost { fill: none; stroke: rgba(148, 163, 184, .55); stroke-width: 1.4; stroke-dasharray: 4 4; stroke-linejoin: round; }
+        .live-trend-svg .live-spark-ghost { stroke-width: 1.8; }
+        .live-dir[data-trend-range] { cursor: pointer; border-radius: 6px; margin: 0 -4px; padding: 0 4px; }
+        .live-card.stat-button:hover .live-dir[data-trend-range] { background: rgba(103, 232, 249, .05); }
+        .live-couple { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #b7c6d8; }
+        .live-couple-glyph { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: #162536; color: #9fb2c7; font-weight: 800; font-size: 13px; }
         .live-spark-event { stroke: #c9a24a; stroke-width: 2; opacity: .8; }
         .live-spark-event:hover { opacity: 1; stroke-width: 3; }
         .live-pace { color: #b7c6d8; font-style: italic; }

@@ -494,5 +494,130 @@ test("trend modal for a hand-logged parameter: the band and the chart, no ring, 
   } finally { restore(); }
 });
 
+
+// ── 0.7.174: the typical day, room ↔ tank, tap for six hours ────────────────
+
+// Seven days of hourly statistics whose value is 20 + hour-of-day (UTC in the harness).
+function weekOfHours(days = 7, base = 20) {
+  const out = [];
+  for (let d = days; d >= 1; d -= 1) {
+    for (let h = 0; h < 24; h += 1) {
+      const t = new Date(NOW_MS - d * 86400000);
+      t.setUTCHours(h, 0, 0, 0);
+      out.push({ time: t.getTime(), value: base + h });
+    }
+  }
+  return out;
+}
+
+test("the typical day folds seven days of hourly means onto the clock; fewer than four days draws nothing", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await live();
+    const g = panel._liveGhostHours(weekOfHours(7));
+    assertEqual(g.days, 7);
+    assertEqual(g.covered, 24);
+    assertEqual(g.hours[0], 20);
+    assertEqual(g.hours[13], 33);
+    // Hour centres sit at :30 — 10:30 is exactly hour 10, 10:00 is halfway from hour 9.
+    const at = (h, m) => { const d = new Date(NOW_MS); d.setUTCHours(h, m, 0, 0); return d.getTime(); };
+    assertEqual(panel._liveGhostValueAt(g.hours, at(10, 30)), 30);
+    assertEqual(panel._liveGhostValueAt(g.hours, at(10, 0)), 29.5);
+    assert(Math.abs(panel._liveGhostValueAt(g.hours, at(0, 10)) - (43 + (20 - 43) * (2 / 3))) < 1e-9, "midnight wraps from hour 23 to hour 0");
+    const thin = panel._liveGhostHours(weekOfHours(3));
+    assertEqual(thin.covered, 0, "three days is not a typical day");
+    panel._liveGhosts = { tank_temp: { ...thin, at: NOW_MS } };
+    assertEqual(panel._liveGhost("tank_temp"), null);
+    panel._liveGhosts = { tank_temp: { ...g, at: NOW_MS } };
+    assertEqual(panel._liveGhost("tank_temp").length, 24);
+  } finally { restore(); }
+});
+
+test("the ghost is drawn behind the line on the card, the mini and the 24 h modal; the legend explains it; the foot says typical now", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await live(config(), states(), {}, { tank_temp: ramp(25.0, 25.3, 24 * 60, 48) });
+    const g = panel._liveGhostHours(weekOfHours(7, 24.0).map((p) => ({ ...p, value: 24.6 + (p.value - 20) / 48 })));
+    panel._liveGhosts = { tank_temp: { ...g, at: NOW_MS } };
+    const card = panel._liveStatCard("tank_temp", panel._config.sensors.tank_temp);
+    assert(card.includes('class="live-spark-ghost"'), "ghost path on the card");
+    assert(card.includes("typical now <b>"), "typical now in the foot");
+    const ghostPos = card.indexOf("live-spark-ghost");
+    assert(ghostPos < card.indexOf("live-spark-history"), "ghost sits behind the line");
+    const page = panel._liveStats();
+    assert(page.includes("typical day (7-day average)"), "legend");
+    panel._liveDensity = () => "list";
+    assert(panel._liveStats().includes('class="live-spark-ghost"'), "ghost on the mini too");
+    panel._trend = { sensorId: "tank_temp", entityId: "sensor.tank_temp", range: "24h", loading: false, error: "", points: panel._liveSparks.tank_temp };
+    assert(panel._trendModal().includes('class="live-spark-ghost"'), "ghost in the 24 h modal");
+    panel._trend.range = "7d";
+    assert(!panel._trendModal().includes('class="live-spark-ghost"'), "no ghost across a week");
+    const bare = await live(config(), states(), {}, { tank_temp: ramp(25.0, 25.3, 24 * 60, 48) });
+    assert(!bare._liveStatCard("tank_temp", bare._config.sensors.tank_temp).includes("live-spark-ghost"), "no ghost without statistics");
+    assert(!bare._liveStats().includes("typical day"), "no legend entry either");
+  } finally { restore(); }
+});
+
+test("the direction line carries the six-hour range for the tap", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await live(config(), states(), { room_temp: ramp(26.3, 26.0, 15) });
+    const d = panel._liveDirection("room_temp", panel._config.sensors.room_temp);
+    assert(panel._liveDirectionMarkup("room_temp", panel._config.sensors.room_temp, d, { stale: false }).includes('data-trend-range="6h"'));
+    assert(panel._liveDirectionMarkup("room_temp", panel._config.sensors.room_temp, null, { stale: false }).includes('data-trend-range="6h"'), "even while watching");
+  } finally { restore(); }
+});
+
+// Room: a 24 h sine. Tank: a third of the room's swing, two hours later.
+function coupledDay(lagMinutes = 120, gain = 0.3, noise = 0) {
+  let seed = 3; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5;
+  const room = [], tank = [];
+  for (let m = 32 * 60; m >= 0; m -= 10) {
+    const t = NOW_MS - m * 60000;
+    const roomAt = (tt) => 22 + 3 * Math.sin((2 * Math.PI * tt) / 86400000);
+    room.push({ time: t, value: roomAt(t) + rnd() * noise });
+    tank.push({ time: t, value: 25 + gain * (roomAt(t - lagMinutes * 60000) - 22) + rnd() * noise });
+  }
+  return { room, tank };
+}
+
+test("room ↔ tank: the tank that follows the room two hours later at a third of the swing is found, and said so on its card", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const { room, tank } = coupledDay(120, 0.3, 0.02);
+    const panel = await live(config(), states(), {}, { tank_temp: tank, room_temp: room });
+    assertEqual(panel._liveCouplingPairs(), [{ tankId: "tank_temp", roomId: "room_temp" }], "pH and humidity are not temperatures");
+    const c = panel._liveCoupling("tank_temp", "room_temp");
+    assert(c, "a coupling");
+    assert(Math.abs(c.lagMinutes - 120) <= 10, `lag ${c.lagMinutes}`);
+    assert(Math.abs(c.gain - 0.3) < 0.05, `gain ${c.gain}`);
+    assert(c.r > 0.95, `r ${c.r}`);
+    const card = panel._liveStatCard("tank_temp", panel._config.sensors.tank_temp);
+    assert(card.includes("follows the room by ~2 h") && card.includes("each 1 °C in the room ≈ 0.30 °C in the tank"), card.match(/live-couple[^<]*<span[^>]*>[^<]*<\/span><span>([^<]*)/)?.[1] || "no coupling line");
+    assert(!panel._liveStatCard("room_temp", panel._config.sensors.room_temp).includes("live-couple"), "the room card does not say it follows itself");
+  } finally { restore(); }
+});
+
+test("room ↔ tank: no line for a heater-held tank, a flat room, noise, or too little overlap", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const { room } = coupledDay();
+    const flatTank = room.map((p) => ({ time: p.time, value: 25.0 }));
+    const held = await live(config(), states(), {}, { tank_temp: flatTank, room_temp: room });
+    assertEqual(held._liveCoupling("tank_temp", "room_temp"), null, "heater-held tank");
+    const flatRoom = room.map((p) => ({ time: p.time, value: 22.0 }));
+    const still = await live(config(), states(), {}, { tank_temp: coupledDay().tank, room_temp: flatRoom });
+    assertEqual(still._liveCoupling("tank_temp", "room_temp"), null, "flat room");
+    let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5;
+    const noisy = await live(config(), states(), {}, { tank_temp: room.map((p) => ({ time: p.time, value: 25 + rnd() })), room_temp: room });
+    assertEqual(noisy._liveCoupling("tank_temp", "room_temp"), null, "noise");
+    const short = await live(config(), states(), {}, { tank_temp: coupledDay().tank.slice(-30), room_temp: room });
+    assertEqual(short._liveCoupling("tank_temp", "room_temp"), null, "five hours is not enough");
+    assertEqual(held._liveLagLabel(12), "10 min");
+    assertEqual(held._liveLagLabel(95), "1.5 h");
+    assertEqual(held._liveLagLabel(120), "2 h");
+  } finally { restore(); }
+});
+
 // Keep this LAST: tests registered below the runner never run.
 await runTests();

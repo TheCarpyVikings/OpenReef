@@ -6,7 +6,7 @@ temperature going up or down, and how fast?"
 
 Mockup (example data, hover the sparklines): https://claude.ai/code/artifact/0722b031-87c1-4f4c-9d86-e324ddd5ed67
 
-Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10), **the trend modal as 0.7.173** (§11). Later ideas: §8.1.
+Decisions locked in §8 (2026-09-13). **v1 built the same day as 0.7.171** (§9), **v2 as 0.7.172** (§10), **the trend modal as 0.7.173** (§11), **the three parked ideas as 0.7.181** (§12). Nothing is parked now except per-sensor speed thresholds.
 
 ---
 
@@ -325,3 +325,34 @@ bland styling. also the 'cards/list' selector is hard to see."*
   chart, nothing from the ring, the mark or the ledger — "Hand-logged results" where the
   direction line would be.
 - **Tests**: 23 → 25 (a live sensor's modal; a hand-logged one).
+
+## 12. The typical day, room ↔ tank, and the six-hour tap — shipped as 0.7.181 (2026-09-14)
+
+Reece asked for the three parked ideas together. Panel-only; no backend change.
+
+- **Typical day** (`_liveGhostHours`): the loader fetches seven days of hourly statistics per
+  sensor (`recorder/statistics_during_period`, period hour, refetched hourly — `_liveGhosts`,
+  `LIVE_GHOST_TTL_MS`) and folds them onto the clock: the mean of each hour-of-day across the
+  days that have it, null until four days do. A card draws it only when four days exist and at
+  least twelve hours are covered (`_liveGhost`). `_liveGhostValueAt` interpolates between hour
+  centres (:30) and wraps midnight; `_liveGhostPath` samples every 20 min and lifts the pen
+  across gaps. Faint dashed slate, behind the area — never a colour. The y-scale includes it.
+  Drawn on the card, the list's mini and the modal at 1 h / 6 h / 24 h (never across a week).
+  The foot gains `typical now 25.3`; the legend gains "typical day (7-day average)".
+- **Room ↔ tank** (`_liveCoupling`): pairs every tank/sump-group temperature with the first
+  room-group temperature (`_liveCouplingPairs`, by ° in the unit or "temp" in the label). Both
+  merged series are resampled onto a 10-minute grid over the last 24 h (`_liveResample`:
+  linear, null before the first reading, past the last, or across a > 3 h gap; the room grid
+  starts six hours earlier so every lag has a partner). Pearson r and the regression slope at
+  every lag 0…6 h; the best r wins. Reported only when ≥ 12 h overlap, r ≥ 0.6, slope > 0, and
+  both actually moved (room variance ≥ 0.01, tank ≥ 0.0004 — a heater-held tank says nothing).
+  Card line under the direction: *"↔ follows the room by ~2 h · each 1 °C in the room ≈ 0.30 °C
+  in the tank"* (or "tracks the room closely" under 20 min); hover shows r. Cards only — the
+  list is too narrow. Recomputed per render: 37 lags × 145 points, nothing.
+- **Six-hour tap**: the direction line carries `data-trend-range="6h"`; the `show-trend` click
+  reads the nearest `[data-trend-range]` and passes it to `_loadTrend`, so the line opens the
+  window the arrow was judged in and the rest of the card still opens the day. Hover tint on
+  the line inside the card.
+- **Tests**: 25 → 30 (fold + interpolation + midnight wrap + the four-day floor; ghost placement
+  on card/mini/modal and its absence; the tap attribute; a synthetic 2 h / 0.3 coupling found
+  within 10 min and 0.05; the four refusals; lag labels).
