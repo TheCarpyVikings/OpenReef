@@ -194,4 +194,29 @@ test("the three data editors are dialogs off their tabs; Settings only points at
   assert(coral.includes("<!--registry-->") && coral.includes('data-action="coral-close"'));
 });
 
+
+// --- dialogs keep their scroll position across a re-render ------------------
+
+test("an open dialog keeps its scroll position; a different dialog starts at the top", async () => {
+  const panel = await makePanel({});
+  let wizard = { scrollTop: 340, className: "wizard trend-dialog cooling-dialog" };
+  panel.shadowRoot = { querySelector: (sel) => (sel === ".wizard" ? wizard : null) };
+  const state = panel._captureScrollState();
+  assertEqual(state.wizard, 340);
+  assertEqual(state.key, "wizard trend-dialog cooling-dialog");
+  // Same dialog rebuilt by a re-render: position restored.
+  wizard = { scrollTop: 0, className: "wizard trend-dialog cooling-dialog" };
+  panel._restoreScrollState(state);
+  assertEqual(wizard.scrollTop, 340);
+  // A different dialog: left at the top.
+  wizard = { scrollTop: 0, className: "wizard trend-dialog system-check-dialog" };
+  panel._restoreScrollState(state);
+  assertEqual(wizard.scrollTop, 0);
+  // No dialog was open: nothing to restore, nothing thrown.
+  panel.shadowRoot = { querySelector: () => null };
+  const none = panel._captureScrollState();
+  assertEqual(none.key, "");
+  panel._restoreScrollState(none);
+});
+
 await runTests();

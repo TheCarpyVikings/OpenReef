@@ -7078,19 +7078,28 @@ class OpenReefPanel extends HTMLElement {
     this.shadowRoot.innerHTML = `${this._styles()}<main class="page"><div class="center-card"><div class="spinner"></div><p>Loading OpenReef...</p></div></main>`;
   }
 
+  // The open dialog's scroll position, keyed on which dialog it is. A full
+  // re-render rebuilds the modal from scratch (the page re-renders on every
+  // live state change), so without this every dialog snapped back to the
+  // top as you scrolled it — Reece, 2026-09-14, in the cooling dialog.
   _captureScrollState() {
     const wizard = this.shadowRoot.querySelector(".wizard");
     return {
       wizard: wizard ? wizard.scrollTop : 0,
+      key: wizard ? String(wizard.className || "") : "",
     };
   }
 
   _restoreScrollState(scrollState) {
-    if (!scrollState) return;
-    requestAnimationFrame(() => {
+    if (!scrollState || !scrollState.key) return;
+    const apply = () => {
       const wizard = this.shadowRoot.querySelector(".wizard");
-      if (wizard) wizard.scrollTop = scrollState.wizard;
-    });
+      // Only the SAME dialog gets its position back; a different one (or the
+      // setup wizard on a new step, handled by the caller) starts at the top.
+      if (wizard && String(wizard.className || "") === scrollState.key) wizard.scrollTop = scrollState.wizard;
+    };
+    apply();
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(apply);
   }
 
   _render() {
@@ -7158,7 +7167,9 @@ class OpenReefPanel extends HTMLElement {
 
     this._lastRenderedSetupOpen = this._setupOpen;
     this._lastRenderedSetupStep = this._setupOpen ? this._setupStep : null;
-    if (preserveSetupScroll) this._restoreScrollState(scrollState);
+    // The setup wizard keeps its place only within a step; every other
+    // dialog keeps it for as long as it stays open.
+    if (this._setupOpen ? preserveSetupScroll : Boolean(scrollState.key)) this._restoreScrollState(scrollState);
     if (this._onboarding && this._onboarding.active) {
       requestAnimationFrame(() => this._positionOnboarding());
     }
