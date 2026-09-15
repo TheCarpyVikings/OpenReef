@@ -1035,5 +1035,30 @@ test("journal: a skipped look and a bare skip are named", async () => {
   } finally { restore(); }
 });
 
+test("a refused cultures tap outlives the summary reload (0.7.186)", async () => {
+  // Same defect as the hatchery's dead "Harvest now": every rack button
+  // stores the backend's refusal and then reloads, and the reload wiped it.
+  const panel = await culturesPanel();
+  panel._cultures = { ...(panel._cultures || {}), loading: false, demo: false, error: "", loadError: "", message: "" };
+  const REFUSAL = "That bottle is empty — harvest before you feed from it.";
+  const renders = [];
+  panel._render = () => renders.push(panel._cultures.error);
+  panel._callWS = async (call) => {
+    if (call.type === "openreef/cultures_summary") return panel._cultures.summary || {};
+    throw new Error(REFUSAL);
+  };
+  await panel._culturesCall({ type: "openreef/cultures_feed_skip", id: "cone-a" }, "Fed.");
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+  assert(renders.length >= 1, "the tap must paint");
+  assert(renders.every((e) => e === REFUSAL), `every paint after the tap must carry the refusal: ${JSON.stringify(renders)}`);
+  assert(panel._cultures.error === REFUSAL, "the refusal must still be on state after the reload");
+  panel._callWS = async () => { throw new Error("Could not load the cultures."); };
+  await panel._culturesLoadSummary(true);
+  assert(panel._cultures.error === "Could not load the cultures.", "a failed load reports itself");
+  panel._callWS = async () => ({});
+  await panel._culturesLoadSummary(true);
+  assert(panel._cultures.error === "", "a good load clears the loader's own failure");
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

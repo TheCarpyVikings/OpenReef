@@ -98,12 +98,12 @@ class OpenReefPanel extends HTMLElement {
     this._visionLoading = false;
     this._visionError = "";
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
-    this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "",
+    this._nps = { summary: null, at: 0, loading: false, error: "", loadError: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "",
                   // The feeding log's window (local days) and how many rows are unfolded (doc §13.19).
                   logDays: 7, logShown: 10,
                   // The planned row whose dose card is open in the log (0.7.170).
                   logOpen: "" };
-    this._cultures = { summary: null, at: 0, loading: false, error: "", message: "", demo: false, timelineDays: 14 };
+    this._cultures = { summary: null, at: 0, loading: false, error: "", loadError: "", message: "", demo: false, timelineDays: 14 };
     this._cooling = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
@@ -9529,9 +9529,15 @@ class OpenReefPanel extends HTMLElement {
     st.loading = true;
     try {
       st.summary = await this._callWS({ type: "openreef/nps_summary", log_days: Math.max(1, Math.min(90, Number(st.logDays) || 7)) });
-      st.error = "";
+      // The loader clears only its OWN failure (0.7.186). Every action
+      // handler stores the backend's refusal and then reloads through here;
+      // wiping `error` on success threw that refusal away before its first
+      // render, so a refused tap looked like a dead button — Reece's
+      // "Harvest now" while the container held an enriched batch.
+      if (st.error && st.error === st.loadError) st.error = "";
+      st.loadError = "";
     } catch (err) {
-      st.error = (err && err.message) || "Could not load the food shelf.";
+      st.error = st.loadError = (err && err.message) || "Could not load the food shelf.";
     } finally {
       st.at = Date.now();
       st.loading = false;
@@ -12565,9 +12571,13 @@ const rigSteps = [
     st.loading = true;
     try {
       st.summary = await this._callWS({ type: "openreef/cultures_summary" });
-      st.error = "";
+      // Same contract as the NPS loader (0.7.186): a refusal stored by the
+      // tap that triggered this reload survives it; only the loader's own
+      // failure is cleared here.
+      if (st.error && st.error === st.loadError) st.error = "";
+      st.loadError = "";
     } catch (err) {
-      st.error = (err && err.message) || "Could not load the cultures.";
+      st.error = st.loadError = (err && err.message) || "Could not load the cultures.";
     } finally {
       st.at = Date.now();
       st.loading = false;

@@ -2475,5 +2475,50 @@ test("a ripe hatchery joins a running soak — the tile says so, and a refusal l
   } finally { restore(); }
 });
 
+test("a refused tap outlives the summary reload — the loader clears only its own failure (0.7.186)", async () => {
+  // Reece's screen (2026-09-15): Hatchery 1 at 96 %, the container holding an
+  // enriched batch, "Harvest now" refused by the enriched-brine gate — and the
+  // refusal thrown away by the reload every handler chains, before its first
+  // render. The button looked dead.
+  const panel = await npsPanel();
+  panel._nps.noticeScope = "hatchery";
+  const REFUSAL = "Feed or refrigerate the enriched batch before loading plain brine.";
+  const LOAD_FAIL = "Could not load the food shelf.";
+  const renders = [];
+  panel._render = () => renders.push(panel._nps.error);
+  let summaryFails = false;
+  panel._callWS = async (call) => {
+    if (call.type === "openreef/nps_hatch_cancel") throw new Error(REFUSAL);
+    if (call.type === "openreef/nps_summary") {
+      if (summaryFails) throw new Error(LOAD_FAIL);
+      return summaryFixture();
+    }
+    return {};
+  };
+  const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0)); };
+  await panel._npsHatchLoaded("v1");
+  await settle();
+  assert(renders.length >= 1, "the tap must paint");
+  assert(renders.every((e) => e === REFUSAL), `every paint after the tap must carry the refusal: ${JSON.stringify(renders)}`);
+  assert(panel._nps.error === REFUSAL, "the refusal must still be on state after the reload");
+  const card = panel._hatcheryTab();
+  assert(card.slice(card.indexOf(">Today<"), card.indexOf('data-vessel="v1"')).includes("Feed or refrigerate the enriched batch"),
+    "…and drawn inside the hatchery card");
+  // The loader's OWN failure still clears on the next good load.
+  summaryFails = true;
+  await panel._npsLoadSummary(true);
+  assert(panel._nps.error === LOAD_FAIL, "a failed load reports itself");
+  summaryFails = false;
+  await panel._npsLoadSummary(true);
+  assert(panel._nps.error === "", "a good load clears the loader's own failure");
+  // A refusal that lands on top of a stale load failure is not mistaken for it.
+  summaryFails = true;
+  await panel._npsLoadSummary(true);
+  summaryFails = false;
+  await panel._npsHatchLoaded("v1");
+  await settle();
+  assert(panel._nps.error === REFUSAL, "a refusal after a failed load survives the good reload that follows");
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();
