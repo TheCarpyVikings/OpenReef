@@ -793,3 +793,27 @@ made, and the brand's g/L turns that into grams per measure (weighted across bat
 cooling-offset ledger pattern). That would make the estimate go honest for keepers who own no
 scales at all, which is most jug keepers. Top-up runs complicate it (the standing water's own
 salt must be subtracted), so it wants its own slice.
+
+## §34 The Salt & mix card says the dose itself (0.7.189)
+
+Reece: "can we have the Salt & mix section use the salt dose guide calculations automatically,
+instead of just saying '…the dose guide has the grams for the fresh water' — tell the user
+exactly how many grams / jug mls are needed."
+
+Panel-only: the summary already carries every figure (`doseGuide.fresh`, `standingRodi`,
+`run` with `runDoseLitres`/`runTopUp`, each with its `measure` for a jug keeper). The card
+now picks the story for what the vessel holds and prints it under the status line
+(`data-mixing-vessel-dose`), grams bold, the measure beside:
+
+- topped up, idle: "Salt & mix needs roughly **780 g** (≈ about 710 ml in your jug) — the dose
+  for the 20.0 L of fresh RODI; the water already standing keeps its own."
+- RODI on hand: "Salt & mix needs roughly **1560 g** (≈ …) for the 40.0 L of RODI."
+- heating: "Once at temperature, add roughly **…**" (+ the top-up suffix when only the fresh
+  litres are dosed); the status line no longer calls a topped-up run's water "RODI".
+- salting: "This run's salt: roughly **…** for the 35.0 L." — or "No new salt to add" on a
+  0 g re-salt.
+- no brand figure: "No dose figure yet — pick a salt brand…" — said, never guessed.
+- empty vessel, stored batch: no dose line.
+
+Nothing is computed on the panel; the guide card keeps its fuller story (the rest-of-the-way
+projection, the what-if row).

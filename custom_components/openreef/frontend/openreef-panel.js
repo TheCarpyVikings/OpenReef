@@ -26636,11 +26636,11 @@ const rigSteps = [
         : contents === "salt" && vesselL > 0
           ? (fresh > 0
             // Topped up (doc §32): the old batch plus fresh RODI, owed its salt.
-            ? `${this._format(vesselL, 1)} L in the vessel — ${this._format(fresh, 1)} L of it fresh RODI on the old batch. Salt & mix brings the whole vessel back to target; the dose guide has the grams for the fresh water.`
+            ? `${this._format(vesselL, 1)} L in the vessel — ${this._format(fresh, 1)} L of it fresh RODI on the old batch. Salt & mix brings the whole vessel back to target.`
             : `${this._format(vesselL, 1)} L of saltwater standing with no tested batch behind it — salt & mix brings it back to target (test it once the window is done), or discard it.`)
           : "The vessel stands empty. Fill, transfer and mix each run on their own — nothing here forces the next step.")
       : status === "heating"
-        ? `Warming ${this._format(vesselL, 1)} L of RODI to temperature — the salt waits until the water is ready.`
+        ? `Warming ${this._format(vesselL, 1)} L of ${contents === "salt" ? "topped-up saltwater" : "RODI"} to temperature — the salt waits until the water is ready.`
         : status === "salting"
           ? (mixClock.testUnlocked
             ? "Mix window done — test the batch's salinity."
@@ -26663,6 +26663,39 @@ const rigSteps = [
           <div style="display:flex;align-items:flex-end;"><button class="secondary" data-action="mixing-transfer" ${disabled}>Log transfer →</button></div>
         </div>` : "";
     const abortBtn = `<button class="danger-text" data-action="mixing-abort" ${disabled}>${status === "heating" ? "Stop heating" : "Discard batch"}</button>`;
+
+    // The dose, said where the salt goes in (doc §34): the guide's own
+    // backend-computed figure for whatever the vessel holds — the fresh
+    // litres on a topped-up batch, standing RODI, or the run under way — in
+    // grams and, for a jug keeper, in the measure. Never computed here.
+    const guide = sum?.doseGuide || null;
+    const noFigure = "No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings.";
+    const grams = (d) => `<strong>${this._format(d.grams, 0)} g</strong>${d.measure?.text ? ` (≈ ${this._escape(d.measure.text)})` : ""}`;
+    let doseLine = "";
+    if (guide) {
+      if (status === "idle" && contents === "salt" && vesselL > 0 && fresh > 0) {
+        doseLine = guide.fresh?.available
+          ? `Salt &amp; mix needs roughly ${grams(guide.fresh)} — the dose for the ${this._format(fresh, 1)} L of fresh RODI; the water already standing keeps its own.`
+          : noFigure;
+      } else if (status === "idle" && contents === "rodi" && vesselL > 0) {
+        doseLine = guide.standingRodi?.available
+          ? `Salt &amp; mix needs roughly ${grams(guide.standingRodi)} for the ${this._format(vesselL, 1)} L of RODI.`
+          : noFigure;
+      } else if ((status === "heating" || status === "salting") && Number(guide.runLitres) > 0) {
+        const suffix = guide.runTopUp
+          ? ` — the dose for the ${this._format(guide.runDoseLitres, 1)} L of fresh RODI topped up; the water already standing keeps its own`
+          : ` for the ${this._format(guide.runLitres, 1)} L`;
+        if (guide.run?.available) {
+          doseLine = status === "heating"
+            ? `Once at temperature, add roughly ${grams(guide.run)}${suffix}.`
+            : `This run's salt: roughly ${grams(guide.run)}${suffix}.`;
+        } else if (guide.runTopUp) {
+          doseLine = "No new salt to add — the water already carries its own; test it once the window is done.";
+        } else {
+          doseLine = noFigure;
+        }
+      }
+    }
     let controls = "";
     if (status === "idle") {
       // Plain RODI mixes; standing saltwater with no run behind it (a top-up,
@@ -26734,6 +26767,7 @@ const rigSteps = [
         </div>
         ${rail}
         <p class="muted">${this._escape(statusDetail)}</p>
+        ${doseLine ? `<p class="muted" data-mixing-vessel-dose>${doseLine}</p>` : ""}
         ${circulationLine}
         ${controls}
         ${mix.simulate ? `<small class="awc-hint">Simulate is on — virtual switches only, nothing real is energised.</small>` : ""}

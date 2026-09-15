@@ -1358,4 +1358,85 @@ test("settings offers the measure, and the correction speaks it", async () => {
   assert(p._mixingMessage === "High — dilute with about 2.3 L of RODI and retest.", p._mixingMessage);
 });
 
+// --- §34 the Salt & mix card says the dose itself (0.7.189) -----------------------
+
+test("the Salt & mix card states the dose for whatever the vessel holds — grams and the jug", async () => {
+  const withM = (grams, text) => ({ available: true, grams, gPerL: 39.0,
+    measure: { text, wholes: 0, remainderMl: 0, totalMl: 0, estimated: true } });
+  const measure = { label: "jug", ml: 1000, gramsPerMeasure: 1100, gPerMl: 1.1, estimated: true };
+  const saltCfg = { brand: "nyos_pure", targetPpt: 35, mixHours: 0, customGPerL: 0,
+    measure: { mode: "measure", label: "jug", ml: 1000, gramsPerMeasure: 0 } };
+  const vessels = (mixOver) => ({ rodi: { volumeLitres: 50, estimatedLitres: 40, levelSensorEntity: "" },
+    mix: { volumeLitres: 35, estimatedLitres: 24.1, contents: "salt", freshLitres: 20, levelSensorEntity: "", ...mixOver } });
+  const levels = (mixOver) => ({ rodi: { litres: 40, volumeLitres: 50, percent: 80, estimated: true },
+    mix: { litres: 24.1, volumeLitres: 35, percent: 69, contents: "salt", freshLitres: 20, estimated: true, ...mixOver } });
+  const baseGuide = { full: withM(1365, "1 level jug + about 240 ml"), fullLitres: 35, heldLitres: 24.1,
+    topUp: withM(426, "about 390 ml in your jug"), topUpLitres: 10.9, standingRodi: null,
+    run: null, runLitres: 0, runDoseLitres: 0, runTopUp: false, fresh: withM(780, "about 710 ml in your jug"), freshLitres: 20 };
+  const cardSlice = (h) => h.slice(h.indexOf('id="or-mixing-vessel"'), h.indexOf('id="or-mixing-filters"'));
+  // Topped up: the fresh litres' own dose, on the card.
+  const topped = summaryBlob({ batch: { status: "idle", contents: "salt", remainingLitres: 24.1 }, levels: levels() });
+  topped.saltMeasure = measure; topped.doseGuide = baseGuide;
+  let panel = await mixingPanel({ vessels: vessels(), salt: saltCfg }, topped);
+  panel._activeTab = "mixing";
+  let card = cardSlice(panel._mixingTab());
+  assert(card.includes('data-mixing-vessel-dose'), "the card lost its dose line");
+  assert(card.includes("Salt &amp; mix needs roughly <strong>780 g</strong> (≈ about 710 ml in your jug) — the dose for the 20.0 L of fresh RODI"),
+    `the topped-up card must state the fresh dose in grams and jugs: ${card}`);
+  assert(!card.includes("the dose guide has the grams"), "the card must not point at the guide any more");
+  noPlaceholders(card, "topped-up dose line");
+  // RODI on hand: the straight dose for what stands.
+  const rodi = summaryBlob({ batch: { status: "idle", contents: "rodi", remainingLitres: 40 },
+    levels: levels({ litres: 40, percent: 100, contents: "rodi", freshLitres: 0 }) });
+  rodi.saltMeasure = measure;
+  rodi.doseGuide = { ...baseGuide, fresh: null, freshLitres: 0, topUp: null, topUpLitres: 0, heldLitres: 40,
+    standingRodi: withM(1560, "1 level jug + about 420 ml") };
+  panel = await mixingPanel({ vessels: vessels({ estimatedLitres: 40, contents: "rodi", freshLitres: 0 }), salt: saltCfg }, rodi);
+  panel._activeTab = "mixing";
+  card = cardSlice(panel._mixingTab());
+  assert(card.includes("Salt &amp; mix needs roughly <strong>1560 g</strong> (≈ 1 level jug + about 420 ml) for the 40.0 L of RODI"),
+    "RODI on hand must state its straight dose");
+  // Heating a top-up run: the dose waits for temperature, and says which litres it is for.
+  const heating = summaryBlob({ batch: { status: "heating", contents: "salt", litres: 24.1, remainingLitres: 24.1,
+    stages: ["heating", "salting", "ready", "storing"] }, levels: levels() });
+  heating.saltMeasure = measure;
+  heating.doseGuide = { ...baseGuide, fresh: null, freshLitres: 20, run: withM(780, "about 710 ml in your jug"), runLitres: 24.1, runDoseLitres: 20, runTopUp: true };
+  panel = await mixingPanel({ vessels: vessels(), salt: saltCfg, batch: { state: "heating", litres: 24.1 } }, heating);
+  panel._activeTab = "mixing";
+  card = cardSlice(panel._mixingTab());
+  assert(card.includes("Once at temperature, add roughly <strong>780 g</strong> (≈ about 710 ml in your jug) — the dose for the 20.0 L of fresh RODI topped up"),
+    "heating must say the dose waits for temperature and which litres it is for");
+  assert(card.includes("topped-up saltwater to temperature"), "heating a top-up run must not call the water RODI");
+  // Salting a plain run: this run's salt, for all the litres.
+  const salting = summaryBlob({ batch: { status: "salting", contents: "salt", litres: 35, remainingLitres: 35,
+    mix: { percent: 50, hoursLeft: 1.0, testUnlocked: false } }, levels: levels({ litres: 35, percent: 100, freshLitres: 0 }) });
+  salting.saltMeasure = null;
+  salting.doseGuide = { ...baseGuide, fresh: null, freshLitres: 0, run: { available: true, grams: 1365, gPerL: 39.0 }, runLitres: 35, runDoseLitres: 35, runTopUp: false };
+  panel = await mixingPanel({ vessels: vessels({ estimatedLitres: 35, freshLitres: 0 }), batch: { state: "salting", litres: 35 } }, salting);
+  panel._activeTab = "mixing";
+  card = cardSlice(panel._mixingTab());
+  assert(card.includes("This run's salt: roughly <strong>1365 g</strong> for the 35.0 L."), `a plain run must state its dose without a jug: ${card}`);
+  assert(!card.includes("≈"), "a grams keeper sees no measure on the card");
+  // A re-salt with nothing fresh: no new salt, said plainly.
+  salting.doseGuide = { ...salting.doseGuide, run: { available: false, grams: null, gPerL: null }, runDoseLitres: 0, runTopUp: true };
+  panel = await mixingPanel({ vessels: vessels({ estimatedLitres: 35, freshLitres: 0 }), batch: { state: "salting", litres: 35 } }, salting);
+  panel._activeTab = "mixing";
+  assert(cardSlice(panel._mixingTab()).includes("No new salt to add"), "a 0 g re-salt must say no salt is owed");
+  // No brand figure (custom blend without g/L): the card says so instead of a number.
+  topped.doseGuide = { ...baseGuide, full: { available: false, grams: null, gPerL: null }, fresh: { available: false, grams: null, gPerL: null, measure: null } };
+  panel = await mixingPanel({ vessels: vessels(), salt: saltCfg }, topped);
+  panel._activeTab = "mixing";
+  card = cardSlice(panel._mixingTab());
+  assert(card.includes("No dose figure yet"), "a missing brand figure must be said, never guessed");
+  noPlaceholders(card, "no-figure dose line");
+  // Empty vessel and a stored batch: no dose line at all.
+  const empty = await mixingPanel();
+  empty._activeTab = "mixing";
+  assert(!cardSlice(empty._mixingTab()).includes("data-mixing-vessel-dose"), "an empty vessel has no dose to state");
+  const stored = await mixingPanel({ batch: { state: "storing", litres: 40 } },
+    summaryBlob({ batch: { status: "storing", contents: "salt", litres: 40, remainingLitres: 40, loggedPpt: 35 } }));
+  stored._activeTab = "mixing";
+  assert(!cardSlice(stored._mixingTab()).includes("data-mixing-vessel-dose"), "a stored batch has no dose to state");
+});
+
 runTests();
